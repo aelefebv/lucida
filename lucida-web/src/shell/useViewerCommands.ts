@@ -1,5 +1,10 @@
 import { useSyncExternalStore } from "react";
-import { CANVAS_CARDS } from "../components/canvasCards.ts";
+import {
+  CANVAS_CARDS,
+  getCanvasCardState,
+  setCanvasCardState,
+  subscribeCanvasCards,
+} from "../components/canvasCards.ts";
 import {
   ACCENT_PRESETS,
   accentPreference,
@@ -12,9 +17,7 @@ import {
 } from "../theme/appearance.ts";
 import {
   developerToolsPreference,
-  getPreference,
   setPreference,
-  subscribePreferences,
   usePreference,
 } from "../theme/preferences.ts";
 import { useCommands, type CommandOptions } from "../ui/commands.ts";
@@ -65,8 +68,8 @@ export function useViewerCommands({
   const openPanel = useOpenRightPanel();
   const [developerTools, setDeveloperTools] = usePreference(developerToolsPreference);
   // Re-render as any card is hidden or brought back, wherever that happens.
-  useSyncExternalStore(subscribePreferences, () =>
-    CANVAS_CARDS.map((card) => getPreference(card.preference)).join(),
+  useSyncExternalStore(subscribeCanvasCards, () =>
+    CANVAS_CARDS.map((card) => getCanvasCardState(card.preference)).join(),
   );
 
   const commands: CommandOptions[] = [
@@ -112,13 +115,13 @@ export function useViewerCommands({
     }),
 
     ...CANVAS_CARDS.map(({ preference, label }): CommandOptions => {
-      const hidden = getPreference(preference) === "hidden";
+      const hidden = getCanvasCardState(preference) === "hidden";
       return {
         id: `view.card.${preference.key}`,
         label: `${hidden ? "Show" : "Hide"} the ${label.toLowerCase()}`,
         group: "View",
         keywords: ["card"],
-        run: () => setPreference(preference, hidden ? "open" : "hidden"),
+        run: () => setCanvasCardState(preference, hidden ? "open" : "hidden"),
       };
     }),
 

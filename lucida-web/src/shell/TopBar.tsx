@@ -146,7 +146,7 @@ export function TopBar({
  * The workspace's name, edited in place by those who may rename it. Enter or
  * leaving the field saves; Escape restores the saved name.
  */
-function WorkspaceName({ name, onRename }: { name: string; onRename?: (name: string) => Promise<void> }) {
+export function WorkspaceName({ name, onRename }: { name: string; onRename?: (name: string) => Promise<void> }) {
   // The draft follows a rename that lands from elsewhere, unless one is being typed.
   const [edit, setEdit] = useState({ source: name, value: name });
   const draft = edit.source === name ? edit.value : name;

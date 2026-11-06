@@ -70,6 +70,28 @@ export function toggleChannel(
   return { visible: visible.map((v, i) => (i === channel ? !v : v)), leaveSolo: false };
 }
 
+/**
+ * {@link toggleChannel} for one layer, written through the panel's handlers:
+ * each flag that changes, then the return to the composite when it leaves solo.
+ */
+export function applyChannelToggle(
+  layer: { id: string; channels: readonly { visible: boolean }[] },
+  solo: number | null,
+  channel: number,
+  handlers: {
+    onChannelSetVisible: (id: string, channel: number, visible: boolean) => void;
+    onShowAllChannels: () => void;
+  },
+): void {
+  const visible = layer.channels.map((c) => c.visible);
+  const change = toggleChannel(visible, solo, channel);
+  if (!change) return;
+  change.visible.forEach((v, i) => {
+    if (v !== visible[i]) handlers.onChannelSetVisible(layer.id, i, v);
+  });
+  if (change.leaveSolo) handlers.onShowAllChannels();
+}
+
 /** Whether the channel is the only one shown in the composite, so it cannot be hidden. */
 export function isLastShownChannel(
   visible: readonly boolean[],

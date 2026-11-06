@@ -13,6 +13,8 @@ export interface RailPanel {
   id: string;
   /** The rail button's name and tooltip. */
   label: string;
+  /** A shorter name where it is written out in a tight row, as on a phone. */
+  shortLabel?: string;
   icon: Icon;
   /**
    * A count drawn on the icon, e.g. unread items; zero draws none. `label`

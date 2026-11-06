@@ -6,10 +6,11 @@ import {
   UsersIcon,
   type Icon,
 } from "@phosphor-icons/react";
-import { useRef, useState } from "react";
+import { useEffect, useEffectEvent, useRef, useState, type ReactNode } from "react";
 import type { SavedView } from "../savedView/types.ts";
 import { Button } from "../ui/Button.tsx";
 import { useCommand } from "../ui/commands.ts";
+import { Dialog } from "../ui/Dialog.tsx";
 import { Popover } from "../ui/Popover.tsx";
 import { getWorkspaceSharing, type WorkspaceSharingSettings } from "../workspaceApi.ts";
 import { copyViewLink, viewLink } from "./viewLink.ts";
@@ -22,6 +23,11 @@ export interface ShareButtonProps {
   canManageAccess: boolean;
   /** The live view, checked for links that may not open elsewhere. */
   getCurrentSavedView: () => SavedView | null;
+  /**
+   * Shows the same content in a dialog that something else opens, such as a
+   * menu item, in place of the button and its popover.
+   */
+  dialog?: { isOpen: boolean; onOpenChange: (isOpen: boolean) => void };
 }
 
 // Tagged with its workspace, so switching workspaces never shows the last one's access.
@@ -50,7 +56,7 @@ function accessSummary(
  * since that is what most people open it for; who can open the workspace
  * sits below.
  */
-export function ShareButton({ workspaceId, canManageAccess, getCurrentSavedView }: ShareButtonProps) {
+export function ShareButton({ workspaceId, canManageAccess, getCurrentSavedView, dialog }: ShareButtonProps) {
   const [manageOpen, setManageOpen] = useState(false);
   const [access, setAccess] = useState<AccessState | null>(null);
   const current = access?.workspaceId === workspaceId ? access : null;
@@ -103,58 +109,74 @@ export function ShareButton({ workspaceId, canManageAccess, getCurrentSavedView 
     );
   };
 
+  const onOpen = () => {
+    prepareLink();
+    refreshAccess();
+  };
+  const onDialogOpen = useEffectEvent(onOpen);
+  const dialogOpen = dialog?.isOpen ?? false;
+  useEffect(() => {
+    if (dialogOpen) onDialogOpen();
+  }, [dialogOpen]);
+
+  const content = (close: () => void): ReactNode => (
+    <div className="lc-share">
+      <Button
+        variant="primary"
+        icon={LinkSimpleIcon}
+        autoFocus
+        className="lc-share-copy"
+        onPress={() => {
+          close();
+          const view = getCurrentSavedView();
+          void copyViewLink(linkRef.current ?? viewLink(view), view);
+        }}
+      >
+        Copy link to this view
+      </Button>
+      <div className="lc-share-divider" role="presentation" />
+      <div className="lc-share-access">
+        <AccessIcon className="lc-share-access-icon" size={16} aria-hidden />
+        <span className="lc-share-access-text">{accessText}</span>
+        {canManageAccess && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onPress={() => {
+              close();
+              setManageOpen(true);
+            }}
+          >
+            Manage access&hellip;
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+
   return (
     <>
-      <Popover
-        label="Share"
-        placement="bottom end"
-        className="lc-share-popover"
-        onOpenChange={(isOpen) => {
-          if (!isOpen) return;
-          prepareLink();
-          refreshAccess();
-        }}
-        trigger={
-          <Button variant="primary" icon={ShareNetworkIcon}>
-            Share
-          </Button>
-        }
-      >
-        {(close) => (
-          <div className="lc-share">
-            <Button
-              variant="primary"
-              icon={LinkSimpleIcon}
-              autoFocus
-              className="lc-share-copy"
-              onPress={() => {
-                close();
-                const view = getCurrentSavedView();
-                void copyViewLink(linkRef.current ?? viewLink(view), view);
-              }}
-            >
-              Copy link to this view
+      {dialog ? (
+        <Dialog title="Share" size="sm" isOpen={dialog.isOpen} onOpenChange={dialog.onOpenChange}>
+          {content}
+        </Dialog>
+      ) : (
+        <Popover
+          label="Share"
+          placement="bottom end"
+          className="lc-share-popover"
+          onOpenChange={(isOpen) => {
+            if (isOpen) onOpen();
+          }}
+          trigger={
+            <Button variant="primary" icon={ShareNetworkIcon}>
+              Share
             </Button>
-            <div className="lc-share-divider" role="presentation" />
-            <div className="lc-share-access">
-              <AccessIcon className="lc-share-access-icon" size={16} aria-hidden />
-              <span className="lc-share-access-text">{accessText}</span>
-              {canManageAccess && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onPress={() => {
-                    close();
-                    setManageOpen(true);
-                  }}
-                >
-                  Manage access&hellip;
-                </Button>
-              )}
-            </div>
-          </div>
-        )}
-      </Popover>
+          }
+        >
+          {content}
+        </Popover>
+      )}
       {canManageAccess && (
         <WorkspaceSharingDialog
           workspaceId={workspaceId}

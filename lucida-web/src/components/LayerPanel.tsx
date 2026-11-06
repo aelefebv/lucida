@@ -40,10 +40,10 @@ import type { LevelRange } from "../renderer/workerProtocol.ts";
 import { displayedLevelNotice, levelNumbers } from "./levelReadout.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import {
+  applyChannelToggle,
   channelShortcutTarget,
   isChannelShown,
   isLastShownChannel,
-  toggleChannel,
 } from "./channels.ts";
 import "./LayerPanel.css";
 
@@ -173,15 +173,8 @@ const RENDER_OPTIONS = [
 export function LayerPanel(props: Props) {
   const { layers, selectedLayerId, soloChannel, onAddData } = props;
 
-  const toggleLayerChannel = (layer: LayerInfo, channel: number) => {
-    const visible = layer.channels.map((c) => c.visible);
-    const change = toggleChannel(visible, soloChannel, channel);
-    if (!change) return;
-    change.visible.forEach((v, i) => {
-      if (v !== visible[i]) props.onChannelSetVisible(layer.id, i, v);
-    });
-    if (change.leaveSolo) props.onShowAllChannels();
-  };
+  const toggleLayerChannel = (layer: LayerInfo, channel: number) =>
+    applyChannelToggle(layer, soloChannel, channel, props);
 
   // One command per channel the target layer has, so the palette and the
   // shortcut sheet list only channels that exist, by name.

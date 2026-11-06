@@ -1,5 +1,12 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { BookmarkSimpleIcon, ChatCircleIcon, CompassIcon, InfoIcon } from "@phosphor-icons/react";
+import {
+  BookmarkSimpleIcon,
+  ChatCircleIcon,
+  CompassIcon,
+  InfoIcon,
+  SquaresFourIcon,
+  StackIcon,
+} from "@phosphor-icons/react";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
@@ -21,6 +28,7 @@ import {
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { CollectionSelector, extractCollectionData } from "./components/CollectionSelector.tsx";
 import { frameRect } from "./components/groupFraming.ts";
+import type { VoxelRect } from "./pipeline/layoutBuilders.ts";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { ImportWarningBanner } from "./components/ImportWarningBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
@@ -83,9 +91,14 @@ import { WebGpuUnavailable } from "./shell/WebGpuUnavailable.tsx";
 import { DimensionBar } from "./shell/DimensionBar.tsx";
 import { useOpenRightPanel } from "./shell/sidePanels.ts";
 import { LeftPanel } from "./shell/LeftPanel.tsx";
-import { RightRail } from "./shell/RightRail.tsx";
+import { ChannelChips } from "./shell/phone/ChannelChips.tsx";
+import { PhoneSheet } from "./shell/phone/PhoneSheet.tsx";
+import { PhoneTopBar } from "./shell/phone/PhoneTopBar.tsx";
+import { revealCanvas } from "./shell/phone/sheet.ts";
+import { RightRail, type RailPanel } from "./shell/RightRail.tsx";
 import { ToolPalette } from "./shell/ToolPalette.tsx";
 import { TopBar } from "./shell/TopBar.tsx";
+import { useViewportClass } from "./theme/viewport.ts";
 import { useDeveloperSurfaces } from "./shell/useDeveloperSurfaces.ts";
 import { useViewerCommands } from "./shell/useViewerCommands.ts";
 import { KeyboardHelp } from "./ui/KeyboardHelp.tsx";
@@ -155,6 +168,8 @@ function App({
   // writes. Read `captureSurface.ts` before wiring anything new in here.
   const captureSurface = useMemo(() => isCaptureSurface(), []);
   const developer = useDeveloperSurfaces({ captureSurface });
+  // A phone puts its own chrome around the same canvas (src/shell/phone).
+  const phone = useViewportClass() === "phone" && !captureSurface;
   // The canvas's CSS size, settled: it follows a panel drag a beat behind, so
   // the drag doesn't re-render the whole viewer on every frame.
   const [canvasSize, setCanvasSize] = useState<CanvasSize>({ width: 0, height: 0 });
@@ -1024,6 +1039,7 @@ function App({
   const savedViewApplier = savedViewSync.applier;
   const notifySavedViewChange = savedViewSync.notifyChange;
   const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView, savedViewId: string) => {
+    revealCanvas();
     await savedViewApplier.apply(view);
     notifySavedViewChange();
     // Remember which saved view is now applied so the sidebar can flag the
@@ -1076,7 +1092,7 @@ function App({
   });
 
   // The 2D collection navigator for the selected dataset, when it is a collection.
-  const collectionNavigator = (() => {
+  const navigatorProps = (() => {
     if (datasetsVersion === 0 || dims.viewMode !== "2d") return null;
     // eslint-disable-next-line react-hooks/refs -- the live dataset map; datasetsVersion re-renders on change.
     const ds = selectedDatasetId ? datasetsRef.current.get(selectedDatasetId) : undefined;
@@ -1090,23 +1106,22 @@ function App({
       ?? null;
     const collectionData = extractCollectionData(ds.manifest, activePlacements);
     if (!collectionData) return null;
-    return (
-      <CollectionSelector
-        collectionKind={collectionData.collectionKind}
-        members={collectionData.members}
-        collectionName={ds.name}
-        onGroupClick={(bounds) => {
-          const ws = scene.wasmSceneRef.current;
-          const canvas = render.canvasRef.current;
-          if (!ws || !canvas) return;
-          bridge.breakFollow();
-          frameRect(ws, canvas, bounds);
-          emitPresenceWithUrl();
-          requestRender(render.loopRef.current, "collection_group_click");
-        }}
-        getViewCenter={() => scene.wasmSceneRef.current?.center() ?? null}
-      />
-    );
+    return {
+      collectionKind: collectionData.collectionKind,
+      members: collectionData.members,
+      collectionName: ds.name,
+      onGroupClick: (bounds: VoxelRect) => {
+        const ws = scene.wasmSceneRef.current;
+        const canvas = render.canvasRef.current;
+        if (!ws || !canvas) return;
+        revealCanvas();
+        bridge.breakFollow();
+        frameRect(ws, canvas, bounds);
+        emitPresenceWithUrl();
+        requestRender(render.loopRef.current, "collection_group_click");
+      },
+      getViewCenter: () => scene.wasmSceneRef.current?.center() ?? null,
+    };
   })();
 
   // A browser that can't draw gets its own explanation in place of the canvas.
@@ -1125,78 +1140,198 @@ function App({
   // eslint-plugin-react-hooks@7 "rules of react" treat all such reads as
   // suspicious; they are intentional and load-bearing here.
   /* eslint-disable react-hooks/refs */
-  return (
-    <div className="lc-shell" data-capture={captureSurface || undefined}>
-      {!captureSurface && (
-        <TopBar
+  // The layer panel, the dimension bar, and the rail's panels sit beside and
+  // over the canvas on wider screens, and in the bottom sheet on a phone.
+  const layerPanel = (
+    <LayerPanel
+      layers={layers.layerInfos}
+      selectedLayerId={selectedDatasetId}
+      expandedLayerId={layers.expandedLayerId}
+      soloChannel={dims.soloChannel}
+      onSelectLayer={layers.handleLayerSelect}
+      onToggleExpand={layers.handleLayerToggleExpand}
+      onSetVisible={layers.handleLayerSetVisible}
+      onSetOpacity={layers.handleLayerSetOpacity}
+      onSetBlendMode={layers.handleLayerSetBlendMode}
+      onSetRenderMode={layers.handleLayerSetRenderMode}
+      onSetLevelPin={layers.handleLayerSetLevelPin}
+      onAutoContrastChange={layers.handleAutoContrastChange}
+      onMoveLayer={layers.handleLayerMove}
+      onRemoveLayer={layers.handleRemoveLayer}
+      onRenameLayer={layers.handleLayerRename}
+      canEdit={canEditWorkspace}
+      onChannelSetVisible={layers.handleChannelSetVisible}
+      onChannelSetColormap={layers.handleChannelSetColormap}
+      onChannelSetName={layers.handleChannelSetName}
+      onChannelSetContrast={layers.handleChannelSetContrast}
+      onChannelSetGamma={layers.handleChannelSetGamma}
+      onChannelAutoFit={layers.handleChannelAutoFit}
+      onChannelSetBlendMode={layers.handleChannelSetBlendMode}
+      onSoloChannel={dims.handleSoloChannel}
+      onShowAllChannels={dims.handleShowAllChannels}
+      onLabelSetVisible={layers.handleLabelSetVisible}
+      onLabelSetOpacity={layers.handleLabelSetOpacity}
+      onAddData={() => setAddDataOpen(true)}
+      layoutRegistry={layoutRegistry}
+      sendCommand={bridge.sendCommand}
+      onLayoutChange={() => {
+        // The switcher already applied `set_active_layout`. Match the
+        // inbound-peer arm in sessionController.ts so the planner re-reads
+        // now; a missed signal leaves collection members drawn at their
+        // pre-switch positions until the next pan or zoom.
+        invalidateDisplaySettings(render.loopRef.current, "layout_switch");
+        // A local switch re-anchors collection annotations in core but, unlike
+        // an inbound peer switch, doesn't bump the document version, so bump
+        // it here for the overlay to re-read the pins.
+        bumpRemoteDocumentVersion();
+      }}
+    />
+  );
+  const dimensionBar = hasData && (
+    <DimensionBar
+      viewMode={dims.viewMode}
+      onViewModeToggle={dims.handleViewModeToggle}
+      z={dims.z}
+      dimZ={dims.dimZ}
+      onZChange={dims.handleZChange}
+      t={dims.t}
+      dimT={dims.dimT}
+      onTChange={dims.handleTChange}
+      cameraMode={cameraMode === "fly" ? "fly" : "arcball"}
+      onCameraModeToggle={handleCameraModeToggle}
+      // Moves the same scene state the `[` and `]` keys do, and
+      // shares and repaints it the same way.
+      clipDepth={
+        scene.wasmScene && selectedDatasetId
+          ? sceneClipDepth(scene.wasmScene, selectedDatasetId, () => {
+              emitPresenceWithUrl();
+              requestRender(render.loopRef.current, "clip_plane");
+            })
+          : undefined
+      }
+    />
+  );
+  const railPanels: RailPanel[] = [
+    {
+      id: "savedViews",
+      label: "Saved views",
+      shortLabel: "Views",
+      icon: BookmarkSimpleIcon,
+      render: (active) => (
+        <WorkspaceSavedViewsSidebar
           workspaceId={workspaceId}
-          workspaceName={workspaceName}
-          onRenameWorkspace={canRenameWorkspace ? onRenameWorkspace : undefined}
-          onBackToDashboard={onBackToDashboard}
-          onUseViewAsPreview={takeViewAsPreview}
-          presence={{
-            peers: bridge.peers,
-            followTarget: bridge.followTarget,
-            onFollow: bridge.handleFollow,
-          }}
-          share={
-            <ShareButton
-              workspaceId={workspaceId}
-              canManageAccess={workspaceRole === "owner"}
-              getCurrentSavedView={savedViewSync.captureBuilder}
-            />
-          }
-          developer={developer}
+          currentUserEmail={authSession.principal.email}
+          canEdit={canEditWorkspace}
+          getCurrentSavedView={savedViewSync.captureBuilder}
+          onOpenSavedView={handleOpenWorkspaceSavedView}
+          loadedDatasetNames={loadedDatasetNames}
+          activeLayoutName={activeLayoutName}
+          defaultSavedViewId={defaultSavedViewId}
+          onSetDefaultSavedView={onSetDefaultSavedView}
+          currentOpenSavedViewId={currentOpenSavedViewId}
+          onActiveSavedViewInvalidated={handleActiveSavedViewInvalidated}
+          visible={active}
         />
-      )}
+      ),
+    },
+    {
+      id: "comments",
+      label: "Comments",
+      icon: ChatCircleIcon,
+      badge: {
+        count: unreadMentions,
+        label: `${unreadMentions} unread mention${unreadMentions === 1 ? "" : "s"}`,
+      },
+      render: (active) => (
+        <CommentsPanel
+          visible={active}
+          annotations={currentAnnotations}
+          mentions={mentionsOfMe}
+          viewedCommentIds={viewedCommentIds}
+          currentUserId={annotationAuthor}
+          extents={{ z: dims.dimZ, t: dims.dimT }}
+          onNavigate={(pinId) => {
+            revealCanvas();
+            handleNavigateToMention(pinId);
+          }}
+          onMarkViewed={markViewed}
+        />
+      ),
+    },
+    {
+      id: "explore",
+      label: "Explore",
+      icon: CompassIcon,
+      render: (active) => (
+        <ExplorationPanel
+          visible={active}
+          captureBuilder={savedViewSync.captureBuilder}
+          applyView={applyExploreView}
+          createSavedView={handleExploreBookmark}
+          datasetId={exploreTarget.id}
+          datasetName={exploreTarget.name}
+          dims={exploreTarget.dims}
+          viewport={[
+            render.canvasRef.current?.clientWidth ?? 800,
+            render.canvasRef.current?.clientHeight ?? 600,
+          ]}
+          getHomeBounds={getExploreHomeBounds}
+          requestThumbnail={requestThumbnail}
+        />
+      ),
+    },
+    {
+      id: "info",
+      label: "Info",
+      icon: InfoIcon,
+      render: (active) => (
+        <DatasetInfoPanel
+          visible={active}
+          workspaceId={workspaceId}
+          dataset={infoDataset}
+          getSource={getDatasetSource}
+        />
+      ),
+    },
+  ];
+  const shareProps = {
+    workspaceId,
+    canManageAccess: workspaceRole === "owner",
+    getCurrentSavedView: savedViewSync.captureBuilder,
+  };
+
+  // The canvas stage keeps its place in the tree whichever chrome is around
+  // it, so a phone turned sideways never remounts the canvas the render
+  // worker draws into, nor the minimap's.
+  return (
+    <div className="lc-shell" data-capture={captureSurface || undefined} data-layout={phone ? "phone" : undefined}>
+      {!captureSurface &&
+        (phone ? (
+          <PhoneTopBar
+            workspaceName={workspaceName}
+            onRenameWorkspace={canRenameWorkspace ? onRenameWorkspace : undefined}
+            onBackToDashboard={onBackToDashboard}
+            onUseViewAsPreview={takeViewAsPreview}
+            share={shareProps}
+          />
+        ) : (
+          <TopBar
+            workspaceId={workspaceId}
+            workspaceName={workspaceName}
+            onRenameWorkspace={canRenameWorkspace ? onRenameWorkspace : undefined}
+            onBackToDashboard={onBackToDashboard}
+            onUseViewAsPreview={takeViewAsPreview}
+            presence={{
+              peers: bridge.peers,
+              followTarget: bridge.followTarget,
+              onFollow: bridge.handleFollow,
+            }}
+            share={<ShareButton {...shareProps} />}
+            developer={developer}
+          />
+        ))}
       <div className="lc-shell-body">
-        {!captureSurface && (
-          <LeftPanel label="Layers">
-            <LayerPanel
-              layers={layers.layerInfos}
-              selectedLayerId={selectedDatasetId}
-              expandedLayerId={layers.expandedLayerId}
-              soloChannel={dims.soloChannel}
-              onSelectLayer={layers.handleLayerSelect}
-              onToggleExpand={layers.handleLayerToggleExpand}
-              onSetVisible={layers.handleLayerSetVisible}
-              onSetOpacity={layers.handleLayerSetOpacity}
-              onSetBlendMode={layers.handleLayerSetBlendMode}
-              onSetRenderMode={layers.handleLayerSetRenderMode}
-              onSetLevelPin={layers.handleLayerSetLevelPin}
-              onAutoContrastChange={layers.handleAutoContrastChange}
-              onMoveLayer={layers.handleLayerMove}
-              onRemoveLayer={layers.handleRemoveLayer}
-              onRenameLayer={layers.handleLayerRename}
-              canEdit={canEditWorkspace}
-              onChannelSetVisible={layers.handleChannelSetVisible}
-              onChannelSetColormap={layers.handleChannelSetColormap}
-              onChannelSetName={layers.handleChannelSetName}
-              onChannelSetContrast={layers.handleChannelSetContrast}
-              onChannelSetGamma={layers.handleChannelSetGamma}
-              onChannelAutoFit={layers.handleChannelAutoFit}
-              onChannelSetBlendMode={layers.handleChannelSetBlendMode}
-              onSoloChannel={dims.handleSoloChannel}
-              onShowAllChannels={dims.handleShowAllChannels}
-              onLabelSetVisible={layers.handleLabelSetVisible}
-              onLabelSetOpacity={layers.handleLabelSetOpacity}
-              onAddData={() => setAddDataOpen(true)}
-              layoutRegistry={layoutRegistry}
-              sendCommand={bridge.sendCommand}
-              onLayoutChange={() => {
-                // The switcher already applied `set_active_layout`. Match the
-                // inbound-peer arm in sessionController.ts so the planner re-reads
-                // now; a missed signal leaves collection members drawn at their
-                // pre-switch positions until the next pan or zoom.
-                invalidateDisplaySettings(render.loopRef.current, "layout_switch");
-                // A local switch re-anchors collection annotations in core but, unlike
-                // an inbound peer switch, doesn't bump the document version, so bump
-                // it here for the overlay to re-read the pins.
-                bumpRemoteDocumentVersion();
-              }}
-            />
-          </LeftPanel>
-        )}
+        {!captureSurface && !phone && <LeftPanel label="Layers">{layerPanel}</LeftPanel>}
         <div className="lc-shell-center">
           <CanvasStage
             canvasRef={render.canvasRef}
@@ -1219,6 +1354,7 @@ function App({
                   onToolChange={setTool}
                   annotationsVisible={annotationsVisible}
                   onAnnotationsVisibleChange={setAnnotationsVisible}
+                  compact={phone}
                 />
               ),
               "top-center": (
@@ -1275,31 +1411,8 @@ function App({
                   )}
                 </>
               ),
-              "bottom-left": collectionNavigator,
-              "bottom-center": hasData && (
-                <DimensionBar
-                  viewMode={dims.viewMode}
-                  onViewModeToggle={dims.handleViewModeToggle}
-                  z={dims.z}
-                  dimZ={dims.dimZ}
-                  onZChange={dims.handleZChange}
-                  t={dims.t}
-                  dimT={dims.dimT}
-                  onTChange={dims.handleTChange}
-                  cameraMode={cameraMode === "fly" ? "fly" : "arcball"}
-                  onCameraModeToggle={handleCameraModeToggle}
-                  // Moves the same scene state the `[` and `]` keys do, and
-                  // shares and repaints it the same way.
-                  clipDepth={
-                    scene.wasmScene && selectedDatasetId
-                      ? sceneClipDepth(scene.wasmScene, selectedDatasetId, () => {
-                          emitPresenceWithUrl();
-                          requestRender(render.loopRef.current, "clip_plane");
-                        })
-                      : undefined
-                  }
-                />
-              ),
+              "bottom-left": !phone && navigatorProps && <CollectionSelector {...navigatorProps} />,
+              "bottom-center": !phone && dimensionBar,
               // Mounted before any dataset opens, and only hidden until one
               // does: its first 2D-canvas draw must land before an open's
               // first frame (see Minimap.tsx).
@@ -1439,90 +1552,41 @@ function App({
               </Suspense>
             </div>
           )}
+          {phone && (
+            <PhoneSheet
+              peek={
+                <>
+                  <ChannelChips
+                    layers={layers.layerInfos}
+                    selectedLayerId={selectedDatasetId}
+                    soloChannel={dims.soloChannel}
+                    onChannelSetVisible={layers.handleChannelSetVisible}
+                    onSoloChannel={dims.handleSoloChannel}
+                    onShowAllChannels={dims.handleShowAllChannels}
+                  />
+                  {dimensionBar}
+                </>
+              }
+              layerTabs={[
+                { id: "layers", label: "Layers", icon: StackIcon, render: () => layerPanel },
+                ...(navigatorProps
+                  ? [
+                      {
+                        id: "groups",
+                        label: "Groups",
+                        icon: SquaresFourIcon,
+                        render: (active: boolean) => (
+                          <CollectionSelector {...navigatorProps} variant="panel" visible={active} />
+                        ),
+                      },
+                    ]
+                  : []),
+              ]}
+              railTabs={railPanels}
+            />
+          )}
         </div>
-        {!captureSurface && (
-          <RightRail
-            panels={[
-              {
-                id: "savedViews",
-                label: "Saved views",
-                icon: BookmarkSimpleIcon,
-                render: (active) => (
-                  <WorkspaceSavedViewsSidebar
-                    workspaceId={workspaceId}
-                    currentUserEmail={authSession.principal.email}
-                    canEdit={canEditWorkspace}
-                    getCurrentSavedView={savedViewSync.captureBuilder}
-                    onOpenSavedView={handleOpenWorkspaceSavedView}
-                    loadedDatasetNames={loadedDatasetNames}
-                    activeLayoutName={activeLayoutName}
-                    defaultSavedViewId={defaultSavedViewId}
-                    onSetDefaultSavedView={onSetDefaultSavedView}
-                    currentOpenSavedViewId={currentOpenSavedViewId}
-                    onActiveSavedViewInvalidated={handleActiveSavedViewInvalidated}
-                    visible={active}
-                  />
-                ),
-              },
-              {
-                id: "comments",
-                label: "Comments",
-                icon: ChatCircleIcon,
-                badge: {
-                  count: unreadMentions,
-                  label: `${unreadMentions} unread mention${unreadMentions === 1 ? "" : "s"}`,
-                },
-                render: (active) => (
-                  <CommentsPanel
-                    visible={active}
-                    annotations={currentAnnotations}
-                    mentions={mentionsOfMe}
-                    viewedCommentIds={viewedCommentIds}
-                    currentUserId={annotationAuthor}
-                    extents={{ z: dims.dimZ, t: dims.dimT }}
-                    onNavigate={handleNavigateToMention}
-                    onMarkViewed={markViewed}
-                  />
-                ),
-              },
-              {
-                id: "explore",
-                label: "Explore",
-                icon: CompassIcon,
-                render: (active) => (
-                  <ExplorationPanel
-                    visible={active}
-                    captureBuilder={savedViewSync.captureBuilder}
-                    applyView={applyExploreView}
-                    createSavedView={handleExploreBookmark}
-                    datasetId={exploreTarget.id}
-                    datasetName={exploreTarget.name}
-                    dims={exploreTarget.dims}
-                    viewport={[
-                      render.canvasRef.current?.clientWidth ?? 800,
-                      render.canvasRef.current?.clientHeight ?? 600,
-                    ]}
-                    getHomeBounds={getExploreHomeBounds}
-                    requestThumbnail={requestThumbnail}
-                  />
-                ),
-              },
-              {
-                id: "info",
-                label: "Info",
-                icon: InfoIcon,
-                render: (active) => (
-                  <DatasetInfoPanel
-                    visible={active}
-                    workspaceId={workspaceId}
-                    dataset={infoDataset}
-                    getSource={getDatasetSource}
-                  />
-                ),
-              },
-            ]}
-          />
-        )}
+        {!captureSurface && !phone && <RightRail panels={railPanels} />}
       </div>
       {!captureSurface && (
         <AddDataDialog

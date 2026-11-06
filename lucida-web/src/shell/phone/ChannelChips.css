@@ -1,0 +1,79 @@
+/* One row that scrolls sideways when the channels outrun the width, so the
+   peek keeps its height. */
+.lc-channel-chips {
+  display: flex;
+  gap: var(--lc-space-2);
+  overflow-x: auto;
+  scrollbar-width: none;
+  overscroll-behavior-x: contain;
+}
+
+.lc-channel-chip {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: var(--lc-space-2);
+  box-sizing: border-box;
+  max-width: 160px;
+  height: max(var(--lc-control-h), var(--lc-target-min));
+  margin: 0;
+  padding: 0 var(--lc-space-3);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-full);
+  outline: none;
+  background: transparent;
+  color: var(--lc-text-subtle);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    background-color var(--lc-motion-fast) var(--lc-ease),
+    border-color var(--lc-motion-fast) var(--lc-ease),
+    color var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-channel-chip[data-selected] {
+  border-color: var(--lc-border-strong);
+  background: var(--lc-surface-3);
+  color: var(--lc-text);
+}
+
+.lc-channel-chip[data-solo] {
+  border-color: var(--lc-accent);
+  background: var(--lc-accent-subtle);
+}
+
+.lc-channel-chip[data-pressed] {
+  background-image: linear-gradient(var(--lc-surface-3), var(--lc-surface-3));
+}
+
+.lc-channel-chip[data-focus-visible] {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 2px;
+}
+
+.lc-channel-chip-swatch {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border-radius: var(--lc-radius-full);
+  box-shadow: inset 0 0 0 1px var(--lc-border-strong);
+}
+
+.lc-channel-chip:not([data-selected]) .lc-channel-chip-swatch {
+  opacity: 0.35;
+}
+
+.lc-channel-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lc-channel-chip-solo {
+  flex: none;
+  color: var(--lc-accent-text);
+}

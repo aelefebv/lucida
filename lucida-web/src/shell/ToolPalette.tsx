@@ -6,6 +6,7 @@ import {
   KeyboardIcon,
   LineSegmentIcon,
   MapPinIcon,
+  PencilSimpleIcon,
   type Icon,
 } from "@phosphor-icons/react";
 import { useLayoutEffect, useRef, useState } from "react";
@@ -15,6 +16,7 @@ import { Card } from "../ui/Card.tsx";
 import { useCommand } from "../ui/commands.ts";
 import { escapeTopLayer, hasEscapeLayer } from "../ui/escape.ts";
 import { showKeyboardHelp } from "../ui/keyboardHelpState.ts";
+import { Popover } from "../ui/Popover.tsx";
 import { useShortcut, type KeyCombo } from "../ui/shortcuts.ts";
 import { Toolbar, ToolbarSeparator } from "../ui/Toolbar.tsx";
 import "./ToolPalette.css";
@@ -31,6 +33,11 @@ export interface ToolPaletteProps {
   onToolChange: (tool: Tool) => void;
   annotationsVisible: boolean;
   onAnnotationsVisibleChange: (visible: boolean) => void;
+  /**
+   * One Annotate button that opens the tools, for a phone, where a column of
+   * them would cover the canvas. It shows the active tool.
+   */
+  compact?: boolean;
 }
 
 /**
@@ -39,7 +46,13 @@ export interface ToolPaletteProps {
  * tool still drops a point. A column, or a row where the stage is too short
  * for one, as on a phone held sideways.
  */
-export function ToolPalette({ tool, onToolChange, annotationsVisible, onAnnotationsVisibleChange }: ToolPaletteProps) {
+export function ToolPalette({
+  tool,
+  onToolChange,
+  annotationsVisible,
+  onAnnotationsVisibleChange,
+  compact,
+}: ToolPaletteProps) {
   useToolCommand("pan", tool, onToolChange);
   useToolCommand("point", tool, onToolChange);
   useToolCommand("line", tool, onToolChange);
@@ -62,34 +75,73 @@ export function ToolPalette({ tool, onToolChange, annotationsVisible, onAnnotati
     },
   });
 
-  const { roomRef, orientation } = useFittedOrientation();
+  const { roomRef, orientation } = useFittedOrientation(!compact);
   const tooltipPlacement = orientation === "vertical" ? "right" : "bottom";
+
+  const tools = (placement: "right" | "bottom", onPicked?: () => void) => (
+    <>
+      {TOOL_BUTTONS.map((button) => (
+        <IconButton
+          key={button.tool}
+          icon={button.icon}
+          label={button.label}
+          shortcut={button.combo}
+          tooltipPlacement={placement}
+          isSelected={tool === button.tool}
+          onSelectedChange={() => {
+            onToolChange(button.tool);
+            onPicked?.();
+          }}
+        />
+      ))}
+      <ToolbarSeparator />
+      <IconButton
+        icon={annotationsVisible ? EyeIcon : EyeSlashIcon}
+        label="Hide annotations"
+        shortcut="Shift+A"
+        tooltipPlacement={placement}
+        isSelected={!annotationsVisible}
+        onSelectedChange={(hidden) => onAnnotationsVisibleChange(!hidden)}
+        data-testid="annot-visibility-toggle"
+      />
+    </>
+  );
+
+  if (compact) {
+    const active = TOOL_BUTTONS.find((button) => button.tool === tool);
+    const drawing = active && active.tool !== "pan" ? active : null;
+    return (
+      <div className="lc-tool-palette">
+        <Card padding="sm">
+          <Popover
+            label="Annotate"
+            placement="bottom start"
+            trigger={
+              <IconButton
+                icon={drawing?.icon ?? PencilSimpleIcon}
+                label={drawing ? `Annotate: ${drawing.label}` : "Annotate"}
+                tooltipPlacement="bottom"
+                variant={drawing ? "secondary" : "ghost"}
+                data-testid="annotate-button"
+              />
+            }
+          >
+            {(close) => (
+              <Toolbar label="Tools" orientation="horizontal">
+                {tools("bottom", close)}
+              </Toolbar>
+            )}
+          </Popover>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <div ref={roomRef} className="lc-tool-palette">
       <Card padding="sm">
         <Toolbar label="Tools" orientation={orientation}>
-          {TOOL_BUTTONS.map((button) => (
-            <IconButton
-              key={button.tool}
-              icon={button.icon}
-              label={button.label}
-              shortcut={button.combo}
-              tooltipPlacement={tooltipPlacement}
-              isSelected={tool === button.tool}
-              onSelectedChange={() => onToolChange(button.tool)}
-            />
-          ))}
-          <ToolbarSeparator />
-          <IconButton
-            icon={annotationsVisible ? EyeIcon : EyeSlashIcon}
-            label="Hide annotations"
-            shortcut="Shift+A"
-            tooltipPlacement={tooltipPlacement}
-            isSelected={!annotationsVisible}
-            onSelectedChange={(hidden) => onAnnotationsVisibleChange(!hidden)}
-            data-testid="annot-visibility-toggle"
-          />
+          {tools(tooltipPlacement)}
           <ToolbarSeparator />
           <IconButton
             icon={KeyboardIcon}
@@ -109,13 +161,13 @@ export function ToolPalette({ tool, onToolChange, annotationsVisible, onAnnotati
  * square and the padding even, so the row is exactly as long as the column
  * is tall, and the palette's longer side is what a column needs either way.
  */
-function useFittedOrientation() {
+function useFittedOrientation(enabled: boolean) {
   const roomRef = useRef<HTMLDivElement>(null);
   const [orientation, setOrientation] = useState<"vertical" | "horizontal">("vertical");
   useLayoutEffect(() => {
     const room = roomRef.current;
     const card = room?.firstElementChild;
-    if (!room || !(card instanceof HTMLElement) || typeof ResizeObserver === "undefined") return;
+    if (!enabled || !room || !(card instanceof HTMLElement) || typeof ResizeObserver === "undefined") return;
     const fit = () => {
       const column = Math.max(card.offsetWidth, card.offsetHeight);
       setOrientation(column <= room.clientHeight ? "vertical" : "horizontal");
@@ -125,7 +177,7 @@ function useFittedOrientation() {
     observer.observe(card);
     fit();
     return () => observer.disconnect();
-  }, []);
+  }, [enabled]);
   return { roomRef, orientation };
 }
 

@@ -24,10 +24,13 @@
   pointer-events: auto;
 }
 
+/* Finger-sized buttons outgrow a narrow thread, so the actions wrap under
+   the title rather than push Close out of reach. */
 .lc-thread-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: var(--lc-space-2);
+  gap: 0 var(--lc-space-2);
   padding: var(--lc-space-1) var(--lc-space-1) var(--lc-space-1) var(--lc-space-3);
   border-bottom: 1px solid var(--lc-border);
 }
