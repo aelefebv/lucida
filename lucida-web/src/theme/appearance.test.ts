@@ -10,6 +10,7 @@ import {
   themePreference,
   accentPreference,
 } from "./appearance.ts";
+import { DEPLOYMENT_THEME_ELEMENT_ID, installDeploymentTheme } from "./deployment.ts";
 import {
   PREFERENCES_STORAGE_KEY,
   PREFERENCES_VERSION,
@@ -45,10 +46,18 @@ function snapshot(el: HTMLElement): Record<string, string | null> {
   return out;
 }
 
+const TOKEN_STYLE_ID = "lucida-deployment-tokens";
+
+function tokenCss(): string | null {
+  return document.getElementById(TOKEN_STYLE_ID)?.textContent ?? null;
+}
+
 function resetRoot(): void {
   const root = document.documentElement;
   for (const name of ATTRIBUTES) root.removeAttribute(name);
   root.removeAttribute("style");
+  document.getElementById(DEPLOYMENT_THEME_ELEMENT_ID)?.remove();
+  document.getElementById(TOKEN_STYLE_ID)?.remove();
 }
 
 const indexHtml = readFileSync(resolve(process.cwd(), "index.html"), "utf8");
@@ -95,7 +104,20 @@ describe("applyAppearance", () => {
 });
 
 describe("the pre-paint script in index.html", () => {
-  const cases: { name: string; values?: unknown; raw?: string; light?: boolean; search?: string }[] = [
+  const lightDeployment = {
+    configured: true,
+    defaults: { theme: "light", accent: "#0f8278", density: "compact", canvasBackground: "white" },
+    tokens: { dark: {}, light: {} },
+  };
+  const cases: {
+    name: string;
+    values?: unknown;
+    raw?: string;
+    light?: boolean;
+    search?: string;
+    /** The theme the server writes into the page, as JSON or raw text. */
+    deployment?: unknown;
+  }[] = [
     { name: "nothing stored" },
     {
       name: "every preference set",
@@ -124,23 +146,71 @@ describe("the pre-paint script in index.html", () => {
       values: { "appearance.theme": "light", "appearance.canvasBackground": "white" },
       search: "?render=1",
     },
+    { name: "deployment defaults", deployment: lightDeployment },
+    {
+      name: "deployment defaults under stored values",
+      values: { "appearance.theme": "dark", "appearance.accent": "rose" },
+      deployment: lightDeployment,
+    },
+    {
+      name: "a deployment default under an invalid stored value",
+      values: { "appearance.accent": "#12ab9", "appearance.canvasBackground": "red" },
+      deployment: { ...lightDeployment, defaults: { accent: "teal", canvasBackground: "theme" } },
+    },
+    {
+      name: "invalid deployment defaults",
+      deployment: { ...lightDeployment, defaults: { theme: "sepia", accent: 7, density: null } },
+    },
+    {
+      name: "a System deployment default on a light OS",
+      deployment: { ...lightDeployment, defaults: { theme: "system" } },
+      light: true,
+    },
+    {
+      name: "deployment token overrides",
+      deployment: {
+        ...lightDeployment,
+        tokens: {
+          dark: { "--lc-bg": "#101014", "--lc-font": '"Inter", system-ui' },
+          light: { "--lc-surface-1": "rgb(250 250 250)", "--lc-text": "red; color: blue", color: "red" },
+        },
+      },
+    },
+    {
+      name: "a deployment on the capture surface",
+      values: { "appearance.theme": "dark" },
+      search: "?render=1",
+      deployment: lightDeployment,
+    },
+    { name: "a corrupt deployment element", deployment: "{oops" },
   ];
 
-  it.each(cases)("matches applyAppearance: $name", ({ values, raw, light = false, search = "" }) => {
+  it.each(cases)("matches the TypeScript: $name", async ({ values, raw, light = false, search = "", deployment }) => {
     stubColorScheme(light);
     window.history.replaceState({}, "", `/${search}`);
     if (raw !== undefined) localStorage.setItem(PREFERENCES_STORAGE_KEY, raw);
     else if (values !== undefined) {
       localStorage.setItem(PREFERENCES_STORAGE_KEY, JSON.stringify({ version: PREFERENCES_VERSION, values }));
     }
+    if (deployment !== undefined) {
+      const element = document.createElement("script");
+      element.type = "application/json";
+      element.id = DEPLOYMENT_THEME_ELEMENT_ID;
+      element.textContent = typeof deployment === "string" ? deployment : JSON.stringify(deployment);
+      document.head.appendChild(element);
+    }
 
     runInlineScript();
     const fromScript = snapshot(document.documentElement);
+    const scriptCss = tokenCss();
+    document.getElementById(TOKEN_STYLE_ID)?.remove();
 
     __resetPreferencesForTesting();
+    await installDeploymentTheme(() => Promise.reject(new Error("the page carries the theme")));
     const el = document.createElement("div");
     applyAppearance(el, resolveAppearance());
     expect(fromScript).toEqual(snapshot(el));
+    expect(scriptCss).toEqual(tokenCss());
   });
 });
 
