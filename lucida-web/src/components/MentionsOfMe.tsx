@@ -8,10 +8,15 @@
  * since nothing links an opaque comment author to a roster email. A match is an
  * exact, case-insensitive token, and the user's own comments count too.
  */
+import { AtIcon, EyeSlashIcon } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
+import { Badge } from "../ui/Badge.tsx";
+import { Button, IconButton } from "../ui/Button.tsx";
+import { Popover } from "../ui/Popover.tsx";
 import type { Annotation } from "./annotationDocument.ts";
 import { splitMentionTokens } from "./annotationMentions.ts";
 import { deriveHandle, handleFromName } from "./annotationParticipants.ts";
+import "./MentionsOfMe.css";
 
 interface Props {
   /** The current dataset's pins with nested `comments`. Scoping to one dataset
@@ -132,171 +137,83 @@ export function MentionsOfMe({
   );
 
   return (
-    <div style={{ position: "relative", display: "inline-flex" }}>
-      <button
-        type="button"
-        data-testid="mentions-of-me-badge"
-        onClick={() => setOpen((v) => !v)}
-        aria-expanded={open}
-        aria-label={
-          count === 0
-            ? "Mentions of me: no unread"
-            : `Mentions of me: ${count} unread comment${count === 1 ? "" : "s"}`
-        }
-        title={
-          count === 0
-            ? "No unread mentions in this dataset"
-            : `${count} unread comment${count === 1 ? "" : "s"} mention you — click to view`
-        }
-        style={{
-          padding: "0.375rem 0.75rem",
-          fontSize: "0.875rem",
-          whiteSpace: "nowrap",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: "0.35rem",
-          // Same accent as the sibling toolbar toggles.
-          background: open ? "#646cff" : count > 0 ? "#1f6feb" : undefined,
-          color: open || count > 0 ? "#fff" : undefined,
-        }}
-      >
-        <span aria-hidden="true">@</span>
-        <span>Mentions</span>
-        {/* Shows 0 too, so the badge's textContent carries the count in every
-            state. */}
-        <span
-          style={{
-            minWidth: 16,
-            height: 16,
-            padding: "0 4px",
-            borderRadius: 8,
-            background: count > 0 ? "#da3633" : "rgba(255,255,255,0.18)",
-            color: "#fff",
-            fontSize: 11,
-            lineHeight: "16px",
-            textAlign: "center",
-            fontWeight: 700,
-          }}
-        >
-          {count}
-        </span>
-      </button>
-      {open && (
-        <div
-          data-testid="mentions-of-me-panel"
-          role="dialog"
-          aria-label="Comments that mention you"
-          style={{
-            position: "absolute",
-            top: "calc(100% + 6px)",
-            left: 0,
-            width: 320,
-            maxHeight: 360,
-            overflowY: "auto",
-            background: "rgba(22,27,34,0.98)",
-            color: "#e6edf3",
-            border: "1px solid #30363d",
-            borderRadius: 8,
-            boxShadow: "0 6px 18px rgba(0,0,0,0.6)",
-            zIndex: 50,
-            fontSize: 12,
-          }}
-        >
-          {/* Empty-state copy keys off whether any mention exists, not the
-              unread count, so a fully read inbox doesn't claim no one ever
-              mentioned you. */}
-          <div
-            style={{
-              padding: "8px 10px",
-              borderBottom: "1px solid #30363d",
-              fontWeight: 600,
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
-            }}
-          >
-            <span>
-              {hits.length === 0
-                ? "No one has mentioned you here"
-                : count === 0
-                  ? "All mentions read"
-                  : `${count} unread mention${count === 1 ? "" : "s"}`}
-            </span>
-            <button
-              type="button"
-              data-testid="mentions-of-me-hide-viewed-toggle"
-              onClick={() => setHideViewed((v) => !v)}
-              aria-pressed={hideViewed}
-              aria-label={hideViewed ? "Show viewed mentions" : "Hide viewed mentions"}
-              title={hideViewed ? "Show viewed mentions" : "Hide viewed mentions"}
-              style={{
-                padding: "2px 8px",
-                fontSize: 11,
-                fontWeight: 600,
-                whiteSpace: "nowrap",
-                borderRadius: 6,
-                border: "1px solid #30363d",
-                cursor: "pointer",
-                background: hideViewed ? "#646cff" : "transparent",
-                color: hideViewed ? "#fff" : "#8b949e",
-              }}
-            >
-              {hideViewed ? "Unread only" : "Hide read"}
-            </button>
-          </div>
-          {hits.length === 0 ? (
-            <div style={{ padding: "10px", color: "#8b949e" }}>
-              When a collaborator @-mentions you in a comment on this dataset, it
-              shows up here.
-            </div>
-          ) : visibleHits.length === 0 ? (
-            // Every mention is read and hidden: say why the list is empty.
-            <div style={{ padding: "10px", color: "#8b949e" }}>
-              No unread mentions. Toggle off “Hide read” to see read ones.
-            </div>
-          ) : (
-            <ul style={{ listStyle: "none", margin: 0, padding: "4px 0" }}>
-              {visibleHits.map((hit) => {
-                const isViewed = viewedSet.has(hit.commentId);
-                return (
-                  <li key={hit.commentId}>
-                    <button
-                      type="button"
-                      data-testid={`mention-of-me-item-${hit.commentId}`}
-                      data-viewed={isViewed ? "true" : "false"}
-                      onClick={() => {
-                        onNavigate(hit.pinId);
-                        onMarkViewed?.(hit.commentId);
-                      }}
-                      title={hit.text}
-                      style={{
-                        display: "block",
-                        width: "100%",
-                        textAlign: "left",
-                        padding: "7px 10px",
-                        fontSize: 12,
-                        lineHeight: 1.4,
-                        background: "none",
-                        border: "none",
-                        borderBottom: "1px solid rgba(48,54,61,0.6)",
-                        color: isViewed ? "#8b949e" : "#e6edf3",
-                        fontWeight: isViewed ? 400 : 600,
-                        cursor: "pointer",
-                        whiteSpace: "nowrap",
-                        overflow: "hidden",
-                        textOverflow: "ellipsis",
-                      }}
-                    >
-                      {snippet(hit.text)}
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+    <Popover
+      label="Comments that mention you"
+      placement="bottom start"
+      className="lc-mentions-popover"
+      isOpen={open}
+      onOpenChange={setOpen}
+      trigger={
+        <Button className="lc-mentions-trigger" icon={AtIcon} data-testid="mentions-of-me-badge">
+          Mentions
+          {/* Shows 0 too, so the trigger's text carries the count in every
+              state. */}
+          <Badge className="lc-mentions-count" tone={count > 0 ? "accent" : "neutral"}>
+            {count}
+          </Badge>
+        </Button>
+      }
+    >
+      <div className="lc-mentions" data-testid="mentions-of-me-panel">
+        {/* Empty-state copy keys off whether any mention exists, not the unread
+            count, so a fully read inbox doesn't claim no one ever mentioned
+            you. */}
+        <div className="lc-mentions-header">
+          <span className="lc-mentions-summary">
+            {hits.length === 0
+              ? "No one has mentioned you here"
+              : count === 0
+                ? "All mentions read"
+                : `${count} unread mention${count === 1 ? "" : "s"}`}
+          </span>
+          <IconButton
+            size="sm"
+            icon={EyeSlashIcon}
+            label="Hide read mentions"
+            tooltipPlacement="bottom"
+            isSelected={hideViewed}
+            onSelectedChange={setHideViewed}
+            data-testid="mentions-of-me-hide-viewed-toggle"
+          />
         </div>
-      )}
-    </div>
+        {hits.length === 0 ? (
+          <p className="lc-mentions-empty">
+            When a collaborator @-mentions you in a comment on this dataset, it shows up
+            here.
+          </p>
+        ) : visibleHits.length === 0 ? (
+          // Every mention is read and hidden: say why the list is empty.
+          <p className="lc-mentions-empty">
+            No unread mentions. Turn off “Hide read mentions” to see the read ones.
+          </p>
+        ) : (
+          <ul className="lc-mentions-list">
+            {visibleHits.map((hit) => {
+              const isViewed = viewedSet.has(hit.commentId);
+              return (
+                <li key={hit.commentId}>
+                  <button
+                    type="button"
+                    className="lc-mentions-item"
+                    data-testid={`mention-of-me-item-${hit.commentId}`}
+                    data-viewed={isViewed ? "true" : "false"}
+                    onClick={() => {
+                      // The popover would cover the thread this opens, so it
+                      // closes first.
+                      setOpen(false);
+                      onNavigate(hit.pinId);
+                      onMarkViewed?.(hit.commentId);
+                    }}
+                    title={hit.text}
+                  >
+                    <span className="lc-mentions-item-text">{snippet(hit.text)}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+    </Popover>
   );
 }

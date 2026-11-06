@@ -149,6 +149,12 @@ export interface SessionControllerEvents {
  * time (scene, render loop, callback registries) are reached through getters
  * so the controller always sees the current one.
  */
+/** A canvas size in device pixels. */
+export interface ViewportSize {
+  width: number;
+  height: number;
+}
+
 export interface SessionControllerDeps {
   workspaceId: string;
   /** Construct-or-return the WasmScene (see `useWasmScene.ensureScene`). */
@@ -157,6 +163,12 @@ export interface SessionControllerDeps {
   getScene: () => WasmScene | null;
   /** Current render loop, or null while no viewer is mounted. */
   getLoop: () => RenderLoop | null;
+  /**
+   * The canvas's size in device pixels, or null before it is laid out. The
+   * auto-fit frames against it: the scene otherwise learns its size only from
+   * render ticks, and none has run before the first dataset opens.
+   */
+  getViewportSize: () => ViewportSize | null;
   /**
    * Shared dataset registry. The host owns the Map's identity; the controller
    * is its only writer. `destroy()` clears it so a successor controller
@@ -1253,6 +1265,10 @@ export class SessionController {
     const following = this.followTarget !== null;
     if (shouldAutoFitOnOpen(cmd.type, { isOpener, restoreInProgress, following })) {
       try {
+        // Until a render tick asserts the canvas size, the scene holds its
+        // construction default, which is not the canvas the user sees.
+        const viewport = this.deps.getViewportSize();
+        if (viewport) scene.set_viewport(viewport.width, viewport.height);
         // Untyped call: the wasm export may predate the regenerated
         // bindings, so reach it structurally rather than via the type.
         (

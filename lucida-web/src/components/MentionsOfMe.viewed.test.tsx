@@ -187,8 +187,11 @@ describe("MentionsOfMe read/unread inbox (#803)", () => {
     fireEvent.click(screen.getByTestId("mention-of-me-item-c-1"));
 
     // The host marked it read: count drops and the item now reads as viewed.
+    // Navigating closes the panel, so reopen it to look.
     expect(onNavigate).toHaveBeenCalledWith("pin-1");
     expect(badgeText()).toContain("1");
+    expect(screen.queryByTestId("mentions-of-me-panel")).toBeNull();
+    openPanel();
     expect(
       screen.getByTestId("mention-of-me-item-c-1").getAttribute("data-viewed"),
     ).toBe("true");

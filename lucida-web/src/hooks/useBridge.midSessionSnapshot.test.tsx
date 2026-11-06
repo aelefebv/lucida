@@ -135,6 +135,7 @@ function makeParams(scene: ReturnType<typeof makeFakeScene>) {
         return scene as unknown as WasmScene;
       }),
       loopRef: { current: null },
+      canvasRef: { current: null },
       datasetsRef: { current: new Map<string, DatasetState>() },
       datasetCallbacksRef: { current: { removeDataset: vi.fn() } },
       bumpLayerSettingsVersion: vi.fn(),
