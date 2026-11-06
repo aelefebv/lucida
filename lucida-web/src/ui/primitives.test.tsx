@@ -1,12 +1,13 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { GearSixIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { Button, IconButton } from "./Button.tsx";
 import { Dialog } from "./Dialog.tsx";
+import { LONG_PRESS_MS, REVEAL_LINGER_MS } from "./longPress.ts";
 import { Popover } from "./Popover.tsx";
 import { __resetShortcutsForTesting, useShortcut } from "./shortcuts.ts";
 import { Slider } from "./Slider.tsx";
@@ -138,6 +139,60 @@ describe("IconButton", () => {
     expect(button.getAttribute("aria-pressed")).toBe("false");
     await user.click(button);
     expect(onSelectedChange).toHaveBeenCalledWith(true);
+  });
+});
+
+describe("IconButton under touch", () => {
+  // A real finger has a contact area; React Aria reads a zero-size pointer
+  // as a screen reader's virtual click.
+  const finger = { pointerType: "touch", pointerId: 7, isPrimary: true, width: 20, height: 20, pressure: 0.5 };
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("shows its name on a long press, without activating", () => {
+    vi.useFakeTimers();
+    const onPress = vi.fn();
+    render(<IconButton icon={GearSixIcon} label="Settings" onPress={onPress} />);
+    const button = screen.getByRole("button", { name: "Settings" });
+
+    fireEvent.pointerDown(button, finger);
+    act(() => vi.advanceTimersByTime(LONG_PRESS_MS));
+    expect(screen.getByRole("tooltip").textContent).toBe("Settings");
+
+    fireEvent.pointerUp(button, finger);
+    fireEvent.click(button);
+    act(() => vi.advanceTimersByTime(100));
+    expect(onPress).not.toHaveBeenCalled();
+    expect(screen.getByRole("tooltip")).toBeTruthy();
+
+    act(() => vi.advanceTimersByTime(REVEAL_LINGER_MS));
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("activates on a tap and shows nothing", () => {
+    vi.useFakeTimers();
+    const onPress = vi.fn();
+    render(<IconButton icon={GearSixIcon} label="Settings" onPress={onPress} />);
+    const button = screen.getByRole("button", { name: "Settings" });
+
+    fireEvent.pointerDown(button, finger);
+    act(() => vi.advanceTimersByTime(100));
+    fireEvent.pointerUp(button, finger);
+    fireEvent.click(button);
+    act(() => vi.advanceTimersByTime(LONG_PRESS_MS + 100));
+    expect(onPress).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("tooltip")).toBeNull();
+  });
+
+  it("leaves a held mouse button alone", () => {
+    vi.useFakeTimers();
+    render(<IconButton icon={GearSixIcon} label="Settings" onPress={() => {}} />);
+    const button = screen.getByRole("button", { name: "Settings" });
+    fireEvent.pointerDown(button, { ...finger, pointerType: "mouse" });
+    act(() => vi.advanceTimersByTime(LONG_PRESS_MS * 2));
+    expect(screen.queryByRole("tooltip")).toBeNull();
   });
 });
 

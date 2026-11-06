@@ -1,7 +1,9 @@
+/* Each option sits inside 2px of padding, so under touch the control grows
+   4px past the target size for every option to reach it. */
 .lc-segmented {
   display: inline-flex;
   box-sizing: border-box;
-  height: var(--lc-control-h);
+  height: max(var(--lc-control-h), calc(var(--lc-target-min) + 4px));
   padding: 2px;
   border-radius: var(--lc-radius);
   background: var(--lc-field-bg);
@@ -9,7 +11,7 @@
 }
 
 .lc-segmented[data-size="sm"] {
-  height: var(--lc-control-h-sm);
+  height: max(var(--lc-control-h-sm), calc(var(--lc-target-min) + 4px));
 }
 
 .lc-segment {
@@ -20,7 +22,7 @@
   gap: var(--lc-space-1);
   box-sizing: border-box;
   height: 100%;
-  min-width: 0;
+  min-width: var(--lc-target-min);
   margin: 0;
   padding: 0 var(--lc-space-3);
   border: none;

@@ -70,7 +70,11 @@
   justify-content: space-between;
   gap: var(--lc-space-3);
   box-sizing: border-box;
-  padding: var(--lc-space-3);
+  /* The stage meets the bottom of the viewport, and a side when no panel
+     stands between, so the slots keep clear of a home indicator or a notch.
+     The top bar has already taken the top inset. */
+  padding: var(--lc-space-3) max(var(--lc-space-3), var(--lc-safe-right))
+    calc(var(--lc-space-3) + var(--lc-safe-bottom)) max(var(--lc-space-3), var(--lc-safe-left));
   pointer-events: none;
 }
 

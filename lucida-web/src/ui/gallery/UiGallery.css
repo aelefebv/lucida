@@ -525,3 +525,20 @@
   color: var(--lc-text-subtle);
   font-size: var(--lc-text-xs);
 }
+
+/* The same reading as useViewportClass and usePointerCoarse, from the shared
+   queries, so a mismatch beside the hook's reading shows a drift. */
+.gallery-viewport-width::after { content: "desktop"; }
+.gallery-viewport-pointer::after { content: "fine"; }
+
+@media (640px <= width < 1024px) {
+  .gallery-viewport-width::after { content: "tablet"; }
+}
+
+@media (width < 640px) {
+  .gallery-viewport-width::after { content: "phone"; }
+}
+
+@media (pointer: coarse) {
+  .gallery-viewport-pointer::after { content: "coarse"; }
+}

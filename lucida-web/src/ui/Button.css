@@ -5,7 +5,7 @@
   gap: var(--lc-space-2);
   box-sizing: border-box;
   height: var(--lc-control-h);
-  min-width: 0;
+  min-width: var(--lc-target-min);
   margin: 0;
   padding: 0 var(--lc-space-3);
   border: none;
@@ -20,6 +20,7 @@
   white-space: nowrap;
   cursor: default;
   user-select: none;
+  -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
   transition:
     background-color var(--lc-motion-fast) var(--lc-ease),

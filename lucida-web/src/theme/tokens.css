@@ -20,6 +20,7 @@
   --lc-text-lg: 14px;
   --lc-text-xl: 16px;
   --lc-text-2xl: 20px;
+  --lc-text-input: var(--lc-text-md);
 
   /* Spacing, on a 4px grid */
   --lc-space-1: 4px;
@@ -40,6 +41,19 @@
   /* Density */
   --lc-control-h: 28px;
   --lc-control-h-sm: 24px;
+  /* The smallest tap target. Zero for a fine pointer, so a size written as
+     max(its own, this) stays as it is on desktop. */
+  --lc-target-min: 0px;
+  /* Slider thumbs. The switch takes its size from this too. */
+  --lc-thumb-size: 14px;
+
+  /* What a notch, rounded corners, or a home indicator take from each edge
+     of the viewport (index.html asks for viewport-fit=cover). Zero wherever
+     the device reports none, which is every desktop. */
+  --lc-safe-top: env(safe-area-inset-top, 0px);
+  --lc-safe-right: env(safe-area-inset-right, 0px);
+  --lc-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --lc-safe-left: env(safe-area-inset-left, 0px);
 
   /* Motion. Zeroed under prefers-reduced-motion below. */
   --lc-motion-fast: 120ms;
@@ -181,6 +195,21 @@
 :root[data-density="compact"] {
   --lc-control-h: 24px;
   --lc-control-h-sm: 20px;
+}
+
+/* A finger needs a 44px target on a screen of any width, and a mouse keeps
+   the denser sizes at any width, so this follows the pointer, not the width
+   class (viewport.ts). Density is comfortable here whatever the setting says.
+   Fields take 16px text, below which iOS zooms the page into a focused one. */
+@media (pointer: coarse) {
+  :root,
+  :root[data-density="compact"] {
+    --lc-control-h: 44px;
+    --lc-control-h-sm: 44px;
+    --lc-target-min: 44px;
+    --lc-thumb-size: 24px;
+    --lc-text-input: 16px;
+  }
 }
 
 /* The canvas follows its own setting, not the UI theme, so what is drawn on it

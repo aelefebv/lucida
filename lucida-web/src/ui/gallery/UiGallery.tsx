@@ -43,6 +43,7 @@ import {
 } from "../../theme/appearance.ts";
 import { developerToolsPreference, setPreference, usePreference } from "../../theme/preferences.ts";
 import { CANVAS_TOKEN_NAMES, TOKEN_NAMES, readColorToken } from "../../theme/tokens.ts";
+import { usePointerCoarse, useViewportClass } from "../../theme/viewport.ts";
 import { AccentPicker } from "../../theme/AccentPicker.tsx";
 import { Avatar } from "../Avatar.tsx";
 import { Badge } from "../Badge.tsx";
@@ -245,6 +246,8 @@ function TypeSection() {
 }
 
 function ShapeSection() {
+  const viewport = useViewportClass();
+  const coarse = usePointerCoarse();
   return (
     <Section title="Shape, space, depth">
       <Row label="Radius">
@@ -279,6 +282,14 @@ function ShapeSection() {
         <div className="gallery-control-h" style={{ height: "var(--lc-control-h-sm)" }}>
           control-h-sm
         </div>
+      </Row>
+      <Row label="Viewport">
+        <code className="gallery-mono">
+          hook: {viewport}, {coarse ? "coarse" : "fine"} pointer
+        </code>
+        <code className="gallery-mono">
+          CSS: <span className="gallery-viewport-width" />, <span className="gallery-viewport-pointer" /> pointer
+        </code>
       </Row>
     </Section>
   );

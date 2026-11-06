@@ -1,9 +1,10 @@
 /* The viewer's canvas stage sets the insets so toasts rise above its bottom
-   row of floating controls instead of covering them. */
+   row of floating controls instead of covering them. Elsewhere the region
+   keeps clear of the viewport's safe-area insets itself. */
 .lc-toast-region {
   position: fixed;
-  right: var(--toast-inset-right, var(--lc-space-4));
-  bottom: var(--toast-inset-bottom, var(--lc-space-4));
+  right: var(--toast-inset-right, calc(var(--lc-space-4) + var(--lc-safe-right)));
+  bottom: var(--toast-inset-bottom, calc(var(--lc-space-4) + var(--lc-safe-bottom)));
   z-index: var(--lc-z-toast);
   display: flex;
   flex-direction: column-reverse;
@@ -17,7 +18,7 @@
   gap: var(--lc-space-3);
   box-sizing: border-box;
   width: 360px;
-  max-width: calc(100vw - 2 * var(--lc-space-4));
+  max-width: calc(100vw - 2 * var(--lc-space-4) - var(--lc-safe-left) - var(--lc-safe-right));
   padding: var(--lc-space-3) var(--lc-space-2) var(--lc-space-3) var(--lc-space-4);
   border: 1px solid var(--lc-border);
   border-radius: var(--lc-radius-lg);
