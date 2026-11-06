@@ -102,13 +102,25 @@ pub(crate) const SHARING_SETTINGS: &str = r#"
 // each is on the whole of that table's primary key — so naming them splits
 // no group and the answer is the same on either engine. SQLite would have
 // accepted the shorter form; only PostgreSQL asks.
+//
+// `first_dataset_url` is a correlated subquery because no aggregate both
+// engines share picks one row of a group by order. "First" is the order
+// `LIST_DATASET_SOURCES` lists them in.
 
 pub(crate) const LIST_WORKSPACES_AS_ADMIN: &str = r#"
     SELECT
         w.id, w.name, w.created_by, w.created_at, w.updated_at,
         w.archived_at, w.seq, w.default_saved_view_id, 'owner' AS role,
         uws.last_opened_at, uws.pinned_at,
-        COALESCE(COUNT(wd.id), 0) AS dataset_count
+        COALESCE(COUNT(wd.id), 0) AS dataset_count,
+        (
+            SELECT ds.canonical_url
+            FROM workspace_datasets first_wd
+            INNER JOIN dataset_sources ds ON ds.id = first_wd.dataset_source_id
+            WHERE first_wd.workspace_id = w.id
+            ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
+            LIMIT 1
+        ) AS first_dataset_url
     FROM workspaces w
     LEFT JOIN user_workspace_state uws
         ON uws.workspace_id = w.id AND uws.user_email = $1
@@ -127,7 +139,15 @@ pub(crate) const LIST_WORKSPACES: &str = r#"
         w.archived_at, w.seq, w.default_saved_view_id,
         COALESCE(wm.role, w.link_role) AS role,
         uws.last_opened_at, uws.pinned_at,
-        COALESCE(COUNT(wd.id), 0) AS dataset_count
+        COALESCE(COUNT(wd.id), 0) AS dataset_count,
+        (
+            SELECT ds.canonical_url
+            FROM workspace_datasets first_wd
+            INNER JOIN dataset_sources ds ON ds.id = first_wd.dataset_source_id
+            WHERE first_wd.workspace_id = w.id
+            ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
+            LIMIT 1
+        ) AS first_dataset_url
     FROM workspaces w
     LEFT JOIN workspace_members wm
         ON wm.workspace_id = w.id AND wm.email = $1
@@ -155,7 +175,15 @@ pub(crate) const LIST_ARCHIVED_WORKSPACES_AS_ADMIN: &str = r#"
         w.id, w.name, w.created_by, w.created_at, w.updated_at,
         w.archived_at, w.seq, w.default_saved_view_id, 'owner' AS role,
         uws.last_opened_at, uws.pinned_at,
-        COALESCE(COUNT(wd.id), 0) AS dataset_count
+        COALESCE(COUNT(wd.id), 0) AS dataset_count,
+        (
+            SELECT ds.canonical_url
+            FROM workspace_datasets first_wd
+            INNER JOIN dataset_sources ds ON ds.id = first_wd.dataset_source_id
+            WHERE first_wd.workspace_id = w.id
+            ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
+            LIMIT 1
+        ) AS first_dataset_url
     FROM workspaces w
     LEFT JOIN user_workspace_state uws
         ON uws.workspace_id = w.id AND uws.user_email = $1
@@ -170,7 +198,15 @@ pub(crate) const LIST_ARCHIVED_WORKSPACES: &str = r#"
         w.id, w.name, w.created_by, w.created_at, w.updated_at,
         w.archived_at, w.seq, w.default_saved_view_id, wm.role,
         uws.last_opened_at, uws.pinned_at,
-        COALESCE(COUNT(wd.id), 0) AS dataset_count
+        COALESCE(COUNT(wd.id), 0) AS dataset_count,
+        (
+            SELECT ds.canonical_url
+            FROM workspace_datasets first_wd
+            INNER JOIN dataset_sources ds ON ds.id = first_wd.dataset_source_id
+            WHERE first_wd.workspace_id = w.id
+            ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
+            LIMIT 1
+        ) AS first_dataset_url
     FROM workspaces w
     INNER JOIN workspace_members wm
         ON wm.workspace_id = w.id AND wm.email = $1 AND wm.role = 'owner'

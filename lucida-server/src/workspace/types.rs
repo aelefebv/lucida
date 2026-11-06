@@ -133,6 +133,10 @@ pub struct WorkspaceSummary {
     pub default_saved_view_id: Option<String>,
     pub last_opened_at: Option<DateTime<Utc>>,
     pub pinned_at: Option<DateTime<Utc>>,
+    /// The canonical URL of the workspace's first dataset in layer order,
+    /// so a listing can tell apart workspaces that share a name. `None`
+    /// until a dataset is opened.
+    pub first_dataset_url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
