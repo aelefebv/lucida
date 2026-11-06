@@ -81,6 +81,15 @@ describe("PhoneSheet", () => {
     expect(isPanelOpen("left")).toBe(false);
   });
 
+  it("steps on a screen reader's click, but not again on a tap's own click", () => {
+    render(<Shell />);
+    fireEvent.click(handle());
+    expect(sheet().dataset.snap).toBe("half");
+    tapHandle();
+    fireEvent.click(handle());
+    expect(sheet().dataset.snap).toBe("full");
+  });
+
   it("opens a rail panel as its tab, and remembers it as the rail does", () => {
     render(<Shell />);
     tapHandle();
