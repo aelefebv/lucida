@@ -110,6 +110,8 @@ export interface MinimapOverviewCache {
   datasetDims: Map<string, { width: number; height: number; depth: number }>;
   /** Backing pixel size the cached camera/overview were rendered at. */
   backingSize: number;
+  /** The cached camera looks straight down Z and ignores orientation. */
+  topDown: boolean;
 }
 
 export function createMinimapState(): MinimapState {
@@ -494,12 +496,13 @@ interface MinimapCamera {
   invViewProj: Float32Array;
   eye: Float32Array;
   backingSize: number;
+  topDown: boolean;
 }
 
 /**
  * The only place `scene.minimap_camera(...)` is unpacked, so a full rebuild and
- * an orbit get identical camera outputs. The 35-float payload is
- * [0..16) invViewProj, [16..19) eye, [19..35) viewProj.
+ * an orbit get identical camera outputs. The 36-float payload is
+ * [0..16) invViewProj, [16..19) eye, [19..35) viewProj, [35] topDown (1 or 0).
  */
 function computeMinimapCamera(
   scene: WasmScene,
@@ -514,6 +517,7 @@ function computeMinimapCamera(
     invViewProj: new Float32Array(camData.subarray(0, 16)),
     eye: new Float32Array(camData.subarray(16, 19)),
     backingSize,
+    topDown: camData[35] === 1,
   };
 }
 
@@ -536,6 +540,7 @@ function updateMinimapCamera(
   cache.invViewProj = cam.invViewProj;
   cache.eye = cam.eye;
   cache.backingSize = cam.backingSize;
+  cache.topDown = cam.topDown;
   issueMinimapRender(client, cache.renderLayers, allSettings, activeC, cache.invViewProj, cache.eye, cache.backingSize);
 }
 
@@ -554,7 +559,7 @@ function buildMinimapOverview(
 ): MinimapOverviewCache {
   const { scene, client, datasets } = ctx;
 
-  const { viewProj, invViewProj, eye, backingSize } = computeMinimapCamera(scene, cssSize, theta, phi);
+  const { viewProj, invViewProj, eye, backingSize, topDown } = computeMinimapCamera(scene, cssSize, theta, phi);
 
   const renderLayers: MinimapRenderLayerGeometry[] = [];
   const overlayLayers: { datasetId: string; modelMatrix: Float32Array; invModelMatrix: Float32Array }[] = [];
@@ -643,6 +648,7 @@ function buildMinimapOverview(
     sliceViewportMembers,
     datasetDims,
     backingSize,
+    topDown,
   };
 }
 
@@ -711,6 +717,9 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const settingsChanged = settingsSnap !== state.overviewSettingsSnap;
   const overlayChanged = overlayKey !== state.overlayRenderKey;
   if (!geometryChanged && !cameraChanged && !settingsChanged && !overlayChanged && state.overviewCache) return;
+  // A top-down camera ignores orientation, so an orbit leaves it and the
+  // overview unchanged.
+  const orbited = cameraChanged && !state.overviewCache?.topDown;
 
   let rebuilt = false;
   if (geometryChanged || !state.overviewCache) {
@@ -728,12 +737,12 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       state.overviewCache = buildMinimapOverview(ctx, state.size, activeC, layerOrder, allSettings, theta, phi);
       state.overviewVisibilitySig = visibilitySig;
       rebuilt = true;
-    } else if (cameraChanged) {
+    } else if (orbited) {
       updateMinimapCamera(scene, ctx.client, state.overviewCache, state.size, activeC, allSettings, theta, phi);
     } else {
       updateMinimapDisplay(ctx.client, state.overviewCache, allSettings, activeC);
     }
-  } else if (cameraChanged) {
+  } else if (orbited) {
     // A rotated volume looks different, so the overview must still redraw.
     const allSettings: MinimapAllSettings = JSON.parse(settingsSnap);
     updateMinimapCamera(scene, ctx.client, state.overviewCache, state.size, activeC, allSettings, theta, phi);
@@ -783,6 +792,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
       datasetLayers: cache.datasetOverlayLayers,
       sliceViewports,
       mode,
+      topDown: cache.topDown,
       theta,
       phi,
       canvasW: cache.backingSize,

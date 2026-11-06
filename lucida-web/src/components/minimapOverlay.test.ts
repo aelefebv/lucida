@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { MinimapOverlayData } from "../renderLoopTypes.ts";
 import {
   drawDynamicMinimapOverlays,
+  drawStaticMinimapOverlays,
   drawViewportOverlays,
   drawZPlaneOverlays,
   zPlaneLayerDirty,
@@ -69,6 +70,7 @@ function makeData(mode: "slice" | "volume", overrides: Partial<MinimapOverlayDat
       },
     ],
     mode,
+    topDown: false,
     theta: 0.5,
     phi: 1.2,
     canvasW: 400,
@@ -143,6 +145,52 @@ describe("dynamic overlay split", () => {
     // No viewport rects in volume mode, but the cube is still present.
     expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(100,180,255,0.3)")).toBe(false);
     expect(log.some((op) => op.type === "call" && op.name === "arc")).toBe(true);
+  });
+});
+
+describe("top-down minimap", () => {
+  beforeEach(() => {
+    globalThis.devicePixelRatio = 2;
+  });
+
+  // The orientation cube's background circle is the only arc() the overlay draws.
+  const drawsCube = (log: Op[]) => log.some((op) => op.type === "call" && op.name === "arc");
+  const axisLabels = (log: Op[]) =>
+    log.filter((op) => op.type === "call" && op.name === "fillText").map((op) => (op as { args: unknown[] }).args[0]);
+
+  for (const mode of ["slice", "volume"] as const) {
+    it(`hides the orientation cube in ${mode} mode`, () => {
+      const orbit: Op[] = [];
+      drawViewportOverlays(recordingCtx(orbit), makeData(mode));
+      expect(drawsCube(orbit)).toBe(true);
+
+      const topDown: Op[] = [];
+      drawViewportOverlays(recordingCtx(topDown), makeData(mode, { topDown: true }));
+      expect(drawsCube(topDown)).toBe(false);
+    });
+  }
+
+  it("still draws the slice viewport rectangles", () => {
+    const log: Op[] = [];
+    drawViewportOverlays(recordingCtx(log), makeData("slice", { topDown: true }));
+    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(100,180,255,0.3)")).toBe(true);
+  });
+
+  it("omits the axis arrows but keeps the member outlines", () => {
+    const orbit: Op[] = [];
+    drawStaticMinimapOverlays(recordingCtx(orbit), makeData("slice"));
+    expect(axisLabels(orbit)).toEqual(["X", "Y", "Z"]);
+
+    const topDown: Op[] = [];
+    drawStaticMinimapOverlays(recordingCtx(topDown), makeData("slice", { topDown: true }));
+    expect(axisLabels(topDown)).toEqual([]);
+    expect(topDown.some((op) => op.type === "set" && op.name === "strokeStyle" && op.value === "rgba(255,255,255,0.5)")).toBe(true);
+  });
+
+  it("draws no slice plane", () => {
+    const log: Op[] = [];
+    drawZPlaneOverlays(recordingCtx(log), makeData("slice", { topDown: true }));
+    expect(log).toEqual([]);
   });
 });
 

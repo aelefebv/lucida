@@ -185,12 +185,12 @@ function drawSliceViewportRect(
 }
 
 /**
- * Draw the Z-invariant layer: member bounding boxes, axis arrows, and in volume
- * mode the camera frustum. None of it depends on the current Z-plane, so a
- * Z-scrub reuses a cached copy. Clears the target first.
+ * Draw the Z-invariant layer: member bounding boxes, axis arrows (orbit only),
+ * and in volume mode the camera frustum. None of it depends on the current
+ * Z-plane, so a Z-scrub reuses a cached copy. Clears the target first.
  */
 export function drawStaticMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, layers, datasetLayers, mode, canvasW, canvasH, mainInvViewProj } = data;
+  const { viewProj, layers, datasetLayers, mode, topDown, canvasW, canvasH, mainInvViewProj } = data;
 
   ctx.clearRect(0, 0, canvasW, canvasH);
 
@@ -199,8 +199,9 @@ export function drawStaticMinimapOverlays(ctx: CanvasRenderingContext2D, data: M
     drawBoundingBox(ctx, viewProj, layer.modelMatrix, canvasW, canvasH, "rgba(255,255,255,0.5)");
   }
 
-  // Axis arrows (once, not per-dataset)
-  drawAxisArrows(ctx, viewProj, canvasW, canvasH);
+  // Axis arrows (once, not per-dataset). Looking straight down Z, the Z arrow
+  // collapses to a point and X and Y only repeat the slice view's orientation.
+  if (!topDown) drawAxisArrows(ctx, viewProj, canvasW, canvasH);
 
   if (mode === "volume" && mainInvViewProj) {
     // Frustum intersection (per-dataset)
@@ -218,9 +219,11 @@ export function drawStaticMinimapOverlays(ctx: CanvasRenderingContext2D, data: M
  * on pan/zoom. Does not clear, so the consumer clears its cache canvas first.
  */
 export function drawZPlaneOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, layers, mode, canvasW, canvasH, currentZ, datasetDims } = data;
+  const { viewProj, layers, mode, topDown, canvasW, canvasH, currentZ, datasetDims } = data;
 
-  if (mode === "slice") {
+  // Top-down means one plane per member, so a plane marker would only tint
+  // every member.
+  if (mode === "slice" && !topDown) {
     // One slice plane per member, showing Z within each tile.
     for (const layer of layers) {
       const dims = datasetDims.get(layer.datasetId);
@@ -231,12 +234,12 @@ export function drawZPlaneOverlays(ctx: CanvasRenderingContext2D, data: MinimapO
 }
 
 /**
- * Draw the viewport rectangles (slice mode) and the orientation cube. Cheap,
- * since it scales with visible viewports rather than member count, so it is
- * re-stroked every callback. Does not clear.
+ * Draw the viewport rectangles (slice mode) and, for the orbit, the orientation
+ * cube. Cheap, since it scales with visible viewports rather than member count,
+ * so it is re-stroked every callback. Does not clear.
  */
 export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, sliceViewports, mode, canvasW, canvasH, currentZ, theta, phi } = data;
+  const { viewProj, sliceViewports, mode, topDown, canvasW, canvasH, currentZ, theta, phi } = data;
 
   if (mode === "slice") {
     // View rectangle intersections (per-member, in member-local voxel coordinates)
@@ -249,8 +252,9 @@ export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: Minima
     }
   }
 
-  // Orientation cube (drawn last, on top of everything)
-  drawOrientationCube(ctx, theta, phi, canvasW, canvasH);
+  // Orientation cube (drawn last, on top of everything). A top-down camera
+  // doesn't follow the main camera's angles, so the cube would orient nothing.
+  if (!topDown) drawOrientationCube(ctx, theta, phi, canvasW, canvasH);
 }
 
 /**

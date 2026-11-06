@@ -25,8 +25,8 @@ pub fn target_level(pixels_per_sample: f64, shape_ratios: &[f64], previous: Opti
 
 /// GPU camera matrices for an off-screen render of an arbitrary camera, in the
 /// 35-float layout the volume renderer wants (`invViewProj[16] + eye[3] +
-/// viewProj[16]`), the same as [`WasmScene::minimap_camera`]'s output, so the
-/// worker's thumbnail path reuses the minimap's offscreen render.
+/// viewProj[16]`), the first 35 floats of [`WasmScene::minimap_camera`]'s
+/// output, so the worker's thumbnail path reuses the minimap's offscreen render.
 ///
 /// `camera_json` is a serialized [`crate::camera::Camera`]; `w`/`h` size the
 /// target and override the stored viewport's aspect. The matrices come from
@@ -859,38 +859,48 @@ impl WasmScene {
         }
     }
 
-    /// Returns 35 floats: invViewProj[16] + eye[3] + viewProj[16]
+    /// Returns 36 floats: invViewProj[16] + eye[3] + viewProj[16] + topDown[1].
+    ///
+    /// `topDown` is `1` when every framed member has one Z plane and the camera
+    /// looks straight down Z, ignoring `theta`/`phi`, and `0` for the orbit.
+    /// See [`crate::minimap::minimap_framing`].
     pub fn minimap_camera(&self, theta: f64, phi: f64, w: f64, h: f64) -> Vec<f32> {
-        // Compute bounding box of all members to frame the camera
-        let (target, distance) = self.minimap_framing();
-        let cam = Arcball {
-            target,
-            theta,
-            phi,
-            distance,
-            fov: std::f64::consts::FRAC_PI_4,
-            viewport: [w as u32, h as u32],
-            near: 0.01,
-            far: (distance * 4.0_f64).max(100.0),
-            clip_distance: 0.0,
-            clip_mode: crate::camera::ClipMode::default(),
+        use crate::minimap::{MinimapFraming, minimap_framing, top_down_view};
+
+        let viewport = [w as u32, h as u32];
+        let (view_proj, eye, top_down) = match minimap_framing(&self.minimap_members()) {
+            MinimapFraming::Orbit { target, distance } => {
+                let cam = Arcball {
+                    target,
+                    theta,
+                    phi,
+                    distance,
+                    fov: std::f64::consts::FRAC_PI_4,
+                    viewport,
+                    near: 0.01,
+                    far: (distance * 4.0_f64).max(100.0),
+                    clip_distance: 0.0,
+                    clip_mode: crate::camera::ClipMode::default(),
+                };
+                (cam.view_proj_f64(), cam.eye_position(), false)
+            }
+            MinimapFraming::TopDown { bounds } => {
+                let (view_proj, eye) = top_down_view(bounds, viewport);
+                (view_proj, eye, true)
+            }
         };
-        let mut out = Vec::with_capacity(35);
-        out.extend_from_slice(&cam.inv_view_proj());
-        let eye = cam.eye_position();
-        out.push(eye[0] as f32);
-        out.push(eye[1] as f32);
-        out.push(eye[2] as f32);
-        out.extend_from_slice(&cam.view_proj());
+        let mut out = Vec::with_capacity(36);
+        out.extend_from_slice(&crate::mat4::invert4_f32(view_proj));
+        out.extend(eye.iter().map(|&v| v as f32));
+        out.extend(view_proj.iter().map(|&v| v as f32));
+        out.push(if top_down { 1.0 } else { 0.0 });
         out
     }
 
-    /// Compute minimap camera target and distance from the bounding box of the
-    /// member model matrices. Frames the **visible** members (falling back to all
-    /// when none are visible) so a single shown dataset isn't dwarfed by hidden
-    /// ones; the framing math lives in `crate::minimap` so it can be unit tested.
-    fn minimap_framing(&self) -> ([f64; 3], f64) {
-        let mut members: Vec<([f32; 16], bool)> = Vec::new();
+    /// Every member's world box, visibility, and plane count, for
+    /// [`crate::minimap::minimap_framing`].
+    fn minimap_members(&self) -> Vec<crate::minimap::MinimapMember> {
+        let mut members = Vec::new();
 
         for (ds_id, derived) in &self.inner.derived {
             let visible = self
@@ -900,14 +910,16 @@ impl WasmScene {
                 .map(|s| s.visible)
                 .unwrap_or(true);
             for member in &derived.members {
-                // Model matrix is scale+translate (diagonal); the framing helper
-                // reads mat[0]/[5]/[10] (scale) and mat[12]/[13]/[14] (translate).
-                // Shared with the renderer + auto-fit via `Scene::member_world_matrix`.
-                let mat = self.inner.member_world_matrix(member);
-                members.push((mat, visible));
+                members.push(crate::minimap::MinimapMember {
+                    // Shared with the renderer and auto-fit, so the minimap
+                    // frames the boxes that are drawn.
+                    model: self.inner.member_world_matrix(member),
+                    visible,
+                    z_planes: member.levels.first().map_or(0, |l| l.shape[2]),
+                });
             }
         }
 
-        crate::minimap::minimap_framing_boxes(&members)
+        members
     }
 }

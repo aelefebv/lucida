@@ -35,6 +35,12 @@ export interface MinimapOverlayData {
     depth: number;
   }[];
   mode: "slice" | "volume";
+  /**
+   * The minimap camera looks straight down Z because every framed member has
+   * one Z plane. The orientation cube, axis arrows, and slice planes then have
+   * nothing to show, so they are not drawn.
+   */
+  topDown: boolean;
   theta: number;
   phi: number;
   canvasW: number;
