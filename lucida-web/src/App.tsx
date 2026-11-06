@@ -1062,6 +1062,7 @@ function App({
           emitPresenceWithUrl();
           requestRender(render.loopRef.current, "collection_group_click");
         }}
+        getViewCenter={() => scene.wasmSceneRef.current?.center() ?? null}
       />
     );
   })();
