@@ -3,13 +3,14 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { cleanup, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import initWasm from "lucida-core";
 import { useState } from "react";
 import { __resetPreferencesForTesting, getPreference } from "../theme/preferences.ts";
 import { Button } from "../ui/Button.tsx";
-import { __resetShortcutsForTesting } from "../ui/shortcuts.ts";
+import { __resetCommandsForTesting, listCommands, runCommand } from "../ui/commands.ts";
+import { __resetShortcutsForTesting, listShortcuts } from "../ui/shortcuts.ts";
 import { AddDataDialog } from "./AddDataDialog.tsx";
 import { AddDataPrompt } from "./AddDataPrompt.tsx";
 import {
@@ -17,6 +18,7 @@ import {
   recentSourcesPreference,
   rememberRecentSource,
 } from "./recentSources.ts";
+import { ADD_DATA_SHORTCUT } from "./shortcut.ts";
 
 interface Listing {
   path: string;
@@ -61,6 +63,7 @@ afterEach(() => {
   globalThis.fetch = originalFetch;
   cleanup();
   __resetShortcutsForTesting();
+  __resetCommandsForTesting();
 });
 
 function Harness({ onOpen }: { onOpen: (url: string) => void }) {
@@ -153,6 +156,16 @@ describe("AddDataDialog", () => {
     render(<Harness onOpen={() => {}} />);
     const mod = /mac/i.test(navigator.platform) ? "Meta" : "Control";
     await user.keyboard(`{${mod}>}o{/${mod}}`);
+    expect(await screen.findByRole("dialog", { name: "Add data" })).toBeTruthy();
+  });
+
+  it("offers a palette command that carries the same key", async () => {
+    render(<Harness onOpen={() => {}} />);
+    expect(listCommands().find((c) => c.id === "data.add")?.label).toBe("Add data…");
+    expect(listShortcuts().find((s) => s.id === "data.add")?.keys).toEqual([ADD_DATA_SHORTCUT]);
+    act(() => {
+      runCommand("data.add");
+    });
     expect(await screen.findByRole("dialog", { name: "Add data" })).toBeTruthy();
   });
 });

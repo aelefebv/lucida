@@ -247,6 +247,7 @@ import {
   setPreference,
 } from "./theme/preferences.ts";
 import { leftPanelOpenPreference, rightPanelOpenPreference } from "./shell/layoutPreferences.ts";
+import { showKeyboardHelp } from "./ui/keyboardHelpState.ts";
 import {
   invalidateDisplaySettings,
   invalidateAfterViewRestore,
@@ -391,6 +392,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  showKeyboardHelp(null);
   window.location.hash = "";
 });
 
@@ -641,5 +643,72 @@ describe("App wiring: the shell", () => {
       fireEvent.click(avatar);
     });
     expect(bridge.sendFollow).toHaveBeenLastCalledWith(null);
+  });
+});
+
+describe("App wiring: tools and keyboard help", () => {
+  it("takes keys right after load, with nothing focused", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(document.activeElement).toBe(document.body);
+    const point = screen.getByRole("button", { name: "Point tool" });
+    expect(point.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "p", code: "KeyP" });
+    });
+    expect(point.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Escape", code: "Escape" });
+    });
+    expect(point.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Pan tool" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("ignores keys typed into a field", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    // The dialog's file browser lists a folder as it opens.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ path: "/", entries: [] })));
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "o", code: "KeyO", ctrlKey: true });
+    });
+    const dialog = await screen.findByRole("dialog", { name: "Add data" });
+    const field = within(dialog).getByRole("textbox", { name: "Dataset path or URL" });
+    await act(async () => {
+      fireEvent.keyDown(field, { key: "p", code: "KeyP" });
+    });
+    expect(screen.getByRole("button", { name: "Point tool" }).getAttribute("aria-pressed")).toBe("false");
+    fetchSpy.mockRestore();
+  });
+
+  it("runs a shell command from the palette", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "k", code: "KeyK", ctrlKey: true });
+    });
+    const search = within(await screen.findByRole("dialog", { name: "Command palette" })).getByRole("searchbox");
+    // A browser focuses the field on open; happy-dom leaves focus on the dialog.
+    act(() => search.focus());
+    await act(async () => {
+      fireEvent(search, new InputEvent("beforeinput", { inputType: "insertText", data: "layers", bubbles: true }));
+      fireEvent.change(search, { target: { value: "layers" } });
+    });
+    await act(async () => {
+      fireEvent.keyDown(search, { key: "Enter" });
+    });
+    expect(getPreference(leftPanelOpenPreference)).toBe(false);
+  });
+
+  it("lists the shell's keys in the shortcut sheet", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
+    });
+    const sheet = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    for (const label of ["Command palette", "Show or hide the left panel", "Point tool", "Hide annotations"]) {
+      expect(within(sheet).getByText(label)).toBeTruthy();
+    }
   });
 });

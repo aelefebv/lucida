@@ -3,7 +3,7 @@ import { is_local_dataset_url, normalize_dataset_url } from "lucida-core";
 import { useId } from "react";
 import { IconButton } from "../ui/Button.tsx";
 import { Dialog } from "../ui/Dialog.tsx";
-import { useShortcut } from "../ui/shortcuts.ts";
+import { useCommand } from "../ui/commands.ts";
 import { BrowsePane } from "./BrowsePane.tsx";
 import {
   forgetRecentSource,
@@ -26,17 +26,19 @@ export interface AddDataDialogProps {
 
 /**
  * The one way to add data: a path or URL, a recent dataset, or the file
- * browser. `Mod+O` opens it; it closes as soon as an open is sent, and the
- * canvas's banners carry the progress or the failure from there.
+ * browser. `Mod+O` and the "Add data…" command open it; it closes as soon as
+ * an open is sent, and the canvas's banners carry the progress or the
+ * failure from there.
  */
 export function AddDataDialog({ isOpen, onOpenChange, onOpen, onCreateWorkspace }: AddDataDialogProps) {
   const headingId = useId();
-  useShortcut({
+  useCommand({
     id: "data.add",
-    keys: [ADD_DATA_SHORTCUT],
-    label: "Add data",
+    label: "Add data…",
     group: "General",
-    onTrigger: () => onOpenChange(true),
+    keywords: ["open", "dataset", "path", "url", "browse", "files"],
+    keys: [ADD_DATA_SHORTCUT],
+    run: () => onOpenChange(true),
   });
 
   return (

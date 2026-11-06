@@ -108,6 +108,13 @@
   color: var(--lc-text-subtle);
 }
 
+/* The search field draws its own clear button. */
+.lc-search-input::-webkit-search-cancel-button,
+.lc-search-input::-webkit-search-decoration {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
 .lc-input-group > .lc-input-adornment {
   flex: none;
   margin-left: var(--lc-space-2);
