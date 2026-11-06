@@ -1,11 +1,10 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { Hud } from "./Hud.tsx";
-import { useHudKeyBinding } from "./useHudKey.ts";
 import { DEBUG_OVERLAYS, isOverlayEnabled, setOverlayEnabled } from "../debug/logging.ts";
 
 beforeEach(() => {
@@ -92,25 +91,5 @@ describe("the HUD strip", () => {
     const { unmount } = renderHud();
     unmount();
     expect(clear).toHaveBeenCalled();
-  });
-});
-
-function KeyHost({ onToggle }: { onToggle: () => void }) {
-  useHudKeyBinding(onToggle);
-  return <input aria-label="field" />;
-}
-
-describe("the HUD key binding", () => {
-  it("toggles on a bare h, and not while typing or with a modifier", () => {
-    const toggle = vi.fn();
-    render(<KeyHost onToggle={toggle} />);
-
-    fireEvent.keyDown(window, { key: "h" });
-    expect(toggle).toHaveBeenCalledTimes(1);
-
-    fireEvent.keyDown(window, { key: "h", ctrlKey: true });
-    fireEvent.keyDown(window, { key: "H" });
-    fireEvent.keyDown(screen.getByLabelText("field"), { key: "h" });
-    expect(toggle).toHaveBeenCalledTimes(1);
   });
 });

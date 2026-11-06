@@ -1,0 +1,132 @@
+.lc-canvas-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  /* The layers' own z-indexes stay inside the stage. */
+  isolation: isolate;
+  background: var(--lc-canvas-bg);
+}
+
+.lc-canvas-stage-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-color: var(--lc-canvas-bg);
+  outline: none;
+}
+
+/* Drawn inside, since the stage clips anything outside the canvas. */
+.lc-canvas-stage-canvas:focus-visible {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: -2px;
+}
+
+/* Layers cover the canvas and pass pointer events through; the markers in
+   them opt back in. */
+.lc-canvas-stage-layers {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.lc-canvas-stage-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--lc-space-6);
+  pointer-events: none;
+}
+
+.lc-canvas-stage-empty > * {
+  pointer-events: auto;
+}
+
+/* Two rows of three slots. The side slots share what the middle one leaves,
+   so the middle stays centered until a side needs more room, and no slot
+   shrinks below its content. */
+.lc-canvas-stage-slots {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--lc-space-3);
+  box-sizing: border-box;
+  padding: var(--lc-space-3);
+  pointer-events: none;
+}
+
+.lc-canvas-stage-row {
+  display: flex;
+  gap: var(--lc-space-3);
+  min-height: 0;
+}
+
+/* A zero basis gives the top row a definite height, so a tall slot in it
+   (the dev controls) can be capped at the room left above the bottom row. */
+.lc-canvas-stage-row[data-row="top"] {
+  flex: 1 1 0;
+  align-items: flex-start;
+}
+
+.lc-canvas-stage-row[data-row="bottom"] {
+  flex: none;
+  align-items: flex-end;
+}
+
+.lc-canvas-slot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+  min-height: 0;
+  max-height: 100%;
+}
+
+.lc-canvas-slot[data-slot$="-left"],
+.lc-canvas-slot[data-slot$="-right"] {
+  flex: 1 1 0;
+}
+
+.lc-canvas-slot[data-slot$="-left"] {
+  align-items: flex-start;
+}
+
+.lc-canvas-slot[data-slot$="-right"] {
+  align-items: flex-end;
+}
+
+.lc-canvas-slot[data-slot$="-center"] {
+  flex: 0 1 auto;
+  min-width: 0;
+  align-items: center;
+}
+
+.lc-canvas-stage-row[data-row="bottom"] > .lc-canvas-slot {
+  justify-content: flex-end;
+}
+
+/* Zero specificity, so a child that wants pointer-events: none still can. */
+:where(.lc-canvas-slot) > * {
+  pointer-events: auto;
+  max-width: 100%;
+}
+
+/* The HUD places itself at the top left of whatever holds it; in a slot it
+   joins the stack instead. */
+.lc-canvas-slot > .hud {
+  position: relative;
+  inset: auto;
+}
+
+.lc-canvas-stage[data-bare] > :not(canvas) {
+  display: none;
+}

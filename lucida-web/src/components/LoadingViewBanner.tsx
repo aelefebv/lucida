@@ -49,18 +49,14 @@ export function LoadingViewBanner({ applier }: Props) {
     <div
       role="status"
       style={{
-        position: "absolute",
-        top: 12,
-        left: "50%",
-        transform: "translateX(-50%)",
         background: state.anyOpenFailed || hasWarnings ? "#5a3a00" : "#1a3a5a",
         color: "#fff",
         padding: "0.5rem 0.875rem",
         borderRadius: 6,
         border: state.anyOpenFailed || hasWarnings ? "1px solid #b88500" : "1px solid #4080c0",
         fontSize: "0.85rem",
-        zIndex: 50,
-        maxWidth: 480,
+        maxWidth: "min(480px, 100%)",
+        boxSizing: "border-box",
         boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
       }}
     >

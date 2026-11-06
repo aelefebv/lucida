@@ -1,0 +1,49 @@
+.lc-presence {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  min-width: 0;
+}
+
+.lc-presence-stack {
+  display: flex;
+  align-items: center;
+}
+
+.lc-presence-peer {
+  display: inline-flex;
+  margin: 0 0 0 -4px;
+  padding: 0;
+  border: none;
+  border-radius: var(--lc-radius-full);
+  background: none;
+  /* A ring in the bar's color separates overlapping avatars. */
+  box-shadow: 0 0 0 2px var(--lc-surface-1);
+  cursor: pointer;
+  transition: translate var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-presence-peer:first-child {
+  margin-left: 0;
+}
+
+.lc-presence-peer:hover:not(:disabled) {
+  z-index: 1;
+  translate: 0 -1px;
+}
+
+.lc-presence-peer:disabled {
+  cursor: default;
+}
+
+.lc-presence-peer[data-following] {
+  z-index: 1;
+  box-shadow:
+    0 0 0 2px var(--lc-surface-1),
+    0 0 0 4px var(--lc-accent);
+}
+
+.lc-presence-peer:focus-visible {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 2px;
+}

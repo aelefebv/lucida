@@ -2,7 +2,8 @@
 
 Status: Accepted. Carried out; `DebugPanel.tsx` was deleted in c278b3ef.
 Amended by [#1048] and [#1061], which made the monitor a dock in the viewer and
-moved the overlay toggles to the HUD legend.
+moved the overlay toggles to the HUD legend, and by [#1130], which put every
+debug surface behind the Developer tools setting.
 
 ## Context
 
@@ -31,6 +32,11 @@ beneath them. The two link through a published selection, a brushed window's
 chunk set, and neither reads the other. Log categories keep their console
 interface ([0012](0012-logging-conventions.md)) with no UI.
 
+The monitor, the HUD and its key, Dev controls, the overlays, and the frame
+rate show only while the per-browser Developer tools setting is on. It is off
+by default, because the viewer's users are looking at data, and turning it on
+puts the toggles in the top bar.
+
 ## Rejected alternatives
 
 - Keeping the panel beside the monitor. Two observation surfaces would disagree
@@ -44,3 +50,4 @@ interface ([0012](0012-logging-conventions.md)) with no UI.
 
 [#1048]: https://github.com/aelefebv/lucida/issues/1048
 [#1061]: https://github.com/aelefebv/lucida/issues/1061
+[#1130]: https://github.com/aelefebv/lucida/issues/1130
