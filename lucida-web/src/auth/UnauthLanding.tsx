@@ -10,7 +10,10 @@
 // browser lands at the originally-requested URL and AuthGate flips
 // back to the authed branch.
 
+import { SignInIcon } from "@phosphor-icons/react";
 import { useEffect, useRef } from "react";
+import { Button } from "../ui/Button.tsx";
+import "./auth.css";
 
 /** Where /auth/start lives on the same origin. Relative — Vite dev
  *  proxies `/auth/*` to the backend; production serves the web bundle
@@ -81,14 +84,10 @@ export function UnauthLanding({ navigate, location, signedOut }: UnauthLandingPr
   }
 
   return (
-    <div
-      style={{
-        padding: "2rem",
-        color: "#aaa",
-        fontFamily: "system-ui, -apple-system, sans-serif",
-      }}
-    >
-      Redirecting to sign-in...
+    <div className="lc-auth-screen">
+      <p className="lc-auth-status" role="status">
+        Redirecting to sign-in...
+      </p>
     </div>
   );
 }
@@ -112,45 +111,14 @@ function SignedOutCard({
     else window.location.assign(url);
   };
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "#1a1a1f",
-        color: "#eee",
-        fontFamily: "system-ui, -apple-system, sans-serif",
-      }}
-    >
-      <div
-        style={{
-          padding: "24px 32px",
-          border: "1px solid #444",
-          borderRadius: 8,
-          background: "#22222a",
-          maxWidth: 360,
-        }}
-      >
-        <h1 style={{ marginTop: 0 }}>Signed out</h1>
-        <p style={{ color: "#aaa" }}>You've been signed out of lucida.</p>
-        <button
-          type="button"
-          onClick={onSignIn}
-          style={{
-            marginTop: 8,
-            padding: "8px 16px",
-            background: "#646cff",
-            color: "#fff",
-            border: "none",
-            borderRadius: 6,
-            cursor: "pointer",
-            font: "inherit",
-          }}
-        >
+    <main className="lc-auth-screen">
+      <div className="lc-auth-card">
+        <h1 className="lc-auth-title">Signed out</h1>
+        <p className="lc-auth-body">You've been signed out of lucida.</p>
+        <Button variant="primary" icon={SignInIcon} onPress={onSignIn} autoFocus>
           Sign in again
-        </button>
+        </Button>
       </div>
-    </div>
+    </main>
   );
 }

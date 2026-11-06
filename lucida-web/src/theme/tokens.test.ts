@@ -146,3 +146,18 @@ describe.each([
     }
   });
 });
+
+describe("annotation colors", () => {
+  // Shapes sit over the canvas background and over data, which can be as dark
+  // or as bright as either end, so each color has to read on both.
+  const root = parsed.get(":root")!;
+  it.each([
+    ["black", [0, 0, 0]],
+    ["white", [255, 255, 255]],
+  ] as const)("own and peer shapes meet 3:1 on %s", (_, background) => {
+    for (const name of ["--lc-annotation-own", "--lc-annotation-peer"]) {
+      const color = parseColor(root.get(name)!).rgb;
+      expect(contrast(color, [...background]), name).toBeGreaterThanOrEqual(3);
+    }
+  });
+});

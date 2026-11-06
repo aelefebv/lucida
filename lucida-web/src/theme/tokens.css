@@ -61,6 +61,16 @@
 
   /* Slider and switch thumbs stay white on every fill, in both themes. */
   --lc-thumb: #ffffff;
+
+  /* Annotations sit over data of any brightness as well as over the canvas
+     background, so they do not follow either. Your own shapes are red and
+     collaborators' amber, both mid-luminance so each keeps 3:1 against pure
+     black and pure white alike. Pins and handles add a white ring and a dark
+     shadow so they separate from whatever is beneath. */
+  --lc-annotation-own: #ff453a;
+  --lc-annotation-peer: #d97a00;
+  --lc-annotation-ring: #ffffff;
+  --lc-annotation-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
 }
 
 /* Presets match any element, so an accent swatch can show one by carrying
