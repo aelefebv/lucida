@@ -19,6 +19,7 @@ import {
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { CollectionSelector, extractCollectionData } from "./components/CollectionSelector.tsx";
+import { frameRect } from "./components/groupFraming.ts";
 import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { ImportWarningBanner } from "./components/ImportWarningBanner.tsx";
@@ -1266,10 +1267,12 @@ function App({
                   collectionKind={collectionData.collectionKind}
                   members={collectionData.members}
                   collectionName={ds.name}
-                  onGroupClick={(cx, cy) => {
+                  onGroupClick={(bounds) => {
                     const ws = scene.wasmSceneRef.current;
-                    if (!ws) return;
-                    applyViewportCommand(ws, { type: "set_center", x: cx, y: cy });
+                    const canvas = render.canvasRef.current;
+                    if (!ws || !canvas) return;
+                    bridge.breakFollow();
+                    frameRect(ws, canvas, bounds);
                     emitPresenceWithUrl();
                     requestRender(render.loopRef.current, "collection_group_click");
                   }}
