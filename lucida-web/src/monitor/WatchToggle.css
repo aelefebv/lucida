@@ -5,9 +5,10 @@
 }
 
 /* Left to wrap, this sentence sets the height of the dock's header row.
-   The span's title carries the whole of it. */
+   The span's title carries the whole of it. The dock decides the text color,
+   so the status follows it: dimmed while off, full strength while on. */
 .monitor-watch-status {
-  color: var(--lc-text-muted);
+  color: color-mix(in srgb, currentColor 68%, transparent);
   font-size: var(--lc-text-sm);
   max-width: 32ch;
   overflow: hidden;
@@ -16,7 +17,7 @@
 }
 
 .monitor-watch-on .monitor-watch-status {
-  color: var(--lc-text);
+  color: inherit;
 }
 
 .monitor-watch-on button {
