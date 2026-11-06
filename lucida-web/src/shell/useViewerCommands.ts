@@ -1,3 +1,5 @@
+import { useSyncExternalStore } from "react";
+import { CANVAS_CARDS } from "../components/canvasCards.ts";
 import {
   ACCENT_PRESETS,
   accentPreference,
@@ -12,6 +14,7 @@ import {
   developerToolsPreference,
   getPreference,
   setPreference,
+  subscribePreferences,
   usePreference,
   type Preference,
 } from "../theme/preferences.ts";
@@ -30,8 +33,6 @@ export interface ViewerCommandsOptions {
   hasData: boolean;
   onToggleViewMode: () => void;
   onAddData: () => void;
-  /** Omit when the user can't share. */
-  onShare?: () => void;
   onBackToDashboard: () => void;
   /** The rail's panels, which the palette opens directly. */
   rightPanels: readonly { id: string; label: string }[];
@@ -69,13 +70,16 @@ export function useViewerCommands({
   hasData,
   onToggleViewMode,
   onAddData,
-  onShare,
   onBackToDashboard,
   rightPanels,
   developer,
 }: ViewerCommandsOptions): void {
   const openPanel = useOpenRightPanel();
   const [developerTools, setDeveloperTools] = usePreference(developerToolsPreference);
+  // Re-render as any card is hidden or brought back, wherever that happens.
+  useSyncExternalStore(subscribePreferences, () =>
+    CANVAS_CARDS.map((card) => getPreference(card.preference)).join(),
+  );
 
   const commands: CommandOptions[] = [
     {
@@ -87,14 +91,6 @@ export function useViewerCommands({
       enabled: hasData,
     },
     { id: "data.add", label: "Add data…", group: "General", keywords: ["open", "dataset"], run: onAddData },
-    {
-      id: "workspace.share",
-      label: "Share workspace…",
-      group: "General",
-      keywords: ["invite", "access"],
-      run: () => onShare?.(),
-      enabled: onShare !== undefined,
-    },
     {
       id: "workspace.all",
       label: "Go to all workspaces",
@@ -128,6 +124,17 @@ export function useViewerCommands({
           if (!open) setPreference(rightPanelPreference, id);
           setPreference(rightPanelOpenPreference, !open);
         },
+      };
+    }),
+
+    ...CANVAS_CARDS.map(({ preference, label }): CommandOptions => {
+      const hidden = getPreference(preference) === "hidden";
+      return {
+        id: `view.card.${preference.key}`,
+        label: `${hidden ? "Show" : "Hide"} the ${label.toLowerCase()}`,
+        group: "View",
+        keywords: ["card"],
+        run: () => setPreference(preference, hidden ? "open" : "hidden"),
       };
     }),
 

@@ -25,7 +25,7 @@ import { ImportWarningBanner } from "./components/ImportWarningBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
 import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
-import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
+import { ShareButton } from "./share/ShareButton.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import {
   invalidateDisplaySettings,
@@ -892,7 +892,6 @@ function App({
   const showDebugOverlays =
     developer.enabled && (anyOverlayEnabled || radiusPreviewActive || selectionPublished);
   const showExplorePanel = useOpenRightPanel() === "explore";
-  const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
 
   useEffect(() => {
     if (captureSurface) return;
@@ -1040,7 +1039,6 @@ function App({
     hasData: datasetsVersion > 0,
     onToggleViewMode: dims.handleViewModeToggle,
     onAddData: () => setShowFileBrowser(true),
-    onShare: canRenameWorkspace ? () => setShowWorkspaceSharing(true) : undefined,
     onBackToDashboard,
     rightPanels: [
       { id: "savedViews", label: "Saved views" },
@@ -1078,6 +1076,7 @@ function App({
           emitPresenceWithUrl();
           requestRender(render.loopRef.current, "collection_group_click");
         }}
+        getViewCenter={() => scene.wasmSceneRef.current?.center() ?? null}
       />
     );
   })();
@@ -1120,7 +1119,13 @@ function App({
             followTarget: bridge.followTarget,
             onFollow: bridge.handleFollow,
           }}
-          onShare={canRenameWorkspace ? () => setShowWorkspaceSharing(true) : undefined}
+          share={
+            <ShareButton
+              workspaceId={workspaceId}
+              canManageAccess={workspaceRole === "owner"}
+              getCurrentSavedView={savedViewSync.captureBuilder}
+            />
+          }
           developer={developer}
         />
       )}
@@ -1418,7 +1423,6 @@ function App({
               onOpenUrl={datasets.handleUrlSubmit}
               loading={bridge.remoteDatasetLoading}
               onBrowse={() => setShowFileBrowser(true)}
-              getCurrentSavedView={savedViewSync.captureBuilder}
             />
           )}
           {developer.monitor && (
@@ -1495,11 +1499,6 @@ function App({
           onClose={() => setShowFileBrowser(false)}
         />
       )}
-      <WorkspaceSharingDialog
-        workspaceId={workspaceId}
-        open={showWorkspaceSharing}
-        onClose={() => setShowWorkspaceSharing(false)}
-      />
       {!captureSurface && <KeyboardHelp />}
     </div>
   );

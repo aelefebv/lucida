@@ -69,7 +69,8 @@ export {
   type SearchFieldProps,
   type TextFieldProps,
 } from "./TextField.tsx";
-export { ToastRegion } from "./Toast.tsx";
+// ToastRegion is left out: main.tsx loads it lazily, and a static re-export
+// here would pull it into the main bundle.
 export { dismissToast, toast, type ToastOptions, type ToastTone } from "./toastQueue.ts";
 export { Toolbar, ToolbarSeparator, type ToolbarProps } from "./Toolbar.tsx";
 export { Tooltip, type TooltipPlacement, type TooltipProps } from "./Tooltip.tsx";

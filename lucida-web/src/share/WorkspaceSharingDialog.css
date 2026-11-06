@@ -1,0 +1,136 @@
+.lc-sharing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-5);
+}
+
+.lc-sharing-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+}
+
+.lc-sharing-heading {
+  margin: 0;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 600;
+}
+
+.lc-sharing-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lc-space-3);
+  color: var(--lc-text-muted);
+}
+
+.lc-sharing-status[role="alert"] {
+  color: var(--lc-danger);
+}
+
+.lc-sharing-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px auto;
+  align-items: center;
+  gap: var(--lc-space-2);
+}
+
+.lc-sharing-empty {
+  margin: 0;
+  color: var(--lc-text-subtle);
+}
+
+.lc-sharing-members {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lc-sharing-member {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 112px auto;
+  align-items: center;
+  gap: var(--lc-space-3);
+  padding: var(--lc-space-2) 0;
+}
+
+.lc-sharing-member + .lc-sharing-member {
+  border-top: 1px solid var(--lc-border);
+}
+
+.lc-sharing-person {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.lc-sharing-name,
+.lc-sharing-email {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lc-sharing-name {
+  font-weight: 500;
+}
+
+.lc-sharing-email {
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+}
+
+/* Icon, access, and (for an open link) role on one row; help text under the
+   two selects. */
+.lc-sharing-link {
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  grid-template-areas:
+    "icon access"
+    ". help";
+  align-items: center;
+  column-gap: var(--lc-space-3);
+  row-gap: var(--lc-space-1);
+}
+
+.lc-sharing-link[data-open] {
+  grid-template-columns: 32px minmax(0, 1fr) 112px;
+  grid-template-areas:
+    "icon access role"
+    ". help help";
+}
+
+.lc-sharing-link > .lc-sharing-access {
+  grid-area: access;
+}
+
+.lc-sharing-link > .lc-sharing-role {
+  grid-area: role;
+}
+
+.lc-sharing-link-icon {
+  grid-area: icon;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-surface-3);
+  color: var(--lc-text-muted);
+}
+
+.lc-sharing-link[data-open] .lc-sharing-link-icon {
+  background: var(--lc-accent-subtle);
+  color: var(--lc-accent-text);
+}
+
+.lc-sharing-help {
+  grid-area: help;
+  margin: 0;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+}

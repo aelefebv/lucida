@@ -7,6 +7,7 @@ import type { WasmScene } from "lucida-core";
 import { ThreadPopover } from "./ThreadPopover.tsx";
 import type { Annotation } from "./annotationDocument.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
+import { toastQueue } from "../ui/toastQueue.ts";
 
 const MY_ID = "7";
 
@@ -51,7 +52,10 @@ function renderThread(pin: Annotation, onGoToAuthorView?: (id: string) => void) 
 beforeEach(() => {
   Object.defineProperty(globalThis, "devicePixelRatio", { value: 1, configurable: true });
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  toastQueue.clear();
+});
 
 describe("ThreadPopover — Go to author's view affordance (slice 2)", () => {
   it("renders the affordance ONLY when the pin carries a captured view", () => {
@@ -146,8 +150,7 @@ describe("ThreadPopover — Copy link share affordance (slice 3)", () => {
 
     expect(copied).toHaveLength(1);
     expect(copied[0]).toBe(`${window.location.origin}/w/ws-42#a=pin-share`);
-    // Transient "Copied!" feedback replaces the label.
-    expect(screen.getByTestId("pin-copy-link-pin-share").textContent).toBe("Copied!");
+    expect(toastQueue.visibleToasts.map((t) => t.content.title)).toEqual(["Link copied"]);
   });
 
   it("is available to ANY viewer (a pin authored by someone else still shows it)", () => {
@@ -162,7 +165,7 @@ describe("ThreadPopover — Copy link share affordance (slice 3)", () => {
     expect(screen.getByTestId("pin-copy-link-pin-other")).toBeTruthy();
   });
 
-  it("shows a non-throwing 'Copy failed' when the clipboard write rejects", async () => {
+  it("reports a rejected clipboard write in a toast, without throwing", async () => {
     Object.defineProperty(navigator, "clipboard", {
       value: {
         writeText: async () => {
@@ -185,7 +188,9 @@ describe("ThreadPopover — Copy link share affordance (slice 3)", () => {
     fireEvent.click(screen.getByTestId("pin-copy-link-pin-fail"));
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(screen.getByTestId("pin-copy-link-pin-fail").textContent).toBe("Copy failed");
+    expect(toastQueue.visibleToasts.map((t) => t.content)).toMatchObject([
+      { title: "Couldn't copy the link", description: "denied", tone: "danger" },
+    ]);
   });
 });
 

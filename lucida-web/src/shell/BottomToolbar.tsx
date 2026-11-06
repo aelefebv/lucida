@@ -1,6 +1,4 @@
 import { useState } from "react";
-import { ShareToolbarButton } from "../components/ShareToolbarButton.tsx";
-import type { SavedView } from "../savedView/types.ts";
 import "./BottomToolbar.css";
 
 export interface BottomToolbarProps {
@@ -10,17 +8,10 @@ export interface BottomToolbarProps {
   loading: boolean;
   /** Opens the file browser. */
   onBrowse: () => void;
-  /** The live view, for the link the share button copies. */
-  getCurrentSavedView: () => SavedView | null;
 }
 
 /** The viewer's remaining toolbar, in a slim bar under the canvas. */
-export function BottomToolbar({
-  onOpenUrl,
-  loading,
-  onBrowse,
-  getCurrentSavedView,
-}: BottomToolbarProps) {
+export function BottomToolbar({ onOpenUrl, loading, onBrowse }: BottomToolbarProps) {
   const [url, setUrl] = useState("");
   const open = () => {
     onOpenUrl(url);
@@ -47,7 +38,6 @@ export function BottomToolbar({
       <button onClick={onBrowse} disabled={loading}>
         Browse Local
       </button>
-      <ShareToolbarButton getCurrentSavedView={getCurrentSavedView} />
     </div>
   );
 }
