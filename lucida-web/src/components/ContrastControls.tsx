@@ -1,144 +1,113 @@
-import { useCallback, useRef } from "react";
+import type { ReactNode } from "react";
+import { ArrowsOutLineHorizontalIcon, MagicWandIcon } from "@phosphor-icons/react";
+import { Button, IconButton, Slider, Switch, Tooltip } from "../ui/index.ts";
+import { contrastBounds, orderLimits } from "./contrastLimits.ts";
+import "./ContrastControls.css";
+
+const GAMMA_MIN = 0.1;
+const GAMMA_MAX = 5;
 
 interface Props {
-  dataMin: number;
-  dataMax: number;
+  /** Names the group for assistive tech, e.g. the channel's name. */
+  label: string;
   contrastMin: number;
   contrastMax: number;
   gamma: number;
-  autoContrast: boolean;
+  /** The range the loaded data spans, or `null` before any has loaded. */
+  dataRange: { min: number; max: number } | null;
+  /** The data type's largest value. */
+  fullRangeMax: number;
+  /** Whole-number data steps by 1; other data by a thousandth of the span. */
+  integer: boolean;
+  /** Span the slider over the data type's whole range instead of the loaded data's. */
+  fullRange: boolean;
+  onFullRangeChange: (fullRange: boolean) => void;
   onContrastChange: (min: number, max: number) => void;
   onGammaChange: (gamma: number) => void;
-  onAutoContrast: () => void;
-  onAutoContrastToggle: () => void;
-  fullRange: boolean;
-  onFullRangeToggle: () => void;
-  fullRangeMax: number;
-  labelPrefix?: string;
+  /** Fit the limits to the loaded data once. */
+  onAutoFit: () => void;
+  /** Continuous auto-contrast, when it is shown with these controls. */
+  continuous?: { isSelected: boolean; onChange: (on: boolean) => void };
+  children?: ReactNode;
 }
 
+/** Contrast limits and gamma, each a slider with editable values, plus auto-fit. */
 export function ContrastControls({
-  dataMin,
-  dataMax,
+  label,
   contrastMin,
   contrastMax,
   gamma,
-  autoContrast,
+  dataRange,
+  fullRangeMax,
+  integer,
+  fullRange,
+  onFullRangeChange,
   onContrastChange,
   onGammaChange,
-  onAutoContrast,
-  onAutoContrastToggle,
-  fullRange,
-  onFullRangeToggle,
-  fullRangeMax,
-  labelPrefix = "",
+  onAutoFit,
+  continuous,
+  children,
 }: Props) {
-  const pressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const wasLongPress = useRef(false);
-
-  const handlePointerDown = useCallback(() => {
-    wasLongPress.current = false;
-    pressTimer.current = setTimeout(() => {
-      wasLongPress.current = true;
-      onAutoContrastToggle();
-    }, 400);
-  }, [onAutoContrastToggle]);
-
-  const handlePointerUp = useCallback(() => {
-    if (pressTimer.current) {
-      clearTimeout(pressTimer.current);
-      pressTimer.current = null;
-    }
-    if (!wasLongPress.current) {
-      onAutoContrast();
-    }
-  }, [onAutoContrast]);
-
-  const handlePointerLeave = useCallback(() => {
-    if (pressTimer.current) {
-      clearTimeout(pressTimer.current);
-      pressTimer.current = null;
-    }
-  }, []);
-
-  const effectiveMin = fullRange ? 0 : dataMin;
-  const effectiveMax = fullRange ? fullRangeMax : dataMax;
-  const range = effectiveMax - effectiveMin;
-  const fillLeft = range > 0 ? ((contrastMin - effectiveMin) / range) * 100 : 0;
-  const fillRight = range > 0 ? ((contrastMax - effectiveMin) / range) * 100 : 100;
-  const prefix = labelPrefix ? `${labelPrefix} ` : "";
+  const [minValue, maxValue] = contrastBounds(contrastMin, contrastMax, dataRange, fullRangeMax, fullRange);
+  const span = maxValue - minValue;
+  const step = integer ? 1 : span > 0 ? span / 1000 : 0.001;
+  const format: Intl.NumberFormatOptions = integer
+    ? { maximumFractionDigits: 0, useGrouping: false }
+    : { maximumSignificantDigits: 4, useGrouping: false };
 
   return (
-    <div className="contrast-controls">
-      <div className="dim-control">
-        <span className="dim-label" style={{ width: "auto" }}>Contrast</span>
-        <div className="range-slider">
-          <div className="range-slider-track" />
-          <div
-            className="range-slider-fill"
-            style={{ left: `${fillLeft}%`, width: `${fillRight - fillLeft}%` }}
+    <div className="lc-contrast" role="group" aria-label={`${label} contrast`}>
+      <Slider<readonly [number, number]>
+        label="Contrast"
+        value={[contrastMin, contrastMax]}
+        minValue={minValue}
+        maxValue={maxValue}
+        step={step}
+        formatOptions={format}
+        valueDisplay="field"
+        thumbLabels={["Minimum", "Maximum"]}
+        onChange={(next) => {
+          const [lo, hi] = orderLimits(next, contrastMin, step);
+          if (lo !== contrastMin || hi !== contrastMax) onContrastChange(lo, hi);
+        }}
+      />
+      <Slider<number>
+        label="Gamma"
+        value={gamma}
+        minValue={GAMMA_MIN}
+        maxValue={GAMMA_MAX}
+        step={0.01}
+        formatOptions={{ minimumFractionDigits: 2, maximumFractionDigits: 2 }}
+        valueDisplay="field"
+        onChange={(next) => {
+          if (next !== gamma) onGammaChange(next);
+        }}
+      />
+      <div className="lc-contrast-actions">
+        <Tooltip content={dataRange ? "Fit the limits to the loaded data once" : "No data has loaded yet"}>
+          <Button size="sm" icon={MagicWandIcon} onPress={onAutoFit} isDisabled={!dataRange}>
+            Auto
+          </Button>
+        </Tooltip>
+        {continuous && (
+          <Switch
+            className="lc-contrast-continuous"
+            label="Continuous"
+            isSelected={continuous.isSelected}
+            onChange={continuous.onChange}
           />
-          <input
-            type="range"
-            className="range-slider-input"
-            aria-label={`${prefix}contrast minimum`}
-            min={effectiveMin}
-            max={effectiveMax}
-            value={contrastMin}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              onContrastChange(Math.min(v, contrastMax - 1), contrastMax);
-            }}
+        )}
+        {children}
+        {integer && (
+          <IconButton
+            className="lc-contrast-full"
+            icon={ArrowsOutLineHorizontalIcon}
+            size="sm"
+            label="Span the slider over the full value range"
+            isSelected={fullRange}
+            onSelectedChange={onFullRangeChange}
           />
-          <input
-            type="range"
-            className="range-slider-input"
-            aria-label={`${prefix}contrast maximum`}
-            min={effectiveMin}
-            max={effectiveMax}
-            value={contrastMax}
-            onChange={(e) => {
-              const v = Number(e.target.value);
-              onContrastChange(contrastMin, Math.max(v, contrastMin + 1));
-            }}
-          />
-        </div>
-        <span className="dim-value">{Math.round(contrastMin)}-{Math.round(contrastMax)}</span>
-      </div>
-
-      <div className="dim-control">
-        <span className="dim-label" style={{ width: "auto" }}>Gamma</span>
-        <input
-          type="range"
-          className="dim-slider"
-          aria-label={`${prefix}gamma`}
-          min={10}
-          max={500}
-          value={Math.round(gamma * 100)}
-          onChange={(e) => onGammaChange(Number(e.target.value) / 100)}
-        />
-        <span className="dim-value">{gamma.toFixed(2)}</span>
-      </div>
-
-      <div className="dim-control">
-        <button
-          className={`auto-btn${autoContrast ? " auto-btn-active" : ""}`}
-          aria-label={`${prefix}auto contrast`}
-          aria-pressed={autoContrast}
-          onPointerDown={handlePointerDown}
-          onPointerUp={handlePointerUp}
-          onPointerLeave={handlePointerLeave}
-        >
-          Auto
-        </button>
-        <button
-          className={`auto-btn${fullRange ? " auto-btn-active" : ""}`}
-          aria-label={`${prefix}full range`}
-          aria-pressed={fullRange}
-          onClick={onFullRangeToggle}
-        >
-          Full
-        </button>
+        )}
       </div>
     </div>
   );

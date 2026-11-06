@@ -1,6 +1,6 @@
 import type { Icon } from "@phosphor-icons/react";
 import { useEffect, useRef, type ReactNode } from "react";
-import { Button as AriaButton, ToggleButton } from "react-aria-components";
+import { Button as AriaButton, ToggleButton, type PressEvent } from "react-aria-components";
 import { ariaKeyShortcut, type KeyCombo } from "./shortcuts.ts";
 import { Tooltip, type TooltipPlacement } from "./Tooltip.tsx";
 import "./Button.css";
@@ -77,13 +77,20 @@ interface IconButtonBase {
   /** `lg` is for rails (20px icon). Default `md`. */
   size?: "sm" | "md" | "lg";
   isDisabled?: boolean;
+  /** For a disclosure: whether the region it shows and hides is open. */
+  "aria-expanded"?: boolean;
+  /** The id of the region a disclosure shows and hides. */
+  "aria-controls"?: string;
   className?: string;
   "data-testid"?: string;
 }
 
 interface ActionIconButtonProps extends IconButtonBase {
-  /** Omit when the button triggers a Menu, Popover, or Dialog. */
-  onPress?: () => void;
+  /**
+   * Omit when the button triggers a Menu, Popover, or Dialog. The event
+   * carries the modifier keys, for an Alt-click variant.
+   */
+  onPress?: (event: PressEvent) => void;
   isSelected?: never;
   onSelectedChange?: never;
 }
@@ -109,6 +116,8 @@ export function IconButton(props: IconButtonProps) {
     isDisabled,
     className,
     "data-testid": testId,
+    "aria-expanded": ariaExpanded,
+    "aria-controls": ariaControls,
   } = props;
   const ref = useRef<HTMLButtonElement>(null);
   const isToggle = props.isSelected !== undefined;
@@ -123,6 +132,8 @@ export function IconButton(props: IconButtonProps) {
     "data-variant": variant,
     "data-size": size,
     "aria-label": label,
+    "aria-expanded": ariaExpanded,
+    "aria-controls": ariaControls,
     "data-testid": testId,
     isDisabled,
   };

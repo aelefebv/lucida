@@ -1,35 +1,86 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  ArrowDownIcon,
+  ArrowUpIcon,
+  CaretDownIcon,
+  CaretRightIcon,
+  CaretUpIcon,
+  CubeIcon,
+  DotsThreeIcon,
+  DotsThreeVerticalIcon,
+  EyeIcon,
+  EyeSlashIcon,
+  HeadphonesIcon,
+  PencilSimpleIcon,
+  PlusIcon,
+  SquareIcon,
+  TrashIcon,
+} from "@phosphor-icons/react";
+import type { PressEvent } from "react-aria-components";
+import {
+  Badge,
+  Button,
+  IconButton,
+  Menu,
+  MenuItem,
+  MenuSeparator,
+  PanelHeader,
+  Select,
+  Slider,
+  Switch,
+  TextField,
+  Tooltip,
+  useShortcut,
+  type KeyCombo,
+} from "../ui/index.ts";
 import { ContrastControls } from "./ContrastControls.tsx";
-import { ColormapSelector } from "./ColormapSelector.tsx";
+import { ColormapPicker } from "./ColormapPicker.tsx";
+import { colormapTitle } from "./colormapSwatch.ts";
 import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
 import type { LevelRange } from "../renderer/workerProtocol.ts";
 import { displayedLevelNotice, levelNumbers } from "./levelReadout.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
+import {
+  channelShortcutTarget,
+  isChannelShown,
+  isLastShownChannel,
+  toggleChannel,
+} from "./channels.ts";
 import "./LayerPanel.css";
+
+export interface LayerChannel {
+  /** The override, else the metadata label, else `Channel n`. */
+  name: string;
+  /** The user's override, or `null` when the name is inherited. */
+  nameOverride: string | null;
+  /** The name without the override: the placeholder while renaming. */
+  inheritedName: string;
+  visible: boolean;
+  colormap: string;
+  contrastMin: number;
+  contrastMax: number;
+  gamma: number;
+  /** The loaded data's range for this channel, or `null` before any has loaded. */
+  dataRange: { min: number; max: number } | null;
+}
 
 export interface LayerInfo {
   id: string;
   name: string;
   visible: boolean;
   opacity: number;
-  contrastMin: number;
-  contrastMax: number;
-  gamma: number;
-  colormap: string;
+  /** One per channel in the data, so a single-channel image has one. */
+  channels: LayerChannel[];
+  /** Continuous auto-contrast: every channel keeps fitting its loaded data. */
+  autoContrast: boolean;
+  /** The data type's largest value. */
+  fullRangeMax: number;
+  /** Whether values are whole numbers. */
+  integerData: boolean;
   blendMode: string;
   renderMode: string;
-  autoContrast: boolean;
-  fullRange: boolean;
-  dataRange: { min: number; max: number } | null;
-  fullRangeMax: number;
-  channelSettings?: { visible: boolean; colormap: string; contrast_min: number; contrast_max: number; gamma: number; name?: string }[];
-  /**
-   * Per-channel labels from the manifest's omero block, in channel order. A
-   * missing entry falls back to `Ch {i}`. The user's `name` override in
-   * `channelSettings` takes precedence.
-   */
-  channelInfos?: { label: string; color?: string | null }[];
+  channelBlendMode: string;
   /**
    * Rows for every label drawable in either view mode, so the panel is stable
    * across a mode switch. `index` is the manifest index the handlers take. A row
@@ -37,7 +88,6 @@ export interface LayerInfo {
    * beside disabled controls. Empty hides the Labels subsection and badge.
    */
   labelRows?: { index: number; name: string; visible: boolean; opacity: number; disabledReason?: string }[];
-  channelBlendMode: string;
   /** The dataset's level pin; `null` means the target level follows the screen. */
   levelPin: number | null;
   /**
@@ -68,681 +118,668 @@ interface Props {
   layers: LayerInfo[];
   selectedLayerId: string | null;
   expandedLayerId: string | null;
-  multiChannel: boolean;
+  /** The channel shown alone, or `null` for the composite. One for the whole scene. */
+  soloChannel: number | null;
+  /** Editor-only affordances (rename) are shown only when true. */
+  canEdit: boolean;
   onSelectLayer: (id: string) => void;
   onToggleExpand: (id: string) => void;
   onSetVisible: (id: string, visible: boolean) => void;
   onSetOpacity: (id: string, opacity: number) => void;
-  onSetContrast: (id: string, min: number, max: number) => void;
-  onSetGamma: (id: string, gamma: number) => void;
-  onSetColormap: (id: string, colormap: Colormap) => void;
+  onRenameLayer: (id: string, name: string) => void;
+  onMoveLayer: (id: string, direction: "up" | "down") => void;
+  onRemoveLayer: (id: string) => void;
+  /** Opens whatever adds data to the workspace. */
+  onAddData: () => void;
   onSetBlendMode: (id: string, mode: BlendMode) => void;
   onSetRenderMode: (id: string, mode: RenderMode) => void;
   onSetLevelPin: (id: string, level: number | null) => void;
-  onAutoContrast: (id: string) => void;
-  onAutoContrastToggle: (id: string) => void;
-  onFullRangeToggle: (id: string) => void;
-  onMoveLayer: (id: string, direction: "up" | "down") => void;
-  onRemoveLayer: (id: string) => void;
-  onRenameLayer: (id: string, name: string) => void;
-  onAddLayer: () => void;
-  /** Editor-only affordances (rename) are shown only when true. */
-  canEdit: boolean;
-  onChannelSetVisible?: (id: string, ch: number, visible: boolean) => void;
-  onChannelSetColormap?: (id: string, ch: number, colormap: Colormap) => void;
+  onAutoContrastChange: (id: string, on: boolean) => void;
+  onChannelSetVisible: (id: string, ch: number, visible: boolean) => void;
+  onChannelSetColormap: (id: string, ch: number, colormap: Colormap) => void;
   /** Set or clear (`null`) a channel's display-name override. Editor-only. An
-   *  emptied input passes `null` to fall back to the omero label or `Ch N`. */
-  onChannelSetName?: (id: string, ch: number, name: string | null) => void;
-  onChannelSetContrast?: (id: string, ch: number, min: number, max: number) => void;
-  onChannelSetGamma?: (id: string, ch: number, gamma: number) => void;
-  onChannelSetBlendMode?: (id: string, blendMode: BlendMode) => void;
-  onLabelSetVisible?: (id: string, label: number, visible: boolean) => void;
+   *  emptied input passes `null` to fall back to the metadata label. */
+  onChannelSetName: (id: string, ch: number, name: string | null) => void;
+  onChannelSetContrast: (id: string, ch: number, min: number, max: number) => void;
+  onChannelSetGamma: (id: string, ch: number, gamma: number) => void;
+  /** Fit a channel's contrast to its loaded data once. */
+  onChannelAutoFit: (id: string, ch: number) => void;
+  onChannelSetBlendMode: (id: string, blendMode: BlendMode) => void;
+  /** Solo a channel, or return to the composite when it is already soloed. */
+  onSoloChannel: (ch: number) => void;
+  onShowAllChannels: () => void;
+  onLabelSetVisible: (id: string, label: number, visible: boolean) => void;
   /** Opacity in 0..1. */
-  onLabelSetOpacity?: (id: string, label: number, opacity: number) => void;
-  viewModeToggle: { label: string; onClick: () => void } | null;
-  cameraModeToggle: { label: string; onClick: () => void } | null;
-  /** Opens the dev-controls surface (planning knobs, overlays, cache knobs). */
-  devControlsToggle?: { label: string; active: boolean; onClick: () => void };
+  onLabelSetOpacity: (id: string, label: number, opacity: number) => void;
+  viewModeToggle?: { label: string; onClick: () => void } | null;
+  cameraModeToggle?: { label: string; onClick: () => void } | null;
   layoutRegistry: LayoutRegistry | null;
   sendCommand: (json: string) => void;
   onLayoutChange?: () => void;
-  style?: React.CSSProperties;
 }
 
-export function LayerPanel({
-  layers,
-  selectedLayerId,
-  expandedLayerId,
-  multiChannel,
-  onSelectLayer,
-  onToggleExpand,
-  onSetVisible,
-  onSetOpacity,
-  onSetContrast,
-  onSetGamma,
-  onSetColormap,
-  onSetBlendMode,
-  onSetRenderMode,
-  onSetLevelPin,
-  onAutoContrast,
-  onAutoContrastToggle,
-  onFullRangeToggle,
-  onMoveLayer,
-  onRemoveLayer,
-  onRenameLayer,
-  onAddLayer,
-  canEdit,
-  onChannelSetVisible,
-  onChannelSetColormap,
-  onChannelSetName,
-  onChannelSetContrast,
-  onChannelSetGamma,
-  onChannelSetBlendMode,
-  onLabelSetVisible,
-  onLabelSetOpacity,
-  viewModeToggle,
-  cameraModeToggle,
-  devControlsToggle,
-  layoutRegistry,
-  sendCommand,
-  onLayoutChange,
-  style,
-}: Props) {
-  const [renamingLayerId, setRenamingLayerId] = useState<string | null>(null);
-  // Keyed by `${layerId}::${channelIndex}` so only one channel across all layers
-  // is in edit mode at a time.
-  const [renamingChannelKey, setRenamingChannelKey] = useState<string | null>(null);
-  // Channels are collapsed by default, so a many-channel layer opens tidy; a key
-  // is listed here once expanded. View-only state, never persisted or broadcast.
-  const [expandedChannels, setExpandedChannels] = useState<Set<string>>(new Set());
-  const channelKeyOf = (layerId: string, chIdx: number) => `${layerId}::${chIdx}`;
-  const toggleChannelExpanded = (channelKey: string) => {
-    setExpandedChannels((prev) => {
-      const next = new Set(prev);
-      if (next.has(channelKey)) {
-        next.delete(channelKey);
-      } else {
-        next.add(channelKey);
-      }
-      return next;
-    });
-  };
-  // Collapse or expand one layer's channels, leaving other layers untouched.
-  const setAllChannelsExpanded = (
-    layerId: string,
-    count: number,
-    expanded: boolean,
-  ) => {
-    setExpandedChannels((prev) => {
-      const next = new Set(
-        [...prev].filter((k) => !k.startsWith(`${layerId}::`)),
-      );
-      if (expanded) {
-        for (let i = 0; i < count; i++) next.add(channelKeyOf(layerId, i));
-      }
-      return next;
-    });
-  };
-  return (
-    <div className="layer-panel" style={style}>
-      <div className="layer-panel-header">
-        <h3>Layers</h3>
-        <div className="layer-panel-header-buttons">
-          {viewModeToggle && (
-            <button
-              aria-label={`Switch view mode to ${viewModeToggle.label}`}
-              onClick={viewModeToggle.onClick}
-            >
-              {viewModeToggle.label}
-            </button>
-          )}
-          {cameraModeToggle && (
-            <button
-              aria-label={`Switch camera mode to ${cameraModeToggle.label}`}
-              onClick={cameraModeToggle.onClick}
-              title="Toggle camera mode (F)"
-            >
-              {cameraModeToggle.label}
-            </button>
-          )}
-          {devControlsToggle && (
-            <button
-              aria-label={devControlsToggle.label}
-              onClick={devControlsToggle.onClick}
-              title="Toggle dev controls"
-              style={devControlsToggle.active ? { background: "#4a9eff", color: "#fff" } : undefined}
-            >
-              {devControlsToggle.label}
-            </button>
-          )}
-          <button aria-label="Add layer" onClick={onAddLayer}>+ Add</button>
-        </div>
-      </div>
-      <div className="layer-list">
-        {layers.length === 0 && (
-          <div className="layer-empty">No layers. Click "+ Add" to open a folder.</div>
-        )}
-        {layers.map((layer, index) => {
-          const isSelected = layer.id === selectedLayerId;
-          const isExpanded = layer.id === expandedLayerId;
-          const levelNotice = displayedLevelNotice(layer);
+const CHANNEL_KEYS = ["1", "2", "3", "4", "5", "6", "7", "8", "9"] as const satisfies readonly KeyCombo[];
+const SOLO_KEYS = [
+  "Alt+1", "Alt+2", "Alt+3", "Alt+4", "Alt+5", "Alt+6", "Alt+7", "Alt+8", "Alt+9",
+] as const satisfies readonly KeyCombo[];
 
-          return (
-            <div
-              key={layer.id}
-              className={`layer-row${isSelected ? " selected" : ""}`}
-              onClick={() => onSelectLayer(layer.id)}
-            >
-              <div className="layer-row-header">
-                <button
-                  className="layer-eye-btn"
-                  title={layer.visible ? "Hide" : "Show"}
-                  aria-label={`${layer.visible ? "Hide" : "Show"} layer ${layer.name}`}
-                  aria-pressed={layer.visible}
-                  onClick={(e) => { e.stopPropagation(); onSetVisible(layer.id, !layer.visible); }}
+const BLEND_OPTIONS = [
+  { value: "alpha", label: "Alpha" },
+  { value: "additive", label: "Additive" },
+  { value: "max", label: "Maximum" },
+] as const;
+
+const RENDER_OPTIONS = [
+  { value: "translucent", label: "Translucent" },
+  { value: "max_intensity", label: "Maximum intensity" },
+] as const;
+
+/** The channel number a digit key names, 1 to 9. */
+function digitOf(event: KeyboardEvent): number | null {
+  const match = /^(?:Digit|Numpad)([1-9])$/.exec(event.code) ?? /^([1-9])$/.exec(event.key);
+  return match ? Number(match[1]) : null;
+}
+
+export function LayerPanel(props: Props) {
+  const { layers, selectedLayerId, soloChannel, onAddData, viewModeToggle, cameraModeToggle } = props;
+
+  const toggleLayerChannel = (layer: LayerInfo, channel: number) => {
+    const visible = layer.channels.map((c) => c.visible);
+    const change = toggleChannel(visible, soloChannel, channel);
+    if (!change) return;
+    change.visible.forEach((v, i) => {
+      if (v !== visible[i]) props.onChannelSetVisible(layer.id, i, v);
+    });
+    if (change.leaveSolo) props.onShowAllChannels();
+  };
+
+  const shortcutTarget = channelShortcutTarget(layers, selectedLayerId);
+  useShortcut({
+    id: "channels.toggle",
+    keys: CHANNEL_KEYS,
+    label: "Show or hide channel 1–9",
+    group: "Channels",
+    enabled: shortcutTarget !== null,
+    onTrigger: (event) => {
+      const n = digitOf(event);
+      if (shortcutTarget && n !== null && n <= shortcutTarget.channels.length) {
+        toggleLayerChannel(shortcutTarget, n - 1);
+      }
+    },
+  });
+  useShortcut({
+    id: "channels.solo",
+    keys: SOLO_KEYS,
+    label: "Solo channel 1–9, or show all again",
+    group: "Channels",
+    enabled: shortcutTarget !== null,
+    onTrigger: (event) => {
+      const n = digitOf(event);
+      if (shortcutTarget && n !== null && n <= shortcutTarget.channels.length) {
+        props.onSoloChannel(n - 1);
+      }
+    },
+  });
+
+  return (
+    <div className="lc-layer-panel">
+      <PanelHeader
+        className="lc-layer-panel-header"
+        title="Layers"
+        actions={
+          <>
+            {viewModeToggle && (
+              <Tooltip content={`Switch to ${viewModeToggle.label}`}>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  icon={viewModeToggle.label === "3D" ? CubeIcon : SquareIcon}
+                  onPress={viewModeToggle.onClick}
                 >
-                  {layer.visible ? "\u25C9" : "\u25CB"}
-                </button>
-                {canEdit && renamingLayerId === layer.id ? (
-                  <LayerNameInput
-                    initial={layer.name}
-                    onCommit={(name) => {
-                      setRenamingLayerId(null);
-                      onRenameLayer(layer.id, name);
-                    }}
-                    onCancel={() => setRenamingLayerId(null)}
-                  />
-                ) : (
-                  <span
-                    className="layer-name"
-                    title={canEdit ? "Double-click to rename" : layer.name}
-                    onDoubleClick={canEdit ? (e) => { e.stopPropagation(); setRenamingLayerId(layer.id); } : undefined}
-                  >
-                    {layer.name}
-                  </span>
-                )}
-                {/*
-                  A count pill telling the user the layer has drawable labels to
-                  reach in the Labels panel. Counts the same rows the panel shows,
-                  so it never over-promises. Non-interactive; the expand button
-                  owns disclosure.
-                */}
-                {layer.labelRows && layer.labelRows.length > 0 && (
-                  <span
-                    className="layer-label-badge"
-                    data-testid={`layer-label-count-${layer.id}`}
-                    aria-label={`${layer.labelRows.length} label${layer.labelRows.length === 1 ? "" : "s"}`}
-                    title={`This dataset has ${layer.labelRows.length} segmentation label${layer.labelRows.length === 1 ? "" : "s"}. Expand the layer to toggle them or adjust their opacity in the Labels panel.`}
-                  >
-                    {`◰ ${layer.labelRows.length}`}
-                  </span>
-                )}
-                {canEdit && renamingLayerId !== layer.id && (
-                  <button
-                    className="layer-rename-btn"
-                    title={`Rename layer ${layer.name}`}
-                    aria-label={`Rename layer ${layer.name}`}
-                    onClick={(e) => { e.stopPropagation(); setRenamingLayerId(layer.id); }}
-                  >
-                    {"✎"}
-                  </button>
-                )}
-                <input
-                  type="range"
-                  className="layer-opacity-slider"
-                  aria-label={`${layer.name} opacity`}
-                  min={0}
-                  max={100}
-                  value={Math.round(layer.opacity * 100)}
-                  title={`Opacity: ${Math.round(layer.opacity * 100)}%`}
-                  onClick={(e) => e.stopPropagation()}
-                  onChange={(e) => { e.stopPropagation(); onSetOpacity(layer.id, Number(e.target.value) / 100); }}
-                />
-                <button
-                  className="layer-expand-btn"
-                  title={isExpanded ? "Collapse" : "Expand"}
-                  aria-label={`${isExpanded ? "Collapse" : "Expand"} layer ${layer.name}`}
-                  aria-expanded={isExpanded}
-                  onClick={(e) => { e.stopPropagation(); onToggleExpand(layer.id); }}
-                >
-                  {isExpanded ? "\u25B2" : "\u25BC"}
-                </button>
-              </div>
-              {isExpanded && (
-                <div className="layer-detail" onClick={(e) => e.stopPropagation()}>
-                  <LayoutSwitcher
-                    datasetId={layer.id}
-                    registry={layoutRegistry}
-                    sendCommand={sendCommand}
-                    onAfterChange={onLayoutChange}
-                  />
-                  {multiChannel && layer.channelSettings ? (
-                    <>
-                      <div className="layer-detail-row channel-collapse-controls">
-                        <label>Channels</label>
-                        <button
-                          className="channel-collapse-all-btn"
-                          aria-label={`Collapse all channels of ${layer.name}`}
-                          onClick={() =>
-                            setAllChannelsExpanded(layer.id, layer.channelSettings?.length ?? 0, false)
-                          }
-                        >
-                          Collapse all
-                        </button>
-                        <button
-                          className="channel-collapse-all-btn"
-                          aria-label={`Expand all channels of ${layer.name}`}
-                          onClick={() =>
-                            setAllChannelsExpanded(layer.id, layer.channelSettings?.length ?? 0, true)
-                          }
-                        >
-                          Expand all
-                        </button>
-                      </div>
-                      {layer.channelSettings.map((ch, chIdx) => {
-                        // User override, then omero label, then `Ch N`.
-                        const chName =
-                          ch.name?.trim() ||
-                          layer.channelInfos?.[chIdx]?.label?.trim() ||
-                          `Ch ${chIdx}`;
-                        const channelKey = `${layer.id}::${chIdx}`;
-                        const isRenamingChannel = renamingChannelKey === channelKey;
-                        // Gates the channel's controls, not its visibility, so a
-                        // channel can stay visible with its controls tucked away.
-                        const isChannelExpanded = expandedChannels.has(channelKey);
-                        return (
-                        <div key={chIdx} className="channel-sublayer">
-                          <div className="channel-sublayer-header">
-                            <button
-                              className="layer-eye-btn"
-                              title={ch.visible ? "Hide channel" : "Show channel"}
-                              aria-label={`${ch.visible ? "Hide" : "Show"} ${layer.name} ${chName}`}
-                              aria-pressed={ch.visible}
-                              onClick={() => onChannelSetVisible?.(layer.id, chIdx, !ch.visible)}
-                            >
-                              {ch.visible ? "\u25C9" : "\u25CB"}
-                            </button>
-                            {canEdit && isRenamingChannel ? (
-                              <ChannelNameInput
-                                // Start from the override, or empty so the
-                                // placeholder shows the inherited name and a
-                                // blank commit clears back to it.
-                                initial={ch.name ?? ""}
-                                placeholder={chName}
-                                onCommit={(name) => {
-                                  setRenamingChannelKey(null);
-                                  const trimmed = name.trim();
-                                  onChannelSetName?.(layer.id, chIdx, trimmed.length === 0 ? null : trimmed);
-                                }}
-                                onCancel={() => setRenamingChannelKey(null)}
-                              />
-                            ) : (
-                              <span
-                                className="channel-label"
-                                title={canEdit ? "Double-click to rename channel" : chName}
-                                onDoubleClick={canEdit ? () => setRenamingChannelKey(channelKey) : undefined}
-                              >
-                                {chName}
-                              </span>
-                            )}
-                            {canEdit && !isRenamingChannel && (
-                              <button
-                                className="channel-rename-btn"
-                                title={`Rename ${layer.name} ${chName}`}
-                                aria-label={`Rename channel ${chName}`}
-                                onClick={() => setRenamingChannelKey(channelKey)}
-                              >
-                                {"\u270E"}
-                              </button>
-                            )}
-                            {/*
-                              Per-channel disclosure toggle. It only shows or
-                              hides the channel's controls, never visibility. At
-                              the row's end so the tab order reads left to right.
-                            */}
-                            <button
-                              className="channel-expand-btn"
-                              title={isChannelExpanded ? "Collapse channel" : "Expand channel"}
-                              aria-label={`${isChannelExpanded ? "Collapse" : "Expand"} channel ${chName}`}
-                              aria-expanded={isChannelExpanded}
-                              onClick={() => toggleChannelExpanded(channelKey)}
-                            >
-                              {isChannelExpanded ? "\u25B2" : "\u25BC"}
-                            </button>
-                          </div>
-                          {isChannelExpanded && (
-                            <div className="channel-sublayer-detail">
-                              <div className="layer-detail-row">
-                                <label>Colormap</label>
-                                <ColormapSelector
-                                  value={ch.colormap}
-                                  label={`${layer.name} ${chName} colormap`}
-                                  onChange={(cmap) => onChannelSetColormap?.(layer.id, chIdx, cmap)}
-                                />
-                              </div>
-                              <ContrastControls
-                                dataMin={0}
-                                dataMax={layer.fullRangeMax}
-                                contrastMin={ch.contrast_min}
-                                contrastMax={ch.contrast_max}
-                                gamma={ch.gamma}
-                                autoContrast={false}
-                                onContrastChange={(min, max) => onChannelSetContrast?.(layer.id, chIdx, min, max)}
-                                onGammaChange={(g) => onChannelSetGamma?.(layer.id, chIdx, g)}
-                                onAutoContrast={() => {}}
-                                onAutoContrastToggle={() => {}}
-                                fullRange={false}
-                                onFullRangeToggle={() => {}}
-                                fullRangeMax={layer.fullRangeMax}
-                                labelPrefix={`${layer.name} ${chName}`}
-                              />
-                            </div>
-                          )}
-                        </div>
-                        );
-                      })}
-                      <div className="layer-detail-row">
-                        <label>Ch Blend</label>
-                        <select
-                          aria-label={`${layer.name} channel blend mode`}
-                          value={layer.channelBlendMode}
-                          onChange={(e) => onChannelSetBlendMode?.(layer.id, e.target.value as BlendMode)}
-                        >
-                          <option value="alpha">Alpha</option>
-                          <option value="additive">Additive</option>
-                          <option value="max">Max</option>
-                        </select>
-                      </div>
-                    </>
-                  ) : (
-                    <>
-                      <ContrastControls
-                        dataMin={layer.dataRange?.min ?? 0}
-                        dataMax={layer.dataRange?.max ?? 65535}
-                        contrastMin={layer.contrastMin}
-                        contrastMax={layer.contrastMax}
-                        gamma={layer.gamma}
-                        autoContrast={layer.autoContrast}
-                        onContrastChange={(min, max) => onSetContrast(layer.id, min, max)}
-                        onGammaChange={(g) => onSetGamma(layer.id, g)}
-                        onAutoContrast={() => onAutoContrast(layer.id)}
-                        onAutoContrastToggle={() => onAutoContrastToggle(layer.id)}
-                        fullRange={layer.fullRange}
-                        onFullRangeToggle={() => onFullRangeToggle(layer.id)}
-                        fullRangeMax={layer.fullRangeMax}
-                        labelPrefix={layer.name}
-                      />
-                      <div className="layer-detail-row">
-                        <label>Colormap</label>
-                        <ColormapSelector
-                          value={layer.colormap}
-                          label={`${layer.name} colormap`}
-                          onChange={(cmap) => onSetColormap(layer.id, cmap)}
-                        />
-                      </div>
-                    </>
-                  )}
-                  {/*
-                    Labels subsection, independent of multi-channel mode. Handlers
-                    pass the manifest index (row.index), not the row position, so
-                    they hit the right label when earlier labels were skipped. The
-                    enclosing `.layer-detail` already stops row-click propagation.
-                  */}
-                  {layer.labelRows && layer.labelRows.length > 0 && (
-                    <div className="layer-labels-section" data-testid={`labels-section-${layer.id}`}>
-                      <div className="layer-detail-row">
-                        <label>Labels</label>
-                      </div>
-                      {layer.labelRows.map((row) => {
-                        const labelName = row.name.trim() || `Label ${row.index}`;
-                        const labelPct = Math.round((row.opacity ?? 0.5) * 100);
-                        // A label drawable only in the other view mode gets
-                        // disabled controls and its reason as text, rather than
-                        // a toggle that draws nothing.
-                        const disabled = row.disabledReason !== undefined;
-                        return (
-                          <div key={row.index} className="label-sublayer">
-                            <div className="label-sublayer-header">
-                              <button
-                                className="layer-eye-btn"
-                                title={disabled ? row.disabledReason : row.visible ? "Hide label" : "Show label"}
-                                // When disabled, name the state (why it's off)
-                                // rather than an action the user can't perform.
-                                aria-label={
-                                  disabled
-                                    ? `${layer.name} ${labelName} — ${row.disabledReason}`
-                                    : `${row.visible ? "Hide" : "Show"} ${layer.name} ${labelName}`
-                                }
-                                // A disabled label draws nothing here, so report
-                                // not pressed whatever the persisted flag says.
-                                aria-pressed={disabled ? false : row.visible}
-                                disabled={disabled}
-                                data-testid={`label-eye-${layer.id}-${row.index}`}
-                                onClick={() => onLabelSetVisible?.(layer.id, row.index, !row.visible)}
-                              >
-                                {row.visible ? "◉" : "○"}
-                              </button>
-                              <span className="label-name" title={labelName}>{labelName}</span>
-                              <input
-                                type="range"
-                                className="label-opacity-slider"
-                                aria-label={`${layer.name} ${labelName} opacity`}
-                                data-testid={`label-opacity-${layer.id}-${row.index}`}
-                                min={0}
-                                max={100}
-                                value={labelPct}
-                                disabled={disabled}
-                                title={disabled ? row.disabledReason : `Label opacity: ${labelPct}%`}
-                                onChange={(e) => onLabelSetOpacity?.(layer.id, row.index, Number(e.target.value) / 100)}
-                              />
-                            </div>
-                            {disabled && (
-                              <div className="label-disabled-reason">{row.disabledReason}</div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                  <div className="layer-detail-row">
-                    <label>Blend</label>
-                    <select
-                      aria-label={`${layer.name} blend mode`}
-                      value={layer.blendMode}
-                      onChange={(e) => onSetBlendMode(layer.id, e.target.value as BlendMode)}
-                    >
-                      <option value="alpha">Alpha</option>
-                      <option value="additive">Additive</option>
-                      <option value="max">Max</option>
-                    </select>
-                  </div>
-                  <div className="layer-detail-row">
-                    <label>Rendering</label>
-                    <select
-                      aria-label={`${layer.name} rendering mode`}
-                      value={layer.renderMode}
-                      onChange={(e) => onSetRenderMode(layer.id, e.target.value as RenderMode)}
-                    >
-                      <option value="translucent">Translucent</option>
-                      <option value="max_intensity">Max Intensity</option>
-                    </select>
-                  </div>
-                  {layer.targetLevel && (
-                    <div className="layer-detail-row">
-                      <label>Level</label>
-                      <span
-                        className="layer-level-readout"
-                        aria-label={`${layer.name} target level`}
-                        title="The level the screen calls for, or the pinned level"
-                      >
-                        {levelNumbers(layer.targetLevel)}
-                      </span>
-                      {levelNotice && layer.displayedLevel && (
-                        <span
-                          className="layer-level-readout layer-level-displayed"
-                          aria-label={`${layer.name} displayed level`}
-                          title="The level on screen until the target is resident"
-                        >
-                          displaying {levelNumbers(layer.displayedLevel)}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                  {layer.downsamplingMethod && (
-                    <div className="layer-detail-row">
-                      <label>Downsampling</label>
-                      <span
-                        className="layer-level-readout"
-                        aria-label={`${layer.name} downsampling method`}
-                      >
-                        {layer.downsamplingMethod}
-                      </span>
-                    </div>
-                  )}
-                  {levelNotice && (
-                    <div className="layer-level-notice" role="status">
-                      {levelNotice}
-                    </div>
-                  )}
-                  {layer.levelPinOptions.length > 0 && (
-                    <div className="layer-detail-row">
-                      <label>Level</label>
-                      <select
-                        aria-label={`${layer.name} level pin`}
-                        value={layer.levelPin ?? ""}
-                        onChange={(e) => {
-                          const value = e.target.value;
-                          onSetLevelPin(layer.id, value === "" ? null : Number(value));
-                        }}
-                      >
-                        <option value="">Follow the screen</option>
-                        {layer.levelPinOptions.map((option) => (
-                          <option key={option.level} value={option.level}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-                  <div className="layer-actions">
-                    <button
-                      onClick={() => onMoveLayer(layer.id, "up")}
-                      disabled={index === 0}
-                      title="Move up (render later / on top)"
-                      aria-label={`Move layer ${layer.name} up`}
-                    >
-                      Up
-                    </button>
-                    <button
-                      onClick={() => onMoveLayer(layer.id, "down")}
-                      disabled={index === layers.length - 1}
-                      title="Move down (render first / behind)"
-                      aria-label={`Move layer ${layer.name} down`}
-                    >
-                      Down
-                    </button>
-                    <button
-                      onClick={() => onRemoveLayer(layer.id)}
-                      style={{ marginLeft: "auto", color: "#f44" }}
-                      aria-label={`Remove layer ${layer.name}`}
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
+                  {viewModeToggle.label}
+                </Button>
+              </Tooltip>
+            )}
+            {cameraModeToggle && (
+              <Tooltip content={`Switch the camera to ${cameraModeToggle.label}`}>
+                <Button size="sm" variant="ghost" onPress={cameraModeToggle.onClick}>
+                  {cameraModeToggle.label}
+                </Button>
+              </Tooltip>
+            )}
+            <IconButton icon={PlusIcon} size="sm" label="Add data" tooltipPlacement="bottom" onPress={onAddData} />
+          </>
+        }
+      />
+      <div className="lc-layer-list">
+        {layers.length === 0 && (
+          <div className="lc-layer-empty">
+            <p>No layers yet.</p>
+            <Button icon={PlusIcon} size="sm" onPress={onAddData}>
+              Add data
+            </Button>
+          </div>
+        )}
+        {layers.map((layer, index) => (
+          <LayerRow
+            key={layer.id}
+            {...props}
+            layer={layer}
+            index={index}
+            isShortcutTarget={shortcutTarget?.id === layer.id}
+            onToggleChannel={(channel) => toggleLayerChannel(layer, channel)}
+          />
+        ))}
       </div>
     </div>
   );
 }
 
-/**
- * Inline rename input for a layer name. Enter or blur commits, Escape cancels.
- * Stops click propagation so editing doesn't select or collapse the row.
- */
-function LayerNameInput({
-  initial,
-  onCommit,
-  onCancel,
-}: {
-  initial: string;
-  onCommit: (name: string) => void;
-  onCancel: () => void;
-}) {
-  const [value, setValue] = useState(initial);
-  const ref = useRef<HTMLInputElement | null>(null);
-  useEffect(() => {
-    ref.current?.focus();
-    ref.current?.select();
-  }, []);
+interface LayerRowProps extends Props {
+  layer: LayerInfo;
+  index: number;
+  /** The channel keys act on this layer, so its toggles show them. */
+  isShortcutTarget: boolean;
+  onToggleChannel: (channel: number) => void;
+}
+
+function LayerRow(props: LayerRowProps) {
+  const { layer, index, layers, canEdit, soloChannel } = props;
+  const [renaming, setRenaming] = useState(false);
+  const isSelected = layer.id === props.selectedLayerId;
+  const isExpanded = layer.id === props.expandedLayerId;
+  const bodyId = useId();
+  const multichannel = layer.channels.length > 1;
+  // One `c` serves the scene, so a layer without the soloed channel draws nothing.
+  const hiddenBySolo = soloChannel !== null && soloChannel >= layer.channels.length;
+
   return (
-    <input
-      ref={ref}
-      type="text"
-      className="layer-name-input"
-      aria-label="Layer name"
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onClick={(e) => e.stopPropagation()}
-      onBlur={() => onCommit(value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          onCommit(value);
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          onCancel();
-        }
-      }}
-    />
+    <section
+      className="lc-layer"
+      aria-label={layer.name}
+      data-selected={isSelected || undefined}
+      onClick={() => props.onSelectLayer(layer.id)}
+    >
+      <div className="lc-layer-head">
+        <IconButton
+          icon={isExpanded ? CaretDownIcon : CaretRightIcon}
+          size="sm"
+          label={`${isExpanded ? "Collapse" : "Expand"} layer ${layer.name}`}
+          aria-expanded={isExpanded}
+          aria-controls={isExpanded ? bodyId : undefined}
+          onPress={() => props.onToggleExpand(layer.id)}
+        />
+        <IconButton
+          icon={layer.visible ? EyeIcon : EyeSlashIcon}
+          size="sm"
+          label={`${layer.visible ? "Hide" : "Show"} layer ${layer.name}`}
+          onPress={() => props.onSetVisible(layer.id, !layer.visible)}
+        />
+        {canEdit && renaming ? (
+          <InlineNameField
+            label="Layer name"
+            initial={layer.name}
+            onCommit={(name) => {
+              setRenaming(false);
+              props.onRenameLayer(layer.id, name);
+            }}
+            onCancel={() => setRenaming(false)}
+          />
+        ) : (
+          <span
+            className="lc-layer-name"
+            data-hidden={!layer.visible || undefined}
+            title={canEdit ? `${layer.name} (double-click to rename)` : layer.name}
+            onDoubleClick={canEdit ? () => setRenaming(true) : undefined}
+          >
+            {layer.name}
+          </span>
+        )}
+        {layer.labelRows && layer.labelRows.length > 0 && (
+          <span data-testid={`layer-label-count-${layer.id}`}>
+            <Badge>{`${layer.labelRows.length} label${layer.labelRows.length === 1 ? "" : "s"}`}</Badge>
+          </span>
+        )}
+        <Menu
+          label={`Layer ${layer.name} actions`}
+          placement="bottom end"
+          trigger={<IconButton icon={DotsThreeIcon} size="sm" label={`More for layer ${layer.name}`} />}
+        >
+          {canEdit && (
+            <MenuItem icon={PencilSimpleIcon} onAction={() => setRenaming(true)}>
+              Rename
+            </MenuItem>
+          )}
+          <MenuItem icon={ArrowUpIcon} isDisabled={index === 0} onAction={() => props.onMoveLayer(layer.id, "up")}>
+            Move up
+          </MenuItem>
+          <MenuItem
+            icon={ArrowDownIcon}
+            isDisabled={index === layers.length - 1}
+            onAction={() => props.onMoveLayer(layer.id, "down")}
+          >
+            Move down
+          </MenuItem>
+          <MenuSeparator />
+          <MenuItem icon={TrashIcon} variant="danger" onAction={() => props.onRemoveLayer(layer.id)}>
+            Remove
+          </MenuItem>
+        </Menu>
+      </div>
+      <div className="lc-layer-opacity">
+        <Slider<number>
+          label="Opacity"
+          value={layer.opacity}
+          minValue={0}
+          maxValue={1}
+          step={0.01}
+          formatOptions={{ style: "percent" }}
+          onChange={(v) => props.onSetOpacity(layer.id, v)}
+        />
+      </div>
+      {hiddenBySolo && (
+        <p className="lc-layer-note">
+          {`Not shown while channel ${(soloChannel ?? 0) + 1} is soloed.`}
+        </p>
+      )}
+      {isExpanded && (
+        <div className="lc-layer-body" id={bodyId}>
+          {multichannel ? <ChannelList {...props} /> : <SingleChannel {...props} />}
+          {layer.labelRows && layer.labelRows.length > 0 && <LabelList {...props} />}
+          <Advanced {...props} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+/** The colormap and contrast of an image with one channel. */
+function SingleChannel({ layer, ...props }: LayerRowProps) {
+  const channel = layer.channels[0];
+  const [fullRange, setFullRange] = useState(false);
+  if (!channel) return null;
+  return (
+    <div className="lc-layer-single">
+      <div className="lc-layer-field">
+        <span className="lc-layer-field-label">Colormap</span>
+        <ColormapPicker
+          value={channel.colormap}
+          label={layer.name}
+          onChange={(cmap) => props.onChannelSetColormap(layer.id, 0, cmap)}
+        />
+        <span className="lc-layer-field-value">{colormapTitle(channel.colormap)}</span>
+      </div>
+      <ContrastControls
+        label={layer.name}
+        contrastMin={channel.contrastMin}
+        contrastMax={channel.contrastMax}
+        gamma={channel.gamma}
+        dataRange={channel.dataRange}
+        fullRangeMax={layer.fullRangeMax}
+        integer={layer.integerData}
+        fullRange={fullRange}
+        onFullRangeChange={setFullRange}
+        onContrastChange={(min, max) => props.onChannelSetContrast(layer.id, 0, min, max)}
+        onGammaChange={(g) => props.onChannelSetGamma(layer.id, 0, g)}
+        onAutoFit={() => props.onChannelAutoFit(layer.id, 0)}
+        continuous={{
+          isSelected: layer.autoContrast,
+          onChange: (on) => props.onAutoContrastChange(layer.id, on),
+        }}
+      />
+    </div>
+  );
+}
+
+function ChannelList(props: LayerRowProps) {
+  const { layer, soloChannel } = props;
+  return (
+    <div className="lc-channels" role="group" aria-label={`${layer.name} channels`}>
+      <div className="lc-channels-head">
+        <span className="lc-layer-section-title">Channels</span>
+        <Switch
+          className="lc-channels-auto"
+          label="Keep contrast fitted"
+          isSelected={layer.autoContrast}
+          onChange={(on) => props.onAutoContrastChange(layer.id, on)}
+        />
+      </div>
+      <ul className="lc-channel-list">
+        {layer.channels.map((channel, i) => (
+          <ChannelRow key={i} {...props} channel={channel} channelIndex={i} />
+        ))}
+      </ul>
+      {soloChannel !== null && (
+        <div className="lc-channels-solo">
+          <span>{`${layer.channels[soloChannel]?.name ?? `Channel ${soloChannel + 1}`} is soloed.`}</span>
+          <Button size="sm" variant="ghost" onPress={props.onShowAllChannels}>
+            Show all
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChannelRow(props: LayerRowProps & { channel: LayerChannel; channelIndex: number }) {
+  const { layer, channel, channelIndex: i, soloChannel, canEdit, isShortcutTarget } = props;
+  const [expanded, setExpanded] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [fullRange, setFullRange] = useState(false);
+  const detailId = useId();
+  const visible = layer.channels.map((c) => c.visible);
+  const shown = isChannelShown(visible, soloChannel, i);
+  const isSolo = soloChannel === i;
+  const lastShown = isLastShownChannel(visible, soloChannel, i);
+  const key = i < 9 ? CHANNEL_KEYS[i] : undefined;
+  const soloKey = i < 9 ? SOLO_KEYS[i] : undefined;
+
+  const eyeLabel = isSolo ? `Show all channels` : `${shown ? "Hide" : "Show"} ${channel.name}`;
+  const onEyePress = (event: PressEvent) => {
+    if (event.altKey) props.onSoloChannel(i);
+    else props.onToggleChannel(i);
+  };
+
+  return (
+    <li className="lc-channel" data-shown={shown || undefined} data-solo={isSolo || undefined}>
+      <div className="lc-channel-row">
+        <IconButton
+          icon={expanded ? CaretDownIcon : CaretRightIcon}
+          size="sm"
+          label={`${expanded ? "Hide" : "Show"} ${channel.name} contrast`}
+          aria-expanded={expanded}
+          aria-controls={expanded ? detailId : undefined}
+          onPress={() => setExpanded(!expanded)}
+        />
+        <ColormapPicker
+          value={channel.colormap}
+          label={channel.name}
+          onChange={(cmap) => props.onChannelSetColormap(layer.id, i, cmap)}
+        />
+        {canEdit && renaming ? (
+          <InlineNameField
+            label="Channel name"
+            // Start from the override, or empty so the placeholder shows the
+            // inherited name and a blank commit clears back to it.
+            initial={channel.nameOverride ?? ""}
+            placeholder={channel.inheritedName}
+            onCommit={(name) => {
+              setRenaming(false);
+              const trimmed = name.trim();
+              props.onChannelSetName(layer.id, i, trimmed.length === 0 ? null : trimmed);
+            }}
+            onCancel={() => setRenaming(false)}
+          />
+        ) : (
+          <span
+            className="lc-channel-name"
+            title={canEdit ? `${channel.name} (double-click to rename)` : channel.name}
+            onDoubleClick={canEdit ? () => setRenaming(true) : undefined}
+          >
+            {channel.name}
+          </span>
+        )}
+        {isSolo && <Badge tone="accent">Solo</Badge>}
+        <IconButton
+          icon={shown ? EyeIcon : EyeSlashIcon}
+          size="sm"
+          label={eyeLabel}
+          shortcut={isShortcutTarget ? key : undefined}
+          isDisabled={lastShown}
+          onPress={onEyePress}
+        />
+        <Menu
+          label={`${channel.name} actions`}
+          placement="bottom end"
+          trigger={<IconButton icon={DotsThreeVerticalIcon} size="sm" label={`More for ${channel.name}`} />}
+        >
+          <MenuItem
+            icon={HeadphonesIcon}
+            shortcut={isShortcutTarget ? soloKey : undefined}
+            onAction={() => props.onSoloChannel(i)}
+          >
+            {isSolo ? "Show all channels" : "Solo"}
+          </MenuItem>
+          {canEdit && (
+            <MenuItem icon={PencilSimpleIcon} onAction={() => setRenaming(true)}>
+              Rename
+            </MenuItem>
+          )}
+        </Menu>
+      </div>
+      {expanded && (
+        <div className="lc-channel-detail" id={detailId}>
+          <ContrastControls
+            label={channel.name}
+            contrastMin={channel.contrastMin}
+            contrastMax={channel.contrastMax}
+            gamma={channel.gamma}
+            dataRange={channel.dataRange}
+            fullRangeMax={layer.fullRangeMax}
+            integer={layer.integerData}
+            fullRange={fullRange}
+            onFullRangeChange={setFullRange}
+            onContrastChange={(min, max) => props.onChannelSetContrast(layer.id, i, min, max)}
+            onGammaChange={(g) => props.onChannelSetGamma(layer.id, i, g)}
+            onAutoFit={() => props.onChannelAutoFit(layer.id, i)}
+          />
+        </div>
+      )}
+    </li>
   );
 }
 
 /**
- * Inline rename input for a channel's display-name override. Behaves like
- * {@link LayerNameInput}, except the inherited name is the placeholder and an
- * empty commit is meaningful: it clears the override.
+ * Per-label overlays. Handlers pass the manifest index (`row.index`), not the
+ * row position, so they hit the right label when earlier labels were skipped.
  */
-function ChannelNameInput({
+function LabelList({ layer, ...props }: LayerRowProps) {
+  const rows = layer.labelRows ?? [];
+  return (
+    <div className="lc-labels" role="group" aria-label={`${layer.name} labels`} data-testid={`labels-section-${layer.id}`}>
+      <span className="lc-layer-section-title">Labels</span>
+      <ul className="lc-label-list">
+        {rows.map((row) => {
+          const labelName = row.name.trim() || `Label ${row.index}`;
+          // A label drawable only in the other view mode gets disabled
+          // controls and its reason as text, rather than a toggle that draws
+          // nothing.
+          const disabled = row.disabledReason !== undefined;
+          return (
+            <li key={row.index} className="lc-label">
+              <div className="lc-label-row">
+                <IconButton
+                  icon={!disabled && row.visible ? EyeIcon : EyeSlashIcon}
+                  size="sm"
+                  // When disabled, name the state (why it's off) rather than
+                  // an action the user can't perform.
+                  label={
+                    disabled
+                      ? `${layer.name} ${labelName}: ${row.disabledReason}`
+                      : `${row.visible ? "Hide" : "Show"} ${layer.name} ${labelName}`
+                  }
+                  isDisabled={disabled}
+                  data-testid={`label-eye-${layer.id}-${row.index}`}
+                  onPress={() => props.onLabelSetVisible(layer.id, row.index, !row.visible)}
+                />
+                <span className="lc-label-name" title={labelName}>{labelName}</span>
+                <Slider<number>
+                  className="lc-label-opacity"
+                  label={`${labelName} opacity`}
+                  labelPosition="hidden"
+                  valueDisplay="none"
+                  value={row.opacity ?? 0.5}
+                  minValue={0}
+                  maxValue={1}
+                  step={0.01}
+                  isDisabled={disabled}
+                  onChange={(v) => props.onLabelSetOpacity(layer.id, row.index, v)}
+                />
+              </div>
+              {disabled && <p className="lc-label-reason">{row.disabledReason}</p>}
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/** Settings most people never change, closed until asked for. */
+function Advanced(props: LayerRowProps) {
+  const { layer } = props;
+  const [open, setOpen] = useState(false);
+  const regionId = useId();
+  const levelNotice = displayedLevelNotice(layer);
+  const multichannel = layer.channels.length > 1;
+  const pinValue = layer.levelPin === null ? "follow" : String(layer.levelPin);
+
+  return (
+    <div className="lc-advanced">
+      <Button
+        className="lc-advanced-toggle"
+        size="sm"
+        variant="ghost"
+        trailingIcon={open ? CaretUpIcon : CaretDownIcon}
+        aria-expanded={open}
+        aria-controls={open ? regionId : undefined}
+        onPress={() => setOpen(!open)}
+      >
+        Advanced
+      </Button>
+      {open && (
+        <div className="lc-advanced-body" id={regionId}>
+          <Select
+            label="Layer blend"
+            description="How this layer combines with the layers below it"
+            options={BLEND_OPTIONS}
+            value={layer.blendMode as BlendMode}
+            onChange={(mode) => props.onSetBlendMode(layer.id, mode)}
+          />
+          {multichannel && (
+            <Select
+              label="Channel blend"
+              description="How this layer's channels combine with each other"
+              options={BLEND_OPTIONS}
+              value={layer.channelBlendMode as BlendMode}
+              onChange={(mode) => props.onChannelSetBlendMode(layer.id, mode)}
+            />
+          )}
+          <Select
+            label="Rendering"
+            description="How a 3D view draws the volume"
+            options={RENDER_OPTIONS}
+            value={layer.renderMode as RenderMode}
+            onChange={(mode) => props.onSetRenderMode(layer.id, mode)}
+          />
+          <LayoutSwitcher
+            className="lc-advanced-layout"
+            datasetId={layer.id}
+            registry={props.layoutRegistry}
+            sendCommand={props.sendCommand}
+            onAfterChange={props.onLayoutChange}
+          />
+          {(layer.targetLevel || layer.levelPinOptions.length > 0) && (
+            <div className="lc-level-row">
+              <span className="lc-layer-field-label">Level</span>
+              {layer.targetLevel && (
+                <span
+                  className="lc-level-readout"
+                  aria-label={`${layer.name} target level`}
+                  title="The level the screen calls for, or the pinned level"
+                >
+                  {levelNumbers(layer.targetLevel)}
+                </span>
+              )}
+              {levelNotice && layer.displayedLevel && (
+                <span
+                  className="lc-level-readout lc-level-displayed"
+                  aria-label={`${layer.name} displayed level`}
+                  title="The level on screen until the target is resident"
+                >
+                  {`showing ${levelNumbers(layer.displayedLevel)}`}
+                </span>
+              )}
+              {layer.levelPinOptions.length > 0 && (
+                <Select
+                  className="lc-level-pin"
+                  label={`${layer.name} level pin`}
+                  labelPosition="hidden"
+                  options={[
+                    { value: "follow", label: "Follow the screen" },
+                    ...layer.levelPinOptions.map((o) => ({ value: String(o.level), label: o.label })),
+                  ]}
+                  value={pinValue}
+                  onChange={(value) => props.onSetLevelPin(layer.id, value === "follow" ? null : Number(value))}
+                />
+              )}
+            </div>
+          )}
+          {levelNotice && (
+            <p className="lc-level-notice" role="status">
+              {levelNotice}
+            </p>
+          )}
+          {layer.downsamplingMethod && (
+            <p className="lc-level-meta" aria-label={`${layer.name} downsampling method`}>
+              {`Downsampled by ${layer.downsamplingMethod}`}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Inline rename. Enter or blur commits, Escape cancels. Clicks stay inside,
+ * so editing doesn't select or collapse the row.
+ */
+function InlineNameField({
+  label,
   initial,
   placeholder,
   onCommit,
   onCancel,
 }: {
+  label: string;
   initial: string;
-  placeholder: string;
+  placeholder?: string;
   onCommit: (name: string) => void;
   onCancel: () => void;
 }) {
   const [value, setValue] = useState(initial);
-  const ref = useRef<HTMLInputElement | null>(null);
+  const settled = useRef(false);
+  const wrapper = useRef<HTMLSpanElement>(null);
   useEffect(() => {
-    ref.current?.focus();
-    ref.current?.select();
+    wrapper.current?.querySelector("input")?.select();
   }, []);
+  const finish = (commit: boolean) => {
+    if (settled.current) return;
+    settled.current = true;
+    if (commit) onCommit(value);
+    else onCancel();
+  };
   return (
-    <input
-      ref={ref}
-      type="text"
-      className="channel-name-input"
-      aria-label="Channel name"
-      placeholder={placeholder}
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onClick={(e) => e.stopPropagation()}
-      onBlur={() => onCommit(value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          onCommit(value);
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          onCancel();
-        }
-      }}
-    />
+    <span ref={wrapper} className="lc-inline-name" onClick={(e) => e.stopPropagation()}>
+      <TextField
+        label={label}
+        labelPosition="hidden"
+        value={value}
+        placeholder={placeholder}
+        autoFocus
+        onChange={setValue}
+        onBlur={() => finish(true)}
+        onKeyDown={(e: ReactKeyboardEvent) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            finish(true);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            finish(false);
+          }
+        }}
+      />
+    </span>
   );
 }

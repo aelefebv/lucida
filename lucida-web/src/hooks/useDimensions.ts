@@ -155,18 +155,52 @@ export function useDimensions({
     }
   }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
-  // Changes which channels are shown, so a select.
-  const handleMultiChannelToggle = useCallback(() => {
-    const next = !multiChannel;
-    setMultiChannel(next);
+  // Solo is single-channel mode on the soloed channel; the composite is
+  // multi-channel mode. Both change which channels are shown, so a select.
+  const applyChannelMode = useCallback((multi: boolean, channel: number | null) => {
+    if (channel !== null) setC(channel);
+    setMultiChannel(multi);
     bridgeCallbacksRef.current.breakFollow();
     const scene = wasmSceneRef.current;
     if (scene) {
-      applyViewportCommand(scene, { type: "set_multi_channel", enabled: next });
+      if (channel !== null) applyViewportCommand(scene, { type: "set_c", c: channel });
+      applyViewportCommand(scene, { type: "set_multi_channel", enabled: multi });
       invalidateSelection(loopRef.current);
       bridgeCallbacksRef.current.emitPresence();
     }
-  }, [multiChannel, wasmSceneRef, bridgeCallbacksRef, loopRef]);
+  }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
+
+  const soloChannel = !multiChannel && dimC > 1 ? c : null;
+
+  /** Show one channel alone, or return to the composite when it already is. */
+  const handleSoloChannel = useCallback((channel: number) => {
+    if (soloChannel === channel) applyChannelMode(true, null);
+    else applyChannelMode(false, channel);
+  }, [soloChannel, applyChannelMode]);
+
+  const handleShowAllChannels = useCallback(() => {
+    applyChannelMode(true, null);
+  }, [applyChannelMode]);
+
+  // A multichannel image opens as a composite. Only the first one switches
+  // the mode, so opening another never undoes a solo, and this runs as the
+  // dataset registers, before a saved view or a followed peer applies its own
+  // mode on top. The scene's default stays single-channel, because a view
+  // recorded without the flag means single-channel.
+  const handleDatasetRegistered = useCallback((datasetId: string) => {
+    const datasets = datasetsRef.current;
+    const ds = datasets.get(datasetId);
+    if (!ds || channelCountOf(ds) <= 1) return;
+    for (const [id, other] of datasets) {
+      if (id !== datasetId && channelCountOf(other) > 1) return;
+    }
+    const scene = wasmSceneRef.current;
+    if (!scene || scene.multi_channel()) return;
+    applyViewportCommand(scene, { type: "set_multi_channel", enabled: true });
+    setMultiChannel(true);
+    invalidateSelection(loopRef.current);
+    bridgeCallbacksRef.current.emitPresence();
+  }, [datasetsRef, wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
   return {
     z, c, t, setZ, setC, setT,
@@ -175,7 +209,13 @@ export function useDimensions({
     dimZ, dimC, dimT,
     dimensionExtentsFor,
     labelNamesFor,
+    soloChannel,
     handleViewModeToggle,
-    handleZChange, handleCChange, handleTChange, handleMultiChannelToggle,
+    handleZChange, handleCChange, handleTChange,
+    handleSoloChannel, handleShowAllChannels, handleDatasetRegistered,
   };
+}
+
+function channelCountOf(ds: DatasetState): number {
+  return ds.manifest.images[0]?.multiscale.levels[0]?.shape[Axis.C] ?? 1;
 }

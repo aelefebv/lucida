@@ -9,10 +9,11 @@ import { applyDocumentCommand } from "../applyAndSend.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import type { ViewportCommand } from "../commands.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
-import { invalidateDisplaySettings, invalidateSelection, requestRender } from "../invalidation.ts";
+import { invalidateDisplaySettings, invalidateSelection } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
 import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
 import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
+import { channelDisplayName, channelRangeKey, parseChannelRangeKey } from "../components/channels.ts";
 
 /** A per-label overlay row for the layer panel, keyed by manifest index. */
 interface PanelLabelRow {
@@ -126,6 +127,17 @@ function levelPinOptions(
   });
 }
 
+/** How many channel entries the scene holds for a dataset, at least one. */
+function settingsChannelCount(scene: WasmScene | null, id: string): number {
+  if (!scene) return 0;
+  try {
+    const all = JSON.parse(scene.all_dataset_settings()) as Record<string, RawDatasetSettings>;
+    return Math.max(1, all[id]?.channel_settings?.length ?? 1);
+  } catch {
+    return 1;
+  }
+}
+
 /** The per-dataset display settings shape `scene.all_dataset_settings()`
  *  serializes (mirrors `lucida_core::scene::DatasetDisplaySettings`). */
 interface RawDatasetSettings {
@@ -154,6 +166,7 @@ export function buildLayerInfos(
   maps: {
     autoContrast: Map<string, boolean>;
     fullRange: Map<string, boolean>;
+    /** Keyed by {@link channelRangeKey}. */
     dataRange: Map<string, { min: number; max: number }>;
     /** The worker's per-dataset level readout; a dataset it has not reported yet is absent. */
     levels: Map<string, DatasetLevels>;
@@ -169,38 +182,48 @@ export function buildLayerInfos(
     return [];
   }
 
-  const currentC = scene.c();
-
   return layerOrder.slice().reverse().map((id) => {
     const settings = allSettings[id];
     const ds = datasets.get(id);
-    const dr = maps.dataRange.get(id) ?? null;
-    const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
-
-    const chSettings = settings?.channel_settings?.[currentC];
+    const multiscale = ds?.manifest.images[0]?.multiscale;
+    const dataType = multiscale?.data_type ?? "uint16";
 
     const rawLabelSettings = settings?.label_settings;
     const labelRows = ds ? buildLabelRows(ds.manifest, rawLabelSettings, viewMode) : [];
     const levels = maps.levels.get(id) ?? null;
+
+    // The data's channel count is authoritative; the settings may still be
+    // growing to match it while the dataset registers.
+    const rawChannels = settings?.channel_settings ?? [];
+    const channelCount = Math.max(1, multiscale?.levels[0]?.shape[Axis.C] ?? rawChannels.length);
+    const channels = Array.from({ length: channelCount }, (_, i) => {
+      const raw = rawChannels[i];
+      const label = multiscale?.channel_infos?.[i]?.label;
+      return {
+        name: channelDisplayName(i, raw?.name, label),
+        nameOverride: raw?.name?.trim() ? raw.name : null,
+        inheritedName: channelDisplayName(i, null, label),
+        visible: raw?.visible ?? true,
+        colormap: raw?.colormap ?? "gray",
+        contrastMin: raw?.contrast_min ?? settings?.contrast_min ?? 0,
+        contrastMax: raw?.contrast_max ?? settings?.contrast_max ?? 65535,
+        gamma: raw?.gamma ?? settings?.gamma ?? 1,
+        dataRange: maps.dataRange.get(channelRangeKey(id, i)) ?? null,
+      };
+    });
 
     return {
       id,
       name: scene.dataset_name(id),
       visible: settings?.visible ?? true,
       opacity: settings?.opacity ?? 1,
-      contrastMin: chSettings?.contrast_min ?? settings?.contrast_min ?? 0,
-      contrastMax: chSettings?.contrast_max ?? settings?.contrast_max ?? 65535,
-      gamma: chSettings?.gamma ?? settings?.gamma ?? 1,
-      colormap: chSettings?.colormap ?? "gray",
+      channels,
       blendMode: settings?.blend_mode ?? "alpha",
       renderMode: settings?.render_mode ?? "translucent",
       autoContrast: maps.autoContrast.get(id) ?? true,
       fullRange: maps.fullRange.get(id) ?? false,
-      dataRange: dr,
-      fullRangeMax: frMax,
-      channelSettings: settings?.channel_settings,
-      // Positional and may be short; LayerPanel falls back to `Ch {i}`.
-      channelInfos: ds?.manifest.images[0]?.multiscale.channel_infos,
+      fullRangeMax: dtypeMax(dataType),
+      integerData: !dataType.toLowerCase().startsWith("float"),
       labelRows: labelRows.length > 0 ? labelRows : undefined,
       channelBlendMode: settings?.channel_blend_mode ?? "additive",
       levelPin: settings?.detail_level_override ?? null,
@@ -276,7 +299,11 @@ export function useDatasetSettings({
   const cleanupLayerMaps = useCallback((id: string) => {
     setAutoContrastMap(prev => { const next = new Map(prev); next.delete(id); return next; });
     setFullRangeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
-    setDataRangeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
+    setDataRangeMap(prev => {
+      const next = new Map(prev);
+      for (const key of prev.keys()) if (parseChannelRangeKey(key)?.datasetId === id) next.delete(key);
+      return next;
+    });
   }, []);
 
   const handleLayerSelect = useCallback((id: string) => {
@@ -315,39 +342,6 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetContrast = useCallback((id: string, min: number, max: number) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min, max }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
-    }
-    setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  const handleLayerSetGamma = useCallback((id: string, gamma: number) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel: c, gamma }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
-      setLayerSettingsVersion((v) => v + 1);
-    }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  const handleLayerSetColormap = useCallback((id: string, colormap: Colormap) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel: c, colormap }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
-      setLayerSettingsVersion((v) => v + 1);
-    }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
   const handleChannelSetVisible = useCallback((id: string, channel: number, visible: boolean) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -369,8 +363,8 @@ export function useDatasetSettings({
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
   // A viewport command, not a document edit: followers see it via presence.
-  // `null` clears the override, falling back to the omero name or `Ch N`. The
-  // caller trims and passes null for a blank value.
+  // `null` clears the override, falling back to the metadata label or
+  // `Channel n`. The caller trims and passes null for a blank value.
   const handleChannelSetName = useCallback((id: string, channel: number, name: string | null) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -381,7 +375,7 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleChannelSetContrast = useCallback((id: string, channel: number, min: number, max: number) => {
+  const applyChannelContrast = useCallback((id: string, channel: number, min: number, max: number) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
@@ -390,6 +384,35 @@ export function useDatasetSettings({
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  // A hand-set limit stops continuous auto-contrast for the layer, or the next
+  // loaded chunk would refit over it.
+  const handleChannelSetContrast = useCallback((id: string, channel: number, min: number, max: number) => {
+    applyChannelContrast(id, channel, min, max);
+    setAutoContrastMap((prev) => (prev.get(id) === false ? prev : new Map(prev).set(id, false)));
+  }, [applyChannelContrast]);
+
+  /** Fit a channel's limits to its loaded data once. */
+  const handleChannelAutoFit = useCallback((id: string, channel: number) => {
+    const range = dataRangeMap.get(channelRangeKey(id, channel));
+    if (range) applyChannelContrast(id, channel, range.min, range.max);
+  }, [dataRangeMap, applyChannelContrast]);
+
+  /** Keep every channel of the layer fitted to its loaded data, or stop. */
+  const handleAutoContrastChange = useCallback((id: string, on: boolean) => {
+    setAutoContrastMap((prev) => new Map(prev).set(id, on));
+    if (!on) return;
+    const count = settingsChannelCount(wasmSceneRef.current, id);
+    for (let channel = 0; channel < count; channel++) {
+      const range = dataRangeMap.get(channelRangeKey(id, channel));
+      if (range) applyChannelContrast(id, channel, range.min, range.max);
+    }
+  }, [dataRangeMap, wasmSceneRef, applyChannelContrast]);
+
+  /** Let the contrast slider span the data type's whole range instead of the loaded data's. */
+  const handleFullRangeChange = useCallback((id: string, on: boolean) => {
+    setFullRangeMap((prev) => new Map(prev).set(id, on));
+  }, []);
 
   const handleChannelSetGamma = useCallback((id: string, channel: number, gamma: number) => {
     const scene = wasmSceneRef.current;
@@ -464,72 +487,6 @@ export function useDatasetSettings({
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  const handleLayerAutoContrast = useCallback((id: string) => {
-    const dr = dataRangeMap.get(id);
-    if (dr) {
-      const scene = wasmSceneRef.current;
-      if (scene) {
-        bridgeCallbacksRef.current.breakFollow();
-        const c = scene.c();
-        applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
-        bridgeCallbacksRef.current.emitDatasetPresence();
-      }
-    }
-    setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, true); return next; });
-  }, [dataRangeMap, wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  const handleLayerAutoContrastToggle = useCallback((id: string) => {
-    setAutoContrastMap(prev => {
-      const next = new Map(prev);
-      const wasAuto = prev.get(id) ?? true;
-      next.set(id, !wasAuto);
-      if (!wasAuto) {
-        const dr = dataRangeMap.get(id);
-        if (dr) {
-          const scene = wasmSceneRef.current;
-          if (scene) {
-            bridgeCallbacksRef.current.breakFollow();
-            const c = scene.c();
-            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
-            bridgeCallbacksRef.current.emitDatasetPresence();
-          }
-        }
-      }
-      return next;
-    });
-  }, [dataRangeMap, wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  const handleLayerFullRangeToggle = useCallback((id: string) => {
-    setFullRangeMap(prev => {
-      const next = new Map(prev);
-      const wasFull = prev.get(id) ?? false;
-      next.set(id, !wasFull);
-      const scene = wasmSceneRef.current;
-      if (scene) {
-        bridgeCallbacksRef.current.breakFollow();
-        const c = scene.c();
-        if (!wasFull) {
-          const ds = datasetsRef.current.get(id);
-          const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
-          applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: 0, max: frMax }, loopRef.current);
-          setAutoContrastMap(p => { const n = new Map(p); n.set(id, false); return n; });
-        } else {
-          const dr = dataRangeMap.get(id);
-          if (dr) {
-            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
-          } else {
-            // No data range to return to. The scene is unchanged, but request
-            // a frame so the panel flip shows promptly.
-            requestRender(loopRef.current);
-          }
-          setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
-        }
-        bridgeCallbacksRef.current.emitDatasetPresence();
-      }
-      return next;
-    });
-  }, [dataRangeMap, wasmSceneRef, datasetsRef, loopRef, bridgeCallbacksRef]);
 
   const handleLayerMove = useCallback((id: string, direction: "up" | "down") => {
     const scene = wasmSceneRef.current;
@@ -611,23 +568,20 @@ export function useDatasetSettings({
     handleLayerToggleExpand,
     handleLayerSetVisible,
     handleLayerSetOpacity,
-    handleLayerSetContrast,
-    handleLayerSetGamma,
-    handleLayerSetColormap,
     handleChannelSetVisible,
     handleChannelSetColormap,
     handleChannelSetName,
     handleChannelSetContrast,
     handleChannelSetGamma,
     handleChannelSetBlendMode,
+    handleChannelAutoFit,
+    handleAutoContrastChange,
+    handleFullRangeChange,
     handleLabelSetVisible,
     handleLabelSetOpacity,
     handleLayerSetBlendMode,
     handleLayerSetRenderMode,
     handleLayerSetLevelPin,
-    handleLayerAutoContrast,
-    handleLayerAutoContrastToggle,
-    handleLayerFullRangeToggle,
     handleLayerMove,
     handleRemoveLayer,
     handleLayerRename,

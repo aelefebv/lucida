@@ -1,0 +1,77 @@
+.lc-colormap-swatch {
+  flex: none;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--lc-radius-full);
+  outline: none;
+  box-shadow: inset 0 0 0 1px var(--lc-border-strong);
+  cursor: default;
+  transition: scale var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-colormap-swatch[data-hovered],
+.lc-colormap-swatch[data-pressed] {
+  scale: 1.15;
+}
+
+.lc-colormap-swatch[data-focus-visible] {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 2px;
+}
+
+.lc-colormap-popover .lc-popover-dialog {
+  padding: var(--lc-space-1);
+}
+
+.lc-colormap-list {
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  max-height: min(400px, 70vh);
+  overflow: auto;
+  outline: none;
+}
+
+.lc-colormap-option {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  box-sizing: border-box;
+  min-height: var(--lc-control-h-sm);
+  padding: 0 var(--lc-space-2);
+  border-radius: var(--lc-radius);
+  color: var(--lc-text);
+  font-size: var(--lc-text-md);
+  outline: none;
+  cursor: default;
+}
+
+.lc-colormap-option[data-focused],
+.lc-colormap-option[data-hovered] {
+  background: var(--lc-surface-3);
+}
+
+.lc-colormap-option[data-focus-visible] {
+  box-shadow: inset 0 0 0 2px var(--lc-focus-ring);
+}
+
+.lc-colormap-ramp {
+  flex: none;
+  width: 48px;
+  height: 10px;
+  border-radius: var(--lc-radius-sm);
+  box-shadow: inset 0 0 0 1px var(--lc-border);
+}
+
+.lc-colormap-name {
+  flex: 1;
+}
+
+.lc-colormap-check {
+  flex: none;
+  color: var(--lc-accent-text);
+}

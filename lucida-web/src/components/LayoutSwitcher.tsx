@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
+import { Select } from "../ui/index.ts";
 
 interface Props {
   datasetId: string;
@@ -8,14 +9,15 @@ interface Props {
   /** Called after a local layout switch, so the caller can mark the canvas
    *  dirty and the view updates without a pan or zoom. */
   onAfterChange?: () => void;
+  className?: string;
 }
 
 /**
- * Small dropdown that lets the user switch between available layouts for a
- * dataset. Renders nothing when there are <= 1 layouts to choose from
- * (single-image datasets) or when the registry isn't available yet.
+ * Switches between a dataset's layouts. Renders nothing when there are <= 1
+ * layouts to choose from (single-image datasets) or when the registry isn't
+ * available yet.
  */
-export function LayoutSwitcher({ datasetId, registry, sendCommand, onAfterChange }: Props) {
+export function LayoutSwitcher({ datasetId, registry, sendCommand, onAfterChange, className }: Props) {
   // Subscribe to registry changes. The version counter is the stable
   // snapshot; we read fresh state via available()/activeId() below.
   useSyncExternalStore(
@@ -31,19 +33,16 @@ export function LayoutSwitcher({ datasetId, registry, sendCommand, onAfterChange
   const activeId = registry.activeId(datasetId) ?? available[0]?.id ?? "";
 
   return (
-    <div className="layer-detail-row">
-      <label>Layout</label>
-      <select
-        value={activeId}
-        onChange={(e) => {
-          registry.setActive(datasetId, e.target.value, sendCommand);
-          onAfterChange?.();
-        }}
-      >
-        {available.map((l) => (
-          <option key={l.id} value={l.id}>{l.name}</option>
-        ))}
-      </select>
-    </div>
+    <Select
+      className={className}
+      label="Layout"
+      description="How the dataset's images are arranged"
+      options={available.map((l) => ({ value: l.id, label: l.name }))}
+      value={activeId}
+      onChange={(id) => {
+        registry.setActive(datasetId, id, sendCommand);
+        onAfterChange?.();
+      }}
+    />
   );
 }

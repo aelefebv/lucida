@@ -246,7 +246,10 @@ function App({
     datasetCallbacksRef,
     savedViewHooksRef,
     bumpLayerSettingsVersion: layers.bumpLayerSettingsVersion,
-    initLayerMaps: layers.initLayerMaps,
+    initLayerMaps: (id) => {
+      layers.initLayerMaps(id);
+      dims.handleDatasetRegistered(id);
+    },
     setZ: dims.setZ,
     setC: dims.setC,
     setT: dims.setT,
@@ -1114,20 +1117,15 @@ function App({
               layers={layers.layerInfos}
               selectedLayerId={selectedDatasetId}
               expandedLayerId={layers.expandedLayerId}
+              soloChannel={dims.soloChannel}
               onSelectLayer={layers.handleLayerSelect}
               onToggleExpand={layers.handleLayerToggleExpand}
               onSetVisible={layers.handleLayerSetVisible}
               onSetOpacity={layers.handleLayerSetOpacity}
-              multiChannel={dims.multiChannel}
-              onSetContrast={layers.handleLayerSetContrast}
-              onSetGamma={layers.handleLayerSetGamma}
-              onSetColormap={layers.handleLayerSetColormap}
               onSetBlendMode={layers.handleLayerSetBlendMode}
               onSetRenderMode={layers.handleLayerSetRenderMode}
               onSetLevelPin={layers.handleLayerSetLevelPin}
-              onAutoContrast={layers.handleLayerAutoContrast}
-              onAutoContrastToggle={layers.handleLayerAutoContrastToggle}
-              onFullRangeToggle={layers.handleLayerFullRangeToggle}
+              onAutoContrastChange={layers.handleAutoContrastChange}
               onMoveLayer={layers.handleLayerMove}
               onRemoveLayer={layers.handleRemoveLayer}
               onRenameLayer={layers.handleLayerRename}
@@ -1137,10 +1135,13 @@ function App({
               onChannelSetName={layers.handleChannelSetName}
               onChannelSetContrast={layers.handleChannelSetContrast}
               onChannelSetGamma={layers.handleChannelSetGamma}
+              onChannelAutoFit={layers.handleChannelAutoFit}
               onChannelSetBlendMode={layers.handleChannelSetBlendMode}
+              onSoloChannel={dims.handleSoloChannel}
+              onShowAllChannels={dims.handleShowAllChannels}
               onLabelSetVisible={layers.handleLabelSetVisible}
               onLabelSetOpacity={layers.handleLabelSetOpacity}
-              onAddLayer={() => setShowFileBrowser(true)}
+              onAddData={() => setShowFileBrowser(true)}
               viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
               cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
               layoutRegistry={layoutRegistry}
@@ -1156,8 +1157,6 @@ function App({
                 // it here for the overlay to re-read the pins.
                 bumpRemoteDocumentVersion();
               }}
-              // The left panel draws the edge.
-              style={{ borderRight: "none" }}
             />
           </LeftPanel>
         )}
@@ -1248,14 +1247,9 @@ function App({
                   z={dims.z}
                   dimZ={dims.dimZ}
                   onZChange={dims.handleZChange}
-                  c={dims.c}
-                  dimC={dims.dimC}
-                  onCChange={dims.handleCChange}
                   t={dims.t}
                   dimT={dims.dimT}
                   onTChange={dims.handleTChange}
-                  multiChannel={dims.multiChannel}
-                  onMultiChannelToggle={dims.handleMultiChannelToggle}
                 />
               ),
               // Mounted before any dataset opens, and only hidden until one
