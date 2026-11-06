@@ -3,7 +3,7 @@
  * fake cache, and a recorder on a fake clock. Test support, not product code.
  */
 
-import type { HudDrawContext } from "./hudDraw.ts";
+import type { HudColors, HudDrawContext } from "./hudDraw.ts";
 import type { HudSample } from "./hudModel.ts";
 import type { HudCacheReads } from "./hudSource.ts";
 import type { LaneOutstanding } from "../pipeline/fetch/types.ts";
@@ -11,6 +11,16 @@ import { TraceRecorder } from "../trace/recorder.ts";
 import type { GpuIdentity } from "../trace/types.ts";
 
 export const MIB = 1024 * 1024;
+
+/** One distinct color per role, so a test can tell what a draw was painted as. */
+export const HUD_TEST_COLORS: HudColors = {
+  background: "background",
+  text: "text",
+  muted: "muted",
+  track: "track",
+  tones: { ok: "tone-ok", busy: "tone-busy", warn: "tone-warn", absent: "tone-absent", info: "tone-info" },
+  series: { received: "series-received", sent: "series-sent", frame: "series-frame", gpu: "series-gpu" },
+};
 
 export const HARDWARE: GpuIdentity = {
   vendor: "vendor",
@@ -77,6 +87,8 @@ export class RecordingContext implements HudDrawContext {
   globalAlpha = 1;
   transforms: number[][] = [];
   texts: string[] = [];
+  /** The fill each text was written in, by text. */
+  textColors = new Map<string, unknown>();
   calls = 0;
   rects = 0;
 
@@ -115,6 +127,7 @@ export class RecordingContext implements HudDrawContext {
   fillText(text: string): void {
     this.calls++;
     this.texts.push(text);
+    this.textColors.set(text, this.fillStyle);
   }
 }
 

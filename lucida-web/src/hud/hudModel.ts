@@ -26,14 +26,6 @@ export const HUD_HISTORY = 60;
 /** A state's color, always paired with a label. */
 export type HudTone = "ok" | "busy" | "warn" | "absent" | "info";
 
-export const HUD_COLORS: Record<HudTone, string> = {
-  ok: "#5ec269",
-  busy: "#f0b429",
-  warn: "#ef5350",
-  absent: "#9aa0a6",
-  info: "#64b5f6",
-};
-
 /** One dataset's levels, from its latest per-tick aggregate sample. */
 export interface HudLevelSample {
   datasetId: string;

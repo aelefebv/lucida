@@ -17,6 +17,7 @@ import { describe, expect, it } from "vitest";
 import type { ChunkReading } from "../trace/diagnose/chunkStates.ts";
 import type { RowState } from "../trace/diagnose/types.ts";
 import { type ChunkCell, type OverlayModes } from "./overlayDrawList.ts";
+import { OVERLAY_TEST_COLORS } from "./overlayFixtures.ts";
 import { BOX_EDGES, buildVolumeDrawList, hitTestBox, projectChunkBox, type Projector } from "./volumeWireframe.ts";
 
 /** The overlay's MAX_CHUNK_RECTS. */
@@ -117,7 +118,7 @@ function poll(specs: BoxSpec[], project: Projector, byKey: Map<string, ChunkRead
       depth: center[0] ** 2 + center[1] ** 2 + (center[2] + 30) ** 2,
     });
   }
-  return buildVolumeDrawList({ cells, modes: MODES, readingOf: (cell) => byKey.get(cell.key) ?? null, windowMs: 12_000 });
+  return buildVolumeDrawList({ cells, colors: OVERLAY_TEST_COLORS, modes: MODES, readingOf: (cell) => byKey.get(cell.key) ?? null, windowMs: 12_000 });
 }
 
 function median(samples: number[]): number {

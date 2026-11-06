@@ -10,7 +10,8 @@ struct Uniforms {
   levelAtlasSlotDims: array<vec4u, 4>, // offset 64  (64 bytes) — xy=slots per axis, one per level pool binding
   coarseAtlasSlotDims: vec4u,          // offset 128 (16 bytes) — xy=slots per axis
   memberScreenSize: vec4f,             // offset 144 (16 bytes) — xy=member pixel size on screen
-  // total = 160 bytes
+  borderColor: vec4f,                  // offset 160 (16 bytes) — member footprint border, premultiplied
+  // total = 176 bytes
 };
 
 struct EntityRef { index: vec4u };
@@ -94,12 +95,13 @@ struct MemberQuad {
 };
 @group(1) @binding(3) var<storage, read> memberQuads: array<MemberQuad>;
 
-// Width of the gray frame drawn just inside a member's footprint edge.
+// Width of the frame drawn just inside a member's footprint edge. Its color
+// is the page's theme token, in the uniforms.
 const MEMBER_BORDER_WIDTH_PX: f32 = 1.5;
 
 // Minimum on-screen member size (per axis) for the footprint border to
 // draw at all. Below this the frame would cover the member's ENTIRE
-// footprint — every visible pixel would be constant border gray, so the
+// footprint — every visible pixel would be the constant border color, so the
 // sampled data (and any contrast/gamma/colormap edit) could never reach
 // the screen. Tiny members render pure content instead: sampled value
 // on hit, transparent on miss.
@@ -342,7 +344,7 @@ fn fs(input: VSOut) -> @location(0) vec4f {
 
   let entity = entityDescriptors[currentEntity.index.x];
 
-  // member footprint border: a gray frame just inside each member's
+  // member footprint border: a frame just inside each member's
   // footprint edge. Skip it for a label overlay (categorical) — an opaque
   // frame around a sub-footprint mask would sit on top of the intensity
   // image it annotates — and for members too small on screen to show
@@ -355,7 +357,7 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     let dist_y_px = edge_y * u.memberScreenSize.y;
     let edge_min_px = min(dist_x_px, dist_y_px);
     if (edge_min_px < MEMBER_BORDER_WIDTH_PX) {
-      return vec4f(0.3, 0.3, 0.3, 1.0);
+      return u.borderColor;
     }
   }
 
@@ -445,7 +447,7 @@ fn fsAggregate(input: AggregateVSOut) -> @location(0) vec4f {
   // skip is needed — but the size gate matters MOST here: batched
   // members are routinely sub-pixel at overview zoom, where an ungated
   // frame would cover every member's whole footprint and the field
-  // would read as a constant gray grid no display edit can touch.
+  // would read as a constant grid no display edit can touch.
   if (min(input.memberScreenPx.x, input.memberScreenPx.y) >= MEMBER_BORDER_MIN_SCREEN_PX) {
     let edge_x = min(input.uv.x, 1.0 - input.uv.x);
     let edge_y = min(input.uv.y, 1.0 - input.uv.y);
@@ -454,7 +456,7 @@ fn fsAggregate(input: AggregateVSOut) -> @location(0) vec4f {
       edge_y * input.memberScreenPx.y,
     );
     if (edge_min_px < MEMBER_BORDER_WIDTH_PX) {
-      return vec4f(0.3, 0.3, 0.3, 1.0);
+      return u.borderColor;
     }
   }
 

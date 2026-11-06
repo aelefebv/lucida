@@ -10,14 +10,15 @@
 
 import {
   buildChunkDrawList,
-  CELL_BORDER,
-  NO_ROW_FILL,
+  overlayPaints,
   type BoxCorners,
   type ChunkDrawItem,
   type ChunkDrawList,
   type DrawListInput,
+  type OverlayColors,
   type ScreenPoint,
 } from "./overlayDrawList.ts";
+import { paint } from "../theme/tokenColors.ts";
 
 export type Vec3 = readonly [number, number, number];
 
@@ -68,12 +69,14 @@ export function projectChunkBox(project: Projector, min: Vec3, max: Vec3): Proje
 /** How opaque a box's edges are. A cell's fill is painted over pixels at a third of this; an edge has no area to spare. */
 export const WIREFRAME_ALPHA = 0.9;
 /**
- * The edge of a box a trace-reading mode leaves uncolored: dim white, and
+ * The edge of a box a trace-reading mode leaves uncolored: a dim stroke, and
  * dashed when the cell's border is, which is when the chunk has no row.
  * A chunk with a row the window never fetched keeps a solid edge, as its
  * cell keeps a solid border.
  */
-export const NO_ROW_STROKE = "rgba(255, 255, 255, 0.45)";
+export function noRowStroke(colors: OverlayColors): string {
+  return paint(colors.stroke, 0.53);
+}
 export const NO_ROW_DASH = "3 3";
 const HALO_EXTRA_WIDTH = 2;
 
@@ -95,15 +98,16 @@ const RGBA = /^rgba?\((\d+),\s*(\d+),\s*(\d+)(?:,\s*[\d.]+)?\)$/;
 const BORDER = /^([\d.]+)px (solid|dashed) (.+)$/;
 
 /** A cell's fill and border as a box's edges: one stroke, dashed when the cell has no row, with a halo when the border says something the fill does not. */
-export function wireframeStyle(item: Pick<ChunkDrawItem, "fill" | "border">): WireframeStyle {
+export function wireframeStyle(item: Pick<ChunkDrawItem, "fill" | "border">, colors: OverlayColors): WireframeStyle {
+  const paints = overlayPaints(colors);
   const border = BORDER.exec(item.border);
   const width = border ? Number.parseFloat(border[1]) : 1;
   const dashed = border ? border[2] === "dashed" : false;
   const dash = dashed ? NO_ROW_DASH : null;
-  if (item.fill === NO_ROW_FILL) {
-    return { stroke: NO_ROW_STROKE, strokeWidth: 1, dash, halo: null };
+  if (item.fill === paints.noRowFill) {
+    return { stroke: noRowStroke(colors), strokeWidth: 1, dash, halo: null };
   }
-  const banded = border !== null && !dashed && item.border !== CELL_BORDER;
+  const banded = border !== null && !dashed && item.border !== paints.cellBorder;
   return {
     stroke: strokeOf(item.fill),
     strokeWidth: width,
@@ -253,7 +257,7 @@ export function buildVolumeDrawList(input: DrawListInput): VolumeDrawList {
   for (let i = 0; i < list.items.length; i++) {
     const item = list.items[i];
     const corners = item.cell.corners ?? rectangleCorners(item);
-    items[i] = { ...item, path: boxPath(corners), hull: boxHull(corners), style: wireframeStyle(item) };
+    items[i] = { ...item, path: boxPath(corners), hull: boxHull(corners), style: wireframeStyle(item, input.colors) };
   }
   return {
     items,

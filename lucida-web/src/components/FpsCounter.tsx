@@ -31,16 +31,14 @@ export function FpsCounter() {
   return (
     <div
       style={{
-        position: "absolute",
-        top: 8,
-        right: 8,
-        zIndex: 10,
-        background: "rgba(0, 0, 0, 0.5)",
-        color: "white",
-        fontFamily: "monospace",
-        fontSize: 12,
-        padding: "2px 6px",
-        borderRadius: 4,
+        background: "var(--lc-surface-float)",
+        color: "var(--lc-text)",
+        border: "1px solid var(--lc-border)",
+        fontFamily: "var(--lc-font-mono)",
+        fontSize: "var(--lc-text-xs)",
+        fontVariantNumeric: "tabular-nums",
+        padding: "2px var(--lc-space-2)",
+        borderRadius: "var(--lc-radius)",
         pointerEvents: "none",
       }}
     >

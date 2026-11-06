@@ -1,8 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { BookmarkSimpleIcon, CompassIcon, FolderOpenIcon } from "@phosphor-icons/react";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
-import { DimensionControls } from "./components/DimensionControls.tsx";
-import { FocalDepthControl } from "./components/FocalDepthControl.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
 import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
@@ -20,7 +19,6 @@ import { FpsCounter } from "./components/FpsCounter.tsx";
 import { FileBrowser } from "./components/FileBrowser.tsx";
 import { CollectionSelector, extractCollectionData } from "./components/CollectionSelector.tsx";
 import { frameRect } from "./components/groupFraming.ts";
-import { ShareToolbarButton } from "./components/ShareToolbarButton.tsx";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { ImportWarningBanner } from "./components/ImportWarningBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
@@ -35,7 +33,6 @@ import {
 } from "./invalidation.ts";
 import { annotationAuthorId } from "./annotationIdentity.ts";
 import { deriveMentionCandidates } from "./components/annotationParticipants.ts";
-import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { useAuthSession } from "./auth/AuthSession.ts";
 import {
   DEBUG_OVERLAYS,
@@ -47,7 +44,6 @@ import {
 import type { DatasetState } from "./types.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
-import { useLayout } from "./hooks/useLayout.ts";
 import { useDatasetSettings, type BridgeCallbacks, type DatasetCallbacks } from "./hooks/useDatasetSettings.ts";
 import { useDimensions } from "./hooks/useDimensions.ts";
 import { useBridge } from "./hooks/useBridge.ts";
@@ -75,7 +71,16 @@ import { setBundleServices } from "./trace/bundle.ts";
 import { visibleRectOf } from "./trace/flatFrame.ts";
 import { currentChunkSelection, onChunkSelectionChanged } from "./trace/linkedSelection.ts";
 import { setReportSender } from "./trace/reportInbox.ts";
-import { useHudKeyBinding } from "./hud/useHudKey.ts";
+import { Banner } from "./shell/Banner.tsx";
+import { BottomToolbar } from "./shell/BottomToolbar.tsx";
+import { CanvasStage, type CanvasSize } from "./shell/CanvasStage.tsx";
+import { DimensionBar } from "./shell/DimensionBar.tsx";
+import { useOpenRightPanel } from "./shell/layoutPreferences.ts";
+import { LeftPanel } from "./shell/LeftPanel.tsx";
+import { RightRail } from "./shell/RightRail.tsx";
+import { TopBar } from "./shell/TopBar.tsx";
+import { useDeveloperSurfaces } from "./shell/useDeveloperSurfaces.ts";
+import { Button } from "./ui/Button.tsx";
 import "./App.css";
 
 // The debug UI is code-split: the panel loads on first open, the overlay layer
@@ -140,7 +145,10 @@ function App({
   // `dataset explore`, and the trace driver: no UI chrome and no persisted
   // writes. Read `captureSurface.ts` before wiring anything new in here.
   const captureSurface = useMemo(() => isCaptureSurface(), []);
-  const layout = useLayout({ loopRef: render.loopRef, captureSurface });
+  const developer = useDeveloperSurfaces({ captureSurface });
+  // The canvas's CSS size, settled: it follows a panel drag a beat behind, so
+  // the drag doesn't re-render the whole viewer on every frame.
+  const [canvasSize, setCanvasSize] = useState<CanvasSize>({ width: 0, height: 0 });
 
   const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
   // Lifted here because call ordering stops the hooks that use it from owning it.
@@ -173,15 +181,8 @@ function App({
   // fails at the workspace gate first, so this never reveals whether an
   // annotation exists.
   const [deepLinkNotFound, setDeepLinkNotFound] = useState(false);
-  const [workspaceNameEdit, setWorkspaceNameEdit] = useState({
-    source: workspaceName,
-    value: workspaceName,
-  });
   const bumpDatasetsVersion = useCallback(() => setDatasetsVersion(v => v + 1), []);
   const bumpRemoteDocumentVersion = useCallback(() => setRemoteDocumentVersion(v => v + 1), []);
-  const workspaceNameDraft = workspaceNameEdit.source === workspaceName
-    ? workspaceNameEdit.value
-    : workspaceName;
   const canEditWorkspace = workspaceRole !== "viewer";
 
   // Callback refs to break circular dependencies.
@@ -816,7 +817,8 @@ function App({
 
     setCursorLabels(result.labels);
     requestRender(render.loopRef.current, "peer_cursors");
-  }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef]);
+    // canvasSize re-projects the labels after a panel moves the canvas edges.
+  }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef, canvasSize]);
 
   // Auto-clear the clamp notice after a few seconds. Re-arms on each new notice.
   useEffect(() => {
@@ -857,20 +859,7 @@ function App({
     render.canvasRef.current?.focus();
   }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef, render.canvasRef]);
 
-  const [urlInput, setUrlInput] = useState("");
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization
-  const handleUrlKeyDown = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter") {
-      datasets.handleUrlSubmit(urlInput);
-      setUrlInput("");
-    }
-  }, [datasets, urlInput]);
-
   const [showFileBrowser, setShowFileBrowser] = useState(false);
-  const [showDevControls, setShowDevControls] = useState(false);
-  // The dock overlays the canvas rather than resizing it (ADR 0052), so
-  // opening it changes nothing the recorder sees.
-  const [showMonitor, setShowMonitor] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
   // localStorage `debug.overlays`, independent of every panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
@@ -896,13 +885,33 @@ function App({
     () => currentChunkSelection() !== null,
     () => false,
   );
-  const [showHud, setShowHud] = useState(false);
-  const toggleHud = useCallback(() => setShowHud((v) => !v), []);
-  useHudKeyBinding(toggleHud);
-  const [showBookmarkSidebar, setShowBookmarkSidebar] = useState(true);
-  // The Explore panel starts closed; it is a user toggle.
-  const [showExplorePanel, setShowExplorePanel] = useState(false);
+  // Debug overlays are a developer surface too, so the setting hides them.
+  const showDebugOverlays =
+    developer.enabled && (anyOverlayEnabled || radiusPreviewActive || selectionPublished);
+  const showExplorePanel = useOpenRightPanel() === "explore";
   const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
+
+  useEffect(() => {
+    if (captureSurface) return;
+    document.title = `${workspaceName} · lucida`;
+    return () => {
+      document.title = "lucida";
+    };
+  }, [workspaceName, captureSurface]);
+
+  const settleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // CanvasStage keeps the latest handler in a ref, so this needs no memo.
+  const handleCanvasResize = (size: CanvasSize) => {
+    requestRender(render.loopRef.current, "canvas_resize");
+    if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = setTimeout(() => {
+      settleTimerRef.current = null;
+      setCanvasSize(size);
+    }, 100);
+  };
+  useEffect(() => () => {
+    if (settleTimerRef.current !== null) clearTimeout(settleTimerRef.current);
+  }, []);
 
   const loadedDatasetNames = layers.layerInfos.map((layerInfo) => layerInfo.name);
 
@@ -1021,19 +1030,45 @@ function App({
     [bridge, savedViewApplier, notifySavedViewChange],
   );
 
-  const commitWorkspaceName = useCallback(() => {
-    const next = workspaceNameDraft.trim();
-    if (!next || next === workspaceName) {
-      setWorkspaceNameEdit({ source: workspaceName, value: workspaceName });
-      return;
-    }
-    void onRenameWorkspace(next).catch(() => {
-      setWorkspaceNameEdit({ source: workspaceName, value: workspaceName });
-    });
-  }, [workspaceNameDraft, workspaceName, onRenameWorkspace]);
+  const hasData = layers.layerInfos.length > 0;
+
+  // The 2D collection navigator for the selected dataset, when it is a collection.
+  const collectionNavigator = (() => {
+    if (datasetsVersion === 0 || dims.viewMode !== "2d") return null;
+    // eslint-disable-next-line react-hooks/refs -- the live dataset map; datasetsVersion re-renders on change.
+    const ds = selectedDatasetId ? datasetsRef.current.get(selectedDatasetId) : undefined;
+    if (!ds) return null;
+    // Resolve the active layout's placements: derived layouts come from the
+    // registry, source layouts from the content graph.
+    const activeId = layoutRegistry?.activeId(ds.id) ?? ds.manifest.default_layout_id;
+    const activePlacements =
+      (activeId ? layoutRegistry?.getSpec(ds.id, activeId)?.placements : null)
+      ?? (activeId ? ds.manifest.source_layouts.find((l) => l.id === activeId)?.placements : null)
+      ?? null;
+    const collectionData = extractCollectionData(ds.manifest, activePlacements);
+    if (!collectionData) return null;
+    return (
+      <CollectionSelector
+        collectionKind={collectionData.collectionKind}
+        members={collectionData.members}
+        collectionName={ds.name}
+        onGroupClick={(bounds) => {
+          const ws = scene.wasmSceneRef.current;
+          const canvas = render.canvasRef.current;
+          if (!ws || !canvas) return;
+          bridge.breakFollow();
+          frameRect(ws, canvas, bounds);
+          emitPresenceWithUrl();
+          requestRender(render.loopRef.current, "collection_group_click");
+        }}
+      />
+    );
+  })();
+
+  const datasetStatus = scene.wasmError || render.renderError || bridge.remoteDatasetError;
 
   // The JSX block below reads `.current` from refs returned by useRenderClient,
-  // useWasmScene, useBridge, useLayout, etc. — passing them as props to
+  // useWasmScene, useBridge, etc. — passing them as props to
   // SliceViewer / VolumeViewer / PeerCursors / Minimap / DebugOverlays
   // so those children can read the latest canvas, scene, loop, etc.
   // each render. This is the canonical "ref-as-current-value-prop" idiom that
@@ -1045,167 +1080,194 @@ function App({
   // suspicious; they are intentional and load-bearing here.
   /* eslint-disable react-hooks/refs */
   return (
-    <div className={captureSurface ? "app render-mode" : "app"}>
-      {/* ProfileMenu floats over the bottom-left corner of the app
-          chrome. Absolute-positioning keeps it out of the existing
-          flex layout so the LayerPanel + canvas geometry is untouched.
-          Gated out of the chrome-free render surface. */}
-      {!captureSurface && <ProfileMenu />}
-      <LayerPanel
-        layers={layers.layerInfos}
-        selectedLayerId={selectedDatasetId}
-        expandedLayerId={layers.expandedLayerId}
-        onSelectLayer={layers.handleLayerSelect}
-        onToggleExpand={layers.handleLayerToggleExpand}
-        onSetVisible={layers.handleLayerSetVisible}
-        onSetOpacity={layers.handleLayerSetOpacity}
-        multiChannel={dims.multiChannel}
-        onSetContrast={layers.handleLayerSetContrast}
-        onSetGamma={layers.handleLayerSetGamma}
-        onSetColormap={layers.handleLayerSetColormap}
-        onSetBlendMode={layers.handleLayerSetBlendMode}
-        onSetRenderMode={layers.handleLayerSetRenderMode}
-        onSetLevelPin={layers.handleLayerSetLevelPin}
-        onAutoContrast={layers.handleLayerAutoContrast}
-        onAutoContrastToggle={layers.handleLayerAutoContrastToggle}
-        onFullRangeToggle={layers.handleLayerFullRangeToggle}
-        onMoveLayer={layers.handleLayerMove}
-        onRemoveLayer={layers.handleRemoveLayer}
-        onRenameLayer={layers.handleLayerRename}
-        canEdit={canEditWorkspace}
-        onChannelSetVisible={layers.handleChannelSetVisible}
-        onChannelSetColormap={layers.handleChannelSetColormap}
-        onChannelSetName={layers.handleChannelSetName}
-        onChannelSetContrast={layers.handleChannelSetContrast}
-        onChannelSetGamma={layers.handleChannelSetGamma}
-        onChannelSetBlendMode={layers.handleChannelSetBlendMode}
-        onLabelSetVisible={layers.handleLabelSetVisible}
-        onLabelSetOpacity={layers.handleLabelSetOpacity}
-        onAddLayer={() => setShowFileBrowser(true)}
-        viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
-        cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
-        devControlsToggle={{
-          label: "Dev",
-          active: showDevControls,
-          onClick: () => setShowDevControls((v) => !v),
-        }}
-        layoutRegistry={layoutRegistry}
-        sendCommand={bridge.sendCommand}
-        onLayoutChange={() => {
-          // The switcher already applied `set_active_layout`. Match the
-          // inbound-peer arm in sessionController.ts so the planner re-reads
-          // now; a missed signal leaves collection members drawn at their
-          // pre-switch positions until the next pan or zoom.
-          invalidateDisplaySettings(render.loopRef.current, "layout_switch");
-          // A local switch re-anchors collection annotations in core but, unlike
-          // an inbound peer switch, doesn't bump the document version, so bump
-          // it here for the overlay to re-read the pins.
-          bumpRemoteDocumentVersion();
-        }}
-        style={{ width: layout.sidebarWidth, minWidth: layout.sidebarWidth }}
-      />
-      <div className="sidebar-resize-handle" onPointerDown={layout.handleSidebarResizeDown} />
-      <div className="main-content">
-        <div className="workspace-chrome">
-          <button className="workspace-back-button" onClick={onBackToDashboard}>
-            Workspaces
-          </button>
-          {canRenameWorkspace ? (
-            <input
-              className="workspace-name-input"
-              value={workspaceNameDraft}
-              onChange={(e) => setWorkspaceNameEdit({
-                source: workspaceName,
-                value: e.target.value,
-              })}
-              onBlur={commitWorkspaceName}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.currentTarget.blur();
-                }
-                if (e.key === "Escape") {
-                  setWorkspaceNameEdit({ source: workspaceName, value: workspaceName });
-                  e.currentTarget.blur();
-                }
-              }}
-              aria-label="Workspace name"
+    <div className="lc-shell" data-capture={captureSurface || undefined}>
+      {!captureSurface && (
+        <TopBar
+          workspaceId={workspaceId}
+          workspaceName={workspaceName}
+          onRenameWorkspace={canRenameWorkspace ? onRenameWorkspace : undefined}
+          onBackToDashboard={onBackToDashboard}
+          inbox={
+            <MentionsOfMe
+              annotations={currentAnnotations}
+              currentUserId={annotationAuthor}
+              currentUserEmail={authSession.principal.email}
+              members={workspaceMembers}
+              onNavigate={handleNavigateToMention}
+              viewedCommentIds={viewedCommentIds}
+              onMarkViewed={markViewed}
             />
-          ) : (
-            <div className="workspace-name-label" title={workspaceName}>
-              {workspaceName}
-            </div>
-          )}
-          <div className="workspace-chrome-actions">
-            <button
-              type="button"
-              onClick={() => setShowMonitor((v) => !v)}
-              aria-pressed={showMonitor}
-              title={showMonitor ? "Close the pipeline monitor" : "Open the pipeline monitor"}
-              data-testid="open-monitor"
-              style={{
-                background: showMonitor ? "#646cff" : undefined,
-                color: showMonitor ? "#fff" : undefined,
+          }
+          presence={{
+            peers: bridge.peers,
+            followTarget: bridge.followTarget,
+            onFollow: bridge.handleFollow,
+          }}
+          onShare={canRenameWorkspace ? () => setShowWorkspaceSharing(true) : undefined}
+          developer={developer}
+        />
+      )}
+      <div className="lc-shell-body">
+        {!captureSurface && (
+          <LeftPanel label="Layers">
+            <LayerPanel
+              layers={layers.layerInfos}
+              selectedLayerId={selectedDatasetId}
+              expandedLayerId={layers.expandedLayerId}
+              onSelectLayer={layers.handleLayerSelect}
+              onToggleExpand={layers.handleLayerToggleExpand}
+              onSetVisible={layers.handleLayerSetVisible}
+              onSetOpacity={layers.handleLayerSetOpacity}
+              multiChannel={dims.multiChannel}
+              onSetContrast={layers.handleLayerSetContrast}
+              onSetGamma={layers.handleLayerSetGamma}
+              onSetColormap={layers.handleLayerSetColormap}
+              onSetBlendMode={layers.handleLayerSetBlendMode}
+              onSetRenderMode={layers.handleLayerSetRenderMode}
+              onSetLevelPin={layers.handleLayerSetLevelPin}
+              onAutoContrast={layers.handleLayerAutoContrast}
+              onAutoContrastToggle={layers.handleLayerAutoContrastToggle}
+              onFullRangeToggle={layers.handleLayerFullRangeToggle}
+              onMoveLayer={layers.handleLayerMove}
+              onRemoveLayer={layers.handleRemoveLayer}
+              onRenameLayer={layers.handleLayerRename}
+              canEdit={canEditWorkspace}
+              onChannelSetVisible={layers.handleChannelSetVisible}
+              onChannelSetColormap={layers.handleChannelSetColormap}
+              onChannelSetName={layers.handleChannelSetName}
+              onChannelSetContrast={layers.handleChannelSetContrast}
+              onChannelSetGamma={layers.handleChannelSetGamma}
+              onChannelSetBlendMode={layers.handleChannelSetBlendMode}
+              onLabelSetVisible={layers.handleLabelSetVisible}
+              onLabelSetOpacity={layers.handleLabelSetOpacity}
+              onAddLayer={() => setShowFileBrowser(true)}
+              viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
+              cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
+              layoutRegistry={layoutRegistry}
+              sendCommand={bridge.sendCommand}
+              onLayoutChange={() => {
+                // The switcher already applied `set_active_layout`. Match the
+                // inbound-peer arm in sessionController.ts so the planner re-reads
+                // now; a missed signal leaves collection members drawn at their
+                // pre-switch positions until the next pan or zoom.
+                invalidateDisplaySettings(render.loopRef.current, "layout_switch");
+                // A local switch re-anchors collection annotations in core but, unlike
+                // an inbound peer switch, doesn't bump the document version, so bump
+                // it here for the overlay to re-read the pins.
+                bumpRemoteDocumentVersion();
               }}
-            >
-              Monitor
-            </button>
-            {canRenameWorkspace && (
-              <button type="button" onClick={() => setShowWorkspaceSharing(true)}>
-                Share Workspace
-              </button>
-            )}
-            <div className="workspace-id-label" title={workspaceId}>
-              {workspaceId}
-            </div>
-          </div>
-        </div>
-        {bridge.peers.size > 0 && (
-          <div className="peer-list" style={{ fontSize: "0.85em", margin: "8px 0" }}>
-            <strong>Peers ({bridge.peers.size}):</strong>
-            {bridge.followTarget !== null && (
-              <button onClick={() => bridge.handleFollow(null)} style={{ marginLeft: 8 }}>
-                Stop Following
-              </button>
-            )}
-            <ul style={{ listStyle: "none", padding: 0, margin: "4px 0" }}>
-              {bridge.followablePeers.map(([peerId]) => (
-                <li key={peerId} style={{ display: "inline", marginRight: 8 }}>
-                  Client {peerId}
-                  {bridge.followTarget !== peerId && (
-                    <button onClick={() => bridge.handleFollow(peerId)} style={{ marginLeft: 4 }}>
-                      Follow
-                    </button>
-                  )}
-                  {bridge.followTarget === peerId && " (following)"}
-                </li>
-              ))}
-            </ul>
-          </div>
+              // The left panel draws the edge.
+              style={{ borderRight: "none" }}
+            />
+          </LeftPanel>
         )}
-        <div style={{ display: "flex", flexDirection: "row", width: layout.canvasWidth }}>
-          <div className="viewer-canvas-wrap" style={{
-            position: "relative",
-            display: datasetsVersion > 0 ? "block" : "none",
-            flex: 1,
-            minWidth: 0,
-          }}>
-            <canvas
-              // Keyed per RenderClient generation: `transferControlToOffscreen`
-              // is one-shot per element, so after a client teardown (dev
-              // StrictMode remount) the next client needs a fresh element.
-              key={render.canvasKey}
-              ref={render.canvasRef}
-              tabIndex={0}
-              style={{
-                // The docked dev-controls panel is 300px wide.
-                width: layout.canvasWidth - 300 * (showDevControls ? 1 : 0),
-                height: layout.canvasHeight,
-                imageRendering: dims.viewMode === "2d" ? "pixelated" : "auto",
-                borderRadius: 8,
-                backgroundColor: "black",
-                display: "block",
-              }}
-            />
+        <div className="lc-shell-center">
+          <CanvasStage
+            canvasRef={render.canvasRef}
+            canvasKey={render.canvasKey}
+            pixelated={dims.viewMode === "2d"}
+            onResize={handleCanvasResize}
+            bare={captureSurface}
+            emptyState={
+              !hasData && bridge.sessionReady && !bridge.remoteDatasetLoading && !captureSurface ? (
+                <div className="lc-shell-empty">
+                  <p>This workspace has no data yet.</p>
+                  <Button icon={FolderOpenIcon} onPress={() => setShowFileBrowser(true)}>
+                    Add data
+                  </Button>
+                </div>
+              ) : null
+            }
+            slots={{
+              "top-center": (
+                <>
+                  <LoadingViewBanner applier={savedViewSync.applier} />
+                  {/* Durable, dismissible surface for non-fatal import warnings
+                      from a dataset open (e.g. the sampled-label-discovery
+                      notice). Stays visible after the open completes and clears
+                      on dismiss or a fresh open. */}
+                  <ImportWarningBanner
+                    warnings={bridge.remoteDatasetWarnings}
+                    overflow={bridge.remoteDatasetWarningsOverflow}
+                    onDismiss={bridge.dismissRemoteDatasetWarnings}
+                  />
+                  {bridge.remoteDatasetLoading && (
+                    <Banner tone="info">{bridge.remoteDatasetProgress ?? "Loading volume..."}</Banner>
+                  )}
+                  {datasetStatus && (
+                    <Banner tone="danger" role="alert">
+                      {datasetStatus}
+                    </Banner>
+                  )}
+                  {/* Clamp notice from the light annotation-view restore. */}
+                  {restoreNotice && (
+                    <Banner tone="info" data-testid="annotation-restore-notice">
+                      {restoreNotice}
+                    </Banner>
+                  )}
+                  {/* `#a=<id>` didn't resolve. A recipient without access fails
+                      at the gate first, so this never confirms the annotation
+                      existed. */}
+                  {deepLinkNotFound && (
+                    <Banner data-testid="annotation-deeplink-notfound" onDismiss={() => setDeepLinkNotFound(false)}>
+                      This annotation couldn&rsquo;t be found — it may have been deleted.
+                    </Banner>
+                  )}
+                </>
+              ),
+              "top-right": (
+                <>
+                  {developer.fps && <FpsCounter />}
+                  {developer.hud && (
+                    <Suspense fallback={null}>
+                      <Hud
+                        canvasRef={render.canvasRef}
+                        datasets={datasetsRef.current}
+                        getCache={() => bridge.sessionRef.current?.cpuCache ?? null}
+                      />
+                    </Suspense>
+                  )}
+                  {developer.devControls && (
+                    <Suspense fallback={null}>
+                      <DevControls
+                        // Deferred ref read (never during render): the session can
+                        // attach or be replaced while the surface is open, and the
+                        // surface re-reads on its own tick.
+                        getCpuCache={() => bridge.sessionRef.current?.cpuCache ?? null}
+                        // Lets it shrink to the room the slot has and scroll.
+                        style={{ minHeight: 0, flexShrink: 1 }}
+                      />
+                    </Suspense>
+                  )}
+                </>
+              ),
+              "bottom-left": collectionNavigator,
+              "bottom-center": hasData && (
+                <DimensionBar
+                  viewMode={dims.viewMode}
+                  z={dims.z}
+                  dimZ={dims.dimZ}
+                  onZChange={dims.handleZChange}
+                  c={dims.c}
+                  dimC={dims.dimC}
+                  onCChange={dims.handleCChange}
+                  t={dims.t}
+                  dimT={dims.dimT}
+                  onTChange={dims.handleTChange}
+                  multiChannel={dims.multiChannel}
+                  onMultiChannelToggle={dims.handleMultiChannelToggle}
+                />
+              ),
+              // Mounted before any dataset opens, and only hidden until one
+              // does: its first 2D-canvas draw must land before an open's
+              // first frame (see Minimap.tsx).
+              "bottom-right": render.clientReady && render.clientRef.current && (
+                <div hidden={!hasData}>
+                  <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
+                </div>
+              ),
+            }}
+          >
             {datasetsVersion > 0 && dims.viewMode === "2d" && scene.wasmScene && render.client && bridge.sessionRef.current && (
               <SliceViewer
                 z={dims.z}
@@ -1250,35 +1312,6 @@ function App({
                 onGoToAuthorView={handleGoToAuthorView}
               />
             )}
-            {datasetsVersion > 0 && dims.viewMode === "2d" && (() => {
-              const ds = selectedDatasetId ? datasetsRef.current.get(selectedDatasetId) : undefined;
-              if (!ds) return null;
-              // Resolve the active layout's placements: derived layouts
-              // come from the registry, source layouts from the content graph.
-              const activeId = layoutRegistry?.activeId(ds.id) ?? ds.manifest.default_layout_id;
-              const activePlacements =
-                (activeId ? layoutRegistry?.getSpec(ds.id, activeId)?.placements : null)
-                ?? (activeId ? ds.manifest.source_layouts.find((l) => l.id === activeId)?.placements : null)
-                ?? null;
-              const collectionData = extractCollectionData(ds.manifest, activePlacements);
-              if (!collectionData) return null;
-              return (
-                <CollectionSelector
-                  collectionKind={collectionData.collectionKind}
-                  members={collectionData.members}
-                  collectionName={ds.name}
-                  onGroupClick={(bounds) => {
-                    const ws = scene.wasmSceneRef.current;
-                    const canvas = render.canvasRef.current;
-                    if (!ws || !canvas) return;
-                    bridge.breakFollow();
-                    frameRect(ws, canvas, bounds);
-                    emitPresenceWithUrl();
-                    requestRender(render.loopRef.current, "collection_group_click");
-                  }}
-                />
-              );
-            })()}
             {datasetsVersion > 0 && dims.viewMode === "3d" && scene.wasmScene && render.client && bridge.sessionRef.current && (
               <VolumeViewer
                 session={bridge.sessionRef.current}
@@ -1337,10 +1370,7 @@ function App({
                 cursorLabels={cursorLabels}
               />
             )}
-            {render.clientReady && render.clientRef.current && (
-              <Minimap client={render.clientRef.current} activeLoop={render.activeLoop} />
-            )}
-            {(anyOverlayEnabled || radiusPreviewActive || selectionPublished) && (
+            {showDebugOverlays && (
               <Suspense fallback={null}>
                 <DebugOverlays
                   wasmSceneRef={scene.wasmSceneRef}
@@ -1352,303 +1382,93 @@ function App({
                 />
               </Suspense>
             )}
-            {showHud && !captureSurface && (
-              <Suspense fallback={null}>
-                <Hud
-                  canvasRef={render.canvasRef}
-                  datasets={datasetsRef.current}
-                  getCache={() => bridge.sessionRef.current?.cpuCache ?? null}
-                />
-              </Suspense>
-            )}
-            <FpsCounter />
-            <LoadingViewBanner applier={savedViewSync.applier} />
-            {/* Durable, dismissible surface for non-fatal import warnings from
-                a dataset open (e.g. the sampled-label-discovery notice). Stays
-                visible after the open completes and clears on dismiss or a
-                fresh open. */}
-            <ImportWarningBanner
-              warnings={bridge.remoteDatasetWarnings}
-              overflow={bridge.remoteDatasetWarningsOverflow}
-              onDismiss={bridge.dismissRemoteDatasetWarnings}
+          </CanvasStage>
+          {!captureSurface && (
+            <BottomToolbar
+              onOpenUrl={datasets.handleUrlSubmit}
+              loading={bridge.remoteDatasetLoading}
+              onBrowse={() => setShowFileBrowser(true)}
+              getCurrentSavedView={savedViewSync.captureBuilder}
+              annotationKind={annotationKind}
+              onAnnotationKindChange={setAnnotationKind}
+              annotationsVisible={annotationsVisible}
+              onToggleAnnotations={() => setAnnotationsVisible((v) => !v)}
             />
-            {/* Clamp notice from the light annotation-view restore. */}
-            {restoreNotice && (
-              <div
-                role="status"
-                data-testid="annotation-restore-notice"
-                style={{
-                  position: "absolute",
-                  top: 12,
-                  left: "50%",
-                  transform: "translateX(-50%)",
-                  background: "rgba(31,111,235,0.95)",
-                  color: "#fff",
-                  padding: "6px 12px",
-                  borderRadius: 6,
-                  fontSize: "0.8rem",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.4)",
-                  zIndex: 40,
-                  pointerEvents: "none",
-                }}
-              >
-                {restoreNotice}
-              </div>
-            )}
-            {/* `#a=<id>` didn't resolve. A recipient without access fails at the
-                gate first, so this never confirms the annotation existed. */}
-            {deepLinkNotFound && (
-              <div
-                role="status"
-                data-testid="annotation-deeplink-notfound"
-                style={{
-                  position: "absolute",
-                  top: 12,
-                  left: "50%",
-                  transform: "translateX(-50%)",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 10,
-                  background: "rgba(48,54,61,0.97)",
-                  color: "#e6edf3",
-                  padding: "8px 12px",
-                  borderRadius: 6,
-                  fontSize: "0.85rem",
-                  boxShadow: "0 2px 8px rgba(0,0,0,0.5)",
-                  zIndex: 41,
-                  maxWidth: 420,
-                }}
-              >
-                <span>
-                  This annotation couldn&rsquo;t be found — it may have been
-                  deleted.
-                </span>
-                <button
-                  data-testid="annotation-deeplink-notfound-dismiss"
-                  onClick={() => setDeepLinkNotFound(false)}
-                  aria-label="Dismiss"
-                  style={{
-                    background: "none",
-                    border: "none",
-                    color: "#8b949e",
-                    cursor: "pointer",
-                    fontSize: 16,
-                    lineHeight: 1,
-                    padding: 0,
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-            )}
-            <div className="canvas-resize-handle" onPointerDown={layout.handleCanvasResizeDown} />
-          </div>
-          {showDevControls && (
-            <Suspense fallback={null}>
-              <DevControls
-                // Deferred ref read (never during render): the session can
-                // attach or be replaced while the surface is open, and the
-                // surface re-reads on its own tick.
-                getCpuCache={() => bridge.sessionRef.current?.cpuCache ?? null}
-                style={{ height: layout.canvasHeight }}
-              />
-            </Suspense>
+          )}
+          {developer.monitor && (
+            // The dock overlays the canvas rather than resizing it (ADR 0052),
+            // so opening it changes nothing the recorder sees. Its frame keeps
+            // it between the side panels.
+            <div className="lc-shell-dock">
+              <Suspense fallback={null}>
+                <MonitorDock onClose={developer.closeMonitor} />
+              </Suspense>
+            </div>
           )}
         </div>
-        {showMonitor && (
-          <Suspense fallback={null}>
-            <MonitorDock onClose={() => setShowMonitor(false)} insetLeft={layout.sidebarWidth} />
-          </Suspense>
-        )}
-        {datasetsVersion > 0 && (
-          <div className="dimension-controls" style={{ maxWidth: layout.canvasWidth }}>
-            <DimensionControls label="Z" value={dims.z} max={dims.dimZ} onChange={dims.handleZChange} disabled={dims.viewMode === "3d"} />
-            {dims.multiChannel ? (
-              dims.dimC > 1 && (
-                <div className="dim-control">
-                  <span className="dim-label">C</span>
-                  <button className="dim-btn" style={{ background: "#4a9eff", color: "#fff" }} onClick={dims.handleMultiChannelToggle} title="Switch to single-channel mode">Multi</button>
-                </div>
-              )
-            ) : (
-              <DimensionControls label="C" value={dims.c} max={dims.dimC} onChange={dims.handleCChange} />
-            )}
-            {!dims.multiChannel && dims.dimC > 1 && (
-              <div className="dim-control" style={{ marginLeft: "-0.25rem" }}>
-                <button className="dim-btn" onClick={dims.handleMultiChannelToggle} title="Switch to multi-channel composite mode">Multi</button>
-              </div>
-            )}
-            <DimensionControls label="T" value={dims.t} max={dims.dimT} onChange={dims.handleTChange} />
-            {/* Near/far bias for the 3D chunk-spawn origin, shown only in 3D
-                where it means something. Binds to configStore.depthBiasView. */}
-            {dims.viewMode === "3d" && <FocalDepthControl />}
-          </div>
-        )}
-        <div style={{ display: "flex", gap: "0.5rem", alignItems: "center", width: "100%", maxWidth: layout.canvasWidth }}>
-          <input
-            type="text"
-            placeholder="Enter dataset path or gs:// URL"
-            value={urlInput}
-            onChange={e => setUrlInput(e.target.value)}
-            onKeyDown={handleUrlKeyDown}
-            disabled={bridge.remoteDatasetLoading}
-            style={{ flex: 1, padding: "0.375rem 0.5rem", fontSize: "0.875rem" }}
+        {!captureSurface && (
+          <RightRail
+            panels={[
+              {
+                id: "savedViews",
+                label: "Saved views",
+                icon: BookmarkSimpleIcon,
+                render: (active) => (
+                  <WorkspaceSavedViewsSidebar
+                    workspaceId={workspaceId}
+                    currentUserEmail={authSession.principal.email}
+                    canEdit={canEditWorkspace}
+                    getCurrentSavedView={savedViewSync.captureBuilder}
+                    onOpenSavedView={handleOpenWorkspaceSavedView}
+                    loadedDatasetNames={loadedDatasetNames}
+                    activeLayoutName={activeLayoutName}
+                    defaultSavedViewId={defaultSavedViewId}
+                    onSetDefaultSavedView={onSetDefaultSavedView}
+                    currentOpenSavedViewId={currentOpenSavedViewId}
+                    onActiveSavedViewInvalidated={handleActiveSavedViewInvalidated}
+                    visible={active}
+                  />
+                ),
+              },
+              {
+                id: "explore",
+                label: "Explore",
+                icon: CompassIcon,
+                render: (active) => (
+                  <ExplorationPanel
+                    visible={active}
+                    captureBuilder={savedViewSync.captureBuilder}
+                    applyView={applyExploreView}
+                    createSavedView={handleExploreBookmark}
+                    datasetId={exploreTarget.id}
+                    datasetName={exploreTarget.name}
+                    dims={exploreTarget.dims}
+                    viewport={[
+                      render.canvasRef.current?.clientWidth ?? 800,
+                      render.canvasRef.current?.clientHeight ?? 600,
+                    ]}
+                    requestThumbnail={requestThumbnail}
+                  />
+                ),
+              },
+            ]}
           />
-          <button
-            onClick={() => { datasets.handleUrlSubmit(urlInput); setUrlInput(""); }}
-            disabled={bridge.remoteDatasetLoading || !urlInput.trim()}
-            style={{ padding: "0.375rem 0.75rem", fontSize: "0.875rem" }}
-          >
-            {bridge.remoteDatasetLoading ? "Loading..." : "Open"}
-          </button>
-          <button
-            onClick={() => setShowFileBrowser(true)}
-            disabled={bridge.remoteDatasetLoading}
-            style={{ padding: "0.375rem 0.75rem", fontSize: "0.875rem", whiteSpace: "nowrap" }}
-          >
-            Browse Local
-          </button>
-          <ShareToolbarButton getCurrentSavedView={savedViewSync.captureBuilder} />
-          <label
-            title="Shape drawn by shift-drag on the canvas (point = click, line/box = drag)"
-            style={{ display: "flex", alignItems: "center", gap: "0.25rem", fontSize: "0.875rem", whiteSpace: "nowrap" }}
-          >
-            Annotate
-            <select
-              aria-label="Annotation shape"
-              value={annotationKind}
-              onChange={(e) => setAnnotationKind(e.target.value as "point" | "line" | "box")}
-              style={{ padding: "0.25rem", fontSize: "0.875rem" }}
-            >
-              <option value="point">Point</option>
-              <option value="line">Line</option>
-              <option value="box">Box</option>
-            </select>
-          </label>
-          <MentionsOfMe
-            annotations={currentAnnotations}
-            currentUserId={annotationAuthor}
-            currentUserEmail={authSession.principal.email}
-            members={workspaceMembers}
-            onNavigate={handleNavigateToMention}
-            viewedCommentIds={viewedCommentIds}
-            onMarkViewed={markViewed}
-          />
-          {/* The aria-label and title name the next action, so the control
-              reads correctly in either state. */}
-          <button
-            data-testid="annot-visibility-toggle"
-            onClick={() => setAnnotationsVisible((v) => !v)}
-            aria-pressed={!annotationsVisible}
-            aria-label={annotationsVisible ? "Hide annotations" : "Show annotations"}
-            title={annotationsVisible ? "Hide annotations" : "Show annotations"}
-            style={{
-              padding: "0.375rem 0.75rem",
-              fontSize: "0.875rem",
-              whiteSpace: "nowrap",
-              // Same accent as the other toolbar toggles.
-              background: !annotationsVisible ? "#646cff" : undefined,
-              color: !annotationsVisible ? "#fff" : undefined,
-            }}
-          >
-            {annotationsVisible ? "Hide Annotations" : "Show Annotations"}
-          </button>
-          <button
-            onClick={() => setShowBookmarkSidebar((v) => !v)}
-            title={showBookmarkSidebar ? "Hide saved views" : "Show saved views"}
-            style={{
-              padding: "0.375rem 0.75rem",
-              fontSize: "0.875rem",
-              whiteSpace: "nowrap",
-              background: showBookmarkSidebar ? "#646cff" : undefined,
-              color: showBookmarkSidebar ? "#fff" : undefined,
-            }}
-          >
-            Saved Views
-          </button>
-          <button
-            onClick={() => setShowExplorePanel((v) => !v)}
-            title={showExplorePanel ? "Hide the Explore panel" : "Suggest next views to explore"}
-            data-testid="explore-toggle"
-            style={{
-              padding: "0.375rem 0.75rem",
-              fontSize: "0.875rem",
-              whiteSpace: "nowrap",
-              background: showExplorePanel ? "#646cff" : undefined,
-              color: showExplorePanel ? "#fff" : undefined,
-            }}
-          >
-            Explore
-          </button>
-          <button
-            onClick={toggleHud}
-            aria-pressed={showHud}
-            title={showHud ? "Hide the pipeline HUD (H)" : "Show the pipeline HUD (H)"}
-            data-testid="hud-toggle"
-            style={{
-              padding: "0.375rem 0.75rem",
-              fontSize: "0.875rem",
-              whiteSpace: "nowrap",
-              background: showHud ? "#646cff" : undefined,
-              color: showHud ? "#fff" : undefined,
-            }}
-          >
-            HUD
-          </button>
-        </div>
-        {showFileBrowser && (
-          <FileBrowser
-            onSelect={handleFileBrowserSelect}
-            onCreateWorkspace={
-              onCreateWorkspaceFromDatasets
-                ? (paths) => {
-                    setShowFileBrowser(false);
-                    onCreateWorkspaceFromDatasets(paths);
-                  }
-                : undefined
-            }
-            onClose={() => setShowFileBrowser(false)}
-          />
-        )}
-        {bridge.remoteDatasetLoading && (
-          <p className="secondary">{bridge.remoteDatasetProgress ?? "Loading volume..."}</p>
-        )}
-        {(scene.wasmError || render.renderError || bridge.remoteDatasetError) && (
-          <p style={{ color: "#f44" }}>
-            {scene.wasmError || render.renderError || bridge.remoteDatasetError}
-          </p>
         )}
       </div>
-      <WorkspaceSavedViewsSidebar
-        workspaceId={workspaceId}
-        currentUserEmail={authSession.principal.email}
-        canEdit={canEditWorkspace}
-        getCurrentSavedView={savedViewSync.captureBuilder}
-        onOpenSavedView={handleOpenWorkspaceSavedView}
-        loadedDatasetNames={loadedDatasetNames}
-        activeLayoutName={activeLayoutName}
-        defaultSavedViewId={defaultSavedViewId}
-        onSetDefaultSavedView={onSetDefaultSavedView}
-        currentOpenSavedViewId={currentOpenSavedViewId}
-        onActiveSavedViewInvalidated={handleActiveSavedViewInvalidated}
-        visible={showBookmarkSidebar}
-        style={{ width: 280, minWidth: 280, height: "100vh" }}
-      />
-      <ExplorationPanel
-        visible={showExplorePanel}
-        captureBuilder={savedViewSync.captureBuilder}
-        applyView={applyExploreView}
-        createSavedView={handleExploreBookmark}
-        datasetId={exploreTarget.id}
-        datasetName={exploreTarget.name}
-        dims={exploreTarget.dims}
-        viewport={[
-          render.canvasRef.current?.clientWidth ?? 800,
-          render.canvasRef.current?.clientHeight ?? 600,
-        ]}
-        requestThumbnail={requestThumbnail}
-        style={{ width: 280, minWidth: 280, height: "100vh" }}
-      />
+      {showFileBrowser && (
+        <FileBrowser
+          onSelect={handleFileBrowserSelect}
+          onCreateWorkspace={
+            onCreateWorkspaceFromDatasets
+              ? (paths) => {
+                  setShowFileBrowser(false);
+                  onCreateWorkspaceFromDatasets(paths);
+                }
+              : undefined
+          }
+          onClose={() => setShowFileBrowser(false)}
+        />
+      )}
       <WorkspaceSharingDialog
         workspaceId={workspaceId}
         open={showWorkspaceSharing}

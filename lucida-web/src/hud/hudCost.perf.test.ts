@@ -41,7 +41,7 @@
 import { describe, expect, it } from "vitest";
 
 import { drawHud, hudHeight } from "./hudDraw.ts";
-import { fakeCache, HARDWARE, makeRecorder, MIB, RecordingContext } from "./hudFixtures.ts";
+import { fakeCache, HARDWARE, HUD_TEST_COLORS, makeRecorder, MIB, RecordingContext } from "./hudFixtures.ts";
 import { buildHudView, createHudHistory, HUD_HISTORY, HUD_TICK_MS, pushSample, type HudSample } from "./hudModel.ts";
 import { emptyLaneOutstanding, HudSource } from "./hudSource.ts";
 import { Scheduler } from "../pipeline/fetch/scheduler.ts";
@@ -165,17 +165,17 @@ describe("HUD cost contract", () => {
     const box = { width: WIDTH, height: hudHeight(view, WIDTH), dpr: 2 };
 
     const early = new RecordingContext();
-    drawHud(early, view, box);
+    drawHud(early, view, box, HUD_TEST_COLORS);
 
     for (let tick = HUD_HISTORY * 2; tick < HUD_HISTORY * 40; tick++) pushSample(history, sampleAt(tick));
     const later = buildHudView(history);
     const late = new RecordingContext();
-    drawHud(late, later, box);
+    drawHud(late, later, box, HUD_TEST_COLORS);
 
     const ctx = new RecordingContext();
     const draw = measure(() => {
       ctx.texts.length = 0;
-      drawHud(ctx, later, box);
+      drawHud(ctx, later, box, HUD_TEST_COLORS);
     }, 500);
     log(
       `draw tick: ${WIDTH}px strip at ratio 2, ${late.calls} context calls (${late.texts.length} text) | ` +

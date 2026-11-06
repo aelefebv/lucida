@@ -10,7 +10,6 @@ import { FALLBACK, HARDWARE, hudSample, lanes, MIB } from "./hudFixtures.ts";
 import {
   buildHudView,
   createHudHistory,
-  HUD_COLORS,
   HUD_HISTORY,
   HUD_TICK_MS,
   pushSample,
@@ -275,13 +274,10 @@ describe("the adapter", () => {
 });
 
 describe("the view's frame", () => {
-  it("states its rolling window and pairs every tone with a color", () => {
+  it("states its rolling window", () => {
     const view = buildHudView(after([hudSample(0)]));
     expect(view.window).toBe("15 s rolling window · 250 ms tick");
     expect(view.run).toEqual({ label: "run open", detail: "a run is recording", tone: "info" });
-    for (const tone of ["ok", "busy", "warn", "absent", "info"] as const) {
-      expect(HUD_COLORS[tone]).toMatch(/^#[0-9a-f]{6}$/);
-    }
   });
 
   it("reads before any sample without throwing", () => {

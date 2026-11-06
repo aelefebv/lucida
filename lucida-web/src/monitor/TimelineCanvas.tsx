@@ -23,6 +23,8 @@
  */
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useAppearance } from "../theme/appearance.ts";
+import { Button } from "../ui/Button.tsx";
 import type { ChunkSelection } from "../trace/diagnose/chunkSelection.ts";
 import type { TimelineSection, WindowRequest } from "../trace/diagnose/types.ts";
 import type { MonitorWindow } from "./monitorModel.ts";
@@ -106,6 +108,9 @@ export function TimelineCanvas({ section, provisional, alignSpanMs, brush }: Tim
     [section, width, ratio, alignSpanMs],
   );
   const store = backingStoreSize(list);
+  // The list names theme tokens and the paint resolves them, so a theme or
+  // accent change repaints the same list.
+  const appearance = useAppearance();
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -114,7 +119,7 @@ export function TimelineCanvas({ section, provisional, alignSpanMs, brush }: Tim
     const ctx = canvas?.getContext("2d") ?? null;
     if (!canvas || !ctx) return;
     paintTimeline(canvas, ctx, list);
-  }, [list]);
+  }, [list, appearance]);
 
   const startBrush = brush
     ? (event: React.PointerEvent<HTMLCanvasElement>): void => {
@@ -169,9 +174,9 @@ export function TimelineCanvas({ section, provisional, alignSpanMs, brush }: Tim
                 Window <strong>{brushed.view.label} ms</strong> of the {brushed.view.ofWallMs} ms run. The
                 report below is of this window. The CLI reads the same window of a saved run with{" "}
                 <code data-testid="monitor-brush-command">{brushed.view.command}</code>.{" "}
-                <button type="button" onClick={() => brush.onChange(null)} data-testid="monitor-brush-clear">
+                <Button size="sm" onPress={() => brush.onChange(null)} data-testid="monitor-brush-clear">
                   Clear the brush
-                </button>
+                </Button>
               </>
             ) : (
               BRUSH_HINT

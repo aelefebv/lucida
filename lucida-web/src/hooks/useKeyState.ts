@@ -27,7 +27,9 @@ export function useKeyState(
 
     function onKeyDown(e: KeyboardEvent) {
       if (isInputFocused()) return;
-      if (boundKeys.has(e.key)) {
+      // A held modifier makes it a browser or app shortcut (Ctrl+F, Alt+[),
+      // whose default and listeners further up must still run.
+      if (boundKeys.has(e.key) && !e.altKey && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
       }
       pressed.add(e.key);

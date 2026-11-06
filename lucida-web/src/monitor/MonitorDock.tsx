@@ -45,6 +45,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { subscribeAppearance } from "../theme/appearance.ts";
+import { Button } from "../ui/Button.tsx";
 import "./MonitorDock.css";
 import { CompareSlotView, RunOption, type CompareSlot } from "./CompareSlotView.tsx";
 import { CompareView } from "./CompareView.tsx";
@@ -451,12 +453,13 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
               that ends it. Every other read here exports, and exporting would
               close the run being watched without saying that is what it did. */}
           {mode === "live" && (
-            <button type="button" onClick={stopAndAnalyse} data-testid="monitor-stop">
+            <Button size="sm" variant="primary" onPress={stopAndAnalyse} data-testid="monitor-stop">
               Stop &amp; analyse
-            </button>
+            </Button>
           )}
           {(mode === "read" || mode === "file") && shownRuns.length > 0 && (
             <select
+              className="monitor-select"
               aria-label="Run"
               data-testid="monitor-run-select"
               value={shownRunId ?? ""}
@@ -471,81 +474,83 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
               screen they would save something other than what is shown. */}
           {mode === "read" && (
             <>
-              <button type="button" onClick={() => readRun()} data-testid="monitor-reread">
+              <Button size="sm" onPress={() => readRun()} data-testid="monitor-reread">
                 Read the newest run
-              </button>
-              <button
-                type="button"
-                onClick={() => save("trace")}
-                disabled={!read?.ok}
-                data-testid="monitor-save-run"
-              >
+              </Button>
+              <Button size="sm" onPress={() => save("trace")} isDisabled={!read?.ok} data-testid="monitor-save-run">
                 Save run
-              </button>
-              <button
-                type="button"
-                onClick={() => save("perfetto")}
-                disabled={!read?.ok}
+              </Button>
+              <Button
+                size="sm"
+                onPress={() => save("perfetto")}
+                isDisabled={!read?.ok}
                 data-testid="monitor-save-perfetto"
               >
                 Save for Perfetto
-              </button>
-              <button
-                type="button"
-                onClick={saveBundle}
-                disabled={!read?.ok || bundling}
+              </Button>
+              <Button
+                size="sm"
+                onPress={saveBundle}
+                isDisabled={!read?.ok || bundling}
                 data-testid="monitor-save-bundle"
               >
                 {bundling ? "Saving bundle…" : "Save bundle"}
-              </button>
-              <button
-                type="button"
-                onClick={send}
-                disabled={!read?.ok || sending}
+              </Button>
+              {/* A native title rather than a Tooltip: the tooltip's overlay
+                  would portal into the opener's page while the dock is
+                  popped out. */}
+              <span
+                className="monitor-hint"
                 title="Post this run's bundle to the workspace inbox, where the CLI reads it"
-                data-testid="monitor-send-report"
               >
-                {sending ? "Sending report…" : "Send report"}
-              </button>
+                <Button
+                  size="sm"
+                  onPress={send}
+                  isDisabled={!read?.ok || sending}
+                  data-testid="monitor-send-report"
+                >
+                  {sending ? "Sending report…" : "Send report"}
+                </Button>
+              </span>
             </>
           )}
           {(mode === "read" || mode === "file") && (
-            <button
-              type="button"
-              onClick={() => pick(null)}
+            <span
+              className="monitor-hint"
               title="Or drop a saved run, a run file, or a bundle anywhere on the dock"
-              data-testid="monitor-open-file"
             >
-              Open a run or bundle
-            </button>
+              <Button size="sm" onPress={() => pick(null)} data-testid="monitor-open-file">
+                Open a run or bundle
+              </Button>
+            </span>
           )}
           {mode === "file" && (
-            <button type="button" onClick={closeFile} data-testid="monitor-close-file">
+            <Button size="sm" onPress={closeFile} data-testid="monitor-close-file">
               Back to this page&rsquo;s runs
-            </button>
+            </Button>
           )}
           {mode !== "live" &&
             (mode === "compare" ? (
-              <button type="button" onClick={leaveCompare} data-testid="monitor-leave-compare">
+              <Button size="sm" onPress={leaveCompare} data-testid="monitor-leave-compare">
                 Leave compare mode
-              </button>
+              </Button>
             ) : (
-              <button type="button" onClick={enterCompare} data-testid="monitor-compare-runs">
+              <Button size="sm" onPress={enterCompare} data-testid="monitor-compare-runs">
                 Compare two runs
-              </button>
+              </Button>
             ))}
           {popout ? (
-            <button type="button" onClick={dockBack} data-testid="monitor-dock-back">
+            <Button size="sm" onPress={dockBack} data-testid="monitor-dock-back">
               Return to the viewer
-            </button>
+            </Button>
           ) : (
-            <button type="button" onClick={popOut} data-testid="monitor-popout">
+            <Button size="sm" onPress={popOut} data-testid="monitor-popout">
               Pop out
-            </button>
+            </Button>
           )}
-          <button type="button" onClick={onClose} data-testid="monitor-close">
+          <Button size="sm" variant="ghost" onPress={onClose} data-testid="monitor-close">
             Close
-          </button>
+          </Button>
         </div>
       </header>
 
@@ -579,9 +584,9 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
       {!live && nextRunId && (
         <p className="monitor-note" data-testid="monitor-next-run">
           A run is open in the viewer.{" "}
-          <button type="button" onClick={watchNextRun} data-testid="monitor-watch-next">
+          <Button size="sm" onPress={watchNextRun} data-testid="monitor-watch-next">
             Watch the run in progress
-          </button>
+          </Button>
         </p>
       )}
 
@@ -775,6 +780,18 @@ function usePopout() {
     };
   }, [popout]);
 
+  // The tokens key on attributes of the root element, and the popout has a
+  // root of its own, so it follows the opener's theme and accent as they change.
+  useEffect(() => {
+    if (!popout) return;
+    const mirror = (): void => mirrorAppearance(window.document, popout.document);
+    mirror();
+    const unsubscribe = subscribeAppearance(mirror);
+    return () => {
+      unsubscribe();
+    };
+  }, [popout]);
+
   return { popout, popOut, dockBack, popoutFailed };
 }
 
@@ -786,4 +803,16 @@ function adoptStyles(from: Document, into: Document): void {
   }
   into.title = "lucida — pipeline monitor";
   into.body.className = "monitor-popout-body";
+}
+
+/** The appearance attributes and the inline accent, copied onto the popout's root. */
+function mirrorAppearance(from: Document, into: Document): void {
+  const source = from.documentElement;
+  const target = into.documentElement;
+  for (const name of target.getAttributeNames()) {
+    if (name.startsWith("data-") || name === "style") target.removeAttribute(name);
+  }
+  for (const name of source.getAttributeNames()) {
+    if (name.startsWith("data-") || name === "style") target.setAttribute(name, source.getAttribute(name) ?? "");
+  }
 }

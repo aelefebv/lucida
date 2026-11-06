@@ -1,7 +1,7 @@
 // The chrome-free capture surface (`?render=1`), used by `dataset montage`,
 // `dataset explore` and the headless trace driver (ADR 0051).
 //
-// `render=1` hides all UI chrome (`.app.render-mode` in App.css) and records
+// `render=1` renders the canvas alone (`bare` on CanvasStage) and records
 // nothing on a person's behalf: no camera, view, or preference is written back.
 // A writing capture perturbs the next run, overwrites the user's saved view, and
 // puts a debounce floor under every headless run. Gate any new load-path write

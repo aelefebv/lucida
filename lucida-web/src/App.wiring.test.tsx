@@ -122,6 +122,7 @@ vi.mock("lucida-core", () => {
     is_local_dataset_url: vi.fn(() => true),
     normalize_dataset_url: vi.fn((url: string) => url),
     dataset_id_for_url: vi.fn((url: string) => `wds:${url}`),
+    peer_palette: vi.fn(() => ["#ff6b6b", "#4ecdc4", "#ffe66d"]),
   };
 });
 
@@ -240,13 +241,24 @@ import { WasmScene } from "lucida-core";
 import { getSceneSettings } from "./tickCommon.ts";
 import { updateWorkspaceLastView } from "./workspaceApi.ts";
 import {
+  __resetPreferencesForTesting,
+  developerToolsPreference,
+  getPreference,
+  setPreference,
+} from "./theme/preferences.ts";
+import { leftPanelOpenPreference, rightPanelOpenPreference } from "./shell/layoutPreferences.ts";
+import {
   invalidateDisplaySettings,
   invalidateAfterViewRestore,
   invalidateSelection,
 } from "./invalidation.ts";
 
 const MockedBridge = Bridge as unknown as {
-  instances: Array<{ handlers: BridgeHandlers; sendCommand: ReturnType<typeof vi.fn> }>;
+  instances: Array<{
+    handlers: BridgeHandlers;
+    sendCommand: ReturnType<typeof vi.fn>;
+    sendFollow: ReturnType<typeof vi.fn>;
+  }>;
 };
 const FakeScene = WasmScene as unknown as {
   instances: Array<{
@@ -357,19 +369,21 @@ function renderApp() {
 /** Mount the app, let the mocked WASM init settle so the session controller
  *  connects, then deliver the join snapshot through the recorded bridge
  *  handlers, the same entry the real WebSocket uses. */
-async function mountWithSnapshot(docJson: string) {
+async function mountWithSnapshot(docJson: string, peers: unknown[] = []) {
   renderApp();
   // Flush wasm init, then wasmReady, then controller construction.
   await act(async () => {});
   const bridge = MockedBridge.instances[MockedBridge.instances.length - 1];
   await act(async () => {
-    bridge.handlers.onSnapshot(1, docJson, [], 1, {});
+    bridge.handlers.onSnapshot(1, docJson, peers as never, 1, {});
   });
   const scene = FakeScene.instances[FakeScene.instances.length - 1];
   return { bridge, scene };
 }
 
 beforeEach(() => {
+  localStorage.clear();
+  __resetPreferencesForTesting();
   vi.clearAllMocks();
   MockedBridge.instances.length = 0;
   FakeScene.instances.length = 0;
@@ -460,13 +474,14 @@ describe("App wiring: the capture surface writes no user state (#923)", () => {
   });
 });
 
-describe("App wiring: the toolbar opens the monitor's dock", () => {
+describe("App wiring: the top bar opens the monitor's dock", () => {
   // The dock is code-split and reads the page's trace seam, which this
   // harness never installs, so what it shows is its "no seam" reason. The
-  // wiring under test is the toolbar toggle and the dock's own close.
-  it("toggles the dock from the Monitor button, and the dock closes itself", async () => {
+  // wiring under test is the top bar toggle and the dock's own close.
+  it("toggles the dock from the monitor button, and the dock closes itself", async () => {
+    setPreference(developerToolsPreference, true);
     await mountWithSnapshot(documentJson(["wds-1"]));
-    const toggle = screen.getByTestId("open-monitor");
+    const toggle = screen.getByRole("button", { name: "Pipeline monitor" });
     expect(toggle.getAttribute("aria-pressed")).toBe("false");
     expect(screen.queryByTestId("monitor-dock")).toBeNull();
 
@@ -474,7 +489,9 @@ describe("App wiring: the toolbar opens the monitor's dock", () => {
       fireEvent.click(toggle);
     });
 
-    const dock = await screen.findByTestId("monitor-dock");
+    // The dock's chunk loads the UI primitives, and transforming them cold
+    // takes longer than findBy's default second.
+    const dock = await screen.findByTestId("monitor-dock", {}, { timeout: 10_000 });
     expect(toggle.getAttribute("aria-pressed")).toBe("true");
     expect(within(dock).getByTestId("monitor-empty").textContent).toContain("trace seam");
 
@@ -509,21 +526,120 @@ describe("App wiring: dataset-settings mutation canary", () => {
   });
 });
 
-describe("App wiring: the pipeline HUD (#1061)", () => {
-  it("shows on the toolbar control and hides on its key, with no dev gate", async () => {
+describe("App wiring: the pipeline HUD", () => {
+  it("shows on the top bar control and hides on its key, with developer tools on", async () => {
+    setPreference(developerToolsPreference, true);
     await mountWithSnapshot(documentJson(["wds-1"]));
     expect(screen.queryByTestId("hud")).toBeNull();
+    const toggle = screen.getByRole("button", { name: "Pipeline HUD" });
 
-    fireEvent.click(screen.getByTestId("hud-toggle"));
+    fireEvent.click(toggle);
     // The HUD is code-split, so it mounts after the import resolves.
     expect(await screen.findByTestId("hud")).toBeTruthy();
-    expect(screen.getByTestId("hud-toggle").getAttribute("aria-pressed")).toBe("true");
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
     expect(screen.getByLabelText("chunkGrid")).toBeTruthy();
 
     await act(async () => {
       fireEvent.keyDown(window, { key: "h" });
     });
     expect(screen.queryByTestId("hud")).toBeNull();
-    expect(screen.getByTestId("hud-toggle").getAttribute("aria-pressed")).toBe("false");
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+  });
+});
+
+describe("App wiring: developer tools off (the default)", () => {
+  it("shows no developer surface, and H does nothing", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(getPreference(developerToolsPreference)).toBe(false);
+    for (const name of ["Pipeline monitor", "Pipeline HUD", "Dev controls"]) {
+      expect(screen.queryByRole("button", { name })).toBeNull();
+    }
+    expect(screen.queryByText(/FPS$/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Dev" })).toBeNull();
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "h" });
+    });
+    expect(screen.queryByTestId("hud")).toBeNull();
+  });
+
+  it("brings every surface back when the setting turns on", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    await act(async () => {
+      setPreference(developerToolsPreference, true);
+    });
+    for (const name of ["Pipeline monitor", "Pipeline HUD", "Dev controls"]) {
+      expect(screen.getByRole("button", { name })).toBeTruthy();
+    }
+    expect(screen.getByText(/FPS$/)).toBeTruthy();
+  });
+});
+
+describe("App wiring: the shell", () => {
+  it("names the page after the workspace", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(document.title).toBe("Wiring · lucida");
+  });
+
+  it("collapses the left panel on Alt+[ and remembers it", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    const panel = screen.getByRole("complementary", { name: "Layers" });
+    expect(panel.hidden).toBe(false);
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "[", code: "BracketLeft", altKey: true });
+    });
+    expect(panel.hidden).toBe(true);
+    expect(getPreference(leftPanelOpenPreference)).toBe(false);
+    // Collapsed, the panel stays mounted, so its controls keep their state.
+    expect(screen.getByLabelText("Hide layer wds-1.zarr", { selector: "button" })).toBeTruthy();
+  });
+
+  it("opens one rail panel at a time, closed by default", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(screen.queryByText("Saved Views")).toBeNull();
+    expect(screen.queryByTestId("explore-panel")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Saved views" }));
+    expect(await screen.findByText("Saved Views")).toBeTruthy();
+    expect(getPreference(rightPanelOpenPreference)).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Explore" }));
+    expect(screen.getByTestId("explore-panel")).toBeTruthy();
+    expect(screen.queryByText("Saved Views")).toBeNull();
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "]", code: "BracketRight", altKey: true });
+    });
+    expect(screen.queryByTestId("explore-panel")).toBeNull();
+    expect(getPreference(rightPanelOpenPreference)).toBe(false);
+  });
+
+  it("follows a peer from their presence avatar", async () => {
+    const peer = {
+      client_id: 7,
+      camera: { mode: "slice", center: [0, 0], zoom: 1 },
+      view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+      display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
+      following: null,
+      cursor: null,
+      dataset_order: [],
+      dataset_settings: {},
+      identity: { display_name: "Ada Lovelace" },
+    };
+    const { bridge } = await mountWithSnapshot(documentJson(["wds-1"]), [peer]);
+    expect(screen.queryByText(/Peers \(/)).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Follow Ada Lovelace" }));
+    });
+    expect(bridge.sendFollow).toHaveBeenCalledWith(7);
+    const avatar = screen.getByRole("button", { name: "Stop following Ada Lovelace" });
+    expect(avatar.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => {
+      fireEvent.click(avatar);
+    });
+    expect(bridge.sendFollow).toHaveBeenLastCalledWith(null);
   });
 });

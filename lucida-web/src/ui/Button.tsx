@@ -21,9 +21,12 @@ export interface ButtonProps {
   isDisabled?: boolean;
   type?: "button" | "submit";
   autoFocus?: boolean;
+  /** For a disclosure: whether the region it shows and hides is open. */
+  "aria-expanded"?: boolean;
+  /** The id of the region a disclosure shows and hides. */
+  "aria-controls"?: string;
   /** For layout only (margins, flex). Never restyle a primitive. */
   className?: string;
-  /** For tests and scripted drivers that find controls by id. */
   "data-testid"?: string;
 }
 
@@ -42,12 +45,12 @@ export function Button({
   type = "button",
   autoFocus,
   className,
-  "data-testid": testId,
+  ...attributes
 }: ButtonProps) {
   return (
     <AriaButton
+      {...attributes}
       className={cx("lc-button", className)}
-      data-testid={testId}
       data-variant={variant}
       data-size={size}
       onPress={onPress}
@@ -75,7 +78,6 @@ interface IconButtonBase {
   size?: "sm" | "md" | "lg";
   isDisabled?: boolean;
   className?: string;
-  /** For tests and scripted drivers that find controls by id. */
   "data-testid"?: string;
 }
 

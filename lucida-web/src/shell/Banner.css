@@ -1,0 +1,35 @@
+.lc-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  box-sizing: border-box;
+  max-width: min(480px, 100%);
+  min-height: calc(var(--lc-control-h) + var(--lc-space-2));
+  padding: var(--lc-space-1) var(--lc-space-1) var(--lc-space-1) var(--lc-space-3);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  background: var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
+}
+
+.lc-banner-text {
+  flex: 1;
+  min-width: 0;
+  padding: var(--lc-space-1) var(--lc-space-2) var(--lc-space-1) 0;
+}
+
+.lc-banner[data-tone="info"] {
+  border-color: color-mix(in oklab, var(--lc-info) 45%, transparent);
+  box-shadow: inset 3px 0 0 var(--lc-info), var(--lc-shadow-2);
+}
+
+.lc-banner[data-tone="danger"] {
+  border-color: color-mix(in oklab, var(--lc-danger) 45%, transparent);
+  box-shadow: inset 3px 0 0 var(--lc-danger), var(--lc-shadow-2);
+}

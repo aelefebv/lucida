@@ -7,19 +7,30 @@ use crate::camera::ray_aabb_hit;
 use crate::mat4::{invert4_f64, normalize3, unproject};
 use crate::scene::Scene;
 
-const PEER_COLORS: [[f32; 3]; 8] = [
-    [1.0, 0.420, 0.420],   // #FF6B6B
-    [0.306, 0.804, 0.769], // #4ECDC4
-    [1.0, 0.902, 0.427],   // #FFE66D
-    [0.659, 0.902, 0.812], // #A8E6CF
-    [1.0, 0.545, 0.580],   // #FF8B94
-    [0.710, 0.918, 0.843], // #B5EAD7
-    [0.780, 0.808, 0.918], // #C7CEEA
-    [0.973, 0.710, 0.0],   // #F8B500
+/// The one peer palette, in 8-bit sRGB. The page reads it through
+/// [`peer_palette_css`] for the labels it draws beside each cursor, so a
+/// peer wears one color on the GPU and in the DOM.
+const PEER_COLORS: [[u8; 3]; 8] = [
+    [0xFF, 0x6B, 0x6B],
+    [0x4E, 0xCD, 0xC4],
+    [0xFF, 0xE6, 0x6D],
+    [0xA8, 0xE6, 0xCF],
+    [0xFF, 0x8B, 0x94],
+    [0xB5, 0xEA, 0xD7],
+    [0xC7, 0xCE, 0xEA],
+    [0xF8, 0xB5, 0x00],
 ];
 
 pub fn peer_color(client_id: u64) -> [f32; 3] {
-    PEER_COLORS[(client_id as usize) % PEER_COLORS.len()]
+    PEER_COLORS[(client_id as usize) % PEER_COLORS.len()].map(|c| f32::from(c) / 255.0)
+}
+
+/// The palette as CSS hex colors, indexed as [`peer_color`] indexes it.
+pub fn peer_palette_css() -> Vec<String> {
+    PEER_COLORS
+        .iter()
+        .map(|[r, g, b]| format!("#{r:02x}{g:02x}{b:02x}"))
+        .collect()
 }
 
 #[derive(Deserialize)]
@@ -650,6 +661,18 @@ mod tests {
     #[test]
     fn color_wraps_around() {
         assert_eq!(peer_color(0), peer_color(8));
+    }
+
+    #[test]
+    fn css_palette_matches_the_gpu_colors() {
+        let css = peer_palette_css();
+        assert_eq!(css.len(), PEER_COLORS.len());
+        assert_eq!(css[0], "#ff6b6b");
+        for (i, hex) in css.iter().enumerate() {
+            let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).unwrap();
+            let rgb = [channel(1), channel(3), channel(5)].map(|c| f32::from(c) / 255.0);
+            assert_eq!(rgb, peer_color(i as u64));
+        }
     }
 
     #[test]

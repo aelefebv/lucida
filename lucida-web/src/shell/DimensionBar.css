@@ -1,0 +1,89 @@
+.dimension-controls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+  width: 480px;
+}
+
+.dim-control-group {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+}
+
+.dim-control-group > .dim-control {
+  flex: 1;
+  min-width: 0;
+}
+
+.dim-control {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  min-height: var(--lc-control-h);
+}
+
+.dim-label {
+  width: 1.5rem;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 600;
+  text-align: center;
+}
+
+.dim-btn {
+  flex: none;
+  box-sizing: border-box;
+  width: var(--lc-control-h-sm);
+  height: var(--lc-control-h-sm);
+  padding: 0;
+  border: none;
+  border-radius: var(--lc-radius);
+  background: transparent;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-lg);
+  line-height: 1;
+  cursor: pointer;
+}
+
+.dim-btn:hover:not(:disabled) {
+  background: var(--lc-surface-3);
+  color: var(--lc-text);
+}
+
+.dim-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.dim-btn-wide {
+  width: auto;
+  padding: 0 var(--lc-space-2);
+  font-size: var(--lc-text-sm);
+  font-weight: 500;
+}
+
+.dim-btn[aria-pressed="true"] {
+  background: var(--lc-accent-subtle);
+  color: var(--lc-accent-text);
+}
+
+.dim-slider {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--lc-accent);
+}
+
+.dim-value {
+  min-width: 3.5rem;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* Small muted labels at either end of the focal-depth slider. */
+.dim-endcap {
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-xs);
+}

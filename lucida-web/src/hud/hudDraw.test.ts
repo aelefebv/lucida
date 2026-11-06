@@ -7,7 +7,7 @@
 import { describe, expect, it } from "vitest";
 
 import { drawHud, hudHeight, LEVEL_ROWS_SHOWN } from "./hudDraw.ts";
-import { FALLBACK, hudSample, RecordingContext } from "./hudFixtures.ts";
+import { FALLBACK, HUD_TEST_COLORS, hudSample, RecordingContext } from "./hudFixtures.ts";
 import { buildHudView, createHudHistory, pushSample, type HudSample } from "./hudModel.ts";
 
 /** Two ticks of a busy pipeline: 1 MB and 1 kB across 250 ms. */
@@ -27,7 +27,7 @@ function viewAfter(samples: HudSample[]) {
 function drawn(samples: HudSample[], width = 900) {
   const ctx = new RecordingContext();
   const view = viewAfter(samples);
-  drawHud(ctx, view, { width, height: hudHeight(view, width), dpr: 1 });
+  drawHud(ctx, view, { width, height: hudHeight(view, width), dpr: 1 }, HUD_TEST_COLORS);
   return ctx;
 }
 
@@ -35,7 +35,7 @@ describe("drawHud", () => {
   it("scales to the device pixel ratio and paints the background", () => {
     const ctx = new RecordingContext();
     const view = viewAfter(busy());
-    drawHud(ctx, view, { width: 900, height: hudHeight(view, 900), dpr: 2 });
+    drawHud(ctx, view, { width: 900, height: hudHeight(view, 900), dpr: 2 }, HUD_TEST_COLORS);
     expect(ctx.transforms[0]).toEqual([2, 0, 0, 2, 0, 0]);
     expect(ctx.rects).toBeGreaterThan(0);
   });
@@ -110,10 +110,26 @@ describe("drawHud", () => {
     expect(texts).not.toContain(`d${LEVEL_ROWS_SHOWN}`);
   });
 
+  it("paints in the colors it is given, each state in its tone", () => {
+    const ctx = drawn([hudSample(0, { gpu: FALLBACK })]);
+    expect(ctx.textColors.get("pipeline HUD")).toBe(HUD_TEST_COLORS.muted);
+    expect(ctx.textColors.get("software fallback")).toBe(HUD_TEST_COLORS.tones.warn);
+    expect(ctx.textColors.get("run open")).toBe(HUD_TEST_COLORS.tones.info);
+    const known = new Set<unknown>([
+      HUD_TEST_COLORS.background,
+      HUD_TEST_COLORS.text,
+      HUD_TEST_COLORS.muted,
+      HUD_TEST_COLORS.track,
+      ...Object.values(HUD_TEST_COLORS.tones),
+      ...Object.values(HUD_TEST_COLORS.series),
+    ]);
+    for (const [text, color] of ctx.textColors) expect(known.has(color), text).toBe(true);
+  });
+
   it("draws an empty history without throwing", () => {
     const ctx = new RecordingContext();
     const view = buildHudView(createHudHistory());
-    expect(() => drawHud(ctx, view, { width: 520, height: hudHeight(view, 520), dpr: 1 })).not.toThrow();
+    expect(() => drawHud(ctx, view, { width: 520, height: hudHeight(view, 520), dpr: 1 }, HUD_TEST_COLORS)).not.toThrow();
     expect(ctx.texts).toContain("unpublished");
   });
 });

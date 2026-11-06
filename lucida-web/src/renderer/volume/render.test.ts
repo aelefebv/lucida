@@ -138,7 +138,11 @@ function makeCtx(opts: {
     state: opts.state,
     passTimer: UNTIMED,
     getVolumeRenderer: () => opts.renderer,
-    getCompositor: () => ({ composite: opts.composite, compiled: opts.compositorCompiled ?? Promise.resolve() }),
+    getCompositor: () => ({
+      composite: opts.composite,
+      underlayBackground: () => {},
+      compiled: opts.compositorCompiled ?? Promise.resolve(),
+    }),
     getCursorRenderer: () => ({ hasData: () => false, compiled: opts.cursorCompiled ?? Promise.resolve() }),
     ensureOffscreenPool: () => [{ createView: () => ({}) }],
     getOrCreateLUT: () => ({}),

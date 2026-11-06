@@ -115,6 +115,19 @@
   --lc-success-subtle: color-mix(in oklab, var(--lc-success) 16%, transparent);
   --lc-info-subtle: color-mix(in oklab, var(--lc-info) 16%, transparent);
 
+  /* Chart series: categorical slots, assigned in order and never cycled. The
+     order keeps neighbors apart under red-green color-vision deficiency, so
+     a chart takes slot 1, 2, 3... for its series in sequence. */
+  --lc-chart-1: #3987e5;
+  --lc-chart-2: #d95926;
+  --lc-chart-3: #199e70;
+  --lc-chart-4: #c98500;
+  --lc-chart-5: #d55181;
+  --lc-chart-6: #008300;
+  --lc-chart-7: #9085e9;
+  --lc-chart-8: #e66767;
+  --lc-chart-neutral: #7f7f89;
+
   --lc-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.2);
   --lc-shadow-2: 0 4px 12px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.4);
 }
@@ -151,6 +164,16 @@
   --lc-success-subtle: color-mix(in oklab, var(--lc-success) 12%, transparent);
   --lc-info-subtle: color-mix(in oklab, var(--lc-info) 12%, transparent);
 
+  --lc-chart-1: #2a78d6;
+  --lc-chart-2: #eb6834;
+  --lc-chart-3: #1baf7a;
+  --lc-chart-4: #eda100;
+  --lc-chart-5: #e87ba4;
+  --lc-chart-6: #008300;
+  --lc-chart-7: #6250d6;
+  --lc-chart-8: #e34948;
+  --lc-chart-neutral: #8b8b95;
+
   --lc-shadow-1: 0 1px 2px rgba(16, 16, 24, 0.06), 0 1px 3px rgba(16, 16, 24, 0.08);
   --lc-shadow-2: 0 4px 12px rgba(16, 16, 24, 0.08), 0 16px 40px rgba(16, 16, 24, 0.14);
 }
@@ -185,6 +208,46 @@
   --lc-canvas-bg: var(--lc-bg);
   --lc-canvas-stroke: color-mix(in srgb, var(--lc-text) 85%, transparent);
   --lc-canvas-label: var(--lc-text);
+}
+
+/* Colors drawn over data come in one set for dark canvases and one for light,
+   each at least 3:1 against its background. The theme canvas borrows the
+   theme's status hues, which the theme already tunes to its background. Axes
+   keep the conventional red, green, and blue. */
+:root {
+  --lc-canvas-axis-x: #ff4444;
+  --lc-canvas-axis-y: #44cc44;
+  --lc-canvas-axis-z: #4488ff;
+  --lc-canvas-viewport: #64b4ff;
+  --lc-canvas-plane: #ffc832;
+  --lc-canvas-success: #4fcf86;
+  --lc-canvas-warning: #f5b94a;
+  --lc-canvas-danger: #f87171;
+  --lc-canvas-info: #6aaaf8;
+}
+
+:root[data-canvas="white"] {
+  --lc-canvas-axis-x: #d42a2a;
+  --lc-canvas-axis-y: #17803d;
+  --lc-canvas-axis-z: #2563eb;
+  --lc-canvas-viewport: #1d6fd8;
+  --lc-canvas-plane: #b07800;
+  --lc-canvas-success: #17803d;
+  --lc-canvas-warning: #9a5700;
+  --lc-canvas-danger: #d42a2a;
+  --lc-canvas-info: #2563eb;
+}
+
+:root[data-canvas="theme"] {
+  --lc-canvas-axis-x: var(--lc-danger);
+  --lc-canvas-axis-y: var(--lc-success);
+  --lc-canvas-axis-z: var(--lc-info);
+  --lc-canvas-viewport: var(--lc-info);
+  --lc-canvas-plane: var(--lc-warning);
+  --lc-canvas-success: var(--lc-success);
+  --lc-canvas-warning: var(--lc-warning);
+  --lc-canvas-danger: var(--lc-danger);
+  --lc-canvas-info: var(--lc-info);
 }
 
 @media (prefers-reduced-motion: reduce) {

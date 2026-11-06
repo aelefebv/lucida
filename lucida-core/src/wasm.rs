@@ -48,6 +48,13 @@ pub fn camera_matrices(camera_json: &str, w: f64, h: f64) -> Vec<f32> {
     out
 }
 
+/// The peer cursor palette as CSS hex colors. A peer's color is the entry at
+/// its client id modulo the length, as on its GPU cursor.
+#[wasm_bindgen]
+pub fn peer_palette() -> Vec<String> {
+    crate::cursor::peer_palette_css()
+}
+
 /// Push the JS-side enabled-category set into the WASM logger. Pass a
 /// comma-separated list (matches `localStorage.debug` format). Empty
 /// string disables all WASM logging.

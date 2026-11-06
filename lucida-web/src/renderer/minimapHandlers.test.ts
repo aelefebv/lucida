@@ -63,7 +63,7 @@ function makeCtx(renderer: ReturnType<typeof makeVolumeRenderer>["renderer"]) {
     },
     format: "bgra8unorm",
     getVolumeRenderer: () => renderer,
-    getCompositor: () => ({ isCompiled: true, compiled: Promise.resolve(), composite }),
+    getCompositor: () => ({ isCompiled: true, compiled: Promise.resolve(), composite, underlayBackground: vi.fn() }),
     getOrCreateLUT: () => ({}),
     post(msg: WorkerToMainMessage) {
       posts.push(msg);

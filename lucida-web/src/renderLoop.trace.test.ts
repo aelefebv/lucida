@@ -39,6 +39,7 @@ function makeLoop() {
     datasets: new Map(),
     client: {
       takeGpuPassUs: () => null,
+      setCanvasColors: () => {},
       captureFrame: () => Promise.resolve({ frame: null, reason: "no frame in this test" }),
     } as unknown as RenderClient,
     canvas,
