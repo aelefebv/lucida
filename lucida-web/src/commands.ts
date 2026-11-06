@@ -152,7 +152,6 @@ export interface SetCenterCommand {
   y: number;
 }
 
-/** No producer sends this; kept so the absolute 2D setters travel together. */
 export interface SetZoomCommand {
   type: "set_zoom";
   value: number;
