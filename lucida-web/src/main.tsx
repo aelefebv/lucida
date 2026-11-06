@@ -6,7 +6,6 @@ import { AuthGate } from './auth/AuthGate.tsx'
 import { installTraceSeam, resolveGpuIdentity } from './trace/seam.ts'
 import { traceRecorder } from './trace/recorder.ts'
 import { installAppearance } from './theme/appearance.ts'
-import { ToastRegion } from './ui/Toast.tsx'
 import { isCaptureSurface } from './captureSurface.ts'
 
 // The trace seam is public interface in every build (ADR 0051): a
@@ -20,6 +19,8 @@ installAppearance()
 
 // An unlinked review page for the primitives, kept out of the main bundle.
 const UiGallery = lazy(() => import('./ui/gallery/UiGallery.tsx'))
+// Loaded after first paint; toast() queues until it mounts.
+const ToastRegion = lazy(() => import('./ui/Toast.tsx').then((m) => ({ default: m.ToastRegion })))
 const isGallery = /^\/ui-gallery\/?$/.test(window.location.pathname)
 
 createRoot(document.getElementById('root')!).render(
@@ -33,6 +34,10 @@ createRoot(document.getElementById('root')!).render(
         <WorkspaceRoot />
       </AuthGate>
     )}
-    {!isCaptureSurface() && <ToastRegion />}
+    {!isCaptureSurface() && (
+      <Suspense fallback={null}>
+        <ToastRegion />
+      </Suspense>
+    )}
   </StrictMode>,
 )

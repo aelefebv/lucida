@@ -162,6 +162,15 @@
   overflow-wrap: anywhere;
 }
 
+.gallery-resolved {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--lc-text-subtle);
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+}
+
 .gallery-contrast {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

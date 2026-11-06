@@ -166,7 +166,7 @@ export function useShortcut(options: ShortcutOptions): void {
   }, [enabled, options.id, keySignature, options.scope, options.label, options.group]);
 }
 
-/** Make a scope's shortcuts take precedence while `active`. */
+/** Make a scope's shortcuts take precedence until the returned function runs. */
 export function activateShortcutScope(scope: string): () => void {
   activeScopes.set(scope, (activeScopes.get(scope) ?? 0) + 1);
   return () => {
@@ -176,6 +176,7 @@ export function activateShortcutScope(scope: string): () => void {
   };
 }
 
+/** Make a scope's shortcuts take precedence while `active`. */
 export function useShortcutScope(scope: string, active: boolean): void {
   useEffect(() => (active ? activateShortcutScope(scope) : undefined), [scope, active]);
 }

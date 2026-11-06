@@ -35,13 +35,14 @@ import {
   densityPreference,
   isHexColor,
   themePreference,
+  useAppearance,
   type Accent,
   type CanvasBackground,
   type Density,
   type ThemeOption,
 } from "../../theme/appearance.ts";
 import { developerToolsPreference, setPreference, usePreference } from "../../theme/preferences.ts";
-import { TOKEN_NAMES } from "../../theme/tokens.ts";
+import { TOKEN_NAMES, readColorToken, type TokenName } from "../../theme/tokens.ts";
 import { AccentPicker } from "../../theme/AccentPicker.tsx";
 import { Avatar } from "../Avatar.tsx";
 import { Badge } from "../Badge.tsx";
@@ -162,6 +163,22 @@ const COLOR_GROUPS: readonly { title: string; tokens: readonly string[] }[] = [
   { title: "Canvas", tokens: ["--lc-canvas-bg", "--lc-canvas-stroke", "--lc-canvas-label"] },
 ];
 
+const CANVAS_TOKENS: readonly TokenName[] = ["--lc-canvas-bg", "--lc-canvas-stroke", "--lc-canvas-label"];
+
+/** Canvas colors as GPU and 2D-canvas code reads them, re-read on each change. */
+function ResolvedCanvasColors() {
+  useAppearance(); // re-render, and so re-read, when the appearance changes
+  return (
+    <div className="gallery-resolved">
+      {CANVAS_TOKENS.map((token) => (
+        <code key={token}>
+          {token.replace("--lc-", "")} → {readColorToken(token).css}
+        </code>
+      ))}
+    </div>
+  );
+}
+
 function ColorSection() {
   return (
     <Section title="Color" meta={`${TOKEN_NAMES.length} tokens`} wide>
@@ -177,6 +194,7 @@ function ColorSection() {
                 </div>
               ))}
             </div>
+            {group.title === "Canvas" && <ResolvedCanvasColors />}
           </div>
         ))}
       </div>
