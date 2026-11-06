@@ -1,6 +1,7 @@
 import type { Icon } from "@phosphor-icons/react";
 import { useId } from "react";
 import { SelectionIndicator, ToggleButton, ToggleButtonGroup } from "react-aria-components";
+import type { KeyCombo } from "./shortcuts.ts";
 import { Tooltip } from "./Tooltip.tsx";
 import "./SegmentedControl.css";
 
@@ -8,6 +9,8 @@ export interface SegmentOption<V extends string> {
   value: V;
   label: string;
   icon?: Icon;
+  /** A key that picks this option; the option gets a tooltip naming it. */
+  shortcut?: KeyCombo;
 }
 
 export interface SegmentedControlProps<V extends string> {
@@ -39,6 +42,9 @@ export function SegmentedControl<V extends string>({
   className,
 }: SegmentedControlProps<V>) {
   const labelId = useId();
+  // Every segment keeps one element shape while shortcuts come and go, so the
+  // selection indicator never remounts mid-slide.
+  const withTooltips = iconOnly || options.some((option) => option.shortcut);
   const group = (
     <ToggleButtonGroup
       className="lc-segmented"
@@ -69,8 +75,13 @@ export function SegmentedControl<V extends string>({
             {!iconOnly && <span className="lc-segment-label">{option.label}</span>}
           </ToggleButton>
         );
-        return iconOnly ? (
-          <Tooltip key={option.value} content={option.label}>
+        return withTooltips ? (
+          <Tooltip
+            key={option.value}
+            content={option.label}
+            shortcut={option.shortcut}
+            isDisabled={!iconOnly && !option.shortcut}
+          >
             {segment}
           </Tooltip>
         ) : (
