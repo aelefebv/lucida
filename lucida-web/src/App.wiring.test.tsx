@@ -122,6 +122,7 @@ vi.mock("lucida-core", () => {
     is_local_dataset_url: vi.fn(() => true),
     normalize_dataset_url: vi.fn((url: string) => url),
     dataset_id_for_url: vi.fn((url: string) => `wds:${url}`),
+    peer_palette: vi.fn(() => ["#ff6b6b", "#4ecdc4", "#ffe66d"]),
   };
 });
 

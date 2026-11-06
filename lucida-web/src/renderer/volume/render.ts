@@ -279,12 +279,11 @@ export async function handleVolumeRenderMultiPass(
     isFirstLayer = false;
   }
 
-  // If no layers were rendered, clear the canvas
-  if (isFirstLayer) {
-    const clearEncoder = ctx.device.createCommandEncoder();
-    comp.composite(canvasView, [], clearEncoder, true, timing);
-    ctx.device.queue.submit([clearEncoder.finish()]);
-  }
+  const backgroundEncoder = ctx.device.createCommandEncoder();
+  // With no layer drawn, nothing has cleared the canvas yet.
+  if (isFirstLayer) comp.composite(canvasView, [], backgroundEncoder, true, timing);
+  comp.underlayBackground(canvasView, backgroundEncoder, timing);
+  ctx.device.queue.submit([backgroundEncoder.finish()]);
 
   const depthTex = getDepthTexture();
   if (cr.hasData() && msg.viewProj && depthTex) {

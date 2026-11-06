@@ -61,6 +61,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     }
 
+    case "canvasColors":
+      ctx.getCompositor().setBackground(msg.colors.background);
+      ctx.getSliceRenderer().setTileBorderColor(msg.colors.tileBorder);
+      return;
+
     case "sliceChunkData": {
       const memberId = msg.memberId;
       const poolKey = ctx.state.memberSourcePools

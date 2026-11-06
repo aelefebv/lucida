@@ -11,15 +11,14 @@ import { describe, expect, it } from "vitest";
 import { PHASE_COLORS, ROW_STATE_COLORS, withAlpha } from "../monitor/timelinePalette.ts";
 import { lookupChunk } from "../trace/diagnose/chunkLookup.ts";
 import { chunkIdentity, deriveChunkStates, type ChunkStates } from "../trace/diagnose/chunkStates.ts";
+import { paint } from "../theme/tokenColors.ts";
 import { selectChunks } from "../trace/diagnose/chunkSelection.ts";
 import { healthyLocalOpen, lateStallOpen, refetchLoopSteadyState, saturatedReopen } from "../trace/diagnose/fixtures.ts";
 import type { TraceRun } from "../trace/types.ts";
 import {
   buildChunkDrawList,
-  CELL_BORDER,
   churnBand,
   describeHoverInspector,
-  NO_ROW_FILL,
   overlayAbsence,
   PHASE_FILL_ALPHA,
   type ChunkCell,
@@ -36,13 +35,16 @@ import {
   hullContains,
   isVolumeDrawItem,
   NO_ROW_DASH,
-  NO_ROW_STROKE,
+  noRowStroke,
   projectChunkBox,
   WIREFRAME_ALPHA,
   wireframeStyle,
   type Projector,
   type Vec3,
 } from "./volumeWireframe.ts";
+import { OVERLAY_TEST_COLORS, OVERLAY_TEST_PAINTS } from "./overlayFixtures.ts";
+
+const NO_ROW_STROKE = noRowStroke(OVERLAY_TEST_COLORS);
 
 const OFF: OverlayModes = {
   chunkTier: false,
@@ -119,7 +121,13 @@ function inputOver(run: TraceRun, cells: ChunkCell[], modes: Partial<OverlayMode
   const states = deriveChunkStates(run);
   return {
     states,
-    input: { cells, modes: { ...OFF, ...modes }, readingOf: readerOver(states), windowMs: states.windowMs },
+    input: {
+      cells,
+      colors: OVERLAY_TEST_COLORS,
+      modes: { ...OFF, ...modes },
+      readingOf: readerOver(states),
+      windowMs: states.windowMs,
+    },
   };
 }
 
@@ -260,7 +268,7 @@ describe("the volume draw list", () => {
     ]);
     // The phase color stays on the edge; the selection rides under it as the halo.
     expect(list.batches[1].style.stroke).toBe(list.items[1].style.stroke);
-    expect(list.batches[1].style.halo).toEqual({ stroke: "rgba(255, 255, 255, 0.95)", strokeWidth: 2 + 2 });
+    expect(list.batches[1].style.halo).toEqual({ stroke: paint(OVERLAY_TEST_COLORS.label), strokeWidth: 2 + 2 });
     expect(list.batches[0].style.halo).toBeNull();
     expect(list.batches[1].d).toBe([list.items[1].path, list.items[2].path].join(" "));
   });
@@ -307,7 +315,7 @@ describe("a chunk is one color as a cell and as a box", () => {
       const cell = flat.items[i];
       const item = volume.items[i];
       expect(item.style.dash).toBe(cell.border.includes("dashed") ? NO_ROW_DASH : null);
-      if (cell.fill === NO_ROW_FILL) {
+      if (cell.fill === OVERLAY_TEST_PAINTS.noRowFill) {
         expect(item.style.stroke).toBe(NO_ROW_STROKE);
         continue;
       }
@@ -325,7 +333,7 @@ describe("a chunk is one color as a cell and as a box", () => {
     const [queuedItem, absentItem] = buildVolumeDrawList(input).items;
 
     expect(queuedItem.reading?.fetches).toBe(0);
-    expect(queuedItem.fill).toBe(NO_ROW_FILL);
+    expect(queuedItem.fill).toBe(OVERLAY_TEST_PAINTS.noRowFill);
     expect(queuedItem.style).toEqual({ stroke: NO_ROW_STROKE, strokeWidth: 1, dash: null, halo: null });
     expect(queuedItem.tooltip).toContain("fetched 0×");
 
@@ -342,12 +350,12 @@ describe("a chunk is one color as a cell and as a box", () => {
       entityId: "member-1",
       chunkKey: "1/0/0/0/0/0",
     });
-    const three = churnBand(3)!;
+    const three = churnBand(3, OVERLAY_TEST_PAINTS)!;
 
     const both = buildVolumeDrawList(inputOver(run, [looped], { phaseColor: true, churnTint: true }).input).items[0];
     expect(rgb(both.style.stroke)).toBe(rgb(withAlpha(ROW_STATE_COLORS.complete, 1)));
     expect(both.style.strokeWidth).toBe(2);
-    expect(both.style.halo).toEqual({ stroke: "rgba(255, 140, 70, 0.9)", strokeWidth: 4 });
+    expect(both.style.halo).toEqual({ stroke: three.border.replace("2px solid ", ""), strokeWidth: 4 });
     expect(three.border).toContain(both.style.halo!.stroke);
 
     // Churn alone carries the band in the fill, with the default border, so the edge is the band and there is no halo.
@@ -355,7 +363,7 @@ describe("a chunk is one color as a cell and as a box", () => {
     expect(rgb(churnOnly.style.stroke)).toBe(rgb(three.fill));
     expect(churnOnly.style.halo).toBeNull();
 
-    expect(wireframeStyle({ fill: "rgba(1, 2, 3, 0.3)", border: CELL_BORDER })).toEqual({
+    expect(wireframeStyle({ fill: "rgba(1, 2, 3, 0.3)", border: OVERLAY_TEST_PAINTS.cellBorder }, OVERLAY_TEST_COLORS)).toEqual({
       stroke: "rgba(1, 2, 3, 0.9)",
       strokeWidth: 1,
       dash: null,

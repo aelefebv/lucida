@@ -36,7 +36,11 @@ Data colormaps are never themed.
 
 Canvas and GPU code reads the same tokens. `readColorToken` resolves a token to
 sRGB through the browser, since a derived token's computed value is an
-unresolved expression, and `subscribeAppearance` says when to read again.
+unresolved expression, and `subscribeAppearance` says when to read again. The
+render worker cannot read styles, so the render loop sends it the canvas colors
+before its first frame and after every appearance change. Layers blend with
+each other over a transparent canvas and the background goes beneath the
+finished stack, so an additive layer never brightens a light background.
 
 Preferences live per browser in one versioned localStorage entry. A module
 defines its own preference beside itself with a typed builder and reads it with
@@ -50,9 +54,22 @@ paint, so a reload never flashes the wrong theme. It duplicates a few lines of
 surface reads defaults and persists nothing, so a capture looks the same
 whichever browser took it.
 
-A deployment sets defaults with `setPreferenceDefaults`, under any stored
-choice, and overrides tokens with a stylesheet loaded after `tokens.css`. End
-users pick presets, never individual tokens.
+A deployment sets the defaults and overrides tokens from a JSON file that the
+server reads at startup (`LUCIDA_THEME_FILE`). A malformed file or an unknown
+token stops the boot. The defaults sit under any stored choice through
+`setPreferenceDefaults`. Overrides are per theme preset and become a stylesheet
+whose `html:root[data-theme=...]` rules outrank `tokens.css` in either load
+order. Tokens that a user setting decides (the accent, the control heights,
+the canvas colors, and the motion durations) take no override, since a pinned
+value would beat the user's choice. The server's image builds without the web
+bundle, so it checks names against its own copy of the token list, and a web
+test fails when the copies differ. End users pick presets, never individual
+tokens.
+
+The server writes the deployment's theme into the `index.html` it serves, and
+the pre-paint script reads it there, so even a first visit paints in the
+deployment's theme. `/api/theme` serves the same JSON without a session, for a
+page the server did not serve, such as the dev server's.
 
 ## Rejected alternatives
 
@@ -65,6 +82,9 @@ users pick presets, never individual tokens.
   manageable, but a custom hex would have no correct values.
 - Applying the theme from React. The module script runs after the first paint,
   which shows a flash of the dark theme on every light-theme reload.
+- Fetching the deployment's theme at startup, alone or with the last fetch
+  cached in preferences. A first visit would still paint the built-in theme
+  before the fetch returns.
 - One localStorage key per preference. Nothing would version them together,
   and a reshape would need a migration per key.
 - Syncing preferences through the server. Possible later; per-browser storage

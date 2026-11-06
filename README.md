@@ -51,6 +51,19 @@ Add these to any `docker run` above:
 -v lucida-data:/var/lib/lucida -e LUCIDA_PROXY_CACHE_DIR=/var/lib/lucida/proxy-cache
 ```
 
+### Theme a deployment
+
+Point `LUCIDA_THEME_FILE` at a JSON file to set the appearance a first visit opens in and to restyle theme tokens. In Docker, mount it, for example `-v $PWD/theme.json:/etc/lucida/theme.json:ro -e LUCIDA_THEME_FILE=/etc/lucida/theme.json`.
+
+```json
+{
+  "defaults": { "theme": "light", "accent": "#0f8278", "density": "compact", "canvasBackground": "white" },
+  "tokens": { "dark": { "--lc-bg": "#101014" }, "light": { "--lc-radius": "4px" } }
+}
+```
+
+Every key is optional. `theme` is `dark`, `light`, or `system`; `accent` is a six-digit hex color or `indigo`, `blue`, `teal`, `green`, `amber`, `rose`; `density` is `comfortable` or `compact`; `canvasBackground` is `black`, `dark-gray`, `white`, or `theme`. Users can still change each, and their choice wins. `tokens` overrides any `--lc-*` token in [`tokens.css`](lucida-web/src/theme/tokens.css) under that preset only, except the ones a setting above decides (accent, control heights, canvas colors, motion). The server refuses to start if the file is malformed or names an unknown token. `GET /api/theme` serves the file without a session.
+
 ### Reading from `gs://`
 
 Credentials are found in this order: `GOOGLE_*` environment variables (`GOOGLE_SERVICE_ACCOUNT*`, `GOOGLE_APPLICATION_CREDENTIALS`), the ADC file at `$HOME/.config/gcloud/application_default_credentials.json`, then the GCE metadata server. Off Google Cloud, provide one of the first two, or the metadata-server probe adds a hang of about 13 s before it gives up.

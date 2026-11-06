@@ -455,6 +455,7 @@ export async function handleSliceRenderMultiPass(
   const canvasView = canvasTexture.createView();
   const compEncoder = ctx.device.createCommandEncoder();
   comp.composite(canvasView, renderedLayers, compEncoder, true, timing);
+  comp.underlayBackground(canvasView, compEncoder, timing);
   ctx.device.queue.submit([compEncoder.finish()]);
 
   if (cr.hasData()) {

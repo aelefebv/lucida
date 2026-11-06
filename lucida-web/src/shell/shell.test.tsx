@@ -17,6 +17,9 @@ import { LeftPanel } from "./LeftPanel.tsx";
 import { PresenceAvatars } from "./PresenceAvatars.tsx";
 import { SettingsMenu } from "./SettingsMenu.tsx";
 
+// The palette comes from the wasm module, which these tests never load.
+vi.mock("../peerColor.ts", () => ({ peerColor: () => "#4ecdc4" }));
+
 // The segmented control's selection indicator animates through the Web
 // Animations API, which happy-dom lacks.
 if (!("getAnimations" in Element.prototype)) {

@@ -1,6 +1,6 @@
 import { XIcon } from "@phosphor-icons/react";
 import type { ClientId, PresenceState } from "../bridge.ts";
-import { peerColor } from "../components/PeerCursors.tsx";
+import { peerColor } from "../peerColor.ts";
 import { Avatar } from "../ui/Avatar.tsx";
 import { Button } from "../ui/Button.tsx";
 import { Menu, MenuItem } from "../ui/Menu.tsx";
