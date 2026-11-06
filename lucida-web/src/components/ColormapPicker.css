@@ -1,4 +1,5 @@
 .lc-colormap-swatch {
+  position: relative;
   flex: none;
   box-sizing: border-box;
   width: 16px;
@@ -11,6 +12,13 @@
   box-shadow: inset 0 0 0 1px var(--lc-border-strong);
   cursor: default;
   transition: scale var(--lc-motion-fast) var(--lc-ease);
+}
+
+/* Under touch the target reaches past the swatch. */
+.lc-colormap-swatch::before {
+  content: "";
+  position: absolute;
+  inset: min(0px, calc((16px - var(--lc-target-min)) / 2));
 }
 
 .lc-colormap-swatch[data-hovered],

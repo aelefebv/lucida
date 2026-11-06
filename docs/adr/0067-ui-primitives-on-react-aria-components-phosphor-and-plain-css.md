@@ -23,7 +23,8 @@ options). Layout passes through `className`; restyling a primitive does not.
 
 Every overlay closes on Escape and returns focus to its trigger, and dialogs
 trap focus. An icon-only button always has a tooltip that names it and shows its
-shortcut, so a control is discoverable before it is fast.
+shortcut, so a control is discoverable before it is fast. Under touch, where
+nothing hovers, a long press shows the tooltip instead of activating.
 
 Icons are Phosphor, regular weight, passed to primitives as components
 (`icon={PlusIcon}`) so the primitive sets the size: 16px in controls, 20px in

@@ -33,8 +33,14 @@ Appearance is four choices, written as attributes on `<html>`:
 - Canvas background: black (the default), dark gray, white, or the theme's
   background. It is separate from the theme because image data is judged
   against it, and colors drawn on the canvas take their contrast from it.
+  Data colormaps are never themed.
 
-Data colormaps are never themed.
+Touch sizing follows the pointer, never the width. Under `(pointer: coarse)`
+the control heights and `--lc-target-min` are 44px, thumbs grow, fields take
+16px text so iOS does not zoom into them, and density is comfortable. A fine
+pointer keeps desktop sizes, since `--lc-target-min` is zero there and sizes
+use `max()` against it. `--lc-safe-*` are the safe-area insets. Width classes
+are media queries in `viewport.ts`, and a test holds stylesheets to them.
 
 Canvas and GPU code reads the same tokens. `readColorToken` resolves a token to
 sRGB through the browser, since a derived token's computed value is an
@@ -61,12 +67,12 @@ server reads at startup (`LUCIDA_THEME_FILE`). A malformed file or an unknown
 token stops the boot. The defaults sit under any stored choice through
 `setPreferenceDefaults`. Overrides are per theme preset and become a stylesheet
 whose `html:root[data-theme=...]` rules outrank `tokens.css` in either load
-order. Tokens that a user setting decides (the accent, the control heights,
-the canvas colors, and the motion durations) take no override, since a pinned
-value would beat the user's choice. The server's image builds without the web
-bundle, so it checks names against its own copy of the token list, and a web
-test fails when the copies differ. End users pick presets, never individual
-tokens.
+order. Tokens that a user setting or the pointer decides (the accent, the
+control and touch sizes, the canvas colors, and the motion durations) take no
+override, since a pinned value would beat the user's choice. The server's
+image builds without the web bundle, so it checks names against its own copy
+of the token list, and a web test fails when the copies differ. End users
+pick presets, never individual tokens.
 
 The server writes the deployment's theme into the `index.html` it serves, and
 the pre-paint script reads it there, so even a first visit paints in the
