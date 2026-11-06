@@ -36,6 +36,7 @@ use super::*;
 mod access;
 mod datasets;
 mod duplicate;
+mod previews;
 mod profile_directory;
 mod saved_views;
 

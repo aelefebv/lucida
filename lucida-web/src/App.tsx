@@ -89,6 +89,7 @@ import { TopBar } from "./shell/TopBar.tsx";
 import { useDeveloperSurfaces } from "./shell/useDeveloperSurfaces.ts";
 import { useViewerCommands } from "./shell/useViewerCommands.ts";
 import { KeyboardHelp } from "./ui/KeyboardHelp.tsx";
+import { useWorkspacePreview } from "./workspacePreview/useWorkspacePreview.ts";
 import "./App.css";
 
 // The debug UI is code-split: the panel loads on first open, the overlay layer
@@ -1053,6 +1054,13 @@ function App({
 
   const hasData = layers.layerInfos.length > 0;
 
+  const takeViewAsPreview = useWorkspacePreview({
+    workspaceId,
+    canUpload: workspaceRole !== "viewer" && !captureSurface,
+    hasData,
+    captureFrame: () => render.loopRef.current?.captureFrame() ?? render.clientRef.current?.captureFrame() ?? null,
+  });
+
   useViewerCommands({
     viewMode: dims.viewMode,
     hasData: datasetsVersion > 0,
@@ -1125,6 +1133,7 @@ function App({
           workspaceName={workspaceName}
           onRenameWorkspace={canRenameWorkspace ? onRenameWorkspace : undefined}
           onBackToDashboard={onBackToDashboard}
+          onUseViewAsPreview={takeViewAsPreview}
           presence={{
             peers: bridge.peers,
             followTarget: bridge.followTarget,

@@ -105,7 +105,8 @@ pub(crate) const SHARING_SETTINGS: &str = r#"
 //
 // `first_dataset_url` is a correlated subquery because no aggregate both
 // engines share picks one row of a group by order. "First" is the order
-// `LIST_DATASET_SOURCES` lists them in.
+// `LIST_DATASET_SOURCES` lists them in. `preview_updated_at` is one too,
+// so it needs no place in the `GROUP BY`.
 
 pub(crate) const LIST_WORKSPACES_AS_ADMIN: &str = r#"
     SELECT
@@ -120,7 +121,12 @@ pub(crate) const LIST_WORKSPACES_AS_ADMIN: &str = r#"
             WHERE first_wd.workspace_id = w.id
             ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
             LIMIT 1
-        ) AS first_dataset_url
+        ) AS first_dataset_url,
+        (
+            SELECT wp.updated_at
+            FROM workspace_previews wp
+            WHERE wp.workspace_id = w.id
+        ) AS preview_updated_at
     FROM workspaces w
     LEFT JOIN user_workspace_state uws
         ON uws.workspace_id = w.id AND uws.user_email = $1
@@ -147,7 +153,12 @@ pub(crate) const LIST_WORKSPACES: &str = r#"
             WHERE first_wd.workspace_id = w.id
             ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
             LIMIT 1
-        ) AS first_dataset_url
+        ) AS first_dataset_url,
+        (
+            SELECT wp.updated_at
+            FROM workspace_previews wp
+            WHERE wp.workspace_id = w.id
+        ) AS preview_updated_at
     FROM workspaces w
     LEFT JOIN workspace_members wm
         ON wm.workspace_id = w.id AND wm.email = $1
@@ -183,7 +194,12 @@ pub(crate) const LIST_ARCHIVED_WORKSPACES_AS_ADMIN: &str = r#"
             WHERE first_wd.workspace_id = w.id
             ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
             LIMIT 1
-        ) AS first_dataset_url
+        ) AS first_dataset_url,
+        (
+            SELECT wp.updated_at
+            FROM workspace_previews wp
+            WHERE wp.workspace_id = w.id
+        ) AS preview_updated_at
     FROM workspaces w
     LEFT JOIN user_workspace_state uws
         ON uws.workspace_id = w.id AND uws.user_email = $1
@@ -206,7 +222,12 @@ pub(crate) const LIST_ARCHIVED_WORKSPACES: &str = r#"
             WHERE first_wd.workspace_id = w.id
             ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
             LIMIT 1
-        ) AS first_dataset_url
+        ) AS first_dataset_url,
+        (
+            SELECT wp.updated_at
+            FROM workspace_previews wp
+            WHERE wp.workspace_id = w.id
+        ) AS preview_updated_at
     FROM workspaces w
     INNER JOIN workspace_members wm
         ON wm.workspace_id = w.id AND wm.email = $1 AND wm.role = 'owner'
@@ -657,6 +678,35 @@ pub(crate) const SET_USER_LAST_VIEW: &str = r#"
     ON CONFLICT(user_email, workspace_id) DO UPDATE SET
         updated_at = excluded.updated_at,
         last_view_json = excluded.last_view_json
+"#;
+
+/// Write a workspace's one preview, replacing the existing one only if it
+/// was written at or before `$7`.
+///
+/// The `WHERE` on the update is the rate limit, and it is part of the
+/// write so concurrent uploads cannot both pass it. An insert has no row
+/// to compare and always lands. Either way the statement changes one row
+/// or none, and none means the existing preview was too recent.
+pub(crate) const UPSERT_PREVIEW: &str = r#"
+    INSERT INTO workspace_previews
+        (workspace_id, content_type, size_bytes, image, updated_at, updated_by)
+    VALUES ($1, $2, $3, $4, $5, $6)
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        content_type = excluded.content_type,
+        size_bytes = excluded.size_bytes,
+        image = excluded.image,
+        updated_at = excluded.updated_at,
+        updated_by = excluded.updated_by
+    WHERE workspace_previews.updated_at <= $7
+"#;
+
+pub(crate) const PREVIEW_UPDATED_AT: &str =
+    "SELECT updated_at FROM workspace_previews WHERE workspace_id = $1";
+
+pub(crate) const GET_PREVIEW: &str = r#"
+    SELECT workspace_id, content_type, size_bytes, image, updated_at, updated_by
+    FROM workspace_previews
+    WHERE workspace_id = $1
 "#;
 
 #[cfg(test)]

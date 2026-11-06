@@ -15,9 +15,10 @@ use lucida_core::scene::DocumentState;
 use thiserror::Error;
 
 use super::types::{
-    SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
-    WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
-    WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
+    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
+    WorkspacePreview, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView, WorkspaceSharingSettings,
+    WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
 };
 
 mod postgres;
@@ -375,4 +376,17 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<WorkspaceUserState, StoreError>;
+
+    /// Store a live workspace's one preview image, replacing the existing
+    /// one unless it was written after `preview.replaces_up_to`.
+    /// `Ok(None)` if the workspace is missing or archived.
+    async fn put_preview(
+        &self,
+        preview: NewWorkspacePreview<'_>,
+    ) -> Result<Option<PreviewWrite>, StoreError>;
+
+    /// The workspace's preview image, in any archive state, so a restore
+    /// finds it where it was. `Ok(None)` when none was ever stored.
+    async fn get_preview(&self, workspace_id: &str)
+    -> Result<Option<WorkspacePreview>, StoreError>;
 }

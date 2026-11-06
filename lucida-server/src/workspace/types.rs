@@ -137,6 +137,55 @@ pub struct WorkspaceSummary {
     /// so a listing can tell apart workspaces that share a name. `None`
     /// until a dataset is opened.
     pub first_dataset_url: Option<String>,
+    /// When the workspace's preview image was last written, so a listing
+    /// can tell a stale cached image from the current one. `None` until a
+    /// viewer uploads one.
+    pub preview_updated_at: Option<DateTime<Utc>>,
+}
+
+/// What the store knows about a workspace's preview image, without the
+/// bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkspacePreviewMeta {
+    pub workspace_id: String,
+    /// One of the allowlisted image types, sniffed from the bytes.
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub updated_at: DateTime<Utc>,
+    /// The email of whoever uploaded it.
+    pub updated_by: String,
+}
+
+/// A workspace's preview image and what the store knows about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePreview {
+    pub meta: WorkspacePreviewMeta,
+    pub image: Vec<u8>,
+}
+
+/// A preview to store. The caller owns the clock and the policy: it
+/// validated the bytes and chose both instants.
+#[derive(Debug, Clone, Copy)]
+pub struct NewWorkspacePreview<'a> {
+    pub workspace_id: &'a str,
+    pub content_type: &'a str,
+    pub image: &'a [u8],
+    pub updated_by: &'a str,
+    pub updated_at: DateTime<Utc>,
+    /// An existing preview is replaced only if it was written at or before
+    /// this instant. The comparison runs inside the write, so two uploads
+    /// racing each other cannot both pass a rate limit read beforehand.
+    pub replaces_up_to: DateTime<Utc>,
+}
+
+/// How a preview write ended, when the workspace was there to take it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewWrite {
+    Stored(WorkspacePreviewMeta),
+    /// The existing preview is newer than the write allowed, and stays.
+    TooSoon {
+        last_updated_at: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone)]

@@ -7,6 +7,7 @@
 
 pub mod http;
 pub mod manager;
+pub mod preview;
 pub mod store;
 pub mod types;
 
@@ -26,7 +27,8 @@ pub use manager::{
 };
 pub use store::{PostgresWorkspaceStore, SqliteWorkspaceStore, StoreError, WorkspaceStore};
 pub use types::{
-    SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
-    WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
+    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
+    WorkspacePreview, WorkspacePreviewMeta, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
     WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
 };
