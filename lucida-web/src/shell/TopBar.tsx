@@ -3,6 +3,7 @@ import {
   ChartLineIcon,
   CopyIcon,
   GaugeIcon,
+  MagnifyingGlassIcon,
   SidebarSimpleIcon,
   SquaresFourIcon,
   WrenchIcon,
@@ -10,6 +11,7 @@ import {
 import { useState, type MouseEvent, type ReactNode } from "react";
 import { ProfileMenu } from "../auth/ProfileMenu.tsx";
 import { IconButton } from "../ui/Button.tsx";
+import { showKeyboardHelp } from "../ui/keyboardHelpState.ts";
 import { Menu, MenuItem } from "../ui/Menu.tsx";
 import { toast } from "../ui/toastQueue.ts";
 import { LucidaMark } from "./LucidaMark.tsx";
@@ -88,6 +90,14 @@ export function TopBar({
         </Menu>
       </div>
       <div className="lc-topbar-end">
+        {/* The palette's way in without a keyboard. */}
+        <IconButton
+          icon={MagnifyingGlassIcon}
+          label="Search commands"
+          shortcut="Mod+K"
+          tooltipPlacement="bottom"
+          onPress={() => showKeyboardHelp("commandPalette")}
+        />
         {developer.enabled && (
           <div className="lc-topbar-group" role="group" aria-label="Developer tools">
             <IconButton

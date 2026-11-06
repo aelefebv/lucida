@@ -3,28 +3,37 @@
  * {@link AnnotationOverlay}. The thread UI is the shared {@link ThreadPopover};
  * this file owns projection, the pin gesture, and popover anchoring.
  *
- * A click toggles the thread, a plain drag orbits, and Shift+drag on an own pin
- * moves it in-plane at its own depth. A plain press is handed to the canvas only
- * once it passes the click slop, so it can still resolve into a click while the
- * camera code stays the canvas's alone. Markers re-project every frame through
+ * A click toggles the thread and selects one's own pin, a plain drag orbits,
+ * and a selected pin or a Shift+drag on one's own moves it in-plane at its own
+ * depth. A plain press is handed to the canvas only once it passes the click
+ * slop, so it can still resolve into a click while the camera code stays the
+ * canvas's alone. A tap on one's own line or box selects it for the context
+ * menu and the Delete key. Markers re-project every frame through
  * `scene.project_annotation`, the same transform the volume pass uses.
  */
-import { forwardRef, useEffect, useImperativeHandle, useRef, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import type { Annotation, AnnotationOverlayHandle } from "./annotationDocument.ts";
 import { useAnnotationOverlay } from "./useAnnotationOverlay.ts";
+import { useAnnotationEditing, type AnnotationPlacement } from "./useAnnotationEditing.ts";
 import {
   capturePointer,
   emitMoveAnnotation,
-  exceedsClickSlop,
+  exceedsPressSlop,
+  forwardPressToCanvas,
   releasePointer,
+  startLongPress,
+  useCanvasTaps,
 } from "./annotationInteraction.ts";
-import { eventToScreenPx, makeProjectAnnotationToCss } from "./cameraProjection.ts";
+import { eventToScreenPx, makeProjectAnnotationToCss, type ClientPoint } from "./cameraProjection.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
+import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
-import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
+import { buildAnnotationView, liveViewWithLiveTC } from "../savedView/buildAnnotationView.ts";
+import { annotationVertices, hitTestShapes, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
 import { isOffContext, type ViewContext } from "./annotationContext.ts";
+import type { Tool } from "./annotationTool.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
 import type { MentionCandidate } from "./annotationMentions.ts";
 import "./AnnotationOverlay.css";
@@ -54,20 +63,31 @@ interface Props {
   /** Personal, view-only toggle. When false nothing renders; annotations are
    * hidden, not deleted, and nothing goes on the wire. */
   visible?: boolean;
+  /** The canvas tool. A tap selects only with the pan tool, since a drawing
+   * tool's tap draws. */
+  tool?: Tool;
   /** Passed through to {@link ThreadPopover}. */
   mentionCandidates?: MentionCandidate[];
   /** Passed through to {@link ThreadPopover}. */
   onGoToAuthorView?: (pinId: string) => void;
 }
 
-/** A gesture that began on a marker, for one captured pointer. `move` is a
- * Shift+drag on an own pin; `orbit` is a plain press that stays a click or,
- * past the slop, is handed to the canvas. */
+/** How far (CSS px) a tap may land from a stroke and still select its shape. */
+const TAP_TOLERANCE = 6;
+const TOUCH_TAP_TOLERANCE = 22;
+
+/** A gesture that began on a marker, for one captured pointer. `move` drags
+ * one's own pin, when selected or with Shift; `orbit` is a press that stays a
+ * click or, past the slop, is handed to the canvas. */
 interface Pin3DDrag {
   pinId: string;
   pointerId: number;
-  /** Fixed at pointerdown from Shift and authorship. */
+  pointerType: string;
+  /** Fixed at pointerdown from Shift, authorship, and the selection. */
   mode: "move" | "orbit";
+  /** Whether Shift was held at the press, which makes a stationary press
+   * nothing rather than a click. */
+  shift: boolean;
   /** Press point in CSS px, to measure travel against the slop. */
   startX: number;
   startY: number;
@@ -75,23 +95,102 @@ interface Pin3DDrag {
   moved: boolean;
   /** Set once an orbit press is handed to the canvas, so it is forwarded once. */
   forwarded: boolean;
+  cancelLongPress: () => void;
 }
 
-export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, mentionCandidates = [], onGoToAuthorView }: Props, ref) {
+export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(function AnnotationOverlay3D({ datasetId, wasmSceneRef, canvas, version, viewContext, myId, sendCommand, onDocumentChanged, onViewportChanged, visible = true, tool = "pan", mentionCandidates = [], onGoToAuthorView }: Props, ref) {
   const dotRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   // Lines and boxes re-project each frame through the same call as the dots.
   const shapeRefs = useRef<Map<string, SVGLineElement | SVGPolygonElement>>(new Map());
-  // The pin set and open thread, with the lifecycle shared with the 2D overlay.
-  const { annotations, annotationsRef, openPinId, setOpenPinId } = useAnnotationOverlay({
+  // The pin set, open thread, and selection, with the lifecycle shared with
+  // the 2D overlay.
+  const overlay = useAnnotationOverlay({
     wasmSceneRef,
     datasetId,
     version,
     visible,
   });
+  const { annotations, annotationsRef, openPinId, setOpenPinId, selectedId, setSelectedId } = overlay;
+  const editing = useAnnotationEditing({ state: overlay, datasetId, myId, wasmSceneRef, sendCommand, onDocumentChanged });
+  const [menu, setMenu] = useState<CanvasMenuRequest | null>(null);
 
   const datasetIdRef = useRef(datasetId);
-   
+
   datasetIdRef.current = datasetId;
+
+  /** Where a client point lands in the volume, by the same depth pick a 3D
+   * drop uses, or null when the ray misses. */
+  const pickPlacement = (point: ClientPoint): AnnotationPlacement | null => {
+    const scene = wasmSceneRef.current;
+    if (!scene) return null;
+    const [screenX, screenY] = eventToScreenPx(canvas, point);
+    const voxel = scene.pick_annotation_voxel(datasetId, screenX, screenY);
+    if (voxel.length < 3) return null;
+    // A far-face pick can round past the last plane, where 2D could never
+    // reach the point; clamp as a drawn point does.
+    const depth = scene.dataset_volume_shape(datasetId)[0] ?? 0;
+    const z = depth > 0 ? Math.max(0, Math.min(voxel[2], depth - 1)) : voxel[2];
+    return { position: [voxel[0], voxel[1]], z };
+  };
+
+  /** One's own line or box under a client point, as projected now, or null. */
+  const ownShapeAt = (point: ClientPoint, tolerance: number): string | null => {
+    const scene = wasmSceneRef.current;
+    if (!scene) return null;
+    const project = makeProjectAnnotationToCss(scene, datasetId);
+    const rect = canvas.getBoundingClientRect();
+    const shapes = [];
+    for (const pin of annotationsRef.current) {
+      if (pin.author !== String(myId) || !pin.end || (pin.kind !== "line" && pin.kind !== "box")) continue;
+      const points = annotationVertices(pin).map((v) => project(v, pin.z ?? 0));
+      if (points.some((p) => p === null)) continue;
+      shapes.push({ id: pin.id, points: points as ScreenPoint[], closed: isClosedShape(pin) });
+    }
+    return hitTestShapes([point.clientX - rect.left, point.clientY - rect.top], shapes, tolerance);
+  };
+
+  /** Open the canvas menu at a client point. A press on one's own annotation
+   * selects it, so the menu can delete it; a press elsewhere deselects. */
+  const openMenu = (point: ClientPoint, pointerType: string, pinId?: string) => {
+    if (visible) {
+      if (pinId !== undefined) {
+        const pin = annotationsRef.current.find((p) => p.id === pinId);
+        setSelectedId(pin && pin.author === String(myId) ? pinId : null);
+      } else {
+        setSelectedId(ownShapeAt(point, pointerType === "touch" ? TOUCH_TAP_TOLERANCE : TAP_TOLERANCE));
+      }
+    }
+    setMenu({ x: point.clientX, y: point.clientY, target: pickPlacement(point) });
+  };
+
+  // Read by the canvas listener, which binds once.
+  const openMenuRef = useRef(openMenu);
+  useEffect(() => {
+    openMenuRef.current = openMenu;
+  });
+
+  // A right-click on the canvas opens the menu. A finger's long press arrives
+  // through `openContextMenu` from the viewer's gesture recognizer instead.
+  useEffect(() => {
+    const onContextMenu = (e: MouseEvent) => {
+      const pointerType = (e as PointerEvent).pointerType ?? "mouse";
+      if (pointerType === "touch") return;
+      e.preventDefault();
+      openMenuRef.current(e, pointerType);
+    };
+    canvas.addEventListener("contextmenu", onContextMenu);
+    return () => canvas.removeEventListener("contextmenu", onContextMenu);
+  }, [canvas]);
+
+  // A tap on one's own line or box selects it; a tap elsewhere deselects.
+  useCanvasTaps(canvas, (tap) => {
+    if (!visible) return;
+    if (tool !== "pan" || tap.shiftKey) {
+      setSelectedId(null);
+      return;
+    }
+    setSelectedId(ownShapeAt(tap, tap.pointerType === "touch" ? TOUCH_TAP_TOLERANCE : TAP_TOLERANCE));
+  });
 
   // Same handle shape as the 2D `focusPin`; only the recenter differs. 2D
   // `set_center` never touches the arcball/fly camera, so this issues
@@ -119,6 +218,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
           onViewportChanged?.();
         }
       },
+      openContextMenu: (at: ClientPoint) => openMenuRef.current(at, "touch"),
     }),
     [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId],
   );
@@ -138,7 +238,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
         // `null` means the vertex is behind the camera or the dataset has no
         // anchorable member. A line or box shares one depth `z` across vertices.
         const project = makeProjectAnnotationToCss(scene, datasetIdRef.current);
-        // pointermove positions a dot being Shift-moved; reprojecting its stale
+        // pointermove positions a dot being moved; reprojecting its stale
         // stored position would snap it back every frame. An orbit doesn't move
         // the pin, so its dot keeps reprojecting.
         const activeDrag = dragRef.current;
@@ -190,31 +290,15 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     return frameClock.subscribe(tick);
   }, [wasmSceneRef, canvas, annotationsRef]);
 
-  /** Hand a plain drag to the canvas: transfer capture and replay the
-   * pointerdown from the original press point, so the canvas's first move
-   * computes the right delta. */
-  const forwardPressToCanvas = (drag: Pin3DDrag, e: ReactPointerEvent) => {
-    releasePointer(e.currentTarget as Element, drag.pointerId);
-    // Without capture support (test env), the canvas listeners still get the
-    // dispatched event below.
-    capturePointer(canvas, drag.pointerId);
-    try {
-      canvas.dispatchEvent(
-        new PointerEvent("pointerdown", {
-          pointerId: drag.pointerId,
-          button: 0,
-          buttons: e.buttons,
-          // Replay from the press point so the canvas's lastPos anchors correctly.
-          clientX: drag.startX,
-          clientY: drag.startY,
-          shiftKey: false,
-          bubbles: true,
-          cancelable: true,
-        }),
-      );
-    } catch {
-      // No PointerEvent constructor (non-browser env): the drag won't orbit.
-    }
+  /** A right-click on a marker opens the canvas menu on it. A finger's long
+   * press is timed by the gesture instead, so its native menu is only
+   * suppressed. */
+  const onPinContextMenu = (pin: Annotation) => (e: ReactMouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const pointerType = (e.nativeEvent as PointerEvent).pointerType ?? "mouse";
+    if (pointerType === "touch") return;
+    openMenu(e, pointerType, pin.id);
   };
 
   const onPinPointerDown = (pin: Annotation) => (e: ReactPointerEvent) => {
@@ -224,19 +308,34 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     // Clear stale suppression from a drag that never got its trailing click.
     suppressClickRef.current = null;
     const mine = pin.author === String(myId);
-    // Shift on an own pin moves; anything else is orbit-or-click.
-    const mode: "move" | "orbit" = e.shiftKey && mine ? "move" : "orbit";
-    dragRef.current = {
+    // One's own pin moves when selected or with Shift; anything else is
+    // orbit-or-click.
+    const mode: "move" | "orbit" = mine && (e.shiftKey || selectedId === pin.id) ? "move" : "orbit";
+    const target = e.currentTarget as Element;
+    const drag: Pin3DDrag = {
       pinId: pin.id,
       pointerId: e.pointerId,
+      pointerType: e.pointerType,
       mode,
+      shift: e.shiftKey,
       startX: e.clientX,
       startY: e.clientY,
       moved: false,
       forwarded: false,
+      cancelLongPress: () => {},
     };
+    if (e.pointerType === "touch") {
+      drag.cancelLongPress = startLongPress(() => {
+        if (dragRef.current !== drag || drag.moved) return;
+        dragRef.current = null;
+        releasePointer(target, drag.pointerId);
+        suppressClickRef.current = pin.id;
+        openMenu({ clientX: drag.startX, clientY: drag.startY }, "touch", pin.id);
+      });
+    }
+    dragRef.current = drag;
     // Capture so move and up land here while deciding click versus drag.
-    capturePointer(e.currentTarget as Element, e.pointerId);
+    capturePointer(target, e.pointerId);
   };
 
   const onPinPointerMove = (pin: Annotation) => (e: ReactPointerEvent) => {
@@ -244,8 +343,9 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     if (!drag || drag.pinId !== pin.id) return;
     if (!drag.moved) {
       // Still within the click slop.
-      if (!exceedsClickSlop(drag.startX, drag.startY, e.clientX, e.clientY)) return;
+      if (!exceedsPressSlop(drag.pointerType, drag.startX, drag.startY, e.clientX, e.clientY)) return;
       drag.moved = true;
+      drag.cancelLongPress();
     }
 
     if (drag.mode === "orbit") {
@@ -254,7 +354,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
         drag.forwarded = true;
         // A real drag must not also toggle the thread on the trailing click.
         suppressClickRef.current = pin.id;
-        forwardPressToCanvas(drag, e);
+        forwardPressToCanvas(e.currentTarget as Element, canvas, drag, e.buttons);
         // The canvas owns the rest of the gesture, so release our state now; a
         // stale orbit drag would block the next press here. The suppress flag
         // stays to swallow the trailing click.
@@ -276,21 +376,19 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   const onPinPointerUp = (pin: Annotation) => (e: ReactPointerEvent) => {
     const drag = dragRef.current;
     if (!drag || drag.pinId !== pin.id) return;
+    drag.cancelLongPress();
     dragRef.current = null;
     releasePointer(e.currentTarget as Element, drag.pointerId);
 
-    // An orbit that reaches pointerup here never traveled (a traveled one was
-    // handed off), so it is a click: let onClick toggle the thread.
-    if (drag.mode === "orbit") {
-      return;
-    }
-
-    // A Shift-press that never passed the slop is not a move. Swallow its click
-    // too, since Shift is the move modifier.
+    // A press that never travelled is a click, and onClick toggles the thread.
+    // A stationary Shift-press is not a move and not a click either, since
+    // Shift is the move modifier, so its click is swallowed.
     if (!drag.moved) {
-      suppressClickRef.current = pin.id;
+      if (drag.mode === "move" && drag.shift) suppressClickRef.current = pin.id;
       return;
     }
+    // An orbit that traveled was handed off before reaching here.
+    if (drag.mode === "orbit") return;
     // Resolve the release through the same depth pick a 3D drop uses. A ray miss
     // declines, so a pin never floats in empty space.
     suppressClickRef.current = pin.id;
@@ -313,14 +411,33 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   const onPinPointerCancel = (pin: Annotation) => (e: ReactPointerEvent) => {
     const drag = dragRef.current;
     if (!drag || drag.pinId !== pin.id) return;
-    const captured = drag.pointerId;
+    drag.cancelLongPress();
     dragRef.current = null;
-    releasePointer(e.currentTarget as Element, captured);
+    releasePointer(e.currentTarget as Element, drag.pointerId);
     // A cancelled gesture never moves the pin; the tick snaps the dot back.
   };
 
+  const addPoint = (at: AnnotationPlacement, openThread: boolean) => {
+    const scene = wasmSceneRef.current;
+    const view = scene ? buildAnnotationView(scene, liveViewWithLiveTC(scene, viewContext.t, viewContext.c)) : null;
+    editing.addPoint(at, { t: viewContext.t, c: viewContext.c, view, openThread });
+    onViewportChanged?.();
+  };
+
+  const contextMenu = (
+    <AnnotationContextMenu
+      request={menu}
+      onClose={() => setMenu(null)}
+      annotationsVisible={visible}
+      selected={editing.selected}
+      onComment={(at) => addPoint(at, true)}
+      onDropPoint={(at) => addPoint(at, false)}
+      onDelete={editing.remove}
+    />
+  );
+
   // After every hook, so hook order stays stable.
-  if (!visible) return null;
+  if (!visible) return contextMenu;
 
   return (
     <div className="lc-annotation-layer">
@@ -331,41 +448,25 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
           if (pin.kind !== "line" && pin.kind !== "box") return null;
           if (!pin.end) return null;
           const author = pin.author === String(myId) ? "own" : "peer";
+          const shapeProps = {
+            className: "lc-annotation-shape",
+            "data-author": author,
+            "data-selected": selectedId === pin.id || undefined,
+            ref: (el: SVGLineElement | SVGPolygonElement | null) => {
+              if (el) shapeRefs.current.set(pin.id, el);
+              else shapeRefs.current.delete(pin.id);
+            },
+            style: { display: "none" },
+          };
           if (isClosedShape(pin)) {
-            return (
-              <polygon
-                key={pin.id}
-                className="lc-annotation-shape"
-                data-author={author}
-                ref={(el) => {
-                  if (el) shapeRefs.current.set(pin.id, el);
-                  else shapeRefs.current.delete(pin.id);
-                }}
-                points=""
-                style={{ display: "none" }}
-              />
-            );
+            return <polygon key={pin.id} {...shapeProps} points="" />;
           }
-          return (
-            <line
-              key={pin.id}
-              className="lc-annotation-shape"
-              data-author={author}
-              ref={(el) => {
-                if (el) shapeRefs.current.set(pin.id, el);
-                else shapeRefs.current.delete(pin.id);
-              }}
-              x1={0}
-              y1={0}
-              x2={0}
-              y2={0}
-              style={{ display: "none" }}
-            />
-          );
+          return <line key={pin.id} {...shapeProps} x1={0} y1={0} x2={0} y2={0} />;
         })}
       </svg>
       {annotations.map((pin) => {
         const mine = pin.author === String(myId);
+        const selected = mine && selectedId === pin.id;
         const comments = pin.comments ?? [];
         const isOpen = openPinId === pin.id;
         // The tick governs display; off-context only changes the look. The
@@ -393,21 +494,24 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
             }}
           >
             {/* Every marker takes the pointer so any pin's thread can open; a
-                peer's pin just can't be Shift-moved. */}
+                peer's pin just can't be moved. */}
             <div
               className="lc-annotation-pin"
               data-testid={`annot-pin-${pin.id}`}
               data-author={mine ? "own" : "peer"}
               data-off-context={offCtx || undefined}
+              // A selected shape shows it on its outline instead.
+              data-selected={(selected && !pin.end) || undefined}
               title={
                 mine
-                  ? "Pin by you — click for thread, Shift+drag to move, drag to orbit"
+                  ? "Pin by you — click for thread; drag once selected, or Shift+drag, to move; drag to orbit"
                   : `Pin by ${pin.author} — click for thread, drag to orbit`
               }
               onPointerDown={onPinPointerDown(pin)}
               onPointerMove={onPinPointerMove(pin)}
               onPointerUp={onPinPointerUp(pin)}
               onPointerCancel={onPinPointerCancel(pin)}
+              onContextMenu={onPinContextMenu(pin)}
               onClick={() => {
                 // Swallow the click after a real drag or a stationary
                 // Shift-press, once.
@@ -416,10 +520,9 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
                   return;
                 }
                 setOpenPinId((cur) => (cur === pin.id ? null : pin.id));
+                if (mine) setSelectedId(pin.id);
               }}
-              // Every marker forwards a drag to the orbit, so none lets the
-              // browser take the touch.
-              style={{ cursor: mine ? "grab" : "pointer", touchAction: "none" }}
+              style={{ cursor: selected ? "move" : mine ? "grab" : "pointer" }}
             />
             {offCtx && <OffContextHelptext pin={pin} />}
             {/* A child of the wrapper, so the projection and the behind-camera
@@ -431,7 +534,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
             {/* Keyed by pin id so draft, edit, and confirm state reset on switch. */}
             {isOpen && (
               <ThreadPopover
-                key={pin.id}
+                key={editing.threadKey(pin.id)}
                 pin={pin}
                 datasetId={datasetId}
                 myId={myId}
@@ -441,11 +544,14 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
                 onClose={() => setOpenPinId(null)}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={onGoToAuthorView}
+                armDelete={editing.armsDelete(pin.id)}
+                focusComposer={editing.focusesComposer(pin.id)}
               />
             )}
           </div>
         );
       })}
+      {contextMenu}
     </div>
   );
 });

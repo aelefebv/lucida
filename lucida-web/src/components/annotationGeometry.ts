@@ -169,3 +169,67 @@ export function reshapeBox(
   }
   return { position, end };
 }
+
+/** A box's corners or a line's endpoints moved together by `delta`, as dragging
+ * a whole shape previews it. */
+export function translateShape(
+  vertices: BoxCorners & LineEndpoints,
+  delta: [number, number],
+): BoxCorners & LineEndpoints {
+  return {
+    position: [vertices.position[0] + delta[0], vertices.position[1] + delta[1]],
+    end: [vertices.end[0] + delta[0], vertices.end[1] + delta[1]],
+  };
+}
+
+/** A shape as drawn on screen, for {@link hitTestShapes}. */
+export interface ShapeOnScreen {
+  id: string;
+  /** Screen vertices in draw order. */
+  points: ScreenPoint[];
+  /** A closed ring, whose inside counts as a hit. */
+  closed: boolean;
+}
+
+function distanceToSegment(p: ScreenPoint, a: ScreenPoint, b: ScreenPoint): number {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const lengthSq = dx * dx + dy * dy;
+  const t = lengthSq > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / lengthSq)) : 0;
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
+}
+
+function insidePolygon(p: ScreenPoint, points: readonly ScreenPoint[]): boolean {
+  let inside = false;
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    const [xi, yi] = points[i];
+    const [xj, yj] = points[j];
+    if (yi > p[1] !== yj > p[1] && p[0] < ((xj - xi) * (p[1] - yi)) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+
+/**
+ * The shape a press at `p` lands on, or null: one within `tolerance` CSS px of
+ * its stroke, or anywhere inside a closed one. The nearest stroke wins, so a
+ * line drawn inside a box, or a box inside another, stays reachable.
+ */
+export function hitTestShapes(
+  p: ScreenPoint,
+  shapes: readonly ShapeOnScreen[],
+  tolerance: number,
+): string | null {
+  let best: { id: string; distance: number } | null = null;
+  for (const shape of shapes) {
+    const { points, closed } = shape;
+    if (points.length < 2) continue;
+    let distance = Infinity;
+    const segments = closed ? points.length : points.length - 1;
+    for (let i = 0; i < segments; i++) {
+      distance = Math.min(distance, distanceToSegment(p, points[i], points[(i + 1) % points.length]));
+    }
+    if (distance > tolerance && !(closed && insidePolygon(p, points))) continue;
+    if (!best || distance < best.distance) best = { id: shape.id, distance };
+  }
+  return best?.id ?? null;
+}

@@ -172,7 +172,8 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
 
   const onPointerDown = useCallback(
     (e: PointerEvent) => {
-      if (e.pointerType === "touch") return;
+      // The right button opens the canvas menu instead.
+      if (e.pointerType === "touch" || e.button === 2) return;
       beginPress(e, e.shiftKey);
       canvas.setPointerCapture(e.pointerId);
     },

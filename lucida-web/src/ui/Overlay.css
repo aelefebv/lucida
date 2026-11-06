@@ -36,6 +36,14 @@
   }
 }
 
+/* The zero-size point a context menu opens from. */
+.lc-context-anchor {
+  position: fixed;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
 .lc-popover-dialog {
   padding: var(--lc-space-3);
   outline: none;

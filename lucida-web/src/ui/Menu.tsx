@@ -1,5 +1,6 @@
 import type { Icon } from "@phosphor-icons/react";
-import type { ReactElement, ReactNode } from "react";
+import { useRef, useState, type ReactElement, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import {
   Header,
   Keyboard,
@@ -35,6 +36,54 @@ export function Menu({ trigger, children, label, placement = "bottom start" }: M
         </AriaMenu>
       </AriaPopover>
     </MenuTrigger>
+  );
+}
+
+export interface ContextMenuProps {
+  /** The client point to open at, or null while closed. */
+  at: { x: number; y: number } | null;
+  onClose: () => void;
+  /** Accessible name for the menu. */
+  label: string;
+  /** MenuItem, MenuSection, and MenuSeparator. */
+  children: ReactNode;
+}
+
+/**
+ * A menu opened at a point, by a right-click or a long press, rather than by
+ * a trigger. It flips and shifts to stay on screen. Escape, a click outside,
+ * or running an item closes it.
+ */
+export function ContextMenu({ at, onClose, label, children }: ContextMenuProps) {
+  const anchorRef = useRef<HTMLDivElement>(null);
+  // The point outlives `at` so the menu stays put while it animates closed.
+  const [point, setPoint] = useState(at);
+  if (at && (at.x !== point?.x || at.y !== point?.y)) setPoint(at);
+  return createPortal(
+    <>
+      <div
+        ref={anchorRef}
+        className="lc-context-anchor"
+        style={{ left: point?.x ?? 0, top: point?.y ?? 0 }}
+        aria-hidden="true"
+      />
+      <AriaPopover
+        triggerRef={anchorRef}
+        isOpen={at !== null}
+        onOpenChange={(open) => {
+          if (!open) onClose();
+        }}
+        placement="bottom start"
+        offset={2}
+        className="lc-popover"
+        data-lc-overlay=""
+      >
+        <AriaMenu className="lc-menu" aria-label={label} autoFocus onClose={onClose}>
+          {children}
+        </AriaMenu>
+      </AriaPopover>
+    </>,
+    document.body,
   );
 }
 

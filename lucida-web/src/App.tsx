@@ -9,6 +9,7 @@ import { AnnotationOverlay } from "./components/AnnotationOverlay.tsx";
 import type { Annotation, AnnotationOverlayHandle } from "./components/annotationDocument.ts";
 import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
 import { AnnotationDraftOverlay } from "./components/AnnotationDraftOverlay.tsx";
+import { sceneClipDepth } from "./components/clipDepth.ts";
 import type { AnnotationDraft } from "./components/annotationDraft.ts";
 import type { Tool } from "./components/annotationTool.ts";
 import { CommentsPanel } from "./components/CommentsPanel.tsx";
@@ -1278,6 +1279,16 @@ function App({
                   onTChange={dims.handleTChange}
                   cameraMode={cameraMode === "fly" ? "fly" : "arcball"}
                   onCameraModeToggle={handleCameraModeToggle}
+                  // Moves the same scene state the `[` and `]` keys do, and
+                  // shares and repaints it the same way.
+                  clipDepth={
+                    scene.wasmScene && selectedDatasetId
+                      ? sceneClipDepth(scene.wasmScene, selectedDatasetId, () => {
+                          emitPresenceWithUrl();
+                          requestRender(render.loopRef.current, "clip_plane");
+                        })
+                      : undefined
+                  }
                 />
               ),
               // Mounted before any dataset opens, and only hidden until one
@@ -1312,6 +1323,7 @@ function App({
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 annotationDraftRef={annotationDraftRef}
+                onLongPress={(at) => overlay2dRef.current?.openContextMenu(at)}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
@@ -1330,6 +1342,7 @@ function App({
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
                 visible={annotationsVisible}
+                tool={tool}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={handleGoToAuthorView}
               />
@@ -1356,6 +1369,7 @@ function App({
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 annotationDraftRef={annotationDraftRef}
+                onLongPress={(at) => overlay3dRef.current?.openContextMenu(at)}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
@@ -1374,6 +1388,7 @@ function App({
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
                 visible={annotationsVisible}
+                tool={tool}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={handleGoToAuthorView}
               />
