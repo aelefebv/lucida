@@ -1,0 +1,185 @@
+/*
+ * Design tokens. Style with these and nothing else (ADR 0066).
+ *
+ * <html> carries the resolved appearance as attributes: data-theme
+ * (dark | light), data-density (comfortable | compact), data-accent (a preset
+ * name, or "custom" with --lc-accent set inline), and data-canvas (black |
+ * dark-gray | white | theme). The inline script in index.html sets them
+ * before first paint, and appearance.ts keeps them current.
+ *
+ * Every name here is listed in tokens.ts, and a test holds the two together.
+ */
+
+:root {
+  /* Type */
+  --lc-font: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --lc-font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono", Menlo, Consolas, monospace;
+  --lc-text-xs: 11px;
+  --lc-text-sm: 12px;
+  --lc-text-md: 13px;
+  --lc-text-lg: 14px;
+  --lc-text-xl: 16px;
+  --lc-text-2xl: 20px;
+
+  /* Spacing, on a 4px grid */
+  --lc-space-1: 4px;
+  --lc-space-2: 8px;
+  --lc-space-3: 12px;
+  --lc-space-4: 16px;
+  --lc-space-5: 20px;
+  --lc-space-6: 24px;
+  --lc-space-7: 32px;
+  --lc-space-8: 40px;
+
+  /* Shape */
+  --lc-radius-sm: 4px;
+  --lc-radius: 6px;
+  --lc-radius-lg: 10px;
+  --lc-radius-full: 999px;
+
+  /* Density */
+  --lc-control-h: 28px;
+  --lc-control-h-sm: 24px;
+
+  /* Motion. Zeroed under prefers-reduced-motion below. */
+  --lc-motion-fast: 120ms;
+  --lc-motion: 180ms;
+  --lc-ease: cubic-bezier(0.2, 0, 0, 1);
+
+  /* Layers. Popovers sit above dialogs so a select or menu opened inside a
+     dialog is not drawn beneath it. Both clear the legacy 10000 ceiling. */
+  --lc-z-float: 10;
+  --lc-z-panel: 20;
+  --lc-z-dialog: 11000;
+  --lc-z-popover: 12000;
+  --lc-z-toast: 13000;
+
+  /* Accent: one input, everything else derives from it. Presets keep white
+     text at 4.5:1 on the fill, except amber, which takes dark text. */
+  --lc-accent: #5b63f5;
+  --lc-text-on-accent: oklch(from var(--lc-accent) clamp(0.2, (0.68 - l) * 100, 1) 0 0);
+
+  /* Slider and switch thumbs stay white on every fill, in both themes. */
+  --lc-thumb: #ffffff;
+}
+
+/* Presets match any element, so an accent swatch can show one by carrying
+   data-accent. Only --lc-accent follows there; derived tokens resolve on <html>. */
+[data-accent="indigo"] { --lc-accent: #5b63f5; }
+[data-accent="blue"] { --lc-accent: #2a6de2; }
+[data-accent="teal"] { --lc-accent: #0f8278; }
+[data-accent="green"] { --lc-accent: #1a8546; }
+[data-accent="amber"] { --lc-accent: #f0a020; }
+[data-accent="rose"] { --lc-accent: #e11d48; }
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+
+  --lc-bg: #232326;
+  --lc-surface-1: #1b1b1e;
+  --lc-surface-2: #2a2a2e;
+  --lc-surface-3: rgba(255, 255, 255, 0.08);
+  --lc-surface-float: rgba(28, 28, 32, 0.86);
+  --lc-field-bg: rgba(0, 0, 0, 0.22);
+  --lc-scrim: rgba(0, 0, 0, 0.55);
+
+  --lc-text: #e8e8eb;
+  --lc-text-muted: #a8a8b2;
+  --lc-text-subtle: #8f8f99;
+
+  --lc-border: rgba(255, 255, 255, 0.1);
+  --lc-border-strong: rgba(255, 255, 255, 0.18);
+
+  --lc-accent-hover: oklch(from var(--lc-accent) calc(l + 0.04) c h);
+  --lc-accent-subtle: color-mix(in oklab, var(--lc-accent) 20%, transparent);
+  --lc-accent-text: oklch(from var(--lc-accent) max(l, 0.74) c h);
+  --lc-focus-ring: oklch(from var(--lc-accent) max(l, 0.7) c h);
+
+  --lc-danger: #f87171;
+  --lc-warning: #f5b94a;
+  --lc-success: #4fcf86;
+  --lc-info: #6aaaf8;
+  --lc-danger-subtle: color-mix(in oklab, var(--lc-danger) 16%, transparent);
+  --lc-warning-subtle: color-mix(in oklab, var(--lc-warning) 16%, transparent);
+  --lc-success-subtle: color-mix(in oklab, var(--lc-success) 16%, transparent);
+  --lc-info-subtle: color-mix(in oklab, var(--lc-info) 16%, transparent);
+
+  --lc-shadow-1: 0 1px 2px rgba(0, 0, 0, 0.35), 0 1px 3px rgba(0, 0, 0, 0.2);
+  --lc-shadow-2: 0 4px 12px rgba(0, 0, 0, 0.3), 0 16px 40px rgba(0, 0, 0, 0.4);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --lc-bg: #f4f4f6;
+  --lc-surface-1: #ffffff;
+  --lc-surface-2: #ffffff;
+  --lc-surface-3: rgba(0, 0, 0, 0.055);
+  --lc-surface-float: rgba(255, 255, 255, 0.86);
+  --lc-field-bg: rgba(0, 0, 0, 0.03);
+  --lc-scrim: rgba(16, 16, 24, 0.32);
+
+  --lc-text: #1a1a1e;
+  --lc-text-muted: #55555f;
+  --lc-text-subtle: #6b6b75;
+
+  --lc-border: rgba(0, 0, 0, 0.1);
+  --lc-border-strong: rgba(0, 0, 0, 0.18);
+
+  --lc-accent-hover: oklch(from var(--lc-accent) calc(l - 0.05) c h);
+  --lc-accent-subtle: color-mix(in oklab, var(--lc-accent) 14%, transparent);
+  --lc-accent-text: oklch(from var(--lc-accent) min(l, 0.52) c h);
+  --lc-focus-ring: oklch(from var(--lc-accent) min(l, 0.55) c h);
+
+  --lc-danger: #d42a2a;
+  --lc-warning: #9a5700;
+  --lc-success: #17803d;
+  --lc-info: #2563eb;
+  --lc-danger-subtle: color-mix(in oklab, var(--lc-danger) 12%, transparent);
+  --lc-warning-subtle: color-mix(in oklab, var(--lc-warning) 12%, transparent);
+  --lc-success-subtle: color-mix(in oklab, var(--lc-success) 12%, transparent);
+  --lc-info-subtle: color-mix(in oklab, var(--lc-info) 12%, transparent);
+
+  --lc-shadow-1: 0 1px 2px rgba(16, 16, 24, 0.06), 0 1px 3px rgba(16, 16, 24, 0.08);
+  --lc-shadow-2: 0 4px 12px rgba(16, 16, 24, 0.08), 0 16px 40px rgba(16, 16, 24, 0.14);
+}
+
+:root[data-density="compact"] {
+  --lc-control-h: 24px;
+  --lc-control-h-sm: 20px;
+}
+
+/* The canvas follows its own setting, not the UI theme, so what is drawn on it
+   takes its contrast from the canvas background. */
+:root,
+:root[data-canvas="black"] {
+  --lc-canvas-bg: #000000;
+  --lc-canvas-stroke: rgba(255, 255, 255, 0.85);
+  --lc-canvas-label: rgba(255, 255, 255, 0.92);
+}
+
+:root[data-canvas="dark-gray"] {
+  --lc-canvas-bg: #202023;
+  --lc-canvas-stroke: rgba(255, 255, 255, 0.85);
+  --lc-canvas-label: rgba(255, 255, 255, 0.92);
+}
+
+:root[data-canvas="white"] {
+  --lc-canvas-bg: #ffffff;
+  --lc-canvas-stroke: rgba(0, 0, 0, 0.75);
+  --lc-canvas-label: rgba(0, 0, 0, 0.85);
+}
+
+:root[data-canvas="theme"] {
+  --lc-canvas-bg: var(--lc-bg);
+  --lc-canvas-stroke: color-mix(in srgb, var(--lc-text) 85%, transparent);
+  --lc-canvas-label: var(--lc-text);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --lc-motion-fast: 0ms;
+    --lc-motion: 0ms;
+  }
+}

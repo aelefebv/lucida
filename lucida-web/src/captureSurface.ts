@@ -8,6 +8,9 @@
 // on `isCaptureSurface()` and pass the flag down, rather than re-reading the URL
 // at the write site, so the rule stays findable from here.
 //
+// Preferences read their defaults here and persist nothing (theme/preferences.ts),
+// so a capture looks the same whichever browser takes it.
+//
 // Not gated, since none records a person's choice: `history.replaceState` URL
 // sync (dies with the page), `open_remote_dataset` (opening is the capture), and
 // presence (live followers still see the capture's camera). A restore here

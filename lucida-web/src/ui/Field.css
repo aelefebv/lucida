@@ -1,0 +1,164 @@
+/* Field layout. Grid areas place label, control, and help the same way
+   whatever their order in the DOM. */
+.lc-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-areas:
+    "label"
+    "control"
+    "help";
+  row-gap: var(--lc-space-1);
+  min-width: 0;
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
+}
+
+.lc-field[data-label-position="side"] {
+  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-areas:
+    "label control"
+    "help control";
+  column-gap: var(--lc-space-4);
+  row-gap: 0;
+  align-items: center;
+}
+
+.lc-field-label {
+  grid-area: label;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 500;
+}
+
+.lc-field[data-label-position="side"] .lc-field-label {
+  color: var(--lc-text);
+  font-size: var(--lc-text-md);
+  font-weight: 400;
+}
+
+.lc-field-control {
+  grid-area: control;
+  min-width: 0;
+}
+
+.lc-field-help {
+  grid-area: help;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+}
+
+.lc-field-error {
+  color: var(--lc-danger);
+}
+
+/* The input well: Input, plus any icon or stepper buttons. */
+.lc-input-group {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  height: var(--lc-control-h);
+  min-width: 0;
+  border: 1px solid var(--lc-border-strong);
+  border-radius: var(--lc-radius);
+  background: var(--lc-field-bg);
+  color: var(--lc-text);
+  transition:
+    border-color var(--lc-motion-fast) var(--lc-ease),
+    box-shadow var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-input-group[data-hovered],
+.lc-input-group:hover {
+  border-color: color-mix(in srgb, var(--lc-border-strong), var(--lc-text) 12%);
+}
+
+.lc-input-group[data-focus-within],
+.lc-input-group:focus-within {
+  border-color: var(--lc-focus-ring);
+  box-shadow: 0 0 0 1px var(--lc-focus-ring);
+}
+
+.lc-input-group[data-invalid],
+.lc-field[data-invalid] .lc-input-group {
+  border-color: var(--lc-danger);
+}
+
+.lc-input-group[data-disabled],
+.lc-field[data-disabled] .lc-input-group {
+  opacity: 0.5;
+}
+
+.lc-input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  margin: 0;
+  padding: 0 var(--lc-space-2);
+  border: none;
+  outline: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--lc-text-md);
+}
+
+.lc-input::placeholder {
+  color: var(--lc-text-subtle);
+}
+
+.lc-input-group > .lc-input-adornment {
+  flex: none;
+  margin-left: var(--lc-space-2);
+  color: var(--lc-text-subtle);
+}
+
+.lc-input-group > .lc-input-adornment + .lc-input {
+  padding-left: var(--lc-space-1);
+}
+
+/* A small square button inside the well (clear, steppers). */
+.lc-input-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  box-sizing: border-box;
+  width: calc(var(--lc-control-h) - 8px);
+  height: calc(var(--lc-control-h) - 8px);
+  margin: 0 var(--lc-space-1) 0 0;
+  padding: 0;
+  border: none;
+  border-radius: var(--lc-radius-sm);
+  outline: none;
+  background: transparent;
+  color: var(--lc-text-subtle);
+  cursor: default;
+}
+
+.lc-input-button[data-hovered] {
+  background: var(--lc-surface-3);
+  color: var(--lc-text);
+}
+
+.lc-input-button[data-focus-visible] {
+  outline: 2px solid var(--lc-focus-ring);
+}
+
+.lc-input-button[data-disabled] {
+  opacity: 0.4;
+}
+
+.lc-number-input {
+  font-variant-numeric: tabular-nums;
+}
+
+.lc-input-button.lc-stepper-decrement {
+  margin: 0 0 0 var(--lc-space-1);
+}
+
+.lc-number-group:has(.lc-stepper-decrement) .lc-number-input {
+  padding: 0;
+  text-align: center;
+}
