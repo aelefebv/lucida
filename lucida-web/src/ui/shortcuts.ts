@@ -355,6 +355,12 @@ export function formatKeyCombo(combo: KeyCombo, apple = isApplePlatform()): stri
   return [...mods.map((m) => names[m]), KEY_LABELS[key] ?? key];
 }
 
+/** A `shortcut` prop or option as a list, empty when absent. */
+export function combosOf(keys: KeyCombo | readonly KeyCombo[] | undefined): readonly KeyCombo[] {
+  if (keys === undefined) return [];
+  return typeof keys === "string" ? [keys] : keys;
+}
+
 /** The combo as an `aria-keyshortcuts` value. */
 export function ariaKeyShortcut(combo: KeyCombo, apple = isApplePlatform()): string {
   const { mods, key } = split(combo);

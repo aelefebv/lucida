@@ -1,0 +1,95 @@
+/* A crowded toolbar must not squeeze the label and count away. */
+.lc-mentions-trigger {
+  flex: none;
+}
+
+.lc-mentions-count {
+  margin-left: var(--lc-space-2);
+}
+
+.lc-mentions-popover {
+  width: 320px;
+}
+
+.lc-mentions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+  max-height: 336px;
+}
+
+.lc-mentions-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lc-space-2);
+  padding-bottom: var(--lc-space-2);
+  border-bottom: 1px solid var(--lc-border);
+}
+
+.lc-mentions-summary {
+  font-weight: 600;
+}
+
+.lc-mentions-empty {
+  margin: 0;
+  color: var(--lc-text-muted);
+}
+
+.lc-mentions-list {
+  flex: 1;
+  min-height: 0;
+  margin: 0 calc(-1 * var(--lc-space-2));
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.lc-mentions-item {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--lc-control-h);
+  margin: 0;
+  padding: var(--lc-space-1) var(--lc-space-2);
+  border: none;
+  border-radius: var(--lc-radius);
+  background: transparent;
+  color: var(--lc-text-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lc-mentions-item-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Unread: full-strength text and an accent dot. */
+.lc-mentions-item[data-viewed="false"] {
+  color: var(--lc-text);
+  font-weight: 600;
+}
+
+.lc-mentions-item[data-viewed="false"]::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-accent);
+}
+
+.lc-mentions-item:hover {
+  background: var(--lc-surface-3);
+}
+
+.lc-mentions-item:focus-visible {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: -2px;
+}

@@ -1,16 +1,18 @@
 /**
  * Focal-depth slider: biases the 3D center-out chunk-spawn origin along the
- * near-far axis. Shown only in 3D, in the dimension-controls row beside
- * {@link DimensionControls}.
+ * near-far axis. Shown only in 3D, in the dimension bar's camera popover.
  *
  * Reads and writes {@link configStore} `depthBiasView` (-1..1, 0 = centered)
  * directly, so it persists like every other planning tunable. 0 leaves the
  * planner unchanged (see emit.ts `applyDepthBias`).
  */
 
+import { CrosshairSimpleIcon } from "@phosphor-icons/react";
 import { useSyncExternalStore } from "react";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import { DEPTH_BIAS_VIEW } from "../pipeline/planning/config.ts";
+import { IconButton } from "../ui/Button.tsx";
+import { Slider } from "../ui/Slider.tsx";
 
 /** Slider bounds for the near↔far bias. Mirrors the configStore field range. */
 const MIN = -1;
@@ -36,35 +38,32 @@ export function FocalDepthControl() {
   };
 
   return (
-    <div className="dim-control" data-testid="focal-depth-control">
-      <span className="dim-label" title="3D chunk-spawn focal depth (near↔far)">
-        Focal
-      </span>
-      <span className="dim-endcap" aria-hidden="true">
-        near
-      </span>
-      <input
-        type="range"
-        className="dim-slider"
-        aria-label="Focal depth (near↔far)"
-        min={MIN}
-        max={MAX}
+    <div className="lc-focal-depth" data-testid="focal-depth-control">
+      <div className="lc-focal-depth-header">
+        <span className="lc-focal-depth-label">Focal depth</span>
+        <IconButton
+          icon={CrosshairSimpleIcon}
+          size="sm"
+          label="Reset focal depth to center"
+          isDisabled={centered}
+          onPress={() => configStore.reset("depthBiasView")}
+        />
+      </div>
+      <p className="lc-focal-depth-hint">Which depth loads first.</p>
+      <Slider
+        label="Focal depth"
+        labelPosition="hidden"
+        valueDisplay="none"
+        minValue={MIN}
+        maxValue={MAX}
         step={STEP}
         value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+        onChange={onChange}
       />
-      <span className="dim-endcap" aria-hidden="true">
-        far
-      </span>
-      <button
-        className="dim-btn"
-        aria-label="Reset focal depth to center"
-        title="Reset focal depth to center"
-        disabled={centered}
-        onClick={() => configStore.reset("depthBiasView")}
-      >
-        ⌖
-      </button>
+      <div className="lc-focal-depth-ends" aria-hidden="true">
+        <span>Near</span>
+        <span>Far</span>
+      </div>
     </div>
   );
 }

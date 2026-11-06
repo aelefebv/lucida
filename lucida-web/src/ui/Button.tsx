@@ -1,7 +1,7 @@
 import type { Icon } from "@phosphor-icons/react";
 import { useEffect, useRef, type ReactNode } from "react";
 import { Button as AriaButton, ToggleButton } from "react-aria-components";
-import { ariaKeyShortcut, type KeyCombo } from "./shortcuts.ts";
+import { ariaKeyShortcut, combosOf, type KeyCombo } from "./shortcuts.ts";
 import { Tooltip, type TooltipPlacement } from "./Tooltip.tsx";
 import "./Button.css";
 
@@ -70,7 +70,7 @@ interface IconButtonBase {
   /** Names the action. It is the accessible name and the tooltip. */
   label: string;
   /** Shown in the tooltip; pass the keys you registered with `useShortcut`. */
-  shortcut?: KeyCombo;
+  shortcut?: KeyCombo | readonly KeyCombo[];
   tooltipPlacement?: TooltipPlacement;
   /** Default `ghost`. */
   variant?: "ghost" | "secondary";
@@ -112,11 +112,12 @@ export function IconButton(props: IconButtonProps) {
   } = props;
   const ref = useRef<HTMLButtonElement>(null);
   const isToggle = props.isSelected !== undefined;
+  const keyShortcuts = combosOf(shortcut).map((combo) => ariaKeyShortcut(combo)).join(" ");
   // React Aria drops aria-keyshortcuts from the props it forwards.
   useEffect(() => {
-    if (shortcut) ref.current?.setAttribute("aria-keyshortcuts", ariaKeyShortcut(shortcut));
+    if (keyShortcuts) ref.current?.setAttribute("aria-keyshortcuts", keyShortcuts);
     else ref.current?.removeAttribute("aria-keyshortcuts");
-  }, [shortcut, isToggle]);
+  }, [keyShortcuts, isToggle]);
   const common = {
     ref,
     className: cx("lc-button", "lc-icon-button", className),

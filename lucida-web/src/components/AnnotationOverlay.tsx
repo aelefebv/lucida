@@ -38,6 +38,7 @@ import { ThreadPopover } from "./ThreadPopover.tsx";
 import type { MentionCandidate } from "./annotationMentions.ts";
 
 import type { AnnotationOverlayHandle } from "./annotationDocument.ts";
+import "./AnnotationOverlay.css";
 
 interface Props {
   /** The dataset whose pins to show (annotations are scoped per dataset). */
@@ -69,9 +70,6 @@ interface Props {
   /** Passed through to {@link ThreadPopover}. */
   onGoToAuthorView?: (pinId: string) => void;
 }
-
-/** Resize handle side in CSS px, small so a handle doesn't swallow the box. */
-const HANDLE_SIZE = 10;
 
 /** CSS px to nudge each handle outward, so it straddles the stroke and the `nw`
  * handle clears the anchor dot. Cosmetic: resize math uses the cursor's world
@@ -603,73 +601,43 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
   if (!visible) return null;
 
   return (
-    <div
-      style={{
-        position: "absolute",
-        top: 0,
-        left: 0,
-        width: "100%",
-        height: "100%",
-        // Pins and their popovers accept clicks; the layer itself does not
-        // block canvas pan/zoom/pin-placement elsewhere.
-        pointerEvents: "none",
-        overflow: "hidden",
-        zIndex: 10,
-      }}
-    >
+    <div className="lc-annotation-layer">
       {/* One SVG element per line or box, beneath the DOM markers. The tick
           rewrites their coordinates every frame. */}
-      <svg
-        width="100%"
-        height="100%"
-        style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", overflow: "visible" }}
-      >
+      <svg className="lc-annotation-svg" width="100%" height="100%">
         {annotations.map((pin) => {
           if (pin.kind !== "line" && pin.kind !== "box") return null;
           if (!pin.end) return null;
-          const color = pin.author === String(myId) ? "#FF3B30" : "#FF9F0A";
-          // Dimmed off-context, like the dot.
-          const shapeOpacity = isOffContext(pin, viewContext) ? 0.5 : 1;
+          // Only an own box or line reveals handles on hover; a peer's stays
+          // inert.
+          const hoverable = isClosedShape(pin) ? isOwnBox(pin, myId) : isOwnLine(pin, myId);
+          const shapeProps = {
+            className: "lc-annotation-shape",
+            "data-testid": `annot-shape-${pin.id}`,
+            "data-author": pin.author === String(myId) ? "own" : "peer",
+            // Dimmed off-context, like the dot.
+            "data-off-context": isOffContext(pin, viewContext) || undefined,
+            "data-hoverable": hoverable || undefined,
+            onPointerEnter: hoverable ? () => revealHandles(pin.id) : undefined,
+            onPointerLeave: hoverable ? () => scheduleHideHandles(pin.id) : undefined,
+          };
           if (isClosedShape(pin)) {
-            // Only an own box reveals handles on hover; a peer's stays inert.
-            const hoverable = isOwnBox(pin, myId);
             return (
               <polygon
                 key={pin.id}
-                data-testid={`annot-shape-${pin.id}`}
+                {...shapeProps}
                 ref={(el) => {
                   if (el) shapeRefs.current.set(pin.id, el);
                   else shapeRefs.current.delete(pin.id);
                 }}
                 points=""
-                fill={color}
-                fillOpacity={0.12}
-                stroke={color}
-                strokeWidth={2.5}
-                strokeLinejoin="round"
-                opacity={shapeOpacity}
-                onPointerEnter={hoverable ? () => revealHandles(pin.id) : undefined}
-                onPointerLeave={hoverable ? () => scheduleHideHandles(pin.id) : undefined}
-                style={
-                  hoverable
-                    ? {
-                        // Hit-test only the stroke, so a press inside the box
-                        // still reaches the canvas. Only enter/leave are tracked,
-                        // so the shape never starts a gesture.
-                        pointerEvents: "stroke",
-                        cursor: "pointer",
-                      }
-                    : undefined
-                }
               />
             );
           }
-          // Only an own line reveals endpoint handles on hover.
-          const hoverable = isOwnLine(pin, myId);
           return (
             <line
               key={pin.id}
-              data-testid={`annot-shape-${pin.id}`}
+              {...shapeProps}
               ref={(el) => {
                 if (el) shapeRefs.current.set(pin.id, el);
                 else shapeRefs.current.delete(pin.id);
@@ -678,21 +646,6 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
               y1={0}
               x2={0}
               y2={0}
-              stroke={color}
-              strokeWidth={2.5}
-              strokeLinecap="round"
-              opacity={shapeOpacity}
-              onPointerEnter={hoverable ? () => revealHandles(pin.id) : undefined}
-              onPointerLeave={hoverable ? () => scheduleHideHandles(pin.id) : undefined}
-              style={
-                hoverable
-                  ? {
-                      // Hit-test only the stroke, as for the box outline.
-                      pointerEvents: "stroke",
-                      cursor: "pointer",
-                    }
-                  : undefined
-              }
             />
           );
         })}
@@ -708,6 +661,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         return BOX_HANDLES.map((h) => (
           <div
             key={`${pin.id}:${h}`}
+            className="lc-annotation-handle"
             data-testid={`annot-resize-${pin.id}-${h}`}
             title={`Resize this box (${h})`}
             ref={(el) => {
@@ -722,27 +676,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             // hide, leaving re-arms it.
             onPointerEnter={() => revealHandles(pin.id)}
             onPointerLeave={() => scheduleHideHandles(pin.id)}
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              transform: "translate(0px, 0px)",
-              willChange: "transform",
-              // Centered on the handle's projected point.
-              width: HANDLE_SIZE,
-              height: HANDLE_SIZE,
-              marginLeft: -HANDLE_SIZE / 2,
-              marginTop: -HANDLE_SIZE / 2,
-              boxSizing: "border-box",
-              backgroundColor: "white",
-              border: "1.5px solid #FF3B30",
-              borderRadius: 2,
-              boxShadow: "0 1px 2px rgba(0,0,0,0.5)",
-              pointerEvents: "auto",
-              touchAction: "none",
-              cursor: HANDLE_CURSOR[h],
-              zIndex: 3,
-            }}
+            style={{ transform: "translate(0px, 0px)", cursor: HANDLE_CURSOR[h] }}
           />
         ));
       })}
@@ -755,6 +689,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         return LINE_HANDLES.map((h) => (
           <div
             key={`${pin.id}:${h}`}
+            className="lc-annotation-handle"
             data-testid={`annot-resize-${pin.id}-${h}`}
             title={`Adjust this line's ${h === "start" ? "start" : "end"} point`}
             ref={(el) => {
@@ -768,28 +703,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             // Same hover region as the box handles.
             onPointerEnter={() => revealHandles(pin.id)}
             onPointerLeave={() => scheduleHideHandles(pin.id)}
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              transform: "translate(0px, 0px)",
-              willChange: "transform",
-              // Centered on the endpoint's projected point.
-              width: HANDLE_SIZE,
-              height: HANDLE_SIZE,
-              marginLeft: -HANDLE_SIZE / 2,
-              marginTop: -HANDLE_SIZE / 2,
-              boxSizing: "border-box",
-              backgroundColor: "white",
-              border: "1.5px solid #FF3B30",
-              borderRadius: 2,
-              boxShadow: "0 1px 2px rgba(0,0,0,0.5)",
-              pointerEvents: "auto",
-              touchAction: "none",
-              // An endpoint moves freely in both axes.
-              cursor: "move",
-              zIndex: 3,
-            }}
+            // An endpoint moves freely in both axes.
+            style={{ transform: "translate(0px, 0px)", cursor: "move" }}
           />
         ));
       })}
@@ -803,6 +718,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
         return (
           <div
             key={pin.id}
+            className="lc-annotation-anchor"
             data-testid={`annot-pin-wrapper-${pin.id}`}
             ref={(el) => {
               if (el) dotRefs.current.set(pin.id, el);
@@ -811,12 +727,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
             style={{
               // The marker is positioned via transform each frame; the popover
               // is an absolutely-positioned child anchored to it.
-              position: "absolute",
-              top: 0,
-              left: 0,
               transform: "translate(0px, 0px)",
-              willChange: "transform",
-              pointerEvents: "none",
               // Dimmed like an off-view peer cursor. An open thread is never
               // dimmed.
               opacity: offCtx && !isOpen ? 0.5 : 1,
@@ -829,7 +740,10 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
                 drives the gestures: a plain drag pans, Shift+drag moves. Delete
                 lives in the thread behind a confirm. */}
             <div
+              className="lc-annotation-pin"
               data-testid={`annot-pin-${pin.id}`}
+              data-author={mine ? "own" : "peer"}
+              data-off-context={offCtx || undefined}
               title={
                 mine
                   ? `Pin by you — click for thread, Shift+drag to move`
@@ -849,19 +763,6 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
                 setOpenPinId((cur) => (cur === pin.id ? null : pin.id));
               }}
               style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: 12,
-                height: 12,
-                marginLeft: -6,
-                marginTop: -6,
-                borderRadius: "50%",
-                backgroundColor: "#FF3B30",
-                // Dashed off-context, on top of the group dimming.
-                border: offCtx ? "2px dashed white" : "2px solid white",
-                boxShadow: "0 1px 3px rgba(0,0,0,0.6)",
-                pointerEvents: "auto",
                 // Own pins show the canvas's grab cursor, since a plain drag pans.
                 cursor: mine ? "grab" : "pointer",
                 touchAction: mine ? "none" : undefined,
