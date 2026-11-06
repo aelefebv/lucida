@@ -9,6 +9,7 @@
  */
 
 import type { ReactNode } from "react";
+import { Button } from "../ui/Button.tsx";
 import {
   formatMs,
   type MonitorBanner,
@@ -196,13 +197,9 @@ function CalloutCard({
       </ul>
       <p className="monitor-detail">{callout.detail}</p>
       {callout.drill && (
-        <button
-          type="button"
-          onClick={() => onDrill(callout.drill!)}
-          data-testid={`monitor-drill-${callout.id}`}
-        >
+        <Button size="sm" onPress={() => onDrill(callout.drill!)} data-testid={`monitor-drill-${callout.id}`}>
           Show the rows behind {callout.drill.phaseId}
-        </button>
+        </Button>
       )}
     </article>
   );
@@ -244,9 +241,9 @@ function DrillPanel({ drill, onClose }: { drill: MonitorDrill; onClose: () => vo
         Raw spans are not in the dock at any depth — a warm re-open is tens of thousands of rows.
         Save the run for Perfetto to ask a per-span question.
       </p>
-      <button type="button" onClick={onClose}>
+      <Button size="sm" onPress={onClose}>
         Close drill-down
-      </button>
+      </Button>
     </div>
   );
 }

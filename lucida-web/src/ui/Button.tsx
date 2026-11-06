@@ -21,8 +21,13 @@ export interface ButtonProps {
   isDisabled?: boolean;
   type?: "button" | "submit";
   autoFocus?: boolean;
+  /** For a disclosure: whether the region it shows and hides is open. */
+  "aria-expanded"?: boolean;
+  /** The id of the region a disclosure shows and hides. */
+  "aria-controls"?: string;
   /** For layout only (margins, flex). Never restyle a primitive. */
   className?: string;
+  "data-testid"?: string;
 }
 
 function cx(...names: (string | false | undefined)[]): string {
@@ -40,9 +45,11 @@ export function Button({
   type = "button",
   autoFocus,
   className,
+  ...attributes
 }: ButtonProps) {
   return (
     <AriaButton
+      {...attributes}
       className={cx("lc-button", className)}
       data-variant={variant}
       data-size={size}
@@ -71,6 +78,7 @@ interface IconButtonBase {
   size?: "sm" | "md" | "lg";
   isDisabled?: boolean;
   className?: string;
+  "data-testid"?: string;
 }
 
 interface ActionIconButtonProps extends IconButtonBase {
@@ -100,6 +108,7 @@ export function IconButton(props: IconButtonProps) {
     size = "md",
     isDisabled,
     className,
+    "data-testid": testId,
   } = props;
   const ref = useRef<HTMLButtonElement>(null);
   const isToggle = props.isSelected !== undefined;
@@ -114,6 +123,7 @@ export function IconButton(props: IconButtonProps) {
     "data-variant": variant,
     "data-size": size,
     "aria-label": label,
+    "data-testid": testId,
     isDisabled,
   };
   const glyph = <IconComponent size={size === "lg" ? 20 : 16} aria-hidden />;
