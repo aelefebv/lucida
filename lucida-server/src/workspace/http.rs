@@ -21,6 +21,7 @@ use crate::auth::AdminRequired;
 use crate::handler;
 
 use super::manager::WorkspaceManager;
+use super::preview;
 use super::types::{
     SavedViewVisibility, WorkspaceLinkAccess, WorkspaceRecord, WorkspaceRole, WorkspaceUserState,
 };
@@ -102,6 +103,10 @@ pub fn router(manager: Arc<WorkspaceManager>) -> Router {
         .route(
             "/api/workspaces/{workspace_id}/user-state",
             get(get_workspace_user_state),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/preview",
+            get(preview::get_preview).put(preview::put_preview),
         )
         .route(
             "/api/workspaces/{workspace_id}/duplicate",

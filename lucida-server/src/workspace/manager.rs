@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
+use chrono::{DateTime, Utc};
 use lucida_content::DatasetId;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
@@ -24,10 +25,12 @@ use crate::inbox::InboxStore;
 use crate::session::Session;
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
 
+use super::preview::{MIN_PREVIEW_INTERVAL, PreviewError, retry_after_secs, validate_preview};
 use super::store::{StoreError, WorkspaceStore, normalize_email};
 use super::types::{
-    SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
-    WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
+    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
+    WorkspacePreview, WorkspacePreviewMeta, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
     WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
 };
 
@@ -991,6 +994,67 @@ impl WorkspaceManager {
             .get_user_workspace_state_for(workspace_id, principal)
             .await
             .map_err(WorkspaceError::Store)
+    }
+
+    /// The workspace's preview, for anyone who may view the workspace. An
+    /// archived workspace's preview stays readable by its owners, who still
+    /// see its card on the archived shelf.
+    pub async fn workspace_preview(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<Option<WorkspacePreview>, WorkspaceError> {
+        let viewer = self
+            .store
+            .role_for(workspace_id, principal)
+            .await
+            .map_err(WorkspaceError::Store)?;
+        if viewer.is_none() {
+            self.require_owner_any_state(workspace_id, principal)
+                .await?;
+        }
+        self.store
+            .get_preview(workspace_id)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
+
+    /// Store a preview uploaded by an owner or editor at `now`.
+    ///
+    /// The role is checked before the bytes, so a viewer is told it may not
+    /// upload whatever it sent. The rate limit is the store's conditional
+    /// write rather than a read here, so two racing uploads cannot both
+    /// pass it.
+    pub async fn put_workspace_preview(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        declared_type: Option<&str>,
+        image: &[u8],
+        now: DateTime<Utc>,
+    ) -> Result<WorkspacePreviewMeta, PreviewError> {
+        self.require_editor(workspace_id, principal).await?;
+        let content_type = validate_preview(declared_type, image)?;
+        let interval = chrono::Duration::from_std(MIN_PREVIEW_INTERVAL).expect("a few seconds fit");
+        let written = self
+            .store
+            .put_preview(NewWorkspacePreview {
+                workspace_id,
+                content_type,
+                image,
+                updated_by: &principal.email,
+                updated_at: now,
+                replaces_up_to: now - interval,
+            })
+            .await
+            .map_err(WorkspaceError::Store)?;
+        match written {
+            Some(PreviewWrite::Stored(meta)) => Ok(meta),
+            Some(PreviewWrite::TooSoon { last_updated_at }) => Err(PreviewError::TooSoon {
+                retry_after_secs: retry_after_secs(last_updated_at, now),
+            }),
+            None => Err(WorkspaceError::NotFound.into()),
+        }
     }
 
     pub async fn live_workspace(

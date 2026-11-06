@@ -20,8 +20,9 @@ use sqlx::types::Json;
 use sqlx::{PgPool, Postgres, Row};
 
 use crate::workspace::types::{
-    SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
-    WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
+    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
+    WorkspacePreview, WorkspacePreviewMeta, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
     WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
 };
 
@@ -1304,6 +1305,63 @@ impl WorkspaceStore for PostgresWorkspaceStore {
         let email = normalize_email(&principal.email);
         self.get_user_workspace_state(workspace_id, &email).await
     }
+
+    async fn put_preview(
+        &self,
+        preview: NewWorkspacePreview<'_>,
+    ) -> Result<Option<PreviewWrite>, StoreError> {
+        if !self.workspace_exists(preview.workspace_id).await? {
+            return Ok(None);
+        }
+        let meta = WorkspacePreviewMeta {
+            workspace_id: preview.workspace_id.to_string(),
+            content_type: preview.content_type.to_string(),
+            size_bytes: preview.image.len() as i64,
+            updated_at: preview.updated_at.trunc_subsecs(6),
+            updated_by: normalize_email(preview.updated_by),
+        };
+        let result = sqlx::query(sql::UPSERT_PREVIEW)
+            .bind(&meta.workspace_id)
+            .bind(&meta.content_type)
+            .bind(meta.size_bytes)
+            .bind(preview.image)
+            .bind(meta.updated_at)
+            .bind(&meta.updated_by)
+            .bind(preview.replaces_up_to.trunc_subsecs(6))
+            .execute(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        if result.rows_affected() > 0 {
+            return Ok(Some(PreviewWrite::Stored(meta)));
+        }
+        let (last_updated_at,): (DateTime<Utc>,) = sqlx::query_as(sql::PREVIEW_UPDATED_AT)
+            .bind(preview.workspace_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        Ok(Some(PreviewWrite::TooSoon { last_updated_at }))
+    }
+
+    async fn get_preview(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspacePreview>, StoreError> {
+        let row = sqlx::query(sql::GET_PREVIEW)
+            .bind(workspace_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        Ok(row.map(|row| WorkspacePreview {
+            meta: WorkspacePreviewMeta {
+                workspace_id: row.get("workspace_id"),
+                content_type: row.get("content_type"),
+                size_bytes: row.get("size_bytes"),
+                updated_at: row.get("updated_at"),
+                updated_by: row.get("updated_by"),
+            },
+            image: row.get("image"),
+        }))
+    }
 }
 
 fn row_to_dataset_source(row: PgRow) -> WorkspaceDatasetSource {
@@ -1331,6 +1389,7 @@ fn row_to_summary(row: PgRow) -> Result<WorkspaceSummary, StoreError> {
         last_opened_at: row.get("last_opened_at"),
         pinned_at: row.get("pinned_at"),
         first_dataset_url: row.get("first_dataset_url"),
+        preview_updated_at: row.get("preview_updated_at"),
     })
 }
 

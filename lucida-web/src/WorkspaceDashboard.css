@@ -194,12 +194,12 @@
   opacity: 0.6;
 }
 
-/* Where a preview of the data will go once the server can make one. */
+/* The card's image area: the workspace's preview, or this placeholder. */
 .lc-ws-card-preview {
   display: flex;
   align-items: center;
   justify-content: center;
-  aspect-ratio: 3 / 1;
+  aspect-ratio: 2 / 1;
   border-bottom: 1px solid var(--lc-border);
   background:
     radial-gradient(circle at 1px 1px, var(--lc-border) 1px, transparent 0) 0 0 / 12px 12px,

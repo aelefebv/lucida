@@ -280,6 +280,12 @@ explore`, and the trace driver load headless. It hides all UI and writes no user
 state (`lucida-web/src/captureSurface.ts`).
 _Avoid_: render mode (`RenderMode` is a volume display setting), run
 
+**Workspace preview**:
+The image on a workspace's dashboard card: a frame a viewer captured from its
+own canvas once the view settled, uploaded by an owner or editor. The server
+stores it and never renders one.
+_Avoid_: thumbnail (an explore panel tile)
+
 **Open link**:
 A link to `/open?url=<dataset URL>` that creates a new workspace around the
 datasets it names and opens them.

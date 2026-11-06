@@ -18,6 +18,8 @@ export interface WorkspaceSummary {
   pinned_at: string | null;
   /** Canonical URL of the first dataset in layer order; null until one is opened. */
   first_dataset_url?: string | null;
+  /** When the workspace's preview image was last written; null until a viewer uploads one. */
+  preview_updated_at?: string | null;
 }
 
 export interface WorkspaceRecord {

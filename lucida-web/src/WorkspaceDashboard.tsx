@@ -11,7 +11,6 @@ import {
   PlusIcon,
   PushPinIcon,
   SquaresFourIcon,
-  StackIcon,
   type Icon,
   type IconProps,
 } from "@phosphor-icons/react";
@@ -57,6 +56,7 @@ import {
 } from "./workspaceApi.ts";
 import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
 import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
+import { WorkspacePreview } from "./workspacePreview/WorkspacePreview.tsx";
 import "./WorkspaceDashboard.css";
 
 interface Props {
@@ -502,9 +502,7 @@ function WorkspaceCard({
 
   return (
     <li className="lc-ws-card" data-pinned={isPinned || undefined} aria-busy={busy || undefined}>
-      <div className="lc-ws-card-preview" aria-hidden="true">
-        <StackIcon size={28} />
-      </div>
+      <WorkspacePreview workspaceId={workspace.id} updatedAt={workspace.preview_updated_at} />
       <div className="lc-ws-card-body">
         <div className="lc-ws-card-title">
           <a

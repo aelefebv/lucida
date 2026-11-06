@@ -3,6 +3,7 @@ import {
   ChartLineIcon,
   CopyIcon,
   GaugeIcon,
+  ImageSquareIcon,
   SidebarSimpleIcon,
   SquaresFourIcon,
   WrenchIcon,
@@ -26,6 +27,8 @@ export interface TopBarProps {
   /** Renames the workspace; omit when the user may not. */
   onRenameWorkspace?: (name: string) => Promise<void>;
   onBackToDashboard: () => void;
+  /** Makes the current view the workspace's dashboard preview; omit when the user may not. */
+  onUseViewAsPreview?: () => void;
   presence: PresenceAvatarsProps;
   /** The Share control. */
   share?: ReactNode;
@@ -38,6 +41,7 @@ export function TopBar({
   workspaceName,
   onRenameWorkspace,
   onBackToDashboard,
+  onUseViewAsPreview,
   presence,
   share,
   developer,
@@ -83,6 +87,11 @@ export function TopBar({
           <MenuItem icon={CopyIcon} onAction={copyWorkspaceId}>
             Copy workspace id
           </MenuItem>
+          {onUseViewAsPreview && (
+            <MenuItem icon={ImageSquareIcon} onAction={onUseViewAsPreview}>
+              Use this view as the preview
+            </MenuItem>
+          )}
           <MenuItem icon={SquaresFourIcon} onAction={onBackToDashboard}>
             All workspaces
           </MenuItem>
