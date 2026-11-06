@@ -16,7 +16,7 @@ import { __resetShortcutsForTesting } from "../ui/shortcuts.ts";
 import { CanvasStage } from "./CanvasStage.tsx";
 import { leftPanelOpenPreference, leftPanelWidthPreference } from "./layoutPreferences.ts";
 import { LeftPanel } from "./LeftPanel.tsx";
-import { PresenceAvatars } from "./PresenceAvatars.tsx";
+import { CompactPresence, PresenceAvatars } from "./PresenceAvatars.tsx";
 import { SettingsMenu } from "./SettingsMenu.tsx";
 
 // The palette comes from the wasm module, which these tests never load.
@@ -165,5 +165,44 @@ describe("PresenceAvatars", () => {
     // Four avatars and a "+2" for the rest.
     expect(screen.getAllByRole("button", { name: /Follow Person|following someone/ })).toHaveLength(4);
     expect(screen.getByRole("button", { name: "+2" })).toBeTruthy();
+  });
+});
+
+describe("CompactPresence", () => {
+  it("shows nothing when nobody else is here", () => {
+    const { container } = render(<CompactPresence peers={new Map()} followTarget={null} onFollow={() => {}} />);
+    expect(container.innerHTML).toBe("");
+  });
+
+  it("is one button that counts everyone and follows from its menu", async () => {
+    const onFollow = vi.fn();
+    const peers = new Map([1, 2, 3].map((id) => [id, peer(id, id === 2 ? 1 : null)]));
+    render(<CompactPresence peers={peers} followTarget={null} onFollow={onFollow} />);
+
+    const trigger = screen.getByRole("button", { name: "3 other people here" });
+    expect(trigger.textContent).toContain("+1");
+    await act(async () => {
+      fireEvent.click(trigger);
+    });
+    const busy = await screen.findByRole("menuitem", { name: "Person 2 is following someone" });
+    expect(busy.getAttribute("aria-disabled")).toBe("true");
+    await act(async () => {
+      fireEvent.click(screen.getByRole("menuitem", { name: "Follow Person 3" }));
+    });
+    expect(onFollow).toHaveBeenCalledWith(3);
+  });
+
+  it("names whom it follows, and stops from the menu", async () => {
+    const onFollow = vi.fn();
+    const peers = new Map([1, 2].map((id) => [id, peer(id, null)]));
+    render(<CompactPresence peers={peers} followTarget={2} onFollow={onFollow} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Following Person 2, 2 other people here" }));
+    });
+    await act(async () => {
+      fireEvent.click(await screen.findByRole("menuitem", { name: "Stop following Person 2" }));
+    });
+    expect(onFollow).toHaveBeenCalledWith(null);
   });
 });

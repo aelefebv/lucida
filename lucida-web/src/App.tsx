@@ -1294,6 +1294,11 @@ function App({
       ),
     },
   ];
+  const presence = {
+    peers: bridge.peers,
+    followTarget: bridge.followTarget,
+    onFollow: bridge.handleFollow,
+  };
   const shareProps = {
     workspaceId,
     canManageAccess: workspaceRole === "owner",
@@ -1313,6 +1318,7 @@ function App({
             onBackToDashboard={onBackToDashboard}
             onUseViewAsPreview={takeViewAsPreview}
             share={shareProps}
+            presence={presence}
           />
         ) : (
           <TopBar
@@ -1321,11 +1327,7 @@ function App({
             onRenameWorkspace={canRenameWorkspace ? onRenameWorkspace : undefined}
             onBackToDashboard={onBackToDashboard}
             onUseViewAsPreview={takeViewAsPreview}
-            presence={{
-              peers: bridge.peers,
-              followTarget: bridge.followTarget,
-              onFollow: bridge.handleFollow,
-            }}
+            presence={presence}
             share={<ShareButton {...shareProps} />}
             developer={developer}
           />
