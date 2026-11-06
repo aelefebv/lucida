@@ -1140,8 +1140,8 @@ function App({
               onLabelSetVisible={layers.handleLabelSetVisible}
               onLabelSetOpacity={layers.handleLabelSetOpacity}
               onAddLayer={() => setAddDataOpen(true)}
-              viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
-              cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
+              viewModeToggle={null}
+              cameraModeToggle={null}
               layoutRegistry={layoutRegistry}
               sendCommand={bridge.sendCommand}
               onLayoutChange={() => {
@@ -1239,17 +1239,22 @@ function App({
               "bottom-center": hasData && (
                 <DimensionBar
                   viewMode={dims.viewMode}
+                  onViewModeToggle={dims.handleViewModeToggle}
                   z={dims.z}
                   dimZ={dims.dimZ}
                   onZChange={dims.handleZChange}
-                  c={dims.c}
-                  dimC={dims.dimC}
-                  onCChange={dims.handleCChange}
                   t={dims.t}
                   dimT={dims.dimT}
                   onTChange={dims.handleTChange}
-                  multiChannel={dims.multiChannel}
-                  onMultiChannelToggle={dims.handleMultiChannelToggle}
+                  cameraMode={cameraMode === "fly" ? "fly" : "arcball"}
+                  onCameraModeToggle={handleCameraModeToggle}
+                  channel={{
+                    c: dims.c,
+                    dimC: dims.dimC,
+                    onCChange: dims.handleCChange,
+                    multiChannel: dims.multiChannel,
+                    onMultiChannelToggle: dims.handleMultiChannelToggle,
+                  }}
                 />
               ),
               // Mounted before any dataset opens, and only hidden until one
