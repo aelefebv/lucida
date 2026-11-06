@@ -68,3 +68,20 @@
   width: 100%;
   margin-top: var(--lc-space-2);
 }
+
+.lc-navigator-panel-body {
+  padding: var(--lc-space-3);
+}
+
+/* In a panel the cells share the width up to their full size and stay
+   square, so a wide collection still fits a phone. */
+.lc-navigator-panel .lc-navigator-grid {
+  grid-template-columns: auto repeat(var(--navigator-columns), minmax(0, var(--navigator-cell)));
+  grid-auto-rows: auto;
+}
+
+.lc-navigator-panel .lc-navigator-cell {
+  width: 100%;
+  height: auto;
+  aspect-ratio: 1;
+}

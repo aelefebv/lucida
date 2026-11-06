@@ -1,0 +1,45 @@
+/* The bar meets the top and both sides of the screen, so it takes their
+   safe-area insets. */
+.lc-phone-topbar {
+  position: relative;
+  z-index: var(--lc-z-panel);
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--lc-space-1);
+  box-sizing: border-box;
+  height: calc(var(--lc-control-h) + var(--lc-space-2) + var(--lc-safe-top));
+  padding: var(--lc-safe-top) calc(var(--lc-space-1) + var(--lc-safe-right)) 0
+    calc(var(--lc-space-1) + var(--lc-safe-left));
+  border-bottom: 1px solid var(--lc-border);
+  background: var(--lc-surface-1);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-lg);
+}
+
+/* Takes what the buttons leave, and cuts a long name short. */
+.lc-phone-topbar-name {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.lc-phone-topbar-name > .lc-workspace-name {
+  max-width: 100%;
+}
+
+/* Fields under 16px make iOS zoom the page into them. */
+.lc-phone-topbar-name > input.lc-workspace-name {
+  min-width: 0;
+  font-size: max(var(--lc-text-lg), var(--lc-text-input));
+}
+
+/* The account menu's sections, laid out for a dialog rather than a dropdown. */
+.lc-phone-account {
+  margin: calc(-1 * var(--lc-space-2)) calc(-1 * var(--lc-space-3)) 0;
+}
+
+.lc-phone-account > .lc-profile-section:last-of-type {
+  border-bottom: 0;
+}

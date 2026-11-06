@@ -16,12 +16,25 @@ import { Select } from "../ui/Select.tsx";
 import { Switch } from "../ui/Switch.tsx";
 import "./SettingsMenu.css";
 
+/** The settings in a popover off the top bar. */
+export function SettingsMenu() {
+  return (
+    <Popover
+      label="Settings"
+      placement="bottom end"
+      trigger={<IconButton icon={GearSixIcon} label="Settings" tooltipPlacement="bottom" />}
+    >
+      <SettingsPanel />
+    </Popover>
+  );
+}
+
 /**
  * Appearance, the cards over the canvas, and developer tools. Each control
  * writes its preference as it changes, so the change shows at once and
  * survives a reload.
  */
-export function SettingsMenu() {
+export function SettingsPanel() {
   const [theme, setTheme] = usePreference(themePreference);
   const [accent, setAccent] = usePreference(accentPreference);
   const [density, setDensity] = usePreference(densityPreference);
@@ -30,67 +43,61 @@ export function SettingsMenu() {
   const accentLabelId = useId();
 
   return (
-    <Popover
-      label="Settings"
-      placement="bottom end"
-      trigger={<IconButton icon={GearSixIcon} label="Settings" tooltipPlacement="bottom" />}
-    >
-      <div className="lc-settings">
-        <h2 className="lc-settings-heading">Appearance</h2>
-        <SegmentedControl
-          label="Theme"
-          labelPosition="side"
-          size="sm"
-          options={[
-            { value: "dark", label: "Dark" },
-            { value: "light", label: "Light" },
-            { value: "system", label: "System" },
-          ]}
-          value={theme}
-          onChange={setTheme}
-        />
-        <div className="lc-settings-row" role="group" aria-labelledby={accentLabelId}>
-          <span id={accentLabelId} className="lc-settings-label">
-            Accent
-          </span>
-          <AccentPicker value={accent} onChange={setAccent} />
-        </div>
-        <SegmentedControl
-          label="Density"
-          labelPosition="side"
-          size="sm"
-          options={[
-            { value: "comfortable", label: "Comfortable" },
-            { value: "compact", label: "Compact" },
-          ]}
-          value={density}
-          onChange={setDensity}
-        />
-        <Select
-          label="Canvas"
-          labelPosition="side"
-          description="Separate from the theme"
-          options={[
-            { value: "black", label: "Black" },
-            { value: "dark-gray", label: "Dark gray" },
-            { value: "white", label: "White" },
-            { value: "theme", label: "Match theme" },
-          ]}
-          value={canvas}
-          onChange={setCanvas}
-          className="lc-settings-select"
-        />
-        <div className="lc-settings-divider" role="presentation" />
-        <h2 className="lc-settings-heading">View</h2>
-        <CanvasCardSwitches />
-        <div className="lc-settings-divider" role="presentation" />
-        <Switch
-          label="Developer tools"
-          description="Monitor, HUD, dev controls, and frame rate"
-          isSelected={developerTools}
-          onChange={setDeveloperTools}
-        />
+    <div className="lc-settings">
+      <h2 className="lc-settings-heading">Appearance</h2>
+      <SegmentedControl
+        label="Theme"
+        labelPosition="side"
+        size="sm"
+        options={[
+          { value: "dark", label: "Dark" },
+          { value: "light", label: "Light" },
+          { value: "system", label: "System" },
+        ]}
+        value={theme}
+        onChange={setTheme}
+      />
+      <div className="lc-settings-row" role="group" aria-labelledby={accentLabelId}>
+        <span id={accentLabelId} className="lc-settings-label">
+          Accent
+        </span>
+        <AccentPicker value={accent} onChange={setAccent} />
       </div>
-    </Popover>
+      <SegmentedControl
+        label="Density"
+        labelPosition="side"
+        size="sm"
+        options={[
+          { value: "comfortable", label: "Comfortable" },
+          { value: "compact", label: "Compact" },
+        ]}
+        value={density}
+        onChange={setDensity}
+      />
+      <Select
+        label="Canvas"
+        labelPosition="side"
+        description="Separate from the theme"
+        options={[
+          { value: "black", label: "Black" },
+          { value: "dark-gray", label: "Dark gray" },
+          { value: "white", label: "White" },
+          { value: "theme", label: "Match theme" },
+        ]}
+        value={canvas}
+        onChange={setCanvas}
+        className="lc-settings-select"
+      />
+      <div className="lc-settings-divider" role="presentation" />
+      <h2 className="lc-settings-heading">View</h2>
+      <CanvasCardSwitches />
+      <div className="lc-settings-divider" role="presentation" />
+      <Switch
+        label="Developer tools"
+        description="Monitor, HUD, dev controls, and frame rate"
+        isSelected={developerTools}
+        onChange={setDeveloperTools}
+      />
+    </div>
   );
 }

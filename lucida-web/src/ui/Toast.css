@@ -10,9 +10,12 @@
   flex-direction: column-reverse;
   gap: var(--lc-space-2);
   outline: none;
+  /* Over the canvas, only the toasts themselves take a press or a gesture. */
+  pointer-events: none;
 }
 
 .lc-toast {
+  pointer-events: auto;
   display: flex;
   align-items: flex-start;
   gap: var(--lc-space-3);

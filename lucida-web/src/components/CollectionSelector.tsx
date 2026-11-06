@@ -3,6 +3,7 @@ import type { DatasetManifest, DatasetKind, Entity, LayoutSpec } from "../manife
 import { buildManifestIndex, entityExtent, type VoxelRect } from "../pipeline/layoutBuilders.ts";
 import { usePreference } from "../theme/preferences.ts";
 import { Button } from "../ui/Button.tsx";
+import { PanelHeader } from "../ui/PanelHeader.tsx";
 import { CanvasCard } from "./CanvasCard.tsx";
 import { navigatorCardPreference } from "./canvasCards.ts";
 import { groupAt, unionRects } from "./groupFraming.ts";
@@ -37,6 +38,13 @@ interface CollectionSelectorProps {
    */
   getViewCenter?: () => ArrayLike<number> | null;
   onPositioningModeToggle?: () => void;
+  /**
+   * `card` floats over the canvas; `panel` fills a panel, with cells sized
+   * for a finger where there is room. Default `card`.
+   */
+  variant?: "card" | "panel";
+  /** Whether the panel shows; a hidden one draws nothing. Panel only. */
+  visible?: boolean;
 }
 
 /**
@@ -116,6 +124,12 @@ function cellSize(columns: number): number {
   return 10;
 }
 
+/**
+ * The largest cell edge in a panel: a finger's width. The grid shrinks it to
+ * fit a wide collection (CollectionSelector.css).
+ */
+const PANEL_CELL = 40;
+
 const groupKey = (row: number, column: number) => `${row},${column}`;
 
 export function CollectionSelector({
@@ -125,9 +139,12 @@ export function CollectionSelector({
   onGroupClick,
   getViewCenter,
   onPositioningModeToggle,
+  variant = "card",
+  visible = true,
 }: CollectionSelectorProps) {
   const { rows, columns } = collectionKind;
   const [cardState] = usePreference(navigatorCardPreference);
+  const panel = variant === "panel";
 
   // Members by the group their row and column labels put them in.
   const groupMembers = useMemo(() => {
@@ -165,7 +182,7 @@ export function CollectionSelector({
 
   // The camera moves without a React render, so the mark follows it on the
   // frame clock and re-renders only when the group changes.
-  const watching = cardState !== "hidden" && getViewCenter !== undefined;
+  const watching = (panel ? visible : cardState !== "hidden") && getViewCenter !== undefined;
   useEffect(() => {
     if (!watching) return;
     let lastX = NaN;
@@ -186,7 +203,7 @@ export function CollectionSelector({
   };
 
   const current = currentKey === null ? undefined : groups.find((g) => g.key === currentKey);
-  const cell = cellSize(columns.length);
+  const cell = panel ? PANEL_CELL : cellSize(columns.length);
   // Below 14px a column number is wider than its cell, so every other one shows.
   const labelStep = cell < 14 ? 2 : 1;
   const gridStyle = {
@@ -197,14 +214,8 @@ export function CollectionSelector({
   const showToggle = collectionKind.has_explicit_positions && onPositioningModeToggle != null;
   const explicit = collectionKind.positioning_mode === "Explicit";
 
-  return (
-    <CanvasCard
-      title={collectionName}
-      meta={current?.name}
-      label="Collection selector"
-      preference={navigatorCardPreference}
-      padding="sm"
-    >
+  const body = (
+    <>
       <div className="lc-navigator-grid" role="group" aria-label="Groups" style={gridStyle}>
         <span aria-hidden="true" />
         {columns.map((column, c) => (
@@ -243,6 +254,27 @@ export function CollectionSelector({
           {explicit ? "Grid layout" : "Explicit positions"}
         </Button>
       )}
+    </>
+  );
+
+  if (panel) {
+    if (!visible) return null;
+    return (
+      <div className="lc-navigator-panel">
+        <PanelHeader title={collectionName} meta={current?.name} />
+        <div className="lc-navigator-panel-body">{body}</div>
+      </div>
+    );
+  }
+  return (
+    <CanvasCard
+      title={collectionName}
+      meta={current?.name}
+      label="Collection selector"
+      preference={navigatorCardPreference}
+      padding="sm"
+    >
+      {body}
     </CanvasCard>
   );
 }
