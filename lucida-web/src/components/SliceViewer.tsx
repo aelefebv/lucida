@@ -10,7 +10,8 @@ import { buildAnnotationView, liveViewWithLiveZTC } from "../savedView/buildAnno
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
-import { eventToWorld as sceneEventToWorld } from "./cameraProjection.ts";
+import { eventToWorld as sceneEventToWorld, type ClientPoint } from "./cameraProjection.ts";
+import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { useCommand } from "../ui/commands.ts";
 import { pushEscapeLayer } from "../ui/escape.ts";
 import { comboFromEvent, useShortcut } from "../ui/shortcuts.ts";
@@ -19,6 +20,8 @@ import { comboFromEvent, useShortcut } from "../ui/shortcuts.ts";
 const KEY_PAN_FRACTION = 0.1;
 /** `+` and `-` zoom about the center by this factor. */
 const KEY_ZOOM_FACTOR = 1.25;
+/** A double tap zooms in, and a two-finger tap out, by this factor. */
+const TAP_ZOOM_FACTOR = 2;
 /** Which way each arrow moves the camera, so the image moves the other way. */
 const PAN_DIRECTIONS: Readonly<Record<string, readonly [number, number]>> = {
   ArrowLeft: [-1, 0],
@@ -59,9 +62,11 @@ interface Props {
   /** Live box/line draw preview in canvas-relative CSS px, rendered by
    * {@link AnnotationDraftOverlay}. Cleared on release or cancel. */
   annotationDraftRef: RefObject<AnnotationDraft | null>;
+  /** A touch long press on the canvas, at its client point. */
+  onLongPress?: (at: ClientPoint) => void;
 }
 
-export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
+export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
@@ -89,6 +94,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
   const myIdRef = useRef(myId);
   const sendCommandRef = useRef(sendCommand);
   const onDocumentChangedRef = useRef(onDocumentChanged);
+  const onLongPressRef = useRef(onLongPress);
   // Refreshed after every commit, not during render: these refs are read only in
   // pointer events and RAF ticks, so render stays free of ref writes.
   useEffect(() => {
@@ -100,6 +106,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     myIdRef.current = myId;
     sendCommandRef.current = sendCommand;
     onDocumentChangedRef.current = onDocumentChanged;
+    onLongPressRef.current = onLongPress;
   });
 
   // Create/start render loop. Deliberately omits `datasets` (live mutable
@@ -130,7 +137,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
   /** Convert a pointer event to 2D world coords via the shared inverse camera
    * projection. */
   const eventToWorld = useCallback(
-    (e: PointerEvent): [number, number] => sceneEventToWorld(scene, canvas, e),
+    (e: ClientPoint): [number, number] => sceneEventToWorld(scene, canvas, e),
     [canvas, scene],
   );
 
@@ -142,10 +149,13 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     annotationDraftRef.current = null;
   }, [annotationDraftRef]);
 
-  const onPointerDown = useCallback(
-    (e: PointerEvent) => {
+  // A press, from a mouse, a pen, or a finger drawing with a tool. Touch
+  // navigation goes through the gesture recognizer instead, so the pointer
+  // handlers skip touch.
+  const beginPress = useCallback(
+    (e: ClientPoint, shiftKey: boolean) => {
       pressStart.current?.endEscape();
-      const kind = pressAnnotationKind(toolRef.current, e.shiftKey);
+      const kind = pressAnnotationKind(toolRef.current, shiftKey);
       pressStart.current = {
         x: e.clientX,
         y: e.clientY,
@@ -156,13 +166,21 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       };
       setDragging(kind === null);
       lastPos.current = { x: e.clientX, y: e.clientY };
-      canvas.setPointerCapture(e.pointerId);
     },
-    [canvas, eventToWorld, cancelPress],
+    [eventToWorld, cancelPress],
   );
 
-  const onPointerMove = useCallback(
+  const onPointerDown = useCallback(
     (e: PointerEvent) => {
+      if (e.pointerType === "touch") return;
+      beginPress(e, e.shiftKey);
+      canvas.setPointerCapture(e.pointerId);
+    },
+    [canvas, beginPress],
+  );
+
+  const movePress = useCallback(
+    (e: ClientPoint) => {
       const dpr = devicePixelRatio;
       const rect = canvas.getBoundingClientRect();
       sendCursor(eventToWorld(e));
@@ -201,8 +219,15 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     [scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef, eventToWorld],
   );
 
-  const onPointerUp = useCallback(
+  const onPointerMove = useCallback(
     (e: PointerEvent) => {
+      if (e.pointerType !== "touch") movePress(e);
+    },
+    [movePress],
+  );
+
+  const endPress = useCallback(
+    (e: ClientPoint) => {
       const press = pressStart.current;
       pressStart.current = null;
       press?.endEscape();
@@ -262,8 +287,20 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     [eventToWorld, scene, annotationDraftRef],
   );
 
+  const onPointerUp = useCallback(
+    (e: PointerEvent) => {
+      if (e.pointerType !== "touch") endPress(e);
+    },
+    [endPress],
+  );
+
   // A cancelled gesture never drops a pin.
-  const onPointerCancel = cancelPress;
+  const onPointerCancel = useCallback(
+    (e: PointerEvent) => {
+      if (e.pointerType !== "touch") cancelPress();
+    },
+    [cancelPress],
+  );
 
   const onPointerLeave = useCallback(() => {
     sendCursor(null);
@@ -309,6 +346,61 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     emitPresence();
     loopRef.current?.markInput(input);
   };
+
+  /** Zoom by `factor`, moving the world point under `from` to `to`: the wheel's
+   * anchoring, with room for the fingers to travel while they pinch. */
+  const zoomBetween = (from: ClientPoint, to: ClientPoint, factor: number) => {
+    const dpr = devicePixelRatio;
+    const rect = canvas.getBoundingClientRect();
+    const [worldX, worldY] = sceneEventToWorld(scene, canvas, from);
+    applyViewportCommand(scene, { type: "zoom_by", factor });
+    const zoom = scene.zoom();
+    const offsetX = (to.clientX - rect.left) * dpr - (canvas.clientWidth * dpr) / 2;
+    const offsetY = (to.clientY - rect.top) * dpr - (canvas.clientHeight * dpr) / 2;
+    applyViewportCommand(scene, { type: "set_center", x: worldX - offsetX / zoom, y: worldY - offsetY / zoom });
+  };
+
+  // One finger pans, or draws with a tool; two pinch and pan in one move.
+  useTouchGestures(canvas, true, {
+    claimsPress: () => toolRef.current !== "pan",
+    onGesture: (g) => {
+      switch (g.type) {
+        case "pressStart":
+          beginPress(clientPoint(g), false);
+          break;
+        case "pressMove":
+          movePress(clientPoint(g));
+          break;
+        case "pressEnd":
+          endPress(clientPoint(g));
+          break;
+        case "pressCancel":
+          cancelPress();
+          break;
+        case "drag": {
+          const dpr = devicePixelRatio;
+          moveView(() => applyViewportCommand(scene, { type: "pan", dx: -g.dx * dpr, dy: -g.dy * dpr }), "pan");
+          sendCursor(eventToWorld(clientPoint(g)));
+          break;
+        }
+        case "pinch": {
+          const from = { clientX: g.x - g.dx, clientY: g.y - g.dy };
+          moveView(() => zoomBetween(from, clientPoint(g), g.scale), g.scale === 1 ? "pan" : "zoom");
+          sendCursor(eventToWorld(clientPoint(g)));
+          break;
+        }
+        case "doubleTap":
+          moveView(() => zoomBetween(clientPoint(g), clientPoint(g), TAP_ZOOM_FACTOR), "zoom");
+          break;
+        case "twoFingerTap":
+          moveView(() => zoomBetween(clientPoint(g), clientPoint(g), 1 / TAP_ZOOM_FACTOR), "zoom");
+          break;
+        case "longPress":
+          onLongPressRef.current?.(clientPoint(g));
+          break;
+      }
+    },
+  });
 
   useShortcut({
     id: "view.pan",

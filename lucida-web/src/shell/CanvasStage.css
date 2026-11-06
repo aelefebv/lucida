@@ -17,6 +17,13 @@
   height: 100%;
   background-color: var(--lc-canvas-bg);
   outline: none;
+  /* The viewers handle every touch on the canvas (src/input), so a pinch here
+     zooms the view, never the page; the rest of the page stays zoomable. A
+     long press shouldn't select or call out either. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
 }
 
 /* Layers cover the canvas and pass pointer events through; the markers in
