@@ -21,9 +21,6 @@ export const keyBindings = {
   // Clip distance
   "clip.decrease": "[",
   "clip.increase": "]",
-
-  // HUD
-  "hud.toggle": "h",
 } as const;
 
 export type ActionName = keyof typeof keyBindings;

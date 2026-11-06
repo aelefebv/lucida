@@ -15,7 +15,9 @@ const PEER_COLORS = [
   "#F8B500",
 ];
 
-function peerColor(clientId: ClientId): string {
+// Shared with the top bar's presence avatars, so a peer's avatar and cursor match.
+// eslint-disable-next-line react-refresh/only-export-components
+export function peerColor(clientId: ClientId): string {
   return PEER_COLORS[clientId % PEER_COLORS.length];
 }
 

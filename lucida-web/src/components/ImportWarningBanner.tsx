@@ -36,12 +36,6 @@ export function ImportWarningBanner({ warnings, overflow = 0, onDismiss }: Props
       role="status"
       data-testid="import-warning-banner"
       style={{
-        position: "absolute",
-        // Below the loading banner (top: 12), so both stay readable when an
-        // open restores a view and warns.
-        top: 72,
-        left: "50%",
-        transform: "translateX(-50%)",
         display: "flex",
         flexDirection: "column",
         background: "#5a3a00",
@@ -50,8 +44,8 @@ export function ImportWarningBanner({ warnings, overflow = 0, onDismiss }: Props
         borderRadius: 6,
         border: "1px solid #b88500",
         fontSize: "0.85rem",
-        zIndex: 50,
-        maxWidth: 480,
+        maxWidth: "min(480px, 100%)",
+        boxSizing: "border-box",
         boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
       }}
     >

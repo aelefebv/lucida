@@ -1,105 +1,78 @@
-.app {
-  position: relative; /* anchors absolute-positioned ProfileMenu */
-  display: flex;
-  flex-direction: row;
-  align-items: stretch;
-  height: 100vh;
-  width: 100%;
+/* The viewer shell: the top bar over a row of the left panel, the canvas
+   column, and the right rail. The canvas takes whatever the panels leave. */
+
+/* body is a flex row; let the shell take its width. */
+#root:has(> .lc-shell) {
+  flex: 1;
+  min-width: 0;
 }
 
-.main-content {
+.lc-shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  background: var(--lc-bg);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+}
+
+.lc-shell-body {
+  display: flex;
   flex: 1;
+  min-height: 0;
+}
+
+.lc-shell-center {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* Frames the monitor dock, which positions itself against the viewport,
+   so it spans the canvas column instead of the window: layout containment
+   makes this the containing block for its fixed position. */
+.lc-shell-dock {
+  position: absolute;
+  inset: 0;
+  z-index: var(--lc-z-panel);
+  contain: layout;
+  pointer-events: none;
+}
+
+.lc-shell-dock > * {
+  pointer-events: auto;
+}
+
+.lc-shell-empty {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 1rem;
-  padding: 1rem;
-  overflow: auto;
+  gap: var(--lc-space-3);
+  padding: var(--lc-space-6);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  background: var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-md);
 }
 
-/* Chrome-free capture surface (`?render=1`), used by `dataset montage` and
-   `dataset explore`: hide every piece of UI so a headless screenshot is pure data
-   on the WebGPU canvas, and let the canvas fill the whole viewport. The render
-   loop draws to the canvas independent of the overlay DOM, so hiding overlays
-   never stops rendering. `> :not(canvas)` also sweeps up any future overlay.
-   The surface also has a behavioural half — it writes no user state (#923);
-   the rule and its boundaries live in `captureSurface.ts`. */
-.app.render-mode {
-  overflow: hidden;
+.lc-shell-empty p {
+  margin: 0;
 }
 
-.app.render-mode .layer-panel,
-.app.render-mode .sidebar-resize-handle,
-.app.render-mode .workspace-chrome,
-.app.render-mode .peer-list {
-  display: none !important;
-}
-
-.app.render-mode .main-content {
-  padding: 0;
-  gap: 0;
-  align-items: stretch;
-  overflow: hidden;
-}
-
-.app.render-mode .viewer-canvas-wrap > :not(canvas) {
-  display: none !important;
-}
-
-.app.render-mode canvas {
-  border-radius: 0 !important;
-}
-
-.workspace-chrome {
-  width: 100%;
-  display: grid;
-  grid-template-columns: auto minmax(14rem, 28rem) minmax(0, 1fr);
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.workspace-back-button {
-  padding: 0.375rem 0.75rem;
-  font-size: 0.875rem;
-  white-space: nowrap;
-}
-
-.workspace-name-input,
-.workspace-name-label {
-  min-width: 0;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 0.375rem 0.5rem;
-  border-radius: 6px;
-  border: 1px solid #444;
-  background: #1a1a1a;
-  color: inherit;
-  font: inherit;
-  font-weight: 650;
-}
-
-.workspace-name-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workspace-id-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #888;
-  font-size: 0.75rem;
-  text-align: right;
-}
-
-.workspace-chrome-actions {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.75rem;
+/* The capture surface (`?render=1`, see captureSurface.ts) is the canvas
+   alone, filling the viewport, so a headless screenshot is pure data. */
+.lc-shell[data-capture] {
+  background: var(--lc-canvas-bg);
 }
 
 .workspace-share-backdrop {
@@ -223,71 +196,11 @@
 }
 
 @media (max-width: 720px) {
-  .workspace-chrome-actions {
-    justify-content: flex-start;
-  }
-
   .workspace-share-section,
   .workspace-share-add,
   .workspace-share-member {
     grid-template-columns: minmax(0, 1fr);
   }
-}
-
-.secondary {
-  color: #888;
-  font-size: 0.875rem;
-}
-
-.dimension-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  width: 100%;
-}
-
-.dim-control {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.dim-label {
-  font-weight: 600;
-  width: 1.5rem;
-  text-align: center;
-}
-
-.dim-btn {
-  width: 2rem;
-  height: 2rem;
-  padding: 0;
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.dim-btn:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.dim-slider {
-  flex: 1;
-}
-
-.dim-value {
-  font-size: 0.875rem;
-  color: #888;
-  min-width: 3.5rem;
-  text-align: right;
-}
-
-/* Focal-depth control end-caps (near / far) — small muted labels that
-   flank the near↔far slider in the 3D dimension-controls row. */
-.dim-endcap {
-  font-size: 0.75rem;
-  color: #888;
 }
 
 /* Contrast controls */
@@ -385,31 +298,4 @@
   background: #646cff;
   color: #fff;
   border-color: #646cff;
-}
-
-.sidebar-resize-handle {
-  width: 4px;
-  cursor: col-resize;
-  background: transparent;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-.sidebar-resize-handle:hover,
-.sidebar-resize-handle:active {
-  background: #646cff;
-}
-
-.canvas-resize-handle {
-  position: absolute;
-  bottom: 0;
-  right: 0;
-  width: 16px;
-  height: 16px;
-  cursor: nwse-resize;
-  z-index: 5;
-  background: linear-gradient(135deg, transparent 50%, rgba(100, 108, 255, 0.5) 50%);
-  border-radius: 0 0 8px 0;
-}
-.canvas-resize-handle:hover {
-  background: linear-gradient(135deg, transparent 50%, rgba(100, 108, 255, 0.8) 50%);
 }

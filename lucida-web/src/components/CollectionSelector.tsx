@@ -154,10 +154,8 @@ export function CollectionSelector({
   return (
     <div
       style={{
-        position: "absolute",
-        bottom: 16,
-        left: 16,
-        zIndex: 10,
+        position: "relative",
+        boxSizing: "border-box",
         background: "rgba(0, 0, 0, 0.7)",
         borderRadius: 6,
         padding: PADDING,

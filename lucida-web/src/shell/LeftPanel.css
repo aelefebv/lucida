@@ -1,0 +1,62 @@
+.lc-left-panel {
+  position: relative;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  box-sizing: border-box;
+  min-height: 0;
+  border-right: 1px solid var(--lc-border);
+  background: var(--lc-surface-1);
+}
+
+.lc-left-panel[hidden] {
+  display: none;
+}
+
+.lc-left-panel-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.lc-left-panel-body > * {
+  flex: 1;
+  min-height: 0;
+}
+
+/* A thin line over the border with a wider grab area. */
+.lc-left-panel-resize {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  z-index: 1;
+  width: 8px;
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+
+.lc-left-panel-resize::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 3px;
+  width: 2px;
+  background: transparent;
+  transition: background-color var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-left-panel-resize:hover::after,
+.lc-left-panel-resize[data-dragging]::after,
+.lc-left-panel-resize:focus-visible::after {
+  background: var(--lc-accent);
+}
+
+body[data-lc-resizing="col"] {
+  cursor: col-resize;
+  user-select: none;
+}
