@@ -8,7 +8,6 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
-import { SLICE_ATLAS_BUDGET } from "../workerProtocol.ts";
 import { createSliceTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
@@ -183,6 +182,7 @@ export interface SliceAtlasState {
 /** Create a shared slice pool. Indirection sized later from entityMetas. */
 function createSliceAtlas(
   device: GPUDevice,
+  budgetBytes: number,
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
 ): SliceAtlasState {
@@ -190,7 +190,7 @@ function createSliceAtlas(
   const geom = computeAtlasGeometry(
     limits,
     [chunkX, chunkY],
-    SLICE_ATLAS_BUDGET,
+    budgetBytes,
     "2d",
   );
   const { slotsX, slotsY, totalSlots, atlasW, atlasH } = geom;
@@ -252,7 +252,7 @@ export function getOrCreateSlicePool(
     return existing;
   }
   if (existing) destroySliceAtlas(existing);
-  const newAtlas = createSliceAtlas(ctx.device, chunkX, chunkY, z, t, c);
+  const newAtlas = createSliceAtlas(ctx.device, ctx.state.atlasBudgets.sliceAtlasBytes, chunkX, chunkY, z, t, c);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }

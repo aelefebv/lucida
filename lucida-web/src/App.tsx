@@ -9,6 +9,7 @@ import { AnnotationOverlay } from "./components/AnnotationOverlay.tsx";
 import type { Annotation, AnnotationOverlayHandle } from "./components/annotationDocument.ts";
 import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
 import { AnnotationDraftOverlay } from "./components/AnnotationDraftOverlay.tsx";
+import { sceneClipDepth } from "./components/clipDepth.ts";
 import type { AnnotationDraft } from "./components/annotationDraft.ts";
 import type { Tool } from "./components/annotationTool.ts";
 import { CommentsPanel } from "./components/CommentsPanel.tsx";
@@ -78,8 +79,9 @@ import { setReportSender } from "./trace/reportInbox.ts";
 import { AddDataDialog, AddDataPrompt, noteSourceOpenFailed } from "./addData/index.ts";
 import { Banner } from "./shell/Banner.tsx";
 import { CanvasStage, type CanvasSize } from "./shell/CanvasStage.tsx";
+import { WebGpuUnavailable } from "./shell/WebGpuUnavailable.tsx";
 import { DimensionBar } from "./shell/DimensionBar.tsx";
-import { useOpenRightPanel } from "./shell/layoutPreferences.ts";
+import { useOpenRightPanel } from "./shell/sidePanels.ts";
 import { LeftPanel } from "./shell/LeftPanel.tsx";
 import { RightRail } from "./shell/RightRail.tsx";
 import { ToolPalette } from "./shell/ToolPalette.tsx";
@@ -1107,7 +1109,9 @@ function App({
     );
   })();
 
-  const datasetStatus = scene.wasmError || render.renderError || bridge.remoteDatasetError;
+  // A browser that can't draw gets its own explanation in place of the canvas.
+  const datasetStatus =
+    scene.wasmError || (render.gpuUnavailable ? null : render.renderError) || bridge.remoteDatasetError;
 
   // The JSX block below reads `.current` from refs returned by useRenderClient,
   // useWasmScene, useBridge, etc. — passing them as props to
@@ -1201,11 +1205,14 @@ function App({
             onResize={handleCanvasResize}
             bare={captureSurface}
             emptyState={
-              !hasData && bridge.sessionReady && !bridge.remoteDatasetLoading && !captureSurface ? (
+              render.gpuUnavailable ? (
+                <WebGpuUnavailable reason={render.gpuUnavailable} />
+              ) : !hasData && bridge.sessionReady && !bridge.remoteDatasetLoading && !captureSurface ? (
                 <AddDataPrompt onAddData={() => setAddDataOpen(true)} />
               ) : null
             }
-            slots={{
+            // Without a renderer the controls over the canvas have nothing to drive.
+            slots={render.gpuUnavailable ? undefined : {
               "top-left": hasData && (
                 <ToolPalette
                   tool={tool}
@@ -1281,6 +1288,16 @@ function App({
                   onTChange={dims.handleTChange}
                   cameraMode={cameraMode === "fly" ? "fly" : "arcball"}
                   onCameraModeToggle={handleCameraModeToggle}
+                  // Moves the same scene state the `[` and `]` keys do, and
+                  // shares and repaints it the same way.
+                  clipDepth={
+                    scene.wasmScene && selectedDatasetId
+                      ? sceneClipDepth(scene.wasmScene, selectedDatasetId, () => {
+                          emitPresenceWithUrl();
+                          requestRender(render.loopRef.current, "clip_plane");
+                        })
+                      : undefined
+                  }
                 />
               ),
               // Mounted before any dataset opens, and only hidden until one
@@ -1315,6 +1332,7 @@ function App({
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 annotationDraftRef={annotationDraftRef}
+                onLongPress={(at) => overlay2dRef.current?.openContextMenu(at)}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
@@ -1333,6 +1351,7 @@ function App({
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
                 visible={annotationsVisible}
+                tool={tool}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={handleGoToAuthorView}
               />
@@ -1359,6 +1378,7 @@ function App({
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 annotationDraftRef={annotationDraftRef}
+                onLongPress={(at) => overlay3dRef.current?.openContextMenu(at)}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
@@ -1377,6 +1397,7 @@ function App({
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
                 visible={annotationsVisible}
+                tool={tool}
                 mentionCandidates={mentionCandidates}
                 onGoToAuthorView={handleGoToAuthorView}
               />

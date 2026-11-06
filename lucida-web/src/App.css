@@ -19,7 +19,9 @@
   font-family: var(--lc-font);
 }
 
+/* Positioned, so a side panel can overlay the row (sidePanels.ts). */
 .lc-shell-body {
+  position: relative;
   display: flex;
   flex: 1;
   min-height: 0;

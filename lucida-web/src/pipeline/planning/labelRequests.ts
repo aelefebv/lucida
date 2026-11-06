@@ -13,6 +13,7 @@ import { labelDepthZ, labelFootprint, labelTimeIndex } from "../../renderer/labe
 import { sliceLevelZ } from "../../renderer/slicePlane.ts";
 import { labelPaddedVolumeBytes } from "../../renderer/volume/atlas.ts";
 import { isUint32 } from "../../renderer/dataTypeUtil.ts";
+import { pageDeviceBudgets } from "../../deviceBudget.ts";
 import type {
   DatasetManifest,
   ImageSpec,
@@ -52,18 +53,18 @@ const DEFAULT_MAX_BRICK_DIM_3D = 2048;
  * footprint ({@link labelPaddedVolumeBytes}), not `w·h·d·4`, because an
  * awkward chunk shape can pad the allocation well past the true size.
  *
- * {@link DEFAULT_MAX_TOTAL_VOLUME_BYTES} must be >= this so the first
- * eligible mask always fits and 3D never opens blank.
- * {@link resolveLabelCaps} enforces the floor for caller-supplied caps.
+ * The total must be >= this so the first eligible mask always fits and 3D
+ * never opens blank. {@link resolveLabelCaps} enforces the floor for
+ * caller-supplied caps. Fitted to the device (ADR 0068).
  */
-const DEFAULT_MAX_VOLUME_BYTES = 512 * 1024 * 1024;
+const defaultMaxVolumeBytes = () => pageDeviceBudgets().labelVolumeBytes;
 /**
  * Byte budget for the sum of all label volume atlases shown at once in volume
  * mode, on padded footprints. Each visible mask gets its own atlas, so the
  * per-mask cap alone does not bound device memory. Masks are shown in
  * manifest order until the budget is reached and the rest are skipped.
  */
-const DEFAULT_MAX_TOTAL_VOLUME_BYTES = 512 * 1024 * 1024;
+const defaultMaxTotalVolumeBytes = () => pageDeviceBudgets().labelTotalVolumeBytes;
 
 /**
  * Overlay opacity when no per-label setting applies, including snapshots
@@ -159,11 +160,11 @@ export interface LabelSelectionCaps {
   maxBrickDim3D?: number;
   /** Volume-mode total chunk-count cap (default {@link DEFAULT_MAX_CHUNKS_PER_VOLUME}). */
   maxChunksPerVolume?: number;
-  /** Volume-mode atlas-allocation byte budget (default {@link DEFAULT_MAX_VOLUME_BYTES}). */
+  /** Volume-mode atlas-allocation byte budget (default from the device budgets). */
   maxVolumeBytes?: number;
   /**
    * Volume-mode byte budget across every mask shown at once (default
-   * {@link DEFAULT_MAX_TOTAL_VOLUME_BYTES}). {@link resolveLabelCaps} raises
+   * from the device budgets). {@link resolveLabelCaps} raises
    * it to at least {@link maxVolumeBytes} so the first drawable mask fits.
    */
   maxTotalVolumeBytes?: number;
@@ -181,8 +182,8 @@ interface ResolvedLabelCaps {
 }
 
 function resolveLabelCaps(caps?: LabelSelectionCaps): ResolvedLabelCaps {
-  const maxVolumeBytes = caps?.maxVolumeBytes ?? DEFAULT_MAX_VOLUME_BYTES;
-  const rawTotal = caps?.maxTotalVolumeBytes ?? DEFAULT_MAX_TOTAL_VOLUME_BYTES;
+  const maxVolumeBytes = caps?.maxVolumeBytes ?? defaultMaxVolumeBytes();
+  const rawTotal = caps?.maxTotalVolumeBytes ?? defaultMaxTotalVolumeBytes();
   // Floor the total at the per-texture cap, or a drawable mask could resolve
   // to nothing and 3D would open blank.
   const maxTotalVolumeBytes = Math.max(rawTotal, maxVolumeBytes);

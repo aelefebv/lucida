@@ -15,7 +15,8 @@
   font-size: var(--lc-text-md);
 }
 
-/* Matches the viewer's top bar, so moving between the two keeps the frame. */
+/* Matches the viewer's top bar, so moving between the two keeps the frame,
+   safe-area insets included. */
 .lc-dashboard-header {
   position: sticky;
   top: 0;
@@ -26,8 +27,9 @@
   justify-content: space-between;
   gap: var(--lc-space-4);
   box-sizing: border-box;
-  height: calc(var(--lc-control-h) + var(--lc-space-4));
-  padding: 0 var(--lc-space-4);
+  height: calc(var(--lc-control-h) + var(--lc-space-4) + var(--lc-safe-top));
+  padding: var(--lc-safe-top) calc(var(--lc-space-4) + var(--lc-safe-right)) 0
+    calc(var(--lc-space-4) + var(--lc-safe-left));
   border-bottom: 1px solid var(--lc-border);
   background: var(--lc-surface-1);
 }
@@ -53,7 +55,8 @@
   box-sizing: border-box;
   width: min(100%, 1600px);
   margin: 0 auto;
-  padding: var(--lc-space-8) var(--lc-space-7) var(--lc-space-8);
+  padding: var(--lc-space-8) calc(var(--lc-space-7) + var(--lc-safe-right))
+    calc(var(--lc-space-8) + var(--lc-safe-bottom)) calc(var(--lc-space-7) + var(--lc-safe-left));
 }
 
 .lc-dashboard-heading {
@@ -155,9 +158,10 @@
   white-space: nowrap;
 }
 
+/* One column once the page is narrower than a card, never wider than it. */
 .lc-dashboard-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(280px, 100%), 1fr));
   gap: var(--lc-space-4);
   margin: 0;
   padding: 0;
@@ -332,4 +336,39 @@
    while folders of different lengths load. */
 .lc-dashboard-browse {
   height: min(480px, calc(85vh - 96px));
+}
+
+/* On a phone the page keeps its width for content: tighter margins, the Open
+   data field over its Browse button, and search across the full width with
+   New workspace beside it. */
+@media (width < 640px) {
+  .lc-dashboard-main {
+    padding: var(--lc-space-5) calc(var(--lc-space-4) + var(--lc-safe-right))
+      calc(var(--lc-space-6) + var(--lc-safe-bottom)) calc(var(--lc-space-4) + var(--lc-safe-left));
+  }
+
+  .lc-dashboard-open {
+    margin-bottom: var(--lc-space-6);
+    padding: var(--lc-space-5) var(--lc-space-4) var(--lc-space-4);
+  }
+
+  .lc-dashboard-open-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .lc-dashboard-toolbar-end {
+    flex: 1 1 100%;
+    margin-left: 0;
+  }
+
+  .lc-dashboard-search {
+    flex: 1 1 auto;
+    width: auto;
+    min-width: 0;
+  }
+
+  .lc-dashboard-toolbar-end > .lc-button {
+    flex: none;
+  }
 }

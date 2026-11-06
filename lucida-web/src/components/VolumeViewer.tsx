@@ -10,6 +10,7 @@ import { buildAnnotationView, liveViewWithLiveTC } from "../savedView/buildAnnot
 import { useHeldKeys } from "../hooks/useHeldKeys.ts";
 import { CLIP_BINDINGS, FLY_BINDINGS, TOGGLE_FLY_KEYS } from "../config/keyBindings.ts";
 import { useFlyCameraInput } from "../hooks/useFlyCameraInput.ts";
+import { useFineInputAvailable } from "../input/fineInput.ts";
 import { useCommand } from "../ui/commands.ts";
 import { pushEscapeLayer } from "../ui/escape.ts";
 import { useShortcutScope } from "../ui/shortcuts.ts";
@@ -19,6 +20,7 @@ import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
 import { eventToScreenPx, type ClientPoint } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
+import { frameClock } from "../frameClock.ts";
 
 interface Props {
   session: Session;
@@ -133,6 +135,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     emitPresence();
     loopRef.current?.markInteractiveDirty();
   };
+  const canFly = useFineInputAvailable();
   useCommand({
     id: "camera.toggleFly",
     label: isFlyMode ? "Leave fly mode" : "Fly through the volume",
@@ -140,6 +143,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     keys: TOGGLE_FLY_KEYS,
     keywords: ["camera", "orbit", "arcball"],
     run: toggleFly,
+    // Steered by keys and a mouse, so offered only with one of them, or to
+    // get back out.
+    enabled: canFly || isFlyMode,
   });
 
   // A fly-specific dirty source: fly ticks every frame, so attribution is useful
@@ -195,30 +201,27 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   // Held clip keys, and the camera mode followed from the scene, since a
   // control outside this viewer or a restored view can switch it too.
   useEffect(() => {
-    let rafId: number | null = null;
     let lastTime = 0;
 
-    function tick(time: number) {
+    return frameClock.subscribe((time) => {
       const dt = lastTime > 0 ? Math.min((time - lastTime) / 1000, 0.1) : 0;
       lastTime = time;
 
+      setCameraMode(scene.camera_mode());
       const farther = clipKeys.has("clipFarther");
       const nearer = clipKeys.has("clipNearer");
-      if (farther !== nearer) {
-        const delta = (farther ? 1 : -1) * CLIP_SPEED * (dt * 60); // normalize to ~60fps
-        scene.adjust_clip_distance(delta);
-        emitPresence();
-        loopRef.current?.markInteractiveDirty();
+      if (farther === nearer) {
+        // The next press starts from rest, not from the last frame before it.
+        lastTime = 0;
+        return false;
       }
-
-      setCameraMode(scene.camera_mode());
-      rafId = requestAnimationFrame(tick);
-    }
-
-    rafId = requestAnimationFrame(tick);
-    return () => {
-      if (rafId !== null) cancelAnimationFrame(rafId);
-    };
+      const delta = (farther ? 1 : -1) * CLIP_SPEED * (dt * 60); // normalize to ~60fps
+      scene.adjust_clip_distance(delta);
+      emitPresence();
+      loopRef.current?.markInteractiveDirty();
+      // A held key moves the clip every frame without further input.
+      return true;
+    });
   }, [scene, clipKeys, emitPresence]);
 
   // Resolution scaling during interaction
@@ -354,7 +357,8 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
 
   const onArcballPointerDown = useCallback(
     (e: PointerEvent) => {
-      if (e.pointerType === "touch") return;
+      // The right button opens the canvas menu instead.
+      if (e.pointerType === "touch" || e.button === 2) return;
       beginArcballPress(e, e.shiftKey);
       canvas.setPointerCapture(e.pointerId);
       setLowRes();

@@ -46,25 +46,54 @@ export interface GPUContext {
   format: GPUTextureFormat;
 }
 
+const WEBGPU_MISSING = "WebGPU is not supported in this browser";
+const NO_ADAPTER = "Failed to get WebGPU adapter";
+
+/** Why the viewer can't draw: no WebGPU at all, or no adapter behind it. */
+export type WebGpuUnavailableReason = "missing" | "no-adapter";
+
+/**
+ * Whether a render-worker init failure means the browser can't draw at all,
+ * which the page explains in place of the viewer rather than as an error.
+ */
+export function webGpuUnavailableReason(message: string): WebGpuUnavailableReason | null {
+  if (message.includes(WEBGPU_MISSING)) return "missing";
+  if (message.includes(NO_ADAPTER)) return "no-adapter";
+  return null;
+}
+
 export async function initGPU(canvas: HTMLCanvasElement | OffscreenCanvas): Promise<GPUContext> {
   if (!navigator.gpu) {
-    throw new Error("WebGPU is not supported in this browser");
+    throw new Error(WEBGPU_MISSING);
   }
 
   const adapter = await requestAdapterWithRetry(navigator.gpu);
   if (!adapter) {
-    throw new Error("Failed to get WebGPU adapter");
+    throw new Error(NO_ADAPTER);
   }
 
-  const device = await adapter.requestDevice({
-    // `timestamp-query` lets the render worker read a GPU pass time back per
-    // frame for the trace. A device without it initializes untimed.
-    requiredFeatures: adapter.features.has("timestamp-query") ? ["timestamp-query"] : [],
-    requiredLimits: {
-      maxBufferSize: adapter.limits.maxBufferSize,
-      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-    },
-  });
+  // `timestamp-query` lets the render worker read a GPU pass time back per
+  // frame for the trace. A device without it initializes untimed.
+  const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
+  let device: GPUDevice;
+  try {
+    device = await adapter.requestDevice({
+      requiredFeatures,
+      requiredLimits: {
+        maxBufferSize: adapter.limits.maxBufferSize,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      },
+    });
+  } catch (err) {
+    // A driver can advertise limits it then refuses to grant. The default
+    // limits still draw, and the atlas budgets follow the smaller buffers.
+    // The retry takes a fresh adapter, in case the refusal consumed this one.
+    console.warn("WebGPU device at adapter limits refused; using default limits", err);
+    const retry = (await requestAdapterWithRetry(navigator.gpu)) ?? adapter;
+    device = await retry.requestDevice({
+      requiredFeatures: retry.features.has("timestamp-query") ? ["timestamp-query"] : [],
+    });
+  }
   const context = canvas.getContext("webgpu");
   if (!context) {
     throw new Error("Failed to get WebGPU canvas context");

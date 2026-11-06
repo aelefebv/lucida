@@ -297,6 +297,7 @@ describe("epoch caching", () => {
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
+      resolutionScale: 1,
       cpuCache: createMockCpuCache(),
       assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
@@ -821,6 +822,7 @@ describe("display-only fast path", () => {
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
+      resolutionScale: 1,
       cpuCache: over?.cpuCache ?? createMockCpuCache(),
       assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
@@ -1459,6 +1461,7 @@ describe("multi-dataset planning", () => {
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
+      resolutionScale: 1,
       cpuCache: createMockCpuCache(),
       assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
@@ -1611,6 +1614,7 @@ describe("incremental delta fold", () => {
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
+      resolutionScale: 1,
       cpuCache: createMockCpuCache(),
       assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;

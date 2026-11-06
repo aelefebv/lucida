@@ -50,6 +50,9 @@ export interface AnnotationOverlayHandle {
   /** Open `pinId`'s thread and recenter on it. A safe no-op if the pin isn't in
    * the set, the overlay is hidden, or the scene isn't ready. */
   focusPin: (pinId: string) => void;
+  /** Open the canvas menu at a client point, as a long press on the canvas
+   * does. */
+  openContextMenu: (at: { clientX: number; clientY: number }) => void;
 }
 
 /**

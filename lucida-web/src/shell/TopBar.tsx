@@ -4,20 +4,21 @@ import {
   CopyIcon,
   GaugeIcon,
   ImageSquareIcon,
+  MagnifyingGlassIcon,
   SidebarSimpleIcon,
   SquaresFourIcon,
   WrenchIcon,
 } from "@phosphor-icons/react";
 import { useState, type MouseEvent, type ReactNode } from "react";
 import { ProfileMenu } from "../auth/ProfileMenu.tsx";
-import { usePreference } from "../theme/preferences.ts";
 import { IconButton } from "../ui/Button.tsx";
+import { showKeyboardHelp } from "../ui/keyboardHelpState.ts";
 import { Menu, MenuItem } from "../ui/Menu.tsx";
 import { toast } from "../ui/toastQueue.ts";
-import { leftPanelOpenPreference } from "./layoutPreferences.ts";
 import { LucidaMark } from "./LucidaMark.tsx";
 import { PresenceAvatars, type PresenceAvatarsProps } from "./PresenceAvatars.tsx";
 import { SettingsMenu } from "./SettingsMenu.tsx";
+import { usePanelOpen } from "./sidePanels.ts";
 import type { DeveloperSurfaces } from "./useDeveloperSurfaces.ts";
 import "./TopBar.css";
 
@@ -46,7 +47,7 @@ export function TopBar({
   share,
   developer,
 }: TopBarProps) {
-  const [leftOpen, setLeftOpen] = usePreference(leftPanelOpenPreference);
+  const [leftOpen, setLeftOpen] = usePanelOpen("left");
 
   const goToDashboard = (event: MouseEvent<HTMLAnchorElement>) => {
     // A modified click opens the list in a new tab, as a link should.
@@ -98,6 +99,14 @@ export function TopBar({
         </Menu>
       </div>
       <div className="lc-topbar-end">
+        {/* The palette's way in without a keyboard. */}
+        <IconButton
+          icon={MagnifyingGlassIcon}
+          label="Search commands"
+          shortcut="Mod+K"
+          tooltipPlacement="bottom"
+          onPress={() => showKeyboardHelp("commandPalette")}
+        />
         {developer.enabled && (
           <div className="lc-topbar-group" role="group" aria-label="Developer tools">
             <IconButton

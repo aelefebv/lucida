@@ -6,7 +6,8 @@
  * Every mutation applies locally and sends (`applyDocumentCommand`), because the
  * server leaves the sender out of its rebroadcast; client-supplied ids make both
  * paths converge. State here is per-thread only: hosts key the popover by pin id,
- * so switching pins remounts it and clears drafts. Hosts also position it.
+ * so switching pins remounts it and clears drafts. Hosts move it with its pin,
+ * and it keeps itself on screen beside it.
  */
 import {
   CheckIcon,
@@ -16,9 +17,10 @@ import {
   TrashIcon,
   XIcon,
 } from "@phosphor-icons/react";
-import { useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand } from "../applyAndSend.ts";
+import { useThreadPlacement } from "./threadPlacement.ts";
 import type { Annotation, Comment } from "./annotationDocument.ts";
 import {
   splitMentionTokens,
@@ -60,6 +62,11 @@ interface Props {
    * restore. A pin selected on the canvas only recenters, so this is how a
    * viewer opts into the author's framing. */
   onGoToAuthorView?: (pinId: string) => void;
+  /** Open with the delete confirm already showing, when a delete was asked
+   * for outside the thread. */
+  armDelete?: boolean;
+  /** Open with the comment field focused, for a pin made to comment on. */
+  focusComposer?: boolean;
 }
 
 /** Stable client-supplied id so the local apply and peers' broadcast converge. */
@@ -79,6 +86,8 @@ export function ThreadPopover({
   onClose,
   mentionCandidates = [],
   onGoToAuthorView,
+  armDelete = false,
+  focusComposer = false,
 }: Props) {
   const [draft, setDraft] = useState("");
   // A mention pick returns focus here so typing continues.
@@ -88,11 +97,21 @@ export function ThreadPopover({
   const [editDraft, setEditDraft] = useState("");
   // One edit field mounts at a time, so one shared ref always points at it.
   const editInputRef = useRef<HTMLInputElement>(null);
+  const mine = pin.author === String(myId);
   // Nothing is emitted until Confirm, so one click can never destroy a pin and
   // its thread.
-  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [confirmingDelete, setConfirmingDelete] = useState(armDelete && mine);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useThreadPlacement(rootRef);
 
-  const mine = pin.author === String(myId);
+  // A frame late, once the menu that asked for it has let go of focus;
+  // autoFocus would lose to the closing menu's focus containment.
+  useEffect(() => {
+    if (!focusComposer) return;
+    const frame = requestAnimationFrame(() => addInputRef.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [focusComposer]);
+
   const comments = pin.comments ?? [];
 
   // Copies `<workspace-url>#a=<pinId>`. A deep link, not an access grant: the
@@ -248,6 +267,7 @@ export function ThreadPopover({
 
   return (
     <div
+      ref={rootRef}
       className="lc-thread"
       data-testid={`annot-thread-${pin.id}`}
       role="dialog"

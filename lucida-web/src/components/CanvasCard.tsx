@@ -1,12 +1,12 @@
 import { CaretDownIcon, CaretUpIcon, XIcon } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
-import { usePreference, type Preference } from "../theme/preferences.ts";
+import type { Preference } from "../theme/preferences.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { Card } from "../ui/Card.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
 import { Switch } from "../ui/Switch.tsx";
 import { toast } from "../ui/toastQueue.ts";
-import { CANVAS_CARDS, type CanvasCardEntry, type CanvasCardState } from "./canvasCards.ts";
+import { CANVAS_CARDS, useCanvasCardState, type CanvasCardEntry, type CanvasCardState } from "./canvasCards.ts";
 import "./CanvasCard.css";
 
 export interface CanvasCardProps {
@@ -22,12 +22,13 @@ export interface CanvasCardProps {
 }
 
 /**
- * A card over the canvas with a header that folds it or hides it. The content
- * stays mounted while folded or hidden, so a card holding a canvas keeps its
- * context; a card that draws should read the preference and stop drawing.
+ * A card over the canvas with a header that folds it or hides it, folded to
+ * start with below desktop. The content stays mounted while folded or
+ * hidden, so a card holding a canvas keeps its context; a card that draws
+ * should read `useCanvasCardState` and stop drawing.
  */
 export function CanvasCard({ title, meta, label, preference, padding = "none", children }: CanvasCardProps) {
-  const [state, setState] = usePreference(preference);
+  const [state, setState] = useCanvasCardState(preference);
   const collapsed = state === "collapsed";
   const name = label.toLowerCase();
 
@@ -74,7 +75,7 @@ export function CanvasCardSwitches() {
 }
 
 function CanvasCardSwitch({ preference, label }: CanvasCardEntry) {
-  const [state, setState] = usePreference(preference);
+  const [state, setState] = useCanvasCardState(preference);
   return (
     <Switch label={label} isSelected={state !== "hidden"} onChange={(on) => setState(on ? "open" : "hidden")} />
   );

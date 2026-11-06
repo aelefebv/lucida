@@ -274,7 +274,8 @@ const NON_TEXT_INPUTS = new Set([
   "checkbox", "radio", "range", "button", "submit", "reset", "color", "file", "image",
 ]);
 
-function isTypingTarget(target: EventTarget | null): boolean {
+/** Whether keys pressed at `target` type text rather than run shortcuts. */
+export function isTypingTarget(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
   if (target.isContentEditable) return true;
   if (target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) return true;

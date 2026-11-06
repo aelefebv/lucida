@@ -62,6 +62,7 @@ import {
   type ReadyDelivery,
   type ReadyProxyDelivery,
 } from "./types.ts";
+import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 
 // Re-exported so existing `./cpuCache.ts` imports keep working.
@@ -78,10 +79,12 @@ export type {
   TierResidencyEntry,
 } from "./types.ts";
 
-export const DEFAULT_MAIN_BUDGET = 512 * 1024 * 1024;
-export const DEFAULT_OVERVIEW_BUDGET = 64 * 1024 * 1024;
-export const DEFAULT_PROXY_BUDGET = 256 * 1024 * 1024;
-export const DEFAULT_MAX_BYTES_IN_FLIGHT = 32 * 1024 * 1024;
+// The page passes budgets fitted to the device (ADR 0068); these defaults
+// are the ceiling it fits them under.
+export const DEFAULT_MAIN_BUDGET = CEILING_BUDGETS.cpuMainBytes;
+export const DEFAULT_OVERVIEW_BUDGET = CEILING_BUDGETS.cpuOverviewBytes;
+export const DEFAULT_PROXY_BUDGET = CEILING_BUDGETS.cpuProxyBytes;
+export const DEFAULT_MAX_BYTES_IN_FLIGHT = CEILING_BUDGETS.cpuBytesInFlight;
 export const FETCH_CONCURRENCY_MULTIPLIER = 3;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;

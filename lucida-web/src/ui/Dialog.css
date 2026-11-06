@@ -5,8 +5,18 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: var(--lc-space-6);
+  /* Clear of a notch, rounded corners, and a home indicator as well. */
+  padding: max(var(--lc-space-6), var(--lc-safe-top)) max(var(--lc-space-6), var(--lc-safe-right))
+    max(var(--lc-space-6), var(--lc-safe-bottom)) max(var(--lc-space-6), var(--lc-safe-left));
   background: var(--lc-scrim);
+}
+
+/* A phone's width goes to the dialog, not the frame around it. */
+@media (width < 640px) {
+  .lc-dialog-overlay {
+    padding: max(var(--lc-space-3), var(--lc-safe-top)) max(var(--lc-space-3), var(--lc-safe-right))
+      max(var(--lc-space-3), var(--lc-safe-bottom)) max(var(--lc-space-3), var(--lc-safe-left));
+  }
 }
 
 .lc-dialog-overlay[data-entering] {
@@ -23,6 +33,7 @@
   width: 480px;
   max-width: 100%;
   max-height: min(85vh, 100%);
+  max-height: min(85dvh, 100%);
   border: 1px solid var(--lc-border);
   border-radius: var(--lc-radius-lg);
   background: var(--lc-surface-2);

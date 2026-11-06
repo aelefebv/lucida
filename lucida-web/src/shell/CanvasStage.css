@@ -91,6 +91,12 @@
   align-items: flex-start;
 }
 
+/* Each top slot spans the row, so a control in it can measure the room it
+   has. Its children still stack from the top. */
+.lc-canvas-stage-row[data-row="top"] > .lc-canvas-slot {
+  align-self: stretch;
+}
+
 .lc-canvas-stage-row[data-row="bottom"] {
   flex: none;
   align-items: flex-end;
@@ -125,6 +131,19 @@
 
 .lc-canvas-stage-row[data-row="bottom"] > .lc-canvas-slot {
   justify-content: flex-end;
+}
+
+/* A phone is too narrow to share the bottom row, so the middle slot takes a
+   line of its own along the bottom edge, under the side slots. */
+@media (width < 640px) {
+  .lc-canvas-stage-row[data-row="bottom"] {
+    flex-wrap: wrap;
+  }
+
+  .lc-canvas-slot[data-slot="bottom-center"] {
+    flex-basis: 100%;
+    order: 1;
+  }
 }
 
 /* Zero specificity, so a child that wants pointer-events: none still can. */

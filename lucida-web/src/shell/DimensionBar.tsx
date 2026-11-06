@@ -1,6 +1,9 @@
 import { PauseIcon, PlayIcon, VideoCameraIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
+import type { ClipDepth } from "../components/clipDepth.ts";
+import { ClipPlaneControl } from "../components/ClipPlaneControl.tsx";
 import { FocalDepthControl } from "../components/FocalDepthControl.tsx";
+import { useFineInputAvailable } from "../input/fineInput.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { Card } from "../ui/Card.tsx";
 import { Popover } from "../ui/Popover.tsx";
@@ -43,6 +46,8 @@ export interface DimensionBarProps {
   /** The 3D camera's mode. */
   cameraMode: CameraMode;
   onCameraModeToggle: () => void;
+  /** The 3D clip plane, when there is a volume to clip. */
+  clipDepth?: ClipDepth;
 }
 
 /**
@@ -61,6 +66,7 @@ export function DimensionBar({
   onTChange,
   cameraMode,
   onCameraModeToggle,
+  clipDepth,
 }: DimensionBarProps) {
   const showZ = viewMode === "2d" && dimZ > 1;
   const showT = dimT > 1;
@@ -144,7 +150,7 @@ export function DimensionBar({
             if (mode !== viewMode) onViewModeToggle();
           }}
         />
-        {viewMode === "3d" && <CameraPopover mode={cameraMode} onToggle={onCameraModeToggle} />}
+        {viewMode === "3d" && <CameraPopover mode={cameraMode} onToggle={onCameraModeToggle} clipDepth={clipDepth} />}
       </div>
       {showZ && (
         <AxisScrubber
@@ -194,7 +200,10 @@ function usePlayback(playing: boolean, step: () => void): void {
   }, [playing]);
 }
 
-function CameraPopover({ mode, onToggle }: { mode: CameraMode; onToggle: () => void }) {
+function CameraPopover({ mode, onToggle, clipDepth }: { mode: CameraMode; onToggle: () => void; clipDepth?: ClipDepth }) {
+  // Fly mode steers with keys and a mouse, so with neither it is left out,
+  // unless the camera is already flying and needs a way back.
+  const canFly = useFineInputAvailable() || mode === "fly";
   return (
     <Popover
       label="Camera"
@@ -202,19 +211,22 @@ function CameraPopover({ mode, onToggle }: { mode: CameraMode; onToggle: () => v
       trigger={<IconButton icon={VideoCameraIcon} size="sm" label="Camera" />}
     >
       <div className="lc-camera-popover">
-        <SegmentedControl
-          label="Camera"
-          labelPosition="side"
-          size="sm"
-          options={[
-            { value: "arcball", label: "Arcball" },
-            { value: "fly", label: "Fly" },
-          ]}
-          value={mode}
-          onChange={(next) => {
-            if (next !== mode) onToggle();
-          }}
-        />
+        {canFly && (
+          <SegmentedControl
+            label="Camera"
+            labelPosition="side"
+            size="sm"
+            options={[
+              { value: "arcball", label: "Arcball" },
+              { value: "fly", label: "Fly" },
+            ]}
+            value={mode}
+            onChange={(next) => {
+              if (next !== mode) onToggle();
+            }}
+          />
+        )}
+        {clipDepth && <ClipPlaneControl depth={clipDepth} />}
         <FocalDepthControl />
       </div>
     </Popover>

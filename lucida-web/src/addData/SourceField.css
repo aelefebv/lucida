@@ -5,6 +5,13 @@
   gap: var(--lc-space-2);
 }
 
+/* The input gives up width before the button does, so the button's label
+   never truncates in a narrow dialog or on a phone. */
 .lc-source-field-input {
   flex: 1 1 auto;
+  min-width: 0;
+}
+
+.lc-source-field > .lc-button {
+  flex: none;
 }

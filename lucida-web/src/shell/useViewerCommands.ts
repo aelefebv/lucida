@@ -16,15 +16,9 @@ import {
   setPreference,
   subscribePreferences,
   usePreference,
-  type Preference,
 } from "../theme/preferences.ts";
 import { useCommands, type CommandOptions } from "../ui/commands.ts";
-import {
-  leftPanelOpenPreference,
-  rightPanelOpenPreference,
-  rightPanelPreference,
-  useOpenRightPanel,
-} from "./layoutPreferences.ts";
+import { openRightPanel, setPanelOpen, togglePanel, useOpenRightPanel } from "./sidePanels.ts";
 import type { DeveloperSurfaces } from "./useDeveloperSurfaces.ts";
 
 export interface ViewerCommandsOptions {
@@ -53,10 +47,6 @@ const CANVAS_BACKGROUNDS: readonly [CanvasBackground, string][] = [
   ["white", "White"],
   ["theme", "Match theme"],
 ];
-
-function toggle(pref: Preference<boolean>): void {
-  setPreference(pref, !getPreference(pref));
-}
 
 /**
  * The palette's commands for what the viewer shell owns: the view mode,
@@ -101,14 +91,14 @@ export function useViewerCommands({
       label: "Show or hide the layers panel",
       group: "Panels",
       keywords: ["sidebar", "channels"],
-      run: () => toggle(leftPanelOpenPreference),
+      run: () => togglePanel("left"),
     },
     {
       id: "panels.toggleRight",
       label: "Show or hide the right panel",
       group: "Panels",
       keywords: ["sidebar"],
-      run: () => toggle(rightPanelOpenPreference),
+      run: () => togglePanel("right"),
       enabled: rightPanels.length > 0,
     },
     ...rightPanels.map(({ id, label }): CommandOptions => {
@@ -117,10 +107,7 @@ export function useViewerCommands({
         id: `panels.${id}`,
         label: `${open ? "Close" : "Open"} panel: ${label}`,
         group: "Panels",
-        run: () => {
-          if (!open) setPreference(rightPanelPreference, id);
-          setPreference(rightPanelOpenPreference, !open);
-        },
+        run: () => (open ? setPanelOpen("right", false) : openRightPanel(id)),
       };
     }),
 

@@ -30,10 +30,12 @@ export { Kbd, type KbdProps } from "./Kbd.tsx";
 export { KeyboardHelp } from "./KeyboardHelp.tsx";
 export { showKeyboardHelp, useKeyboardHelp, type KeyboardHelpOverlay } from "./keyboardHelpState.ts";
 export {
+  ContextMenu,
   Menu,
   MenuItem,
   MenuSection,
   MenuSeparator,
+  type ContextMenuProps,
   type MenuItemProps,
   type MenuProps,
 } from "./Menu.tsx";

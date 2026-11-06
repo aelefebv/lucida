@@ -1,12 +1,34 @@
+/* The panel meets the viewport's left and bottom edges, so it takes their
+   safe-area insets, outside the width a person sets. */
 .lc-left-panel {
   position: relative;
   display: flex;
   flex: none;
   flex-direction: column;
   box-sizing: border-box;
+  width: calc(var(--left-panel-width) + var(--lc-safe-left));
   min-height: 0;
+  padding: 0 0 var(--lc-safe-bottom) var(--lc-safe-left);
   border-right: 1px solid var(--lc-border);
   background: var(--lc-surface-1);
+}
+
+/* Over the canvas at a set width, leaving the rail and some canvas showing. */
+.lc-left-panel[data-mode="overlay"] {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: calc(var(--lc-z-panel) + 1);
+  width: min(calc(320px + var(--lc-safe-left)), calc(100% - 2 * var(--lc-space-8)));
+  box-shadow: var(--lc-shadow-2);
+  animation: lc-left-panel-in var(--lc-motion) var(--lc-ease);
+}
+
+@keyframes lc-left-panel-in {
+  from {
+    translate: -100% 0;
+  }
 }
 
 .lc-left-panel[hidden] {
