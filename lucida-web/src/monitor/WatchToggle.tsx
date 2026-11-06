@@ -1,5 +1,5 @@
 /**
- * The watch stream's visible face (#1068): the action that turns it on, and
+ * The watch stream's visible face: the action that turns it on, and
  * the notice that says it is on.
  *
  * Both live here because "off by default and visible while on" is one
@@ -17,6 +17,7 @@ import { useCallback, useSyncExternalStore } from "react";
 
 import "./WatchToggle.css";
 import { watchStream, type WatchStream, type WatchStreamState } from "../trace/watchStream.ts";
+import { Button } from "../ui/Button.tsx";
 
 function useWatchStream(stream: WatchStream): WatchStreamState {
   const subscribe = useCallback((onChange: () => void) => stream.subscribe(onChange), [stream]);
@@ -37,7 +38,7 @@ export function WatchToggle({ stream = watchStream }: { stream?: WatchStream }) 
       >
         {state.on ? "Stop the watch stream" : "Start a watch stream"}
       </button>
-      {/* The stylesheet cuts this to one line (#1093), so the title carries
+      {/* The stylesheet cuts this to one line, so the title carries
           the whole sentence. */}
       <span role="status" className="monitor-watch-status" title={status} data-testid="monitor-watch-status">
         {status}
@@ -58,10 +59,11 @@ export function WatchStreamBanner({ stream = watchStream }: { stream?: WatchStre
   if (!state.on) return null;
   return (
     <div className="watch-stream-banner" role="status" data-testid="watch-stream-banner">
+      <span className="watch-stream-banner-dot" aria-hidden="true" />
       <span>Watch stream on. This session&rsquo;s aggregates are going to watchers.</span>
-      <button type="button" onClick={() => stream.stop()} data-testid="watch-stream-banner-stop">
+      <Button size="sm" onPress={() => stream.stop()} data-testid="watch-stream-banner-stop">
         Stop
-      </button>
+      </Button>
     </div>
   );
 }

@@ -8,6 +8,14 @@
  * paths converge. State here is per-thread only: hosts key the popover by pin id,
  * so switching pins remounts it and clears drafts. Hosts also position it.
  */
+import {
+  CheckIcon,
+  FrameCornersIcon,
+  LinkIcon,
+  PencilSimpleIcon,
+  TrashIcon,
+  XIcon,
+} from "@phosphor-icons/react";
 import { useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand } from "../applyAndSend.ts";
@@ -19,6 +27,16 @@ import {
 import { useMentionAutocomplete } from "./useMentionAutocomplete.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
 import { buildAnnotationLink } from "../savedView/urlSync.ts";
+// Straight from each primitive's file: the ui index also re-exports the toast
+// region, which would pull it out of its lazy chunk into the main bundle.
+import { Badge } from "../ui/Badge.tsx";
+import { Button, IconButton } from "../ui/Button.tsx";
+import { useShortcut, useShortcutScope } from "../ui/shortcuts.ts";
+import { TextField } from "../ui/TextField.tsx";
+import "./ThreadPopover.css";
+
+/** Takes precedence over global shortcuts while a thread is open. */
+const THREAD_SHORTCUT_SCOPE = "annotation-thread";
 
 interface Props {
   /** The pin whose thread this is, with its nested `comments`. */
@@ -213,523 +231,285 @@ export function ThreadPopover({
     onDocumentChanged();
   };
 
+  // Escape closes the thread wherever focus is. With focus inside, the root
+  // catches it below; elsewhere this binding does, ahead of any global Escape.
+  useShortcutScope(THREAD_SHORTCUT_SCOPE, true);
+  useShortcut({
+    id: "annotations.closeThread",
+    keys: "Escape",
+    label: "Close the comment thread",
+    group: "Annotations",
+    scope: THREAD_SHORTCUT_SCOPE,
+    onTrigger: onClose,
+  });
+
+  const commentCount = `${comments.length} comment${comments.length === 1 ? "" : "s"}`;
+
   return (
     <div
+      className="lc-thread"
       data-testid={`annot-thread-${pin.id}`}
-      style={{
-        position: "absolute",
-        top: 10,
-        left: 10,
-        width: 240,
-        maxHeight: 280,
-        display: "flex",
-        flexDirection: "column",
-        background: "rgba(22,27,34,0.97)",
-        color: "#e6edf3",
-        border: "1px solid #30363d",
-        borderRadius: 8,
-        boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
-        fontSize: 12,
-        pointerEvents: "auto",
-        overflow: "hidden",
+      role="dialog"
+      aria-label="Comment thread"
+      // Marks an open overlay, so app shortcuts stay quiet while focus is here.
+      data-lc-overlay=""
+      onKeyDown={(e) => {
+        // The fields handle their own Escape (closing the picker, cancelling an
+        // edit), so only an unhandled one closes the thread.
+        if (e.key !== "Escape" || e.defaultPrevented) return;
+        e.preventDefault();
+        onClose();
       }}
     >
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: "6px 8px",
-          borderBottom: "1px solid #30363d",
-          fontWeight: 600,
-        }}
-      >
-        <span>Thread{comments.length > 0 ? ` (${comments.length})` : ""}</span>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <button
+      <div className="lc-thread-header">
+        <span className="lc-thread-title">Thread</span>
+        {comments.length > 0 && <Badge>{comments.length}</Badge>}
+        <div className="lc-thread-actions">
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={LinkIcon}
+            onPress={copyLink}
             data-testid={`pin-copy-link-${pin.id}`}
-            onClick={copyLink}
-            title="Copy a shareable link to this annotation"
-            aria-label="Copy link to this annotation"
-            style={{
-              background: "none",
-              border: "none",
-              color: copyState === "failed" ? "#f85149" : "#58a6ff",
-              cursor: "pointer",
-              fontSize: 12,
-              lineHeight: 1,
-              padding: 0,
-              fontWeight: 600,
-            }}
           >
             {copyState === "copied"
               ? "Copied!"
               : copyState === "failed"
                 ? "Copy failed"
                 : "Copy link"}
-          </button>
+          </Button>
           {pin.view && (
-            <button
+            <IconButton
+              size="sm"
+              icon={FrameCornersIcon}
+              label="Go to author’s view"
+              onPress={() => onGoToAuthorView?.(pin.id)}
               data-testid={`pin-goto-author-view-${pin.id}`}
-              onClick={() => onGoToAuthorView?.(pin.id)}
-              title="Go to the view the author had when they placed this pin"
-              aria-label="Go to author's view"
-              style={{
-                background: "none",
-                border: "none",
-                color: "#58a6ff",
-                cursor: "pointer",
-                fontSize: 12,
-                lineHeight: 1,
-                padding: 0,
-                fontWeight: 600,
-              }}
-            >
-              Go to author&rsquo;s view
-            </button>
+            />
           )}
           {mine && (
-            <button
+            <IconButton
+              size="sm"
+              icon={TrashIcon}
+              label="Delete pin"
+              onPress={requestDeletePin}
               data-testid={`pin-delete-${pin.id}`}
-              onClick={requestDeletePin}
-              title="Delete pin"
-              aria-label="Delete pin"
-              style={{
-                background: "none",
-                border: "none",
-                color: "#f85149",
-                cursor: "pointer",
-                fontSize: 12,
-                lineHeight: 1,
-                padding: 0,
-                fontWeight: 600,
-              }}
-            >
-              Delete
-            </button>
+            />
           )}
-          <button
-            onClick={onClose}
-            aria-label="Close thread"
-            style={{
-              background: "none",
-              border: "none",
-              color: "#8b949e",
-              cursor: "pointer",
-              fontSize: 14,
-              lineHeight: 1,
-              padding: 0,
-            }}
-          >
-            ×
-          </button>
+          <IconButton size="sm" icon={XIcon} label="Close thread" shortcut="Escape" onPress={onClose} />
         </div>
       </div>
       {/* Names the blast radius, the pin and its comments, before committing. */}
       {mine && confirmingDelete && (
         <div
+          className="lc-thread-confirm"
           role="alertdialog"
-          aria-label={`Delete this pin and its ${comments.length} comment${comments.length === 1 ? "" : "s"}?`}
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            gap: 6,
-            padding: "8px",
-            borderBottom: "1px solid #30363d",
-            background: "rgba(248,81,73,0.08)",
-          }}
+          aria-label={`Delete this pin and its ${commentCount}?`}
         >
-          <span style={{ color: "#e6edf3" }}>
-            Delete this pin and its {comments.length} comment
-            {comments.length === 1 ? "" : "s"}? This can&rsquo;t be undone.
-          </span>
-          <div style={{ display: "flex", gap: 6 }}>
-            <button
-              data-testid={`pin-delete-confirm-${pin.id}`}
-              onClick={confirmDeletePin}
-              aria-label={`Confirm delete pin and ${comments.length} comment${comments.length === 1 ? "" : "s"}`}
-              style={{
-                flex: 1,
-                padding: "4px 8px",
-                fontSize: 12,
-                fontWeight: 600,
-                cursor: "pointer",
-                color: "white",
-                background: "#da3633",
-                border: "1px solid #f85149",
-                borderRadius: 4,
-              }}
-            >
-              Delete {comments.length} comment{comments.length === 1 ? "" : "s"}
-            </button>
-            <button
-              data-testid={`pin-delete-cancel-${pin.id}`}
-              onClick={cancelDeletePin}
-              aria-label="Cancel delete"
-              style={{
-                flex: 1,
-                padding: "4px 8px",
-                fontSize: 12,
-                cursor: "pointer",
-                color: "#e6edf3",
-                background: "transparent",
-                border: "1px solid #30363d",
-                borderRadius: 4,
-              }}
-            >
+          <p className="lc-thread-confirm-text">
+            Delete this pin and its {commentCount}? This can&rsquo;t be undone.
+          </p>
+          <div className="lc-thread-confirm-actions">
+            <Button size="sm" onPress={cancelDeletePin} data-testid={`pin-delete-cancel-${pin.id}`}>
               Cancel
-            </button>
+            </Button>
+            <Button
+              size="sm"
+              variant="danger"
+              onPress={confirmDeletePin}
+              data-testid={`pin-delete-confirm-${pin.id}`}
+            >
+              Delete {commentCount}
+            </Button>
           </div>
         </div>
       )}
-      <div style={{ overflowY: "auto", padding: "4px 0", flex: 1 }}>
+      <div className="lc-thread-comments">
         {comments.length === 0 ? (
-          <div style={{ padding: "8px", color: "#8b949e" }}>
-            No comments yet. Start the discussion.
-          </div>
+          <p className="lc-thread-empty">No comments yet. Start the discussion.</p>
         ) : (
           comments.map((c) => {
             const mineComment = c.author === String(myId);
             const isEditing = mineComment && editingCommentId === c.id;
+            // An author is an opaque per-browser id, so show the handle they are
+            // @-mentioned by, never the raw id. Self stays "you".
+            const authorName = mineComment ? "you" : deriveHandle(c.author);
             return (
-              <div
-                key={c.id}
-                style={{
-                  padding: "4px 8px",
-                  display: "flex",
-                  gap: 6,
-                  alignItems: "baseline",
-                }}
-              >
-                {/* An author is an opaque per-browser id, so show the handle they
-                    are @-mentioned by, never the raw id, capped with an ellipsis
-                    so it can't overflow the panel. Self stays "you". */}
-                <span
-                  title={mineComment ? "you" : deriveHandle(c.author)}
-                  style={{
-                    color: "#58a6ff",
-                    fontWeight: 600,
-                    whiteSpace: "nowrap",
-                    maxWidth: 120,
-                    overflow: "hidden",
-                    textOverflow: "ellipsis",
-                  }}
-                >
-                  {mineComment ? "you" : deriveHandle(c.author)}
-                </span>
+              <div key={c.id} className="lc-thread-comment">
+                <div className="lc-thread-comment-head">
+                  <span className="lc-thread-author" title={authorName}>
+                    {authorName}
+                  </span>
+                  {mineComment && !isEditing && (
+                    <span className="lc-thread-comment-actions">
+                      <IconButton
+                        size="sm"
+                        icon={PencilSimpleIcon}
+                        label="Edit comment"
+                        onPress={() => startEdit(c)}
+                        data-testid={`comment-edit-${c.id}`}
+                      />
+                      <IconButton
+                        size="sm"
+                        icon={TrashIcon}
+                        label="Remove comment"
+                        onPress={() => removeComment(c.id)}
+                      />
+                    </span>
+                  )}
+                </div>
                 {isEditing ? (
                   // Same @-mention autocomplete as the add box. Enter saves when
                   // the picker is closed; Escape and blur cancel.
-                  <>
-                    {/* Positions the mention picker just above the field, as in
-                        the add composer. */}
-                    <div style={{ position: "relative", flex: 1, minWidth: 0 }}>
-                      {editMention.open && (
-                        <div
-                          data-testid={`mention-picker-edit-${c.id}`}
-                          role="listbox"
-                          aria-label="Mention a collaborator"
-                          style={{
-                            position: "absolute",
-                            left: 0,
-                            right: 0,
-                            bottom: "100%",
-                            marginBottom: 4,
-                            maxHeight: 132,
-                            overflowY: "auto",
-                            background: "#161b22",
-                            border: "1px solid #30363d",
-                            borderRadius: 6,
-                            boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
-                            zIndex: 1,
-                          }}
-                        >
-                          {editMention.matches.map((candidate) => (
-                            <button
-                              key={candidate.id}
-                              type="button"
-                              role="option"
-                              data-testid={`mention-option-${candidate.id}`}
-                              // Keeps focus on the edit input so its blur cancel
-                              // doesn't fire and `pick`'s refocus lands on a live
-                              // field.
-                              onMouseDown={(e) => e.preventDefault()}
-                              onClick={() => editMention.pick(candidate.label)}
-                              style={{
-                                display: "block",
-                                width: "100%",
-                                textAlign: "left",
-                                padding: "5px 8px",
-                                fontSize: 12,
-                                background: "none",
-                                border: "none",
-                                color: "#e6edf3",
-                                cursor: "pointer",
-                              }}
-                            >
-                              <span style={{ color: "#58a6ff", fontWeight: 600 }}>
-                                @
-                              </span>
-                              {candidate.label}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      <input
-                        ref={editInputRef}
-                        type="text"
-                        data-testid={`comment-edit-input-${c.id}`}
-                        value={editDraft}
-                        autoFocus
-                        aria-label="Edit comment"
-                        onChange={(e) => setEditDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter") {
-                            // With the picker open, Enter picks the top match;
-                            // it saves only with the picker closed.
-                            if (editMention.open) {
-                              e.preventDefault();
-                              editMention.pick(editMention.matches[0].label);
-                              return;
-                            }
-                            e.preventDefault();
-                            saveEdit(c.id);
-                          } else if (e.key === "Escape") {
-                            if (editMention.open) {
-                              // Escape first dismisses the picker (a trailing
-                              // space closes the token) without cancelling the edit.
-                              e.preventDefault();
-                              setEditDraft((cur) => `${cur} `);
-                              return;
-                            }
-                            e.preventDefault();
-                            cancelEdit();
-                          }
-                        }}
-                        onBlur={(e) => {
-                          // Blur cancels unless focus is moving to this comment's
-                          // save control. Mention picks prevent the mousedown
-                          // default, so they never blur.
-                          const next = e.relatedTarget as HTMLElement | null;
-                          if (
-                            next?.dataset?.testid === `comment-edit-save-${c.id}`
-                          ) {
-                            return;
-                          }
-                          cancelEdit();
-                        }}
-                        style={{
-                          width: "100%",
-                          minWidth: 0,
-                          padding: "2px 4px",
-                          fontSize: 12,
-                          background: "#0d1117",
-                          color: "#e6edf3",
-                          border: "1px solid #30363d",
-                          borderRadius: 4,
-                          boxSizing: "border-box",
-                        }}
+                  <div className="lc-thread-composer">
+                    {editMention.open && (
+                      <MentionPicker
+                        testId={`mention-picker-edit-${c.id}`}
+                        matches={editMention.matches}
+                        onPick={editMention.pick}
                       />
-                    </div>
-                    <button
-                      data-testid={`comment-edit-save-${c.id}`}
-                      // Keeps focus on the input so its blur cancel doesn't tear
-                      // the field down before the click saves.
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={() => saveEdit(c.id)}
-                      title="Save comment"
-                      aria-label="Save comment"
-                      style={{
-                        background: "none",
-                        border: "none",
-                        color: "#3fb950",
-                        cursor: "pointer",
-                        fontSize: 12,
-                        lineHeight: 1,
-                        padding: 0,
-                      }}
-                    >
-                      ✓
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    {/* Chips are styling only: every segment renders as text,
-                        never HTML. */}
-                    <span style={{ wordBreak: "break-word", flex: 1 }}>
-                      {splitMentionTokens(c.text).map((seg, i) =>
-                        seg.kind === "mention" ? (
-                          <span
-                            key={i}
-                            data-testid="mention-chip"
-                            style={{
-                              color: "#58a6ff",
-                              backgroundColor: "rgba(56,139,253,0.15)",
-                              borderRadius: 4,
-                              padding: "0 3px",
-                              fontWeight: 600,
-                            }}
-                          >
-                            {seg.text}
-                          </span>
-                        ) : (
-                          <span key={i}>{seg.text}</span>
-                        ),
-                      )}
-                    </span>
-                    {mineComment && (
-                      <>
-                        <button
-                          data-testid={`comment-edit-${c.id}`}
-                          onClick={() => startEdit(c)}
-                          title="Edit comment"
-                          aria-label="Edit comment"
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: "#8b949e",
-                            cursor: "pointer",
-                            fontSize: 12,
-                            lineHeight: 1,
-                            padding: 0,
-                          }}
-                        >
-                          ✎
-                        </button>
-                        <button
-                          onClick={() => removeComment(c.id)}
-                          title="Remove comment"
-                          aria-label="Remove comment"
-                          style={{
-                            background: "none",
-                            border: "none",
-                            color: "#8b949e",
-                            cursor: "pointer",
-                            fontSize: 12,
-                            lineHeight: 1,
-                            padding: 0,
-                          }}
-                        >
-                          ×
-                        </button>
-                      </>
                     )}
-                  </>
+                    <TextField
+                      className="lc-thread-composer-field"
+                      label="Edit comment"
+                      labelPosition="hidden"
+                      value={editDraft}
+                      onChange={setEditDraft}
+                      autoFocus
+                      inputRef={editInputRef}
+                      data-testid={`comment-edit-input-${c.id}`}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          // With the picker open, Enter picks the top match; it
+                          // saves only with the picker closed.
+                          e.preventDefault();
+                          if (editMention.open) editMention.pick(editMention.matches[0].label);
+                          else saveEdit(c.id);
+                        } else if (e.key === "Escape") {
+                          // Escape first dismisses the picker (a trailing space
+                          // closes the token) without cancelling the edit.
+                          e.preventDefault();
+                          if (editMention.open) setEditDraft((cur) => `${cur} `);
+                          else cancelEdit();
+                        }
+                      }}
+                      onBlur={(e) => {
+                        // Blur cancels unless focus is moving to this comment's
+                        // save control. Mention picks prevent the mousedown
+                        // default, so they never blur.
+                        const next = e.relatedTarget as HTMLElement | null;
+                        if (next?.dataset?.testid === `comment-edit-save-${c.id}`) return;
+                        cancelEdit();
+                      }}
+                    />
+                    <IconButton
+                      icon={CheckIcon}
+                      label="Save comment"
+                      onPress={() => saveEdit(c.id)}
+                      data-testid={`comment-edit-save-${c.id}`}
+                    />
+                  </div>
+                ) : (
+                  // Chips are styling only: every segment renders as text, never
+                  // HTML.
+                  <p className="lc-thread-text">
+                    {splitMentionTokens(c.text).map((seg, i) =>
+                      seg.kind === "mention" ? (
+                        <span key={i} className="lc-thread-mention" data-testid="mention-chip">
+                          {seg.text}
+                        </span>
+                      ) : (
+                        <span key={i}>{seg.text}</span>
+                      ),
+                    )}
+                  </p>
                 )}
               </div>
             );
           })
         )}
       </div>
-      <div
-        style={{
-          position: "relative",
-          display: "flex",
-          gap: 4,
-          padding: 6,
-          borderTop: "1px solid #30363d",
-        }}
-      >
+      <div className="lc-thread-composer lc-thread-footer">
         {/* Floats above the composer because the popover clips its own
             overflow. */}
         {addMention.open && (
-          <div
-            data-testid={`mention-picker-${pin.id}`}
-            role="listbox"
-            aria-label="Mention a collaborator"
-            style={{
-              position: "absolute",
-              left: 6,
-              right: 6,
-              bottom: "100%",
-              marginBottom: 4,
-              maxHeight: 132,
-              overflowY: "auto",
-              background: "#161b22",
-              border: "1px solid #30363d",
-              borderRadius: 6,
-              boxShadow: "0 4px 12px rgba(0,0,0,0.6)",
-              zIndex: 1,
-            }}
-          >
-            {addMention.matches.map((candidate) => (
-              <button
-                key={candidate.id}
-                type="button"
-                role="option"
-                data-testid={`mention-option-${candidate.id}`}
-                // Keeps focus on the input so `pick`'s refocus lands on a live
-                // field.
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => addMention.pick(candidate.label)}
-                style={{
-                  display: "block",
-                  width: "100%",
-                  textAlign: "left",
-                  padding: "5px 8px",
-                  fontSize: 12,
-                  background: "none",
-                  border: "none",
-                  color: "#e6edf3",
-                  cursor: "pointer",
-                }}
-              >
-                <span style={{ color: "#58a6ff", fontWeight: 600 }}>@</span>
-                {candidate.label}
-              </button>
-            ))}
-          </div>
+          <MentionPicker
+            testId={`mention-picker-${pin.id}`}
+            matches={addMention.matches}
+            onPick={addMention.pick}
+          />
         )}
-        <input
-          ref={addInputRef}
-          type="text"
-          data-testid={`comment-add-input-${pin.id}`}
-          value={draft}
+        <TextField
+          className="lc-thread-composer-field"
+          label="Add a comment"
+          labelPosition="hidden"
           placeholder="Add a comment…"
-          aria-label="Add a comment"
-          onChange={(e) => setDraft(e.target.value)}
+          value={draft}
+          onChange={setDraft}
+          inputRef={addInputRef}
+          data-testid={`comment-add-input-${pin.id}`}
           onKeyDown={(e) => {
             if (e.key === "Enter") {
               // With the picker open, Enter picks the top match; it sends only
               // with the picker closed.
-              if (addMention.open) {
-                e.preventDefault();
-                addMention.pick(addMention.matches[0].label);
-                return;
-              }
               e.preventDefault();
-              addComment();
-            } else if (e.key === "Escape" && addMention.open) {
-              // Escape dismisses the picker by appending a space, which closes
-              // the token, without sending or losing the draft.
+              if (addMention.open) addMention.pick(addMention.matches[0].label);
+              else addComment();
+            } else if (e.key === "Escape") {
+              // The field keeps its keys to itself, so it handles the thread's
+              // Escape too. With the picker open, a trailing space closes the
+              // token and keeps the draft.
               e.preventDefault();
-              setDraft((cur) => `${cur} `);
+              if (addMention.open) setDraft((cur) => `${cur} `);
+              else onClose();
             }
           }}
-          style={{
-            flex: 1,
-            minWidth: 0,
-            padding: "4px 6px",
-            fontSize: 12,
-            background: "#0d1117",
-            color: "#e6edf3",
-            border: "1px solid #30363d",
-            borderRadius: 4,
-          }}
         />
-        <button
+        <Button
+          variant="primary"
+          onPress={addComment}
+          isDisabled={!draft.trim()}
           data-testid={`comment-add-send-${pin.id}`}
-          onClick={addComment}
-          disabled={!draft.trim()}
-          style={{
-            padding: "4px 8px",
-            fontSize: 12,
-            cursor: draft.trim() ? "pointer" : "default",
-          }}
         >
           Send
-        </button>
+        </Button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * The @-mention picker above a composer. Options keep focus in the field
+ * (mousedown is prevented), so typing continues and an edit field's blur never
+ * cancels the edit.
+ */
+function MentionPicker({
+  testId,
+  matches,
+  onPick,
+}: {
+  testId: string;
+  matches: MentionCandidate[];
+  onPick: (label: string) => void;
+}) {
+  return (
+    <div className="lc-thread-picker" data-testid={testId} role="listbox" aria-label="Mention a collaborator">
+      {matches.map((candidate, i) => (
+        <button
+          key={candidate.id}
+          type="button"
+          role="option"
+          // Enter picks the top match, so it reads as the selected one.
+          aria-selected={i === 0}
+          className="lc-thread-picker-option"
+          data-testid={`mention-option-${candidate.id}`}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => onPick(candidate.label)}
+        >
+          <span className="lc-thread-picker-at">@</span>
+          {candidate.label}
+        </button>
+      ))}
     </div>
   );
 }
