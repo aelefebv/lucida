@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
 
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { cleanup, render } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { MinimapOverlayData, RenderLoop } from "../renderLoop.ts";
+import { __resetPreferencesForTesting, getPreference } from "../theme/preferences.ts";
+import { minimapCardPreference } from "./canvasCards.ts";
 import { drawViewportOverlays } from "./minimapOverlay.ts";
 import { Minimap } from "./Minimap.tsx";
 
@@ -140,6 +142,11 @@ function makeClient(pipelinesCompiled: boolean): ClientStub {
   return stub as unknown as ClientStub;
 }
 
+beforeEach(() => {
+  localStorage.clear();
+  __resetPreferencesForTesting();
+});
+
 afterEach(() => {
   cleanup();
   vi.mocked(drawViewportOverlays).mockClear();
@@ -205,6 +212,27 @@ describe("the minimap overlay's content draws", () => {
     } finally {
       recorder.restore();
     }
+  });
+
+  it("stops the loop drawing it while folded or hidden, and keeps its canvases", () => {
+    const { loop } = makeLoop();
+    const client = makeClient(true);
+    const { container } = render(<Minimap client={client} activeLoop={loop} />);
+    const drawingOn = () => expect(loop.setMinimap).toHaveBeenLastCalledWith(true, expect.any(Number), expect.any(Function));
+    drawingOn();
+
+    fireEvent.click(screen.getByRole("button", { name: "Collapse minimap" }));
+    expect(loop.setMinimap).toHaveBeenLastCalledWith(false);
+    expect(getPreference(minimapCardPreference)).toBe("collapsed");
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand minimap" }));
+    drawingOn();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide minimap" }));
+    expect(loop.setMinimap).toHaveBeenLastCalledWith(false);
+    expect(getPreference(minimapCardPreference)).toBe("hidden");
+    expect(container.querySelectorAll("canvas")).toHaveLength(2);
+    expect(client.minimapInit).toHaveBeenCalledOnce();
   });
 
   it("withdraws its handler when it unmounts", () => {

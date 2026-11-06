@@ -1,5 +1,6 @@
 import { GearSixIcon } from "@phosphor-icons/react";
 import { useId } from "react";
+import { CanvasCardSwitches } from "../components/CanvasCard.tsx";
 import { AccentPicker } from "../theme/AccentPicker.tsx";
 import {
   accentPreference,
@@ -16,8 +17,9 @@ import { Switch } from "../ui/Switch.tsx";
 import "./SettingsMenu.css";
 
 /**
- * Appearance and developer tools. Each control writes its preference as it
- * changes, so the change shows at once and survives a reload.
+ * Appearance, the cards over the canvas, and developer tools. Each control
+ * writes its preference as it changes, so the change shows at once and
+ * survives a reload.
  */
 export function SettingsMenu() {
   const [theme, setTheme] = usePreference(themePreference);
@@ -78,6 +80,9 @@ export function SettingsMenu() {
           onChange={setCanvas}
           className="lc-settings-select"
         />
+        <div className="lc-settings-divider" role="presentation" />
+        <h2 className="lc-settings-heading">View</h2>
+        <CanvasCardSwitches />
         <div className="lc-settings-divider" role="presentation" />
         <Switch
           label="Developer tools"
