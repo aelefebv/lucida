@@ -6,9 +6,14 @@
 //! instructions is served instead. That check runs per request, so building
 //! the SPA after the server starts needs no restart. Mounts on the public
 //! router half: the bundle itself must never 401.
+//!
+//! With a deployment theme configured, `index.html` goes out with the
+//! theme written in at [`INDEX_MARKER`], so the pre-paint script applies
+//! it on a first visit (ADR 0066).
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::Router;
 use axum::extract::{Request, State};
@@ -17,17 +22,20 @@ use axum::response::{IntoResponse, Response};
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
+use crate::deployment_theme::{DeploymentTheme, INDEX_MARKER};
+
 /// Build the static-serve router for the SPA bundle at `dist_path`.
 ///
 /// The returned router is a catch-all (`fallback`) — merge it LAST into
 /// the application router so route-specific handlers (`/auth/*`,
 /// `/api/*`, `/admin/*`, `/ws`) take precedence and the SPA fallback
 /// only fires for truly unknown paths.
-pub fn router(dist_path: PathBuf) -> Router {
+pub fn router(dist_path: PathBuf, theme: Option<&DeploymentTheme>) -> Router {
     Router::new()
         .fallback(serve_static)
         .with_state(StaticState {
             dist_path: Arc::new(dist_path),
+            theme_snippet: theme.map(|t| t.index_snippet().into()),
         })
 }
 
@@ -36,6 +44,9 @@ pub fn router(dist_path: PathBuf) -> Router {
 #[derive(Clone)]
 struct StaticState {
     dist_path: Arc<PathBuf>,
+    /// What replaces [`INDEX_MARKER`] in `index.html`, when a deployment
+    /// theme is configured.
+    theme_snippet: Option<Arc<str>>,
 }
 
 /// Returns true iff `dist_path` is a directory containing `index.html`.
@@ -54,6 +65,9 @@ async fn serve_static(State(state): State<StaticState>, req: Request) -> Respons
     if !dist_is_ready(dist_path) {
         return missing_dist_landing();
     }
+    if let Some(snippet) = state.theme_snippet.as_deref() {
+        return serve_with_theme(dist_path, snippet, req).await;
+    }
     // SPA fallback: any unknown path returns `index.html` so client-side
     // routing survives deep-link refresh. `.fallback(...)`, not
     // `.not_found_service(...)`, because the latter would serve the SPA
@@ -66,6 +80,59 @@ async fn serve_static(State(state): State<StaticState>, req: Request) -> Respons
         // Unreachable: ServeDir's error is Infallible.
         Err(e) => match e {},
     }
+}
+
+/// The plain path, except that every response that would be `index.html`
+/// carries the theme. `/` and `/index.html` reach the file through
+/// `ServeDir` itself, so they are caught first; any other path is
+/// `index.html` exactly when `ServeDir` finds no file for it.
+async fn serve_with_theme(dist_path: &Path, snippet: &str, req: Request) -> Response {
+    let path = req.uri().path();
+    if path == "/" || path == "/index.html" {
+        return themed_index(dist_path, snippet).await;
+    }
+    let response = match ServeDir::new(dist_path).oneshot(req).await {
+        Ok(r) => r,
+        Err(e) => match e {},
+    };
+    if response.status() == StatusCode::NOT_FOUND {
+        return themed_index(dist_path, snippet).await;
+    }
+    response.into_response()
+}
+
+async fn themed_index(dist_path: &Path, snippet: &str) -> Response {
+    let html = match tokio::fs::read_to_string(dist_path.join("index.html")).await {
+        Ok(html) => html,
+        Err(e) => {
+            tracing::error!(error = %e, "static_serve.index_unreadable");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            // The page differs from the file on disk, so the file's
+            // modification time cannot validate it.
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        with_theme(html, snippet),
+    )
+        .into_response()
+}
+
+/// `html` with the theme in place of the marker. A bundle without the
+/// marker goes out unchanged and the client fetches the theme instead,
+/// which still themes the page but shows the built-in theme first.
+fn with_theme(html: String, snippet: &str) -> String {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !html.contains(INDEX_MARKER) {
+        if !WARNED.swap(true, Ordering::Relaxed) {
+            tracing::warn!(marker = INDEX_MARKER, "static_serve.theme_marker_missing");
+        }
+        return html;
+    }
+    html.replacen(INDEX_MARKER, snippet, 1)
 }
 
 /// Build the "SPA bundle missing — run `pnpm run build`" landing page.
@@ -132,7 +199,7 @@ mod tests {
     async fn missing_dist_returns_build_instructions_landing() {
         // Point at a path that definitely doesn't exist.
         let bogus = PathBuf::from("/nonexistent/lucida-web/dist-does-not-exist");
-        let app = router(bogus);
+        let app = router(bogus, None);
 
         let req = Request::builder().uri("/").body(Body::empty()).unwrap();
         let res = app.oneshot(req).await.unwrap();
@@ -166,7 +233,7 @@ mod tests {
         let html = "<html>HELLO</html>";
         write_index(tmp.path(), html);
 
-        let app = router(tmp.path().to_path_buf());
+        let app = router(tmp.path().to_path_buf(), None);
         let req = Request::builder().uri("/").body(Body::empty()).unwrap();
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
@@ -186,7 +253,7 @@ mod tests {
         let html = "<html>HELLO</html>";
         write_index(tmp.path(), html);
 
-        let app = router(tmp.path().to_path_buf());
+        let app = router(tmp.path().to_path_buf(), None);
         let req = Request::builder()
             .uri("/some/spa/route")
             .body(Body::empty())
@@ -197,5 +264,83 @@ mod tests {
         let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
         let body = std::str::from_utf8(&bytes).unwrap();
         assert_eq!(body, html, "SPA fallback must serve index.html verbatim");
+    }
+
+    const MARKED: &str = "<html><head><!-- deployment theme --><script></script></head></html>";
+
+    async fn get(app: &Router, uri: &str) -> (StatusCode, Option<String>, String) {
+        let req = Request::builder().uri(uri).body(Body::empty()).unwrap();
+        let res = app.clone().oneshot(req).await.unwrap();
+        let status = res.status();
+        let cache = res
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .map(|v| v.to_str().unwrap().to_string());
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        (status, cache, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    fn light_theme() -> DeploymentTheme {
+        DeploymentTheme::parse(r#"{"defaults": {"theme": "light"}}"#).unwrap()
+    }
+
+    #[tokio::test]
+    async fn without_a_theme_the_marker_is_left_alone() {
+        let tmp = TempDir::new().unwrap();
+        write_index(tmp.path(), MARKED);
+        let app = router(tmp.path().to_path_buf(), None);
+        for uri in ["/", "/index.html", "/open"] {
+            let (status, _, body) = get(&app, uri).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(body, MARKED, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn every_route_to_index_carries_the_theme() {
+        let tmp = TempDir::new().unwrap();
+        write_index(tmp.path(), MARKED);
+        let theme = light_theme();
+        let expected = MARKED.replace(INDEX_MARKER, &theme.index_snippet());
+        let app = router(tmp.path().to_path_buf(), Some(&theme));
+        for uri in [
+            "/",
+            "/index.html",
+            "/open?url=/data/a.zarr",
+            "/some/spa/route",
+        ] {
+            let (status, cache, body) = get(&app, uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(body, expected, "{uri}");
+            assert_eq!(cache.as_deref(), Some("no-cache"), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn assets_are_served_untouched_beside_a_theme() {
+        let tmp = TempDir::new().unwrap();
+        write_index(tmp.path(), MARKED);
+        std::fs::create_dir(tmp.path().join("assets")).unwrap();
+        std::fs::write(
+            tmp.path().join("assets/app.js"),
+            "// <!-- deployment theme -->",
+        )
+        .unwrap();
+        let theme = light_theme();
+        let app = router(tmp.path().to_path_buf(), Some(&theme));
+        let (status, _, body) = get(&app, "/assets/app.js").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "// <!-- deployment theme -->");
+    }
+
+    #[tokio::test]
+    async fn a_bundle_without_the_marker_is_served_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        write_index(tmp.path(), "<html>HELLO</html>");
+        let theme = light_theme();
+        let app = router(tmp.path().to_path_buf(), Some(&theme));
+        let (status, _, body) = get(&app, "/").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body, "<html>HELLO</html>");
     }
 }
