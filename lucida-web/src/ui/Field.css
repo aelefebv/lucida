@@ -35,6 +35,15 @@
   align-items: center;
 }
 
+/* A side label shares its row with the help text. Without help, under touch,
+   where every control is taller than the label, the label takes the whole
+   row so it centers on the control. */
+@media (pointer: coarse) {
+  .lc-field[data-label-position="side"]:not(:has(> .lc-field-help)) {
+    grid-template-areas: "label control";
+  }
+}
+
 .lc-field-label {
   grid-area: label;
   color: var(--lc-text-muted);
@@ -111,7 +120,7 @@
   background: transparent;
   color: inherit;
   font: inherit;
-  font-size: var(--lc-text-md);
+  font-size: var(--lc-text-input);
 }
 
 .lc-input::placeholder {
@@ -135,8 +144,10 @@
   padding-left: var(--lc-space-1);
 }
 
-/* A small square button inside the well (clear, steppers). */
+/* A small square button inside the well (clear, steppers). The well leaves
+   no room for a full tap target, so under touch it reaches past the button. */
 .lc-input-button {
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -152,6 +163,12 @@
   background: transparent;
   color: var(--lc-text-subtle);
   cursor: default;
+}
+
+.lc-input-button::before {
+  content: "";
+  position: absolute;
+  inset: min(0px, calc((var(--lc-control-h) - 8px - var(--lc-target-min)) / 2));
 }
 
 .lc-input-button[data-hovered] {

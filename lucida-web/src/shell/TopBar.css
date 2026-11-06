@@ -1,3 +1,5 @@
+/* The bar meets the top and both sides of the viewport, so it takes their
+   safe-area insets. */
 .lc-topbar {
   position: relative;
   z-index: var(--lc-z-panel);
@@ -6,8 +8,9 @@
   justify-content: space-between;
   gap: var(--lc-space-4);
   box-sizing: border-box;
-  height: calc(var(--lc-control-h) + var(--lc-space-4));
-  padding: 0 var(--lc-space-2);
+  height: calc(var(--lc-control-h) + var(--lc-space-4) + var(--lc-safe-top));
+  padding: var(--lc-safe-top) calc(var(--lc-space-2) + var(--lc-safe-right)) 0
+    calc(var(--lc-space-2) + var(--lc-safe-left));
   border-bottom: 1px solid var(--lc-border);
   background: var(--lc-surface-1);
   color: var(--lc-text);

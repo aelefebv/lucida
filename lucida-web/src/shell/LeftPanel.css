@@ -26,14 +26,15 @@
   min-height: 0;
 }
 
-/* A thin line over the border with a wider grab area. */
+/* A thin line over the border with a wider grab area, wider still under touch. */
 .lc-left-panel-resize {
+  --grab: max(8px, var(--lc-target-min));
   position: absolute;
   top: 0;
-  right: -4px;
+  right: calc(var(--grab) / -2);
   bottom: 0;
   z-index: 1;
-  width: 8px;
+  width: var(--grab);
   cursor: col-resize;
   outline: none;
   touch-action: none;
@@ -44,7 +45,7 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  left: 3px;
+  left: calc(50% - 1px);
   width: 2px;
   background: transparent;
   transition: background-color var(--lc-motion-fast) var(--lc-ease);

@@ -10,7 +10,9 @@
   align-items: center;
   gap: var(--lc-space-1);
   box-sizing: border-box;
-  width: 48px;
+  /* Wide enough for a rail button with room either side, which under touch
+     is wider than the desktop rail. */
+  width: max(48px, calc(var(--lc-control-h) + var(--lc-space-2) + var(--lc-space-3)));
   padding: var(--lc-space-2) 0;
   border-left: 1px solid var(--lc-border);
   background: var(--lc-surface-1);

@@ -44,3 +44,12 @@ export {
   type ResolvedColor,
   type TokenName,
 } from "./tokens.ts";
+export {
+  POINTER_COARSE_MEDIA,
+  VIEWPORT_MEDIA,
+  getViewportClass,
+  isPointerCoarse,
+  usePointerCoarse,
+  useViewportClass,
+  type ViewportClass,
+} from "./viewport.ts";
