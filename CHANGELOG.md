@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.20.0](https://github.com/aelefebv/lucida/compare/v0.19.0...v0.20.0) (2026-11-06)
+
+
+### Features
+
+* snapshot previews on dashboard workspace cards ([#1186](https://github.com/aelefebv/lucida/issues/1186)) ([97dad75](https://github.com/aelefebv/lucida/commit/97dad7558c4972903cdbf87a1c1c0ee6b852720a))
+* **web:** fit GPU and memory budgets to the device, idle the frame loop, explain missing WebGPU ([#1182](https://github.com/aelefebv/lucida/issues/1182)) ([3fba27e](https://github.com/aelefebv/lucida/commit/3fba27eb2d96f94c655cdc38a3ef81ba1802fed7))
+* **web:** phone shell with a full-screen canvas and one bottom sheet ([#1189](https://github.com/aelefebv/lucida/issues/1189)) ([dc7c782](https://github.com/aelefebv/lucida/commit/dc7c782acc329abe8a13a656aefa08f7b469502b))
+* **web:** responsive foundation with width classes, touch sizing, safe areas, and long-press tooltips ([#1181](https://github.com/aelefebv/lucida/issues/1181)) ([beb09b8](https://github.com/aelefebv/lucida/commit/beb09b8230f0b8614beca2047553d453010be3e8))
+* **web:** side panels slide over the canvas below 1024 px; dashboard and dialogs fit small screens ([#1184](https://github.com/aelefebv/lucida/issues/1184)) ([080feaa](https://github.com/aelefebv/lucida/commit/080feaad9aeb82d2912b6eb740a33424b18596c7))
+* **web:** touch gestures on the canvas ([#1179](https://github.com/aelefebv/lucida/issues/1179)) ([40b5b8a](https://github.com/aelefebv/lucida/commit/40b5b8a558e99f1694fcbea035fb2f921d9c6dfa))
+* **web:** touch-reachable editing with select to edit, a canvas menu, and on-screen paths for keyboard-only features ([#1185](https://github.com/aelefebv/lucida/issues/1185)) ([d2232d3](https://github.com/aelefebv/lucida/commit/d2232d370b6f600854d50377520f27e3a43638ef))
+
+
+### Bug Fixes
+
+* **web:** mobile QA pass with 3D framing on phones, phone presence, and sheet, toast, and menu fixes ([#1190](https://github.com/aelefebv/lucida/issues/1190)) ([ba61a1c](https://github.com/aelefebv/lucida/commit/ba61a1c5bee0e4eb09e23ad26bf75c8d7dfc2d96))
+
 ## [0.19.0](https://github.com/aelefebv/lucida/compare/v0.18.0...v0.19.0) (2026-11-06)
 
 
