@@ -178,8 +178,9 @@
 }
 
 /* Colors drawn over data come in one set for dark canvases and one for light,
-   each at least 3:1 against its background. The theme canvas takes the set
-   that matches the theme. Axes keep the conventional red, green, and blue. */
+   each at least 3:1 against its background. The theme canvas borrows the
+   theme's status hues, which the theme already tunes to its background. Axes
+   keep the conventional red, green, and blue. */
 :root {
   --lc-canvas-axis-x: #ff4444;
   --lc-canvas-axis-y: #44cc44;
@@ -192,8 +193,7 @@
   --lc-canvas-info: #6aaaf8;
 }
 
-:root[data-canvas="white"],
-:root[data-canvas="theme"][data-theme="light"] {
+:root[data-canvas="white"] {
   --lc-canvas-axis-x: #d42a2a;
   --lc-canvas-axis-y: #17803d;
   --lc-canvas-axis-z: #2563eb;
@@ -203,6 +203,18 @@
   --lc-canvas-warning: #9a5700;
   --lc-canvas-danger: #d42a2a;
   --lc-canvas-info: #2563eb;
+}
+
+:root[data-canvas="theme"] {
+  --lc-canvas-axis-x: var(--lc-danger);
+  --lc-canvas-axis-y: var(--lc-success);
+  --lc-canvas-axis-z: var(--lc-info);
+  --lc-canvas-viewport: var(--lc-info);
+  --lc-canvas-plane: var(--lc-warning);
+  --lc-canvas-success: var(--lc-success);
+  --lc-canvas-warning: var(--lc-warning);
+  --lc-canvas-danger: var(--lc-danger);
+  --lc-canvas-info: var(--lc-info);
 }
 
 @media (prefers-reduced-motion: reduce) {

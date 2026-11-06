@@ -104,9 +104,7 @@ describe.each([
 // references to theme tokens resolved against that theme.
 function canvasTokens(canvas: string, theme: "dark" | "light"): Map<string, string> {
   const merged = new Map([...parsed.get(":root")!, ...(theme === "light" ? light : dark)]);
-  for (const selector of [`:root[data-canvas="${canvas}"]`, `:root[data-canvas="${canvas}"][data-theme="${theme}"]`]) {
-    for (const [name, value] of parsed.get(selector) ?? []) merged.set(name, value);
-  }
+  for (const [name, value] of parsed.get(`:root[data-canvas="${canvas}"]`) ?? []) merged.set(name, value);
   for (const [name, value] of merged) {
     const ref = /^var\((--lc-[\w-]+)\)$/.exec(value);
     if (ref) merged.set(name, merged.get(ref[1])!);
