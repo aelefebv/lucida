@@ -19,12 +19,6 @@
   outline: none;
 }
 
-/* Drawn inside, since the stage clips anything outside the canvas. */
-.lc-canvas-stage-canvas:focus-visible {
-  outline: 2px solid var(--lc-focus-ring);
-  outline-offset: -2px;
-}
-
 /* Layers cover the canvas and pass pointer events through; the markers in
    them opt back in. */
 .lc-canvas-stage-layers {
@@ -32,6 +26,13 @@
   inset: 0;
   z-index: 0;
   pointer-events: none;
+}
+
+/* A comment thread is a popover pinned to a point on the canvas, so it lives
+   in the layers. While one is open the layers rise above the slots, since
+   floating controls belong below popovers. */
+.lc-canvas-stage-layers:has([role="dialog"]) {
+  z-index: var(--lc-z-popover);
 }
 
 .lc-canvas-stage-empty {
@@ -55,7 +56,7 @@
 .lc-canvas-stage-slots {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: var(--lc-z-float);
   display: flex;
   flex-direction: column;
   justify-content: space-between;

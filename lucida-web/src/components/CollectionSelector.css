@@ -1,0 +1,70 @@
+/* Row labels in the first column, then one fixed-size cell per column. The
+   first row holds the column labels and is only as tall as its text. The
+   cell size and gap come from the component, by grid density. */
+.lc-navigator-grid {
+  display: grid;
+  grid-template-columns: auto repeat(var(--navigator-columns), var(--navigator-cell));
+  grid-template-rows: auto;
+  grid-auto-rows: var(--navigator-cell);
+  gap: var(--navigator-gap);
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+}
+
+.lc-navigator-axis {
+  overflow: visible;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+}
+
+.lc-navigator-axis[data-axis="row"] {
+  padding-right: var(--lc-space-1);
+  text-align: right;
+}
+
+.lc-navigator-cell {
+  box-sizing: border-box;
+  width: var(--navigator-cell);
+  height: var(--navigator-cell);
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--lc-border-strong);
+  border-radius: min(var(--lc-radius-sm), calc(var(--navigator-cell) / 4));
+  outline: none;
+  background: var(--lc-surface-3);
+  cursor: default;
+  transition:
+    background-color var(--lc-motion-fast) var(--lc-ease),
+    border-color var(--lc-motion-fast) var(--lc-ease);
+}
+
+/* A group with nothing in it keeps its place in the grid but takes no click. */
+.lc-navigator-cell:disabled {
+  border-color: var(--lc-border);
+  background: transparent;
+}
+
+.lc-navigator-cell:enabled:hover {
+  border-color: var(--lc-accent);
+  background: var(--lc-accent-subtle);
+}
+
+.lc-navigator-cell[aria-current] {
+  border-color: var(--lc-accent);
+  background: var(--lc-accent);
+}
+
+.lc-navigator-cell:focus-visible {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 1px;
+}
+
+.lc-navigator-toggle {
+  width: 100%;
+  margin-top: var(--lc-space-2);
+}

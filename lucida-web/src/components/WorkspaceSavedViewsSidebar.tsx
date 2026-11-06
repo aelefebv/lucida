@@ -34,6 +34,10 @@ import {
   type WorkspaceSavedViewVisibility,
 } from "../savedView/useWorkspaceSavedViews.ts";
 import type { SavedView } from "../savedView/types.ts";
+import { rightPanelOpenPreference, rightPanelPreference } from "../shell/layoutPreferences.ts";
+import { setPreference } from "../theme/preferences.ts";
+import { useCommand } from "../ui/commands.ts";
+import { dismissToast, toast } from "../ui/toastQueue.ts";
 import "./BookmarkSidebar.css";
 import "./WorkspaceSavedViewsSidebar.css";
 
@@ -63,24 +67,8 @@ export interface WorkspaceSavedViewsSidebarProps {
   visible: boolean;
 }
 
-interface ToastAction {
-  label: string;
-  onClick: () => void;
-}
-
-interface ToastMessage {
-  /** Status toasts get a generated id. A deferred reject's Undo toast is keyed by
-   *  `reject:<savedViewId>`, so each pending reject owns its own toast. */
-  id: string;
-  text: string;
-  kind: "info" | "warn";
-  /** Optional inline action (e.g. "Undo") rendered as a button in the toast. */
-  action?: ToastAction;
-}
-
-/** Per-view id, so one pending reject's Undo toast never clobbers another's. */
-function rejectToastId(savedViewId: string): string {
-  return `reject:${savedViewId}`;
+function failed(title: string, e: unknown): void {
+  toast({ title, description: e instanceof Error ? e.message : String(e), tone: "danger" });
 }
 
 interface ConfirmRequest {
@@ -152,53 +140,25 @@ export function WorkspaceSavedViewsSidebar({
   );
 
   const [savePromptOpen, setSavePromptOpen] = useState(false);
+  // The prompt renders only while this panel shows, so the command opens it.
+  useCommand({
+    id: "views.save",
+    label: "Save view…",
+    group: "View",
+    keywords: ["bookmark"],
+    run: () => {
+      setPreference(rightPanelPreference, "savedViews");
+      setPreference(rightPanelOpenPreference, true);
+      setSavePromptOpen(true);
+    },
+  });
   const [renameId, setRenameId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ConfirmRequest | null>(null);
   const [confirmPropose, setConfirmPropose] = useState<ConfirmRequest | null>(null);
-  // A stack, not a single slot: rejecting view B must not evict view A's
-  // still-live Undo toast while A's reject timer runs. Newest on top.
-  const [toasts, setToasts] = useState<readonly ToastMessage[]>([]);
   // Ids whose Reject is in its cancelable window: hidden from the review queue
   // but not yet sent to the server.
   const [pendingReject, setPendingReject] = useState<ReadonlySet<string>>(
     () => new Set(),
-  );
-
-  // One auto-dismiss timer per toast id, so one toast's expiry can't tear down
-  // another's.
-  const dismissTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  const seqRef = useRef(0);
-  const dismissToast = useCallback((id: string) => {
-    const timer = dismissTimers.current.get(id);
-    if (timer) {
-      clearTimeout(timer);
-      dismissTimers.current.delete(id);
-    }
-    setToasts((prev) => {
-      if (!prev.some((t) => t.id === id)) return prev;
-      return prev.filter((t) => t.id !== id);
-    });
-  }, []);
-  const showToast = useCallback(
-    (
-      text: string,
-      kind: ToastMessage["kind"] = "info",
-      opts?: { action?: ToastAction; durationMs?: number; id?: string },
-    ) => {
-      // A reject toast's stable id makes re-issuing replace that view's toast in
-      // place; status toasts get a fresh id each.
-      const id = opts?.id ?? `toast:${seqRef.current++}`;
-      const next: ToastMessage = { id, text, kind, action: opts?.action };
-      setToasts((prev) => [...prev.filter((t) => t.id !== id), next]);
-      const existing = dismissTimers.current.get(id);
-      if (existing) clearTimeout(existing);
-      const timer = setTimeout(() => {
-        dismissTimers.current.delete(id);
-        setToasts((prev) => prev.filter((t) => t.id !== id));
-      }, opts?.durationMs ?? 3000);
-      dismissTimers.current.set(id, timer);
-    },
-    [],
   );
 
   // Mirrored into refs so handlers can report "the open view went away" without
@@ -218,17 +178,25 @@ export function WorkspaceSavedViewsSidebar({
     }
   }, []);
 
-  // One timer per deferred reject, so several can be undone independently.
-  // Cleared on unmount so a pending PATCH never fires after the sidebar is gone.
+  // One timer and one Undo toast per deferred reject, so several can be undone
+  // independently. Both go on unmount: a pending PATCH never fires after the
+  // sidebar is gone, and an Undo with nothing left to undo never lingers.
   const rejectTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const rejectToasts = useRef(new Map<string, string>());
+  const closeRejectToast = useCallback((id: string) => {
+    const toastId = rejectToasts.current.get(id);
+    if (toastId === undefined) return;
+    rejectToasts.current.delete(id);
+    dismissToast(toastId);
+  }, []);
   useEffect(() => {
     const rejects = rejectTimers.current;
-    const dismisses = dismissTimers.current;
+    const undoToasts = rejectToasts.current;
     return () => {
       for (const timer of rejects.values()) clearTimeout(timer);
       rejects.clear();
-      for (const timer of dismisses.values()) clearTimeout(timer);
-      dismisses.clear();
+      for (const toastId of undoToasts.values()) dismissToast(toastId);
+      undoToasts.clear();
     };
   }, []);
 
@@ -236,21 +204,23 @@ export function WorkspaceSavedViewsSidebar({
     async (name: string, visibility: WorkspaceSavedViewVisibility) => {
       const view = getCurrentSavedView();
       if (!view) {
-        showToast("No active view to save", "warn");
+        toast({ title: "No active view to save", tone: "warning" });
         return;
       }
       try {
         await createSavedView(name, view, visibility);
-        showToast(
-          visibility === "personal"
-            ? `Saved "${name}" to your personal views`
-            : `Saved "${name}" for the team`,
-        );
+        toast({
+          title:
+            visibility === "personal"
+              ? `Saved "${name}" to your personal views`
+              : `Saved "${name}" for the team`,
+          tone: "success",
+        });
       } catch (e) {
-        showToast(`Save failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Save failed", e);
       }
     },
-    [createSavedView, getCurrentSavedView, showToast],
+    [createSavedView, getCurrentSavedView],
   );
 
   const handleOpen = useCallback(
@@ -258,10 +228,10 @@ export function WorkspaceSavedViewsSidebar({
       try {
         await onOpenSavedView(view.view, view.id);
       } catch (e) {
-        showToast(`Open failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Open failed", e);
       }
     },
-    [onOpenSavedView, showToast],
+    [onOpenSavedView],
   );
 
   const handleRenameCommit = useCallback(
@@ -274,41 +244,41 @@ export function WorkspaceSavedViewsSidebar({
       try {
         await renameSavedView(id, trimmed);
       } catch (e) {
-        showToast(`Rename failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Rename failed", e);
       } finally {
         setRenameId(null);
       }
     },
-    [renameSavedView, showToast],
+    [renameSavedView],
   );
 
   const handleReplace = useCallback(
     async (view: WorkspaceSavedView) => {
       const current = getCurrentSavedView();
       if (!current) {
-        showToast("No active view to save", "warn");
+        toast({ title: "No active view to save", tone: "warning" });
         return;
       }
       try {
         await replaceSavedView(view.id, current);
-        showToast(`Updated "${view.name}"`);
+        toast({ title: `Updated "${view.name}"`, tone: "success" });
       } catch (e) {
-        showToast(`Update failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Update failed", e);
       }
     },
-    [getCurrentSavedView, replaceSavedView, showToast],
+    [getCurrentSavedView, replaceSavedView],
   );
 
   const handlePromote = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
         await setSavedViewVisibility(view.id, "shared");
-        showToast(`Shared "${view.name}" with the team`);
+        toast({ title: `Shared "${view.name}" with the team`, tone: "success" });
       } catch (e) {
-        showToast(`Share failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Share failed", e);
       }
     },
-    [setSavedViewVisibility, showToast],
+    [setSavedViewVisibility],
   );
 
   // Runs from the confirm modal, never directly from the menu.
@@ -316,14 +286,14 @@ export function WorkspaceSavedViewsSidebar({
     async (view: WorkspaceSavedView) => {
       try {
         await setSavedViewVisibility(view.id, "proposed");
-        showToast(`Proposed "${view.name}" to the team for review`);
+        toast({ title: `Proposed "${view.name}" to the team for review`, tone: "success" });
       } catch (e) {
-        showToast(`Propose failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Propose failed", e);
       } finally {
         setConfirmPropose(null);
       }
     },
-    [setSavedViewVisibility, showToast],
+    [setSavedViewVisibility],
   );
 
   const handleWithdraw = useCallback(
@@ -331,24 +301,24 @@ export function WorkspaceSavedViewsSidebar({
       try {
         await setSavedViewVisibility(view.id, "personal");
         invalidateIfOpen(view.id);
-        showToast(`Withdrew "${view.name}" — back to your personal views`);
+        toast({ title: `Withdrew "${view.name}"`, description: "It is back in your personal views." });
       } catch (e) {
-        showToast(`Withdraw failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Withdraw failed", e);
       }
     },
-    [invalidateIfOpen, setSavedViewVisibility, showToast],
+    [invalidateIfOpen, setSavedViewVisibility],
   );
 
   const handleApprove = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
         await approveSavedView(view.id);
-        showToast(`Approved "${view.name}" — now shared with the team`);
+        toast({ title: `Approved "${view.name}"`, description: "It is now shared with the team.", tone: "success" });
       } catch (e) {
-        showToast(`Approve failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Approve failed", e);
       }
     },
-    [approveSavedView, showToast],
+    [approveSavedView],
   );
 
   // Cancel a pending reject before it commits. The row was only hidden locally,
@@ -366,9 +336,9 @@ export function WorkspaceSavedViewsSidebar({
         next.delete(id);
         return next;
       });
-      dismissToast(rejectToastId(id));
+      closeRejectToast(id);
     },
-    [dismissToast],
+    [closeRejectToast],
   );
 
   // Reject is a delayed, cancelable send: hide the row now, offer Undo, and fire
@@ -387,6 +357,9 @@ export function WorkspaceSavedViewsSidebar({
 
       const timer = setTimeout(() => {
         rejectTimers.current.delete(id);
+        // A hovered or focused toast holds its own timer, so close it here,
+        // where the Undo stops meaning anything.
+        closeRejectToast(id);
         // Clear the local hide once it settles; on failure the hook's refresh
         // restores the row.
         void rejectSavedView(id)
@@ -396,10 +369,7 @@ export function WorkspaceSavedViewsSidebar({
             invalidateIfOpen(id);
           })
           .catch((e) => {
-            showToast(
-              `Reject failed: ${e instanceof Error ? e.message : String(e)}`,
-              "warn",
-            );
+            failed("Reject failed", e);
           })
           .finally(() => {
             setPendingReject((prev) => {
@@ -413,13 +383,16 @@ export function WorkspaceSavedViewsSidebar({
       rejectTimers.current.set(id, timer);
 
       // The Undo toast lives for the whole cancelable window.
-      showToast(`Rejected "${view.name}"`, "info", {
-        durationMs: REJECT_UNDO_WINDOW_MS,
-        id: rejectToastId(id),
-        action: { label: "Undo", onClick: () => cancelReject(id) },
-      });
+      rejectToasts.current.set(
+        id,
+        toast({
+          title: `Rejected "${view.name}"`,
+          action: { label: "Undo", onPress: () => cancelReject(id) },
+          timeout: REJECT_UNDO_WINDOW_MS,
+        }),
+      );
     },
-    [cancelReject, invalidateIfOpen, rejectSavedView, showToast],
+    [cancelReject, closeRejectToast, invalidateIfOpen, rejectSavedView],
   );
 
   const handleSetDefault = useCallback(
@@ -427,12 +400,15 @@ export function WorkspaceSavedViewsSidebar({
       const nextDefaultId = defaultSavedViewId === view.id ? null : view.id;
       try {
         await onSetDefaultSavedView(nextDefaultId);
-        showToast(nextDefaultId === null ? "Default view cleared" : `"${view.name}" set as default`);
+        toast({
+          title: nextDefaultId === null ? "Default view cleared" : `"${view.name}" set as default`,
+          tone: "success",
+        });
       } catch (e) {
-        showToast(`Default update failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Default update failed", e);
       }
     },
-    [defaultSavedViewId, onSetDefaultSavedView, showToast],
+    [defaultSavedViewId, onSetDefaultSavedView],
   );
 
   const handleDelete = useCallback(
@@ -445,14 +421,14 @@ export function WorkspaceSavedViewsSidebar({
             console.warn("[WorkspaceSavedViewsSidebar] default clear after delete failed:", e);
           });
         }
-        showToast(`Deleted "${view.name}"`);
+        toast({ title: `Deleted "${view.name}"` });
       } catch (e) {
-        showToast(`Delete failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Delete failed", e);
       } finally {
         setConfirmDelete(null);
       }
     },
-    [defaultSavedViewId, deleteSavedView, invalidateIfOpen, onSetDefaultSavedView, showToast],
+    [defaultSavedViewId, deleteSavedView, invalidateIfOpen, onSetDefaultSavedView],
   );
 
   const handleCopyLink = useCallback(
@@ -460,12 +436,12 @@ export function WorkspaceSavedViewsSidebar({
       try {
         const url = `${window.location.origin}${window.location.pathname}${window.location.search}#b=${encodeURIComponent(view.id)}`;
         await navigator.clipboard.writeText(url);
-        showToast("View link copied");
+        toast({ title: "View link copied", tone: "success" });
       } catch (e) {
-        showToast(`Copy failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Copy failed", e);
       }
     },
-    [showToast],
+    [],
   );
 
   // Called when the Save dialog opens (the modal seeds its state once), so the
@@ -660,30 +636,6 @@ export function WorkspaceSavedViewsSidebar({
         />
       )}
 
-      {toasts.length > 0 && (
-        <div className="bookmark-toast-stack" data-testid="saved-view-toast-stack">
-          {toasts.map((t) => (
-            <div
-              key={t.id}
-              role="status"
-              className={`bookmark-toast${t.kind === "warn" ? " warn" : ""}`}
-              data-testid="saved-view-toast"
-            >
-              <span className="bookmark-toast-text">{t.text}</span>
-              {t.action && (
-                <button
-                  type="button"
-                  className="bookmark-toast-action"
-                  data-testid="saved-view-toast-action"
-                  onClick={t.action.onClick}
-                >
-                  {t.action.label}
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
     </section>
   );
 }

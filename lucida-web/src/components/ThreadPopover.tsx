@@ -27,12 +27,11 @@ import {
 import { useMentionAutocomplete } from "./useMentionAutocomplete.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
 import { buildAnnotationLink } from "../savedView/urlSync.ts";
-// Straight from each primitive's file: the ui index also re-exports the toast
-// region, which would pull it out of its lazy chunk into the main bundle.
 import { Badge } from "../ui/Badge.tsx";
 import { Button, IconButton } from "../ui/Button.tsx";
 import { useShortcut, useShortcutScope } from "../ui/shortcuts.ts";
 import { TextField } from "../ui/TextField.tsx";
+import { toast } from "../ui/toastQueue.ts";
 import "./ThreadPopover.css";
 
 /** Takes precedence over global shortcuts while a thread is open. */
@@ -92,7 +91,6 @@ export function ThreadPopover({
   // Nothing is emitted until Confirm, so one click can never destroy a pin and
   // its thread.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
-  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
   const mine = pin.author === String(myId);
   const comments = pin.comments ?? [];
@@ -104,11 +102,14 @@ export function ThreadPopover({
     const link = buildAnnotationLink(pin.id);
     try {
       await navigator.clipboard.writeText(link);
-      setCopyState("copied");
-    } catch {
-      setCopyState("failed");
+      toast({ title: "Link copied", tone: "success" });
+    } catch (e) {
+      toast({
+        title: "Couldn't copy the link",
+        description: e instanceof Error ? e.message : String(e),
+        tone: "danger",
+      });
     }
-    setTimeout(() => setCopyState("idle"), 2500);
   };
 
   // Anyone may add a comment.
@@ -272,11 +273,7 @@ export function ThreadPopover({
             onPress={copyLink}
             data-testid={`pin-copy-link-${pin.id}`}
           >
-            {copyState === "copied"
-              ? "Copied!"
-              : copyState === "failed"
-                ? "Copy failed"
-                : "Copy link"}
+            Copy link
           </Button>
           {pin.view && (
             <IconButton

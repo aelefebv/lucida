@@ -8,6 +8,8 @@ import {
   type WorkspaceSavedViewsSidebarProps,
 } from "./WorkspaceSavedViewsSidebar.tsx";
 import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
+import { ToastRegion } from "../ui/Toast.tsx";
+import { toastQueue } from "../ui/toastQueue.ts";
 
 function emptyView(): SavedView {
   return {
@@ -87,6 +89,7 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   cleanup();
+  toastQueue.clear();
 });
 
 describe("WorkspaceSavedViewsSidebar — visibility on rows", () => {
@@ -465,7 +468,12 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
       ]);
     };
     await act(async () => {
-      render(<WorkspaceSavedViewsSidebar {...baseProps(true)} />);
+      render(
+        <>
+          <WorkspaceSavedViewsSidebar {...baseProps(true)} />
+          <ToastRegion />
+        </>,
+      );
     });
     // Let the initial list fetch settle under fake timers.
     await act(async () => {
@@ -486,14 +494,14 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
 
     // Two toasts, each naming its view and carrying an Undo: B's did not evict
     // A's. No reject has been sent yet.
-    const toasts = screen.getAllByTestId("saved-view-toast");
+    const toasts = screen.getAllByRole("alertdialog");
     expect(toasts).toHaveLength(2);
     const aToast = toasts.find((t) => within(t).queryByText(/Proposal A/)) as HTMLElement;
     const bToast = toasts.find((t) => within(t).queryByText(/Proposal B/)) as HTMLElement;
     expect(aToast).toBeTruthy();
     expect(bToast).toBeTruthy();
-    expect(within(aToast).getByTestId("saved-view-toast-action").textContent).toMatch(/undo/i);
-    expect(within(bToast).getByTestId("saved-view-toast-action").textContent).toMatch(/undo/i);
+    expect(within(aToast).getByRole("button", { name: "Undo" })).toBeTruthy();
+    expect(within(bToast).getByRole("button", { name: "Undo" })).toBeTruthy();
     expect(rejectPosts()).toHaveLength(0);
   });
 
@@ -509,10 +517,10 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
 
     // Undo A specifically (via A's own toast's Undo button).
     const aToast = screen
-      .getAllByTestId("saved-view-toast")
+      .getAllByRole("alertdialog")
       .find((t) => within(t).queryByText(/Proposal A/)) as HTMLElement;
     await act(async () => {
-      fireEvent.click(within(aToast).getByTestId("saved-view-toast-action"));
+      fireEvent.click(within(aToast).getByRole("button", { name: "Undo" }));
     });
 
     // A is back in the queue (its row was only hidden, never sent); B is still
@@ -524,6 +532,8 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(6000);
     });
+    // B's Undo goes with its window, so nothing is left to undo.
+    expect(toastQueue.visibleToasts.some((t) => t.content.action)).toBe(false);
 
     // The reject fired for B only, never for the undone A.
     const posts = rejectPosts();
@@ -542,7 +552,8 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
     cleanup();
 
     // Advancing past the window must not fire the reject: unmount cleared the
-    // timer.
+    // timer, and closed the Undo toast that would now undo nothing.
+    expect(toastQueue.visibleToasts).toHaveLength(0);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(6000);
     });

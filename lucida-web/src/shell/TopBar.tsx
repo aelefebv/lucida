@@ -3,15 +3,14 @@ import {
   ChartLineIcon,
   CopyIcon,
   GaugeIcon,
-  ShareNetworkIcon,
   SidebarSimpleIcon,
   SquaresFourIcon,
   WrenchIcon,
 } from "@phosphor-icons/react";
-import { useState, type MouseEvent } from "react";
+import { useState, type MouseEvent, type ReactNode } from "react";
 import { ProfileMenu } from "../auth/ProfileMenu.tsx";
 import { usePreference } from "../theme/preferences.ts";
-import { Button, IconButton } from "../ui/Button.tsx";
+import { IconButton } from "../ui/Button.tsx";
 import { Menu, MenuItem } from "../ui/Menu.tsx";
 import { toast } from "../ui/toastQueue.ts";
 import { leftPanelOpenPreference } from "./layoutPreferences.ts";
@@ -28,8 +27,8 @@ export interface TopBarProps {
   onRenameWorkspace?: (name: string) => Promise<void>;
   onBackToDashboard: () => void;
   presence: PresenceAvatarsProps;
-  /** Opens the sharing dialog; omit when the user can't share. */
-  onShare?: () => void;
+  /** The Share control. */
+  share?: ReactNode;
   developer: DeveloperSurfaces;
 }
 
@@ -40,7 +39,7 @@ export function TopBar({
   onRenameWorkspace,
   onBackToDashboard,
   presence,
-  onShare,
+  share,
   developer,
 }: TopBarProps) {
   const [leftOpen, setLeftOpen] = usePreference(leftPanelOpenPreference);
@@ -117,11 +116,7 @@ export function TopBar({
           </div>
         )}
         <PresenceAvatars {...presence} />
-        {onShare && (
-          <Button variant="primary" icon={ShareNetworkIcon} onPress={onShare}>
-            Share
-          </Button>
-        )}
+        {share}
         <SettingsMenu />
         <ProfileMenu />
       </div>

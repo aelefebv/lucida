@@ -11,9 +11,24 @@ export {
   type IconButtonProps,
 } from "./Button.tsx";
 export { Card, type CardProps } from "./Card.tsx";
+export { CommandPalette, type CommandPaletteProps } from "./CommandPalette.tsx";
+export {
+  listCommands,
+  registerCommand,
+  runCommand,
+  searchCommands,
+  useCommand,
+  useCommandList,
+  useCommands,
+  type CommandInfo,
+  type CommandOptions,
+} from "./commands.ts";
 export { Dialog, type DialogProps } from "./Dialog.tsx";
+export { escapeTopLayer, hasEscapeLayer, pushEscapeLayer } from "./escape.ts";
 export type { LabelPosition } from "./fieldProps.ts";
 export { Kbd, type KbdProps } from "./Kbd.tsx";
+export { KeyboardHelp } from "./KeyboardHelp.tsx";
+export { showKeyboardHelp, useKeyboardHelp, type KeyboardHelpOverlay } from "./keyboardHelpState.ts";
 export {
   Menu,
   MenuItem,
@@ -45,6 +60,7 @@ export {
   type ShortcutInfo,
   type ShortcutOptions,
 } from "./shortcuts.ts";
+export { ShortcutSheet, type ShortcutSheetProps } from "./ShortcutSheet.tsx";
 export { Slider, type SliderProps, type SliderValue } from "./Slider.tsx";
 export { Switch, type SwitchProps } from "./Switch.tsx";
 export {
@@ -53,6 +69,8 @@ export {
   type SearchFieldProps,
   type TextFieldProps,
 } from "./TextField.tsx";
-export { ToastRegion } from "./Toast.tsx";
+// ToastRegion is left out: main.tsx loads it lazily, and a static re-export
+// here would pull it into the main bundle.
 export { dismissToast, toast, type ToastOptions, type ToastTone } from "./toastQueue.ts";
+export { Toolbar, ToolbarSeparator, type ToolbarProps } from "./Toolbar.tsx";
 export { Tooltip, type TooltipPlacement, type TooltipProps } from "./Tooltip.tsx";

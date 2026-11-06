@@ -40,6 +40,7 @@ export const SHORTCUT_GROUPS = [
   "Tools",
   "Annotations",
   "Fly camera",
+  "Appearance",
   "Developer",
 ] as const;
 export type ShortcutGroup = (typeof SHORTCUT_GROUPS)[number];
@@ -352,6 +353,12 @@ export function formatKeyCombo(combo: KeyCombo, apple = isApplePlatform()): stri
   const { mods, key } = split(combo);
   const names = apple ? APPLE_MODIFIERS : OTHER_MODIFIERS;
   return [...mods.map((m) => names[m]), KEY_LABELS[key] ?? key];
+}
+
+/** A `shortcut` prop or option as a list, empty when absent. */
+export function combosOf(keys: KeyCombo | readonly KeyCombo[] | undefined): readonly KeyCombo[] {
+  if (keys === undefined) return [];
+  return typeof keys === "string" ? [keys] : keys;
 }
 
 /** The combo as an `aria-keyshortcuts` value. */

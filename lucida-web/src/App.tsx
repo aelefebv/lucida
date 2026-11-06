@@ -10,6 +10,7 @@ import type { Annotation, AnnotationOverlayHandle } from "./components/annotatio
 import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
 import { AnnotationDraftOverlay } from "./components/AnnotationDraftOverlay.tsx";
 import type { AnnotationDraft } from "./components/annotationDraft.ts";
+import type { Tool } from "./components/annotationTool.ts";
 import { CommentsPanel } from "./components/CommentsPanel.tsx";
 import { countUnread, findMentionsOfMe } from "./components/mentionsOfMe.ts";
 import {
@@ -26,7 +27,7 @@ import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSide
 import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
 import { DatasetInfoPanel } from "./components/DatasetInfoPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
-import { WorkspaceSharingDialog } from "./WorkspaceSharingDialog.tsx";
+import { ShareButton } from "./share/ShareButton.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
 import {
   invalidateDisplaySettings,
@@ -80,9 +81,12 @@ import { DimensionBar } from "./shell/DimensionBar.tsx";
 import { useOpenRightPanel } from "./shell/layoutPreferences.ts";
 import { LeftPanel } from "./shell/LeftPanel.tsx";
 import { RightRail } from "./shell/RightRail.tsx";
+import { ToolPalette } from "./shell/ToolPalette.tsx";
 import { TopBar } from "./shell/TopBar.tsx";
 import { useDeveloperSurfaces } from "./shell/useDeveloperSurfaces.ts";
+import { useViewerCommands } from "./shell/useViewerCommands.ts";
 import { Button } from "./ui/Button.tsx";
+import { KeyboardHelp } from "./ui/KeyboardHelp.tsx";
 import "./App.css";
 
 // The debug UI is code-split: the panel loads on first open, the overlay layer
@@ -155,9 +159,8 @@ function App({
   const datasetsRef = useRef<Map<string, DatasetState>>(new Map());
   // Lifted here because call ordering stops the hooks that use it from owning it.
   const [selectedDatasetId, setSelectedDatasetId] = useState<string | null>(null);
-  // Which annotation shape a shift-drag draws: a point pin (drop), a line
-  // (drag between two points), or a box (drag between opposite corners).
-  const [annotationKind, setAnnotationKind] = useState<"point" | "line" | "box">("point");
+  // The canvas tool: pan navigates; point, line, and box draw an annotation.
+  const [tool, setTool] = useState<Tool>("pan");
   // Personal show/hide of all annotations: local, unsynced, not persisted, and
   // passed as `visible` to both overlays.
   const [annotationsVisible, setAnnotationsVisible] = useState(true);
@@ -875,8 +878,7 @@ function App({
     bridge.breakFollow();
     emitPresenceWithUrl();
     requestRender(render.loopRef.current, "camera_mode_toggle");
-    render.canvasRef.current?.focus();
-  }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef, render.canvasRef]);
+  }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef]);
 
   const [showFileBrowser, setShowFileBrowser] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
@@ -908,7 +910,6 @@ function App({
   const showDebugOverlays =
     developer.enabled && (anyOverlayEnabled || radiusPreviewActive || selectionPublished);
   const showExplorePanel = useOpenRightPanel() === "explore";
-  const [showWorkspaceSharing, setShowWorkspaceSharing] = useState(false);
 
   useEffect(() => {
     if (captureSurface) return;
@@ -1079,6 +1080,21 @@ function App({
 
   const hasData = layers.layerInfos.length > 0;
 
+  useViewerCommands({
+    viewMode: dims.viewMode,
+    hasData: datasetsVersion > 0,
+    onToggleViewMode: dims.handleViewModeToggle,
+    onAddData: () => setShowFileBrowser(true),
+    onBackToDashboard,
+    rightPanels: [
+      { id: "savedViews", label: "Saved views" },
+      { id: "comments", label: "Comments" },
+      { id: "explore", label: "Explore" },
+      { id: "info", label: "Info" },
+    ],
+    developer,
+  });
+
   // The 2D collection navigator for the selected dataset, when it is a collection.
   const collectionNavigator = (() => {
     if (datasetsVersion === 0 || dims.viewMode !== "2d") return null;
@@ -1108,6 +1124,7 @@ function App({
           emitPresenceWithUrl();
           requestRender(render.loopRef.current, "collection_group_click");
         }}
+        getViewCenter={() => scene.wasmSceneRef.current?.center() ?? null}
       />
     );
   })();
@@ -1139,7 +1156,13 @@ function App({
             followTarget: bridge.followTarget,
             onFollow: bridge.handleFollow,
           }}
-          onShare={canRenameWorkspace ? () => setShowWorkspaceSharing(true) : undefined}
+          share={
+            <ShareButton
+              workspaceId={workspaceId}
+              canManageAccess={workspaceRole === "owner"}
+              getCurrentSavedView={savedViewSync.captureBuilder}
+            />
+          }
           developer={developer}
         />
       )}
@@ -1177,8 +1200,8 @@ function App({
               onLabelSetVisible={layers.handleLabelSetVisible}
               onLabelSetOpacity={layers.handleLabelSetOpacity}
               onAddLayer={() => setShowFileBrowser(true)}
-              viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
-              cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
+              viewModeToggle={null}
+              cameraModeToggle={null}
               layoutRegistry={layoutRegistry}
               sendCommand={bridge.sendCommand}
               onLayoutChange={() => {
@@ -1215,6 +1238,14 @@ function App({
               ) : null
             }
             slots={{
+              "top-left": hasData && (
+                <ToolPalette
+                  tool={tool}
+                  onToolChange={setTool}
+                  annotationsVisible={annotationsVisible}
+                  onAnnotationsVisibleChange={setAnnotationsVisible}
+                />
+              ),
               "top-center": (
                 <>
                   <LoadingViewBanner applier={savedViewSync.applier} />
@@ -1281,17 +1312,22 @@ function App({
               "bottom-center": hasData && (
                 <DimensionBar
                   viewMode={dims.viewMode}
+                  onViewModeToggle={dims.handleViewModeToggle}
                   z={dims.z}
                   dimZ={dims.dimZ}
                   onZChange={dims.handleZChange}
-                  c={dims.c}
-                  dimC={dims.dimC}
-                  onCChange={dims.handleCChange}
                   t={dims.t}
                   dimT={dims.dimT}
                   onTChange={dims.handleTChange}
-                  multiChannel={dims.multiChannel}
-                  onMultiChannelToggle={dims.handleMultiChannelToggle}
+                  cameraMode={cameraMode === "fly" ? "fly" : "arcball"}
+                  onCameraModeToggle={handleCameraModeToggle}
+                  channel={{
+                    c: dims.c,
+                    dimC: dims.dimC,
+                    onCChange: dims.handleCChange,
+                    multiChannel: dims.multiChannel,
+                    onMultiChannelToggle: dims.handleMultiChannelToggle,
+                  }}
                 />
               ),
               // Mounted before any dataset opens, and only hidden until one
@@ -1321,7 +1357,7 @@ function App({
                 loopRef={render.loopRef}
                 onLoopChange={render.setActiveLoop}
                 annotationDatasetId={selectedDatasetId}
-                annotationKind={annotationKind}
+                tool={tool}
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
@@ -1365,7 +1401,7 @@ function App({
                 onLoopChange={render.setActiveLoop}
                 onCameraModeChange={handleCameraModeChange}
                 annotationDatasetId={selectedDatasetId}
-                annotationKind={annotationKind}
+                tool={tool}
                 myId={annotationAuthor}
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
@@ -1424,11 +1460,6 @@ function App({
               onOpenUrl={datasets.handleUrlSubmit}
               loading={bridge.remoteDatasetLoading}
               onBrowse={() => setShowFileBrowser(true)}
-              getCurrentSavedView={savedViewSync.captureBuilder}
-              annotationKind={annotationKind}
-              onAnnotationKindChange={setAnnotationKind}
-              annotationsVisible={annotationsVisible}
-              onToggleAnnotations={() => setAnnotationsVisible((v) => !v)}
             />
           )}
           {developer.monitor && (
@@ -1540,11 +1571,7 @@ function App({
           onClose={() => setShowFileBrowser(false)}
         />
       )}
-      <WorkspaceSharingDialog
-        workspaceId={workspaceId}
-        open={showWorkspaceSharing}
-        onClose={() => setShowWorkspaceSharing(false)}
-      />
+      {!captureSurface && <KeyboardHelp />}
     </div>
   );
   /* eslint-enable react-hooks/refs */
