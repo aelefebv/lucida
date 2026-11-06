@@ -245,8 +245,10 @@
   gap: var(--lc-space-2);
 }
 
+/* The ghost button's own padding would indent its text past the section titles. */
 .lc-advanced-toggle {
   align-self: flex-start;
+  margin-left: calc(-1 * var(--lc-space-2));
 }
 
 .lc-advanced-body {
