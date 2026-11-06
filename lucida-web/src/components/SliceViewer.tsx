@@ -9,7 +9,24 @@ import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { buildAnnotationView, liveViewWithLiveZTC } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
+import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
 import { eventToWorld as sceneEventToWorld } from "./cameraProjection.ts";
+import { useCommand } from "../ui/commands.ts";
+import { pushEscapeLayer } from "../ui/escape.ts";
+import { comboFromEvent, useShortcut } from "../ui/shortcuts.ts";
+
+/** An arrow key pans by this share of the canvas's shorter side. */
+const KEY_PAN_FRACTION = 0.1;
+/** `+` and `-` zoom about the center by this factor. */
+const KEY_ZOOM_FACTOR = 1.25;
+/** Which way each arrow moves the camera, so the image moves the other way. */
+const PAN_DIRECTIONS: Readonly<Record<string, readonly [number, number]>> = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, -1],
+  ArrowDown: [0, 1],
+};
+const ARROW_KEY_CONTROLS = 'input[type="range"], input[type="radio"], [role="slider"]';
 
 interface Props {
   z: number;
@@ -28,8 +45,8 @@ interface Props {
   onLoopChange: (loop: RenderLoop | null) => void;
   /** Dataset to attach a dropped pin to (annotations are scoped per dataset). */
   annotationDatasetId: string | null;
-  /** Shape a shift-drag draws: a point pin, a line, or a box. */
-  annotationKind: "point" | "line" | "box";
+  /** The canvas tool: pan, or the annotation shape a press draws. */
+  tool: Tool;
   /** Stable, browser-persisted annotation-author identity, recorded as a pin's
    * `author`. From `annotationAuthorId()`, not the per-connection `bridge.myId`,
    * so pins stay yours across leaving and rejoining a workspace. */
@@ -44,19 +61,28 @@ interface Props {
   annotationDraftRef: RefObject<AnnotationDraft | null>;
 }
 
-export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
+export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
-  // Press context for distinguishing a pin-drop click from a pan drag, and for
-  // anchoring a line/box draw at the press point. `world` is the start vertex.
-  const pressStart = useRef<{ x: number; y: number; pin: boolean; world: [number, number] } | null>(null);
+  // The press in progress. `kind` is what it draws (null when it pans), fixed
+  // at press time so a tool change mid-drag can't reshape it; `panning` turns
+  // on at once for a pan and past the click slop for a point; `world` is a
+  // line or box's first vertex; `endEscape` drops the press's Escape layer.
+  const pressStart = useRef<{
+    x: number;
+    y: number;
+    kind: AnnotationKind | null;
+    panning: boolean;
+    world: [number, number];
+    endEscape: () => void;
+  } | null>(null);
 
   // Mirror placement props into refs so the pointer handlers, which depend on
   // `canvas` only, read the latest values without re-binding on every doc or
   // slice change. A dropped pin records its Z/T/C from these.
   const annotationDatasetIdRef = useRef(annotationDatasetId);
-  const annotationKindRef = useRef(annotationKind);
+  const toolRef = useRef(tool);
   const zRef = useRef(z);
   const tRef = useRef(t);
   const cRef = useRef(c);
@@ -67,7 +93,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
   // pointer events and RAF ticks, so render stays free of ref writes.
   useEffect(() => {
     annotationDatasetIdRef.current = annotationDatasetId;
-    annotationKindRef.current = annotationKind;
+    toolRef.current = tool;
     zRef.current = z;
     tRef.current = t;
     cRef.current = c;
@@ -108,18 +134,31 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     [canvas, scene],
   );
 
+  // Escape mid-press abandons it: no annotation lands on release.
+  const cancelPress = useCallback(() => {
+    pressStart.current?.endEscape();
+    pressStart.current = null;
+    setDragging(false);
+    annotationDraftRef.current = null;
+  }, [annotationDraftRef]);
+
   const onPointerDown = useCallback(
     (e: PointerEvent) => {
-      // Shift-press begins an annotation draw and never pans; a plain press
-      // pans. The press point is kept in world space so a line/box can use it
-      // as its first vertex.
-      const pin = e.shiftKey;
-      pressStart.current = { x: e.clientX, y: e.clientY, pin, world: eventToWorld(e) };
-      setDragging(!pin);
+      pressStart.current?.endEscape();
+      const kind = pressAnnotationKind(toolRef.current, e.shiftKey);
+      pressStart.current = {
+        x: e.clientX,
+        y: e.clientY,
+        kind,
+        panning: kind === null,
+        world: eventToWorld(e),
+        endEscape: kind === null ? () => {} : pushEscapeLayer(cancelPress),
+      };
+      setDragging(kind === null);
       lastPos.current = { x: e.clientX, y: e.clientY };
       canvas.setPointerCapture(e.pointerId);
     },
-    [canvas, eventToWorld],
+    [canvas, eventToWorld, cancelPress],
   );
 
   const onPointerMove = useCallback(
@@ -128,19 +167,27 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       const rect = canvas.getBoundingClientRect();
       sendCursor(eventToWorld(e));
 
+      const press = pressStart.current;
+      if (!press) return;
+      const pastSlop = exceedsClickSlop(press.x, press.y, e.clientX, e.clientY);
       // Live line/box preview. Below the click slop it stays null, since a
       // sub-slop release drops a point and the preview shouldn't flash a shape.
-      const press = pressStart.current;
-      if (press?.pin) {
-        const drawKind = annotationKindRef.current;
-        annotationDraftRef.current =
-          (drawKind === "line" || drawKind === "box") &&
-          exceedsClickSlop(press.x, press.y, e.clientX, e.clientY)
-            ? { kind: drawKind, x0: press.x - rect.left, y0: press.y - rect.top, x1: e.clientX - rect.left, y1: e.clientY - rect.top }
-            : null;
+      if (isShapeKind(press.kind)) {
+        annotationDraftRef.current = pastSlop
+          ? { kind: press.kind, x0: press.x - rect.left, y0: press.y - rect.top, x1: e.clientX - rect.left, y1: e.clientY - rect.top }
+          : null;
+        return;
+      }
+      // A point press that travels becomes a pan, so the point tool never
+      // traps navigation. The pan starts from the press, keeping the image
+      // under the pointer.
+      if (press.kind === "point" && !press.panning && pastSlop) {
+        press.panning = true;
+        press.endEscape();
+        setDragging(true);
       }
 
-      if (!dragging) return;
+      if (!press.panning) return;
       const dx = (e.clientX - lastPos.current.x) * dpr;
       const dy = (e.clientY - lastPos.current.y) * dpr;
       lastPos.current = { x: e.clientX, y: e.clientY };
@@ -151,28 +198,25 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       emitPresence();
       loopRef.current?.markInput("pan");
     },
-    [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef, eventToWorld],
+    [scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef, eventToWorld],
   );
 
   const onPointerUp = useCallback(
     (e: PointerEvent) => {
       const press = pressStart.current;
       pressStart.current = null;
+      press?.endEscape();
       setDragging(false);
       annotationDraftRef.current = null;
 
-      if (!press?.pin) return;
+      if (!press || press.kind === null || press.panning) return;
       const datasetId = annotationDatasetIdRef.current;
       if (!datasetId) return;
 
-      const pastSlop = exceedsClickSlop(press.x, press.y, e.clientX, e.clientY);
-      const kind = annotationKindRef.current;
       // A line/box that never left the slop drops a point instead, so a stray
-      // shift-click never leaves an invisible zero-size shape. A point-kind drag
-      // is a no-op.
-      const drawShape = (kind === "line" || kind === "box") && pastSlop;
-      const dropPoint = !drawShape && !pastSlop;
-      if (!drawShape && !dropPoint) return;
+      // click never leaves an invisible zero-size shape.
+      const kind = press.kind;
+      const drawShape = isShapeKind(kind) && exceedsClickSlop(press.x, press.y, e.clientX, e.clientY);
 
       const id = globalThis.crypto?.randomUUID
         ? globalThis.crypto.randomUUID()
@@ -218,12 +262,8 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     [eventToWorld, scene, annotationDraftRef],
   );
 
-  const onPointerCancel = useCallback(() => {
-    // A cancelled gesture never drops a pin.
-    pressStart.current = null;
-    setDragging(false);
-    annotationDraftRef.current = null;
-  }, [annotationDraftRef]);
+  // A cancelled gesture never drops a pin.
+  const onPointerCancel = cancelPress;
 
   const onPointerLeave = useCallback(() => {
     sendCursor(null);
@@ -262,6 +302,63 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     [scene, canvas, emitPresence, breakFollow],
   );
 
+  // The keyboard moves the view about its center, as the toolbar would.
+  const moveView = (move: () => void, input: "pan" | "zoom") => {
+    breakFollow();
+    move();
+    emitPresence();
+    loopRef.current?.markInput(input);
+  };
+
+  useShortcut({
+    id: "view.pan",
+    keys: ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"],
+    label: "Pan",
+    group: "View",
+    repeat: true,
+    // A focused native slider or radio moves on its own arrow keys.
+    when: () => !document.activeElement?.matches(ARROW_KEY_CONTROLS),
+    onTrigger: (event) => {
+      const step = KEY_PAN_FRACTION * Math.min(canvas.clientWidth, canvas.clientHeight) * devicePixelRatio;
+      const [dx, dy] = PAN_DIRECTIONS[comboFromEvent(event) ?? ""] ?? [0, 0];
+      moveView(() => applyViewportCommand(scene, { type: "pan", dx: dx * step, dy: dy * step }), "pan");
+    },
+  });
+  useCommand({
+    id: "view.zoomIn",
+    label: "Zoom in",
+    group: "View",
+    keys: ["+", "="],
+    repeat: true,
+    run: () => moveView(() => applyViewportCommand(scene, { type: "zoom_by", factor: KEY_ZOOM_FACTOR }), "zoom"),
+  });
+  useCommand({
+    id: "view.zoomOut",
+    label: "Zoom out",
+    group: "View",
+    keys: ["-"],
+    repeat: true,
+    run: () => moveView(() => applyViewportCommand(scene, { type: "zoom_by", factor: 1 / KEY_ZOOM_FACTOR }), "zoom"),
+  });
+  useCommand({
+    id: "view.fit",
+    label: "Fit to view",
+    group: "View",
+    keys: ["0"],
+    keywords: ["reset", "frame", "home"],
+    run: () => {
+      const datasetId = annotationDatasetIdRef.current ?? datasets.keys().next().value;
+      if (!datasetId) return;
+      moveView(() => {
+        try {
+          scene.fit_camera_to_dataset_bounds(datasetId);
+        } catch {
+          // A dataset with nothing loaded yet has no bounds; the view stays.
+        }
+      }, "zoom");
+    },
+  });
+
   useEffect(() => {
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointermove", onPointerMove);
@@ -274,7 +371,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
     // state to the parent + a CSS class would re-render the whole
     // viewport tree on every drag transition.
     // eslint-disable-next-line react-hooks/immutability
-    canvas.style.cursor = dragging ? "grabbing" : "grab";
+    canvas.style.cursor = dragging ? "grabbing" : tool === "pan" ? "grab" : "crosshair";
     return () => {
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
@@ -283,7 +380,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       canvas.removeEventListener("pointerleave", onPointerLeave);
       canvas.removeEventListener("wheel", onWheel);
     };
-  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave, onWheel, dragging]);
+  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave, onWheel, dragging, tool]);
 
   return null;
 }
