@@ -1,157 +1,105 @@
-/* Explore panel — layered on top of the shared BookmarkSidebar.css so the
-   chrome (sidebar shell, header, list, rows) matches the saved-views sidebar.
-   Only the exploration-specific bits live here. */
+/* Explore's own pieces; the frame and rows come from BookmarkSidebar.css. */
 
-.explore-here {
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #2a2a2a;
+.lc-explore-here {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
-.explore-here-dataset {
-  font-size: 0.85rem;
-  color: #ddd;
-  font-weight: 600;
+.lc-explore-dataset {
   overflow: hidden;
+  font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.explore-here-detail {
-  font-size: 0.72rem;
-  color: #9a9aa6;
-  margin-top: 0.15rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-/* The move trail (Home › Rotate right 45° › Zoom in). Primary proof of
-   navigation while thumbnails are deferred — kept on one line, ellipsized if it
-   somehow overflows the head-truncation. */
-.explore-breadcrumb {
-  font-size: 0.72rem;
-  color: #b9b9c6;
-  margin-top: 0.2rem;
+/* The move trail (Home › Rotate right 45° › Zoom in), the plainest sign that a
+   move navigated when a rotate or zoom leaves the list unchanged. */
+.lc-explore-breadcrumb {
   overflow: hidden;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.explore-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.35rem;
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #2a2a2a;
+.lc-explore-detail {
+  color: var(--lc-text-subtle);
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
 }
 
-.explore-controls button {
-  padding: 0.25rem 0.5rem;
-  font-size: 0.75rem;
-  background: #2a2a2a;
-  color: #ddd;
-  border: 1px solid #444;
-  border-radius: 4px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.explore-controls button:hover:not(:disabled) {
-  background: #33334a;
-  border-color: #54546a;
-}
-
-.explore-controls button:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* The primary call-to-action of the panel — make it read as the accent action. */
-.explore-controls button.explore-suggest {
-  flex-basis: 100%;
-  background: #646cff;
-  border-color: #646cff;
-  color: #fff;
-}
-
-.explore-controls button.explore-suggest:hover:not(:disabled) {
-  background: #535bdf;
-  border-color: #535bdf;
-}
-
-.explore-section-header {
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  text-transform: uppercase;
-  color: #9a9aa6;
-  padding: 0.45rem 0.75rem 0.25rem;
-}
-
-/* The muted transform tag sits under the plain-language label as a small
-   machine-id hint. */
-.explore-cell-transform {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #777;
-  font-size: 0.68rem;
-}
-
-/* "Show previews" toggle, sitting under the accent action on its own line so it
-   reads as a sheet-level option rather than a per-move button. */
-.explore-previews-toggle {
-  flex-basis: 100%;
+.lc-explore-moves {
   display: flex;
   align-items: center;
-  gap: 0.35rem;
-  font-size: 0.72rem;
-  color: #b9b9c6;
-  cursor: pointer;
-  user-select: none;
+  gap: 2px;
+  margin: 0 calc(-1 * var(--lc-space-1));
 }
 
-.explore-previews-toggle input {
-  cursor: pointer;
+.lc-explore-moves-gap {
+  flex: none;
+  width: 1px;
+  height: var(--lc-space-4);
+  margin: 0 var(--lc-space-1);
+  background: var(--lc-border);
 }
 
-/* When a row carries a preview, lay the thumbnail beside the text as a compact
-   contact-sheet row. Without a thumbnail the row keeps the default stacked
-   layout, so a missing/failed preview degrades cleanly. */
-.explore-cell-has-thumb {
+.lc-explore-options {
   display: flex;
   align-items: center;
-  gap: 0.6rem;
+  justify-content: space-between;
+  gap: var(--lc-space-2);
+  min-width: 0;
 }
 
-.explore-cell-text {
-  min-width: 0; /* let the label ellipsize next to the thumb */
-  flex: 1 1 auto;
+.lc-explore-previews {
+  flex: none;
 }
 
-/* The thumbnail box: a fixed square that holds the rendered overview. While a
-   render is in flight it shows a faint placeholder; once painted the canvas
-   fills it. A failed/empty render unmounts the box entirely (see the component),
-   so there's no broken-image state. */
-.explore-thumb {
-  flex: 0 0 auto;
-  width: 66px;
-  height: 66px;
-  border-radius: 4px;
+.lc-explore-transform {
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+}
+
+/* A fixed square holding the rendered overview, beside the row's text. While a
+   render is in flight it pulses as a placeholder; a failed render unmounts it,
+   so there is no broken-image state. */
+.lc-explore-thumb {
+  display: block;
+  flex: none;
+  width: 64px;
+  height: 64px;
   overflow: hidden;
-  background: #15151c;
-  border: 1px solid #2a2a2a;
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-sm);
+  background: var(--lc-canvas-bg);
 }
 
-.explore-thumb-pending {
-  /* Subtle pulse so an in-flight tile reads as "loading", not "broken". */
-  animation: explore-thumb-pulse 1.2s ease-in-out infinite;
+.lc-explore-thumb[data-thumb-status="pending"] {
+  animation: lc-explore-thumb-pulse 1.2s ease-in-out infinite;
 }
 
-@keyframes explore-thumb-pulse {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 0.85; }
+@keyframes lc-explore-thumb-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.8;
+  }
 }
 
-.explore-thumb-canvas {
+@media (prefers-reduced-motion: reduce) {
+  .lc-explore-thumb[data-thumb-status="pending"] {
+    animation: none;
+  }
+}
+
+.lc-explore-thumb-canvas {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
 }

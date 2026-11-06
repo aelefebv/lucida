@@ -154,6 +154,18 @@ impl WasmScene {
         }
     }
 
+    /// The dataset's bounds in the current camera's coordinate space as
+    /// `[min_x, min_y, min_z, max_x, max_y, max_z]`, the box
+    /// [`Self::fit_camera_to_dataset_bounds`] frames; empty when it has none.
+    /// Guided exploration passes it to [`crate::view_transform::explore_view`]
+    /// so its Home move frames what the viewer's own fit does.
+    pub fn dataset_fit_bounds(&self, dataset_id: &str) -> Vec<f64> {
+        match self.inner.dataset_fit_bounds(dataset_id) {
+            Some((min, max)) => vec![min[0], min[1], min[2], max[0], max[1], max[2]],
+            None => Vec::new(),
+        }
+    }
+
     pub fn set_mode_arcball(&mut self) {
         self.inner.apply(ViewportCommand::SetMode3D.into());
     }

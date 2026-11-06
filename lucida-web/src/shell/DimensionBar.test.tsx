@@ -22,22 +22,19 @@ interface Shape {
   mode?: "2d" | "3d";
   dimZ?: number;
   dimT?: number;
-  dimC?: number;
   z?: number;
   t?: number;
 }
 
 /** The bar wired to its own state, the way App wires it to `useDimensions`. */
-function Harness({ mode = "2d", dimZ = 1, dimT = 1, dimC = 1, z: z0 = 0, t: t0 = 0 }: Shape) {
+function Harness({ mode = "2d", dimZ = 1, dimT = 1, z: z0 = 0, t: t0 = 0 }: Shape) {
   const [viewMode, setViewMode] = useState(mode);
   const [z, setZ] = useState(z0);
   const [t, setT] = useState(t0);
-  const [c, setC] = useState(0);
-  const [multiChannel, setMultiChannel] = useState(false);
   const [cameraMode, setCameraMode] = useState<"arcball" | "fly">("arcball");
   return (
     <>
-      <output data-testid="state">{`${viewMode} z=${z} t=${t} c=${c} ${cameraMode}`}</output>
+      <output data-testid="state">{`${viewMode} z=${z} t=${t} ${cameraMode}`}</output>
       <DimensionBar
         viewMode={viewMode}
         onViewModeToggle={() => setViewMode((m) => (m === "2d" ? "3d" : "2d"))}
@@ -49,13 +46,6 @@ function Harness({ mode = "2d", dimZ = 1, dimT = 1, dimC = 1, z: z0 = 0, t: t0 =
         onTChange={setT}
         cameraMode={cameraMode}
         onCameraModeToggle={() => setCameraMode((m) => (m === "fly" ? "arcball" : "fly"))}
-        channel={{
-          c,
-          dimC,
-          onCChange: setC,
-          multiChannel,
-          onMultiChannelToggle: () => setMultiChannel((m) => !m),
-        }}
       />
     </>
   );
@@ -69,7 +59,7 @@ const press = (key: string, init: KeyboardEventInit = {}) =>
 
 describe("DimensionBar", () => {
   it("shows only the mode switch for one plane and one timepoint", () => {
-    render(<Harness dimZ={1} dimT={1} dimC={1} />);
+    render(<Harness dimZ={1} dimT={1} />);
     expect(screen.getByRole("radio", { name: "2D" }).getAttribute("aria-checked")).toBe("true");
     expect(screen.getByRole("radio", { name: "3D" })).toBeTruthy();
     expect(screen.queryAllByRole("slider")).toHaveLength(0);
@@ -184,17 +174,9 @@ describe("DimensionBar", () => {
     expect(screen.getByRole("button", { name: "Play" })).toBeTruthy();
   });
 
-  it("keeps the channel stepper and its composite toggle working", async () => {
-    render(<Harness dimC={3} />);
-    expect(screen.getByRole("slider", { name: "Channel" })).toBeTruthy();
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Next channel" }));
-    });
-    expect(state()).toContain("c=1");
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Show all channels" }));
-    });
-    expect(screen.queryByRole("slider", { name: "Channel" })).toBeNull();
-    expect(screen.getByRole("button", { name: "Show all channels" }).getAttribute("aria-pressed")).toBe("true");
+  it("leaves channels to the layer panel", () => {
+    render(<Harness dimZ={4} />);
+    expect(screen.queryByRole("slider", { name: /channel/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /channel/i })).toBeNull();
   });
 });

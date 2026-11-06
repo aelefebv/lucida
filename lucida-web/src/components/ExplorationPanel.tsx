@@ -8,9 +8,26 @@
 // testable. They are optional: lazy, concurrency-capped, and any failure falls
 // back to a label-only row.
 
+import {
+  ArrowClockwiseIcon,
+  ArrowCounterClockwiseIcon,
+  ArrowLeftIcon,
+  ArrowsClockwiseIcon,
+  BookmarkSimpleIcon,
+  HouseIcon,
+  MagnifyingGlassMinusIcon,
+  MagnifyingGlassPlusIcon,
+  type Icon,
+} from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { explore_view } from "lucida-core";
 import type { SavedView } from "../savedView/types.ts";
+import { useAppearance } from "../theme/appearance.ts";
+import { Button, IconButton } from "../ui/Button.tsx";
+import { Dialog } from "../ui/Dialog.tsx";
+import { PanelHeader } from "../ui/PanelHeader.tsx";
+import { Switch } from "../ui/Switch.tsx";
+import { TextField } from "../ui/TextField.tsx";
 import "./BookmarkSidebar.css";
 import "./ExplorationPanel.css";
 
@@ -55,6 +72,13 @@ export interface ExplorationPanelProps {
   /** Current viewport size in CSS px (for the synthesized Home camera). */
   viewport: readonly [number, number];
   /**
+   * The dataset's box in the live camera's coordinate space
+   * (`WasmScene.dataset_fit_bounds`), so Home frames what the viewer's own fit
+   * does. Without it the generator frames the shape's voxel box, which a 3D
+   * camera doesn't share.
+   */
+  getHomeBounds?: (datasetId: string) => Float64Array | null;
+  /**
    * Render a preview of `view`, or resolve `null` when one can't be produced yet
    * (the coarse overview isn't resident) so the row stays label-only. `size` is
    * the square edge in device pixels. Omit it for label-only rows.
@@ -70,30 +94,32 @@ export interface ExplorationPanelProps {
 const NUDGES: ReadonlyArray<{
   transform: string;
   text: string;
-  testid?: string;
-  unavailableTitle: string;
+  icon: Icon;
+  testid: string;
 }> = [
   {
     transform: "azimuth:-45",
     text: "Rotate left",
+    icon: ArrowCounterClockwiseIcon,
     testid: "explore-rotate-left",
-    unavailableTitle: "Rotate is available in 3D",
   },
   {
     transform: "azimuth:+45",
     text: "Rotate right",
+    icon: ArrowClockwiseIcon,
     testid: "explore-rotate-right",
-    unavailableTitle: "Rotate is available in 3D",
   },
   {
     transform: "zoom:in",
     text: "Zoom in",
-    unavailableTitle: "Zoom in isn't available here",
+    icon: MagnifyingGlassPlusIcon,
+    testid: "explore-zoom-in",
   },
   {
     transform: "zoom:out",
     text: "Zoom out",
-    unavailableTitle: "Zoom out isn't available here",
+    icon: MagnifyingGlassMinusIcon,
+    testid: "explore-zoom-out",
   },
 ];
 
@@ -105,6 +131,7 @@ function runExplore(
   dims: Dims,
   viewport: readonly [number, number],
   depth: number,
+  bounds: Float64Array | null,
 ): { sidecar?: ExplorationSidecar; error?: string } {
   const [t, c, z, y, x] = dims;
   const [vw, vh] = viewport;
@@ -122,6 +149,7 @@ function runExplore(
       Math.max(1, Math.floor(vw)),
       Math.max(1, Math.floor(vh)),
       Math.max(0, Math.floor(depth)),
+      bounds,
     );
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
@@ -138,13 +166,21 @@ function runExplore(
   return { sidecar: parsed as ExplorationSidecar };
 }
 
-/** Thumbnail edge in CSS px, scaled by DPR. Kept small so the coarse-overview
- *  render stays cheap. */
-const THUMB_CSS_SIZE = 132;
+/** Thumbnail edge in CSS px; the render is this times the device pixel ratio. */
+const THUMB_CSS_SIZE = 64;
 
 /** Max thumbnail requests in flight, so a long list or fast scrolling can't
  *  flood the worker queue. */
 const THUMB_CONCURRENCY = 3;
+
+/**
+ * Whether a preview can show this candidate. The overview path draws a volume
+ * from a 3D camera; a 2D slice camera has no such view, so every 2D candidate
+ * would get the same head-on picture of the whole stack.
+ */
+function canPreview(view: SavedView): boolean {
+  return view.camera.mode !== "slice";
+}
 
 /**
  * Concurrency limiter for thumbnail requests: at most {@link THUMB_CONCURRENCY}
@@ -173,21 +209,20 @@ class ThumbnailScheduler {
 /**
  * One row's preview thumbnail, requested once it scrolls into view. On `null` or
  * error it renders nothing, so a thumbnail failure can never break the row.
- * Re-requests when `viewKey` changes.
+ * Mounted under a key that changes with the view and the canvas background, so
+ * a change of either draws it afresh.
  */
 function ExploreThumbnail({
   view,
-  viewKey,
   request,
   scheduler,
 }: {
   view: SavedView;
-  viewKey: string;
   request: (view: SavedView, size: number) => Promise<ImageBitmap | null>;
   scheduler: ThumbnailScheduler;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const holderRef = useRef<HTMLDivElement>(null);
+  const holderRef = useRef<HTMLSpanElement>(null);
   const [status, setStatus] = useState<"pending" | "ready" | "empty">("pending");
 
   // Read at fire time, so the observer effect stays keyed on the view alone and
@@ -202,7 +237,6 @@ function ExploreThumbnail({
   useEffect(() => {
     const holder = holderRef.current;
     if (!holder) return;
-    setStatus("pending");
 
     let cancelled = false;
     let fired = false;
@@ -258,18 +292,18 @@ function ExploreThumbnail({
       cancelled = true;
       observer.disconnect();
     };
-  }, [view, viewKey]);
+  }, [view]);
 
   if (status === "empty") return null;
   return (
-    <div
+    <span
       ref={holderRef}
-      className={`explore-thumb explore-thumb-${status}`}
+      className="lc-explore-thumb"
       data-testid="explore-thumb"
       data-thumb-status={status}
     >
-      <canvas ref={canvasRef} className="explore-thumb-canvas" />
-    </div>
+      <canvas ref={canvasRef} className="lc-explore-thumb-canvas" />
+    </span>
   );
 }
 
@@ -282,15 +316,21 @@ export function ExplorationPanel({
   datasetName,
   dims,
   viewport,
+  getHomeBounds,
   requestThumbnail,
   style,
 }: ExplorationPanelProps) {
   const [cells, setCells] = useState<ExplorationCell[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showPreviews, setShowPreviews] = useState(true);
+  const [bookmarkOpen, setBookmarkOpen] = useState(false);
   // useState rather than a ref so it's readable during render.
   const [scheduler] = useState(() => new ThumbnailScheduler());
-  const thumbnailsOn = showPreviews && !!requestThumbnail;
+  // A preview bakes in the canvas background, which can follow the UI theme.
+  const appearance = useAppearance();
+  const previewKey = `${appearance.theme}:${appearance.canvasBackground}`;
+  const previewable = !!requestThumbnail && cells.some((cell) => canPreview(cell.view));
+  const thumbnailsOn = showPreviews && previewable;
   // The Back stack lives in a ref so async handlers can push and pop it
   // deterministically: a value set inside a setState updater isn't available on
   // the next line, and StrictMode double-invokes updaters. `backDepth` mirrors
@@ -348,24 +388,29 @@ export function ExplorationPanel({
   const viewportRef = useRef(viewport);
   // eslint-disable-next-line react-hooks/refs
   viewportRef.current = viewport;
+  const getHomeBoundsRef = useRef(getHomeBounds);
+  // eslint-disable-next-line react-hooks/refs
+  getHomeBoundsRef.current = getHomeBounds;
 
-  const refresh = useCallback(() => {
+  /** Run the generator from `current` against the live dataset. */
+  const explore = useCallback((current: SavedView | null, depth: number) => {
     const dsId = datasetIdRef.current;
     const ds = dimsRef.current;
-    if (!dsId || !ds) {
+    if (!dsId || !ds) return null;
+    const bounds = getHomeBoundsRef.current?.(dsId) ?? null;
+    return runExplore(current, dsId, ds, viewportRef.current, depth, bounds);
+  }, []);
+
+  const refresh = useCallback(() => {
+    const ds = dimsRef.current;
+    const result = explore(captureBuilderRef.current(), breadcrumbRef.current.length);
+    if (!result || !ds) {
       setCells([]);
       setError(null);
       setHereLabel("");
       return;
     }
-    const current = captureBuilderRef.current();
-    const { sidecar, error: err } = runExplore(
-      current,
-      dsId,
-      ds,
-      viewportRef.current,
-      breadcrumbRef.current.length,
-    );
+    const { sidecar, error: err } = result;
     if (err || !sidecar) {
       setError(err ?? "No suggestions available.");
       setCells([]);
@@ -378,7 +423,7 @@ export function ExplorationPanel({
       homeDistanceRef.current = cam.distance;
     }
     setHereLabel(describeView(sidecar.current.view, ds, homeDistanceRef.current));
-  }, []);
+  }, [explore]);
 
   useEffect(() => {
     if (!visible) return;
@@ -414,19 +459,23 @@ export function ExplorationPanel({
     refresh();
   }, [applyView, popBack, popTrail, refresh]);
 
-  // A null view makes the wasm wrapper synthesize Home, at walk depth 0.
+  // Home frames the whole dataset from the live view, keeping its 2D or 3D
+  // camera and display settings, as the generator's Home move does. Only with
+  // no live view does the generator synthesize one.
   const goHome = useCallback(async () => {
-    const dsId = datasetIdRef.current;
-    const ds = dimsRef.current;
-    if (!dsId || !ds) return;
-    const { sidecar, error: err } = runExplore(null, dsId, ds, viewportRef.current, 0);
-    if (err || !sidecar) {
+    const current = captureBuilderRef.current();
+    const result = explore(current, 0);
+    if (!result) return;
+    const { sidecar, error: err } = result;
+    const home = current
+      ? sidecar?.cells.find((cell) => cell.transform === "home")?.view ?? current
+      : sidecar?.current.view;
+    if (err || !home) {
       setError(err ?? "Could not return home.");
       return;
     }
-    const current = captureBuilderRef.current();
     try {
-      await applyView(sidecar.current.view);
+      await applyView(home);
     } catch (e) {
       setError(`Could not return home: ${e instanceof Error ? e.message : String(e)}`);
       return;
@@ -435,7 +484,7 @@ export function ExplorationPanel({
     setTrail([]);
     homeDistanceRef.current = undefined;
     refresh();
-  }, [applyView, pushBack, setTrail, refresh]);
+  }, [applyView, explore, pushBack, setTrail, refresh]);
 
   // A nudge descends into the generator's matching cell, like clicking that row,
   // so Back undoes it too.
@@ -448,164 +497,232 @@ export function ExplorationPanel({
     [cells, descend],
   );
 
-  const handleBookmark = useCallback(async () => {
-    const current = captureBuilderRef.current();
-    if (!current) {
-      setError("No active view to bookmark.");
-      return;
-    }
-    const name = window.prompt("Name this bookmark", suggestBookmarkName(datasetName));
-    if (name === null) return; // cancelled
-    const trimmed = name.trim();
-    if (trimmed.length === 0) return;
-    try {
-      await createSavedView(trimmed, current, "personal");
-    } catch (e) {
-      setError(`Bookmark failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }, [createSavedView, datasetName]);
+  const handleBookmark = useCallback(
+    async (name: string) => {
+      const current = captureBuilderRef.current();
+      if (!current) {
+        setError("No active view to bookmark.");
+        return;
+      }
+      try {
+        await createSavedView(name, current, "personal");
+      } catch (e) {
+        setError(`Bookmark failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+    [createSavedView],
+  );
 
   if (!visible) return null;
 
   const noDataset = !datasetId || !dims;
 
   return (
-    <div className="bookmark-sidebar explore-panel" style={style} data-testid="explore-panel">
-      <div className="bookmark-sidebar-header">
-        <h3>Explore</h3>
-        <button
-          type="button"
-          className="primary"
-          onClick={() => void handleBookmark()}
-          disabled={noDataset}
-          title="Bookmark the current view (saved privately to you)"
-          data-testid="explore-bookmark"
-        >
-          Bookmark
-        </button>
-      </div>
-
-      <div className="explore-here" data-testid="explore-here">
-        <div className="explore-here-dataset">
-          {datasetName || datasetId || "No dataset open"}
-        </div>
-        {!noDataset && (
-          <div
-            className="explore-breadcrumb"
-            data-testid="explore-breadcrumb"
-            title={["Home", ...breadcrumb].join(" › ")}
+    <section
+      className="lc-rail-panel lc-explore"
+      style={style}
+      aria-label="Explore"
+      data-testid="explore-panel"
+    >
+      <PanelHeader
+        className="lc-rail-panel-header"
+        title="Explore"
+        actions={
+          <Button
+            size="sm"
+            icon={BookmarkSimpleIcon}
+            onPress={() => setBookmarkOpen(true)}
+            isDisabled={noDataset}
+            data-testid="explore-bookmark"
           >
-            {formatBreadcrumb(breadcrumb)}
-          </div>
-        )}
-        {!noDataset && hereLabel && (
-          <div className="explore-here-detail">You are here: {hereLabel}</div>
-        )}
-      </div>
+            Bookmark
+          </Button>
+        }
+      />
 
-      <div className="explore-controls" data-testid="explore-controls">
-        {NUDGES.map((n) => {
-          const available = cells.some((c) => c.transform === n.transform);
-          return (
-            <button
-              key={n.transform}
-              type="button"
-              onClick={() => applyNudge(n.transform)}
-              disabled={noDataset || !available}
-              title={available ? n.text : n.unavailableTitle}
-              data-testid={n.testid}
+      <div className="lc-rail-panel-toolbar">
+        <div className="lc-explore-here" data-testid="explore-here">
+          <div className="lc-explore-dataset" title={datasetName || datasetId || undefined}>
+            {datasetName || datasetId || "No dataset open"}
+          </div>
+          {!noDataset && (
+            <div
+              className="lc-explore-breadcrumb"
+              data-testid="explore-breadcrumb"
+              title={["Home", ...breadcrumb].join(" › ")}
             >
-              {n.text}
-            </button>
-          );
-        })}
-        <button
-          type="button"
-          onClick={() => void goHome()}
-          disabled={noDataset}
-          title="Frame the whole dataset"
-        >
-          Home
-        </button>
-        <button
-          type="button"
-          onClick={() => void goBack()}
-          disabled={backDepth === 0}
-          title="Go back to the previous view"
-          data-testid="explore-back"
-        >
-          Back
-        </button>
-        <button
-          type="button"
-          className="explore-suggest"
-          onClick={() => refresh()}
-          disabled={noDataset}
-          title="Suggest views from where you are now"
-          data-testid="explore-suggest"
-        >
-          Suggest views from here
-        </button>
-        {requestThumbnail && (
-          <label className="explore-previews-toggle" data-testid="explore-previews-toggle">
-            <input
-              type="checkbox"
-              checked={showPreviews}
-              onChange={(e) => setShowPreviews(e.target.checked)}
-            />
-            Show previews
-          </label>
-        )}
-      </div>
-
-      {error && (
-        <div className="bookmark-error" data-testid="explore-error">
-          {error}
-        </div>
-      )}
-
-      <div className="explore-section-header">Suggested next views</div>
-      <div className="bookmark-list" role="list">
-        {noDataset && (
-          <div className="bookmark-empty">
-            Open a dataset to start exploring.
-          </div>
-        )}
-        {!noDataset && cells.length === 0 && !error && (
-          <div className="bookmark-empty">
-            No suggestions from here. Try Home, or zoom out.
-          </div>
-        )}
-        {cells.map((cell) => (
-          <div
-            role="listitem"
-            key={cell.handle + cell.transform}
-            className={`bookmark-row explore-cell${thumbnailsOn ? " explore-cell-has-thumb" : ""}`}
-            data-testid="explore-cell"
-            onClick={() => void descend(cell)}
-          >
-            {thumbnailsOn && requestThumbnail && (
-              <ExploreThumbnail
-                view={cell.view}
-                // The handle is the content address of the child view, so it
-                // changes exactly when the view (hence the thumbnail) should.
-                viewKey={cell.handle}
-                request={requestThumbnail}
-                scheduler={scheduler}
-              />
-            )}
-            <div className="explore-cell-text">
-              <div className="bookmark-row-top">
-                <span className="bookmark-name" title={cell.label}>
-                  {cell.label}
-                </span>
-              </div>
-              <div className="bookmark-row-meta explore-cell-transform">{cell.transform}</div>
+              {formatBreadcrumb(breadcrumb)}
             </div>
-          </div>
-        ))}
+          )}
+          {!noDataset && hereLabel && (
+            <div className="lc-explore-detail">You are here: {hereLabel}</div>
+          )}
+        </div>
+
+        <div className="lc-explore-moves" role="toolbar" aria-label="Moves" data-testid="explore-controls">
+          <IconButton
+            icon={ArrowLeftIcon}
+            label="Back"
+            tooltipPlacement="bottom"
+            onPress={() => void goBack()}
+            isDisabled={backDepth === 0}
+            data-testid="explore-back"
+          />
+          <IconButton
+            icon={HouseIcon}
+            label="Home"
+            tooltipPlacement="bottom"
+            onPress={() => void goHome()}
+            isDisabled={noDataset}
+            data-testid="explore-home"
+          />
+          <span className="lc-explore-moves-gap" aria-hidden="true" />
+          {NUDGES.map((n) => {
+            const available = cells.some((c) => c.transform === n.transform);
+            return (
+              <IconButton
+                key={n.transform}
+                icon={n.icon}
+                label={n.text}
+                tooltipPlacement="bottom"
+                onPress={() => applyNudge(n.transform)}
+                isDisabled={noDataset || !available}
+                data-testid={n.testid}
+              />
+            );
+          })}
+        </div>
+
+        <div className="lc-explore-options">
+          <Button
+            size="sm"
+            icon={ArrowsClockwiseIcon}
+            onPress={() => refresh()}
+            isDisabled={noDataset}
+            data-testid="explore-suggest"
+          >
+            Suggest from here
+          </Button>
+          {previewable && (
+            <div className="lc-explore-previews" data-testid="explore-previews-toggle">
+              <Switch label="Previews" isSelected={showPreviews} onChange={setShowPreviews} />
+            </div>
+          )}
+        </div>
       </div>
-    </div>
+
+      <div className="lc-rail-panel-body">
+        {error && (
+          <p className="lc-rail-panel-note" data-tone="danger" data-testid="explore-error">
+            {error}
+          </p>
+        )}
+        <h3 className="lc-rail-panel-section-title">Suggested next views</h3>
+        {noDataset && <p className="lc-rail-panel-empty">Open a dataset to start exploring.</p>}
+        {!noDataset && cells.length === 0 && !error && (
+          <p className="lc-rail-panel-empty">No suggestions from here. Try Home, or zoom out.</p>
+        )}
+        <ul className="lc-rail-list">
+          {cells.map((cell) => (
+            <li key={cell.handle + cell.transform} className="lc-rail-row">
+              <button
+                type="button"
+                className="lc-rail-row-open"
+                data-testid="explore-cell"
+                title={cell.label}
+                onClick={() => void descend(cell)}
+              >
+                {thumbnailsOn && requestThumbnail && canPreview(cell.view) && (
+                  <ExploreThumbnail
+                    // The handle is the content address of the child view, so it
+                    // changes exactly when the view (hence the thumbnail) should.
+                    key={`${cell.handle}|${previewKey}`}
+                    view={cell.view}
+                    request={requestThumbnail}
+                    scheduler={scheduler}
+                  />
+                )}
+                <span className="lc-rail-row-text">
+                  <span className="lc-rail-row-name">{cell.label}</span>
+                  <span className="lc-rail-row-meta lc-explore-transform">{cell.transform}</span>
+                </span>
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      {bookmarkOpen && (
+        <BookmarkDialog
+          defaultName={suggestBookmarkName(datasetName)}
+          onCancel={() => setBookmarkOpen(false)}
+          onSave={(name) => {
+            setBookmarkOpen(false);
+            void handleBookmark(name);
+          }}
+        />
+      )}
+    </section>
+  );
+}
+
+/** Names the bookmark the Explore panel saves as a personal view. */
+function BookmarkDialog({
+  defaultName,
+  onCancel,
+  onSave,
+}: {
+  defaultName: string;
+  onCancel: () => void;
+  onSave: (name: string) => void;
+}) {
+  const [name, setName] = useState(defaultName);
+  const nameRef = useRef<HTMLInputElement | null>(null);
+  useEffect(() => {
+    nameRef.current?.select();
+  }, []);
+  const trimmed = name.trim();
+  const submit = () => {
+    if (trimmed.length > 0) onSave(trimmed);
+  };
+  return (
+    <Dialog
+      title="Bookmark this view"
+      size="sm"
+      isOpen
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+      footer={
+        <>
+          <Button onPress={onCancel}>Cancel</Button>
+          <Button
+            variant="primary"
+            isDisabled={trimmed.length === 0}
+            onPress={submit}
+            data-testid="explore-bookmark-save"
+          >
+            Save
+          </Button>
+        </>
+      }
+    >
+      <TextField
+        label="Name"
+        description="Saved to your personal views."
+        value={name}
+        onChange={setName}
+        autoFocus
+        inputRef={nameRef}
+        data-testid="explore-bookmark-name"
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            submit();
+          }
+        }}
+      />
+    </Dialog>
   );
 }
 

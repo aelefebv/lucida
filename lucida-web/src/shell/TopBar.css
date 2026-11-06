@@ -89,13 +89,6 @@ input.lc-workspace-name:focus {
   box-shadow: 0 0 0 1px var(--lc-focus-ring);
 }
 
-.lc-topbar-inbox {
-  display: flex;
-  flex: none;
-  align-items: center;
-  margin-left: var(--lc-space-2);
-}
-
 .lc-topbar-group {
   display: flex;
   align-items: center;

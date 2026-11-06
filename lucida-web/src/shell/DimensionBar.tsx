@@ -7,7 +7,6 @@ import { Popover } from "../ui/Popover.tsx";
 import { SegmentedControl } from "../ui/SegmentedControl.tsx";
 import { useShortcut, type KeyCombo } from "../ui/shortcuts.ts";
 import { AxisScrubber } from "./AxisScrubber.tsx";
-import { ChannelStepper, type ChannelStepperProps } from "./ChannelStepper.tsx";
 import "./DimensionBar.css";
 
 const MODE_KEYS: readonly KeyCombo[] = ["M"];
@@ -44,12 +43,12 @@ export interface DimensionBarProps {
   /** The 3D camera's mode. */
   cameraMode: CameraMode;
   onCameraModeToggle: () => void;
-  channel: ChannelStepperProps;
 }
 
 /**
  * The floating bar at the bottom of the canvas: the 2D/3D switch, the 3D
  * camera, and a scrubber for each axis the data has more than one position on.
+ * Channels live in the layer panel, where they composite and solo.
  */
 export function DimensionBar({
   viewMode,
@@ -62,7 +61,6 @@ export function DimensionBar({
   onTChange,
   cameraMode,
   onCameraModeToggle,
-  channel,
 }: DimensionBarProps) {
   const showZ = viewMode === "2d" && dimZ > 1;
   const showT = dimT > 1;
@@ -179,7 +177,6 @@ export function DimensionBar({
           }
         />
       )}
-      <ChannelStepper {...channel} />
     </Card>
   );
 }

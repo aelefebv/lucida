@@ -1,0 +1,30 @@
+.lc-contrast {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+  min-width: 0;
+}
+
+/* Room for five digits, a 16-bit maximum. */
+.lc-contrast .lc-slider-field-input {
+  width: 7.5ch;
+}
+
+.lc-contrast-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-3);
+  min-height: var(--lc-control-h-sm);
+}
+
+.lc-contrast-continuous {
+  gap: var(--lc-space-2);
+}
+
+.lc-contrast-continuous .lc-switch-label {
+  font-size: var(--lc-text-sm);
+}
+
+.lc-contrast-full {
+  margin-left: auto;
+}
