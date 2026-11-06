@@ -1,0 +1,130 @@
+/* The popover surface, shared by Popover, Menu, and Select. */
+.lc-popover {
+  box-sizing: border-box;
+  min-width: 160px;
+  max-width: min(420px, calc(100vw - 16px));
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  background: var(--lc-surface-2);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
+  z-index: var(--lc-z-popover);
+  outline: none;
+  overflow: auto;
+}
+
+.lc-popover[data-entering] {
+  animation: lc-popover-in var(--lc-motion) var(--lc-ease);
+}
+
+.lc-popover[data-exiting] {
+  animation: lc-popover-in var(--lc-motion-fast) var(--lc-ease) reverse;
+}
+
+.lc-popover[data-placement="top"] { --popover-from: 0 4px; }
+.lc-popover[data-placement="bottom"] { --popover-from: 0 -4px; }
+.lc-popover[data-placement="left"] { --popover-from: 4px 0; }
+.lc-popover[data-placement="right"] { --popover-from: -4px 0; }
+
+@keyframes lc-popover-in {
+  from {
+    opacity: 0;
+    translate: var(--popover-from, 0 -4px);
+  }
+}
+
+.lc-popover-dialog {
+  padding: var(--lc-space-3);
+  outline: none;
+}
+
+/* Menu and list rows */
+.lc-menu {
+  display: flex;
+  flex-direction: column;
+  padding: var(--lc-space-1);
+  outline: none;
+}
+
+.lc-menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  box-sizing: border-box;
+  min-height: var(--lc-control-h);
+  padding: 0 var(--lc-space-2);
+  border-radius: var(--lc-radius);
+  color: var(--lc-text);
+  outline: none;
+  cursor: default;
+  user-select: none;
+}
+
+.lc-menu-item[data-focused] {
+  background: var(--lc-surface-3);
+}
+
+.lc-menu-item[data-disabled] {
+  color: var(--lc-text-subtle);
+}
+
+.lc-menu-item[data-variant="danger"] {
+  color: var(--lc-danger);
+}
+
+.lc-menu-item[data-variant="danger"][data-focused] {
+  background: var(--lc-danger-subtle);
+}
+
+.lc-menu-item-icon {
+  flex: none;
+  color: var(--lc-text-muted);
+}
+
+.lc-menu-item[data-variant="danger"] .lc-menu-item-icon {
+  color: inherit;
+}
+
+.lc-menu-item-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lc-menu-item-shortcut {
+  margin-left: var(--lc-space-4);
+  color: var(--lc-text-subtle);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.lc-menu-item-check {
+  flex: none;
+  margin-left: auto;
+  color: var(--lc-accent-text);
+}
+
+.lc-menu-separator {
+  height: 1px;
+  margin: var(--lc-space-1) calc(-1 * var(--lc-space-1));
+  background: var(--lc-border);
+}
+
+.lc-menu-section + .lc-menu-section {
+  margin-top: var(--lc-space-1);
+  padding-top: var(--lc-space-1);
+  border-top: 1px solid var(--lc-border);
+}
+
+.lc-menu-section-title {
+  padding: var(--lc-space-1) var(--lc-space-2);
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-xs);
+  font-weight: 600;
+}

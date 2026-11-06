@@ -1,10 +1,51 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark" data-density="comfortable" data-accent="indigo" data-canvas="black">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>lucida-web</title>
+    <script>
+      // Apply the stored appearance before first paint, so a reload never
+      // flashes the wrong theme. Mirrors applyAppearance in
+      // src/theme/appearance.ts, and a test runs both to keep them equal.
+      (function () {
+        var root = document.documentElement;
+        var values = {};
+        try {
+          // The capture surface ignores stored preferences (preferences.ts).
+          if (new URLSearchParams(location.search).get("render") !== "1") {
+            values = JSON.parse(localStorage.getItem("lucida.preferences") || "{}").values || {};
+          }
+        } catch (e) {}
+        function pick(value, allowed, fallback) {
+          return allowed.indexOf(value) >= 0 ? value : fallback;
+        }
+        var theme = pick(values["appearance.theme"], ["dark", "light", "system"], "dark");
+        if (theme === "system") {
+          theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        }
+        root.setAttribute("data-theme", theme);
+        root.setAttribute(
+          "data-density",
+          pick(values["appearance.density"], ["comfortable", "compact"], "comfortable"),
+        );
+        root.setAttribute(
+          "data-canvas",
+          pick(values["appearance.canvasBackground"], ["black", "dark-gray", "white", "theme"], "black"),
+        );
+        var accent = values["appearance.accent"];
+        if (typeof accent === "string" && /^#[0-9a-f]{6}$/i.test(accent)) {
+          root.setAttribute("data-accent", "custom");
+          root.style.setProperty("--lc-accent", accent);
+        } else {
+          root.setAttribute(
+            "data-accent",
+            pick(accent, ["indigo", "blue", "teal", "green", "amber", "rose"], "indigo"),
+          );
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
