@@ -107,6 +107,14 @@ pub fn default_view(ds_id: &str, dims: [u64; 5], viewport: [u32; 2]) -> SavedVie
 /// `view_json` is the current [`SavedView`], or `None`/empty for the Home view
 /// ([`default_view`]). `t, c, z, y, x` are the dataset shape; `viewport_w` and
 /// `viewport_h` size the Home camera; `depth` is recorded on the sidecar node.
+///
+/// `bounds` is the dataset's box in the current view's camera space,
+/// `[min_x, min_y, min_z, max_x, max_y, max_z]` as
+/// `WasmScene::dataset_fit_bounds` returns it. [`ViewExtent::from_dims`] gives
+/// voxel space, which only a 2D camera shares, so without `bounds` a 3D Home
+/// aims at empty space. It applies only with a `view_json`, since the
+/// synthesized Home picks its own camera; a malformed box is ignored.
+///
 /// Returns the serialized [`ExplorationSidecar`], or `{"error": "<message>"}`
 /// for a malformed `view_json` instead of panicking. Only wasm gets the
 /// `#[wasm_bindgen]` export.
@@ -123,12 +131,19 @@ pub fn explore_view(
     viewport_w: u32,
     viewport_h: u32,
     depth: u32,
+    bounds: Option<Vec<f64>>,
 ) -> String {
     let dims = [t as u64, c as u64, z as u64, y as u64, x as u64];
-    let extent = ViewExtent::from_dims(dims);
+    let mut extent = ViewExtent::from_dims(dims);
     let current = match view_json {
         Some(j) if !j.is_empty() => match serde_json::from_str::<SavedView>(&j) {
-            Ok(v) => v,
+            Ok(v) => {
+                if let Some((min, max)) = bounds.as_deref().and_then(parse_bounds) {
+                    extent.min = min;
+                    extent.max = max;
+                }
+                v
+            }
             Err(e) => {
                 return format!(
                     "{{\"error\":{}}}",
@@ -140,6 +155,19 @@ pub fn explore_view(
     };
     let sidecar = ExplorationSidecar::build(&current, &extent, depth, Vec::new());
     serde_json::to_string(&sidecar).unwrap_or_else(|_| "{\"error\":\"serialize\"}".to_string())
+}
+
+/// A finite, ordered `[min_x, min_y, min_z, max_x, max_y, max_z]` box, or
+/// `None`.
+fn parse_bounds(raw: &[f64]) -> Option<([f64; 3], [f64; 3])> {
+    let [x0, y0, z0, x1, y1, z1] = *raw else {
+        return None;
+    };
+    let ordered = x0 <= x1 && y0 <= y1 && z0 <= z1;
+    if !ordered || raw.iter().any(|v| !v.is_finite()) {
+        return None;
+    }
+    Some(([x0, y0, z0], [x1, y1, z1]))
 }
 
 /// One parametric move in the guided-exploration move-set.
@@ -1627,7 +1655,7 @@ mod tests {
     fn explore_view_home_volume_has_azimuth_cells() {
         // No view_json -> synthesize the Home view for a volume (z_count > 1),
         // which opens in an Arcball and so offers azimuth (rotate) cells.
-        let json = explore_view(None, "wds-1", 1, 1, 40, 80, 100, 800, 600, 0);
+        let json = explore_view(None, "wds-1", 1, 1, 40, 80, 100, 800, 600, 0, None);
         let sidecar: ExplorationSidecar = serde_json::from_str(&json).unwrap();
         assert_eq!(sidecar.v, EXPLORATION_SIDECAR_VERSION);
         assert!(
@@ -1642,7 +1670,7 @@ mod tests {
     #[test]
     fn explore_view_passes_depth_through() {
         // The caller's walk depth is recorded on the current node.
-        let json = explore_view(None, "wds-1", 1, 1, 40, 80, 100, 800, 600, 3);
+        let json = explore_view(None, "wds-1", 1, 1, 40, 80, 100, 800, 600, 3, None);
         let sidecar: ExplorationSidecar = serde_json::from_str(&json).unwrap();
         assert_eq!(sidecar.current.depth, 3);
     }
@@ -1654,9 +1682,88 @@ mod tests {
         let mut v = arcball_view();
         v.view.z_range = 10..11;
         let view_json = serde_json::to_string(&v).unwrap();
-        let json = explore_view(Some(view_json), "wds-1", 1, 1, 40, 80, 100, 800, 600, 0);
+        let json = explore_view(
+            Some(view_json),
+            "wds-1",
+            1,
+            1,
+            40,
+            80,
+            100,
+            800,
+            600,
+            0,
+            None,
+        );
         let sidecar: ExplorationSidecar = serde_json::from_str(&json).unwrap();
         assert_eq!(sidecar.current.handle, view_handle(&v));
+    }
+
+    fn home_target(json: &str) -> [f64; 3] {
+        let sidecar: ExplorationSidecar = serde_json::from_str(json).unwrap();
+        let home = sidecar
+            .cells
+            .iter()
+            .find(|c| c.transform == "home")
+            .unwrap_or_else(|| panic!("no home cell: {json}"));
+        match &home.view.camera {
+            Camera::Arcball(a) => a.target,
+            other => panic!("home kept the arcball, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn explore_view_home_frames_the_given_bounds() {
+        // A 3D camera works in normalized world space, not the voxel box the
+        // shape implies, so Home must center on the box the caller passes.
+        let view_json = serde_json::to_string(&arcball_view()).unwrap();
+        let bounds = vec![0.0, 0.0, 0.0, 1.0, 0.8, 0.25];
+        let json = explore_view(
+            Some(view_json),
+            "wds-1",
+            1,
+            1,
+            40,
+            80,
+            100,
+            800,
+            600,
+            0,
+            Some(bounds),
+        );
+        let target = home_target(&json);
+        for (got, want) in target.iter().zip([0.5, 0.4, 0.125]) {
+            assert!((got - want).abs() < 1e-9, "home target {target:?}");
+        }
+    }
+
+    #[test]
+    fn explore_view_ignores_malformed_bounds() {
+        // A short, inverted, or non-finite box falls back to the shape's box.
+        let view_json = serde_json::to_string(&arcball_view()).unwrap();
+        for bounds in [
+            vec![0.0, 0.0, 1.0],
+            vec![1.0, 0.0, 0.0, 0.0, 1.0, 1.0],
+            vec![0.0, 0.0, 0.0, f64::NAN, 1.0, 1.0],
+        ] {
+            let json = explore_view(
+                Some(view_json.clone()),
+                "wds-1",
+                1,
+                1,
+                40,
+                80,
+                100,
+                800,
+                600,
+                0,
+                Some(bounds),
+            );
+            let target = home_target(&json);
+            for (got, want) in target.iter().zip([50.0, 40.0, 20.0]) {
+                assert!((got - want).abs() < 1e-9, "home target {target:?}");
+            }
+        }
     }
 
     #[test]
@@ -1673,6 +1780,7 @@ mod tests {
             800,
             600,
             0,
+            None,
         );
         let value: serde_json::Value = serde_json::from_str(&json).unwrap();
         assert!(

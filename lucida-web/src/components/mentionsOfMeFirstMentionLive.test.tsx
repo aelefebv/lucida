@@ -3,20 +3,44 @@
 // The first inbound @-mention must count live even with no dataset selected.
 // `selectedDatasetId` stays null until a selection, so the resolver falls back
 // to the first annotated dataset. Drives the real resolver, a real WasmScene,
-// and the real <MentionsOfMe>.
+// and the real Comments badge on the rail.
 
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { act, cleanup, render } from "@testing-library/react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { ChatCircleIcon } from "@phosphor-icons/react";
 import initWasm, { WasmScene } from "lucida-core";
-import { MentionsOfMe } from "./MentionsOfMe.tsx";
+import { RightRail } from "../shell/RightRail.tsx";
 import {
   currentDatasetAnnotations,
   type AnnotationScene,
 } from "./currentDatasetAnnotations.ts";
 import { deriveHandle } from "./annotationParticipants.ts";
+import type { Annotation } from "./annotationDocument.ts";
+import { countUnread, findMentionsOfMe } from "./mentionsOfMe.ts";
+
+/** The rail with only the Comments icon, badged as App badges it. */
+function CommentsBadge({ annotations }: { annotations: Annotation[] }) {
+  const count = countUnread(
+    findMentionsOfMe({ annotations, currentUserId: MY_ID, currentUserEmail: "me@example.com" }),
+    new Set(),
+  );
+  return (
+    <RightRail
+      panels={[
+        {
+          id: "comments",
+          label: "Comments",
+          icon: ChatCircleIcon,
+          badge: { count, label: `${count} unread` },
+          render: () => null,
+        },
+      ]}
+    />
+  );
+}
 
 beforeAll(async () => {
   // wasm-bindgen web target: init with the built .wasm bytes (cwd is lucida-web).
@@ -61,11 +85,9 @@ function sceneWithMention(): WasmScene {
   return s;
 }
 
+/** The badge's count; the rail draws none at zero. */
 function badgeText(): string {
-  return (
-    document.querySelector('[data-testid="mentions-of-me-badge"]')?.textContent ??
-    ""
-  );
+  return document.querySelector(".lc-right-rail-badge")?.textContent ?? "0";
 }
 
 describe("#802 resolver: currentDatasetAnnotations with no dataset selected", () => {
@@ -100,20 +122,12 @@ describe("#802 resolver: currentDatasetAnnotations with no dataset selected", ()
   });
 });
 
-describe("#802 badge: MentionsOfMe reflects a first mention with no selection", () => {
+describe("#802 badge: the Comments badge reflects a first mention with no selection", () => {
   it("shows the first mention's count even when selectedDatasetId is null", () => {
     const scene = sceneWithMention();
     const annotations = currentDatasetAnnotations(scene as AnnotationScene, null);
 
-    render(
-      <MentionsOfMe
-        annotations={annotations}
-        currentUserId={MY_ID}
-        currentUserEmail="me@example.com"
-        members={[]}
-        onNavigate={() => {}}
-      />,
-    );
+    render(<CommentsBadge annotations={annotations} />);
     expect(badgeText()).toContain("1");
   });
 
@@ -126,21 +140,15 @@ describe("#802 badge: MentionsOfMe reflects a first mention with no selection", 
     function Harness() {
       const [version, setVersion] = useState(0);
       // App bumps this from the session controller's onCommand handler.
-      bumpRef.current = () => setVersion((v) => v + 1);
+      useEffect(() => {
+        bumpRef.current = () => setVersion((v) => v + 1);
+      }, []);
       const annotations = useMemo(
         () => currentDatasetAnnotations(scene as AnnotationScene, null),
         // eslint-disable-next-line react-hooks/exhaustive-deps -- version is the doc tick (mirrors App's currentAnnotations deps).
         [version],
       );
-      return (
-        <MentionsOfMe
-          annotations={annotations}
-          currentUserId={MY_ID}
-          currentUserEmail="me@example.com"
-          members={[]}
-          onNavigate={() => {}}
-        />
-      );
+      return <CommentsBadge annotations={annotations} />;
     }
     const bumpRef: { current: (() => void) | null } = { current: null };
 

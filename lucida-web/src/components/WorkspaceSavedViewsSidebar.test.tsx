@@ -146,7 +146,7 @@ describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
     await renderSidebar(true);
 
     const menu = await openRowMenu({ name: "My layout" });
-    const promote = within(menu).getByTestId("saved-view-promote-p1");
+    const promote = within(menu).getByRole("menuitem", { name: /share with team/i });
     expect(promote.textContent).toMatch(/share with team/i);
 
     await act(async () => {
@@ -171,7 +171,7 @@ describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
     await renderSidebar(true);
 
     const menu = await openRowMenu({ name: "Team layout" });
-    expect(within(menu).queryByTestId("saved-view-promote-s1")).toBeNull();
+    expect(within(menu).queryByRole("menuitem", { name: /share with team/i })).toBeNull();
   });
 
   it("does not offer 'Share with team' for someone else's personal view", async () => {
@@ -188,7 +188,7 @@ describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
     await renderSidebar(true);
 
     const menu = await openRowMenu({ name: "Bob layout" });
-    expect(within(menu).queryByTestId("saved-view-promote-p2")).toBeNull();
+    expect(within(menu).queryByRole("menuitem", { name: /share with team/i })).toBeNull();
   });
 
   it("does not offer 'Share with team' to a viewer (cannot edit) even on their own personal view", async () => {
@@ -197,7 +197,7 @@ describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
     await renderSidebar(false);
 
     const menu = await openRowMenu({ name: "My layout" });
-    expect(within(menu).queryByTestId("saved-view-promote-p1")).toBeNull();
+    expect(within(menu).queryByRole("menuitem", { name: /share with team/i })).toBeNull();
   });
 });
 
@@ -290,7 +290,7 @@ describe("WorkspaceSavedViewsSidebar — inline rename", () => {
 
     // The rename input renders in place of the name (class set by RenameInput);
     // pick it by class so the search box isn't grabbed instead.
-    const input = document.querySelector(".bookmark-name-input") as HTMLInputElement;
+    const input = screen.getByTestId("saved-view-rename-input") as HTMLInputElement;
     expect(input).toBeTruthy();
     await userEvent.clear(input);
     await act(async () => {
@@ -314,7 +314,7 @@ describe("WorkspaceSavedViewsSidebar — inline rename", () => {
     const menu = await openRowMenu({ name: "old" });
     await userEvent.click(within(menu).getByRole("menuitem", { name: /rename/i }));
 
-    const input = document.querySelector(".bookmark-name-input") as HTMLInputElement;
+    const input = screen.getByTestId("saved-view-rename-input") as HTMLInputElement;
     expect(input).toBeTruthy();
     await userEvent.clear(input);
     await act(async () => {
@@ -323,7 +323,7 @@ describe("WorkspaceSavedViewsSidebar — inline rename", () => {
 
     expect(calls.some((c) => c.method === "PATCH")).toBe(false);
     // The rename input closed; the original name is shown again.
-    expect(document.querySelector(".bookmark-name-input")).toBeNull();
+    expect(screen.queryByTestId("saved-view-rename-input")).toBeNull();
     expect(screen.getByText("old")).toBeTruthy();
   });
 });
@@ -346,7 +346,7 @@ describe("WorkspaceSavedViewsSidebar — delete confirmation", () => {
     await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
 
     // Confirmation dialog appears naming the view; no DELETE has fired yet.
-    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    const dialog = await screen.findByRole("dialog", { name: /delete saved view/i });
     expect(within(dialog).getByText(/Doomed/)).toBeTruthy();
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
 
@@ -368,11 +368,11 @@ describe("WorkspaceSavedViewsSidebar — delete confirmation", () => {
     const menu = await openRowMenu({ name: "Doomed" });
     await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
 
-    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    const dialog = await screen.findByRole("dialog", { name: /delete saved view/i });
     await userEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
 
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
-    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
 
@@ -413,7 +413,7 @@ describe("WorkspaceSavedViewsSidebar — filter and search", () => {
     expect(screen.getByText("alice 1")).toBeTruthy();
     expect(screen.getByText("bob 1")).toBeTruthy();
 
-    await userEvent.click(screen.getByRole("checkbox", { name: /mine only/i }));
+    await userEvent.click(screen.getByRole("switch", { name: /mine only/i }));
 
     expect(screen.getByText("alice 1")).toBeTruthy();
     expect(screen.queryByText("bob 1")).toBeNull();
@@ -603,7 +603,7 @@ describe("WorkspaceSavedViewsSidebar — active-row invalidation", () => {
 
     const menu = await openRowMenu({ name: "Doomed" });
     await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
-    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    const dialog = await screen.findByRole("dialog", { name: /delete saved view/i });
     await act(async () => {
       await userEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
     });
@@ -632,7 +632,7 @@ describe("WorkspaceSavedViewsSidebar — active-row invalidation", () => {
 
     const menu = await openRowMenu({ name: "Mine" });
     await act(async () => {
-      await userEvent.click(within(menu).getByTestId("saved-view-withdraw-v1"));
+      await userEvent.click(within(menu).getByRole("menuitem", { name: /withdraw proposal/i }));
     });
 
     expect(onInvalidated).toHaveBeenCalledWith("v1");

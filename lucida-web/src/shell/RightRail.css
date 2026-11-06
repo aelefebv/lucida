@@ -16,11 +16,39 @@
   background: var(--lc-surface-1);
 }
 
+.lc-right-rail-item {
+  position: relative;
+  display: flex;
+}
+
+/* Sits on the icon's top-right corner and lets clicks through to the button. */
+.lc-right-rail-badge {
+  position: absolute;
+  top: -2px;
+  right: -4px;
+  box-sizing: border-box;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 var(--lc-space-1);
+  border: 2px solid var(--lc-surface-1);
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-accent);
+  color: var(--lc-text-on-accent);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-xs);
+  font-weight: 600;
+  line-height: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  pointer-events: none;
+}
+
 .lc-right-panel {
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
   width: 300px;
+  min-width: 0;
   min-height: 0;
   border-left: 1px solid var(--lc-border);
   background: var(--lc-surface-1);
@@ -30,10 +58,8 @@
   display: none;
 }
 
-/* The panels mounted here bring their own frame from when they stood beside
-   the canvas; here they fill the column. */
 .lc-right-panel > * {
   flex: 1;
+  min-width: 0;
   min-height: 0;
-  border-left: none;
 }

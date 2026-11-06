@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { BookmarkSimpleIcon, CompassIcon } from "@phosphor-icons/react";
+import { BookmarkSimpleIcon, ChatCircleIcon, CompassIcon, InfoIcon } from "@phosphor-icons/react";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
@@ -11,7 +11,8 @@ import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
 import { AnnotationDraftOverlay } from "./components/AnnotationDraftOverlay.tsx";
 import type { AnnotationDraft } from "./components/annotationDraft.ts";
 import type { Tool } from "./components/annotationTool.ts";
-import { MentionsOfMe } from "./components/MentionsOfMe.tsx";
+import { CommentsPanel } from "./components/CommentsPanel.tsx";
+import { countUnread, findMentionsOfMe } from "./components/mentionsOfMe.ts";
 import {
   currentDatasetAnnotations,
   resolveAnnotationDatasetId,
@@ -23,6 +24,7 @@ import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { ImportWarningBanner } from "./components/ImportWarningBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
 import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
+import { DatasetInfoPanel } from "./components/DatasetInfoPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
 import { ShareButton } from "./share/ShareButton.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
@@ -160,7 +162,7 @@ function App({
   // Personal show/hide of all annotations: local, unsynced, not persisted, and
   // passed as `visible` to both overlays.
   const [annotationsVisible, setAnnotationsVisible] = useState(true);
-  // Lets the mentions inbox jump to a pin, although each overlay owns its
+  // Lets the Comments panel jump to a pin, although each overlay owns its
   // `openPinId`.
   const overlay2dRef = useRef<AnnotationOverlayHandle | null>(null);
   const overlay3dRef = useRef<AnnotationOverlayHandle | null>(null);
@@ -449,7 +451,7 @@ function App({
   }, [workspaceId]);
 
   // The current dataset's annotations, read once per document or dataset change
-  // and shared by the mention-candidate builder and the mentions inbox.
+  // and shared by the mention-candidate builder and the Comments panel.
   const currentAnnotations = useMemo<Annotation[]>(() => {
     // With no selection, falls back to the first dataset with annotations, so a
     // peer's mention that lands before selection still counts.
@@ -457,9 +459,25 @@ function App({
     // eslint-disable-next-line react-hooks/exhaustive-deps -- re-read on doc/dataset change; the scene is a stable ref.
   }, [scene.wasmSceneRef, selectedDatasetId, remoteDocumentVersion]);
 
-  // Per-browser read state for the mentions inbox, persisted and scoped to the
-  // selected dataset. Never synced.
+  // Per-browser read state for mentions, persisted and scoped to the selected
+  // dataset. Never synced.
   const { viewedCommentIds, markViewed } = useViewedMentions(selectedDatasetId);
+
+  // Comments that mention this user; the unread ones badge the Comments rail icon.
+  const mentionsOfMe = useMemo(
+    () =>
+      findMentionsOfMe({
+        annotations: currentAnnotations,
+        currentUserId: annotationAuthor,
+        currentUserEmail: authSession.principal.email,
+        members: workspaceMembers,
+      }),
+    [currentAnnotations, annotationAuthor, authSession.principal.email, workspaceMembers],
+  );
+  const unreadMentions = useMemo(
+    () => countUnread(mentionsOfMe, new Set(viewedCommentIds)),
+    [mentionsOfMe, viewedCommentIds],
+  );
 
   const mentionCandidates = useMemo(() => {
     return deriveMentionCandidates({
@@ -982,6 +1000,34 @@ function App({
     };
   }, [showExplorePanel, render.loopRef, render.activeLoop, datasetsVersion]);
 
+  // Home in the Explore panel frames the box the viewer's own fit uses, in the
+  // live camera's space.
+  const getExploreHomeBounds = (datasetId: string) => {
+    const bounds = scene.wasmSceneRef.current?.dataset_fit_bounds(datasetId);
+    return bounds && bounds.length === 6 ? bounds : null;
+  };
+
+  // The Info panel describes the selected dataset, else the first one open.
+  const infoDataset = useMemo(() => {
+    const layer =
+      layers.layerInfos.find((l) => l.id === selectedDatasetId) ?? layers.layerInfos[0] ?? null;
+    // eslint-disable-next-line react-hooks/refs -- the live dataset map; datasetsVersion re-runs this.
+    const ds = layer ? datasetsRef.current.get(layer.id) : undefined;
+    return layer && ds ? { id: layer.id, name: layer.name, manifest: ds.manifest } : null;
+    // datasetsVersion drives the re-render that surfaces datasetsRef mutations.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layers.layerInfos, selectedDatasetId, datasetsVersion]);
+
+  // The manifest has no source location; the server's dataset health does.
+  const getDatasetSource = useCallback(
+    async (datasetId: string) => {
+      if (!liveBridge) return null;
+      const health = await liveBridge.requestDatasetHealth(datasetId);
+      return health.find((h) => h.workspace_dataset_id === datasetId)?.source_url ?? null;
+    },
+    [liveBridge],
+  );
+
   // Bookmark from the Explore panel as a personal workspace saved view, since
   // guided exploration never auto-shares. Calls the API directly so the panel
   // needn't mount the saved-views list hook.
@@ -1041,7 +1087,9 @@ function App({
     onBackToDashboard,
     rightPanels: [
       { id: "savedViews", label: "Saved views" },
+      { id: "comments", label: "Comments" },
       { id: "explore", label: "Explore" },
+      { id: "info", label: "Info" },
     ],
     developer,
   });
@@ -1102,17 +1150,6 @@ function App({
           workspaceName={workspaceName}
           onRenameWorkspace={canRenameWorkspace ? onRenameWorkspace : undefined}
           onBackToDashboard={onBackToDashboard}
-          inbox={
-            <MentionsOfMe
-              annotations={currentAnnotations}
-              currentUserId={annotationAuthor}
-              currentUserEmail={authSession.principal.email}
-              members={workspaceMembers}
-              onNavigate={handleNavigateToMention}
-              viewedCommentIds={viewedCommentIds}
-              onMarkViewed={markViewed}
-            />
-          }
           presence={{
             peers: bridge.peers,
             followTarget: bridge.followTarget,
@@ -1435,6 +1472,27 @@ function App({
                 ),
               },
               {
+                id: "comments",
+                label: "Comments",
+                icon: ChatCircleIcon,
+                badge: {
+                  count: unreadMentions,
+                  label: `${unreadMentions} unread mention${unreadMentions === 1 ? "" : "s"}`,
+                },
+                render: (active) => (
+                  <CommentsPanel
+                    visible={active}
+                    annotations={currentAnnotations}
+                    mentions={mentionsOfMe}
+                    viewedCommentIds={viewedCommentIds}
+                    currentUserId={annotationAuthor}
+                    extents={{ z: dims.dimZ, t: dims.dimT }}
+                    onNavigate={handleNavigateToMention}
+                    onMarkViewed={markViewed}
+                  />
+                ),
+              },
+              {
                 id: "explore",
                 label: "Explore",
                 icon: CompassIcon,
@@ -1451,7 +1509,21 @@ function App({
                       render.canvasRef.current?.clientWidth ?? 800,
                       render.canvasRef.current?.clientHeight ?? 600,
                     ]}
+                    getHomeBounds={getExploreHomeBounds}
                     requestThumbnail={requestThumbnail}
+                  />
+                ),
+              },
+              {
+                id: "info",
+                label: "Info",
+                icon: InfoIcon,
+                render: (active) => (
+                  <DatasetInfoPanel
+                    visible={active}
+                    workspaceId={workspaceId}
+                    dataset={infoDataset}
+                    getSource={getDatasetSource}
                   />
                 ),
               },

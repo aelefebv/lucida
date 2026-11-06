@@ -26,8 +26,6 @@ export interface TopBarProps {
   /** Renames the workspace; omit when the user may not. */
   onRenameWorkspace?: (name: string) => Promise<void>;
   onBackToDashboard: () => void;
-  /** Sits after the workspace name, e.g. the mentions inbox. */
-  inbox?: ReactNode;
   presence: PresenceAvatarsProps;
   /** The Share control. */
   share?: ReactNode;
@@ -40,7 +38,6 @@ export function TopBar({
   workspaceName,
   onRenameWorkspace,
   onBackToDashboard,
-  inbox,
   presence,
   share,
   developer,
@@ -90,7 +87,6 @@ export function TopBar({
             All workspaces
           </MenuItem>
         </Menu>
-        {inbox && <div className="lc-topbar-inbox">{inbox}</div>}
       </div>
       <div className="lc-topbar-end">
         {developer.enabled && (

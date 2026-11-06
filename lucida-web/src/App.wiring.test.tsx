@@ -87,6 +87,7 @@ vi.mock("lucida-core", () => {
     zoom() { return 1; }
     center() { return new Float64Array([0, 0]); }
     dataset_volume_shape(_id: string) { return new Uint32Array([4, 8, 8]); }
+    dataset_fit_bounds(_id: string) { return new Float64Array([0, 0, 0, 8, 8, 0]); }
     export_presence() {
       return JSON.stringify({
         camera: { mode: "slice", center: [0, 0], zoom: 1 },
@@ -628,16 +629,25 @@ describe("App wiring: the shell", () => {
 
   it("opens one rail panel at a time, closed by default", async () => {
     await mountWithSnapshot(documentJson(["wds-1"]));
-    expect(screen.queryByText("Saved Views")).toBeNull();
+    const savedViews = () => screen.queryByRole("region", { name: "Saved views" });
+    expect(savedViews()).toBeNull();
     expect(screen.queryByTestId("explore-panel")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Saved views" }));
-    expect(await screen.findByText("Saved Views")).toBeTruthy();
+    expect(await screen.findByRole("region", { name: "Saved views" })).toBeTruthy();
     expect(getPreference(rightPanelOpenPreference)).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Comments" }));
+    expect(screen.getByRole("region", { name: "Comments" })).toBeTruthy();
+    expect(savedViews()).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Info" }));
+    expect(screen.getByRole("region", { name: "Info" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Comments" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "Explore" }));
     expect(screen.getByTestId("explore-panel")).toBeTruthy();
-    expect(screen.queryByText("Saved Views")).toBeNull();
+    expect(screen.queryByRole("region", { name: "Info" })).toBeNull();
 
     await act(async () => {
       fireEvent.keyDown(window, { key: "]", code: "BracketRight", altKey: true });

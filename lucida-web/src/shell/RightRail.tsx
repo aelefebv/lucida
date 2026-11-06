@@ -13,6 +13,11 @@ export interface RailPanel {
   label: string;
   icon: Icon;
   /**
+   * A count drawn on the icon, e.g. unread items; zero draws none. `label`
+   * says what it counts and joins the button's name and tooltip.
+   */
+  badge?: { count: number; label: string };
+  /**
    * Renders the panel. Called for every panel on every render, open or not,
    * so a panel keeps its state while another is showing; `active` says
    * whether this one is.
@@ -55,17 +60,27 @@ export function RightRail({ panels }: RightRailProps) {
   return (
     <div className="lc-right-rail-region">
       <nav className="lc-right-rail" aria-label="Panels">
-        {panels.map((panel) => (
-          <IconButton
-            key={panel.id}
-            icon={panel.icon}
-            label={panel.label}
-            size="lg"
-            tooltipPlacement="left"
-            isSelected={open && panel.id === activeId}
-            onSelectedChange={() => choose(panel.id)}
-          />
-        ))}
+        {panels.map((panel) => {
+          const count = panel.badge?.count ?? 0;
+          return (
+            <span key={panel.id} className="lc-right-rail-item">
+              <IconButton
+                icon={panel.icon}
+                label={count > 0 ? `${panel.label} (${panel.badge?.label})` : panel.label}
+                size="lg"
+                tooltipPlacement="left"
+                isSelected={open && panel.id === activeId}
+                onSelectedChange={() => choose(panel.id)}
+                data-testid={`rail-${panel.id}`}
+              />
+              {count > 0 && (
+                <span className="lc-right-rail-badge" aria-hidden="true">
+                  {count > 99 ? "99+" : count}
+                </span>
+              )}
+            </span>
+          );
+        })}
       </nav>
       <div className="lc-right-panel" hidden={!open}>
         {panels.map((panel) => (
