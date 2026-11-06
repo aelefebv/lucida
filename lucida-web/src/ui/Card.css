@@ -1,0 +1,23 @@
+.lc-card {
+  box-sizing: border-box;
+  padding: var(--lc-space-3);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  background: var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
+}
+
+.lc-card[data-padding="sm"] {
+  padding: var(--lc-space-2);
+}
+
+.lc-card[data-padding="none"] {
+  padding: 0;
+  overflow: hidden;
+}

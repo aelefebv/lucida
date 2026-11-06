@@ -1,0 +1,119 @@
+.lc-slider {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+  min-width: 0;
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
+}
+
+.lc-slider[data-disabled] {
+  opacity: 0.45;
+}
+
+.lc-slider-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lc-space-2);
+  min-height: 20px;
+}
+
+.lc-slider-label {
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 500;
+}
+
+.lc-slider-output {
+  margin-left: auto;
+  color: var(--lc-text);
+  font-size: var(--lc-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.lc-slider-fields {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+}
+
+.lc-slider-field-input {
+  box-sizing: border-box;
+  width: 6ch;
+  height: 20px;
+  margin: 0;
+  padding: 0 var(--lc-space-1);
+  border: 1px solid transparent;
+  border-radius: var(--lc-radius-sm);
+  outline: none;
+  background: transparent;
+  color: var(--lc-text);
+  font: inherit;
+  font-size: var(--lc-text-sm);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.lc-slider-field-input:hover {
+  border-color: var(--lc-border-strong);
+  background: var(--lc-field-bg);
+}
+
+.lc-slider-field-input:focus {
+  border-color: var(--lc-focus-ring);
+  background: var(--lc-field-bg);
+}
+
+.lc-slider-track {
+  position: relative;
+  height: 16px;
+  touch-action: none;
+}
+
+.lc-slider-rail,
+.lc-slider-fill {
+  position: absolute;
+  top: 50%;
+  height: 4px;
+  translate: 0 -50%;
+  border-radius: var(--lc-radius-full);
+}
+
+.lc-slider-rail {
+  left: 0;
+  right: 0;
+  background: var(--lc-border-strong);
+}
+
+.lc-slider-fill {
+  background: var(--lc-accent);
+}
+
+.lc-slider-thumb {
+  top: 50%;
+  box-sizing: border-box;
+  width: 14px;
+  height: 14px;
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-thumb);
+  box-shadow:
+    0 0 0 1px var(--lc-border-strong),
+    var(--lc-shadow-1);
+  transition: scale var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-slider-thumb[data-hovered],
+.lc-slider-thumb[data-dragging] {
+  scale: 1.15;
+}
+
+.lc-slider-thumb[data-focus-visible] {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 2px;
+}

@@ -1,0 +1,75 @@
+.lc-toast-region {
+  position: fixed;
+  right: var(--lc-space-4);
+  bottom: var(--lc-space-4);
+  z-index: var(--lc-z-toast);
+  display: flex;
+  flex-direction: column-reverse;
+  gap: var(--lc-space-2);
+  outline: none;
+}
+
+.lc-toast {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--lc-space-3);
+  box-sizing: border-box;
+  width: 360px;
+  max-width: calc(100vw - 2 * var(--lc-space-4));
+  padding: var(--lc-space-3) var(--lc-space-2) var(--lc-space-3) var(--lc-space-4);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  background: var(--lc-surface-2);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
+  outline: none;
+  animation: lc-toast-in var(--lc-motion) var(--lc-ease);
+}
+
+.lc-toast[data-focus-visible] {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 2px;
+}
+
+.lc-toast > .lc-button {
+  flex: none;
+  margin-top: -2px;
+}
+
+.lc-toast-icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+.lc-toast[data-tone="success"] .lc-toast-icon { color: var(--lc-success); }
+.lc-toast[data-tone="warning"] .lc-toast-icon { color: var(--lc-warning); }
+.lc-toast[data-tone="danger"] .lc-toast-icon { color: var(--lc-danger); }
+.lc-toast[data-tone="info"] .lc-toast-icon { color: var(--lc-info); }
+
+.lc-toast-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.lc-toast-title {
+  font-weight: 500;
+}
+
+.lc-toast-description {
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+}
+
+@keyframes lc-toast-in {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}

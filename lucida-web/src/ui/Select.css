@@ -1,0 +1,48 @@
+.lc-select-trigger {
+  gap: var(--lc-space-2);
+  margin: 0;
+  padding: 0 var(--lc-space-2);
+  outline: none;
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.lc-field[data-label-position="side"] .lc-select-trigger {
+  min-width: 140px;
+}
+
+.lc-select-trigger[data-focus-visible] {
+  border-color: var(--lc-focus-ring);
+  box-shadow: 0 0 0 1px var(--lc-focus-ring);
+}
+
+.lc-select-trigger[data-pressed],
+.lc-field[data-open] .lc-select-trigger {
+  border-color: var(--lc-focus-ring);
+}
+
+.lc-select-value {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  flex: 1;
+  min-width: 0;
+  color: var(--lc-text);
+  font-size: var(--lc-text-md);
+}
+
+.lc-select-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lc-select-caret {
+  flex: none;
+  color: var(--lc-text-subtle);
+}
+
+.lc-select-popover {
+  min-width: var(--trigger-width);
+}
