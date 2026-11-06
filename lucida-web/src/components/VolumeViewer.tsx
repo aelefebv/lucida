@@ -17,7 +17,8 @@ import { FlyCameraHint } from "./FlyCameraHint.tsx";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
-import { eventToScreenPx } from "./cameraProjection.ts";
+import { eventToScreenPx, type ClientPoint } from "./cameraProjection.ts";
+import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { frameClock } from "../frameClock.ts";
 
 interface Props {
@@ -51,6 +52,8 @@ interface Props {
    * relative to the canvas), rendered by {@link AnnotationDraftOverlay}; the
    * shift-drag writes it and clears it on release/cancel. */
   annotationDraftRef: RefObject<AnnotationDraft | null>;
+  /** A touch long press on the canvas, at its client point. */
+  onLongPress?: (at: ClientPoint) => void;
 }
 
 const CLIP_SPEED = 0.02; // world-space units per frame at 60 fps
@@ -58,7 +61,7 @@ const INTERACTION_RENDER_SCALE = 0.5;
 const FULL_RENDER_SCALE = 1.0;
 const SCALE_RESTORE_DELAY_MS = 50;
 
-export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
+export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [cameraMode, setCameraMode] = useState<string>(() => scene.camera_mode());
   const [showHint, setShowHint] = useState(false);
@@ -87,6 +90,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const onDocumentChangedRef = useRef(onDocumentChanged);
   // eslint-disable-next-line react-hooks/refs
   onDocumentChangedRef.current = onDocumentChanged;
+  const onLongPressRef = useRef(onLongPress);
+  // eslint-disable-next-line react-hooks/refs
+  onLongPressRef.current = onLongPress;
 
   // Notify parent of camera mode (after render, to avoid setState-in-render)
   useEffect(() => {
@@ -327,24 +333,35 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     [scene, pickVoxel],
   );
 
-  const onArcballPointerDown = useCallback(
-    (e: PointerEvent) => {
+  // A press, from a mouse, a pen, or a finger drawing with a tool. Touch
+  // navigation goes through the gesture recognizer instead, so the arcball
+  // pointer handlers skip touch.
+  const beginArcballPress = useCallback(
+    (e: ClientPoint, shiftKey: boolean) => {
       setDragging(true);
-      shiftDragRef.current = e.shiftKey;
+      shiftDragRef.current = shiftKey;
       pinPressRef.current?.endEscape();
-      const kind = pressAnnotationKind(toolRef.current, e.shiftKey);
+      const kind = pressAnnotationKind(toolRef.current, shiftKey);
       pinPressRef.current = kind
         ? { x: e.clientX, y: e.clientY, moved: false, kind, endEscape: pushEscapeLayer(cancelPress) }
         : null;
       lastPos.current = { x: e.clientX, y: e.clientY };
+    },
+    [cancelPress],
+  );
+
+  const onArcballPointerDown = useCallback(
+    (e: PointerEvent) => {
+      if (e.pointerType === "touch") return;
+      beginArcballPress(e, e.shiftKey);
       canvas.setPointerCapture(e.pointerId);
       setLowRes();
     },
-    [canvas, setLowRes, cancelPress],
+    [canvas, setLowRes, beginArcballPress],
   );
 
-  const onArcballPointerMove = useCallback(
-    (e: PointerEvent) => {
+  const moveArcballPress = useCallback(
+    (e: ClientPoint) => {
       // Always broadcast cursor as normalized screen coordinates
       const rect = canvas.getBoundingClientRect();
       const nx = (e.clientX - rect.left) / canvas.clientWidth;
@@ -397,8 +414,15 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef],
   );
 
-  const onArcballPointerUp = useCallback(
+  const onArcballPointerMove = useCallback(
     (e: PointerEvent) => {
+      if (e.pointerType !== "touch") moveArcballPress(e);
+    },
+    [moveArcballPress],
+  );
+
+  const endArcballPress = useCallback(
+    (e: ClientPoint) => {
       setDragging(false);
       scheduleFullRes();
       const press = pinPressRef.current;
@@ -416,6 +440,13 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       // A point press that navigated draws nothing.
     },
     [scheduleFullRes, drawAnnotation, annotationDraftRef],
+  );
+
+  const onArcballPointerUp = useCallback(
+    (e: PointerEvent) => {
+      if (e.pointerType !== "touch") endArcballPress(e);
+    },
+    [endArcballPress],
   );
 
   // Fly input handling
@@ -452,12 +483,86 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   }, [sendCursor]);
 
   // A cancelled gesture must never drop a pin (or leave a half-finished drag).
-  const onPointerCancel = useCallback(() => {
+  const onPointerCancel = useCallback((e: PointerEvent) => {
+    if (e.pointerType === "touch" && !isFlyMode) return;
     cancelPress();
     setDragging(false);
     scheduleFullRes();
     if (isFlyMode) fly.onPointerUp();
   }, [cancelPress, scheduleFullRes, isFlyMode, fly]);
+
+  /** Move the camera from a touch gesture, at the interaction render scale the
+   * wheel uses. */
+  const navigate = (input: "orbit" | "pan" | "zoom", move: () => void) => {
+    breakFollow();
+    move();
+    emitPresence();
+    loopRef.current?.markInput(input);
+    setLowRes();
+    scheduleFullRes();
+  };
+
+  const sendTouchCursor = (g: { x: number; y: number }) => {
+    const rect = canvas.getBoundingClientRect();
+    sendCursor([(g.x - rect.left) / canvas.clientWidth, (g.y - rect.top) / canvas.clientHeight]);
+  };
+
+  // One finger orbits, or draws with a tool; two pinch to zoom and drag to
+  // pan. Fly mode keeps its own pointer handling, touch included.
+  useTouchGestures(canvas, !isFlyMode, {
+    claimsPress: () => toolRef.current !== "pan",
+    onGesture: (g) => {
+      switch (g.type) {
+        case "pressStart":
+          beginArcballPress(clientPoint(g), false);
+          setLowRes();
+          break;
+        case "pressMove":
+          moveArcballPress(clientPoint(g));
+          break;
+        case "pressEnd":
+          endArcballPress(clientPoint(g));
+          break;
+        case "pressCancel":
+          cancelPress();
+          scheduleFullRes();
+          break;
+        case "drag":
+          navigate("orbit", () =>
+            applyViewportCommand(scene, {
+              type: "arcball_rotate",
+              d_theta: -g.dx * ORBIT_RADIANS_PER_PIXEL,
+              d_phi: -g.dy * ORBIT_RADIANS_PER_PIXEL,
+            }),
+          );
+          sendTouchCursor(g);
+          break;
+        case "pinch":
+          navigate(g.scale === 1 ? "pan" : "zoom", () => {
+            // Spreading the fingers brings the camera closer by the same ratio.
+            if (g.scale !== 1) applyViewportCommand(scene, { type: "arcball_zoom", delta: 1 / g.scale - 1 });
+            if (g.dx !== 0 || g.dy !== 0) applyViewportCommand(scene, { type: "arcball_pan", dx: g.dx, dy: g.dy });
+          });
+          sendTouchCursor(g);
+          break;
+        case "doubleTap": {
+          const datasetId = annotationDatasetIdRef.current ?? datasets.keys().next().value;
+          if (!datasetId) break;
+          navigate("zoom", () => {
+            try {
+              scene.fit_camera_to_dataset_bounds(datasetId);
+            } catch {
+              // A dataset with nothing loaded yet has no bounds; the view stays.
+            }
+          });
+          break;
+        }
+        case "longPress":
+          onLongPressRef.current?.(clientPoint(g));
+          break;
+      }
+    },
+  });
 
   // Clear cursor on unmount (e.g. mode switch to 2D)
   useEffect(() => {
