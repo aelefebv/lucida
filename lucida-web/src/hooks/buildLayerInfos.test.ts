@@ -79,7 +79,6 @@ function datasetsWith(labels: LabelSpec[]): Map<string, DatasetState> {
 
 const emptyMaps = {
   autoContrast: new Map<string, boolean>(),
-  fullRange: new Map<string, boolean>(),
   dataRange: new Map<string, { min: number; max: number }>(),
   levels: new Map<string, DatasetLevels>(),
 };

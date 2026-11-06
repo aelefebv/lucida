@@ -165,7 +165,6 @@ export function buildLayerInfos(
   datasets: Map<string, DatasetState>,
   maps: {
     autoContrast: Map<string, boolean>;
-    fullRange: Map<string, boolean>;
     /** Keyed by {@link channelRangeKey}. */
     dataRange: Map<string, { min: number; max: number }>;
     /** The worker's per-dataset level readout; a dataset it has not reported yet is absent. */
@@ -221,7 +220,6 @@ export function buildLayerInfos(
       blendMode: settings?.blend_mode ?? "alpha",
       renderMode: settings?.render_mode ?? "translucent",
       autoContrast: maps.autoContrast.get(id) ?? true,
-      fullRange: maps.fullRange.get(id) ?? false,
       fullRangeMax: dtypeMax(dataType),
       integerData: !dataType.toLowerCase().startsWith("float"),
       labelRows: labelRows.length > 0 ? labelRows : undefined,
@@ -277,7 +275,6 @@ export function useDatasetSettings({
   datasetLevels,
 }: Params) {
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
-  const [fullRangeMap, setFullRangeMap] = useState<Map<string, boolean>>(new Map());
   const [dataRangeMap, setDataRangeMap] = useState<Map<string, { min: number; max: number }>>(new Map());
   const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null);
   const [layerSettingsVersion, setLayerSettingsVersion] = useState(0);
@@ -293,12 +290,10 @@ export function useDatasetSettings({
 
   const initLayerMaps = useCallback((id: string) => {
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, true); return next; });
-    setFullRangeMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
   }, []);
 
   const cleanupLayerMaps = useCallback((id: string) => {
     setAutoContrastMap(prev => { const next = new Map(prev); next.delete(id); return next; });
-    setFullRangeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
     setDataRangeMap(prev => {
       const next = new Map(prev);
       for (const key of prev.keys()) if (parseChannelRangeKey(key)?.datasetId === id) next.delete(key);
@@ -408,11 +403,6 @@ export function useDatasetSettings({
       if (range) applyChannelContrast(id, channel, range.min, range.max);
     }
   }, [dataRangeMap, wasmSceneRef, applyChannelContrast]);
-
-  /** Let the contrast slider span the data type's whole range instead of the loaded data's. */
-  const handleFullRangeChange = useCallback((id: string, on: boolean) => {
-    setFullRangeMap((prev) => new Map(prev).set(id, on));
-  }, []);
 
   const handleChannelSetGamma = useCallback((id: string, channel: number, gamma: number) => {
     const scene = wasmSceneRef.current;
@@ -540,7 +530,6 @@ export function useDatasetSettings({
   const layerInfos = scene
     ? buildLayerInfos(scene, datasets, {
         autoContrast: autoContrastMap,
-        fullRange: fullRangeMap,
         dataRange: dataRangeMap,
         levels: datasetLevels,
       }, viewMode)
@@ -554,8 +543,6 @@ export function useDatasetSettings({
     autoContrastMap,
     setAutoContrastMap,
     autoContrastMapRef,
-    fullRangeMap,
-    setFullRangeMap,
     dataRangeMap,
     setDataRangeMap,
     expandedLayerId,
@@ -576,7 +563,6 @@ export function useDatasetSettings({
     handleChannelSetBlendMode,
     handleChannelAutoFit,
     handleAutoContrastChange,
-    handleFullRangeChange,
     handleLabelSetVisible,
     handleLabelSetOpacity,
     handleLayerSetBlendMode,

@@ -69,8 +69,7 @@ export function useIntensityBatcher({
     if (!client) return;
     client.onIntensityRange = (rawId, min, max) => {
       const scene = wasmSceneRef.current;
-      const source = resolveIntensitySource(rawId, datasetsRef.current, scene?.c() ?? 0);
-      const { datasetId, channel } = source;
+      const { datasetId, channel } = resolveIntensitySource(rawId, datasetsRef.current, scene?.c() ?? 0);
       const key = channelRangeKey(datasetId, channel);
 
       // Union across collection members.
