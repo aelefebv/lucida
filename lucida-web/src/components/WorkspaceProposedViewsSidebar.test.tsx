@@ -96,7 +96,7 @@ describe("WorkspaceSavedViewsSidebar — viewer propose flow", () => {
     await screen.findByText("My view");
     // Open the per-row actions menu.
     await userEvent.click(screen.getByLabelText("Saved view actions"));
-    const proposeBtn = await screen.findByTestId("saved-view-propose-sv-own");
+    const proposeBtn = await screen.findByRole("menuitem", { name: /propose to team/i });
     await userEvent.click(proposeBtn);
     // Proposing asks for confirmation before it is sent.
     await userEvent.click(await screen.findByRole("button", { name: /propose|confirm|share/i }));
@@ -125,7 +125,7 @@ describe("WorkspaceSavedViewsSidebar — viewer propose flow", () => {
     );
     await screen.findByText("My view");
     await userEvent.click(screen.getByLabelText("Saved view actions"));
-    expect(screen.queryByTestId("saved-view-propose-sv-other")).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /propose to team/i })).toBeNull();
   });
 });
 

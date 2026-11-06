@@ -8,7 +8,7 @@ import {
   SquaresFourIcon,
   WrenchIcon,
 } from "@phosphor-icons/react";
-import { useState, type MouseEvent, type ReactNode } from "react";
+import { useState, type MouseEvent } from "react";
 import { ProfileMenu } from "../auth/ProfileMenu.tsx";
 import { usePreference } from "../theme/preferences.ts";
 import { Button, IconButton } from "../ui/Button.tsx";
@@ -27,8 +27,6 @@ export interface TopBarProps {
   /** Renames the workspace; omit when the user may not. */
   onRenameWorkspace?: (name: string) => Promise<void>;
   onBackToDashboard: () => void;
-  /** Sits after the workspace name, e.g. the mentions inbox. */
-  inbox?: ReactNode;
   presence: PresenceAvatarsProps;
   /** Opens the sharing dialog; omit when the user can't share. */
   onShare?: () => void;
@@ -41,7 +39,6 @@ export function TopBar({
   workspaceName,
   onRenameWorkspace,
   onBackToDashboard,
-  inbox,
   presence,
   onShare,
   developer,
@@ -91,7 +88,6 @@ export function TopBar({
             All workspaces
           </MenuItem>
         </Menu>
-        {inbox && <div className="lc-topbar-inbox">{inbox}</div>}
       </div>
       <div className="lc-topbar-end">
         {developer.enabled && (

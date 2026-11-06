@@ -488,36 +488,37 @@ impl Scene {
         if any { Some((min, max)) } else { None }
     }
 
-    /// Frame the named dataset's full extent in the current camera, feeding each
-    /// camera mode bounds in the coordinate space it uses:
+    /// The named dataset's bounds in the coordinate space the current camera
+    /// works in, the box [`Camera::fit_to_bounds`] frames:
     ///
-    /// - The 2D [`Camera::Slice`] camera works in voxel space, so it is framed
-    ///   with [`Self::dataset_voxel_bounds_2d`] via [`Slice::fit_to_bounds`] and
-    ///   [`crate::framing::FIT_MARGIN_2D`]. Normalized unit-cube bounds would
-    ///   zoom onto a sub-pixel speck at the origin.
+    /// - The 2D [`Camera::Slice`] camera works in voxel space, so this is
+    ///   [`Self::dataset_voxel_bounds_2d`] with a zero Z extent. Normalized
+    ///   unit-cube bounds would zoom onto a sub-pixel speck at the origin.
     /// - The 3D [`Camera::Arcball`]/[`Camera::Fly`] cameras work in normalized
-    ///   world space, so they use [`Self::dataset_world_bounds`] via
-    ///   [`Camera::fit_to_bounds`].
+    ///   world space, so this is [`Self::dataset_world_bounds`]. Voxel bounds
+    ///   would aim the camera at empty space far from the data.
+    ///
+    /// `None` when the dataset has no bounds in that space.
+    pub fn dataset_fit_bounds(&self, dataset_id: &str) -> Option<([f64; 3], [f64; 3])> {
+        if let Camera::Slice(_) = self.camera {
+            let (min, max) = self.dataset_voxel_bounds_2d(dataset_id)?;
+            Some(([min[0], min[1], 0.0], [max[0], max[1], 0.0]))
+        } else {
+            self.dataset_world_bounds(dataset_id)
+        }
+    }
+
+    /// Frame the named dataset's full extent in the current camera, using
+    /// [`Self::dataset_fit_bounds`] for the camera's coordinate space.
     ///
     /// Returns `false`, leaving the camera and epochs untouched, if the dataset
     /// has no bounds in the active space. On success it bumps `epochs.view`, as
     /// pan, zoom, and rotate do.
     pub fn fit_camera_to_dataset(&mut self, dataset_id: &str) -> bool {
-        if let Camera::Slice(_) = self.camera {
-            // 2D: the Slice camera lives in voxel space — frame the voxel AABB.
-            let Some((min, max)) = self.dataset_voxel_bounds_2d(dataset_id) else {
-                return false;
-            };
-            if let Camera::Slice(s) = &mut self.camera {
-                s.fit_to_bounds(min, max, crate::framing::FIT_MARGIN_2D);
-            }
-        } else {
-            // 3D (Arcball/Fly): the camera lives in normalized world space.
-            let Some((min, max)) = self.dataset_world_bounds(dataset_id) else {
-                return false;
-            };
-            self.camera.fit_to_bounds(min, max);
-        }
+        let Some((min, max)) = self.dataset_fit_bounds(dataset_id) else {
+            return false;
+        };
+        self.camera.fit_to_bounds(min, max);
         self.epochs.view += 1;
         true
     }
@@ -4256,6 +4257,32 @@ mod tests {
             [w as f64, h as f64],
             "max should be the level-0 X/Y voxel extent"
         );
+    }
+
+    #[test]
+    fn dataset_fit_bounds_follows_the_camera_space() {
+        // The box a Home move frames must be the one the viewer's own fit
+        // uses: voxel space for the slice camera, normalized world space for 3D.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "ds1",
+            "test",
+            1,
+            [1, 1, 16, 1024, 2048],
+            [1, 1, 1, 256, 256],
+            1,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let (min, max) = scene.dataset_fit_bounds("ds1").expect("slice bounds");
+        assert_eq!((min, max), ([0.0, 0.0, 0.0], [2048.0, 1024.0, 0.0]));
+
+        scene.camera = Camera::new_3d([800, 600]);
+        assert_eq!(
+            scene.dataset_fit_bounds("ds1"),
+            scene.dataset_world_bounds("ds1"),
+        );
+        assert!(scene.dataset_fit_bounds("nope").is_none());
     }
 
     #[test]

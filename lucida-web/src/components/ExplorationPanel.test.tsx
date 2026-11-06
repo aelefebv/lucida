@@ -372,35 +372,68 @@ describe("ExplorationPanel — you-are-here readout reveals the axes", () => {
 });
 
 describe("ExplorationPanel — bookmark", () => {
-  // happy-dom doesn't implement window.prompt, so install a stub directly
-  // (vi.spyOn can't spy on an undefined property).
-  function stubPrompt(value: string | null) {
-    const fn = vi.fn(() => value);
-    Object.defineProperty(window, "prompt", { configurable: true, value: fn });
-    return fn;
-  }
-
-  it("prompts for a name and saves a personal view", async () => {
-    const promptStub = stubPrompt("My spot");
+  it("asks for a name and saves a personal view", async () => {
     const props = await renderPanel();
     await act(async () => {
       await userEvent.click(screen.getByTestId("explore-bookmark"));
     });
-    expect(promptStub).toHaveBeenCalled();
+    const dialog = await screen.findByRole("dialog", { name: /bookmark this view/i });
+    const name = within(dialog).getByTestId("explore-bookmark-name");
+    await act(async () => {
+      await userEvent.clear(name);
+      await userEvent.type(name, "My spot{Enter}");
+    });
     expect(props.createSavedView).toHaveBeenCalledTimes(1);
-    const [name, , visibility] = (props.createSavedView as ReturnType<typeof vi.fn>)
+    const [saved, , visibility] = (props.createSavedView as ReturnType<typeof vi.fn>)
       .mock.calls[0];
-    expect(name).toBe("My spot");
+    expect(saved).toBe("My spot");
     expect(visibility).toBe("personal");
   });
 
-  it("cancelling the prompt does not save", async () => {
-    stubPrompt(null);
+  it("cancelling the dialog does not save", async () => {
     const props = await renderPanel();
     await act(async () => {
       await userEvent.click(screen.getByTestId("explore-bookmark"));
     });
+    const dialog = await screen.findByRole("dialog", { name: /bookmark this view/i });
+    await act(async () => {
+      await userEvent.click(within(dialog).getByRole("button", { name: /^cancel$/i }));
+    });
+    expect(screen.queryByRole("dialog")).toBeNull();
     expect(props.createSavedView).not.toHaveBeenCalled();
+  });
+});
+
+describe("ExplorationPanel — Home", () => {
+  it("hands the generator the live camera's bounds", async () => {
+    const bounds = new Float64Array([0, 0, 0, 1, 1, 0.25]);
+    const getHomeBounds = vi.fn(() => bounds);
+    await renderPanel({ getHomeBounds });
+    expect(getHomeBounds).toHaveBeenCalledWith("ds-1");
+    const args = exploreView.mock.calls.at(-1) as unknown[];
+    expect(args[10]).toBe(bounds);
+  });
+
+  it("applies the generator's Home move from the live view, not a synthesized one", async () => {
+    const home = viewWithTheta(2);
+    exploreView.mockImplementation(() => {
+      const sidecar = defaultSidecar();
+      sidecar.cells.push({
+        handle: "vh-home",
+        transform: "home",
+        label: "Home (fit dataset)",
+        view: home,
+      } as (typeof sidecar.cells)[number]);
+      return JSON.stringify(sidecar);
+    });
+    const props = await renderPanel();
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("explore-home"));
+    });
+    // The live view went in, so the Home move keeps its camera mode.
+    const args = exploreView.mock.calls.at(-1) as unknown[];
+    expect(args[0]).toBeTypeOf("string");
+    expect(props.applyView).toHaveBeenCalledWith(home);
   });
 });
 
@@ -507,7 +540,7 @@ describe("ExplorationPanel — preview thumbnails", () => {
     // Toggle previews off before revealing rows.
     await act(async () => {
       await userEvent.click(
-        within(screen.getByTestId("explore-previews-toggle")).getByRole("checkbox"),
+        within(screen.getByTestId("explore-previews-toggle")).getByRole("switch"),
       );
     });
     observed = []; // ignore any observers registered before the toggle
@@ -523,5 +556,28 @@ describe("ExplorationPanel — preview thumbnails", () => {
     await renderPanel(); // requestThumbnail omitted
     expect(screen.queryByTestId("explore-previews-toggle")).toBeNull();
     expect(screen.queryByTestId("explore-thumb")).toBeNull();
+  });
+
+  it("requests no previews for 2D candidates, which would all look alike", async () => {
+    const slice = (zoom: number): SavedView => ({
+      ...arcballView(),
+      camera: { mode: "slice", center: [128, 128], zoom, viewport: [800, 600] },
+    });
+    exploreView.mockImplementation(() => {
+      const sidecar = defaultSidecar();
+      sidecar.current.view = slice(1);
+      sidecar.cells = sidecar.cells
+        .filter((cell) => !cell.transform.startsWith("azimuth"))
+        .map((cell, i) => ({ ...cell, view: slice(1 + i) }));
+      return JSON.stringify(sidecar);
+    });
+    const requestThumbnail = vi.fn(async () => fakeBitmap());
+    await renderPanel({ requestThumbnail });
+    await act(async () => {
+      scrollAllIntoView();
+    });
+    expect(requestThumbnail).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("explore-thumb")).toBeNull();
+    expect(screen.queryByTestId("explore-previews-toggle")).toBeNull();
   });
 });
