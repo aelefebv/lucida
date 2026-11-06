@@ -1,5 +1,5 @@
 import { MagnifyingGlassIcon, XIcon } from "@phosphor-icons/react";
-import type { FocusEvent, KeyboardEvent } from "react";
+import type { FocusEvent, KeyboardEvent, Ref } from "react";
 import {
   Button as AriaButton,
   Group,
@@ -30,6 +30,10 @@ export interface TextFieldProps {
   onKeyDown?: (event: KeyboardEvent) => void;
   onBlur?: (event: FocusEvent) => void;
   className?: string;
+  /** The input element, for a caller that moves focus back to it. */
+  inputRef?: Ref<HTMLInputElement>;
+  /** Set on the input, for tests and scripted drivers that find it by id. */
+  "data-testid"?: string;
 }
 
 export function TextField({
@@ -39,6 +43,8 @@ export function TextField({
   errorMessage,
   placeholder,
   className,
+  inputRef,
+  "data-testid": testId,
   ...rest
 }: TextFieldProps) {
   return (
@@ -54,7 +60,7 @@ export function TextField({
         errorMessage={errorMessage}
       />
       <Group className="lc-input-group lc-field-control">
-        <Input className="lc-input" placeholder={placeholder} />
+        <Input ref={inputRef} className="lc-input" placeholder={placeholder} data-testid={testId} />
       </Group>
     </AriaTextField>
   );

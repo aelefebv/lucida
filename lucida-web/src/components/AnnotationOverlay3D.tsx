@@ -26,6 +26,7 @@ import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotatio
 import { isOffContext, type ViewContext } from "./annotationContext.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
 import type { MentionCandidate } from "./annotationMentions.ts";
+import "./AnnotationOverlay.css";
 
 interface Props {
   /** The dataset whose pins to show (annotations are scoped per dataset). */
@@ -322,45 +323,25 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   if (!visible) return null;
 
   return (
-    <div
-      style={{
-        position: "absolute",
-        top: 0,
-        left: 0,
-        width: "100%",
-        height: "100%",
-        // The layer never blocks the canvas: only markers and an open popover
-        // opt back into pointer events.
-        pointerEvents: "none",
-        overflow: "hidden",
-        zIndex: 10,
-      }}
-    >
+    <div className="lc-annotation-layer">
       {/* Starts hidden so nothing flashes at the origin before the first
           projection. */}
-      <svg
-        width="100%"
-        height="100%"
-        style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", overflow: "visible" }}
-      >
+      <svg className="lc-annotation-svg" width="100%" height="100%">
         {annotations.map((pin) => {
           if (pin.kind !== "line" && pin.kind !== "box") return null;
           if (!pin.end) return null;
-          const color = pin.author === String(myId) ? "#FF3B30" : "#FF9F0A";
+          const author = pin.author === String(myId) ? "own" : "peer";
           if (isClosedShape(pin)) {
             return (
               <polygon
                 key={pin.id}
+                className="lc-annotation-shape"
+                data-author={author}
                 ref={(el) => {
                   if (el) shapeRefs.current.set(pin.id, el);
                   else shapeRefs.current.delete(pin.id);
                 }}
                 points=""
-                fill={color}
-                fillOpacity={0.12}
-                stroke={color}
-                strokeWidth={2.5}
-                strokeLinejoin="round"
                 style={{ display: "none" }}
               />
             );
@@ -368,6 +349,8 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
           return (
             <line
               key={pin.id}
+              className="lc-annotation-shape"
+              data-author={author}
               ref={(el) => {
                 if (el) shapeRefs.current.set(pin.id, el);
                 else shapeRefs.current.delete(pin.id);
@@ -376,9 +359,6 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
               y1={0}
               x2={0}
               y2={0}
-              stroke={color}
-              strokeWidth={2.5}
-              strokeLinecap="round"
               style={{ display: "none" }}
             />
           );
@@ -394,6 +374,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
         return (
           <div
             key={pin.id}
+            className="lc-annotation-anchor"
             data-testid={`annot-pin-wrapper-${pin.id}`}
             ref={(el) => {
               if (el) dotRefs.current.set(pin.id, el);
@@ -401,13 +382,8 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
             }}
             // Starts hidden; the tick reveals and positions it once projected.
             style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
               display: "none",
               transform: "translate(0px, 0px)",
-              willChange: "transform",
-              pointerEvents: "none",
               // The tick writes only display and transform, so this persists.
               // An open thread is never dimmed.
               opacity: offCtx && !isOpen ? 0.5 : 1,
@@ -419,7 +395,10 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
             {/* Every marker takes the pointer so any pin's thread can open; a
                 peer's pin just can't be Shift-moved. */}
             <div
+              className="lc-annotation-pin"
               data-testid={`annot-pin-${pin.id}`}
+              data-author={mine ? "own" : "peer"}
+              data-off-context={offCtx || undefined}
               title={
                 mine
                   ? "Pin by you — click for thread, Shift+drag to move, drag to orbit"
@@ -438,23 +417,9 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
                 }
                 setOpenPinId((cur) => (cur === pin.id ? null : pin.id));
               }}
-              style={{
-                position: "absolute",
-                top: 0,
-                left: 0,
-                width: 12,
-                height: 12,
-                marginLeft: -6,
-                marginTop: -6,
-                borderRadius: "50%",
-                backgroundColor: "#FF3B30",
-                // Dashed off-context, as in the 2D overlay.
-                border: offCtx ? "2px dashed white" : "2px solid white",
-                boxShadow: "0 1px 3px rgba(0,0,0,0.6)",
-                pointerEvents: "auto",
-                cursor: mine ? "grab" : "pointer",
-                touchAction: "none",
-              }}
+              // Every marker forwards a drag to the orbit, so none lets the
+              // browser take the touch.
+              style={{ cursor: mine ? "grab" : "pointer", touchAction: "none" }}
             />
             {offCtx && <OffContextHelptext pin={pin} />}
             {/* A child of the wrapper, so the projection and the behind-camera

@@ -188,3 +188,57 @@ describe("ThreadPopover — Copy link share affordance (slice 3)", () => {
     expect(screen.getByTestId("pin-copy-link-pin-fail").textContent).toBe("Copy failed");
   });
 });
+
+describe("ThreadPopover — Escape", () => {
+  function renderClosable(pin: Annotation) {
+    const closes: number[] = [];
+    const sceneRef = createRef<WasmScene | null>();
+    sceneRef.current = makeScene();
+    render(
+      <ThreadPopover
+        pin={pin}
+        datasetId="wds-1"
+        myId={MY_ID}
+        wasmSceneRef={sceneRef}
+        sendCommand={() => {}}
+        onDocumentChanged={() => {}}
+        onClose={() => closes.push(1)}
+      />,
+    );
+    return closes;
+  }
+
+  const ownPin: Annotation = {
+    id: "pin-esc",
+    position: [1, 2],
+    author: MY_ID,
+    kind: "point",
+    comments: [{ id: "c1", author: MY_ID, text: "mine" }],
+  };
+
+  it("closes the thread with focus outside it", () => {
+    const closes = renderClosable(ownPin);
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(closes).toHaveLength(1);
+  });
+
+  it("closes the thread from a control inside it", () => {
+    const closes = renderClosable(ownPin);
+    fireEvent.keyDown(screen.getByTestId("pin-copy-link-pin-esc"), { key: "Escape" });
+    expect(closes).toHaveLength(1);
+  });
+
+  it("closes the thread from the composer", () => {
+    const closes = renderClosable(ownPin);
+    fireEvent.keyDown(screen.getByTestId("comment-add-input-pin-esc"), { key: "Escape" });
+    expect(closes).toHaveLength(1);
+  });
+
+  it("cancels an edit before it closes anything", () => {
+    const closes = renderClosable(ownPin);
+    fireEvent.click(screen.getByTestId("comment-edit-c1"));
+    fireEvent.keyDown(screen.getByTestId("comment-edit-input-c1"), { key: "Escape" });
+    expect(screen.queryByTestId("comment-edit-input-c1")).toBeNull();
+    expect(closes).toHaveLength(0);
+  });
+});

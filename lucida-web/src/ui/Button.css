@@ -34,9 +34,12 @@
   font-size: var(--lc-text-sm);
 }
 
+/* The clip that makes the ellipsis would cut descenders at the button's
+   line-height of 1, so the label takes the font's own line height. */
 .lc-button-label {
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: normal;
 }
 
 .lc-button-icon {

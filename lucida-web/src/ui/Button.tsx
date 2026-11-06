@@ -23,6 +23,8 @@ export interface ButtonProps {
   autoFocus?: boolean;
   /** For layout only (margins, flex). Never restyle a primitive. */
   className?: string;
+  /** For tests and scripted drivers that find controls by id. */
+  "data-testid"?: string;
 }
 
 function cx(...names: (string | false | undefined)[]): string {
@@ -40,10 +42,12 @@ export function Button({
   type = "button",
   autoFocus,
   className,
+  "data-testid": testId,
 }: ButtonProps) {
   return (
     <AriaButton
       className={cx("lc-button", className)}
+      data-testid={testId}
       data-variant={variant}
       data-size={size}
       onPress={onPress}
@@ -71,6 +75,8 @@ interface IconButtonBase {
   size?: "sm" | "md" | "lg";
   isDisabled?: boolean;
   className?: string;
+  /** For tests and scripted drivers that find controls by id. */
+  "data-testid"?: string;
 }
 
 interface ActionIconButtonProps extends IconButtonBase {
@@ -100,6 +106,7 @@ export function IconButton(props: IconButtonProps) {
     size = "md",
     isDisabled,
     className,
+    "data-testid": testId,
   } = props;
   const ref = useRef<HTMLButtonElement>(null);
   const isToggle = props.isSelected !== undefined;
@@ -114,6 +121,7 @@ export function IconButton(props: IconButtonProps) {
     "data-variant": variant,
     "data-size": size,
     "aria-label": label,
+    "data-testid": testId,
     isDisabled,
   };
   const glyph = <IconComponent size={size === "lg" ? 20 : 16} aria-hidden />;
