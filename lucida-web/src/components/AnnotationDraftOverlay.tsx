@@ -1,6 +1,7 @@
 /**
  * Live preview of a box or line while it is being drawn. The canvas gesture
- * writes the in-progress shape into a shared ref and this draws it each frame.
+ * writes the in-progress shape into a shared ref and this draws it on the
+ * frame clock.
  *
  * Screen space is correct because a shift-drag draws and never moves the
  * camera, so raw pointer coords match where the committed shape lands. One
@@ -8,6 +9,7 @@
  */
 import { useEffect, useRef, type RefObject } from "react";
 import { type AnnotationDraft, draftBoxRect } from "./annotationDraft.ts";
+import { frameClock } from "../frameClock.ts";
 import "./AnnotationOverlay.css";
 
 interface Props {
@@ -22,7 +24,6 @@ export function AnnotationDraftOverlay({ draftRef, visible = true }: Props) {
   const lineRef = useRef<SVGLineElement>(null);
 
   useEffect(() => {
-    let rafId: number;
     const tick = () => {
       const rect = rectRef.current;
       const line = lineRef.current;
@@ -50,10 +51,9 @@ export function AnnotationDraftOverlay({ draftRef, visible = true }: Props) {
           line.style.display = "";
         }
       }
-      rafId = requestAnimationFrame(tick);
     };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    // The draft moves only with the pointer, whose events wake the clock.
+    return frameClock.subscribe(tick);
   }, [draftRef, visible]);
 
   // Drawn with the own-shape style, so the draft matches the shape it becomes.

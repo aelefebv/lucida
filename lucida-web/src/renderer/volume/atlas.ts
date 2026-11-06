@@ -8,7 +8,6 @@
 
 import { Axis } from "../../axes.ts";
 import type { WorkerCtx } from "../workerContext.ts";
-import { VOLUME_ATLAS_BUDGET } from "../workerProtocol.ts";
 import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 import { computeProxyAtlasLayout } from "../proxyAtlas.ts";
@@ -43,10 +42,14 @@ export interface AtlasState {
   /** slotIndex → globalGridIdx (for eviction cleanup). */
   slotGridIdx: Int32Array<ArrayBuffer>;
   freeSlots: number[];            // available slot indices (stack)
+  /** Slots the texture holds now. */
   totalSlots: number;
   /** Shared slot pool dimensions (same chunk dims for all entities in this pool). */
   chunkX: number; chunkY: number; chunkZ: number;
+  /** The texture's slot grid now. Only `slotsZ` changes, as the pool grows. */
   slotsX: number; slotsY: number; slotsZ: number;
+  /** The layers the budget allows, which the pool grows toward. */
+  maxSlotsZ: number;
   /** Per-entity LOD sections. memberId → array of per-LOD indirection meta with absolute offsets. */
   entityMetas: Map<string, LodIndirectionMeta[]>;
   /** Current T and C — shared across all entities in this pool (one cold state per dataset). */
@@ -437,9 +440,28 @@ export function getDepthTexture(): GPUTexture | null {
   return depthTexture;
 }
 
-/** Create a shared atlas pool. Indirection is sized later from entityMetas. */
+function createAtlasTexture(
+  device: GPUDevice,
+  chunkX: number, chunkY: number, chunkZ: number,
+  slotsX: number, slotsY: number, slotsZ: number,
+): GPUTexture {
+  return device.createTexture({
+    size: [slotsX * chunkX, slotsY * chunkY, slotsZ * chunkZ],
+    format: "r16uint",
+    dimension: "3d",
+    // COPY_SRC so a growing pool can copy its chunks into the larger texture.
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+  });
+}
+
+/**
+ * Create a shared atlas pool one layer of slots deep (ADR 0068). It grows
+ * toward the budget's grid only as chunks fill it, so a small volume never
+ * holds the whole budget. Indirection is sized later from entityMetas.
+ */
 function createVolumeAtlas(
   device: GPUDevice,
+  budgetBytes: number,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
 ): AtlasState {
@@ -447,19 +469,15 @@ function createVolumeAtlas(
   const geom = computeAtlasGeometry(
     limits,
     [chunkX, chunkY, chunkZ],
-    VOLUME_ATLAS_BUDGET,
+    budgetBytes,
     "3d",
   );
-  const { slotsX, slotsY, totalSlots, atlasW, atlasH } = geom;
-  const slotsZ = geom.slotsZ!;
-  const atlasD = geom.atlasD!;
+  const { slotsX, slotsY } = geom;
+  const maxSlotsZ = geom.slotsZ!;
+  const slotsZ = Math.min(1, maxSlotsZ);
+  const totalSlots = slotsX * slotsY * slotsZ;
 
-  const texture = device.createTexture({
-    size: [atlasW, atlasH, atlasD],
-    format: "r16uint",
-    dimension: "3d",
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-  });
+  const texture = createAtlasTexture(device, chunkX, chunkY, chunkZ, slotsX, slotsY, slotsZ);
 
   // Indirection starts at minimum size; cold state handler resizes after computing entityMetas.
   const indirectionData = new Uint32Array(1);
@@ -481,11 +499,50 @@ function createVolumeAtlas(
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
     slotsX, slotsY, slotsZ,
+    maxSlotsZ,
     entityMetas: new Map(),
     t, c,
     intensityMin: 65535, intensityMax: 0,
     indirectionDirty: true,
   };
+}
+
+/**
+ * Double a full pool's layers, up to the budget's. False when it is already
+ * there, so the caller evicts instead.
+ *
+ * A slot's position depends on `slotsX` and `slotsY` alone, which never
+ * change, so every resident slot keeps its texels and its index. Growing is
+ * one copy of the old texture into the new one's front layers, and the
+ * indirection, which holds slot indices, stays valid.
+ */
+export function growVolumeAtlas(device: GPUDevice, atlas: AtlasState): boolean {
+  if (atlas.slotsZ >= atlas.maxSlotsZ) return false;
+  const slotsZ = Math.min(atlas.maxSlotsZ, atlas.slotsZ * 2);
+  const totalSlots = atlas.slotsX * atlas.slotsY * slotsZ;
+
+  const texture = createAtlasTexture(
+    device, atlas.chunkX, atlas.chunkY, atlas.chunkZ, atlas.slotsX, atlas.slotsY, slotsZ,
+  );
+  const encoder = device.createCommandEncoder();
+  encoder.copyTextureToTexture(
+    { texture: atlas.texture },
+    { texture },
+    [atlas.slotsX * atlas.chunkX, atlas.slotsY * atlas.chunkY, atlas.slotsZ * atlas.chunkZ],
+  );
+  device.queue.submit([encoder.finish()]);
+  // Destruction waits for the copy just submitted.
+  atlas.texture.destroy();
+  atlas.texture = texture;
+
+  const slotGridIdx = new Int32Array(totalSlots);
+  slotGridIdx.fill(-1);
+  slotGridIdx.set(atlas.slotGridIdx);
+  atlas.slotGridIdx = slotGridIdx;
+  for (let i = totalSlots - 1; i >= atlas.totalSlots; i--) atlas.freeSlots.push(i);
+  atlas.slotsZ = slotsZ;
+  atlas.totalSlots = totalSlots;
+  return true;
 }
 
 export function destroyAtlas(atlas: AtlasState): void {
@@ -512,7 +569,7 @@ export function getOrCreateVolumePool(
     return existing;
   }
   if (existing) destroyAtlas(existing);
-  const newAtlas = createVolumeAtlas(ctx.device, chunkX, chunkY, chunkZ, t, c);
+  const newAtlas = createVolumeAtlas(ctx.device, ctx.state.atlasBudgets.volumeAtlasBytes, chunkX, chunkY, chunkZ, t, c);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }

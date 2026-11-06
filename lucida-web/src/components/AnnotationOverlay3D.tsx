@@ -22,6 +22,7 @@ import {
 import { eventToScreenPx, makeProjectAnnotationToCss } from "./cameraProjection.ts";
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import { applyViewportCommand } from "../applyAndSend.ts";
+import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
 import { annotationVertices, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
 import { isOffContext, type ViewContext } from "./annotationContext.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
@@ -128,8 +129,9 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   // on drop. Cleared once consumed.
   const suppressClickRef = useRef<string | null>(null);
 
+  // A new or changed pin needs a frame to be placed.
+  useWakeFramesOnRender();
   useEffect(() => {
-    let rafId: number;
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
@@ -184,10 +186,8 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
           }
         }
       }
-      rafId = requestAnimationFrame(tick);
     };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    return frameClock.subscribe(tick);
   }, [wasmSceneRef, canvas, annotationsRef]);
 
   /** Hand a plain drag to the canvas: transfer capture and replay the

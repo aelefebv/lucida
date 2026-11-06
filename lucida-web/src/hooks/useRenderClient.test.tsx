@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { StrictMode } from "react";
 import { render, cleanup } from "@testing-library/react";
 
@@ -51,6 +51,25 @@ function Host() {
 beforeEach(() => {
   MockedRenderClient.instances.length = 0;
   cleanup();
+  Object.defineProperty(navigator, "gpu", { value: {}, configurable: true });
+});
+
+afterEach(() => {
+  delete (navigator as { gpu?: unknown }).gpu;
+});
+
+describe("useRenderClient without WebGPU", () => {
+  function Probe() {
+    const { canvasKey, canvasRef, gpuUnavailable } = useRenderClient();
+    return <canvas key={canvasKey} ref={canvasRef} data-unavailable={gpuUnavailable ?? ""} />;
+  }
+
+  it("starts no render client and reports WebGPU missing", () => {
+    delete (navigator as { gpu?: unknown }).gpu;
+    const { container } = render(<Probe />);
+    expect(MockedRenderClient.instances).toHaveLength(0);
+    expect(container.querySelector("canvas")?.dataset.unavailable).toBe("missing");
+  });
 });
 
 describe("useRenderClient teardown", () => {

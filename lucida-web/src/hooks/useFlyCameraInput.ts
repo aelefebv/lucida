@@ -2,9 +2,10 @@ import { useRef, useEffect, useCallback } from "react";
 import type { WasmScene } from "lucida-core";
 import type { HeldAction } from "../config/keyBindings.ts";
 import type { ViewportCommand } from "../commands.ts";
+import { frameClock } from "../frameClock.ts";
 
 /**
- * Drives the fly camera from a RAF loop: held keys for translation and
+ * Drives the fly camera from the frame clock: held keys for translation and
  * rotation, accumulated mouse delta for mouselook. Returns the pointer handlers
  * VolumeViewer spreads onto the canvas.
  */
@@ -20,7 +21,6 @@ export function useFlyCameraInput(
 ) {
   const mouseDeltaRef = useRef({ dx: 0, dy: 0 });
   const draggingRef = useRef(false);
-  const rafRef = useRef(0);
   const lastTimeRef = useRef(0);
   const hadInputRef = useRef(false);
 
@@ -31,16 +31,16 @@ export function useFlyCameraInput(
 
     lastTimeRef.current = performance.now();
 
-    function tick() {
+    function tick(): boolean {
       const scene = sceneRef.current;
       const pressed = pressedKeysRef.current;
-      if (!scene) {
-        rafRef.current = requestAnimationFrame(tick);
-        return;
-      }
+      if (!scene) return false;
 
       const now = performance.now();
-      const dt = (now - lastTimeRef.current) / 1000; // seconds
+      // The clock stops while nothing moves, so the gap before the first
+      // frame of a new press can be seconds; that frame steps by one frame.
+      const elapsed = (now - lastTimeRef.current) / 1000;
+      const dt = hadInputRef.current ? Math.min(elapsed, 0.1) : Math.min(elapsed, 1 / 60);
       lastTimeRef.current = now;
 
       let forward = 0;
@@ -102,15 +102,11 @@ export function useFlyCameraInput(
         emitPresence();
         hadInputRef.current = false;
       }
-
-      rafRef.current = requestAnimationFrame(tick);
+      // Held keys move the camera every frame without further input.
+      return hasInput;
     }
 
-    rafRef.current = requestAnimationFrame(tick);
-
-    return () => {
-      cancelAnimationFrame(rafRef.current);
-    };
+    return frameClock.subscribe(tick);
   }, [
     isActive,
     sceneRef,
