@@ -76,6 +76,7 @@ import {
   type RemoteDatasetActivity,
   type SessionControllerDeps,
   type SessionControllerEvents,
+  type ViewportSize,
 } from "./sessionController.ts";
 import { applyDocumentCommand, applyViewportCommand } from "./applyAndSend.ts";
 import { Bridge, type BridgeHandlers, type PresenceState } from "./bridge.ts";
@@ -126,6 +127,7 @@ function makeFakeScene() {
     import_presence: vi.fn(),
     import_dataset_presence: vi.fn(),
     fit_camera_to_dataset_bounds: vi.fn(),
+    set_viewport: vi.fn(),
     z: vi.fn(() => 0),
     t: vi.fn(() => 0),
     c: vi.fn(() => 0),
@@ -246,6 +248,7 @@ function makeHarness() {
     }),
     getScene: () => sceneRef.current,
     getLoop: () => null,
+    getViewportSize: vi.fn((): ViewportSize | null => null),
     datasets,
     removeDatasetLocal: vi.fn(),
     getSavedViewHooks: () => savedViewHooks,
@@ -305,6 +308,31 @@ describe("SessionController dataset registration", () => {
     expect(events.onRemoteDatasetActivity).toHaveBeenLastCalledWith(
       expect.objectContaining({ loading: false, progress: null }),
     );
+  });
+
+  it("fits a fresh open to the canvas's measured size, not the scene's default", () => {
+    const { handlers, deps, scene } = makeHarness();
+    deps.getViewportSize.mockReturnValue({ width: 2544, height: 1832 });
+
+    handlers.onSnapshot(1, snapshotJson([]), [], 4, {});
+    handlers.onCommand(2, datasetOpenedJson("wds-1", 4));
+
+    expect(scene.set_viewport).toHaveBeenCalledWith(2544, 1832);
+    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledWith("wds-1");
+    // The size lands first, so the fit frames the canvas the user sees.
+    expect(scene.set_viewport.mock.invocationCallOrder[0]).toBeLessThan(
+      scene.fit_camera_to_dataset_bounds.mock.invocationCallOrder[0],
+    );
+  });
+
+  it("leaves the scene's size alone when the canvas has no layout yet", () => {
+    const { handlers, scene } = makeHarness();
+
+    handlers.onSnapshot(1, snapshotJson([]), [], 4, {});
+    handlers.onCommand(2, datasetOpenedJson("wds-1", 4));
+
+    expect(scene.set_viewport).not.toHaveBeenCalled();
+    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledWith("wds-1");
   });
 
   it("registers a brand-new dataset exactly once from a live open", () => {
