@@ -408,6 +408,18 @@ describe("App wiring: channels", () => {
     const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
     expect(scene.commands.some((cmd) => cmd.type === "set_multi_channel")).toBe(false);
   });
+
+  it("opens Add data from the layer panel's header", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    // The dialog's file browser lists a folder as it opens.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ path: "/", entries: [] })));
+    const panel = screen.getByRole("complementary", { name: "Layers" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Add data" }));
+    expect(await screen.findByRole("dialog", { name: "Add data" })).toBeTruthy();
+    fetchSpy.mockRestore();
+  });
 });
 
 describe("App wiring: layout switch (the #780 class)", () => {
@@ -684,11 +696,20 @@ describe("App wiring: tools and keyboard help", () => {
 
   it("ignores keys typed into a field", async () => {
     await mountWithSnapshot(documentJson(["wds-1"]));
-    const field = screen.getByRole("textbox", { name: "Dataset path or URL" });
+    // The dialog's file browser lists a folder as it opens.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ path: "/", entries: [] })));
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "o", code: "KeyO", ctrlKey: true });
+    });
+    const dialog = await screen.findByRole("dialog", { name: "Add data" });
+    const field = within(dialog).getByRole("textbox", { name: "Dataset path or URL" });
     await act(async () => {
       fireEvent.keyDown(field, { key: "p", code: "KeyP" });
     });
     expect(screen.getByRole("button", { name: "Point tool" }).getAttribute("aria-pressed")).toBe("false");
+    fetchSpy.mockRestore();
   });
 
   it("runs a shell command from the palette", async () => {

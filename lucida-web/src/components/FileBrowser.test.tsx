@@ -65,7 +65,7 @@ describe("FileBrowser — empty-root initial fetch", () => {
     const url = fetchSpy.urls[0];
     // Bare endpoint — no `path=` param of any kind. This is the signal
     // to the server to return its platform-default root.
-    expect(url).toBe("http://localhost:9876/api/browse");
+    expect(url).toBe("/api/browse");
     expect(url).not.toContain("path=");
   });
 
@@ -148,7 +148,7 @@ describe("FileBrowser — navigation", () => {
         render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
       });
       // Initial fetch: no path param.
-      expect(fetchSpy.urls[0]).toBe("http://localhost:9876/api/browse");
+      expect(fetchSpy.urls[0]).toBe("/api/browse");
 
       // The empty-root branch in `navigateTo` must not prefix a `/`, which
       // would produce `/c:`.
@@ -157,7 +157,7 @@ describe("FileBrowser — navigation", () => {
       });
       expect(fetchSpy.urls.length).toBe(2);
       expect(fetchSpy.urls[1]).toBe(
-        `http://localhost:9876/api/browse?path=${encodeURIComponent("c:")}`,
+        `/api/browse?path=${encodeURIComponent("c:")}`,
       );
       expect(fetchSpy.urls[1]).not.toContain(encodeURIComponent("/c:"));
     },
@@ -312,15 +312,40 @@ describe("FileBrowser — root breadcrumb", () => {
     );
 
     // The home breadcrumb is the first button rendered, labelled "/".
-    // Multiple buttons render "/" as text — use getAllByText and pick
-    // the first, which is the home button (the others are interstitial
-    // separators that are <span>s, not buttons).
     const homeButton = screen.getAllByRole("button", { name: "/" })[0];
     await act(async () => {
       fireEvent.click(homeButton);
     });
     expect(fetchSpy.urls.length).toBe(2);
-    expect(fetchSpy.urls[1]).toBe("http://localhost:9876/api/browse");
+    expect(fetchSpy.urls[1]).toBe("/api/browse");
     expect(fetchSpy.urls[1]).not.toContain("path=");
+  });
+});
+
+describe("FileBrowser — remembered folder", () => {
+  it("falls back to the root when the remembered folder can't be listed", async () => {
+    window.sessionStorage.setItem("lucida-browse-path", "/gone");
+    globalThis.fetch = (async (url: string) => {
+      fetchSpy.urls.push(url);
+      if (url.includes("path=")) return new Response("Not found", { status: 404 });
+      return jsonResponse({ path: "/", entries: [{ name: "data", type: "directory" }] });
+    }) as typeof globalThis.fetch;
+
+    await act(async () => {
+      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+    });
+    expect(fetchSpy.urls).toEqual([`/api/browse?path=${encodeURIComponent("/gone")}`, "/api/browse"]);
+    expect(await screen.findByText("data")).toBeTruthy();
+  });
+
+  it("joins an entry onto the Unix root without doubling the slash", async () => {
+    fetchSpy.responder = () => ({ path: "/", entries: [{ name: "data", type: "directory" }] });
+    await act(async () => {
+      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("data"));
+    });
+    expect(fetchSpy.urls[1]).toBe(`/api/browse?path=${encodeURIComponent("/data")}`);
   });
 });
