@@ -21,6 +21,26 @@ export interface ResizeMessage {
   height: number;
 }
 
+/** An sRGB color with straight alpha, channels in 0..1. */
+export type RgbaColor = readonly [number, number, number, number];
+
+/**
+ * The colors the renderer draws that are not data. The worker cannot read
+ * styles, so the page resolves them from theme tokens and sends them again
+ * whenever the appearance changes.
+ */
+export interface CanvasColors {
+  /** Beneath every layer, in the viewport, the minimap, and thumbnails. */
+  background: RgbaColor;
+  /** The frame inside each collection member's footprint. */
+  tileBorder: RgbaColor;
+}
+
+export interface CanvasColorsMessage {
+  type: "canvasColors";
+  colors: CanvasColors;
+}
+
 /**
  * A single chunk payload carried by `sliceChunkData`, `volumeChunkData`,
  * and `minimapUploadOverviewChunksForLayer`.
@@ -629,6 +649,7 @@ export interface ColdStateDeltaMessage {
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
+  | CanvasColorsMessage
   | SliceChunkDataMessage
   | LabelSliceChunkDataMessage
   | VolumeChunkDataMessage

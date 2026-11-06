@@ -13,11 +13,13 @@ import { configStore } from "./pipeline/planning/configStore.ts";
 import type { CpuCache } from "./pipeline/fetch/index.ts";
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
-import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
+import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview } from "./minimapPath.ts";
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./trace/quiescence.ts";
 import type { CacheWarmth, InputKind, Outstanding, RunConditions } from "./trace/types.ts";
 import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
+import { readCanvasColors } from "./renderer/renderClient.ts";
+import { subscribeAppearance } from "./theme/appearance.ts";
 
 // Re-exported so imports of these types from the render loop keep working.
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -87,6 +89,7 @@ export class RenderLoop implements TraceEnvironment {
   private tickCoordinator = new TickCoordinator(this.uploader);
   private cpuCacheUnsub: () => void;
   private configStoreUnsub: () => void;
+  private appearanceUnsub: () => void;
 
   private _renderScale = 1.0;
 
@@ -116,6 +119,16 @@ export class RenderLoop implements TraceEnvironment {
     // ensures a frame happens promptly so the user sees the change.
     this.configStoreUnsub = configStore.subscribe(() => {
       this.setDirty("interactive", "planning_config_changed");
+    });
+    // The worker cannot read styles, so the loop sends it the canvas colors
+    // before its first frame and again after every appearance change.
+    this.client.setCanvasColors(readCanvasColors());
+    this.appearanceUnsub = subscribeAppearance(() => {
+      this.client.setCanvasColors(readCanvasColors());
+      // The minimap caches its overview and overlay until their inputs
+      // change, and the colors are not among those inputs.
+      invalidateMinimapOverview(this.minimapState);
+      this.setDirty("interactive", "appearance_changed");
     });
     this.publishCaptureReady(false, "initializing");
     // The render loop is the one place that holds the canvas, the mode, the
@@ -171,6 +184,7 @@ export class RenderLoop implements TraceEnvironment {
     this.client.onWantedSetDelta = null;
     this.cpuCacheUnsub();
     this.configStoreUnsub();
+    this.appearanceUnsub();
     for (const unsub of this.unsubs.values()) {
       unsub();
     }

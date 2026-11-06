@@ -2,12 +2,20 @@
 //
 // Peer identity rendering. The label pill, avatar, and initial chip render from
 // JSX for every peer (the RAF tick only positions them), so a null scene ref and
-// a stub canvas are enough, with no WebGPU.
+// a stub canvas are enough, with no WebGPU. The pill's color comes from the
+// wasm module's peer palette, so the module is initialized.
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeAll } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
+import initWasm, { peer_palette } from "lucida-core";
 import { PeerCursors, type CursorLabel } from "./PeerCursors.tsx";
 import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
+
+beforeAll(async () => {
+  await initWasm({ module_or_path: readFileSync(resolve(process.cwd(), "../lucida-core/pkg/lucida_core_bg.wasm")) });
+});
 
 function makePeer(
   clientId: ClientId,
@@ -160,5 +168,15 @@ describe("PeerCursors identity", () => {
     // myId is 0 → only the peer (id 1) renders.
     expect(screen.queryByText("Me")).toBeNull();
     expect(screen.getByText("Other")).toBeTruthy();
+  });
+
+  it("colors a peer's pill from the palette its GPU cursor is drawn in", () => {
+    const palette = peer_palette();
+    const id = palette.length + 3;
+    renderPeers(new Map([[id, makePeer(id, { display_name: "Wrapped" })]]));
+    const pill = screen.getByText("Wrapped").closest("div")!;
+    const expected = document.createElement("div");
+    expected.style.backgroundColor = palette[3];
+    expect(pill.style.backgroundColor).toBe(expected.style.backgroundColor);
   });
 });

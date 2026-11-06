@@ -10,7 +10,7 @@
 
 import { useEffect, useRef } from "react";
 
-import { drawHud, hudHeight } from "./hudDraw.ts";
+import { drawHud, hudHeight, readHudColors } from "./hudDraw.ts";
 import { buildHudView, createHudHistory, HUD_TICK_MS, pushSample } from "./hudModel.ts";
 import { HudSource, type HudCacheReads } from "./hudSource.ts";
 import { HudLegend } from "./HudLegend.tsx";
@@ -71,7 +71,7 @@ export function Hud({ canvasRef, datasets, getCache }: HudProps) {
 
       const ctx = strip.getContext("2d");
       if (!ctx) return;
-      drawHud(ctx, view, { width, height, dpr });
+      drawHud(ctx, view, { width, height, dpr }, readHudColors());
     };
 
     tick();
