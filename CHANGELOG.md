@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.18.0](https://github.com/aelefebv/lucida/compare/v0.17.1...v0.18.0) (2026-11-06)
+
+
+### Features
+
+* let a deployment set the default theme and override tokens ([#1145](https://github.com/aelefebv/lucida/issues/1145)) ([9def114](https://github.com/aelefebv/lucida/commit/9def1141c10954b3042efd69a6d19ec60f50773d))
+* **web:** draw canvas-side UI and the canvas background from theme tokens ([#1147](https://github.com/aelefebv/lucida/issues/1147)) ([21d850a](https://github.com/aelefebv/lucida/commit/21d850a575ba1860afd3599578e7f85da6eff6e9))
+* **web:** move annotations, comments, mentions, and sign-in screens onto theme tokens ([#1148](https://github.com/aelefebv/lucida/issues/1148)) ([3413fde](https://github.com/aelefebv/lucida/commit/3413fde3f41e7ccb0ae0d944e92656cec5b45125))
+* **web:** move the developer surfaces onto theme tokens ([#1146](https://github.com/aelefebv/lucida/issues/1146)) ([771c4e3](https://github.com/aelefebv/lucida/commit/771c4e3ce4cf1a1b08f901e5af64919d23f21dd3))
+* **web:** UI foundation: theme tokens, preferences, accessible primitives, icons, and a shortcut registry ([#1144](https://github.com/aelefebv/lucida/issues/1144)) ([72a02a1](https://github.com/aelefebv/lucida/commit/72a02a19a3ef346a759154f0ad68993434e1055d))
+* **web:** viewer shell with a full-window canvas, top bar, and side panels ([#1149](https://github.com/aelefebv/lucida/issues/1149)) ([df7c781](https://github.com/aelefebv/lucida/commit/df7c7816b9d7d6f004a5dbb1427c95a5a075cbb3))
+
+
+### Bug Fixes
+
+* frame the whole group when clicking it in the collection selector ([#1140](https://github.com/aelefebv/lucida/issues/1140)) ([32bb4ef](https://github.com/aelefebv/lucida/commit/32bb4ef842a871f34763e32089428e3956ee39c3))
+* **minimap:** look straight down at data with one Z plane ([#1141](https://github.com/aelefebv/lucida/issues/1141)) ([24e7669](https://github.com/aelefebv/lucida/commit/24e766991bc31454b18608c9901e70bf738fb353))
+* **web:** fit a newly opened dataset to the canvas's real size ([#1150](https://github.com/aelefebv/lucida/issues/1150)) ([3b28813](https://github.com/aelefebv/lucida/commit/3b28813b8f357d4c825bbafa14723fdc053da345))
+
 ## [0.17.1](https://github.com/aelefebv/lucida/compare/v0.17.0...v0.17.1) (2026-11-05)
 
 

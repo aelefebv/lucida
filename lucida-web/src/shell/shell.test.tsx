@@ -4,11 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { createRef } from "react";
 import type { ClientId, PresenceState } from "../bridge.ts";
+import { minimapCardPreference } from "../components/canvasCards.ts";
 import { themePreference } from "../theme/appearance.ts";
 import {
   __resetPreferencesForTesting,
   developerToolsPreference,
   getPreference,
+  setPreference,
 } from "../theme/preferences.ts";
 import { __resetShortcutsForTesting } from "../ui/shortcuts.ts";
 import { CanvasStage } from "./CanvasStage.tsx";
@@ -53,6 +55,25 @@ describe("SettingsMenu", () => {
       fireEvent.click(within(dialog).getByRole("switch", { name: /Developer tools/ }));
     });
     expect(getPreference(developerToolsPreference)).toBe(true);
+  });
+
+  it("hides a canvas card and brings it back whole", async () => {
+    setPreference(minimapCardPreference, "collapsed");
+    render(<SettingsMenu />);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Settings" }));
+    });
+    const dialog = await screen.findByRole("dialog", { name: "Settings" });
+    const minimap = within(dialog).getByRole("switch", { name: "Minimap" });
+
+    await act(async () => {
+      fireEvent.click(minimap);
+    });
+    expect(getPreference(minimapCardPreference)).toBe("hidden");
+    await act(async () => {
+      fireEvent.click(minimap);
+    });
+    expect(getPreference(minimapCardPreference)).toBe("open");
   });
 });
 
