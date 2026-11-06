@@ -46,15 +46,15 @@ describe("annotationContext — isOffContext (pure decision)", () => {
 });
 
 describe("annotationContext — offContextLabel (exact contract form)", () => {
-  it("formats the pin's own integer z/t/c as `slice <z> · t=<t> · ch=<c>`", () => {
-    expect(offContextLabel(pin(12, 3, 2))).toBe("slice 12 · t=3 · ch=2");
+  it("formats the pin's own integer z/t/c as `Z <z> · T <t> · Channel <c>`, counted from 1", () => {
+    expect(offContextLabel(pin(12, 3, 2))).toBe("Z 13 · T 4 · Channel 3");
   });
 
-  it("absent fields render as 0", () => {
-    expect(offContextLabel(pin(undefined, undefined, undefined))).toBe("slice 0 · t=0 · ch=0");
+  it("absent fields read as the first of each", () => {
+    expect(offContextLabel(pin(undefined, undefined, undefined))).toBe("Z 1 · T 1 · Channel 1");
   });
 
   it("a float z is rendered as a rounded integer (no decimals leak)", () => {
-    expect(offContextLabel(pin(7.0, 1, 0))).toBe("slice 7 · t=1 · ch=0");
+    expect(offContextLabel(pin(7.0, 1, 0))).toBe("Z 8 · T 2 · Channel 1");
   });
 });

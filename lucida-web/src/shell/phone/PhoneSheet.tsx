@@ -95,6 +95,15 @@ export function PhoneSheet({ peek, layerTabs, railTabs }: PhoneSheetProps) {
   // The keyboard covers the home indicator, so the inset applies only without it.
   const safeBottom = keyboard > 0 ? 0 : readSafeAreaInsets().bottom;
   const heights = sheetHeights(room - keyboard, headHeight + safeBottom);
+  const covers = heights[snap] + keyboard;
+  useLayoutEffect(() => {
+    // Toasts rise above whatever the sheet covers (Toast.css).
+    const root = document.documentElement.style;
+    root.setProperty("--toast-clear-bottom", `${covers}px`);
+    return () => {
+      root.removeProperty("--toast-clear-bottom");
+    };
+  }, [covers]);
 
   const choose = (id: string) => {
     if (has(layerTabs, id)) {

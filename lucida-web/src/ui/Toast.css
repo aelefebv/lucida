@@ -1,10 +1,14 @@
 /* The viewer's canvas stage sets the insets so toasts rise above its bottom
-   row of floating controls instead of covering them. Elsewhere the region
-   keeps clear of the viewport's safe-area insets itself. */
+   row of floating controls instead of covering them, and a phone's sheet
+   sets how much of the screen's bottom it covers, so they clear it too.
+   Elsewhere the region keeps clear of the viewport's safe-area insets itself. */
 .lc-toast-region {
   position: fixed;
   right: var(--toast-inset-right, calc(var(--lc-space-4) + var(--lc-safe-right)));
-  bottom: var(--toast-inset-bottom, calc(var(--lc-space-4) + var(--lc-safe-bottom)));
+  bottom: max(
+    var(--toast-inset-bottom, calc(var(--lc-space-4) + var(--lc-safe-bottom))),
+    calc(var(--toast-clear-bottom, 0px) + var(--lc-space-3))
+  );
   z-index: var(--lc-z-toast);
   display: flex;
   flex-direction: column-reverse;

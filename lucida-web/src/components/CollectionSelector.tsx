@@ -125,10 +125,12 @@ function cellSize(columns: number): number {
 }
 
 /**
- * The largest cell edge in a panel: a finger's width. The grid shrinks it to
- * fit a wide collection (CollectionSelector.css).
+ * The largest cell edge in a panel: a finger's width, and the touch target
+ * size where the pointer is coarse. The grid shrinks it to fit a wide
+ * collection (CollectionSelector.css).
  */
 const PANEL_CELL = 40;
+const PANEL_CELL_CSS = `max(${PANEL_CELL}px, var(--lc-target-min))`;
 
 const groupKey = (row: number, column: number) => `${row},${column}`;
 
@@ -208,7 +210,7 @@ export function CollectionSelector({
   const labelStep = cell < 14 ? 2 : 1;
   const gridStyle = {
     "--navigator-columns": columns.length,
-    "--navigator-cell": `${cell}px`,
+    "--navigator-cell": panel ? PANEL_CELL_CSS : `${cell}px`,
     "--navigator-gap": cell < 14 ? "2px" : "var(--lc-space-1)",
   } as CSSProperties;
   const showToggle = collectionKind.has_explicit_positions && onPositioningModeToggle != null;

@@ -109,6 +109,14 @@ describe("PhoneSheet", () => {
     expect(sheet().dataset.snap).toBe("peek");
   });
 
+  it("tells the toasts how much of the screen it covers, and stops when it goes", () => {
+    const { unmount } = render(<Shell />);
+    const clear = () => document.documentElement.style.getPropertyValue("--toast-clear-bottom");
+    expect(clear()).toMatch(/^\d+px$/);
+    unmount();
+    expect(clear()).toBe("");
+  });
+
   it("lowers to peek when a thread opens on the canvas", async () => {
     render(<Shell />);
     tapHandle();

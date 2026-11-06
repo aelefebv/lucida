@@ -1,8 +1,10 @@
 /* The bar meets the top and both sides of the viewport, so it takes their
-   safe-area insets. */
+   safe-area insets. It stacks above the side panels that slide over the
+   canvas below desktop widths, so the account menu it drops is not drawn
+   under the right rail. */
 .lc-topbar {
   position: relative;
-  z-index: var(--lc-z-panel);
+  z-index: calc(var(--lc-z-panel) + 2);
   display: flex;
   align-items: center;
   justify-content: space-between;
