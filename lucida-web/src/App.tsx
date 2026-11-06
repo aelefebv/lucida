@@ -242,6 +242,7 @@ function App({
     setWasmScene: scene.setWasmScene,
     ensureScene: scene.ensureScene,
     loopRef: render.loopRef,
+    canvasRef: render.canvasRef,
     datasetsRef,
     datasetCallbacksRef,
     savedViewHooksRef,
