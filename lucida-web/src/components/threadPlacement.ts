@@ -55,11 +55,14 @@ function intersect(a: Box, b: Box, inset: number): Box {
 export function useThreadPlacement(ref: RefObject<HTMLElement | null>): void {
   useLayoutEffect(() => {
     const thread = ref.current;
-    const anchor = thread?.parentElement;
-    const clip = anchor?.offsetParent;
-    if (!thread || !anchor || !clip) return;
+    if (!thread) return;
     let last = "";
     const place = () => {
+      // Looked up each time: a pin that leaves the view hides its anchor,
+      // which then has no offset parent until it shows again.
+      const anchor = thread.parentElement;
+      const clip = anchor?.offsetParent;
+      if (!anchor || !clip) return;
       const insets = readSafeAreaInsets();
       const screen: Box = {
         left: insets.left,
