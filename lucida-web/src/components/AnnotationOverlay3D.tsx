@@ -35,7 +35,6 @@ import { annotationVertices, hitTestShapes, isClosedShape, type ScreenPoint } fr
 import { isOffContext, type ViewContext } from "./annotationContext.ts";
 import type { Tool } from "./annotationTool.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
-import { keepThreadOnCanvas } from "./threadPlacement.ts";
 import type { MentionCandidate } from "./annotationMentions.ts";
 import "./AnnotationOverlay.css";
 
@@ -224,12 +223,6 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
     [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId],
   );
 
-  // Read by the RAF tick, which places the open thread.
-  const openPinIdRef = useRef(openPinId);
-  useEffect(() => {
-    openPinIdRef.current = openPinId;
-  });
-
   // Declared before the RAF effect, which reads it to skip the dot being moved.
   const dragRef = useRef<Pin3DDrag | null>(null);
   // After a real drag, swallow the trailing click so the thread doesn't toggle
@@ -267,7 +260,6 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
             } else {
               el.style.display = "";
               el.style.transform = `translate(${anchor[0]}px, ${anchor[1]}px)`;
-              if (pin.id === openPinIdRef.current) keepThreadOnCanvas(el, anchor, canvas);
             }
           }
 

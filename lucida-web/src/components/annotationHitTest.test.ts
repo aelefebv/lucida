@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { hitTestShapes, translateShape, type ShapeOnScreen } from "./annotationGeometry.ts";
-import { threadOffset } from "./threadPlacement.ts";
 
 const square = (id: string, x0: number, y0: number, x1: number, y1: number): ShapeOnScreen => ({
   id,
@@ -50,24 +49,5 @@ describe("hitTestShapes", () => {
 describe("translateShape", () => {
   it("moves both vertices by the same delta", () => {
     expect(translateShape({ position: [1, 2], end: [5, 8] }, [10, -2])).toEqual({ position: [11, 0], end: [15, 6] });
-  });
-});
-
-describe("threadOffset", () => {
-  const size = { width: 288, height: 200 };
-  const bounds = { width: 1000, height: 800 };
-
-  it("sits below and right of the pin where it fits", () => {
-    expect(threadOffset([100, 100], size, bounds)).toEqual([12, 12]);
-  });
-
-  it("flips left and up near the far edges", () => {
-    expect(threadOffset([900, 700], size, bounds)).toEqual([-300, -212]);
-  });
-
-  it("slides along an axis with no room on either side, staying inside", () => {
-    const narrow = { width: 342, height: 800 };
-    const [x] = threadOffset([200, 100], size, narrow);
-    expect(200 + x).toBe(342 - 8 - 288);
   });
 });

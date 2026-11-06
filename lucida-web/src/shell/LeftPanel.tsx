@@ -1,12 +1,9 @@
-import { useState, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
+import { useCallback, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react";
 import { usePreference } from "../theme/preferences.ts";
 import { useShortcut } from "../ui/shortcuts.ts";
-import {
-  LEFT_PANEL_MAX_WIDTH,
-  LEFT_PANEL_MIN_WIDTH,
-  leftPanelOpenPreference,
-  leftPanelWidthPreference,
-} from "./layoutPreferences.ts";
+import { LEFT_PANEL_MAX_WIDTH, LEFT_PANEL_MIN_WIDTH, leftPanelWidthPreference } from "./layoutPreferences.ts";
+import { PanelScrim } from "./PanelScrim.tsx";
+import { useEscapeCloses, usePanelMode, usePanelOpen } from "./sidePanels.ts";
 import "./LeftPanel.css";
 
 const KEY_STEP = 16;
@@ -22,12 +19,17 @@ export interface LeftPanelProps {
 }
 
 /**
- * The collapsible, resizable panel at the left. Its width and whether it is
- * open persist per browser; `Alt [` toggles it. Collapsed, it stays mounted,
- * so what is expanded inside it survives.
+ * The collapsible panel at the left; `Alt [` toggles it. Collapsed, it stays
+ * mounted, so what is expanded inside it survives. Docked, it is resizable,
+ * and its width and whether it is open persist per browser. As an overlay it
+ * slides over the canvas at a fixed width, starts closed, and closes on a tap
+ * outside or Escape.
  */
 export function LeftPanel({ label, children }: LeftPanelProps) {
-  const [open, setOpen] = usePreference(leftPanelOpenPreference);
+  const overlay = usePanelMode() === "overlay";
+  const [open, setOpen] = usePanelOpen("left");
+  const close = useCallback(() => setOpen(false), [setOpen]);
+  useEscapeCloses(overlay && open, close);
   const [storedWidth, setStoredWidth] = usePreference(leftPanelWidthPreference);
   // The width while a drag is in progress, committed once on release rather
   // than written to storage on every pointer move.
@@ -83,21 +85,32 @@ export function LeftPanel({ label, children }: LeftPanelProps) {
   };
 
   return (
-    <aside className="lc-left-panel" aria-label={label} hidden={!open} style={{ width }}>
-      <div className="lc-left-panel-body">{children}</div>
-      <div
-        className="lc-left-panel-resize"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label={`Resize ${label.toLowerCase()}`}
-        aria-valuemin={LEFT_PANEL_MIN_WIDTH}
-        aria-valuemax={LEFT_PANEL_MAX_WIDTH}
-        aria-valuenow={width}
-        tabIndex={0}
-        onPointerDown={onPointerDown}
-        onKeyDown={onKeyDown}
-        data-dragging={dragWidth !== null || undefined}
-      />
-    </aside>
+    <>
+      {overlay && open && <PanelScrim onDismiss={close} />}
+      <aside
+        className="lc-left-panel"
+        aria-label={label}
+        hidden={!open}
+        data-mode={overlay ? "overlay" : "docked"}
+        style={overlay ? undefined : ({ "--left-panel-width": `${width}px` } as CSSProperties)}
+      >
+        <div className="lc-left-panel-body">{children}</div>
+        {!overlay && (
+          <div
+            className="lc-left-panel-resize"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label={`Resize ${label.toLowerCase()}`}
+            aria-valuemin={LEFT_PANEL_MIN_WIDTH}
+            aria-valuemax={LEFT_PANEL_MAX_WIDTH}
+            aria-valuenow={width}
+            tabIndex={0}
+            onPointerDown={onPointerDown}
+            onKeyDown={onKeyDown}
+            data-dragging={dragWidth !== null || undefined}
+          />
+        )}
+      </aside>
+    </>
   );
 }

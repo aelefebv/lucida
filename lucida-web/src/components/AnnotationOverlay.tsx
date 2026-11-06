@@ -52,7 +52,6 @@ import {
 import { isOffContext, type ViewContext } from "./annotationContext.ts";
 import type { Tool } from "./annotationTool.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
-import { keepThreadOnCanvas } from "./threadPlacement.ts";
 import type { MentionCandidate } from "./annotationMentions.ts";
 
 import type { AnnotationOverlayHandle } from "./annotationDocument.ts";
@@ -251,11 +250,9 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
 
   // Mirrors for the RAF tick, written after each commit.
   const selectedIdRef = useRef(selectedId);
-  const openPinIdRef = useRef(openPinId);
   const handleOutsetRef = useRef(HANDLE_OUTSET);
   useEffect(() => {
     selectedIdRef.current = selectedId;
-    openPinIdRef.current = openPinId;
     handleOutsetRef.current = coarse ? COARSE_HANDLE_OUTSET : HANDLE_OUTSET;
   });
 
@@ -464,7 +461,6 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
           if (el) {
             const [ax, ay] = project(anchor);
             el.style.transform = `translate(${ax}px, ${ay}px)`;
-            if (pin.id === openPinIdRef.current) keepThreadOnCanvas(el, [ax, ay], canvas);
           }
           const shape = shapeRefs.current.get(pin.id);
           if (shape) {
