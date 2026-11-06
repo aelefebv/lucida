@@ -114,12 +114,7 @@ describe("phase color", () => {
       makeRow({ startUs: 10 * MS, durations: { plan: 100, queue: MS, wire: 5 * MS }, outcome: "in-flight" }, 0),
     ];
     const { list } = drawOver(makeRun({ header: { durationUs: 100 * MS }, rows }), [cell(0)], { phaseColor: true });
-    const hex = PHASE_COLORS.decode;
-    const r = Number.parseInt(hex.slice(1, 3), 16);
-    const g = Number.parseInt(hex.slice(3, 5), 16);
-    const b = Number.parseInt(hex.slice(5, 7), 16);
-    // The rgba the overlay paints is the timeline's hex with an alpha, nothing else.
-    expect(list.items[0].fill).toBe(`rgba(${r}, ${g}, ${b}, ${PHASE_FILL_ALPHA})`);
+    // The rgba the overlay paints is the timeline's color with an alpha, nothing else.
     expect(list.items[0].fill).toBe(withAlpha(seriesColor("occupancy.browser", "decode"), PHASE_FILL_ALPHA));
   });
 

@@ -32,7 +32,7 @@ import {
   xAtMs,
   type DrawPrimitive,
 } from "./timelineDraw.ts";
-import { PHASE_COLORS, seriesColor } from "./timelinePalette.ts";
+import { BAND_COLORS, PHASE_COLORS, seriesColor } from "./timelinePalette.ts";
 
 const MS = 1_000;
 
@@ -117,7 +117,7 @@ describe("the bands", () => {
 
     const labels = texts(list.bands);
     expect(labels).toContain("dataset_added");
-    expect(list.bands.some((primitive) => primitive.kind === "rect" && primitive.fill === "#6f8fd1")).toBe(true);
+    expect(list.bands.some((primitive) => primitive.kind === "rect" && primitive.fill === BAND_COLORS.current)).toBe(true);
   });
 
   it("draws a steady-state interval as unlabelled ribbon", () => {
@@ -134,7 +134,7 @@ describe("the bands", () => {
     const list = buildTimelineDrawList(section, { width: 1_000, devicePixelRatio: 1 });
 
     expect(texts(list.bands)).not.toContain("steady state");
-    const ribbon = list.bands.find((primitive) => primitive.kind === "rect" && primitive.fill === "#262626");
+    const ribbon = list.bands.find((primitive) => primitive.kind === "rect" && primitive.fill === BAND_COLORS["steady-state"]);
     expect(ribbon).toBeDefined();
     if (ribbon?.kind === "rect") expect(ribbon.h).toBeLessThan(6);
   });

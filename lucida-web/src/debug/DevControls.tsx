@@ -11,6 +11,7 @@
  * a manual localStorage wipe.
  */
 
+import { ArrowCounterClockwiseIcon, CaretDownIcon, CaretRightIcon } from "@phosphor-icons/react";
 import { useEffect, useReducer, useState, useSyncExternalStore } from "react";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import {
@@ -19,6 +20,7 @@ import {
 } from "../pipeline/planning/config.ts";
 import type { CpuCacheConfig } from "../pipeline/fetch/index.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
+import { Button, IconButton } from "../ui/Button.tsx";
 import { setRenderRadiusPreviewTier } from "./logging.ts";
 import "./DevControls.css";
 
@@ -246,15 +248,13 @@ function TunableRow({
           aria-label={`${spec.label} value`}
         />
         {editable && dirty ? (
-          <button
-            type="button"
-            className="dev-controls-reset"
-            title={`Reset to default (${def})`}
-            aria-label={`Reset ${spec.label}`}
-            onClick={() => configStore.reset(spec.field)}
-          >
-            ↩
-          </button>
+          <IconButton
+            icon={ArrowCounterClockwiseIcon}
+            label={`Reset ${spec.label} to ${def}`}
+            size="sm"
+            tooltipPlacement="left"
+            onPress={() => configStore.reset(spec.field)}
+          />
         ) : (
           // Reserved-width spacer so rows don't reflow on the appear/disappear
           // boundary — the arrow flickering shifting other controls is more
@@ -378,14 +378,9 @@ export function DevControls({
               still steer the planner in prod, and moving toward defaults
               is a safety valve — without it the only recovery from stale
               persisted knobs would be a manual localStorage wipe. */}
-          <button
-            type="button"
-            onClick={() => configStore.reset()}
-            disabled={allDefaults}
-            className="dev-controls-reset-all"
-          >
+          <Button size="sm" onPress={() => configStore.reset()} isDisabled={allDefaults}>
             Reset all to defaults
-          </button>
+          </Button>
         </div>
 
         <div className="dev-controls-section">
@@ -433,15 +428,16 @@ export function DevControls({
         <div className="dev-controls-section">
           <div className="dev-controls-title dev-controls-title-split">
             <span>Lane offsets</span>
-            <button
-              type="button"
-              className="dev-controls-toggle"
-              onClick={() => setLaneOffsetsExpanded((v) => !v)}
+            <Button
+              size="sm"
+              variant="ghost"
+              trailingIcon={laneOffsetsExpanded ? CaretDownIcon : CaretRightIcon}
+              onPress={() => setLaneOffsetsExpanded((v) => !v)}
               aria-expanded={laneOffsetsExpanded}
               aria-controls="cfg-lane-offsets"
             >
               {laneOffsetsExpanded ? "Hide" : "Show"}
-            </button>
+            </Button>
           </div>
           {laneOffsetsExpanded && (
             <div id="cfg-lane-offsets">

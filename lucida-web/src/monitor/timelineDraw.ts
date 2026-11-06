@@ -23,7 +23,8 @@ import type {
   TimelineSeries,
   WindowRequest,
 } from "../trace/diagnose/types.ts";
-import { BAND_COLORS, CANVAS_COLORS, seriesColor } from "./timelinePalette.ts";
+import { readToken } from "../theme/tokens.ts";
+import { BAND_COLORS, CANVAS_COLORS, resolveColor, seriesColor } from "./timelinePalette.ts";
 
 /** The size the list is laid out at, in CSS pixels, and the ratio it is painted at. */
 export interface TimelineLayout {
@@ -220,7 +221,7 @@ function bandStrip(section: TimelineSection, plotX: number, plotWidth: number): 
         x: x + 3,
         y: BAND_STRIP_PX / 2,
         text: bandLabel(interval),
-        fill: interval.current ? CANVAS_COLORS.background : CANVAS_COLORS.text,
+        fill: interval.current ? CANVAS_COLORS.onCurrent : CANVAS_COLORS.text,
         align: "left",
         size: FONT_PX - 1,
       });
@@ -460,7 +461,11 @@ export function backingStoreSize(list: TimelineDrawList): { width: number; heigh
   return { width: Math.round(list.width * ratio), height: Math.round(list.height * ratio), ratio };
 }
 
-/** Replay the list on a context, sizing the store and setting the transform first. */
+/**
+ * Replay the list on a context, sizing the store and setting the transform
+ * first. The list names its colours as theme tokens, which a canvas cannot
+ * parse, so each is resolved here, at the theme in force when the paint runs.
+ */
 export function paintTimeline(
   canvas: HTMLCanvasElement,
   ctx: CanvasRenderingContext2D,
@@ -470,22 +475,23 @@ export function paintTimeline(
   canvas.width = store.width;
   canvas.height = store.height;
   ctx.setTransform(store.ratio, 0, 0, store.ratio, 0, 0);
-  ctx.fillStyle = CANVAS_COLORS.background;
+  ctx.fillStyle = resolveColor(CANVAS_COLORS.background).css;
   ctx.fillRect(0, 0, list.width, list.height);
   ctx.textBaseline = "middle";
-  for (const primitive of list.bands) paint(ctx, primitive);
-  for (const primitive of list.axis) paint(ctx, primitive);
-  for (const row of list.rows) for (const primitive of row.primitives) paint(ctx, primitive);
+  const font = readToken("--lc-font");
+  for (const primitive of list.bands) paint(ctx, primitive, font);
+  for (const primitive of list.axis) paint(ctx, primitive, font);
+  for (const row of list.rows) for (const primitive of row.primitives) paint(ctx, primitive, font);
 }
 
-function paint(ctx: CanvasRenderingContext2D, primitive: DrawPrimitive): void {
+function paint(ctx: CanvasRenderingContext2D, primitive: DrawPrimitive, font: string): void {
   switch (primitive.kind) {
     case "rect":
-      ctx.fillStyle = primitive.fill;
+      ctx.fillStyle = resolveColor(primitive.fill).css;
       ctx.fillRect(primitive.x, primitive.y, primitive.w, primitive.h);
       return;
     case "polyline": {
-      ctx.strokeStyle = primitive.stroke;
+      ctx.strokeStyle = resolveColor(primitive.stroke).css;
       ctx.lineWidth = primitive.width;
       ctx.beginPath();
       primitive.points.forEach((point, index) => {
@@ -496,7 +502,7 @@ function paint(ctx: CanvasRenderingContext2D, primitive: DrawPrimitive): void {
       return;
     }
     case "tick":
-      ctx.strokeStyle = primitive.stroke;
+      ctx.strokeStyle = resolveColor(primitive.stroke).css;
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(Math.round(primitive.x) + 0.5, primitive.y);
@@ -504,8 +510,8 @@ function paint(ctx: CanvasRenderingContext2D, primitive: DrawPrimitive): void {
       ctx.stroke();
       return;
     case "text":
-      ctx.fillStyle = primitive.fill;
-      ctx.font = `${primitive.size}px system-ui, sans-serif`;
+      ctx.fillStyle = resolveColor(primitive.fill).css;
+      ctx.font = `${primitive.size}px ${font}`;
       ctx.textAlign = primitive.align;
       ctx.fillText(primitive.text, primitive.x, primitive.y);
       return;
