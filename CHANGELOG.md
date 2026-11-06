@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.19.0](https://github.com/aelefebv/lucida/compare/v0.18.0...v0.19.0) (2026-11-06)
+
+
+### Features
+
+* **web:** composite channels with solo, typed contrast limits, and a tidier layer panel ([#1157](https://github.com/aelefebv/lucida/issues/1157)) ([aba5443](https://github.com/aelefebv/lucida/commit/aba5443ceafba8d2f1f0dfdf3794cc5cfba920c3))
+* **web:** floating dimension bar with a 2D/3D switch and Z/T scrubbers ([#1151](https://github.com/aelefebv/lucida/issues/1151)) ([fddaaa7](https://github.com/aelefebv/lucida/commit/fddaaa7bd55c7a29dcbe3692a4775af11ef7e62b))
+* **web:** fold, hide, and restore the collection selector and minimap cards ([#1153](https://github.com/aelefebv/lucida/issues/1153)) ([2e60278](https://github.com/aelefebv/lucida/commit/2e60278baf66684b93cbb167de2e93eb8175ea03))
+* **web:** one Add data dialog for paths, URLs, recent datasets, and browsing ([#1154](https://github.com/aelefebv/lucida/issues/1154)) ([9188c24](https://github.com/aelefebv/lucida/commit/9188c249300a6c83f046aefeea8adab668e5c4c4))
+* **web:** one Share popover with copy-link first, and one toast system ([#1152](https://github.com/aelefebv/lucida/issues/1152)) ([3e48af0](https://github.com/aelefebv/lucida/commit/3e48af064ac1ca865041b41ffadf6f1d45895400))
+* **web:** saved views, comments, explore, and info in the right rail ([#1158](https://github.com/aelefebv/lucida/issues/1158)) ([2cc1b3c](https://github.com/aelefebv/lucida/commit/2cc1b3c4a4bb1a8a7ba490c0706a9928eaf8ac45))
+* **web:** tool palette, viewer shortcuts, command palette, and shortcut sheet ([#1156](https://github.com/aelefebv/lucida/issues/1156)) ([8c50adf](https://github.com/aelefebv/lucida/commit/8c50adfc5f9973de8c44f343d5469b8e45ccc3f6))
+* **web:** workspace dashboard with a card grid, an Open data field, and distinguishable names ([#1160](https://github.com/aelefebv/lucida/issues/1160)) ([4f5aef8](https://github.com/aelefebv/lucida/commit/4f5aef83c8ea7076a8e8502b33d0c9cbb70a0433))
+
+
+### Bug Fixes
+
+* **web:** visual QA pass across sizes, pixel ratios, themes, and densities ([#1161](https://github.com/aelefebv/lucida/issues/1161)) ([6deab1a](https://github.com/aelefebv/lucida/commit/6deab1ade35c452d8775f06efe1fb27d062904dc))
+
 ## [0.18.0](https://github.com/aelefebv/lucida/compare/v0.17.1...v0.18.0) (2026-11-06)
 
 
