@@ -84,6 +84,7 @@ function overlayData(currentZ = 3): MinimapOverlayData {
       },
     ],
     mode: "slice",
+    topDown: false,
     theta: 0,
     phi: 0,
     canvasW: 400,
