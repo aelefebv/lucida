@@ -15,7 +15,7 @@ use crate::storage::StorageBackend;
 use crate::storage::test_support::{postgres_backend, sqlite_backend};
 use crate::workspace::{
     SavedViewVisibility, WorkspaceLinkAccess, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
-    WorkspaceStore,
+    WorkspaceStore, WorkspaceSummary,
 };
 
 conformance_suite! {
@@ -42,6 +42,7 @@ conformance_suite! {
         one_source_gets_its_own_workspace_local_id_in_each_workspace,
         a_rejected_dataset_open_leaves_the_workspace_untouched,
         datasets_list_in_the_order_they_were_opened,
+        listings_say_where_each_workspaces_first_dataset_lives,
         renaming_a_dataset_stays_inside_its_own_workspace,
         removing_a_dataset_drops_the_membership,
         members_can_be_added_promoted_and_removed,
@@ -873,6 +874,62 @@ async fn datasets_list_in_the_order_they_were_opened(store: Arc<dyn WorkspaceSto
     assert_eq!(
         listed, opened,
         "the layer panel's order is the order datasets were opened, not their names",
+    );
+}
+
+async fn listings_say_where_each_workspaces_first_dataset_lives(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let support = admin("support@example.com");
+    let here = workspace_named(&store, &owner, "sample.zarr").await;
+    let there = workspace_named(&store, &owner, "sample.zarr").await;
+    let empty = workspace_named(&store, &owner, "Empty").await;
+    for (workspace_id, source, url, seq) in [
+        (&here.id, "source-here", "/data/here/sample.zarr", 1),
+        (&here.id, "source-later", "/data/here/later.zarr", 2),
+        (&there.id, "source-there", "/data/there/sample.zarr", 1),
+    ] {
+        open_dataset(&store, workspace_id, &owner, source, url, source, seq).await;
+    }
+
+    let first_urls = |listed: Vec<WorkspaceSummary>| -> Vec<(String, Option<String>)> {
+        let mut pairs: Vec<_> = listed
+            .into_iter()
+            .map(|summary| (summary.id, summary.first_dataset_url))
+            .collect();
+        pairs.sort();
+        pairs
+    };
+    let mut expected = vec![
+        (here.id.clone(), Some("/data/here/sample.zarr".to_string())),
+        (
+            there.id.clone(),
+            Some("/data/there/sample.zarr".to_string()),
+        ),
+        (empty.id.clone(), None),
+    ];
+    expected.sort();
+    assert_eq!(
+        first_urls(store.list_workspaces(&owner).await.unwrap()),
+        expected,
+        "two workspaces with one name differ by where their first dataset lives",
+    );
+    assert_eq!(
+        first_urls(store.list_workspaces(&support).await.unwrap()),
+        expected
+    );
+
+    store.archive_workspace(&there.id).await.unwrap().unwrap();
+    let archived = vec![(
+        there.id.clone(),
+        Some("/data/there/sample.zarr".to_string()),
+    )];
+    assert_eq!(
+        first_urls(store.list_archived_workspaces(&owner).await.unwrap()),
+        archived
+    );
+    assert_eq!(
+        first_urls(store.list_archived_workspaces(&support).await.unwrap()),
+        archived
     );
 }
 

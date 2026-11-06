@@ -1297,6 +1297,7 @@ fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSummary, Stor
         default_saved_view_id: row.get("default_saved_view_id"),
         last_opened_at: row.get("last_opened_at"),
         pinned_at: row.get("pinned_at"),
+        first_dataset_url: row.get("first_dataset_url"),
     })
 }
 

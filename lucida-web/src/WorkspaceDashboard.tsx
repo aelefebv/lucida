@@ -1,4 +1,49 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  ArchiveIcon,
+  ArrowCounterClockwiseIcon,
+  CloudIcon,
+  CopyIcon,
+  DotsThreeIcon,
+  FolderIcon,
+  FolderOpenIcon,
+  LinkIcon,
+  MagnifyingGlassIcon,
+  PlusIcon,
+  PushPinIcon,
+  SquaresFourIcon,
+  StackIcon,
+  type Icon,
+  type IconProps,
+} from "@phosphor-icons/react";
+import {
+  forwardRef,
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
+import { BrowsePane } from "./addData/BrowsePane.tsx";
+import { rememberRecentSource } from "./addData/recentSources.ts";
+import { ADD_DATA_SHORTCUT } from "./addData/shortcut.ts";
+import { SourceField } from "./addData/SourceField.tsx";
+import { ProfileMenu } from "./auth/ProfileMenu.tsx";
+import { isRemoteDatasetUrl, shortDatasetLocations } from "./datasetLocation.ts";
+import { relativeTimeFromIso } from "./savedView/useBookmarks.ts";
+import { LucidaMark } from "./shell/LucidaMark.tsx";
+import { SettingsMenu } from "./shell/SettingsMenu.tsx";
+import { Badge } from "./ui/Badge.tsx";
+import { Button, IconButton } from "./ui/Button.tsx";
+import { useCommand } from "./ui/commands.ts";
+import { Dialog } from "./ui/Dialog.tsx";
+import { KeyboardHelp } from "./ui/KeyboardHelp.tsx";
+import { Menu, MenuItem } from "./ui/Menu.tsx";
+import { SegmentedControl } from "./ui/SegmentedControl.tsx";
+import { SearchField } from "./ui/TextField.tsx";
+import { toast } from "./ui/toastQueue.ts";
+import { initWasmOnce } from "./wasmInit.ts";
 import {
   archiveWorkspace,
   createWorkspace,
@@ -7,12 +52,11 @@ import {
   listWorkspaces,
   restoreWorkspace,
   updateWorkspacePin,
+  type WorkspaceRole,
   type WorkspaceSummary,
 } from "./workspaceApi.ts";
-import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
-import { FileBrowser } from "./components/FileBrowser.tsx";
-import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { sortWorkspaceDashboardRows } from "./workspaceDashboardOrder.ts";
+import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
 import "./WorkspaceDashboard.css";
 
 interface Props {
@@ -21,31 +65,70 @@ interface Props {
   onOpenWorkspace: (id: string, datasetUrls?: readonly string[]) => void;
 }
 
+type Shelf = "active" | "archived";
+
+const ROLE_LABELS: Record<WorkspaceRole, string> = {
+  owner: "Owner",
+  editor: "Editor",
+  viewer: "Viewer",
+};
+
+const PushPinFilledIcon = forwardRef<SVGSVGElement, IconProps>((props, ref) => (
+  <PushPinIcon ref={ref} weight="fill" {...props} />
+)) as Icon;
+
+function messageOf(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
+function workspaceHref(id: string): string {
+  return `/w/${encodeURIComponent(id)}`;
+}
+
 export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
   const [workspaces, setWorkspaces] = useState<WorkspaceSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [creating, setCreating] = useState(false);
-  const [pinningId, setPinningId] = useState<string | null>(null);
-  const [archivingId, setArchivingId] = useState<string | null>(null);
-  const [duplicatingId, setDuplicatingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [shelf, setShelf] = useState<Shelf>("active");
+  // Bumped to fetch the current shelf again without switching it.
+  const [reloads, setReloads] = useState(0);
   const [query, setQuery] = useState("");
-  const [showArchived, setShowArchived] = useState(false);
-  // "New workspace from dataset": one in-flight flag covers both the typed-URL
-  // and file-browser creates, so both buttons disable.
-  const [datasetUrlInput, setDatasetUrlInput] = useState("");
-  const [creatingFromDataset, setCreatingFromDataset] = useState(false);
-  const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // One flag for every create (blank, typed path, browsed files), so a second
+  // create cannot start while the first is in flight.
+  const [creating, setCreating] = useState(false);
+  // Cards with a pin, archive, restore, or duplicate in flight.
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [browseOpen, setBrowseOpen] = useState(false);
+  // The path field checks input with the wasm build, which the viewer would
+  // otherwise load only once a workspace opens.
+  const [wasmReady, setWasmReady] = useState(false);
+  const openDataRef = useRef<HTMLDivElement>(null);
+  const headingId = useId();
 
   useEffect(() => {
     let cancelled = false;
-    const load = showArchived ? listArchivedWorkspaces : listWorkspaces;
+    initWasmOnce().then(
+      () => {
+        if (!cancelled) setWasmReady(true);
+      },
+      (e: unknown) => {
+        if (!cancelled) setError(`Couldn't load the path checker: ${messageOf(e)}`);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = shelf === "archived" ? listArchivedWorkspaces : listWorkspaces;
     void load()
       .then((rows) => {
         if (!cancelled) setWorkspaces(rows);
       })
       .catch((e) => {
-        if (!cancelled) setError(e instanceof Error ? e.message : String(e));
+        if (!cancelled) setError(messageOf(e));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);
@@ -53,14 +136,53 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [showArchived]);
+  }, [shelf, reloads]);
 
-  const filtered = useMemo(() => {
+  // Labeled across every loaded workspace, not just the matches, so a label
+  // holds still while a search narrows the grid.
+  const locations = useMemo(() => {
+    const placed = workspaces.filter((w) => w.first_dataset_url);
+    const labels = shortDatasetLocations(placed.map((w) => w.first_dataset_url as string));
+    return new Map(placed.map((w, i) => [w.id, labels[i]]));
+  }, [workspaces]);
+
+  const visible = useMemo(() => {
+    // The archived list arrives most recently archived first; keep that.
+    const ordered = shelf === "archived" ? workspaces : sortWorkspaceDashboardRows(workspaces);
     const q = query.trim().toLocaleLowerCase();
-    const ordered = sortWorkspaceDashboardRows(workspaces);
     if (!q) return ordered;
-    return ordered.filter((w) => w.name.toLocaleLowerCase().includes(q));
-  }, [query, workspaces]);
+    return ordered.filter(
+      (w) =>
+        w.name.toLocaleLowerCase().includes(q) ||
+        (w.first_dataset_url ?? "").toLocaleLowerCase().includes(q),
+    );
+  }, [query, shelf, workspaces]);
+
+  const pinned = shelf === "active" ? visible.filter((w) => w.pinned_at) : [];
+  const others = shelf === "active" ? visible.filter((w) => !w.pinned_at) : visible;
+
+  const switchShelf = (next: Shelf) => {
+    if (next === shelf) return;
+    setLoading(true);
+    setWorkspaces([]);
+    setShelf(next);
+  };
+
+  const withCard = useCallback(async (id: string, action: () => Promise<void>) => {
+    setBusyIds((ids) => new Set(ids).add(id));
+    setError(null);
+    try {
+      await action();
+    } catch (e) {
+      setError(messageOf(e));
+    } finally {
+      setBusyIds((ids) => {
+        const next = new Set(ids);
+        next.delete(id);
+        return next;
+      });
+    }
+  }, []);
 
   const handleCreate = useCallback(async () => {
     setCreating(true);
@@ -69,7 +191,7 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
       const workspace = await createWorkspace();
       onOpenWorkspace(workspace.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setError(messageOf(e));
     } finally {
       setCreating(false);
     }
@@ -77,249 +199,435 @@ export function WorkspaceDashboard({ onOpenWorkspace }: Props) {
 
   // Only the create step can fail here, and it stays on the dashboard. A failed
   // dataset open surfaces in the viewer and keeps the workspace.
-  const handleCreateFromDatasets = useCallback(
+  const handleOpenData = useCallback(
     async (urls: readonly string[]) => {
       const cleaned = urls.map((u) => u.trim()).filter((u) => u.length > 0);
       if (cleaned.length === 0) return;
-      setCreatingFromDataset(true);
+      setCreating(true);
       setError(null);
       try {
         const workspace = await createWorkspaceFromDatasets(cleaned);
         onOpenWorkspace(workspace.id, cleaned);
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        setError(messageOf(e));
       } finally {
-        setCreatingFromDataset(false);
+        setCreating(false);
       }
     },
     [onOpenWorkspace],
   );
 
-  const handlePin = useCallback(async (workspace: WorkspaceSummary, pinned: boolean) => {
-    setPinningId(workspace.id);
-    setError(null);
-    try {
-      const state = await updateWorkspacePin(workspace.id, pinned);
+  const handlePin = (workspace: WorkspaceSummary, pin: boolean) =>
+    withCard(workspace.id, async () => {
+      const state = await updateWorkspacePin(workspace.id, pin);
       setWorkspaces((rows) =>
-        sortWorkspaceDashboardRows(
-          rows.map((row) =>
-            row.id === workspace.id
-              ? {
-                ...row,
-                last_opened_at: state.last_opened_at ?? row.last_opened_at,
-                pinned_at: state.pinned_at,
-              }
-              : row
-          ),
-        )
+        rows.map((row) =>
+          row.id === workspace.id
+            ? {
+              ...row,
+              last_opened_at: state.last_opened_at ?? row.last_opened_at,
+              pinned_at: state.pinned_at,
+            }
+            : row,
+        ),
       );
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPinningId(null);
-    }
-  }, []);
+    });
 
-  const handleArchive = useCallback(async (workspace: WorkspaceSummary) => {
-    setArchivingId(workspace.id);
-    setError(null);
-    try {
-      await archiveWorkspace(workspace.id);
-      setWorkspaces((rows) => rows.filter((row) => row.id !== workspace.id));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setArchivingId(null);
-    }
-  }, []);
-
-  const handleRestore = useCallback(async (workspace: WorkspaceSummary) => {
-    setArchivingId(workspace.id);
-    setError(null);
-    try {
+  const handleRestore = (workspace: WorkspaceSummary) =>
+    withCard(workspace.id, async () => {
       await restoreWorkspace(workspace.id);
       setWorkspaces((rows) => rows.filter((row) => row.id !== workspace.id));
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setArchivingId(null);
-    }
-  }, []);
+    });
+
+  const handleArchive = (workspace: WorkspaceSummary) =>
+    withCard(workspace.id, async () => {
+      await archiveWorkspace(workspace.id);
+      setWorkspaces((rows) => rows.filter((row) => row.id !== workspace.id));
+      toast({
+        title: `Archived ${workspace.name}`,
+        description: "It's under Archived until you restore it.",
+        action: {
+          label: "Undo",
+          onPress: () => {
+            restoreWorkspace(workspace.id).then(
+              () => setReloads((n) => n + 1),
+              (e: unknown) => toast({ title: "Couldn't restore it", description: messageOf(e), tone: "danger" }),
+            );
+          },
+        },
+        timeout: 8000,
+      });
+    });
 
   // Copy any accessible workspace into one the user owns, then open it.
-  const handleDuplicate = useCallback(
-    async (workspace: WorkspaceSummary) => {
-      setDuplicatingId(workspace.id);
-      setError(null);
-      try {
-        const copy = await duplicateWorkspace(workspace.id);
-        onOpenWorkspace(copy.id);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setDuplicatingId(null);
-      }
-    },
-    [onOpenWorkspace],
+  const handleDuplicate = (workspace: WorkspaceSummary) =>
+    withCard(workspace.id, async () => {
+      const copy = await duplicateWorkspace(workspace.id);
+      onOpenWorkspace(copy.id);
+    });
+
+  const copyLink = async (workspace: WorkspaceSummary) => {
+    const link = `${window.location.origin}${workspaceHref(workspace.id)}`;
+    try {
+      // Absent outside a secure context, which throws here like a refusal.
+      await navigator.clipboard.writeText(link);
+      toast({ title: "Link copied", tone: "success" });
+    } catch {
+      toast({ title: "Couldn't copy the link", description: link, tone: "danger" });
+    }
+  };
+
+  const focusOpenData = () => openDataRef.current?.querySelector("input")?.focus();
+
+  useCommand({
+    id: "dashboard.openData",
+    label: "Open data…",
+    group: "General",
+    keywords: ["dataset", "path", "url", "add", "new workspace"],
+    keys: [ADD_DATA_SHORTCUT],
+    run: focusOpenData,
+  });
+  useCommand({
+    id: "dashboard.browseFiles",
+    label: "Browse files…",
+    group: "General",
+    keywords: ["open", "dataset", "folder"],
+    run: () => setBrowseOpen(true),
+  });
+  useCommand({
+    id: "dashboard.newWorkspace",
+    label: "New empty workspace",
+    group: "General",
+    keywords: ["create", "blank"],
+    run: () => void handleCreate(),
+    enabled: !creating,
+  });
+
+  const renderGrid = (rows: WorkspaceSummary[]) => (
+    <ul className="lc-dashboard-grid">
+      {rows.map((workspace) => (
+        <WorkspaceCard
+          key={workspace.id}
+          workspace={workspace}
+          location={locations.get(workspace.id) ?? null}
+          archived={shelf === "archived"}
+          busy={busyIds.has(workspace.id)}
+          onOpen={() => onOpenWorkspace(workspace.id)}
+          onPin={(pin) => void handlePin(workspace, pin)}
+          onDuplicate={() => void handleDuplicate(workspace)}
+          onArchive={() => void handleArchive(workspace)}
+          onRestore={() => void handleRestore(workspace)}
+          onCopyLink={() => void copyLink(workspace)}
+        />
+      ))}
+    </ul>
   );
 
   return (
-    <div className="workspace-dashboard">
-      <ProfileMenu />
-      <div className="workspace-dashboard-inner">
-        <div className="workspace-dashboard-toolbar">
-          <h1>Workspaces</h1>
-          <div className="workspace-dashboard-actions">
-            <button
-              type="button"
-              className="workspace-dashboard-secondary"
-              onClick={() => {
-                setLoading(true);
-                setWorkspaces([]);
-                setShowArchived((value) => !value);
+    <div className="lc-dashboard">
+      <header className="lc-dashboard-header">
+        <h1 className="lc-dashboard-brand">
+          <LucidaMark size={24} />
+          lucida
+        </h1>
+        <div className="lc-dashboard-header-end">
+          <SettingsMenu />
+          <ProfileMenu />
+        </div>
+      </header>
+
+      <main className="lc-dashboard-main">
+        <section className="lc-dashboard-open" aria-labelledby={`${headingId}-open`}>
+          <h2 id={`${headingId}-open`} className="lc-dashboard-heading">
+            Open data
+          </h2>
+          <p className="lc-dashboard-lede">Each dataset you open starts a new workspace.</p>
+          <div ref={openDataRef} className="lc-dashboard-open-row" data-testid="new-workspace-from-dataset">
+            <SourceField
+              className="lc-dashboard-source"
+              submitLabel={creating ? "Opening…" : "Open"}
+              isDisabled={creating || !wasmReady}
+              onSubmit={(url) => {
+                rememberRecentSource(url);
+                void handleOpenData([url]);
               }}
+            />
+            <Button icon={FolderOpenIcon} onPress={() => setBrowseOpen(true)} isDisabled={creating}>
+              Browse files…
+            </Button>
+          </div>
+        </section>
+
+        <section className="lc-dashboard-workspaces" aria-labelledby={`${headingId}-workspaces`}>
+          <div className="lc-dashboard-toolbar">
+            <h2 id={`${headingId}-workspaces`} className="lc-dashboard-heading">
+              Workspaces
+            </h2>
+            <SegmentedControl
+              label="Show"
+              size="sm"
+              options={[
+                { value: "active", label: "Active" },
+                { value: "archived", label: "Archived" },
+              ]}
+              value={shelf}
+              onChange={switchShelf}
+            />
+            <div className="lc-dashboard-toolbar-end">
+              <SearchField
+                className="lc-dashboard-search"
+                label="Search workspaces"
+                placeholder="Search workspaces"
+                value={query}
+                onChange={setQuery}
+              />
+              {shelf === "active" && (
+                <Button icon={PlusIcon} onPress={() => void handleCreate()} isDisabled={creating}>
+                  New workspace
+                </Button>
+              )}
+            </div>
+          </div>
+
+          {error && (
+            <div className="lc-dashboard-error" role="alert">
+              <span>{error}</span>
+              <Button size="sm" variant="ghost" onPress={() => setError(null)}>
+                Dismiss
+              </Button>
+            </div>
+          )}
+
+          {loading ? (
+            <p className="lc-dashboard-note" aria-busy="true">
+              Loading workspaces…
+            </p>
+          ) : visible.length === 0 ? (
+            <EmptyState
+              kind={query.trim() ? "search" : shelf}
+              query={query.trim()}
+              onClearSearch={() => setQuery("")}
+              onBrowse={() => setBrowseOpen(true)}
+            />
+          ) : (
+            <>
+              {pinned.length > 0 && (
+                <section className="lc-dashboard-section" aria-labelledby={`${headingId}-pinned`}>
+                  <h3 id={`${headingId}-pinned`} className="lc-dashboard-section-title">
+                    Pinned
+                  </h3>
+                  {renderGrid(pinned)}
+                </section>
+              )}
+              {others.length > 0 && (
+                <section className="lc-dashboard-section" aria-labelledby={`${headingId}-others`}>
+                  {/* Without a pinned section above, one heading over the lone grid adds nothing. */}
+                  <h3
+                    id={`${headingId}-others`}
+                    className="lc-dashboard-section-title"
+                    data-hidden={pinned.length === 0 || undefined}
+                  >
+                    {shelf === "archived" ? "Archived" : "Recent"}
+                  </h3>
+                  {renderGrid(others)}
+                </section>
+              )}
+            </>
+          )}
+        </section>
+      </main>
+
+      <Dialog title="Browse files" size="lg" isOpen={browseOpen} onOpenChange={setBrowseOpen}>
+        {(close) => (
+          <BrowsePane
+            className="lc-dashboard-browse"
+            onOpen={(path) => {
+              close();
+              void handleOpenData([path]);
+            }}
+            onCreateWorkspace={(paths) => {
+              close();
+              void handleOpenData(paths);
+            }}
+          />
+        )}
+      </Dialog>
+      <KeyboardHelp />
+    </div>
+  );
+}
+
+interface WorkspaceCardProps {
+  workspace: WorkspaceSummary;
+  /** Where its first dataset lives, shortened; null without one. */
+  location: string | null;
+  archived: boolean;
+  busy: boolean;
+  onOpen: () => void;
+  onPin: (pin: boolean) => void;
+  onDuplicate: () => void;
+  onArchive: () => void;
+  onRestore: () => void;
+  onCopyLink: () => void;
+}
+
+function WorkspaceCard({
+  workspace,
+  location,
+  archived,
+  busy,
+  onOpen,
+  onPin,
+  onDuplicate,
+  onArchive,
+  onRestore,
+  onCopyLink,
+}: WorkspaceCardProps) {
+  const { name, role, dataset_count: count, first_dataset_url: url } = workspace;
+  const isPinned = Boolean(workspace.pinned_at);
+  const detailsId = useId();
+  const LocationIcon = url && isRemoteDatasetUrl(url) ? CloudIcon : FolderIcon;
+  const [when, timestamp] = archived && workspace.archived_at
+    ? ["Archived", workspace.archived_at]
+    : workspace.last_opened_at
+      ? ["Opened", workspace.last_opened_at]
+      : ["Updated", workspace.updated_at];
+
+  const open = (event: MouseEvent<HTMLAnchorElement>) => {
+    // A modified click opens the workspace in a new tab, as a link should.
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    onOpen();
+  };
+
+  return (
+    <li className="lc-ws-card" data-pinned={isPinned || undefined} aria-busy={busy || undefined}>
+      <div className="lc-ws-card-preview" aria-hidden="true">
+        <StackIcon size={28} />
+      </div>
+      <div className="lc-ws-card-body">
+        <div className="lc-ws-card-title">
+          <a
+            className="lc-ws-card-link"
+            href={workspaceHref(workspace.id)}
+            aria-label={`Open workspace ${name}`}
+            aria-describedby={`${detailsId}-location ${detailsId}-meta`}
+            onClick={open}
+          >
+            <span className="lc-ws-card-name" title={name}>
+              {name}
+            </span>
+          </a>
+          <div className="lc-ws-card-actions">
+            {!archived && (
+              <IconButton
+                icon={isPinned ? PushPinFilledIcon : PushPinIcon}
+                label={`Pin ${name}`}
+                size="sm"
+                isSelected={isPinned}
+                onSelectedChange={onPin}
+                isDisabled={busy}
+              />
+            )}
+            <Menu
+              label={`Actions for ${name}`}
+              placement="bottom end"
+              trigger={<IconButton icon={DotsThreeIcon} label={`More actions for ${name}`} size="sm" />}
             >
-              {showArchived ? "Active" : "Archived"}
-            </button>
-            <button
-              onClick={handleCreate}
-              disabled={creating || creatingFromDataset || showArchived}
-            >
-              {creating ? "Creating..." : "New Workspace"}
-            </button>
+              {/* Duplicate is open to any role; the copy becomes the user's own. */}
+              {!archived && (
+                <MenuItem icon={CopyIcon} onAction={onDuplicate} isDisabled={busy}>
+                  Duplicate
+                </MenuItem>
+              )}
+              <MenuItem icon={LinkIcon} onAction={onCopyLink}>
+                Copy link
+              </MenuItem>
+              {role === "owner" &&
+                (archived ? (
+                  <MenuItem icon={ArrowCounterClockwiseIcon} onAction={onRestore} isDisabled={busy}>
+                    Restore
+                  </MenuItem>
+                ) : (
+                  <MenuItem icon={ArchiveIcon} onAction={onArchive} isDisabled={busy}>
+                    Archive
+                  </MenuItem>
+                ))}
+            </Menu>
           </div>
         </div>
-        {!showArchived && (
-          <form
-            className="workspace-from-dataset"
-            data-testid="new-workspace-from-dataset"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void handleCreateFromDatasets([datasetUrlInput]);
-            }}
-          >
-            <input
-              className="workspace-from-dataset-input"
-              value={datasetUrlInput}
-              onChange={(e) => setDatasetUrlInput(e.target.value)}
-              placeholder="New workspace from dataset — file path or remote URL"
-              aria-label="New workspace from dataset URL or path"
-              disabled={creatingFromDataset}
-            />
-            <button
-              type="submit"
-              disabled={creatingFromDataset || !datasetUrlInput.trim()}
-            >
-              {creatingFromDataset ? "Creating..." : "Create from URL"}
-            </button>
-            <button
-              type="button"
-              className="workspace-dashboard-secondary"
-              onClick={() => setShowFileBrowser(true)}
-              disabled={creatingFromDataset}
-            >
-              Browse files…
-            </button>
-          </form>
-        )}
-        <input
-          className="workspace-search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search visible workspaces"
-          aria-label="Search workspaces"
-        />
-        {error && <div className="workspace-dashboard-error">{error}</div>}
-        {loading ? (
-          <div className="workspace-dashboard-empty">Loading workspaces...</div>
-        ) : filtered.length === 0 ? (
-          <div className="workspace-dashboard-empty">
-            {query.trim()
-              ? "No matching workspaces."
-              : showArchived
-                ? "No archived workspaces."
-                : "No workspaces yet."}
-          </div>
-        ) : (
-          <div className="workspace-list">
-            {filtered.map((workspace) => (
-              <div
-                key={workspace.id}
-                className="workspace-list-row"
-              >
-                <button
-                  className="workspace-list-open"
-                  onClick={() => onOpenWorkspace(workspace.id)}
-                  aria-label={`Open workspace ${workspace.name}`}
-                >
-                  <span className="workspace-list-name">{workspace.name}</span>
-                  <span className="workspace-list-meta">
-                    {workspace.role} | {workspace.dataset_count} dataset
-                    {workspace.dataset_count === 1 ? "" : "s"}
-                  </span>
-                  <span className="workspace-list-updated">
-                    {workspace.last_opened_at
-                      ? `Opened ${new Date(workspace.last_opened_at).toLocaleString()}`
-                      : `Updated ${new Date(workspace.updated_at).toLocaleString()}`}
-                  </span>
-                </button>
-                <div className="workspace-row-actions">
-                  {!showArchived && (
-                    <button
-                      className="workspace-pin-button"
-                      disabled={pinningId === workspace.id}
-                      aria-pressed={Boolean(workspace.pinned_at)}
-                      aria-label={`${workspace.pinned_at ? "Unpin" : "Pin"} ${workspace.name}`}
-                      onClick={() => {
-                        void handlePin(workspace, !workspace.pinned_at);
-                      }}
-                    >
-                      {workspace.pinned_at ? "Unpin" : "Pin"}
-                    </button>
-                  )}
-                  {/* Duplicate is available for any workspace the user can
-                      access, whatever their role; the copy becomes their own. */}
-                  {!showArchived && (
-                    <button
-                      className="workspace-duplicate-button"
-                      disabled={duplicatingId === workspace.id}
-                      aria-label={`Duplicate ${workspace.name}`}
-                      onClick={() => {
-                        void handleDuplicate(workspace);
-                      }}
-                    >
-                      {duplicatingId === workspace.id ? "Duplicating..." : "Duplicate"}
-                    </button>
-                  )}
-                  {workspace.role === "owner" && (
-                    <button
-                      className="workspace-archive-button"
-                      disabled={archivingId === workspace.id}
-                      aria-label={`${showArchived ? "Restore" : "Archive"} ${workspace.name}`}
-                      onClick={() => {
-                        void (showArchived
-                          ? handleRestore(workspace)
-                          : handleArchive(workspace));
-                      }}
-                    >
-                      {showArchived ? "Restore" : "Archive"}
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
+        <p id={`${detailsId}-location`} className="lc-ws-card-location" title={url ?? undefined}>
+          {location ? (
+            <>
+              <LocationIcon size={14} aria-hidden />
+              <span className="lc-ws-card-location-text">{location}</span>
+            </>
+          ) : (
+            <span className="lc-ws-card-location-text" data-empty="">
+              No datasets yet
+            </span>
+          )}
+        </p>
+        <div id={`${detailsId}-meta`} className="lc-ws-card-meta">
+          <span>
+            {count} dataset{count === 1 ? "" : "s"}
+          </span>
+          <span aria-hidden="true">·</span>
+          <time dateTime={timestamp} title={new Date(timestamp).toLocaleString()}>
+            {when} {relativeTimeFromIso(timestamp)}
+          </time>
+          <Badge className="lc-ws-card-role">{ROLE_LABELS[role]}</Badge>
+        </div>
       </div>
-      {showFileBrowser && (
-        <FileBrowser
-          onClose={() => setShowFileBrowser(false)}
-          onCreateWorkspace={(paths) => {
-            setShowFileBrowser(false);
-            void handleCreateFromDatasets(paths);
-          }}
-        />
-      )}
+    </li>
+  );
+}
+
+function EmptyState({
+  kind,
+  query,
+  onClearSearch,
+  onBrowse,
+}: {
+  kind: Shelf | "search";
+  query: string;
+  onClearSearch: () => void;
+  onBrowse: () => void;
+}) {
+  if (kind === "search") {
+    return (
+      <div className="lc-dashboard-empty">
+        <MagnifyingGlassIcon className="lc-dashboard-empty-icon" size={32} aria-hidden />
+        <p className="lc-dashboard-empty-title">No workspaces match “{query}”</p>
+        <p className="lc-dashboard-empty-text">Search looks at workspace names and where their data lives.</p>
+        <Button variant="ghost" onPress={onClearSearch}>
+          Clear search
+        </Button>
+      </div>
+    );
+  }
+  if (kind === "archived") {
+    return (
+      <div className="lc-dashboard-empty">
+        <ArchiveIcon className="lc-dashboard-empty-icon" size={32} aria-hidden />
+        <p className="lc-dashboard-empty-title">Nothing archived</p>
+        <p className="lc-dashboard-empty-text">
+          Archiving a workspace takes it off your list without deleting it. Restore it from here.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="lc-dashboard-empty">
+      <SquaresFourIcon className="lc-dashboard-empty-icon" size={32} aria-hidden />
+      <p className="lc-dashboard-empty-title">No workspaces yet</p>
+      <p className="lc-dashboard-empty-text">
+        Open a dataset above to start one. A workspace keeps its datasets, saved views, and
+        annotations together, and you can share it.
+      </p>
+      <Button icon={FolderOpenIcon} onPress={onBrowse}>
+        Browse files…
+      </Button>
     </div>
   );
 }
