@@ -6,7 +6,8 @@
  * Every mutation applies locally and sends (`applyDocumentCommand`), because the
  * server leaves the sender out of its rebroadcast; client-supplied ids make both
  * paths converge. State here is per-thread only: hosts key the popover by pin id,
- * so switching pins remounts it and clears drafts. Hosts also position it.
+ * so switching pins remounts it and clears drafts. Hosts move it with its pin,
+ * and it keeps itself on screen beside it.
  */
 import {
   CheckIcon,
@@ -19,6 +20,7 @@ import {
 import { useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyDocumentCommand } from "../applyAndSend.ts";
+import { useThreadPlacement } from "./threadPlacement.ts";
 import type { Annotation, Comment } from "./annotationDocument.ts";
 import {
   splitMentionTokens,
@@ -91,6 +93,8 @@ export function ThreadPopover({
   // Nothing is emitted until Confirm, so one click can never destroy a pin and
   // its thread.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+  useThreadPlacement(rootRef);
 
   const mine = pin.author === String(myId);
   const comments = pin.comments ?? [];
@@ -248,6 +252,7 @@ export function ThreadPopover({
 
   return (
     <div
+      ref={rootRef}
       className="lc-thread"
       data-testid={`annot-thread-${pin.id}`}
       role="dialog"

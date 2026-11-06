@@ -1,9 +1,8 @@
 import { useEffect, useRef } from "react";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { RenderLoop, MinimapOverlayData } from "../renderLoop.ts";
-import { usePreference } from "../theme/preferences.ts";
 import { CanvasCard } from "./CanvasCard.tsx";
-import { minimapCardPreference } from "./canvasCards.ts";
+import { minimapCardPreference, useCanvasCardState } from "./canvasCards.ts";
 import { drawStaticMinimapOverlays, drawZPlaneOverlays, drawViewportOverlays, readMinimapColors, zPlaneLayerDirty } from "./minimapOverlay.ts";
 import "./Minimap.css";
 
@@ -26,7 +25,7 @@ interface Props {
 export function Minimap({ client, activeLoop }: Props) {
   // Folded or hidden, the loop stops rendering it. The canvases stay mounted,
   // since the GPU context is bound to this canvas for the worker's life.
-  const [cardState] = usePreference(minimapCardPreference);
+  const [cardState] = useCanvasCardState(minimapCardPreference);
   const drawing = cardState === "open";
   const gpuCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);

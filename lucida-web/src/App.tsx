@@ -79,7 +79,7 @@ import { AddDataDialog, AddDataPrompt, noteSourceOpenFailed } from "./addData/in
 import { Banner } from "./shell/Banner.tsx";
 import { CanvasStage, type CanvasSize } from "./shell/CanvasStage.tsx";
 import { DimensionBar } from "./shell/DimensionBar.tsx";
-import { useOpenRightPanel } from "./shell/layoutPreferences.ts";
+import { useOpenRightPanel } from "./shell/sidePanels.ts";
 import { LeftPanel } from "./shell/LeftPanel.tsx";
 import { RightRail } from "./shell/RightRail.tsx";
 import { ToolPalette } from "./shell/ToolPalette.tsx";

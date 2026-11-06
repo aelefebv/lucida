@@ -1,0 +1,15 @@
+/* Covers the row the panels share. The overlay panels and the rail sit one
+   layer up, so the rail's buttons still switch panels while one is open. */
+.lc-panel-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: var(--lc-z-panel);
+  background: color-mix(in srgb, var(--lc-scrim) 50%, transparent);
+  animation: lc-panel-scrim-in var(--lc-motion) var(--lc-ease);
+}
+
+@keyframes lc-panel-scrim-in {
+  from {
+    opacity: 0;
+  }
+}

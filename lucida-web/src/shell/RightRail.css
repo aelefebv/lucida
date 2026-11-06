@@ -1,7 +1,15 @@
+/* The region meets the viewport's right edge, so it takes the right inset
+   whichever of the rail or the panel is outermost, and each of them takes
+   the bottom one. */
 .lc-right-rail-region {
+  /* Wide enough for a rail button with room either side, which under touch
+     is wider than the desktop rail. */
+  --rail-width: max(48px, calc(var(--lc-control-h) + var(--lc-space-2) + var(--lc-space-3)));
   display: flex;
   flex: none;
   min-height: 0;
+  padding-right: var(--lc-safe-right);
+  background: var(--lc-surface-1);
 }
 
 .lc-right-rail {
@@ -10,10 +18,8 @@
   align-items: center;
   gap: var(--lc-space-1);
   box-sizing: border-box;
-  /* Wide enough for a rail button with room either side, which under touch
-     is wider than the desktop rail. */
-  width: max(48px, calc(var(--lc-control-h) + var(--lc-space-2) + var(--lc-space-3)));
-  padding: var(--lc-space-2) 0;
+  width: var(--rail-width);
+  padding: var(--lc-space-2) 0 calc(var(--lc-space-2) + var(--lc-safe-bottom));
   border-left: 1px solid var(--lc-border);
   background: var(--lc-surface-1);
 }
@@ -52,8 +58,38 @@
   width: 300px;
   min-width: 0;
   min-height: 0;
+  padding-bottom: var(--lc-safe-bottom);
   border-left: 1px solid var(--lc-border);
   background: var(--lc-surface-1);
+}
+
+/* The rail keeps its place; the panel slides out from under it, over the
+   canvas, and leaves a strip of canvas showing. */
+.lc-right-rail-region[data-mode="overlay"] {
+  position: relative;
+  z-index: calc(var(--lc-z-panel) + 1);
+}
+
+.lc-right-rail-region[data-mode="overlay"] > .lc-right-rail {
+  position: relative;
+  z-index: 1;
+}
+
+.lc-right-rail-region[data-mode="overlay"] > .lc-right-panel {
+  position: absolute;
+  top: 0;
+  right: 100%;
+  bottom: 0;
+  width: min(300px, calc(100vw - var(--rail-width) - var(--lc-safe-right) - var(--lc-space-4)));
+  border-right: 1px solid var(--lc-border);
+  box-shadow: var(--lc-shadow-2);
+  animation: lc-right-panel-in var(--lc-motion) var(--lc-ease);
+}
+
+@keyframes lc-right-panel-in {
+  from {
+    translate: 100% 0;
+  }
 }
 
 .lc-right-panel[hidden] {

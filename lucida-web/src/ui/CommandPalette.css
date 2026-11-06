@@ -1,7 +1,7 @@
 /* Near the top, where the eye already is, and steady as the list shrinks. */
-.lc-command-overlay {
+.lc-dialog-overlay.lc-command-overlay {
   align-items: flex-start;
-  padding-top: min(14vh, 120px);
+  padding-top: max(min(14vh, 120px), var(--lc-safe-top));
 }
 
 .lc-command-palette {

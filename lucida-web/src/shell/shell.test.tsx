@@ -89,7 +89,9 @@ describe("LeftPanel", () => {
     expect(getPreference(leftPanelWidthPreference)).toBe(296);
     fireEvent.keyDown(handle, { key: "Home" });
     expect(getPreference(leftPanelWidthPreference)).toBe(200);
-    expect(screen.getByRole("complementary", { name: "Layers" }).style.width).toBe("200px");
+    expect(screen.getByRole("complementary", { name: "Layers" }).style.getPropertyValue("--left-panel-width")).toBe(
+      "200px",
+    );
   });
 
   it("toggles on Alt+[ and stays mounted while closed", async () => {
