@@ -32,7 +32,6 @@ export interface ViewerCommandsOptions {
   /** Whether a dataset is open; switching the view mode needs one. */
   hasData: boolean;
   onToggleViewMode: () => void;
-  onAddData: () => void;
   onBackToDashboard: () => void;
   /** The rail's panels, which the palette opens directly. */
   rightPanels: readonly { id: string; label: string }[];
@@ -69,7 +68,6 @@ export function useViewerCommands({
   viewMode,
   hasData,
   onToggleViewMode,
-  onAddData,
   onBackToDashboard,
   rightPanels,
   developer,
@@ -90,7 +88,6 @@ export function useViewerCommands({
       run: onToggleViewMode,
       enabled: hasData,
     },
-    { id: "data.add", label: "Add data…", group: "General", keywords: ["open", "dataset"], run: onAddData },
     {
       id: "workspace.all",
       label: "Go to all workspaces",

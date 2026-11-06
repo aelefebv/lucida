@@ -17,6 +17,7 @@ vi.mock("lucida-core", () => ({
 import { useSavedViewSync } from "./useSavedViewSync.ts";
 import type { SavedView } from "../savedView/types.ts";
 import { SAVED_VIEW_VERSION } from "../savedView/types.ts";
+import { decode, encode } from "../savedView/encoder.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 
 interface MockScene {
@@ -403,5 +404,30 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
 
     expect(scene.multiChannelVal).toBe(true);
     expect(outRef.current?.multiChannel).toBe(true);
+  });
+
+  // The layer panel reads single-channel mode on `c` as that channel soloed.
+  it("restores a URL recorded in single-channel mode on its channel, from a composite", async () => {
+    const loop = makeMockLoop();
+    scene.multiChannelVal = true;
+    await act(async () => {
+      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+    });
+
+    // Single-channel views were recorded without the flag.
+    const recorded = emptyView();
+    recorded.view.c = 1;
+    delete recorded.view.multi_channel;
+    const restored = await decode(await encode(recorded));
+
+    await act(async () => {
+      await outRef.current!.handle.applier.apply(restored);
+    });
+    await act(async () => { /* flush pending effects */ });
+
+    expect(scene.multiChannelVal).toBe(false);
+    expect(scene.cVal).toBe(1);
+    expect(outRef.current?.multiChannel).toBe(false);
+    expect(outRef.current?.c).toBe(1);
   });
 });

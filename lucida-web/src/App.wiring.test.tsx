@@ -13,6 +13,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
 // Boundary doubles. The WASM scene is a small stateful fake: it stores the
 // loaded document and records every applied command, and serves the JSON
@@ -269,7 +270,7 @@ const FakeScene = WasmScene as unknown as {
   }>;
 };
 
-function makeManifest(datasetId: string) {
+function makeManifest(datasetId: string, channels = 1) {
   return {
     dataset_id: datasetId,
     name: `${datasetId}.zarr`,
@@ -291,7 +292,7 @@ function makeManifest(datasetId: string) {
           levels: [
             {
               level_index: 0,
-              shape: [1, 1, 4, 8, 8],
+              shape: [1, channels, 4, 8, 8],
               chunk_shape: [1, 1, 4, 8, 8],
               grid_shape: [1, 1, 1, 1, 1],
               scale: [1, 1, 1, 1, 1],
@@ -334,9 +335,10 @@ function makePinWithView(pinId: string) {
 function documentJson(
   datasetIds: string[],
   annotations?: Record<string, unknown[]>,
+  channels = 1,
 ): string {
   const manifests: Record<string, unknown> = {};
-  for (const id of datasetIds) manifests[id] = makeManifest(id);
+  for (const id of datasetIds) manifests[id] = makeManifest(id, channels);
   return JSON.stringify({ manifests, annotations: annotations ?? {} });
 }
 
@@ -397,19 +399,46 @@ afterEach(() => {
   window.location.hash = "";
 });
 
+describe("App wiring: channels", () => {
+  it("opens a multichannel dataset as a composite", async () => {
+    const { scene } = await mountWithSnapshot(documentJson(["wds-1"], undefined, 3));
+    expect(scene.commands).toContainEqual({ type: "set_multi_channel", enabled: true });
+  });
+
+  it("leaves a single-channel dataset in single-channel mode", async () => {
+    const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(scene.commands.some((cmd) => cmd.type === "set_multi_channel")).toBe(false);
+  });
+
+  it("opens Add data from the layer panel's header", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    // The dialog's file browser lists a folder as it opens.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ path: "/", entries: [] })));
+    const panel = screen.getByRole("complementary", { name: "Layers" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Add data" }));
+    expect(await screen.findByRole("dialog", { name: "Add data" })).toBeTruthy();
+    fetchSpy.mockRestore();
+  });
+});
+
 describe("App wiring: layout switch (the #780 class)", () => {
   it("switching layouts fires the display-settings intent so the planner re-reads", async () => {
     const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
 
-    // The dataset auto-selected and auto-expanded; the layout switcher shows
-    // the first available layout.
-    const switcher = await screen.findByDisplayValue("Grid");
+    // The dataset auto-selected and auto-expanded; the layout switcher sits
+    // under Advanced and shows the first available layout.
+    await userEvent.click(await screen.findByRole("button", { name: "Advanced" }));
+    const switcher = screen.getByRole("button", { name: /Layout/ });
+    expect(switcher.textContent).toContain("Grid");
 
     // Prime the planner's settings cache so a served-from-cache read is
     // distinguishable from a re-read.
     const primed = getSceneSettings(scene as unknown as InstanceType<typeof WasmScene>);
 
-    fireEvent.change(switcher, { target: { value: "row" } });
+    await userEvent.click(switcher);
+    await userEvent.click(screen.getByRole("option", { name: "Row" }));
 
     // The switch applied the command to the scene...
     expect(scene.commands).toContainEqual({
@@ -677,11 +706,20 @@ describe("App wiring: tools and keyboard help", () => {
 
   it("ignores keys typed into a field", async () => {
     await mountWithSnapshot(documentJson(["wds-1"]));
-    const field = screen.getByRole("textbox", { name: "Dataset path or URL" });
+    // The dialog's file browser lists a folder as it opens.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ path: "/", entries: [] })));
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "o", code: "KeyO", ctrlKey: true });
+    });
+    const dialog = await screen.findByRole("dialog", { name: "Add data" });
+    const field = within(dialog).getByRole("textbox", { name: "Dataset path or URL" });
     await act(async () => {
       fireEvent.keyDown(field, { key: "p", code: "KeyP" });
     });
     expect(screen.getByRole("button", { name: "Point tool" }).getAttribute("aria-pressed")).toBe("false");
+    fetchSpy.mockRestore();
   });
 
   it("runs a shell command from the palette", async () => {

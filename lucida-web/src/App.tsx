@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { BookmarkSimpleIcon, ChatCircleIcon, CompassIcon, FolderOpenIcon, InfoIcon } from "@phosphor-icons/react";
+import { BookmarkSimpleIcon, ChatCircleIcon, CompassIcon, InfoIcon } from "@phosphor-icons/react";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
@@ -18,7 +18,6 @@ import {
   resolveAnnotationDatasetId,
 } from "./components/currentDatasetAnnotations.ts";
 import { FpsCounter } from "./components/FpsCounter.tsx";
-import { FileBrowser } from "./components/FileBrowser.tsx";
 import { CollectionSelector, extractCollectionData } from "./components/CollectionSelector.tsx";
 import { frameRect } from "./components/groupFraming.ts";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
@@ -74,8 +73,8 @@ import { setBundleServices } from "./trace/bundle.ts";
 import { visibleRectOf } from "./trace/flatFrame.ts";
 import { currentChunkSelection, onChunkSelectionChanged } from "./trace/linkedSelection.ts";
 import { setReportSender } from "./trace/reportInbox.ts";
+import { AddDataDialog, AddDataPrompt, noteSourceOpenFailed } from "./addData/index.ts";
 import { Banner } from "./shell/Banner.tsx";
-import { BottomToolbar } from "./shell/BottomToolbar.tsx";
 import { CanvasStage, type CanvasSize } from "./shell/CanvasStage.tsx";
 import { DimensionBar } from "./shell/DimensionBar.tsx";
 import { useOpenRightPanel } from "./shell/layoutPreferences.ts";
@@ -85,7 +84,6 @@ import { ToolPalette } from "./shell/ToolPalette.tsx";
 import { TopBar } from "./shell/TopBar.tsx";
 import { useDeveloperSurfaces } from "./shell/useDeveloperSurfaces.ts";
 import { useViewerCommands } from "./shell/useViewerCommands.ts";
-import { Button } from "./ui/Button.tsx";
 import { KeyboardHelp } from "./ui/KeyboardHelp.tsx";
 import "./App.css";
 
@@ -252,7 +250,10 @@ function App({
     datasetCallbacksRef,
     savedViewHooksRef,
     bumpLayerSettingsVersion: layers.bumpLayerSettingsVersion,
-    initLayerMaps: layers.initLayerMaps,
+    initLayerMaps: (id) => {
+      layers.initLayerMaps(id);
+      dims.handleDatasetRegistered(id);
+    },
     setZ: dims.setZ,
     setC: dims.setC,
     setT: dims.setT,
@@ -376,7 +377,10 @@ function App({
   // eslint-disable-next-line react-hooks/refs
   savedViewHooksRef.current = {
     onDatasetOpened: (id) => savedViewSync.applier.notifyDatasetOpened(id),
-    onOpenDatasetFailed: (url, err) => savedViewSync.applier.notifyOpenFailed(url, err),
+    onOpenDatasetFailed: (url, err) => {
+      savedViewSync.applier.notifyOpenFailed(url, err);
+      noteSourceOpenFailed(url);
+    },
     // So the bridge can suppress auto-fit-on-open while a saved or last view is
     // restoring its own camera.
     isInProgress: () => savedViewSync.applier.isInProgress(),
@@ -880,7 +884,7 @@ function App({
     requestRender(render.loopRef.current, "camera_mode_toggle");
   }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef]);
 
-  const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [addDataOpen, setAddDataOpen] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
   // localStorage `debug.overlays`, independent of every panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
@@ -1043,10 +1047,6 @@ function App({
     const spec = layoutRegistry.getSpec(selectedDatasetId, activeId);
     return spec?.name ?? activeId;
   }, [selectedDatasetId, layoutRegistry]);
-  const handleFileBrowserSelect = useCallback((path: string) => {
-    datasets.handleUrlSubmit(path);
-  }, [datasets]);
-
   const savedViewApplier = savedViewSync.applier;
   const notifySavedViewChange = savedViewSync.notifyChange;
   const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView, savedViewId: string) => {
@@ -1084,7 +1084,6 @@ function App({
     viewMode: dims.viewMode,
     hasData: datasetsVersion > 0,
     onToggleViewMode: dims.handleViewModeToggle,
-    onAddData: () => setShowFileBrowser(true),
     onBackToDashboard,
     rightPanels: [
       { id: "savedViews", label: "Saved views" },
@@ -1173,20 +1172,15 @@ function App({
               layers={layers.layerInfos}
               selectedLayerId={selectedDatasetId}
               expandedLayerId={layers.expandedLayerId}
+              soloChannel={dims.soloChannel}
               onSelectLayer={layers.handleLayerSelect}
               onToggleExpand={layers.handleLayerToggleExpand}
               onSetVisible={layers.handleLayerSetVisible}
               onSetOpacity={layers.handleLayerSetOpacity}
-              multiChannel={dims.multiChannel}
-              onSetContrast={layers.handleLayerSetContrast}
-              onSetGamma={layers.handleLayerSetGamma}
-              onSetColormap={layers.handleLayerSetColormap}
               onSetBlendMode={layers.handleLayerSetBlendMode}
               onSetRenderMode={layers.handleLayerSetRenderMode}
               onSetLevelPin={layers.handleLayerSetLevelPin}
-              onAutoContrast={layers.handleLayerAutoContrast}
-              onAutoContrastToggle={layers.handleLayerAutoContrastToggle}
-              onFullRangeToggle={layers.handleLayerFullRangeToggle}
+              onAutoContrastChange={layers.handleAutoContrastChange}
               onMoveLayer={layers.handleLayerMove}
               onRemoveLayer={layers.handleRemoveLayer}
               onRenameLayer={layers.handleLayerRename}
@@ -1196,12 +1190,13 @@ function App({
               onChannelSetName={layers.handleChannelSetName}
               onChannelSetContrast={layers.handleChannelSetContrast}
               onChannelSetGamma={layers.handleChannelSetGamma}
+              onChannelAutoFit={layers.handleChannelAutoFit}
               onChannelSetBlendMode={layers.handleChannelSetBlendMode}
+              onSoloChannel={dims.handleSoloChannel}
+              onShowAllChannels={dims.handleShowAllChannels}
               onLabelSetVisible={layers.handleLabelSetVisible}
               onLabelSetOpacity={layers.handleLabelSetOpacity}
-              onAddLayer={() => setShowFileBrowser(true)}
-              viewModeToggle={null}
-              cameraModeToggle={null}
+              onAddData={() => setAddDataOpen(true)}
               layoutRegistry={layoutRegistry}
               sendCommand={bridge.sendCommand}
               onLayoutChange={() => {
@@ -1215,8 +1210,6 @@ function App({
                 // it here for the overlay to re-read the pins.
                 bumpRemoteDocumentVersion();
               }}
-              // The left panel draws the edge.
-              style={{ borderRight: "none" }}
             />
           </LeftPanel>
         )}
@@ -1229,12 +1222,7 @@ function App({
             bare={captureSurface}
             emptyState={
               !hasData && bridge.sessionReady && !bridge.remoteDatasetLoading && !captureSurface ? (
-                <div className="lc-shell-empty">
-                  <p>This workspace has no data yet.</p>
-                  <Button icon={FolderOpenIcon} onPress={() => setShowFileBrowser(true)}>
-                    Add data
-                  </Button>
-                </div>
+                <AddDataPrompt onAddData={() => setAddDataOpen(true)} />
               ) : null
             }
             slots={{
@@ -1321,13 +1309,6 @@ function App({
                   onTChange={dims.handleTChange}
                   cameraMode={cameraMode === "fly" ? "fly" : "arcball"}
                   onCameraModeToggle={handleCameraModeToggle}
-                  channel={{
-                    c: dims.c,
-                    dimC: dims.dimC,
-                    onCChange: dims.handleCChange,
-                    multiChannel: dims.multiChannel,
-                    onMultiChannelToggle: dims.handleMultiChannelToggle,
-                  }}
                 />
               ),
               // Mounted before any dataset opens, and only hidden until one
@@ -1455,13 +1436,6 @@ function App({
               </Suspense>
             )}
           </CanvasStage>
-          {!captureSurface && (
-            <BottomToolbar
-              onOpenUrl={datasets.handleUrlSubmit}
-              loading={bridge.remoteDatasetLoading}
-              onBrowse={() => setShowFileBrowser(true)}
-            />
-          )}
           {developer.monitor && (
             // The dock overlays the canvas rather than resizing it (ADR 0052),
             // so opening it changes nothing the recorder sees. Its frame keeps
@@ -1557,18 +1531,12 @@ function App({
           />
         )}
       </div>
-      {showFileBrowser && (
-        <FileBrowser
-          onSelect={handleFileBrowserSelect}
-          onCreateWorkspace={
-            onCreateWorkspaceFromDatasets
-              ? (paths) => {
-                  setShowFileBrowser(false);
-                  onCreateWorkspaceFromDatasets(paths);
-                }
-              : undefined
-          }
-          onClose={() => setShowFileBrowser(false)}
+      {!captureSurface && (
+        <AddDataDialog
+          isOpen={addDataOpen}
+          onOpenChange={setAddDataOpen}
+          onOpen={datasets.handleUrlSubmit}
+          onCreateWorkspace={onCreateWorkspaceFromDatasets}
         />
       )}
       {!captureSurface && <KeyboardHelp />}
