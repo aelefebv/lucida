@@ -24,7 +24,7 @@ export {
   type CommandOptions,
 } from "./commands.ts";
 export { Dialog, type DialogProps } from "./Dialog.tsx";
-export { escapeTopLayer, hasEscapeLayer, pushEscapeLayer, useEscapeLayer } from "./escape.ts";
+export { escapeTopLayer, hasEscapeLayer, pushEscapeLayer } from "./escape.ts";
 export type { LabelPosition } from "./fieldProps.ts";
 export { Kbd, type KbdProps } from "./Kbd.tsx";
 export { KeyboardHelp } from "./KeyboardHelp.tsx";

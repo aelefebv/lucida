@@ -1,32 +1,20 @@
-import { useEffect, useRef } from "react";
-
 /**
- * What Escape undoes, innermost first. Something transient (an open thread,
- * a shape being drawn) pushes a layer while it lasts, and the viewer's
- * Escape shortcut calls the newest one before falling back to its own
- * action. Overlays built on the primitives close themselves on Escape and
- * need no layer.
+ * What Escape undoes, innermost first, for transient state that is not an
+ * overlay, such as a shape being drawn. It pushes a layer while it lasts,
+ * and the viewer's Escape shortcut runs the newest one before falling back
+ * to its own action. Overlays close themselves on Escape and need no layer.
  */
 
-const layers: { current: () => void }[] = [];
+const layers: { readonly onEscape: () => void }[] = [];
 
-/** Push a layer until the returned function runs. For gestures, outside React. */
+/** Push a layer until the returned function runs. */
 export function pushEscapeLayer(onEscape: () => void): () => void {
-  const layer = { current: onEscape };
+  const layer = { onEscape };
   layers.push(layer);
   return () => {
     const at = layers.lastIndexOf(layer);
     if (at >= 0) layers.splice(at, 1);
   };
-}
-
-/** Hold a layer while `active`. `onEscape` may change on every render. */
-export function useEscapeLayer(active: boolean, onEscape: () => void): void {
-  const ref = useRef(onEscape);
-  useEffect(() => {
-    ref.current = onEscape;
-  });
-  useEffect(() => (active ? pushEscapeLayer(() => ref.current()) : undefined), [active]);
 }
 
 export function hasEscapeLayer(): boolean {
@@ -37,7 +25,7 @@ export function hasEscapeLayer(): boolean {
 export function escapeTopLayer(): boolean {
   const layer = layers.pop();
   if (!layer) return false;
-  layer.current();
+  layer.onEscape();
   return true;
 }
 

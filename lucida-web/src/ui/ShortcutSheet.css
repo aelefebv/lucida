@@ -50,7 +50,7 @@
 }
 
 .lc-shortcut-note {
-  margin: 0;
+  margin: var(--lc-space-2) 0 0;
   color: var(--lc-text-subtle);
   font-size: var(--lc-text-sm);
 }

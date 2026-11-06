@@ -50,10 +50,9 @@ the same way: `useCommand` with an id, a label, a group, and `run`. Its `keys`
 register a shortcut under the command's id, and the palette shows whatever
 shortcut shares a command's id, so a key bound by its owner with
 `useShortcut` still appears beside the matching command. Escape undoes the
-innermost transient state first: anything transient that is not a primitive
-overlay (a thread, a shape being drawn) holds an Escape layer while it lasts,
-and the viewer's Escape shortcut runs the newest one before returning to the
-pan tool.
+innermost transient state first: an open overlay closes itself, a shape being
+drawn holds an Escape layer while it lasts, and otherwise the viewer's Escape
+shortcut returns to the pan tool.
 
 Toasts go through one region at the app root and a `toast()` call that works
 outside React.

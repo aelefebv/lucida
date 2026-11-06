@@ -4,12 +4,11 @@
  *
  * The pin set is re-read in an effect when `version` or the dataset changes,
  * never during render or in the RAF tick. The open thread closes when its pin
- * vanishes, the dataset changes, annotations are hidden, or on Escape.
- * Projection and gestures stay in the components.
+ * vanishes, the dataset changes, or annotations are hidden. Projection and
+ * gestures stay in the components.
  */
 import { useEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from "react";
 import type { WasmScene } from "lucida-core";
-import { useEscapeLayer } from "../ui/escape.ts";
 import { readAnnotations, type Annotation } from "./annotationDocument.ts";
 
 export interface AnnotationOverlayState {
@@ -60,9 +59,6 @@ export function useAnnotationOverlay(opts: {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (!visible) setOpenPinId(null);
   }, [visible]);
-
-  // The thread is a popover, so Escape closes it.
-  useEscapeLayer(openPinId !== null, () => setOpenPinId(null));
 
   // Render-phase mirror so the RAF loop reads the latest pins without
   // remounting. Written, never read, during render.
