@@ -15,6 +15,16 @@
   line-height: 1.4;
 }
 
+/* The empty label and help rows would each still take a row gap, which
+   moves the control off the line of a button beside it. */
+.lc-field[data-label-position="hidden"] {
+  row-gap: 0;
+}
+
+.lc-field[data-label-position="hidden"] > .lc-field-help {
+  margin-top: var(--lc-space-1);
+}
+
 .lc-field[data-label-position="side"] {
   grid-template-columns: minmax(0, 1fr) auto;
   grid-template-areas:

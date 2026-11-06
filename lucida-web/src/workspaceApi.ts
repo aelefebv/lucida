@@ -16,6 +16,8 @@ export interface WorkspaceSummary {
   default_saved_view_id: string | null;
   last_opened_at: string | null;
   pinned_at: string | null;
+  /** Canonical URL of the first dataset in layer order; null until one is opened. */
+  first_dataset_url?: string | null;
 }
 
 export interface WorkspaceRecord {
