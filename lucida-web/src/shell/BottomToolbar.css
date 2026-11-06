@@ -15,7 +15,6 @@
 }
 
 .lc-bottom-toolbar button,
-.lc-bottom-toolbar input,
 .lc-bottom-toolbar select {
   box-sizing: border-box;
   height: var(--lc-control-h);
@@ -47,17 +46,11 @@
   color: var(--lc-accent-text);
 }
 
-.lc-bottom-toolbar input,
 .lc-bottom-toolbar select {
   padding: 0 var(--lc-space-2);
   border: 1px solid var(--lc-border-strong);
   background: var(--lc-field-bg);
   color: var(--lc-text);
-}
-
-.lc-bottom-toolbar-url {
-  flex: 1 1 200px;
-  min-width: 160px;
 }
 
 .lc-bottom-toolbar-label {

@@ -1,5 +1,5 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import { BookmarkSimpleIcon, CompassIcon, FolderOpenIcon } from "@phosphor-icons/react";
+import { BookmarkSimpleIcon, CompassIcon } from "@phosphor-icons/react";
 import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
@@ -16,7 +16,6 @@ import {
   resolveAnnotationDatasetId,
 } from "./components/currentDatasetAnnotations.ts";
 import { FpsCounter } from "./components/FpsCounter.tsx";
-import { FileBrowser } from "./components/FileBrowser.tsx";
 import { CollectionSelector, extractCollectionData } from "./components/CollectionSelector.tsx";
 import { frameRect } from "./components/groupFraming.ts";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
@@ -71,6 +70,7 @@ import { setBundleServices } from "./trace/bundle.ts";
 import { visibleRectOf } from "./trace/flatFrame.ts";
 import { currentChunkSelection, onChunkSelectionChanged } from "./trace/linkedSelection.ts";
 import { setReportSender } from "./trace/reportInbox.ts";
+import { AddDataDialog, AddDataPrompt, noteSourceOpenFailed } from "./addData/index.ts";
 import { Banner } from "./shell/Banner.tsx";
 import { BottomToolbar } from "./shell/BottomToolbar.tsx";
 import { CanvasStage, type CanvasSize } from "./shell/CanvasStage.tsx";
@@ -80,7 +80,6 @@ import { LeftPanel } from "./shell/LeftPanel.tsx";
 import { RightRail } from "./shell/RightRail.tsx";
 import { TopBar } from "./shell/TopBar.tsx";
 import { useDeveloperSurfaces } from "./shell/useDeveloperSurfaces.ts";
-import { Button } from "./ui/Button.tsx";
 import "./App.css";
 
 // The debug UI is code-split: the panel loads on first open, the overlay layer
@@ -371,7 +370,10 @@ function App({
   // eslint-disable-next-line react-hooks/refs
   savedViewHooksRef.current = {
     onDatasetOpened: (id) => savedViewSync.applier.notifyDatasetOpened(id),
-    onOpenDatasetFailed: (url, err) => savedViewSync.applier.notifyOpenFailed(url, err),
+    onOpenDatasetFailed: (url, err) => {
+      savedViewSync.applier.notifyOpenFailed(url, err);
+      noteSourceOpenFailed(url);
+    },
     // So the bridge can suppress auto-fit-on-open while a saved or last view is
     // restoring its own camera.
     isInProgress: () => savedViewSync.applier.isInProgress(),
@@ -860,7 +862,7 @@ function App({
     render.canvasRef.current?.focus();
   }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef, render.canvasRef]);
 
-  const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [addDataOpen, setAddDataOpen] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
   // localStorage `debug.overlays`, independent of every panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
@@ -996,10 +998,6 @@ function App({
     const spec = layoutRegistry.getSpec(selectedDatasetId, activeId);
     return spec?.name ?? activeId;
   }, [selectedDatasetId, layoutRegistry]);
-  const handleFileBrowserSelect = useCallback((path: string) => {
-    datasets.handleUrlSubmit(path);
-  }, [datasets]);
-
   const savedViewApplier = savedViewSync.applier;
   const notifySavedViewChange = savedViewSync.notifyChange;
   const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView, savedViewId: string) => {
@@ -1141,7 +1139,7 @@ function App({
               onChannelSetBlendMode={layers.handleChannelSetBlendMode}
               onLabelSetVisible={layers.handleLabelSetVisible}
               onLabelSetOpacity={layers.handleLabelSetOpacity}
-              onAddLayer={() => setShowFileBrowser(true)}
+              onAddLayer={() => setAddDataOpen(true)}
               viewModeToggle={datasetsVersion > 0 ? { label: dims.viewMode === "2d" ? "3D" : "2D", onClick: dims.handleViewModeToggle } : null}
               cameraModeToggle={dims.viewMode === "3d" ? { label: cameraMode === "fly" ? "Arcball" : "Fly", onClick: handleCameraModeToggle } : null}
               layoutRegistry={layoutRegistry}
@@ -1171,12 +1169,7 @@ function App({
             bare={captureSurface}
             emptyState={
               !hasData && bridge.sessionReady && !bridge.remoteDatasetLoading && !captureSurface ? (
-                <div className="lc-shell-empty">
-                  <p>This workspace has no data yet.</p>
-                  <Button icon={FolderOpenIcon} onPress={() => setShowFileBrowser(true)}>
-                    Add data
-                  </Button>
-                </div>
+                <AddDataPrompt onAddData={() => setAddDataOpen(true)} />
               ) : null
             }
             slots={{
@@ -1386,9 +1379,6 @@ function App({
           </CanvasStage>
           {!captureSurface && (
             <BottomToolbar
-              onOpenUrl={datasets.handleUrlSubmit}
-              loading={bridge.remoteDatasetLoading}
-              onBrowse={() => setShowFileBrowser(true)}
               getCurrentSavedView={savedViewSync.captureBuilder}
               annotationKind={annotationKind}
               onAnnotationKindChange={setAnnotationKind}
@@ -1456,18 +1446,12 @@ function App({
           />
         )}
       </div>
-      {showFileBrowser && (
-        <FileBrowser
-          onSelect={handleFileBrowserSelect}
-          onCreateWorkspace={
-            onCreateWorkspaceFromDatasets
-              ? (paths) => {
-                  setShowFileBrowser(false);
-                  onCreateWorkspaceFromDatasets(paths);
-                }
-              : undefined
-          }
-          onClose={() => setShowFileBrowser(false)}
+      {!captureSurface && (
+        <AddDataDialog
+          isOpen={addDataOpen}
+          onOpenChange={setAddDataOpen}
+          onOpen={datasets.handleUrlSubmit}
+          onCreateWorkspace={onCreateWorkspaceFromDatasets}
         />
       )}
       <WorkspaceSharingDialog
