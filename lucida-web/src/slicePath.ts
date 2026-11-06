@@ -292,7 +292,8 @@ function uploadAndRenderSlice(
   const fullW = Math.round(canvas.clientWidth * dpr);
   const fullH = Math.round(canvas.clientHeight * dpr);
   // Zoom is scaled by the same factor below, so only resolution changes.
-  const backingScale = sliceBackingScale(fullW, fullH);
+  const resolution = ctx.resolutionScale;
+  const backingScale = resolution * sliceBackingScale(fullW * resolution, fullH * resolution);
   const canvasW = Math.max(1, Math.round(fullW * backingScale));
   const canvasH = Math.max(1, Math.round(fullH * backingScale));
 

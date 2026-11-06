@@ -391,12 +391,15 @@ beforeEach(() => {
   vi.clearAllMocks();
   MockedBridge.instances.length = 0;
   FakeScene.instances.length = 0;
+  // The page draws through the mocked render client, as in a WebGPU browser.
+  Object.defineProperty(navigator, "gpu", { value: {}, configurable: true });
 });
 
 afterEach(() => {
   cleanup();
   showKeyboardHelp(null);
   window.location.hash = "";
+  delete (navigator as { gpu?: unknown }).gpu;
 });
 
 describe("App wiring: channels", () => {
@@ -611,6 +614,19 @@ describe("App wiring: the shell", () => {
   it("names the page after the workspace", async () => {
     await mountWithSnapshot(documentJson(["wds-1"]));
     expect(document.title).toBe("Wiring · lucida");
+  });
+
+  it("explains a browser without WebGPU in place of the viewer", async () => {
+    delete (navigator as { gpu?: unknown }).gpu;
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    const message = screen.getByRole("alert");
+    expect(message.textContent).toContain("This browser can’t show the viewer");
+    expect(message.textContent).toContain("Chrome, Edge, or Safari");
+    // Nothing over the canvas to drive, and no error banner for it.
+    expect(screen.queryByRole("button", { name: "Point tool" })).toBeNull();
+    expect(screen.queryByText(/WebGPU is not supported/)).toBeNull();
+    // The rest of the workspace still works.
+    expect(screen.getByRole("complementary", { name: "Layers" })).toBeTruthy();
   });
 
   it("collapses the left panel on Alt+[ and remembers it", async () => {

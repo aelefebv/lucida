@@ -4,15 +4,15 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 
-/** Atlas budget for the fixed-size 3D volume atlas (per dataset). */
-export const VOLUME_ATLAS_BUDGET = 512 * 1024 * 1024; // 512 MB
-
-/** Atlas budget for the fixed-size 2D slice atlas (per dataset). */
-export const SLICE_ATLAS_BUDGET = 64 * 1024 * 1024; // 64 MB
-
 export interface InitMessage {
   type: "init";
   canvas: OffscreenCanvas;
+  /**
+   * The page's reading of the device's memory, in GiB, or null when unknown.
+   * The page reads it because only it can tell a touch-only device that
+   * reports none; the worker fits its atlas budgets from it (ADR 0068).
+   */
+  deviceMemoryGiB?: number | null;
 }
 
 export interface ResizeMessage {
@@ -241,6 +241,8 @@ export interface VolumeRenderMultiPassMessage {
   camForward?: Float32Array;
   clipDistance?: number;
   clipMode?: number;
+  /** Echoed in the frame's {@link FrameDoneMessage}. */
+  frameSeq?: number;
 }
 
 /**
@@ -325,6 +327,8 @@ export interface SliceRenderMultiPassMessage {
   cy: number;
   canvasW: number;
   canvasH: number;
+  /** Echoed in the frame's {@link FrameDoneMessage}. */
+  frameSeq?: number;
 }
 
 export interface MinimapLayerParams {
@@ -828,6 +832,17 @@ export interface GpuPassTimeMessage {
   gpuPassUs: number;
 }
 
+/**
+ * A viewport frame's GPU work has finished. Posted for every frame on every
+ * device, unlike {@link GpuPassTimeMessage}, so the page can time a frame
+ * from dispatch to done on its own clock and lower the render resolution
+ * when frames run long (ADR 0068).
+ */
+export interface FrameDoneMessage {
+  type: "frameDone";
+  frameSeq: number;
+}
+
 /** Why a frame could not be read: the error's name and message, as the bundle's reason carries them. */
 export interface CaptureFailure {
   name: string;
@@ -876,4 +891,5 @@ export type WorkerToMainMessage =
   | WantedSetDeltaMessage
   | EntityLevelsMessage
   | GpuPassTimeMessage
+  | FrameDoneMessage
   | FrameCapturedMessage;

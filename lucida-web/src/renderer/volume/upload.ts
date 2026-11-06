@@ -20,7 +20,7 @@ import {
 import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
 import { chunkDistSq, findFarthestSlot, rayHitForMember } from "./eviction.ts";
-import { acquireLabelSlot, getOrCreateLabelVolumePool } from "./atlas.ts";
+import { acquireLabelSlot, getOrCreateLabelVolumePool, growVolumeAtlas } from "./atlas.ts";
 
 /**
  * Write whole 3D uint32 label chunks into the member's bricked r32uint
@@ -146,6 +146,10 @@ export function handleVolumeChunkData(
     const compositeKey = makeCompositeKey(memberId, chunk.key);
     if (atlas.slots.has(compositeKey)) continue;
 
+    // A pool grows only once every slot it has holds a chunk.
+    if (atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
+      growVolumeAtlas(ctx.device, atlas);
+    }
     let slotIndex: number;
     if (atlas.freeSlots.length > 0) {
       slotIndex = atlas.freeSlots.pop()!;

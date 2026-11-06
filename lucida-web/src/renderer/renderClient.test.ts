@@ -82,6 +82,33 @@ describe("RenderClient destroy", () => {
     expect(client.takeGpuPassUs()).toBeNull();
   });
 
+  it("times each viewport frame from dispatch to the worker's frameDone", () => {
+    const { client, worker } = makeReadyClient();
+    const epochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
+    client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    vi.advanceTimersByTime(5);
+    client.volumeRenderMultiPass(noLayers, invViewProj, eye, 10, 10, 10, 10, epochs);
+    const sent = worker.posted.filter((m) => m.type.endsWith("RenderMultiPass")).map((m) => m.frameSeq);
+    expect(sent).toEqual([1, 2]);
+    expect(client.lastFrameSeq()).toBe(2);
+    expect(client.takeFrameLatency()).toBeNull();
+
+    vi.advanceTimersByTime(40);
+    worker.emit({ type: "frameDone", frameSeq: 2 });
+    // The first frame's report never came; the second's covers it.
+    expect(client.takeFrameLatency()).toEqual({ frameSeq: 2, ms: 40 });
+    expect(client.takeFrameLatency()).toBeNull();
+    worker.emit({ type: "frameDone", frameSeq: 1 });
+    expect(client.takeFrameLatency()).toBeNull();
+  });
+
+  it("sends the page's reading of device memory with init", () => {
+    vi.stubGlobal("navigator", { deviceMemory: 4 });
+    makeReadyClient();
+    const worker = FakeWorker.instances[FakeWorker.instances.length - 1];
+    expect(worker.posted[0]).toMatchObject({ type: "init", deviceMemoryGiB: 4 });
+  });
+
   it("destroy before init settles ready() with a rejection", async () => {
     const client = new RenderClient(makeCanvas());
     const ready = client.ready();

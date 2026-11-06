@@ -2,6 +2,7 @@
 import type {
   CanvasColors,
   Chunk,
+  InitMessage,
   VolumeLayerParams,
   SliceLayerParams,
   MinimapLayerParams,
@@ -25,6 +26,7 @@ import type {
 } from "../pipeline/upload/uploadClient.ts";
 import { tokenColor } from "../theme/tokenColors.ts";
 import type { ResolvedColor } from "../theme/tokens.ts";
+import { readDeviceMemoryGiB } from "../deviceBudget.ts";
 
 /**
  * How much of the canvas stroke the tile frame takes. Members sit edge to
@@ -56,6 +58,15 @@ function failureText(failure: CaptureFailure | null): string {
 }
 
 const DESTROYED_BEFORE_ANSWER = "the render client was destroyed before the worker answered";
+
+/** Frames in flight past which the oldest is taken as lost. */
+const MAX_FRAMES_AWAITING_DONE = 64;
+
+/** One viewport frame, timed from dispatch until its GPU work was done. */
+export interface FrameLatency {
+  frameSeq: number;
+  ms: number;
+}
 
 export class RenderClient implements UploadClient {
   private worker: Worker;
@@ -127,6 +138,12 @@ export class RenderClient implements UploadClient {
 
   private gpuPassUs: number | null = null;
 
+  /** The last viewport frame dispatched. */
+  private viewportFrameSeq = 0;
+  /** When each frame still awaiting its `frameDone` was dispatched. */
+  private readonly frameDispatchedAt = new Map<number, number>();
+  private frameLatency: FrameLatency | null = null;
+
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
     this.worker = new Worker(
@@ -163,7 +180,8 @@ export class RenderClient implements UploadClient {
     // awaiting callers still observe the rejection themselves.
     this.readyPromise.catch(() => {});
 
-    this.worker.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
+    const init: InitMessage = { type: "init", canvas: offscreen, deviceMemoryGiB: readDeviceMemoryGiB() };
+    this.worker.postMessage(init, [offscreen]);
   }
 
   /** Resolves when the worker finishes init; rejects if `destroy()` runs
@@ -183,6 +201,45 @@ export class RenderClient implements UploadClient {
     const gpuPassUs = this.gpuPassUs;
     this.gpuPassUs = null;
     return gpuPassUs;
+  }
+
+  /**
+   * The newest frame finished since the last call, timed from dispatch to its
+   * GPU work done on this thread's clock, or null when none finished. Taking
+   * it clears it.
+   */
+  takeFrameLatency(): FrameLatency | null {
+    const latency = this.frameLatency;
+    this.frameLatency = null;
+    return latency;
+  }
+
+  /** The sequence number of the last viewport frame dispatched. */
+  lastFrameSeq(): number {
+    return this.viewportFrameSeq;
+  }
+
+  /** Number the next viewport frame and note when it left. */
+  private nextFrameSeq(): number {
+    this.viewportFrameSeq += 1;
+    this.frameDispatchedAt.set(this.viewportFrameSeq, performance.now());
+    // A frame whose report never comes (the worker dropped it) must not
+    // hold its entry forever.
+    if (this.frameDispatchedAt.size > MAX_FRAMES_AWAITING_DONE) {
+      const oldest = this.frameDispatchedAt.keys().next().value;
+      if (oldest !== undefined) this.frameDispatchedAt.delete(oldest);
+    }
+    return this.viewportFrameSeq;
+  }
+
+  private noteFrameDone(frameSeq: number): void {
+    const dispatchedAt = this.frameDispatchedAt.get(frameSeq);
+    for (const seq of this.frameDispatchedAt.keys()) {
+      if (seq > frameSeq) break;
+      this.frameDispatchedAt.delete(seq);
+    }
+    if (dispatchedAt === undefined) return;
+    this.frameLatency = { frameSeq, ms: performance.now() - dispatchedAt };
   }
 
   private onMessage = (e: MessageEvent<WorkerToMainMessage>) => {
@@ -208,6 +265,8 @@ export class RenderClient implements UploadClient {
       // Latest wins: when two frames land between ticks, the newer one is
       // the frame on screen.
       this.gpuPassUs = msg.gpuPassUs;
+    } else if (msg.type === "frameDone") {
+      this.noteFrameDone(msg.frameSeq);
     } else if (msg.type === "pipelinesCompiled") {
       this.notePipelinesCompiled();
     } else if (msg.type === "thumbnailResult") {
@@ -474,6 +533,7 @@ export class RenderClient implements UploadClient {
       layers, invViewProj, eye,
       canvasW, canvasH, fullW, fullH, viewProj,
       camForward, clipDistance, clipMode,
+      frameSeq: this.nextFrameSeq(),
     });
   }
 
@@ -498,6 +558,7 @@ export class RenderClient implements UploadClient {
       epochs,
       layers, zoom, cx, cy,
       canvasW, canvasH,
+      frameSeq: this.nextFrameSeq(),
     }, transfer);
   }
 

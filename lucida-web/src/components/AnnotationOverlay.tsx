@@ -9,6 +9,7 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyViewportCommand } from "../applyAndSend.ts";
+import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
 import type { Annotation } from "./annotationDocument.ts";
 import { useAnnotationOverlay } from "./useAnnotationOverlay.ts";
 import {
@@ -288,8 +289,9 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId],
   );
 
+  // A new or changed pin needs a frame to be placed.
+  useWakeFramesOnRender();
   useEffect(() => {
-    let rafId: number;
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
@@ -384,10 +386,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
           }
         }
       }
-      rafId = requestAnimationFrame(tick);
     };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    return frameClock.subscribe(tick);
   }, [wasmSceneRef, canvas, annotationsRef]);
 
   /** The shared inverse projection, tolerating an unready scene, so a moved pin

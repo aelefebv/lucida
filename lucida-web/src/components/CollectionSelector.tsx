@@ -6,6 +6,7 @@ import { Button } from "../ui/Button.tsx";
 import { CanvasCard } from "./CanvasCard.tsx";
 import { navigatorCardPreference } from "./canvasCards.ts";
 import { groupAt, unionRects } from "./groupFraming.ts";
+import { frameClock } from "../frameClock.ts";
 import "./CollectionSelector.css";
 
 export interface CollectionKind {
@@ -162,25 +163,21 @@ export function CollectionSelector({
     getViewCenterRef.current = getViewCenter;
   });
 
-  // The camera moves without a React render, so the mark follows it frame by
-  // frame and re-renders only when the group changes.
+  // The camera moves without a React render, so the mark follows it on the
+  // frame clock and re-renders only when the group changes.
   const watching = cardState !== "hidden" && getViewCenter !== undefined;
   useEffect(() => {
     if (!watching) return;
-    let raf = 0;
     let lastX = NaN;
     let lastY = NaN;
-    const tick = () => {
+    return frameClock.subscribe(() => {
       const center = getViewCenterRef.current?.();
       if (center && center.length >= 2 && (center[0] !== lastX || center[1] !== lastY)) {
         lastX = center[0];
         lastY = center[1];
         setCurrentKey(groupAt(groups, [lastX, lastY]));
       }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
+    });
   }, [watching, groups]);
 
   const handleGroupClick = (key: string) => {

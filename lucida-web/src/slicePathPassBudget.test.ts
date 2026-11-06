@@ -413,6 +413,7 @@ function makeSeamHarness(opts: {
     },
     mode: "slice",
     renderScale: 1,
+    resolutionScale: 1,
   } as unknown as TickContext;
 
   return {
