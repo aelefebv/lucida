@@ -1,5 +1,7 @@
 import { useMemo } from "react";
 import type { DatasetManifest, DatasetKind, Entity, LayoutSpec } from "../manifestTypes.ts";
+import { buildManifestIndex, entityExtent, type VoxelRect } from "../pipeline/layoutBuilders.ts";
+import { unionRects } from "./groupFraming.ts";
 
 export interface CollectionKind {
   rows: string[];
@@ -11,6 +13,8 @@ export interface CollectionKind {
 interface PlacedMember {
   id: string;
   position: [number, number];
+  /** What the 2D view draws for this member; null when it draws nothing. */
+  bounds: VoxelRect | null;
   rowIndex?: number;
   columnIndex?: number;
 }
@@ -19,7 +23,7 @@ interface CollectionSelectorProps {
   collectionKind: CollectionKind;
   members: PlacedMember[];
   collectionName: string;
-  onGroupClick: (centerX: number, centerY: number) => void;
+  onGroupClick: (bounds: VoxelRect) => void;
   onPositioningModeToggle?: () => void;
 }
 
@@ -27,8 +31,8 @@ interface CollectionSelectorProps {
  * Extract CollectionKind and positioned members from a DatasetManifest.
  *
  * Non-empty `activeLayoutPlacements` take precedence over the source default
- * layout, so click-to-pan follows the active layout. The row/col grid stays on
- * the collection's logical structure either way.
+ * layout, so clicking a group frames it where the active layout put it. The
+ * row/col grid stays on the collection's logical structure either way.
  *
  * Returns null if the dataset is not a collection.
  */
@@ -60,13 +64,24 @@ export function extractCollectionData(
         )?.placements;
 
   if (placements) {
+    const index = buildManifestIndex(manifest);
+    const entityById = new Map<string, Entity>();
+    for (const e of manifest.entities) {
+      if (!entityById.has(e.id)) entityById.set(e.id, e);
+    }
     for (const placement of placements) {
-      const entity = manifest.entities.find((e: Entity) => e.id === placement.entity_id);
+      const entity = entityById.get(placement.entity_id);
       if (entity) {
         const labels = entity.labels as Record<string, unknown>;
+        const extent = entityExtent(index, entity.id);
+        const [x, y] = placement.position;
         members.push({
           id: entity.id,
           position: placement.position,
+          bounds: extent && {
+            min: [x + extent.min[0], y + extent.min[1]],
+            max: [x + extent.max[0], y + extent.max[1]],
+          },
           rowIndex: typeof labels.row_index === "number" ? labels.row_index : undefined,
           columnIndex: typeof labels.column_index === "number" ? labels.column_index : undefined,
         });
@@ -75,7 +90,7 @@ export function extractCollectionData(
   } else {
     // Fallback: use image IDs with zero position
     for (const img of manifest.images) {
-      members.push({ id: img.image_id, position: [0, 0] });
+      members.push({ id: img.image_id, position: [0, 0], bounds: null });
     }
   }
 
@@ -123,20 +138,8 @@ export function CollectionSelector({
 
   const handleGroupClick = (rowIdx: number, colIdx: number) => {
     const key = `${rowIdx},${colIdx}`;
-    const groupMembers = groupMemberMap.get(key);
-    if (!groupMembers || groupMembers.length === 0) return;
-
-    // Compute center as the average position of all members in this group
-    let sumX = 0;
-    let sumY = 0;
-    for (const m of groupMembers) {
-      sumX += m.position[0];
-      sumY += m.position[1];
-    }
-    const centerX = sumX / groupMembers.length;
-    const centerY = sumY / groupMembers.length;
-
-    onGroupClick(centerX, centerY);
+    const bounds = unionRects((groupMemberMap.get(key) ?? []).map((m) => m.bounds));
+    if (bounds) onGroupClick(bounds);
   };
 
   const gridWidth =
