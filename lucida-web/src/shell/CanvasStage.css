@@ -34,6 +34,13 @@
   pointer-events: none;
 }
 
+/* A comment thread is a popover pinned to a point on the canvas, so it lives
+   in the layers. While one is open the layers rise above the cards, which
+   belong below popovers. */
+.lc-canvas-stage-layers:has([role="dialog"]) {
+  z-index: var(--lc-z-popover);
+}
+
 .lc-canvas-stage-empty {
   position: absolute;
   inset: 0;
@@ -55,7 +62,7 @@
 .lc-canvas-stage-slots {
   position: absolute;
   inset: 0;
-  z-index: 2;
+  z-index: var(--lc-z-float);
   display: flex;
   flex-direction: column;
   justify-content: space-between;

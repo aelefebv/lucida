@@ -1,7 +1,12 @@
-import { useMemo } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { DatasetManifest, DatasetKind, Entity, LayoutSpec } from "../manifestTypes.ts";
 import { buildManifestIndex, entityExtent, type VoxelRect } from "../pipeline/layoutBuilders.ts";
-import { unionRects } from "./groupFraming.ts";
+import { usePreference } from "../theme/preferences.ts";
+import { Button } from "../ui/Button.tsx";
+import { CanvasCard } from "./CanvasCard.tsx";
+import { navigatorCardPreference } from "./canvasCards.ts";
+import { groupAt, unionRects } from "./groupFraming.ts";
+import "./CollectionSelector.css";
 
 export interface CollectionKind {
   rows: string[];
@@ -24,6 +29,12 @@ interface CollectionSelectorProps {
   members: PlacedMember[];
   collectionName: string;
   onGroupClick: (bounds: VoxelRect) => void;
+  /**
+   * The 2D view's center in the members' coordinates, or null before there is
+   * a view. Read every frame while the card shows, to mark the group the view
+   * is on.
+   */
+  getViewCenter?: () => ArrayLike<number> | null;
   onPositioningModeToggle?: () => void;
 }
 
@@ -97,26 +108,32 @@ export function extractCollectionData(
   return { collectionKind, members };
 }
 
-const CELL_SIZE = 24;
-const CELL_GAP = 2;
-const PADDING = 8;
-const HEADER_HEIGHT = 20;
-const TOGGLE_HEIGHT = 24;
+/** Cell edge in CSS pixels. Denser grids get smaller cells, so the card stays a corner of the canvas. */
+function cellSize(columns: number): number {
+  if (columns <= 12) return 20;
+  if (columns <= 24) return 14;
+  return 10;
+}
+
+const groupKey = (row: number, column: number) => `${row},${column}`;
 
 export function CollectionSelector({
   collectionKind,
   members,
   collectionName,
   onGroupClick,
+  getViewCenter,
   onPositioningModeToggle,
 }: CollectionSelectorProps) {
-  // Build a set of populated groups by matching entity IDs to group-like entities.
-  // A group is populated if any member belongs to it (entity parent or label-based).
-  const groupMemberMap = useMemo(() => {
+  const { rows, columns } = collectionKind;
+  const [cardState] = usePreference(navigatorCardPreference);
+
+  // Members by the group their row and column labels put them in.
+  const groupMembers = useMemo(() => {
     const map = new Map<string, PlacedMember[]>();
     for (const member of members) {
       if (member.rowIndex != null && member.columnIndex != null) {
-        const key = `${member.rowIndex},${member.columnIndex}`;
+        const key = groupKey(member.rowIndex, member.columnIndex);
         const existing = map.get(key) ?? [];
         existing.push(member);
         map.set(key, existing);
@@ -125,203 +142,111 @@ export function CollectionSelector({
     return map;
   }, [members]);
 
-  // Build a group lookup by (row, col) for grid rendering
-  const groupPathMap = useMemo(() => {
-    const map = new Map<string, string>();
-    for (let r = 0; r < collectionKind.rows.length; r++) {
-      for (let c = 0; c < collectionKind.columns.length; c++) {
-        map.set(`${r},${c}`, `${collectionKind.rows[r]}/${collectionKind.columns[c]}`);
-      }
-    }
-    return map;
-  }, [collectionKind.rows, collectionKind.columns]);
+  // What a click frames and what the view center is tested against. Groups
+  // outside the grid have no cell to mark, so they are left out.
+  const groups = useMemo(() => {
+    const out: { key: string; name: string; bounds: VoxelRect }[] = [];
+    rows.forEach((row, r) =>
+      columns.forEach((column, c) => {
+        const key = groupKey(r, c);
+        const bounds = unionRects((groupMembers.get(key) ?? []).map((m) => m.bounds));
+        if (bounds) out.push({ key, name: `${row}${column}`, bounds });
+      }),
+    );
+    return out;
+  }, [rows, columns, groupMembers]);
 
-  const handleGroupClick = (rowIdx: number, colIdx: number) => {
-    const key = `${rowIdx},${colIdx}`;
-    const bounds = unionRects((groupMemberMap.get(key) ?? []).map((m) => m.bounds));
+  const [currentKey, setCurrentKey] = useState<string | null>(null);
+  const getViewCenterRef = useRef(getViewCenter);
+  useEffect(() => {
+    getViewCenterRef.current = getViewCenter;
+  });
+
+  // The camera moves without a React render, so the mark follows it frame by
+  // frame and re-renders only when the group changes.
+  const watching = cardState !== "hidden" && getViewCenter !== undefined;
+  useEffect(() => {
+    if (!watching) return;
+    let raf = 0;
+    let lastX = NaN;
+    let lastY = NaN;
+    const tick = () => {
+      const center = getViewCenterRef.current?.();
+      if (center && center.length >= 2 && (center[0] !== lastX || center[1] !== lastY)) {
+        lastX = center[0];
+        lastY = center[1];
+        setCurrentKey(groupAt(groups, [lastX, lastY]));
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [watching, groups]);
+
+  const handleGroupClick = (key: string) => {
+    const bounds = groups.find((g) => g.key === key)?.bounds;
     if (bounds) onGroupClick(bounds);
   };
 
-  const gridWidth =
-    CELL_SIZE +
-    CELL_GAP +
-    collectionKind.columns.length * (CELL_SIZE + CELL_GAP) -
-    CELL_GAP;
-  const panelWidth = Math.max(gridWidth + PADDING * 2, 100);
-  const showToggle =
-    collectionKind.has_explicit_positions && onPositioningModeToggle != null;
+  const current = currentKey === null ? undefined : groups.find((g) => g.key === currentKey);
+  const cell = cellSize(columns.length);
+  // Below 14px a column number is wider than its cell, so every other one shows.
+  const labelStep = cell < 14 ? 2 : 1;
+  const gridStyle = {
+    "--navigator-columns": columns.length,
+    "--navigator-cell": `${cell}px`,
+    "--navigator-gap": cell < 14 ? "2px" : "var(--lc-space-1)",
+  } as CSSProperties;
+  const showToggle = collectionKind.has_explicit_positions && onPositioningModeToggle != null;
+  const explicit = collectionKind.positioning_mode === "Explicit";
 
   return (
-    <div
-      style={{
-        position: "relative",
-        boxSizing: "border-box",
-        background: "rgba(0, 0, 0, 0.7)",
-        borderRadius: 6,
-        padding: PADDING,
-        color: "white",
-        fontSize: 11,
-        fontFamily: "system-ui, -apple-system, sans-serif",
-        userSelect: "none",
-        backdropFilter: "blur(4px)",
-        border: "1px solid rgba(255, 255, 255, 0.1)",
-        width: panelWidth,
-      }}
+    <CanvasCard
+      title={collectionName}
+      meta={current?.name}
+      label="Collection selector"
+      preference={navigatorCardPreference}
+      padding="sm"
     >
-      {/* Collection name */}
-      <div
-        style={{
-          height: HEADER_HEIGHT,
-          lineHeight: `${HEADER_HEIGHT}px`,
-          overflow: "hidden",
-          textOverflow: "ellipsis",
-          whiteSpace: "nowrap",
-          fontWeight: 600,
-          marginBottom: 4,
-          opacity: 0.8,
-        }}
-      >
-        {collectionName}
-      </div>
-
-      {/* Column headers */}
-      <div
-        style={{
-          display: "flex",
-          marginLeft: CELL_SIZE + CELL_GAP,
-          marginBottom: 1,
-        }}
-      >
-        {collectionKind.columns.map((col) => (
-          <div
-            key={col}
-            style={{
-              width: CELL_SIZE,
-              marginRight: CELL_GAP,
-              textAlign: "center",
-              fontSize: 9,
-              opacity: 0.5,
-            }}
-          >
-            {col}
-          </div>
+      <div className="lc-navigator-grid" role="group" aria-label="Groups" style={gridStyle}>
+        <span aria-hidden="true" />
+        {columns.map((column, c) => (
+          <span key={`column-${c}`} className="lc-navigator-axis" aria-hidden="true">
+            {c % labelStep === 0 ? column : ""}
+          </span>
+        ))}
+        {rows.map((row, r) => (
+          <Fragment key={`row-${r}`}>
+            <span className="lc-navigator-axis" data-axis="row" aria-hidden="true">
+              {row}
+            </span>
+            {columns.map((column, c) => {
+              const key = groupKey(r, c);
+              const name = `${row}${column}`;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  className="lc-navigator-cell"
+                  aria-label={name}
+                  title={name}
+                  aria-current={key === currentKey ? "location" : undefined}
+                  disabled={!groupMembers.has(key)}
+                  onClick={() => handleGroupClick(key)}
+                />
+              );
+            })}
+          </Fragment>
         ))}
       </div>
-
-      {/* Grid rows */}
-      {collectionKind.rows.map((rowName, rowIdx) => (
-        <div
-          key={rowName}
-          style={{
-            display: "flex",
-            alignItems: "center",
-            marginBottom: CELL_GAP,
-          }}
-        >
-          {/* Row label */}
-          <div
-            style={{
-              width: CELL_SIZE,
-              marginRight: CELL_GAP,
-              textAlign: "center",
-              fontSize: 9,
-              opacity: 0.5,
-            }}
-          >
-            {rowName}
-          </div>
-
-          {/* Group cells */}
-          {collectionKind.columns.map((_colName, colIdx) => {
-            const key = `${rowIdx},${colIdx}`;
-            const populated = groupMemberMap.has(key);
-            const groupExists = groupPathMap.has(key);
-
-            return (
-              <button
-                key={colIdx}
-                disabled={!populated}
-                onClick={() => populated && handleGroupClick(rowIdx, colIdx)}
-                style={{
-                  width: CELL_SIZE,
-                  height: CELL_SIZE,
-                  marginRight: CELL_GAP,
-                  padding: 0,
-                  border: "1px solid rgba(255, 255, 255, 0.15)",
-                  borderRadius: 3,
-                  background: populated
-                    ? "rgba(255, 255, 255, 0.12)"
-                    : "rgba(255, 255, 255, 0.03)",
-                  color: populated
-                    ? "rgba(255, 255, 255, 0.8)"
-                    : "rgba(255, 255, 255, 0.2)",
-                  fontSize: 8,
-                  cursor: populated ? "pointer" : "default",
-                  display: "flex",
-                  visibility: groupExists ? "visible" : "hidden",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  transition: "background 0.1s",
-                  ...(populated
-                    ? {}
-                    : ({ pointerEvents: "none" } as const)),
-                }}
-                onMouseEnter={(e) => {
-                  if (populated) {
-                    (e.currentTarget as HTMLButtonElement).style.background =
-                      "rgba(100, 108, 255, 0.35)";
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  if (populated) {
-                    (e.currentTarget as HTMLButtonElement).style.background =
-                      "rgba(255, 255, 255, 0.12)";
-                  }
-                }}
-              >
-                {populated
-                  ? `${collectionKind.rows[rowIdx]}${collectionKind.columns[colIdx]}`
-                  : ""}
-              </button>
-            );
-          })}
-        </div>
-      ))}
-
-      {/* Positioning toggle */}
       {showToggle && (
-        <button
-          onClick={onPositioningModeToggle}
-          style={{
-            marginTop: 4,
-            width: "100%",
-            height: TOGGLE_HEIGHT,
-            padding: "0 8px",
-            border: "1px solid rgba(255, 255, 255, 0.15)",
-            borderRadius: 3,
-            background: "rgba(255, 255, 255, 0.08)",
-            color: "rgba(255, 255, 255, 0.7)",
-            fontSize: 10,
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 4,
-          }}
-          onMouseEnter={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.background =
-              "rgba(100, 108, 255, 0.25)";
-          }}
-          onMouseLeave={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.background =
-              "rgba(255, 255, 255, 0.08)";
-          }}
-        >
-          {collectionKind.positioning_mode === "Explicit" ? "Explicit positions" : "Grid layout"}
-          {" \u2194 "}
-          {collectionKind.positioning_mode === "Explicit" ? "Grid layout" : "Explicit positions"}
-        </button>
+        <Button size="sm" onPress={onPositioningModeToggle} className="lc-navigator-toggle">
+          {explicit ? "Explicit positions" : "Grid layout"}
+          {" ↔ "}
+          {explicit ? "Grid layout" : "Explicit positions"}
+        </Button>
       )}
-    </div>
+    </CanvasCard>
   );
 }
+
