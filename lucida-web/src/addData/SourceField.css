@@ -1,0 +1,10 @@
+/* The button sits beside the input row, above the help line. */
+.lc-source-field {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--lc-space-2);
+}
+
+.lc-source-field-input {
+  flex: 1 1 auto;
+}
