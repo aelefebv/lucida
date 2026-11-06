@@ -5,6 +5,7 @@
  * side.
  */
 
+import { Button } from "../ui/Button.tsx";
 import { formatMs } from "./monitorModel.ts";
 import {
   describeArtifact,
@@ -48,6 +49,7 @@ export function CompareSlotView({ side, loaded, pageRun, onPick, onDrop, onFill 
       )}
       {loaded && loaded.runs.length > 1 && (
         <select
+          className="monitor-select"
           aria-label={`Run on the ${side}`}
           data-testid={`monitor-compare-run-${side}`}
           value={loaded.runId ?? ""}
@@ -59,13 +61,13 @@ export function CompareSlotView({ side, loaded, pageRun, onPick, onDrop, onFill 
         </select>
       )}
       <div className="monitor-compare-slot-actions">
-        <button type="button" onClick={onPick} data-testid={`monitor-compare-pick-${side}`}>
+        <Button size="sm" onPress={onPick} data-testid={`monitor-compare-pick-${side}`}>
           Choose a file
-        </button>
+        </Button>
         {pageRun && (
-          <button type="button" onClick={() => onFill(pageRun)} data-testid={`monitor-compare-use-page-${side}`}>
+          <Button size="sm" onPress={() => onFill(pageRun)} data-testid={`monitor-compare-use-page-${side}`}>
             Use the run on screen
-          </button>
+          </Button>
         )}
       </div>
     </div>

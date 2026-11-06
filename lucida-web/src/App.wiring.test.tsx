@@ -489,7 +489,9 @@ describe("App wiring: the top bar opens the monitor's dock", () => {
       fireEvent.click(toggle);
     });
 
-    const dock = await screen.findByTestId("monitor-dock");
+    // The dock's chunk loads the UI primitives, and transforming them cold
+    // takes longer than findBy's default second.
+    const dock = await screen.findByTestId("monitor-dock", {}, { timeout: 10_000 });
     expect(toggle.getAttribute("aria-pressed")).toBe("true");
     expect(within(dock).getByTestId("monitor-empty").textContent).toContain("trace seam");
 
