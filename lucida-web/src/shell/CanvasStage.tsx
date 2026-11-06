@@ -111,7 +111,6 @@ export function CanvasStage({
       <canvas
         key={canvasKey}
         ref={canvasRef}
-        tabIndex={0}
         className="lc-canvas-stage-canvas"
         style={{ imageRendering: pixelated ? "pixelated" : "auto" }}
       />

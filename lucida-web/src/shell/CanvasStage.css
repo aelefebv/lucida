@@ -19,12 +19,6 @@
   outline: none;
 }
 
-/* Drawn inside, since the stage clips anything outside the canvas. */
-.lc-canvas-stage-canvas:focus-visible {
-  outline: 2px solid var(--lc-focus-ring);
-  outline-offset: -2px;
-}
-
 /* Layers cover the canvas and pass pointer events through; the markers in
    them opt back in. */
 .lc-canvas-stage-layers {

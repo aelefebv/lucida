@@ -12,6 +12,9 @@ import {
   type WorkspaceSavedViewVisibility,
 } from "../savedView/useWorkspaceSavedViews.ts";
 import type { SavedView } from "../savedView/types.ts";
+import { rightPanelOpenPreference, rightPanelPreference } from "../shell/layoutPreferences.ts";
+import { setPreference } from "../theme/preferences.ts";
+import { useCommand } from "../ui/commands.ts";
 import "./BookmarkSidebar.css";
 
 // How long a rejected proposal lingers (hidden, undoable) before the reject
@@ -135,6 +138,18 @@ export function WorkspaceSavedViewsSidebar({
   );
 
   const [savePromptOpen, setSavePromptOpen] = useState(false);
+  // The prompt renders only while this panel shows, so the command opens it.
+  useCommand({
+    id: "views.save",
+    label: "Save view…",
+    group: "View",
+    keywords: ["bookmark"],
+    run: () => {
+      setPreference(rightPanelPreference, "savedViews");
+      setPreference(rightPanelOpenPreference, true);
+      setSavePromptOpen(true);
+    },
+  });
   const [renameId, setRenameId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ConfirmRequest | null>(null);
   const [confirmPropose, setConfirmPropose] = useState<ConfirmRequest | null>(null);
