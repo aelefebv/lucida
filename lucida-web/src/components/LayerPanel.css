@@ -1,307 +1,291 @@
-.layer-panel {
-  background: #1a1a1a;
-  border-right: 1px solid #333;
+.lc-layer-panel {
   display: flex;
   flex-direction: column;
-  overflow-y: auto;
+  min-height: 0;
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
 }
 
-.layer-panel-header {
+.lc-layer-panel-header {
+  flex: none;
+  border-bottom: 1px solid var(--lc-border);
+}
+
+.lc-layer-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding-bottom: var(--lc-space-6);
+}
+
+.lc-layer-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--lc-space-3);
+  padding: var(--lc-space-7) var(--lc-space-4);
+  color: var(--lc-text-muted);
+  text-align: center;
+}
+
+.lc-layer-empty p {
+  margin: 0;
+}
+
+/* Layer */
+
+.lc-layer {
+  border-bottom: 1px solid var(--lc-border);
+}
+
+.lc-layer[data-selected] {
+  box-shadow: inset 2px 0 0 var(--lc-accent);
+}
+
+.lc-layer-head {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: var(--lc-control-h);
+  padding: var(--lc-space-1) var(--lc-space-2) 0 var(--lc-space-1);
+}
+
+.lc-layer-name {
+  flex: 1;
+  min-width: 0;
+  padding-left: var(--lc-space-1);
+  overflow: hidden;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lc-layer-name[data-hidden] {
+  color: var(--lc-text-subtle);
+}
+
+.lc-inline-name {
+  flex: 1;
+  min-width: 0;
+}
+
+.lc-inline-name .lc-input-group {
+  height: var(--lc-control-h-sm);
+}
+
+/* Lines up with the name, past the caret and eye. */
+.lc-layer-opacity {
+  padding: 0 var(--lc-space-3) var(--lc-space-2) calc(var(--lc-control-h-sm) + var(--lc-space-2));
+}
+
+.lc-layer-note {
+  margin: 0;
+  padding: 0 var(--lc-space-3) var(--lc-space-2) calc(var(--lc-control-h-sm) + var(--lc-space-2));
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+}
+
+.lc-layer-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-3);
+  padding: 0 var(--lc-space-3) var(--lc-space-3);
+}
+
+.lc-layer-section-title {
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 500;
+}
+
+.lc-layer-field {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  min-height: var(--lc-control-h-sm);
+}
+
+.lc-layer-field-label {
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 500;
+}
+
+.lc-layer-field-label + .lc-colormap-swatch {
+  margin-left: auto;
+}
+
+.lc-layer-field-value {
+  font-size: var(--lc-text-sm);
+}
+
+.lc-layer-single {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+}
+
+/* Channels */
+
+.lc-channels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+}
+
+.lc-channels-head {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  min-height: var(--lc-control-h-sm);
+}
+
+.lc-channels-auto {
+  gap: var(--lc-space-2);
+  min-height: var(--lc-control-h-sm);
+  margin-left: auto;
+}
+
+.lc-channels-auto .lc-switch-label {
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+}
+
+.lc-channels-solo {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0.5rem 0.75rem;
-  border-bottom: 1px solid #333;
+  gap: var(--lc-space-2);
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
 }
 
-.layer-panel-header h3 {
-  margin: 0;
-  font-size: 0.9rem;
-  font-weight: 600;
-}
-
-.layer-panel-header-buttons {
-  display: flex;
-  gap: 0.25rem;
-}
-
-.layer-panel-header button {
-  padding: 0.25rem 0.5rem;
-  font-size: 0.75rem;
-}
-
-.layer-list {
-  flex: 1;
-  overflow-y: auto;
-}
-
-.layer-row {
-  border-bottom: 1px solid #2a2a2a;
-  cursor: pointer;
-  border-left: 3px solid transparent;
-}
-
-.layer-row.selected {
-  border-left-color: #646cff;
-  background: #252535;
-}
-
-.layer-row-header {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  padding: 0.4rem 0.5rem;
-}
-
-.layer-eye-btn {
-  width: 1.5rem;
-  height: 1.5rem;
-  padding: 0;
-  font-size: 0.8rem;
-  line-height: 1;
-  flex-shrink: 0;
-  border-radius: 4px;
-}
-
-.layer-name {
-  flex: 1;
-  font-size: 0.8rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.layer-name-input {
-  flex: 1;
-  min-width: 0;
-  font-size: 0.8rem;
-  padding: 0.1rem 0.25rem;
-  border-radius: 4px;
-}
-
-.layer-rename-btn {
-  width: 1.5rem;
-  height: 1.5rem;
-  padding: 0;
-  font-size: 0.75rem;
-  line-height: 1;
-  flex-shrink: 0;
-  border-radius: 4px;
-}
-
-.layer-opacity-slider {
-  width: 60px;
-  flex-shrink: 0;
-}
-
-.layer-expand-btn {
-  width: 1.5rem;
-  height: 1.5rem;
-  padding: 0;
-  font-size: 0.7rem;
-  line-height: 1;
-  flex-shrink: 0;
-  border-radius: 4px;
-}
-
-.layer-detail {
-  padding: 0.5rem 0.75rem;
-  border-top: 1px solid #333;
+.lc-channel-list,
+.lc-label-list {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.layer-detail .contrast-controls {
-  max-width: none;
-}
-
-.layer-detail-row {
+.lc-channel-row {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  font-size: 0.8rem;
+  gap: var(--lc-space-1);
+  min-height: var(--lc-control-h);
 }
 
-.layer-detail-row label {
-  min-width: 3rem;
-  font-size: 0.75rem;
-  color: #aaa;
+.lc-channel-row > .lc-colormap-swatch {
+  margin: 0 var(--lc-space-1);
 }
 
-.layer-detail-row select {
-  flex: 1;
-  background: #2a2a2a;
-  color: #ddd;
-  border: 1px solid #444;
-  border-radius: 4px;
-  padding: 0.2rem 0.3rem;
-  font-size: 0.75rem;
-}
-
-.layer-actions {
-  display: flex;
-  gap: 0.35rem;
-  flex-wrap: wrap;
-}
-
-.layer-actions button {
-  padding: 0.2rem 0.5rem;
-  font-size: 0.7rem;
-}
-
-.layer-empty {
-  padding: 1rem;
-  text-align: center;
-  color: #666;
-  font-size: 0.85rem;
-}
-
-.channel-sublayer {
-  border-left: 2px solid #444;
-  padding-left: 0.5rem;
-  margin-left: 0.25rem;
-}
-
-.channel-sublayer-header {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.8rem;
-  padding: 0.2rem 0;
-}
-
-.channel-label {
-  min-width: 2rem;
-  flex: 1;
-  font-size: 0.75rem;
-  color: #aaa;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.channel-name-input {
+.lc-channel-name {
   flex: 1;
   min-width: 0;
-  font-size: 0.75rem;
-  padding: 0.1rem 0.25rem;
-  border-radius: 4px;
-}
-
-.channel-rename-btn {
-  width: 1.25rem;
-  height: 1.25rem;
-  padding: 0;
-  font-size: 0.7rem;
-  line-height: 1;
-  flex-shrink: 0;
-  border-radius: 4px;
-}
-
-.channel-expand-btn {
-  width: 1.25rem;
-  height: 1.25rem;
-  padding: 0;
-  font-size: 0.65rem;
-  line-height: 1;
-  flex-shrink: 0;
-  margin-left: auto;
-  border-radius: 4px;
-}
-
-.channel-sublayer-detail {
-  padding: 0.2rem 0 0.2rem 1.85rem;
-}
-
-.channel-sublayer-detail .contrast-controls {
-  max-width: none;
-}
-
-/* Labels subsection — per-label overlay controls (eye toggle + opacity),
-   mirroring the channel sublayer look. */
-.layer-labels-section {
-  margin-top: 0.25rem;
-  border-top: 1px solid #333;
-  padding-top: 0.25rem;
-}
-
-.label-sublayer {
-  border-left: 2px solid #444;
-  padding-left: 0.5rem;
-  margin-left: 0.25rem;
-}
-
-.label-sublayer-header {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  font-size: 0.8rem;
-  padding: 0.2rem 0;
-}
-
-.label-name {
-  flex: 1;
-  min-width: 2rem;
-  font-size: 0.75rem;
-  color: #aaa;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.label-opacity-slider {
-  width: 60px;
-  flex-shrink: 0;
+.lc-channel:not([data-shown]) .lc-channel-name {
+  color: var(--lc-text-subtle);
 }
 
-/* Reason a label overlay is inert in the current view mode (e.g. too large to
-   render in 3D). Shown under the disabled eye/opacity controls so the user sees
-   WHY the overlay can't be toggled here. */
-.label-disabled-reason {
-  font-size: 0.7rem;
-  color: #e3a008;
-  padding: 0 0 0.2rem 0;
-  font-style: italic;
+.lc-channel:not([data-shown]) .lc-colormap-swatch {
+  opacity: 0.45;
 }
 
-/* Read-only value beside a detail-row label (target level, downsampling method). */
-.layer-level-readout {
-  color: #ddd;
-  font-size: 0.75rem;
+/* Indented under the name, past the caret and swatch. */
+.lc-channel-detail {
+  padding: var(--lc-space-1) 0 var(--lc-space-3) calc(var(--lc-control-h-sm) + var(--lc-space-6));
 }
 
-/* The level on screen, shown beside the target only while they differ. */
-.layer-level-displayed {
-  color: #e3a008;
+/* Labels */
+
+.lc-labels {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
 }
 
-/* Notice that the pixels on screen come from a coarser level than the target. */
-.layer-level-notice {
-  font-size: 0.7rem;
-  color: #e3a008;
-  font-style: italic;
+.lc-label-row {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  min-height: var(--lc-control-h);
 }
 
-/* Discoverability count pill on a layer row that carries segmentation labels. */
-.layer-label-badge {
-  flex-shrink: 0;
-  font-size: 0.65rem;
-  font-weight: 700;
-  line-height: 1;
-  padding: 0.1rem 0.3rem;
-  border-radius: 8px;
-  background: #1f6feb;
-  color: #fff;
+.lc-label-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-/* Per-channel collapse-all / expand-all controls (sits above the channel list). */
-.channel-collapse-controls {
-  gap: 6px;
+.lc-label-opacity {
+  flex: none;
+  width: 72px;
 }
-.channel-collapse-all-btn {
-  font-size: 0.75rem;
-  padding: 2px 8px;
-  cursor: pointer;
+
+.lc-label-reason {
+  margin: 0 0 var(--lc-space-1) calc(var(--lc-control-h-sm) + var(--lc-space-2));
+  color: var(--lc-warning);
+  font-size: var(--lc-text-sm);
+}
+
+/* Advanced */
+
+.lc-advanced {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+}
+
+/* The ghost button's own padding would indent its text past the section titles. */
+.lc-advanced-toggle {
+  align-self: flex-start;
+  margin-left: calc(-1 * var(--lc-space-2));
+}
+
+.lc-advanced-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-3);
+}
+
+.lc-level-row {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  min-height: var(--lc-control-h);
+}
+
+.lc-level-readout {
+  font-size: var(--lc-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.lc-level-displayed {
+  color: var(--lc-warning);
+}
+
+.lc-level-pin {
+  flex: 1;
+  min-width: 0;
+  margin-left: auto;
+}
+
+.lc-level-notice,
+.lc-level-meta {
+  margin: 0;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+}
+
+.lc-level-notice {
+  color: var(--lc-warning);
 }

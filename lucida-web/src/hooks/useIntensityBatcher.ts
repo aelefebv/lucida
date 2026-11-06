@@ -7,6 +7,7 @@ import { invalidateResidency } from "../invalidation.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { DatasetState } from "../types.ts";
+import { channelRangeKey, parseChannelRangeKey } from "../components/channels.ts";
 
 declare global {
   interface Window {
@@ -14,6 +15,29 @@ declare global {
     // capture to derive a shared, background-clipped contrast.
     __lucidaAutoContrast?: { min: number; max: number };
   }
+}
+
+/**
+ * The dataset and channel a reported range belongs to. In the composite the
+ * worker reports per channel, as `<member>:ch<n>`; in single-channel mode it
+ * reports the bare member, which is the scene's current channel. A
+ * collection reports per tile, and ranges are kept per parent dataset.
+ */
+export function resolveIntensitySource(
+  rawId: string,
+  datasets: Map<string, DatasetState>,
+  currentChannel: number,
+): { datasetId: string; channel: number } {
+  const parsed = parseChannelRangeKey(rawId);
+  const memberId = parsed?.datasetId ?? rawId;
+  const channel = parsed?.channel ?? currentChannel;
+  if (datasets.has(memberId)) return { datasetId: memberId, channel };
+  for (const [dsId, ds] of datasets) {
+    if (ds.manifest.images.some((img) => img.image_id === memberId)) {
+      return { datasetId: dsId, channel };
+    }
+  }
+  return { datasetId: memberId, channel };
 }
 
 interface Params {
@@ -44,21 +68,12 @@ export function useIntensityBatcher({
     const client = clientRef.current;
     if (!client) return;
     client.onIntensityRange = (rawId, min, max) => {
-      // For collection datasets, the GPU worker reports intensity using member IDs,
-      // but contrast settings and data-range maps are keyed by parent dataset ID.
-      let datasetId = rawId;
-      const datasets = datasetsRef.current;
-      if (!datasets.has(rawId)) {
-        for (const [dsId, ds] of datasets) {
-          if (ds.manifest.images.some(img => img.image_id === rawId)) {
-            datasetId = dsId;
-            break;
-          }
-        }
-      }
+      const scene = wasmSceneRef.current;
+      const { datasetId, channel } = resolveIntensitySource(rawId, datasetsRef.current, scene?.c() ?? 0);
+      const key = channelRangeKey(datasetId, channel);
 
       // Union across collection members.
-      const existing = pendingIntensityRef.current.get(datasetId);
+      const existing = pendingIntensityRef.current.get(key);
       const mergedMin = existing ? Math.min(existing.min, min) : min;
       const mergedMax = existing ? Math.max(existing.max, max) : max;
 
@@ -67,24 +82,20 @@ export function useIntensityBatcher({
       window.__lucidaAutoContrast = { min: mergedMin, max: mergedMax };
 
       const isAuto = autoContrastMapRef.current.get(datasetId) ?? true;
-      if (isAuto) {
-        const scene = wasmSceneRef.current;
-        if (scene) {
-          const c = scene.c();
-          const cmd: ViewportCommand = {
-            type: "set_channel_contrast",
-            dataset_id: datasetId,
-            channel: c,
-            min: mergedMin,
-            max: mergedMax,
-          };
-          guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
-          invalidateResidency(loopRef.current, "auto_contrast");
-          sessionRef.current?.bridge.sendDatasetPresence(scene.export_dataset_presence());
-        }
+      if (isAuto && scene) {
+        const cmd: ViewportCommand = {
+          type: "set_channel_contrast",
+          dataset_id: datasetId,
+          channel,
+          min: mergedMin,
+          max: mergedMax,
+        };
+        guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
+        invalidateResidency(loopRef.current, "auto_contrast");
+        sessionRef.current?.bridge.sendDatasetPresence(scene.export_dataset_presence());
       }
 
-      pendingIntensityRef.current.set(datasetId, { min: mergedMin, max: mergedMax });
+      pendingIntensityRef.current.set(key, { min: mergedMin, max: mergedMax });
       if (!intensityRafRef.current) {
         intensityRafRef.current = requestAnimationFrame(() => {
           intensityRafRef.current = 0;

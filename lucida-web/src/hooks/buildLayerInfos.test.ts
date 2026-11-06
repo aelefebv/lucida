@@ -79,7 +79,6 @@ function datasetsWith(labels: LabelSpec[]): Map<string, DatasetState> {
 
 const emptyMaps = {
   autoContrast: new Map<string, boolean>(),
-  fullRange: new Map<string, boolean>(),
   dataRange: new Map<string, { min: number; max: number }>(),
   levels: new Map<string, DatasetLevels>(),
 };
@@ -432,5 +431,53 @@ describe("buildLayerInfos level pin (scene → LayerInfo seam)", () => {
     const scene = stubScene(["ds-0"], settingsWith([]), 0, []);
     const infos = buildLayerInfos(scene, pyramidDatasets(), emptyMaps);
     expect(infos[0].levelPinOptions).toEqual([]);
+  });
+});
+
+describe("buildLayerInfos channels (scene → LayerInfo seam)", () => {
+  /** A three-channel image whose metadata labels only the first channel. */
+  function threeChannelDatasets(): Map<string, DatasetState> {
+    const base = manifest([]);
+    const level = { ...base.images[0].multiscale.levels[0], shape: [1, 3, 1, 340, 348] };
+    const image: ImageSpec = {
+      ...base.images[0],
+      multiscale: { ...base.images[0].multiscale, levels: [level], channel_infos: [{ label: "Signal" }] },
+    };
+    return new Map([["ds-0", { manifest: { ...base, images: [image] } } as unknown as DatasetState]]);
+  }
+
+  function settingsWithChannels() {
+    const settings = settingsWith([]);
+    settings["ds-0"].channel_settings = [
+      { visible: true, colormap: "magenta", contrast_min: 10, contrast_max: 900, gamma: 1 },
+      { visible: false, colormap: "green", contrast_min: 0, contrast_max: 65535, gamma: 2, name: "Mine" } as never,
+      { visible: true, colormap: "cyan", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+    ];
+    return settings;
+  }
+
+  it("lists every channel with its settings, name, and loaded range, whatever the scene's c", () => {
+    const scene = stubScene(["ds-0"], settingsWithChannels(), 2);
+    const maps = { ...emptyMaps, dataRange: new Map([["ds-0:ch1", { min: 5, max: 700 }]]) };
+    const [info] = buildLayerInfos(scene, threeChannelDatasets(), maps);
+
+    expect(info.channels.map((c) => c.name)).toEqual(["Signal", "Mine", "Channel 3"]);
+    expect(info.channels[1]).toMatchObject({
+      nameOverride: "Mine",
+      inheritedName: "Channel 2",
+      visible: false,
+      colormap: "green",
+      gamma: 2,
+      dataRange: { min: 5, max: 700 },
+    });
+    expect(info.channels[0]).toMatchObject({ contrastMin: 10, contrastMax: 900, dataRange: null });
+  });
+
+  it("gives a single-channel image one channel", () => {
+    const scene = stubScene(["ds-0"], settingsWith([]));
+    const [info] = buildLayerInfos(scene, datasetsWith([]), emptyMaps);
+    expect(info.channels).toHaveLength(1);
+    expect(info.channels[0].name).toBe("Channel 1");
+    expect(info.integerData).toBe(true);
   });
 });
