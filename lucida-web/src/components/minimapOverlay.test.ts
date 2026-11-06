@@ -3,11 +3,28 @@ import { beforeEach, describe, expect, it } from "vitest";
 import type { MinimapOverlayData } from "../renderLoopTypes.ts";
 import {
   drawDynamicMinimapOverlays,
+  drawMinimapOverlays,
   drawStaticMinimapOverlays,
   drawViewportOverlays,
   drawZPlaneOverlays,
   zPlaneLayerDirty,
+  type MinimapColors,
 } from "./minimapOverlay.ts";
+import { paint, rgbColor } from "../theme/tokenColors.ts";
+
+/** Distinct colors per role, so an assertion can tell the layers apart. */
+const COLORS: MinimapColors = {
+  background: rgbColor(0, 0, 0),
+  stroke: rgbColor(255, 255, 255, 0.85),
+  label: rgbColor(250, 250, 250),
+  axisX: rgbColor(255, 0, 0),
+  axisY: rgbColor(0, 255, 0),
+  axisZ: rgbColor(0, 0, 255),
+  viewport: rgbColor(100, 180, 255),
+  plane: rgbColor(255, 200, 50),
+};
+const PLANE_FILL = paint(COLORS.plane, 0.25);
+const VIEWPORT_FILL = paint(COLORS.viewport, 0.3);
 
 type Op = { type: "call"; name: string; args: unknown[] } | { type: "set"; name: string; value: unknown };
 
@@ -93,12 +110,12 @@ describe("dynamic overlay split", () => {
       const data = makeData(mode);
 
       const combined: Op[] = [];
-      drawDynamicMinimapOverlays(recordingCtx(combined), data);
+      drawDynamicMinimapOverlays(recordingCtx(combined), data, COLORS);
 
       const split: Op[] = [];
       const ctx = recordingCtx(split);
-      drawZPlaneOverlays(ctx, data);
-      drawViewportOverlays(ctx, data);
+      drawZPlaneOverlays(ctx, data, COLORS);
+      drawViewportOverlays(ctx, data, COLORS);
 
       expect(split).toEqual(combined);
       // The split must actually exercise draw ops, not trivially match by both
@@ -109,41 +126,41 @@ describe("dynamic overlay split", () => {
 
   it("drawZPlaneOverlays draws only the Z-plane sub-layer in slice mode and does not clear", () => {
     const log: Op[] = [];
-    drawZPlaneOverlays(recordingCtx(log), makeData("slice"));
+    drawZPlaneOverlays(recordingCtx(log), makeData("slice"), COLORS);
 
     // No canvas clear (the consumer owns clearing the cache canvas).
     expect(log.some((op) => op.type === "call" && op.name === "clearRect")).toBe(false);
     // Slice planes fill with the plane color; viewport rects and the cube are not here.
-    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(255,200,50,0.25)")).toBe(true);
-    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(100,180,255,0.3)")).toBe(false);
+    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === PLANE_FILL)).toBe(true);
+    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === VIEWPORT_FILL)).toBe(false);
     // No orientation-cube background circle.
     expect(log.some((op) => op.type === "call" && op.name === "arc")).toBe(false);
   });
 
   it("drawZPlaneOverlays draws nothing in volume mode", () => {
     const log: Op[] = [];
-    drawZPlaneOverlays(recordingCtx(log), makeData("volume"));
+    drawZPlaneOverlays(recordingCtx(log), makeData("volume"), COLORS);
     expect(log).toEqual([]);
   });
 
   it("drawViewportOverlays draws viewport rects + cube in slice mode without clearing", () => {
     const log: Op[] = [];
-    drawViewportOverlays(recordingCtx(log), makeData("slice"));
+    drawViewportOverlays(recordingCtx(log), makeData("slice"), COLORS);
 
     expect(log.some((op) => op.type === "call" && op.name === "clearRect")).toBe(false);
     // Viewport rect fill present, slice-plane fill absent.
-    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(100,180,255,0.3)")).toBe(true);
-    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(255,200,50,0.25)")).toBe(false);
+    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === VIEWPORT_FILL)).toBe(true);
+    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === PLANE_FILL)).toBe(false);
     // Orientation cube always drawn (its background circle uses arc()).
     expect(log.some((op) => op.type === "call" && op.name === "arc")).toBe(true);
   });
 
   it("drawViewportOverlays draws only the orientation cube in volume mode", () => {
     const log: Op[] = [];
-    drawViewportOverlays(recordingCtx(log), makeData("volume"));
+    drawViewportOverlays(recordingCtx(log), makeData("volume"), COLORS);
 
     // No viewport rects in volume mode, but the cube is still present.
-    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(100,180,255,0.3)")).toBe(false);
+    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === VIEWPORT_FILL)).toBe(false);
     expect(log.some((op) => op.type === "call" && op.name === "arc")).toBe(true);
   });
 });
@@ -161,35 +178,35 @@ describe("top-down minimap", () => {
   for (const mode of ["slice", "volume"] as const) {
     it(`hides the orientation cube in ${mode} mode`, () => {
       const orbit: Op[] = [];
-      drawViewportOverlays(recordingCtx(orbit), makeData(mode));
+      drawViewportOverlays(recordingCtx(orbit), makeData(mode), COLORS);
       expect(drawsCube(orbit)).toBe(true);
 
       const topDown: Op[] = [];
-      drawViewportOverlays(recordingCtx(topDown), makeData(mode, { topDown: true }));
+      drawViewportOverlays(recordingCtx(topDown), makeData(mode, { topDown: true }), COLORS);
       expect(drawsCube(topDown)).toBe(false);
     });
   }
 
   it("still draws the slice viewport rectangles", () => {
     const log: Op[] = [];
-    drawViewportOverlays(recordingCtx(log), makeData("slice", { topDown: true }));
-    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === "rgba(100,180,255,0.3)")).toBe(true);
+    drawViewportOverlays(recordingCtx(log), makeData("slice", { topDown: true }), COLORS);
+    expect(log.some((op) => op.type === "set" && op.name === "fillStyle" && op.value === VIEWPORT_FILL)).toBe(true);
   });
 
   it("omits the axis arrows but keeps the member outlines", () => {
     const orbit: Op[] = [];
-    drawStaticMinimapOverlays(recordingCtx(orbit), makeData("slice"));
+    drawStaticMinimapOverlays(recordingCtx(orbit), makeData("slice"), COLORS);
     expect(axisLabels(orbit)).toEqual(["X", "Y", "Z"]);
 
     const topDown: Op[] = [];
-    drawStaticMinimapOverlays(recordingCtx(topDown), makeData("slice", { topDown: true }));
+    drawStaticMinimapOverlays(recordingCtx(topDown), makeData("slice", { topDown: true }), COLORS);
     expect(axisLabels(topDown)).toEqual([]);
-    expect(topDown.some((op) => op.type === "set" && op.name === "strokeStyle" && op.value === "rgba(255,255,255,0.5)")).toBe(true);
+    expect(topDown.some((op) => op.type === "set" && op.name === "strokeStyle" && op.value === paint(COLORS.stroke, 0.6))).toBe(true);
   });
 
   it("draws no slice plane", () => {
     const log: Op[] = [];
-    drawZPlaneOverlays(recordingCtx(log), makeData("slice", { topDown: true }));
+    drawZPlaneOverlays(recordingCtx(log), makeData("slice", { topDown: true }), COLORS);
     expect(log).toEqual([]);
   });
 });
@@ -209,5 +226,38 @@ describe("zPlaneLayerDirty", () => {
 
   it("is false on a pan/zoom with unchanged Z and no geometry change", () => {
     expect(zPlaneLayerDirty(makeData("slice", { currentZ: 5, staticDirty: false }), 5)).toBe(false);
+  });
+});
+
+describe("overlay colors", () => {
+  beforeEach(() => {
+    globalThis.devicePixelRatio = 1;
+  });
+
+  /** Every fill and stroke the full overlay sets, in both modes. */
+  function styles(colors: MinimapColors): unknown[] {
+    const log: Op[] = [];
+    for (const mode of ["slice", "volume"] as const) drawMinimapOverlays(recordingCtx(log), makeData(mode), colors);
+    return log
+      .filter((op) => op.type === "set" && (op.name === "fillStyle" || op.name === "strokeStyle"))
+      .map((op) => (op as { value: unknown }).value);
+  }
+
+  it("takes every color it paints from the colors it is given", () => {
+    const other: MinimapColors = {
+      background: rgbColor(255, 255, 255),
+      stroke: rgbColor(0, 0, 0, 0.75),
+      label: rgbColor(10, 10, 10),
+      axisX: rgbColor(200, 40, 40),
+      axisY: rgbColor(20, 130, 60),
+      axisZ: rgbColor(40, 100, 230),
+      viewport: rgbColor(30, 110, 215),
+      plane: rgbColor(176, 120, 0),
+    };
+    const a = styles(COLORS);
+    const b = styles(other);
+    expect(a.length).toBeGreaterThan(0);
+    expect(b).toHaveLength(a.length);
+    a.forEach((value, i) => expect(value, `style ${i}`).not.toBe(b[i]));
   });
 });

@@ -1,5 +1,6 @@
 /** Main-thread API wrapping the GPU render worker. */
 import type {
+  CanvasColors,
   Chunk,
   VolumeLayerParams,
   SliceLayerParams,
@@ -12,6 +13,7 @@ import type {
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
   ViewHotStateMessage,
+  RgbaColor,
 } from "./workerProtocol.ts";
 import { summarizeDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
@@ -21,6 +23,27 @@ import type {
   ChunksEvictedHandler,
   WantedSetHandler,
 } from "../pipeline/upload/uploadClient.ts";
+import { tokenColor } from "../theme/tokenColors.ts";
+import type { ResolvedColor } from "../theme/tokens.ts";
+
+/**
+ * How much of the canvas stroke the tile frame takes. Members sit edge to
+ * edge, so the frame is a faint line that shows where one ends and does not
+ * compete with the data.
+ */
+const TILE_BORDER_ALPHA = 0.35;
+
+function rgba(color: ResolvedColor, alpha = 1): RgbaColor {
+  return [color.r, color.g, color.b, color.a * alpha];
+}
+
+/** The renderer's colors from the current theme tokens. */
+export function readCanvasColors(): CanvasColors {
+  return {
+    background: rgba(tokenColor("--lc-canvas-bg")),
+    tileBorder: rgba(tokenColor("--lc-canvas-stroke"), TILE_BORDER_ALPHA),
+  };
+}
 
 /** How long `destroy()` waits for the worker to process its `destroy`
  *  message (which ends in `self.close()`) before terminating it. Terminating
@@ -213,6 +236,11 @@ export class RenderClient implements UploadClient {
 
   resize(width: number, height: number) {
     this.worker.postMessage({ type: "resize", width, height });
+  }
+
+  /** Takes effect from the next frame drawn. */
+  setCanvasColors(colors: CanvasColors) {
+    this.worker.postMessage({ type: "canvasColors", colors });
   }
 
   volumeChunkData(

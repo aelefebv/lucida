@@ -15,6 +15,7 @@ vi.mock("./minimapOverlay.ts", () => ({
   drawZPlaneOverlays: vi.fn(),
   drawViewportOverlays: vi.fn(),
   zPlaneLayerDirty: vi.fn(() => true),
+  readMinimapColors: vi.fn(() => ({})),
 }));
 
 type ContextRequest = { kind: string; options: unknown };
@@ -184,11 +185,11 @@ describe("the minimap overlay's content draws", () => {
       client.pipelinesCompiled = true;
       client.handler!();
       expect(drawViewportOverlays).toHaveBeenCalledOnce();
-      expect(drawViewportOverlays).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ currentZ: 5 }));
+      expect(drawViewportOverlays).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ currentZ: 5 }), expect.anything());
 
       overlay()(overlayData(6));
       expect(drawViewportOverlays).toHaveBeenCalledTimes(2);
-      expect(drawViewportOverlays).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ currentZ: 6 }));
+      expect(drawViewportOverlays).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({ currentZ: 6 }), expect.anything());
     } finally {
       recorder.restore();
     }

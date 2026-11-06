@@ -96,7 +96,7 @@ interface Compiles {
 
 describe.each<[string, (device: GPUDevice) => Compiles, number]>([
   ["slice renderer", (device) => new SliceRenderer(device), 4],
-  ["layer compositor", (device) => new LayerCompositor(device, "bgra8unorm"), 3],
+  ["layer compositor", (device) => new LayerCompositor(device, "bgra8unorm"), 4],
   ["cursor renderer", (device) => new CursorRenderer(device, "bgra8unorm"), 2],
   ["volume renderer", (device) => new VolumeRenderer(device), 1],
 ])("the %s", (_name, construct, pipelineCount) => {
@@ -140,7 +140,7 @@ describe("drawing before the compile", () => {
     expect(requireCompiled(built, "slice renderer")).toBe(built);
   });
 
-  it("throws from the compositor for a layer, and clears without one", async () => {
+  it("throws from the compositor for a layer or the background, and clears without one", async () => {
     const { device, pending } = makeDevice();
     const compositor = new LayerCompositor(device, "bgra8unorm");
     const { encoder, pass } = makeEncoder();
@@ -150,14 +150,28 @@ describe("drawing before the compile", () => {
     );
     expect(() => compositor.composite(view, [], encoder)).not.toThrow();
 
-    const [alpha, additive, max] = ["alpha", "additive", "max"].map(pipeline);
+    expect(() => compositor.underlayBackground(view, encoder)).toThrow(
+      "the layer compositor drew before its pipelines compiled",
+    );
+
+    const [alpha, additive, max, background] = ["alpha", "additive", "max", "background"].map(pipeline);
     pending[0].resolve(alpha);
     pending[1].resolve(additive);
     pending[2].resolve(max);
+    pending[3].resolve(background);
     await compositor.compiled;
 
     compositor.composite(view, [{ view, blendMode: "max" }], encoder);
     expect(pass.setPipeline).toHaveBeenCalledWith(max);
+    compositor.underlayBackground(view, encoder);
+    expect(pass.setPipeline).toHaveBeenLastCalledWith(background);
+  });
+
+  it("hands the compositor's background to its pass premultiplied", () => {
+    const { device } = makeDevice();
+    const compositor = new LayerCompositor(device, "bgra8unorm");
+    compositor.setBackground([1, 0.5, 0, 0.5]);
+    expect(device.queue.writeBuffer).toHaveBeenLastCalledWith(expect.anything(), 0, new Float32Array([0.5, 0.25, 0, 0.5]));
   });
 
   it("throws from the cursor renderer, then draws with the resolved pipeline", async () => {

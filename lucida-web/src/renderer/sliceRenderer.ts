@@ -5,6 +5,7 @@ import type { BlendMode } from "./layerCompositor.ts";
 import type { PassTiming } from "./passTiming.ts";
 import { DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
 import { requireCompiled } from "./pipelineCompile.ts";
+import type { RgbaColor } from "./workerProtocol.ts";
 
 /**
  * Byte offsets of the shader's `Uniforms` fields (slice.wgsl). The
@@ -16,8 +17,9 @@ export const SLICE_UNIFORM_OFFSETS = {
   levelAtlasSlotDims: 64,  // array<vec4u, 4> (64B) — xy=slots per axis per level pool binding
   coarseAtlasSlotDims: 128, // vec4u (16B)
   memberScreenSize: 144,   // vec4f (16B)
+  borderColor: 160,        // vec4f (16B) — premultiplied
 } as const;
-export const SLICE_UNIFORM_SIZE = 160;
+export const SLICE_UNIFORM_SIZE = 176;
 const ENTITY_REF_SIZE = 16;
 
 /** One chunk pool bound to a slice draw: its atlas texture, indirection buffer, and slot grid. */
@@ -90,6 +92,7 @@ function buildSliceUniformData(
   dataH: number,
   levelSlotDims: LevelSlotDims,
   coarseSlotDims: [number, number],
+  borderColor: RgbaColor,
 ): Float32Array<ArrayBuffer> {
   const sx = canvasW / (dataW * zoom);
   const sy = canvasH / (dataH * zoom);
@@ -117,6 +120,8 @@ function buildSliceUniformData(
   // the member's own size; aggregate layers: the union extent, scaled
   // to each member's fraction in the vertex stage).
   uniformData.set([dataW * zoom, dataH * zoom, 0, 0], SLICE_UNIFORM_OFFSETS.memberScreenSize / 4);
+  const [r, g, b, a] = borderColor;
+  uniformData.set([r * a, g * a, b * a, a], SLICE_UNIFORM_OFFSETS.borderColor / 4);
   return uniformData;
 }
 
@@ -124,6 +129,8 @@ export class SliceRenderer {
   private device: GPUDevice;
   private pipeline: GPURenderPipeline | null = null;
   private aggregatePipelines: Record<BlendMode, GPURenderPipeline> | null = null;
+  /** Faint white until the page sends the theme's color. */
+  private tileBorderColor: RgbaColor = [1, 1, 1, 0.3];
   /** Resolves once the per-member and the three aggregate pipelines have compiled. See `pipelineCompile.ts`. */
   readonly compiled: Promise<void>;
   private uniformBuffer: GPUBuffer;
@@ -506,8 +513,14 @@ export class SliceRenderer {
       zoom, cx, cy, canvasW, canvasH, dataW, dataH,
       levelSlotDimsOf(this.levelBindings),
       this.coarseBinding ? [this.coarseBinding.slotsX, this.coarseBinding.slotsY] : [0, 0],
+      this.tileBorderColor,
     );
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
+  }
+
+  /** The member footprint border, from the next draw on. */
+  setTileBorderColor(color: RgbaColor) {
+    this.tileBorderColor = color;
   }
 
   /** `timing` stamps the pass for the trace's GPU pass time; viewport frames pass it, the minimap does not. */
@@ -586,6 +599,7 @@ export class SliceRenderer {
         params.dataW, params.dataH,
         levelSlotDimsOf(batch.levels),
         batch.coarse ? [batch.coarse.slotsX, batch.coarse.slotsY] : [0, 0],
+        this.tileBorderColor,
       );
       this.device.queue.writeBuffer(this.aggregateUniformBuffers[i], 0, uniformData);
       return this.device.createBindGroup({

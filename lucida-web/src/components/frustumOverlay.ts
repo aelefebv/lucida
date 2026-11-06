@@ -1,3 +1,5 @@
+import { paint } from "../theme/tokenColors.ts";
+import type { ResolvedColor } from "../theme/tokens.ts";
 import type { Vec3 } from "./minimapMath.ts";
 import { mulMat4, mulMat4Vec4, transformPoint, projectToCanvas } from "./minimapMath.ts";
 
@@ -138,7 +140,7 @@ export function drawFrustumIntersection(
   invModelMatrix: Float32Array,
   mainInvViewProj: Float32Array,
   canvasW: number, canvasH: number,
-  color: string,
+  color: ResolvedColor,
 ) {
   // 1. Unproject 8 NDC corners through mainInvViewProj to world, then invModelMatrix to unit space
   const ndcCorners: Vec3[] = [
@@ -180,7 +182,7 @@ export function drawFrustumIntersection(
     }
   }
 
-  ctx.strokeStyle = color;
+  ctx.strokeStyle = paint(color, 0.5);
   ctx.lineWidth = 1.5 * devicePixelRatio;
   ctx.beginPath();
 
@@ -196,8 +198,7 @@ export function drawFrustumIntersection(
   ctx.stroke();
 
   // Draw filled faces with semi-transparent fill
-  const fillColor = color.replace(/[\d.]+\)$/, "0.08)");
-  ctx.fillStyle = fillColor;
+  ctx.fillStyle = paint(color, 0.08);
   for (const face of faces) {
     const projFace = face.map(v => {
       const w = transformPoint(modelMatrix, ...v);

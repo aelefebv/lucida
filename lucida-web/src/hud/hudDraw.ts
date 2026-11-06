@@ -8,7 +8,9 @@
  * so a narrow viewport costs height rather than readouts.
  */
 
-import { HUD_COLORS, HUD_HISTORY, type HudSeriesView, type HudTone, type HudView } from "./hudModel.ts";
+import { mixColor, paint, tokenColor, tokenColors } from "../theme/tokenColors.ts";
+import type { TokenName } from "../theme/tokens.ts";
+import { HUD_HISTORY, type HudSeriesView, type HudTone, type HudView } from "./hudModel.ts";
 
 /** The part of a 2D context the strip uses. A test can fake this. */
 export type HudDrawContext = Pick<
@@ -39,6 +41,54 @@ export interface HudBox {
   dpr: number;
 }
 
+/**
+ * What the strip paints with, as CSS colors. The strip is a floating card,
+ * so it follows the UI theme, not the canvas background.
+ */
+export interface HudColors {
+  background: string;
+  text: string;
+  muted: string;
+  /** The empty part of a pool's bar. */
+  track: string;
+  tones: Record<HudTone, string>;
+  series: Record<HudSeriesView["key"], string>;
+}
+
+const TONE_TOKENS = {
+  ok: "--lc-success",
+  busy: "--lc-warning",
+  warn: "--lc-danger",
+  absent: "--lc-text-subtle",
+  info: "--lc-info",
+} as const satisfies Record<HudTone, TokenName>;
+
+/** The strip's colors from the current theme tokens. */
+export function readHudColors(): HudColors {
+  const tones = tokenColors(TONE_TOKENS);
+  return {
+    background: paint(tokenColor("--lc-surface-float")),
+    text: paint(tokenColor("--lc-text")),
+    muted: paint(tokenColor("--lc-text-muted")),
+    track: paint(tokenColor("--lc-border")),
+    tones: {
+      ok: paint(tones.ok),
+      busy: paint(tones.busy),
+      warn: paint(tones.warn),
+      absent: paint(tones.absent),
+      info: paint(tones.info),
+    },
+    // Each sparkline has its own labelled cell, so these only need to differ
+    // enough to scan.
+    series: {
+      received: paint(tones.info),
+      sent: paint(tokenColor("--lc-accent-text")),
+      frame: paint(tones.ok),
+      gpu: paint(mixColor(tones.ok, tones.info, 0.5)),
+    },
+  };
+}
+
 const PAD = 8;
 const GAP = 8;
 const FONT_PX = 11;
@@ -47,9 +97,6 @@ const HEADER = 13;
 const CHART_H = 44;
 const CHAR_W = FONT_PX * 0.62;
 const FONT = `${FONT_PX}px ui-monospace, Menlo, Consolas, monospace`;
-const BACKGROUND = "rgba(12, 14, 18, 0.8)";
-const TEXT = "#e3e6ea";
-const MUTED = "#9aa0a6";
 const POOLS_W = 336;
 const POOL_LABEL_W = 60;
 const LANES_W = 200;
@@ -58,13 +105,6 @@ const BAR_W = 56;
 
 /** How many datasets the levels column lists before it counts the rest. */
 export const LEVEL_ROWS_SHOWN = 3;
-
-const SERIES_LINE: Record<HudSeriesView["key"], string> = {
-  received: "#64b5f6",
-  sent: "#ce93d8",
-  frame: "#5ec269",
-  gpu: "#4db6ac",
-};
 
 type ColumnKind = "pools" | "lanes" | "status";
 
@@ -137,12 +177,12 @@ export function hudHeight(view: HudView, width: number): number {
   return layout(view, width).height;
 }
 
-export function drawHud(ctx: HudDrawContext, view: HudView, box: HudBox): void {
+export function drawHud(ctx: HudDrawContext, view: HudView, box: HudBox, colors: HudColors): void {
   const { width, height, dpr } = box;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
   ctx.globalAlpha = 1;
-  ctx.fillStyle = BACKGROUND;
+  ctx.fillStyle = colors.background;
   ctx.fillRect(0, 0, width, height);
   ctx.font = FONT;
   ctx.textBaseline = "alphabetic";
@@ -151,35 +191,35 @@ export function drawHud(ctx: HudDrawContext, view: HudView, box: HudBox): void {
   const inner = width - 2 * PAD;
   let y = PAD;
 
-  text(ctx, "pipeline HUD", PAD, y + 10, MUTED, inner / 2);
+  text(ctx, "pipeline HUD", PAD, y + 10, colors.muted, inner / 2);
   const windowText = fit(view.window, inner / 2);
-  text(ctx, windowText, width - PAD - windowText.length * CHAR_W, y + 10, MUTED, inner / 2);
+  text(ctx, windowText, width - PAD - windowText.length * CHAR_W, y + 10, colors.muted, inner / 2);
   y += HEADER + 4;
 
   const cellW = (inner - GAP * (view.series.length - 1)) / view.series.length;
   view.series.forEach((series, i) => {
-    sparkline(ctx, series, PAD + i * (cellW + GAP), y, cellW, CHART_H);
+    sparkline(ctx, colors, series, PAD + i * (cellW + GAP), y, cellW, CHART_H);
   });
 
   for (const band of layout(view, width).bands) {
     for (const column of band.columns) {
-      if (column.kind === "pools") pools(ctx, view, column.x, band.y, column.w);
-      else if (column.kind === "lanes") lanes(ctx, view, column.x, band.y, column.w);
-      else status(ctx, view, column.x, band.y, column.w);
+      if (column.kind === "pools") pools(ctx, colors, view, column.x, band.y, column.w);
+      else if (column.kind === "lanes") lanes(ctx, colors, view, column.x, band.y, column.w);
+      else status(ctx, colors, view, column.x, band.y, column.w);
     }
   }
 }
 
-function sparkline(ctx: HudDrawContext, series: HudSeriesView, x: number, y: number, w: number, h: number): void {
+function sparkline(ctx: HudDrawContext, colors: HudColors, series: HudSeriesView, x: number, y: number, w: number, h: number): void {
   const titleY = y + 10;
   let labelRoom = w;
   if (series.absent === null) {
     const latest = fit(series.latest, w * 0.4);
     const latestW = latest.length * CHAR_W;
-    text(ctx, latest, x + w - latestW, titleY, HUD_COLORS[series.tone], w * 0.4);
+    text(ctx, latest, x + w - latestW, titleY, colors.tones[series.tone], w * 0.4);
     labelRoom = w - latestW - 8;
   }
-  text(ctx, fit(series.label, labelRoom), x, titleY, MUTED, labelRoom);
+  text(ctx, fit(series.label, labelRoom), x, titleY, colors.muted, labelRoom);
 
   const top = y + 16;
   const bottom = y + h;
@@ -193,7 +233,7 @@ function sparkline(ctx: HudDrawContext, series: HudSeriesView, x: number, y: num
     const slots = Math.max(HUD_HISTORY, series.values.length);
     const step = w / (slots - 1);
     const offset = slots - series.values.length;
-    const color = SERIES_LINE[series.key];
+    const color = colors.series[series.key];
 
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
@@ -242,36 +282,36 @@ function sparkline(ctx: HudDrawContext, series: HudSeriesView, x: number, y: num
   }
 
   if (series.absent !== null) {
-    text(ctx, fit(series.absent, w), x, bottom - 3, MUTED, w);
+    text(ctx, fit(series.absent, w), x, bottom - 3, colors.muted, w);
   } else if (series.state !== null) {
     const stateText = fit(series.state, w * 0.6);
-    text(ctx, stateText, x + w - stateText.length * CHAR_W, bottom - 3, HUD_COLORS[series.tone], w);
+    text(ctx, stateText, x + w - stateText.length * CHAR_W, bottom - 3, colors.tones[series.tone], w);
   }
 }
 
-function pools(ctx: HudDrawContext, view: HudView, x: number, y: number, w: number): void {
+function pools(ctx: HudDrawContext, colors: HudColors, view: HudView, x: number, y: number, w: number): void {
   view.pools.forEach((pool, i) => {
     const baseline = y + LINE * (i + 1) - 4;
-    text(ctx, fit(pool.label, POOL_LABEL_W), x, baseline, MUTED, POOL_LABEL_W);
+    text(ctx, fit(pool.label, POOL_LABEL_W), x, baseline, colors.muted, POOL_LABEL_W);
     const barX = x + POOL_LABEL_W + 4;
-    ctx.fillStyle = "rgba(255, 255, 255, 0.12)";
+    ctx.fillStyle = colors.track;
     ctx.fillRect(barX, baseline - 8, BAR_W, 8);
     if (pool.fill !== null) {
-      ctx.fillStyle = HUD_COLORS[pool.tone];
+      ctx.fillStyle = colors.tones[pool.tone];
       ctx.fillRect(barX, baseline - 8, Math.max(1, Math.min(1, pool.fill) * BAR_W), 8);
     }
     const textX = barX + BAR_W + 8;
     const line = pool.text === pool.state ? pool.state : `${pool.text} · ${pool.state}`;
-    text(ctx, fit(line, w - (textX - x)), textX, baseline, HUD_COLORS[pool.tone], w);
+    text(ctx, fit(line, w - (textX - x)), textX, baseline, colors.tones[pool.tone], w);
   });
 }
 
-function lanes(ctx: HudDrawContext, view: HudView, x: number, y: number, w: number): void {
+function lanes(ctx: HudDrawContext, colors: HudColors, view: HudView, x: number, y: number, w: number): void {
   let baseline = y + LINE - 4;
-  text(ctx, fit("in flight / pending by lane", w), x, baseline, MUTED, w);
+  text(ctx, fit("in flight / pending by lane", w), x, baseline, colors.muted, w);
   for (const row of view.lanes.rows) {
     baseline += LINE;
-    text(ctx, fit(`${row.label.padEnd(13)} ${String(row.inFlight).padStart(4)} / ${row.pending}`, w), x, baseline, TEXT, w);
+    text(ctx, fit(`${row.label.padEnd(13)} ${String(row.inFlight).padStart(4)} / ${row.pending}`, w), x, baseline, colors.text, w);
   }
   baseline += LINE;
   text(
@@ -279,36 +319,37 @@ function lanes(ctx: HudDrawContext, view: HudView, x: number, y: number, w: numb
     fit(`${"all".padEnd(13)} ${String(view.lanes.inFlightTotal).padStart(4)} / ${view.lanes.pendingTotal}`, w),
     x,
     baseline,
-    MUTED,
+    colors.muted,
     w,
   );
   if (view.lanes.note) {
     baseline += LINE;
-    text(ctx, fit(view.lanes.note.text, w), x, baseline, HUD_COLORS[view.lanes.note.tone], w);
+    text(ctx, fit(view.lanes.note.text, w), x, baseline, colors.tones[view.lanes.note.tone], w);
   }
 }
 
-function status(ctx: HudDrawContext, view: HudView, x: number, y: number, w: number): void {
+function status(ctx: HudDrawContext, colors: HudColors, view: HudView, x: number, y: number, w: number): void {
   let baseline = y + LINE - 4;
-  stateLine(ctx, x, baseline, w, view.quiescence.tone, view.quiescence.label, view.quiescence.detail);
+  stateLine(ctx, colors, x, baseline, w, view.quiescence.tone, view.quiescence.label, view.quiescence.detail);
   baseline += LINE;
-  stateLine(ctx, x, baseline, w, view.run.tone, view.run.label, view.run.detail);
+  stateLine(ctx, colors, x, baseline, w, view.run.tone, view.run.label, view.run.detail);
   baseline += LINE;
-  stateLine(ctx, x, baseline, w, view.adapter.tone, view.adapter.label, view.adapter.detail);
+  stateLine(ctx, colors, x, baseline, w, view.adapter.tone, view.adapter.label, view.adapter.detail);
   const shown = view.levels.slice(0, LEVEL_ROWS_SHOWN);
   // The state word leads so a narrow column truncates the numbers, not the judgment.
   for (const level of shown) {
     baseline += LINE;
-    stateLine(ctx, x, baseline, w, level.tone, level.name, `${level.state} · ${level.text}`);
+    stateLine(ctx, colors, x, baseline, w, level.tone, level.name, `${level.state} · ${level.text}`);
   }
   if (view.levels.length > shown.length) {
     baseline += LINE;
-    text(ctx, `+${view.levels.length - shown.length} more datasets`, x + 12, baseline, MUTED, w);
+    text(ctx, `+${view.levels.length - shown.length} more datasets`, x + 12, baseline, colors.muted, w);
   }
 }
 
 function stateLine(
   ctx: HudDrawContext,
+  colors: HudColors,
   x: number,
   baseline: number,
   w: number,
@@ -316,15 +357,15 @@ function stateLine(
   label: string,
   detail: string,
 ): void {
-  ctx.fillStyle = HUD_COLORS[tone];
+  ctx.fillStyle = colors.tones[tone];
   ctx.beginPath();
   ctx.arc(x + 4, baseline - 4, 3.5, 0, Math.PI * 2);
   ctx.fill();
   const labelText = fit(label, w * 0.5);
-  text(ctx, labelText, x + 12, baseline, HUD_COLORS[tone], w);
+  text(ctx, labelText, x + 12, baseline, colors.tones[tone], w);
   const detailX = x + 12 + labelText.length * CHAR_W + 8;
   const room = w - (detailX - x);
-  if (room > CHAR_W * 4) text(ctx, fit(detail, room), detailX, baseline, MUTED, room);
+  if (room > CHAR_W * 4) text(ctx, fit(detail, room), detailX, baseline, colors.muted, room);
 }
 
 function text(ctx: HudDrawContext, value: string, x: number, baseline: number, color: string, maxW: number): void {

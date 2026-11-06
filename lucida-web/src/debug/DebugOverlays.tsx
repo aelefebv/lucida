@@ -45,6 +45,7 @@ import {
   describeHoverInspector,
   hitTestChunk,
   overlayAbsence,
+  readOverlayColors,
   selectionCaption,
   type ChunkCell,
   type ChunkDrawItem,
@@ -1165,6 +1166,7 @@ export function DebugOverlays({
         const window = traceRecorder.openIntervalMs;
         const input = {
           cells: out,
+          colors: readOverlayColors(),
           modes: enabled,
           readingOf: (cell: ChunkCell) => traceRecorder.readChunk(cell),
           windowMs: window,

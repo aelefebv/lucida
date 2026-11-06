@@ -157,11 +157,13 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
     renderedLayers.push({ view: minimapOffscreenPool[idx].createView(), blendMode: "alpha" });
   }
 
-  if (renderedLayers.length > 0) {
-    const compEncoder = ctx.device.createCommandEncoder();
-    comp.composite(minimapContext.getCurrentTexture().createView(), renderedLayers, compEncoder);
-    ctx.device.queue.submit([compEncoder.finish()]);
-  }
+  // Drawn even with no overview resident, so the minimap shows the canvas
+  // background rather than whatever it last held.
+  const compEncoder = ctx.device.createCommandEncoder();
+  const minimapView = minimapContext.getCurrentTexture().createView();
+  comp.composite(minimapView, renderedLayers, compEncoder);
+  comp.underlayBackground(minimapView, compEncoder);
+  ctx.device.queue.submit([compEncoder.finish()]);
 }
 
 /**
@@ -228,7 +230,9 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
   }
 
   const compEncoder = ctx.device.createCommandEncoder();
-  comp.composite(thumbnailContext.getCurrentTexture().createView(), renderedLayers, compEncoder);
+  const thumbnailView = thumbnailContext.getCurrentTexture().createView();
+  comp.composite(thumbnailView, renderedLayers, compEncoder);
+  comp.underlayBackground(thumbnailView, compEncoder);
   ctx.device.queue.submit([compEncoder.finish()]);
 
   // The canvas is reused for the next thumbnail, so snapshot it rather than

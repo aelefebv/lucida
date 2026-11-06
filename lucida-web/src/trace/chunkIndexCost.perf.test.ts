@@ -13,6 +13,7 @@
 import { describe, expect, it } from "vitest";
 
 import { buildChunkDrawList, type ChunkCell } from "../debug/overlayDrawList.ts";
+import { OVERLAY_TEST_COLORS } from "../debug/overlayFixtures.ts";
 import type { ChunkSelection } from "./diagnose/chunkSelection.ts";
 import { chunkIdentity } from "./diagnose/chunkStates.ts";
 import { TraceRecorder } from "./recorder.ts";
@@ -130,6 +131,7 @@ function timeTick(recorder: TraceRecorder, grid: ChunkCell[], repeats: number): 
   for (let r = 0; r < repeats; r++) {
     const start = performance.now();
     buildChunkDrawList({
+      colors: OVERLAY_TEST_COLORS,
       cells: grid,
       modes,
       readingOf: (cell) => recorder.readChunk(cell),

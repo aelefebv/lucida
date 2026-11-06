@@ -805,6 +805,11 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   }
 }
 
+/** Make the next tick rebuild the overview and redraw every overlay layer. */
+export function invalidateMinimapOverview(state: MinimapState): void {
+  state.overviewGeometryKey = null;
+}
+
 export function clearMinimapForDataset(state: MinimapState, dsId: string): void {
   // Clear the dataset ID itself (single-member case).
   state.overviewKey.delete(dsId);

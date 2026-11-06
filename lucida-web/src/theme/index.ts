@@ -36,4 +36,11 @@ export {
   usePreference,
   type Preference,
 } from "./preferences.ts";
-export { readColorToken, readToken, type ResolvedColor, type TokenName } from "./tokens.ts";
+export { mixColor, paint, rgbColor, tokenColor, tokenColors } from "./tokenColors.ts";
+export {
+  CANVAS_TOKEN_NAMES,
+  readColorToken,
+  readToken,
+  type ResolvedColor,
+  type TokenName,
+} from "./tokens.ts";
