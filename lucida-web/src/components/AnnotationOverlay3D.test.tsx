@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
 import { AnnotationOverlay3D } from "./AnnotationOverlay3D.tsx";
@@ -24,6 +25,8 @@ function makeScene(
       new Float64Array([100, 100]),
     pick_annotation_voxel: (_ds: string, x: number, y: number) =>
       new Float64Array(pick(x, y)),
+    dataset_volume_shape: () => new Uint32Array([5, 100, 100]),
+    export_presence: () => "not json",
     apply_command: (json: string) => {
       const cmd = JSON.parse(json) as Record<string, unknown>;
       applied.push(cmd);
@@ -143,7 +146,7 @@ function renderOverlay(opts: {
     viewContext = next;
     rerender(overlay(version));
   };
-  return { applied, sent, getChanged: () => changed, capturedPointers, forwardedDowns, bumpVersion, setViewContext };
+  return { applied, sent, getChanged: () => changed, canvas, capturedPointers, forwardedDowns, bumpVersion, setViewContext };
 }
 
 beforeEach(() => {
@@ -652,5 +655,56 @@ describe("AnnotationOverlay3D — comment-count badge on the marker", () => {
     fireEvent.click(screen.getByLabelText("1 comment"));
     expect(screen.getByTestId("annot-thread-pin-a")).toBeTruthy();
     expect(screen.getByText("hi from 3d")).toBeTruthy();
+  });
+});
+
+describe("AnnotationOverlay3D — select to edit and the canvas menu", () => {
+  it("a click selects one's own pin, after which a plain drag moves it instead of orbiting", () => {
+    const { sent, forwardedDowns } = renderOverlay({ pins: [ownPin()] });
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    fireEvent.pointerDown(marker, { pointerId: 1, button: 0, clientX: 100, clientY: 100 });
+    fireEvent.pointerUp(marker, { pointerId: 1, clientX: 100, clientY: 100 });
+    fireEvent.click(marker);
+    expect(marker.getAttribute("data-selected")).toBe("true");
+
+    fireEvent.pointerDown(marker, { pointerId: 2, button: 0, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(marker, { pointerId: 2, clientX: 160, clientY: 140 });
+    fireEvent.pointerUp(marker, { pointerId: 2, clientX: 160, clientY: 140 });
+    expect(sent.filter((c) => c.type === "move_annotation")).toHaveLength(1);
+    expect(forwardedDowns).toHaveLength(0);
+  });
+
+  it("hands a finger's drag to the canvas as a touch, for its gesture recognizer", () => {
+    const { forwardedDowns } = renderOverlay({ pins: [ownPin({ author: "999" })] });
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    fireEvent.pointerDown(marker, { pointerId: 6, pointerType: "touch", button: 0, clientX: 100, clientY: 100 });
+    fireEvent.pointerMove(marker, { pointerId: 6, pointerType: "touch", clientX: 130, clientY: 100 });
+    expect(forwardedDowns.map((e) => e.pointerType)).toEqual(["touch"]);
+  });
+
+  it("a right-click drops a point where the volume is picked, clamped to its depth", async () => {
+    const { sent, canvas } = renderOverlay({ pins: [], pick: () => [50, 60, 4.9] });
+    act(() => {
+      fireEvent.contextMenu(canvas, { clientX: 300, clientY: 200 });
+    });
+    const menu = screen.getByRole("menu");
+    expect(within(menu).getAllByRole("menuitem").map((e) => e.textContent)).toEqual([
+      "Comment here",
+      "Drop a point",
+      "Copy coordinates",
+    ]);
+    await userEvent.click(within(menu).getByRole("menuitem", { name: "Drop a point" }));
+    const adds = sent.filter((c) => c.type === "add_annotation");
+    expect(adds).toHaveLength(1);
+    // The volume is 5 planes deep, so a far-face pick lands on the last one.
+    expect(adds[0]).toMatchObject({ kind: "point", position: [50, 60], z: 4 });
+  });
+
+  it("offers no point where the press misses the volume", () => {
+    const { canvas } = renderOverlay({ pins: [], pick: () => [] });
+    act(() => {
+      fireEvent.contextMenu(canvas, { clientX: 300, clientY: 200 });
+    });
+    expect(screen.getByRole("menuitem", { name: "Drop a point" }).getAttribute("aria-disabled")).toBe("true");
   });
 });

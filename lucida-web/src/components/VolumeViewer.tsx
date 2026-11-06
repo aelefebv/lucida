@@ -10,6 +10,7 @@ import { buildAnnotationView, liveViewWithLiveTC } from "../savedView/buildAnnot
 import { useHeldKeys } from "../hooks/useHeldKeys.ts";
 import { CLIP_BINDINGS, FLY_BINDINGS, TOGGLE_FLY_KEYS } from "../config/keyBindings.ts";
 import { useFlyCameraInput } from "../hooks/useFlyCameraInput.ts";
+import { useFineInputAvailable } from "../input/pointerCapabilities.ts";
 import { useCommand } from "../ui/commands.ts";
 import { pushEscapeLayer } from "../ui/escape.ts";
 import { useShortcutScope } from "../ui/shortcuts.ts";
@@ -133,6 +134,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     emitPresence();
     loopRef.current?.markInteractiveDirty();
   };
+  const canFly = useFineInputAvailable();
   useCommand({
     id: "camera.toggleFly",
     label: isFlyMode ? "Leave fly mode" : "Fly through the volume",
@@ -140,6 +142,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     keys: TOGGLE_FLY_KEYS,
     keywords: ["camera", "orbit", "arcball"],
     run: toggleFly,
+    // Steered by keys and a mouse, so offered only with one of them, or to
+    // get back out.
+    enabled: canFly || isFlyMode,
   });
 
   // A fly-specific dirty source: fly ticks every frame, so attribution is useful
@@ -354,7 +359,8 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
 
   const onArcballPointerDown = useCallback(
     (e: PointerEvent) => {
-      if (e.pointerType === "touch") return;
+      // The right button opens the canvas menu instead.
+      if (e.pointerType === "touch" || e.button === 2) return;
       beginArcballPress(e, e.shiftKey);
       canvas.setPointerCapture(e.pointerId);
       setLowRes();

@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
+import { __resetKeyboardSeenForTesting } from "../input/pointerCapabilities.ts";
 import { __resetShortcutsForTesting } from "../ui/shortcuts.ts";
 import { DimensionBar, PLAYBACK_INTERVAL_MS } from "./DimensionBar.tsx";
 
@@ -90,6 +91,53 @@ describe("DimensionBar", () => {
     });
     expect(state()).toMatch(/ fly$/);
     expect(screen.getByRole("slider", { name: "Focal depth" })).toBeTruthy();
+  });
+
+  it("offers the clip plane in the camera popover when there is a volume to clip", async () => {
+    const depth = { read: () => 0, write: vi.fn() };
+    render(
+      <DimensionBar
+        viewMode="3d"
+        onViewModeToggle={() => {}}
+        z={0}
+        dimZ={8}
+        onZChange={() => {}}
+        t={0}
+        dimT={1}
+        onTChange={() => {}}
+        cameraMode="arcball"
+        onCameraModeToggle={() => {}}
+        clipDepth={depth}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Camera" }));
+    });
+    fireEvent.change(await screen.findByRole("slider", { name: "Clip plane" }), { target: { value: "0.3" } });
+    expect(depth.write).toHaveBeenCalledWith(0.3);
+  });
+
+  it("leaves fly mode out with no mouse, trackpad, or keyboard, unless already flying", async () => {
+    const realMatchMedia = window.matchMedia;
+    window.matchMedia = ((query: string) =>
+      query.includes("pointer: fine")
+        ? { matches: false, addEventListener: () => {}, removeEventListener: () => {} }
+        : realMatchMedia(query)) as unknown as typeof window.matchMedia;
+    __resetKeyboardSeenForTesting();
+    try {
+      render(<Harness mode="3d" />);
+      await act(async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Camera" }));
+      });
+      expect(screen.queryByRole("radio", { name: "Fly" })).toBeNull();
+      expect(screen.getByRole("slider", { name: "Focal depth" })).toBeTruthy();
+
+      // A key pressed outside a text field means a keyboard is attached.
+      press("x");
+      expect(await screen.findByRole("radio", { name: "Fly" })).toBeTruthy();
+    } finally {
+      window.matchMedia = realMatchMedia;
+    }
   });
 
   it("steps Z and T from their keys, which the buttons name", () => {

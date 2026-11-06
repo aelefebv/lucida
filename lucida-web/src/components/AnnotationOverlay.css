@@ -24,6 +24,9 @@
   left: 0;
   overflow: visible;
   pointer-events: none;
+  /* Shapes inside take a finger's drag; the browser reads touch-action from
+     this box, not from the shapes. */
+  touch-action: none;
 }
 
 .lc-annotation-shape {
@@ -45,10 +48,28 @@
 }
 
 /* Hit-test only the stroke, so a press inside a box still reaches the canvas.
-   Only enter and leave are tracked, so the shape never starts a gesture. */
+   Hover reveals the handles and a click selects; the canvas hit-tests taps on
+   a wider band, so a finger never has to land on the stroke itself, and one
+   that does is handed on to the canvas. */
 .lc-annotation-shape[data-hoverable] {
   pointer-events: stroke;
   cursor: pointer;
+}
+
+.lc-annotation-shape[data-selected] {
+  stroke-width: 3.5;
+}
+
+/* The selected shape's drag target: invisible, covering its inside and a band
+   around its stroke. */
+.lc-annotation-body {
+  fill: transparent;
+  stroke: transparent;
+  stroke-width: 12;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  pointer-events: all;
+  cursor: move;
 }
 
 /* Carries a pin's dot, badges, and open thread; the tick moves it. */
@@ -74,6 +95,13 @@
   background: var(--annotation-color);
   box-shadow: var(--lc-annotation-shadow);
   pointer-events: auto;
+  /* A finger's drag on a pin goes to the canvas, never to the page. */
+  touch-action: none;
+}
+
+.lc-annotation-pin[data-selected] {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 2px;
 }
 
 .lc-annotation-pin[data-author="peer"] {
@@ -124,6 +152,42 @@
   text-align: center;
   pointer-events: auto;
   cursor: pointer;
+}
+
+/* A finger gets 44 px targets without the marks growing: pseudo-elements
+   widen the hit area. The badge's grows up and to the right, away from its
+   pin. Handles also grow on screen, since they appear only when asked for. */
+@media (pointer: coarse) {
+  .lc-annotation-pin::before,
+  .lc-annotation-handle::before,
+  .lc-annotation-count::before {
+    content: "";
+    position: absolute;
+  }
+
+  .lc-annotation-pin::before {
+    inset: -16px;
+    border-radius: var(--lc-radius-full);
+  }
+
+  .lc-annotation-count::before {
+    inset: -28px -28px 0 0;
+  }
+
+  .lc-annotation-handle {
+    width: 16px;
+    height: 16px;
+    margin: -8px 0 0 -8px;
+    border-width: 2px;
+  }
+
+  .lc-annotation-handle::before {
+    inset: -16px;
+  }
+
+  .lc-annotation-body {
+    stroke-width: 44;
+  }
 }
 
 /* Where an off-context pin lives. Sits below the dot so it never collides
