@@ -8,7 +8,7 @@
  * so a narrow viewport costs height rather than readouts.
  */
 
-import { mixColor, paint, tokenColor, tokenColors } from "../theme/tokenColors.ts";
+import { paint, tokenColor, tokenColors } from "../theme/tokenColors.ts";
 import type { TokenName } from "../theme/tokens.ts";
 import { HUD_HISTORY, type HudSeriesView, type HudTone, type HudView } from "./hudModel.ts";
 
@@ -78,13 +78,14 @@ export function readHudColors(): HudColors {
       absent: paint(tones.absent),
       info: paint(tones.info),
     },
-    // Each sparkline has its own labelled cell, so these only need to differ
-    // enough to scan.
+    // The developer surfaces' chart slots, in order, so a series reads the
+    // same here as in the monitor's charts and the status tones keep their
+    // meaning.
     series: {
-      received: paint(tones.info),
-      sent: paint(tokenColor("--lc-accent-text")),
-      frame: paint(tones.ok),
-      gpu: paint(mixColor(tones.ok, tones.info, 0.5)),
+      received: paint(tokenColor("--lc-chart-1")),
+      sent: paint(tokenColor("--lc-chart-2")),
+      frame: paint(tokenColor("--lc-chart-3")),
+      gpu: paint(tokenColor("--lc-chart-4")),
     },
   };
 }

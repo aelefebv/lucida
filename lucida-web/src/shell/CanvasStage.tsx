@@ -104,6 +104,9 @@ export function CanvasStage({
     };
   }, []);
 
+  const bottomRowRef = useRef<HTMLDivElement>(null);
+  useToastInsets(stageRef, bottomRowRef, !bare);
+
   return (
     // `viewer-canvas-wrap` is how the CLI's trace driver finds the canvas,
     // and the canvas stays the page's first, which the capture probe reads.
@@ -122,7 +125,7 @@ export function CanvasStage({
           <Slot name="top-center">{slots["top-center"]}</Slot>
           <Slot name="top-right">{slots["top-right"]}</Slot>
         </div>
-        <div className="lc-canvas-stage-row" data-row="bottom">
+        <div ref={bottomRowRef} className="lc-canvas-stage-row" data-row="bottom">
           <Slot name="bottom-left">{slots["bottom-left"]}</Slot>
           <Slot name="bottom-center">{slots["bottom-center"]}</Slot>
           <Slot name="bottom-right">{slots["bottom-right"]}</Slot>
@@ -130,6 +133,45 @@ export function CanvasStage({
       </div>
     </div>
   );
+}
+
+/**
+ * Places the app's toasts at the stage's bottom-right corner, above the
+ * bottom row of floating controls, by writing the insets the toast region
+ * reads. The row is as tall as its tallest slot, so a toast clears the
+ * minimap card and the dimension bar alike, and drops to the stage's edge
+ * when the row is empty. Off the viewer, the region keeps its own corner.
+ */
+function useToastInsets(
+  stageRef: RefObject<HTMLDivElement | null>,
+  rowRef: RefObject<HTMLDivElement | null>,
+  enabled: boolean,
+) {
+  useEffect(() => {
+    const stage = stageRef.current;
+    const row = rowRef.current;
+    if (!enabled || !stage || !row || typeof ResizeObserver === "undefined") return;
+    const root = document.documentElement.style;
+    const place = () => {
+      const rowRect = row.getBoundingClientRect();
+      // The row's own gap, so a toast sits as far above it as the slots sit apart.
+      const gap = rowRect.height > 0 ? parseFloat(getComputedStyle(row).columnGap) || 0 : 0;
+      root.setProperty("--toast-inset-bottom", `${Math.max(0, window.innerHeight - rowRect.top + gap)}px`);
+      root.setProperty("--toast-inset-right", `${Math.max(0, window.innerWidth - rowRect.right)}px`);
+    };
+    // The stage moves as well as resizes when a side panel opens or closes.
+    const observer = new ResizeObserver(place);
+    observer.observe(stage);
+    observer.observe(row);
+    window.addEventListener("resize", place);
+    place();
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", place);
+      root.removeProperty("--toast-inset-bottom");
+      root.removeProperty("--toast-inset-right");
+    };
+  }, [stageRef, rowRef, enabled]);
 }
 
 function Slot({ name, children }: { name: CanvasSlot; children: ReactNode }) {

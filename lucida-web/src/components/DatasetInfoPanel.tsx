@@ -5,6 +5,7 @@
 import { CopyIcon } from "@phosphor-icons/react";
 import { useEffect, useState, type ReactNode } from "react";
 import type { DatasetManifest, MultiscaleInfo } from "../manifestTypes.ts";
+import { channelDisplayName } from "./channels.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
 import { toast } from "../ui/toastQueue.ts";
@@ -92,7 +93,7 @@ function DatasetFacts({ dataset, source }: { dataset: InfoDataset; source: Sourc
   const generated = new Set((multiscale?.generated_levels ?? []).map((g) => g.level_index));
   const channelCount = shape?.[1] ?? 0;
   const channelNames = Array.from({ length: channelCount }, (_, i) => {
-    return multiscale?.channel_infos?.[i]?.label || `Ch ${i}`;
+    return channelDisplayName(i, null, multiscale?.channel_infos?.[i]?.label);
   });
   const labels = manifest.labels ?? [];
 

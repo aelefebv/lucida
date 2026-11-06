@@ -198,7 +198,7 @@ export function ProfileMenu() {
                 className="lc-profile-item"
                 disabled={devPending || !devEmail.trim()}
               >
-                {devPending ? "Switching..." : "Switch dev user"}
+                {devPending ? "Switching…" : "Switch dev user"}
               </button>
             </form>
           )}
@@ -210,7 +210,7 @@ export function ProfileMenu() {
               onClick={handleSignOut}
               disabled={pending}
             >
-              {pending ? "Signing out..." : "Sign out"}
+              {pending ? "Signing out…" : "Sign out"}
             </button>
           )}
         </div>

@@ -34,11 +34,11 @@
 /* The render-radius rings, drawn over the picture: detail in the success
    color, coarse in the warning color, as the tier overlay colors them. */
 .debug-overlays-radius[data-tier="detail"] {
-  stroke: var(--lc-success);
+  stroke: var(--lc-canvas-success);
 }
 
 .debug-overlays-radius[data-tier="coarse"] {
-  stroke: var(--lc-warning);
+  stroke: var(--lc-canvas-warning);
 }
 
 .debug-overlays-card {

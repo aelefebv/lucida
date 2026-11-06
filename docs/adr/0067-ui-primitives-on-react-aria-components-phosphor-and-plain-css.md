@@ -31,9 +31,7 @@ rails.
 
 Styles are plain CSS beside each primitive, using `lc-` classes, data
 attributes for variants and states, and `--lc-*` tokens only
-([0066](0066-semantic-theme-tokens-and-per-browser-appearance.md)). Base styles
-for unmigrated buttons skip `lc-` classes, so the two coexist while screens
-move over.
+([0066](0066-semantic-theme-tokens-and-per-browser-appearance.md)).
 
 Keyboard shortcuts go through one registry (`src/ui/shortcuts.ts`). A component
 binds a key with `useShortcut`, giving an id, a label, a group, and a handler;

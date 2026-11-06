@@ -86,7 +86,7 @@ export function UnauthLanding({ navigate, location, signedOut }: UnauthLandingPr
   return (
     <div className="lc-auth-screen">
       <p className="lc-auth-status" role="status">
-        Redirecting to sign-in...
+        Redirecting to sign-in…
       </p>
     </div>
   );

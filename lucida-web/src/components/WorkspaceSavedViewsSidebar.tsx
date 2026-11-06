@@ -63,7 +63,6 @@ export interface WorkspaceSavedViewsSidebarProps {
    *  withdrawn, or its deferred reject commits. The host clears its active-row id
    *  so the highlight doesn't dangle. Viewport changes are cleared host-side. */
   onActiveSavedViewInvalidated?: (savedViewId: string) => void;
-  style?: React.CSSProperties;
   visible: boolean;
 }
 
@@ -87,7 +86,6 @@ export function WorkspaceSavedViewsSidebar({
   onSetDefaultSavedView,
   currentOpenSavedViewId,
   onActiveSavedViewInvalidated,
-  style,
   visible,
 }: WorkspaceSavedViewsSidebarProps) {
   const {
@@ -513,7 +511,7 @@ export function WorkspaceSavedViewsSidebar({
   );
 
   return (
-    <section className="lc-rail-panel" style={style} aria-label="Saved views">
+    <section className="lc-rail-panel" aria-label="Saved views">
       <PanelHeader
         className="lc-rail-panel-header"
         title="Saved views"

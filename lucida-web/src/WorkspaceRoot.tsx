@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import App from "./App.tsx";
+import "./auth/auth.css";
 import { WatchStreamBanner } from "./monitor/WatchToggle.tsx";
+import { Banner } from "./shell/Banner.tsx";
+import { Button } from "./ui/Button.tsx";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
 import {
@@ -172,15 +175,26 @@ function OpenLinkRoute({
 
   if (error) {
     return (
-      <div className="workspace-route-message">
-        <button onClick={onBackToDashboard}>Workspaces</button>
-        <p data-testid="open-link-error">
-          Couldn&rsquo;t create the workspace: {error}
-        </p>
+      <div className="lc-auth-screen">
+        <div className="lc-auth-card">
+          <h1 className="lc-auth-title">Couldn&rsquo;t open the link</h1>
+          <p className="lc-auth-body" data-testid="open-link-error">
+            Couldn&rsquo;t create the workspace: {error}
+          </p>
+          <Button variant="primary" onPress={onBackToDashboard}>
+            All workspaces
+          </Button>
+        </div>
       </div>
     );
   }
-  return <div className="workspace-route-message">Opening…</div>;
+  return (
+    <div className="lc-auth-screen">
+      <p className="lc-auth-status" role="status">
+        Opening…
+      </p>
+    </div>
+  );
 }
 
 interface WorkspaceViewerRouteProps {
@@ -238,34 +252,38 @@ function WorkspaceViewerRoute({
     // whose access is workspace access) render the same message, so the page
     // never confirms that one exists. The raw `error` is not shown.
     return (
-      <div className="workspace-route-message">
-        <button onClick={onBackToDashboard}>Workspaces</button>
-        <p data-testid="workspace-access-message">
-          You don&rsquo;t have access to this workspace, or it doesn&rsquo;t
-          exist — ask the person who shared it for an invite.
-        </p>
+      <div className="lc-auth-screen">
+        <div className="lc-auth-card">
+          <h1 className="lc-auth-title">Workspace unavailable</h1>
+          <p className="lc-auth-body" data-testid="workspace-access-message">
+            You don&rsquo;t have access to this workspace, or it doesn&rsquo;t
+            exist — ask the person who shared it for an invite.
+          </p>
+          <Button variant="primary" onPress={onBackToDashboard}>
+            All workspaces
+          </Button>
+        </div>
       </div>
     );
   }
 
   if (!workspace) {
-    return <div className="workspace-route-message">Loading workspace...</div>;
+    return (
+      <div className="lc-auth-screen">
+        <p className="lc-auth-status" role="status">
+          Loading workspace…
+        </p>
+      </div>
+    );
   }
 
   return (
     <>
       {createError && (
-        <div className="workspace-create-error" role="alert">
-          <span data-testid="workspace-create-error">
+        <div className="workspace-create-error">
+          <Banner tone="danger" role="alert" onDismiss={() => setCreateError(null)} data-testid="workspace-create-error">
             Couldn&rsquo;t create the workspace: {createError}
-          </span>
-          <button
-            type="button"
-            aria-label="Dismiss"
-            onClick={() => setCreateError(null)}
-          >
-            Dismiss
-          </button>
+          </Banner>
         </div>
       )}
       <App

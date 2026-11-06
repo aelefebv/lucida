@@ -126,7 +126,7 @@ export function CommentsPanel({
         {tab === "threads" ? (
           threads.length === 0 ? (
             <p className="lc-rail-panel-empty">
-              No comments on this dataset yet. Shift-drag on the canvas to pin one.
+              No comments on this dataset yet. Choose the point tool (P) and click the canvas to pin one.
             </p>
           ) : (
             <ul className="lc-rail-list">

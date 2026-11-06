@@ -174,9 +174,7 @@ describe("PeerCursors identity", () => {
     const palette = peer_palette();
     const id = palette.length + 3;
     renderPeers(new Map([[id, makePeer(id, { display_name: "Wrapped" })]]));
-    const pill = screen.getByText("Wrapped").closest("div")!;
-    const expected = document.createElement("div");
-    expected.style.backgroundColor = palette[3];
-    expect(pill.style.backgroundColor).toBe(expected.style.backgroundColor);
+    const cursor = screen.getByText("Wrapped").closest<HTMLElement>(".lc-peer-cursor")!;
+    expect(cursor.style.getPropertyValue("--peer-color")).toBe(palette[3]);
   });
 });

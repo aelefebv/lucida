@@ -84,7 +84,6 @@ export interface ExplorationPanelProps {
    * the square edge in device pixels. Omit it for label-only rows.
    */
   requestThumbnail?: (view: SavedView, size: number) => Promise<ImageBitmap | null>;
-  style?: React.CSSProperties;
 }
 
 // Each nudge button is keyed to a generator move (`ViewTransform::id`) and applies
@@ -318,7 +317,6 @@ export function ExplorationPanel({
   viewport,
   getHomeBounds,
   requestThumbnail,
-  style,
 }: ExplorationPanelProps) {
   const [cells, setCells] = useState<ExplorationCell[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -520,7 +518,6 @@ export function ExplorationPanel({
   return (
     <section
       className="lc-rail-panel lc-explore"
-      style={style}
       aria-label="Explore"
       data-testid="explore-panel"
     >

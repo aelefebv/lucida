@@ -28,6 +28,8 @@ import { DatasetInfoPanel } from "./components/DatasetInfoPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
 import { ShareButton } from "./share/ShareButton.tsx";
 import { applyViewportCommand } from "./applyAndSend.ts";
+import { runCommand } from "./ui/commands.ts";
+import { toast } from "./ui/toastQueue.ts";
 import {
   invalidateDisplaySettings,
   invalidateAfterViewRestore,
@@ -176,13 +178,9 @@ function App({
   // offline, so this may stay `[]` and the picker uses document participants.
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
   const [cameraMode, setCameraMode] = useState<string>("arcball");
-  // A brief notice when the light annotation-view restore had to clamp z/t/c to
-  // fit the pin's dataset. Auto-cleared.
-  const [restoreNotice, setRestoreNotice] = useState<string | null>(null);
-  // Set when `#a=<id>` doesn't resolve in the loaded document. Separate from
-  // `restoreNotice` so neither clobbers the other. A recipient without access
-  // fails at the workspace gate first, so this never reveals whether an
-  // annotation exists.
+  // Set when `#a=<id>` doesn't resolve in the loaded document. A recipient
+  // without access fails at the workspace gate first, so this never reveals
+  // whether an annotation exists.
   const [deepLinkNotFound, setDeepLinkNotFound] = useState(false);
   const bumpDatasetsVersion = useCallback(() => setDatasetsVersion(v => v + 1), []);
   const bumpRemoteDocumentVersion = useCallback(() => setRemoteDocumentVersion(v => v + 1), []);
@@ -585,8 +583,7 @@ function App({
     emitPresenceWithUrl();
     invalidateAfterViewRestore(render.loopRef.current, "annotation_view_restore");
 
-    // The clamp notice auto-clears below.
-    setRestoreNotice(result.notice);
+    if (result.notice) toast({ title: result.notice, tone: "info" });
 
     // If the mode flipped or annotations were hidden, wait a frame so the right
     // overlay's ref exists. Focus with the restored mode, not the possibly stale
@@ -846,43 +843,17 @@ function App({
     // canvasSize re-projects the labels after a panel moves the canvas edges.
   }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef, canvasSize]);
 
-  // Auto-clear the clamp notice after a few seconds. Re-arms on each new notice.
-  useEffect(() => {
-    if (!restoreNotice) return;
-    const timer = setTimeout(() => setRestoreNotice(null), 4000);
-    return () => clearTimeout(timer);
-  }, [restoreNotice]);
-
   const handleCameraModeChange = useCallback((mode: string) => {
     setCameraMode(mode);
   }, []);
 
-  // The three useCallbacks below trip react-hooks/preserve-manual-memoization
-  // because the deps array references refs (e.g. scene.wasmSceneRef) while
-  // the body reads .current — React Compiler infers the .current as the real
-  // dep and the ref-shaped manual dep as suspicious. The handlers are
-  // user-event-driven (button click, keypress, debug toggle), so the
-  // memoization-stability win is small; the manual deps are intentional and
-  // satisfy the older react-hooks/exhaustive-deps gating.
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization
+  // The volume viewer owns the camera mode: it swaps its pointer handlers and
+  // the fly keys' scope and shows the fly hint, then reports the mode back
+  // through `onCameraModeChange`. Switching the scene here directly would
+  // leave it handling a fly camera as an orbit one.
   const handleCameraModeToggle = useCallback(() => {
-    const ws = scene.wasmSceneRef.current;
-    if (!ws) return;
-    const currentMode = ws.camera_mode();
-    if (currentMode === "fly") {
-      ws.set_mode_arcball();
-    } else if (currentMode === "arcball") {
-      ws.set_mode_fly();
-      const BASE_SPEED_FACTOR = 0.3;
-      const diagonal = ws.volume_diagonal();
-      ws.fly_set_base_speed(diagonal * BASE_SPEED_FACTOR);
-    }
-    const newMode = ws.camera_mode();
-    setCameraMode(newMode);
-    bridge.breakFollow();
-    emitPresenceWithUrl();
-    requestRender(render.loopRef.current, "camera_mode_toggle");
-  }, [scene.wasmSceneRef, bridge, emitPresenceWithUrl, render.loopRef]);
+    runCommand("camera.toggleFly");
+  }, []);
 
   const [addDataOpen, setAddDataOpen] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
@@ -1247,17 +1218,11 @@ function App({
                     onDismiss={bridge.dismissRemoteDatasetWarnings}
                   />
                   {bridge.remoteDatasetLoading && (
-                    <Banner tone="info">{bridge.remoteDatasetProgress ?? "Loading volume..."}</Banner>
+                    <Banner tone="info">{bridge.remoteDatasetProgress ?? "Loading dataset…"}</Banner>
                   )}
                   {datasetStatus && (
                     <Banner tone="danger" role="alert">
                       {datasetStatus}
-                    </Banner>
-                  )}
-                  {/* Clamp notice from the light annotation-view restore. */}
-                  {restoreNotice && (
-                    <Banner tone="info" data-testid="annotation-restore-notice">
-                      {restoreNotice}
                     </Banner>
                   )}
                   {/* `#a=<id>` didn't resolve. A recipient without access fails
@@ -1289,8 +1254,6 @@ function App({
                         // attach or be replaced while the surface is open, and the
                         // surface re-reads on its own tick.
                         getCpuCache={() => bridge.sessionRef.current?.cpuCache ?? null}
-                        // Lets it shrink to the room the slot has and scroll.
-                        style={{ minHeight: 0, flexShrink: 1 }}
                       />
                     </Suspense>
                   )}

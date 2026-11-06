@@ -18,7 +18,9 @@ listed in `tokens.ts`. Names are semantic, saying what a value is for
 (`--lc-surface-2` is popovers and dialogs, `--lc-text-muted` is secondary text),
 never what it looks like. Components style with tokens and nothing else. A new
 need adds a token with a dark and a light value; a test holds the CSS and the
-list together and checks body-text contrast on every surface.
+list together and checks body-text contrast on every surface. Another fails on
+a color literal anywhere in `lucida-web/src` outside the token file and the
+few files that define a palette on purpose.
 
 Appearance is four choices, written as attributes on `<html>`:
 

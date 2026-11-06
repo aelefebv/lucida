@@ -1,0 +1,102 @@
+/* Collaborators' cursor labels over the canvas. Each wears its peer's color
+   (--peer-color, set per cursor from the palette lucida-core draws the GPU
+   cursor in), so the color is data, not a token. Text on it is derived from
+   it the way text on the accent is, so any palette entry stays legible. */
+.lc-peer-cursors {
+  position: absolute;
+  inset: 0;
+  z-index: 11;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.lc-peer-cursor {
+  --peer-text: oklch(from var(--peer-color) clamp(0.2, (0.68 - l) * 100, 1) 0 0);
+  position: absolute;
+  top: 0;
+  left: 0;
+  will-change: transform;
+}
+
+.lc-peer-cursor[data-dim] {
+  opacity: 0.5;
+}
+
+.lc-peer-pill {
+  position: absolute;
+  top: -30px;
+  left: 12px;
+  align-items: center;
+  gap: var(--lc-space-1);
+  padding: 1px var(--lc-space-2) 1px 1px;
+  border-radius: var(--lc-radius-full);
+  background: var(--peer-color);
+  box-shadow: var(--lc-annotation-shadow);
+  color: var(--peer-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-xs);
+  font-weight: 500;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.lc-peer-avatar {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+}
+
+img.lc-peer-avatar {
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--lc-annotation-ring);
+}
+
+/* The initial inverts the pill: its text color as the chip, its fill as the
+   glyph, so the chip reads on every palette entry. */
+.lc-peer-initial {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--peer-text);
+  color: var(--peer-color);
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.lc-peer-dot {
+  position: absolute;
+  top: -4px;
+  left: -4px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--peer-color);
+  box-shadow: var(--lc-annotation-shadow);
+}
+
+/* Points toward a peer whose cursor is off screen. */
+.lc-peer-chevron {
+  position: absolute;
+  top: -6px;
+  left: -5px;
+  width: 0;
+  height: 0;
+  border-top: 6px solid transparent;
+  border-bottom: 6px solid transparent;
+  border-left: 10px solid var(--peer-color);
+  transform-origin: center center;
+}
+
+.lc-peer-chevron-label {
+  position: absolute;
+  padding: 0 2px;
+  border-radius: var(--lc-radius-sm);
+  background: var(--peer-color);
+  color: var(--peer-text);
+  font-family: var(--lc-font);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  white-space: nowrap;
+}

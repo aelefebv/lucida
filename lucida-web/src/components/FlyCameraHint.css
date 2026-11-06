@@ -1,0 +1,26 @@
+/* Over the canvas, below its middle, where the eye already is when fly mode
+   starts. It passes the pointer through so it never blocks a drag. */
+.lc-fly-hint {
+  position: absolute;
+  top: 60%;
+  left: 50%;
+  z-index: 1;
+  padding: var(--lc-space-2) var(--lc-space-4);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  background: var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-lg);
+  white-space: nowrap;
+  pointer-events: none;
+  transform: translateX(-50%);
+  transition: opacity var(--lc-motion) var(--lc-ease);
+}
+
+.lc-fly-hint[data-fading] {
+  opacity: 0;
+}

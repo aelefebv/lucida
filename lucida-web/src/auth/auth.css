@@ -1,5 +1,6 @@
-/* The screens AuthGate shows before the app: checking, redirecting, and
-   signed out. Each fills the viewport on its own, since nothing else renders
+/* Full-window screens before the app: AuthGate's checking, redirecting, and
+   signed out, and a workspace route that is loading, unavailable, or failed
+   to open. Each fills the viewport on its own, since nothing else renders
    beside it. */
 .lc-auth-screen {
   position: fixed;
