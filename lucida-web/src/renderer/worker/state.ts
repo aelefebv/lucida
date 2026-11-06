@@ -16,6 +16,10 @@ import type { EntityProxyDescriptor } from "../workerContext.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import type { EntitySource } from "../entitySources.ts";
 import type { PendingFrameCapture } from "./captureFrame.ts";
+import { CEILING_BUDGETS, type DeviceBudgets } from "../../deviceBudget.ts";
+
+/** The GPU atlas budgets a pool is sized under (ADR 0068). */
+export type AtlasBudgets = Pick<DeviceBudgets, "volumeAtlasBytes" | "sliceAtlasBytes">;
 
 export interface RendererState {
   /** memberId → datasetId (canonical: imageId or imageId:chN; group-as-proxy resolves to entityId). */
@@ -46,6 +50,8 @@ export interface RendererState {
   /** dataset → entity descriptor buffer + index maps (rebuilt fresh on each cold state). */
   descriptorBuffersByDataset: Map<string, EntityDescriptorIndex>;
 
+  /** Per-pool byte budgets, fitted to the device at init. */
+  atlasBudgets: AtlasBudgets;
   /** poolKey → volume atlas pool state. */
   volumeAtlases: Map<string, AtlasState>;
   /** poolKey → slice atlas pool state. */
@@ -107,8 +113,9 @@ export interface RendererState {
 }
 
 /** Build an empty {@link RendererState}. Called once in `case "init"`. */
-export function createInitialState(): RendererState {
+export function createInitialState(atlasBudgets: AtlasBudgets = CEILING_BUDGETS): RendererState {
   return {
+    atlasBudgets: { volumeAtlasBytes: atlasBudgets.volumeAtlasBytes, sliceAtlasBytes: atlasBudgets.sliceAtlasBytes },
     memberToDataset: new Map(),
     memberSourcePools: new Map(),
     currentSourcesByDataset: new Map(),

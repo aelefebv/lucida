@@ -83,6 +83,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "sliceRenderMultiPass":
       await handleSliceRenderMultiPass(ctx, msg);
+      postFrameDone(ctx, msg.frameSeq);
       return;
 
     case "volumeChunkData": {
@@ -104,6 +105,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "volumeRenderMultiPass":
       await handleVolumeRenderMultiPass(ctx, msg);
+      postFrameDone(ctx, msg.frameSeq);
       return;
 
     case "proxyAssetData": {
@@ -210,4 +212,16 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // `self.close()`. Reaching here means a duplicate.
       return;
   }
+}
+
+/**
+ * Report a viewport frame done once the GPU has run everything submitted so
+ * far, which includes the frame. Not awaited: the next message needn't wait.
+ */
+function postFrameDone(ctx: WorkerCtx, frameSeq: number | undefined): void {
+  if (frameSeq === undefined) return;
+  ctx.device.queue.onSubmittedWorkDone().then(
+    () => ctx.post({ type: "frameDone", frameSeq }),
+    () => {},
+  );
 }

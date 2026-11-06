@@ -78,6 +78,7 @@ import { setReportSender } from "./trace/reportInbox.ts";
 import { AddDataDialog, AddDataPrompt, noteSourceOpenFailed } from "./addData/index.ts";
 import { Banner } from "./shell/Banner.tsx";
 import { CanvasStage, type CanvasSize } from "./shell/CanvasStage.tsx";
+import { WebGpuUnavailable } from "./shell/WebGpuUnavailable.tsx";
 import { DimensionBar } from "./shell/DimensionBar.tsx";
 import { useOpenRightPanel } from "./shell/layoutPreferences.ts";
 import { LeftPanel } from "./shell/LeftPanel.tsx";
@@ -1099,7 +1100,9 @@ function App({
     );
   })();
 
-  const datasetStatus = scene.wasmError || render.renderError || bridge.remoteDatasetError;
+  // A browser that can't draw gets its own explanation in place of the canvas.
+  const datasetStatus =
+    scene.wasmError || (render.gpuUnavailable ? null : render.renderError) || bridge.remoteDatasetError;
 
   // The JSX block below reads `.current` from refs returned by useRenderClient,
   // useWasmScene, useBridge, etc. — passing them as props to
@@ -1192,11 +1195,14 @@ function App({
             onResize={handleCanvasResize}
             bare={captureSurface}
             emptyState={
-              !hasData && bridge.sessionReady && !bridge.remoteDatasetLoading && !captureSurface ? (
+              render.gpuUnavailable ? (
+                <WebGpuUnavailable reason={render.gpuUnavailable} />
+              ) : !hasData && bridge.sessionReady && !bridge.remoteDatasetLoading && !captureSurface ? (
                 <AddDataPrompt onAddData={() => setAddDataOpen(true)} />
               ) : null
             }
-            slots={{
+            // Without a renderer the controls over the canvas have nothing to drive.
+            slots={render.gpuUnavailable ? undefined : {
               "top-left": hasData && (
                 <ToolPalette
                   tool={tool}

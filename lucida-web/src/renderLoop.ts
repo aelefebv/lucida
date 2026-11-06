@@ -20,6 +20,8 @@ import type { CacheWarmth, InputKind, Outstanding, RunConditions } from "./trace
 import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 import { readCanvasColors } from "./renderer/renderClient.ts";
 import { subscribeAppearance } from "./theme/appearance.ts";
+import { AdaptiveResolution, cappedPixelRatioScale } from "./renderResolution.ts";
+import { wakeFrames } from "./frameClock.ts";
 
 // Re-exported so imports of these types from the render loop keep working.
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -92,6 +94,9 @@ export class RenderLoop implements TraceEnvironment {
   private appearanceUnsub: () => void;
 
   private _renderScale = 1.0;
+  /** Lowers the render resolution while a gesture's frames run long (ADR 0068). */
+  private readonly resolution = new AdaptiveResolution();
+  private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Track previous multi_channel state to detect transitions and clean up. */
   private prevMultiChannel = false;
@@ -179,6 +184,10 @@ export class RenderLoop implements TraceEnvironment {
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
+    }
+    if (this.resolutionRestoreTimer !== null) {
+      clearTimeout(this.resolutionRestoreTimer);
+      this.resolutionRestoreTimer = null;
     }
     this.client.onChunksEvicted = null;
     this.client.onWantedSetDelta = null;
@@ -448,7 +457,25 @@ export class RenderLoop implements TraceEnvironment {
    */
   markInput(input: InputKind): void {
     if (this.datasets.size > 0) traceRecorder.noteInput(input);
+    this.resolution.noteInput();
     this.setDirty("interactive", input);
+  }
+
+  /**
+   * Feed the newest finished frame to the adaptive resolution, and arrange
+   * for a lowered resolution to come back once input stops, with a frame to
+   * show it.
+   */
+  private adaptResolution(): void {
+    const frame = this.client.takeFrameLatency();
+    if (frame) this.resolution.noteFrame(frame.frameSeq, frame.ms, this.client.lastFrameSeq());
+    const wait = this.resolution.msUntilRestore();
+    if (wait === null || this.resolutionRestoreTimer !== null) return;
+    this.resolutionRestoreTimer = setTimeout(() => {
+      this.resolutionRestoreTimer = null;
+      if (this.resolution.restoreIfIdle()) this.setDirty("interactive", "resolution_restored");
+      else this.adaptResolution();
+    }, wait);
   }
 
   markResidencyDirty(source: string = "external"): void {
@@ -520,6 +547,8 @@ export class RenderLoop implements TraceEnvironment {
     }
     this.wake.note(source);
     this.scheduleIfNeeded();
+    // Whatever dirties the frame can move what the overlays show.
+    wakeFrames();
 
     const key = `${kind}:${source}`;
     const now = performance.now();
@@ -550,6 +579,7 @@ export class RenderLoop implements TraceEnvironment {
       canvas: this.canvas,
       mode: this.mode,
       renderScale: this._renderScale,
+      resolutionScale: cappedPixelRatioScale(devicePixelRatio) * this.resolution.scale,
       cpuCache: this.session.cpuCache,
       sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
       assetCatalog: this.session.assetCatalog!,
@@ -572,6 +602,7 @@ export class RenderLoop implements TraceEnvironment {
     // Before anything in this tick can dirty the loop again: what woke this
     // one is what the samples it publishes carry.
     traceRecorder.noteTickWake(this.wake.take());
+    this.adaptResolution();
 
     const now = performance.now();
     let shouldRender = false;

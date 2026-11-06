@@ -80,7 +80,14 @@ export interface TickContext {
   client: RenderClient;
   canvas: HTMLCanvasElement;
   mode: "slice" | "volume";
+  /** The volume path's interaction scale: lower while the camera moves. */
   renderScale: number;
+  /**
+   * The share of device pixels the render target gets in both modes: the
+   * pixel-ratio cap times the adaptive resolution (ADR 0068). Planning and
+   * the camera keep the full device-pixel viewport.
+   */
+  resolutionScale: number;
   cpuCache: CpuCache;
   sendViewerInterest?: (interest: unknown) => void;
   /**

@@ -26,8 +26,10 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   applyViewHotState,
   getOrCreateVolumePool,
+  growVolumeAtlas,
   handleVolumeChunkData,
   remapIndirection,
+  type AtlasState,
   type LodIndirectionMeta,
 } from "./volume/index.ts";
 import {
@@ -195,6 +197,87 @@ function makeSliceMeta(gridY: number, gridX: number): LodIndirectionMeta {
 // cleanup is required. `beforeEach` is retained as a hook surface in
 // case future tests need to re-spy mocks.
 beforeEach(() => {});
+
+// Volume pool growth
+
+describe("volume pool growth", () => {
+  /** A ctx whose device records texture sizes and copies. */
+  function makeGrowthCtx(volumeAtlasBytes?: number) {
+    const testCtx = makeMockCtx();
+    const device = testCtx.ctx.device as unknown as {
+      createCommandEncoder: () => unknown;
+      queue: { submit: (cmds: unknown[]) => void };
+    };
+    const copies: number[][] = [];
+    device.createCommandEncoder = () => ({
+      copyTextureToTexture: (_src: unknown, _dst: unknown, size: number[]) => copies.push(size),
+      finish: () => ({}),
+    });
+    device.queue.submit = () => {};
+    if (volumeAtlasBytes !== undefined) {
+      testCtx.ctx.state.atlasBudgets.volumeAtlasBytes = volumeAtlasBytes;
+    }
+    return { ...testCtx, copies };
+  }
+
+  function textureSizes(ctx: WorkerCtx): number[][] {
+    const create = ctx.device.createTexture as unknown as { mock: { calls: [GPUTextureDescriptor][] } };
+    return create.mock.calls.map(([desc]) => [...(desc.size as number[])]);
+  }
+
+  /** Mark every slot the pool has as holding a chunk, as a long session would. */
+  function fill(atlas: AtlasState): void {
+    while (atlas.freeSlots.length > 0) {
+      const slot = atlas.freeSlots.pop()!;
+      atlas.slots.set(`filler:${slot}`, slot);
+      atlas.slotGridIdx[slot] = -1;
+    }
+  }
+
+  it("allocates one layer of the budget's slot grid, not the whole budget", () => {
+    const { ctx } = makeGrowthCtx();
+    // 32³ r16uint chunks under 512 MiB: a 20×20×20 grid.
+    const atlas = getOrCreateVolumePool(ctx, "ds1", 32, 32, 32, 0, 0);
+    expect([atlas.slotsX, atlas.slotsY, atlas.slotsZ, atlas.maxSlotsZ]).toEqual([20, 20, 1, 20]);
+    expect(atlas.totalSlots).toBe(400);
+    expect(textureSizes(ctx)).toEqual([[640, 640, 32]]);
+  });
+
+  it("doubles its layers once full, copying the resident chunks in place", () => {
+    const { ctx, posts, copies } = makeGrowthCtx();
+    const atlas = getOrCreateVolumePool(ctx, "ds1", 32, 32, 32, 0, 0);
+    atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
+    atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
+    const firstTexture = atlas.texture as unknown as { destroyed: boolean };
+    fill(atlas);
+
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), "ds1", "imgA");
+
+    expect(atlas.slotsZ).toBe(2);
+    expect(atlas.totalSlots).toBe(800);
+    expect(copies).toEqual([[640, 640, 32]]);
+    expect(textureSizes(ctx).at(-1)).toEqual([640, 640, 64]);
+    expect(firstTexture.destroyed).toBe(true);
+    // The chunk took a new slot and nothing was evicted for it.
+    const slot = atlas.slots.get("imgA|0/0/0/0/0/0");
+    expect(slot).toBeGreaterThanOrEqual(400);
+    expect(atlas.indirectionData[0]).toBe(slot);
+    expect(posts.filter((m) => m.type === "chunksEvicted")).toEqual([]);
+  });
+
+  it("evicts rather than grows once it holds the whole budget", () => {
+    // 64 MiB of 32³ chunks: 1024 slots, a 10×10×10 grid.
+    const { ctx, copies } = makeGrowthCtx(64 * 1024 * 1024);
+    const atlas = getOrCreateVolumePool(ctx, "ds1", 32, 32, 32, 0, 0);
+    expect([atlas.slotsX, atlas.slotsY, atlas.maxSlotsZ]).toEqual([10, 10, 10]);
+    const grown: number[] = [];
+    while (growVolumeAtlas(ctx.device, atlas)) grown.push(atlas.slotsZ);
+    expect(grown).toEqual([2, 4, 8, 10]);
+    expect(atlas.totalSlots).toBe(1000);
+    expect(copies).toHaveLength(4);
+    expect(growVolumeAtlas(ctx.device, atlas)).toBe(false);
+  });
+});
 
 // Volume eviction
 

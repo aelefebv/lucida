@@ -260,6 +260,7 @@ function makeCtx(args: {
     canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
     mode: args.mode ?? "slice",
     renderScale: 1,
+    resolutionScale: 1,
     cpuCache: args.cpuCache ?? makeCpuCache(),
     assetCatalog: createMockAssetCatalog(),
   } as TickContext;

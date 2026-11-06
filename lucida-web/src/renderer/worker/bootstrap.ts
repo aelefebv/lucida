@@ -9,7 +9,8 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { WorkerToMainMessage } from "../workerProtocol.ts";
-import { initGPU } from "../gpuContext.ts";
+import { getDeviceLimits, initGPU } from "../gpuContext.ts";
+import { fitBudgets } from "../../deviceBudget.ts";
 import { SliceRenderer } from "../sliceRenderer.ts";
 import { VolumeRenderer } from "../volumeRenderer.ts";
 import { LayerCompositor } from "../layerCompositor.ts";
@@ -29,9 +30,10 @@ import { sourceKey } from "../poolKeys.ts";
 export async function bootstrapWorker(
   canvas: OffscreenCanvas,
   post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
+  deviceMemoryGiB: number | null = null,
 ): Promise<WorkerCtx> {
   const { device, context, format } = await initGPU(canvas);
-  const state = createInitialState();
+  const state = createInitialState(fitBudgets(deviceMemoryGiB, getDeviceLimits(device)));
   const passTimer = createFrameTiming(device, (gpuPassUs) =>
     post({ type: "gpuPassTime", gpuPassUs }),
   );

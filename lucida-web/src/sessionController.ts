@@ -20,6 +20,7 @@ import {
 import type { ViewportCommand } from "./commands.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
 import { readCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
+import { pageDeviceBudgets } from "./deviceBudget.ts";
 import type {
   WireGeneratedAvailabilityByDataset,
   WireGeneratedAvailabilityDelta,
@@ -263,7 +264,12 @@ export class SessionController {
     this.contentSource = new ProxiedContentSource(
       (json) => this.session?.bridge.send(json),
     );
+    const budgets = pageDeviceBudgets();
     this.cpuCache = new CpuCache(this.contentSource, decodePool, {
+      mainBudgetBytes: budgets.cpuMainBytes,
+      overviewBudgetBytes: budgets.cpuOverviewBytes,
+      proxyBudgetBytes: budgets.cpuProxyBytes,
+      maxBytesInFlight: budgets.cpuBytesInFlight,
       // Knobs the trace driver left in browser storage, read once so the
       // cache starts under them.
       ...readCacheKnobs(),
