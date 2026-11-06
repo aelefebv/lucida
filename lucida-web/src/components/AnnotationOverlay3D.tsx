@@ -29,6 +29,7 @@ import { eventToScreenPx, makeProjectAnnotationToCss, type ClientPoint } from ".
 import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx";
 import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
 import { applyViewportCommand } from "../applyAndSend.ts";
+import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
 import { buildAnnotationView, liveViewWithLiveTC } from "../savedView/buildAnnotationView.ts";
 import { annotationVertices, hitTestShapes, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
 import { isOffContext, type ViewContext } from "./annotationContext.ts";
@@ -235,8 +236,9 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   // on drop. Cleared once consumed.
   const suppressClickRef = useRef<string | null>(null);
 
+  // A new or changed pin needs a frame to be placed.
+  useWakeFramesOnRender();
   useEffect(() => {
-    let rafId: number;
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
@@ -292,10 +294,8 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
           }
         }
       }
-      rafId = requestAnimationFrame(tick);
     };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    return frameClock.subscribe(tick);
   }, [wasmSceneRef, canvas, annotationsRef]);
 
   /** A right-click on a marker opens the canvas menu on it. A finger's long

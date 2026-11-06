@@ -65,7 +65,6 @@
 .lc-annotation-body {
   fill: transparent;
   stroke: transparent;
-  stroke-width: 12;
   stroke-linejoin: round;
   stroke-linecap: round;
   pointer-events: all;
@@ -154,39 +153,39 @@
   cursor: pointer;
 }
 
-/* A finger gets 44 px targets without the marks growing: pseudo-elements
-   widen the hit area. The badge's grows up and to the right, away from its
-   pin. Handles also grow on screen, since they appear only when asked for. */
+/* A finger gets targets of --lc-target-min without the marks growing:
+   pseudo-elements widen the hit area around each mark's 12px inner box. The
+   badge's grows up and to the right, away from its pin. With a mouse the
+   target is 0 and the pseudo-elements sit inside their marks. */
+.lc-annotation-pin::before,
+.lc-annotation-handle::before,
+.lc-annotation-count::before {
+  content: "";
+  position: absolute;
+}
+
+.lc-annotation-pin::before,
+.lc-annotation-handle::before {
+  inset: min(0px, calc((12px - var(--lc-target-min)) / 2));
+  border-radius: var(--lc-radius-full);
+}
+
+.lc-annotation-count::before {
+  inset: min(0px, calc(16px - var(--lc-target-min))) min(0px, calc(16px - var(--lc-target-min))) 0 0;
+}
+
+.lc-annotation-body {
+  stroke-width: max(12px, var(--lc-target-min));
+}
+
+/* Handles also grow on screen under a finger, since they appear only when
+   asked for. */
 @media (pointer: coarse) {
-  .lc-annotation-pin::before,
-  .lc-annotation-handle::before,
-  .lc-annotation-count::before {
-    content: "";
-    position: absolute;
-  }
-
-  .lc-annotation-pin::before {
-    inset: -16px;
-    border-radius: var(--lc-radius-full);
-  }
-
-  .lc-annotation-count::before {
-    inset: -28px -28px 0 0;
-  }
-
   .lc-annotation-handle {
     width: 16px;
     height: 16px;
     margin: -8px 0 0 -8px;
     border-width: 2px;
-  }
-
-  .lc-annotation-handle::before {
-    inset: -16px;
-  }
-
-  .lc-annotation-body {
-    stroke-width: 44;
   }
 }
 

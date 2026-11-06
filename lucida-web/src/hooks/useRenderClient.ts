@@ -1,8 +1,15 @@
 import { useEffect, useRef, useState } from "react";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop } from "../renderLoop.ts";
+import { webGpuUnavailableReason, type WebGpuUnavailableReason } from "../renderer/gpuContext.ts";
+
+/** A browser without `navigator.gpu` is known not to draw before any worker starts. */
+function lacksWebGpu(): boolean {
+  return typeof navigator !== "undefined" && !(navigator as { gpu?: unknown }).gpu;
+}
 
 export function useRenderClient() {
+  const [missingWebGpu] = useState(lacksWebGpu);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const clientRef = useRef<RenderClient | null>(null);
   const [clientReady, setClientReady] = useState(false);
@@ -21,7 +28,7 @@ export function useRenderClient() {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas || clientRef.current) return;
+    if (!canvas || clientRef.current || missingWebGpu) return;
     if (transferredCanvasesRef.current.has(canvas)) {
       // Spent element. The canvasKey bump re-runs this against a fresh one.
       return;
@@ -52,7 +59,14 @@ export function useRenderClient() {
       setClientReady(false);
       setCanvasKey(k => k + 1);
     };
-  }, [canvasKey]);
+  }, [canvasKey, missingWebGpu]);
+
+  /** Set when the browser can't draw at all; the viewer explains instead of erroring. */
+  const gpuUnavailable: WebGpuUnavailableReason | null = missingWebGpu
+    ? "missing"
+    : renderError
+      ? webGpuUnavailableReason(renderError)
+      : null;
 
   // `client` is null until the worker init resolves; once it does,
   // setClientReady(true) re-renders this hook and the ref read picks up
@@ -62,5 +76,5 @@ export function useRenderClient() {
   const client = clientReady ? clientRef.current : null;
 
   // eslint-disable-next-line react-hooks/refs
-  return { canvasRef, clientRef, clientReady, client, loopRef, activeLoop, setActiveLoop, renderError, canvasKey };
+  return { canvasRef, clientRef, clientReady, client, loopRef, activeLoop, setActiveLoop, renderError, gpuUnavailable, canvasKey };
 }

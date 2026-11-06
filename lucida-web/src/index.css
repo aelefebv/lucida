@@ -47,12 +47,22 @@ body {
   min-height: 100vh;
 }
 
+/* iOS zooms the page into a focused field whose text is under 16px, so under
+   touch every field takes the input size, whatever its own rule says. */
+@media (pointer: coarse) {
+  input,
+  textarea,
+  select {
+    font-size: var(--lc-text-input) !important;
+  }
+}
+
 /* A failed in-viewer workspace create. It sits over the top bar rather than
    in the canvas's banner slot because it comes from the route, outside the
    viewer, and the workspace stays mounted underneath. */
 .workspace-create-error {
   position: fixed;
-  top: var(--lc-space-2);
+  top: calc(var(--lc-space-2) + var(--lc-safe-top));
   left: 50%;
   z-index: var(--lc-z-dialog);
   width: max-content;

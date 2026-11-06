@@ -227,13 +227,14 @@ export function tickVolume(
   const { scene } = ctx;
 
   // Use full-res viewport for chunk planning so LOD selection isn't affected
-  // by renderScale (which drops to 0.25 during interaction).
+  // by the render resolution, which drops while the camera moves.
   const fullW = Math.round(ctx.canvas.clientWidth * devicePixelRatio);
   const fullH = Math.round(ctx.canvas.clientHeight * devicePixelRatio);
   scene.set_viewport(fullW, fullH);
 
-  const canvasW = Math.round(fullW * ctx.renderScale);
-  const canvasH = Math.round(fullH * ctx.renderScale);
+  const scale = ctx.renderScale * ctx.resolutionScale;
+  const canvasW = Math.round(fullW * scale);
+  const canvasH = Math.round(fullH * scale);
 
   const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
   if (!orchResult) return false;

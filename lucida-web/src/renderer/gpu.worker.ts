@@ -32,7 +32,7 @@ function postError(err: unknown): void {
 async function handleMessage(msg: MainToWorkerMessage): Promise<void> {
   try {
     if (msg.type === "init") {
-      ctx = await bootstrapWorker(msg.canvas, post);
+      ctx = await bootstrapWorker(msg.canvas, post, msg.deviceMemoryGiB ?? null);
       installDevtools(ctx.state);
       post({ type: "ready" });
       return;

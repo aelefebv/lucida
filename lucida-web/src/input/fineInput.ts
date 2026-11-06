@@ -11,15 +11,6 @@ function mediaMatches(query: string): boolean {
   return typeof matchMedia === "function" && matchMedia(query).matches;
 }
 
-/** Whether the primary pointer is a finger, so targets should be sized for one. */
-export function usePointerCoarse(): boolean {
-  return useSyncExternalStore(
-    (onChange) => subscribeMedia("(pointer: coarse)", onChange),
-    () => mediaMatches("(pointer: coarse)"),
-    () => false,
-  );
-}
-
 // No API says whether a keyboard is attached, so a key pressed outside a text
 // field stands in: an on-screen keyboard only types into a focused field.
 let keyboardSeen = false;

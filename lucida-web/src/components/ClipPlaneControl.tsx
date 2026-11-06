@@ -4,6 +4,7 @@
  */
 import { EraserIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
+import { frameClock } from "../frameClock.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { Slider } from "../ui/Slider.tsx";
 import type { ClipDepth } from "./clipDepth.ts";
@@ -17,13 +18,7 @@ export function ClipPlaneControl({ depth }: { depth: ClipDepth }) {
   });
 
   // The keys and the camera move the plane while this is open, so follow it.
-  useEffect(() => {
-    let frame = requestAnimationFrame(function follow() {
-      setValue(depthRef.current.read());
-      frame = requestAnimationFrame(follow);
-    });
-    return () => cancelAnimationFrame(frame);
-  }, []);
+  useEffect(() => frameClock.subscribe(() => setValue(depthRef.current.read())), []);
 
   const move = (next: number) => {
     if (Number.isNaN(next)) return;

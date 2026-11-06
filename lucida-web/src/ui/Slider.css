@@ -46,7 +46,7 @@
 .lc-slider-field-input {
   box-sizing: border-box;
   width: 6ch;
-  height: 20px;
+  height: max(20px, var(--lc-target-min));
   margin: 0;
   padding: 0 var(--lc-space-1);
   border: 1px solid transparent;
@@ -74,7 +74,7 @@
 
 .lc-slider-track {
   position: relative;
-  height: 16px;
+  height: max(16px, var(--lc-target-min));
   touch-action: none;
 }
 
@@ -100,8 +100,8 @@
 .lc-slider-thumb {
   top: 50%;
   box-sizing: border-box;
-  width: 14px;
-  height: 14px;
+  width: var(--lc-thumb-size);
+  height: var(--lc-thumb-size);
   border-radius: var(--lc-radius-full);
   background: var(--lc-thumb);
   box-shadow:

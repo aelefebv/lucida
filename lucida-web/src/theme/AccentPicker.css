@@ -1,8 +1,11 @@
+/* Under touch each swatch's target reaches past it, and the gap widens as
+   far as the settings menu has room for, so neighbouring targets overlap by
+   only a few pixels. */
 .lc-accent-picker,
 .lc-accent-presets {
   display: inline-flex;
   align-items: center;
-  gap: var(--lc-space-2);
+  gap: max(var(--lc-space-2), calc(var(--lc-target-min) - 18px - var(--lc-space-2)));
 }
 
 .lc-accent-swatch {
@@ -15,6 +18,12 @@
   box-shadow: inset 0 0 0 1px var(--lc-border);
   outline: none;
   cursor: default;
+}
+
+.lc-accent-swatch::before {
+  content: "";
+  position: absolute;
+  inset: min(0px, calc((18px - var(--lc-target-min)) / 2));
 }
 
 .lc-accent-swatch[data-hovered],

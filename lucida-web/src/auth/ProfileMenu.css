@@ -67,10 +67,12 @@
   color: var(--lc-text-subtle);
 }
 
+/* The whole row is the checkbox's target. */
 .lc-profile-check {
   display: flex;
   align-items: center;
   gap: var(--lc-space-2);
+  min-height: var(--lc-target-min);
   cursor: pointer;
 }
 

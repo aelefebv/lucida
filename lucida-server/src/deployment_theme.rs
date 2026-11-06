@@ -107,6 +107,12 @@ const TOKEN_NAMES: &[&str] = &[
     "--lc-space-8",
     "--lc-control-h",
     "--lc-control-h-sm",
+    "--lc-target-min",
+    "--lc-thumb-size",
+    "--lc-safe-top",
+    "--lc-safe-right",
+    "--lc-safe-bottom",
+    "--lc-safe-left",
     "--lc-font",
     "--lc-font-mono",
     "--lc-text-xs",
@@ -115,6 +121,7 @@ const TOKEN_NAMES: &[&str] = &[
     "--lc-text-lg",
     "--lc-text-xl",
     "--lc-text-2xl",
+    "--lc-text-input",
     "--lc-shadow-1",
     "--lc-shadow-2",
     "--lc-motion-fast",
@@ -127,9 +134,10 @@ const TOKEN_NAMES: &[&str] = &[
     "--lc-z-toast",
 ];
 
-/// Tokens a user setting decides, with what to set instead. An override
-/// pinned to a theme preset would beat the user's choice, which the
-/// deployment only sets the default of.
+/// Tokens a user setting or the device decides, with what to set instead.
+/// An override pinned to a theme preset would beat the user's choice, which
+/// the deployment only sets the default of, or the size a touch screen
+/// needs.
 const PREFERENCE_TOKENS: &[(&str, &str)] = &[
     ("--lc-accent", "defaults.accent"),
     ("--lc-control-h", "defaults.density"),
@@ -154,6 +162,9 @@ const PREFERENCE_TOKENS: &[(&str, &str)] = &[
         "--lc-motion",
         "nothing: the reduced-motion setting decides it",
     ),
+    ("--lc-target-min", "nothing: a coarse pointer decides it"),
+    ("--lc-thumb-size", "nothing: a coarse pointer decides it"),
+    ("--lc-text-input", "nothing: a coarse pointer decides it"),
 ];
 
 /// Why the theme file was refused. Each variant names the variable and

@@ -14,7 +14,8 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { applyViewportCommand } from "../applyAndSend.ts";
-import { usePointerCoarse } from "../input/pointerCapabilities.ts";
+import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
+import { usePointerCoarse } from "../theme/viewport.ts";
 import { buildAnnotationView, liveViewWithLiveZTC } from "../savedView/buildAnnotationView.ts";
 import type { Annotation } from "./annotationDocument.ts";
 import { useAnnotationOverlay } from "./useAnnotationOverlay.ts";
@@ -426,8 +427,9 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     [wasmSceneRef, onViewportChanged, annotationsRef, setOpenPinId],
   );
 
+  // A new or changed pin needs a frame to be placed.
+  useWakeFramesOnRender();
   useEffect(() => {
-    let rafId: number;
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
@@ -520,10 +522,8 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
           }
         }
       }
-      rafId = requestAnimationFrame(tick);
     };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    return frameClock.subscribe(tick);
   }, [wasmSceneRef, canvas, annotationsRef]);
 
   /** A right-click on a marker or shape opens the canvas menu on it. A finger's

@@ -15,6 +15,7 @@ export {
   getDepthTexture,
   getOrCreateLabelVolumePool,
   getOrCreateVolumePool,
+  growVolumeAtlas,
   removeLabelVolumePool,
   removeLabelVolumePoolsForDataset,
   removeVolumeAtlas,

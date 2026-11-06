@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import type { ClipDepth } from "../components/clipDepth.ts";
 import { ClipPlaneControl } from "../components/ClipPlaneControl.tsx";
 import { FocalDepthControl } from "../components/FocalDepthControl.tsx";
-import { useFineInputAvailable } from "../input/pointerCapabilities.ts";
+import { useFineInputAvailable } from "../input/fineInput.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { Card } from "../ui/Card.tsx";
 import { Popover } from "../ui/Popover.tsx";

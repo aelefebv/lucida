@@ -4,6 +4,7 @@ import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
 import { projectToCanvas } from "./minimapMath.ts";
 import { makeWorldToScreen } from "./cameraProjection.ts";
 import { peerColor } from "../peerColor.ts";
+import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
 import "./PeerCursors.css";
 
 /**
@@ -89,7 +90,7 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
   const chevronLabelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const dotRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const namePillRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
-  // Mirror props into refs so the RAF tick below reads the latest values
+  // Mirror props into refs so the frame tick below reads the latest values
   // each frame without stale closures and without re-running the effect on
   // every prop change. Mirror updates are render-phase, idempotent, and
   // never read during the same render they're written in — exactly the
@@ -107,9 +108,9 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
   // eslint-disable-next-line react-hooks/refs
   followTargetRef.current = followTarget;
 
+  // A peer's move arrives as a render; it needs a frame to be placed.
+  useWakeFramesOnRender();
   useEffect(() => {
-    let rafId: number;
-
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
@@ -215,13 +216,11 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
         }
       }
 
-      rafId = requestAnimationFrame(tick);
     };
 
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-    // myId, peers, etc. are read via the mirror refs above so the RAF tick
-    // sees the latest values without re-mounting the loop on every change.
+    return frameClock.subscribe(tick);
+    // myId, peers, etc. are read via the mirror refs above so the tick sees
+    // the latest values without re-subscribing on every change.
   }, [wasmSceneRef, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const peerEntries = Array.from(peers.entries()).filter(

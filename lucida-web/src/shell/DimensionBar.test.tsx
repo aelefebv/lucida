@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useState } from "react";
-import { __resetKeyboardSeenForTesting } from "../input/pointerCapabilities.ts";
+import { __resetKeyboardSeenForTesting } from "../input/fineInput.ts";
 import { __resetShortcutsForTesting } from "../ui/shortcuts.ts";
 import { DimensionBar, PLAYBACK_INTERVAL_MS } from "./DimensionBar.tsx";
 
