@@ -17,8 +17,9 @@ import { Switch } from "../ui/Switch.tsx";
 import "./SettingsMenu.css";
 
 /**
- * Appearance, the cards over the canvas, and developer tools. Each control writes its preference as it
- * changes, so the change shows at once and survives a reload.
+ * Appearance, the cards over the canvas, and developer tools. Each control
+ * writes its preference as it changes, so the change shows at once and
+ * survives a reload.
  */
 export function SettingsMenu() {
   const [theme, setTheme] = usePreference(themePreference);
