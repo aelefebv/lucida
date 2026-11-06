@@ -16,6 +16,7 @@ use tower_http::cors::CorsLayer;
 use lucida_server::admin::{self, admin_clear_proxy_cache};
 use lucida_server::auth;
 use lucida_server::bookmarks;
+use lucida_server::deployment_theme::{self, DeploymentTheme};
 use lucida_server::health;
 use lucida_server::inbox;
 use lucida_server::session::Session;
@@ -277,6 +278,21 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             return Err(std::io::Error::other(e.to_string()));
         }
     };
+    let deployment_theme = match DeploymentTheme::from_env() {
+        Ok(theme) => theme,
+        Err(e) => {
+            tracing::error!(error = %e, "theme.startup.config_error");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    };
+    if let Some(theme) = deployment_theme.as_ref() {
+        tracing::info!(
+            file = %std::env::var(deployment_theme::FILE_VAR).unwrap_or_default().trim(),
+            dark_tokens = theme.tokens.dark.len(),
+            light_tokens = theme.tokens.light.len(),
+            "theme.configured",
+        );
+    }
     // Operator-facing startup line: mode + bind together so a glance
     // at the boot log answers "is this server reachable, and is it
     // protected?" Per ADR-0018 both signals should be visible together.
@@ -523,6 +539,10 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     }
     public_auth_router =
         public_auth_router.merge(status::router(status_config, Arc::clone(&storage)));
+    // Public because the sign-in screen is themed before anyone has a
+    // session. It answers whether or not a theme is configured.
+    public_auth_router =
+        public_auth_router.merge(deployment_theme::router(deployment_theme.as_ref()));
 
     // Serve the SPA bundle from `LUCIDA_WEB_DIST` (default
     // `./lucida-web/dist`) on the public router half (ADR-0020). Merged
@@ -535,7 +555,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         web_dist = %web_dist.display(),
         "static_serve.config",
     );
-    let static_serve_router = static_serve::router(web_dist);
+    let static_serve_router = static_serve::router(web_dist, deployment_theme.as_ref());
 
     // App routes carry the auth middleware; public auth routes don't.
     // `/` falls through to the SPA so a browser hitting `:9876` sees the
