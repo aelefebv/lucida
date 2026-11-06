@@ -484,7 +484,7 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
       viewContext: { z: 5, t: 0, c: 1 },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
-    expect(marker.textContent).toBe("slice 5 · t=9 · ch=1");
+    expect(marker.textContent).toBe("Z 6 · T 10 · Channel 2");
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
   });
 
@@ -493,7 +493,7 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 7 })],
       viewContext: { z: 5, t: 2, c: 0 },
     });
-    expect(screen.getByTestId("annot-offcontext-pin-here").textContent).toBe("slice 5 · t=2 · ch=7");
+    expect(screen.getByTestId("annot-offcontext-pin-here").textContent).toBe("Z 6 · T 3 · Channel 8");
   });
 
   it("navigating the view to the pin's Z/T/C returns it to on-context", () => {

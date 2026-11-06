@@ -15,6 +15,7 @@ import { IconButton } from "../../ui/Button.tsx";
 import { Dialog } from "../../ui/Dialog.tsx";
 import { showKeyboardHelp } from "../../ui/keyboardHelpState.ts";
 import { Menu, MenuItem } from "../../ui/Menu.tsx";
+import { CompactPresence, type PresenceAvatarsProps } from "../PresenceAvatars.tsx";
 import { SettingsPanel } from "../SettingsMenu.tsx";
 import { WorkspaceName } from "../TopBar.tsx";
 import "./PhoneTopBar.css";
@@ -27,15 +28,16 @@ export interface PhoneTopBarProps {
   /** Makes the current view the workspace's dashboard preview; omit when the user may not. */
   onUseViewAsPreview?: () => void;
   share: Omit<ShareButtonProps, "dialog">;
+  presence: PresenceAvatarsProps;
 }
 
 type MoreDialog = "share" | "settings" | "account";
 
 /**
- * The phone's top bar: back to the workspaces, the workspace's name, search
- * (the command palette), and a menu with Share, settings, and the account,
- * each opening as a dialog. The name gives way to the buttons, so they stay
- * reachable whatever its length.
+ * The phone's top bar: back to the workspaces, the workspace's name, who else
+ * is here, search (the command palette), and a menu with Share, settings, and
+ * the account, each opening as a dialog. The name gives way to the buttons,
+ * so they stay reachable whatever its length.
  */
 export function PhoneTopBar({
   workspaceName,
@@ -43,6 +45,7 @@ export function PhoneTopBar({
   onBackToDashboard,
   onUseViewAsPreview,
   share,
+  presence,
 }: PhoneTopBarProps) {
   const [dialog, setDialog] = useState<MoreDialog | null>(null);
   const devAuthEnabled = useDevAuthEnabled();
@@ -55,6 +58,7 @@ export function PhoneTopBar({
       <div className="lc-phone-topbar-name">
         <WorkspaceName name={workspaceName} onRename={onRenameWorkspace} />
       </div>
+      <CompactPresence {...presence} />
       <IconButton
         icon={MagnifyingGlassIcon}
         label="Search commands"

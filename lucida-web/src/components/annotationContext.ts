@@ -37,8 +37,9 @@ export function isOffContext(pin: Annotation, view: ViewContext, opts?: OffConte
   return zOff || t !== Math.round(view.t) || c !== Math.round(view.c);
 }
 
-/** The off-context label naming the pin's own Z/T/C. */
+/** The off-context label naming the pin's own Z/T/C, counted from 1 as the
+ * dimension bar and the channel names count them. */
 export function offContextLabel(pin: Annotation): string {
   const { z, t, c } = pinZTC(pin);
-  return `slice ${z} · t=${t} · ch=${c}`;
+  return `Z ${z + 1} · T ${t + 1} · Channel ${c + 1}`;
 }

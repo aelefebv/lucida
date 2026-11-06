@@ -206,6 +206,16 @@ describe("WorkspaceDashboard", () => {
     expect(screen.getAllByText("Owner")).toHaveLength(3);
   });
 
+  it("doesn't claim a workspace with datasets has none when the listing lacks their location", async () => {
+    listWorkspacesMock.mockResolvedValue([workspace({ id: "older", name: "Older", dataset_count: 2 })]);
+
+    render(<WorkspaceDashboard onOpenWorkspace={() => {}} />);
+
+    expect(await screen.findByText("Location unknown")).toBeTruthy();
+    expect(screen.queryByText("No datasets yet")).toBeNull();
+    expect(screen.getByText("2 datasets")).toBeTruthy();
+  });
+
   it("opens a workspace from its card", async () => {
     listWorkspacesMock.mockResolvedValue([workspace({ id: "alpha", name: "Alpha" })]);
     const onOpenWorkspace = vi.fn();

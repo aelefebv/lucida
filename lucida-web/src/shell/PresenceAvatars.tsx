@@ -1,4 +1,5 @@
 import { XIcon } from "@phosphor-icons/react";
+import { Button as AriaButton } from "react-aria-components";
 import type { ClientId, PresenceState } from "../bridge.ts";
 import { peerColor } from "../peerColor.ts";
 import { Avatar } from "../ui/Avatar.tsx";
@@ -44,6 +45,56 @@ function actionLabel(peer: Peer): string {
   if (peer.following) return `Stop following ${peer.name}`;
   if (peer.followable) return `Follow ${peer.name}`;
   return `${peer.name} is following someone`;
+}
+
+/** Avatars a compact indicator shows before a count stands for the rest. */
+const COMPACT_SHOWN = 2;
+
+/**
+ * Who else is here, in the room a phone's top bar has: a couple of small
+ * avatars and a count, as one button that opens a menu to follow someone or
+ * stop. The person followed comes first and carries the follow ring.
+ */
+export function CompactPresence({ peers, followTarget, onFollow }: PresenceAvatarsProps) {
+  if (peers.size === 0) return null;
+  const all = [...peers.values()].map((p) => toPeer(p, followTarget));
+  const followed = all.find((p) => p.following) ?? null;
+  const ordered = followed ? [followed, ...all.filter((p) => p !== followed)] : all;
+  const shown = ordered.slice(0, COMPACT_SHOWN);
+  const here = `${all.length} other ${all.length === 1 ? "person" : "people"} here`;
+  const press = (peer: Peer) => {
+    if (peer.following) onFollow(null);
+    else if (peer.followable) onFollow(peer.id);
+  };
+
+  return (
+    <Menu
+      label="Everyone here"
+      placement="bottom end"
+      trigger={
+        <AriaButton
+          className="lc-presence-compact"
+          aria-label={followed ? `Following ${followed.name}, ${here}` : here}
+          data-following={followed ? "" : undefined}
+        >
+          <span className="lc-presence-stack" aria-hidden="true">
+            {shown.map((peer) => (
+              <Avatar key={peer.id} name={peer.name} src={peer.pictureUrl} color={peer.color} size="sm" />
+            ))}
+          </span>
+          {all.length > shown.length && (
+            <span className="lc-presence-compact-more" aria-hidden="true">{`+${all.length - shown.length}`}</span>
+          )}
+        </AriaButton>
+      }
+    >
+      {ordered.map((peer) => (
+        <MenuItem key={peer.id} onAction={() => press(peer)} isDisabled={!peer.followable && !peer.following}>
+          {actionLabel(peer)}
+        </MenuItem>
+      ))}
+    </Menu>
+  );
 }
 
 /** Who else is here. Click an avatar to follow that person's view. */

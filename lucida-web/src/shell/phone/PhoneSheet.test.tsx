@@ -81,6 +81,15 @@ describe("PhoneSheet", () => {
     expect(isPanelOpen("left")).toBe(false);
   });
 
+  it("steps on a screen reader's click, but not again on a tap's own click", () => {
+    render(<Shell />);
+    fireEvent.click(handle());
+    expect(sheet().dataset.snap).toBe("half");
+    tapHandle();
+    fireEvent.click(handle());
+    expect(sheet().dataset.snap).toBe("full");
+  });
+
   it("opens a rail panel as its tab, and remembers it as the rail does", () => {
     render(<Shell />);
     tapHandle();
@@ -107,6 +116,14 @@ describe("PhoneSheet", () => {
       fireEvent.keyDown(window, { key: "Escape" });
     });
     expect(sheet().dataset.snap).toBe("peek");
+  });
+
+  it("tells the toasts how much of the screen it covers, and stops when it goes", () => {
+    const { unmount } = render(<Shell />);
+    const clear = () => document.documentElement.style.getPropertyValue("--toast-clear-bottom");
+    expect(clear()).toMatch(/^\d+px$/);
+    unmount();
+    expect(clear()).toBe("");
   });
 
   it("lowers to peek when a thread opens on the canvas", async () => {

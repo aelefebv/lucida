@@ -47,3 +47,53 @@
   outline: 2px solid var(--lc-focus-ring);
   outline-offset: 2px;
 }
+
+/* One button for everyone: the overlapped avatars and a count, at the bar's
+   control height so a finger reaches it. */
+.lc-presence-compact {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: var(--lc-space-1);
+  box-sizing: border-box;
+  min-width: var(--lc-control-h);
+  height: var(--lc-control-h);
+  padding: 0 var(--lc-space-1);
+  border: none;
+  border-radius: var(--lc-radius);
+  outline: none;
+  background: none;
+  color: var(--lc-text-muted);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.lc-presence-compact[data-pressed],
+.lc-presence-compact[aria-expanded="true"] {
+  background: var(--lc-surface-3);
+}
+
+.lc-presence-compact[data-focus-visible] {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: -2px;
+}
+
+.lc-presence-compact .lc-avatar {
+  box-shadow: 0 0 0 2px var(--lc-surface-1);
+}
+
+.lc-presence-compact .lc-avatar + .lc-avatar {
+  margin-left: -4px;
+}
+
+.lc-presence-compact[data-following] .lc-avatar:first-child {
+  position: relative;
+  z-index: 1;
+  box-shadow:
+    0 0 0 2px var(--lc-surface-1),
+    0 0 0 4px var(--lc-accent);
+}

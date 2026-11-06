@@ -1021,7 +1021,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     // The label names the pin's own z/t/c.
-    expect(marker.textContent).toBe("slice 12 · t=3 · ch=2");
+    expect(marker.textContent).toBe("Z 13 · T 4 · Channel 3");
     // The dot still renders alongside the off-context marker.
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
   });
@@ -1033,7 +1033,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
       viewContext: { z: 5, t: 0, c: 1 },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
-    expect(marker.textContent).toBe("slice 5 · t=9 · ch=1");
+    expect(marker.textContent).toBe("Z 6 · T 10 · Channel 2");
   });
 
   it("a pin on a different channel (c) renders off-context", () => {
@@ -1043,7 +1043,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
       viewContext: { z: 5, t: 2, c: 0 },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
-    expect(marker.textContent).toBe("slice 5 · t=2 · ch=7");
+    expect(marker.textContent).toBe("Z 6 · T 3 · Channel 8");
   });
 
   it("navigating the view to the pin's Z/T/C returns it to on-context", () => {
@@ -1067,7 +1067,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
 
     setViewContext({ z: 6, t: 2, c: 1 });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
-    expect(marker.textContent).toBe("slice 5 · t=2 · ch=1");
+    expect(marker.textContent).toBe("Z 6 · T 3 · Channel 2");
   });
 
   it("regression: an off-context pin's marker still renders and opens its thread on click", () => {

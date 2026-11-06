@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type KeyboardEvent,
+  type MouseEvent,
   type PointerEvent,
   type ReactNode,
 } from "react";
@@ -22,6 +23,8 @@ import "./PhoneSheet.css";
 const TAP_SLOP_PX = 6;
 /** A finger that rests this long before lifting has stopped flinging. */
 const FLING_IDLE_MS = 100;
+/** A click this soon after a pointer lifts is that pointer's own click. */
+const CLICK_AFTER_POINTER_MS = 1000;
 
 const SNAP_NAMES: Record<SheetSnap, string> = { peek: "Peek", half: "Half", full: "Full" };
 
@@ -67,6 +70,7 @@ export function PhoneSheet({ peek, layerTabs, railTabs }: PhoneSheetProps) {
   const sheetRef = useRef<HTMLElement>(null);
   const headRef = useRef<HTMLDivElement>(null);
   const dockRef = useRef<HTMLDivElement>(null);
+  const pointerEndedAt = useRef(-Infinity);
   const keyboard = useKeyboardInset();
   // A comment typed on the canvas needs the room, so the sheet keeps only
   // its handle above the keyboard. A field in the sheet raises the sheet
@@ -95,6 +99,15 @@ export function PhoneSheet({ peek, layerTabs, railTabs }: PhoneSheetProps) {
   // The keyboard covers the home indicator, so the inset applies only without it.
   const safeBottom = keyboard > 0 ? 0 : readSafeAreaInsets().bottom;
   const heights = sheetHeights(room - keyboard, headHeight + safeBottom);
+  const covers = heights[snap] + keyboard;
+  useLayoutEffect(() => {
+    // Toasts rise above whatever the sheet covers (Toast.css).
+    const root = document.documentElement.style;
+    root.setProperty("--toast-clear-bottom", `${covers}px`);
+    return () => {
+      root.removeProperty("--toast-clear-bottom");
+    };
+  }, [covers]);
 
   const choose = (id: string) => {
     if (has(layerTabs, id)) {
@@ -159,6 +172,7 @@ export function PhoneSheet({ peek, layerTabs, railTabs }: PhoneSheetProps) {
     };
     const onEnd = (end: globalThis.PointerEvent) => {
       if (end.pointerId !== pointerId) return;
+      pointerEndedAt.current = end.timeStamp;
       handle.removeEventListener("pointermove", onMove);
       handle.removeEventListener("pointerup", onEnd);
       handle.removeEventListener("pointercancel", onEnd);
@@ -177,6 +191,13 @@ export function PhoneSheet({ peek, layerTabs, railTabs }: PhoneSheetProps) {
     handle.addEventListener("pointermove", onMove);
     handle.addEventListener("pointerup", onEnd);
     handle.addEventListener("pointercancel", onEnd);
+  };
+
+  // A screen reader's activation arrives as a click with no pointer before
+  // it; a finger's tap already stepped the sheet on pointerup.
+  const onClick = (event: MouseEvent<HTMLDivElement>) => {
+    if (event.timeStamp - pointerEndedAt.current < CLICK_AFTER_POINTER_MS) return;
+    settle(nextSnap(snap));
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -219,6 +240,7 @@ export function PhoneSheet({ peek, layerTabs, railTabs }: PhoneSheetProps) {
             aria-valuetext={SNAP_NAMES[snap]}
             tabIndex={0}
             onPointerDown={onPointerDown}
+            onClick={onClick}
             onKeyDown={onKeyDown}
             data-testid="sheet-handle"
           >

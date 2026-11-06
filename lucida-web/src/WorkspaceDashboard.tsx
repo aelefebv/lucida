@@ -561,8 +561,10 @@ function WorkspaceCard({
               <span className="lc-ws-card-location-text">{location}</span>
             </>
           ) : (
+            // A listing from an older server has the count but not where
+            // the data lives.
             <span className="lc-ws-card-location-text" data-empty="">
-              No datasets yet
+              {count > 0 ? "Location unknown" : "No datasets yet"}
             </span>
           )}
         </p>

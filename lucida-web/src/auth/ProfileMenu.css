@@ -36,6 +36,13 @@
   z-index: var(--lc-z-popover);
   box-sizing: border-box;
   width: 260px;
+  /* What the screen has below the top bar, so a phone turned sideways can
+     still scroll to the last item. */
+  max-height: calc(
+    100dvh - var(--lc-safe-top) - var(--lc-safe-bottom) - var(--lc-control-h) - 2 * var(--lc-space-2) - 6px
+  );
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: var(--lc-space-1) 0;
   border: 1px solid var(--lc-border);
   border-radius: var(--lc-radius-lg);

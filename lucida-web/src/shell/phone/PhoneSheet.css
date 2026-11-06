@@ -220,3 +220,38 @@
 .lc-phone-sheet-panel > * {
   flex: none;
 }
+
+/* The tab already names the panel, and at half the panel gets little room,
+   so its title row is only as tall as its buttons. */
+.lc-phone-sheet-panel .lc-panel-header {
+  min-height: calc(var(--lc-control-h) + var(--lc-space-1));
+}
+
+/* A title row holding nothing but the title repeats the tab's label; it
+   stays for screen readers. */
+.lc-phone-sheet-panel .lc-panel-header:not(:has(.lc-panel-header-meta, .lc-panel-header-actions)) {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  min-height: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* A search and its filter share one row. */
+.lc-phone-sheet-panel .lc-rail-panel-toolbar:has(> .lc-field) {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--lc-space-3);
+}
+
+.lc-phone-sheet-panel .lc-rail-panel-toolbar > .lc-field {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.lc-phone-sheet-panel .lc-rail-panel-toolbar > .lc-switch {
+  flex: none;
+  gap: var(--lc-space-2);
+}

@@ -14,6 +14,7 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
+import { usePointerCoarse } from "../theme/viewport.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
 import { SegmentedControl } from "../ui/SegmentedControl.tsx";
@@ -72,6 +73,7 @@ export function CommentsPanel({
   // Opening the panel with unread mentions shows them first: they are why the
   // rail icon carries a badge.
   const [tab, setTab] = useState<Tab>(() => (visible && unread > 0 ? "mentions" : "threads"));
+  const coarse = usePointerCoarse();
   const [hideViewed, setHideViewed] = useState(false);
   const [wasVisible, setWasVisible] = useState(visible);
   if (visible !== wasVisible) {
@@ -126,7 +128,9 @@ export function CommentsPanel({
         {tab === "threads" ? (
           threads.length === 0 ? (
             <p className="lc-rail-panel-empty">
-              No comments on this dataset yet. Choose the point tool (P) and click the canvas to pin one.
+              {coarse
+                ? "No comments on this dataset yet. Long-press the canvas to comment there."
+                : "No comments on this dataset yet. Choose the point tool (P) and click the canvas to pin one."}
             </p>
           ) : (
             <ul className="lc-rail-list">

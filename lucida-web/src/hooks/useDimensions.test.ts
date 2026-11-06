@@ -8,11 +8,12 @@
  * scene's single-channel mode, so a view recorded in single-channel mode
  * reads back as that channel soloed.
  */
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import type { WasmScene } from "lucida-core";
 
 import type { RenderLoop } from "../renderLoop.ts";
+import { VIEWPORT_MEDIA, type ViewportClass } from "../theme/viewport.ts";
 import type { DatasetState } from "../types.ts";
 import type { BridgeCallbacks } from "./useDatasetSettings.ts";
 import { syncSceneViewState } from "./sceneViewState.ts";
@@ -41,6 +42,7 @@ function renderDimensions(datasets: DatasetState[] = []) {
     z: () => 0,
     t: () => 0,
     camera_mode: () => "slice",
+    fit_camera_to_dataset_bounds: vi.fn(),
   } as unknown as WasmScene;
   const loop = {
     markInput: vi.fn(),
@@ -156,5 +158,36 @@ describe("useDimensions channels", () => {
     const { result } = renderDimensions([dataset("plain", 1)]);
     expect(result.current.multiChannel).toBe(false);
     expect(result.current.soloChannel).toBeNull();
+  });
+});
+
+describe("useDimensions view mode", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  function atWidthClass(viewportClass: ViewportClass) {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === VIEWPORT_MEDIA[viewportClass],
+      addEventListener() {},
+      removeEventListener() {},
+    }));
+  }
+
+  it("frames the data in the new mode below desktop widths", () => {
+    atWidthClass("phone");
+    const { result, scene, commands } = renderDimensions([dataset("ds", 1)]);
+
+    act(() => result.current.handleViewModeToggle());
+
+    expect(commands.map((c) => c.type)).toEqual(["set_mode_arcball"]);
+    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledExactlyOnceWith("ds");
+  });
+
+  it("keeps each mode's starting camera on desktop", () => {
+    atWidthClass("desktop");
+    const { result, scene } = renderDimensions([dataset("ds", 1)]);
+
+    act(() => result.current.handleViewModeToggle());
+
+    expect(scene.fit_camera_to_dataset_bounds).not.toHaveBeenCalled();
   });
 });

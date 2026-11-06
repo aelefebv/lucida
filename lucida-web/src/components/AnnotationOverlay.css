@@ -201,8 +201,9 @@
   background: var(--lc-surface-float);
   box-shadow: var(--lc-shadow-1);
   color: var(--lc-text);
-  font-family: var(--lc-font-mono);
+  font-family: var(--lc-font);
   font-size: var(--lc-text-xs);
+  font-variant-numeric: tabular-nums;
   line-height: 1.4;
   white-space: nowrap;
   pointer-events: none;
