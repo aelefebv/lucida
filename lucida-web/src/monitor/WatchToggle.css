@@ -1,14 +1,15 @@
 .monitor-watch {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--lc-space-2);
 }
 
-/* Left to wrap, this sentence sets the height of the dock's header row
-   (#1093). The span's title carries the whole of it. */
+/* Left to wrap, this sentence sets the height of the dock's header row.
+   The span's title carries the whole of it. The dock decides the text color,
+   so the status follows it: dimmed while off, full strength while on. */
 .monitor-watch-status {
-  color: #9aa0a6;
-  font-size: 12px;
+  color: color-mix(in srgb, currentColor 68%, transparent);
+  font-size: var(--lc-text-sm);
   max-width: 32ch;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -16,12 +17,12 @@
 }
 
 .monitor-watch-on .monitor-watch-status {
-  color: #e8eaed;
+  color: inherit;
 }
 
 .monitor-watch-on button {
-  border-color: #8ab4f8;
-  color: #8ab4f8;
+  border-color: var(--lc-accent);
+  color: var(--lc-accent-text);
 }
 
 /* Fixed and above every surface: a stream that is on has to be visible from
@@ -31,15 +32,29 @@
   top: 0;
   left: 50%;
   transform: translateX(-50%);
-  z-index: 3000;
+  z-index: var(--lc-z-toast);
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 4px 12px;
-  border: 1px solid #8ab4f8;
+  gap: var(--lc-space-2);
+  padding: var(--lc-space-1) var(--lc-space-1) var(--lc-space-1) var(--lc-space-3);
+  border: 1px solid var(--lc-border);
   border-top: none;
-  border-radius: 0 0 6px 6px;
-  background: #1f2430;
-  color: #e8eaed;
-  font-size: 12px;
+  border-radius: 0 0 var(--lc-radius-lg) var(--lc-radius-lg);
+  background: var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-sm);
+}
+
+/* The live indicator: a stream that is on reads as on at a glance. */
+.watch-stream-banner-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-danger);
+  box-shadow: 0 0 0 3px var(--lc-danger-subtle);
 }
