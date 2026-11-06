@@ -7,7 +7,7 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
 import { SessionController } from "../sessionController.ts";
 export type { SavedViewBridgeHooks } from "../sessionController.ts";
-import type { SavedViewBridgeHooks } from "../sessionController.ts";
+import type { SavedViewBridgeHooks, ViewportSize } from "../sessionController.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
 
 interface Params {
@@ -17,6 +17,8 @@ interface Params {
   setWasmScene: React.Dispatch<React.SetStateAction<WasmScene | null>>;
   ensureScene: () => WasmScene;
   loopRef: React.RefObject<RenderLoop | null>;
+  /** The viewer canvas, measured for the auto-fit on open. */
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
   /** Populated by the SavedView applier after construction, so it can resolve
@@ -91,6 +93,7 @@ export function useBridge(params: Params) {
       ensureScene: () => portsRef.current.ensureScene(),
       getScene: () => portsRef.current.wasmSceneRef.current,
       getLoop: () => portsRef.current.loopRef.current,
+      getViewportSize: () => canvasDeviceSize(portsRef.current.canvasRef.current),
       // The map identity is stable for the App's life; the controller owns
       // its contents and clears them on destroy.
       datasets: portsRef.current.datasetsRef.current,
@@ -229,5 +232,18 @@ export function useBridge(params: Params) {
     breakFollow,
     handleFollow,
     followablePeers,
+  };
+}
+
+/**
+ * The canvas's size in device pixels, rounded as the render paths round it, or
+ * null while it has no layout box.
+ */
+function canvasDeviceSize(canvas: HTMLCanvasElement | null): ViewportSize | null {
+  if (!canvas || canvas.clientWidth === 0 || canvas.clientHeight === 0) return null;
+  const dpr = window.devicePixelRatio || 1;
+  return {
+    width: Math.round(canvas.clientWidth * dpr),
+    height: Math.round(canvas.clientHeight * dpr),
   };
 }
