@@ -6,6 +6,7 @@ import { AuthGate } from './auth/AuthGate.tsx'
 import { installTraceSeam, resolveGpuIdentity } from './trace/seam.ts'
 import { traceRecorder } from './trace/recorder.ts'
 import { installAppearance } from './theme/appearance.ts'
+import { installDeploymentTheme } from './theme/deployment.ts'
 import { isCaptureSurface } from './captureSurface.ts'
 
 // The trace seam is public interface in every build (ADR 0051): a
@@ -14,7 +15,9 @@ installTraceSeam()
 void resolveGpuIdentity().then(gpu => traceRecorder.setGpu(gpu))
 
 // index.html already applied the stored appearance before first paint; this
-// keeps it current as preferences and the OS setting change.
+// keeps it current as preferences and the OS setting change. The deployment's
+// defaults go first, so the two agree from the start.
+void installDeploymentTheme()
 installAppearance()
 
 // An unlinked review page for the primitives, kept out of the main bundle.

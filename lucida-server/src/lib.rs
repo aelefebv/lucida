@@ -13,6 +13,7 @@ pub mod browse;
 pub mod chunk_read;
 pub mod dataset_open;
 pub mod decode;
+pub mod deployment_theme;
 pub mod generated;
 pub mod handler;
 pub mod health;

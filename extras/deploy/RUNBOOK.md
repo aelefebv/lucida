@@ -213,6 +213,7 @@ variables.
 | `LUCIDA_PROXY_CONCURRENCY` | half the CPUs | Per-generator concurrency cap |
 | `LUCIDA_LOG_FORMAT` | `text` | `json` for structured logs |
 | `LUCIDA_WEB_DIST` | `./lucida-web/dist`; set in the image | Web UI bundle |
+| `LUCIDA_THEME_FILE` | unset or blank: built-in theme | Default appearance and token overrides. See the README's [Theme a deployment](../../README.md#theme-a-deployment). |
 | `LUCIDA_AUTH` | `disabled` on a loopback bind, else `google` | `google`, `iap`, or `disabled` |
 | `LUCIDA_INSECURE` | unset | `1` allows `disabled` on a non-loopback bind |
 | `LUCIDA_GOOGLE_CLIENT_ID`, `LUCIDA_GOOGLE_CLIENT_SECRET`, `LUCIDA_OAUTH_REDIRECT_URI` | none | Required for `google` |
