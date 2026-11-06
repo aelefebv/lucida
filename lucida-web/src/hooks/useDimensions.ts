@@ -4,6 +4,7 @@ import { Axis } from "../axes.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import { invalidateSelection } from "../invalidation.ts";
 import type { RenderLoop } from "../renderLoop.ts";
+import { getViewportClass } from "../theme/viewport.ts";
 import type { DatasetState, ViewMode } from "../types.ts";
 import type { BridgeCallbacks } from "./useDatasetSettings.ts";
 
@@ -113,6 +114,19 @@ export function useDimensions({
           const shapeX = dsManifest.images[0].multiscale.levels[0].shape[Axis.X];
           const shapeY = dsManifest.images[0].multiscale.levels[0].shape[Axis.Y];
           applyViewportCommand(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
+        }
+      }
+      // Each mode starts from a fixed camera: 3D looks at the unit cube's
+      // middle from a set distance, and 2D shows one sample per device pixel.
+      // On a narrow or tall canvas at a phone's pixel ratio that is a corner
+      // of the volume or a small image, so below desktop widths the new mode
+      // frames the data instead.
+      const fitId = selectedDatasetId ?? datasetsRef.current.keys().next().value;
+      if (getViewportClass() !== "desktop" && fitId) {
+        try {
+          wasmScene.fit_camera_to_dataset_bounds(fitId);
+        } catch {
+          // A dataset with nothing loaded yet has no bounds; the fixed camera stays.
         }
       }
       bridgeCallbacksRef.current.emitPresence();

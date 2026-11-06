@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::framing::{Aabb, arcball_containment, slice_framing};
+use crate::framing::{Aabb, arcball_containment, arcball_view_containment, slice_framing};
 use crate::mat4::{
     cross3, invert4_f32, invert4_f64, look_at, mul4, normalize3, perspective, transform_point,
     unproject,
@@ -485,6 +485,9 @@ pub const SLICE_ZOOM_MAX: f64 = 1e9;
 /// zoom-out multiplies `distance` to Inf, and `Arcball::pan` with a zero
 /// delta then computes `0 × Inf = NaN` into `target`.
 pub const ARCBALL_DISTANCE_MAX: f64 = 1e9;
+/// The least `near` an arcball zoom-in pulls the near plane down to, as a
+/// share of `far`: a fresh arcball's 0.01 against 100.
+const NEAR_PER_FAR: f64 = 1e-4;
 /// Component-wise bound for positional camera state (slice `center`, arcball
 /// `target`, fly `position`). Generous for any real world coordinate (slice
 /// space is voxels; the largest images are ~1e9 voxels across) while keeping
@@ -713,9 +716,24 @@ impl Arcball {
     /// clipped. `theta`/`phi`/`fov` are untouched, and inverted or non-finite
     /// inputs are sanitized. The math lives in
     /// [`crate::framing::arcball_containment`].
+    ///
+    /// A portrait viewport frames the box as it is seen now instead
+    /// ([`crate::framing::arcball_view_containment`]): there the sphere is fit
+    /// into the narrow horizontal angle and leaves most of the height empty,
+    /// so the data would sit small in the middle of a phone's canvas.
     pub fn fit_to_bounds(&mut self, min: [f64; 3], max: [f64; 3], margin: f64) {
-        let (target, distance, near, far) =
-            arcball_containment(min, max, self.viewport, self.fov, margin);
+        let (target, distance, near, far) = if self.viewport[0] < self.viewport[1] {
+            arcball_view_containment(
+                min,
+                max,
+                self.viewport,
+                self.fov,
+                margin,
+                self.screen_axes(),
+            )
+        } else {
+            arcball_containment(min, max, self.viewport, self.fov, margin)
+        };
         // Positional write: same component bound as the pan path.
         for (dst, src) in self.target.iter_mut().zip(target) {
             *dst = src.clamp(-CAMERA_POSITION_MAX, CAMERA_POSITION_MAX);
@@ -754,13 +772,21 @@ impl Arcball {
     }
 
     pub fn zoom(&mut self, delta: f64) {
+        let next = self.distance * (1.0 + delta);
+        // A fit puts `near` just short of the data, where it would stop a
+        // zoom-in at the data's edge. Moving in, the near plane comes in by as
+        // much, down to the ratio to `far` a fresh camera has, so the camera
+        // can still reach the target. Never raised, so a fresh camera keeps
+        // its floor. A NaN `next` fails the comparison and leaves it alone.
+        if next < self.distance {
+            let floor = (self.far * NEAR_PER_FAR).min(self.near);
+            self.near = (self.near - (self.distance - next)).max(floor);
+        }
         // Floor at `near` (a zoom-in can't pass through the target plane) and
         // ceiling at the interactive range end so repeated zoom-out saturates
         // instead of multiplying `distance` to Inf — `pan` scales by
         // `distance`, and `0 × Inf` would put NaN into `target`.
-        self.distance = (self.distance * (1.0 + delta))
-            .max(self.near)
-            .min(ARCBALL_DISTANCE_MAX);
+        self.distance = next.max(self.near).min(ARCBALL_DISTANCE_MAX);
     }
 
     pub fn pan(&mut self, dx: f64, dy: f64) {
@@ -790,6 +816,20 @@ impl Arcball {
             self.target[1] + self.distance * self.phi.cos(),
             self.target[2] + self.distance * sin_phi * self.theta.cos(),
         ]
+    }
+
+    /// The view's `[right, up, back]` unit axes, as [`look_at`] builds them;
+    /// `back` points from the target toward the eye. They depend only on the
+    /// orbit angles.
+    fn screen_axes(&self) -> [[f64; 3]; 3] {
+        let sin_phi = self.phi.sin();
+        let back = [
+            sin_phi * self.theta.sin(),
+            self.phi.cos(),
+            sin_phi * self.theta.cos(),
+        ];
+        let right = normalize3(cross3(self.up_vector(), back));
+        [right, cross3(back, right), back]
     }
 
     /// Up vector derived from spherical coordinates (tangent along phi meridian).
@@ -1779,6 +1819,54 @@ mod tests {
     }
 
     #[test]
+    fn zoom_keeps_a_fresh_cameras_floor() {
+        let mut cam = Arcball::new([800, 600]);
+        for _ in 0..50 {
+            cam.zoom(-0.5);
+        }
+        assert_eq!((cam.near, cam.distance), (0.01, 0.01));
+    }
+
+    #[test]
+    fn zoom_moves_in_past_a_fitted_near_plane() {
+        // A fit sets `near` at the data's front; zooming in carries it along
+        // instead of stopping there, down to a fresh camera's share of `far`.
+        let mut cam = Arcball::new([390, 608]);
+        cam.fit_to_bounds([0.0; 3], [1.0, 1.0, 0.25], FIT_MARGIN_3D);
+        let (fitted, near, far) = (cam.distance, cam.near, cam.far);
+        cam.zoom(-0.5);
+        assert!(
+            (cam.distance - fitted * 0.5).abs() < 1e-12,
+            "distance {}",
+            cam.distance
+        );
+        let expected = (near - fitted * 0.5).max(far * NEAR_PER_FAR);
+        assert!(
+            (cam.near - expected).abs() < 1e-12,
+            "near {} vs {expected}",
+            cam.near
+        );
+        for _ in 0..60 {
+            cam.zoom(-0.5);
+        }
+        assert!(
+            (cam.near - far * NEAR_PER_FAR).abs() < 1e-12,
+            "near {}",
+            cam.near
+        );
+        assert_eq!(cam.distance, cam.near);
+        assert_eq!(cam.far, far);
+        // Zooming back out leaves the near plane where it came to.
+        let near_in = cam.near;
+        cam.zoom(1.0);
+        assert_eq!(cam.near, near_in);
+        // A NaN step changes nothing it shouldn't.
+        cam.zoom(f64::NAN);
+        assert_eq!(cam.near, near_in);
+        assert!(cam.distance.is_finite());
+    }
+
+    #[test]
     fn pan_moves_target() {
         let mut cam = Arcball::new([800, 600]);
         let orig = cam.target;
@@ -2564,6 +2652,90 @@ mod tests {
             let mut cam = Camera::new_3d(vp);
             cam.fit_to_bounds(min, max);
             assert_box_corners_visible(&cam, min, max);
+        }
+    }
+
+    /// The widest share of the viewport any corner of the box reaches, per
+    /// axis, measured from the center (1.0 is the edge).
+    fn box_screen_reach(cam: &Camera, min: [f64; 3], max: [f64; 3]) -> [f64; 2] {
+        let [vw, vh] = cam.viewport();
+        let (half_w, half_h) = (vw as f64 / 2.0, vh as f64 / 2.0);
+        let mut reach = [0.0_f64; 2];
+        for corner in 0..8 {
+            let p: [f64; 3] = std::array::from_fn(|i| {
+                if corner & (1 << i) == 0 {
+                    min[i]
+                } else {
+                    max[i]
+                }
+            });
+            let s = cam.project_to_screen(p).expect("corner projects");
+            reach[0] = reach[0].max((s[0] - half_w).abs() / half_w);
+            reach[1] = reach[1].max((s[1] - half_h).abs() / half_h);
+        }
+        reach
+    }
+
+    #[test]
+    fn arcball_fit_frames_a_flat_box_tightly_in_a_portrait_viewport() {
+        // A flat volume on a phone-shaped canvas, at the default orbit angle:
+        // the box keeps all its corners in view and reaches near the edge of
+        // the binding axis, instead of sitting small inside its bounding sphere.
+        let (min, max) = ([0.0, 0.0, 0.0], [1.0, 1.0, 0.25]);
+        let mut cam = Camera::new_3d([1170, 1824]);
+        cam.fit_to_bounds(min, max);
+        assert_box_corners_visible(&cam, min, max);
+        if let Camera::Arcball(a) = &cam {
+            assert_box_within_depth_clip(a, min, max);
+            let (_, sphere, _, _) = arcball_containment(min, max, a.viewport, a.fov, FIT_MARGIN_3D);
+            assert!(
+                a.distance < sphere * 0.9,
+                "distance {} vs sphere {sphere}",
+                a.distance
+            );
+        }
+        let reach = box_screen_reach(&cam, min, max);
+        let widest = reach[0].max(reach[1]);
+        assert!(
+            widest > 0.85 && widest <= 1.0 / FIT_MARGIN_3D + 1e-6,
+            "reach {reach:?}"
+        );
+    }
+
+    #[test]
+    fn arcball_fit_keeps_the_sphere_fit_in_landscape_viewports() {
+        // Wider than tall, the fit still holds at every orbit angle.
+        let (min, max) = ([0.0, 0.0, 0.0], [1.0, 1.0, 0.25]);
+        for vp in [[1280, 800], [1000, 1000]] {
+            let mut a = Arcball::new(vp);
+            a.fit_to_bounds(min, max, FIT_MARGIN_3D);
+            let (_, sphere, near, far) = arcball_containment(min, max, vp, a.fov, FIT_MARGIN_3D);
+            assert_eq!((a.distance, a.near, a.far), (sphere, near, far));
+        }
+    }
+
+    #[test]
+    fn arcball_fit_contains_boxes_from_any_angle_in_a_portrait_viewport() {
+        let boxes = [
+            ([0.0, 0.0, 0.0], [1.0, 1.0, 0.25]),
+            ([0.0, 0.0, 0.0], [0.1, 1.0, 0.1]),
+            ([-3.0, 2.0, 5.0], [4.0, 2.5, 9.0]),
+        ];
+        for (min, max) in boxes {
+            for (theta, phi) in [
+                (0.0, 0.01),
+                (0.5, 0.8),
+                (2.0, 1.5),
+                (-1.0, 3.0),
+                (0.785, 0.955),
+            ] {
+                let mut a = Arcball::new([390, 608]);
+                a.theta = theta;
+                a.phi = phi;
+                a.fit_to_bounds(min, max, FIT_MARGIN_3D);
+                assert_box_within_depth_clip(&a, min, max);
+                assert_box_corners_visible(&Camera::Arcball(a), min, max);
+            }
         }
     }
 

@@ -4,8 +4,9 @@
 //! The minimap ([`crate::minimap`]) frames the limiting axis loosely with
 //! [`FIT_PADDING`] ([`orbit_overview_framing`]). The main camera
 //! ([`crate::camera`]) must contain the whole dataset, so it uses
-//! [`slice_framing`] (2D) and [`arcball_containment`] (3D). Both share [`Aabb`]
-//! and the input sanitization, so an offset, inverted, or degenerate box is
+//! [`slice_framing`] (2D) and [`arcball_containment`] (3D), or
+//! [`arcball_view_containment`] on a portrait canvas. They share [`Aabb`] and
+//! the input sanitization, so an offset, inverted, or degenerate box is
 //! handled the same everywhere.
 
 /// Padding factor for the minimap's overview framing: the visible region is
@@ -170,18 +171,83 @@ pub fn arcball_containment(
     let target = aabb.center();
     let radius = aabb.bounding_radius();
     let margin = sane_factor(margin, FIT_MARGIN_3D);
+    // The limiting (narrower) axis decides how far back to sit so the sphere
+    // fits both axes.
+    let (half_v, half_h) = half_angles(viewport, fov);
+    let limiting = half_v.min(half_h).clamp(MIN_HALF_ANGLE, MAX_HALF_ANGLE);
 
-    // A sane vertical half-angle in (0, π/2): guard a non-finite or out-of-range
-    // fov so `sin(limiting)` is well away from 0.
+    let distance = (radius / limiting.sin() * margin).max(MIN_EXTENT);
+    let (near, far) = depth_bracket(distance, radius);
+    (target, distance, near, far)
+}
+
+/// 3D framing that contains the box as it is seen now rather than at every
+/// angle: the least distance at which all eight corners project inside the
+/// frustum with `margin` slack, for an eye that looks at the box center along
+/// `axes = [right, up, back]` (`back` points from the target to the eye, as in
+/// [`crate::mat4::look_at`]).
+///
+/// Returns `(target, distance, near, far)` like [`arcball_containment`], and
+/// never sits farther back than it. A flat or elongated box seen from the side
+/// it is widest on frames much tighter than its bounding sphere does, at the
+/// cost of a corner leaving the frame once the view orbits.
+pub fn arcball_view_containment(
+    min: [f64; 3],
+    max: [f64; 3],
+    viewport: [u32; 2],
+    fov: f64,
+    margin: f64,
+    axes: [[f64; 3]; 3],
+) -> ([f64; 3], f64, f64, f64) {
+    let sphere = arcball_containment(min, max, viewport, fov, margin);
+    let aabb = Aabb::sanitized(min, max);
+    let target = aabb.center();
+    let margin = sane_factor(margin, FIT_MARGIN_3D);
+    let (half_v, half_h) = half_angles(viewport, fov);
+    let tan_h = half_h.clamp(MIN_HALF_ANGLE, MAX_HALF_ANGLE).tan();
+    let tan_v = half_v.clamp(MIN_HALF_ANGLE, MAX_HALF_ANGLE).tan();
+    let [right, up, back] = axes;
+    if [right, up, back].iter().flatten().any(|c| !c.is_finite()) {
+        return sphere;
+    }
+
+    // A corner `p` from the target sits `p·back` toward the eye, so at eye
+    // distance `d` it is `d − p·back` deep and fits while
+    // `|p·right| · margin ≤ depth · tan_h`, and likewise for `up` and `tan_v`.
+    // The eye stays outside the bounding sphere, so no corner is behind it.
+    let radius = aabb.bounding_radius();
+    let mut distance = radius;
+    for corner in 0..8 {
+        let p: [f64; 3] = std::array::from_fn(|axis| {
+            let end = if corner & (1 << axis) == 0 {
+                aabb.min[axis]
+            } else {
+                aabb.max[axis]
+            };
+            end - target[axis]
+        });
+        let dot = |a: [f64; 3]| p[0] * a[0] + p[1] * a[1] + p[2] * a[2];
+        let toward_eye = dot(back);
+        distance = distance
+            .max(toward_eye + dot(right).abs() * margin / tan_h)
+            .max(toward_eye + dot(up).abs() * margin / tan_v);
+    }
+    if !distance.is_finite() || distance >= sphere.1 {
+        return sphere;
+    }
+    let (near, far) = depth_bracket(distance, radius);
+    (target, distance, near, far)
+}
+
+/// The frustum's vertical and horizontal half-angles. A non-finite or
+/// out-of-range `fov` falls back to 45°, and a degenerate viewport to square,
+/// so both stay in (0, π/2).
+fn half_angles(viewport: [u32; 2], fov: f64) -> (f64, f64) {
     let half_v = if fov.is_finite() && fov > 0.0 {
         (fov * 0.5).min(MAX_HALF_ANGLE)
     } else {
         (std::f64::consts::FRAC_PI_4 * 0.5).min(MAX_HALF_ANGLE)
     };
-
-    // Horizontal half-angle from the aspect ratio: half_h = atan(tan(half_v) ·
-    // aspect). The limiting (narrower) axis decides how far back to sit so the
-    // sphere fits both axes.
     let vw = viewport[0] as f64;
     let vh = viewport[1] as f64;
     let aspect = if vw.is_finite() && vh.is_finite() && vw > 0.0 && vh > 0.0 {
@@ -189,20 +255,18 @@ pub fn arcball_containment(
     } else {
         1.0
     };
-    let half_h = (half_v.tan() * aspect).atan();
-    let limiting = half_v.min(half_h).clamp(MIN_HALF_ANGLE, MAX_HALF_ANGLE);
+    (half_v, (half_v.tan() * aspect).atan())
+}
 
-    let distance = (radius / limiting.sin() * margin).max(MIN_EXTENT);
-
-    // Depth clip around the sphere. near clears the front face and stays > 0;
-    // far clears the back face with a little slack.
+/// Depth clip around the box's bounding sphere seen from `distance`: near
+/// clears the front and stays > 0, far clears the back with a little slack.
+fn depth_bracket(distance: f64, radius: f64) -> (f64, f64) {
     let near = (distance - radius)
         .max(distance * 1e-3)
         .max(1e-4)
         .max(MIN_EXTENT);
     let far = ((distance + radius) * 1.05).max(near * (1.0 + 1e-6));
-
-    (target, distance, near, far)
+    (near, far)
 }
 
 /// 2D framing for the main camera: the point to center on and the zoom that puts
@@ -428,6 +492,44 @@ mod tests {
         );
         assert!(distance.is_finite() && distance > 0.0);
         assert!(near.is_finite() && near > 0.0 && near < far);
+    }
+
+    #[test]
+    fn arcball_view_containment_fits_a_face_on_box_exactly() {
+        // A 2×1×0.2 slab seen straight down its thin axis in a square viewport:
+        // the wide side binds, so its near edge reaches 1/margin of the half-width.
+        let (min, max) = ([0.0, 0.0, 0.0], [2.0, 1.0, 0.2]);
+        let fov = std::f64::consts::FRAC_PI_4;
+        let axes = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+        let (target, distance, near, far) =
+            arcball_view_containment(min, max, [600, 600], fov, FIT_MARGIN_3D, axes);
+        assert_eq!(target, [1.0, 0.5, 0.1]);
+        let expected = 0.1 + FIT_MARGIN_3D / (fov * 0.5).tan();
+        assert!(
+            (distance - expected).abs() < 1e-12,
+            "distance {distance} vs {expected}"
+        );
+        assert!(near > 0.0 && near < distance - 0.1 && far > distance + 0.1);
+    }
+
+    #[test]
+    fn arcball_view_containment_never_backs_off_past_the_sphere() {
+        let fov = std::f64::consts::FRAC_PI_4;
+        let s = 0.5_f64.sqrt();
+        let axes = [[s, 0.0, -s], [0.0, 1.0, 0.0], [s, 0.0, s]];
+        let (min, max) = ([0.0; 3], [1.0; 3]);
+        for vp in [[390, 844], [844, 390], [600, 600]] {
+            let (_, sphere, _, _) = arcball_containment(min, max, vp, fov, FIT_MARGIN_3D);
+            let (_, distance, _, _) =
+                arcball_view_containment(min, max, vp, fov, FIT_MARGIN_3D, axes);
+            assert!(distance <= sphere, "{vp:?}: {distance} > {sphere}");
+        }
+        // Axes that aren't finite fall back to the sphere.
+        let nan = [[f64::NAN; 3]; 3];
+        assert_eq!(
+            arcball_view_containment(min, max, [390, 844], fov, FIT_MARGIN_3D, nan),
+            arcball_containment(min, max, [390, 844], fov, FIT_MARGIN_3D)
+        );
     }
 
     #[test]
