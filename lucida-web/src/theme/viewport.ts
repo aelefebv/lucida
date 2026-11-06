@@ -63,3 +63,44 @@ export function useViewportClass(): ViewportClass {
 export function usePointerCoarse(): boolean {
   return useSyncExternalStore(subscribePointer, isPointerCoarse, () => false);
 }
+
+export interface SafeAreaInsets {
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+  readonly left: number;
+}
+
+const NO_INSETS: SafeAreaInsets = { top: 0, right: 0, bottom: 0, left: 0 };
+let insetProbe: HTMLElement | null = null;
+let cachedInsets: SafeAreaInsets | null = null;
+
+/**
+ * The `--lc-safe-*` insets in CSS pixels, for code that places something in
+ * script. Script has no direct reading of `env()`, so a hidden element padded
+ * by the tokens reports them. They change only when the window does.
+ */
+export function readSafeAreaInsets(): SafeAreaInsets {
+  if (typeof document === "undefined" || !document.body) return NO_INSETS;
+  if (cachedInsets) return cachedInsets;
+  if (!insetProbe) {
+    insetProbe = document.createElement("div");
+    insetProbe.setAttribute("aria-hidden", "true");
+    insetProbe.style.cssText =
+      "position:fixed;top:0;left:0;visibility:hidden;pointer-events:none;" +
+      "padding:var(--lc-safe-top) var(--lc-safe-right) var(--lc-safe-bottom) var(--lc-safe-left)";
+    document.body.append(insetProbe);
+    window.addEventListener("resize", () => {
+      cachedInsets = null;
+    });
+  }
+  const style = getComputedStyle(insetProbe);
+  const px = (value: string) => parseFloat(value) || 0;
+  cachedInsets = {
+    top: px(style.paddingTop),
+    right: px(style.paddingRight),
+    bottom: px(style.paddingBottom),
+    left: px(style.paddingLeft),
+  };
+  return cachedInsets;
+}

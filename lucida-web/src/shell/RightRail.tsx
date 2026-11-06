@@ -1,9 +1,11 @@
 import type { Icon } from "@phosphor-icons/react";
-import { Fragment, type ReactNode } from "react";
+import { Fragment, useCallback, type ReactNode } from "react";
 import { usePreference } from "../theme/preferences.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { useShortcut } from "../ui/shortcuts.ts";
-import { rightPanelOpenPreference, rightPanelPreference } from "./layoutPreferences.ts";
+import { rightPanelPreference } from "./layoutPreferences.ts";
+import { PanelScrim } from "./PanelScrim.tsx";
+import { useEscapeCloses, usePanelMode, usePanelOpen } from "./sidePanels.ts";
 import "./RightRail.css";
 
 export interface RailPanel {
@@ -31,11 +33,16 @@ export interface RightRailProps {
 
 /**
  * An icon rail at the right whose panels open one at a time. Closed by
- * default; which panel was last open and whether one is persist per browser.
+ * default; which panel was last open persists per browser, and on desktop
+ * whether one is open does too. As an overlay the panel slides over the
+ * canvas beside the rail and closes on a tap outside or Escape.
  * `Alt ]` opens or closes the last panel.
  */
 export function RightRail({ panels }: RightRailProps) {
-  const [open, setOpen] = usePreference(rightPanelOpenPreference);
+  const overlay = usePanelMode() === "overlay";
+  const [open, setOpen] = usePanelOpen("right");
+  const close = useCallback(() => setOpen(false), [setOpen]);
+  useEscapeCloses(overlay && open, close);
   const [storedId, setStoredId] = usePreference(rightPanelPreference);
   const activeId = panels.some((p) => p.id === storedId) ? storedId : (panels[0]?.id ?? null);
 
@@ -58,35 +65,38 @@ export function RightRail({ panels }: RightRailProps) {
   };
 
   return (
-    <div className="lc-right-rail-region">
-      <nav className="lc-right-rail" aria-label="Panels">
-        {panels.map((panel) => {
-          const count = panel.badge?.count ?? 0;
-          return (
-            <span key={panel.id} className="lc-right-rail-item">
-              <IconButton
-                icon={panel.icon}
-                label={count > 0 ? `${panel.label} (${panel.badge?.label})` : panel.label}
-                size="lg"
-                tooltipPlacement="left"
-                isSelected={open && panel.id === activeId}
-                onSelectedChange={() => choose(panel.id)}
-                data-testid={`rail-${panel.id}`}
-              />
-              {count > 0 && (
-                <span className="lc-right-rail-badge" aria-hidden="true">
-                  {count > 99 ? "99+" : count}
-                </span>
-              )}
-            </span>
-          );
-        })}
-      </nav>
-      <div className="lc-right-panel" hidden={!open}>
-        {panels.map((panel) => (
-          <Fragment key={panel.id}>{panel.render(open && panel.id === activeId)}</Fragment>
-        ))}
+    <>
+      {overlay && open && <PanelScrim onDismiss={close} />}
+      <div className="lc-right-rail-region" data-mode={overlay ? "overlay" : "docked"}>
+        <nav className="lc-right-rail" aria-label="Panels">
+          {panels.map((panel) => {
+            const count = panel.badge?.count ?? 0;
+            return (
+              <span key={panel.id} className="lc-right-rail-item">
+                <IconButton
+                  icon={panel.icon}
+                  label={count > 0 ? `${panel.label} (${panel.badge?.label})` : panel.label}
+                  size="lg"
+                  tooltipPlacement="left"
+                  isSelected={open && panel.id === activeId}
+                  onSelectedChange={() => choose(panel.id)}
+                  data-testid={`rail-${panel.id}`}
+                />
+                {count > 0 && (
+                  <span className="lc-right-rail-badge" aria-hidden="true">
+                    {count > 99 ? "99+" : count}
+                  </span>
+                )}
+              </span>
+            );
+          })}
+        </nav>
+        <div className="lc-right-panel" hidden={!open}>
+          {panels.map((panel) => (
+            <Fragment key={panel.id}>{panel.render(open && panel.id === activeId)}</Fragment>
+          ))}
+        </div>
       </div>
-    </div>
+    </>
   );
 }

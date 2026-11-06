@@ -1,6 +1,7 @@
 /* A pin's comment thread. It has the popover surface, but it is anchored to a
    point on the canvas that moves every frame, so it lives in the annotation
-   layer beside its pin rather than in a portal. */
+   layer beside its pin rather than in a portal. Script places it beside the
+   pin and reports the room on screen (threadPlacement.ts). */
 .lc-thread {
   position: absolute;
   top: 12px;
@@ -8,8 +9,8 @@
   display: flex;
   flex-direction: column;
   box-sizing: border-box;
-  width: 288px;
-  max-height: 340px;
+  width: min(288px, var(--thread-room-width, 288px));
+  max-height: min(340px, var(--thread-room-height, 340px));
   overflow: hidden;
   border: 1px solid var(--lc-border);
   border-radius: var(--lc-radius-lg);

@@ -2,7 +2,7 @@
 .lc-popover {
   box-sizing: border-box;
   min-width: 160px;
-  max-width: min(420px, calc(100vw - 16px));
+  max-width: min(420px, calc(100vw - 16px - var(--lc-safe-left) - var(--lc-safe-right)));
   border: 1px solid var(--lc-border);
   border-radius: var(--lc-radius-lg);
   background: var(--lc-surface-2);

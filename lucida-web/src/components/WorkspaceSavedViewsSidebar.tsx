@@ -34,8 +34,7 @@ import {
   type WorkspaceSavedViewVisibility,
 } from "../savedView/useWorkspaceSavedViews.ts";
 import type { SavedView } from "../savedView/types.ts";
-import { rightPanelOpenPreference, rightPanelPreference } from "../shell/layoutPreferences.ts";
-import { setPreference } from "../theme/preferences.ts";
+import { openRightPanel } from "../shell/sidePanels.ts";
 import { useCommand } from "../ui/commands.ts";
 import { dismissToast, toast } from "../ui/toastQueue.ts";
 import "./BookmarkSidebar.css";
@@ -145,8 +144,7 @@ export function WorkspaceSavedViewsSidebar({
     group: "View",
     keywords: ["bookmark"],
     run: () => {
-      setPreference(rightPanelPreference, "savedViews");
-      setPreference(rightPanelOpenPreference, true);
+      openRightPanel("savedViews");
       setSavePromptOpen(true);
     },
   });

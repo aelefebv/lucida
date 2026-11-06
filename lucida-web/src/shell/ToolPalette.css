@@ -1,0 +1,15 @@
+/* Fills the slot, whose height is the room the palette has, so that room can
+   be measured. Only the card takes the pointer. */
+.lc-tool-palette {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: flex-start;
+  min-height: 0;
+  pointer-events: none;
+}
+
+.lc-tool-palette > * {
+  flex: none;
+  pointer-events: auto;
+}
