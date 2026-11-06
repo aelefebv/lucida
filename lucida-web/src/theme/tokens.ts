@@ -30,6 +30,15 @@ export const TOKEN_NAMES = [
   "--lc-canvas-bg",
   "--lc-canvas-stroke",
   "--lc-canvas-label",
+  "--lc-canvas-axis-x",
+  "--lc-canvas-axis-y",
+  "--lc-canvas-axis-z",
+  "--lc-canvas-viewport",
+  "--lc-canvas-plane",
+  "--lc-canvas-success",
+  "--lc-canvas-warning",
+  "--lc-canvas-danger",
+  "--lc-canvas-info",
   "--lc-radius-sm",
   "--lc-radius",
   "--lc-radius-lg",
@@ -94,6 +103,22 @@ export const THEMED_TOKEN_NAMES = [
   "--lc-info-subtle",
   "--lc-shadow-1",
   "--lc-shadow-2",
+] as const satisfies readonly TokenName[];
+
+/** Tokens that follow the canvas background preference rather than the theme. */
+export const CANVAS_TOKEN_NAMES = [
+  "--lc-canvas-bg",
+  "--lc-canvas-stroke",
+  "--lc-canvas-label",
+  "--lc-canvas-axis-x",
+  "--lc-canvas-axis-y",
+  "--lc-canvas-axis-z",
+  "--lc-canvas-viewport",
+  "--lc-canvas-plane",
+  "--lc-canvas-success",
+  "--lc-canvas-warning",
+  "--lc-canvas-danger",
+  "--lc-canvas-info",
 ] as const satisfies readonly TokenName[];
 
 /** A token's computed value as written, e.g. `13px` or `color-mix(...)`. */

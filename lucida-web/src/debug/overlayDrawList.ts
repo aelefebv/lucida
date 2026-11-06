@@ -7,6 +7,9 @@
  * cache, using the timeline's palette. A chunk with no row says why in words
  * rather than wearing a color. The brushed selection highlights its cells in
  * any mode (ADR 0052); it arrives as an input, never read from the dock.
+ *
+ * Every other color is a canvas token, since the cells sit over the data and
+ * take their contrast from the canvas background.
  */
 
 import type { EvictionTier } from "../pipeline/fetch/index.ts";
@@ -18,6 +21,8 @@ import { chunkIdentity, type ChunkReading } from "../trace/diagnose/chunkStates.
 import { describeState } from "../trace/diagnose/rowState.ts";
 import type { ChunkLookup, RowState } from "../trace/diagnose/types.ts";
 import { labelMs } from "../trace/diagnose/window.ts";
+import { mixColor, paint, tokenColors } from "../theme/tokenColors.ts";
+import type { ResolvedColor, TokenName } from "../theme/tokens.ts";
 
 export type ChunkStatus = "cached" | "in-flight" | "planned";
 export type DisplayTier = ResidencyTier | "missing";
@@ -120,6 +125,8 @@ export interface ChunkDrawList {
 
 export interface DrawListInput {
   cells: readonly ChunkCell[];
+  /** From {@link readOverlayColors}, once per draw list. */
+  colors: OverlayColors;
   modes: OverlayModes;
   /**
    * The trace's reading for a cell, or null when no row carries the chunk.
@@ -137,48 +144,119 @@ export interface DrawListInput {
   selection?: ChunkSelection | null;
 }
 
-const SOLID_CACHED = "rgba(80, 220, 120, 0.30)";
-const SOLID_IN_FLIGHT = "rgba(240, 200, 70, 0.35)";
-const SOLID_PLANNED = "rgba(240, 90, 90, 0.30)";
-const TIER_DETAIL = "rgba(80, 220, 120, 0.36)";
-const TIER_COARSE = "rgba(245, 205, 70, 0.34)";
-const TIER_MISSING = "rgba(245, 70, 70, 0.38)";
+const OVERLAY_COLOR_TOKENS = {
+  stroke: "--lc-canvas-stroke",
+  label: "--lc-canvas-label",
+  success: "--lc-canvas-success",
+  warning: "--lc-canvas-warning",
+  danger: "--lc-canvas-danger",
+  info: "--lc-canvas-info",
+} as const satisfies Record<string, TokenName>;
 
-/** The default cell border, and the fill a trace-reading mode gives a cell with no row. */
-export const CELL_BORDER = "1px solid rgba(255, 255, 255, 0.22)";
-export const NO_ROW_FILL = "rgba(255, 255, 255, 0.04)";
-const NO_ROW_BORDER = "1px dashed rgba(255, 255, 255, 0.28)";
+/** The tokens the overlay paints with, resolved. */
+export type OverlayColors = { readonly [K in keyof typeof OVERLAY_COLOR_TOKENS]: ResolvedColor };
+
+export function readOverlayColors(): OverlayColors {
+  return tokenColors(OVERLAY_COLOR_TOKENS);
+}
+
+export interface ChurnBand {
+  minFetches: number;
+  fill: string;
+  border: string;
+  label: string;
+}
+
+/** Every fill and border the overlay paints outside the phase colors, as CSS. */
+export interface OverlayPaints {
+  cached: string;
+  inFlight: string;
+  planned: string;
+  tier: Record<"detail" | "coarse" | "missing", string>;
+  /** The default cell border. */
+  cellBorder: string;
+  /** The fill and border a trace-reading mode gives a cell with no row. */
+  noRowFill: string;
+  noRowBorder: string;
+  /**
+   * The highlight a cell in the brushed selection wears. The border carries
+   * it whatever mode is on, so a phase color or a churn band keeps its fill
+   * and the set still reads. On the plain grid the fill goes light too, since
+   * the cache colors answer a different question from the one the brush asked.
+   */
+  selectedBorder: string;
+  selectedFill: string;
+  /**
+   * Rank 0 is next to fetch. Discrete bands rather than a gradient, so the
+   * grid reads at a glance: amber is imminent, orange is soon, red is further,
+   * faint red is far back.
+   */
+  plannedRank: { unqueued: string; under5: string; under20: string; under60: string; beyond: string };
+  /**
+   * Stays in the green family so cached still reads as green, with shifts for
+   * how at risk the chunk is: active detail green, demoted detail paler,
+   * prefetch teal.
+   */
+  cachedTier: Record<EvictionTier, string>;
+  /**
+   * The churn bands, most fetches first: one fetch is the normal case and
+   * barely tinted; two is the first refetch, and from there the tint warms.
+   * The bands are discrete so a loop reads at a glance.
+   */
+  churnBands: readonly ChurnBand[];
+}
+
+const paintsByColors = new WeakMap<OverlayColors, OverlayPaints>();
+
+/** The overlay's paints for a set of colors, built once per set. */
+export function overlayPaints(colors: OverlayColors): OverlayPaints {
+  let paints = paintsByColors.get(colors);
+  if (paints) return paints;
+  const { stroke, label, success, warning, danger, info } = colors;
+  const orange = mixColor(danger, warning, 0.5);
+  const cellBorder = `1px solid ${paint(stroke, 0.26)}`;
+  paints = {
+    cached: paint(success, 0.3),
+    inFlight: paint(warning, 0.35),
+    planned: paint(danger, 0.3),
+    tier: { detail: paint(success, 0.36), coarse: paint(warning, 0.34), missing: paint(danger, 0.38) },
+    cellBorder,
+    noRowFill: paint(stroke, 0.05),
+    noRowBorder: `1px dashed ${paint(stroke, 0.33)}`,
+    selectedBorder: `2px solid ${paint(label)}`,
+    selectedFill: paint(stroke, 0.35),
+    plannedRank: {
+      unqueued: paint(stroke, 0.2),
+      under5: paint(warning, 0.5),
+      under20: paint(orange, 0.4),
+      under60: paint(danger, 0.32),
+      beyond: paint(danger, 0.2),
+    },
+    cachedTier: {
+      "active-detail": paint(success, 0.36),
+      "demoted-detail": paint(mixColor(success, label, 0.4), 0.3),
+      prefetch: paint(mixColor(success, info, 0.5), 0.32),
+    },
+    churnBands: [
+      { minFetches: 4, fill: paint(danger, 0.56), border: `2px solid ${paint(danger, 0.95)}`, label: "4 or more fetches" },
+      { minFetches: 3, fill: paint(orange, 0.48), border: `2px solid ${paint(orange, 0.9)}`, label: "3 fetches" },
+      { minFetches: 2, fill: paint(warning, 0.4), border: `2px solid ${paint(warning, 0.85)}`, label: "2 fetches" },
+      { minFetches: 1, fill: paint(info, 0.16), border: cellBorder, label: "1 fetch" },
+    ],
+  };
+  paintsByColors.set(colors, paints);
+  return paints;
+}
 
 /** How opaque a phase color is painted over the pixels. */
 export const PHASE_FILL_ALPHA = 0.42;
 
-/**
- * The highlight a cell in the brushed selection wears. The border carries
- * it whatever mode is on, so a phase color or a churn band keeps its fill
- * and the set still reads. On the plain grid the fill goes light too, since
- * the cache colors answer a different question from the one the brush asked.
- */
-export const SELECTED_BORDER = "2px solid rgba(255, 255, 255, 0.95)";
-export const SELECTED_FILL = "rgba(255, 255, 255, 0.30)";
-
 /** What the tooltip and the inspector add for a cell in the brushed selection. */
 export const SELECTED_LABEL = "in the brushed window";
 
-/**
- * The churn bands: one fetch is the normal case and barely tinted; two is
- * the first refetch, and from there the tint warms. The bands are discrete
- * so a loop reads at a glance.
- */
-export const CHURN_BANDS: readonly { minFetches: number; fill: string; border: string; label: string }[] = [
-  { minFetches: 4, fill: "rgba(230, 50, 50, 0.56)", border: "2px solid rgba(255, 80, 80, 0.95)", label: "4 or more fetches" },
-  { minFetches: 3, fill: "rgba(245, 120, 50, 0.48)", border: "2px solid rgba(255, 140, 70, 0.9)", label: "3 fetches" },
-  { minFetches: 2, fill: "rgba(240, 190, 60, 0.40)", border: "2px solid rgba(255, 210, 90, 0.85)", label: "2 fetches" },
-  { minFetches: 1, fill: "rgba(120, 160, 200, 0.16)", border: CELL_BORDER, label: "1 fetch" },
-];
-
 /** The band a fetch count falls in, or null for a chunk the window never fetched. */
-export function churnBand(fetches: number): (typeof CHURN_BANDS)[number] | null {
-  for (const band of CHURN_BANDS) if (fetches >= band.minFetches) return band;
+export function churnBand(fetches: number, paints: OverlayPaints): ChurnBand | null {
+  for (const band of paints.churnBands) if (fetches >= band.minFetches) return band;
   return null;
 }
 
@@ -190,6 +268,7 @@ export function churnWindowLabel(windowMs: number | null): string {
 
 export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
   const { cells, modes } = input;
+  const paints = overlayPaints(input.colors);
   const readsTrace = modes.phaseColor || modes.churnTint;
   const selection = input.selection ?? null;
   const items: ChunkDrawItem[] = [];
@@ -206,8 +285,8 @@ export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
         top: cell.top,
         width: cell.width,
         height: cell.height,
-        fill: cacheFill(cell, modes),
-        border: CELL_BORDER,
+        fill: cacheFill(cell, modes, paints),
+        border: paints.cellBorder,
         status,
         tooltip: `${status} · group proxy asset: not a chunk, so it has no row`,
         reading: null,
@@ -218,7 +297,7 @@ export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
     }
     const reading = readsTrace ? input.readingOf(cell) : null;
     if (reading) withRow += 1;
-    const band = modes.churnTint && reading ? churnBand(reading.fetches) : null;
+    const band = modes.churnTint && reading ? churnBand(reading.fetches, paints) : null;
     if (band && reading && reading.fetches >= 2) churned += 1;
     const inSelection =
       selection !== null &&
@@ -226,20 +305,20 @@ export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
     if (inSelection) selected += 1;
 
     let fill: string;
-    let border = CELL_BORDER;
+    let border = paints.cellBorder;
     if (modes.phaseColor) {
-      fill = reading ? withAlpha(ROW_STATE_COLORS[reading.state], PHASE_FILL_ALPHA) : NO_ROW_FILL;
-      if (!reading) border = NO_ROW_BORDER;
+      fill = reading ? withAlpha(ROW_STATE_COLORS[reading.state], PHASE_FILL_ALPHA) : paints.noRowFill;
+      if (!reading) border = paints.noRowBorder;
       if (band) border = band.border;
     } else if (modes.churnTint) {
-      fill = band ? band.fill : NO_ROW_FILL;
-      if (!reading) border = NO_ROW_BORDER;
+      fill = band ? band.fill : paints.noRowFill;
+      if (!reading) border = paints.noRowBorder;
     } else {
-      fill = cacheFill(cell, modes);
+      fill = cacheFill(cell, modes, paints);
     }
     if (inSelection) {
-      border = SELECTED_BORDER;
-      if (!readsTrace) fill = SELECTED_FILL;
+      border = paints.selectedBorder;
+      if (!readsTrace) fill = paints.selectedFill;
     }
 
     const tooltip = tooltipFor(status, modes, reading, input.windowMs);
@@ -261,55 +340,21 @@ export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
   return { items, withRow, churned, selected };
 }
 
-function cacheFill(cell: ChunkCell, modes: OverlayModes): string {
-  const tierFill = modes.chunkTier ? tierColor(cell.sourceTier) : null;
-  if (tierFill) return tierFill;
-  if (cell.status === "cached") return modes.cachedTier ? cachedColor(cell.tier) : SOLID_CACHED;
-  if (cell.status === "in-flight") return SOLID_IN_FLIGHT;
-  return modes.plannedRank ? plannedColor(cell.priorityRank) : SOLID_PLANNED;
+function cacheFill(cell: ChunkCell, modes: OverlayModes, paints: OverlayPaints): string {
+  const tier = cell.sourceTier;
+  if (modes.chunkTier && (tier === "detail" || tier === "coarse" || tier === "missing")) return paints.tier[tier];
+  if (cell.status === "cached") return modes.cachedTier && cell.tier ? paints.cachedTier[cell.tier] : paints.cached;
+  if (cell.status === "in-flight") return paints.inFlight;
+  return modes.plannedRank ? plannedColor(cell.priorityRank, paints) : paints.planned;
 }
 
-function tierColor(tier: DisplayTier | undefined): string | null {
-  switch (tier) {
-    case "detail":
-      return TIER_DETAIL;
-    case "coarse":
-      return TIER_COARSE;
-    case "missing":
-      return TIER_MISSING;
-    default:
-      return null;
-  }
-}
-
-/**
- * Rank 0 is next to fetch. Discrete bands rather than a gradient, so the
- * grid reads at a glance: orange is imminent, red is soon, dim red is far back.
- */
-function plannedColor(rank: number | undefined): string {
-  if (rank === undefined) return "rgba(140, 140, 140, 0.20)";
-  if (rank < 5) return "rgba(255, 180, 60, 0.50)";
-  if (rank < 20) return "rgba(245, 110, 70, 0.40)";
-  if (rank < 60) return "rgba(220, 70, 70, 0.32)";
-  return "rgba(160, 40, 40, 0.24)";
-}
-
-/**
- * Stays in the green family so cached still reads as green, with hue shifts
- * for how at risk the chunk is: active detail bright green, demoted detail
- * pale sage, prefetch teal.
- */
-function cachedColor(tier: EvictionTier | null | undefined): string {
-  switch (tier) {
-    case "active-detail":
-      return "rgba(80, 220, 120, 0.36)";
-    case "demoted-detail":
-      return "rgba(150, 200, 140, 0.30)";
-    case "prefetch":
-      return "rgba(70, 200, 200, 0.32)";
-    default:
-      return SOLID_CACHED;
-  }
+function plannedColor(rank: number | undefined, paints: OverlayPaints): string {
+  const bands = paints.plannedRank;
+  if (rank === undefined) return bands.unqueued;
+  if (rank < 5) return bands.under5;
+  if (rank < 20) return bands.under20;
+  if (rank < 60) return bands.under60;
+  return bands.beyond;
 }
 
 function statusText(cell: ChunkCell, modes: OverlayModes): string {

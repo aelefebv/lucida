@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { RenderLoop, MinimapOverlayData } from "../renderLoop.ts";
-import { drawStaticMinimapOverlays, drawZPlaneOverlays, drawViewportOverlays, zPlaneLayerDirty } from "./minimapOverlay.ts";
+import { drawStaticMinimapOverlays, drawZPlaneOverlays, drawViewportOverlays, readMinimapColors, zPlaneLayerDirty } from "./minimapOverlay.ts";
 import "./Minimap.css";
 
 const MINIMAP_SIZE = 200;
@@ -53,6 +53,7 @@ export function Minimap({ client, activeLoop }: Props) {
       if (!overlayCanvas) return;
       const ctx = overlayCanvas.getContext("2d");
       if (!ctx) return;
+      const colors = readMinimapColors();
 
       // Maintain the offscreen static-layer cache at the current backing size.
       let staticLayer = staticLayerRef.current;
@@ -86,7 +87,7 @@ export function Minimap({ client, activeLoop }: Props) {
       if (data.staticDirty || !staticReadyRef.current) {
         const staticCtx = staticLayer.getContext("2d");
         if (staticCtx) {
-          drawStaticMinimapOverlays(staticCtx, data);
+          drawStaticMinimapOverlays(staticCtx, data, colors);
           staticReadyRef.current = true;
         }
       }
@@ -97,7 +98,7 @@ export function Minimap({ client, activeLoop }: Props) {
         const zCtx = zLayer.getContext("2d");
         if (zCtx) {
           zCtx.clearRect(0, 0, data.canvasW, data.canvasH);
-          drawZPlaneOverlays(zCtx, data);
+          drawZPlaneOverlays(zCtx, data, colors);
           zReadyRef.current = true;
           prevZRef.current = data.currentZ;
         }
@@ -108,7 +109,7 @@ export function Minimap({ client, activeLoop }: Props) {
       ctx.clearRect(0, 0, data.canvasW, data.canvasH);
       if (staticReadyRef.current) ctx.drawImage(staticLayer, 0, 0);
       if (zReadyRef.current) ctx.drawImage(zLayer, 0, 0);
-      drawViewportOverlays(ctx, data);
+      drawViewportOverlays(ctx, data, colors);
     };
 
     // Content draws hold until the worker's pipelines exist, so the first one

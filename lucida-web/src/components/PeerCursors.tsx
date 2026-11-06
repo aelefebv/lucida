@@ -3,21 +3,7 @@ import type { WasmScene } from "lucida-core";
 import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
 import { projectToCanvas } from "./minimapMath.ts";
 import { makeWorldToScreen } from "./cameraProjection.ts";
-
-const PEER_COLORS = [
-  "#FF6B6B",
-  "#4ECDC4",
-  "#FFE66D",
-  "#A8E6CF",
-  "#FF8B94",
-  "#B5EAD7",
-  "#C7CEEA",
-  "#F8B500",
-];
-
-function peerColor(clientId: ClientId): string {
-  return PEER_COLORS[clientId % PEER_COLORS.length];
-}
+import { peerColor } from "../peerColor.ts";
 
 /**
  * A peer's cursor label: the server-authored `identity.display_name` when

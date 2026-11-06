@@ -36,7 +36,11 @@ Data colormaps are never themed.
 
 Canvas and GPU code reads the same tokens. `readColorToken` resolves a token to
 sRGB through the browser, since a derived token's computed value is an
-unresolved expression, and `subscribeAppearance` says when to read again.
+unresolved expression, and `subscribeAppearance` says when to read again. The
+render worker cannot read styles, so the render loop sends it the canvas colors
+before its first frame and after every appearance change. Layers blend with
+each other over a transparent canvas and the background goes beneath the
+finished stack, so an additive layer never brightens a light background.
 
 Preferences live per browser in one versioned localStorage entry. A module
 defines its own preference beside itself with a typed builder and reads it with

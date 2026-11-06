@@ -17,7 +17,17 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { DatasetState } from "../types.ts";
 import { DebugOverlays } from "./DebugOverlays.tsx";
 import { DEBUG_OVERLAYS, setOverlayEnabled } from "./logging.ts";
-import { BOX_EDGES, NO_ROW_DASH, NO_ROW_STROKE } from "./volumeWireframe.ts";
+import { BOX_EDGES, NO_ROW_DASH, noRowStroke, WIREFRAME_ALPHA } from "./volumeWireframe.ts";
+import { OVERLAY_TEST_COLORS } from "./overlayFixtures.ts";
+import { paint } from "../theme/tokenColors.ts";
+
+// happy-dom resolves no theme token, so the overlay paints with the test colors.
+vi.mock("./overlayDrawList.ts", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("./overlayDrawList.ts")>()),
+  readOverlayColors: () => OVERLAY_TEST_COLORS,
+}));
+
+const edge = (color: keyof typeof OVERLAY_TEST_COLORS) => paint(OVERLAY_TEST_COLORS[color], WIREFRAME_ALPHA);
 
 const CANVAS = { width: 800, height: 600 };
 /** A retina display: the scene answers in physical pixels and the overlay has to divide. */
@@ -179,9 +189,9 @@ describe("the overlay layer in volume mode", () => {
 
     // One cached, one in flight, two planned: three styles over four boxes.
     const byStroke = new Map(batches.map((path) => [path.getAttribute("stroke"), path]));
-    expect(byStroke.get("rgba(80, 220, 120, 0.9)")!.getAttribute("data-count")).toBe("1");
-    expect(byStroke.get("rgba(240, 200, 70, 0.9)")!.getAttribute("data-count")).toBe("1");
-    expect(byStroke.get("rgba(240, 90, 90, 0.9)")!.getAttribute("data-count")).toBe("2");
+    expect(byStroke.get(edge("success"))!.getAttribute("data-count")).toBe("1");
+    expect(byStroke.get(edge("warning"))!.getAttribute("data-count")).toBe("1");
+    expect(byStroke.get(edge("danger"))!.getAttribute("data-count")).toBe("2");
     expect(batches).toHaveLength(3);
     for (const path of batches) {
       const count = Number(path.getAttribute("data-count"));
@@ -236,7 +246,7 @@ describe("the overlay layer in volume mode", () => {
     const batches = Array.from(container.querySelectorAll('[data-testid="overlay-box-batch"]'));
     expect(batches).toHaveLength(1);
     expect(batches[0].getAttribute("data-count")).toBe("4");
-    expect(batches[0].getAttribute("stroke")).toBe("rgba(245, 70, 70, 0.9)");
+    expect(batches[0].getAttribute("stroke")).toBe(edge("danger"));
   });
 
   it("draws a box with no row dashed and captions the empty picture, as the slice overlay does", () => {
@@ -247,7 +257,7 @@ describe("the overlay layer in volume mode", () => {
     const batches = Array.from(container.querySelectorAll('[data-testid="overlay-box-batch"]'));
     expect(batches).toHaveLength(1);
     expect(batches[0].getAttribute("data-count")).toBe("4");
-    expect(batches[0].getAttribute("stroke")).toBe(NO_ROW_STROKE);
+    expect(batches[0].getAttribute("stroke")).toBe(noRowStroke(OVERLAY_TEST_COLORS));
     expect(batches[0].getAttribute("stroke-dasharray")).toBe(NO_ROW_DASH);
     expect(screen.getByTestId("overlay-absence").textContent).toContain("no interval is open");
   });
