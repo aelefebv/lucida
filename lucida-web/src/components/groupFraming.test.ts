@@ -2,7 +2,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import initWasm, { WasmScene } from "lucida-core";
-import { fitRectToViewport, frameRect, GROUP_FIT_MARGIN, unionRects } from "./groupFraming.ts";
+import { fitRectToViewport, frameRect, GROUP_FIT_MARGIN, groupAt, unionRects } from "./groupFraming.ts";
 import type { VoxelRect } from "../pipeline/layoutBuilders.ts";
 
 beforeAll(async () => {
@@ -29,6 +29,29 @@ describe("unionRects", () => {
   it("is null when nothing has a rect", () => {
     expect(unionRects([])).toBeNull();
     expect(unionRects([null, null])).toBeNull();
+  });
+});
+
+describe("groupAt", () => {
+  const groups: { key: string; bounds: VoxelRect }[] = [
+    { key: "left", bounds: { min: [0, 0], max: [100, 100] } },
+    { key: "right", bounds: { min: [120, 0], max: [220, 100] } },
+    { key: "inset", bounds: { min: [140, 20], max: [160, 40] } },
+  ];
+
+  it("names the group under the point, edges included", () => {
+    expect(groupAt(groups, [50, 50])).toBe("left");
+    expect(groupAt(groups, [100, 100])).toBe("left");
+  });
+
+  it("is null between groups", () => {
+    expect(groupAt(groups, [110, 50])).toBeNull();
+    expect(groupAt([], [0, 0])).toBeNull();
+  });
+
+  it("prefers the smallest of overlapping groups", () => {
+    expect(groupAt(groups, [150, 30])).toBe("inset");
+    expect(groupAt(groups, [200, 80])).toBe("right");
   });
 });
 

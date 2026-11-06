@@ -1,6 +1,9 @@
 import { useEffect, useRef } from "react";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { RenderLoop, MinimapOverlayData } from "../renderLoop.ts";
+import { usePreference } from "../theme/preferences.ts";
+import { CanvasCard } from "./CanvasCard.tsx";
+import { minimapCardPreference } from "./canvasCards.ts";
 import { drawStaticMinimapOverlays, drawZPlaneOverlays, drawViewportOverlays, readMinimapColors, zPlaneLayerDirty } from "./minimapOverlay.ts";
 import "./Minimap.css";
 
@@ -21,6 +24,10 @@ interface Props {
 }
 
 export function Minimap({ client, activeLoop }: Props) {
+  // Folded or hidden, the loop stops rendering it. The canvases stay mounted,
+  // since the GPU context is bound to this canvas for the worker's life.
+  const [cardState] = usePreference(minimapCardPreference);
+  const drawing = cardState === "open";
   const gpuCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const initedRef = useRef(false);
@@ -46,7 +53,7 @@ export function Minimap({ client, activeLoop }: Props) {
 
   // Effect 2: Loop registration
   useEffect(() => {
-    if (!activeLoop) return;
+    if (!activeLoop || !drawing) return;
 
     const drawOverlay = (data: MinimapOverlayData) => {
       const overlayCanvas = overlayCanvasRef.current;
@@ -54,6 +61,12 @@ export function Minimap({ client, activeLoop }: Props) {
       const ctx = overlayCanvas.getContext("2d");
       if (!ctx) return;
       const colors = readMinimapColors();
+      // A device-pixel-ratio change (a window moved to another screen) brings a
+      // new backing size; drawn into the old one, the overlay would be cropped.
+      if (overlayCanvas.width !== data.canvasW || overlayCanvas.height !== data.canvasH) {
+        overlayCanvas.width = data.canvasW;
+        overlayCanvas.height = data.canvasH;
+      }
 
       // Maintain the offscreen static-layer cache at the current backing size.
       let staticLayer = staticLayerRef.current;
@@ -132,7 +145,7 @@ export function Minimap({ client, activeLoop }: Props) {
       withdraw();
       activeLoop.setMinimap(false);
     };
-  }, [activeLoop, client]);
+  }, [activeLoop, client, drawing]);
 
   // Effect 3: Overlay canvas DPR sizing. The clear is the overlay's first
   // draw, which creates the main thread's GPU context before the worker
@@ -147,16 +160,18 @@ export function Minimap({ client, activeLoop }: Props) {
   }, []);
 
   return (
-    <div className="minimap-panel" style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}>
-      <canvas
-        ref={gpuCanvasRef}
-        style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
-      />
-      <canvas
-        ref={overlayCanvasRef}
-        className="minimap-overlay"
-        style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
-      />
-    </div>
+    <CanvasCard title="Minimap" label="Minimap" preference={minimapCardPreference}>
+      <div className="minimap-panel" style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}>
+        <canvas
+          ref={gpuCanvasRef}
+          style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
+        />
+        <canvas
+          ref={overlayCanvasRef}
+          className="minimap-overlay"
+          style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
+        />
+      </div>
+    </CanvasCard>
   );
 }

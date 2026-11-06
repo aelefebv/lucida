@@ -4,6 +4,8 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { SavedView } from "../savedView/types.ts";
+import { ToastRegion } from "../ui/Toast.tsx";
+import { toastQueue } from "../ui/toastQueue.ts";
 import type { WorkspaceSavedView } from "../workspaceApi.ts";
 
 // Mock the API surface so the sidebar's hook talks to spies, not the network.
@@ -77,6 +79,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  toastQueue.clear();
 });
 
 describe("WorkspaceSavedViewsSidebar — viewer propose flow", () => {
@@ -164,17 +167,20 @@ describe("WorkspaceSavedViewsSidebar — editor review queue", () => {
     cleanup();
     listMock.mockResolvedValue([proposal]);
     render(
-      <WorkspaceSavedViewsSidebar
-        {...baseProps()}
-        currentUserEmail="editor@example.com"
-        canEdit
-      />,
+      <>
+        <WorkspaceSavedViewsSidebar
+          {...baseProps()}
+          currentUserEmail="editor@example.com"
+          canEdit
+        />
+        <ToastRegion />
+      </>,
     );
     await screen.findByTestId("saved-view-reject-sv-prop");
     await userEvent.click(screen.getByTestId("saved-view-reject-sv-prop"));
     // Reject is deferred, and Undo cancels it with no API call.
     expect(rejectMock).not.toHaveBeenCalled();
-    await userEvent.click(await screen.findByText(/undo/i));
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
     expect(rejectMock).not.toHaveBeenCalled();
   });
 

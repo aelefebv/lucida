@@ -1,12 +1,8 @@
-import { ShareToolbarButton } from "../components/ShareToolbarButton.tsx";
-import type { SavedView } from "../savedView/types.ts";
 import "./BottomToolbar.css";
 
 export type AnnotationKind = "point" | "line" | "box";
 
 export interface BottomToolbarProps {
-  /** The live view, for the link the share button copies. */
-  getCurrentSavedView: () => SavedView | null;
   /** Which shape a shift-drag on the canvas draws. */
   annotationKind: AnnotationKind;
   onAnnotationKindChange: (kind: AnnotationKind) => void;
@@ -16,7 +12,6 @@ export interface BottomToolbarProps {
 
 /** The viewer's remaining toolbar, in a slim bar under the canvas. */
 export function BottomToolbar({
-  getCurrentSavedView,
   annotationKind,
   onAnnotationKindChange,
   annotationsVisible,
@@ -24,7 +19,6 @@ export function BottomToolbar({
 }: BottomToolbarProps) {
   return (
     <div className="lc-bottom-toolbar" role="toolbar" aria-label="Viewer toolbar">
-      <ShareToolbarButton getCurrentSavedView={getCurrentSavedView} />
       <label
         className="lc-bottom-toolbar-label"
         title="Shape drawn by shift-drag on the canvas (point = click, line/box = drag)"

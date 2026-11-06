@@ -1,10 +1,17 @@
 // @vitest-environment happy-dom
 
-import { afterEach, describe, it, expect, vi } from "vitest";
+import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 import { createElement } from "react";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { __resetPreferencesForTesting, getPreference } from "../theme/preferences.ts";
+import { navigatorCardPreference } from "./canvasCards.ts";
 import { CollectionSelector, extractCollectionData } from "./CollectionSelector.tsx";
 import type { DatasetManifest, Entity, ImageSpec, TransformEdge } from "../manifestTypes.ts";
+
+beforeEach(() => {
+  localStorage.clear();
+  __resetPreferencesForTesting();
+});
 
 afterEach(cleanup);
 
@@ -219,5 +226,57 @@ describe("CollectionSelector group click", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "A2" }));
     expect(onGroupClick).toHaveBeenCalledWith({ min: [1000, 0], max: [1208, 166.4] });
+  });
+});
+
+describe("CollectionSelector current group", () => {
+  const isCurrent = (name: string) =>
+    screen.getByRole("button", { name }).getAttribute("aria-current") === "location";
+
+  it("marks the group under the view's center and names it in the header", async () => {
+    const data = extractCollectionData(collection2x2())!;
+    let center = [300, 100];
+    render(
+      createElement(CollectionSelector, {
+        collectionKind: data.collectionKind,
+        members: data.members,
+        collectionName: "collection",
+        onGroupClick: vi.fn(),
+        getViewCenter: () => center,
+      }),
+    );
+    await waitFor(() => expect(isCurrent("A2")).toBe(true));
+    expect(document.querySelector(".lc-panel-header-meta")?.textContent).toBe("A2");
+
+    center = [100, 300];
+    await waitFor(() => expect(isCurrent("B1")).toBe(true));
+    expect(isCurrent("A2")).toBe(false);
+
+    // Off every group, nothing is marked.
+    center = [900, 900];
+    await waitFor(() => expect(isCurrent("B1")).toBe(false));
+    expect(document.querySelector(".lc-panel-header-meta")).toBeNull();
+  });
+
+  it("folds and hides through its header", () => {
+    const data = extractCollectionData(collection2x2())!;
+    render(
+      createElement(CollectionSelector, {
+        collectionKind: data.collectionKind,
+        members: data.members,
+        collectionName: "collection",
+        onGroupClick: vi.fn(),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Collapse collection selector" }));
+    expect(getPreference(navigatorCardPreference)).toBe("collapsed");
+    expect(screen.queryByRole("button", { name: "A1" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Expand collection selector" }));
+    expect(screen.getByRole("button", { name: "A1" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Hide collection selector" }));
+    expect(getPreference(navigatorCardPreference)).toBe("hidden");
+    expect(screen.queryByRole("group", { name: "Collection selector" })).toBeNull();
   });
 });

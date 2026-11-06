@@ -24,6 +24,29 @@ export function unionRects(rects: Iterable<VoxelRect | null>): VoxelRect | null 
 }
 
 /**
+ * The key of the group whose bounds contain `point`, or null when it falls
+ * between groups. Where bounds overlap, the smallest group wins, being the one
+ * the point is most specifically on.
+ */
+export function groupAt<K>(
+  groups: Iterable<{ key: K; bounds: VoxelRect }>,
+  point: readonly [number, number],
+): K | null {
+  const [x, y] = point;
+  let best: K | null = null;
+  let bestArea = Infinity;
+  for (const { key, bounds } of groups) {
+    if (x < bounds.min[0] || x > bounds.max[0] || y < bounds.min[1] || y > bounds.max[1]) continue;
+    const area = (bounds.max[0] - bounds.min[0]) * (bounds.max[1] - bounds.min[1]);
+    if (area < bestArea) {
+      best = key;
+      bestArea = area;
+    }
+  }
+  return best;
+}
+
+/**
  * The slice-camera center and zoom that show all of `rect` with `margin` slack
  * on the limiting axis, as lucida-core's `slice_framing` computes them. The
  * camera's zoom is device pixels per voxel, so `viewportPx` must be in device
