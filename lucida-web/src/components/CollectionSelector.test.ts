@@ -1,8 +1,14 @@
-import { describe, it, expect } from "vitest";
-import { extractCollectionData } from "./CollectionSelector.tsx";
-import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
+// @vitest-environment happy-dom
 
-function makeImage(image_id: string, owner: string): ImageSpec {
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { createElement } from "react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { CollectionSelector, extractCollectionData } from "./CollectionSelector.tsx";
+import type { DatasetManifest, Entity, ImageSpec, TransformEdge } from "../manifestTypes.ts";
+
+afterEach(cleanup);
+
+function makeImage(image_id: string, owner: string, sizeY = 256, sizeX = 256): ImageSpec {
   return {
     image_id,
     owner,
@@ -17,8 +23,8 @@ function makeImage(image_id: string, owner: string): ImageSpec {
       levels: [
         {
           level_index: 0,
-          shape: [1, 1, 1, 256, 256],
-          chunk_shape: [1, 1, 1, 256, 256],
+          shape: [1, 1, 1, sizeY, sizeX],
+          chunk_shape: [1, 1, 1, sizeY, sizeX],
           grid_shape: [1, 1, 1, 1, 1],
           scale: [1, 1, 1, 1, 1],
         },
@@ -111,5 +117,107 @@ describe("extractCollectionData", () => {
     const e0 = data!.members.find((m) => m.id === "e0")!;
     expect(e0.rowIndex).toBe(0);
     expect(e0.columnIndex).toBe(0);
+  });
+});
+
+function translation(from: string, to: string, tx: number, ty: number): TransformEdge {
+  return { from, to, transform: { matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, tx, ty, 0, 1] } };
+}
+
+/**
+ * Two groups in one row, each holding tiles placed by tile→group transforms,
+ * the shape import builds: the layout places groups only.
+ */
+function groupedCollection(
+  tileOffsets: [number, number][],
+  hasExplicitPositions: boolean,
+): DatasetManifest {
+  const entities: Entity[] = [];
+  const images: ImageSpec[] = [];
+  const transforms: TransformEdge[] = [];
+  for (const [col, group] of ["g0", "g1"].entries()) {
+    entities.push({ id: group, kind: "Group", parent: null, labels: { row_index: 0, column_index: col } });
+    tileOffsets.forEach(([tx, ty], i) => {
+      const tile = `${group}:t${i}`;
+      entities.push({ id: tile, kind: "Tile", parent: group, labels: { tile_index: i } });
+      images.push(makeImage(`${tile}:img`, tile, 80, 100));
+      transforms.push(translation(tile, group, tx, ty));
+    });
+  }
+  return {
+    dataset_id: "grouped",
+    name: "grouped",
+    kind: {
+      Collection: {
+        rows: ["A"],
+        columns: ["1", "2"],
+        positioning_mode: hasExplicitPositions ? "Explicit" : "Derived",
+        has_explicit_positions: hasExplicitPositions,
+      },
+    },
+    entities,
+    transforms,
+    images,
+    source_layouts: [
+      {
+        id: "source",
+        name: "Source",
+        placements: [
+          { entity_id: "g0", position: [0, 0] },
+          { entity_id: "g1", position: [1000, 0] },
+        ],
+      },
+    ],
+    default_layout_id: "source",
+  };
+}
+
+// 2×2 tiles of 100×80 with an 8% gap, as the grid transforms lay them out.
+const GRID_OFFSETS: [number, number][] = [[0, 0], [108, 0], [0, 86.4], [108, 86.4]];
+
+describe("extractCollectionData bounds", () => {
+  it("covers a grid-derived group's tiles from its placement", () => {
+    const data = extractCollectionData(groupedCollection(GRID_OFFSETS, false))!;
+    const g1 = data.members.find((m) => m.id === "g1")!;
+    expect(g1.bounds).toEqual({ min: [1000, 0], max: [1208, 166.4] });
+  });
+
+  it("covers explicitly positioned tiles, wherever they sit in the group", () => {
+    const data = extractCollectionData(
+      groupedCollection([[0, 40], [350, 0], [120, 500]], true),
+    )!;
+    const g0 = data.members.find((m) => m.id === "g0")!;
+    expect(g0.bounds).toEqual({ min: [0, 0], max: [450, 580] });
+  });
+
+  it("follows the active layout's placement", () => {
+    const data = extractCollectionData(groupedCollection(GRID_OFFSETS, false), [
+      { entity_id: "g0", position: [5000, 7000] },
+    ])!;
+    const g0 = data.members.find((m) => m.id === "g0")!;
+    expect(g0.bounds).toEqual({ min: [5000, 7000], max: [5208, 7166.4] });
+  });
+
+  it("spans a placed image entity's own image", () => {
+    const data = extractCollectionData(collection2x2())!;
+    const e3 = data.members.find((m) => m.id === "e3")!;
+    expect(e3.bounds).toEqual({ min: [256, 256], max: [512, 512] });
+  });
+});
+
+describe("CollectionSelector group click", () => {
+  it("reports the whole group's bounds, not its origin", () => {
+    const data = extractCollectionData(groupedCollection(GRID_OFFSETS, false))!;
+    const onGroupClick = vi.fn();
+    render(
+      createElement(CollectionSelector, {
+        collectionKind: data.collectionKind,
+        members: data.members,
+        collectionName: "grouped",
+        onGroupClick,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "A2" }));
+    expect(onGroupClick).toHaveBeenCalledWith({ min: [1000, 0], max: [1208, 166.4] });
   });
 });

@@ -2665,8 +2665,18 @@ mod tests {
             m
         };
         let (scale, tx, ty, tz) = (4.0f32, 10.0f32, -3.0f32, 2.0f32);
-        let (mm_center, mm_distance) =
-            crate::minimap::minimap_framing_boxes(&[(make_mat(scale, tx, ty, tz), true)]);
+        let framing = crate::minimap::minimap_framing(&[crate::minimap::MinimapMember {
+            model: make_mat(scale, tx, ty, tz),
+            visible: true,
+            z_planes: 8,
+        }]);
+        let crate::minimap::MinimapFraming::Orbit {
+            target: mm_center,
+            distance: mm_distance,
+        } = framing
+        else {
+            panic!("a volume must get the orbit framing: {framing:?}");
+        };
         // Minimap still uses the overview heuristic exactly.
         assert!(
             (mm_distance - (scale as f64) * FIT_PADDING).abs() < 1e-9,

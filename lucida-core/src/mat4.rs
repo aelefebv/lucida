@@ -12,6 +12,19 @@ pub(crate) fn perspective(fov_y: f64, aspect: f64, near: f64, far: f64) -> [f64;
     m
 }
 
+/// Symmetric orthographic projection, with the same clip-space depth range as
+/// [`perspective`] (`-1` at `near`, `+1` at `far`).
+pub(crate) fn orthographic(half_w: f64, half_h: f64, near: f64, far: f64) -> [f64; 16] {
+    let nf = 1.0 / (near - far);
+    let mut m = [0.0; 16];
+    m[0] = 1.0 / half_w;
+    m[5] = 1.0 / half_h;
+    m[10] = 2.0 * nf;
+    m[14] = (far + near) * nf;
+    m[15] = 1.0;
+    m
+}
+
 pub(crate) fn look_at(eye: [f64; 3], target: [f64; 3], up: [f64; 3]) -> [f64; 16] {
     let z = normalize3([eye[0] - target[0], eye[1] - target[1], eye[2] - target[2]]);
     let x = normalize3(cross3(up, z));

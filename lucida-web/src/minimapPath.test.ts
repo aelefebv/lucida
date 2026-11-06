@@ -295,8 +295,8 @@ describe("tickMinimap overview/overlay split", () => {
       eye_position: () => new Float32Array(s.eye),
       epochs: () =>
         JSON.stringify({ content: s.contentEpoch, layout: s.layoutEpoch, view: 0, selection: 0, asset: 0 }),
-      // 35 floats: [0..16) invViewProj, [16..19) eye, [19..35) viewProj.
-      minimap_camera: () => new Float32Array(35),
+      // 36 floats: [0..16) invViewProj, [16..19) eye, [19..35) viewProj, [35] topDown.
+      minimap_camera: () => new Float32Array(36),
       member_positions: () => JSON.stringify({ m0: [0, 0] }),
       member_render_ids: () => JSON.stringify(["m0"]),
       member_render_matrices: () => new Float32Array(32),
@@ -631,7 +631,7 @@ describe("tickMinimap overview/overlay split", () => {
     const volShapeSpy = vi.spyOn(scene.wasm, "dataset_volume_shape");
     // Return a distinct camera for the new angle so the overlay's viewProj moves.
     const camSpy = vi.spyOn(scene.wasm, "minimap_camera").mockReturnValue(
-      new Float32Array(35).fill(7),
+      new Float32Array(36).fill(7, 0, 35),
     );
 
     scene.theta = 1.0;
@@ -740,6 +740,53 @@ describe("tickMinimap overview/overlay split", () => {
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(0);
     expect(overlay).not.toHaveBeenCalled();
+  });
+
+  /** A camera payload whose last float marks the top-down camera. */
+  function topDownCamera(): Float32Array {
+    const cam = new Float32Array(36);
+    cam[35] = 1;
+    return cam;
+  }
+
+  it("tells the overlay which projection the minimap camera chose", () => {
+    const scene = makeScene();
+    const overlay = vi.fn();
+    const ctx = makeCtx(scene, "slice", { n: 0 });
+
+    tickMinimap(ctx, makeState(overlay), 0);
+    expect(overlay.mock.calls[0][0].topDown).toBe(false);
+
+    vi.spyOn(scene.wasm, "minimap_camera").mockReturnValue(topDownCamera());
+    tickMinimap(ctx, makeState(overlay), 0);
+    expect(overlay.mock.calls[1][0].topDown).toBe(true);
+  });
+
+  it("in volume mode leaves a top-down overview alone on an orbit", () => {
+    // The top-down camera ignores theta/phi, so recomputing it would read every
+    // member in wasm and redraw the overview for an identical picture.
+    const scene = makeScene();
+    const camSpy = vi.spyOn(scene.wasm, "minimap_camera").mockReturnValue(topDownCamera());
+    const renderCount = { n: 0 };
+    const overlay = vi.fn();
+    const state = makeState(overlay);
+    const ctx = makeCtx(scene, "volume", renderCount);
+
+    tickMinimap(ctx, state, 0);
+    expect(renderCount.n).toBe(1);
+    expect(camSpy).toHaveBeenCalledTimes(1);
+
+    scene.theta = 1.0;
+    scene.phi = 0.3;
+    scene.eye = [1, 2, 5];
+    tickMinimap(ctx, state, 0);
+
+    expect(renderCount.n).toBe(1);
+    expect(camSpy).toHaveBeenCalledTimes(1);
+    // The main camera moved, so its frustum footprint is still re-stroked.
+    expect(overlay).toHaveBeenCalledTimes(2);
+    expect(overlay.mock.calls[1][0].staticDirty).toBe(true);
+    expect(overlay.mock.calls[1][0].topDown).toBe(true);
   });
 });
 
