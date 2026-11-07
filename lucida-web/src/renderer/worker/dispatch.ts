@@ -9,8 +9,6 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { MainToWorkerMessage } from "../workerProtocol.ts";
-import { destroyProxyAtlas } from "../proxyAtlas.ts";
-import { destroyDescriptorBuffer } from "../descriptorBuffer.ts";
 import {
   applyColdState,
   applyColdStateDisplay,
@@ -22,14 +20,12 @@ import {
   handleLabelSliceChunkData,
   handleSliceChunkData,
   handleSliceRenderMultiPass,
-  removeSliceResources,
 } from "../slice/index.ts";
 import {
   applyViewHotState,
   handleLabelVolumeChunkData,
   handleVolumeChunkData,
   handleVolumeRenderMultiPass,
-  removeVolumeResources,
 } from "../volume/index.ts";
 import {
   handleMinimapDestroy,
@@ -37,9 +33,10 @@ import {
   handleMinimapRender,
   handleMinimapUploadOverviewChunks,
   handleThumbnailRender,
-  removeMinimapResources,
 } from "../minimapHandlers.ts";
 import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
+import { removeDatasetResources } from "./lifecycle.ts";
+import { postGpuAtlasesIfChanged } from "./atlasReport.ts";
 import { handleCaptureFrame } from "./captureFrame.ts";
 import { postChunksRequeued } from "../chunkUploadFeedback.ts";
 import { sourceKey } from "../poolKeys.ts";
@@ -84,6 +81,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "sliceRenderMultiPass":
       await handleSliceRenderMultiPass(ctx, msg);
       postFrameDone(ctx, msg.frameSeq);
+      postGpuAtlasesIfChanged(ctx);
       return;
 
     case "volumeChunkData": {
@@ -106,6 +104,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "volumeRenderMultiPass":
       await handleVolumeRenderMultiPass(ctx, msg);
       postFrameDone(ctx, msg.frameSeq);
+      postGpuAtlasesIfChanged(ctx);
       return;
 
     case "proxyAssetData": {
@@ -150,6 +149,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       ctx.state.coldStateByDataset.set(msg.datasetId, msg);
       applyColdState(ctx, msg);
       ctx.postWantedSet();
+      postGpuAtlasesIfChanged(ctx);
       return;
 
     case "coldStateDisplay":
@@ -161,6 +161,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // A T/Z scrub changes the wanted chunks, so the wanted-set is posted.
       applyColdStateSelection(ctx, msg);
       ctx.postWantedSet();
+      postGpuAtlasesIfChanged(ctx);
       return;
 
     case "coldStateDelta":
@@ -168,44 +169,13 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // selection paths.
       applyColdStateDelta(ctx, msg);
       ctx.postWantedSet();
+      postGpuAtlasesIfChanged(ctx);
       return;
 
-    case "removeLayerResources": {
-      removeSliceResources(ctx, msg.datasetId);
-      removeVolumeResources(ctx, msg.datasetId);
-      removeMinimapResources(msg.datasetId);
-      const dsPools = ctx.state.proxyPoolsByDataset.get(msg.datasetId);
-      if (dsPools) {
-        for (const pool of dsPools.values()) destroyProxyAtlas(pool);
-        ctx.state.proxyPoolsByDataset.delete(msg.datasetId);
-      }
-      const desc = ctx.state.descriptorBuffersByDataset.get(msg.datasetId);
-      if (desc) {
-        destroyDescriptorBuffer(desc);
-        ctx.state.descriptorBuffersByDataset.delete(msg.datasetId);
-      }
-      ctx.state.currentSourcesByDataset.delete(msg.datasetId);
-      ctx.state.coldStateByDataset.delete(msg.datasetId);
-
-      // These maps would otherwise grow for the worker's whole lifetime.
-      for (const [memberId, dsId] of ctx.state.memberToDataset) {
-        if (dsId === msg.datasetId) {
-          ctx.state.memberToDataset.delete(memberId);
-          ctx.state.memberSourcePools.delete(memberId);
-          ctx.state.targetLevelByMember.delete(memberId);
-        }
-      }
-      // groupsByDataset avoids scanning every group's child set.
-      const groups = ctx.state.groupsByDataset.get(msg.datasetId);
-      if (groups) {
-        for (const groupId of groups) ctx.state.groupToTiles.delete(groupId);
-        ctx.state.groupsByDataset.delete(msg.datasetId);
-      }
-      if (ctx.state.currentColdState?.datasetId === msg.datasetId) {
-        ctx.state.currentColdState = null;
-      }
+    case "removeLayerResources":
+      removeDatasetResources(ctx, msg.datasetId);
+      postGpuAtlasesIfChanged(ctx);
       return;
-    }
 
     case "destroy":
       // The entry point handles `destroy` so it can null the ctx before

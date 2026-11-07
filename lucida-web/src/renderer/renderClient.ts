@@ -9,6 +9,7 @@ import type {
   WorkerToMainMessage,
   CaptureFailure,
   FrameCaptureResult,
+  GpuAtlasReport,
   ColdStateMessage,
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
@@ -139,6 +140,8 @@ export class RenderClient implements UploadClient {
   private readonly levelsByDataset = new Map<string, DatasetLevels>();
 
   private gpuPassUs: number | null = null;
+  /** The worker starts with no atlases and posts only changes. */
+  private gpuAtlasReport: GpuAtlasReport = { atlases: 0, bytes: 0 };
 
   /** The last viewport frame dispatched. */
   private viewportFrameSeq = 0;
@@ -205,6 +208,11 @@ export class RenderClient implements UploadClient {
     return gpuPassUs;
   }
 
+  /** The worker's latest atlas count and bytes. */
+  gpuAtlases(): GpuAtlasReport {
+    return this.gpuAtlasReport;
+  }
+
   /**
    * The newest frame finished since the last call, timed from dispatch to its
    * GPU work done on this thread's clock, or null when none finished. Taking
@@ -267,6 +275,8 @@ export class RenderClient implements UploadClient {
       // Latest wins: when two frames land between ticks, the newer one is
       // the frame on screen.
       this.gpuPassUs = msg.gpuPassUs;
+    } else if (msg.type === "gpuAtlases") {
+      this.gpuAtlasReport = { atlases: msg.atlases, bytes: msg.bytes };
     } else if (msg.type === "frameDone") {
       this.noteFrameDone(msg.frameSeq);
     } else if (msg.type === "pipelinesCompiled") {

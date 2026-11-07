@@ -21,7 +21,8 @@ import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import { makeCompositeKey } from "./chunkKeys.ts";
 import { memberIdForColdEntry } from "./descriptorBuffer.ts";
 import { detailTierLevels, targetLevelOf } from "./entitySources.ts";
-import { sliceChunkZ } from "./slicePlane.ts";
+import { chunkOutsideFrustum } from "../pipeline/planning/chunks.ts";
+import { sliceChunkZ, sliceLevelZ } from "./slicePlane.ts";
 
 /** One level's section metadata for a member in a shared pool. */
 export interface AtlasLevelMeta {
@@ -36,6 +37,12 @@ export interface AtlasSnapshot {
   z?: number; // only for slice atlases
   /** Slots keyed by composite "memberId|chunkKey". */
   slots: Map<string, number>;
+  /**
+   * Slice atlases only: the level plane each slot's 2-D data was cut from,
+   * by slot index. A slot cut from another plane than the one `z` maps to
+   * holds stale data and counts as missing.
+   */
+  slotLevelZ?: ArrayLike<number>;
   /** Per-entity level sections. */
   entityMetas?: Map<string, AtlasLevelMeta[]>;
 }
@@ -256,9 +263,14 @@ export function computeWantedSet(
                 ) {
                   continue;
                 }
+                if (
+                  context.viewMode === "volume" &&
+                  !chunkInFrustum(coldState, grid, layoutPositionVox, ix, iy, iz)
+                ) {
+                  continue;
+                }
                 const chunkKey = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
-                const slotKey = makeCompositeKey(memberId, chunkKey);
-                if (!atlas.slots.has(slotKey)) {
+                if (!holdsCurrentData(atlas, grid, context, chunkKey)) {
                   missing.push({
                     kind: "chunk",
                     datasetId: coldState.datasetId,
@@ -380,6 +392,46 @@ function sliceChunkRange(grid: LevelGrid, sliceZ: number): [number, number] {
   return [Math.max(0, chunkIdx), Math.min(grid.grid[2], chunkIdx + 1)];
 }
 
+/**
+ * Whether the atlas holds this chunk as the current selection draws it. In
+ * slice mode the slot must also hold the plane the current Z maps to: a Z
+ * step inside one chunk keeps the chunk's key but needs a re-cut plane.
+ */
+function holdsCurrentData(
+  atlas: AtlasSnapshot,
+  grid: LevelGrid,
+  context: SampleContext,
+  chunkKey: string,
+): boolean {
+  const slot = atlas.slots.get(makeCompositeKey(context.memberId, chunkKey));
+  if (slot === undefined) return false;
+  if (context.viewMode !== "slice" || atlas.slotLevelZ === undefined) return true;
+  return atlas.slotLevelZ[slot] === sliceLevelZ(context.sliceZ, grid.fullDims[2], grid.levelDims[2]);
+}
+
+/**
+ * The planner's frustum test on the same level-0 chunk box, so the wanted
+ * set never lists a chunk the planner will not request. A chunk listed and
+ * never delivered keeps residency dirty.
+ */
+function chunkInFrustum(
+  coldState: ColdStateMessage,
+  grid: LevelGrid,
+  layoutPositionVox: [number, number],
+  ix: number,
+  iy: number,
+  iz: number,
+): boolean {
+  const planes = coldState.visibleRegion.frustumPlanes;
+  if (planes === null) return true;
+  const [cwX, cwY, cwZ] = grid.chunkWorld;
+  return !chunkOutsideFrustum(
+    [ix * cwX + layoutPositionVox[0], iy * cwY + layoutPositionVox[1], iz * cwZ],
+    [(ix + 1) * cwX + layoutPositionVox[0], (iy + 1) * cwY + layoutPositionVox[1], (iz + 1) * cwZ],
+    planes,
+  );
+}
+
 interface ChunkRange {
   colStart: number;
   colEnd: number;
@@ -490,7 +542,7 @@ function covers(
     for (let y = y0; y < y1; y++) {
       for (let x = x0; x < x1; x++) {
         const chunkKey = `${grid.level}/${context.t}/${context.channel}/${z}/${y}/${x}`;
-        if (!atlas.slots.has(makeCompositeKey(context.memberId, chunkKey))) return false;
+        if (!holdsCurrentData(atlas, grid, context, chunkKey)) return false;
       }
     }
   }

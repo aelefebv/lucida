@@ -20,7 +20,7 @@ use lucida_core::auth_principal::AuthPrincipal;
 use super::bearer_token::{BearerTokenStore, hash_bearer_token};
 use super::config::AuthConfig;
 use super::cookie::read_session_cookie;
-use super::dev::{default_dev_principal, read_dev_principal_cookie};
+use super::dev::{default_dev_principal, dev_switcher_enabled, read_dev_principal_cookie};
 use super::google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
 use super::session_store::{LoginSession, LoginSessionStore};
 
@@ -558,15 +558,29 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
 /// that. Without it the cookie extractor would 401 every request and the
 /// SPA would loop into an unregistered `/auth/start`.
 ///
-/// The fallback `dev@local` is not an admin: it is what a caller gets
-/// for presenting nothing. Admin paths need a deliberate switch to an
-/// admin dev principal on a loopback bind.
-pub struct StubPrincipalExtractor;
+/// The dev cookie is honored only where the switcher that writes it is
+/// offered, a loopback bind; elsewhere every caller is `dev@local`.
+/// Admin rights come from `LUCIDA_ADMIN_EMAILS` alone, as in every other
+/// mode, so no cookie can grant them.
+pub struct StubPrincipalExtractor {
+    config: Arc<AuthConfig>,
+}
+
+impl StubPrincipalExtractor {
+    pub fn new(config: Arc<AuthConfig>) -> Self {
+        Self { config }
+    }
+}
 
 #[async_trait]
 impl PrincipalExtractor for StubPrincipalExtractor {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
-        Ok(read_dev_principal_cookie(req).unwrap_or_else(default_dev_principal))
+        let mut principal = dev_switcher_enabled(&self.config)
+            .then(|| read_dev_principal_cookie(req))
+            .flatten()
+            .unwrap_or_else(default_dev_principal);
+        principal.is_admin = self.config.admin_emails.contains(&principal.email);
+        Ok(principal)
     }
 }
 
@@ -1142,9 +1156,20 @@ mod tests {
 
     // -- StubPrincipalExtractor ------------------------------------------
 
+    fn stub_extractor() -> StubPrincipalExtractor {
+        StubPrincipalExtractor::new(Arc::new(AuthConfig::for_tests()))
+    }
+
+    fn dev_cookie_for(email: &str) -> String {
+        let config = AuthConfig::for_tests();
+        let dev = normalize_dev_principal(email, None).unwrap();
+        let set_cookie = build_dev_principal_cookie(&config, &dev, false);
+        set_cookie.split(';').next().unwrap().to_string()
+    }
+
     #[tokio::test]
     async fn stub_extractor_returns_canned_principal_with_no_cookie() {
-        let p = StubPrincipalExtractor
+        let p = stub_extractor()
             .extract(&parts_with_cookie(None))
             .await
             .unwrap();
@@ -1161,7 +1186,7 @@ mod tests {
     async fn stub_extractor_returns_canned_principal_with_arbitrary_cookie() {
         // Session-cookie garbage is ignored — disabled mode never
         // touches the session store.
-        let p = StubPrincipalExtractor
+        let p = stub_extractor()
             .extract(&parts_with_cookie(Some("garbage-no-row-exists")))
             .await
             .unwrap();
@@ -1172,29 +1197,48 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stub_extractor_grants_admin_only_through_the_dev_cookie() {
-        let config = AuthConfig::for_tests();
-        let dev = normalize_dev_principal("Admin@Example.com", Some("Admin"), true).unwrap();
-        let set_cookie = build_dev_principal_cookie(&config, &dev, false);
-        let inbound_cookie = set_cookie.split(';').next().unwrap();
+    async fn stub_extractor_takes_admin_from_configuration_only() {
+        let mut config = AuthConfig::for_tests();
+        config.admin_emails = ["admin@example.com".to_string()].into_iter().collect();
+        let extractor = StubPrincipalExtractor::new(Arc::new(config));
 
-        let p = StubPrincipalExtractor
-            .extract(&parts_with_raw_cookie(inbound_cookie))
+        let admin = extractor
+            .extract(&parts_with_raw_cookie(&dev_cookie_for("Admin@Example.com")))
             .await
             .unwrap();
+        assert_eq!(admin.email, "admin@example.com");
+        assert!(admin.is_admin, "a configured email is an admin");
 
-        assert_eq!(p.email, "admin@example.com");
-        assert!(p.is_admin);
+        let other = extractor
+            .extract(&parts_with_raw_cookie(&dev_cookie_for("other@example.com")))
+            .await
+            .unwrap();
+        assert!(!other.is_admin, "any other email is not");
+    }
+
+    #[tokio::test]
+    async fn stub_extractor_ignores_the_dev_cookie_off_loopback() {
+        // `LUCIDA_INSECURE=1` on a public bind: the switcher is off, so a
+        // cookie a caller wrote by hand names nobody.
+        let mut config = AuthConfig::for_tests();
+        config.bind_addr = "0.0.0.0:9876".parse().unwrap();
+        config.insecure_acknowledged = true;
+        let p = StubPrincipalExtractor::new(Arc::new(config))
+            .extract(&parts_with_raw_cookie(&dev_cookie_for("owner@example.com")))
+            .await
+            .unwrap();
+        assert_eq!(p.email, "dev@local");
+        assert!(!p.is_admin);
     }
 
     #[tokio::test]
     async fn stub_extractor_uses_dev_principal_cookie_when_present() {
         let config = AuthConfig::for_tests();
-        let dev = normalize_dev_principal("Viewer@Example.com", Some("Viewer"), false).unwrap();
+        let dev = normalize_dev_principal("Viewer@Example.com", Some("Viewer")).unwrap();
         let set_cookie = build_dev_principal_cookie(&config, &dev, false);
         let inbound_cookie = set_cookie.split(';').next().unwrap();
 
-        let p = StubPrincipalExtractor
+        let p = stub_extractor()
             .extract(&parts_with_raw_cookie(inbound_cookie))
             .await
             .unwrap();

@@ -28,10 +28,11 @@ export interface DevAuthStatus {
   default_principal: AuthPrincipal;
 }
 
+/** Names an identity only: admin rights come from the server's
+ *  configuration, never from a dev switch. */
 export interface DevLoginRequest {
   email: string;
   display_name?: string;
-  is_admin?: boolean;
 }
 
 export type FetchLike = (

@@ -772,12 +772,13 @@ impl Arcball {
     }
 
     pub fn zoom(&mut self, delta: f64) {
+        let before = self.distance;
         let next = self.distance * (1.0 + delta);
         // A fit puts `near` just short of the data, where it would stop a
         // zoom-in at the data's edge. Moving in, the near plane comes in by as
         // much, down to the ratio to `far` a fresh camera has, so the camera
-        // can still reach the target. Never raised, so a fresh camera keeps
-        // its floor. A NaN `next` fails the comparison and leaves it alone.
+        // can still reach the target. Never raised. A NaN `next` fails the
+        // comparison and leaves it alone.
         if next < self.distance {
             let floor = (self.far * NEAR_PER_FAR).min(self.near);
             self.near = (self.near - (self.distance - next)).max(floor);
@@ -787,6 +788,15 @@ impl Arcball {
         // instead of multiplying `distance` to Inf — `pan` scales by
         // `distance`, and `0 × Inf` would put NaN into `target`.
         self.distance = next.max(self.near).min(ARCBALL_DISTANCE_MAX);
+        // A fit puts `far` just past the data's back. The far plane moves with
+        // the eye, so it stays the same depth behind the target: a zoom-out
+        // never leaves it in front of the data, and zooming back in returns
+        // it, and the near floor above, to where they were. A far plane
+        // already short of the target is left alone, since moving it in could
+        // put it in front of `near`.
+        if self.distance != before && self.far > before {
+            self.far += self.distance - before;
+        }
     }
 
     pub fn pan(&mut self, dx: f64, dy: f64) {
@@ -1819,12 +1829,18 @@ mod tests {
     }
 
     #[test]
-    fn zoom_keeps_a_fresh_cameras_floor() {
+    fn zoom_never_raises_a_fresh_cameras_near_plane() {
         let mut cam = Arcball::new([800, 600]);
         for _ in 0..50 {
             cam.zoom(-0.5);
         }
-        assert_eq!((cam.near, cam.distance), (0.01, 0.01));
+        assert!(cam.near <= 0.01, "near {}", cam.near);
+        assert_eq!(cam.distance, cam.near);
+    }
+
+    /// The far plane's depth behind the orbit target.
+    fn far_behind_target(cam: &Arcball) -> f64 {
+        cam.far - cam.distance
     }
 
     #[test]
@@ -1834,6 +1850,7 @@ mod tests {
         let mut cam = Arcball::new([390, 608]);
         cam.fit_to_bounds([0.0; 3], [1.0, 1.0, 0.25], FIT_MARGIN_3D);
         let (fitted, near, far) = (cam.distance, cam.near, cam.far);
+        let behind = far_behind_target(&cam);
         cam.zoom(-0.5);
         assert!(
             (cam.distance - fitted * 0.5).abs() < 1e-12,
@@ -1850,12 +1867,13 @@ mod tests {
             cam.zoom(-0.5);
         }
         assert!(
-            (cam.near - far * NEAR_PER_FAR).abs() < 1e-12,
-            "near {}",
-            cam.near
+            (cam.near - cam.far * NEAR_PER_FAR).abs() < cam.near * 1e-6,
+            "near {} far {}",
+            cam.near,
+            cam.far
         );
         assert_eq!(cam.distance, cam.near);
-        assert_eq!(cam.far, far);
+        assert!((far_behind_target(&cam) - behind).abs() < 1e-12);
         // Zooming back out leaves the near plane where it came to.
         let near_in = cam.near;
         cam.zoom(1.0);
@@ -1864,6 +1882,37 @@ mod tests {
         cam.zoom(f64::NAN);
         assert_eq!(cam.near, near_in);
         assert!(cam.distance.is_finite());
+        assert!(cam.far > cam.distance);
+    }
+
+    #[test]
+    fn zoom_out_carries_the_far_plane_back_past_the_data() {
+        let (min, max) = ([0.0; 3], [1.0, 4.0, 4.0]);
+        let radius = Aabb::sanitized(min, max).bounding_radius();
+        let mut cam = Arcball::new([800, 600]);
+        cam.fit_to_bounds(min, max, FIT_MARGIN_3D);
+        let (fitted, far) = (cam.distance, cam.far);
+        let behind = far_behind_target(&cam);
+        for multiple in [2.0, 8.0, 64.0] {
+            let mut out = cam.clone();
+            out.zoom(multiple - 1.0);
+            assert!(
+                out.far >= out.distance + radius,
+                "{multiple}x: far {} short of the data's back at {}",
+                out.far,
+                out.distance + radius
+            );
+            assert!((far_behind_target(&out) - behind).abs() < 1e-9);
+        }
+        // Saturating the zoom keeps the far plane finite, and zooming back to
+        // the fit returns it, so the near floor a later zoom-in reaches is
+        // the fitted one.
+        cam.zoom(1e12);
+        assert_eq!(cam.distance, ARCBALL_DISTANCE_MAX);
+        assert!(cam.far.is_finite() && cam.far > cam.distance);
+        cam.zoom(fitted / cam.distance - 1.0);
+        assert!((cam.distance - fitted).abs() < 1e-6);
+        assert!((cam.far - far).abs() < 1e-6, "far {} vs {far}", cam.far);
     }
 
     #[test]

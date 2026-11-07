@@ -4,9 +4,9 @@
 //! server is bound to loopback. The cookie is not a security boundary.
 //! It is a local-dev convenience, so different browser profiles can
 //! exercise viewer, editor, and owner behavior without configuring
-//! OAuth. That is why the routes that write it are off wherever
-//! anything but this machine can reach the server. See
-//! [`crate::auth::handlers::DevAuthState::new`].
+//! OAuth. That is why it is written and read only where nothing but this
+//! machine can reach the server ([`dev_switcher_enabled`]), and why it
+//! never carries admin rights: those come from `LUCIDA_ADMIN_EMAILS`.
 
 use axum::http::header::COOKIE;
 use axum::http::request::Parts;
@@ -17,7 +17,7 @@ use cookie::{Cookie, SameSite};
 use lucida_core::auth_principal::AuthPrincipal;
 use serde::{Deserialize, Serialize};
 
-use super::config::AuthConfig;
+use super::config::{AuthConfig, AuthMode};
 use super::cookie::resolve_secure;
 use super::principal::{display_name_from_email, normalize_email};
 
@@ -28,15 +28,25 @@ const DEV_PRINCIPAL_TTL_SECS: i64 = 60 * 60 * 24 * 30;
 struct DevPrincipalCookie {
     email: String,
     display_name: String,
-    is_admin: bool,
+}
+
+/// Whether this server offers the dev identity switcher and honors its
+/// cookie: disabled auth on a loopback bind.
+///
+/// Disabled mode alone is not enough. The cookie names whatever identity
+/// its holder chose, so anywhere else any caller could act as any member
+/// of any workspace. `LUCIDA_INSECURE=1` acknowledges running without
+/// sign-in; it does not ask for that.
+pub fn dev_switcher_enabled(config: &AuthConfig) -> bool {
+    config.mode == AuthMode::Disabled && config.bind_is_loopback()
 }
 
 /// The identity disabled mode hands to a caller who presents nothing.
 ///
-/// It carries no admin rights. Every request in disabled mode resolves
-/// to this principal by default, so anything it can do, anyone who
-/// reaches the server can do. Admin rights take a deliberate switch,
-/// which only a loopback bind offers.
+/// It carries no admin rights of its own. Every request in disabled mode
+/// resolves to this principal by default, so anything it can do, anyone
+/// who reaches the server can do. Admin rights come only from
+/// `LUCIDA_ADMIN_EMAILS`.
 pub fn default_dev_principal() -> AuthPrincipal {
     AuthPrincipal {
         email: "dev@local".to_string(),
@@ -46,10 +56,11 @@ pub fn default_dev_principal() -> AuthPrincipal {
     }
 }
 
+/// The principal a dev switch names. Never an admin: the caller derives
+/// that from configuration.
 pub fn normalize_dev_principal(
     email: &str,
     display_name: Option<&str>,
-    is_admin: bool,
 ) -> Result<AuthPrincipal, String> {
     let email = normalize_email(email).ok_or_else(|| "dev user email is invalid".to_string())?;
 
@@ -63,7 +74,7 @@ pub fn normalize_dev_principal(
         email,
         display_name,
         picture_url: None,
-        is_admin,
+        is_admin: false,
     })
 }
 
@@ -94,7 +105,7 @@ pub fn build_dev_principal_cookie(
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
-    cookie.set_secure(resolve_secure(config.secure_mode, request_is_https));
+    cookie.set_secure(resolve_secure(config, request_is_https));
     cookie.set_max_age(CookieDuration::seconds(DEV_PRINCIPAL_TTL_SECS));
     cookie.to_string()
 }
@@ -104,7 +115,7 @@ pub fn build_clearing_dev_principal_cookie(config: &AuthConfig, request_is_https
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
-    cookie.set_secure(resolve_secure(config.secure_mode, request_is_https));
+    cookie.set_secure(resolve_secure(config, request_is_https));
     cookie.set_max_age(CookieDuration::ZERO);
     cookie.to_string()
 }
@@ -113,7 +124,6 @@ fn encode_dev_principal(principal: &AuthPrincipal) -> String {
     let payload = DevPrincipalCookie {
         email: principal.email.clone(),
         display_name: principal.display_name.clone(),
-        is_admin: principal.is_admin,
     };
     let bytes = serde_json::to_vec(&payload).expect("dev principal cookie serializes");
     URL_SAFE_NO_PAD.encode(bytes)
@@ -121,13 +131,10 @@ fn encode_dev_principal(principal: &AuthPrincipal) -> String {
 
 fn decode_dev_principal(value: &str) -> Option<AuthPrincipal> {
     let bytes = URL_SAFE_NO_PAD.decode(value).ok()?;
+    // A payload that carries `is_admin` still parses: serde skips the
+    // field, so the cookie can never grant admin.
     let payload: DevPrincipalCookie = serde_json::from_slice(&bytes).ok()?;
-    normalize_dev_principal(
-        &payload.email,
-        Some(&payload.display_name),
-        payload.is_admin,
-    )
-    .ok()
+    normalize_dev_principal(&payload.email, Some(&payload.display_name)).ok()
 }
 
 #[cfg(test)]
@@ -155,7 +162,7 @@ mod tests {
     #[test]
     fn dev_principal_cookie_round_trips() {
         let config = AuthConfig::for_tests();
-        let principal = normalize_dev_principal("Alice@Example.com", Some("Alice"), false).unwrap();
+        let principal = normalize_dev_principal("Alice@Example.com", Some("Alice")).unwrap();
         let set_cookie = build_dev_principal_cookie(&config, &principal, false);
         let inbound_cookie = set_cookie.split(';').next().unwrap();
 
@@ -168,7 +175,31 @@ mod tests {
 
     #[test]
     fn display_name_falls_back_from_email_local_part() {
-        let principal = normalize_dev_principal("test.viewer@example.com", None, false).unwrap();
+        let principal = normalize_dev_principal("test.viewer@example.com", None).unwrap();
         assert_eq!(principal.display_name, "Test Viewer");
+    }
+
+    #[test]
+    fn an_admin_flag_in_the_cookie_is_ignored() {
+        let forged = URL_SAFE_NO_PAD
+            .encode(br#"{"email":"someone@example.com","display_name":"Someone","is_admin":true}"#);
+        let parsed = read_dev_principal_cookie(&parts_with_cookie(&format!(
+            "{DEV_PRINCIPAL_COOKIE_NAME}={forged}"
+        )))
+        .unwrap();
+        assert_eq!(parsed.email, "someone@example.com");
+        assert!(!parsed.is_admin);
+    }
+
+    #[test]
+    fn the_switcher_needs_disabled_auth_on_a_loopback_bind() {
+        let mut config = AuthConfig::for_tests();
+        config.bind_addr = "127.0.0.1:9876".parse().unwrap();
+        assert!(dev_switcher_enabled(&config));
+        config.bind_addr = "0.0.0.0:9876".parse().unwrap();
+        assert!(!dev_switcher_enabled(&config));
+        config.bind_addr = "127.0.0.1:9876".parse().unwrap();
+        config.mode = AuthMode::Iap;
+        assert!(!dev_switcher_enabled(&config));
     }
 }

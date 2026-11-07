@@ -188,30 +188,15 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
 // removeLayerResources cleanup contract: every memberToDataset and
 // memberSourcePools entry owned by datasetId is gone afterward, and so are
 // the dataset's groups in groupToTiles. Without it these maps grow for the
-// worker's lifetime and a recurring memberId could collide.
+// worker's lifetime and a recurring memberId could collide. GPU teardown is
+// in `worker/poolLifetime.test.ts`.
 
 import { createInitialState, type RendererState } from "../worker/state.ts";
+import { removeDatasetResources } from "../worker/lifecycle.ts";
+import type { WorkerCtx } from "../workerContext.ts";
 
-/** Inline the dispatcher's removeLayerResources cleanup for member-id
- *  routing. Mirrors gpu.worker.ts's case "removeLayerResources" body
- *  (the GPU resource teardown lives in `removeSliceResources` /
- *  `removeVolumeResources` and is exercised separately). */
 function removeMemberRoutingForDataset(state: RendererState, datasetId: string): void {
-  for (const [memberId, dsId] of state.memberToDataset) {
-    if (dsId === datasetId) {
-      state.memberToDataset.delete(memberId);
-      state.memberSourcePools.delete(memberId);
-    }
-  }
-  state.currentSourcesByDataset.delete(datasetId);
-  const groups = state.groupsByDataset.get(datasetId);
-  if (groups) {
-    for (const groupId of groups) state.groupToTiles.delete(groupId);
-    state.groupsByDataset.delete(datasetId);
-  }
-  if (state.currentColdState?.datasetId === datasetId) {
-    state.currentColdState = null;
-  }
+  removeDatasetResources({ state } as unknown as WorkerCtx, datasetId);
 }
 
 describe("Suite D — removeLayerResources cleanup", () => {

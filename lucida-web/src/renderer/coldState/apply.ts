@@ -18,12 +18,14 @@ import {
 import { targetLevelOf, type EntitySource } from "../entitySources.ts";
 import {
   getOrCreateVolumePool,
+  removeVolumeAtlasesForDataset,
   resizeIndirection,
   remapIndirection,
   type LodIndirectionMeta,
 } from "../volume/index.ts";
 import {
   getOrCreateSlicePool,
+  removeSliceAtlasesForDataset,
   resizeSliceIndirection,
   remapSliceIndirection,
 } from "../slice/index.ts";
@@ -135,7 +137,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
     if (mode === "volume") {
       const atlas = getOrCreateVolumePool(
-        ctx, group.poolKey, pcX, pcY, pcZ, msg.currentT, group.channel, msg.sampleFormat,
+        ctx, group.poolKey, msg.datasetId, pcX, pcY, pcZ, msg.currentT, group.channel, msg.sampleFormat,
       );
       atlas.entityMetas = newEntityMetas;
       resizeIndirection(ctx, atlas, offset);
@@ -146,7 +148,8 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
       });
     } else {
       const atlas = getOrCreateSlicePool(
-        ctx, group.poolKey, pcX, pcY, msg.currentZ, msg.currentT, group.channel, msg.sampleFormat,
+        ctx, group.poolKey, msg.datasetId, pcX, pcY, msg.currentZ, msg.currentT, group.channel,
+        msg.sampleFormat,
       );
       atlas.entityMetas = newEntityMetas;
       resizeSliceIndirection(ctx, atlas, offset);
@@ -158,9 +161,18 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     }
   }
 
+  // 5. Free this dataset's pools that no group above names: a hidden
+  // channel, the other view mode, or a chunk shape no resident level uses.
+  // Nothing routes to them now, so nothing would sample them again. The
+  // wanted set posted after every cold state reports a recreated pool as
+  // empty, so the page resends what it needs.
+  const referenced = new Set(groups.keys());
+  removeVolumeAtlasesForDataset(ctx, msg.datasetId, referenced);
+  removeSliceAtlasesForDataset(ctx, msg.datasetId, referenced);
+
   state.currentSourcesByDataset.set(msg.datasetId, currentSources);
 
-  // 5. Rebuild the descriptor buffer from scratch, like the sections.
+  // 6. Rebuild the descriptor buffer from scratch, like the sections.
   const oldDesc = state.descriptorBuffersByDataset.get(msg.datasetId);
   if (oldDesc) destroyDescriptorBuffer(oldDesc);
   state.descriptorBuffersByDataset.set(

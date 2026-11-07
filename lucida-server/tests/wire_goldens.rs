@@ -886,18 +886,50 @@ fn peer_presence() -> PresenceState {
     dataset_settings.insert(DatasetId(SINGLE_DATASET_ID.into()), peer_display_settings());
     PresenceState {
         client_id: 3,
-        camera: slice_camera(),
-        view: shared_view_state(),
-        display: shared_display_state(),
+        camera: Some(slice_camera()),
+        view: Some(shared_view_state()),
+        display: Some(shared_display_state()),
         following: Some(9),
         cursor: Some([412.0, 233.5]),
-        dataset_order: vec![DatasetId(SINGLE_DATASET_ID.into())],
-        dataset_settings,
+        dataset_order: Some(vec![DatasetId(SINGLE_DATASET_ID.into())]),
+        dataset_settings: Some(dataset_settings),
         identity: Some(PeerIdentity {
             display_name: "Ada Lovelace".into(),
             picture_url: Some("https://example.com/avatars/ada.png".into()),
             initial: "A".into(),
         }),
+    }
+}
+
+/// A peer in fly mode that has reported an empty dataset presence.
+fn fly_peer_presence() -> PresenceState {
+    PresenceState {
+        client_id: 11,
+        camera: Some(Camera::Fly(Fly {
+            position: [512.0, 512.0, -300.0],
+            orientation: [0.1, 0.2, 0.3, 0.9273],
+            // Radians, like every camera fov on the wire.
+            fov: std::f64::consts::FRAC_PI_3,
+            viewport: [1280, 720],
+            near: 0.1,
+            far: 10000.0,
+            speed_multiplier: 2.0,
+            base_speed: 340.5,
+            clip_distance: 0.42,
+            clip_mode: ClipMode::Sphere,
+        })),
+        view: Some(ViewState {
+            z_range: 0..50,
+            t: 0,
+            c: 0,
+            multi_channel: false,
+        }),
+        display: Some(DisplayState::default()),
+        following: None,
+        cursor: None,
+        dataset_order: Some(vec![]),
+        dataset_settings: Some(HashMap::new()),
+        identity: None,
     }
 }
 
@@ -1339,6 +1371,23 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
         let mut keys = req("", &["/type", "/seq", "/document", "/peers", "/your_id"]);
         keys.push("/document/manifests".into());
         keys.extend(presence_required().iter().map(|k| format!("/peers/0{k}")));
+        keys.extend(req(
+            "/peers/1",
+            &[
+                "/client_id",
+                "/camera",
+                "/view",
+                "/display",
+                "/camera/mode",
+                "/camera/position",
+                "/camera/orientation",
+                "/camera/fov",
+                "/camera/viewport",
+                "/camera/near",
+                "/camera/far",
+                "/camera/speed_multiplier",
+            ],
+        ));
         let pin = format!("/document/annotations/{SINGLE_DATASET_ID}/0");
         keys.extend(req(
             &pin,
@@ -1371,7 +1420,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             ServerMessage::Snapshot {
                 seq: 42,
                 document: snapshot_document(),
-                peers: vec![peer_presence()],
+                peers: vec![peer_presence(), fly_peer_presence()],
                 your_id: 7,
                 generated_availability,
             },
@@ -1392,36 +1441,12 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
         ),
         (
             "session/server_peer_joined.json",
+            // A peer joins having reported nothing. The camera, view and
+            // display keys stay required for readers that predate
+            // `camera_reported`.
             ServerMessage::PeerJoined {
                 client_id: 11,
-                presence: PresenceState {
-                    client_id: 11,
-                    camera: Camera::Fly(Fly {
-                        position: [512.0, 512.0, -300.0],
-                        orientation: [0.1, 0.2, 0.3, 0.9273],
-                        // Radians, like every camera fov on the wire.
-                        fov: std::f64::consts::FRAC_PI_3,
-                        viewport: [1280, 720],
-                        near: 0.1,
-                        far: 10000.0,
-                        speed_multiplier: 2.0,
-                        base_speed: 340.5,
-                        clip_distance: 0.42,
-                        clip_mode: ClipMode::Sphere,
-                    }),
-                    view: ViewState {
-                        z_range: 0..50,
-                        t: 0,
-                        c: 0,
-                        multi_channel: false,
-                    },
-                    display: DisplayState::default(),
-                    following: None,
-                    cursor: None,
-                    dataset_order: vec![],
-                    dataset_settings: HashMap::new(),
-                    identity: None,
-                },
+                presence: PresenceState::joined(11, None),
             },
             req(
                 "",
@@ -1434,13 +1459,9 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     "/presence/view",
                     "/presence/display",
                     "/presence/camera/mode",
-                    "/presence/camera/position",
-                    "/presence/camera/orientation",
-                    "/presence/camera/fov",
+                    "/presence/camera/center",
+                    "/presence/camera/zoom",
                     "/presence/camera/viewport",
-                    "/presence/camera/near",
-                    "/presence/camera/far",
-                    "/presence/camera/speed_multiplier",
                 ],
             ),
         ),

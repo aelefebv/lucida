@@ -7,3 +7,6 @@ CHANGELOG.md merge=union
 # wire_goldens test; normalize line endings so a CRLF checkout cannot
 # break the byte-for-byte lock.
 wire-fixtures/**/*.json text eol=lf
+
+# The view-property fixtures are compared byte for byte by lucida-core.
+fixtures/view-properties/*.json text eol=lf

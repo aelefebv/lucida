@@ -365,6 +365,53 @@ describe("computeWantedSet", () => {
     }
   });
 
+  it("slice mode - a resident chunk cut from another plane of it counts as missing", () => {
+    const coldState = makeColdState({
+      viewMode: "slice",
+      visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 64, 64] }),
+    });
+    const keys = ["0/0/0/0/0/0", "0/0/0/0/0/1", "0/0/0/0/1/0", "0/0/0/0/1/1"];
+    const atlas: AtlasSnapshot = {
+      slots: new Map(keys.map((key, slot) => [vk("img", key), slot])),
+      slotLevelZ: [10, 10, 10, 10],
+      entityMetas: new Map([
+        ["img", [{ level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 }]],
+      ]),
+      z: 10,
+    };
+    const sliceAtlases = new Map([["ds-0:32x32", atlas]]);
+    const wanted = () =>
+      chunks(computeWantedSet(coldState, new Map(), sliceAtlases, poolsFromAtlases(sliceAtlases)).missing)
+        .map((m) => m.chunkKey);
+
+    expect(wanted()).toEqual([]);
+    // Plane 11 is in the same chunk along Z, so every key still matches.
+    atlas.z = 11;
+    expect(wanted()).toEqual(keys);
+    atlas.slotLevelZ = [11, 11, 10, 10];
+    expect(wanted()).toEqual(keys.slice(2));
+  });
+
+  it("volume mode - asks for no chunk outside the view frustum, as the planner requests none", () => {
+    // One half-plane keeps x ≤ 64 voxels: the last column of 32-voxel chunks lies past it.
+    const coldState = makeColdState({
+      visibleRegion: makeVisibleRegion({
+        xyBoundsVox: [0, 0, 128, 128],
+        frustumPlanes: [[-1, 0, 0, 64]],
+      }),
+    });
+    const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [
+      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+    ])]]);
+
+    const missing = chunks(
+      computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases)).missing,
+    );
+
+    expect(missing).toHaveLength(2 * 4 * 3);
+    expect(missing.every((m) => Number(m.chunkKey.split("/")[5]) < 3)).toBe(true);
+  });
+
   it("source-backed detail/coarse wanted-set uses separate tier pools", () => {
     const coldState = makeColdState({
       visibleRegion: makeVisibleRegion({

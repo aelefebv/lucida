@@ -1,6 +1,6 @@
 /**
  * Slice atlas state: pool allocation, indirection sizing, per-entity Z
- * metadata, stale-on-Z-change tracking.
+ * metadata, and the plane each slot was cut from.
  *
  * Composed cleanups (`removeSliceResources`, `destroyAllSliceResources`) live
  * in `slice/index.ts` so this module stays free of dependencies on
@@ -152,6 +152,11 @@ export interface SliceEntityZInfo {
 }
 
 export interface SliceAtlasState {
+  /**
+   * Owning dataset id. Teardown matches on this, never on a pool-key prefix,
+   * which a dataset id containing the key separator would defeat.
+   */
+  datasetId: string;
   texture: GPUTexture;
   /** How the texture holds samples; the dataset's, fixed for the pool's life. */
   format: SampleFormat;
@@ -176,8 +181,12 @@ export interface SliceAtlasState {
   entityZInfo: Map<string, Map<number, SliceEntityZInfo>>;
   /** Current T, C, full-res Z — pool-wide. */
   z: number; t: number; c: number;
-  /** Composite keys with stale 2D slice data after a Z change. */
-  staleSliceKeys: Set<string> | null;
+  /**
+   * slotIndex → the level plane its 2D data was cut from, -1 when empty. A
+   * slot whose plane is not the one the current Z maps to is stale: the remap
+   * leaves it unmapped and the wanted set reports it missing.
+   */
+  slotLevelZ: Int32Array<ArrayBuffer>;
   intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
 }
@@ -185,6 +194,7 @@ export interface SliceAtlasState {
 /** Create a shared slice pool. Indirection sized later from entityMetas. */
 function createSliceAtlas(
   device: GPUDevice,
+  datasetId: string,
   budgetBytes: number,
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
@@ -217,6 +227,7 @@ function createSliceAtlas(
   slotGridIdx.fill(-1);
 
   return {
+    datasetId,
     texture, format, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY,
@@ -224,7 +235,7 @@ function createSliceAtlas(
     entityMetas: new Map(),
     entityZInfo: new Map(),
     z, t, c,
-    staleSliceKeys: null,
+    slotLevelZ: new Int32Array(totalSlots).fill(-1),
     intensityMin: Infinity, intensityMax: -Infinity,
     indirectionDirty: true,
   };
@@ -242,6 +253,7 @@ export function destroySliceAtlas(atlas: SliceAtlasState): void {
 export function getOrCreateSlicePool(
   ctx: WorkerCtx,
   poolKey: string,
+  datasetId: string,
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
   format: SampleFormat,
@@ -249,16 +261,15 @@ export function getOrCreateSlicePool(
   const atlases = ctx.state.sliceAtlases;
   const existing = atlases.get(poolKey);
   if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY && existing.format === format) {
-    if (z !== existing.z && existing.slots.size > 0) {
-      existing.staleSliceKeys = new Set(existing.slots.keys());
-    }
     existing.z = z;
     existing.t = t;
     existing.c = c;
     return existing;
   }
   if (existing) destroySliceAtlas(existing);
-  const newAtlas = createSliceAtlas(ctx.device, ctx.state.atlasBudgets.sliceAtlasBytes, chunkX, chunkY, z, t, c, format);
+  const newAtlas = createSliceAtlas(
+    ctx.device, datasetId, ctx.state.atlasBudgets.sliceAtlasBytes, chunkX, chunkY, z, t, c, format,
+  );
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }
@@ -275,16 +286,20 @@ export function resizeSliceIndirection(ctx: WorkerCtx, atlas: SliceAtlasState, t
 }
 
 /**
- * Remove the atlas pool for a removed dataset (no-op if not present).
- * Composed cleanup that also clears per-entity camera-UV state lives
- * in `slice/index.ts` as `removeSliceResources`.
+ * Free every slice pool `datasetId` owns, except the keys in `keep`.
+ * Composed cleanup that also clears per-entity camera-UV state lives in
+ * `slice/index.ts` as `removeSliceResources`.
  */
-export function removeSliceAtlas(ctx: WorkerCtx, idOrMember: string): void {
+export function removeSliceAtlasesForDataset(
+  ctx: WorkerCtx,
+  datasetId: string,
+  keep?: ReadonlySet<string>,
+): void {
   const atlases = ctx.state.sliceAtlases;
-  const atlas = atlases.get(idOrMember);
-  if (atlas) {
+  for (const [poolKey, atlas] of atlases) {
+    if (atlas.datasetId !== datasetId || keep?.has(poolKey)) continue;
     destroySliceAtlas(atlas);
-    atlases.delete(idOrMember);
+    atlases.delete(poolKey);
   }
 }
 

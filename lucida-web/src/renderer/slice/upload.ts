@@ -2,8 +2,8 @@
  * Slice chunk upload: staleness check, Z-slice filter, eviction, GPU write,
  * intensity sampling, and per-member feedback messages.
  *
- * Clears an atlas's `staleSliceKeys` as fresh chunks land for the new target
- * Z. Pairs with `slice/zRetarget.ts`.
+ * Re-cuts a resident chunk in place when the plane the current Z maps to is
+ * not the one its slot holds. Pairs with `slice/zRetarget.ts`.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -146,10 +146,7 @@ export function handleSliceChunkData(
     const compositeKey = makeCompositeKey(memberId, chunk.key);
 
     const existingSlot = atlas.slots.get(compositeKey);
-    if (existingSlot !== undefined) {
-      if (!atlas.staleSliceKeys?.has(compositeKey)) continue;
-      atlas.staleSliceKeys.delete(compositeKey);
-    }
+    if (existingSlot !== undefined && atlas.slotLevelZ[existingSlot] === levelZ) continue;
 
     const r = sampleIntensityRange(decodedValues(chunk.data, chunk.dataType), perChunkSamples);
     if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
@@ -165,9 +162,11 @@ export function handleSliceChunkData(
       if (!evictKey) continue;
       const cam = cameraUVForMember(ctx.state, memberId);
       const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cam);
-      // Equal-distance replacement matters for T/C scrubbing: the new
-      // timepoint often maps to the same spatial cell as the old one.
-      if (incomingDist > farthestDist) continue;
+      // A tie keeps the resident. Mirror-image chunks sit at one distance, and
+      // letting either displace the other turns their re-sends into a loop. A
+      // T or C scrub still replaces in place: the remap unmaps the old
+      // selection's slots, and an unmapped slot ranks at infinite distance.
+      if (incomingDist >= farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       evictedKeys.push(evictKey);
@@ -198,6 +197,7 @@ export function handleSliceChunkData(
       atlas.slotGridIdx[slotIndex] = globalIdx;
     }
     atlas.slots.set(compositeKey, slotIndex);
+    atlas.slotLevelZ[slotIndex] = levelZ;
     atlas.indirectionDirty = true;
   }
 
