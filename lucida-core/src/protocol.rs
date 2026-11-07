@@ -72,24 +72,128 @@ impl PeerIdentity {
 }
 
 /// Per-client ephemeral state broadcast to other clients.
+///
+/// A field the client has not reported yet is `None`, so a follower can tell
+/// "nothing to adopt" from a real view.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(from = "PresenceStateWire", into = "PresenceStateWire")]
 pub struct PresenceState {
     pub client_id: ClientId,
-    pub camera: Camera,
-    pub view: ViewState,
-    pub display: DisplayState,
+    /// Camera, view and display arrive together in [`ClientMessage::Presence`],
+    /// so they are all `Some` or all `None`.
+    pub camera: Option<Camera>,
+    pub view: Option<ViewState>,
+    pub display: Option<DisplayState>,
     /// Who this client is following (`None` = independent).
     pub following: Option<ClientId>,
     pub cursor: Option<[f64; 2]>,
-    #[serde(default)]
-    pub dataset_order: Vec<DatasetId>,
-    #[serde(default)]
-    pub dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+    /// Both arrive together in [`ClientMessage::DatasetPresence`].
+    pub dataset_order: Option<Vec<DatasetId>>,
+    pub dataset_settings: Option<HashMap<DatasetId, DatasetDisplaySettings>>,
     /// Presentational identity for the peer's cursor. Server-set from the
     /// authed principal; `None` for sessions without auth (the
     /// non-workspace `/ws` path), which render via the numeric-id fallback.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<PeerIdentity>,
+}
+
+impl PresenceState {
+    /// A client that has just joined and reported nothing.
+    pub fn joined(client_id: ClientId, identity: Option<PeerIdentity>) -> Self {
+        Self {
+            client_id,
+            camera: None,
+            view: None,
+            display: None,
+            following: None,
+            cursor: None,
+            dataset_order: None,
+            dataset_settings: None,
+            identity,
+        }
+    }
+}
+
+/// The JSON shape of [`PresenceState`].
+///
+/// Readers that predate partial presence require `camera`, `view` and
+/// `display`, so an unreported camera still sends those keys, with
+/// `camera_reported: false` telling newer readers to ignore them. Those
+/// readers already default the dataset fields, so an unreported dataset
+/// presence just omits them.
+#[derive(Serialize, Deserialize)]
+struct PresenceStateWire {
+    client_id: ClientId,
+    camera: Camera,
+    view: ViewState,
+    display: DisplayState,
+    #[serde(default = "reported", skip_serializing_if = "is_reported")]
+    camera_reported: bool,
+    following: Option<ClientId>,
+    cursor: Option<[f64; 2]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dataset_order: Option<Vec<DatasetId>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dataset_settings: Option<HashMap<DatasetId, DatasetDisplaySettings>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    identity: Option<PeerIdentity>,
+}
+
+fn reported() -> bool {
+    true
+}
+
+fn is_reported(reported: &bool) -> bool {
+    *reported
+}
+
+impl From<PresenceStateWire> for PresenceState {
+    fn from(wire: PresenceStateWire) -> Self {
+        let (camera, view, display) = if wire.camera_reported {
+            (Some(wire.camera), Some(wire.view), Some(wire.display))
+        } else {
+            (None, None, None)
+        };
+        Self {
+            client_id: wire.client_id,
+            camera,
+            view,
+            display,
+            following: wire.following,
+            cursor: wire.cursor,
+            dataset_order: wire.dataset_order,
+            dataset_settings: wire.dataset_settings,
+            identity: wire.identity,
+        }
+    }
+}
+
+impl From<PresenceState> for PresenceStateWire {
+    fn from(presence: PresenceState) -> Self {
+        let (camera, view, display, camera_reported) =
+            match (presence.camera, presence.view, presence.display) {
+                (Some(camera), Some(view), Some(display)) => (camera, view, display, true),
+                // The values older readers have always received for a client
+                // that has not reported.
+                _ => (
+                    Camera::new_2d([800, 600]),
+                    ViewState::new(),
+                    DisplayState::default(),
+                    false,
+                ),
+            };
+        Self {
+            client_id: presence.client_id,
+            camera,
+            view,
+            display,
+            camera_reported,
+            following: presence.following,
+            cursor: presence.cursor,
+            dataset_order: presence.dataset_order,
+            dataset_settings: presence.dataset_settings,
+            identity: presence.identity,
+        }
+    }
 }
 
 /// Messages sent from a client to the server.
@@ -1253,13 +1357,13 @@ mod tests {
     fn presence_state_round_trips() {
         let ps = PresenceState {
             client_id: 1,
-            camera: Camera::new_2d([800, 600]),
-            view: ViewState::new(),
-            display: DisplayState::default(),
+            camera: Some(Camera::new_2d([800, 600])),
+            view: Some(ViewState::new()),
+            display: Some(DisplayState::default()),
             following: None,
             cursor: Some([100.0, 200.0]),
-            dataset_order: vec![],
-            dataset_settings: HashMap::new(),
+            dataset_order: Some(vec![]),
+            dataset_settings: Some(HashMap::new()),
             identity: None,
         };
         let json = serde_json::to_string(&ps).unwrap();
@@ -1276,13 +1380,13 @@ mod tests {
         // avatar URL so the cursor overlay can render them.
         let ps = PresenceState {
             client_id: 9,
-            camera: Camera::new_2d([800, 600]),
-            view: ViewState::new(),
-            display: DisplayState::default(),
+            camera: Some(Camera::new_2d([800, 600])),
+            view: Some(ViewState::new()),
+            display: Some(DisplayState::default()),
             following: None,
             cursor: Some([1.0, 2.0]),
-            dataset_order: vec![],
-            dataset_settings: HashMap::new(),
+            dataset_order: None,
+            dataset_settings: None,
             identity: Some(PeerIdentity {
                 display_name: "Ada Lovelace".into(),
                 picture_url: Some("https://example.com/ada.png".into()),
@@ -1350,7 +1454,63 @@ mod tests {
         let parsed: PresenceState = serde_json::from_str(legacy).unwrap();
         assert_eq!(parsed.client_id, 4);
         assert_eq!(parsed.identity, None);
-        assert!(parsed.dataset_order.is_empty());
+        assert!(parsed.camera.is_some());
+        assert!(parsed.dataset_order.is_none());
+    }
+
+    #[test]
+    fn joined_presence_reports_nothing_and_round_trips() {
+        let json = serde_json::to_value(PresenceState::joined(5, None)).unwrap();
+        assert_eq!(json["camera_reported"], false);
+        assert!(json.get("dataset_order").is_none());
+        assert!(json.get("dataset_settings").is_none());
+
+        let parsed: PresenceState = serde_json::from_value(json).unwrap();
+        assert!(parsed.camera.is_none());
+        assert!(parsed.view.is_none());
+        assert!(parsed.display.is_none());
+        assert!(parsed.dataset_order.is_none());
+        assert!(parsed.dataset_settings.is_none());
+    }
+
+    #[test]
+    fn reported_presence_carries_no_reported_flag() {
+        let mut presence = PresenceState::joined(5, None);
+        presence.camera = Some(Camera::new_2d([1024, 768]));
+        presence.view = Some(ViewState::new());
+        presence.display = Some(DisplayState::default());
+        presence.dataset_order = Some(vec![]);
+        presence.dataset_settings = Some(HashMap::new());
+        let json = serde_json::to_value(&presence).unwrap();
+        assert!(json.get("camera_reported").is_none());
+        assert_eq!(json["dataset_order"], serde_json::json!([]));
+
+        let parsed: PresenceState = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.camera.unwrap().viewport(), [1024, 768]);
+        assert_eq!(parsed.dataset_order, Some(vec![]));
+    }
+
+    #[test]
+    fn joined_presence_still_parses_in_readers_that_predate_it() {
+        // The presence shape before fields could be unreported.
+        #[derive(Deserialize)]
+        #[allow(dead_code)]
+        struct OlderPresence {
+            client_id: ClientId,
+            camera: Camera,
+            view: ViewState,
+            display: DisplayState,
+            following: Option<ClientId>,
+            cursor: Option<[f64; 2]>,
+            #[serde(default)]
+            dataset_order: Vec<DatasetId>,
+            #[serde(default)]
+            dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+        }
+        let json = serde_json::to_string(&PresenceState::joined(5, None)).unwrap();
+        let older: OlderPresence = serde_json::from_str(&json).unwrap();
+        assert_eq!(older.client_id, 5);
+        assert!(older.dataset_order.is_empty());
     }
 
     #[test]
@@ -1372,17 +1532,7 @@ mod tests {
 
     #[test]
     fn peer_joined_round_trips() {
-        let presence = PresenceState {
-            client_id: 3,
-            camera: Camera::new_2d([800, 600]),
-            view: ViewState::new(),
-            display: DisplayState::default(),
-            following: None,
-            cursor: None,
-            dataset_order: vec![],
-            dataset_settings: HashMap::new(),
-            identity: None,
-        };
+        let presence = PresenceState::joined(3, None);
         let msg = ServerMessage::PeerJoined {
             client_id: 3,
             presence,
@@ -1407,13 +1557,13 @@ mod tests {
 
         let ps = PresenceState {
             client_id: 7,
-            camera: Camera::Fly(fly),
-            view: ViewState::new(),
-            display: DisplayState::default(),
+            camera: Some(Camera::Fly(fly)),
+            view: Some(ViewState::new()),
+            display: Some(DisplayState::default()),
             following: Some(3),
             cursor: Some([0.5, 0.5]),
-            dataset_order: vec![],
-            dataset_settings: HashMap::new(),
+            dataset_order: None,
+            dataset_settings: None,
             identity: None,
         };
         let json = serde_json::to_string(&ps).unwrap();
@@ -1426,7 +1576,7 @@ mod tests {
         assert_eq!(parsed.following, Some(3));
         assert_eq!(parsed.cursor, Some([0.5, 0.5]));
         // Verify camera round-tripped as Fly with correct state
-        match &parsed.camera {
+        match parsed.camera.as_ref().expect("reported camera") {
             Camera::Fly(v) => {
                 assert_eq!(v.position, [1.5, 2.5, 3.5]);
                 assert!((v.orientation[0] - 0.1).abs() < 1e-10);
