@@ -3044,9 +3044,9 @@ mod tests {
 
     #[test]
     fn chunk_plan_in_a_volume_view_fetches_the_level_the_view_query_targets() {
-        // Closer than half the fitted orbit the camera is inside the volume,
-        // and past twice the fit the plan is empty on this pyramid. Neither is
-        // about the level.
+        // Zoomed from the fit, from inside the volume to far enough out that
+        // the coarsest level is the target, so the plan holds chunks at every
+        // distance and the walk crosses every level.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened_with_shape(
             "vol",
@@ -3060,25 +3060,19 @@ mod tests {
         let ds = DatasetId::from("vol");
         scene.set_mode_3d();
         assert!(scene.fit_camera_to_dataset("vol"));
-        let Camera::Arcball(a) = &scene.camera else {
-            unreachable!()
-        };
-        let fitted = a.distance;
+        let fitted = scene.camera.clone();
 
         let mut levels = Vec::new();
-        for factor in [0.5, 0.75, 1.0] {
+        for factor in [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0, 64.0] {
+            scene.camera = fitted.clone();
             if let Camera::Arcball(a) = &mut scene.camera {
-                a.distance = fitted * factor;
+                a.zoom(factor - 1.0);
             }
             let target = queried_target(&scene, &ds);
             assert_eq!(planned_levels(&scene, &ds), vec![target], "factor {factor}");
             levels.push(target);
         }
-        assert_eq!(
-            levels,
-            vec![0, 0, 1],
-            "the walk must cross a level boundary"
-        );
+        assert_eq!(levels, vec![0, 0, 0, 0, 1, 2, 3, 4, 4]);
     }
 
     fn pin_level(scene: &mut Scene, ds: &DatasetId, level: Option<u32>) {
