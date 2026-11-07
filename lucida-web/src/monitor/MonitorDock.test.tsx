@@ -1257,12 +1257,11 @@ describe("compare mode (#1066)", () => {
 
 describe("it ships in production builds", () => {
   it("gates nothing on the build mode, on the page or on the route into it", async () => {
-    // ADR 0051: a diagnostic that only exists in development cannot explain a
-    // field report, and shipping the agent surface to production while
-    // withholding the human one is the asymmetry surface parity forbids. This
-    // is a source check because the failure it guards against is a one-line
-    // `import.meta.env.DEV` that no rendered test would catch — the test
-    // environment is itself a dev build.
+    // A diagnostic that only exists in development cannot explain a field
+    // report, and what an agent reaches in production a person reaches too.
+    // This is a source check because the failure it guards against is a
+    // one-line `import.meta.env.DEV` that no rendered test would catch — the
+    // test environment is itself a dev build.
     const { readFile } = await import("node:fs/promises");
     const sources = await Promise.all(
       [

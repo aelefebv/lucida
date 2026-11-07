@@ -1,6 +1,5 @@
 /**
- * Trace model types: the vocabulary of ADR 0047 and ADR 0051, and the
- * shape of the document the trace seam returns.
+ * Trace model types, and the shape of the document the trace seam returns.
  *
  * `CONTEXT.md` is the glossary: a *trace* is the artifact, a *phase* is a
  * stage delimited by a handoff, a *run* is a labelled interval within the
@@ -356,7 +355,7 @@ export interface TruncationRecord {
  * One socket the interval was recorded over.
  *
  * A run is a client-side interval that can outlive a socket, and the
- * correlation label restarts at zero on every new connection (ADR 0048), so
+ * correlation label restarts at zero on every new connection, so
  * one run can hold two `rid: 0` rows meaning different requests. The
  * generation is what disambiguates them, and this is where a reader learns
  * which generations a run spanned rather than inferring the set by scanning
@@ -910,7 +909,7 @@ export interface TraceRow extends WireLabel {
  * all.
  *
  * `level-change` is the one that is not about a chunk. The target level
- * follows the screen (ADR 0061), so a zoom moves the whole wanted set to
+ * follows the screen, so a zoom moves the whole wanted set to
  * another level at one instant, and a stall that begins there is explained by
  * it. It names the dataset and the old and new level; see {@link LevelChange}.
  */
@@ -1274,7 +1273,7 @@ export interface TraceRun {
  * Recorded rather than assumed because the caps are derived, not universal:
  * they come from measured volumes at a 384-member collection, and a workload
  * an order of magnitude larger should have them re-derived rather than be
- * quietly truncated against numbers that never fit it (ADR 0049).
+ * quietly truncated against numbers that never fit it.
  */
 export interface RetentionRecord {
   residentCapBytes: number;

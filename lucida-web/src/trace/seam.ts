@@ -1,6 +1,6 @@
 /**
- * The trace seam: the page-level export function every reader goes through
- * (ADR 0051). `lucida trace`, an agent driving its own browser, and the
+ * The trace seam: the page-level export function every reader goes through.
+ * `lucida trace`, an agent driving its own browser, and the
  * monitor's save button all call it, so no surface gets a privately shaped
  * copy.
  *

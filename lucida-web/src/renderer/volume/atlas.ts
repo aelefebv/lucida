@@ -455,7 +455,7 @@ function createAtlasTexture(
 }
 
 /**
- * Create a shared atlas pool one layer of slots deep (ADR 0068). It grows
+ * Create a shared atlas pool one layer of slots deep. It grows
  * toward the budget's grid only as chunks fill it, so a small volume never
  * holds the whole budget. Indirection is sized later from entityMetas.
  */

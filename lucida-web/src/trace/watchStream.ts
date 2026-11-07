@@ -1,6 +1,6 @@
 /**
  * The watch stream: what the page pushes over the session socket while
- * somebody has turned its watch toggle on (ADR 0051). The server relays it to
+ * somebody has turned its watch toggle on. The server relays it to
  * `lucida trace watch` subscribers.
  *
  * Rows never leave: no item kind can carry a lifecycle row, so what travels

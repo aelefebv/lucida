@@ -1,6 +1,6 @@
 /**
  * The per-tick aggregate sample, derived from a plan. Recording is
- * unconditional (ADR 0049), so this reads counts the cache already keeps
+ * unconditional, so this reads counts the cache already keeps
  * and allocates nothing per tick. The sample it fills is the recorder's
  * reusable scratch.
  */

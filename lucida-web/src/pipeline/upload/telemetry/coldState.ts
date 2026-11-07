@@ -2,13 +2,9 @@
  * Cold-state rebuild telemetry. Owns a rolling 1s ring buffer of
  * hit/rebuild events, cumulative counters, and a non-view-churn detector.
  *
- * It also used to keep a windowed rates/percentiles snapshot for the debug
- * panel's Orch tab. That reader is gone with ADR 0049's gate and nothing
- * replaced it, so the snapshot went too rather than being recomputed on every
- * rebuild for nobody — the churn detector below is what survives, and it
- * counts what it needs itself. ADR 0052 marks those rates and rebuild
- * percentiles absorbed by the trace, but the trace does not carry them yet.
- * Its readings (`READING_NAMES`) hold no cold-state rate.
+ * It keeps no windowed rates or percentiles, since nothing reads them; the
+ * churn detector below counts what it needs itself. The trace's readings
+ * (`READING_NAMES`) carry no cold-state rate either.
  */
 
 import { debugLog } from "../../../debug/logging.ts";

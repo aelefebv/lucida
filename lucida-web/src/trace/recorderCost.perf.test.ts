@@ -1,7 +1,7 @@
 /**
- * The recorder's cost contract, asserted (issue #928, ADR 0049).
+ * The recorder's cost contract, asserted.
  *
- * ADR 0049 makes the recorder's cost a **design contract rather than a runtime
+ * The recorder's cost is a **design contract rather than a runtime
  * governor**: nothing measures the recorder while it runs, because a governor
  * would make the monitor instrument itself continuously — the perverse case —
  * and would make the cost emergent when the model is deterministic by
@@ -10,8 +10,8 @@
  * - **≤ 100 ns per event, amortised.** The primary number, because it
  *   composes: any burst size multiplied by it gives the tick cost.
  * - **≤ 250 µs worst-case tick.** #888's largest observed burst is 2,943 chunk
- *   requests inside one `cpuCache.submit()`. The ADR derived this ceiling as
- *   one recorded event per chunk request, and the dispatch path now emits
+ *   requests inside one `cpuCache.submit()`. The ceiling assumes one
+ *   recorded event per chunk request, and the dispatch path now emits
  *   exactly that: the row birth carries the admission stamp and opens `wire`
  *   itself. It emitted three — row birth, admission, wire start — until #949,
  *   which put the tick over a ceiling derived from one third of its events.
@@ -38,8 +38,8 @@
  *
  * ## The floor comparison is pinned to a tick shape (#962)
  *
- * ADR 0049's *net* obligation is that total observability cost be no higher
- * than the floor #888 measured. Its per-tick half was checked against #888's
+ * The *net* obligation is that total observability cost be no higher than
+ * the floor #888 measured. Its per-tick half was checked against #888's
  * "≈1–3 µs/tick" for a while, and that was a category error: #888's figure is
  * a single `publish` *read* at 1–8 events per tick, and it was being held
  * against a whole chunk lifecycle's worth of recorder *writes* forced into
@@ -51,7 +51,7 @@
  * So the comparison is made on one shape, with both sides at the same rates:
  * see {@link MATCHED_TICK} and {@link FLOOR_TICK_NS}.
  *
- * The fourth gate ADR 0049 requires — an A/B frame-throughput comparison of
+ * The fourth gate — an A/B frame-throughput comparison of
  * real sink against no-op sink over a warm re-open at devicePixelRatio 2 —
  * needs a GPU, a server and a real fixture, none of which a CI runner has. It
  * lives as a harness at `docs/perf/recorder-cost/`, with its last result.
@@ -75,10 +75,10 @@ import {
   type WireLabel,
 } from "./types.ts";
 
-/** ADR 0049's amortised per-event ceiling. */
+/** The amortised per-event ceiling. */
 const PER_EVENT_CEILING_NS = 100;
 
-/** ADR 0049's worst-case tick ceiling, for #888's largest observed burst. */
+/** The worst-case tick ceiling, for the largest observed burst. */
 const WORST_TICK_CEILING_US = 250;
 
 /**
@@ -298,9 +298,8 @@ const MATCHED_EVENTS_PER_TICK =
  *
  * This being 1 is what #949 fixed and what this file exists to keep fixed. It
  * was 3 — row birth, admission, wire start, in one breath at dispatch — which
- * is three times the event count ADR 0049 derived
- * {@link WORST_TICK_CEILING_US} from, and the reason the worst tick sat over
- * that ceiling.
+ * is three times the event count {@link WORST_TICK_CEILING_US} was derived
+ * from, and the reason the worst tick sat over that ceiling.
  */
 const BURST_CALLS_PER_CHUNK = 1;
 
@@ -387,8 +386,9 @@ function makeRig(chunks: number, calls?: { count: number }) {
   }
 
   /**
-   * The worst-case tick ADR 0049 sized: one `cpuCache.submit()` admitting the
-   * whole burst, with nothing downstream of dispatch on this tick.
+   * The worst-case tick the ceiling is sized for: one `cpuCache.submit()`
+   * admitting the whole burst, with nothing downstream of dispatch on this
+   * tick.
    */
   function burstTick(): void {
     recorder.markPlanStart();
@@ -647,8 +647,8 @@ describe("recorder cost contract", () => {
   });
 
   it("bounds the worst tick #888 measured against the 250 µs ceiling", () => {
-    // ADR 0049 derived this ceiling from one number: the largest burst #888
-    // found is 2,943 chunk requests inside one `cpuCache.submit()`, and at
+    // This ceiling comes from one number: the largest burst #888 found is
+    // 2,943 chunk requests inside one `cpuCache.submit()`, and at
     // 100 ns an event that is 294 µs. So the tick being bounded is the
     // submit-and-dispatch burst — the rest of each chunk's lifecycle lands on
     // later ticks as its fetch settles, and the previous gate's whole-
@@ -670,8 +670,9 @@ describe("recorder cost contract", () => {
     // It was the latter while the dispatch path emitted three write calls per
     // chunk against a ceiling derived from one, which put the tick over the
     // ceiling on a green build — a gate that cannot pass on green is not a
-    // gate. #949 collapsed those three into one, so the implementation and
-    // the ADR now count the same events and the ceiling is the honest bound.
+    // gate. #949 collapsed those three into one, so the implementation now
+    // counts the events the ceiling was derived from, and it is the honest
+    // bound.
     expect(
       burst.tickUs.p50,
       `worst-case tick p50 ${burst.tickUs.p50.toFixed(1)} µs`,
@@ -679,16 +680,15 @@ describe("recorder cost contract", () => {
   });
 
   it("holds one run inside the observability floor the teardown must not raise", () => {
-    // ADR 0049's *net* obligation (#962 settled its per-tick half): once the
-    // debug panel is dismantled (#918, #919), total observability cost must
-    // be no higher than the floor #888 measured — ≈1.05 MB of live state, and
-    // per tick the figure derived in FLOOR_TICK_NS.
+    // The *net* obligation: total observability cost must be no higher than
+    // the floor #888 measured — ≈1.05 MB of live state, and per tick the
+    // figure derived in FLOOR_TICK_NS.
     //
-    // Live state is the run's buffers, not the retained history: ADR 0049
-    // grants retention its own separate 8 MB resident cap, which is a
-    // deliberate spend rather than a regression against this floor.
+    // Live state is the run's buffers, not the retained history: retention
+    // has its own 8 MB resident cap, a deliberate spend rather than a
+    // regression against this floor.
     const rig = makeRig(64);
-    // #888's typical run: 2,559 chunks, which ADR 0047 sizes at ~123 kB.
+    // A typical run: 2,559 chunks, about 123 kB of rows.
     for (let i = 0; i < 40; i++) rig.tick();
     const liveBytes = rig.sink()!.byteLength;
     rig.recorder.reset();
@@ -702,7 +702,7 @@ describe("recorder cost contract", () => {
   });
 
   it("costs less per tick than the instrumentation it replaces, on the same tick", () => {
-    // #962. The per-tick half of ADR 0049's net obligation used to be checked
+    // The per-tick half of the net obligation used to be checked
     // by holding a *whole chunk lifecycle forced into one tick* against
     // #888's "≈1–3 µs/tick", and the two are not the same quantity — three
     // ways, all of which had to be fixed for the comparison to mean anything:
@@ -801,9 +801,9 @@ describe("recorder cost contract", () => {
     // Row appends are inside the window on purpose, and the window is sized to
     // fit inside the capacity the warmup grew. Leaving them out would make the
     // buffer-identity check below unfalsifiable — nothing else in the recorder
-    // can reallocate — and growth-by-doubling is the one allocation ADR 0049
-    // permits, so the thing worth asserting is that it does not happen where
-    // there is room.
+    // can reallocate — and growth-by-doubling is the one allocation the
+    // contract permits, so the thing worth asserting is that it does not
+    // happen where there is room.
     const chunks = 128;
     const rig = makeRig(chunks);
     for (let i = 0; i < 400; i++) rig.tick();

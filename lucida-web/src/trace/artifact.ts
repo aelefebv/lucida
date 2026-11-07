@@ -173,7 +173,7 @@ function parseRunFile(value: Record<string, unknown>, name: string): TraceRunFil
 /**
  * The schema check the derivation makes per run, made once for the file,
  * so a document from another schema is refused by name at the drop rather
- * than partway through a reading (ADR 0047).
+ * than partway through a reading.
  */
 function parseSavedRun(value: Record<string, unknown>, name: string): TraceDocument {
   if (value.schemaVersion !== TRACE_SCHEMA_VERSION) {

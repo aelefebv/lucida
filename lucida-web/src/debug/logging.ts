@@ -1,8 +1,7 @@
 /**
  * Debug logging registry: the enabled categories, persisted in
- * `localStorage.debug` as a comma-separated list or `*` (see
- * docs/adr/0012-logging-conventions.md). There is no UI; set
- * `localStorage.debug = 'bridge,cache'` and reload.
+ * `localStorage.debug` as a comma-separated list or `*`. There is no UI;
+ * set `localStorage.debug = 'bridge,cache'` and reload.
  *
  * The set is read once at module init. `isDebugEnabled` sits on hot paths, so
  * it must never read localStorage per call. Other tabs' writes arrive through

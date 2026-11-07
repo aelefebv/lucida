@@ -1,6 +1,6 @@
 /**
- * The volume overlay's cost contract (ADR 0049): a surface that draws while a
- * run is open must not show up in the run it draws. It polls ten times a
+ * The volume overlay's cost contract: a surface that draws while a run is
+ * open must not show up in the run it draws. It polls ten times a
  * second, never per frame, and does no work while hidden. This file times one
  * poll at the 600-cell cap: projection, draw list, and edges, silhouette, and
  * stroke batched by style, plus the pointer hit test. The camera is a

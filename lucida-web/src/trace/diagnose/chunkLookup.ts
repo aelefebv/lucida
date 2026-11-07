@@ -3,7 +3,7 @@
  * recorded, from the same document the overlay's hover inspector reads.
  *
  * The queue rank is derived, not recorded: the scheduler keeps no per-key
- * bookkeeping behind its admission window (ADR 0044), so a rank is a count
+ * bookkeeping behind its admission window, so a rank is a count
  * over the recorded rows' admissions and dispatches. A row is born at
  * dispatch, so a chunk still queued at close is invisible to the count, and a
  * chunk re-delivered from the CPU cache carries no second row.

@@ -3,7 +3,7 @@
  * and the fold that applies a view-query delta onto a prior snapshot map. The
  * full builder (`snapshot.ts`) and the fold share {@link makeEntitySnapshot},
  * so the two paths cannot drift. `targetLevel` arrives from the core already
- * pinned and clamped (ADR 0061); nothing here picks a level. The map is keyed
+ * pinned and clamped; nothing here picks a level. The map is keyed
  * by `image_id` because one entity can own images at several pyramid depths.
  * A delta carries only quantized fields, so continuous fields on a carried-over
  * record may be stale: never derive a discrete decision from them.

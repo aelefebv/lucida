@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 /**
- * The trace seam, tested the way ADR 0051 says it will be used: drive the
+ * The trace seam, tested the way its callers use it: drive the
  * pipeline, call the function on the page, assert on the returned document.
  *
  * Nothing here reaches into the recorder's buffers. Phase names, run

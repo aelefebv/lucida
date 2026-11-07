@@ -3,7 +3,7 @@ import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 /*
- * Every color in the UI is a token (ADR 0066). This holds the line: a color
+ * Every color in the UI is a token. This holds the line: a color
  * written as a literal anywhere in src fails here, outside the token file and
  * the few files that define a palette on purpose.
  */

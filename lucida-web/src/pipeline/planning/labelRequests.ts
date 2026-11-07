@@ -55,7 +55,7 @@ const DEFAULT_MAX_BRICK_DIM_3D = 2048;
  *
  * The total must be >= this so the first eligible mask always fits and 3D
  * never opens blank. {@link resolveLabelCaps} enforces the floor for
- * caller-supplied caps. Fitted to the device (ADR 0068).
+ * caller-supplied caps. Fitted to the device.
  */
 const defaultMaxVolumeBytes = () => pageDeviceBudgets().labelVolumeBytes;
 /**

@@ -371,9 +371,8 @@ describe("epoch caching", () => {
 
   it("never takes the panel's per-rebuild cache snapshot", () => {
     // `snapshot()` walks every resident entity in the chunk and overview
-    // stores. Recording is unconditional (ADR 0049), so no gate can keep
-    // that walk off a rebuild; the trace must read counts the cache already
-    // keeps instead.
+    // stores. Recording is unconditional, so no gate can keep that walk off
+    // a rebuild; the trace must read counts the cache already keeps instead.
     const { scene, datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
     const cpuCache = createMockCpuCache();
@@ -1893,8 +1892,7 @@ describe("incremental delta fold", () => {
 
   it("keeps the target level under memory pressure: a cache evicting past its budget never lowers it", async () => {
     // A real CPU cache with a 1.5-chunk budget, so delivering the four
-    // level-1 chunks evicts. Pressure changes coverage, never the level
-    // (ADR 0061).
+    // level-1 chunks evicts. Pressure changes coverage, never the level.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
       const chunkBytes = 100;

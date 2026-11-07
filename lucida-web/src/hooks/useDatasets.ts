@@ -8,7 +8,6 @@ interface Params {
 export function useDatasets({ sendOpenRemoteDataset }: Params) {
   // The canonical form is what gets hashed into the `DatasetId`, so
   // `C:\Users\me\foo.zarr` and `c:/Users/me/foo.zarr` dedupe to one dataset.
-  // See docs/adr/0042-canonical-dataset-url-form.md.
   const handleUrlSubmit = useCallback((url: string) => {
     const trimmed = url.trim();
     if (!trimmed) return;
