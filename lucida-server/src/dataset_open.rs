@@ -1588,7 +1588,7 @@ mod tests {
             .join("../fixtures/ome-zarr/collection-mixed.ome.zarr")
             .canonicalize()
             .unwrap();
-        let url = fixture.to_str().unwrap().to_string();
+        let url = location(&fixture);
 
         let health = health_after_open(15, &url, tmp.path()).await;
 
