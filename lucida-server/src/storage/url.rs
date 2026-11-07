@@ -210,8 +210,11 @@ impl DatabaseUrl {
     }
 }
 
+/// Splits on both separators whatever the host OS, because a SQLite path
+/// written on Windows uses `\`, and a missed separator would hand the
+/// status route the whole path.
 fn last_segment(path: &str) -> &str {
-    path.rsplit('/')
+    path.rsplit(['/', '\\'])
         .find(|segment| !segment.is_empty())
         .unwrap_or("")
 }
@@ -489,6 +492,9 @@ mod tests {
             ("sqlite:lucida.db", "lucida.db"),
             ("sqlite:///var/lib/lucida/lucida.db", "lucida.db"),
             ("sqlite://lucida.db?mode=rwc", "lucida.db"),
+            (r"sqlite://C:\srv\lucida\lucida.db", "lucida.db"),
+            (r"sqlite:C:\srv\lucida\lucida.db?mode=rwc", "lucida.db"),
+            ("sqlite://C:/srv/lucida/lucida.db", "lucida.db"),
             ("sqlite::memory:", ":memory:"),
             (
                 "postgres://lucida:hunter2@10.0.0.1:5432/lucida?password=hunter2&sslmode=require",
