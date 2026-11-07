@@ -1,6 +1,6 @@
 /**
  * CPU cache knobs handed to a page before it loads. The trace driver sets
- * Dev controls knobs before the cache exists (ADR 0051), so it leaves them
+ * Dev controls knobs before the cache exists, so it leaves them
  * under one storage key and the session reads them once when it builds its
  * cache. Only the driver writes this key, so a person's Dev controls edits
  * stay session-scoped.

@@ -84,8 +84,8 @@ export interface TickContext {
   renderScale: number;
   /**
    * The share of device pixels the render target gets in both modes: the
-   * pixel-ratio cap times the adaptive resolution (ADR 0068). Planning and
-   * the camera keep the full device-pixel viewport.
+   * pixel-ratio cap times the adaptive resolution. Planning and the camera
+   * keep the full device-pixel viewport.
    */
   resolutionScale: number;
   cpuCache: CpuCache;

@@ -7,7 +7,7 @@
  * {@link markInFlightDone}.
  *
  * Only the first {@link SchedulerConfig.admissionWindow} pending entries
- * carry a timestamp (ADR 0044). The backlog behind them can be ~21k requests
+ * carry a timestamp. The backlog behind them can be ~21k requests
  * re-submitted ~5x/s, and stamping all of them costs real main-thread time.
  */
 

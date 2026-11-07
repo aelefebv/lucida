@@ -1545,9 +1545,9 @@ function App({
             )}
           </CanvasStage>
           {developer.monitor && (
-            // The dock overlays the canvas rather than resizing it (ADR 0052),
-            // so opening it changes nothing the recorder sees. Its frame keeps
-            // it between the side panels.
+            // The dock overlays the canvas rather than resizing it, so opening
+            // it changes nothing the recorder sees. Its frame keeps it between
+            // the side panels.
             <div className="lc-shell-dock">
               <Suspense fallback={null}>
                 <MonitorDock onClose={developer.closeMonitor} />

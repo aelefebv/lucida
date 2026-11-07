@@ -7,8 +7,8 @@
  * the readouts. Bytes each way are differenced from page-scoped totals: the
  * aggregate's send tally is per planning pass, and passes can be seconds apart
  * while the socket stays busy. Pool and lane figures come from the cache
- * because the reading ring carries one resident total, and widening it is a
- * budget decision (ADR 0049).
+ * because the reading ring carries one resident total, and widening it
+ * spends from the recorder's cost budget.
  */
 
 import type { Lane, LaneOutstanding, PoolResidencyReport } from "../pipeline/fetch/types.ts";

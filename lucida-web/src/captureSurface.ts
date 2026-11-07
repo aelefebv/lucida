@@ -1,5 +1,5 @@
 // The chrome-free capture surface (`?render=1`), used by `dataset montage`,
-// `dataset explore` and the headless trace driver (ADR 0051).
+// `dataset explore` and the headless trace driver.
 //
 // `render=1` renders the canvas alone (`bare` on CanvasStage) and records
 // nothing on a person's behalf: no camera, view, or preference is written back.

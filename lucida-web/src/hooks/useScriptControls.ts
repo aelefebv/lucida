@@ -1,6 +1,5 @@
 /**
- * Register the viewer's controls for the trace driver's scripted steps
- * (ADR 0051, as amended).
+ * Register the viewer's controls for the trace driver's scripted steps.
  *
  * A script's scrub and select land on the handlers the dimension controls
  * and the layer panel call, and its view read is the share button's

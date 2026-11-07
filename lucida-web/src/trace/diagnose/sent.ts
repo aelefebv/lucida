@@ -1,7 +1,7 @@
 /**
  * The send side of one interval, in the diagnostic's units. One function for
  * a run and the steady-state interval after it, because the two are the same
- * object differing only by cause (ADR 0047). The rate's denominator is the
+ * object differing only by cause. The rate's denominator is the
  * interval's own span.
  *
  * Read from the interval's totals rather than summed off the tick samples: a

@@ -3,7 +3,7 @@
  * React renders: annotation overlays, peer cursors, the collection
  * navigator, held camera keys. It runs only while something changes and
  * stops once the page has been still for {@link IDLE_AFTER_MS} or is hidden,
- * so an idle viewer requests no frames (ADR 0068).
+ * so an idle viewer requests no frames.
  *
  * Whatever can move what these layers show wakes it: input anywhere on the
  * page, every render-loop dirty (data, camera, peers, playback, resize), and

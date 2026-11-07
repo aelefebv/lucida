@@ -7,8 +7,8 @@ import { toast } from "../ui/toastQueue.ts";
 const LONG_LINK_CHARS = 4096;
 
 /**
- * A link to this page with `view` in its hash, the form the URL sync writes
- * (ADR 0013). Built from the view itself rather than read from the address
+ * A link to this page with `view` in its hash, the form the URL sync writes.
+ * Built from the view itself rather than read from the address
  * bar, which lags a debounce behind and has no view at all until the first
  * change after a load.
  */
@@ -21,7 +21,7 @@ export async function viewLink(view: SavedView | null): Promise<string> {
 /** Why a copied view link might not open for someone else, if it might not. */
 export function viewLinkCaveats(link: string, view: SavedView | null): string[] {
   const caveats: string[] = [];
-  // A local path resolves only on a server with the same files (ADR 0014).
+  // A local path resolves only on a server with the same files.
   if (view && hasLocalFilePaths(view)) {
     const n = localFilePathCount(view);
     caveats.push(

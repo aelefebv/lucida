@@ -718,7 +718,7 @@ export class TickCoordinator {
       emitViewerInterestHint(ctx, dsId, selection, visibleRegion, result.requests, this.requestEpoch);
 
       // Recorded unconditionally, unlike the `orch` telemetry: recording
-      // does not wait for somebody to open a panel (ADR 0049).
+      // does not wait for somebody to open a panel.
       recordPlanningTick(
         dsId,
         result,

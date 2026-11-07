@@ -1,6 +1,6 @@
 /**
  * The recorder's write path, behind an interface so a bench can substitute
- * a no-op (ADR 0049).
+ * a no-op.
  *
  * A test seam, not a toggle. Recording is unconditional in every build. The
  * indirection exists so "always-on is free" is a measurement, real sink

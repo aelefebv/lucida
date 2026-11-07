@@ -14,9 +14,10 @@ import type { LimiterSummary } from "./types.ts";
 import { inWindow, resolveWindow, type RunWindow } from "./window.ts";
 
 /**
- * The one limiter a client can see from inside its own trace. ADR 0050 gives
- * a client its own rows and no aggregate, so the server's read cap is visible
- * only as the wait it imposes — it gets a phase, not a limiter.
+ * The one limiter a client can see from inside its own trace. The server
+ * sends a client its own rows and no process-wide aggregate, so the server's
+ * read cap is visible only as the wait it imposes — it gets a phase, not a
+ * limiter.
  */
 const SCHEDULER_ADMISSION = "scheduler.admission";
 

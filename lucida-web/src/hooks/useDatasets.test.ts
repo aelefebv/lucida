@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 //
-// Every URL handed to `sendOpenRemoteDataset` is normalized first (ADR 0042),
+// Every URL handed to `sendOpenRemoteDataset` is normalized first,
 // so spelling variants of one Windows or UNC path produce one `DatasetId`.
 // The `lucida-core` mock reproduces only the rules under test; it locks the
 // property "what we send is what `normalize_dataset_url` returned."

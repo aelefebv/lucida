@@ -1,7 +1,7 @@
 /**
  * GPU pass time per viewport frame, read from the device's own clock where
  * the adapter offers `timestamp-query`. The stamps are durations on the
- * device clock, never compared with the main thread's (ADR 0047).
+ * device clock, never compared with the main thread's.
  *
  * The queue runs a frame's passes in order, so two stamps cover the frame:
  * the first pass writes both and every later pass overwrites the end stamp.

@@ -1,5 +1,5 @@
 /**
- * The cost contract of the per-chunk read (ADR 0049): the overlay's phase
+ * The cost contract of the per-chunk read: the overlay's phase
  * color and churn tint read one chunk per cell per tick from the interval in
  * progress, and a live surface may not walk rows. So the read has to be flat
  * in rows, and its index must cost the write path nothing measurable.

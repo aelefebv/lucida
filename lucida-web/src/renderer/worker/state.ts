@@ -18,7 +18,7 @@ import type { EntitySource } from "../entitySources.ts";
 import type { PendingFrameCapture } from "./captureFrame.ts";
 import { CEILING_BUDGETS, type DeviceBudgets } from "../../deviceBudget.ts";
 
-/** The GPU atlas budgets a pool is sized under (ADR 0068). */
+/** The GPU atlas budgets a pool is sized under. */
 export type AtlasBudgets = Pick<DeviceBudgets, "volumeAtlasBytes" | "sliceAtlasBytes">;
 
 export interface RendererState {
@@ -75,7 +75,7 @@ export interface RendererState {
   cameraUVPerEntity: Map<string, [number, number]>;
   /**
    * memberId → target level from the most recent cold state. Eviction
-   * takes a resident chunk finer than it first (ADR 0061). Absent for a
+   * takes a resident chunk finer than it first. Absent for a
    * member with no chunk levels.
    */
   targetLevelByMember: Map<string, number>;

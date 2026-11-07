@@ -79,8 +79,8 @@ export type {
   TierResidencyEntry,
 } from "./types.ts";
 
-// The page passes budgets fitted to the device (ADR 0068); these defaults
-// are the ceiling it fits them under.
+// The page passes budgets fitted to the device; these defaults are the
+// ceiling it fits them under.
 export const DEFAULT_MAIN_BUDGET = CEILING_BUDGETS.cpuMainBytes;
 export const DEFAULT_OVERVIEW_BUDGET = CEILING_BUDGETS.cpuOverviewBytes;
 export const DEFAULT_PROXY_BUDGET = CEILING_BUDGETS.cpuProxyBytes;
@@ -193,7 +193,10 @@ export class CpuCache {
 
   private chunkStore!: ChunkStore;
 
-  /** Serves the overview, minimap, and coarse lanes (ADR 0023). */
+  /**
+   * Serves the overview, minimap, and coarse lanes, apart from the detail
+   * store so detail churn never evicts them.
+   */
   private overviewStore!: ChunkStore;
 
   private proxyStore!: ProxyStore;
@@ -210,7 +213,7 @@ export class CpuCache {
   /**
    * Each tile entity's target level from its most recent plan. The detail
    * store's eviction policy reads it so that a resident chunk finer than
-   * the target goes first (ADR 0061). The policy judges entries against
+   * the target goes first. The policy judges entries against
    * this map at eviction time, so a target change costs no pass over the
    * resident entries. An entity that left the view keeps its last target.
    */
@@ -1018,7 +1021,7 @@ export class CpuCache {
   }
 
   /**
-   * The cache's half of the quiescence predicate (ADR 0051): everything the
+   * The cache's half of the quiescence predicate: everything the
    * view asked for is resident, with nothing pending or in flight. Writes
    * into `out` so the per-tick call does not allocate.
    *
@@ -1186,8 +1189,8 @@ export class CpuCache {
     //
     // The row opens at dispatch, when `plan` and `queue` are already over, so
     // one call closes both and starts `wire`. This runs thousands of times in
-    // one submit, and three calls would triple the event count the tick
-    // budget allows (ADR 0049).
+    // one submit, and three calls would triple the event count the
+    // recorder's tick budget allows.
     const rowTier = req.tier === "coarse" ? 1 : 0;
     const traceRow = traceRecorder.beginChunkRow(req, rowTier, admittedAtMs);
 

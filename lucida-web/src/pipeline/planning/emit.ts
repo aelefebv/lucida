@@ -68,7 +68,7 @@ function stampRequest(
 }
 
 /**
- * Minimap lane (ADR 0023). Emits one {@link ChunkRequest} per pending coord
+ * Minimap lane. Emits one {@link ChunkRequest} per pending coord
  * of each entity's image, with no importance or distance terms.
  *
  * The top lane (`config.minimapLaneOffset`) is safe only while the seed set

@@ -1174,7 +1174,7 @@ export class SessionController {
         traceRecorder.noteConnected(generation);
         // Attaching also turns the toggle off: the server forgot this page's
         // stream when the old connection closed, and nobody has asked for one
-        // on this socket (ADR 0051).
+        // on this socket.
         watchStream.attach(this.session.bridge);
         this.deps.events.onConnectedChanged(true);
       },

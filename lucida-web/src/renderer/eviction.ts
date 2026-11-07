@@ -67,7 +67,7 @@ export interface FindFarthestParams {
 }
 
 /**
- * Pick the eviction candidate from an atlas's slot map (ADR 0061):
+ * Pick the eviction candidate from an atlas's slot map:
  *   1. A chunk finer than its member's target level, finest first. The
  *      pool has no section for it, so the shader never samples it.
  *   2. Else a stale slot: unmapped, member gone from the active set, or

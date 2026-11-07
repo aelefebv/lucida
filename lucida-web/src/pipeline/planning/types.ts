@@ -12,7 +12,7 @@ import type { VisibleRegion } from "../viewport.ts";
 /**
  * Fields shared by every {@link EntitySnapshot} variant. `levels` stays
  * on the base, {@link GroupSnapshot} included, even though a group never
- * iterates its own chunks (ADR 0026).
+ * iterates its own chunks, so readers of `levels` need not narrow on `kind`.
  */
 export interface BaseEntitySnapshot {
   entityId: string;
@@ -133,7 +133,7 @@ export interface PlanningSnapshot {
   selection: SelectionState;
   /**
    * Read only by the proxy residency planner, which goes away with the
-   * proxy-asset path (ADR 0043). `null` for callers that opt out, such
+   * proxy-asset path. `null` for callers that opt out, such
    * as tests and `createSyntheticSnapshot`.
    */
   assetCatalog: AssetCatalogSnapshot | null;
@@ -146,11 +146,13 @@ export interface PlanningSnapshot {
 }
 
 /**
- * Carry-forward state between planning ticks (ADR 0027). The caller
- * stores {@link RequestPlan.nextState} and passes it to the next `plan`
- * call. It holds the previous active set, which the dev-mode validator
- * checks and the cold-state delta diffs against, and the zoom memory the
- * prefetch lane reads to pick the next level.
+ * Carry-forward state between planning ticks. Anything that survives a tick
+ * goes here, never in the snapshot, a module global, or a cache inside the
+ * planner. The caller stores {@link RequestPlan.nextState} and passes it to
+ * the next `plan` call without reading it. It holds the previous active
+ * set, which the dev-mode validator checks and the cold-state delta diffs
+ * against, and the zoom memory the prefetch lane reads to pick the next
+ * level.
  */
 export interface PlanningState {
   previousActiveSet: ActiveSetEntry[];
