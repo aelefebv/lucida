@@ -7,6 +7,11 @@ license = "MIT"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# The view property checks and their fixtures, for the tests of crates whose
+# view producers live outside this one.
+test-support = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

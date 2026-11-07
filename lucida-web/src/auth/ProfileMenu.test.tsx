@@ -188,6 +188,8 @@ describe("ProfileMenu", () => {
       render(<ProfileMenu />);
     });
     fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
+    // Admin comes from the server's configuration, so the switch offers none.
+    expect(screen.queryByText(/admin/i)).toBeNull();
     fireEvent.change(screen.getByLabelText(/dev user email/i), {
       target: { value: "viewer@example.com" },
     });
@@ -202,7 +204,6 @@ describe("ProfileMenu", () => {
     expect(postDevLogin).toHaveBeenCalledWith({
       email: "viewer@example.com",
       display_name: "Viewer",
-      is_admin: false,
     });
     expect(refresh).toHaveBeenCalledTimes(1);
   });

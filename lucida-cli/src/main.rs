@@ -18,6 +18,8 @@ mod trace_knobs;
 mod trace_replay;
 mod trace_script;
 mod view;
+#[cfg(test)]
+mod view_properties;
 mod watch;
 mod workspace;
 
