@@ -84,8 +84,10 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
 }
 
 /** Insert a fake chunk into a shared-pool slice atlas's slots map (composite key). */
-function insertSliceChunk(atlas: { slots: Map<string, number> }, level: number, t: number, c: number, z: number, y: number, x: number, slotIndex: number, memberId: string = "memA") {
-  atlas.slots.set(`${memberId}|${level}/${t}/${c}/${z}/${y}/${x}`, slotIndex);
+/** Insert a fake slice chunk whose 2D data was cut from level plane `plane`. */
+function insertSliceChunk(atlas: SliceAtlasState, level: number, t: number, c: number, z: number, y: number, x: number, slotIndex: number, plane: number) {
+  atlas.slots.set(`memA|${level}/${t}/${c}/${z}/${y}/${x}`, slotIndex);
+  atlas.slotLevelZ[slotIndex] = plane;
 }
 
 /** Insert a fake chunk into a shared-pool atlas's slots map (composite key). */
@@ -179,9 +181,9 @@ describe("remapSliceIndirection", () => {
   it("maps only chunks matching current T and Z", () => {
     const atlas = makeSliceAtlas({ z: 16 }); // full-res Z = 16
     // chunkZ=32, fullResDepth=64, levelDepth=64 → levelZ=16, targetChunkZ=0
-    insertSliceChunk(atlas, 0, 5, 0, 0, 1, 2, 3);  // T=5, Z=0
-    insertSliceChunk(atlas, 0, 6, 0, 0, 1, 2, 4);  // T=6, Z=0
-    insertSliceChunk(atlas, 0, 5, 0, 1, 1, 2, 5);  // T=5, Z=1 (wrong Z)
+    insertSliceChunk(atlas, 0, 5, 0, 0, 1, 2, 3, 16);  // T=5, Z=0
+    insertSliceChunk(atlas, 0, 6, 0, 0, 1, 2, 4, 16);  // T=6, Z=0
+    insertSliceChunk(atlas, 0, 5, 0, 1, 1, 2, 5, 40);  // T=5, Z=1 (wrong Z)
 
     remapSliceIndirection(atlas, 5, 0, 16);
 
@@ -194,8 +196,8 @@ describe("remapSliceIndirection", () => {
   it("switch-back: Z=16 → Z=48 → Z=16 remaps cached chunks", () => {
     const atlas = makeSliceAtlas();
     // chunkZ=32 → Z=16 maps to chunkZ=0, Z=48 maps to chunkZ=1
-    insertSliceChunk(atlas, 0, 0, 0, 0, 0, 0, 1);  // Z chunk 0
-    insertSliceChunk(atlas, 0, 0, 0, 1, 0, 0, 2);  // Z chunk 1
+    insertSliceChunk(atlas, 0, 0, 0, 0, 0, 0, 1, 16);  // Z chunk 0, cut at plane 16
+    insertSliceChunk(atlas, 0, 0, 0, 1, 0, 0, 2, 48);  // Z chunk 1, cut at plane 48
 
     remapSliceIndirection(atlas, 0, 0, 48);
     expect(atlas.indirectionData[0]).toBe(2);  // Z chunk 1 mapped
@@ -207,9 +209,21 @@ describe("remapSliceIndirection", () => {
   it("no Z metadata → Z filter skipped → chunks still map", () => {
     // Empty entityZInfo means computeTargetChunkZ returns null → Z filter is skipped
     const atlas = makeSliceAtlas({ entityZInfo: new Map() });
-    insertSliceChunk(atlas, 0, 0, 0, 0, 0, 0, 1);
+    insertSliceChunk(atlas, 0, 0, 0, 0, 0, 0, 1, 0);
 
     remapSliceIndirection(atlas, 0, 0, 0);
+    expect(atlas.indirectionData[0]).toBe(1);
+  });
+
+  it("leaves a slot cut from another plane of the same chunk unmapped", () => {
+    const atlas = makeSliceAtlas();
+    insertSliceChunk(atlas, 0, 0, 0, 0, 0, 0, 1, 16);
+
+    remapSliceIndirection(atlas, 0, 0, 17);
+    expect(atlas.indirectionData[0]).toBe(0xFFFFFFFF);
+    expect(atlas.slotGridIdx[1]).toBe(-1);
+
+    remapSliceIndirection(atlas, 0, 0, 16);
     expect(atlas.indirectionData[0]).toBe(1);
   });
 });
