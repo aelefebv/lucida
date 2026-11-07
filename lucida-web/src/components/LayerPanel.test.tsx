@@ -404,6 +404,37 @@ describe("LayerPanel labels", () => {
   });
 });
 
+describe("LayerPanel data problems", () => {
+  const shape = "tiles differ in shape, and smaller tiles are padded with fill";
+  const sampled = "label discovery was sampled";
+
+  it("marks a layer degraded and spells out what is shown wrong, collapsed or not", () => {
+    const importWarnings = new Map([
+      [
+        "wds-1",
+        [
+          { target: "wds-1", message: shape, degrades: true },
+          { target: "wds-1", message: sampled, degrades: false },
+        ],
+      ],
+    ]);
+    render(<LayerPanel {...baseProps({ importWarnings })} />);
+
+    expect(screen.getByTestId("layer-degraded-wds-1").textContent).toBe("Degraded");
+    const list = screen.getByRole("list", { name: "original.zarr data problems" });
+    expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([shape]);
+    expect(screen.queryByText(sampled)).toBeNull();
+  });
+
+  it("leaves a layer whose warnings are only informational unmarked", () => {
+    const importWarnings = new Map([["wds-1", [{ target: "wds-1", message: sampled, degrades: false }]]]);
+    render(<LayerPanel {...baseProps({ importWarnings })} />);
+
+    expect(screen.queryByTestId("layer-degraded-wds-1")).toBeNull();
+    expect(screen.queryByRole("list", { name: "original.zarr data problems" })).toBeNull();
+  });
+});
+
 describe("LayerPanel advanced", () => {
   it("is closed by default and holds blend, channel blend, and rendering", async () => {
     render(<LayerPanel {...multichannelProps()} />);

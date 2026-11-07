@@ -2721,6 +2721,7 @@ mod tests {
                 recent_failures: Vec::new(),
             },
             messages: Vec::new(),
+            import_warnings: Vec::new(),
         }
     }
 

@@ -50,10 +50,9 @@ pub enum ImportWarningKind {
     UnreadableTileGeometry,
     /// One or more tiles' own geometry could not be used: their metadata
     /// was unreadable, or their axes, data type, or codec chain differ from
-    /// the first readable tile's. Those tiles are read as if they were
-    /// stored like the first readable tile, which is wrong wherever they
-    /// differ. Always aggregated, for the same reason as
-    /// [`Self::UnreadableTileGeometry`].
+    /// the representative's. Those tiles are read as if they were stored
+    /// like the representative, which is wrong wherever they differ. Always
+    /// aggregated, for the same reason as [`Self::UnreadableTileGeometry`].
     UnusableTileGeometry,
     /// Label discovery on a large collection probed only a sample of tiles, so
     /// labels present only on unsampled tiles were not discovered. The message
@@ -78,6 +77,44 @@ pub enum ImportWarningKind {
     /// several levels bare at once. See [`crate::unwritten`] for how a level
     /// is judged unwritten without scanning its chunk prefix.
     UnwrittenLevel,
+    /// A collection's tiles differ in shape, level count, or pixel size, but
+    /// the collection declares one geometry for all of them: smaller tiles
+    /// are padded with fill, levels past the fewest any tile has are dropped,
+    /// and every tile is shown at the representative's pixel size. One
+    /// warning per kind of difference, naming the tiles.
+    MismatchedTileGeometry,
+    /// Tiles of one group duplicate each other: a path listed twice, two
+    /// tiles at one explicit position, or more tiles than the collection's
+    /// `field_count` allows. Copies are laid out as if they were different
+    /// tiles. Always aggregated.
+    DuplicateTile,
+    /// The collection's row, column, or group entries are malformed: an
+    /// entry without a name, a group without an index, a group listed twice,
+    /// or two groups at one position. Labels and placement are a guess
+    /// wherever this is reported. Always aggregated.
+    MalformedCollectionLayout,
+}
+
+impl ImportWarningKind {
+    /// Whether the warning says the data is shown wrong, which makes the
+    /// dataset's health degraded rather than healthy. Exhaustive, so a new
+    /// kind has to decide.
+    pub fn degrades_health(self) -> bool {
+        match self {
+            Self::UnusableTileGeometry
+            | Self::UnwrittenLevel
+            | Self::MismatchedTileGeometry
+            | Self::DuplicateTile
+            | Self::MalformedCollectionLayout => true,
+            // The data that opened is shown right: these say what was left
+            // out or which tile stood in, and the collection is complete
+            // wherever they do not reach.
+            Self::SkippedGroup
+            | Self::UnreadableTileGeometry
+            | Self::SampledLabelDiscovery
+            | Self::UnusableLabelIndex => false,
+        }
+    }
 }
 
 /// Everything the server needs to build its operational binding.

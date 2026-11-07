@@ -50,14 +50,15 @@ use lucida_core::view::ViewState;
 use lucida_protocol::{
     AssetCatalog, AssetCatalogDelta, AssetMessage, DatasetGeneratedCoarseCacheStats,
     DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth, DatasetHealthComponent,
-    DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
-    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
-    DatasetSourceCacheStats, DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec,
-    FetchSource, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE,
-    LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor,
-    ProxiedImageSpec, ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch,
-    SourceChunkStatus, TimingRowFamily, TimingRowOutcome, WireFormat,
+    DatasetHealthStatus, DatasetImportWarning, DatasetOpenFailureDiagnostic,
+    DatasetOpenFailureKind, DatasetOpenProgressDiagnostic, DatasetOpenStage,
+    DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats, DatasetSourceHealth,
+    DirectFetchDescriptor, DirectImageSpec, FetchSource, GeneratedAvailabilityDelta,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedChunkStatusUpdate,
+    GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE, LevelAddress,
+    LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor, ProxiedImageSpec,
+    ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch, SourceChunkStatus,
+    TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -1159,7 +1160,15 @@ fn source_health() -> DatasetSourceHealth {
                 message: Some("source read timed out".into()),
             }],
         },
-        messages: vec!["generated coarse cache is warming".into()],
+        messages: vec![
+            "generated coarse cache is warming".into(),
+            "tiles differ in shape, and smaller tiles are padded with fill".into(),
+        ],
+        import_warnings: vec![DatasetImportWarning {
+            target: SINGLE_DATASET_ID.into(),
+            message: "tiles differ in shape, and smaller tiles are padded with fill".into(),
+            degrades: true,
+        }],
     }
 }
 

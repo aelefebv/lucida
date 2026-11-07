@@ -79,6 +79,15 @@ export interface DatasetSourceHealth {
   source_cache?: DatasetSourceCacheStats | null;
   generated_coarse: DatasetGeneratedCoarseHealth;
   messages?: string[];
+  /** What the import found. Omitted on the wire when empty. */
+  import_warnings?: DatasetImportWarning[];
+}
+
+export interface DatasetImportWarning {
+  target: string;
+  message: string;
+  /** The warning says the data is shown wrong, so it degrades `status`. */
+  degrades: boolean;
 }
 
 export type DatasetOpenStage =
