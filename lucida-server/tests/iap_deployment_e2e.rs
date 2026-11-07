@@ -7,10 +7,12 @@
 //! The perimeter's key set is served by a mock on loopback, and assertions
 //! are signed with a key generated per run.
 
+mod boot;
+
 use std::io::Read;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use axum::Router;
 use axum::routing::get;
@@ -29,6 +31,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
+use boot::{STARTUP_BUDGET, free_port, server};
 use lucida_server::auth::hash_bearer_token;
 use lucida_server::auth::iap::IAP_ASSERTION_HEADER;
 use lucida_server::connection::CLOSE_ACCESS_REVOKED;
@@ -115,30 +118,19 @@ impl Deployment {
             let _ = axum::serve(listener, app).await;
         });
 
+        // The cases run in parallel, and two handed the same free port
+        // before either server bound it would both talk to whichever won.
+        // A case picks its port only once the previous one's server answers.
+        static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let _starting = STARTING.lock().await;
+
         let tmp = tempfile::tempdir().unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
-        let mut command = Command::new(env!("CARGO_BIN_EXE_lucida-server"));
-        // Unset rather than clear the environment: the platform's own
-        // variables are what the binary's networking needs on some hosts.
-        for var in [
-            "LUCIDA_INSECURE",
-            "LUCIDA_ALLOWED_ORIGINS",
-            "LUCIDA_COOKIE_SECURE",
-            "LUCIDA_ADMIN_EMAILS",
-            "LUCIDA_DIRECTORY_URL",
-            "LUCIDA_STATUS_PATH",
-            "LUCIDA_THEME_FILE",
-            "LUCIDA_GOOGLE_CLIENT_ID",
-        ] {
-            command.env_remove(var);
-        }
+        let port = free_port();
+        // `server` passes no `LUCIDA_*` variable through, so
+        // `LUCIDA_INSECURE` and `LUCIDA_ALLOWED_ORIGINS` are unset.
+        let mut command = server(&format!("0.0.0.0:{port}"));
         command
             .env("LUCIDA_AUTH", "iap")
-            .env("LUCIDA_BIND", format!("0.0.0.0:{port}"))
             .env("LUCIDA_IAP_AUDIENCE", AUDIENCE)
             .env("LUCIDA_IAP_ISSUER", ISSUER)
             .env(
@@ -151,7 +143,6 @@ impl Deployment {
             )
             .env("LUCIDA_PROXY_CACHE_DIR", tmp.path().join("cache"))
             .env("LUCIDA_WEB_DIST", tmp.path().join("no-dist"))
-            .env("RUST_LOG", "lucida_server=info")
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         let mut child = command.spawn().expect("spawn lucida-server");
@@ -169,7 +160,7 @@ impl Deployment {
             });
         }
 
-        let deployment = Self {
+        let mut deployment = Self {
             child,
             port,
             key,
@@ -184,15 +175,18 @@ impl Deployment {
         deployment
     }
 
-    async fn wait_until_healthy(&self) {
-        let deadline = Instant::now() + Duration::from_secs(30);
-        while Instant::now() < deadline {
+    async fn wait_until_healthy(&mut self) {
+        let deadline = tokio::time::Instant::now() + STARTUP_BUDGET;
+        while tokio::time::Instant::now() < deadline {
+            if !matches!(self.child.try_wait(), Ok(None)) {
+                break;
+            }
             if let Ok(res) = self.http.get(self.url("/healthz")).send().await
                 && res.status().is_success()
             {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
         panic!("the server never became healthy; stderr:\n{}", self.logs());
     }
