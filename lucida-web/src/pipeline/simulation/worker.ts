@@ -1,0 +1,187 @@
+/**
+ * The render worker, run in-process on a stand-in GPU device. Messages go
+ * through the worker's own dispatcher, so atlas sizing, eviction, the
+ * upload filters and the wanted-set report are the production code. Only
+ * drawing is skipped: it touches no residency.
+ *
+ * Messages queue in both directions and are delivered when the harness
+ * drains, which keeps the main thread and the worker as far apart as a
+ * real postMessage boundary does, in an order that repeats run to run.
+ */
+
+import { dispatchMessage } from "../../renderer/worker/dispatch.ts";
+import { createInitialState, type AtlasBudgets } from "../../renderer/worker/state.ts";
+import { createWantedSetPoster } from "../../renderer/worker/bootstrap.ts";
+import { UNTIMED } from "../../renderer/passTiming.ts";
+import { proxyDescriptorKey, type WorkerCtx } from "../../renderer/workerContext.ts";
+import type {
+  MainToWorkerMessage,
+  MissingChunk,
+  MissingProxy,
+  WorkerToMainMessage,
+} from "../../renderer/workerProtocol.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
+
+/** Messages that only draw, capture or style, so the simulation answers them without a handler. */
+const DRAW_ONLY = new Set<MainToWorkerMessage["type"]>([
+  "resize",
+  "canvasColors",
+  "sliceRenderMultiPass",
+  "volumeRenderMultiPass",
+  "minimapInit",
+  "minimapRender",
+  "minimapDestroy",
+  "minimapUploadOverviewChunksForLayer",
+  "thumbnailRender",
+  "captureFrame",
+  "updateCursorData",
+  "destroy",
+]);
+
+/** The WebGPU usage flags the atlas code reads off the global scope. */
+export const GPU_USAGE_GLOBALS = {
+  GPUTextureUsage: {
+    COPY_SRC: 0x01,
+    COPY_DST: 0x02,
+    TEXTURE_BINDING: 0x04,
+    STORAGE_BINDING: 0x08,
+    RENDER_ATTACHMENT: 0x10,
+  },
+  GPUBufferUsage: {
+    MAP_READ: 0x01,
+    MAP_WRITE: 0x02,
+    COPY_SRC: 0x04,
+    COPY_DST: 0x08,
+    INDEX: 0x10,
+    VERTEX: 0x20,
+    UNIFORM: 0x40,
+    STORAGE: 0x80,
+    INDIRECT: 0x100,
+    QUERY_RESOLVE: 0x200,
+  },
+};
+
+/** A device that accepts every allocation and write and keeps nothing. */
+function simulatedDevice(): GPUDevice {
+  const resource = () => ({ createView: () => ({}), destroy: () => {} });
+  return {
+    createTexture: resource,
+    createBuffer: (desc: GPUBufferDescriptor) => ({ size: desc.size, destroy: () => {} }),
+    createCommandEncoder: () => ({
+      copyTextureToTexture: () => {},
+      copyBufferToBuffer: () => {},
+      finish: () => ({}),
+    }),
+    queue: {
+      writeTexture: () => {},
+      writeBuffer: () => {},
+      submit: () => {},
+      onSubmittedWorkDone: () => Promise.resolve(),
+    },
+  } as unknown as GPUDevice;
+}
+
+type Listener = (event: { data: WorkerToMainMessage }) => void;
+
+export class SimulatedWorker {
+  readonly ctx: WorkerCtx;
+  private readonly inbox: MainToWorkerMessage[] = [];
+  private readonly outbox: WorkerToMainMessage[] = [];
+  private readonly listeners = new Set<Listener>();
+  /** Called with every message the worker posts, before the page sees it. */
+  onPost: ((msg: WorkerToMainMessage) => void) | null = null;
+  /** `${memberId}/${chunkKey}` → how many times the page sent that chunk, and for which tier. */
+  readonly deliveries = new Map<string, { tier: ResidencyTier; count: number }>();
+
+  constructor(atlasBudgets: AtlasBudgets) {
+    const state = createInitialState(atlasBudgets);
+    const post = (msg: WorkerToMainMessage): void => {
+      this.outbox.push(msg);
+    };
+    this.ctx = {
+      device: simulatedDevice(),
+      context: { canvas: { width: 0, height: 0 } } as unknown as GPUCanvasContext,
+      format: "bgra8unorm",
+      state,
+      passTimer: UNTIMED,
+      getSliceRenderer: () => { throw new Error("the simulated worker does not draw"); },
+      getVolumeRenderer: () => { throw new Error("the simulated worker does not draw"); },
+      getCompositor: () => { throw new Error("the simulated worker does not draw"); },
+      getCursorRenderer: () => { throw new Error("the simulated worker does not draw"); },
+      ensureOffscreenPool: () => [],
+      getOrCreateLUT: () => { throw new Error("the simulated worker does not draw"); },
+      post,
+      postWantedSet: createWantedSetPoster(state, post),
+      lookupProxyDescriptor: (entityId, t, c) =>
+        state.proxyDescriptorsByEntity.get(proxyDescriptorKey(entityId, t, c)) ?? null,
+      lookupProxyPool: (datasetId, poolKey) =>
+        state.proxyPoolsByDataset.get(datasetId)?.get(poolKey) ?? null,
+      lookupEntityDescriptor: (datasetId) => state.descriptorBuffersByDataset.get(datasetId) ?? null,
+    };
+  }
+
+  // The slice of the `Worker` interface `RenderClient` uses.
+
+  postMessage(msg: MainToWorkerMessage): void {
+    if (msg.type === "init") {
+      this.outbox.push({ type: "ready" });
+      return;
+    }
+    if (msg.type === "sliceChunkData" || msg.type === "volumeChunkData") {
+      for (const chunk of msg.chunks) {
+        const key = `${msg.memberId}/${chunk.key}`;
+        const prior = this.deliveries.get(key);
+        this.deliveries.set(key, { tier: msg.tier, count: (prior?.count ?? 0) + 1 });
+      }
+    }
+    // A real postMessage copies, so neither side can see the other mutate.
+    this.inbox.push(structuredClone(msg));
+  }
+
+  addEventListener(type: string, listener: Listener): void {
+    if (type === "message") this.listeners.add(listener);
+  }
+
+  removeEventListener(type: string, listener: Listener): void {
+    if (type === "message") this.listeners.delete(listener);
+  }
+
+  terminate(): void {}
+
+  get idle(): boolean {
+    return this.inbox.length === 0 && this.outbox.length === 0;
+  }
+
+  /** Run every queued message, then hand the page what the worker posted, until both sides are quiet. */
+  async drain(): Promise<void> {
+    while (!this.idle) {
+      while (this.inbox.length > 0) {
+        const msg = this.inbox.shift()!;
+        if (DRAW_ONLY.has(msg.type)) {
+          const frameSeq = (msg as { frameSeq?: number }).frameSeq;
+          if (frameSeq !== undefined) this.outbox.push({ type: "frameDone", frameSeq });
+          continue;
+        }
+        await dispatchMessage(this.ctx, msg);
+      }
+      while (this.outbox.length > 0) {
+        const msg = structuredClone(this.outbox.shift()!);
+        this.onPost?.(msg);
+        for (const listener of [...this.listeners]) listener({ data: msg });
+      }
+    }
+  }
+
+  /**
+   * What the worker wants and does not hold for one dataset, computed now.
+   * The worker reports its wanted set only after a cold state or an upload
+   * that bounced, so its last report can be stale by the time a run settles.
+   */
+  missingNow(datasetId: string): Array<MissingChunk | MissingProxy> {
+    let missing: Array<MissingChunk | MissingProxy> = [];
+    createWantedSetPoster(this.ctx.state, (msg) => {
+      if (msg.type === "wantedSetDelta") missing = msg.missing;
+    })(datasetId);
+    return missing;
+  }
+}

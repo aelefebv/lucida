@@ -1,0 +1,574 @@
+/**
+ * A deterministic simulation of the viewer's pipeline loop, for vitest with
+ * no browser or GPU. The render loop, tick coordinator, planner, CPU cache,
+ * scheduler and uploader are the production modules, on a real wasm scene.
+ * The server is {@link SimulatedSource}, the render worker is
+ * {@link SimulatedWorker}, and time is vitest's fake clock, stepped one frame
+ * at a time.
+ *
+ * {@link describeScenario} states a view and what happens to it;
+ * {@link runScenario} runs it to a fixed point at one device pixel ratio.
+ */
+
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+import { setImmediate as realSetImmediate } from "node:timers";
+import { vi } from "vitest";
+import initWasm, { WasmScene } from "lucida-core";
+
+import { RenderLoop } from "../../renderLoop.ts";
+import { RenderClient } from "../../renderer/renderClient.ts";
+import type { Session } from "../../session.ts";
+import type { DatasetManifest } from "../../manifestTypes.ts";
+import { applyViewportCommand } from "../../applyAndSend.ts";
+import { bumpSettingsGeneration } from "../../tickCommon.ts";
+import { AVAILABILITY_UPDATE_SOURCE } from "../../invalidation.ts";
+import { traceRecorder } from "../../trace/recorder.ts";
+import { createQuiescenceState } from "../../trace/quiescence.ts";
+import type { AtlasBudgets } from "../../renderer/worker/state.ts";
+import type { MissingChunk } from "../../renderer/workerProtocol.ts";
+import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import { AssetCatalog } from "../assetCatalog.ts";
+import { GeneratedAvailabilityCatalog } from "../generatedAvailability.ts";
+import { CpuCache, type CpuCacheConfig } from "../fetch/index.ts";
+import type { DatasetFixture } from "./fixtures.ts";
+import {
+  passThroughDecodePool,
+  SimulatedSource,
+  type SourceAnswer,
+  type SourceRequest,
+  type SourceSpec,
+} from "./source.ts";
+import { GPU_USAGE_GLOBALS, SimulatedWorker } from "./worker.ts";
+
+/** One step of the simulation clock: a frame at 60 Hz. */
+export const FRAME_MS = 16;
+
+/**
+ * How long a fixed point must hold before a phase counts as settled. Longer
+ * than any timer a quiet view can still have armed (the in-fetch retry, the
+ * first failure backoffs, a scenario's availability update), so a view that
+ * would wake again does so inside the window.
+ */
+export const QUIET_MS = 3_000;
+
+/** Steps a phase may take to reach its fixed point, unless the scenario says otherwise. */
+export const DEFAULT_TICK_BOUND = 400;
+
+/** Canvas size in CSS pixels, unless the scenario says otherwise. */
+const DEFAULT_VIEWPORT: readonly [number, number] = [640, 400];
+
+/** Keys listed per section of a report; the rest are counted. */
+const REPORT_KEY_LIMIT = 12;
+
+/**
+ * Sends of one chunk within a phase from which the report lists it. Once
+ * is the norm, and a rebuild can legitimately send it a second time.
+ */
+const RESENT_THRESHOLD = 3;
+
+export type ScenarioStep =
+  | { scrub: { z?: number; t?: number; c?: number } };
+
+export interface ScenarioSpec {
+  name: string;
+  dataset: DatasetFixture;
+  mode?: "slice" | "volume";
+  /** Canvas size in CSS pixels. */
+  viewport?: [number, number];
+  source?: SourceSpec;
+  /**
+   * The worker's atlas pool budgets. A slice pool holds
+   * `floor(sqrt(bytes / slotBytes))²` slots, so a small budget bounds them.
+   */
+  atlas?: Partial<AtlasBudgets>;
+  cache?: Partial<Pick<CpuCacheConfig, "mainBudgetBytes" | "overviewBudgetBytes">>;
+  /** What happens after the open, each followed by its own settle. */
+  steps?: ScenarioStep[];
+  tickBound?: number;
+  /**
+   * Whether settling also requires every chunk the worker wants to be on the
+   * GPU. Off for views that want more than the atlas holds.
+   */
+  gpuComplete?: boolean;
+}
+
+export interface Scenario {
+  readonly name: string;
+  readonly dataset: DatasetFixture;
+  readonly mode: "slice" | "volume";
+  readonly viewport: readonly [number, number];
+  readonly source: SourceSpec;
+  readonly atlas: AtlasBudgets;
+  readonly cache: Partial<CpuCacheConfig>;
+  readonly steps: readonly ScenarioStep[];
+  readonly tickBound: number;
+  readonly gpuComplete: boolean;
+}
+
+/** State a scenario, filling in the defaults every run uses. */
+export function describeScenario(spec: ScenarioSpec): Scenario {
+  return Object.freeze({
+    name: spec.name,
+    dataset: spec.dataset,
+    mode: spec.mode ?? "slice",
+    viewport: spec.viewport ?? DEFAULT_VIEWPORT,
+    source: spec.source ?? {},
+    atlas: {
+      volumeAtlasBytes: spec.atlas?.volumeAtlasBytes ?? CEILING_BUDGETS.volumeAtlasBytes,
+      sliceAtlasBytes: spec.atlas?.sliceAtlasBytes ?? CEILING_BUDGETS.sliceAtlasBytes,
+    },
+    cache: { ...spec.cache },
+    steps: spec.steps ?? [],
+    tickBound: spec.tickBound ?? DEFAULT_TICK_BOUND,
+    gpuComplete: spec.gpuComplete ?? true,
+  });
+}
+
+/** One residency tier's wanted-and-resident count in the CPU cache. */
+interface TierCount {
+  resident: number;
+  desired: number;
+}
+
+export interface PhaseOutcome {
+  label: string;
+  settled: boolean;
+  /** Steps to the fixed point, or the steps taken when there was none. */
+  ticks: number;
+  /** "settled", or the first condition that was not met. */
+  why: string;
+  /** Frames the render loop ran in this phase. */
+  frames: number;
+  /** Chunks the page sent the worker in this phase. */
+  chunksSent: number;
+  quiescence: string;
+  detail: TierCount;
+  coarse: TierCount;
+  queued: number;
+  inFlight: number;
+  /** Chunks the last plan wants, outside prefetch, that the CPU cache does not hold. */
+  missingCpu: string[];
+  /** Chunks the worker wants that are not on the GPU. */
+  missingGpu: string[];
+  /** Chunks the page sent the worker again and again in this phase, most often first. */
+  resent: string[];
+}
+
+export interface SimulationRun {
+  scenario: string;
+  dpr: number;
+  phases: PhaseOutcome[];
+  settled: boolean;
+  /** Why the run did or did not settle, for a failure message. */
+  report: string;
+}
+
+/** Load the wasm core the scene runs on. Call once per test file, from `beforeAll`. */
+export async function initSimulationWasm(): Promise<void> {
+  // vitest runs from `lucida-web`; the wasm-bindgen web target takes the bytes.
+  const bytes = readFileSync(resolve(process.cwd(), "../lucida-core/pkg/lucida_core_bg.wasm"));
+  await initWasm({ module_or_path: bytes });
+}
+
+/** Run a scenario at one device pixel ratio, phase by phase, until one fails to settle. */
+export async function runScenario(scenario: Scenario, opts: { dpr: number }): Promise<SimulationRun> {
+  const sim = new Simulation(scenario, opts.dpr);
+  try {
+    const phases: PhaseOutcome[] = [];
+    sim.open();
+    phases.push(await sim.settle("open"));
+    for (const step of scenario.steps) {
+      if (!phases[phases.length - 1].settled) break;
+      phases.push(await sim.settle(sim.apply(step)));
+    }
+    const settled = phases.every((p) => p.settled) && phases.length === scenario.steps.length + 1;
+    return {
+      scenario: scenario.name,
+      dpr: opts.dpr,
+      phases,
+      settled,
+      report: formatReport(scenario.name, opts.dpr, phases),
+    };
+  } finally {
+    sim.dispose();
+  }
+}
+
+/** Fail with the run's report unless every phase settled. */
+export function expectSettled(run: SimulationRun): void {
+  if (!run.settled) throw new Error(run.report);
+}
+
+/**
+ * Whether the page says its view settled, and if not, why. This is the
+ * published quiescence every settle consumer waits on, read where they read
+ * it, so a change to that predicate changes what the simulation accepts.
+ */
+function pageSettle(): { settled: boolean; reason: string } {
+  const published = traceRecorder.quiescence;
+  return { settled: published?.quiescent ?? false, reason: published?.reason ?? "unpublished" };
+}
+
+/** Resolve every pending microtask, including those the resolved ones queue. */
+function flushMicrotasks(): Promise<void> {
+  return new Promise((done) => realSetImmediate(done));
+}
+
+class Simulation {
+  private readonly scenario: Scenario;
+  private readonly dpr: number;
+  private readonly frames = new Map<number, FrameRequestCallback>();
+  private nextFrameId = 1;
+  private readonly worker: SimulatedWorker;
+  private readonly source: SimulatedSource;
+  private readonly cpuCache: CpuCache;
+  private readonly datasets = new Map<string, DatasetManifest>();
+  private readonly availability = new GeneratedAvailabilityCatalog();
+  private scene: WasmScene | null = null;
+  private loop: RenderLoop | null = null;
+  /** `${memberId}/${chunkKey}` → the worker's last feedback reason and how often it was given. */
+  private readonly feedback = new Map<string, { reason: string; count: number }>();
+  private framesRun = 0;
+
+  constructor(scenario: Scenario, dpr: number) {
+    this.scenario = scenario;
+    this.dpr = dpr;
+    this.worker = new SimulatedWorker(scenario.atlas);
+    this.worker.onPost = (msg) => {
+      if (msg.type !== "chunksEvicted") return;
+      const note = (key: string, reason: string): void => {
+        const id = `${msg.memberId}/${key}`;
+        const prior = this.feedback.get(id);
+        this.feedback.set(id, { reason, count: (prior?.reason === reason ? prior.count : 0) + 1 });
+      };
+      for (const key of msg.keys) note(key, msg.reason ?? "evicted");
+      for (const key of msg.skipped ?? []) note(key, "atlas-policy");
+    };
+    this.source = new SimulatedSource(
+      { latencyMs: scenario.source.latencyMs, answer: (req) => this.answer(req) },
+      (datasetId) => this.datasets.get(datasetId),
+    );
+    this.cpuCache = new CpuCache(this.source, passThroughDecodePool(), {
+      ...scenario.cache,
+      // Backoff jitter is the only randomness on the path.
+      random: () => 0.5,
+    });
+  }
+
+  /** The scenario's answer, with a generated chunk pending until the server has made it. */
+  private answer(req: SourceRequest): SourceAnswer {
+    const generated = this.scenario.dataset.generated;
+    if (
+      generated &&
+      Number(req.chunkKey.split("/")[0]) === generated.levelIndex &&
+      req.nowMs < generated.readyAtMs
+    ) {
+      return "pending";
+    }
+    return this.scenario.source.answer?.(req) ?? "ready";
+  }
+
+  /** Install the fake clock and globals the page reads. {@link dispose} removes them. */
+  private installEnvironment(): void {
+    // The fake clock covers every timer the pipeline arms and the clock it
+    // reads. `setImmediate` stays real: it is how a step waits out microtasks.
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "setInterval", "clearInterval", "Date", "performance"],
+    });
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => {
+      const id = this.nextFrameId++;
+      this.frames.set(id, cb);
+      return id;
+    });
+    vi.stubGlobal("cancelAnimationFrame", (id: number) => {
+      this.frames.delete(id);
+    });
+    vi.stubGlobal("devicePixelRatio", this.dpr);
+    for (const [name, value] of Object.entries(GPU_USAGE_GLOBALS)) vi.stubGlobal(name, value);
+    const worker = this.worker;
+    vi.stubGlobal("Worker", function SimulatedWorkerHandle() {
+      return worker;
+    });
+    traceRecorder.reset();
+  }
+
+  /** Open the dataset the way a live open does: apply, register, fit the camera, start the loop. */
+  open(): void {
+    this.installEnvironment();
+    const { dataset, viewport, mode } = this.scenario;
+    const [cssW, cssH] = viewport;
+    const deviceW = Math.round(cssW * this.dpr);
+    const deviceH = Math.round(cssH * this.dpr);
+
+    const scene = new WasmScene(deviceW, deviceH);
+    scene.apply_command(dataset.openCommand);
+    bumpSettingsGeneration();
+    this.scene = scene;
+
+    let manifest = dataset.manifest;
+    if (dataset.generated) {
+      this.availability.applySnapshot(dataset.datasetId, dataset.generated.snapshot);
+      manifest = this.availability.mergeManifest(dataset.datasetId, manifest);
+    }
+    this.datasets.set(dataset.datasetId, manifest);
+
+    const assetCatalog = new AssetCatalog(scene);
+    assetCatalog.applyInitial(dataset.datasetId, { entries: [] });
+    const session = {
+      scene,
+      cpuCache: this.cpuCache,
+      contentSource: this.source,
+      assetCatalog,
+      generatedAvailability: this.availability,
+      bridge: { sendViewerInterest: () => {} },
+    } as unknown as Session;
+
+    const canvas = {
+      clientWidth: cssW,
+      clientHeight: cssH,
+      width: deviceW,
+      height: deviceH,
+      transferControlToOffscreen: () => ({}),
+    } as unknown as HTMLCanvasElement;
+    const client = new RenderClient(canvas);
+    const loop = new RenderLoop({ session, datasets: new Map(), client, canvas, mode });
+    this.loop = loop;
+    loop.start();
+    loop.addDataset(dataset.datasetId, manifest);
+
+    scene.set_viewport(deviceW, deviceH);
+    scene.fit_camera_to_dataset_bounds(dataset.datasetId);
+    loop.markInteractiveDirty("auto_fit_on_open");
+    if (mode === "slice") loop.setSliceParams(scene.z(), scene.t(), scene.c());
+
+    if (dataset.generated) {
+      const generated = dataset.generated;
+      setTimeout(() => this.publishGeneratedReady(generated), generated.readyAtMs);
+    }
+  }
+
+  /**
+   * The server's availability update once the generated level is made,
+   * applied as the session controller applies one: merge it into the
+   * manifest, hand the loop the new manifest, and mark residency dirty.
+   */
+  private publishGeneratedReady(generated: NonNullable<DatasetFixture["generated"]>): void {
+    const datasetId = this.scenario.dataset.datasetId;
+    const chunks = [...generated.chunkKeys].flatMap(([imageId, keys]) =>
+      keys.map((key) => ({
+        image_id: imageId,
+        level_index: generated.levelIndex,
+        key,
+        status: "ready" as const,
+      })),
+    );
+    this.availability.applyDelta(datasetId, { chunks });
+    const merged = this.availability.mergeManifest(datasetId, this.datasets.get(datasetId)!);
+    this.datasets.set(datasetId, merged);
+    this.loop!.updateDatasetManifest(datasetId, merged);
+    this.loop!.markResidencyDirty(AVAILABILITY_UPDATE_SOURCE);
+  }
+
+  /** Apply a step the way its control does, and name it for the report. */
+  apply(step: ScenarioStep): string {
+    const scene = this.scene!;
+    const loop = this.loop!;
+    const { scrub } = step;
+    loop.markInput("scrub");
+    if (scrub.z !== undefined) applyViewportCommand(scene, { type: "set_z", z: scrub.z });
+    if (scrub.t !== undefined) applyViewportCommand(scene, { type: "set_t", t: scrub.t });
+    if (scrub.c !== undefined) applyViewportCommand(scene, { type: "set_c", c: scrub.c });
+    loop.setSliceParams(scene.z(), scene.t(), scene.c());
+    return `scrub ${Object.entries(scrub).map(([axis, v]) => `${axis}=${v}`).join(" ")}`;
+  }
+
+  /**
+   * Advance one frame: fire the timers that fall due, run the frame the loop
+   * asked for, then let the worker answer everything it was sent. Returns
+   * whether the loop ran a frame.
+   */
+  private async step(): Promise<boolean> {
+    await vi.advanceTimersByTimeAsync(FRAME_MS);
+    await flushMicrotasks();
+    const due = [...this.frames.values()];
+    this.frames.clear();
+    for (const frame of due) frame(performance.now());
+    if (due.length > 0) this.framesRun++;
+    await flushMicrotasks();
+    await this.worker.drain();
+    await flushMicrotasks();
+    return due.length > 0;
+  }
+
+  /** Nothing queued, in flight or pending anywhere, and no frame requested. */
+  private atFixedPoint(): boolean {
+    if (this.frames.size > 0 || !this.worker.idle) return false;
+    const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
+    return (
+      q.pending === 0 &&
+      q.inFlight === 0 &&
+      q.speculativePending === 0 &&
+      q.speculativeInFlight === 0 &&
+      !q.pendingUnclassified
+    );
+  }
+
+  /**
+   * Step until a fixed point reached within the tick bound holds for
+   * {@link QUIET_MS}. A frame, a request or a worker message in that window
+   * means it was not one, and stepping goes on. A fixed point settles the
+   * phase when the page publishes quiescence and, where the scenario asks,
+   * the worker holds every chunk it wants.
+   */
+  async settle(label: string): Promise<PhaseOutcome> {
+    const framesBefore = this.framesRun;
+    const sentBefore = new Map([...this.worker.deliveries].map(([key, d]) => [key, d.count]));
+    const quietSteps = Math.ceil(QUIET_MS / FRAME_MS);
+    let fixedSince: number | null = null;
+    let requestsAtFixed = this.source.requestCount;
+    for (let i = 1; ; i++) {
+      // A frame that ran is the loop waking, even when it asked for no other.
+      const ranFrame = await this.step();
+      if (ranFrame || !this.atFixedPoint() || this.source.requestCount !== requestsAtFixed) {
+        fixedSince = null;
+        requestsAtFixed = this.source.requestCount;
+        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, sentBefore);
+        continue;
+      }
+      fixedSince ??= i;
+      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, sentBefore);
+    }
+  }
+
+  private outcome(
+    label: string,
+    ticks: number,
+    fixed: boolean,
+    framesBefore: number,
+    sentBefore: Map<string, number>,
+  ): PhaseOutcome {
+    const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
+    const page = pageSettle();
+    const missingCpu = this.missingFromCpu();
+    const missingGpu = this.missingFromGpu();
+
+    let chunksSent = 0;
+    const resent: Array<{ text: string; times: number }> = [];
+    for (const [key, { tier, count }] of this.worker.deliveries) {
+      const times = count - (sentBefore.get(key) ?? 0);
+      chunksSent += times;
+      if (times < RESENT_THRESHOLD) continue;
+      const slash = key.indexOf("/");
+      resent.push({ text: this.describeKey(key.slice(0, slash), key.slice(slash + 1), tier), times });
+    }
+    resent.sort((a, b) => b.times - a.times);
+
+    let why = "settled";
+    if (!fixed) {
+      why = `no fixed point within ${this.scenario.tickBound} ticks: ${this.whatIsStillMoving()}`;
+    } else if (!page.settled) {
+      why = `fixed point after ${ticks} ticks, but the page publishes ${page.reason}`;
+    } else if (this.scenario.gpuComplete && missingGpu.length > 0) {
+      why = `fixed point after ${ticks} ticks, but the worker lacks ${missingGpu.length} chunks it wants`;
+    }
+
+    return {
+      label,
+      settled: why === "settled",
+      ticks,
+      why,
+      frames: this.framesRun - framesBefore,
+      chunksSent,
+      quiescence: page.reason,
+      detail: { resident: q.residentDetailChunks, desired: q.desiredDetailChunks },
+      coarse: { resident: q.residentCoarseChunks, desired: q.desiredCoarseChunks },
+      queued: q.pending + q.speculativePending,
+      inFlight: q.inFlight + q.speculativeInFlight,
+      missingCpu,
+      missingGpu,
+      resent: resent.map((r) => r.text),
+    };
+  }
+
+  private whatIsStillMoving(): string {
+    const parts: string[] = [];
+    if (this.frames.size > 0) parts.push(`a frame is requested (the page publishes ${pageSettle().reason})`);
+    const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
+    if (q.pending + q.speculativePending > 0) parts.push(`${q.pending + q.speculativePending} chunks queued`);
+    if (q.inFlight + q.speculativeInFlight > 0) parts.push(`${q.inFlight + q.speculativeInFlight} in flight`);
+    return parts.join(", ") || "the worker is still busy";
+  }
+
+  /** Each chunk the last plan asks for, outside prefetch, that its store does not hold. */
+  private missingFromCpu(): string[] {
+    const out: string[] = [];
+    const plans = this.loop?.getTickCoordinator().getLastPlans() ?? new Map();
+    for (const plan of plans.values()) {
+      for (const req of plan.requests) {
+        if (req.lane === "prefetch" || this.cpuCache.holds(req)) continue;
+        out.push(this.describeKey(req.imageId, req.chunkKey, req.tier));
+      }
+    }
+    return out;
+  }
+
+  /** Each chunk the worker wants for the open dataset and does not hold. */
+  private missingFromGpu(): string[] {
+    return this.worker
+      .missingNow(this.scenario.dataset.datasetId)
+      .filter((m): m is MissingChunk => m.kind === "chunk")
+      .map((m) => this.describeKey(m.memberId, m.chunkKey, m.tier));
+  }
+
+  /** A key with the last word on it from the source and the worker. */
+  private describeKey(memberId: string, chunkKey: string, tier: string): string {
+    const imageId = memberId.replace(/:ch\d+$/, "");
+    const notes: string[] = [];
+    const source = this.source.records.get(`${imageId}/${chunkKey}`);
+    if (!source) notes.push("never requested");
+    else notes.push(`source answered ${source.last} (${times(source.requests, "request")})`);
+    const sent = this.worker.deliveries.get(`${memberId}/${chunkKey}`)?.count ?? 0;
+    if (sent > 0) notes.push(`sent to the worker ${times(sent, "time")}`);
+    const feedback = this.feedback.get(`${memberId}/${chunkKey}`);
+    if (feedback) notes.push(`last worker feedback ${feedback.reason} (${feedback.count} in a row)`);
+    return `${memberId} ${chunkKey} [${tier}]: ${notes.join("; ")}`;
+  }
+
+  dispose(): void {
+    this.loop?.getTickCoordinator().dispose();
+    this.loop?.stop();
+    this.scene?.free();
+    traceRecorder.reset();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  }
+}
+
+function times(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
+function formatKeys(title: string, keys: string[]): string[] {
+  if (keys.length === 0) return [];
+  const lines = [`  ${title} (${keys.length}):`];
+  for (const key of keys.slice(0, REPORT_KEY_LIMIT)) lines.push(`    ${key}`);
+  if (keys.length > REPORT_KEY_LIMIT) lines.push(`    and ${keys.length - REPORT_KEY_LIMIT} more`);
+  return lines;
+}
+
+function formatReport(name: string, dpr: number, phases: PhaseOutcome[]): string {
+  const lines = [`"${name}" at device pixel ratio ${dpr}:`];
+  for (const p of phases) {
+    lines.push(
+      `phase "${p.label}": ${p.why}.`,
+      `  ${p.frames} frames, ${p.chunksSent} chunks sent to the worker; ` +
+        `CPU cache holds detail ${p.detail.resident}/${p.detail.desired}, ` +
+        `coarse ${p.coarse.resident}/${p.coarse.desired}; ${p.queued} queued, ${p.inFlight} in flight.`,
+      ...formatKeys("wanted by the plan, not in the CPU cache", p.missingCpu),
+      ...formatKeys("wanted by the worker, not on the GPU", p.missingGpu),
+      ...formatKeys(`sent to the worker ${RESENT_THRESHOLD} or more times`, p.resent),
+    );
+  }
+  return lines.join("\n");
+}

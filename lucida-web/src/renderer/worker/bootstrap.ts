@@ -20,7 +20,7 @@ import {
   buildDescriptorBuffer,
   destroyDescriptorBuffer,
 } from "../descriptorBuffer.ts";
-import { createInitialState } from "./state.ts";
+import { createInitialState, type RendererState } from "./state.ts";
 import { ensureOffscreenPool, getOrCreateLUT } from "./resources.ts";
 import { createFrameTiming } from "../passTiming.ts";
 import { proxyDescriptorKey } from "../workerContext.ts";
@@ -53,45 +53,7 @@ export async function bootstrapWorker(
     (err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }),
   );
 
-  /** A flat snapshot of a dataset's proxy pools, in the shape `computeWantedSet()` expects. */
-  function buildProxyAtlasSnapshot(datasetId: string): Map<string, ProxyAtlasSnapshot> {
-    const snap = new Map<string, ProxyAtlasSnapshot>();
-    const pools = state.proxyPoolsByDataset.get(datasetId);
-    if (!pools) return snap;
-    for (const [poolKey, pool] of pools) {
-      snap.set(poolKey, { kind: pool.kind, slots: pool.slots });
-    }
-    return snap;
-  }
-
-  /** See `WorkerCtx.postWantedSet`. */
-  function postWantedSet(datasetId?: string): void {
-    const cold = datasetId === undefined
-      ? state.currentColdState
-      : state.coldStateByDataset.get(datasetId) ?? null;
-    if (!cold) return;
-    const epochs = cold === state.currentColdState ? state.currentEpochs ?? cold.epochs : cold.epochs;
-    const proxySnap = buildProxyAtlasSnapshot(cold.datasetId);
-    const result = computeWantedSet(
-      cold,
-      state.volumeAtlases,
-      state.sliceAtlases,
-      (memberId, tier, level) =>
-        state.memberSourcePools.get(memberId)?.get(sourceKey(tier, level)),
-      proxySnap,
-    );
-    post({
-      type: "wantedSetDelta",
-      datasetId: cold.datasetId,
-      epochs,
-      missing: result.missing,
-    });
-    post({
-      type: "entityLevels",
-      datasetId: cold.datasetId,
-      entities: result.levels,
-    });
-  }
+  const postWantedSet = createWantedSetPoster(state, post);
 
   const ctx: WorkerCtx = {
     device,
@@ -130,6 +92,54 @@ export async function bootstrapWorker(
   };
 
   return ctx;
+}
+
+/**
+ * Build {@link WorkerCtx.postWantedSet} over one worker's state. Kept apart
+ * from {@link bootstrapWorker} so a test can run the real report without a GPU.
+ */
+export function createWantedSetPoster(
+  state: RendererState,
+  post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
+): (datasetId?: string) => void {
+  /** A flat snapshot of a dataset's proxy pools, in the shape `computeWantedSet()` expects. */
+  function buildProxyAtlasSnapshot(datasetId: string): Map<string, ProxyAtlasSnapshot> {
+    const snap = new Map<string, ProxyAtlasSnapshot>();
+    const pools = state.proxyPoolsByDataset.get(datasetId);
+    if (!pools) return snap;
+    for (const [poolKey, pool] of pools) {
+      snap.set(poolKey, { kind: pool.kind, slots: pool.slots });
+    }
+    return snap;
+  }
+
+  return function postWantedSet(datasetId?: string): void {
+    const cold = datasetId === undefined
+      ? state.currentColdState
+      : state.coldStateByDataset.get(datasetId) ?? null;
+    if (!cold) return;
+    const epochs = cold === state.currentColdState ? state.currentEpochs ?? cold.epochs : cold.epochs;
+    const proxySnap = buildProxyAtlasSnapshot(cold.datasetId);
+    const result = computeWantedSet(
+      cold,
+      state.volumeAtlases,
+      state.sliceAtlases,
+      (memberId, tier, level) =>
+        state.memberSourcePools.get(memberId)?.get(sourceKey(tier, level)),
+      proxySnap,
+    );
+    post({
+      type: "wantedSetDelta",
+      datasetId: cold.datasetId,
+      epochs,
+      missing: result.missing,
+    });
+    post({
+      type: "entityLevels",
+      datasetId: cold.datasetId,
+      entities: result.levels,
+    });
+  };
 }
 
 /**
