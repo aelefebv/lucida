@@ -199,7 +199,7 @@ pub async fn build_extractor(
     token_store: Arc<dyn BearerTokenStore>,
 ) -> Result<SharedExtractor, IapError> {
     Ok(match config.mode {
-        AuthMode::Disabled => Arc::new(StubPrincipalExtractor),
+        AuthMode::Disabled => Arc::new(StubPrincipalExtractor::new(config)),
         AuthMode::Google => Arc::new(DualCredentialExtractor::new(config, store, token_store)),
         AuthMode::Iap => {
             let iap_config = config
@@ -840,8 +840,7 @@ mod tests {
         let config = Arc::new(config);
         let state = state_over_empty_stores(Arc::clone(&config)).await;
 
-        let switched =
-            normalize_dev_principal("alice@example.com", Some("Alice Dev"), false).unwrap();
+        let switched = normalize_dev_principal("alice@example.com", Some("Alice Dev")).unwrap();
         let set_cookie = build_dev_principal_cookie(&config, &switched, false);
         let cookie = set_cookie.split(';').next().unwrap().to_string();
         let req = Request::builder()
