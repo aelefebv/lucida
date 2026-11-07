@@ -13,6 +13,7 @@ import { useEffect, useRef } from "react";
 import { drawHud, hudHeight, readHudColors } from "./hudDraw.ts";
 import { buildHudView, createHudHistory, HUD_TICK_MS, pushSample } from "./hudModel.ts";
 import { HudSource, type HudCacheReads } from "./hudSource.ts";
+import type { GpuAtlasReport } from "../renderer/workerProtocol.ts";
 import { HudLegend } from "./HudLegend.tsx";
 import "./Hud.css";
 
@@ -29,20 +30,25 @@ export interface HudProps {
   datasets: ReadonlyMap<string, { name: string }>;
   /** The session's cache, or null while there is none. */
   getCache: () => HudCacheReads | null;
+  /** The render worker's atlas report, or null while there is no worker. */
+  getGpuAtlases: () => GpuAtlasReport | null;
 }
 
-export function Hud({ canvasRef, datasets, getCache }: HudProps) {
+export function Hud({ canvasRef, datasets, getCache, getGpuAtlases }: HudProps) {
   const stripRef = useRef<HTMLCanvasElement | null>(null);
   const datasetsRef = useRef(datasets);
   const getCacheRef = useRef(getCache);
+  const getGpuAtlasesRef = useRef(getGpuAtlases);
   useEffect(() => {
     datasetsRef.current = datasets;
     getCacheRef.current = getCache;
-  }, [datasets, getCache]);
+    getGpuAtlasesRef.current = getGpuAtlases;
+  }, [datasets, getCache, getGpuAtlases]);
 
   useEffect(() => {
     const source = new HudSource({
       getCache: () => getCacheRef.current(),
+      getGpuAtlases: () => getGpuAtlasesRef.current(),
       datasetName: (id) => datasetsRef.current.get(id)?.name ?? id,
     });
     source.start();

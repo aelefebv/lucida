@@ -67,6 +67,7 @@ export function hudSample(atMs: number, overrides: Partial<HudSample> = {}): Hud
       overview: { bytes: 63 * MIB, budgetBytes: 64 * MIB },
       proxy: { bytes: 0, budgetBytes: 256 * MIB },
     },
+    gpuAtlases: null,
     levels: [
       { datasetId: "ds-a", name: "a.zarr", target: { min: 2, max: 2 }, pinned: false, displayed: { min: 3, max: 3 } },
     ],

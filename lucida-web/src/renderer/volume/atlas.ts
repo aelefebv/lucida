@@ -34,6 +34,11 @@ export interface LodIndirectionMeta {
 }
 
 export interface AtlasState {
+  /**
+   * Owning dataset id. Teardown matches on this, never on a pool-key prefix,
+   * which a dataset id containing the key separator would defeat.
+   */
+  datasetId: string;
   texture: GPUTexture;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
@@ -461,6 +466,7 @@ function createAtlasTexture(
  */
 function createVolumeAtlas(
   device: GPUDevice,
+  datasetId: string,
   budgetBytes: number,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
@@ -495,6 +501,7 @@ function createVolumeAtlas(
   slotGridIdx.fill(-1);
 
   return {
+    datasetId,
     texture, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
@@ -558,6 +565,7 @@ export function destroyAtlas(atlas: AtlasState): void {
 export function getOrCreateVolumePool(
   ctx: WorkerCtx,
   poolKey: string,
+  datasetId: string,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
 ): AtlasState {
@@ -569,7 +577,7 @@ export function getOrCreateVolumePool(
     return existing;
   }
   if (existing) destroyAtlas(existing);
-  const newAtlas = createVolumeAtlas(ctx.device, ctx.state.atlasBudgets.volumeAtlasBytes, chunkX, chunkY, chunkZ, t, c);
+  const newAtlas = createVolumeAtlas(ctx.device, datasetId, ctx.state.atlasBudgets.volumeAtlasBytes, chunkX, chunkY, chunkZ, t, c);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }
@@ -586,16 +594,20 @@ export function resizeIndirection(ctx: WorkerCtx, atlas: AtlasState, totalEntrie
 }
 
 /**
- * Remove the atlas pool for a removed dataset (no-op if not present).
+ * Free every volume pool `datasetId` owns, except the keys in `keep`.
  * Composed cleanup that also clears per-entity ray-pick state lives in
  * `volume/index.ts` as `removeVolumeResources`.
  */
-export function removeVolumeAtlas(ctx: WorkerCtx, idOrMember: string): void {
+export function removeVolumeAtlasesForDataset(
+  ctx: WorkerCtx,
+  datasetId: string,
+  keep?: ReadonlySet<string>,
+): void {
   const atlases = ctx.state.volumeAtlases;
-  const atlas = atlases.get(idOrMember);
-  if (atlas) {
+  for (const [poolKey, atlas] of atlases) {
+    if (atlas.datasetId !== datasetId || keep?.has(poolKey)) continue;
     destroyAtlas(atlas);
-    atlases.delete(idOrMember);
+    atlases.delete(poolKey);
   }
 }
 
