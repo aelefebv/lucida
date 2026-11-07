@@ -45,6 +45,12 @@ export interface RemapParams {
    * select the volume index arithmetic (Z multiplier included).
    */
   targetChunkZFor: ((memberId: string, level: number) => number | null) | null;
+  /**
+   * Slice mode: whether a slot holds the plane the current Z maps to at its
+   * level. A slot that fails keeps its key but stays unmapped, so the shader
+   * never draws the previous plane while the re-cut one is on its way.
+   */
+  holdsCurrentPlane?: (memberId: string, level: number, slotIndex: number) => boolean;
 }
 
 /**
@@ -79,6 +85,12 @@ export function remapSharedIndirection(params: RemapParams): void {
     if (params.targetChunkZFor) {
       const tz = params.targetChunkZFor(parsedComp.memberId, chunk.level);
       if (tz !== null && chunk.z !== tz) continue;
+    }
+    if (
+      params.holdsCurrentPlane &&
+      !params.holdsCurrentPlane(parsedComp.memberId, chunk.level, slotIndex)
+    ) {
+      continue;
     }
 
     const meta = lodMetas.find(m => m.level === chunk.level);

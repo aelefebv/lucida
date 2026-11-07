@@ -40,6 +40,7 @@ import type {
 } from "./planning/index.ts";
 import type { VisibleRegion } from "./viewport.ts";
 import type { LevelGeometry } from "../manifestTypes.ts";
+import { sliceChunkZ } from "../renderer/slicePlane.ts";
 
 // ---------------------------------------------------------------------------
 // Catalog helper
@@ -563,6 +564,35 @@ describe("iterateChunks", () => {
     expect(levelCounts.get(0)).toBe(16);
     expect(levelCounts.get(1)).toBe(4);
     expect(levelCounts.get(2)).toBe(1);
+  });
+
+  it("asks a slice view for the chunk along Z that the render worker maps the plane to", () => {
+    // Level 1 halves 100 planes to 50, in chunks 8 deep. Under a 2-D view
+    // each plane wants exactly the chunk sliceChunkZ names, which is the one
+    // the worker files the plane under.
+    const level0 = makeLevelGeo(0, [1, 1, 100, 256, 256], [1, 1, 8, 256, 256]);
+    const level1 = makeLevelGeo(1, [1, 1, 50, 128, 128], [1, 1, 8, 128, 128]);
+    const entity = createSyntheticEntity({
+      entityId: "e0", imageId: "img0", levels: [level0, level1], layoutPositionVox: [0, 0],
+    });
+    const entry = makeTileDetailEntry("e0", "img0", [1]);
+    for (let z = 0; z < 100; z++) {
+      const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 256, 256], zRangeVox: [z, z + 1] });
+      const zs = iterateChunks(entity, entry, region, makeSelection({ z })).map((r) => r.z);
+      expect(zs).toEqual([sliceChunkZ(z, 100, 50, 8)]);
+    }
+  });
+
+  it("asks a slice view for one chunk along Z even where the plane's slab spans two level planes", () => {
+    // Plane 2 of 10 spans level planes 0 and 1 of 4; only its center's plane is drawn.
+    const level0 = makeLevelGeo(0, [1, 1, 10, 256, 256], [1, 1, 1, 256, 256]);
+    const level1 = makeLevelGeo(1, [1, 1, 4, 128, 128], [1, 1, 1, 128, 128]);
+    const entity = createSyntheticEntity({
+      entityId: "e0", imageId: "img0", levels: [level0, level1], layoutPositionVox: [0, 0],
+    });
+    const entry = makeTileDetailEntry("e0", "img0", [1]);
+    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 256, 256], zRangeVox: [2, 3] });
+    expect(iterateChunks(entity, entry, region, makeSelection({ z: 2 })).map((r) => r.z)).toEqual([1]);
   });
 });
 

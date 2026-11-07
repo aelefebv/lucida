@@ -833,24 +833,34 @@ describe("tickMinimapOverview throttle", () => {
     expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // skipped → not pending
   });
 
-  it("keeps scheduling on a throttle-skip while chunks await fetch (no tail-chunk strand)", () => {
+  it("keeps scheduling on a throttle-skip once an awaited chunk lands (no tail-chunk strand), and not before", () => {
     // The loop is dirty-driven, so a throttle-skipped frame must signal
-    // continuation while members still await chunks, or a tail chunk landing
-    // inside the interval strands until an unrelated interaction.
+    // continuation when a chunk a member awaits has landed inside the interval,
+    // or it strands until an unrelated interaction. While nothing has landed it
+    // must not: the arrival dirties the loop itself, and asking for frames
+    // until then redraws at frame rate, forever if nothing fetches the chunk.
     const state = createMinimapState();
     state.enabled = true;
+    const cache = new Map<string, { data: ArrayBuffer; dataType: string }>();
     const ctx = {
       scene: { t: () => 0, c: () => 0 },
       datasets: new Map(),
+      cpuCache: { getCachedChunk: (memberId: string, key: string) => cache.get(`${memberId}/${key}`) ?? null },
     } as unknown as TickContext;
 
     tickMinimapOverview(ctx, state, 1000); // establishes lastOverviewScanMs
     expect(state.overviewBudgetPending).toBe(false); // empty scan → budget not exhausted
 
-    state.pendingFetch.set("m0", []); // a member is now awaiting fetched chunks
-    expect(tickMinimapOverview(ctx, state, 1010)).toBe(true); // skipped but continuation kept
+    state.pendingFetch.set("m0", [{ level: 2, x: 0, y: 0, z: 0, t: 0, c: 0, key: "2/0/0/0/0/0" }]);
+    expect(tickMinimapOverview(ctx, state, 1010)).toBe(false); // awaited, not landed → idle
+
+    cache.set("m0/2/0/0/0/0/0", { data: new ArrayBuffer(0), dataType: "uint16" });
+    expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // empty data is nothing to upload
+
+    cache.set("m0/2/0/0/0/0/0", { data: new ArrayBuffer(8), dataType: "uint16" });
+    expect(tickMinimapOverview(ctx, state, 1030)).toBe(true); // landed → the next scan uploads it
 
     state.pendingFetch.clear(); // seeding complete
-    expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // skipped → loop may quiesce
+    expect(tickMinimapOverview(ctx, state, 1040)).toBe(false); // skipped → loop may quiesce
   });
 });

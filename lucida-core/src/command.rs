@@ -571,9 +571,9 @@ impl Scene {
                             .unwrap_or(1);
 
                         // A new dataset seeds full settings with the same
-                        // constructor `load_document` uses. Settings adopted from
-                        // a peer before the manifest arrived are realigned to its
-                        // labels by name; entries without `label_names` stay
+                        // constructor `load_document` uses. Settings this scene
+                        // already holds for the id are realigned to its labels
+                        // by name; entries without `label_names` stay
                         // positional.
                         match self.dataset_settings.entry(dataset_id.clone()) {
                             std::collections::hash_map::Entry::Vacant(slot) => {

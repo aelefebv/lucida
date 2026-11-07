@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
-use futures_util::{SinkExt, StreamExt};
-use lucida_content::url::DatasetLocation;
+use futures_util::{SinkExt, Stream, StreamExt};
+use lucida_content::url::{DatasetLocation, normalize_dataset_url};
 use lucida_content::{DatasetId, DatasetManifest, ImageId};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
@@ -23,6 +23,7 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::binding::{ChunkResolver, parse_level_from_chunk_key};
 use crate::chunk_read::{ChunkReadError, read_chunk};
+use crate::connection::{CloseSignal, client_queue};
 use crate::dataset_open::{self, DatasetOpenContext, DatasetOpenOutcome, WorkspaceScope};
 use crate::generated::{
     DerivedCacheStorage, DerivedCacheTelemetry, DerivedChunkCache, DerivedChunkLookup,
@@ -105,9 +106,17 @@ async fn handle_client_inner(
 ) {
     let (mut ws_tx, mut ws_rx) = ws.split();
 
-    // Per-client unicast channel for targeted messages (chunk routing).
-    let (unicast_tx, mut unicast_rx) = mpsc::unbounded_channel::<Message>();
-    unicast_routes.lock().await.insert(id, unicast_tx);
+    // Per-client unicast queue for targeted messages (chunk routing). It
+    // also carries the close signal anything in the server can raise.
+    let (unicast_tx, mut unicast_rx) = client_queue();
+    let mut outbound_close = unicast_tx.close_signal();
+    let mut inbound_close = unicast_tx.close_signal();
+    unicast_routes.lock().await.insert(id, unicast_tx.clone());
+    if let Some(ctx) = workspace.as_ref() {
+        ctx.manager
+            .attach_connection(&ctx.live, id, &ctx.principal, unicast_tx.clone())
+            .await;
+    }
 
     // This connection's server-side lifecycle rows. Scoped to the connection
     // rather than the process, so a client can only ever be handed rows its
@@ -156,6 +165,9 @@ async fn handle_client_inner(
         let mut sess = session.lock().await;
         sess.remove_client(id);
         unicast_routes.lock().await.remove(&id);
+        if let Some(ctx) = workspace.as_ref() {
+            ctx.live.detach_connection(id);
+        }
         return;
     }
 
@@ -169,13 +181,26 @@ async fn handle_client_inner(
     // flush its buffered timing rows on the ticker.
     let outbound_session = Arc::clone(&session);
     let outbound_timings = Arc::clone(&timings);
-    let outbound = tokio::spawn(async move {
+    let mut outbound = tokio::spawn(async move {
         let mut flush_tick = tokio::time::interval(FLUSH_INTERVAL);
         // A tick missed while the socket was busy is not worth catching up
         // on: the next tick carries whatever accumulated meanwhile.
         flush_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            // A requested close goes out next, ahead of anything still
+            // queued: the connection is ending, and the backlog may be why.
+            if let Some(frame) = outbound_close.current() {
+                tracing::warn!(
+                    client_id = %id,
+                    code = frame.code,
+                    reason = %frame.reason,
+                    "ws.connection.closed_by_server"
+                );
+                let _ = ws_tx.send(Message::Close(Some(frame))).await;
+                break;
+            }
             tokio::select! {
+                _ = outbound_close.requested() => continue,
                 _ = flush_tick.tick() => {
                     if !flush_timings(&outbound_timings, &mut ws_tx).await {
                         break;
@@ -279,7 +304,7 @@ async fn handle_client_inner(
     let mut last_requested_snapshot: Option<Instant> = None;
 
     // Inbound: parse client messages, apply/route.
-    while let Some(Ok(msg)) = ws_rx.next().await {
+    while let Some(msg) = next_inbound(id, &mut ws_rx, &mut inbound_close).await {
         match msg {
             Message::Text(text) => {
                 // Every offset a labelled request reports is relative to
@@ -375,14 +400,13 @@ async fn handle_client_inner(
                                 continue;
                             }
 
-                            // Non-workspace `/ws` session: this path has no
-                            // workspace authorization by design — apply
-                            // directly; nothing to persist.
-                            let seq = {
-                                let mut sess = session.lock().await;
-                                sess.apply(command.clone())
-                            };
-                            broadcast_applied_command(&tx, id, seq, command);
+                            // The legacy `/ws` session has no membership, so
+                            // nobody holds the editor role a workspace asks
+                            // for before its document changes.
+                            tracing::warn!(
+                                client_id = %id,
+                                "legacy_session.command.rejected"
+                            );
                         }
                         ClientMessage::Presence {
                             camera,
@@ -454,6 +478,25 @@ async fn handle_client_inner(
                             }
                         }
                         ClientMessage::OpenRemoteDataset { request_id, url } => {
+                            // Adding a dataset takes the editor role, which
+                            // nobody holds on the legacy `/ws` session.
+                            if workspace.is_none() {
+                                send_open_failed(
+                                    id,
+                                    &request_id,
+                                    &normalize_dataset_url(&url),
+                                    open_failure(
+                                        DatasetOpenStage::Authorization,
+                                        DatasetOpenFailureKind::Authorization,
+                                        false,
+                                        "opening a dataset requires a workspace session",
+                                        None,
+                                    ),
+                                    &unicast_routes,
+                                )
+                                .await;
+                                continue;
+                            }
                             tracing::info!(
                                 client_id = %id,
                                 request_id = %request_id,
@@ -885,25 +928,36 @@ async fn handle_client_inner(
 
                 eprintln!("client {id}: unrecognized message");
             }
-            Message::Binary(data) => {
-                // Binary chunk data: [client_id: u32 LE][key_len: u16 LE][key][data]
-                if data.len() < 6 {
-                    continue;
-                }
-                let target_id = u32::from_le_bytes([data[0], data[1], data[2], data[3]]) as u64;
-
-                let senders = unicast_routes.lock().await;
-                if let Some(sender) = senders.get(&target_id) {
-                    let _ = sender.send(Message::Binary(data));
-                }
-            }
+            // Every client message is JSON text. Binary frames flow only
+            // from the server, so one arriving here carries nothing to act
+            // on and goes nowhere.
+            Message::Binary(_) => {}
             _ => {}
         }
     }
 
-    // Cleanup on disconnect.
+    // Cleanup on disconnect. A close the server asked for is written by the
+    // outbound task behind whatever the socket already holds, so give it a
+    // bounded moment to get through. Inbound frames are read and dropped
+    // meanwhile: a client blocked writing to us cannot read the close.
+    if unicast_tx.close_requested() {
+        let drain = async {
+            while let Some(Ok(_)) = ws_rx.next().await {}
+            std::future::pending::<()>().await
+        };
+        let _ = tokio::time::timeout(CLOSE_FLUSH_TIMEOUT, async {
+            tokio::select! {
+                _ = &mut outbound => {}
+                _ = drain => {}
+            }
+        })
+        .await;
+    }
     outbound.abort();
     unicast_routes.lock().await.remove(&id);
+    if let Some(ctx) = workspace.as_ref() {
+        ctx.live.detach_connection(id);
+    }
     let generated_services: Vec<_> = {
         let sess = session.lock().await;
         sess.server_bindings
@@ -945,6 +999,31 @@ async fn handle_client_inner(
     }
 
     eprintln!("client {id} disconnected");
+}
+
+/// How long a server-side close may take to reach the client before the
+/// connection is torn down regardless. A client that has not read by then
+/// sees the connection drop without the reason.
+const CLOSE_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The next frame the client sent, or `None` once the connection should end:
+/// the client closed it, a read failed (an oversized message among them), or
+/// the server asked to close it.
+async fn next_inbound<S>(id: ClientId, ws_rx: &mut S, close: &mut CloseSignal) -> Option<Message>
+where
+    S: Stream<Item = Result<Message, axum::Error>> + Unpin,
+{
+    tokio::select! {
+        next = ws_rx.next() => match next {
+            Some(Ok(msg)) => Some(msg),
+            Some(Err(e)) => {
+                tracing::info!(client_id = %id, error = %e, "ws.inbound.read_failed");
+                None
+            }
+            None => None,
+        },
+        _ = close.requested() => None,
+    }
 }
 
 fn dataset_health_snapshot(sess: &Session, filter: Option<&DatasetId>) -> Vec<DatasetSourceHealth> {
@@ -2329,7 +2408,7 @@ mod tests {
     #[tokio::test]
     async fn missing_source_chunk_is_served_as_zero_fill() {
         let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = client_queue();
         routes.lock().await.insert(5, tx);
         let store =
             Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
@@ -2368,7 +2447,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_image_fails_the_row_and_sends_nothing() {
         let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = client_queue();
         routes.lock().await.insert(5, tx);
         let store =
             Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
@@ -2402,7 +2481,7 @@ mod tests {
     /// the single frame the requesting client received.
     async fn serve_against_failing_store(failure: StoreFailure) -> serde_json::Value {
         let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = client_queue();
         routes.lock().await.insert(7, tx);
         let store = Arc::new(FailingStore(failure)) as Arc<dyn object_store::ObjectStore>;
         let cache = Arc::new(CachedStore::new(store, 1024));
@@ -2433,7 +2512,7 @@ mod tests {
     #[tokio::test]
     async fn present_source_chunk_is_served_as_binary_with_no_status_frame() {
         let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = client_queue();
         routes.lock().await.insert(5, tx);
         let store = object_store::memory::InMemory::new();
         let resolver = tiny_resolver();
@@ -2513,7 +2592,7 @@ mod tests {
     #[tokio::test]
     async fn generated_ready_chunk_is_served_with_normal_chunk_frame() {
         let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = client_queue();
         routes.lock().await.insert(5, tx);
 
         let cache = Arc::new(DerivedChunkCache::default());
@@ -2564,7 +2643,7 @@ mod tests {
     #[tokio::test]
     async fn a_not_ready_generated_answer_is_recorded_as_not_ready() {
         let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = client_queue();
         routes.lock().await.insert(5, tx);
         let cache = Arc::new(DerivedChunkCache::default());
 
@@ -2591,7 +2670,7 @@ mod tests {
     #[tokio::test]
     async fn generated_pending_status_is_sent_as_text() {
         let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = client_queue();
         routes.lock().await.insert(3, tx);
 
         send_generated_chunk_status(
@@ -2707,8 +2786,8 @@ mod tests {
         const BACKLOG: usize = 200;
 
         let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
-        let (busy_tx, mut busy_rx) = mpsc::unbounded_channel();
-        let (newcomer_tx, mut newcomer_rx) = mpsc::unbounded_channel();
+        let (busy_tx, mut busy_rx) = client_queue();
+        let (newcomer_tx, mut newcomer_rx) = client_queue();
         routes.lock().await.insert(1, busy_tx);
         routes.lock().await.insert(2, newcomer_tx);
 

@@ -18,7 +18,7 @@ export {
   growVolumeAtlas,
   removeLabelVolumePool,
   removeLabelVolumePoolsForDataset,
-  removeVolumeAtlas,
+  removeVolumeAtlasesForDataset,
   resizeIndirection,
 } from "./atlas.ts";
 
@@ -42,17 +42,18 @@ import {
   destroyAllLabelVolumePools,
   destroyAllVolumeAtlasResources,
   removeLabelVolumePoolsForDataset,
-  removeVolumeAtlas,
+  removeVolumeAtlasesForDataset,
 } from "./atlas.ts";
 import { clearAllRayHits, clearRayHitForMember } from "./eviction.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 
 /**
- * Remove resources for a removed entity or dataset. Pass a poolKey to remove
- * the whole pool or a memberId to remove per-entity state.
+ * Remove resources for a removed dataset or member: a dataset id frees every
+ * pool the dataset owns, and a member id frees that member's label pool and
+ * ray-pick state.
  */
 export function removeVolumeResources(ctx: WorkerCtx, idOrMember: string): void {
-  removeVolumeAtlas(ctx, idOrMember);
+  removeVolumeAtlasesForDataset(ctx, idOrMember);
   removeLabelVolumePoolsForDataset(ctx, idOrMember);
   clearRayHitForMember(ctx.state, idOrMember);
 }

@@ -50,6 +50,45 @@ pub struct ChunkRequestPlan {
     pub prefetch: Vec<ChunkCoord>,
 }
 
+/// The plane at a level `level_depth` planes deep that holds the center of the
+/// full-resolution plane `full_res_z`, the plane nearest-sample filtering
+/// reads. The browser's planner and render worker map a plane with the same
+/// arithmetic (`lucida-web/src/renderer/slicePlane.ts`): a slice delivery lands
+/// only in the chunk the worker maps its plane to.
+pub fn slice_level_z(full_res_z: u64, full_res_depth: u64, level_depth: u64) -> u64 {
+    let last = level_depth.saturating_sub(1);
+    if level_depth == full_res_depth || full_res_depth == 0 {
+        return full_res_z.min(last);
+    }
+    ((2 * full_res_z + 1) * level_depth / (2 * full_res_depth)).min(last)
+}
+
+/// The half-open chunk range along Z a view samples. A 2-D view samples the
+/// chunks holding its planes' mapped level planes, one chunk for one plane; a
+/// 3-D view samples every chunk its Z extent overlaps.
+fn z_chunk_range(
+    region: &VisibleRegion,
+    full_z: u64,
+    level_z: u64,
+    chunk_z: u64,
+    chunk_world_z: f64,
+    max_z: u32,
+) -> (u32, u32) {
+    if region.frustum_planes.is_some() {
+        let z_start = (region.z_range.start as f64 / chunk_world_z).floor() as u32;
+        let z_end = ((region.z_range.end as f64 / chunk_world_z).ceil().max(0.0) as u32).min(max_z);
+        return (z_start, z_end);
+    }
+    if region.z_range.end <= region.z_range.start {
+        return (0, 0);
+    }
+    let chunk_of = |z: u32| slice_level_z(z as u64, full_z, level_z) / chunk_z.max(1);
+    let first = chunk_of(region.z_range.start);
+    let last = chunk_of(region.z_range.end - 1);
+    let end = u32::try_from(last + 1).unwrap_or(u32::MAX).min(max_z);
+    (u32::try_from(first).unwrap_or(u32::MAX).min(end), end)
+}
+
 /// Compute which chunk grid cells intersect the visible region's bounds and z range.
 ///
 /// `level_geo` is the geometry at the target level (shape, chunk_shape, grid_shape).
@@ -96,8 +135,7 @@ pub fn visible_chunks(
     let row_start = (min_y / chunk_world_y).floor().max(0.0) as u32;
     let row_end = ((max_y / chunk_world_y).ceil().max(0.0) as u32).min(max_row);
 
-    let z_start = (region.z_range.start as f64 / chunk_world_z).floor() as u32;
-    let z_end = ((region.z_range.end as f64 / chunk_world_z).ceil().max(0.0) as u32).min(max_z);
+    let (z_start, z_end) = z_chunk_range(region, full_z, level_z, chunk_z, chunk_world_z, max_z);
 
     let mut chunks = Vec::new();
     for z in z_start..z_end {
@@ -195,8 +233,7 @@ pub fn visible_and_prefetch_chunks(
     let row_start = (min_y / chunk_world_y).floor().max(0.0) as u32;
     let row_end = ((max_y / chunk_world_y).ceil().max(0.0) as u32).min(max_row);
 
-    let z_start = (region.z_range.start as f64 / chunk_world_z).floor() as u32;
-    let z_end = ((region.z_range.end as f64 / chunk_world_z).ceil().max(0.0) as u32).min(max_z);
+    let (z_start, z_end) = z_chunk_range(region, full_z, level_z, chunk_z, chunk_world_z, max_z);
 
     let exp_col_start = col_start.saturating_sub(1);
     let exp_col_end = (col_end + 1).min(max_col);
@@ -454,5 +491,30 @@ mod tests {
         assert_eq!(max_z_chunk, 3);
         let z_set: std::collections::HashSet<u32> = chunks.iter().map(|c| c.z).collect();
         assert_eq!(z_set.len(), 4);
+    }
+
+    #[test]
+    fn slice_level_z_takes_the_level_plane_under_the_plane_center() {
+        assert_eq!(slice_level_z(16, 100, 50), 8);
+        assert_eq!(slice_level_z(17, 100, 50), 8);
+        assert_eq!(slice_level_z(99, 100, 50), 49);
+        assert_eq!(slice_level_z(2, 10, 4), 1);
+        assert_eq!(slice_level_z(15, 23, 23), 15);
+        assert_eq!(slice_level_z(40, 32, 16), 15);
+    }
+
+    #[test]
+    fn a_slice_view_samples_one_chunk_along_z() {
+        // Plane 2 of 10 spans level planes 0 and 1 of 4. Its center is in
+        // plane 1, so only the chunk holding plane 1 is wanted.
+        let cam = Camera::new_2d([512, 512]);
+        let region = cam.visible_region(&(2..3), None, None);
+        let full = geo(0, [10, 512, 512], [1, 512, 512]);
+        let level1 = geo(1, [4, 256, 256], [1, 256, 256]);
+        let chunks = visible_chunks(&region, &level1, 0, 0, &full);
+        let z_set: std::collections::HashSet<u32> = chunks.iter().map(|c| c.z).collect();
+        assert_eq!(z_set, std::collections::HashSet::from([1]));
+        let (needed, prefetch) = visible_and_prefetch_chunks(&region, &level1, 0, 0, &full);
+        assert!(needed.iter().chain(&prefetch).all(|c| c.z == 1));
     }
 }

@@ -7,7 +7,7 @@
 import { remapSharedIndirection, type RemapEntryInfo } from "../remap.ts";
 import type { VisibleRegion } from "../../pipeline/viewport.ts";
 import type { SliceAtlasState } from "./atlas.ts";
-import { computeTargetChunkZ } from "./zRetarget.ts";
+import { computeTargetChunkZ, computeTargetPlane } from "./zRetarget.ts";
 
 /** Remap the 2D indirection buffer to the chunks matching current T/C and each level's target Z. */
 export function remapSliceIndirection(
@@ -33,6 +33,10 @@ export function remapSliceIndirection(
     entryByMember: options.entryByMember,
     targetChunkZFor: (memberId, level) =>
       computeTargetChunkZ(atlas.entityZInfo.get(memberId)?.get(level), currentZ),
+    holdsCurrentPlane: (memberId, level, slotIndex) => {
+      const plane = computeTargetPlane(atlas.entityZInfo.get(memberId)?.get(level), currentZ);
+      return plane === null || atlas.slotLevelZ[slotIndex] === plane;
+    },
   });
   atlas.indirectionDirty = true;
 }

@@ -3,7 +3,9 @@
  *
  * Tracks optimistic "sent" facts: a chunk/proxy is considered sent
  * once posted to the worker, and worker feedback clears that fact when
- * the worker later reports eviction or a missing proxy.
+ * the worker later reports eviction, refusal, or a missing chunk or proxy.
+ * A cold-state rebuild clears nothing: the worker keeps its pools and slots
+ * across one, and its wanted set names anything it no longer holds.
  *
  * Pure collaborator: no I/O, no clocks, no worker-member-id knowledge.
  */
@@ -89,14 +91,6 @@ export class DeliveryState {
     for (const key of this.proxySent) {
       if (key.startsWith(prefix)) this.proxySent.delete(key);
     }
-  }
-
-  /**
-   * Cold-state rebuilds clear chunk delivery because chunk atlases are
-   * rebuilt. Proxy sent state survives because worker proxy pools persist.
-   */
-  onPlanRebuildStart(): void {
-    this.chunkSent.clear();
   }
 
   reset(): void {

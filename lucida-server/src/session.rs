@@ -159,17 +159,7 @@ impl Session {
     /// `None`, so anonymous peers still join and render via the numeric-id
     /// fallback.
     pub fn add_client(&mut self, id: ClientId, identity: Option<PeerIdentity>) -> PresenceState {
-        let presence = PresenceState {
-            client_id: id,
-            camera: Camera::new_2d([800, 600]),
-            view: ViewState::new(),
-            display: DisplayState::default(),
-            following: None,
-            cursor: None,
-            dataset_order: Vec::new(),
-            dataset_settings: HashMap::new(),
-            identity,
-        };
+        let presence = PresenceState::joined(id, identity);
         self.clients.insert(id, presence.clone());
         presence
     }
@@ -197,9 +187,9 @@ impl Session {
         display: DisplayState,
     ) {
         if let Some(presence) = self.clients.get_mut(&id) {
-            presence.camera = camera;
-            presence.view = view;
-            presence.display = display;
+            presence.camera = Some(camera);
+            presence.view = Some(view);
+            presence.display = Some(display);
         }
     }
 
@@ -216,8 +206,8 @@ impl Session {
         dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     ) {
         if let Some(presence) = self.clients.get_mut(&id) {
-            presence.dataset_order = dataset_order;
-            presence.dataset_settings = dataset_settings;
+            presence.dataset_order = Some(dataset_order);
+            presence.dataset_settings = Some(dataset_settings);
         }
     }
 
@@ -522,6 +512,34 @@ mod tests {
         let presence = session.add_client(3, None);
         assert_eq!(presence.identity, None);
         assert!(session.clients.get(&3).unwrap().identity.is_none());
+    }
+
+    #[test]
+    fn new_client_presence_is_unreported_until_it_reports() {
+        let mut session = Session::new();
+        let joined = session.add_client(4, None);
+        assert!(joined.camera.is_none());
+        assert!(joined.view.is_none());
+        assert!(joined.display.is_none());
+        assert!(joined.dataset_order.is_none());
+        assert!(joined.dataset_settings.is_none());
+
+        session.update_presence(
+            4,
+            Camera::new_2d([1024, 768]),
+            ViewState::new(),
+            DisplayState::default(),
+        );
+        let presence = session.clients.get(&4).unwrap();
+        assert_eq!(presence.camera.as_ref().unwrap().viewport(), [1024, 768]);
+        assert!(presence.view.is_some());
+        assert!(presence.display.is_some());
+        assert!(presence.dataset_order.is_none());
+
+        session.update_dataset_presence(4, Vec::new(), HashMap::new());
+        let presence = session.clients.get(&4).unwrap();
+        assert_eq!(presence.dataset_order, Some(Vec::new()));
+        assert_eq!(presence.dataset_settings, Some(HashMap::new()));
     }
 
     #[test]

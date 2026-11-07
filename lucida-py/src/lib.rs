@@ -156,17 +156,6 @@ impl PyScene {
         serde_json::to_string(&msg).unwrap()
     }
 
-    fn chunk_plan(&self) -> String {
-        let plan = self.inner.chunk_plan();
-        serde_json::to_string(&plan).unwrap()
-    }
-
-    fn chunk_plan_for(&self, dataset_id: &str) -> String {
-        let id = DatasetId(dataset_id.to_string());
-        let plan = self.inner.chunk_plan_for(&id);
-        serde_json::to_string(&plan).unwrap()
-    }
-
     fn dataset_ids(&self) -> String {
         let ids: Vec<&str> = self
             .inner

@@ -121,11 +121,11 @@ impl Backoff {
 
 /// How the `Secure` cookie attribute is chosen.
 ///
-/// `Auto` (the default) sets `Secure` iff the request scheme is
-/// `https`. `Always` sets it unconditionally — required when a TLS-
-/// terminating proxy strips the scheme. `Never` skips it — the only
-/// option that lets a non-loopback HTTP deployment work, used in dev
-/// when nothing terminates TLS.
+/// `Auto` (the default) sets `Secure` when the request scheme is
+/// `https` or the bind is not loopback. `Always` sets it
+/// unconditionally. `Never` skips it, the only option that lets a
+/// non-loopback HTTP deployment work, used in dev when nothing
+/// terminates TLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecureCookieMode {
     Auto,

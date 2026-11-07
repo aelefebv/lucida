@@ -263,6 +263,8 @@ export interface FindingObservation {
   /** The coverage the screen goes without: wanted chunks that are not resident. */
   lossChunks?: number;
   lossPct?: number;
+  /** Chunks the uploader stopped re-sending, each with the renderer's last reason for handing it back. */
+  held?: Array<{ entityId: string; chunkKey: string; reason: string }>;
 }
 
 export interface Finding {

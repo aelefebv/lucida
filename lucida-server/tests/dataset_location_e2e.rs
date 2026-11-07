@@ -1,74 +1,115 @@
-//! What a dataset location becomes over a real WebSocket, against the real
-//! `handle_client` stack: a location that does not parse is refused before
-//! any storage is touched, echoing the input as given, and a `file://` URL
-//! opens the path it names.
+//! What a dataset location becomes over a real workspace socket: a
+//! location that does not parse is refused before any storage is touched,
+//! echoing the input as given, and a `file://` URL opens the path it names.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::{State, ws::WebSocketUpgrade};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use lucida_content::url::DatasetLocation;
+use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::protocol::{ClientMessage, ServerMessage};
 use lucida_protocol::{DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenStage};
-use lucida_server::session::Session;
-use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes, handler};
+use lucida_server::ProxyConfig;
+use lucida_server::auth::{
+    AuthConfig, AuthMode, BearerToken, BearerTokenStore, DualCredentialExtractor,
+    LoginSessionStore, MemoryBearerTokenStore, MemorySessionStore, PrincipalExtractor,
+    hash_bearer_token,
+};
+use lucida_server::storage::{self, DatabaseUrl};
+use lucida_server::workspace::WorkspaceManager;
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, broadcast};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
-use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
+const RAW_TOKEN: &str = "lucida_pat_location_e2e";
 
-async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    ws.on_upgrade(move |socket| async move {
-        handler::handle_client(
-            id,
-            socket,
-            state.session,
-            state.tx,
-            state.unicast_routes,
-            state.proxy_config,
-        )
-        .await;
-    })
+fn owner() -> AuthPrincipal {
+    AuthPrincipal {
+        email: "owner@example.com".into(),
+        display_name: "Owner".into(),
+        picture_url: None,
+        is_admin: false,
+    }
 }
 
-async fn start_server(root: &Path) -> SocketAddr {
-    let (tx, _) = broadcast::channel::<BroadcastItem>(64);
-    let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));
+/// A live server with one workspace its owner can open datasets in.
+struct Rig {
+    address: std::net::SocketAddr,
+    workspace_id: String,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Rig {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+async fn start_server(root: &Path) -> Rig {
+    let storage = storage::open(&DatabaseUrl::in_memory()).await.unwrap();
+    let workspace = storage
+        .workspaces()
+        .create_workspace(&owner(), Some("Locations"))
+        .await
+        .unwrap();
     let mut proxy_config = ProxyConfig::defaults();
     proxy_config.cache_dir = root.join("proxies");
     proxy_config.generated_cache_dir = root.join("generated-coarse");
     proxy_config.generated_enabled = false;
-    let state = AppState {
-        session: Arc::new(Mutex::new(Session::new())),
-        tx,
-        next_id: Arc::new(AtomicU64::new(0)),
-        unicast_routes,
-        data_dir: None,
-        proxy_config,
-    };
-    let app = Router::new().route("/ws", get(ws_route)).with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
+    let manager = Arc::new(WorkspaceManager::new(storage.workspaces(), proxy_config));
+    let app: Router =
+        lucida_server::workspace::router(manager).layer(axum::middleware::from_fn_with_state(
+            bearer_extractor().await,
+            lucida_server::auth::middleware::auth_middleware,
+        ));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
     });
-    addr
+    Rig {
+        address,
+        workspace_id: workspace.id,
+        server,
+    }
+}
+
+/// The principal extractor the real server runs, holding one token for
+/// the owner.
+async fn bearer_extractor() -> Arc<dyn PrincipalExtractor> {
+    let now = chrono::Utc::now();
+    let tokens = Arc::new(MemoryBearerTokenStore::new());
+    let principal = owner();
+    tokens
+        .create(BearerToken {
+            id: "location-e2e".into(),
+            token_hash: hash_bearer_token(RAW_TOKEN),
+            name: "location e2e".into(),
+            email: principal.email.clone(),
+            display_name: principal.display_name.clone(),
+            picture_url: None,
+            created_at: now,
+            last_used_at: None,
+            expires_at: now + chrono::Duration::hours(1),
+            revoked_at: None,
+        })
+        .await
+        .unwrap();
+    let mut config = AuthConfig::for_tests();
+    config.mode = AuthMode::Google;
+    Arc::new(DualCredentialExtractor::new(
+        Arc::new(config),
+        Arc::new(MemorySessionStore::new()) as Arc<dyn LoginSessionStore>,
+        tokens as Arc<dyn BearerTokenStore>,
+    ))
 }
 
 /// The terminal reply to one open: its envelope URL, and the failure
@@ -78,8 +119,19 @@ struct OpenReply {
     failure: Option<DatasetOpenFailureDiagnostic>,
 }
 
-async fn open(addr: SocketAddr, url: &str) -> OpenReply {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/ws"))
+async fn open(rig: &Rig, url: &str) -> OpenReply {
+    let mut request = format!(
+        "ws://{}/ws/workspaces/{}",
+        rig.address,
+        urlencoding::encode(&rig.workspace_id)
+    )
+    .into_client_request()
+    .unwrap();
+    request.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {RAW_TOKEN}").parse().unwrap(),
+    );
+    let (mut ws, _) = tokio_tungstenite::connect_async(request)
         .await
         .expect("ws connect");
     let request = ClientMessage::OpenRemoteDataset {
@@ -165,10 +217,10 @@ fn write_minimal_zarr(dir: &Path) {
 #[tokio::test]
 async fn a_relative_path_is_refused_before_storage_echoing_the_input() {
     let tmp = tempfile::tempdir().unwrap();
-    let addr = start_server(tmp.path()).await;
+    let rig = start_server(tmp.path()).await;
 
     for input in ["./sample.zarr", "data/sample.zarr"] {
-        let reply = open(addr, input).await;
+        let reply = open(&rig, input).await;
         let failure = reply.failure.expect("a relative path must fail");
         assert_eq!(reply.url, input, "the envelope echoes the input as given");
         assert_eq!(failure.stage, DatasetOpenStage::RequestReceived);
@@ -182,9 +234,9 @@ async fn a_relative_path_is_refused_before_storage_echoing_the_input() {
 #[tokio::test]
 async fn an_unknown_scheme_is_refused_naming_the_scheme() {
     let tmp = tempfile::tempdir().unwrap();
-    let addr = start_server(tmp.path()).await;
+    let rig = start_server(tmp.path()).await;
 
-    let reply = open(addr, "ftp://host/sample.zarr").await;
+    let reply = open(&rig, "ftp://host/sample.zarr").await;
     let failure = reply.failure.expect("an unknown scheme must fail");
     assert_eq!(reply.url, "ftp://host/sample.zarr");
     assert_eq!(failure.stage, DatasetOpenStage::RequestReceived);
@@ -197,7 +249,7 @@ async fn a_file_url_opens_the_absolute_path_it_names() {
     let tmp = tempfile::tempdir().unwrap();
     let data = tmp.path().join("sample.zarr");
     write_minimal_zarr(&data);
-    let addr = start_server(tmp.path()).await;
+    let rig = start_server(tmp.path()).await;
 
     let path = data.to_str().unwrap().replace('\\', "/");
     // A Unix path already starts with the slash that ends `file://`'s empty
@@ -207,7 +259,7 @@ async fn a_file_url_opens_the_absolute_path_it_names() {
     } else {
         format!("file:///{path}")
     };
-    let reply = open(addr, &file_url).await;
+    let reply = open(&rig, &file_url).await;
 
     assert!(reply.failure.is_none(), "{:?}", reply.failure);
     let expected = DatasetLocation::parse(data.to_str().unwrap()).unwrap();

@@ -42,6 +42,7 @@ import {
   TRACE_SCHEMA_VERSION,
   type GpuIdentity,
   type TraceDocument,
+  type TracePointEvent,
 } from "../types.ts";
 
 const MS = 1_000;
@@ -306,6 +307,54 @@ describe("attribution", () => {
       seen.add(attribution.confidence);
     }
     expect([...seen].sort()).toEqual([...CONFIDENCE_WORDS].sort());
+  });
+});
+
+describe("chunks the uploader held", () => {
+  function held(chunkKey: string, reason: TracePointEvent["reason"], atUs: number): TracePointEvent {
+    const [level, t, c, z, y, x] = chunkKey.split("/").map(Number);
+    return {
+      atUs,
+      kind: "held",
+      reason,
+      chunk: {
+        datasetId: "",
+        entityId: "tile-0",
+        imageId: "image-0",
+        residencyTier: "detail",
+        level, t, c, z, y, x,
+        chunkKey,
+      },
+      levelChange: null,
+    };
+  }
+
+  it("leads with a stall that names each held chunk and the renderer's reason, and the verdict says the view settled without them", () => {
+    const run = healthyLocalOpen();
+    run.events = [
+      held("0/0/0/1/0/0", "wrong-slice", 200 * MS),
+      held("0/0/0/0/1/2", "evicted", 200 * MS),
+      held("0/0/0/0/1/2", "evicted", 250 * MS),
+    ];
+    const doc = diagnoseRun(run);
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain("0/0/0/1/0/0 (wrong-slice)");
+    expect(doc.verdict.text).toContain("the view settled without them");
+    const lead = doc.findings[0];
+    expect(lead.rule).toBe(RULESET.held.id);
+    expect(lead.severity).toBe("stall");
+    expect(lead.observed.chunks).toBe(2);
+    expect(lead.observed.held).toEqual([
+      { entityId: "tile-0", chunkKey: "0/0/0/1/0/0", reason: "wrong-slice" },
+      { entityId: "tile-0", chunkKey: "0/0/0/0/1/2", reason: "evicted" },
+    ]);
+    // The attribution is about the critical path, which the held chunks are not.
+    expect(lead.attribution).toBeNull();
+  });
+
+  it("finds nothing held on a run that held nothing", () => {
+    expect(diagnoseRun(healthyLocalOpen()).findings.some((f) => f.rule === RULESET.held.id)).toBe(false);
   });
 });
 
