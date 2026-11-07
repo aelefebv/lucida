@@ -79,6 +79,15 @@ export interface DatasetSourceHealth {
   source_cache?: DatasetSourceCacheStats | null;
   generated_coarse: DatasetGeneratedCoarseHealth;
   messages?: string[];
+  /** What the import found. Omitted on the wire when empty. */
+  import_warnings?: DatasetImportWarning[];
+}
+
+export interface DatasetImportWarning {
+  target: string;
+  message: string;
+  /** The warning says the data is shown wrong, so it degrades `status`. */
+  degrades: boolean;
 }
 
 export type DatasetOpenStage =
@@ -255,18 +264,39 @@ export interface PeerIdentity {
   initial?: string;
 }
 
+/** Mirror of `lucida_core::protocol::PresenceState`. A field the peer has not
+ *  reported yet is absent, so a follower adopts nothing for it. */
 export interface PresenceState {
   client_id: ClientId;
-  camera: unknown;
-  view: { z_range: { start: number; end: number }; t: number; c: number };
-  display: { contrast_min: number; contrast_max: number; gamma: number };
+  /** Camera, view and display arrive together in one `presence` message. */
+  camera?: unknown;
+  view?: { z_range: { start: number; end: number }; t: number; c: number };
+  display?: { contrast_min: number; contrast_max: number; gamma: number };
   following: ClientId | null;
   cursor: [number, number] | null;
-  dataset_order: string[];
-  dataset_settings: Record<string, unknown>;
+  /** Order and settings arrive together in one `dataset_presence` message. */
+  dataset_order?: string[];
+  dataset_settings?: Record<string, unknown>;
   /** Presentational identity for this peer's cursor. Absent for peers from a
    *  session without auth. */
   identity?: PeerIdentity | null;
+}
+
+/** `PresenceState` as the server sends it. A peer that has not reported a
+ *  camera still carries `camera`, `view` and `display` for readers that
+ *  predate `camera_reported`, so those values are not the peer's. */
+type PresenceStateWire = Omit<PresenceState, "camera" | "view" | "display"> & {
+  camera: unknown;
+  view: NonNullable<PresenceState["view"]>;
+  display: NonNullable<PresenceState["display"]>;
+  camera_reported?: boolean;
+};
+
+function readPresence(wire: PresenceStateWire): PresenceState {
+  const { camera_reported, ...presence } = wire;
+  if (camera_reported !== false) return presence;
+  const { camera: _camera, view: _view, display: _display, ...unreported } = presence;
+  return unreported;
 }
 
 export interface BridgeHandlers {
@@ -522,7 +552,7 @@ export class Bridge {
               this.handlers.onSnapshot(
                 msg.seq,
                 JSON.stringify(msg.document),
-                msg.peers ?? [],
+                ((msg.peers ?? []) as PresenceStateWire[]).map(readPresence),
                 msg.your_id ?? 0,
                 msg.generated_availability ?? {},
               );
@@ -568,7 +598,7 @@ export class Bridge {
             this.handlers.onAck(msg.seq);
             break;
           case "peer_joined":
-            this.handlers.onPeerJoined?.(msg.client_id, msg.presence);
+            this.handlers.onPeerJoined?.(msg.client_id, readPresence(msg.presence));
             break;
           case "peer_left":
             this.handlers.onPeerLeft?.(msg.client_id);

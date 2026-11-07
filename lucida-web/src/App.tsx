@@ -1148,6 +1148,7 @@ function App({
       selectedLayerId={selectedDatasetId}
       expandedLayerId={layers.expandedLayerId}
       soloChannel={dims.soloChannel}
+      importWarnings={bridge.datasetImportWarnings}
       onSelectLayer={layers.handleLayerSelect}
       onToggleExpand={layers.handleLayerToggleExpand}
       onSetVisible={layers.handleLayerSetVisible}
@@ -1398,6 +1399,7 @@ function App({
                         canvasRef={render.canvasRef}
                         datasets={datasetsRef.current}
                         getCache={() => bridge.sessionRef.current?.cpuCache ?? null}
+                        getGpuAtlases={() => render.clientRef.current?.gpuAtlases() ?? null}
                       />
                     </Suspense>
                   )}

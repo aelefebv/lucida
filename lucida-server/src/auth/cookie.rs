@@ -1,7 +1,7 @@
 //! Cookie reading + Set-Cookie building for the session cookie.
 //!
 //! The cookie (`lucida_session` by default) carries an opaque id. It is
-//! `HttpOnly`, `Path=/`, and `Secure` by request scheme unless
+//! `HttpOnly`, `Path=/`, and `Secure` over https or off loopback unless
 //! `LUCIDA_COOKIE_SECURE` overrides it. `SameSite=Lax` lets a saved-view
 //! link opened from another site land signed in while still blocking
 //! cross-site writes. `Max-Age` matches the session hard cap.
@@ -53,22 +53,28 @@ pub fn read_session_cookie(parts: &Parts, cookie_name: &str) -> Option<String> {
         })
 }
 
-/// Decide whether to set the `Secure` attribute given the request
-/// scheme and the server's secure-cookie mode.
-pub fn resolve_secure(mode: SecureCookieMode, request_is_https: bool) -> bool {
-    match mode {
+/// Decide whether to set the `Secure` attribute.
+///
+/// `Auto` sets it for a request that came over https, and on any bind
+/// other than loopback. The scheme alone misses most deployments: a
+/// perimeter that terminates TLS forwards plain http, and an HTTP/1.1
+/// request carries no scheme at all. A server other machines can reach
+/// is served over https in any deployment worth having, and one that is
+/// not sets `LUCIDA_COOKIE_SECURE=never`.
+pub fn resolve_secure(config: &AuthConfig, request_is_https: bool) -> bool {
+    match config.secure_mode {
         SecureCookieMode::Always => true,
         SecureCookieMode::Never => false,
-        SecureCookieMode::Auto => request_is_https,
+        SecureCookieMode::Auto => request_is_https || !config.bind_is_loopback(),
     }
 }
 
 /// Detect whether the inbound request was served over HTTPS. Trusts the
-/// request scheme as observed by axum (`parts.uri.scheme_str()`); when
-/// behind a TLS-terminating proxy that strips the scheme, the operator
-/// must set `LUCIDA_COOKIE_SECURE=always` explicitly. We deliberately
-/// do not trust `X-Forwarded-Proto` here — operator-override is the
-/// safer default than auto-trusting a spoofable header.
+/// request scheme as observed by axum (`parts.uri.scheme_str()`), which
+/// a TLS-terminating perimeter strips; [`resolve_secure`] covers that
+/// case by the bind. We deliberately do not trust `X-Forwarded-Proto`
+/// here: operator override is the safer default than auto-trusting a
+/// spoofable header.
 pub fn request_is_https(parts: &Parts) -> bool {
     parts
         .uri
@@ -89,7 +95,7 @@ pub fn build_session_cookie(
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
-    cookie.set_secure(resolve_secure(config.secure_mode, request_is_https));
+    cookie.set_secure(resolve_secure(config, request_is_https));
     cookie.set_max_age(CookieDuration::seconds(config.hard_cap.as_secs() as i64));
     cookie.to_string()
 }
@@ -101,7 +107,7 @@ pub fn build_clearing_cookie(config: &AuthConfig, request_is_https: bool) -> Str
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
-    cookie.set_secure(resolve_secure(config.secure_mode, request_is_https));
+    cookie.set_secure(resolve_secure(config, request_is_https));
     cookie.set_max_age(CookieDuration::ZERO);
     cookie.to_string()
 }
@@ -129,7 +135,7 @@ pub fn build_signed_out_marker(config: &AuthConfig, request_is_https: bool) -> S
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
-    cookie.set_secure(resolve_secure(config.secure_mode, request_is_https));
+    cookie.set_secure(resolve_secure(config, request_is_https));
     cookie.set_max_age(CookieDuration::seconds(SIGNED_OUT_TTL_SECS));
     cookie.to_string()
 }
@@ -142,7 +148,7 @@ pub fn build_clearing_signed_out_marker(config: &AuthConfig, request_is_https: b
     cookie.set_http_only(true);
     cookie.set_path("/");
     cookie.set_same_site(SameSite::Lax);
-    cookie.set_secure(resolve_secure(config.secure_mode, request_is_https));
+    cookie.set_secure(resolve_secure(config, request_is_https));
     cookie.set_max_age(CookieDuration::ZERO);
     cookie.to_string()
 }
@@ -184,12 +190,49 @@ mod tests {
         assert!(read_session_cookie(&parts, "lucida_session").is_none());
     }
 
+    fn config_with(mode: SecureCookieMode, bind: &str) -> AuthConfig {
+        let mut config = AuthConfig::for_tests();
+        config.secure_mode = mode;
+        config.bind_addr = bind.parse().unwrap();
+        config
+    }
+
     #[test]
     fn secure_resolution_matches_documented_modes() {
-        assert!(resolve_secure(SecureCookieMode::Always, false));
-        assert!(!resolve_secure(SecureCookieMode::Never, true));
-        assert!(resolve_secure(SecureCookieMode::Auto, true));
-        assert!(!resolve_secure(SecureCookieMode::Auto, false));
+        let loopback = "127.0.0.1:9876";
+        assert!(resolve_secure(
+            &config_with(SecureCookieMode::Always, loopback),
+            false
+        ));
+        assert!(!resolve_secure(
+            &config_with(SecureCookieMode::Never, loopback),
+            true
+        ));
+        assert!(resolve_secure(
+            &config_with(SecureCookieMode::Auto, loopback),
+            true
+        ));
+        assert!(!resolve_secure(
+            &config_with(SecureCookieMode::Auto, loopback),
+            false
+        ));
+    }
+
+    #[test]
+    fn auto_is_secure_off_loopback_whatever_the_request_scheme() {
+        let public = "0.0.0.0:9876";
+        assert!(resolve_secure(
+            &config_with(SecureCookieMode::Auto, public),
+            false
+        ));
+        assert!(!resolve_secure(
+            &config_with(SecureCookieMode::Never, public),
+            false
+        ));
+
+        let header =
+            build_session_cookie(&config_with(SecureCookieMode::Auto, public), "id", false);
+        assert!(header.contains("Secure"), "{header}");
     }
 
     #[test]

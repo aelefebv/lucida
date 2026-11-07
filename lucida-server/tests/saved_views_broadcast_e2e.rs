@@ -18,7 +18,7 @@ use axum::http::{Request, StatusCode};
 use axum::middleware::from_fn_with_state;
 use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::{Value, json};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tower::ServiceExt;
 
 use lucida_content::{
@@ -37,6 +37,7 @@ use lucida_server::binding::{ChunkResolver, ServerBinding};
 use lucida_server::bookmarks::handlers::BookmarksState;
 use lucida_server::bookmarks::routes::router as bookmarks_router;
 use lucida_server::bookmarks::{BookmarkStore, MemoryBookmarkStore};
+use lucida_server::connection::{ClientReceiver, client_queue};
 use lucida_server::generated::DerivedChunkCache;
 use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 use lucida_server::session::Session;
@@ -211,14 +212,14 @@ async fn install_dataset(rig: &Rig, url: &str) {
         .insert(DatasetId(format!("ds-{url}")), make_binding(url));
 }
 
-async fn connect_client(rig: &Rig, id: ClientId) -> mpsc::UnboundedReceiver<Message> {
+async fn connect_client(rig: &Rig, id: ClientId) -> ClientReceiver {
     rig.session.lock().await.add_client(id, None);
-    let (tx, rx) = mpsc::unbounded_channel::<Message>();
+    let (tx, rx) = client_queue();
     rig.unicast_routes.lock().await.insert(id, tx);
     rx
 }
 
-fn drain_text(rx: &mut mpsc::UnboundedReceiver<Message>) -> Vec<String> {
+fn drain_text(rx: &mut ClientReceiver) -> Vec<String> {
     let mut out = Vec::new();
     while let Ok(msg) = rx.try_recv() {
         if let Message::Text(t) = msg {

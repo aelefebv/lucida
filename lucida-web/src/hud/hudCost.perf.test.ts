@@ -96,6 +96,7 @@ function sampleAt(tick: number): HudSample {
       overview: { bytes: 60 * MIB, budgetBytes: 64 * MIB },
       proxy: { bytes: 0, budgetBytes: 256 * MIB },
     },
+    gpuAtlases: { atlases: 6, bytes: (300 + tick) * MIB },
     levels: Array.from({ length: 4 }, (_, i) => ({
       datasetId: `ds-${i}`,
       name: `dataset-${i}.zarr`,

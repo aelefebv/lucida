@@ -145,12 +145,11 @@ spec:
             - name: LUCIDA_DATA_DIR
               value: "/var/lib/lucida/data"
 
-            # ---- Required behind a TLS-terminating ingress ----
+            # ---- Behind a TLS-terminating ingress ----
             # The ingress terminates TLS and forwards http:// to the
-            # pod. Lucida's auto-detect of cookie `Secure` looks at
-            # the request scheme; with http it would NOT mark cookies
-            # Secure, and the browser would refuse to set them on the
-            # https origin. Force `always` to bridge the gap.
+            # pod. `auto` marks cookies Secure anyway, because the bind
+            # is not loopback; `always` says so outright, so a change
+            # to the bind cannot drop it.
             # We deliberately don't trust X-Forwarded-Proto here.
             - name: LUCIDA_COOKIE_SECURE
               value: "always"
