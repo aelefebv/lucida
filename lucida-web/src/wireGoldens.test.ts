@@ -818,7 +818,17 @@ const expectedSourceHealth: DatasetSourceHealth = {
       },
     ],
   },
-  messages: ["generated coarse cache is warming"],
+  messages: [
+    "generated coarse cache is warming",
+    "tiles differ in shape, and smaller tiles are padded with fill",
+  ],
+  import_warnings: [
+    {
+      target: "wds-0f3a",
+      message: "tiles differ in shape, and smaller tiles are padded with fill",
+      degrades: true,
+    },
+  ],
 };
 
 const expectedProgressDiagnostic: DatasetOpenProgressDiagnostic = {

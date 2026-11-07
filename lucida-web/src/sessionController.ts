@@ -4,6 +4,7 @@ import {
   bridgeLog,
   type BridgeHandlers,
   type ClientId,
+  type DatasetImportWarning,
   type DatasetOpenProgressDiagnostic,
   type PresenceState,
 } from "./bridge.ts";
@@ -142,6 +143,9 @@ export interface SessionControllerEvents {
    *  the author's own edits. */
   onRemoteDocumentChanged: () => void;
   onWorkspaceArchived: () => void;
+  /** Each dataset's import warnings, by dataset id, from the server's dataset
+   *  health. A fresh map each time; datasets without warnings are absent. */
+  onDatasetImportWarnings: (warnings: ReadonlyMap<string, readonly DatasetImportWarning[]>) => void;
 }
 
 /**
@@ -243,6 +247,17 @@ export class SessionController {
   /** Sum of [`overflowByUrl`], surfaced as
    *  [`RemoteDatasetActivity.warningsOverflow`]. */
   private overflowWarnings = 0;
+  /** Import warnings by dataset id, as dataset health last reported them.
+   *  Health is asked because open progress reaches only the opener and only
+   *  on a fresh open, while a peer's open and a workspace restored after a
+   *  server restart import with warnings just the same. */
+  private importWarnings: ReadonlyMap<string, readonly DatasetImportWarning[]> = new Map();
+  /** Datasets whose import warnings already went to the open-warning list,
+   *  so a later refresh cannot bring back a notice the user dismissed. */
+  private readonly announcedImportWarnings = new Set<string>();
+  /** Numbers each health request, so a reply that a newer one overtook is
+   *  dropped. */
+  private importWarningsRequest = 0;
   /** True while a coalesced `onRemoteDocumentChanged` is scheduled for a
    *  snapshot burst. Commands applied meanwhile (replays, gap-buffer drain)
    *  are covered by that one emission. */
@@ -341,6 +356,8 @@ export class SessionController {
     this.retainedMessages.clear();
     this.overflowByUrl.clear();
     this.overflowWarnings = 0;
+    this.importWarnings = new Map();
+    this.announcedImportWarnings.clear();
   }
 
   // Outbound surface: user-initiated sends.
@@ -701,9 +718,45 @@ export class SessionController {
     this.session.ensureAssetCatalog()?.removeDataset(datasetId);
     this.session.generatedAvailability.removeDataset(datasetId);
     this.session.ensureLayoutRegistry()?.removeDataset(datasetId);
-    // Warnings are keyed by source url and removal carries only the dataset
-    // id, so they stay until dismiss or connection loss. Clearing wholesale
-    // would drop other datasets' live warnings.
+    // Open warnings are keyed by source url and removal carries only the
+    // dataset id, so they stay until dismiss or connection loss. Clearing
+    // wholesale would drop other datasets' live warnings.
+    if (this.importWarnings.has(datasetId)) {
+      const next = new Map(this.importWarnings);
+      next.delete(datasetId);
+      this.importWarnings = next;
+      this.deps.events.onDatasetImportWarnings(next);
+    }
+  }
+
+  /** Ask the server's dataset health for every dataset's import warnings.
+   *  The first time a dataset reports any, they also join the open-warning
+   *  list, as a fresh open's do. Best-effort: a failed request leaves the
+   *  last answer standing. */
+  private refreshImportWarnings(): void {
+    const request = ++this.importWarningsRequest;
+    this.session.bridge.requestDatasetHealth().then(
+      (datasets) => {
+        if (this.destroyed || request !== this.importWarningsRequest) return;
+        const next = new Map<string, readonly DatasetImportWarning[]>();
+        for (const health of datasets) {
+          const warnings = health.import_warnings ?? [];
+          if (warnings.length === 0) continue;
+          const datasetId = health.workspace_dataset_id;
+          next.set(datasetId, warnings);
+          if (this.announcedImportWarnings.has(datasetId)) continue;
+          this.announcedImportWarnings.add(datasetId);
+          for (const warning of warnings) {
+            this.collectOpenWarning(health.source_url ?? datasetId, warning.message);
+          }
+        }
+        this.importWarnings = next;
+        this.deps.events.onDatasetImportWarnings(next);
+      },
+      (error: unknown) => {
+        bridgeLog("dataset_health.import_warnings_failed", { error: String(error) });
+      },
+    );
   }
 
   private setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource): void {
@@ -931,6 +984,7 @@ export class SessionController {
           // so an open sent now reaches the server. One-shot sends such as
           // the seed open gate on this signal.
           this.deps.events.onSessionReadyChanged(true);
+          this.refreshImportWarnings();
         } catch (e) {
           console.warn("[Bridge] bad snapshot:", e);
         }
@@ -1301,5 +1355,6 @@ export class SessionController {
     // Resolve the saved-view applier's pending open. Safe for opens it didn't
     // start: `notifyDatasetOpened` ignores unknown ids.
     this.deps.getSavedViewHooks()?.onDatasetOpened(datasetId);
+    this.refreshImportWarnings();
   }
 }
