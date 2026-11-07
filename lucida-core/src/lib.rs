@@ -15,6 +15,8 @@ pub mod scene;
 pub mod target_level;
 pub mod transform;
 pub mod view;
+#[cfg(any(test, feature = "test-support"))]
+pub mod view_properties;
 pub mod view_transform;
 pub mod wasm_log;
 
