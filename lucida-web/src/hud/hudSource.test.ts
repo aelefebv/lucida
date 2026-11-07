@@ -18,6 +18,7 @@ describe("HudSource", () => {
       recorder,
       now,
       getCache: () => cache,
+      getGpuAtlases: () => ({ atlases: 4, bytes: 96 * MIB }),
       datasetName: (id) => `${id}.zarr`,
     });
     source.start();
@@ -56,6 +57,7 @@ describe("HudSource", () => {
     expect(sample.lanes?.inFlight.detail).toBe(3);
     expect(sample.lanes?.pending.prefetch).toBe(7);
     expect(sample.pools?.main.bytes).toBe(5 * MIB);
+    expect(sample.gpuAtlases).toEqual({ atlases: 4, bytes: 96 * MIB });
     expect(cache.calls).toBe(1);
     source.dispose();
   });
@@ -85,6 +87,7 @@ describe("HudSource", () => {
     expect(sample.quiescence).toBeNull();
     expect(sample.lanes).toBeNull();
     expect(sample.pools).toBeNull();
+    expect(sample.gpuAtlases).toBeNull();
     expect(sample.levels).toEqual([]);
     expect(sample.runOpen).toBe(false);
   });
