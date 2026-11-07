@@ -650,24 +650,8 @@ fn capture_saved_view_from_snapshot(
                 format!("no peer presence found for client {source_client_id}"),
             )
         })?;
-    let (dataset_order, dataset_settings) =
-        hydrated_dataset_presence(&snapshot.document, source_presence);
-    let view = SavedView {
-        v: lucida_core::saved_view::SAVED_VIEW_VERSION,
-        datasets: Vec::new(),
-        // `SavedView`'s per-dataset maps are `IndexMap` (deterministic wire
-        // order); the CLI helpers build plain `HashMap`s, so collect into the
-        // field's `IndexMap` type at the boundary.
-        active_layouts: active_layouts_from_document(&snapshot.document)
-            .into_iter()
-            .collect(),
-        camera: source_presence.camera.clone(),
-        view: source_presence.view.clone(),
-        display: source_presence.display.clone(),
-        dataset_order,
-        dataset_settings: dataset_settings.into_iter().collect(),
-        auto_contrast: Default::default(),
-    };
+    let scene = crate::view::scene_from_presence(&snapshot.document, source_presence);
+    let view = crate::view::saved_view_from_scene(&snapshot.document, scene);
     let source = SavedViewPresenceSource {
         client_id: source_client_id,
         kind: if source_client_id == snapshot.your_id {
@@ -814,10 +798,11 @@ fn dataset_presence_for_saved_view(
         .filter(|id| loaded_ids.contains(*id))
         .cloned()
         .collect::<Vec<_>>();
+    let own_order = own_presence.dataset_order.as_deref().unwrap_or_default();
     if order.is_empty() && requested_ids.is_empty() {
-        order = own_presence.dataset_order.clone();
+        order = own_order.to_vec();
     }
-    for id in &own_presence.dataset_order {
+    for id in own_order {
         if loaded_ids.contains(id) && !order.contains(id) {
             order.push(id.clone());
         }
@@ -828,7 +813,7 @@ fn dataset_presence_for_saved_view(
         }
     }
 
-    let mut settings = own_presence.dataset_settings.clone();
+    let mut settings = own_presence.dataset_settings.clone().unwrap_or_default();
     for id in &loaded_ids {
         settings.entry(id.clone()).or_default();
     }
@@ -844,42 +829,6 @@ fn dataset_presence_for_saved_view(
     }
     settings.retain(|id, _| loaded_ids.contains(id));
     Some((order, settings))
-}
-
-fn hydrated_dataset_presence(
-    document: &DocumentState,
-    presence: &PresenceState,
-) -> (Vec<DatasetId>, HashMap<DatasetId, DatasetDisplaySettings>) {
-    let loaded_ids = document.manifests.keys().cloned().collect::<HashSet<_>>();
-    let mut order = presence.dataset_order.clone();
-    for id in document.manifests.keys() {
-        if !order.contains(id) {
-            order.push(id.clone());
-        }
-    }
-    order.retain(|id| loaded_ids.contains(id));
-
-    let mut settings = presence.dataset_settings.clone();
-    for id in document.manifests.keys() {
-        settings.entry(id.clone()).or_default();
-    }
-    settings.retain(|id, _| loaded_ids.contains(id));
-    (order, settings)
-}
-
-fn active_layouts_from_document(document: &DocumentState) -> HashMap<DatasetId, LayoutId> {
-    document
-        .manifests
-        .iter()
-        .filter_map(|(dataset_id, manifest)| {
-            let layout = document
-                .active_layout_ids
-                .get(dataset_id)
-                .or(manifest.default_layout_id.as_ref())
-                .or_else(|| manifest.source_layouts().first().map(|layout| &layout.id))?;
-            Some((dataset_id.clone(), layout.clone()))
-        })
-        .collect()
 }
 
 fn layout_exists(document: &DocumentState, dataset_id: &DatasetId, layout_id: &LayoutId) -> bool {
@@ -1071,17 +1020,17 @@ mod tests {
     fn presence(client_id: ClientId) -> PresenceState {
         PresenceState {
             client_id,
-            camera: Camera::Slice(Slice {
+            camera: Some(Camera::Slice(Slice {
                 center: [10.0, 20.0],
                 zoom: 2.0,
                 viewport: [800, 600],
-            }),
-            view: ViewState::new(),
-            display: DisplayState::default(),
+            })),
+            view: Some(ViewState::new()),
+            display: Some(DisplayState::default()),
             following: None,
             cursor: None,
-            dataset_order: Vec::new(),
-            dataset_settings: HashMap::new(),
+            dataset_order: Some(Vec::new()),
+            dataset_settings: Some(HashMap::new()),
             identity: None,
         }
     }

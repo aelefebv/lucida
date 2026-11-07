@@ -16,7 +16,7 @@ export {
   removeLabelSlicePool,
   removeLabelSlicePoolsForDataset,
   resetLabelSliceAllocWarnings,
-  removeSliceAtlas,
+  removeSliceAtlasesForDataset,
   resizeSliceIndirection,
 } from "./atlas.ts";
 
@@ -41,17 +41,18 @@ import {
   destroyAllSliceAtlasResources,
   destroyAllLabelSlicePools,
   removeLabelSlicePoolsForDataset,
-  removeSliceAtlas,
+  removeSliceAtlasesForDataset,
 } from "./atlas.ts";
 import { clearAllCameraUVs, clearCameraUVForMember } from "./eviction.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 
 /**
- * Remove resources for a removed entity or dataset. Pass a poolKey to remove
- * the whole pool or a memberId to remove per-entity state.
+ * Remove resources for a removed dataset or member: a dataset id frees every
+ * pool the dataset owns, and a member id frees that member's label pool and
+ * camera-UV state.
  */
 export function removeSliceResources(ctx: WorkerCtx, idOrMember: string): void {
-  removeSliceAtlas(ctx, idOrMember);
+  removeSliceAtlasesForDataset(ctx, idOrMember);
   removeLabelSlicePoolsForDataset(ctx, idOrMember);
   clearCameraUVForMember(ctx.state, idOrMember);
 }

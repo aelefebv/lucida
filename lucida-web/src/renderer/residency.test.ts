@@ -28,6 +28,7 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: str
     for (const m of metas) totalIndirection += m.gridDims[0] * m.gridDims[1] * m.gridDims[2];
   }
   return {
+    datasetId: "ds1",
     texture: null as unknown as GPUTexture,
     indirectionBuf: null as unknown as GPUBuffer,
     indirectionData: new Uint32Array(Math.max(totalIndirection, 1)).fill(0xFFFFFFFF),
@@ -64,6 +65,7 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     [defaultMember, new Map([[0, { chunkZ: 32, fullResDepth: 64, levelDepth: 64 }]])],
   ]);
   return {
+    datasetId: "ds1",
     texture: null as unknown as GPUTexture,
     indirectionBuf: null as unknown as GPUBuffer,
     indirectionData: new Uint32Array(Math.max(totalIndirection, 1)).fill(0xFFFFFFFF),

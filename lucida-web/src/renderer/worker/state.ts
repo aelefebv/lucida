@@ -8,7 +8,7 @@
  */
 
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
-import type { ColdStateMessage } from "../workerProtocol.ts";
+import type { ColdStateMessage, GpuAtlasReport } from "../workerProtocol.ts";
 import type { AtlasState, LabelVolumePool } from "../volume/atlas.ts";
 import type { SliceAtlasState, LabelSlicePool } from "../slice/atlas.ts";
 import type { ProxyAtlasState } from "../proxyAtlas.ts";
@@ -99,6 +99,12 @@ export interface RendererState {
    */
   frameCaptures: PendingFrameCapture[];
 
+  /**
+   * The atlas report the page last heard. Both sides start from no atlases,
+   * so only a change is ever posted.
+   */
+  gpuAtlasesPosted: GpuAtlasReport;
+
   /** Proxy upload/residency counters exposed via `self.__lucidaProxyStats`. */
   proxyStats: {
     uploaded: number;
@@ -135,6 +141,7 @@ export function createInitialState(atlasBudgets: AtlasBudgets = CEILING_BUDGETS)
     currentColdState: null,
     coldStateByDataset: new Map(),
     frameCaptures: [],
+    gpuAtlasesPosted: { atlases: 0, bytes: 0 },
     proxyStats: {
       uploaded: 0,
       dropped: 0,
