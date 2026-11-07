@@ -1244,3 +1244,204 @@ async fn last_owner_cannot_be_removed_or_demoted() {
         Some(WorkspaceRole::Owner)
     );
 }
+
+/// Open a socket's worth of server state for `who` on a live workspace:
+/// the queue the handler would register, attached under the principal.
+async fn attach(
+    manager: &WorkspaceManager,
+    live: &LiveWorkspace,
+    id: u64,
+    who: &AuthPrincipal,
+) -> crate::connection::ClientSender {
+    let (sender, _receiver) = crate::connection::client_queue();
+    manager
+        .attach_connection(live, id, who, sender.clone())
+        .await;
+    sender
+}
+
+#[tokio::test]
+async fn removing_a_member_closes_their_open_sockets_and_no_one_elses() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let member = principal("member@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Revoke"))
+        .await
+        .unwrap();
+    let manager = manager_for(&store);
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    let live = manager
+        .live_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    let owner_socket = attach(&manager, &live, 1, &owner).await;
+    let member_socket = attach(&manager, &live, 2, &member).await;
+    let member_second_tab = attach(&manager, &live, 3, &member).await;
+    assert!(!member_socket.close_requested());
+
+    manager
+        .remove_member(&workspace.id, &owner, &member.email)
+        .await
+        .unwrap();
+
+    assert!(member_socket.close_requested());
+    assert!(member_second_tab.close_requested());
+    assert!(!owner_socket.close_requested());
+    let frame = member_socket.close_signal().requested().await;
+    assert_eq!(frame.code, crate::connection::CLOSE_ACCESS_REVOKED);
+}
+
+#[tokio::test]
+async fn restricting_link_access_closes_sockets_that_came_in_by_the_link() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let member = principal("member@example.com", false);
+    let visitor = principal("visitor@example.com", false);
+    let workspace = store.create_workspace(&owner, Some("Link")).await.unwrap();
+    let manager = manager_for(&store);
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    manager
+        .update_link_access(
+            &workspace.id,
+            &owner,
+            WorkspaceLinkAccess::AnyoneWithLink,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    let live = manager
+        .live_workspace(&workspace.id, &visitor)
+        .await
+        .unwrap();
+    let visitor_socket = attach(&manager, &live, 1, &visitor).await;
+    let member_socket = attach(&manager, &live, 2, &member).await;
+
+    manager
+        .update_link_access(
+            &workspace.id,
+            &owner,
+            WorkspaceLinkAccess::Restricted,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+
+    assert!(visitor_socket.close_requested());
+    assert!(!member_socket.close_requested());
+}
+
+#[tokio::test]
+async fn lowering_a_role_keeps_the_socket_and_refuses_the_next_edit() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let member = principal("member@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Demote"))
+        .await
+        .unwrap();
+    let manager = manager_for(&store);
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Editor,
+        )
+        .await
+        .unwrap();
+    let live = manager
+        .live_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    let member_socket = attach(&manager, &live, 1, &member).await;
+    let edit = || DocumentCommand::RenameDataset {
+        id: DatasetId("missing".into()),
+        name: "x".into(),
+    };
+    manager
+        .apply_document_command(&live, &member, edit())
+        .await
+        .expect("an editor's command applies");
+
+    manager
+        .update_member_role(&workspace.id, &owner, &member.email, WorkspaceRole::Viewer)
+        .await
+        .unwrap();
+
+    assert!(!member_socket.close_requested(), "a viewer may still watch");
+    assert!(matches!(
+        manager.apply_document_command(&live, &member, edit()).await,
+        Err(CommandApplyError::Forbidden)
+    ));
+}
+
+#[tokio::test]
+async fn a_socket_attached_after_its_access_was_revoked_is_closed_at_once() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let stranger = principal("stranger@example.com", false);
+    let workspace = store.create_workspace(&owner, Some("Late")).await.unwrap();
+    let manager = manager_for(&store);
+    let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
+
+    let stranger_socket = attach(&manager, &live, 1, &stranger).await;
+    let owner_socket = attach(&manager, &live, 2, &owner).await;
+
+    assert!(stranger_socket.close_requested());
+    assert!(!owner_socket.close_requested());
+}
+
+#[tokio::test]
+async fn a_detached_socket_is_no_longer_revisited() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let member = principal("member@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Detach"))
+        .await
+        .unwrap();
+    let manager = manager_for(&store);
+    manager
+        .upsert_member(
+            &workspace.id,
+            &owner,
+            &member.email,
+            None,
+            WorkspaceRole::Viewer,
+        )
+        .await
+        .unwrap();
+    let live = manager
+        .live_workspace(&workspace.id, &member)
+        .await
+        .unwrap();
+    let member_socket = attach(&manager, &live, 1, &member).await;
+    live.detach_connection(1);
+
+    manager
+        .remove_member(&workspace.id, &owner, &member.email)
+        .await
+        .unwrap();
+
+    assert!(!member_socket.close_requested());
+}
