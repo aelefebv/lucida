@@ -239,6 +239,7 @@ describe("handleVolumeRenderMultiPass", () => {
     const atlas = getOrCreateVolumePool(
       { device, state } as unknown as WorkerCtx,
       "pool-b",
+      "ds-0",
       16,
       16,
       16,
@@ -281,6 +282,7 @@ describe("handleVolumeRenderMultiPass", () => {
     const coarseAtlas = getOrCreateVolumePool(
       { device, state } as unknown as WorkerCtx,
       "coarse-pool",
+      "ds-0",
       64,
       64,
       16,
@@ -316,9 +318,9 @@ describe("handleVolumeRenderMultiPass", () => {
     const composite = vi.fn();
     const state = createInitialState();
     const stub = { device, state } as unknown as WorkerCtx;
-    const finePool = getOrCreateVolumePool(stub, "ds-0:32x32x32:detail", 32, 32, 32, 0, 0);
-    const smallChunkPool = getOrCreateVolumePool(stub, "ds-0:16x16x16:detail", 16, 16, 16, 0, 0);
-    const coarsePool = getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", 16, 16, 16, 0, 0);
+    const finePool = getOrCreateVolumePool(stub, "ds-0:32x32x32:detail", "ds-0", 32, 32, 32, 0, 0);
+    const smallChunkPool = getOrCreateVolumePool(stub, "ds-0:16x16x16:detail", "ds-0", 16, 16, 16, 0, 0);
+    const coarsePool = getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", "ds-0", 16, 16, 16, 0, 0);
     const meta = (level: number, chunk: number) => [{
       level,
       gridDims: [1, 1, 1] as [number, number, number],

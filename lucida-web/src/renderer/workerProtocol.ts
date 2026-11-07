@@ -833,6 +833,21 @@ export interface GpuPassTimeMessage {
 }
 
 /**
+ * What the worker's chunk, label, and proxy atlases hold on the GPU: how
+ * many there are, and the bytes of their textures and indirection buffers.
+ * Render targets, colormaps, and minimap textures are not counted.
+ */
+export interface GpuAtlasReport {
+  atlases: number;
+  bytes: number;
+}
+
+/** A changed {@link GpuAtlasReport}. Posted only when a number moves. */
+export interface GpuAtlasesMessage extends GpuAtlasReport {
+  type: "gpuAtlases";
+}
+
+/**
  * A viewport frame's GPU work has finished. Posted for every frame on every
  * device, unlike {@link GpuPassTimeMessage}, so the page can time a frame
  * from dispatch to done on its own clock and lower the render resolution
@@ -891,5 +906,6 @@ export type WorkerToMainMessage =
   | WantedSetDeltaMessage
   | EntityLevelsMessage
   | GpuPassTimeMessage
+  | GpuAtlasesMessage
   | FrameDoneMessage
   | FrameCapturedMessage;

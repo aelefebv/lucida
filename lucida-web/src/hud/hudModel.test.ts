@@ -182,6 +182,14 @@ describe("resident bytes against budget", () => {
     const view = buildHudView(after([hudSample(0, { pools: null })]));
     expect(view.pools.map((p) => p.state)).toEqual(["no session", "no session", "no session", "not reported"]);
   });
+
+  it("reads the render worker's atlases into the GPU row, with no budget to fill against", () => {
+    const view = buildHudView(after([hudSample(0, { gpuAtlases: { atlases: 6, bytes: 412 * MIB } })]));
+    expect(view.pools[3]).toEqual({ label: "GPU", text: "412 MiB", fill: null, state: "6 atlases", tone: "info" });
+
+    const one = buildHudView(after([hudSample(0, { gpuAtlases: { atlases: 1, bytes: 0.5 * MIB } })]));
+    expect([one.pools[3].text, one.pools[3].state]).toEqual(["0.5 MiB", "1 atlas"]);
+  });
 });
 
 describe("target and displayed level per dataset", () => {
