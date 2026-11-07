@@ -188,7 +188,7 @@ fn explicit_disabled_non_loopback_with_insecure_starts() {
     // false for it (verified), so it correctly trips the "non-loopback"
     // branch of the auto-detect safety check. With LUCIDA_INSECURE=1
     // set, the server should boot and emit the multi-line audit
-    // banner (ADR-0018) so it's impossible to miss
+    // banner so it's impossible to miss
     // in a `journalctl`/k8s log scroll.
     let port = pick_loopback_port();
     let bind = format!("0.0.0.0:{port}");

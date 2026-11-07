@@ -1,4 +1,4 @@
-//! Capture record for the URL-as-app-state saved-views feature (ADR 0013).
+//! Capture record for the URL-as-app-state saved-views feature.
 //!
 //! `SavedView` spans both tiers of the document/viewport split: `datasets`
 //! and `active_layouts` are document state (what is loaded), and the rest
@@ -10,7 +10,7 @@
 //! the encoder rejects unknown major versions. The tests at the bottom lock it.
 //
 // The URL helpers live in `lucida-content::url` so server, store, and SPA
-// share one implementation (ADR 0042). The shims below re-export them through
+// share one implementation. The shims below re-export them through
 // `#[wasm_bindgen]` for the SPA's `import { ... } from "lucida-core"`.
 
 use indexmap::IndexMap;
@@ -126,8 +126,8 @@ impl SavedView {
     /// Membership is owned by the workspace document, so a view carried
     /// inside it, on a pin ([`crate::scene::Annotation::view`]) or as a stored
     /// workspace saved view, must not also carry source URLs, local
-    /// `file:///` paths included, into broadcast or persisted state
-    /// (ADR 0014). The apply and duplicate paths both enforce it through here.
+    /// `file:///` paths included, into broadcast or persisted state. The
+    /// apply and duplicate paths both enforce it through here.
     pub fn clear_source_urls(&mut self) {
         self.datasets.clear();
     }

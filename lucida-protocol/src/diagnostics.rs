@@ -222,8 +222,8 @@ pub enum TimingRowOutcome {
 /// The server's phase enum: the stages a served request passes through,
 /// each delimited by a handoff.
 ///
-/// This is finer than the browser's enum on purpose. [ADR 0047]'s rule that a
-/// phase earns a slot only above the 100 µs clock floor came from a *browser
+/// This is finer than the browser's enum on purpose. The browser's rule that a
+/// phase earns a slot only above the 100 µs clock floor comes from a *browser
 /// platform* measurement. Rust's `Instant` has no such floor, so the rule is
 /// clock-relative and the server can name stages the browser could only
 /// count.
@@ -236,8 +236,6 @@ pub enum TimingRowOutcome {
 /// The discriminants are the column order and the row's slot indices, which
 /// is why they are written out: a phase's position is data, not an accident
 /// of declaration order.
-///
-/// [ADR 0047]: `docs/adr/0047-trace-model-phases-runs-and-lifecycle-rows.md`
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum ServerPhase {
@@ -271,8 +269,8 @@ pub enum ServerPhase {
     Decompress = 7,
     /// Turning the stored bytes into the wire frame: the (t, c) slice and
     /// the frame envelope. For the asset family, producing the asset and
-    /// its frame — that family has no separate generation slot, and it is
-    /// due for deletion under ADR 0043.
+    /// its frame — that family has no separate generation slot, since no
+    /// planner emits a proxy request.
     SliceEncode = 8,
     /// Handing the frame to this connection's outbound queue. Terminal:
     /// socket write time happens in a separate task behind an unbounded

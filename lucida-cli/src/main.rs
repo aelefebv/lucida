@@ -1245,7 +1245,7 @@ struct TraceRunArgs {
     #[arg(long, value_name = "MODE")]
     render_mode: Option<RenderModeValue>,
     /// Pin the dataset's target level instead of letting it follow the
-    /// screen. Pinning to 0 is the level-0 default ADR 0061 replaced
+    /// screen. Pinning to 0 asks for the finest level at every zoom
     #[arg(long, value_name = "LEVEL")]
     level_pin: Option<u32>,
     /// Keep the dataset's contrast window at its default instead of fitting it

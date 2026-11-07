@@ -343,9 +343,8 @@ pub struct Comment {
 }
 
 /// A single collaborative annotation: a marker anchored to a position in
-/// 2D world space (the same frame `centroidWorld`/layout positions use, per
-/// ADR-0030) so it stays glued to the data for every peer regardless of
-/// their viewport.
+/// 2D world space (the same frame `centroidWorld`/layout positions use) so
+/// it stays glued to the data for every peer regardless of their viewport.
 ///
 /// The `id` is client-supplied (a uuid string) so an inbound command and
 /// its rebroadcast are byte-identical and apply identically on every peer.

@@ -41,8 +41,7 @@ use crate::{BroadcastItem, ProxyConfig};
 
 // `dataset_id_for_url` and `dataset_url_hash16` live in
 // `lucida_content::url` so the SPA (via the `lucida-core` wasm shim),
-// the storage layer, and this orchestration share one implementation. See
-// `docs/adr/0042-canonical-dataset-url-form.md`.
+// the storage layer, and this orchestration share one implementation.
 
 /// The workspace scope a connection acts under: the live runtime handles,
 /// the [`WorkspaceManager`] that owns authorization and persistence, and

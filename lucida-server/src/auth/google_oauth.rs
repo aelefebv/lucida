@@ -159,10 +159,10 @@ impl GoogleOAuthClient {
     /// Build a Google authorization URL for the configured `redirect_uri`
     /// and a state token the handler has already stored in `pending_auth`.
     ///
-    /// We omit `access_type=offline` deliberately: no refresh tokens
-    /// (ADR-0016). `prompt` is `Some(Prompt::SelectAccount)` only after a
-    /// logout, so cold and expired-session paths keep Google's silent
-    /// pass-through.
+    /// We omit `access_type=offline` deliberately: no refresh tokens,
+    /// because nothing calls Google on the user's behalf. `prompt` is
+    /// `Some(Prompt::SelectAccount)` only after a logout, so cold and
+    /// expired-session paths keep Google's silent pass-through.
     pub fn authorize_url(&self, state: &str, prompt: Option<Prompt>) -> String {
         // Manual URL build (rather than `reqwest::Url::parse_with_params`)
         // keeps the dependency surface narrow and the output bytewise

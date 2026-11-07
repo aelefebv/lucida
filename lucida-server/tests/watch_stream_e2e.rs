@@ -1,5 +1,5 @@
 //! The watch stream, end to end: one socket publishes, another subscribes,
-//! and what comes out the far end is the relay's contract (ADR 0051).
+//! and what comes out the far end is the relay's contract.
 //!
 //! Only the live path routes `watch_subscribe` and `watch_publish` and
 //! replays the ring into the per-connection channel, so this drives real

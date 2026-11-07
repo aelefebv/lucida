@@ -32,7 +32,7 @@ pub struct Session {
     /// Per-client ephemeral presence state.
     pub clients: HashMap<ClientId, PresenceState>,
     /// The workspace's watch stream: who is subscribed, and the ring of what
-    /// pages published (ADR 0051). Kept beside the session's other
+    /// pages published. Kept beside the session's other
     /// live-connection state rather than in its own lock, so one lock orders
     /// a publish against a subscribe and a late joiner cannot read the ring
     /// and an item twice.

@@ -4,8 +4,8 @@
 //!
 //! **Number the placeholders, `$1` and up, and never mix `$1` and `?` in
 //! one statement.** A mixed statement binds the same argument to both,
-//! reports no error, and returns a wrong answer. ADR-0058 has the
-//! reasoning and [`super::pending_auth_sql`] the longer note.
+//! reports no error, and returns a wrong answer. [`super::pending_auth_sql`]
+//! has the longer note.
 
 /// Insert a freshly-minted approval request.
 ///

@@ -3,7 +3,7 @@
 //! The `AuthPrincipal` is what feature code consumes after authentication.
 //! It knows nothing about how it was derived, so every provider flows through
 //! the same shape. The type lives here and the trait and extractors live in
-//! lucida-server (ADR 0015).
+//! lucida-server.
 
 use serde::{Deserialize, Serialize};
 

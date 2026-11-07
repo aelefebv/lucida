@@ -3,7 +3,7 @@
 //!
 //! It runs before any framework code mounts, because the JS shim must
 //! capture `location.hash` and bounce to `/auth/start` so a saved-view
-//! deep link survives the OAuth round trip (ADR-0013). The shim, not the
+//! deep link survives the OAuth round trip. The shim, not the
 //! server, URL-encodes the hash and path.
 
 /// The complete unauth-landing HTML body. `Content-Type: text/html`.

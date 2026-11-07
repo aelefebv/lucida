@@ -154,10 +154,10 @@ pub enum ClientMessage {
     /// Variant added at the end so the serde tag positions of older
     /// variants don't shift.
     SendReport { request_id: String, bundle: String },
-    /// Subscribe this connection to the workspace's watch stream
-    /// (ADR 0051). The server answers with the ring it keeps for late
-    /// joiners and then relays every item published from that point on, each
-    /// as a [`ServerMessage::WatchUpdate`].
+    /// Subscribe this connection to the workspace's watch stream. The server
+    /// answers with the ring it keeps for late joiners and then relays every
+    /// item published from that point on, each as a
+    /// [`ServerMessage::WatchUpdate`].
     ///
     /// Carries no fields: a subscriber receives every publishing page's items
     /// and filters by `client_id` itself, so the server holds no per-subscriber
@@ -550,7 +550,7 @@ pub enum ServerMessage {
         message: Option<String>,
     },
     /// One flush window of the server's own lifecycle table, pushed to the
-    /// client whose requests produced the rows (ADR 0050).
+    /// client whose requests produced the rows.
     ///
     /// Pushed, because the server has no idea runs exist and cannot detect
     /// the end a pull would wait for. Batched, because one message per row
@@ -619,7 +619,7 @@ pub enum ChunkMessage {
     /// Viewer -> Server: request a chunk from the dataset's data source.
     ChunkRequest {
         /// Correlation label: the join key between this client's lifecycle
-        /// row and the server's row for the same wire request (ADR 0048).
+        /// row and the server's row for the same wire request.
         /// Minted from one per-connection counter shared with
         /// `AssetRequest`, so `(connection, rid)` is unique.
         ///

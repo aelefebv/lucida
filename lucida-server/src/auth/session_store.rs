@@ -2,7 +2,7 @@
 //!
 //! The seam between the cookie extractor, which only looks up by ID, and
 //! the storage layer. `async_trait` keeps it object-safe for
-//! `Arc<dyn LoginSessionStore>`. See ADR 0016.
+//! `Arc<dyn LoginSessionStore>`.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

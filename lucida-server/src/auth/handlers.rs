@@ -588,8 +588,8 @@ impl DevAuthState {
     /// mode alone is not enough. `/auth/dev/login` mints whatever
     /// identity the request body names, admin included, so on any other
     /// address it lets every caller make themselves an admin.
-    /// `LUCIDA_INSECURE=1` acknowledges running without sign-in
-    /// (ADR-0018). It does not ask for a route that hands out privilege.
+    /// `LUCIDA_INSECURE=1` acknowledges running without sign-in. It does
+    /// not ask for a route that hands out privilege.
     pub fn new(config: Arc<AuthConfig>) -> Self {
         let enabled = config.mode == AuthMode::Disabled && config.bind_is_loopback();
         Self { config, enabled }
@@ -695,7 +695,7 @@ pub struct LogoutState {
 /// Idempotent: 302 to `/` with a clearing cookie whether or not the
 /// request carried a valid session, so the client need not check auth
 /// state first. It does not federate to Google's revoke endpoint, since
-/// the ID token is not held past login (ADR-0016).
+/// the ID token is not held past login.
 pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Response {
     let (parts, _body) = req.into_parts();
     let session_id = read_session_cookie(&parts, &state.config.cookie_name);
@@ -786,13 +786,13 @@ pub struct StartRequest {
 ///
 /// Stores a 256-bit state token with the intended path and hash in
 /// `pending_auth`, then 302s to Google. The hash is captured here so a
-/// `#view=…` link survives the round trip (ADR-0013).
+/// `#view=…` link survives the round trip.
 ///
 /// With the `lucida_signed_out` marker present it asks Google for the
 /// account chooser (`prompt=select_account`). The marker is cleared in
 /// `/auth/callback`, not here: a user who backs out of the chooser must
 /// get the chooser again next time, or Google's live session would
-/// silently undo the logout (ADR-0019).
+/// silently undo the logout.
 pub async fn auth_start(
     State(state): State<OAuthState>,
     Query(query): Query<StartRequest>,

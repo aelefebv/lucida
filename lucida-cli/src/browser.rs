@@ -466,8 +466,7 @@ impl Page {
     /// `params` is the DevTools protocol's `Input.dispatchMouseEvent`
     /// request, with `x` and `y` in CSS pixels. The page sees the pointer or
     /// wheel event a person's mouse would raise, at the emulated device
-    /// pixel ratio, so a scripted gesture measures the path a person's takes
-    /// (ADR 0051).
+    /// pixel ratio, so a scripted gesture measures the path a person's takes.
     pub async fn dispatch_mouse_event(
         &mut self,
         params: Value,

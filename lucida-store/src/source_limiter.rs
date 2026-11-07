@@ -1,4 +1,4 @@
-//! Fair-share admission for backend source reads (ADR 0053).
+//! Fair-share admission for backend source reads.
 //!
 //! One process-wide cap, because the link to the object store is shared,
 //! but not FIFO: one client opening a large collection submits tens of

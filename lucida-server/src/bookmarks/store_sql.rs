@@ -6,7 +6,7 @@
 //! placeholders, which sqlx's SQLite driver binds by number. Do not mix
 //! `$1` and `?` in one statement: it binds the same argument to both and
 //! returns a wrong answer without an error. Only the `view_json` binding
-//! differs, `TEXT` on one engine and `JSONB` on the other. See ADR-0058.
+//! differs, `TEXT` on one engine and `JSONB` on the other.
 
 use super::store::StoreError;
 

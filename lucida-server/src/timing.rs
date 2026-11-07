@@ -1,5 +1,5 @@
 //! The server's lifecycle table: one row per served request, buffered per
-//! connection and pushed to the client that caused it (ADR 0050).
+//! connection and pushed to the client that caused it.
 //!
 //! The buffer holds one flush window, never a session, so the server is a
 //! source of timing without becoming a place where recordings accumulate.

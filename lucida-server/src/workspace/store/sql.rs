@@ -1,7 +1,7 @@
 //! What both SQL-backed `WorkspaceStore` implementations share: the
 //! statements they run, and the one query they assemble at runtime.
 //!
-//! Every statement is valid on both engines (ADR-0058) and uses numbered
+//! Every statement is valid on both engines and uses numbered
 //! `$N` placeholders, which sqlx's SQLite driver binds by number. Do not
 //! mix `$1` and `?` in one statement: it binds the same argument to both
 //! and returns a wrong answer without an error. Each bound argument gets

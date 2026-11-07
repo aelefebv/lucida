@@ -1,7 +1,6 @@
 //! Storage backend abstraction for reading from Zarr Stores.
 //!
-//! Routing by URL scheme, after [`lucida_content::url::normalize_dataset_url`]
-//! (ADR 0042):
+//! Routing by URL scheme, after [`lucida_content::url::normalize_dataset_url`]:
 //! - Unix `/path/...`, drive-letter `c:/path/...`, UNC `//server/share/...`
 //!   → local filesystem.
 //! - `gs://bucket/...` → Google Cloud Storage, with credentials from the

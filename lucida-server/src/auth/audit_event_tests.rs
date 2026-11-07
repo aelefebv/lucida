@@ -88,9 +88,9 @@ impl Subscriber for CaptureSubscriber {
         let mut visitor = FieldRecorder::default();
         event.record(&mut visitor);
         let level = *event.metadata().level();
-        // The event-name convention in this codebase (ADR 0012) puts
-        // `dot.scope` strings in the message position; tracing surfaces
-        // the message via the synthetic `message` field.
+        // The event-name convention puts `dot.scope` strings in the
+        // message position; tracing surfaces the message via the
+        // synthetic `message` field.
         let name = visitor
             .message
             .clone()

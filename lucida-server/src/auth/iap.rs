@@ -258,7 +258,7 @@ fn read_assertion(req: &Parts) -> Option<&str> {
 /// Never produces an identity for a caller who presented nothing: a
 /// request with no assertion is unauthenticated, full stop. A
 /// deployment that wants every caller to share one identity runs
-/// disabled mode on a loopback bind, which ADR-0018 governs.
+/// disabled mode on a loopback bind.
 ///
 /// Admin rights come from `LUCIDA_ADMIN_EMAILS`, the same mechanism
 /// every other provider uses. IAP decides who reaches the server; it

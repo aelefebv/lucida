@@ -2,7 +2,7 @@
 //! handler that runs without an `AuthPrincipal` is a wiring bug, so it
 //! logs `bookmarks.no_principal_in_extensions` and returns 500, not 401.
 //!
-//! Every principal can read every bookmark (ADR-0015). POST takes
+//! Every principal can read every bookmark. POST takes
 //! `created_by` from the principal, and [`CreateRequest`] has no field to
 //! spoof it with. PATCH and DELETE need the creator or an admin.
 

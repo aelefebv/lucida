@@ -30,9 +30,9 @@ use crate::source_limiter::{ReaderId, RequestLabel, SourceReadLimiter};
 /// Default cap on concurrent backend source reads when no operator override
 /// is supplied.
 ///
-/// Measured, not chosen (ADR 0053): a sweep of this value against the real
-/// remote collection from #899 (up to 1,200 reads per level, levels
-/// interleaved across passes). Completed reads per second, pooled:
+/// Measured, not chosen: a sweep of this value against a real remote
+/// collection (up to 1,200 reads per level, levels interleaved across
+/// passes). Completed reads per second, pooled:
 ///
 /// ```text
 ///    8 -> 35.7      24 -> 57.1      96 -> 43.7
@@ -98,7 +98,7 @@ const SOURCE_READ_CONCURRENCY_ENV: &str = "LUCIDA_SOURCE_READ_CONCURRENCY";
 /// The *bound* is global; the *admission* is not. Reads queue per reader and
 /// are admitted least-in-flight-first, so one client opening a large
 /// collection cannot starve another client on the same server — see
-/// [`SourceReadLimiter`] and ADR 0053.
+/// [`SourceReadLimiter`].
 fn global_source_read_limiter() -> &'static Arc<SourceReadLimiter> {
     static LIMITER: OnceLock<Arc<SourceReadLimiter>> = OnceLock::new();
     LIMITER.get_or_init(|| SourceReadLimiter::new(configured_source_read_limit()))
@@ -316,10 +316,10 @@ impl From<ByteRange> for GetRange {
 /// The split follows the single flight, because that is what makes the
 /// arithmetic honest. A follower performs no backend read and takes no
 /// permit: its wait belongs to `coalesced_wait_us` and nothing else, so a
-/// sum over `backend_read_us` counts each real round trip exactly once
-/// (ADR 0050). Reporting a follower's wait as a backend read would tell a
-/// reader the store is slow when the truth is that the same object was
-/// already being read.
+/// sum over `backend_read_us` counts each real round trip exactly once.
+/// Reporting a follower's wait as a backend read would tell a reader the
+/// store is slow when the truth is that the same object was already being
+/// read.
 ///
 /// A read carried in a neighbour's merged request is a follower of that
 /// request in every respect that matters here: no permit, no round trip of
@@ -347,9 +347,8 @@ pub struct SourceReadTiming {
     pub coalesced_wait_us: Option<u32>,
     /// The label of the request whose read this one waited on. Set only for
     /// a follower, and it is what turns "this request waited 400 ms" into
-    /// "it waited on *that* read" — the join ADR 0050 asks a follower row to
-    /// carry. Labels are per connection, so a leader from another connection
-    /// joins to nothing on this client's side; that is the honest answer,
+    /// "it waited on *that* read". Labels are per connection, so a leader from
+    /// another connection joins to nothing on this client's side; that is the honest answer,
     /// and it is also why no peer identity travels with it.
     pub coalesced_onto: Option<RequestLabel>,
 }
@@ -369,7 +368,7 @@ impl SourceReadTiming {
     /// reads, such as an inner chunk whose shard index had to be read first.
     ///
     /// Each stretch is the sum of the two reads' stretches, and a stretch
-    /// neither read had stays `None`. The sum keeps ADR 0050's arithmetic
+    /// neither read had stays `None`. The sum keeps the trace's arithmetic
     /// honest. Both round trips were this caller's, so both belong on its
     /// row, and a follower's wait on either read is still only a wait. The
     /// leader a follower waited on is the later read's when both had one.
@@ -482,7 +481,7 @@ struct LruState {
 /// subscribes. A range read carried in a neighbour's merged request is
 /// delivered by a leader it never lined up behind, and its row is meant to
 /// name the request that made the round trip, not the one it first found in
-/// flight (ADR 0050).
+/// flight.
 #[derive(Clone)]
 enum Delivery {
     /// The outcome, and whose request made the round trip.
@@ -503,7 +502,7 @@ struct FlightId(u64);
 /// One in-flight read, as a follower finds it: the channel to wait on, who
 /// is doing the reading, and which guard answers for the entry. The label is
 /// kept so a follower's row can say which read it waited on rather than only
-/// how long (ADR 0050).
+/// how long.
 struct InFlightRead {
     tx: broadcast::Sender<Delivery>,
     leader: RequestLabel,
@@ -630,7 +629,7 @@ impl Flights {
 
         // Never across a gap: the bytes between would be fetched and dropped,
         // since the cache has no key to file them under, and on a shard they
-        // are whole inner chunks (ADR 0062 has the cost). A contiguous group
+        // are whole inner chunks. A contiguous group
         // is one fetch under any gap object_store's multi-range read merges
         // on, so one permit stays one request.
         let touches = |end: u64, next: &QueuedRange| next.range().start <= end;
@@ -880,7 +879,7 @@ impl CachedStore {
     ///
     /// `label` is the requesting browser's correlation label for this chunk,
     /// carried across the hop so a permit wait can be attributed to a request
-    /// rather than only to a client (ADR 0048).
+    /// rather than only to a client.
     pub async fn get_bytes(&self, path: &Path, reader: ReaderId, label: RequestLabel) -> TimedRead {
         self.get_bytes_as(ReadKey::new(path, None), ReadClass::Chunk, reader, label)
             .await
@@ -1141,7 +1140,7 @@ impl CachedStore {
                     // round trip belongs to the leader's row, so a sum over
                     // the backend column counts each one exactly once
                     // rather than reporting thousands of trips for an open
-                    // that made hundreds (ADR 0050).
+                    // that made hundreds.
                     if let Some(started) = started {
                         metadata_reads::record(
                             MetadataReadPhase::CoalescedWait,
@@ -1716,7 +1715,7 @@ mod tests {
     /// of one object path produce exactly one backend read and exactly one
     /// coalesced wait. If a follower reported the leader's read as its own, a
     /// sum over the read column would report thousands of round trips for an
-    /// open that made hundreds (ADR 0050).
+    /// open that made hundreds.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn two_readers_of_one_path_yield_one_read_and_one_coalesced_wait() {
         let delay_ms = 50;
@@ -2751,8 +2750,7 @@ mod tests {
         }
 
         assert_eq!(get_count.load(Ordering::SeqCst), 1, "one backend read");
-        // One row owns the round trip and every other row owns only its wait
-        // (ADR 0050).
+        // One row owns the round trip and every other row owns only its wait.
         assert_eq!(round_trips, 1);
         assert_eq!(coalesced_waits, waiters - 1);
         let stats = cached.stats();
@@ -3019,7 +3017,7 @@ mod tests {
     /// The merged request is one permit and one round trip, and the rows say
     /// so: the read that led it owns the permit wait and the backend read,
     /// and each read it carried owns only a wait, attributed to the leader's
-    /// label. A sum over the backend column still counts one trip (ADR 0050).
+    /// label. A sum over the backend column still counts one trip.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_merged_read_takes_one_permit_and_the_reads_it_carried_report_a_wait_on_its_leader() {
         let delay_ms = 30;

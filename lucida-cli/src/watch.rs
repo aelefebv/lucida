@@ -15,7 +15,7 @@
 //!
 //! **It computes nothing.** Each line is what the page published, inside the
 //! envelope the server relayed it in. The derivation lives behind the trace
-//! seam ([ADR 0051]), so a watcher that reduced or re-judged what it received
+//! seam, so a watcher that reduced or re-judged what it received
 //! would be a second opinion nobody asked for; `lucida trace show` reads the
 //! run when it closes.
 

@@ -1,7 +1,7 @@
 //! `lucida trace`: an agent measures an open with no human present.
 //!
 //! The command drives headless Chrome and reads the already-merged trace off
-//! the page seam (ADR 0051). The server pushes its rows to the browser, so
+//! the page seam. The server pushes its rows to the browser, so
 //! there is no server-side trace endpoint to ask. Thresholds, attribution, the
 //! verdict and both renderings are the page's. This module composes the
 //! workload, records what only the driver knows, persists the run and prints
@@ -282,7 +282,7 @@ fn compare_read_expression(left: &CompareSide<'_>, right: &CompareSide<'_>) -> S
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ComposedView {
-    /// The dataset as opened, in canonical form (ADR 0042).
+    /// The dataset as opened, in canonical form.
     pub dataset: String,
     /// The URL the driver navigated to, view fragment and all.
     pub url: String,
@@ -366,8 +366,7 @@ pub struct DisplayPins {
     pub colormap: Option<Colormap>,
     pub render_mode: Option<RenderMode>,
     /// The level pin. Absent leaves the target following the screen, and a
-    /// number holds it at that level however the camera moves. Pinning to
-    /// level 0 is how a run measures the behavior ADR 0061 replaced.
+    /// number holds it at that level however the camera moves.
     pub level: Option<u32>,
 }
 

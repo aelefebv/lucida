@@ -1,4 +1,4 @@
-//! Replaying a bundle in the trace driver (ADR 0051 as amended).
+//! Replaying a bundle in the trace driver.
 //!
 //! A field report becomes a reproducible run. A bundle's header carries what
 //! the driver needs to replay the view (#1055): the dataset, the view URL,
@@ -13,7 +13,7 @@
 //! The replay restores the view by re-hosting a view fragment on the
 //! configured workspace rather than by navigating to the bundle's URL. The
 //! fragment carries the camera, the mode, and every pin, keyed by dataset
-//! ids derived from the source URL (ADR 0042), so it reads the same on
+//! ids derived from the source URL, so it reads the same on
 //! another server. Which fragment depends on whether the bundle carries a
 //! script. Without one, it is the header's own, byte for byte, so on the
 //! machine that wrote the bundle the replay navigates to the page the run
@@ -25,7 +25,7 @@
 //! The diff of the original and the replay is the page's (#1059). The
 //! header fields that break comparability, the adapter among them, are the
 //! page's to warn about, so a bundle replayed on a different adapter reads
-//! as not comparable without this module judging anything (ADR 0051).
+//! as not comparable without this module judging anything.
 
 use std::io::Read as _;
 use std::path::{Path, PathBuf};

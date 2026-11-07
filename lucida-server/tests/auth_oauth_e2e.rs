@@ -364,7 +364,7 @@ async fn full_oauth_flow_lands_user_at_intended_path_with_hash() {
     // Cookie set + redirect target reconstructed from intent.
     // Two Set-Cookie headers expected: the new session cookie AND a
     // clearing-marker for `lucida_signed_out` (no-op when marker
-    // wasn't present, but emitted unconditionally — see ADR-0019).
+    // wasn't present, but emitted unconditionally).
     let set_cookies: Vec<String> = cb_res
         .headers()
         .get_all(SET_COOKIE)

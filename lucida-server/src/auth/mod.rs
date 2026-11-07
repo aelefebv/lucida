@@ -2,8 +2,9 @@
 //! stores, and the middleware that resolves each request to a principal.
 //!
 //! A store with two SQL implementations keeps its statements in a `*_sql`
-//! module the two run, rather than in a second copy of the SQL. See
-//! ADR-0058.
+//! module the two run, rather than in a second copy of the SQL. The Rust is
+//! written once per engine, because code generic over the engine needs a
+//! trait bound for every type it binds or decodes.
 
 #[cfg(test)]
 mod audit_event_tests;

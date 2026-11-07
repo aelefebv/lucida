@@ -10,7 +10,7 @@
 //!
 //! It is off unless `LUCIDA_STATUS_PATH` is set and always answers 200,
 //! because the monitor reads a non-200 as "could not read the status",
-//! not "down" (ADR-0064). The body names only the database, never a host
+//! not "down". The body names only the database, never a host
 //! or a credential, so it mounts on the public router half.
 
 use std::sync::Arc;

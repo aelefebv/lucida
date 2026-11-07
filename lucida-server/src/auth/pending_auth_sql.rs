@@ -5,7 +5,7 @@
 //! placeholders, which sqlx's SQLite driver binds by number. Do not mix
 //! `$1` and `?` in one statement: it binds the same argument to both and
 //! returns a wrong answer without an error. A backend may diverge where
-//! the engines really differ, such as row locking. See ADR-0058.
+//! the engines really differ, such as row locking.
 
 /// Insert a freshly-minted pending row.
 ///

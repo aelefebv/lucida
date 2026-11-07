@@ -16,7 +16,7 @@ use super::config::{AuthConfig, SecureCookieMode};
 /// Marker cookie set by `/auth/logout` and read by the middleware and
 /// `/auth/start`. Its presence, not its value, tells the next request
 /// that this user just signed out, so do not bounce them back through
-/// OAuth. `/auth/callback` clears it once they sign back in (ADR-0019).
+/// OAuth. `/auth/callback` clears it once they sign back in.
 /// Attributes mirror `lucida_session`.
 pub const SIGNED_OUT_COOKIE_NAME: &str = "lucida_signed_out";
 

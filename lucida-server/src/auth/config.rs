@@ -1,8 +1,8 @@
 //! Auth subsystem runtime configuration, read from the environment at boot.
 //!
-//! When `LUCIDA_AUTH` is unset, the mode is inferred from the bind address
-//! (ADR-0018): loopback means `Disabled`, anything else means `Google`, and
-//! disabled auth on a non-loopback bind needs an explicit `LUCIDA_INSECURE=1`.
+//! When `LUCIDA_AUTH` is unset, the mode is inferred from the bind address:
+//! loopback means `Disabled`, anything else means `Google`, and disabled
+//! auth on a non-loopback bind needs an explicit `LUCIDA_INSECURE=1`.
 //!
 //! `from_env_map` takes any `Fn(&str) -> Option<String>` so tests can cover
 //! every env permutation without mutating process state. The `Secure` cookie
@@ -785,10 +785,9 @@ where
 
 /// Parse the `LUCIDA_ALLOWED_HOSTED_DOMAINS` env var into a lowercased
 /// `HashSet`. None / empty / whitespace-only → empty set ("no
-/// restriction" — the OSS-permissive default per ADR-0017). Comma-
-/// separated; whitespace around entries is tolerated. Duplicate entries
+/// restriction"). Comma-separated; whitespace around entries is tolerated. Duplicate entries
 /// collapse via the set semantics, lowercase normalization avoids
-/// `Calicolabs.com` vs `calicolabs.com` near-misses since both env-var
+/// `Example.com` vs `example.com` near-misses since both env-var
 /// authoring and Google's `hd` claim should be treated case-insensitively.
 pub(crate) fn parse_allowed_hosted_domains(raw: Option<&str>) -> HashSet<String> {
     parse_lowercased_csv(raw)
