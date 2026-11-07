@@ -1575,7 +1575,10 @@ pub(crate) fn saved_view_from_scene(document: &DocumentState, scene: Scene) -> S
     }
 }
 
-fn apply_overview_to_scene(scene: &mut Scene, viewport: [u32; 2]) -> Result<(), CliError> {
+pub(crate) fn apply_overview_to_scene(
+    scene: &mut Scene,
+    viewport: [u32; 2],
+) -> Result<(), CliError> {
     if viewport[0] == 0 || viewport[1] == 0 {
         return Err(CliError::config("overview viewport must be positive"));
     }
