@@ -1148,6 +1148,7 @@ function App({
       selectedLayerId={selectedDatasetId}
       expandedLayerId={layers.expandedLayerId}
       soloChannel={dims.soloChannel}
+      importWarnings={bridge.datasetImportWarnings}
       onSelectLayer={layers.handleLayerSelect}
       onToggleExpand={layers.handleLayerToggleExpand}
       onSetVisible={layers.handleLayerSetVisible}

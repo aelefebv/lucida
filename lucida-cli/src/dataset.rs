@@ -1751,6 +1751,7 @@ mod tests {
                     }],
                 },
                 messages: vec![],
+                import_warnings: vec![],
             }],
         };
 

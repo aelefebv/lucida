@@ -11,14 +11,13 @@ use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, PeerIdentity,
 use lucida_protocol::{
     AssetMessage, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
-    DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
-    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats,
-    DatasetSourceHealth, GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerPhase,
-    SourceChunkStatus, TimingRowFamily, TimingRowOutcome,
+    DatasetImportWarning, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
+    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
+    DatasetSourceCacheStats, DatasetSourceHealth, GeneratedAvailabilitySnapshot,
+    GeneratedChunkStatus, ServerPhase, SourceChunkStatus, TimingRowFamily, TimingRowOutcome,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
-use lucida_store::import_types::ImportWarningKind;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
 use tokio::sync::{Mutex, broadcast, mpsc};
 
@@ -1003,18 +1002,25 @@ pub(crate) fn dataset_health_for_manifest(
         .or_else(|| runtime.map(|state| state.source_url.clone()));
     let backend = source_url.as_deref().map(backend_kind_for_url);
     let mut messages = Vec::new();
-    // A level the export never wrote reads as fill and renders as an all-zero
-    // image, so a dataset carrying one is not healthy however well the server
-    // is serving it — reporting `healthy` over a black viewport is exactly the
-    // mis-read this is here to prevent. Other import warnings stay
-    // informational and leave the status alone.
+    // A warning that says the data is shown wrong, such as an unwritten level
+    // drawing black or tiles padded with fill, makes the dataset unhealthy
+    // however well the server is serving it: reporting `healthy` over wrong
+    // pixels is the mis-read this is here to prevent. Other import warnings
+    // stay informational and leave the status alone.
     let mut import_status = DatasetHealthStatus::Healthy;
+    let mut import_warnings = Vec::new();
     if let Some(binding) = binding {
         for warning in &binding.import_warnings {
-            if warning.kind == ImportWarningKind::UnwrittenLevel {
+            let degrades = warning.kind.degrades_health();
+            if degrades {
                 import_status = DatasetHealthStatus::Degraded;
             }
             messages.push(warning.message.clone());
+            import_warnings.push(DatasetImportWarning {
+                target: warning.target.clone(),
+                message: warning.message.clone(),
+                degrades,
+            });
         }
     }
     if binding.is_none() {
@@ -1090,6 +1096,7 @@ pub(crate) fn dataset_health_for_manifest(
         source_cache,
         generated_coarse: generated,
         messages,
+        import_warnings,
     }
 }
 
