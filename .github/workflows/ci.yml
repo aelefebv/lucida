@@ -235,7 +235,7 @@ jobs:
       # image are already exercised by the rust + web jobs, so the
       # build alone is sufficient Dockerfile signal.
       #
-      # LUCIDA_AUTH=disabled bypasses ADR-0018 bind-address auto-detect
+      # LUCIDA_AUTH=disabled bypasses the bind-address auto-detect
       # (which would otherwise demand OAuth on the wildcard bind the
       # Dockerfile sets) — the smoke is verifying process startup +
       # health endpoints, not the auth path. LUCIDA_INSECURE=1 is the
@@ -280,7 +280,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # The reference manifests in extras/deploy/k8s/ ship with
-      # <UPPERCASE-WITH-DASHES> placeholders per ADR-0021. Substitute
+      # <UPPERCASE-WITH-DASHES> placeholders. Substitute
       # them to dummy strings in a scratch directory, then run
       # `kubectl apply --dry-run=client` to validate schema + structure.
       # No real cluster involved; this catches typos and apiVersion

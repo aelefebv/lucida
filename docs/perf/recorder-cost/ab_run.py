@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one arm of the recorder A/B (issue #928, ADR 0049).
+"""Run one arm of the recorder A/B (issue #928).
 
 Boots lucida-server from this tree against a pre-built web bundle, opens a
 local fixture, and drives the viewer at devicePixelRatio 2 over a warm re-open,
@@ -9,7 +9,7 @@ counting rendered frames for a fixed window.
 
 ARM is a label only ("real" / "noop"); which sink the page uses is decided by
 the bundle in AB_WEB_DIST, not by anything at runtime. There is no toggle at
-any scope — that is the whole point of ADR 0049 — so the no-op arm is a
+any scope, by design, so the no-op arm is a
 separate build with `noopSinkFactory` in the recorder singleton. See README.md.
 
 Environment:

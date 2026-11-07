@@ -5,10 +5,10 @@
 
 The number to beat comes from #888, which ran this exact shape — same warm
 re-open, same ten-second window, at devicePixelRatio 2 — against the debug
-panel and measured **1,148 rendered frames either way**. ADR 0049's claim is
-that the recorder is unrepresentable at a 100 microsecond clock, so the two
-arms should be indistinguishable; a real difference is the claim failing, not
-the harness being imprecise.
+panel and measured **1,148 rendered frames either way**. The claim under test
+is that the recorder's cost is unrepresentable at a 100 microsecond clock, so
+the two arms should be indistinguishable; a real difference is the claim
+failing, not the harness being imprecise.
 """
 from __future__ import annotations
 
@@ -58,6 +58,6 @@ if abs(delta) <= TOLERANCE:
     print(f"PASS — indistinguishable within {TOLERANCE:.0%}; the recorder is not "
           f"visible in frame throughput")
     sys.exit(0)
-print(f"FAIL — {abs(delta):.1%} apart, outside the {TOLERANCE:.0%} band. ADR 0049's "
+print(f"FAIL — {abs(delta):.1%} apart, outside the {TOLERANCE:.0%} band. The recorder's "
       f"observer-effect bound does not hold as built.")
 sys.exit(1)

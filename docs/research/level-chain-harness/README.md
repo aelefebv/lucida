@@ -1,15 +1,14 @@
 # level-chain harness (issue #1003)
 
-Measurement tooling for the "Measured, before and after" section of ADR 0061.
-Not part of the product and not wired into CI. It answers one question on a wide
-collection zoomed out to show every tile: what does the level-0 default cost against
-the screen-chosen target level, in chunks per rebuild, bytes, and time to a quiescent
-view, at device pixel ratio 2?
+Measurement tooling, not part of the product and not wired into CI. It answers one
+question on a wide collection zoomed out to show every tile: what does the level-0
+default cost against the screen-chosen target level, in chunks per rebuild, bytes, and
+time to a quiescent view, at device pixel ratio 2?
 
 It needs no instrumentation patch. The server's per-read timing rows carry
 `backend_bytes`, and the per-tick aggregate carries the target level, the displayed
 level, and the per-lane request counts. So this harness is a thin loop around
-`lucida trace`. ADR 0061 has the results.
+`lucida trace`.
 
 ```bash
 # 1. build what the runs use
@@ -30,7 +29,7 @@ uv run docs/research/level-chain-harness/lc_run.py /tmp/lc/twin /tmp/twin.ome.za
 `lc_run.py` boots the server from `target/release/lucida-server` with the bundle in
 `lucida-web/dist` (override with `--server-bin` and `--web-dist`), opens the dataset
 in a new workspace through the CLI, and drives `lucida trace --camera slice` at device
-pixel ratio 2, once with `--level-pin 0` (the level-0 default that ADR 0061 replaced)
+pixel ratio 2, once with `--level-pin 0` (the former level-0 default)
 and once following the screen. Each round alternates the order. The report is a
 Markdown table, and `summary.json` in the output directory holds the same numbers with
 the run file and frame of every run.
@@ -51,7 +50,7 @@ the run file and frame of every run.
 
 The tick counters, not the rows, are the wanted-set figure. A row is one request's
 life over the whole run, so a set the page keeps re-planning appears once in the rows
-and once per pass in the counters, and ADR 0044's "requests per submit" is the latter.
+and once per pass in the counters.
 `summary.json` also keeps each run's lifecycle-row count at the target level and, when
 every one of those rows completed, the moment the last was presented.
 

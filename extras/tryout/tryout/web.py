@@ -2,7 +2,7 @@
 
 The web surface needs the server to actually serve lucida's single-page app so a
 real browser can render the viewer. The server reads ``LUCIDA_WEB_DIST`` and
-serves the bundle there (ADR-0020); if it is unset/empty it serves only a
+serves the bundle there; if it is unset/empty it serves only a
 placeholder landing page with no viewer canvas — useless for a screenshot. So
 ``drive --surface web`` must point the server at a real ``dist/`` *before* boot.
 

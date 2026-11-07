@@ -1,7 +1,6 @@
 # Reference Deployment for lucida-server.
 #
-# Per ADR-0021 (docs/adr/0021-deployment-artifacts-as-reference-templates.md)
-# this manifest is a documentation-by-example template, not a turnkey
+# This manifest is a documentation-by-example template, not a turnkey
 # deploy. Copy it into your own infra repo, replace every <PLACEHOLDER>,
 # and own the result. The upstream copy stays generic so it works as a
 # reference for any target cluster.
@@ -17,7 +16,7 @@
 #     PVC). RollingUpdate would briefly run two writers against the
 #     same SQLite file.
 #
-# PostgreSQL lifts all three (ADR-0055), and ../RUNBOOK.md step 4
+# PostgreSQL lifts all three, and ../RUNBOOK.md step 4
 # documents that shape — no PVC, an ephemeral cache, a RollingUpdate
 # rollout — as a diff against this file. It is prose rather than a
 # second manifest because `kubectl apply -f k8s/` would apply anything
@@ -72,7 +71,7 @@ spec:
               protocol: TCP
           env:
             # ---- Required: bind to all interfaces inside the pod ----
-            # ADR-0018: the loopback default is for local dev. Inside a
+            # The server's loopback default is for local dev. Inside a
             # pod the kubelet reaches the container by IP, so we bind
             # 0.0.0.0. The Service in front of this is the only routable
             # path; the pod IP isn't exposed.
@@ -171,8 +170,7 @@ spec:
             # - name: LUCIDA_COOKIE_NAME
             #   value: "<YOUR-COOKIE-NAME>"
 
-            # Session TTL knobs. Defaults documented in
-            # docs/adr/0016-backend-mediated-oauth-with-session-cookies.
+            # Session TTL knobs. Defaults: 720 hours total, 168 hours idle.
             # - name: LUCIDA_SESSION_HARD_CAP_HOURS
             #   value: "<HOURS>"
             # - name: LUCIDA_SESSION_IDLE_TIMEOUT_HOURS
@@ -183,8 +181,8 @@ spec:
             # - name: LUCIDA_PROXY_CONCURRENCY
             #   value: "<INT>"
 
-            # Run with auth disabled on a non-loopback bind. Required
-            # explicit acknowledgment per ADR-0018. Do not set this in
+            # Run with auth disabled on a non-loopback bind. The server
+            # refuses to start that way without it. Do not set this in
             # production deployments unless your network access controls
             # are doing the entire job of authenticating callers.
             # - name: LUCIDA_INSECURE

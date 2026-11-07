@@ -1,7 +1,7 @@
 # Recorder cost: the A/B harness
 
-ADR 0049 makes the trace recorder's cost a set of ceilings asserted in CI,
-because recording is unconditional and has no toggle. Three of its four gates
+The trace recorder's cost is a set of ceilings asserted in CI, because
+recording is unconditional and has no toggle. Three of its four gates
 run in `pnpm test` from `lucida-web/src/trace/recorderCost.perf.test.ts`. That
 file's header and constants carry the ceilings, the 16× slack and why, and the
 derivation of the floor the recorder is compared against (#962).
@@ -97,9 +97,9 @@ The arms are 1.0% apart, inside the 5% band, and both sit within 1.3% of the
 frame throughput.
 
 Live heap, 2026-08-11, across the debug panel teardown (#919), with
-`AB_MODE=heap` and the same drive. This settled the memory half of ADR 0049's
-net obligation: total observability cost no higher than the floor #888
-measured.
+`AB_MODE=heap` and the same drive. This settled the memory half of the
+recorder's net obligation: total observability cost no higher than the
+floor #888 measured.
 
 | Arm | Live heap, post-GC | Frames in 10 s |
 | --- | --- | --- |
