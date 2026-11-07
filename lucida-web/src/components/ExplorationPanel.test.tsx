@@ -1,19 +1,42 @@
 // @vitest-environment happy-dom
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import type { WasmScene } from "lucida-core";
+import { SavedViewApplier } from "../savedView/applier.ts";
+import { buildCapture } from "../savedView/captureBuilder.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
+import {
+  FIXTURES,
+  PIXEL_RATIOS,
+  PropertyReport,
+  VIEWPORTS,
+  cssSize,
+  cssSizesDiffer,
+  datasetId,
+  dims as fixtureDims,
+  loadWasm,
+  notFramed,
+  openedScene,
+  type ViewFixture,
+  type Viewport,
+} from "../viewProperties.ts";
 
-// The mocked generator decides which cells appear, and so which nudge buttons
-// are enabled. Tests override its return per case.
-const exploreView = vi.fn(() => JSON.stringify(defaultSidecar()));
+// The real generator runs; the spy only records its arguments.
+const exploreView = vi.hoisted(() => ({ spy: undefined as unknown as Mock }));
 
-vi.mock("lucida-core", () => ({
-  explore_view: (...args: unknown[]) => exploreView(...(args as [])),
-}));
+vi.mock("lucida-core", async (importOriginal) => {
+  const real = await importOriginal<typeof import("lucida-core")>();
+  exploreView.spy = vi.fn(real.explore_view);
+  return { ...real, explore_view: exploreView.spy };
+});
 
 import { ExplorationPanel, type ExplorationPanelProps } from "./ExplorationPanel.tsx";
+
+beforeAll(loadWasm);
+
+const QUARTER_TURN = Math.PI / 4;
 
 function arcballView(): SavedView {
   return {
@@ -38,69 +61,15 @@ function arcballView(): SavedView {
   };
 }
 
-/** A child view with a distinct camera `theta` so an applyView call can be
- *  matched back to the cell that produced it. */
-function viewWithTheta(theta: number): SavedView {
-  const v = arcballView();
-  (v.camera as { theta: number }).theta = theta;
-  return v;
+function sliceView(): SavedView {
+  return {
+    ...arcballView(),
+    camera: { mode: "slice", center: [128, 128], zoom: 1, viewport: [800, 600] },
+  };
 }
 
-/** An interior 3D view's sidecar: both rotates, both zooms, and a StepZ row,
- *  each with a distinct child view, so every nudge button is live. */
-function defaultSidecar() {
-  return {
-    v: 1,
-    current: { handle: "vh-0", view: arcballView() },
-    extent: { min: [0, 0, 0], max: [256, 256, 40], z_count: 40, t_count: 1, c_count: 1 },
-    cells: [
-      {
-        handle: "vh-rot-right",
-        transform: "azimuth:+45",
-        label: "Rotate right 45°",
-        z: 20,
-        t: 0,
-        c: 0,
-        view: viewWithTheta(0.785),
-      },
-      {
-        handle: "vh-rot-left",
-        transform: "azimuth:-45",
-        label: "Rotate left 45°",
-        z: 20,
-        t: 0,
-        c: 0,
-        view: viewWithTheta(-0.785),
-      },
-      {
-        handle: "vh-zoom-in",
-        transform: "zoom:in",
-        label: "Zoom in",
-        z: 20,
-        t: 0,
-        c: 0,
-        view: viewWithTheta(0.111),
-      },
-      {
-        handle: "vh-zoom-out",
-        transform: "zoom:out",
-        label: "Zoom out",
-        z: 20,
-        t: 0,
-        c: 0,
-        view: viewWithTheta(0.222),
-      },
-      {
-        handle: "vh-stepz",
-        transform: "stepz:+1",
-        label: "Next slice (deeper)",
-        z: 21,
-        t: 0,
-        c: 0,
-        view: viewWithTheta(0.333),
-      },
-    ],
-  };
+function cameraOf(view: SavedView): Record<string, number> {
+  return view.camera as unknown as Record<string, number>;
 }
 
 function baseProps(over: Partial<ExplorationPanelProps> = {}): ExplorationPanelProps {
@@ -117,14 +86,9 @@ function baseProps(over: Partial<ExplorationPanelProps> = {}): ExplorationPanelP
   };
 }
 
-beforeEach(() => {
-  // Reset the implementation too, so a custom sidecar can't leak into the next test.
-  exploreView.mockReset();
-  exploreView.mockImplementation(() => JSON.stringify(defaultSidecar()));
-});
-
 afterEach(() => {
   cleanup();
+  exploreView.spy.mockClear();
   vi.restoreAllMocks();
   // The thumbnail tests stub IntersectionObserver; don't leak it to later files.
   vi.unstubAllGlobals();
@@ -136,6 +100,10 @@ async function renderPanel(over: Partial<ExplorationPanelProps> = {}) {
     render(<ExplorationPanel {...props} />);
   });
   return props;
+}
+
+function appliedViews(props: ExplorationPanelProps): SavedView[] {
+  return (props.applyView as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0] as SavedView);
 }
 
 function cellByLabel(label: string): HTMLElement {
@@ -162,7 +130,7 @@ describe("ExplorationPanel — candidates", () => {
 
   it("calls explore_view when it becomes visible (refresh on open)", async () => {
     await renderPanel();
-    expect(exploreView).toHaveBeenCalled();
+    expect(exploreView.spy).toHaveBeenCalled();
   });
 
   it("clicking a candidate descends via applyView with that cell's view", async () => {
@@ -170,11 +138,10 @@ describe("ExplorationPanel — candidates", () => {
     await act(async () => {
       await userEvent.click(cellByLabel("Rotate right 45°"));
     });
-    expect(props.applyView).toHaveBeenCalledTimes(1);
     // The cell's view (the rotated child), not the current view.
-    const applied = (props.applyView as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as SavedView;
-    expect((applied.camera as { theta: number }).theta).toBeCloseTo(0.785);
+    const applied = appliedViews(props);
+    expect(applied).toHaveLength(1);
+    expect(cameraOf(applied[0]).theta).toBeCloseTo(QUARTER_TURN);
   });
 
   it("does not render anything when not visible", async () => {
@@ -183,9 +150,9 @@ describe("ExplorationPanel — candidates", () => {
   });
 
   it("shows the error text when the generator returns an error envelope", async () => {
-    exploreView.mockReturnValueOnce(JSON.stringify({ error: "bad view" }));
-    await renderPanel();
-    expect(screen.getByTestId("explore-error").textContent).toContain("bad view");
+    // A view with no camera is one the generator cannot read.
+    await renderPanel({ captureBuilder: () => ({ v: SAVED_VIEW_VERSION }) as unknown as SavedView });
+    expect(screen.getByTestId("explore-error").textContent).toMatch(/camera/);
   });
 
   it("prompts to open a dataset when none is loaded", async () => {
@@ -200,11 +167,10 @@ describe("ExplorationPanel — manual controls (shortcuts to generator moves)", 
     await act(async () => {
       await userEvent.click(screen.getByTestId("explore-rotate-right"));
     });
-    // Same descend path as the row: the azimuth:+45 cell's view (theta 0.785).
-    expect(props.applyView).toHaveBeenCalledTimes(1);
-    const applied = (props.applyView as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as SavedView;
-    expect((applied.camera as { theta: number }).theta).toBeCloseTo(0.785);
+    // Same descend path as the row: the azimuth:+45 cell's view.
+    const applied = appliedViews(props);
+    expect(applied).toHaveLength(1);
+    expect(cameraOf(applied[0]).theta).toBeCloseTo(QUARTER_TURN);
   });
 
   it("Zoom in descends into the generator's zoom:in cell", async () => {
@@ -212,33 +178,14 @@ describe("ExplorationPanel — manual controls (shortcuts to generator moves)", 
     await act(async () => {
       await userEvent.click(nudgeButton("Zoom in"));
     });
-    expect(props.applyView).toHaveBeenCalledTimes(1);
-    const applied = (props.applyView as ReturnType<typeof vi.fn>).mock
-      .calls[0][0] as SavedView;
-    expect((applied.camera as { theta: number }).theta).toBeCloseTo(0.111);
+    const applied = appliedViews(props);
+    expect(applied).toHaveLength(1);
+    expect(cameraOf(applied[0]).distance).toBeCloseTo(50);
   });
 
   it("disables a nudge whose move the generator does not offer (Rotate on a 2D view)", async () => {
-    // A 2D slice sidecar offers no azimuth cells, so the Rotate buttons disable.
-    exploreView.mockReturnValue(
-      JSON.stringify({
-        v: 1,
-        current: { handle: "vh-2d", view: arcballView() },
-        extent: { min: [0, 0, 0], max: [256, 256, 1], z_count: 1, t_count: 1, c_count: 1 },
-        cells: [
-          {
-            handle: "vh-zoom-in",
-            transform: "zoom:in",
-            label: "Zoom in",
-            z: 0,
-            t: 0,
-            c: 0,
-            view: viewWithTheta(0.111),
-          },
-        ],
-      }),
-    );
-    await renderPanel();
+    // A 2D slice view offers no azimuth cells, so the Rotate buttons disable.
+    await renderPanel({ captureBuilder: () => sliceView() });
     expect(
       (screen.getByTestId("explore-rotate-right") as HTMLButtonElement).disabled,
     ).toBe(true);
@@ -263,14 +210,14 @@ describe("ExplorationPanel — manual controls (shortcuts to generator moves)", 
     await act(async () => {
       await userEvent.click(back());
     });
-    const applyCalls = (props.applyView as ReturnType<typeof vi.fn>).mock.calls;
-    // 1st apply = descend (theta 0.785); 2nd = back (theta 0).
-    expect(applyCalls).toHaveLength(2);
-    expect((applyCalls[1][0] as SavedView).camera).toMatchObject({ theta: 0 });
+    const applied = appliedViews(props);
+    // 1st apply = descend (a quarter turn); 2nd = back (theta 0).
+    expect(applied).toHaveLength(2);
+    expect(applied[1].camera).toMatchObject({ theta: 0 });
     expect(back().disabled).toBe(true);
   });
 
-  it("a manual nudge pushes onto the Back stack — Back returns to the pre-nudge view (Part D)", async () => {
+  it("a manual nudge pushes onto the Back stack, so Back returns to the pre-nudge view", async () => {
     // captureBuilder returns the pre-nudge view; after a Rotate nudge, Back must
     // re-apply that view, not the nudge's child.
     const props = await renderPanel();
@@ -286,12 +233,11 @@ describe("ExplorationPanel — manual controls (shortcuts to generator moves)", 
     await act(async () => {
       await userEvent.click(back());
     });
-    const applyCalls = (props.applyView as ReturnType<typeof vi.fn>).mock.calls;
-    // 1st apply = the nudge's child (theta 0.785); 2nd = Back → the pre-nudge
-    // view captured before the nudge (theta 0).
-    expect(applyCalls).toHaveLength(2);
-    expect((applyCalls[0][0] as SavedView).camera).toMatchObject({ theta: 0.785 });
-    expect((applyCalls[1][0] as SavedView).camera).toMatchObject({ theta: 0 });
+    const applied = appliedViews(props);
+    // 1st apply = the nudge's child; 2nd = Back → the pre-nudge view.
+    expect(applied).toHaveLength(2);
+    expect(cameraOf(applied[0]).theta).toBeCloseTo(QUARTER_TURN);
+    expect(applied[1].camera).toMatchObject({ theta: 0 });
     // Stack drained → Back disabled again.
     expect(back().disabled).toBe(true);
   });
@@ -338,14 +284,14 @@ describe("ExplorationPanel — breadcrumb trail (proof of navigation)", () => {
     await renderPanel();
     // Initial refresh: depth 0.
     const depthArg = (call: unknown[]) => call[9] as number;
-    expect(depthArg(exploreView.mock.calls[0])).toBe(0);
-    exploreView.mockClear();
+    expect(depthArg(exploreView.spy.mock.calls[0])).toBe(0);
+    exploreView.spy.mockClear();
 
     // After one descend the trail has length 1 → the next generate uses depth 1.
     await act(async () => {
       await userEvent.click(cellByLabel("Rotate right 45°"));
     });
-    const lastCall = exploreView.mock.calls[exploreView.mock.calls.length - 1];
+    const lastCall = exploreView.spy.mock.calls[exploreView.spy.mock.calls.length - 1];
     expect(depthArg(lastCall)).toBe(1);
   });
 });
@@ -410,30 +356,102 @@ describe("ExplorationPanel — Home", () => {
     const getHomeBounds = vi.fn(() => bounds);
     await renderPanel({ getHomeBounds });
     expect(getHomeBounds).toHaveBeenCalledWith("ds-1");
-    const args = exploreView.mock.calls.at(-1) as unknown[];
+    const args = exploreView.spy.mock.calls.at(-1) as unknown[];
     expect(args[10]).toBe(bounds);
   });
 
   it("applies the generator's Home move from the live view, not a synthesized one", async () => {
-    const home = viewWithTheta(2);
-    exploreView.mockImplementation(() => {
-      const sidecar = defaultSidecar();
-      sidecar.cells.push({
-        handle: "vh-home",
-        transform: "home",
-        label: "Home (fit dataset)",
-        view: home,
-      } as (typeof sidecar.cells)[number]);
-      return JSON.stringify(sidecar);
+    const props = await renderPanel({
+      getHomeBounds: () => new Float64Array([0, 0, 0, 1, 1, 0.25]),
     });
-    const props = await renderPanel();
     await act(async () => {
       await userEvent.click(screen.getByTestId("explore-home"));
     });
-    // The live view went in, so the Home move keeps its camera mode.
-    const args = exploreView.mock.calls.at(-1) as unknown[];
+    // The live view went in, so the Home move keeps its camera mode and
+    // frames the box it was handed.
+    const args = exploreView.spy.mock.calls.at(-1) as unknown[];
     expect(args[0]).toBeTypeOf("string");
-    expect(props.applyView).toHaveBeenCalledWith(home);
+    const [home] = appliedViews(props);
+    expect(home.camera.mode).toBe("arcball");
+    const target = (home.camera as { target: number[] }).target;
+    expect(target[0]).toBeCloseTo(0.5);
+    expect(target[1]).toBeCloseTo(0.5);
+    expect(target[2]).toBeCloseTo(0.125);
+  });
+});
+
+describe("ExplorationPanel — Home on a page", () => {
+  /** The page after Home: `f` opened and fitted in `mode` on a real scene, the
+   *  panel wired as the viewer wires it, Home pressed. `live` false is a page
+   *  whose capture is unavailable, so the generator synthesizes Home. */
+  async function afterHome(
+    f: ViewFixture,
+    vp: Viewport,
+    dpr: number,
+    mode: "slice" | "arcball",
+    live: boolean,
+  ): Promise<WasmScene> {
+    const page = openedScene(f, vp, dpr, mode);
+    const applier = new SavedViewApplier(
+      { sendOpenRemoteDataset: () => {}, sendCommand: () => {} },
+      () => page,
+      (url) => url,
+      1000,
+      "workspace-dataset-id",
+      "local",
+    );
+    const capture = () =>
+      buildCapture({ scene: page, urlByDatasetId: new Map(), datasetReferenceMode: "workspace-dataset-id" });
+    await renderPanel({
+      captureBuilder: live ? capture : () => null,
+      applyView: (view) => applier.apply(view),
+      datasetId: datasetId(f),
+      dims: fixtureDims(f),
+      // The viewer passes the canvas's client size, in CSS pixels.
+      viewport: vp.css,
+      getHomeBounds: (id) => page.dataset_fit_bounds(id),
+    });
+    await act(async () => {
+      await userEvent.click(screen.getByTestId("explore-home"));
+    });
+    cleanup();
+    return page;
+  }
+
+  /** Home frames every fixture and shows it at one CSS size at both ratios. */
+  async function assertHomeFrames(live: boolean): Promise<void> {
+    const framed = new PropertyReport();
+    const sized = new PropertyReport();
+    for (const f of FIXTURES) {
+      const id = datasetId(f);
+      for (const vp of VIEWPORTS) {
+        for (const mode of ["slice", "arcball"] as const) {
+          const pages: WasmScene[] = [];
+          for (const dpr of PIXEL_RATIOS) {
+            const page = await afterHome(f, vp, dpr, mode, live);
+            framed.check(`${f.name} on ${vp.name} ${dpr}x, from ${mode}`, notFramed(page, id));
+            pages.push(page);
+          }
+          sized.check(
+            `${f.name} on ${vp.name}, from ${mode}`,
+            cssSizesDiffer(cssSize(pages[0], id, 1), cssSize(pages[1], id, 2)),
+          );
+        }
+      }
+    }
+    framed.assertHolds();
+    sized.assertHolds();
+  }
+
+  it("frames the dataset from the live view", async () => {
+    await assertHomeFrames(true);
+  });
+
+  // Fails while the synthesized Home frames the first image's voxel box at
+  // the viewport in CSS pixels: a volume's 3D Home points at empty space, a
+  // collection's frames one tile, and a 2x canvas shows it at half size.
+  it.fails("frames the dataset when the generator synthesizes Home", async () => {
+    await assertHomeFrames(false);
   });
 });
 
@@ -495,13 +513,13 @@ describe("ExplorationPanel — preview thumbnails", () => {
     await act(async () => {
       scrollAllIntoView();
     });
-    // The rotate-right cell carries theta 0.785: the tile renders from its own
-    // angle, not the current view's.
+    // The rotate-right cell is a quarter turn round: the tile renders from its
+    // own angle, not the current view's.
     const views = (requestThumbnail as ReturnType<typeof vi.fn>).mock.calls.map(
       (c) => c[0] as SavedView,
     );
-    const thetas = views.map((v) => (v.camera as { theta: number }).theta);
-    expect(thetas).toContain(0.785);
+    const thetas = views.map((v) => cameraOf(v).theta);
+    expect(thetas.some((theta) => Math.abs(theta - QUARTER_TURN) < 1e-9)).toBe(true);
     // Size is a positive device-pixel edge.
     const size = (requestThumbnail as ReturnType<typeof vi.fn>).mock.calls[0][1] as number;
     expect(size).toBeGreaterThan(0);
@@ -559,20 +577,8 @@ describe("ExplorationPanel — preview thumbnails", () => {
   });
 
   it("requests no previews for 2D candidates, which would all look alike", async () => {
-    const slice = (zoom: number): SavedView => ({
-      ...arcballView(),
-      camera: { mode: "slice", center: [128, 128], zoom, viewport: [800, 600] },
-    });
-    exploreView.mockImplementation(() => {
-      const sidecar = defaultSidecar();
-      sidecar.current.view = slice(1);
-      sidecar.cells = sidecar.cells
-        .filter((cell) => !cell.transform.startsWith("azimuth"))
-        .map((cell, i) => ({ ...cell, view: slice(1 + i) }));
-      return JSON.stringify(sidecar);
-    });
     const requestThumbnail = vi.fn(async () => fakeBitmap());
-    await renderPanel({ requestThumbnail });
+    await renderPanel({ captureBuilder: () => sliceView(), requestThumbnail });
     await act(async () => {
       scrollAllIntoView();
     });
