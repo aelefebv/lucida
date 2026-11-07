@@ -10,12 +10,13 @@
  */
 
 import type { PhaseClass } from "./types.ts";
+import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.ts";
 
 /**
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 4;
+export const RULESET_VERSION = 5;
 
 export interface AbsoluteRule {
   id: string;
@@ -103,6 +104,18 @@ export interface BudgetBoundRule {
   why: string;
 }
 
+/**
+ * Chunks the uploader stopped re-sending because the renderer kept handing
+ * them back. `guardTicks` is the uploader's own bound, carried so the finding
+ * prints the number that cut the loop.
+ */
+export interface HeldRule {
+  id: string;
+  minChunks: number;
+  guardTicks: number;
+  why: string;
+}
+
 /** Planning passes woken by an availability update and nothing else. */
 export interface ReplanRule {
   id: string;
@@ -146,6 +159,8 @@ export interface Ruleset {
    * which has no per-item rows.
    */
   interaction: AbsoluteRule;
+  /** A feedback loop between the uploader and the renderer, cut by the uploader's bound. */
+  held: HeldRule;
   /**
    * What the run left behind: four rules over the interval that opened when
    * it closed, and one over its settle block. None of them judges the run.
@@ -334,6 +349,12 @@ export const RULESET: Ruleset = {
     stat: "p95",
     ceilMs: 50,
     why: "An interaction run is judged on whether the gesture stayed smooth, not on how much of it the main thread held: a drag ticks every frame, so its main-thread share is near total on every gesture and says nothing. The reading is main-thread tick time and includes the plan pass, so the ceiling matches compute.plan's 50 ms rather than undercutting it — three dropped frames at 60 Hz, far above a healthy tick, and a run whose planning passed cannot fail here on planning alone. It is main-thread time only: a slow GPU pass shows here only as far as it holds the main thread.",
+  },
+  held: {
+    id: "upload.held",
+    minChunks: 1,
+    guardTicks: RESEND_GUARD_TICKS,
+    why: "Every chunk the renderer evicts, refuses, or still lists as missing comes back eligible to send, so a lasting disagreement between the uploader and the renderer re-sends the same chunks every tick and the view never settles. The uploader counts ticks whose every send repeats a chunk it already sent since the last cold state. A real delivery repeats a chunk once or twice after an eviction and moves on, so that many such ticks in a row is a loop: the uploader holds those chunks until the next cold state and names each with the reason the renderer last gave. One held chunk is enough to report, because the view settled without data it asked for.",
   },
   steadyState: {
     received: {

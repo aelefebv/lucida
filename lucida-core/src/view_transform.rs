@@ -371,11 +371,9 @@ pub fn apply(view: &SavedView, t: &ViewTransform, extent: &ViewExtent) -> Option
             }
             match &mut child.camera {
                 Camera::Slice(s) => s.zoom_by(*factor),
-                Camera::Arcball(a) => {
-                    // factor > 1 means zoom IN, i.e. move the eye closer: shrink
-                    // distance, but never inside the near plane.
-                    a.distance = (a.distance / *factor).max(a.near);
-                }
+                // The interactive zoom path, which carries the clip planes
+                // along with the eye.
+                Camera::Arcball(a) => a.zoom(1.0 / *factor - 1.0),
                 // Fly has no zoom-by-factor; applies_to filtered it, but stay total.
                 Camera::Fly(_) => return None,
             }

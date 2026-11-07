@@ -172,7 +172,6 @@ capture_json "${output_dir}/channel-colormap.json" channel colormap "${dataset_i
 capture_json "${output_dir}/channel-contrast.json" channel contrast --min 0 --max 4096 "${dataset_id}" 0
 capture_json "${output_dir}/viewer-state-final.json" viewer state
 capture_json "${output_dir}/debug-state.json" debug state
-capture_json "${output_dir}/visible-chunks.json" plan visible-chunks "${dataset_id}"
 
 if [[ "${LUCIDA_SMOKE_CAPTURE:-1}" != "0" ]]; then
   capture_timeout="${LUCIDA_SMOKE_CAPTURE_TIMEOUT_SECONDS:-60}"

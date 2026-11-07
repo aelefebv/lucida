@@ -379,7 +379,6 @@ fn explore_home_shows_the_same_css_size_at_any_pixel_ratio() {
 }
 
 #[test]
-#[ignore = "explore's zoom out doubles the arcball distance without moving the far plane, which then culls every chunk"]
 fn explore_home_plans_what_is_visible() {
     assert_plans("explore Home plans what is visible", explore_home);
 }
@@ -402,7 +401,6 @@ fn explore_from_the_live_view_shows_the_same_css_size_at_any_pixel_ratio() {
 }
 
 #[test]
-#[ignore = "explore's zoom moves set the arcball distance without moving the clip planes: zoom out leaves the far plane in front of the data and zoom in stops at the near plane, and either culls visible chunks"]
 fn explore_from_the_live_view_plans_what_is_visible() {
     assert_plans(
         "explore from the live view plans what is visible",
@@ -413,7 +411,7 @@ fn explore_from_the_live_view_plans_what_is_visible() {
 /// The fitted arcball zoomed by the interactive command to each multiple of
 /// the fit distance.
 fn arcball_zoomed(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
-    [0.5, 0.75, 1.0, 2.0, 4.0, 8.0, 64.0]
+    [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0, 64.0]
         .into_iter()
         .map(|multiple: f64| {
             let mut shown = open(f, vp, dpr, Mode::Arcball);
@@ -429,7 +427,6 @@ fn arcball_zoomed(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
 }
 
 #[test]
-#[ignore = "zooming the arcball out never moves the far plane, so past about twice the fit distance it culls every chunk"]
-fn arcball_zoom_plans_what_is_visible_from_half_to_64x_the_fit() {
+fn arcball_zoom_plans_what_is_visible_from_a_tenth_to_64x_the_fit() {
     assert_plans("arcball zoom plans what is visible", arcball_zoomed);
 }

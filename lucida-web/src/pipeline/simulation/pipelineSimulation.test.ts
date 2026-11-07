@@ -6,7 +6,7 @@
  * known stalls.
  */
 
-import { beforeAll, describe, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import {
   describeScenario,
   expectSettled,
@@ -140,11 +140,33 @@ describe("a full atlas with more wanted chunks than worker slots", () => {
       atlas: { sliceAtlasBytes: 25 * CHUNK_64_BYTES },
       gpuComplete: false,
     }),
-    {
-      stallsAt: [2],
-      because: "an incoming chunk displaces a resident one at the same distance, which is resent and displaces it back",
-    },
   );
+});
+
+describe("two mirror-image chunks and one worker slot", () => {
+  // Two chunks side by side, centered in the view, so both sit at exactly one
+  // distance from the camera. Each tier's pool has one slot, and neither chunk
+  // may displace the other: each would come back evicted, be re-sent, and
+  // displace it back.
+  const scenario = describeScenario({
+    name: "mirror-image chunks in a full atlas",
+    dataset: singleImage({
+      id: "pair",
+      pyramid: { shape: [1, 1, 1, 64, 128], chunk: [1, 64, 64], levels: 1 },
+    }),
+    atlas: { sliceAtlasBytes: CHUNK_64_BYTES },
+    gpuComplete: false,
+  });
+  // Two chunks in each of two tiers. Each goes at most twice: once, and again
+  // after a cold state clears the refusal of the one that did not fit.
+  const MAX_SENDS = 2 * 4;
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles at device pixel ratio ${dpr} without the two trading the slot`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      expect(run.phases[0].chunksSent).toBeLessThanOrEqual(MAX_SENDS);
+    });
+  }
 });
 
 describe("a transient source failure", () => {
@@ -166,9 +188,9 @@ describe("a transient source failure", () => {
 });
 
 describe("a Z scrub on a level downsampled along Z", () => {
-  // 100 planes at level 0 and 50 at level 1, in chunks 8 planes deep. The
-  // planner puts plane 16 in level 1's chunk 1 and the worker in chunk 0;
-  // plane 15 is in chunk 0 for both.
+  // 100 planes at level 0 and 50 at level 1, in chunks 8 planes deep. Plane
+  // 16 is the first plane of level 1's chunk 1, where a proportional mapping
+  // lands one plane short, in chunk 0; plane 15 is in chunk 0 either way.
   settles(
     describeScenario({
       name: "Z scrub on a Z-downsampled level",
@@ -178,9 +200,5 @@ describe("a Z scrub on a level downsampled along Z", () => {
       }),
       steps: [{ scrub: { z: 15 } }, { scrub: { z: 16 } }],
     }),
-    {
-      stallsAt: [1, 2],
-      because: "the planner and the worker map the plane to different chunks, so each delivery comes back wrong-slice",
-    },
   );
 });

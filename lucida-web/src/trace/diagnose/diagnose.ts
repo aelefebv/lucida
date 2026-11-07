@@ -202,6 +202,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     // cold browser cache is the page's first paint.
     coldOpen: isDatasetOpenCause(run.header.cause) && browserCacheCold(run.header.cacheWarmth),
     steadyState: steady.findings,
+    held: heldEvents(run, window),
     baseline: options.baseline ?? null,
   });
   const worst = worstRowSelector(run, phases, findings);
@@ -590,7 +591,36 @@ interface FindingsInput {
   coldOpen: boolean;
   /** What the steady-state ruleset found, ranked here with the run's own. */
   steadyState: SteadyStateFinding[];
+  /** The chunks the uploader stopped re-sending, inside the window. */
+  held: TracePointEvent[];
   baseline: DiagnosticDocument | null;
+}
+
+function heldEvents(run: TraceRun, window: RunWindow): TracePointEvent[] {
+  return run.events.filter(
+    (event) => event.kind === "held" && (window.whole || inWindow(event.atUs, window)),
+  );
+}
+
+/**
+ * The uploader cut a feedback loop: it held chunks the renderer kept handing
+ * back. A stall, because the view settled without data it asked for.
+ */
+function heldFinding(held: TracePointEvent[]): RawFinding | null {
+  if (held.length < RULESET.held.minChunks) return null;
+  const chunks = new Map<string, { entityId: string; chunkKey: string; reason: string }>();
+  for (const event of held) {
+    const entityId = event.chunk?.entityId ?? "";
+    const chunkKey = event.chunk?.chunkKey ?? "";
+    chunks.set(`${entityId}/${chunkKey}`, { entityId, chunkKey, reason: event.reason });
+  }
+  return {
+    severity: "stall",
+    rule: RULESET.held.id,
+    subject: "renderer residency",
+    observed: { chunks: chunks.size, held: [...chunks.values()] },
+    threshold: { kind: "count", value: RULESET.held.minChunks, why: RULESET.held.why },
+  };
 }
 
 /**
@@ -751,12 +781,17 @@ function rankFindings(input: FindingsInput): Finding[] {
 
   raw.push(...comparativeFindings(input));
   raw.push(...input.steadyState);
+  const held = heldFinding(input.held);
+  if (held) raw.push(held);
 
   const seen = new Set<string>();
   const ranked = raw
     .sort(
       (a, b) =>
         SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] ||
+        // A held chunk leads the stalls: a slow phase cost time, while a held
+        // chunk is data the view settled without.
+        Number(b.rule === RULESET.held.id) - Number(a.rule === RULESET.held.id) ||
         (b.observed.sharePct ?? 0) - (a.observed.sharePct ?? 0) ||
         (b.observed.ms ?? 0) - (a.observed.ms ?? 0),
     )
@@ -770,7 +805,11 @@ function rankFindings(input: FindingsInput): Finding[] {
   // The attribution is the run's answer to "what was this waiting on", so it
   // rides the leading finding about the run. A steady-state finding is about
   // the interval after the run and carries the ruleset's rationale instead.
-  const leader = ranked.findIndex((finding) => finding.severity !== "steady-state");
+  // A held finding is about the renderer's residency, not the critical path,
+  // so the attribution rides the first finding after it.
+  const leader = ranked.findIndex(
+    (finding) => finding.severity !== "steady-state" && finding.rule !== RULESET.held.id,
+  );
   return ranked.map((finding, index) => ({
     ...finding,
     id: index + 1,
@@ -878,6 +917,14 @@ function buildVerdict(
     };
   }
 
+  if (lead.rule === RULESET.held.id) {
+    return {
+      kind: "stall",
+      text: `${describeHeld(lead)}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
   // A gate's one line has to say which input was slow, not which reading
   // measured it.
   if (lead.rule === RULESET.interaction.id) {
@@ -903,6 +950,22 @@ function buildVerdict(
     confidence: attribution.confidence,
   };
 }
+
+/** The held chunks, the first few by name, as one sentence. */
+export function describeHeld(finding: Finding): string {
+  const held = finding.observed.held ?? [];
+  const named = held
+    .slice(0, HELD_NAMED)
+    .map((chunk) => `${chunk.chunkKey} (${chunk.reason})`)
+    .join(", ");
+  const more = held.length > HELD_NAMED ? ` and ${held.length - HELD_NAMED} more` : "";
+  return (
+    `the renderer kept handing back ${held.length} chunk(s), so the uploader stopped ` +
+    `re-sending them: ${named}${more}; the view settled without them`
+  );
+}
+
+const HELD_NAMED = 4;
 
 function describeFirstPaint(finding: Finding): string {
   const observed = finding.observed;

@@ -336,6 +336,54 @@ describe("Uploader unified delivery", () => {
     expect(publish.mock.calls[0][1].skippedNoMeta).toBe(1);
   });
 
+  it("stops re-sending a chunk the worker keeps handing back, names it in the trace, and retries after a cold state", async () => {
+    const { traceRecorder } = await import("../../trace/recorder.ts");
+    const { PointEvent } = await import("../../trace/types.ts");
+    const { RESEND_GUARD_TICKS } = await import("./delivery/resendGuard.ts");
+    const recordPointEvent = vi.spyOn(traceRecorder, "recordPointEvent");
+    // The cache offers the chunk every tick, as it does when every delivery
+    // comes back evicted and clears its sent mark.
+    const chunk = makeChunkDelivery({ chunkKey: "0/0/0/0/1/1", y: 1, x: 1 });
+    const sliceChunkData = vi.fn();
+    const ctx = makeCtx({
+      cpuCache: makeCpuCache([chunk]),
+      client: { sliceChunkData, coldStateDisplay: vi.fn(), coldStateSelection: vi.fn() },
+    });
+    const uploader = new Uploader();
+
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    for (let i = 0; i < RESEND_GUARD_TICKS; i++) {
+      uploader.handleChunksEvicted("img-0", [chunk.chunkKey], [], ctx.cpuCache, "wrong-slice");
+      uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    }
+    expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
+    const held = recordPointEvent.mock.calls.filter(([kind]) => kind === PointEvent.Held);
+    expect(held.map(([, reason, source]) => [reason, (source as ReadyChunkDelivery).chunkKey])).toEqual([
+      ["wrong-slice", chunk.chunkKey],
+    ]);
+
+    // Held: the next ticks send nothing and ask for no further tick.
+    expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0)).toBe(false);
+    expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
+
+    uploader.sendColdStateDisplay({ ctx, datasetId: "ds1", displayStateByChannel: {} });
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
+
+    uploader.sendColdStateSelection({
+      ctx,
+      datasetId: "ds1",
+      currentT: 0,
+      currentZ: 1,
+      visibleRegion: { xyBoundsVox: [0, 0, 1, 1], zRangeVox: [1, 2], effectiveZoom: 1, sortCenterVox: null, frustumPlanes: null },
+      desiredProxyKeys: [],
+      epochs: { content: 1, layout: 1, view: 1, selection: 2, asset: 0, request: 1 },
+    });
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 2);
+    recordPointEvent.mockRestore();
+  });
+
   it("preserves the one-item soft budget cap", () => {
     const large = makeChunkDelivery({
       data: new ArrayBuffer(4 * 1024 * 1024),

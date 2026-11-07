@@ -659,10 +659,21 @@ function renderTimingOf(document: DiagnosticDocument, p: PrintNumber): string {
   return `${main} · ${gpu}`;
 }
 
+/** Held chunks named on the finding's line; the document carries every one. */
+const HELD_LISTED = 5;
+
 function describeObservation(finding: Finding, p: PrintNumber): string {
   const observed = finding.observed;
   const base = `findings[${finding.id - 1}].observed`;
   if (finding.severity === "steady-state") return describeSteadyState(finding, p);
+  if (observed.held) {
+    const named = observed.held
+      .slice(0, HELD_LISTED)
+      .map((chunk) => `${chunk.entityId}/${chunk.chunkKey} (${chunk.reason})`)
+      .join(", ");
+    const more = observed.held.length > HELD_LISTED ? `, +${observed.held.length - HELD_LISTED} more` : "";
+    return `${p(`${base}.chunks`, (observed.chunks ?? 0).toLocaleString())} chunk(s) held: ${named}${more}`;
+  }
   if (observed.backlogEtaS != null || observed.pending != null) {
     const parts = [
       `${p(`${base}.pending`, (observed.pending ?? 0).toLocaleString())} pending`,
