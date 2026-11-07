@@ -304,7 +304,11 @@ async fn assert_dev_switcher_advertised(server: &SpawnedServer, expected: bool) 
 async fn dev_login_switches_identity_on_a_loopback_bind() {
     let port = pick_loopback_port();
     let bind = format!("127.0.0.1:{port}");
-    let server = spawn_server(&bind, &bind, &[]);
+    let server = spawn_server(
+        &bind,
+        &bind,
+        &[("LUCIDA_ADMIN_EMAILS", "admin@example.com")],
+    );
     let client = http_client();
 
     assert_dev_switcher_advertised(&server, true).await;
@@ -329,7 +333,31 @@ async fn dev_login_switches_identity_on_a_loopback_bind() {
     );
     let principal: Value = res.json().await.expect("json body");
     assert_eq!(principal["email"], "owner@example.com");
-    assert_eq!(principal["is_admin"], true);
+    assert_eq!(
+        principal["is_admin"], false,
+        "a switch cannot ask for admin rights"
+    );
+
+    let admin: Value = client
+        .post(format!("{}/auth/dev/login", server.base_url))
+        .json(&serde_json::json!({ "email": "admin@example.com" }))
+        .send()
+        .await
+        .expect("POST /auth/dev/login")
+        .json()
+        .await
+        .expect("json body");
+    assert_eq!(admin["is_admin"], true, "LUCIDA_ADMIN_EMAILS grants them");
+}
+
+/// A dev principal cookie written by hand rather than by the switcher.
+fn forged_dev_cookie(email: &str) -> String {
+    use base64::Engine;
+    let payload = serde_json::json!({ "email": email, "display_name": "Forged", "is_admin": true });
+    format!(
+        "lucida_dev_principal={}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload.to_string())
+    )
 }
 
 // `LUCIDA_INSECURE=1` is what lets a disabled-mode server boot on an
@@ -381,4 +409,20 @@ async fn dev_login_404s_on_a_non_loopback_bind() {
     assert_eq!(res.status(), reqwest::StatusCode::OK);
     assert_eq!(res.text().await.expect("body"), index_html);
     assert_whoami_returns_dev_principal(&server).await;
+
+    // Nor does a cookie the caller wrote themselves name anybody.
+    let whoami: Value = client
+        .get(format!("{}/auth/whoami", server.base_url))
+        .header(
+            reqwest::header::COOKIE,
+            forged_dev_cookie("owner@example.com"),
+        )
+        .send()
+        .await
+        .expect("GET /auth/whoami")
+        .json()
+        .await
+        .expect("json body");
+    assert_eq!(whoami["email"], "dev@local", "got {whoami}");
+    assert_eq!(whoami["is_admin"], false, "got {whoami}");
 }
