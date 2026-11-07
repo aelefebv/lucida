@@ -72,6 +72,42 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-features --all-targets -- -D warnings
 
+  # Path separators, drive letters, and what a child process needs from
+  # its environment all differ on Windows, and the Linux jobs cannot see
+  # any of it. Format and lint are the same on every OS, so only the tests
+  # run here. No PostgreSQL service: Windows runners cannot start service
+  # containers, the conformance cases skip without one, and the rust job
+  # covers them.
+  rust-windows:
+    name: Rust workspace tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      # aws-lc-sys assembles with NASM, which the runner lacks. Its
+      # prebuilt objects stand in.
+      AWS_LC_SYS_PREBUILT_NASM: '1'
+      # Full debug info slows MSVC linking and inflates the cached target
+      # directory. Line tables still put a file and line in a backtrace.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Saved from main only. A pull request restores main's cache, and
+      # one entry per branch would push the Linux caches out of the
+      # repository's quota.
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # --no-fail-fast: one failing test binary would otherwise stop the
+      # run and hide whether the rest pass on Windows.
+      - name: cargo test
+        run: cargo test --locked --workspace --all-features --no-fail-fast
+
   web:
     name: Web (wasm-pack + pnpm)
     runs-on: ubuntu-latest
@@ -142,6 +178,57 @@ jobs:
       - name: Build SPA
         working-directory: lucida-web
         run: pnpm run build
+
+  # The unit tests only, for the same reason as rust-windows. Type
+  # checking, lint, and the bundle come out the same on every OS, and the
+  # web job runs them.
+  web-windows:
+    name: Web unit tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      # Saved from main only, as in rust-windows.
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          # The web job's pin.
+          version: 'v0.15.0'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 'lts/*'
+          cache: pnpm
+          cache-dependency-path: lucida-web/pnpm-lock.yaml
+
+      - name: Build lucida-core WASM (consumed by lucida-web)
+        working-directory: lucida-core
+        run: wasm-pack build --target web --out-dir pkg -- --locked
+
+      - name: Install web deps
+        working-directory: lucida-web
+        run: pnpm install --frozen-lockfile
+
+      - name: Test
+        working-directory: lucida-web
+        run: pnpm test
 
   docker:
     name: Docker smoke build (no push)
