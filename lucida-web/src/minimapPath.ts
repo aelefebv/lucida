@@ -68,6 +68,8 @@ export interface MinimapState {
    * {@link MINIMAP_OVERVIEW_SCAN_INTERVAL_MS}.
    */
   lastOverviewScanMs: number;
+  /** The CPU cache's admission count when the last seed-scan ran. */
+  admissionsAtScan: number;
   /**
    * The last scan ran out of upload budget. With a non-empty `pendingFetch`, it
    * keeps a throttle-skipped frame scheduling so deferred seed work isn't
@@ -133,6 +135,7 @@ export function createMinimapState(): MinimapState {
     overviewCache: null,
     uploadGeneration: 0,
     lastOverviewScanMs: Number.NEGATIVE_INFINITY,
+    admissionsAtScan: 0,
     overviewBudgetPending: false,
   };
 }
@@ -308,13 +311,17 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
   if (!state.enabled && !state.overviewActive) return false;
 
   // The scan is O(members × chunks), the dominant per-move CPU cost on large
-  // collections, so it is throttled. A skipped frame still returns true while
-  // seed work remains: the loop is dirty-driven, and a tail chunk landing inside
-  // the interval would otherwise sit un-uploaded until an unrelated interaction.
+  // collections, so it is throttled. A skipped frame still returns true when a
+  // chunk arrived since the last scan while seed work remains: the loop is
+  // dirty-driven, and a tail chunk landing inside the interval would otherwise
+  // sit un-uploaded until an unrelated interaction. Nothing new to upload is no
+  // reason to tick, or a chunk that never arrives would spin the loop forever.
   if (now - state.lastOverviewScanMs < MINIMAP_OVERVIEW_SCAN_INTERVAL_MS) {
-    return state.overviewBudgetPending || state.pendingFetch.size > 0;
+    return state.overviewBudgetPending ||
+      (state.pendingFetch.size > 0 && ctx.cpuCache.admissions !== state.admissionsAtScan);
   }
   state.lastOverviewScanMs = now;
+  state.admissionsAtScan = ctx.cpuCache.admissions;
 
   const { scene, client, datasets } = ctx;
   const t = scene.t();

@@ -801,6 +801,7 @@ describe("tickMinimapOverview throttle", () => {
     const ctx = {
       scene: { t: tSpy, c: () => 0 },
       datasets: new Map(),
+      cpuCache: { admissions: 0 },
     } as unknown as TickContext;
 
     tickMinimapOverview(ctx, state, 1000); // first scan runs (never scanned before)
@@ -824,6 +825,7 @@ describe("tickMinimapOverview throttle", () => {
     const ctx = {
       scene: { t: () => 0, c: () => 0 },
       datasets: new Map(),
+      cpuCache: { admissions: 0 },
     } as unknown as TickContext;
 
     tickMinimapOverview(ctx, state, 1000); // establishes lastOverviewScanMs
@@ -833,24 +835,43 @@ describe("tickMinimapOverview throttle", () => {
     expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // skipped → not pending
   });
 
-  it("keeps scheduling on a throttle-skip while chunks await fetch (no tail-chunk strand)", () => {
+  it("keeps scheduling on a throttle-skip once a chunk arrives for a member awaiting it (no tail-chunk strand)", () => {
     // The loop is dirty-driven, so a throttle-skipped frame must signal
-    // continuation while members still await chunks, or a tail chunk landing
-    // inside the interval strands until an unrelated interaction.
+    // continuation when a chunk lands inside the interval while members still
+    // await chunks, or it strands until an unrelated interaction.
     const state = createMinimapState();
     state.enabled = true;
+    const cpuCache = { admissions: 0 };
     const ctx = {
       scene: { t: () => 0, c: () => 0 },
       datasets: new Map(),
+      cpuCache,
     } as unknown as TickContext;
 
     tickMinimapOverview(ctx, state, 1000); // establishes lastOverviewScanMs
     expect(state.overviewBudgetPending).toBe(false); // empty scan → budget not exhausted
 
     state.pendingFetch.set("m0", []); // a member is now awaiting fetched chunks
+    cpuCache.admissions++; // and a chunk has arrived since the scan
     expect(tickMinimapOverview(ctx, state, 1010)).toBe(true); // skipped but continuation kept
 
     state.pendingFetch.clear(); // seeding complete
     expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // skipped → loop may quiesce
+  });
+
+  it("lets the loop idle on a throttle-skip while awaited chunks have not arrived", () => {
+    // A chunk the minimap waits on that never arrives must not keep the loop
+    // ticking at frame rate.
+    const state = createMinimapState();
+    state.enabled = true;
+    const ctx = {
+      scene: { t: () => 0, c: () => 0 },
+      datasets: new Map(),
+      cpuCache: { admissions: 7 },
+    } as unknown as TickContext;
+
+    tickMinimapOverview(ctx, state, 1000);
+    state.pendingFetch.set("m0", []);
+    expect(tickMinimapOverview(ctx, state, 1010)).toBe(false);
   });
 });
