@@ -2019,6 +2019,7 @@ describe("wire goldens: enum vocabulary", () => {
         "session_closed",
         "workspace_lookup",
         "unsupported_scheme",
+        "invalid_location",
         "local_path",
         "missing_object",
         "permission",

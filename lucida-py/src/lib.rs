@@ -196,11 +196,13 @@ struct PyStore {
 
 #[pymethods]
 impl PyStore {
-    /// Open a StorageBackend from a URL.
-    /// "/" prefix -> local filesystem, "gs://" -> GCS.
+    /// Open a StorageBackend from an absolute path or a gs://, s3://,
+    /// http://, or https:// URL.
     #[staticmethod]
     fn open(url: &str) -> PyResult<Self> {
-        let store = lucida_store::backend::open(url)
+        let location = lucida_content::url::DatasetLocation::parse(url)
+            .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
+        let store = lucida_store::backend::open(&location)
             .map_err(|e| pyo3::exceptions::PyValueError::new_err(e.to_string()))?;
         let runtime = tokio::runtime::Runtime::new()
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;

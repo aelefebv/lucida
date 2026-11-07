@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
+use lucida_content::url::{DatasetLocation, LocationError};
 use lucida_core::DatasetId;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientMessage, ServerMessage};
@@ -176,6 +177,29 @@ pub struct DatasetImageSummary {
     pub level_indices: Vec<u32>,
     pub dimensions: Option<[u64; 5]>,
     pub channel_count: Option<u64>,
+}
+
+/// `source` with a relative path resolved against this process's working
+/// directory, which the server cannot know. Any other input passes through
+/// unchanged for the server to judge.
+pub fn absolute_dataset_source(source: &str) -> Result<String, CliError> {
+    if !matches!(
+        DatasetLocation::parse(source),
+        Err(LocationError::RelativePath { .. })
+    ) {
+        return Ok(source.to_string());
+    }
+    let unresolvable = |reason: String| {
+        CliError::new(
+            ErrorKind::Io,
+            format!("cannot resolve dataset path {source:?}: {reason}"),
+        )
+    };
+    std::path::absolute(source)
+        .map_err(|e| unresolvable(e.to_string()))?
+        .into_os_string()
+        .into_string()
+        .map_err(|_| unresolvable("the path is not valid UTF-8".to_string()))
 }
 
 pub struct DatasetOpenClient {
@@ -1008,9 +1032,9 @@ fn error_kind_for_open_failure(kind: DatasetOpenFailureKind) -> ErrorKind {
         DatasetOpenFailureKind::LocalPath
         | DatasetOpenFailureKind::MissingObject
         | DatasetOpenFailureKind::MissingMetadata => ErrorKind::MissingResource,
-        DatasetOpenFailureKind::CloudConfiguration | DatasetOpenFailureKind::UnsupportedScheme => {
-            ErrorKind::Config
-        }
+        DatasetOpenFailureKind::CloudConfiguration
+        | DatasetOpenFailureKind::UnsupportedScheme
+        | DatasetOpenFailureKind::InvalidLocation => ErrorKind::Config,
         _ => ErrorKind::DatasetOpenFailure,
     }
 }
@@ -1055,6 +1079,37 @@ mod tests {
     use futures_util::stream;
 
     use super::*;
+
+    #[test]
+    fn a_relative_dataset_path_resolves_against_the_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        for relative in ["x.zarr", "./x.zarr", "data/x.zarr"] {
+            let resolved = absolute_dataset_source(relative).unwrap();
+            let location = DatasetLocation::parse(&resolved)
+                .unwrap_or_else(|e| panic!("{relative:?} resolved to {resolved:?}: {e}"));
+            assert!(location.is_local(), "{resolved}");
+            assert!(
+                std::path::Path::new(&resolved).starts_with(&cwd),
+                "{resolved} is not under {}",
+                cwd.display()
+            );
+            assert!(resolved.ends_with("x.zarr"), "{resolved}");
+        }
+    }
+
+    #[test]
+    fn an_absolute_path_or_url_passes_through_unchanged() {
+        for source in [
+            "/srv/x.zarr",
+            "file:///srv/x.zarr",
+            "C:\\data\\x.zarr",
+            "gs://bucket/x.zarr",
+            "https://host/x.zarr",
+            "ftp://host/x.zarr",
+        ] {
+            assert_eq!(absolute_dataset_source(source).unwrap(), source);
+        }
+    }
 
     fn dataset_open_succeeded_message(request_id: &str, seq: u64) -> String {
         serde_json::json!({
