@@ -437,7 +437,7 @@ describe("handleVolumeChunkData — eviction policy", () => {
     const poolKey = "ds1";
     const memberA = "imgA";
 
-    const atlas = getOrCreateVolumePool(ctx, poolKey, 32, 32, 32, 0, 0);
+    const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0);
     atlas.entityMetas.set(memberA, [makeVolumeMeta(2, 4, 4)]);
     atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
     atlas.freeSlots = [0];
@@ -625,7 +625,7 @@ describe("handleSliceChunkData — Z-slice retargeting", () => {
     const poolKey = "ds1";
     const memberA = "imgA";
 
-    const atlas = getOrCreateSlicePool(ctx, poolKey, 32, 32, 0, 0, 0);
+    const atlas = getOrCreateSlicePool(ctx, poolKey, "ds1", 32, 32, 0, 0, 0);
     atlas.entityMetas.set(memberA, [makeSliceMeta(4, 4)]);
     atlas.indirectionData = new Uint32Array(4 * 4).fill(0xFFFFFFFF);
     atlas.freeSlots = [0];
@@ -678,7 +678,7 @@ describe("handleSliceChunkData — Z-slice retargeting", () => {
     const poolKey = "ds1";
     const memberA = "imgA";
 
-    const atlas = getOrCreateSlicePool(ctx, poolKey, 32, 32, 4, 0, 0);
+    const atlas = getOrCreateSlicePool(ctx, poolKey, "ds1", 32, 32, 4, 0, 0);
     atlas.entityMetas.set(memberA, [makeSliceMeta(4, 4)]);
     atlas.indirectionData = new Uint32Array(4 * 4).fill(0xFFFFFFFF);
 
