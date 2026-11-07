@@ -739,7 +739,6 @@ export class CpuCache {
     this.desiredCoarseKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
     this.rejectionTracker.clear();
-    this.deliveryState.onPlanRebuildStart();
   }
 
   *getDeliverable(): Iterable<ReadyDelivery> {

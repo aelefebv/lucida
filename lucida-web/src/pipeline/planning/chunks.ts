@@ -6,6 +6,7 @@
 import { Axis } from "../../axes.ts";
 import type { LevelGeometry } from "../../manifestTypes.ts";
 import type { VisibleRegion } from "../viewport.ts";
+import { sliceChunkRange } from "../../renderer/slicePlane.ts";
 import type {
   ActiveSetEntry,
   ChunkRequest,
@@ -287,8 +288,25 @@ function clipGridCellsToRegion(
   const rowStart = Math.max(0, Math.floor(localMinY / chunkWorldY));
   const rowEnd = Math.min(maxRow, Math.max(0, Math.ceil(localMaxY / chunkWorldY)));
 
-  const zStart = Math.max(0, Math.floor(region.zRangeVox[0] / chunkWorldZ));
-  const zEnd = Math.min(maxZ, Math.max(0, Math.ceil(region.zRangeVox[1] / chunkWorldZ)));
+  let zStart: number;
+  let zEnd: number;
+  if (region.frustumPlanes === null) {
+    // A 2-D view samples the chunk the render worker maps its plane to, not
+    // every chunk the plane's slab overlaps: a chunk the worker does not want
+    // is refused on delivery and re-sent.
+    const [first, end] = sliceChunkRange(
+      region.zRangeVox[0],
+      region.zRangeVox[1],
+      level0.shape[Axis.Z],
+      levelGeo.shape[Axis.Z],
+      levelGeo.chunk_shape[Axis.Z],
+    );
+    zStart = Math.max(0, first);
+    zEnd = Math.min(maxZ, end);
+  } else {
+    zStart = Math.max(0, Math.floor(region.zRangeVox[0] / chunkWorldZ));
+    zEnd = Math.min(maxZ, Math.max(0, Math.ceil(region.zRangeVox[1] / chunkWorldZ)));
+  }
 
   if (stats) {
     const colsKept = Math.max(0, colEnd - colStart);

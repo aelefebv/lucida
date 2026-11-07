@@ -76,7 +76,7 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     entityMetas,
     entityZInfo,
     z: 0, t: 0, c: 0,
-    staleSliceKeys: null,
+    slotLevelZ: new Int32Array(totalSlots).fill(-1),
     intensityMin: 65535, intensityMax: 0,
     indirectionDirty: false,
     ...overrides,

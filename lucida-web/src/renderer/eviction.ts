@@ -73,10 +73,11 @@ export interface FindFarthestParams {
  *   2. Else a stale slot: unmapped, member gone from the active set, or
  *      no section for its level.
  *   3. Else the mapped chunk farthest from its member's camera reference,
- *      whatever its level.
+ *      whatever its level. Among equally far chunks the greatest composite
+ *      key goes, so the choice never depends on the order chunks arrived in.
  * Cases 1 and 2 return `dist = Infinity`. A later finer chunk outranks a
  * stale one, so the scan can't stop early except at level 0. The caller
- * evicts only if the incoming chunk is nearer than `dist`.
+ * evicts only if the incoming chunk is strictly nearer than `dist`.
  */
 export function findFarthestSlot(params: FindFarthestParams): { key: string; dist: number } {
   let finerKey = "";
@@ -118,7 +119,7 @@ export function findFarthestSlot(params: FindFarthestParams): { key: string; dis
       ? chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam)
       : chunkDistSq(lodMeta, chunk.x, chunk.y, null, cam);
 
-    if (dist > maxDist) {
+    if (dist > maxDist || (dist === maxDist && compositeKey > farthestKey)) {
       maxDist = dist;
       farthestKey = compositeKey;
     }
