@@ -1,128 +1,68 @@
 //! End-to-end startup tests for `AuthConfig::from_env`: spawn the real
 //! `lucida-server` binary with `LUCIDA_*` combinations and assert it either
-//! binds or exits non-zero naming the variable. Only the binary covers the
-//! fail-fast in `main.rs`, the bind, and the startup banner; `from_env_map`
-//! has unit tests in `auth/config.rs`.
+//! comes up or exits non-zero naming the variable. Only the binary covers
+//! the fail-fast in `main.rs`, the bind, and the startup banner;
+//! `from_env_map` has unit tests in `auth/config.rs`.
 //!
-//! Each test uses its own loopback port, clears the parent env so no
-//! `LUCIDA_*` override leaks in, and points `LUCIDA_DB_URL` at a tempdir.
+//! Each test uses its own port and points `LUCIDA_DB_URL` at a tempdir,
+//! and `boot::server` keeps the parent's `LUCIDA_*` variables out.
 
-use std::io::Read;
-use std::net::TcpListener;
-use std::process::{Child, Command, Stdio};
+mod boot;
+
+use std::path::Path;
+use std::process::{Command, Stdio};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::{Duration, Instant};
 
-const BIN: &str = env!("CARGO_BIN_EXE_lucida-server");
+use boot::{exit_of, free_port, server, wait_for_health};
 
 fn serial_test_lock() -> MutexGuard<'static, ()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
 }
 
-/// Reserve and immediately drop a loopback TCP port. The port is
-/// briefly available between the drop here and the spawned server's
-/// bind; that race is acceptable for these tests because each test
-/// also runs with a unique port (no two tests collide).
-fn pick_loopback_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
-/// Build a `Command` with a wiped env, then layer the supplied
-/// LUCIDA_* vars on top. Always points the SQLite store at a tempdir
-/// so we don't pollute the workspace.
-fn server_command(tmp_db: &std::path::Path, env: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new(BIN);
-    cmd.env_clear()
-        // PATH is needed so dynamic loader / sqlx can resolve libs on
-        // some hosts; HOME for any default-cache-dir lookups.
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
+/// The server on `bind` with `env` layered on, its SQLite store in `tmp`
+/// so the workspace stays clean.
+fn server_command(bind: &str, tmp: &Path, env: &[(&str, &str)]) -> Command {
+    let mut command = server(bind);
+    command
         .env(
             "LUCIDA_DB_URL",
-            format!("sqlite://{}", tmp_db.to_str().expect("utf-8")),
+            format!("sqlite://{}", tmp.join("lucida.db").display()),
         )
-        // Force trace level off / quiet so stderr stays scannable.
-        .env("RUST_LOG", "lucida_server=warn");
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    cmd
+        .envs(env.iter().copied());
+    command
 }
 
-/// Spawn the server with the given env, poll the port until it accepts
-/// a TCP connection (success) or the process exits (failure), then
-/// kill / harvest. Returns the captured stderr so callers can grep
-/// for any expected banners (the LUCIDA_INSECURE warning, etc).
-fn assert_server_starts(port: u16, env: &[(&str, &str)]) -> String {
+/// Start the server on a free port of `host`, wait until it answers, then
+/// stop it. Returns its stderr so callers can grep for a banner such as
+/// the `LUCIDA_INSECURE` warning.
+fn assert_server_starts(host: &str, env: &[(&str, &str)]) -> String {
     let tmp = tempfile::tempdir().unwrap();
-    let db_path = tmp.path().join("lucida.db");
-    let mut cmd = server_command(&db_path, env);
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let port = free_port();
+    let bind = format!("{host}:{port}");
+    let mut child = server_command(&bind, tmp.path(), env)
+        // Only stderr is asserted on, and a log pipe nobody drains can
+        // fill and stall the server.
+        .stdout(Stdio::null())
         .spawn()
-        .expect("spawn server");
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    let addr = format!("127.0.0.1:{port}");
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            // Process exited before we observed a successful bind.
-            let stderr = drain(child.stderr.as_mut().unwrap());
-            panic!("server exited with {status:?} before binding {addr}; stderr=\n{stderr}",);
-        }
-        match std::net::TcpStream::connect_timeout(
-            &addr.parse().unwrap(),
-            Duration::from_millis(200),
-        ) {
-            Ok(_) => break,
-            Err(last_err) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let stderr = drain(child.stderr.as_mut().unwrap());
-                    panic!(
-                        "timed out waiting for {addr} to accept; last error={last_err:?}; \
-                         stderr=\n{stderr}",
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(75));
-            }
-        }
-    }
+        .expect("the server binary runs");
+    let up = wait_for_health(port, &mut child);
+    // Stop the server before reading stderr: draining it runs to
+    // end-of-file, and a running server never reaches one.
     let _ = child.kill();
-    let _ = child.wait();
-    // Drain whatever stderr was buffered up to the bind moment. Tests
-    // that care about the startup banner can grep this.
-    drain(child.stderr.as_mut().unwrap())
+    let output = child.wait_with_output().expect("the server can be reaped");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(up, "the server on {bind} must come up; stderr=\n{stderr}");
+    stderr
 }
 
-/// Spawn the server with the given env, expect it to exit non-zero
-/// within the timeout, and assert `expected_substr` appears in
-/// stderr. Returns the captured stderr for any extra checks the caller
-/// wants to layer on.
-fn assert_server_fails(env: &[(&str, &str)], expected_substr: &str) -> String {
+/// Run the server on `bind` with `env`, expect it to exit non-zero, and
+/// assert `expected_substr` appears in stderr. Returns the captured
+/// stderr for any extra checks the caller wants to layer on.
+fn assert_server_fails(bind: &str, env: &[(&str, &str)], expected_substr: &str) -> String {
     let tmp = tempfile::tempdir().unwrap();
-    let db_path = tmp.path().join("lucida.db");
-    let mut cmd = server_command(&db_path, env);
-    let child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn server");
-    // The fail-fast paths exit synchronously after env parsing; 5s is
-    // generous for any cold-start overhead.
-    let output = wait_with_timeout(child, Duration::from_secs(5));
-    assert!(
-        !output.status.success(),
-        "expected non-zero exit, got {:?}\nstderr=\n{}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr),
-    );
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let (code, stderr) = exit_of(&mut server_command(bind, tmp.path(), env));
+    assert_ne!(code, Some(0), "expected a non-zero exit; stderr=\n{stderr}");
     assert!(
         stderr.contains(expected_substr),
         "stderr missing {expected_substr:?}; got=\n{stderr}",
@@ -130,55 +70,18 @@ fn assert_server_fails(env: &[(&str, &str)], expected_substr: &str) -> String {
     stderr
 }
 
-fn wait_with_timeout(mut child: Child, timeout: Duration) -> std::process::Output {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            let mut stderr = Vec::new();
-            if let Some(mut s) = child.stderr.take() {
-                let _ = s.read_to_end(&mut stderr);
-            }
-            let mut stdout = Vec::new();
-            if let Some(mut s) = child.stdout.take() {
-                let _ = s.read_to_end(&mut stdout);
-            }
-            return std::process::Output {
-                status,
-                stdout,
-                stderr,
-            };
-        }
-        if Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("child did not exit within {timeout:?}");
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-fn drain(stream: &mut std::process::ChildStderr) -> String {
-    let mut buf = Vec::new();
-    let _ = stream.read_to_end(&mut buf);
-    String::from_utf8_lossy(&buf).into_owned()
-}
-
 #[test]
 fn loopback_default_starts_with_disabled_auth() {
     let _guard = serial_test_lock();
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
     // No LUCIDA_AUTH set → loopback bind → auto-detect Disabled →
     // server boots without requiring Google credentials.
-    assert_server_starts(port, &[("LUCIDA_BIND", &bind)]);
+    assert_server_starts("127.0.0.1", &[]);
 }
 
 #[test]
 fn explicit_disabled_loopback_starts() {
     let _guard = serial_test_lock();
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
-    assert_server_starts(port, &[("LUCIDA_BIND", &bind), ("LUCIDA_AUTH", "disabled")]);
+    assert_server_starts("127.0.0.1", &[("LUCIDA_AUTH", "disabled")]);
 }
 
 #[test]
@@ -190,15 +93,9 @@ fn explicit_disabled_non_loopback_with_insecure_starts() {
     // set, the server should boot and emit the multi-line audit
     // banner so it's impossible to miss
     // in a `journalctl`/k8s log scroll.
-    let port = pick_loopback_port();
-    let bind = format!("0.0.0.0:{port}");
     let stderr = assert_server_starts(
-        port,
-        &[
-            ("LUCIDA_BIND", &bind),
-            ("LUCIDA_AUTH", "disabled"),
-            ("LUCIDA_INSECURE", "1"),
-        ],
+        "0.0.0.0",
+        &[("LUCIDA_AUTH", "disabled"), ("LUCIDA_INSECURE", "1")],
     );
     assert!(
         stderr.contains("LUCIDA_INSECURE=1"),
@@ -213,12 +110,9 @@ fn explicit_disabled_non_loopback_with_insecure_starts() {
 #[test]
 fn explicit_disabled_non_loopback_without_insecure_fails() {
     let _guard = serial_test_lock();
-    let port = pick_loopback_port();
+    let port = free_port();
     let bind = format!("0.0.0.0:{port}");
-    let stderr = assert_server_fails(
-        &[("LUCIDA_BIND", &bind), ("LUCIDA_AUTH", "disabled")],
-        "LUCIDA_INSECURE=1",
-    );
+    let stderr = assert_server_fails(&bind, &[("LUCIDA_AUTH", "disabled")], "LUCIDA_INSECURE=1");
     // Bind value should appear in the error so an operator can grep
     // for the failure cause in their boot log.
     assert!(
@@ -230,10 +124,10 @@ fn explicit_disabled_non_loopback_without_insecure_fails() {
 #[test]
 fn explicit_google_without_credentials_fails() {
     let _guard = serial_test_lock();
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
+    let bind = format!("127.0.0.1:{}", free_port());
     assert_server_fails(
-        &[("LUCIDA_BIND", &bind), ("LUCIDA_AUTH", "google")],
+        &bind,
+        &[("LUCIDA_AUTH", "google")],
         "LUCIDA_GOOGLE_CLIENT_ID",
     );
 }
@@ -241,12 +135,8 @@ fn explicit_google_without_credentials_fails() {
 #[test]
 fn explicit_iap_without_an_audience_fails() {
     let _guard = serial_test_lock();
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
-    let stderr = assert_server_fails(
-        &[("LUCIDA_BIND", &bind), ("LUCIDA_AUTH", "iap")],
-        "LUCIDA_IAP_AUDIENCE",
-    );
+    let bind = format!("127.0.0.1:{}", free_port());
+    let stderr = assert_server_fails(&bind, &[("LUCIDA_AUTH", "iap")], "LUCIDA_IAP_AUDIENCE");
     assert!(
         stderr.contains("backendServices"),
         "the message should show the shape of the value; got=\n{stderr}",
@@ -256,18 +146,14 @@ fn explicit_iap_without_an_audience_fails() {
 #[test]
 fn unknown_auth_mode_fails() {
     let _guard = serial_test_lock();
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
-    assert_server_fails(
-        &[("LUCIDA_BIND", &bind), ("LUCIDA_AUTH", "microsoft")],
-        "microsoft",
-    );
+    let bind = format!("127.0.0.1:{}", free_port());
+    assert_server_fails(&bind, &[("LUCIDA_AUTH", "microsoft")], "microsoft");
 }
 
 #[test]
 fn invalid_bind_address_fails() {
     let _guard = serial_test_lock();
-    assert_server_fails(&[("LUCIDA_BIND", "not-a-socket-addr")], "LUCIDA_BIND");
+    assert_server_fails("not-a-socket-addr", &[], "LUCIDA_BIND");
 }
 
 // -- LUCIDA_DIRECTORY_* ------------------------------------------------
@@ -279,34 +165,31 @@ fn invalid_bind_address_fails() {
 #[test]
 fn a_malformed_directory_variable_stops_the_boot_naming_it() {
     let _guard = serial_test_lock();
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
+    let bind = format!("127.0.0.1:{}", free_port());
     assert_server_fails(
+        &bind,
         &[
-            ("LUCIDA_BIND", &bind),
             ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
             ("LUCIDA_DIRECTORY_NAME_FIELDS", ""),
         ],
         "LUCIDA_DIRECTORY_NAME_FIELDS",
     );
     assert_server_fails(
-        &[
-            ("LUCIDA_BIND", &bind),
-            ("LUCIDA_DIRECTORY_URL", "people.example/people"),
-        ],
+        &bind,
+        &[("LUCIDA_DIRECTORY_URL", "people.example/people")],
         "LUCIDA_DIRECTORY_URL",
     );
     assert_server_fails(
+        &bind,
         &[
-            ("LUCIDA_BIND", &bind),
             ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
             ("LUCIDA_DIRECTORY_HEADERS", "X-Requested-By lucida"),
         ],
         "LUCIDA_DIRECTORY_HEADERS",
     );
     assert_server_fails(
+        &bind,
         &[
-            ("LUCIDA_BIND", &bind),
             ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
             ("LUCIDA_DIRECTORY_REFRESH_SECONDS", "soon"),
         ],
@@ -317,17 +200,12 @@ fn a_malformed_directory_variable_stops_the_boot_naming_it() {
 #[test]
 fn an_unreachable_directory_does_not_stop_the_boot() {
     let _guard = serial_test_lock();
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
     // Port 1 refuses at once, so the load fails without waiting out its
     // timeout. The failed load logs to stdout, which this harness does
-    // not capture, so only the bind is checked here. The middleware
-    // tests pin what `whoami` serves meanwhile.
+    // not capture, so only that the server comes up is checked here. The
+    // middleware tests pin what `whoami` serves meanwhile.
     assert_server_starts(
-        port,
-        &[
-            ("LUCIDA_BIND", &bind),
-            ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
-        ],
+        "127.0.0.1",
+        &[("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people")],
     );
 }
