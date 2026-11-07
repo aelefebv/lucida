@@ -164,7 +164,7 @@ function intervalAfter(document: TraceDocument, run: TraceRun): TraceRun | null 
 
 export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): DiagnosticDocument {
   // A run from another schema fails here, by name, rather than partway through
-  // the derivation on a field that schema never had (ADR 0047).
+  // the derivation on a field that schema never had.
   if (run.header.schemaVersion !== TRACE_SCHEMA_VERSION) {
     throw new Error(
       `run ${run.header.runId} was recorded under trace schema ${run.header.schemaVersion}; ` +

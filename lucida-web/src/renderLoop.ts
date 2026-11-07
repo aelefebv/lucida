@@ -74,7 +74,7 @@ export class RenderLoop implements TraceEnvironment {
   private lastFrameTimeUs = 0;
   /**
    * Reused across every publication. The predicate is evaluated once per
-   * tick, and ADR 0049 asks the monitor for zero steady-state allocation.
+   * tick, and steady-state allocation would show in the trace as GC stalls.
    */
   private quiescenceState: QuiescenceState = createQuiescenceState();
 
@@ -94,7 +94,7 @@ export class RenderLoop implements TraceEnvironment {
   private appearanceUnsub: () => void;
 
   private _renderScale = 1.0;
-  /** Lowers the render resolution while a gesture's frames run long (ADR 0068). */
+  /** Lowers the render resolution while a gesture's frames run long. */
   private readonly resolution = new AdaptiveResolution();
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -308,7 +308,7 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
-   * Publish the page's quiescence (ADR 0051). Called at the end of every
+   * Publish the page's quiescence. Called at the end of every
    * tick, which is also the only moment it can change: every arrival,
    * eviction and view change dirties a flag, and a dirty flag schedules a
    * tick. Nothing polls: an idle viewer publishes nothing because it does

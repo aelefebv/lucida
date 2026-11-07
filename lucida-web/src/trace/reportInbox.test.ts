@@ -59,8 +59,8 @@ describe("Send report", () => {
   });
 
   /**
-   * The invariant the inbox is built on (ADR 0049): the
-   * recording leaves the page when somebody asks, and at no other time.
+   * The invariant the inbox is built on: the recording leaves the page when
+   * somebody asks, and at no other time.
    */
   it("sends nothing while a run opens, closes and is read — and sends when the action does", async () => {
     const sender = vi.fn(() => Promise.resolve(RECEIPT));

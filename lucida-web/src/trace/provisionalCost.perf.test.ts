@@ -1,5 +1,5 @@
 /**
- * The provisional reading's cost contract (ADR 0049). The live view, the
+ * The provisional reading's cost contract. The live view, the
  * watch stream, and an agent polling the seam read a run while it is open,
  * so none of them may walk rows.
  *

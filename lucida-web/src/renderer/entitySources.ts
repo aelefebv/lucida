@@ -6,7 +6,7 @@
  * missing. Planning still requests `detailLevels` only, so the extra
  * sections cost indirection entries, never fetches. A level finer than the
  * target is never a source: zoomed out it would show the decimated picture
- * the target replaces (ADR 0061).
+ * the target replaces.
  */
 
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";

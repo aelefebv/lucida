@@ -2,8 +2,8 @@
  * How far a pointer or wheel input moves the view. The viewers read these,
  * and the trace seam publishes them, so the trace driver's scripted steps
  * turn an angle or a factor into the drag or the wheel delta a person would
- * make with the same constants the page applies (ADR 0051). A
- * change here reaches both sides at once.
+ * make with the same constants the page applies. A change here reaches both
+ * sides at once.
  */
 
 /** Radians of orbit per CSS pixel of drag in the volume view. */

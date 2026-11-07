@@ -6,7 +6,7 @@
  * Phase color and churn tint read the trace ({@link ChunkReading}), not the
  * cache, using the timeline's palette. A chunk with no row says why in words
  * rather than wearing a color. The brushed selection highlights its cells in
- * any mode (ADR 0052); it arrives as an input, never read from the dock.
+ * any mode; it arrives as an input, never read from the dock.
  *
  * Every other color is a canvas token, since the cells sit over the data and
  * take their contrast from the canvas background.

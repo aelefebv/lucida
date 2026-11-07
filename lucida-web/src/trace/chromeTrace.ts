@@ -1,6 +1,6 @@
 /**
  * A {@link TraceDocument} projected into Chrome Trace Event JSON, so a run
- * opens in Perfetto. The in-memory model stays a table (ADR 0047), and rows
+ * opens in Perfetto. The in-memory model stays a table, and rows
  * fan out into spans here, at serialisation, and nowhere else.
  *
  * Each phase gets its own thread id with complete events (`ph: "X"`). Async

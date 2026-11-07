@@ -5,7 +5,7 @@
  *
  * This links the dock and the overlay without merging them: a window brushed
  * on the dock becomes a set of row identities, and the overlay highlights the
- * cells whose identity is in it (ADR 0052). Rows are read by the phase
+ * cells whose identity is in it. Rows are read by the phase
  * rollup's rules: a row still in flight is charged to the run's close, and a
  * row that crosses the window's edge counts for the part inside.
  */

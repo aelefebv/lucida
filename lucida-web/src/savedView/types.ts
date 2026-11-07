@@ -1,6 +1,5 @@
 // TypeScript mirror of `lucida_core::saved_view::SavedView`. The wire format
 // is the contract, so keep this in step with `lucida-core/src/saved_view.rs`.
-// See `docs/adr/0013-url-as-app-state-for-saved-views.md`.
 
 export const SAVED_VIEW_VERSION = 1;
 

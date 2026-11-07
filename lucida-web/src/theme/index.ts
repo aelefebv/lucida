@@ -1,4 +1,4 @@
-// Theme tokens, appearance, and per-browser preferences (ADR 0066).
+// Theme tokens, appearance, and per-browser preferences.
 export { AccentPicker, type AccentPickerProps } from "./AccentPicker.tsx";
 export {
   ACCENT_PRESETS,

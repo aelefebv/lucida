@@ -92,7 +92,7 @@ describe("phase extents", () => {
   });
 
   it("places a server phase inside the browser bracket the row was placed in", () => {
-    // A server row carries no per-phase clock this side can trust (ADR 0050);
+    // A server row carries no per-phase clock this side can trust;
     // the bracket it was nested into is the only position it has.
     const run = makeRun({
       header: { durationUs: 800 * MS },

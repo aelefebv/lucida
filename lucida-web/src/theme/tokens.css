@@ -1,5 +1,5 @@
 /*
- * Design tokens. Style with these and nothing else (ADR 0066).
+ * Design tokens. Style with these and nothing else.
  *
  * <html> carries the resolved appearance as attributes: data-theme
  * (dark | light), data-density (comfortable | compact), data-accent (a preset

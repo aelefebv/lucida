@@ -7,7 +7,7 @@
  * It walks no row. It reads the row table's live tally and the per-tick
  * readings in the window, so a read costs the same at ten rows and at the
  * per-run cap, and the dock, the watch stream and an agent can poll it at the
- * tick cadence without perturbing the run (ADR 0049).
+ * tick cadence without perturbing the run.
  */
 
 import type { LivePhaseOccupancy, LiveProgress } from "../liveProgress.ts";

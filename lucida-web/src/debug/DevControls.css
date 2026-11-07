@@ -1,7 +1,6 @@
 /* Dev controls — standalone mutation surface docked beside the canvas.
-   Self-contained: it was lifted out of the debug panel that ADR 0052
-   then deleted, so it owns its styles rather than borrowing that
-   panel's stylesheet.
+   Self-contained: it owns its styles and borrows no other surface's
+   stylesheet.
 
    The sliders and number boxes stay native inputs: a typed value writes on
    every keystroke and a drag starts the radius preview on pointer down,

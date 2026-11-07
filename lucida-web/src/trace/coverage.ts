@@ -5,7 +5,7 @@
  * rather than the span between the first and last thing the recorder saw.
  *
  * A pure function over the serialised tables, run at export so the
- * recorder's budget (ADR 0049) goes on recording. The judgement about whether
+ * recorder's budget goes on recording. The judgement about whether
  * a gap could hide the bottleneck lives here so reading surfaces cannot
  * disagree about it.
  */

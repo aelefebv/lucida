@@ -1,7 +1,7 @@
 /**
  * The bundle: one file with everything a reader needs to read a run and the
  * driver needs to replay it. One function makes it behind the trace seam, so
- * the monitor and `lucida trace` write the same artifact (ADR 0051).
+ * the monitor and `lucida trace` write the same artifact.
  *
  * View fields and pins are read off the header the run closed with, so a
  * bundle saved long after a run describes the view the run measured. The

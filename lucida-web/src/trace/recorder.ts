@@ -2,7 +2,7 @@
  * The recorder: unconditional, run-scoped, and the only thing that knows
  * when a lifecycle row belongs to a run.
  *
- * Recording is on in every build with no toggle at any scope (ADR 0049). An
+ * Recording is on in every build with no toggle at any scope. An
  * idle viewer emits nothing because the render loop is dirty-driven, so the
  * recording costs nothing at rest, and a switch would only invite every
  * unexplained stall to be blamed on the monitor.
