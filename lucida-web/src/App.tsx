@@ -1398,6 +1398,7 @@ function App({
                         canvasRef={render.canvasRef}
                         datasets={datasetsRef.current}
                         getCache={() => bridge.sessionRef.current?.cpuCache ?? null}
+                        getGpuAtlases={() => render.clientRef.current?.gpuAtlases() ?? null}
                       />
                     </Suspense>
                   )}
