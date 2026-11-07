@@ -3,47 +3,17 @@
 //! `build_extractor` returning the cookie extractor in every mode, which
 //! would 401 every request from a binary that boots fine.
 //!
-//! Each test uses its own port, clears the parent env, points
-//! `LUCIDA_DB_URL` at a tempdir, and drains the child's stdout and stderr
-//! so it never blocks on a full pipe.
+//! Each test uses its own port and points `LUCIDA_DB_URL` at a tempdir,
+//! and `boot::server` keeps the parent's `LUCIDA_*` variables out.
 
-use std::io::Read;
-use std::net::TcpListener;
-use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+mod boot;
 
+use std::process::{Child, Stdio};
+use std::sync::{Mutex, PoisonError};
+use std::time::Duration;
+
+use boot::{free_port, server, wait_for_health};
 use serde_json::Value;
-
-const BIN: &str = env!("CARGO_BIN_EXE_lucida-server");
-
-/// Reserve and immediately drop a loopback TCP port. The port is briefly
-/// available between the drop here and the spawned server's bind; that
-/// race is acceptable for these tests because each test also runs with
-/// a unique port (no two tests collide).
-fn pick_loopback_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
-}
-
-/// Build a `Command` with a wiped env, then layer the supplied
-/// `LUCIDA_*` vars on top. Always points the SQLite store at a tempdir.
-fn server_command(tmp_db: &std::path::Path, env: &[(&str, &str)]) -> Command {
-    let mut cmd = Command::new(BIN);
-    cmd.env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env(
-            "LUCIDA_DB_URL",
-            format!("sqlite://{}", tmp_db.to_str().expect("utf-8")),
-        )
-        .env("RUST_LOG", "lucida_server=warn");
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    cmd
-}
 
 /// Owns the spawned child so the Drop implementation can kill it on
 /// test exit (or panic). Holds the tempdir handle to keep the
@@ -61,80 +31,42 @@ impl Drop for SpawnedServer {
     }
 }
 
-/// Spawn the server with the given env vars, poll the bind addr until
-/// it accepts a TCP connection (success) or the process exits
-/// (failure). Returns a `SpawnedServer` owning the child.
-///
-/// `connect_addr` is what the test client uses (always `127.0.0.1:port`
-/// even when the server is bound on `0.0.0.0:port`, since the loopback
-/// interface always reaches the wildcard bind from the same host).
-fn spawn_server(bind: &str, connect_addr: &str, extra_env: &[(&str, &str)]) -> SpawnedServer {
+/// Start the server on a free port of `host` with `extra_env` layered on,
+/// and wait until it answers. The client connects over loopback, which
+/// also reaches a wildcard bind on the same host.
+fn spawn_server(host: &str, extra_env: &[(&str, &str)]) -> SpawnedServer {
+    // The cases run in parallel, and two handed the same free port before
+    // either server bound it would both talk to whichever server won. A
+    // case picks its port only once the previous one's server listens.
+    static STARTING: Mutex<()> = Mutex::new(());
+    let _starting = STARTING.lock().unwrap_or_else(PoisonError::into_inner);
+
     let tmp = tempfile::tempdir().unwrap();
-    let db_path = tmp.path().join("lucida.db");
-    let mut env = vec![("LUCIDA_BIND", bind)];
-    env.extend_from_slice(extra_env);
-    let mut cmd = server_command(&db_path, &env);
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+    let port = free_port();
+    let mut child = server(&format!("{host}:{port}"))
+        .env(
+            "LUCIDA_DB_URL",
+            format!("sqlite://{}", tmp.path().join("lucida.db").display()),
+        )
+        .envs(extra_env.iter().copied())
+        // Nothing reads the log, and a pipe nobody drains can fill and
+        // stall the server mid-case.
+        .stdout(Stdio::null())
         .spawn()
-        .expect("spawn server");
-
-    // Drain pipes in background threads so the child never blocks on a
-    // full stderr buffer (axum + tracing chatter fills 64K fast under
-    // load even in `warn`-only mode).
-    if let Some(s) = child.stdout.take() {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let _ = std::io::BufReader::new(s).read_to_end(&mut buf);
-        });
-    }
-    let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
-    if let Some(s) = child.stderr.take() {
-        let stderr_buf = std::sync::Arc::clone(&stderr_buf);
-        std::thread::spawn(move || {
-            let mut tmp = [0u8; 4096];
-            let mut s = s;
-            loop {
-                match s.read(&mut tmp) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => stderr_buf.lock().unwrap().extend_from_slice(&tmp[..n]),
-                }
-            }
-        });
-    }
-
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
-            panic!(
-                "server exited with {status:?} before binding {connect_addr}; stderr=\n{stderr}",
-            );
-        }
-        match std::net::TcpStream::connect_timeout(
-            &connect_addr.parse().unwrap(),
-            Duration::from_millis(200),
-        ) {
-            Ok(_) => break,
-            Err(last_err) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let stderr = String::from_utf8_lossy(&stderr_buf.lock().unwrap()).into_owned();
-                    panic!(
-                        "timed out waiting for {connect_addr} to accept; last error={last_err:?}; \
-                         stderr=\n{stderr}",
-                    );
-                }
-                std::thread::sleep(Duration::from_millis(75));
-            }
-        }
+        .expect("the server binary runs");
+    if !wait_for_health(port, &mut child) {
+        let _ = child.kill();
+        let stderr = child
+            .wait_with_output()
+            .map(|output| String::from_utf8_lossy(&output.stderr).into_owned())
+            .unwrap_or_default();
+        panic!("the server on {host}:{port} must come up; stderr=\n{stderr}");
     }
 
     SpawnedServer {
         child,
         _tmp: tmp,
-        base_url: format!("http://{connect_addr}"),
+        base_url: format!("http://127.0.0.1:{port}"),
     }
 }
 
@@ -180,9 +112,7 @@ async fn assert_whoami_returns_dev_principal(server: &SpawnedServer) {
 // route minted in disabled mode would 401.
 #[tokio::test]
 async fn loopback_default_whoami_returns_dev_principal() {
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
-    let server = spawn_server(&bind, &bind, &[]);
+    let server = spawn_server("127.0.0.1", &[]);
     assert_whoami_returns_dev_principal(&server).await;
 }
 
@@ -190,9 +120,7 @@ async fn loopback_default_whoami_returns_dev_principal() {
 // mode ends up with no control rather than one that clears nothing.
 #[tokio::test]
 async fn disabled_mode_advertises_no_sign_out_url() {
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
-    let server = spawn_server(&bind, &bind, &[]);
+    let server = spawn_server("127.0.0.1", &[]);
 
     let mode: Value = http_client()
         .get(format!("{}/auth/mode", server.base_url))
@@ -209,13 +137,8 @@ async fn disabled_mode_advertises_no_sign_out_url() {
 // LUCIDA_INSECURE=1 on a non-loopback bind behaves identically.
 #[tokio::test]
 async fn explicit_disabled_non_loopback_with_insecure_whoami_returns_dev_principal() {
-    let port = pick_loopback_port();
-    let bind = format!("0.0.0.0:{port}");
-    // Connect via loopback; the wildcard bind reaches it on the same host.
-    let connect = format!("127.0.0.1:{port}");
     let server = spawn_server(
-        &bind,
-        &connect,
+        "0.0.0.0",
         &[("LUCIDA_AUTH", "disabled"), ("LUCIDA_INSECURE", "1")],
     );
     assert_whoami_returns_dev_principal(&server).await;
@@ -226,8 +149,6 @@ async fn explicit_disabled_non_loopback_with_insecure_whoami_returns_dev_princip
 // mode.
 #[tokio::test]
 async fn browse_works_without_cookie_in_disabled_mode() {
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
     // Tempdir scoped to the test; seed one file so the listing isn't
     // entirely empty (catches a bug where the handler returned 200 on
     // an empty dir but 500 on a real one). We seed a regular file
@@ -237,7 +158,7 @@ async fn browse_works_without_cookie_in_disabled_mode() {
     std::fs::write(data_tmp.path().join("seed.txt"), b"hello").unwrap();
     let data_dir_str = data_tmp.path().to_str().unwrap().to_string();
 
-    let server = spawn_server(&bind, &bind, &[("LUCIDA_DATA_DIR", &data_dir_str)]);
+    let server = spawn_server("127.0.0.1", &[("LUCIDA_DATA_DIR", &data_dir_str)]);
     let client = http_client();
     // The browse handler canonicalizes its `path` arg and constrains
     // it to LUCIDA_DATA_DIR; pointing at the same directory we set
@@ -302,9 +223,7 @@ async fn assert_dev_switcher_advertised(server: &SpawnedServer, expected: bool) 
 
 #[tokio::test]
 async fn dev_login_switches_identity_on_a_loopback_bind() {
-    let port = pick_loopback_port();
-    let bind = format!("127.0.0.1:{port}");
-    let server = spawn_server(&bind, &bind, &[]);
+    let server = spawn_server("127.0.0.1", &[]);
     let client = http_client();
 
     assert_dev_switcher_advertised(&server, true).await;
@@ -336,16 +255,12 @@ async fn dev_login_switches_identity_on_a_loopback_bind() {
 // exposed bind. It does not buy back the switcher.
 #[tokio::test]
 async fn dev_login_404s_on_a_non_loopback_bind() {
-    let port = pick_loopback_port();
-    let bind = format!("0.0.0.0:{port}");
-    let connect = format!("127.0.0.1:{port}");
     let dist = tempfile::tempdir().unwrap();
     let index_html = "<html>lucida</html>";
     std::fs::write(dist.path().join("index.html"), index_html).unwrap();
     let dist_str = dist.path().to_str().unwrap().to_string();
     let server = spawn_server(
-        &bind,
-        &connect,
+        "0.0.0.0",
         &[
             ("LUCIDA_AUTH", "disabled"),
             ("LUCIDA_INSECURE", "1"),
