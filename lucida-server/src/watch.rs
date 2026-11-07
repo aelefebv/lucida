@@ -11,7 +11,8 @@ use std::collections::{HashMap, VecDeque};
 
 use axum::extract::ws::{Message, Utf8Bytes};
 use lucida_core::protocol::{ClientId, ServerMessage, WatchItem};
-use tokio::sync::mpsc;
+
+use crate::connection::ClientSender;
 
 /// How many items the ring keeps for a late joiner.
 ///
@@ -34,7 +35,7 @@ struct WatchEntry {
 #[derive(Debug, Default)]
 pub struct WatchRelay {
     ring: VecDeque<WatchEntry>,
-    subscribers: HashMap<ClientId, mpsc::UnboundedSender<Message>>,
+    subscribers: HashMap<ClientId, ClientSender>,
     /// The workspace's running count of relayed items, from 1.
     published: u64,
 }
@@ -93,11 +94,7 @@ impl WatchRelay {
     /// that is already subscribed replays the ring again and registers the
     /// same channel: the stream is idempotent apart from the replay, and a
     /// reader that asked twice is asking to be caught up twice.
-    pub fn subscribe(
-        &mut self,
-        subscriber: ClientId,
-        sender: mpsc::UnboundedSender<Message>,
-    ) -> Vec<u64> {
+    pub fn subscribe(&mut self, subscriber: ClientId, sender: ClientSender) -> Vec<u64> {
         let mut replayed = Vec::with_capacity(self.ring.len());
         for entry in &self.ring {
             if sender.send(Message::Text(entry.frame.clone())).is_err() {
@@ -149,7 +146,7 @@ mod tests {
     #[test]
     fn a_subscriber_receives_what_is_published_after_it_joined() {
         let mut relay = WatchRelay::new();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::connection::client_queue();
         assert!(relay.subscribe(9, tx).is_empty());
 
         relay.publish(3, aggregate(1));
@@ -166,7 +163,7 @@ mod tests {
         relay.publish(3, aggregate(1));
         relay.publish(3, aggregate(2));
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::connection::client_queue();
         assert_eq!(relay.subscribe(9, tx), vec![1, 2]);
         relay.publish(3, aggregate(3));
 
@@ -182,7 +179,7 @@ mod tests {
         for at in 0..(WATCH_RING_CAPACITY as u64 + 5) {
             relay.publish(3, aggregate(at));
         }
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::connection::client_queue();
         let replayed = relay.subscribe(9, tx);
         assert_eq!(replayed.len(), WATCH_RING_CAPACITY);
         assert_eq!(replayed[0], 6);
@@ -192,7 +189,7 @@ mod tests {
     #[test]
     fn several_pages_publish_into_one_stream_and_the_publisher_is_named() {
         let mut relay = WatchRelay::new();
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = crate::connection::client_queue();
         relay.subscribe(9, tx);
 
         relay.publish(3, aggregate(1));
@@ -205,7 +202,7 @@ mod tests {
     #[test]
     fn a_departed_subscriber_stops_receiving() {
         let mut relay = WatchRelay::new();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = crate::connection::client_queue();
         relay.subscribe(9, tx);
         assert_eq!(relay.subscribers(), 1);
 
@@ -218,7 +215,7 @@ mod tests {
     #[test]
     fn a_closed_channel_is_pruned_on_publish() {
         let mut relay = WatchRelay::new();
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = crate::connection::client_queue();
         relay.subscribe(9, tx);
         drop(rx);
 

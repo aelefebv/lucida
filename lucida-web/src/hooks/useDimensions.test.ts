@@ -15,6 +15,21 @@ import type { WasmScene } from "lucida-core";
 import type { RenderLoop } from "../renderLoop.ts";
 import { VIEWPORT_MEDIA, type ViewportClass } from "../theme/viewport.ts";
 import type { DatasetState } from "../types.ts";
+import {
+  FIXTURES,
+  PIXEL_RATIOS,
+  PropertyReport,
+  VIEWPORTS,
+  cssSize,
+  cssSizesDiffer,
+  datasetId,
+  loadWasm,
+  manifest,
+  notFramed,
+  openedScene,
+  type ViewFixture,
+  type Viewport,
+} from "../viewProperties.ts";
 import type { BridgeCallbacks } from "./useDatasetSettings.ts";
 import { syncSceneViewState } from "./sceneViewState.ts";
 import { useDimensions } from "./useDimensions.ts";
@@ -172,22 +187,66 @@ describe("useDimensions view mode", () => {
     }));
   }
 
-  it("frames the data in the new mode below desktop widths", () => {
-    atWidthClass("phone");
-    const { result, scene, commands } = renderDimensions([dataset("ds", 1)]);
-
+  /** The page's view after the toggle switches `f`, fitted in `from` on a
+   *  real scene, to the other mode. */
+  function switched(f: ViewFixture, vp: Viewport, dpr: number, from: "slice" | "arcball"): WasmScene {
+    const scene = openedScene(f, vp, dpr, from);
+    const ds = { id: datasetId(f), manifest: manifest(f) } as unknown as DatasetState;
+    const { result } = renderHook(() =>
+      useDimensions({
+        wasmSceneRef: { current: scene },
+        wasmScene: scene,
+        selectedDatasetId: ds.id,
+        datasetsRef: { current: new Map([[ds.id, ds]]) },
+        datasetsVersion: 0,
+        bridgeCallbacksRef: {
+          current: {
+            sendCommand: vi.fn(),
+            emitPresence: vi.fn(),
+            emitDatasetPresence: vi.fn(),
+            breakFollow: vi.fn(),
+          },
+        },
+        loopRef: { current: null },
+      }),
+    );
+    // The page opens in 2D, so from 3D the first toggle only catches the
+    // toggle up with the scene.
     act(() => result.current.handleViewModeToggle());
+    if (from === "arcball") act(() => result.current.handleViewModeToggle());
+    return scene;
+  }
 
-    expect(commands.map((c) => c.type)).toEqual(["set_mode_arcball"]);
-    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledExactlyOnceWith("ds");
+  /** Each switch frames every fixture and shows it at one CSS size at both
+   *  pixel ratios, on canvases `vp` of width class `viewportClass`. */
+  function assertSwitchFrames(vp: Viewport, viewportClass: ViewportClass): void {
+    atWidthClass(viewportClass);
+    const framed = new PropertyReport();
+    const sized = new PropertyReport();
+    for (const f of FIXTURES) {
+      const id = datasetId(f);
+      for (const from of ["slice", "arcball"] as const) {
+        const [at1x, at2x] = PIXEL_RATIOS.map((dpr) => switched(f, vp, dpr, from));
+        const label = `${f.name} on ${vp.name}, from ${from}`;
+        framed.check(`${label} at 1x`, notFramed(at1x, id));
+        framed.check(`${label} at 2x`, notFramed(at2x, id));
+        sized.check(label, cssSizesDiffer(cssSize(at1x, id, 1), cssSize(at2x, id, 2)));
+      }
+    }
+    framed.assertHolds();
+    sized.assertHolds();
+  }
+
+  it("frames the data in the new mode on a phone", () => {
+    loadWasm();
+    assertSwitchFrames(VIEWPORTS[1], "phone");
   });
 
-  it("keeps each mode's starting camera on desktop", () => {
-    atWidthClass("desktop");
-    const { result, scene } = renderDimensions([dataset("ds", 1)]);
-
-    act(() => result.current.handleViewModeToggle());
-
-    expect(scene.fit_camera_to_dataset_bounds).not.toHaveBeenCalled();
+  // Fails while a desktop switch starts each mode from a fixed camera: a 3D
+  // arcball that clips the data or leaves it small, and a 2D slice camera at
+  // one sample per device pixel.
+  it.fails("frames the data in the new mode on a desktop", () => {
+    loadWasm();
+    assertSwitchFrames(VIEWPORTS[0], "desktop");
   });
 });

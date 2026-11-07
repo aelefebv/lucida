@@ -83,11 +83,10 @@ pub async fn broadcast_bookmark_change(
     };
 
     // Snapshot the unicast route map under a short-lived lock so we
-    // don't hold it across `send` calls. The senders themselves are
-    // unbounded mpsc — `send` returns immediately even if the receiver
-    // is slow. A subsequent disconnect drops the receiver, which makes
-    // future sends fail; the dropped client gets cleaned up by its
-    // own handler loop.
+    // don't hold it across `send` calls. `send` never waits: a client
+    // that is not reading has its connection closed once its queue is
+    // full, and a disconnect makes future sends fail; either way the
+    // client is cleaned up by its own handler loop.
     let senders: Vec<_> = {
         let routes = unicast_routes.lock().await;
         routes.iter().map(|(id, tx)| (*id, tx.clone())).collect()
@@ -126,10 +125,11 @@ mod tests {
     };
     use lucida_store::cache::CachedStore;
     use object_store::memory::InMemory;
-    use tokio::sync::{Mutex as TokioMutex, mpsc};
+    use tokio::sync::Mutex as TokioMutex;
 
     use crate::UnicastRoutes;
     use crate::binding::{ChunkResolver, ServerBinding};
+    use crate::connection::{ClientReceiver, client_queue};
     use crate::generated::{DerivedChunkCache, GeneratedCoarseService};
     use crate::proxy::{ProxyCache, ProxyGenerator};
     use crate::session::Session;
@@ -229,22 +229,22 @@ mod tests {
         }
     }
 
-    /// Add a fake client to `Session.clients` and an `mpsc::UnboundedSender`
-    /// to `unicast_routes`. Returns the receiving end so the test can
+    /// Add a fake client to `Session.clients` and a queue to
+    /// `unicast_routes`. Returns the receiving end so the test can
     /// drain delivered messages.
     async fn register_client(
         session: &Arc<TokioMutex<Session>>,
         unicast_routes: &UnicastRoutes,
         id: ClientId,
-    ) -> mpsc::UnboundedReceiver<Message> {
+    ) -> ClientReceiver {
         session.lock().await.add_client(id, None);
-        let (tx, rx) = mpsc::unbounded_channel::<Message>();
+        let (tx, rx) = client_queue();
         unicast_routes.lock().await.insert(id, tx);
         rx
     }
 
     /// Pull every queued message off a receiver without blocking.
-    fn drain(rx: &mut mpsc::UnboundedReceiver<Message>) -> Vec<String> {
+    fn drain(rx: &mut ClientReceiver) -> Vec<String> {
         let mut out = Vec::new();
         while let Ok(msg) = rx.try_recv() {
             if let Message::Text(t) = msg {

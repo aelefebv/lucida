@@ -23,14 +23,14 @@ use lucida_core::auth_principal::AuthPrincipal;
 
 use super::bearer_token::{BearerToken, BearerTokenStore, hash_bearer_token};
 use super::cli_authorization::{CliTokenAuthorization, CliTokenAuthorizationStore};
-use super::config::{AuthConfig, AuthMode};
+use super::config::AuthConfig;
 use super::cookie::{
     build_clearing_cookie, build_clearing_signed_out_marker, build_session_cookie,
     build_signed_out_marker, read_session_cookie, read_signed_out_marker, request_is_https,
 };
 use super::dev::{
     build_clearing_dev_principal_cookie, build_dev_principal_cookie, default_dev_principal,
-    normalize_dev_principal,
+    dev_switcher_enabled, normalize_dev_principal,
 };
 use super::google_oauth::{GoogleOAuthClient, OAuthError, Prompt};
 use super::pending_auth::{PendingAuth, PendingAuthStore};
@@ -65,7 +65,7 @@ pub async fn whoami(principal: Option<Extension<AuthPrincipal>>) -> Response {
 #[derive(Debug, Serialize)]
 pub struct AuthModeInfo {
     /// Where the sign-out control points, or `null` when this mode has
-    /// nothing to sign out of. See [`AuthMode::sign_out_url`].
+    /// nothing to sign out of. See [`super::config::AuthMode::sign_out_url`].
     pub sign_out_url: Option<&'static str>,
 }
 
@@ -582,16 +582,10 @@ pub struct DevAuthState {
 }
 
 impl DevAuthState {
-    /// Decide whether the dev identity switcher is available.
-    ///
-    /// It needs `LUCIDA_AUTH=disabled` and a loopback bind. Disabled
-    /// mode alone is not enough. `/auth/dev/login` mints whatever
-    /// identity the request body names, admin included, so on any other
-    /// address it lets every caller make themselves an admin.
-    /// `LUCIDA_INSECURE=1` acknowledges running without sign-in. It does
-    /// not ask for a route that hands out privilege.
+    /// Decide whether the dev identity switcher is available. See
+    /// [`dev_switcher_enabled`].
     pub fn new(config: Arc<AuthConfig>) -> Self {
-        let enabled = config.mode == AuthMode::Disabled && config.bind_is_loopback();
+        let enabled = dev_switcher_enabled(&config);
         Self { config, enabled }
     }
 }
@@ -602,12 +596,12 @@ pub struct DevAuthStatus {
     pub default_principal: AuthPrincipal,
 }
 
+/// Names an identity and nothing more. Admin rights come from
+/// `LUCIDA_ADMIN_EMAILS`, so an `is_admin` field in the body is ignored.
 #[derive(Debug, Deserialize)]
 pub struct DevLoginRequest {
     pub email: String,
     pub display_name: Option<String>,
-    #[serde(default)]
-    pub is_admin: bool,
 }
 
 /// `GET /auth/dev/status` — tells the SPA whether to draw the identity
@@ -656,22 +650,20 @@ pub async fn dev_login(
         }
     };
 
-    let principal = match normalize_dev_principal(
-        &payload.email,
-        payload.display_name.as_deref(),
-        payload.is_admin,
-    ) {
-        Ok(principal) => principal,
-        Err(detail) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "bad_request", "detail": detail })),
-            )
-                .into_response();
-        }
-    };
+    let mut principal =
+        match normalize_dev_principal(&payload.email, payload.display_name.as_deref()) {
+            Ok(principal) => principal,
+            Err(detail) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "bad_request", "detail": detail })),
+                )
+                    .into_response();
+            }
+        };
 
     let cookie = build_dev_principal_cookie(&state.config, &principal, request_is_https(&parts));
+    principal.is_admin = state.config.admin_emails.contains(&principal.email);
     (
         StatusCode::OK,
         AppendHeaders([(SET_COOKIE, cookie)]),
@@ -1365,6 +1357,48 @@ mod tests {
         assert_eq!(principal.email, "viewer@example.com");
         assert_eq!(principal.display_name, "Viewer");
         assert!(!principal.is_admin);
+    }
+
+    #[tokio::test]
+    async fn dev_login_takes_admin_from_configuration_not_the_body() {
+        let mut config = AuthConfig::for_tests();
+        config.admin_emails = ["admin@example.com".to_string()].into_iter().collect();
+        let state = DevAuthState::new(Arc::new(config));
+        let app = Router::new().route("/auth/dev/login", post(dev_login).with_state(state));
+
+        let login = |body: &'static str| {
+            Request::builder()
+                .method("POST")
+                .uri("/auth/dev/login")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap()
+        };
+        let principal_of = |res: Response| async move {
+            let body = axum::body::to_bytes(res.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            serde_json::from_slice::<AuthPrincipal>(&body).unwrap()
+        };
+
+        let asked = app
+            .clone()
+            .oneshot(login(r#"{"email":"someone@example.com","is_admin":true}"#))
+            .await
+            .unwrap();
+        assert!(
+            !principal_of(asked).await.is_admin,
+            "the body cannot ask for admin"
+        );
+
+        let configured = app
+            .oneshot(login(r#"{"email":"Admin@Example.com"}"#))
+            .await
+            .unwrap();
+        assert!(
+            principal_of(configured).await.is_admin,
+            "configuration grants it"
+        );
     }
 
     #[tokio::test]
