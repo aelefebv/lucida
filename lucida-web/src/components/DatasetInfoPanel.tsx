@@ -6,6 +6,7 @@ import { CopyIcon } from "@phosphor-icons/react";
 import { useEffect, useState, type ReactNode } from "react";
 import type { DatasetManifest, MultiscaleInfo } from "../manifestTypes.ts";
 import { channelDisplayName } from "./channels.ts";
+import { drawnAtFloat32Precision } from "../renderer/dataTypeUtil.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
 import { toast } from "../ui/toastQueue.ts";
@@ -158,7 +159,14 @@ function DatasetFacts({ dataset, source }: { dataset: InfoDataset; source: Sourc
             </ol>
           </Fact>
         )}
-        {multiscale && <Fact label="Data type">{multiscale.data_type.toLowerCase()}</Fact>}
+        {multiscale && (
+          <Fact label="Data type">
+            {multiscale.data_type.toLowerCase()}
+            {drawnAtFloat32Precision(multiscale.data_type) && (
+              <span className="lc-info-muted"> drawn at float32 precision</span>
+            )}
+          </Fact>
+        )}
         {channelCount > 0 && (
           <Fact label={channelCount === 1 ? "1 channel" : `${channelCount} channels`}>
             {channelNames.join(", ")}

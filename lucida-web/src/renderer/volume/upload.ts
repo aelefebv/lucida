@@ -12,7 +12,7 @@ import { writeVolumeChunk } from "../gpuContext.ts";
 import { sampleIntensityRange } from "../../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { asUint16, asUint32 } from "../dataTypeUtil.ts";
+import { asUint32, atlasTexels, atlasTextureFormat, texelValues } from "../dataTypeUtil.ts";
 import {
   parseCompositeKey,
   makeCompositeKey,
@@ -174,7 +174,7 @@ export function handleVolumeChunkData(
     const sy = Math.floor(slotIndex / atlas.slotsX) % atlas.slotsY;
     const sz = Math.floor(slotIndex / (atlas.slotsX * atlas.slotsY));
 
-    const data = asUint16(chunk.data, chunk.dataType);
+    const data = atlasTexels(chunk.data, chunk.dataType, atlas.format);
     const xOff = sx * chunkX;
     const yOff = sy * chunkY;
     const zOff = sz * chunkZ;
@@ -182,7 +182,10 @@ export function handleVolumeChunkData(
     const ch = Math.min(chunkY, levelHeight - chunk.y * chunkY);
     const cd = Math.min(chunkZ, levelDepth - chunk.z * chunkZ);
 
-    writeVolumeChunk(ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
+    writeVolumeChunk(
+      ctx.device, atlas.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff,
+      atlasTextureFormat(atlas.format),
+    );
 
     const [, lodGridY, lodGridX] = lodMeta.gridDims;
     const globalIdx = lodMeta.offset + chunk.z * lodGridY * lodGridX + chunk.y * lodGridX + chunk.x;
@@ -195,7 +198,7 @@ export function handleVolumeChunkData(
     atlas.indirectionDirty = true;
 
     const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
-    const { min, max } = sampleIntensityRange(data, perChunkSamples);
+    const { min, max } = sampleIntensityRange(texelValues(data, atlas.format), perChunkSamples);
     if (min < atlas.intensityMin) { atlas.intensityMin = min; intensityChanged = true; }
     if (max > atlas.intensityMax) { atlas.intensityMax = max; intensityChanged = true; }
   }

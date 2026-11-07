@@ -244,6 +244,7 @@ describe("handleVolumeRenderMultiPass", () => {
       16,
       0,
       0,
+      "u16",
     );
     atlas.entityMetas.set("img-b", [
       {
@@ -286,6 +287,7 @@ describe("handleVolumeRenderMultiPass", () => {
       16,
       0,
       0,
+      "u16",
     );
     coarseAtlas.indirectionDirty = false;
     coarseAtlas.entityMetas.set("img-a", [
@@ -316,9 +318,9 @@ describe("handleVolumeRenderMultiPass", () => {
     const composite = vi.fn();
     const state = createInitialState();
     const stub = { device, state } as unknown as WorkerCtx;
-    const finePool = getOrCreateVolumePool(stub, "ds-0:32x32x32:detail", 32, 32, 32, 0, 0);
-    const smallChunkPool = getOrCreateVolumePool(stub, "ds-0:16x16x16:detail", 16, 16, 16, 0, 0);
-    const coarsePool = getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", 16, 16, 16, 0, 0);
+    const finePool = getOrCreateVolumePool(stub, "ds-0:32x32x32:detail", 32, 32, 32, 0, 0, "u16");
+    const smallChunkPool = getOrCreateVolumePool(stub, "ds-0:16x16x16:detail", 16, 16, 16, 0, 0, "u16");
+    const coarsePool = getOrCreateVolumePool(stub, "ds-0:16x16x16:coarse", 16, 16, 16, 0, 0, "u16");
     const meta = (level: number, chunk: number) => [{
       level,
       gridDims: [1, 1, 1] as [number, number, number],

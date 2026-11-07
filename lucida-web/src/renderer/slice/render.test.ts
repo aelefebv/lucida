@@ -35,6 +35,7 @@ function makeDevice(): GPUDevice {
 function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState {
   return {
     texture: {} as GPUTexture,
+    format: "u16",
     indirectionBuf: {} as GPUBuffer,
     indirectionData: new Uint32Array([0]),
     slots: new Map(),

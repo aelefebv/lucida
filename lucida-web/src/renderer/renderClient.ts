@@ -15,7 +15,9 @@ import type {
   ColdStateDeltaMessage,
   ViewHotStateMessage,
   RgbaColor,
+  MinimapUploadOverviewChunksForLayerMessage,
 } from "./workerProtocol.ts";
+import type { SampleFormat } from "./dataTypeUtil.ts";
 import { summarizeDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
@@ -633,7 +635,7 @@ export class RenderClient implements UploadClient {
 
   minimapUploadOverviewChunksForLayer(
     datasetId: string,
-    chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[],
+    chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
     t: number,
     c: number,
     levelWidth: number,
@@ -642,14 +644,14 @@ export class RenderClient implements UploadClient {
     chunkX: number,
     chunkY: number,
     chunkZ: number,
+    sampleFormat: SampleFormat,
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
-      // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
-      // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app).
-      const buf = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength) as ArrayBuffer;
+      // A copy: the cache keeps the decoded chunk, so it can't be transferred.
+      const buf = chunk.data.slice(0);
       transferList.push(buf);
-      return { data: buf, dataType: "uint16", x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
+      return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
     });
     this.worker.postMessage(
       {
@@ -659,7 +661,8 @@ export class RenderClient implements UploadClient {
         t, c,
         levelWidth, levelHeight, levelDepth,
         chunkX, chunkY, chunkZ,
-      },
+        sampleFormat,
+      } satisfies MinimapUploadOverviewChunksForLayerMessage,
       transferList,
     );
   }

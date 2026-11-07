@@ -48,6 +48,9 @@
     "Uint8",
     "Uint16",
     "Uint32",
+    "Int8",
+    "Int16",
+    "Int32",
     "Float32",
     "Float64"
   ],
@@ -84,6 +87,7 @@
     "storage_backend",
     "unsupported_codec",
     "unsupported_layout",
+    "unsupported_data_type",
     "malformed_metadata",
     "missing_metadata",
     "import",

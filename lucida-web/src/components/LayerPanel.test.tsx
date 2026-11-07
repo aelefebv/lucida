@@ -37,7 +37,7 @@ function layer(overrides: Partial<LayerInfo> = {}): LayerInfo {
     opacity: 1,
     channels: [channel()],
     autoContrast: true,
-    fullRangeMax: 65535,
+    valueRange: [0, 65535],
     integerData: true,
     blendMode: "alpha",
     renderMode: "translucent",

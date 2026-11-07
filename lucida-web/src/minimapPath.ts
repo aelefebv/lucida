@@ -6,6 +6,7 @@ import type { MinimapLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { MINIMAP_UPLOAD_BUDGET_BYTES, MINIMAP_OVERVIEW_SCAN_INTERVAL_MS } from "./renderLoopTypes.ts";
 import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
+import { datasetSampleFormat } from "./renderer/dataTypeUtil.ts";
 
 export interface MinimapState {
   overviewKey: Map<string, string>;
@@ -352,7 +353,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
 
       const uploaded = state.overviewUploaded.get(memberId)!;
       const missing: { level: number; x: number; y: number; z: number; t: number; c: number; key: string }[] = [];
-      const available: { data: Uint16Array; x: number; y: number; z: number; key: string }[] = [];
+      const available: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[] = [];
 
       for (let iz = 0; iz < nz; iz++) {
         for (let iy = 0; iy < ny; iy++) {
@@ -362,17 +363,9 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
 
             const cached = ctx.cpuCache.getCachedChunk(memberId, chunkKey);
             if (cached && cached.data.byteLength > 0) {
-              // The GPU path expects uint16, so widen uint8.
-              let u16: Uint16Array;
-              if (cached.dataType.toLowerCase() === "uint8") {
-                const src = new Uint8Array(cached.data);
-                u16 = new Uint16Array(src.length);
-                u16.set(src);
-              } else {
-                u16 = new Uint16Array(cached.data);
-              }
               available.push({
-                data: u16,
+                data: cached.data,
+                dataType: cached.dataType,
                 x: ix, y: iy, z: iz, key: chunkKey,
               });
               uploaded.add(chunkKey);
@@ -398,6 +391,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
           memberId, available, t, c,
           levelWidth, levelHeight, levelDepth,
           chunkX, chunkY, chunkZ,
+          datasetSampleFormat(ds.manifest),
         );
         state.uploadGeneration++;
       }

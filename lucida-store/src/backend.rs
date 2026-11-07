@@ -90,6 +90,9 @@ pub enum StoreError {
     ObjectStore(object_store::Error),
     /// An error parsing metadata.
     Metadata(String),
+    /// The array's data type, as its metadata names it, is one lucida can't
+    /// show as its values.
+    UnsupportedDataType(String),
 }
 
 impl fmt::Display for StoreError {
@@ -98,6 +101,7 @@ impl fmt::Display for StoreError {
             StoreError::UnsupportedScheme(s) => write!(f, "unsupported URL scheme: {s}"),
             StoreError::ObjectStore(e) => write!(f, "storage error: {e}"),
             StoreError::Metadata(s) => write!(f, "metadata error: {s}"),
+            StoreError::UnsupportedDataType(s) => write!(f, "unsupported data type: {s}"),
         }
     }
 }
