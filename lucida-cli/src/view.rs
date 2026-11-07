@@ -175,11 +175,13 @@ pub struct PeerSummary {
     pub following: Option<ClientId>,
     pub followers: Vec<ClientId>,
     pub cursor: Option<[f64; 2]>,
-    pub camera: Camera,
-    pub view: ViewState,
-    pub display: DisplayState,
-    pub dataset_order: Vec<DatasetId>,
-    pub dataset_settings_count: usize,
+    /// `None` until the peer reports a camera, view and display.
+    pub camera: Option<Camera>,
+    pub view: Option<ViewState>,
+    pub display: Option<DisplayState>,
+    /// `None` until the peer reports its dataset presence.
+    pub dataset_order: Option<Vec<DatasetId>>,
+    pub dataset_settings_count: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -879,8 +881,8 @@ impl ViewerProfileClient {
             ));
         }
 
-        let own_presence = own_presence(snapshot)?;
-        let scene = scene_from_presence(&snapshot.document, own_presence);
+        // This connection is new, so its own presence holds nothing to seed from.
+        let scene = fitted_scene(&snapshot.document);
         Ok((
             saved_view_from_scene(&snapshot.document, scene),
             "workspace_snapshot".to_string(),
@@ -1352,19 +1354,52 @@ fn dataset_presence_result(
     }
 }
 
-fn scene_from_presence(document: &DocumentState, presence: &PresenceState) -> Scene {
-    let mut scene = Scene::new(presence.camera.viewport());
+/// The scene a client's presence describes. What the client has not reported
+/// comes from the document: every dataset with default settings, framed by
+/// [`fit_scene`].
+pub(crate) fn scene_from_presence(document: &DocumentState, presence: &PresenceState) -> Scene {
+    let viewport = presence
+        .camera
+        .as_ref()
+        .map_or(FITTED_VIEWPORT, Camera::viewport);
+    let mut scene = Scene::new(viewport);
     scene.document = document.clone();
-    scene.camera = presence.camera.clone();
-    // Peer-sourced camera: clamp into the ranges the interactive mutators
-    // enforce (same rule as `Scene::import_presence`).
-    scene.camera.sanitize();
-    scene.view = presence.view.clone();
-    scene.display = presence.display.clone();
-    scene.dataset_order = presence.dataset_order.clone();
-    scene.dataset_settings = presence.dataset_settings.clone();
+    if let (Some(order), Some(settings)) = (&presence.dataset_order, &presence.dataset_settings) {
+        scene.dataset_order = order.clone();
+        scene.dataset_settings = settings.clone();
+    }
     hydrate_scene_document_defaults(&mut scene);
+    match (&presence.camera, &presence.view, &presence.display) {
+        (Some(camera), Some(view), Some(display)) => {
+            scene.camera = camera.clone();
+            // Peer-sourced camera: clamp into the ranges the interactive
+            // mutators enforce (same rule as `Scene::import_presence`).
+            scene.camera.sanitize();
+            scene.view = view.clone();
+            scene.display = display.clone();
+        }
+        _ => fit_scene(&mut scene),
+    }
     scene
+}
+
+/// The canvas a fitted view is framed for when no client reported one.
+const FITTED_VIEWPORT: [u32; 2] = [crate::trace::DEFAULT_WIDTH, crate::trace::DEFAULT_HEIGHT];
+
+/// The document's datasets framed in 2D at [`FITTED_VIEWPORT`], or the blank
+/// camera when nothing is visible to frame.
+fn fitted_scene(document: &DocumentState) -> Scene {
+    let mut scene = Scene::new(FITTED_VIEWPORT);
+    scene.document = document.clone();
+    hydrate_scene_document_defaults(&mut scene);
+    fit_scene(&mut scene);
+    scene
+}
+
+fn fit_scene(scene: &mut Scene) {
+    let viewport = scene.camera.viewport();
+    // An empty workspace has nothing to frame and keeps the blank camera.
+    let _ = apply_overview_to_scene(scene, viewport);
 }
 
 fn scene_from_saved_view(document: &DocumentState, view: &SavedView) -> Scene {
@@ -1384,7 +1419,7 @@ fn scene_from_saved_view(document: &DocumentState, view: &SavedView) -> Scene {
     scene
 }
 
-fn saved_view_from_scene(document: &DocumentState, scene: Scene) -> SavedView {
+pub(crate) fn saved_view_from_scene(document: &DocumentState, scene: Scene) -> SavedView {
     SavedView {
         v: SAVED_VIEW_VERSION,
         datasets: Vec::new(),
@@ -1923,7 +1958,7 @@ fn peer_list_result(snapshot: &WorkspaceSnapshot) -> PeerListResult {
                 view: presence.view.clone(),
                 display: presence.display.clone(),
                 dataset_order: presence.dataset_order.clone(),
-                dataset_settings_count: presence.dataset_settings.len(),
+                dataset_settings_count: presence.dataset_settings.as_ref().map(HashMap::len),
             }
         })
         .collect();
@@ -2386,6 +2421,7 @@ fn format_peer_summary(peer: &PeerSummary) -> String {
         .cursor
         .map(|[x, y]| format!("({x:.3}, {y:.3})"))
         .unwrap_or_else(|| "none".to_string());
+    let unreported = || "unreported".to_string();
     format!(
         "{}{} following={} followers={} cursor={} datasets={} settings={} camera={} view={} display={}",
         peer.client_id,
@@ -2393,11 +2429,16 @@ fn format_peer_summary(peer: &PeerSummary) -> String {
         following,
         followers,
         cursor,
-        peer.dataset_order.len(),
-        peer.dataset_settings_count,
-        format_camera(&peer.camera),
-        format_view(&peer.view),
-        format_display(&peer.display)
+        peer.dataset_order
+            .as_ref()
+            .map_or_else(unreported, |order| order.len().to_string()),
+        peer.dataset_settings_count
+            .map_or_else(unreported, |count| count.to_string()),
+        peer.camera.as_ref().map_or_else(unreported, format_camera),
+        peer.view.as_ref().map_or_else(unreported, format_view),
+        peer.display
+            .as_ref()
+            .map_or_else(unreported, format_display)
     )
 }
 
@@ -2476,17 +2517,17 @@ mod tests {
     fn presence(client_id: ClientId, center: [f64; 2]) -> PresenceState {
         PresenceState {
             client_id,
-            camera: Camera::Slice(Slice {
+            camera: Some(Camera::Slice(Slice {
                 center,
                 zoom: 1.0,
                 viewport: [800, 600],
-            }),
-            view: ViewState::new(),
-            display: DisplayState::default(),
+            })),
+            view: Some(ViewState::new()),
+            display: Some(DisplayState::default()),
             following: None,
             cursor: None,
-            dataset_order: Vec::new(),
-            dataset_settings: HashMap::new(),
+            dataset_order: Some(Vec::new()),
+            dataset_settings: Some(HashMap::new()),
             identity: None,
         }
     }
@@ -2837,7 +2878,7 @@ mod tests {
     fn peer_list_result_summarizes_snapshot_presence() {
         let mut own = presence(7, [1.0, 2.0]);
         own.cursor = Some([12.5, 13.5]);
-        own.dataset_order = vec![DatasetId("wds-test".to_string())];
+        own.dataset_order = Some(vec![DatasetId("wds-test".to_string())]);
         let mut follower = presence(9, [3.0, 4.0]);
         follower.following = Some(7);
         let snapshot = WorkspaceSnapshot {
@@ -2858,7 +2899,7 @@ mod tests {
         assert_eq!(own_summary.cursor, Some([12.5, 13.5]));
         assert_eq!(
             own_summary.dataset_order,
-            vec![DatasetId("wds-test".to_string())]
+            Some(vec![DatasetId("wds-test".to_string())])
         );
         assert_eq!(own_summary.followers, vec![9]);
         let follower_summary = result
@@ -2909,6 +2950,58 @@ mod tests {
         let clear = serde_json::to_value(cursor_message(None)).unwrap();
         assert_eq!(clear["type"], "cursor");
         assert!(clear["position"].is_null());
+    }
+
+    /// One dataset whose image has an irregular pyramid: level 1 is four
+    /// times coarser than level 0, level 2 twice coarser again.
+    fn document_with_pyramid() -> DocumentState {
+        let level = |index: u32, side: u64| {
+            serde_json::json!({
+                "level_index": index,
+                "shape": [1, 1, 1, side, side],
+                "chunk_shape": [1, 1, 1, 256, 256],
+                "grid_shape": [1, 1, 1, side.div_ceil(256), side.div_ceil(256)],
+                "scale": [1.0, 1.0, 1.0, 1.0, 1.0]
+            })
+        };
+        serde_json::from_value(serde_json::json!({
+            "manifests": {
+                "wds-pyramid": {
+                    "dataset_id": "wds-pyramid",
+                    "name": "pyramid.zarr",
+                    "kind": "Single",
+                    "entities": [
+                        {
+                            "id": "entity-p",
+                            "kind": "Image",
+                            "parent": null,
+                            "labels": { "name": "pyramid" }
+                        }
+                    ],
+                    "transforms": [],
+                    "images": [
+                        {
+                            "image_id": "image-p",
+                            "owner": "entity-p",
+                            "multiscale": {
+                                "axes": [],
+                                "levels": [level(0, 4096), level(1, 1024), level(2, 512)],
+                                "coarse_level_index": null,
+                                "generated_levels": [],
+                                "data_type": "Uint16",
+                                "pinned_axes": []
+                            }
+                        }
+                    ],
+                    "source_layouts": [],
+                    "default_layout_id": null
+                }
+            },
+            "registered_layouts": {},
+            "active_layout_ids": {},
+            "asset_catalogs": {}
+        }))
+        .unwrap()
     }
 
     fn layer_state(level_pin: Option<u32>) -> LayerState {
@@ -3027,6 +3120,31 @@ mod tests {
     }
 
     #[test]
+    fn a_new_viewer_profile_starts_from_a_fitted_view() {
+        let document = document_with_pyramid();
+        let seeded = fitted_scene(&document);
+        match &seeded.camera {
+            Camera::Slice(slice) => {
+                assert_eq!(slice.viewport, FITTED_VIEWPORT);
+                assert_eq!(slice.center, [2048.0, 2048.0]);
+                let limiting = FITTED_VIEWPORT[1] as f64 / 4096.0;
+                assert!((slice.zoom - limiting * 0.9).abs() < 1e-12);
+            }
+            other => panic!("expected slice camera, got {other:?}"),
+        }
+        assert_eq!(
+            seeded.dataset_order,
+            vec![DatasetId("wds-pyramid".to_string())]
+        );
+
+        // A client that joined and reported nothing reads as the same view.
+        let joined = PresenceState::joined(7, None);
+        let scene = scene_from_presence(&document, &joined);
+        assert_eq!(scene.camera, seeded.camera);
+        assert_eq!(scene.dataset_order, seeded.dataset_order);
+    }
+
+    #[test]
     fn overview_fits_first_visible_image_into_requested_viewport() {
         let snapshot = display_snapshot();
         let mut scene = scene_from_presence(&snapshot.document, &snapshot.peers[0]);
@@ -3109,7 +3227,7 @@ mod tests {
     #[test]
     fn layer_current_channel_commands_resolve_scene_channel() {
         let mut peer = presence(7, [0.0, 0.0]);
-        peer.view.c = 2;
+        peer.view.as_mut().unwrap().c = 2;
         let snapshot = WorkspaceSnapshot {
             peers: vec![peer],
             ..display_snapshot()

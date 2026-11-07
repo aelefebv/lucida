@@ -11,6 +11,7 @@ pub mod binding_restore;
 pub mod bookmarks;
 pub mod browse;
 pub mod chunk_read;
+pub mod connection;
 pub mod dataset_open;
 pub mod decode;
 pub mod deployment_theme;
@@ -19,6 +20,7 @@ pub mod handler;
 pub mod health;
 pub mod inbox;
 pub mod open_diagnostics;
+pub mod origin;
 pub mod proxy;
 pub mod session;
 pub mod static_serve;
@@ -35,10 +37,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-use axum::extract::ws::Message;
 use lucida_core::protocol::ClientId;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{Mutex, broadcast};
 
+use connection::ClientSender;
 use session::Session;
 
 #[derive(Clone)]
@@ -67,8 +69,8 @@ pub enum BroadcastItem {
     WorkspaceArchived { json: String },
 }
 
-/// Per-client targeted message channels for unicast (chunk routing).
-pub type UnicastRoutes = Arc<Mutex<HashMap<ClientId, mpsc::UnboundedSender<Message>>>>;
+/// Per-client targeted message queues for unicast (chunk routing).
+pub type UnicastRoutes = Arc<Mutex<HashMap<ClientId, ClientSender>>>;
 
 #[derive(Clone)]
 pub struct AppState {

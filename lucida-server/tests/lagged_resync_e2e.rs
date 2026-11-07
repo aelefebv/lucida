@@ -7,6 +7,10 @@
 //! converges to the server document, and `ClientMessage::RequestSnapshot`
 //! gets the same snapshot, throttled per client. A broadcast capacity of 8
 //! and ~64 KiB payloads make the overflow deterministic.
+//!
+//! The legacy socket refuses document commands from clients, so the tests
+//! apply and broadcast them server-side, as the workspace path does once a
+//! command passes its role check.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -28,7 +32,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_conf
 
 use lucida_content::{DatasetId, DatasetKind, DatasetManifest};
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::{ClientMessage, ServerMessage};
+use lucida_core::protocol::ServerMessage;
 use lucida_core::scene::DocumentState;
 use lucida_protocol::{AssetCatalog, DatasetOpened, FetchSource, ProxiedFetchDescriptor};
 use lucida_server::session::Session;
@@ -41,7 +45,24 @@ const READ_TIMEOUT: Duration = Duration::from_secs(20);
 struct Rig {
     addr: SocketAddr,
     session: Arc<Mutex<Session>>,
+    tx: broadcast::Sender<BroadcastItem>,
     _tmp: tempfile::TempDir,
+}
+
+/// No connection has this id, so every client receives the broadcast
+/// rather than an ack.
+const SERVER_SIDE_SENDER: u64 = u64::MAX;
+
+/// Apply a document command and broadcast it, the way the handler does
+/// for a command that passed its role check.
+async fn apply_and_broadcast(rig: &Rig, command: DocumentCommand) {
+    let seq = rig.session.lock().await.apply(command.clone());
+    let _ = rig.tx.send(BroadcastItem::CommandBroadcast {
+        sender: SERVER_SIDE_SENDER,
+        broadcast_json: serde_json::to_string(&ServerMessage::CommandBroadcast { seq, command })
+            .unwrap(),
+        ack_json: serde_json::to_string(&ServerMessage::Ack { seq }).unwrap(),
+    });
 }
 
 async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
@@ -71,7 +92,7 @@ async fn start_server(broadcast_capacity: usize) -> Rig {
     proxy_config.generated_cache_dir = tmp.path().join("generated-coarse");
     let state = AppState {
         session: Arc::clone(&session),
-        tx,
+        tx: tx.clone(),
         next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes,
         data_dir: None,
@@ -88,6 +109,7 @@ async fn start_server(broadcast_capacity: usize) -> Rig {
     Rig {
         addr,
         session,
+        tx,
         _tmp: tmp,
     }
 }
@@ -163,11 +185,6 @@ fn dataset_opened_command(idx: usize, name_bytes: usize) -> DocumentCommand {
     })
 }
 
-async fn send_client_message(ws: &mut WsClient, msg: &ClientMessage) {
-    let json = serde_json::to_string(msg).expect("serialize client message");
-    ws.send(WsMessage::Text(json.into())).await.expect("send");
-}
-
 /// The client-side seq discipline, mirrored for the test consumer: apply
 /// contiguous broadcasts, drop stale ones, hold gapped ones until a
 /// snapshot re-baselines, then drain in order.
@@ -241,8 +258,7 @@ impl SequencedConsumer {
 }
 
 /// A stalled reader whose broadcast receiver overflows mid-flood receives a
-/// server-pushed fresh snapshot and converges to the flooding client's
-/// document.
+/// server-pushed fresh snapshot and converges to the server document.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lagged_client_receives_snapshot_and_converges() {
     // Sized to overwhelm loopback socket buffering (which can absorb
@@ -254,11 +270,6 @@ async fn lagged_client_receives_snapshot_and_converges() {
 
     let rig = start_server(8).await;
 
-    let mut flooder = connect(rig.addr).await;
-    let ServerMessage::Snapshot { .. } = next_server_message(&mut flooder).await else {
-        panic!("flooder join snapshot");
-    };
-
     let mut slow = connect(rig.addr).await;
     let mut consumer = SequencedConsumer::from_join_snapshot(next_server_message(&mut slow).await);
 
@@ -266,28 +277,9 @@ async fn lagged_client_receives_snapshot_and_converges() {
     // socket backpressure after a bounded number of ~64 KiB frames while the
     // ring (capacity 8) is lapped many times over.
     for idx in 0..FLOOD {
-        send_client_message(
-            &mut flooder,
-            &ClientMessage::Command {
-                command: dataset_opened_command(idx, NAME_BYTES),
-            },
-        )
-        .await;
+        apply_and_broadcast(&rig, dataset_opened_command(idx, NAME_BYTES)).await;
     }
-
-    // Wait until the server has applied the whole flood.
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let seq = rig.session.lock().await.seq;
-        if seq == FLOOD as u64 {
-            break;
-        }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "server never applied the full flood (seq = {seq})"
-        );
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    assert_eq!(rig.session.lock().await.seq, FLOOD as u64);
 
     // Now the slow client starts reading: buffered head of the stream, then
     // the Lagged-triggered snapshot, then whatever retained tail follows.
@@ -306,8 +298,7 @@ async fn lagged_client_receives_snapshot_and_converges() {
         "the server never pushed a snapshot after Lagged"
     );
 
-    // Convergence: byte-equal document state with the server (which is what
-    // the flooding client's acked view mirrors).
+    // Convergence: byte-equal document state with the server.
     let server_doc = rig.session.lock().await.document.clone();
     assert_eq!(
         serde_json::to_value(&consumer.doc).unwrap(),
@@ -330,19 +321,12 @@ async fn request_snapshot_returns_fresh_snapshot() {
     };
     assert_eq!(seq, 0);
 
-    // Apply a few commands (acked back to us as the sender).
     for idx in 0..3 {
-        send_client_message(
-            &mut client,
-            &ClientMessage::Command {
-                command: dataset_opened_command(idx, 8),
-            },
-        )
-        .await;
+        apply_and_broadcast(&rig, dataset_opened_command(idx, 8)).await;
     }
     for _ in 0..3 {
-        let ServerMessage::Ack { .. } = next_server_message(&mut client).await else {
-            panic!("expected ack");
+        let ServerMessage::CommandBroadcast { .. } = next_server_message(&mut client).await else {
+            panic!("expected command broadcast");
         };
     }
 

@@ -11,14 +11,15 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use clap::{Args, Parser, Subcommand};
 use tokio::sync::{Mutex, broadcast};
-use tower_http::cors::CorsLayer;
 
 use lucida_server::admin::{self, admin_clear_proxy_cache};
 use lucida_server::auth;
 use lucida_server::bookmarks;
+use lucida_server::connection;
 use lucida_server::deployment_theme::{self, DeploymentTheme};
 use lucida_server::health;
 use lucida_server::inbox;
+use lucida_server::origin::{self, OriginPolicy};
 use lucida_server::session::Session;
 use lucida_server::static_serve;
 use lucida_server::status;
@@ -135,7 +136,7 @@ impl LogFormat {
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    ws.on_upgrade(move |socket| async move {
+    connection::limit_inbound(ws).on_upgrade(move |socket| async move {
         tracing::info!(client_id = id, "ws.client_connected");
         handler::handle_client(
             id,
@@ -285,6 +286,17 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             return Err(std::io::Error::other(e.to_string()));
         }
     };
+    let origin_policy = match OriginPolicy::from_env() {
+        Ok(policy) => policy,
+        Err(e) => {
+            tracing::error!(error = %e, "origin.startup.config_error");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    };
+    tracing::info!(
+        allowed_origins = ?origin_policy.allowed(),
+        "origin.config",
+    );
     if let Some(theme) = deployment_theme.as_ref() {
         tracing::info!(
             file = %std::env::var(deployment_theme::FILE_VAR).unwrap_or_default().trim(),
@@ -573,12 +585,18 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             auth::middleware::auth_middleware,
         ));
 
-    let app = app_state_router
+    let mut app = app_state_router
         .merge(public_auth_router)
         // SPA catch-all. Merged last so the fallback only fires for paths
         // no other route claimed.
         .merge(static_serve_router)
-        .layer(CorsLayer::permissive());
+        .layer(axum::middleware::from_fn_with_state(
+            Arc::new(origin_policy.clone()),
+            origin::reject_cross_origin_upgrade,
+        ));
+    if let Some(cors) = origin_policy.cors_layer() {
+        app = app.layer(cors);
+    }
 
     // Hourly background sweep of expired session + pending-auth rows.
     // Spawned here (after stores are open, before the listener accepts

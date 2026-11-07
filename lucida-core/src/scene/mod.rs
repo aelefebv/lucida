@@ -1167,39 +1167,62 @@ impl Scene {
     }
 
     /// Adopt another client's dataset ordering + per-dataset display settings
-    /// (the layer-panel half of follow mode). Bumps `epochs.selection` iff
-    /// something actually changed — the epoch the per-dataset display commands
-    /// bump — so consumers re-read settings without an unchanged rebroadcast
-    /// forcing a replan.
+    /// (the layer-panel half of follow mode), merged per dataset known to both
+    /// sides:
+    ///
+    /// - The peer's order sets the place of every dataset it lists that this
+    ///   document holds. Datasets it doesn't list keep their relative order
+    ///   after those.
+    /// - The peer's settings replace this scene's for each dataset this
+    ///   document holds. A dataset only this scene has keeps its settings.
+    /// - Entries for datasets this document lacks are dropped, so a peer's
+    ///   stale presence can't add a dataset here. An empty blob changes nothing.
+    ///
+    /// Bumps `epochs.selection` iff something actually changed — the epoch the
+    /// per-dataset display commands bump — so consumers re-read settings
+    /// without an unchanged rebroadcast forcing a replan.
     pub fn import_dataset_presence(
         &mut self,
         dataset_order: Vec<DatasetId>,
-        mut dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
+        dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     ) {
-        // Remap each peer blob onto this scene's label order by name. A blob
-        // without `label_names`, from an older peer, stays positional. Without a
-        // manifest yet, the blob is left as-is and `DatasetOpened` reconciles it.
-        for (id, settings) in dataset_settings.iter_mut() {
-            if settings.label_names.is_empty() {
-                continue;
+        let manifests = &self.document.manifests;
+        let mut order: Vec<DatasetId> = Vec::with_capacity(self.dataset_order.len());
+        let peer_known = dataset_order
+            .into_iter()
+            .filter(|id| manifests.contains_key(id));
+        for id in peer_known.chain(self.dataset_order.iter().cloned()) {
+            if !order.contains(&id) {
+                order.push(id);
             }
-            if let Some(manifest) = self.document.manifests.get(id) {
+        }
+
+        let mut settings = self.dataset_settings.clone();
+        for (id, mut incoming) in dataset_settings {
+            let Some(manifest) = manifests.get(&id) else {
+                continue;
+            };
+            // Remap the peer blob onto this scene's label order by name. A blob
+            // without `label_names`, from an older peer, stays positional.
+            if !incoming.label_names.is_empty() {
                 let current: Vec<String> = manifest
                     .label_specs()
                     .iter()
                     .map(|l| l.name.clone())
                     .collect();
-                settings.label_settings = DatasetDisplaySettings::reconcile_label_settings(
-                    &settings.label_settings,
-                    &settings.label_names,
+                incoming.label_settings = DatasetDisplaySettings::reconcile_label_settings(
+                    &incoming.label_settings,
+                    &incoming.label_names,
                     &current,
                 );
-                settings.label_names = current;
+                incoming.label_names = current;
             }
+            settings.insert(id, incoming);
         }
-        if self.dataset_order != dataset_order || self.dataset_settings != dataset_settings {
-            self.dataset_order = dataset_order;
-            self.dataset_settings = dataset_settings;
+
+        if self.dataset_order != order || self.dataset_settings != settings {
+            self.dataset_order = order;
+            self.dataset_settings = settings;
             self.epochs.selection += 1;
         }
     }
@@ -4679,6 +4702,56 @@ mod tests {
         assert_eq!(applied.label_settings[0].opacity, 0.0);
         assert_eq!(applied.label_settings[1].opacity, 0.1);
         assert_eq!(applied.label_settings[2].opacity, 0.2);
+    }
+
+    fn scene_with_datasets(ids: &[&str]) -> Scene {
+        let mut scene = Scene::new([800, 600]);
+        for id in ids {
+            let reg = test_helpers::make_dataset_opened(id, id, 2);
+            scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        }
+        scene
+    }
+
+    #[test]
+    fn import_empty_dataset_presence_leaves_layers_unchanged() {
+        let mut scene = scene_with_datasets(&["ds1", "ds2"]);
+        let ds1 = DatasetId("ds1".into());
+        scene.dataset_settings.get_mut(&ds1).unwrap().opacity = 0.4;
+        let order = scene.dataset_order.clone();
+        let settings = scene.dataset_settings.clone();
+        let epochs = scene.epochs.clone();
+
+        scene.import_dataset_presence(Vec::new(), HashMap::new());
+
+        assert_eq!(scene.dataset_order, order);
+        assert_eq!(scene.dataset_settings, settings);
+        assert_eq!(scene.epochs, epochs);
+    }
+
+    #[test]
+    fn import_dataset_presence_merges_per_dataset() {
+        let mut scene = scene_with_datasets(&["ds1", "ds2", "ds3"]);
+        let [ds1, ds2, ds3] = ["ds1", "ds2", "ds3"].map(|id| DatasetId(id.into()));
+        scene.dataset_settings.get_mut(&ds3).unwrap().opacity = 0.3;
+
+        // The peer knows ds1 and ds2 in the other order, and one dataset this
+        // document never had.
+        let gone = DatasetId("gone".into());
+        let mut peer_ds2 = scene.dataset_settings[&ds2].clone();
+        peer_ds2.visible = false;
+        let peer_settings = HashMap::from([
+            (ds2.clone(), peer_ds2),
+            (ds1.clone(), scene.dataset_settings[&ds1].clone()),
+            (gone.clone(), DatasetDisplaySettings::default()),
+        ]);
+        scene.import_dataset_presence(vec![ds2.clone(), gone.clone(), ds1.clone()], peer_settings);
+
+        assert_eq!(scene.dataset_order, vec![ds2.clone(), ds1, ds3.clone()]);
+        assert!(!scene.dataset_settings[&ds2].visible);
+        // Only the follower has ds3, so its settings stay.
+        assert_eq!(scene.dataset_settings[&ds3].opacity, 0.3);
+        assert!(!scene.dataset_settings.contains_key(&gone));
     }
 
     // The hash indexes (member_index, LayoutPositionIndex, the per-dataset
