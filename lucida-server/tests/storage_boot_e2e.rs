@@ -156,7 +156,7 @@ fn an_unset_connection_string_still_starts_on_sqlite() {
         .spawn()
         .expect("the server binary runs");
 
-    let answered = wait_for_health(port);
+    let answered = wait_for_health(port, &mut child);
     // Stop the server before reading its pipes: draining them runs to
     // end-of-file, and a running server never reaches one.
     let _ = child.kill();
