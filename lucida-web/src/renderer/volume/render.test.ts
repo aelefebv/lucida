@@ -138,7 +138,11 @@ function makeCtx(opts: {
     state: opts.state,
     passTimer: UNTIMED,
     getVolumeRenderer: () => opts.renderer,
-    getCompositor: () => ({ composite: opts.composite, compiled: opts.compositorCompiled ?? Promise.resolve() }),
+    getCompositor: () => ({
+      composite: opts.composite,
+      underlayBackground: () => {},
+      compiled: opts.compositorCompiled ?? Promise.resolve(),
+    }),
     getCursorRenderer: () => ({ hasData: () => false, compiled: opts.cursorCompiled ?? Promise.resolve() }),
     ensureOffscreenPool: () => [{ createView: () => ({}) }],
     getOrCreateLUT: () => ({}),
@@ -170,7 +174,7 @@ function msgFor(layers: Array<{ memberId: string; entityIndex: number; blendMode
 }
 
 describe("handleVolumeRenderMultiPass — the compile", () => {
-  // The reason is in `pipelineCompile.ts` (#1101).
+  // The reason is in `pipelineCompile.ts`.
   it.each([
     ["volume renderer", "renderer"],
     ["layer compositor", "compositor"],

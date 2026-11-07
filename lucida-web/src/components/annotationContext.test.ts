@@ -32,15 +32,12 @@ describe("annotationContext — isOffContext (pure decision)", () => {
   });
 
   it("a near-integer float z is rounded before comparing (a 2D slice depth)", () => {
-    // A 2D-dropped pin's z is the slice index as a float (e.g. 3.0); the view's z
-    // is the integer 3 — they must compare equal, not as 3.0 !== 3-by-epsilon.
+    // A float slice index must compare equal to the view's integer z.
     expect(isOffContext(pin(3.0, 0, 0), { z: 3, t: 0, c: 0 })).toBe(false);
   });
 
   it("ignoreZ (3D): a Z-only mismatch is on-context, since the volume shows all Z", () => {
-    // In 3D the whole volume is rendered, so a pin on a different slice is still
-    // visible — it must NOT dim for Z alone (a 3D-created pin's picked depth is
-    // rarely the slider's z, so otherwise it would always read off-context).
+    // 3D renders every slice, so a pin must not dim for Z alone.
     expect(isOffContext(pin(187, 0, 0), { z: 0, t: 0, c: 0 }, { ignoreZ: true })).toBe(false);
     // …but T/C still count even with ignoreZ.
     expect(isOffContext(pin(187, 2, 0), { z: 0, t: 0, c: 0 }, { ignoreZ: true })).toBe(true);
@@ -49,15 +46,15 @@ describe("annotationContext — isOffContext (pure decision)", () => {
 });
 
 describe("annotationContext — offContextLabel (exact contract form)", () => {
-  it("formats the pin's own integer z/t/c as `slice <z> · t=<t> · ch=<c>`", () => {
-    expect(offContextLabel(pin(12, 3, 2))).toBe("slice 12 · t=3 · ch=2");
+  it("formats the pin's own integer z/t/c as `Z <z> · T <t> · Channel <c>`, counted from 1", () => {
+    expect(offContextLabel(pin(12, 3, 2))).toBe("Z 13 · T 4 · Channel 3");
   });
 
-  it("absent fields render as 0", () => {
-    expect(offContextLabel(pin(undefined, undefined, undefined))).toBe("slice 0 · t=0 · ch=0");
+  it("absent fields read as the first of each", () => {
+    expect(offContextLabel(pin(undefined, undefined, undefined))).toBe("Z 1 · T 1 · Channel 1");
   });
 
   it("a float z is rendered as a rounded integer (no decimals leak)", () => {
-    expect(offContextLabel(pin(7.0, 1, 0))).toBe("slice 7 · t=1 · ch=0");
+    expect(offContextLabel(pin(7.0, 1, 0))).toBe("Z 8 · T 2 · Channel 1");
   });
 });

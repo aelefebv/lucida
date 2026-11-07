@@ -1,0 +1,164 @@
+.lc-canvas-stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  /* The layers' own z-indexes stay inside the stage. */
+  isolation: isolate;
+  background: var(--lc-canvas-bg);
+}
+
+.lc-canvas-stage-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+  background-color: var(--lc-canvas-bg);
+  outline: none;
+  /* The viewers handle every touch on the canvas (src/input), so a pinch here
+     zooms the view, never the page; the rest of the page stays zoomable. A
+     long press shouldn't select or call out either. */
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* Layers cover the canvas and pass pointer events through; the markers in
+   them opt back in. */
+.lc-canvas-stage-layers {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+/* A comment thread is a popover pinned to a point on the canvas, and the
+   debug overlay's inspector a tooltip that follows the pointer, so both live
+   in the layers. While one shows the layers rise above the slots, since
+   floating controls belong below popovers and tooltips. */
+.lc-canvas-stage-layers:has([role="dialog"], [role="tooltip"]) {
+  z-index: var(--lc-z-popover);
+}
+
+.lc-canvas-stage-empty {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--lc-space-6);
+  pointer-events: none;
+}
+
+.lc-canvas-stage-empty > * {
+  pointer-events: auto;
+}
+
+/* Two rows of three slots. The side slots share what the middle one leaves,
+   so the middle stays centered until a side needs more room, and no slot
+   shrinks below its content. */
+.lc-canvas-stage-slots {
+  position: absolute;
+  inset: 0;
+  z-index: var(--lc-z-float);
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: var(--lc-space-3);
+  box-sizing: border-box;
+  /* The stage meets the bottom of the viewport, and a side when no panel
+     stands between, so the slots keep clear of a home indicator or a notch.
+     The top bar has already taken the top inset. */
+  padding: var(--lc-space-3) max(var(--lc-space-3), var(--lc-safe-right))
+    calc(var(--lc-space-3) + var(--lc-safe-bottom)) max(var(--lc-space-3), var(--lc-safe-left));
+  pointer-events: none;
+}
+
+.lc-canvas-stage-row {
+  display: flex;
+  gap: var(--lc-space-3);
+  min-height: 0;
+}
+
+/* A zero basis gives the top row a definite height, so a tall slot in it
+   (the dev controls) can be capped at the room left above the bottom row. */
+.lc-canvas-stage-row[data-row="top"] {
+  flex: 1 1 0;
+  align-items: flex-start;
+}
+
+/* Each top slot spans the row, so a control in it can measure the room it
+   has. Its children still stack from the top. */
+.lc-canvas-stage-row[data-row="top"] > .lc-canvas-slot {
+  align-self: stretch;
+}
+
+.lc-canvas-stage-row[data-row="bottom"] {
+  flex: none;
+  align-items: flex-end;
+}
+
+.lc-canvas-slot {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+  min-height: 0;
+  max-height: 100%;
+}
+
+.lc-canvas-slot[data-slot$="-left"],
+.lc-canvas-slot[data-slot$="-right"] {
+  flex: 1 1 0;
+}
+
+.lc-canvas-slot[data-slot$="-left"] {
+  align-items: flex-start;
+}
+
+.lc-canvas-slot[data-slot$="-right"] {
+  align-items: flex-end;
+}
+
+.lc-canvas-slot[data-slot$="-center"] {
+  flex: 0 1 auto;
+  min-width: 0;
+  align-items: center;
+}
+
+.lc-canvas-stage-row[data-row="bottom"] > .lc-canvas-slot {
+  justify-content: flex-end;
+}
+
+/* A phone is too narrow to share the bottom row, so the middle slot takes a
+   line of its own along the bottom edge, under the side slots. */
+@media (width < 640px) {
+  .lc-canvas-stage-row[data-row="bottom"] {
+    flex-wrap: wrap;
+  }
+
+  .lc-canvas-slot[data-slot="bottom-center"] {
+    flex-basis: 100%;
+    order: 1;
+  }
+}
+
+/* Zero specificity, so a child that wants pointer-events: none still can. */
+:where(.lc-canvas-slot) > * {
+  pointer-events: auto;
+  max-width: 100%;
+}
+
+/* The HUD places itself at the top left of whatever holds it; in a slot it
+   joins the stack instead. */
+.lc-canvas-slot > .hud {
+  position: relative;
+  inset: auto;
+}
+
+.lc-canvas-stage[data-bare] > :not(canvas) {
+  display: none;
+}

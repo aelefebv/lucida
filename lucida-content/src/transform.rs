@@ -52,10 +52,8 @@ impl AffineTransform {
 /// `VoxelTransform` is a unit-tagged newtype around [`AffineTransform`].
 /// The inner matrix is private — construction goes through one of the
 /// dedicated `from_voxel_*` constructors so that callers must explicitly
-/// acknowledge the unit. A previous bug (issues #408 / #409) had a
-/// producer construct an edge with physical units where
-/// consumers expected voxel units; this newtype prevents that class of
-/// bug at compile time.
+/// acknowledge the unit, so a producer cannot hand physical units to a
+/// consumer that expects voxel units.
 ///
 /// The serde representation is `#[serde(transparent)]` so the wire format
 /// is byte-compatible with `AffineTransform`: `{ "matrix": [16 floats] }`.
@@ -101,22 +99,14 @@ impl VoxelTransform {
         &self.inner.matrix
     }
 
-    /// If this transform is exactly a pure 2D translation — the matrix
-    /// [`AffineTransform::translation_2d`] builds, identity everywhere except
-    /// `matrix[12]` (tx) and `matrix[13]` (ty) — return `[tx, ty]`.
+    /// If this transform is exactly a pure 2D translation (identity except
+    /// `matrix[12]` and `matrix[13]`), return `[tx, ty]`.
     ///
-    /// [`DatasetManifest`](crate::DatasetManifest) uses this to encode
-    /// tile-placement edges (grid or explicit 2D positions) as a two-number
-    /// `translation` on the wire instead of 16 matrix elements, which is what
-    /// keeps wide-collection manifests from repeating near-identity matrices
-    /// tens of thousands of times. Comparisons are IEEE `==`, so any scale,
-    /// rotation, z component, or non-affine bottom row falls back to the full
-    /// matrix form. The reconstruction `from_voxel_translation_2d(tx, ty)`
-    /// carries `tx`/`ty` through bit-exactly (including a signed-zero
-    /// translation component); the *other* fourteen elements are rebuilt as
-    /// the canonical identity pattern, so a matrix that matched it only
-    /// IEEE-equally (e.g. `-0.0` where the pattern has `0.0`) round-trips to
-    /// the canonical bits, not the original ones.
+    /// [`DatasetManifest`](crate::DatasetManifest) uses this to send
+    /// tile-placement edges as a two-number `translation`. Comparisons are
+    /// IEEE `==`. `tx` and `ty` round-trip bit-exactly, but the other
+    /// fourteen elements are rebuilt as the canonical identity, so a `-0.0`
+    /// there comes back as `0.0`.
     pub fn as_voxel_translation_2d(&self) -> Option<[f64; 2]> {
         let m = &self.inner.matrix;
         let reference = AffineTransform::translation_2d(m[12], m[13]).matrix;

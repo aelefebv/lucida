@@ -2,6 +2,7 @@ pub mod backend;
 pub mod cache;
 pub(crate) mod coarse;
 pub mod codec;
+pub(crate) mod collection_geometry;
 pub mod import;
 pub mod import_types;
 pub mod ingest;
@@ -18,20 +19,12 @@ pub(crate) mod unwritten;
 const ALL_DIMS: [&str; 5] = ["t", "c", "z", "y", "x"];
 
 /// Convert a logical chunk key `"level/t/c/z/y/x"` to the on-disk Zarr v3
-/// store path. The on-disk path always follows the dataset's raw axes order,
-/// emitting one coordinate per dimension actually present on disk.
+/// store path: one coordinate per axis actually on disk, in raw axes order.
 ///
-/// The wire chunk key encodes `t` and `c` as **voxel coordinates** (e.g.
-/// `c=3` means channel 3) and `z`, `y`, `x` as **chunk-grid coordinates**
-/// (e.g. `y=3` means the 3rd chunk row). For typical OME-Zarrs with
-/// `chunk_shape[t] == chunk_shape[c] == 1`, the two interpretations
-/// coincide. When `chunk_shape[t] > 1` or `chunk_shape[c] > 1`, this
-/// function divides the wire `t`/`c` value by the on-disk chunk size to
-/// produce the correct disk-grid coordinate.
+/// The wire key carries `t` and `c` as voxel coordinates and `z`, `y`, `x`
+/// as chunk-grid coordinates, so `t` and `c` are divided by their on-disk
+/// chunk size. `chunk_shape` parallels `axes`.
 ///
-/// `chunk_shape` parallels `axes` (one entry per on-disk axis).
-///
-/// Three cases handled uniformly by walking the raw `axes` list in order:
 /// - canonical-equal `["t","c","z","y","x"]` → `"{level}/c/{t}/{c}/{z}/{y}/{x}"`
 /// - canonical-subset `["c","y","x"]` → `"{level}/c/{c}/{y}/{x}"` (only the dims that exist)
 /// - canonical-superset `["t","c","z","m","y","x"]` → `"{level}/c/{t}/{c}/{z}/0/{y}/{x}"`

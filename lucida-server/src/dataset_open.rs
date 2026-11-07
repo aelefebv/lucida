@@ -1,20 +1,11 @@
-//! Headless dataset-open orchestration.
+//! Headless dataset-open orchestration: normalize the URL, authorize,
+//! dedupe concurrent opens, probe storage, import metadata, build the
+//! binding, apply the document, persist, and broadcast.
 //!
-//! Owns the full open-a-dataset use case: URL normalization, workspace
-//! authorization, persisted-source lookup, dedup / concurrent-open race
-//! handling, storage-backend probe, metadata import, binding + derived
-//! service construction, document apply, workspace persistence, and the
-//! result broadcast. The module contains **zero websocket types**:
-//! per-stage diagnostics flow out through a [`ProgressSink`] channel and
-//! the terminal result is a typed [`DatasetOpenOutcome`], so the
-//! orchestration can be driven (and tested) by any caller — the
-//! websocket adapter in [`crate::handler`] is one thin transport over it.
-//!
-//! Failure classification lives in [`crate::open_diagnostics`] and the
-//! wake-time counterpart of this path (rebuilding bindings for a lazily
-//! reopened workspace) in [`crate::binding_restore`]; both leaf modules
-//! sit below this one so the two paths share one diagnostic vocabulary
-//! without this module ever being imported by the workspace layer.
+//! It holds no websocket types. Progress flows through a [`ProgressSink`]
+//! and the result is a [`DatasetOpenOutcome`], so any caller can drive it,
+//! and [`crate::handler`] is one thin transport. Failure classification is
+//! shared with [`crate::binding_restore`] through [`crate::open_diagnostics`].
 
 use std::sync::Arc;
 
@@ -51,7 +42,7 @@ use crate::{BroadcastItem, ProxyConfig};
 // `dataset_id_for_url` and `dataset_url_hash16` live in
 // `lucida_content::url` so the SPA (via the `lucida-core` wasm shim),
 // the storage layer, and this orchestration share one implementation. See
-// `wiki/decisions/0042-canonical-dataset-url-form.md`.
+// `docs/adr/0042-canonical-dataset-url-form.md`.
 
 /// The workspace scope a connection acts under: the live runtime handles,
 /// the [`WorkspaceManager`] that owns authorization and persistence, and
@@ -105,24 +96,17 @@ fn emit(progress: &ProgressSink, diagnostic: DatasetOpenProgressDiagnostic) {
 }
 
 /// Open a dataset URL into the session: probe the storage backend, import
-/// the OME-Zarr metadata, build the server binding, apply + broadcast
+/// the OME-Zarr metadata, build the server binding, apply and broadcast
 /// `DatasetOpened`, and (in a workspace) persist the membership.
 ///
-/// The incoming `url` is normalized once at entry via
-/// [`lucida_content::url::normalize_dataset_url`]; every downstream
-/// derivation (`dataset_id_for_url` for source identity,
-/// `dataset_url_hash16` for cache identity, `backend::open`, the
-/// binding's `source_url`, and the name extraction) uses the canonical
-/// form. Workspace clients receive an opaque workspace-local
-/// `DatasetId`; the source-derived id is retained only for membership
-/// dedupe and shared source/cache routing. This makes spelling variants
-/// of the same path dedup to one source — see
-/// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
+/// The `url` is normalized once at entry and every derivation after that
+/// uses the canonical form, so spelling variants of one path dedupe to one
+/// source. Workspace clients get an opaque workspace-local `DatasetId`;
+/// the source-derived id only dedupes membership and routes shared caches.
 ///
-/// Concurrent opens of the same URL are safe: a fast pre-check reuses an
-/// existing binding, and the apply step re-checks under the session lock
-/// so a lost race drops its duplicate binding and rebroadcasts the
-/// canonical `DatasetOpened` instead.
+/// Concurrent opens of the same URL are safe: the apply step re-checks
+/// under the session lock, so a lost race drops its duplicate binding and
+/// rebroadcasts the canonical `DatasetOpened`.
 #[tracing::instrument(
     name = "dataset_open",
     skip(ctx, progress),
@@ -134,12 +118,10 @@ pub async fn open_dataset(
     ctx: &DatasetOpenContext,
     progress: &ProgressSink,
 ) -> Result<DatasetOpenOutcome, DatasetOpenFailureDiagnostic> {
-    // Normalize at the input boundary. Drive-letter case, slash
-    // direction, `file://` prefix, UNC backslashes — see ADR-0042.
-    // Idempotent (safe even though `backend::open` will also normalize),
-    // and required *here* because `dataset_id_for_url` /
-    // `dataset_url_hash16` must hash the canonical form for the dedup
-    // short-circuit to fire across spelling variants.
+    // Normalize at the input boundary (drive-letter case, slash direction,
+    // `file://`, UNC backslashes). `backend::open` normalizes too, but
+    // `dataset_id_for_url` and `dataset_url_hash16` must hash the canonical
+    // form here for the dedup short-circuit to match spelling variants.
     let canonical_url = normalize_dataset_url(url);
 
     // Stable, content-derived source ID. This is intentionally not the
@@ -298,7 +280,7 @@ pub async fn open_dataset(
         if let Some((existing_dataset_id, mut existing)) =
             find_loaded_binding(&sess, &dataset_id_key, &canonical_url, workspace_scoped)
         {
-            // Re-broadcast the CURRENT document manifest, not the stale
+            // Re-broadcast the current document manifest, not the stale
             // import-time one cached on the binding: a `DatasetOpened` apply
             // does a full manifest replace, so reusing the cached manifest
             // here would clobber a since-applied rename (the document is the
@@ -308,7 +290,7 @@ pub async fn open_dataset(
             if let Some(doc_manifest) = sess.document.manifests.get(&existing_dataset_id) {
                 existing.manifest = doc_manifest.clone();
             }
-            // Re-stamp the opener with the CURRENT requester. This is the
+            // Re-stamp the opener with the current requester. This is the
             // everyday multi-user path (someone opens a URL already loaded in
             // the session); the binding's cached copy holds whoever first
             // opened it (or None for a server-side restore), but the client
@@ -413,13 +395,13 @@ pub async fn open_dataset(
         name = %name,
         "importing dataset"
     );
-    // The source cache is resolved here, BEFORE the import, and the import
+    // The source cache is resolved here, before the import, and the import
     // reads through it: metadata objects are the first thing an open reads, they are
     // the largest single term in a remote open, and routing them through the
     // same `CachedStore` the chunk path uses is what makes them both cacheable
     // and visible to the source-cache instrumentation. The same Arc goes on to
     // back the binding, so nothing is read twice across the boundary — and it
-    // is keyed by SOURCE, so a second workspace opening the same URL is served
+    // is keyed by source, so a second workspace opening the same URL is served
     // from what the first one already read.
     let cached = CachedStore::shared_for_source(
         &dataset_source_id,
@@ -558,9 +540,8 @@ pub async fn open_dataset(
         ),
     );
 
-    // Legacy proxy fallback is opt-in after the coarse/detail default
-    // flip. The default DatasetOpened catalog is empty so fallback
-    // availability comes from chunk tier metadata instead of proxies.
+    // Proxy fallback is opt-in. The default DatasetOpened catalog is empty,
+    // so fallback availability comes from chunk tier metadata instead.
     let catalog_entries =
         proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
 
@@ -664,7 +645,7 @@ pub async fn open_dataset(
         {
             // Lost the race: another open completed the import. Drop our
             // duplicate binding/command and rebroadcast the canonical one.
-            // Re-stamp the opener with the CURRENT requester: the binding's
+            // Re-stamp the opener with the current requester: the binding's
             // stored copy holds whoever first opened it (or None for a
             // server-side restore), but the client that just requested this
             // open is the one whose camera should auto-fit when the
@@ -996,28 +977,14 @@ mod tests {
         }
     }
 
-    /// Regression for the dedup-reuse-after-rename bug (#701): re-opening an
-    /// already-loaded dataset URL must re-broadcast the dataset under its
-    /// CURRENT document name, not the stale import-time name cached on the
-    /// `ServerBinding`.
+    /// Re-opening an already-loaded dataset URL must re-broadcast the
+    /// dataset under its current document name, not the import-time name
+    /// cached on the `ServerBinding`. Applying `DatasetOpened` replaces the
+    /// whole manifest, so a stale name would undo a rename for every peer.
     ///
-    /// The bug: the reuse short-circuit cloned the binding's cached
-    /// `dataset_opened` (whose manifest is frozen at import time) into the
-    /// re-broadcast `DatasetOpened`. Because applying a `DatasetOpened` does a
-    /// full manifest *replace*, a re-open after a rename silently clobbered
-    /// the new name back to the import-time one for every client that
-    /// received the re-broadcast.
-    ///
-    /// This drives the real reuse-shortcut body: it seeds a `Session` with a
-    /// dataset (real `Session::apply(DatasetOpened)`) and a matching
-    /// `ServerBinding`, renames it through the real document path
-    /// (`Session::apply(RenameDataset)`), then runs the open path's own
-    /// `find_loaded_binding` lookup + the fix's document-manifest adoption +
-    /// opener re-stamp, and asserts the resulting re-broadcast command carries
-    /// the renamed name AND the re-stamped opener id. As a guard, it confirms
-    /// the binding's own cached copy is deliberately left stale (proving the
-    /// document — not the binding — is the source of truth for the display
-    /// name).
+    /// Drives the real reuse path after a real rename, and checks that the
+    /// binding's cached copy stays stale: the document, not the binding,
+    /// owns the display name.
     #[test]
     fn dedup_reuse_after_rename_rebroadcasts_renamed_name() {
         const URL: &str = "gs://lucida-test/datasets/rename-me.zarr";
@@ -1051,8 +1018,8 @@ mod tests {
             session.document.manifests[&dataset_id].name, renamed,
             "precondition: rename updated the live document manifest"
         );
-        // The binding's cached import-time copy is (intentionally) untouched by
-        // a rename — this is exactly the stale state the bug re-broadcast.
+        // The binding's cached import-time copy is deliberately untouched by
+        // a rename: this is the stale state a re-broadcast must not use.
         assert_eq!(
             session.server_bindings[&dataset_id]
                 .dataset_opened
@@ -1070,7 +1037,7 @@ mod tests {
             "precondition: the binding cache holds the FIRST opener's id"
         );
 
-        // Re-open the SAME URL as a DIFFERENT client: run the real reuse
+        // Re-open the same URL as a different client: run the real reuse
         // short-circuit. `find_loaded_binding` is the production helper;
         // the manifest adoption + opener re-stamp immediately below are the
         // exact fixes under test (mirroring `open_dataset`'s dedup-reuse path).
@@ -1084,8 +1051,8 @@ mod tests {
         existing.opener_client_id = Some(client_id);
         let rebroadcast = DocumentCommand::DatasetOpened(existing);
 
-        // The re-broadcast DatasetOpened — what peers re-apply — must carry the
-        // renamed name, NOT the import-time name.
+        // The re-broadcast DatasetOpened, which peers re-apply, must carry the
+        // renamed name, not the import-time name.
         let DocumentCommand::DatasetOpened(rebroadcast_opened) = &rebroadcast else {
             panic!("expected DatasetOpened");
         };
@@ -1098,7 +1065,7 @@ mod tests {
             rebroadcast_opened.manifest.dataset_id, dataset_id,
             "dedup re-open must target the same dataset id"
         );
-        // The dedup-reuse rebroadcast must re-stamp the CURRENT requester so
+        // The dedup-reuse rebroadcast must re-stamp the current requester so
         // the everyday multi-user case (open a URL already loaded in the
         // session) auto-fits for the opener — not the original first opener.
         assert_eq!(
@@ -1108,8 +1075,6 @@ mod tests {
              requester, not the binding's cached first opener"
         );
     }
-
-    // --- Headless open orchestration ---------------------------------
 
     /// Write a minimal valid OME-Zarr v0.5 store (metadata only — chunks
     /// are fetched lazily, so none are needed for an import) to `dir`.
@@ -1452,7 +1417,7 @@ mod tests {
     }
 
     /// A two-level image whose level 0 was never written, beside a level 1
-    /// that was — the shape of the partially-written export in issue #904.
+    /// that was: a partially written export.
     fn write_partially_written_zarr(dir: &Path) {
         let root = serde_json::json!({
             "zarr_format": 3,
@@ -1514,7 +1479,7 @@ mod tests {
         }
     }
 
-    /// Issue #904: the dataset opens (the level is legal and reads as fill),
+    /// The dataset opens (the level is legal and reads as fill),
     /// but the open trail carries a warning diagnostic instead of letting an
     /// all-zero level pass for data.
     #[tokio::test]

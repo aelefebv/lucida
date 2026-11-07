@@ -1,0 +1,85 @@
+/* The viewer's canvas stage sets the insets so toasts rise above its bottom
+   row of floating controls instead of covering them, and a phone's sheet
+   sets how much of the screen's bottom it covers, so they clear it too.
+   Elsewhere the region keeps clear of the viewport's safe-area insets itself. */
+.lc-toast-region {
+  position: fixed;
+  right: var(--toast-inset-right, calc(var(--lc-space-4) + var(--lc-safe-right)));
+  bottom: max(
+    var(--toast-inset-bottom, calc(var(--lc-space-4) + var(--lc-safe-bottom))),
+    calc(var(--toast-clear-bottom, 0px) + var(--lc-space-3))
+  );
+  z-index: var(--lc-z-toast);
+  display: flex;
+  flex-direction: column-reverse;
+  gap: var(--lc-space-2);
+  outline: none;
+  /* Over the canvas, only the toasts themselves take a press or a gesture. */
+  pointer-events: none;
+}
+
+.lc-toast {
+  pointer-events: auto;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--lc-space-3);
+  box-sizing: border-box;
+  width: 360px;
+  max-width: calc(100vw - 2 * var(--lc-space-4) - var(--lc-safe-left) - var(--lc-safe-right));
+  padding: var(--lc-space-3) var(--lc-space-2) var(--lc-space-3) var(--lc-space-4);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  background: var(--lc-surface-2);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
+  outline: none;
+  animation: lc-toast-in var(--lc-motion) var(--lc-ease);
+}
+
+.lc-toast[data-focus-visible] {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 2px;
+}
+
+.lc-toast > .lc-button {
+  flex: none;
+  margin-top: -2px;
+}
+
+.lc-toast-icon {
+  flex: none;
+  margin-top: 1px;
+}
+
+.lc-toast[data-tone="success"] .lc-toast-icon { color: var(--lc-success); }
+.lc-toast[data-tone="warning"] .lc-toast-icon { color: var(--lc-warning); }
+.lc-toast[data-tone="danger"] .lc-toast-icon { color: var(--lc-danger); }
+.lc-toast[data-tone="info"] .lc-toast-icon { color: var(--lc-info); }
+
+.lc-toast-content {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+  padding-top: 1px;
+}
+
+.lc-toast-title {
+  font-weight: 500;
+}
+
+.lc-toast-description {
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+}
+
+@keyframes lc-toast-in {
+  from {
+    opacity: 0;
+    translate: 0 8px;
+  }
+}

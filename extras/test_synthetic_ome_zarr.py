@@ -331,6 +331,32 @@ def test_collection_tiles_are_identical_across_layouts(tmp_path: Path) -> None:
         np.testing.assert_array_equal(level_array(flat / tile, 0), level_array(sharded / tile, 0))
 
 
+def test_repeated_size_gives_each_tile_its_own_size_and_the_last_repeats(tmp_path: Path) -> None:
+    out = generate(tmp_path, "sized.ome.zarr", "--tiles", "3", "--size", "12,10", "--size", "16,16", "--levels", "2", "--chunk", "8")
+    assert level_array(out / "A/1/0", 0).shape == (12, 10)
+    assert level_array(out / "A/2/0", 0).shape == (16, 16)
+    assert level_array(out / "B/1/0", 0).shape == (16, 16)
+    assert level_array(out / "A/1/0", 1).shape == (6, 5)
+    # Every tile's pyramid has the same scale transforms, whatever its size.
+    assert multiscale(out / "A/1/0")["datasets"] == multiscale(out / "A/2/0")["datasets"]
+
+
+def test_clip_chunks_clips_each_level_chunk_to_that_tile_level(tmp_path: Path) -> None:
+    common = ["--tiles", "2", "--size", "12,10", "--size", "16,16", "--levels", "2", "--chunk", "8", "--chunk", "16", "--seed", "4"]
+    clipped = generate(tmp_path, "clipped.ome.zarr", *common, "--clip-chunks")
+    declared = {
+        (tile, level): read_json(clipped / tile / str(level) / "zarr.json")["chunk_grid"]["configuration"]["chunk_shape"]
+        for tile in ["A/1/0", "A/2/0"]
+        for level in range(2)
+    }
+    assert declared == {("A/1/0", 0): [8, 8], ("A/1/0", 1): [6, 5], ("A/2/0", 0): [8, 8], ("A/2/0", 1): [8, 8]}
+    # Clipping is layout, and layout never changes the samples.
+    unclipped = generate(tmp_path, "unclipped.ome.zarr", *common)
+    for tile in ["A/1/0", "A/2/0"]:
+        for level in range(2):
+            np.testing.assert_array_equal(level_array(clipped / tile, level), level_array(unclipped / tile, level))
+
+
 def test_parse_args_reads_every_option() -> None:
     opts = gen.parse_args(
         [
@@ -354,12 +380,14 @@ def test_parse_args_reads_every_option() -> None:
     )
     assert opts.out == Path("out.zarr")
     assert opts.tiles == 3
+    assert opts.sizes == ((9, 40, 50),)
     assert opts.size == (9, 40, 50)
     assert opts.channels == 2
     assert opts.timepoints == 4
     assert opts.levels == 4
     assert opts.factors == ((1, 2, 2), (3, 3, 3))
     assert opts.chunks == ((4, 4, 4),)
+    assert opts.clip_chunks is False
     assert opts.shard == (8, 8, 8)
     assert opts.sparse is True
     assert opts.unwritten_levels == (1, 3)
@@ -397,6 +425,9 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         ["out.zarr", "--levels", "0"],
         ["out.zarr", "--tiles", "0"],
         ["out.zarr", "--factor", "0"],
+        ["out.zarr", "--size", "16,16", "--size", "8,8"],
+        ["out.zarr", "--tiles", "2", "--size", "16,16", "--size", "8,8,8"],
+        ["out.zarr", "--clip-chunks", "--chunk", "8", "--shard", "16"],
     ],
     ids=[
         "size-arity",
@@ -410,6 +441,9 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         "no-levels",
         "no-tiles",
         "zero-factor",
+        "per-tile-size-without-tiles",
+        "per-tile-size-arity",
+        "clip-with-shard",
     ],
 )
 def test_parse_args_rejects_inconsistent_options(argv: list[str]) -> None:
@@ -458,6 +492,7 @@ COMMITTED = [
     "sparse-sharded.ome.zarr",
     "level-index.ome.zarr",
     "collection-unsharded.ome.zarr",
+    "collection-mixed.ome.zarr",
 ]
 
 

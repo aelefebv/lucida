@@ -1,21 +1,13 @@
 /**
- * The coverage block: what a run measured, and what it did not.
+ * The coverage block: what a run measured, and what it did not. Emitted on
+ * every run, clean ones included, because "no stall found" means nothing
+ * without its denominator, and the denominator is the run's whole wall clock
+ * rather than the span between the first and last thing the recorder saw.
  *
- * On every run, including clean ones. "No stall found" is worth nothing on
- * its own — [#893]'s prototype reported `100% accounted` for a run that was
- * 87% pre-instrument boot — so the honest headline needs its denominator
- * attached, and the denominator is the run's whole wall clock rather than the
- * span between the first and last thing the recorder happened to see.
- *
- * A pure function over the serialised tables. It runs at export, not on the
- * write path: the union of a few thousand spans is nothing next to a
- * lifecycle row's ~75 bytes, and the recorder's own budget (ADR 0049) is
- * spent on recording rather than on interpreting.
- *
- * The judgement about whether a gap could hide the bottleneck lives here, not
- * in each reading surface. A caveat only a careful reader would derive is a
- * caveat most readers will miss, and two surfaces deriving it separately can
- * disagree.
+ * A pure function over the serialised tables, run at export so the
+ * recorder's budget (ADR 0049) goes on recording. The judgement about whether
+ * a gap could hide the bottleneck lives here so reading surfaces cannot
+ * disagree about it.
  */
 
 import {
@@ -33,10 +25,10 @@ import {
 
 /**
  * The shortest interval gap worth a line of its own. Ten times the platform's
- * 100 µs clock floor (#897), so anything below it is quantisation rather than
- * a hole. Shorter gaps are still counted in `unaccountedUs` — the arithmetic
- * stays exact — they just do not get named, because a hundred sub-millisecond
- * entries would bury the one that matters.
+ * 100 µs clock floor, so anything below it is quantisation rather than a
+ * hole. Shorter gaps are still counted in `unaccountedUs`, so the arithmetic
+ * stays exact, but are not named, because a hundred sub-millisecond entries
+ * would bury the one that matters.
  */
 export const MIN_REPORTED_GAP_US = 1_000;
 
@@ -46,7 +38,7 @@ export const MIN_REPORTED_GAP_US = 1_000;
  *
  * Both halves are load-bearing, and each without the other has a known
  * failure. A share test with no absolute floor fires on a healthy sub-400 ms
- * open, where a fast run still spends most of itself somewhere ([#893]). An
+ * open, where a fast run still spends most of itself somewhere. An
  * absolute floor with no share test fires on every one-minute run, where
  * 300 ms of unaccounted time explains nothing.
  */

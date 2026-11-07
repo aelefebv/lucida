@@ -1,4 +1,4 @@
-/** WebGPU render worker — thin entry point that delegates to `worker/`. */
+/** WebGPU render worker entry point; the handlers live in `worker/`. */
 import type { MainToWorkerMessage, WorkerToMainMessage } from "./workerProtocol.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { bootstrapWorker } from "./worker/bootstrap.ts";
@@ -32,7 +32,7 @@ function postError(err: unknown): void {
 async function handleMessage(msg: MainToWorkerMessage): Promise<void> {
   try {
     if (msg.type === "init") {
-      ctx = await bootstrapWorker(msg.canvas, post);
+      ctx = await bootstrapWorker(msg.canvas, post, msg.deviceMemoryGiB ?? null);
       installDevtools(ctx.state);
       post({ type: "ready" });
       return;

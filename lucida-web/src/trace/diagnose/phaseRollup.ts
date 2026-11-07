@@ -13,7 +13,7 @@ import { PHASE_CLASSES } from "./ruleset.ts";
 import type { AggregateCandidate, PhaseClass, PhaseRollup, PhaseSide } from "./types.ts";
 import { clipSpan, inWindow, resolveWindow, type ClippedSpan, type RunWindow } from "./window.ts";
 
-/** Tenths of a millisecond. Below that the platform's own clock is guessing (#897). */
+/** Tenths of a millisecond. Below that the platform's own clock is guessing. */
 export function usToMs(us: number): number {
   return Math.round(us / 100) / 10;
 }
@@ -100,10 +100,9 @@ export const OPEN_PHASE = "metadata.dataset-open";
  * One observation of a phase: how long it took, which row it belonged to, and
  * where on the run's clock it sat when anything could say.
  *
- * The position is optional because a placement is not always available — a
- * server row the merge could not nest has a duration and no position at all
- * (ADR 0050) — and a phase whose rows are all unplaced has to say so rather
- * than be drawn at zero.
+ * The position is optional because a server row the merge could not nest has
+ * a duration and no position at all, and a phase whose rows are all unplaced
+ * has to say so rather than be drawn at zero.
  */
 interface PhaseSample {
   us: number;
@@ -214,15 +213,12 @@ export function rollupWindow(run: TraceRun, window: RunWindow): WindowRollup {
     }
   }
 
-  // The dataset open itself, as its own family.
-  //
-  // Not a recorded phase — the row enum is closed (ADR 0047) — but a bracket
-  // the run already carries, rolled up so a surface can place it. Without it a
-  // warm re-open draws nothing over its own open: every read inside quantises
-  // to zero against the 100 µs clock floor (#897) and drops out, leaving
-  // silence over the stretch the critical path blames. The reads nest inside
-  // this, so the two overlap by construction — which every total here does.
-  // A bracket is not a row, so a window cutting it is not a clipped row.
+  // The dataset open, as its own family. Not a recorded phase, because the
+  // row enum is closed (ADR 0047), but a bracket the run already carries.
+  // Without it a warm re-open draws nothing over its own open: every read
+  // inside quantises to zero against the 100 µs clock floor and drops out.
+  // The reads nest inside it, so the two overlap by construction. A bracket
+  // is not a row, so a window cutting it is not a clipped row.
   for (const open of run.datasetOpens) {
     const endUs = open.endUs ?? run.header.durationUs;
     pushPlaced(

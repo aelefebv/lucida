@@ -1,12 +1,7 @@
 /**
- * Wanted-set computation — pure function that diffs expected chunks against
- * actual atlas contents to determine what the GPU worker is missing, and
- * reads off those same chunk positions which level serves each entity's
- * visible pixels.
- *
- * Reports missing chunks and missing proxy assets via a discriminated
- * union (`MissingChunk | MissingProxy`), plus one {@link EntityLevelReport}
- * per image-bearing entry.
+ * Diffs the chunks and proxies the cold state expects against what the
+ * atlases hold, and reads off from the same chunk positions which level
+ * serves each entity's visible pixels. Pure and GPU-free.
  */
 
 import type {
@@ -46,14 +41,10 @@ export interface AtlasSnapshot {
 }
 
 /**
- * Minimal per-pool view of proxy residency for wanted-set queries.
- * Independent from `ProxyAtlasState` so this module stays GPU-free.
- *
- * The map key is the composite slot key `${entityId}|${t}|${c}` —
- * matches `proxySlotKey()` in `./proxyAtlas.ts`. `kind` is carried so
- * residency checks distinguish `GroupProxy3D` vs `TileProxy3D` pools
- * for entities that could appear as either (a defensive safeguard;
- * pool keying already separates them in practice).
+ * Per-pool view of proxy residency, separate from `ProxyAtlasState` so this
+ * module stays GPU-free. Slot keys match `proxySlotKey()` in
+ * `./proxyAtlas.ts`. `kind` keeps group and tile pools apart for an entity
+ * that could appear as either.
  */
 export interface ProxyAtlasSnapshot {
   kind: ProxyKind;
@@ -78,42 +69,14 @@ export type SourcePoolResolver = (
 ) => string | undefined;
 
 /**
- * Compute which chunks AND proxies the GPU worker is missing, and which
+ * Compute which chunks and proxies the GPU worker is missing, and which
  * level serves each entity's visible pixels.
  *
- * Pure function — no side effects, no GPU dependencies.
- *
- * Chunk wanted-set rules: for each level a tier requests on each visible
- * channel, enumerate the chunk positions inside the visible region and
- * report any whose composite slot key is missing from the pool that
- * holds the level's section. The detail tier requests `detailLevels`
- * only; the coarser levels the worker keeps sections for under the
- * target are sampled when resident but never asked for here.
- *
- * Displayed-level rules: for each visible target-level chunk position,
- * the serving level is the first in the renderer's sampling order (the
- * target, then the coarser detail-tier sections, then the coarse tier)
- * whose chunks covering that position are all resident. An entity's
- * report is the finest and coarsest serving level over its visible
- * positions and channels; a position no level covers is blank on screen
- * and counts toward neither.
- *
- * Proxy wanted-set rules: for each cold-state active entry, walk its
- * `mode`:
- *
- *   - `group-as-proxy` (entry.entityId IS the groupId)
- *       → emit a `MissingProxy { kind: GroupProxy3D }` per visible
- *         channel if the group's slot isn't resident.
- *   - `tiles-with-proxy-fallback` (entry.entityId is the tileId)
- *       → emit a `MissingProxy { kind: TileProxy3D }` for the tile
- *         per channel (if `proxyAvailable`), and a single
- *         `MissingProxy { kind: GroupProxy3D }` for the parent group per
- *         channel (if `groupProxyAvailable` and `parentGroupId` is set).
- *         Parent-group requests are deduped per (parentGroupId, t, c).
- *   - `tiles-with-detail`
- *       → existing chunk wanted-set + a per-channel tile-proxy
- *         request when the catalog advertises one but it isn't yet
- *         resident.
+ * The detail tier requests `detailLevels` only. The coarser levels kept
+ * under the target are sampled when resident but never requested here.
+ * A position's serving level is the first in sampling order whose covering
+ * chunks are all resident; a position no level covers is blank and counts
+ * toward neither end of the entity's range.
  */
 export function computeWantedSet(
   coldState: ColdStateMessage,
@@ -573,14 +536,9 @@ function chunkSourcesForEntry(
 }
 
 /**
- * Check whether a proxy is resident across any pool with matching
- * `(entityId, t, c)`. We don't know the pool key from cold state alone
- * (it depends on slot dims and channel); instead we scan all pools
- * indexed by the channel + composite key.
- *
- * In practice the orchestrator provides `proxyAtlases` indexed by
- * `proxyPoolKey()` strings; the slot composite key is unique per
- * `(entityId, t, c)`, so a single hit anywhere counts.
+ * Cold state alone does not give the pool key (it depends on slot dims), so
+ * scan every pool of the kind. The slot key is unique per `(entityId, t, c)`,
+ * so a hit in any pool counts.
  */
 function isProxyResident(
   proxyAtlases: Map<string, ProxyAtlasSnapshot> | undefined,

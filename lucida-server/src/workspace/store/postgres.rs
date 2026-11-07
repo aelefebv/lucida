@@ -1,22 +1,11 @@
-//! PostgreSQL-backed [`WorkspaceStore`].
+//! PostgreSQL-backed [`WorkspaceStore`], on the pool [`crate::storage`]
+//! opened.
 //!
-//! Shares the PostgreSQL pool that [`crate::storage`] opened, as every
-//! PostgreSQL store does.
-//!
-//! The statements come from [`super::sql`], which the SQLite store runs
-//! too, so this module holds the binding, the row mapping, and nothing
-//! else. Read it beside `sqlite`; what differs is the pool and row types,
-//! the JSON columns, and the clock.
-//!
-//! The baseline gives four of this store's columns the `JSONB` type, and
-//! PostgreSQL refuses a bound Rust `String` for one of those outright, so
-//! every payload goes in as a [`sqlx::types::Json`] and comes back as a
-//! [`serde_json::Value`]. A `$n::jsonb` cast would have kept the `String`
-//! bind, but `::` is syntax SQLite rejects, so casting would end the
-//! sharing for those statements. The clock is [`now`], and the note there
-//! says why it is not `Utc::now`.
-//!
-//! ADR-0058 records why the text is shared and the Rust is not.
+//! The statements come from [`super::sql`], shared with the SQLite store
+//! (ADR-0058). Four columns are `JSONB`, which refuses a bound `String`, so
+//! payloads go in as [`sqlx::types::Json`]. A `$n::jsonb` cast would keep
+//! the `String` bind, but SQLite rejects `::`. The clock is [`now`]; the
+//! note there says why it is not `Utc::now`.
 
 use std::collections::HashMap;
 
@@ -31,8 +20,9 @@ use sqlx::types::Json;
 use sqlx::{PgPool, Postgres, Row};
 
 use crate::workspace::types::{
-    SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
-    WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
+    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
+    WorkspacePreview, WorkspacePreviewMeta, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
     WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
 };
 
@@ -172,7 +162,7 @@ async fn touch_workspace(
 ///
 /// `link_access` / `link_role` are deliberately NOT bound: the
 /// `workspaces` columns take their table defaults ('restricted' /
-/// 'viewer'), i.e. link access OFF. A duplicate therefore never inherits
+/// 'viewer'), i.e. link access off. A duplicate therefore never inherits
 /// the source's sharing, and a freshly created workspace starts private —
 /// the security-critical invariant. Keeping the INSERT in one place
 /// hardens that link-off guarantee against future drift.
@@ -271,9 +261,8 @@ impl WorkspaceStore for PostgresWorkspaceStore {
             return Ok(None);
         };
 
-        // --- Dataset memberships: copy with FRESH workspace-local ids, and
-        // build the old->new remap that keeps the document + saved views
-        // consistent against the copy's datasets (the id-consistency trap). ---
+        // Dataset memberships get fresh workspace-local ids, and the old->new
+        // remap keeps the document and saved views consistent with them.
         let dataset_rows = sqlx::query(sql::DUPLICATE_SOURCE_DATASETS)
             .bind(source_workspace_id)
             .fetch_all(&mut *tx)
@@ -300,7 +289,7 @@ impl WorkspaceStore for PostgresWorkspaceStore {
             });
         }
 
-        // --- Document: remap every dataset-id reference onto the copy's ids. ---
+        // Document: remap every dataset-id reference onto the copy's ids.
         let mut document: DocumentState =
             serde_json::from_value(source_row.get("document_json")).map_err(map_json_in)?;
         document.remap_dataset_ids(&remap);
@@ -310,7 +299,7 @@ impl WorkspaceStore for PostgresWorkspaceStore {
         // `create_workspace` via `insert_blank_owned_workspace`, which also owns
         // the link-off guarantee: `link_access`/`link_role` are left to their
         // table defaults ('restricted' / 'viewer'), so the copy never inherits
-        // the source's sharing, and the source's OTHER members are not copied —
+        // the source's sharing, and the source's other members are not copied —
         // the security-critical invariant.
         insert_blank_owned_workspace(
             &mut tx,
@@ -338,9 +327,9 @@ impl WorkspaceStore for PostgresWorkspaceStore {
                 .map_err(map_sql)?;
         }
 
-        // --- Shared saved views only, re-attributed to the duplicator and
-        // kept Shared. Personal/Proposed views (anyone's) are NOT copied. The
-        // active/default-view pointer is remapped to the copied view. ---
+        // Shared saved views only, re-attributed to the duplicator. Personal
+        // and Proposed views are not copied. The default-view pointer is
+        // remapped to the copied view.
         let source_view_rows = sqlx::query(sql::DUPLICATE_SOURCE_SHARED_VIEWS)
             .bind(source_workspace_id)
             .fetch_all(&mut *tx)
@@ -1316,6 +1305,63 @@ impl WorkspaceStore for PostgresWorkspaceStore {
         let email = normalize_email(&principal.email);
         self.get_user_workspace_state(workspace_id, &email).await
     }
+
+    async fn put_preview(
+        &self,
+        preview: NewWorkspacePreview<'_>,
+    ) -> Result<Option<PreviewWrite>, StoreError> {
+        if !self.workspace_exists(preview.workspace_id).await? {
+            return Ok(None);
+        }
+        let meta = WorkspacePreviewMeta {
+            workspace_id: preview.workspace_id.to_string(),
+            content_type: preview.content_type.to_string(),
+            size_bytes: preview.image.len() as i64,
+            updated_at: preview.updated_at.trunc_subsecs(6),
+            updated_by: normalize_email(preview.updated_by),
+        };
+        let result = sqlx::query(sql::UPSERT_PREVIEW)
+            .bind(&meta.workspace_id)
+            .bind(&meta.content_type)
+            .bind(meta.size_bytes)
+            .bind(preview.image)
+            .bind(meta.updated_at)
+            .bind(&meta.updated_by)
+            .bind(preview.replaces_up_to.trunc_subsecs(6))
+            .execute(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        if result.rows_affected() > 0 {
+            return Ok(Some(PreviewWrite::Stored(meta)));
+        }
+        let (last_updated_at,): (DateTime<Utc>,) = sqlx::query_as(sql::PREVIEW_UPDATED_AT)
+            .bind(preview.workspace_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        Ok(Some(PreviewWrite::TooSoon { last_updated_at }))
+    }
+
+    async fn get_preview(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspacePreview>, StoreError> {
+        let row = sqlx::query(sql::GET_PREVIEW)
+            .bind(workspace_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        Ok(row.map(|row| WorkspacePreview {
+            meta: WorkspacePreviewMeta {
+                workspace_id: row.get("workspace_id"),
+                content_type: row.get("content_type"),
+                size_bytes: row.get("size_bytes"),
+                updated_at: row.get("updated_at"),
+                updated_by: row.get("updated_by"),
+            },
+            image: row.get("image"),
+        }))
+    }
 }
 
 fn row_to_dataset_source(row: PgRow) -> WorkspaceDatasetSource {
@@ -1342,6 +1388,8 @@ fn row_to_summary(row: PgRow) -> Result<WorkspaceSummary, StoreError> {
         default_saved_view_id: row.get("default_saved_view_id"),
         last_opened_at: row.get("last_opened_at"),
         pinned_at: row.get("pinned_at"),
+        first_dataset_url: row.get("first_dataset_url"),
+        preview_updated_at: row.get("preview_updated_at"),
     })
 }
 
@@ -1423,7 +1471,7 @@ fn row_to_user_workspace_state(row: PgRow) -> WorkspaceUserState {
     }
 }
 
-/// Decode the persisted `last_view_json` (#700). `None` for the common
+/// Decode the persisted `last_view_json`. `None` for the common
 /// "never set" case. A malformed payload (e.g. from a future schema)
 /// degrades to `None` rather than erroring the whole user-state read — the
 /// member simply gets no restored view and falls back to the default,

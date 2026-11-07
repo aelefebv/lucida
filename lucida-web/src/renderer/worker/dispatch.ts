@@ -1,20 +1,9 @@
 /**
  * Worker message dispatcher: route a single {@link MainToWorkerMessage}
- * to the appropriate per-mode handler.
+ * to its per-mode handler.
  *
- * Cases `init` and `destroy` are handled in the entry point itself —
- * the former assembles the {@link WorkerCtx} (so we don't have one yet),
- * the latter shuts the worker down. Everything else flows through this
- * function.
- *
- * Renderer-thin cases (`updateCursorData`, `viewHotState`) stay inline
- * here — they're small enough that extracting them into individual files
- * would obscure rather than clarify. The bigger cases delegate to their
- * existing per-mode files (`coldState/apply.ts`, `proxy/upload.ts`,
- * `slice/upload.ts`, `slice/render.ts`, `volume/upload.ts`,
- * `volume/render.ts`, `minimapHandlers.ts`).
- *
- * The frame handlers await their pipelines and are awaited here, so the
+ * `init` and `destroy` are handled in the entry point, which owns the
+ * {@link WorkerCtx} lifecycle. The frame handlers are awaited here, so the
  * entry point's message order holds behind them (`inOrder.ts`).
  */
 
@@ -62,8 +51,7 @@ import { sourceKey } from "../poolKeys.ts";
 export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage): Promise<void> {
   switch (msg.type) {
     case "init":
-      // Handled by the entry point (it assembles the ctx). Reaching
-      // here means a duplicate `init` — ignore.
+      // The entry point handles `init`. Reaching here means a duplicate.
       return;
 
     case "resize": {
@@ -72,6 +60,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       canvas.height = msg.height;
       return;
     }
+
+    case "canvasColors":
+      ctx.getCompositor().setBackground(msg.colors.background);
+      ctx.getSliceRenderer().setTileBorderColor(msg.colors.tileBorder);
+      return;
 
     case "sliceChunkData": {
       const memberId = msg.memberId;
@@ -90,6 +83,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "sliceRenderMultiPass":
       await handleSliceRenderMultiPass(ctx, msg);
+      postFrameDone(ctx, msg.frameSeq);
       return;
 
     case "volumeChunkData": {
@@ -111,6 +105,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "volumeRenderMultiPass":
       await handleVolumeRenderMultiPass(ctx, msg);
+      postFrameDone(ctx, msg.frameSeq);
       return;
 
     case "proxyAssetData": {
@@ -158,27 +153,19 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
 
     case "coldStateDisplay":
-      // Display-only edit: re-apply contrast/gamma/colormap/opacity to the
-      // resident descriptor buffer without re-ingesting cold state. No
-      // residency changed, so no wanted-set is posted.
+      // Display-only edit. No residency changed, so no wanted-set is posted.
       applyColdStateDisplay(ctx, msg);
       return;
 
     case "coldStateSelection":
-      // Selection scrub (T/Z move): re-point the dataset's retained cold state
-      // at the new selection and re-ingest it, repacking the atlas indirection
-      // for the new plane/timepoint. The freshly-wanted chunks changed, so the
-      // wanted-set is posted (as with a full cold state).
+      // A T/Z scrub changes the wanted chunks, so the wanted-set is posted.
       applyColdStateSelection(ctx, msg);
       ctx.postWantedSet();
       return;
 
     case "coldStateDelta":
-      // View move (pan/zoom/orbit): patch the dataset's retained cold state with
-      // the changed/added descriptors + removed ids, reorder to the new active
-      // set, and re-ingest it. The wanted-set is posted unconditionally for
-      // consistency with the full / selection paths — even when the delta was a
-      // no-op (dataset not yet ingested), matching how those paths always post.
+      // Posted even when the delta was a no-op, matching the full and
+      // selection paths.
       applyColdStateDelta(ctx, msg);
       ctx.postWantedSet();
       return;
@@ -187,13 +174,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       removeSliceResources(ctx, msg.datasetId);
       removeVolumeResources(ctx, msg.datasetId);
       removeMinimapResources(msg.datasetId);
-      // Destroy proxy pools for this dataset.
       const dsPools = ctx.state.proxyPoolsByDataset.get(msg.datasetId);
       if (dsPools) {
         for (const pool of dsPools.values()) destroyProxyAtlas(pool);
         ctx.state.proxyPoolsByDataset.delete(msg.datasetId);
       }
-      // Drop the per-dataset descriptor buffer.
       const desc = ctx.state.descriptorBuffersByDataset.get(msg.datasetId);
       if (desc) {
         destroyDescriptorBuffer(desc);
@@ -202,10 +187,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       ctx.state.currentSourcesByDataset.delete(msg.datasetId);
       ctx.state.coldStateByDataset.delete(msg.datasetId);
 
-      // Clear member-id routing for entries owned by this dataset so
-      // dropped layers don't keep stale memberToDataset /
-      // memberSourcePools entries around (these maps would otherwise
-      // grow monotonically across the worker's lifetime).
+      // These maps would otherwise grow for the worker's whole lifetime.
       for (const [memberId, dsId] of ctx.state.memberToDataset) {
         if (dsId === msg.datasetId) {
           ctx.state.memberToDataset.delete(memberId);
@@ -213,16 +195,12 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
           ctx.state.targetLevelByMember.delete(memberId);
         }
       }
-      // Drop group→tiles entries owned by this dataset. Tracked via
-      // groupsByDataset so we don't have to scan every group's child set.
+      // groupsByDataset avoids scanning every group's child set.
       const groups = ctx.state.groupsByDataset.get(msg.datasetId);
       if (groups) {
         for (const groupId of groups) ctx.state.groupToTiles.delete(groupId);
         ctx.state.groupsByDataset.delete(msg.datasetId);
       }
-      // If the dataset being dropped is the one whose cold state is
-      // active, clear that pointer too — no more renders/uploads will
-      // arrive against this state.
       if (ctx.state.currentColdState?.datasetId === msg.datasetId) {
         ctx.state.currentColdState = null;
       }
@@ -230,9 +208,20 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     }
 
     case "destroy":
-      // Handled by the entry point (it owns the lifecycle so it can
-      // null out the ctx before calling `self.close()`). Reaching here
-      // means a duplicate `destroy` — ignore.
+      // The entry point handles `destroy` so it can null the ctx before
+      // `self.close()`. Reaching here means a duplicate.
       return;
   }
+}
+
+/**
+ * Report a viewport frame done once the GPU has run everything submitted so
+ * far, which includes the frame. Not awaited: the next message needn't wait.
+ */
+function postFrameDone(ctx: WorkerCtx, frameSeq: number | undefined): void {
+  if (frameSeq === undefined) return;
+  ctx.device.queue.onSubmittedWorkDone().then(
+    () => ctx.post({ type: "frameDone", frameSeq }),
+    () => {},
+  );
 }

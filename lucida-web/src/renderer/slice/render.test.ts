@@ -176,7 +176,11 @@ function makeCtx(opts: {
     state: opts.state,
     passTimer: UNTIMED,
     getSliceRenderer: () => opts.renderer,
-    getCompositor: () => ({ composite: opts.composite, compiled: opts.compositorCompiled ?? Promise.resolve() }),
+    getCompositor: () => ({
+      composite: opts.composite,
+      underlayBackground: () => {},
+      compiled: opts.compositorCompiled ?? Promise.resolve(),
+    }),
     getCursorRenderer: () => ({ hasData: () => false, compiled: opts.cursorCompiled ?? Promise.resolve() }),
     ensureOffscreenPool: (n: number) =>
       Array.from({ length: n }, () => ({ createView: () => ({}) })),
@@ -203,7 +207,7 @@ function memberMsg(memberId: string, dataW = 128, dataH = 128): SliceRenderMulti
 }
 
 describe("handleSliceRenderMultiPass — the compile", () => {
-  // The reason is in `pipelineCompile.ts` (#1101).
+  // The reason is in `pipelineCompile.ts`.
   it.each([
     ["slice renderer", "renderer"],
     ["layer compositor", "compositor"],
@@ -580,7 +584,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
-    // Two binding sets → two instanced draws in ONE pass, roster order.
+    // Two binding sets → two instanced draws in one pass, roster order.
     expect(params.batches).toHaveLength(2);
     expect(params.batches[0].coarse?.texture).toBe(atlasA.texture);
     expect(params.batches[0].firstInstance).toBe(0);

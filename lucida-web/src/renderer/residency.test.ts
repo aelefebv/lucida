@@ -12,10 +12,6 @@ function makeStubCtx(): WorkerCtx {
   return { state: createInitialState() } as unknown as WorkerCtx;
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
 /** Create a minimal AtlasState for testing (no GPU resources). */
 function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: string }): AtlasState {
   const gridX = 4, gridY = 4, gridZ = 2;
@@ -41,6 +37,7 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: str
     totalSlots,
     chunkX: 32, chunkY: 32, chunkZ: 32,
     slotsX: 4, slotsY: 4, slotsZ: 2,
+    maxSlotsZ: 2,
     entityMetas,
     t: 0, c: 0,
     intensityMin: 65535, intensityMax: 0,
@@ -96,9 +93,7 @@ function insertChunk(atlas: { slots: Map<string, number> }, level: number, t: nu
   atlas.slots.set(`${memberId}|${level}/${t}/${c}/${z}/${y}/${x}`, slotIndex);
 }
 
-// ---------------------------------------------------------------------------
 // parseChunkKey
-// ---------------------------------------------------------------------------
 
 describe("parseChunkKey", () => {
   it("parses valid key", () => {
@@ -111,9 +106,7 @@ describe("parseChunkKey", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // remapIndirection (volume)
-// ---------------------------------------------------------------------------
 
 describe("remapIndirection (volume)", () => {
   it("maps only chunks matching current T", () => {
@@ -180,9 +173,7 @@ describe("remapIndirection (volume)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // remapSliceIndirection
-// ---------------------------------------------------------------------------
 
 describe("remapSliceIndirection", () => {
   it("maps only chunks matching current T and Z", () => {
@@ -223,9 +214,7 @@ describe("remapSliceIndirection", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Shared volume pool — multi-entity tests
-// ---------------------------------------------------------------------------
 
 describe("remapIndirection (shared volume pool)", () => {
   it("two entities with same grid coords don't collide (composite keys)", () => {
@@ -277,9 +266,7 @@ describe("remapIndirection (shared volume pool)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // applyViewHotState (rayHitPerEntity population)
-// ---------------------------------------------------------------------------
 
 describe("applyViewHotState", () => {
   function makeMsg(

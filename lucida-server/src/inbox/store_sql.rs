@@ -2,17 +2,10 @@
 //! implementations share: the statements they run, and how a driver
 //! error becomes a store error.
 //!
-//! One text, two engines, on the terms `bookmarks/store_sql.rs` sets
-//! out: every placeholder is numbered `$1` and up, which sqlx binds the
-//! same way on SQLite and on PostgreSQL, and no statement mixes the
-//! numbered form with SQLite's bare `?`.
-//!
-//! The payload columns are `TEXT` on both engines, so unlike the
-//! bookmark stores these two bind the same values as well as the same
-//! characters, and the implementations differ only in the pool type and
-//! the row type. The reason the columns are text is in the migration:
-//! the inbox hands back the bytes it was sent, and a JSON column stores
-//! a parsed value instead.
+//! Same rules as `bookmarks/store_sql.rs`: numbered `$N` placeholders
+//! only, never mixed with `?`. Both payload columns are `TEXT` on both
+//! engines, because the inbox hands back the bytes it was sent and a JSON
+//! column would store a parsed value.
 
 use super::store::StoreError;
 

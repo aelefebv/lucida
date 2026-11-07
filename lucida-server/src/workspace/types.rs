@@ -52,16 +52,13 @@ impl TryFrom<&str> for WorkspaceRole {
 
 /// Visibility of a workspace saved view.
 ///
-/// `Shared` views are part of the workspace's collaborative surface (the
-/// historical behavior); `Personal` views belong to exactly one member —
-/// keyed on the normalized `AuthPrincipal.email` in `created_by` — and are
-/// never disclosed to anyone else, not even owners. `Proposed` views (#702)
-/// are a viewer's bid to share: like a `Personal` view they belong to exactly
-/// one member and are hidden from other plain viewers, but they are *also*
-/// surfaced to editors as a review queue — an editor can approve (→ `Shared`)
-/// or reject (→ back to the proposer's `Personal`). Persisted as TEXT
-/// (`"shared"` / `"personal"` / `"proposed"`) and serialized into the
-/// REST/JSON response so the client can tell the layers apart.
+/// `Shared` views are part of the workspace's collaborative surface.
+/// `Personal` views belong to one member, keyed on the normalized email in
+/// `created_by`, and are never disclosed to anyone else, owners included.
+/// `Proposed` views are a viewer's bid to share: private like `Personal`,
+/// but also shown to editors as a review queue, where approval makes them
+/// `Shared` and rejection returns them to `Personal`. Persisted and
+/// serialized as `"shared"` / `"personal"` / `"proposed"`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SavedViewVisibility {
@@ -136,6 +133,59 @@ pub struct WorkspaceSummary {
     pub default_saved_view_id: Option<String>,
     pub last_opened_at: Option<DateTime<Utc>>,
     pub pinned_at: Option<DateTime<Utc>>,
+    /// The canonical URL of the workspace's first dataset in layer order,
+    /// so a listing can tell apart workspaces that share a name. `None`
+    /// until a dataset is opened.
+    pub first_dataset_url: Option<String>,
+    /// When the workspace's preview image was last written, so a listing
+    /// can tell a stale cached image from the current one. `None` until a
+    /// viewer uploads one.
+    pub preview_updated_at: Option<DateTime<Utc>>,
+}
+
+/// What the store knows about a workspace's preview image, without the
+/// bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WorkspacePreviewMeta {
+    pub workspace_id: String,
+    /// One of the allowlisted image types, sniffed from the bytes.
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub updated_at: DateTime<Utc>,
+    /// The email of whoever uploaded it.
+    pub updated_by: String,
+}
+
+/// A workspace's preview image and what the store knows about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspacePreview {
+    pub meta: WorkspacePreviewMeta,
+    pub image: Vec<u8>,
+}
+
+/// A preview to store. The caller owns the clock and the policy: it
+/// validated the bytes and chose both instants.
+#[derive(Debug, Clone, Copy)]
+pub struct NewWorkspacePreview<'a> {
+    pub workspace_id: &'a str,
+    pub content_type: &'a str,
+    pub image: &'a [u8],
+    pub updated_by: &'a str,
+    pub updated_at: DateTime<Utc>,
+    /// An existing preview is replaced only if it was written at or before
+    /// this instant. The comparison runs inside the write, so two uploads
+    /// racing each other cannot both pass a rate limit read beforehand.
+    pub replaces_up_to: DateTime<Utc>,
+}
+
+/// How a preview write ended, when the workspace was there to take it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PreviewWrite {
+    Stored(WorkspacePreviewMeta),
+    /// The existing preview is newer than the write allowed, and stays.
+    TooSoon {
+        last_updated_at: DateTime<Utc>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -203,7 +253,7 @@ pub struct WorkspaceUserState {
     pub workspace_id: String,
     pub last_opened_at: Option<DateTime<Utc>>,
     pub pinned_at: Option<DateTime<Utc>>,
-    /// The caller's own last-open view in this workspace (#700), restored on
+    /// The caller's own last-open view in this workspace, restored on
     /// a bare `/w/:id` open behind a user toggle. `None` until the member
     /// records one. Per-user isolated (keyed on the member's email alongside
     /// the rest of this row) and never another user's. Recording it never

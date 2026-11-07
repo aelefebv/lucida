@@ -16,6 +16,10 @@ export interface WorkspaceSummary {
   default_saved_view_id: string | null;
   last_opened_at: string | null;
   pinned_at: string | null;
+  /** Canonical URL of the first dataset in layer order; null until one is opened. */
+  first_dataset_url?: string | null;
+  /** When the workspace's preview image was last written; null until a viewer uploads one. */
+  preview_updated_at?: string | null;
 }
 
 export interface WorkspaceRecord {
@@ -73,9 +77,8 @@ export interface WorkspaceUserState {
   workspace_id: string;
   last_opened_at: string | null;
   pinned_at: string | null;
-  /** The caller's own last-open view in this workspace (#700), restored on
-   *  a bare `/w/:id` open behind the "Restore my last view" toggle. Absent /
-   *  null until the member records one; never another member's view. */
+  /** The caller's own last-open view, restored on a bare `/w/:id` open behind
+   *  the "Restore my last view" toggle. Never another member's view. */
   last_view?: SavedView | null;
 }
 
@@ -168,16 +171,9 @@ export function getWorkspace(id: string): Promise<WorkspaceRecord> {
 }
 
 /**
- * Duplicate a workspace into a private copy owned by the caller (#698).
- *
- * Anyone who can access the source (any role, viewer included) may duplicate
- * it. The copy is a NEW workspace owned by the caller, created with the
- * default sharing (restricted, owner-only, link OFF) — it never inherits the
- * source's members or any permission. It copies datasets (+ display names),
- * the source's *shared* saved views (re-attributed to the caller), the
- * active/default view, and the document, so it opens looking like the
- * original. Defaults to the name `Copy of <source name>`; pass `name` to
- * override. Resolves to the new workspace (id/name) to navigate into.
+ * Duplicate a workspace into a private copy owned by the caller. Any role may
+ * duplicate. The copy gets default owner-only sharing and never inherits the
+ * source's members. Named `Copy of <source name>` unless `name` is given.
  */
 export function duplicateWorkspace(id: string, name?: string): Promise<WorkspaceRecord> {
   return requestJson<WorkspaceRecord>(
@@ -351,9 +347,8 @@ export function setWorkspaceSavedViewVisibility(
 }
 
 /**
- * Approve a viewer's proposed saved view (#702): an editor accepts the
- * proposal and it becomes a `"shared"` view, with the proposer preserved as
- * `created_by`. Editor-only server-side; resolves to the updated view.
+ * Approve a viewer's proposed saved view, making it `"shared"` with the
+ * proposer kept as `created_by`. Editor-only server-side.
  */
 export function approveWorkspaceSavedView(
   workspaceId: string,
@@ -366,9 +361,8 @@ export function approveWorkspaceSavedView(
 }
 
 /**
- * Reject a viewer's proposed saved view (#702): an editor declines the
- * proposal and it reverts to the proposer's own `"personal"` view
- * (non-destructive). Editor-only server-side; resolves to the updated view.
+ * Reject a viewer's proposed saved view; it reverts to the proposer's
+ * `"personal"` view. Editor-only server-side.
  */
 export function rejectWorkspaceSavedView(
   workspaceId: string,
@@ -415,9 +409,8 @@ export function updateWorkspacePin(
   );
 }
 
-/** Record the caller's own last-open view for a workspace (#700). Scoped to
- *  the authenticated principal server-side; never mutates the shared
- *  workspace default. Returns the caller's refreshed state (incl. last_view). */
+/** Record the caller's own last-open view. Principal-scoped server-side; never
+ *  touches the shared workspace default. */
 export function updateWorkspaceLastView(
   workspaceId: string,
   view: SavedView,
@@ -431,8 +424,7 @@ export function updateWorkspaceLastView(
   );
 }
 
-/** Read the caller's own workspace state, including their remembered
- *  `last_view` (#700). Principal-scoped; never another member's state. */
+/** Read the caller's own workspace state, including `last_view`. */
 export function getWorkspaceUserState(
   workspaceId: string,
 ): Promise<WorkspaceUserState> {

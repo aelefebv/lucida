@@ -1,45 +1,12 @@
 /**
- * Incremental per-entity snapshot assembly. Holds the single per-row
- * translation from a scene view-query record into an {@link EntitySnapshot}
- * (snake_case → camelCase plus the manifest join for `levels`,
- * `coarseLevel`, `parentId`, and `layoutPositionVox`), and the fold that
- * applies an incremental view-query delta on top of a prior per-image
- * snapshot map.
- *
- * # The target level arrives resolved
- *
- * The core's view query reports each record's `targetLevel` with the
- * dataset's level pin folded in and clamped to the image's source levels
- * (`Scene::member_target_level`). This module copies it and the planner
- * reads it. Neither chooses nor clamps a level, so the core stays the one
- * home of that rule (ADR 0061). The level is in the quantized set the delta
- * tracks, so a zoom or a pin edit arrives as a `changed` record.
- *
- * The full builder (`snapshot.ts`) and the fold below share
- * {@link makeEntitySnapshot} so a delta-reconstructed snapshot is identical,
- * per row, to one assembled from the full visible set — the two paths cannot
- * drift because they run the same code.
- *
- * # Keying
- *
- * The snapshot map is keyed by `image_id`, the unique per-record identity. An
- * entity can own several images at different pyramid depths (distinct
- * `target_level`); keying by `entity_id` would collapse those into one and
- * lose a level. See `lucida-core/src/query.rs`.
- *
- * # What a delta does and does not carry
- *
- * A delta reports only the *quantized* projection of each record —
- * `{ membership, visible, target_level, kind }`. The continuous fields
- * (`importance`, `projectedDiagonalPx`, `projectedAreaPx2`, `centroidWorld`)
- * are excluded, so a record that appears in no delta between two full
- * snapshots keeps its last-reported continuous values, which may be stale.
- * That staleness is the source of the O(delta) win: a small camera nudge that
- * shifts only continuous fields yields an empty delta and no rebuild. A zoom
- * that moves a record's target level is a quantized change, so it arrives as
- * a `changed` record and re-runs the row translation. Any consumer that turns
- * a continuous field into a discrete decision must recompute that decision
- * itself rather than infer it from delta membership.
+ * Per-row translation from a view-query record into an {@link EntitySnapshot},
+ * and the fold that applies a view-query delta onto a prior snapshot map. The
+ * full builder (`snapshot.ts`) and the fold share {@link makeEntitySnapshot},
+ * so the two paths cannot drift. `targetLevel` arrives from the core already
+ * pinned and clamped (ADR 0061); nothing here picks a level. The map is keyed
+ * by `image_id` because one entity can own images at several pyramid depths.
+ * A delta carries only quantized fields, so continuous fields on a carried-over
+ * record may be stale: never derive a discrete decision from them.
  */
 
 import type { ImageSpec } from "../../manifestTypes.ts";
@@ -96,7 +63,7 @@ export interface SnapshotEntityDeps {
 
 /**
  * The image's source levels, ascending: every listed level except the
- * generated coarse levels, which belong to the coarse tier (ADR 0040). The
+ * generated coarse levels, which belong to the coarse tier. The
  * set the prefetch lane's level step stays inside. The target level arrives
  * from the core already inside it, so nothing here clamps.
  */
@@ -132,13 +99,9 @@ export function resolveCoarseLevel(imgSpec: ImageSpec | undefined): number | nul
  * and `layoutPositionVox`. `targetLevel` is the record's own, as the core
  * reported it.
  *
- * {@link EntitySnapshot} is a discriminated union: the record's `kind`
- * selects the variant. A `Tile` requires a non-null parent edge in the
- * manifest — a missing edge is a producer-invariant violation and throws
- * here, surfacing it at assembly rather than later in grouping.
- *
- * The single source of the per-row shape: both the full builder and the
- * delta fold call this, so the two paths produce byte-identical records.
+ * The record's `kind` selects the variant. A `Tile` with no parent edge in
+ * the manifest is a producer-invariant violation and throws here, at
+ * assembly, rather than later in grouping.
  */
 export function makeEntitySnapshot(
   row: ViewQueryEntityJson,
@@ -184,16 +147,13 @@ export function makeEntitySnapshot(
  * Fold a view-query delta onto the prior per-image snapshot map, producing
  * the next map keyed by `image_id`.
  *
- * - A `Full` payload (or `prev === null`) builds a fresh map from
- *   `visible_entities` — a self-contained snapshot that ignores any prior.
+ * - A `Full` payload builds a fresh map from `visible_entities`, ignoring
+ *   any prior.
  * - A `Delta` payload clones `prev`, deletes every `image_id` in `left`,
  *   then upserts every record in `entered` and `changed`.
  *
- * A `Delta` requires a non-null `prev`: the caller keys the fast path on a
- * live cursor and seeds from a full query otherwise (a fresh consumer's
- * first delta must be a `Full`). Applying a `Delta` against a null prior
- * would fabricate a snapshot from only the changed records, so it is a
- * caller error and throws rather than silently returning a partial map.
+ * A `Delta` with a null `prev` throws: it would fabricate a snapshot from
+ * only the changed records. The caller seeds from a full query instead.
  *
  * The returned map is a new object; `prev` is never mutated.
  */

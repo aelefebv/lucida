@@ -1,0 +1,105 @@
+/* Groups wrap onto a second line rather than squeeze a slider to nothing, and
+   on a wrapped line the scrubbers grow to fill it. The dividers sit in the
+   gap before each group; one that starts a line lands outside the padding,
+   where the clip hides it. */
+.lc-dimension-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--lc-space-2) var(--lc-space-5);
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.lc-dim-group {
+  position: relative;
+  display: flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: var(--lc-space-1);
+  min-width: 0;
+}
+
+.lc-dim-scrubber {
+  flex-grow: 1;
+}
+
+.lc-dim-group + .lc-dim-group::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: calc(var(--lc-space-5) / -2 - 0.5px);
+  width: 1px;
+  height: 16px;
+  translate: 0 -50%;
+  background: var(--lc-border-strong);
+}
+
+.lc-dim-axis {
+  flex: none;
+  min-width: 1.25em;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 600;
+  text-align: center;
+}
+
+.lc-dim-slider {
+  flex: 1 1 auto;
+  width: 128px;
+  min-width: 48px;
+}
+
+.lc-dim-readout {
+  flex: none;
+  padding-left: var(--lc-space-1);
+  color: var(--lc-text);
+  font-size: var(--lc-text-sm);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lc-dim-readout-value {
+  display: inline-block;
+  text-align: right;
+}
+
+.lc-camera-popover {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-4);
+  width: 240px;
+  max-width: 100%;
+}
+
+.lc-focal-depth {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+}
+
+.lc-focal-depth-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lc-space-2);
+}
+
+.lc-focal-depth-label {
+  color: var(--lc-text);
+  font-size: var(--lc-text-md);
+}
+
+.lc-focal-depth-hint {
+  margin: 0 0 var(--lc-space-1);
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+}
+
+.lc-focal-depth-ends {
+  display: flex;
+  justify-content: space-between;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-xs);
+}

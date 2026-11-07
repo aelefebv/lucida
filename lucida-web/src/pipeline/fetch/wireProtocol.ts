@@ -1,12 +1,7 @@
 /**
- * Wire-protocol helpers — pure binary-format codecs.
- *
- * No transport, no state. `parseProxyHeader` decodes the 64-byte
- * little-endian record that fronts every binary proxy frame;
- * `proxyResponseKey` composes the canonical key the bridge uses to
- * route frames back to the originating request. Both pair with their
- * Rust counterparts in `lucida_proxy::header` and `handler.rs` — the
- * two MUST stay in lockstep.
+ * Pure binary codecs for the wire protocol. Each pairs with a Rust
+ * counterpart (`lucida_proxy::header`, `handler.rs`) and must stay in
+ * lockstep with it.
  */
 
 import type { ProxyKind } from "../assetCatalog.ts";
@@ -76,7 +71,7 @@ export function parseProxyHeader(buffer: ArrayBuffer, offset = 0): ProxyHeaderJs
 
 /**
  * Compose the proxy response key. Mirrors the server's
- * `proxy_response_key` (handler.rs); the two MUST stay in lockstep so the
+ * `proxy_response_key` (handler.rs); the two must stay in lockstep so the
  * client can route binary frames back to the right pending request.
  */
 export function proxyResponseKey(

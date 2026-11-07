@@ -5,9 +5,8 @@
  * ~1.1 kB; seven uint32 boundary slots cost 28 B, which is what makes
  * unconditional recording affordable. Spans exist only at {@link serialise}.
  *
- * Buffers are preallocated and grow only by doubling (ADR 0049). This is not
- * tidiness: an allocating recorder produces GC pauses that appear as stalls
- * in its own trace.
+ * Buffers are preallocated and grow only by doubling, because an allocating
+ * recorder produces GC pauses that appear as stalls in its own trace.
  */
 
 import { RESIDENCY_TIERS } from "../pipeline/residencyTier.ts";
@@ -53,7 +52,7 @@ const PLAN_PHASE = PHASES.indexOf("plan");
 const QUEUE_PHASE = PHASES.indexOf("queue");
 
 /**
- * The rows of a run in progress, tallied by how they ended (#937).
+ * The rows of a run in progress, tallied by how they ended.
  *
  * `inFlight` is the remainder rather than a fourth count: every row is
  * exactly one of the three, and deriving it here is what stops the live view
@@ -66,9 +65,8 @@ export interface LiveTally {
   /**
    * Of the in-flight rows, how many have reached no boundary at all.
    *
-   * Structurally zero for anything the recorder made — since #949 a chunk row
-   * is born at dispatch with `queue` stamped (`TraceRecorder.beginChunkRow`).
-   * It is the walk's residual rather than a state the pipeline produces: this
+   * Zero for anything the recorder made, because a chunk row is born at
+   * dispatch with `queue` stamped (`TraceRecorder.beginChunkRow`). This
    * table's own `append` makes an unstamped row, so the count is what stops
    * one going missing between `inFlight` and the phase vector.
    */
@@ -107,37 +105,26 @@ export class RowTable {
   private lastBoundary: Uint8Array;
 
   /**
-   * The identity index (#1062): the newest row of every chunk the table
-   * holds, so a surface that colors the chunks on screen reads each one in
-   * constant time while the interval is still open, and never walks the
-   * rows. `index` is an open-addressing table over a hash of the row's
-   * interned dataset and entity ids and its six coordinates, holding a row
-   * index or {@link NO_ROW}, at most half full. `prevSame` links each row to
-   * the previous row of the same chunk, so the rows behind an identity, and
-   * how many of them fetched, are a walk of that chain and no longer.
+   * The identity index: the newest row of every chunk the table holds, so a
+   * surface coloring the chunks on screen reads each one in constant time
+   * while the interval is open. `index` is an open-addressing table over a
+   * hash of the interned dataset and entity ids and the six coordinates, at
+   * most half full. `prevSame` links each row to the previous row of the
+   * same chunk.
    *
-   * Typed arrays, sized with the table and rebuilt at its doubling, so the
-   * index costs no allocation per row and is counted in the row width the
-   * caps derive from. No string per chunk is interned: the index compares
-   * columns, which is what `StringPool` declines to do for coordinates.
+   * Typed arrays sized with the table and rebuilt when it doubles, so the
+   * index allocates nothing per row and is counted in the row width the caps
+   * derive from. It compares columns rather than interning a string per chunk.
    */
   private index: Int32Array;
   private indexMask: number;
   private prevSame: Int32Array;
 
   /**
-   * The live tally, kept as the rows are written (#937, #1057).
-   *
-   * It was a walk over the rows on every poll, on the argument that the
-   * write path is the pipeline's hottest and nobody is watching most of the
-   * time. That held while the only reader was a person polling twice a
-   * second. The provisional reading, the watch stream, and the HUD read an
-   * open run at the tick cadence, under the cost contract of ADR 0049 as
-   * amended, which forbids them a row walk. So the tally moved to the
-   * writer: a handful of typed-array increments per boundary, paid once,
-   * instead of a walk over tens of thousands of rows paid per reader per
-   * poll. The write path's cost is gated in `recorderCost.perf.test.ts`, and
-   * a read is now a copy of six integers.
+   * The live tally, kept as the rows are written: a few typed-array
+   * increments per boundary, so the surfaces that read an open run at the
+   * tick cadence never walk the rows. The write path's cost is gated in
+   * `recorderCost.perf.test.ts`.
    */
   private readonly occupancy = new Uint32Array(PHASES.length);
   private complete = 0;
@@ -174,7 +161,7 @@ export class RowTable {
     return this.capacity;
   }
 
-  /** Bytes allocated, not bytes used — the cap in ADR 0049 is on resident memory. */
+  /** Bytes allocated, not bytes used, because the cap is on resident memory. */
   get byteLength(): number {
     return this.capacity * RowTable.BYTES_PER_ROW;
   }
@@ -457,16 +444,13 @@ export class RowTable {
   }
 
   /**
-   * How the rows ended, and where the unfinished ones are sitting right now
-   * (#937): the live view's counters and phase bar, read from the counters
-   * the write path keeps rather than by walking the rows. A read costs the
-   * same at ten rows and at the per-run cap, which is what lets the surfaces
-   * that read an open run do so at the tick cadence.
+   * How the rows ended, and where the unfinished ones sit right now: the
+   * live view's counters and phase bar, read from the counters the write
+   * path keeps, so a read costs the same at ten rows and at the per-run cap.
    *
    * `occupancy` is the caller's vector, in {@link PHASES} order, overwritten
-   * here: a poll reads this instant, not a sum of every poll before it. It is
-   * passed in rather than returned so a reader polling at the tick cadence
-   * allocates nothing.
+   * here. It is passed in rather than returned so a reader polling at the
+   * tick cadence allocates nothing.
    */
   liveTally(occupancy: Uint32Array): LiveTally {
     occupancy.set(this.occupancy);

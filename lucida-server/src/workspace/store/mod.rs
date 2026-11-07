@@ -15,9 +15,10 @@ use lucida_core::scene::DocumentState;
 use thiserror::Error;
 
 use super::types::{
-    SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
-    WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
-    WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
+    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
+    WorkspacePreview, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView, WorkspaceSharingSettings,
+    WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
 };
 
 mod postgres;
@@ -93,20 +94,15 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         name: Option<&str>,
     ) -> Result<WorkspaceRecord, StoreError>;
 
-    /// Deep-copy `source_workspace_id` into a brand-new workspace owned by
-    /// `owner`, named `name`, in ONE transaction. The copy COPIES:
-    /// dataset memberships (with their per-workspace display names), the
-    /// **Shared** saved views (re-attributed to `owner`, kept Shared), the
-    /// active/default-view pointer (remapped to the copied view), and the
-    /// document. The copy DOES NOT copy `workspace_members` (only the owner
-    /// row), link access, or any other sharing/permission: it is created with
-    /// the new-workspace defaults (restricted, owner-only, link OFF) so the
-    /// source's membership/permission set can never leak into the duplicate.
+    /// Deep-copy `source_workspace_id` into a new workspace owned by `owner`
+    /// and named `name`, in one transaction. Copies dataset memberships, the
+    /// `Shared` saved views (re-attributed to `owner`), the default-view
+    /// pointer, and the document. Never copies members, link access, or any
+    /// permission: the copy starts restricted and owner-only.
     ///
-    /// Dataset memberships get FRESH workspace-local ids; the document and the
-    /// copied saved views are remapped onto those fresh ids so the copy
-    /// resolves entirely against its own `workspace_datasets` (no dangling
-    /// references to the source). `Ok(None)` if the source row is missing.
+    /// Memberships get fresh workspace-local ids, and the document and saved
+    /// views are remapped onto them, so nothing references the source.
+    /// `Ok(None)` if the source row is missing.
     async fn duplicate_workspace(
         &self,
         source_workspace_id: &str,
@@ -278,7 +274,7 @@ pub trait WorkspaceStore: Send + Sync + 'static {
     /// Saved views visible to `viewer_email`: every `Shared` view, plus the
     /// caller's own `Personal`/`Proposed` views, plus — when `viewer_can_edit`
     /// is true — *every* `Proposed` view in the workspace (the editor review
-    /// queue, #702). No other member's `Personal` view, and no other member's
+    /// queue). No other member's `Personal` view, and no other member's
     /// `Proposed` view unless the caller can edit, ever crosses the store
     /// boundary. The whole predicate is resolved in SQL (one round-trip, no
     /// fetch-all-then-filter); `viewer_email` must already be normalized.
@@ -360,10 +356,10 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         pinned: bool,
     ) -> Result<WorkspaceUserState, StoreError>;
 
-    /// Upsert the caller's own last-open view (#700) for
+    /// Upsert the caller's own last-open view for
     /// `(workspace_id, principal.email)`, returning their refreshed state
     /// (which includes `last_view`). Mirrors `upsert_viewer_profile`: writes
-    /// only this user's row and ONLY the `last_view_json` column — it must
+    /// only this user's row and only the `last_view_json` column. It must
     /// never touch `workspaces.default_saved_view_id`.
     async fn set_user_workspace_last_view(
         &self,
@@ -380,4 +376,17 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<WorkspaceUserState, StoreError>;
+
+    /// Store a live workspace's one preview image, replacing the existing
+    /// one unless it was written after `preview.replaces_up_to`.
+    /// `Ok(None)` if the workspace is missing or archived.
+    async fn put_preview(
+        &self,
+        preview: NewWorkspacePreview<'_>,
+    ) -> Result<Option<PreviewWrite>, StoreError>;
+
+    /// The workspace's preview image, in any archive state, so a restore
+    /// finds it where it was. `Ok(None)` when none was ever stored.
+    async fn get_preview(&self, workspace_id: &str)
+    -> Result<Option<WorkspacePreview>, StoreError>;
 }

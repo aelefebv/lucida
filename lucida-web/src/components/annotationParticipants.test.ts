@@ -8,17 +8,13 @@ import {
 import { splitMentionTokens, activeMentionQuery } from "./annotationMentions.ts";
 
 /**
- * Pure-logic tests for the mention candidate SOURCE + handle derivation
- * (issue #526): the union of workspace members and document participants, deduped
- * by a stable identity, each labelled by a stable, viewer-independent, TOKEN-SAFE
- * @handle, with a never-empty fallback. These guard the properties the rest of
- * the feature depends on — especially that a handle is matchable (a future
- * "mentions of me" can recompute it) and is a valid `@`-mention token.
+ * Mention candidates and handles: members and participants unioned and deduped
+ * by stable identity, each with a stable, viewer-independent, token-safe
+ * @handle, and never an empty list.
  */
 
-/** `@<handle>` must parse back as a SINGLE mention token under the frozen grammar
- * — otherwise the composer would insert text the renderer can't chip and a
- * "mentions of me" couldn't string-match. */
+/** `@<handle>` must parse back as one mention token, or the renderer couldn't
+ * chip it and "mentions of me" couldn't match it. */
 function isTokenSafe(handle: string): boolean {
   const segs = splitMentionTokens(`@${handle}`);
   return (
@@ -38,8 +34,6 @@ describe("deriveHandle — deterministic, token-safe id handle", () => {
 
   it("is NOT a raw prefix of the id (it hashes, not slices)", () => {
     const id = "abcdef0123456789";
-    // The old approach was `id.slice(0, 6)` → "abcdef"; the handle must not be a
-    // literal leading slice of the opaque id.
     expect(deriveHandle(id)).not.toBe("abcdef");
     expect(deriveHandle(id).includes(id.slice(0, 6))).toBe(false);
   });
@@ -56,8 +50,7 @@ describe("deriveHandle — deterministic, token-safe id handle", () => {
   });
 
   it("the handle, inserted as `@handle `, opens then cleanly closes a query", () => {
-    // Inserted with the contract's trailing space, the token is closed (no active
-    // query) — i.e. it is a complete, well-formed mention.
+    // The trailing space closes the token.
     const h = deriveHandle("someone");
     expect(activeMentionQuery(`@${h} `)).toBeNull();
     // …and without the space it IS the active query (round-trips to itself).
@@ -100,7 +93,7 @@ describe("deriveMentionCandidates — source, dedupe, fallback", () => {
     expect(out).toHaveLength(1);
     expect(out[0].id).toBe("author:me");
     expect(out[0].label).toBe(deriveHandle("me"));
-    // The current user is NOT labelled "you" — it is their stable handle.
+    // The current user gets their stable handle, not "you".
     expect(out[0].label).not.toBe("you");
   });
 
@@ -134,8 +127,7 @@ describe("deriveMentionCandidates — source, dedupe, fallback", () => {
   });
 
   it("derives the current user's handle the SAME way it derives anyone's", () => {
-    // The contract behind "mentions of me": the current user's own handle is
-    // exactly deriveHandle(theirId), so a later slice can recompute it and match.
+    // "Mentions of me" recomputes deriveHandle(myId) to match.
     const out = deriveMentionCandidates({
       annotations: [],
       currentUserId: "my-stable-id",

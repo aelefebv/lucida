@@ -1,57 +1,66 @@
-# lucida — intention (the plot)
+# lucida intention
 
-The north-star for **what lucida is and who it's for**. Keep it short and durable; the `wiki/`
-holds the detailed intent, invariants, and gotchas. Litmus test: *if a change makes lucida worse
-against this document, it's the wrong change.*
+The north star for what lucida is and who it's for. Keep it short and durable.
+Decisions and their reasons live in `docs/adr/`. If a change makes lucida worse
+against this document, it's the wrong change.
 
 ## In one line
 
-A general, **domain-neutral viewer for large n-dimensional array/image data**: point it at a dataset
-(local or in object storage) and explore it interactively, in 2D or 3D, without downloading it or
-waiting for it to open.
+A general, domain-neutral viewer for large n-dimensional array and image data.
+Point it at a dataset, local or in object storage, and explore it in 2D or 3D
+without downloading it or waiting for it to open. One chunk-lazy engine serves a
+human GUI and an agent-driven interface, held to a correctness-first bar, so a
+person and an agent can both look at very large data and trust what they see.
 
 ## What it's for
 
-Modern n-dimensional data outgrew the download-then-open desktop path. lucida makes that data
-**immediate, fluid, and trustworthy to look at — where it lives, at full scale — for both people and
-agents.** Three pillars:
+Modern n-dimensional data outgrew the download-then-open desktop path. lucida
+makes it immediate, fluid, and trustworthy to look at, where it lives and at
+full scale.
 
-- **Immediate at any size.** OME-Zarr loaded lazily in chunks: multi-GB volumes, long multichannel
-  timeseries, and whole collections/plates of hundreds of members open in seconds and stream as you
-  move. "Too big to open" is not a thing.
-- **Fluid to navigate.** 2D-slice and 3D-volume views; pan / zoom / orbit; scrub time / Z / channels;
-  per-channel contrast / gamma / colormap; a spatial minimap overview; label overlays; saved views;
-  annotations; sharing. It must stay smooth at scale.
-- **Trustworthy.** It is a *viewer*: it must never silently show a wrong / stale / mis-leveled tile.
-  A user or agent who mis-reads the screen is the real failure. **Correctness outranks smoothness,
-  always.**
+- Immediate at any size. OME-Zarr loads lazily in chunks, so multi-GB volumes,
+  long multichannel timeseries, and collections of hundreds of members open in
+  seconds and stream as you move. Scale is the normal case: never assume a
+  dataset fits in memory or lives locally.
+- Fluid to navigate. It stays smooth at scale.
+- Trustworthy. A viewer must never silently show data that is wrong, stale, or
+  from the wrong level. A user or agent who misreads the screen is the real
+  failure, so correctness outranks smoothness, always.
 
 ## Who it's for
 
-- **Humans** — the interactive *explore-and-understand loop*: open a dataset (or a whole experiment's
-  worth at once), fly around, scrub the extra dimensions, tune the display, mark things up, save and
-  share a view. The data should feel present and navigable, not something wrangled offline in batches.
-- **LLM agents** — the same chunk-lazy engine as an agent's *eyes*, reached programmatically (Python
-  client, wasm/CLI, the server): open a dataset, drive a specific view, and capture what it renders;
-  plus purpose-built affordances like guided/branching exploration and thumbnail/contact-sheet
-  surveys. Agents should be able to *see and reason about* large multidimensional data — render the
-  right view, survey the set, follow an exploration branch — not just read its metadata.
+Every capability is reachable by a person and by an agent, on the same data and
+the same engine.
 
-## Invariants that follow (don't lose these)
+- People explore and understand: open one dataset or many, fly around, scrub
+  the extra dimensions, tune the display, mark things up, save and share a view.
+- LLM agents use the engine as their eyes through the Python client, the CLI,
+  and the server. An agent drives a specific view, captures what it renders,
+  surveys a set, and follows an exploration branch, so it can reason about the
+  data and not just its metadata.
 
-- **Domain-neutral.** One engine for any n-dimensional array data. Vocabulary stays general
-  (channel / dataset / volume / collection / sample / label) — no field-specific jargon anywhere
-  (code, docs, tests, fixtures, commits, issues).
-- **Chunk-lazy, remote-first.** Never assume the whole dataset fits in memory or lives locally. Scale
-  (multi-GB / 3D / timeseries / collections / object storage) is the normal case, not the edge — so
-  test against real large/3D/timeseries fixtures, not toys.
-- **Correctness-first rendering.** Verify what the viewer actually renders, at retina/DPR2 — a fast
-  wrong picture is a failure, not a win.
-- **Two users, one system.** Every capability should be reachable by a human GUI *and* by an agent,
-  on the same data and the same engine.
+## Planning
 
-## The through-line
+Planning decides, each tick, which chunks the viewer wants next. Its trade-offs
+rank in this order.
 
-**One domain-neutral, chunk-lazy engine; rendered two ways (a human GUI and an agent-driven
-interface); held to a correctness-first bar** — so both a person and an agent can look at very large
-n-dimensional data and *trust what they see*.
+1. Stay within memory. GPU and CPU memory caps are hardware limits, so every
+   policy is bounded, and anything that holds memory ships with a budget, an
+   eviction policy, and a defined behavior for when eviction can't keep up.
+   This wins every tie. Under pressure the view covers less and says so, and it
+   never lowers the level it asks for.
+2. Within the bound, the smoother render beats the cheaper fetch. Between two
+   equally correct policies, pick the one that doesn't flicker, even if it
+   fetches a little more.
+3. Fetch a step ahead of the user's likely next move, such as a zoom step or a
+   scrub, because work that starts with the gesture arrives too late. The bound
+   caps how far ahead, and within it the smoother path wins.
+
+Planning is a pure function of a snapshot: state carried between ticks is an
+explicit input and output, never a hidden cache, so two strategies can be
+compared on identical inputs. It does no view math of its own. What is visible,
+and at what apparent size, is computed once in `lucida-core` for every client.
+If planning needs a number the snapshot lacks, grow the snapshot.
+
+When a change can't satisfy all of these, don't soften one to fit. Write an ADR
+that names the one being relaxed and why the trade is worth it.

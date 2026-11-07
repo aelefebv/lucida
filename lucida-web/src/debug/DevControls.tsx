@@ -1,43 +1,17 @@
 /**
- * Dev controls — the one surviving *mutation* surface for the pipeline,
- * a standalone panel docked to the right of the canvas and opened from
- * the toolbar. See `wiki/decisions/0052-debug-surface-dispositions.md`.
+ * Dev controls: the one mutation surface for the pipeline (see
+ * docs/adr/0052-debug-surface-dispositions.md). It holds the planning knobs
+ * backed by {@link configStore}, persisted to localStorage, and four
+ * `CpuCache` knobs that are session-scoped and die on reload. The
+ * session-scoped section says so on screen, because controls that silently
+ * reset beside ones that don't are a trap.
  *
- * It is named for mutation rather than for configuration because
- * configuration is only one of its contents:
- *
- *   1. the planning knobs backed by {@link configStore} (persisted to
- *      localStorage; the planner reads them on every tick), and
- *   2. four `CpuCache` knobs that are **session-scoped**: they go
- *      through `updateConfig`, an `Object.assign` onto the live cache
- *      instance, and die on reload.
- *
- * The overlay toggles used to be a third content and now live in the HUD
- * legend (`hud/HudLegend.tsx`), since the overlays are product surfaces
- * togglable in every build. The render-radius drag preview on the sliders
- * still mounts the overlay layer for the length of the drag.
- *
- * Those two lifetimes sit side by side, so the session-scoped section
- * says so on screen: controls that silently reset next to controls that
- * do not is a trap. (Unifying them onto one store is deliberately out of
- * scope — see `wiki/decisions/deferred.md`.)
- *
- * Every knob here is a developer tunable, so writes are dev-build only
- * (`editable` defaults to `import.meta.env.DEV`); production builds
- * render live values read-only. One exception: "Reset all to defaults"
- * works in every build — planning knobs persisted by an earlier session
- * still steer the planner in production, and resetting *toward* defaults
- * is a safety valve, not a steering control; without it the only
- * recovery is a manual localStorage wipe. The one planning-config field
- * that IS product config, `depthBiasView`, is deliberately not rendered
- * here — it lives in the main 3-D view UI
- * (components/FocalDepthControl.tsx) and stays writable in every build.
- *
- * Cross-constraint warning (warn but allow): lane offsets that invert
- * the canonical priority order (MINIMAP < DETAIL < PROXY < PREFETCH <
- * COARSE), shown under the affected lane field.
+ * Writes are dev-build only. "Reset all to defaults" works in every build:
+ * persisted planning knobs still steer production, and without it recovery is
+ * a manual localStorage wipe.
  */
 
+import { ArrowCounterClockwiseIcon, CaretDownIcon, CaretRightIcon } from "@phosphor-icons/react";
 import { useEffect, useReducer, useState, useSyncExternalStore } from "react";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import {
@@ -46,12 +20,12 @@ import {
 } from "../pipeline/planning/config.ts";
 import type { CpuCacheConfig } from "../pipeline/fetch/index.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
+import { Button, IconButton } from "../ui/Button.tsx";
 import { setRenderRadiusPreviewTier } from "./logging.ts";
 import "./DevControls.css";
 
-// Single source of truth for the per-field UI metadata: label, slider
-// bounds + step, and the section grouping. The render loop walks these
-// arrays — new fields show up just by adding a row here.
+// Per-field UI metadata. The panel renders from these arrays, so a new field
+// needs only a row here.
 
 interface TunableSpec {
   field: keyof PlanningConfig;
@@ -78,10 +52,9 @@ const PRIORITY_WEIGHTS: TunableSpec[] = [
   },
 ];
 
-// Note: the 3-D chunk-spawn focal-depth control (issue #532,
-// `depthBiasView`) is a USER-facing knob and lives in the main 3-D view
-// UI (see components/FocalDepthControl.tsx), not here among the
-// developer planning tunables. It binds to the same configStore field.
+// `depthBiasView` is user-facing, so it lives in
+// components/FocalDepthControl.tsx, writable in every build, not among these
+// developer tunables.
 
 const RESIDENCY_BUDGETS: TunableSpec[] = [
   {
@@ -275,15 +248,13 @@ function TunableRow({
           aria-label={`${spec.label} value`}
         />
         {editable && dirty ? (
-          <button
-            type="button"
-            className="dev-controls-reset"
-            title={`Reset to default (${def})`}
-            aria-label={`Reset ${spec.label}`}
-            onClick={() => configStore.reset(spec.field)}
-          >
-            ↩
-          </button>
+          <IconButton
+            icon={ArrowCounterClockwiseIcon}
+            label={`Reset ${spec.label} to ${def}`}
+            size="sm"
+            tooltipPlacement="left"
+            onPress={() => configStore.reset(spec.field)}
+          />
         ) : (
           // Reserved-width spacer so rows don't reflow on the appear/disappear
           // boundary — the arrow flickering shifting other controls is more
@@ -301,17 +272,12 @@ function TunableRow({
 }
 
 /**
- * The four `CpuCache` knobs. Unlike everything above them these are
- * **session-scoped**: `updateConfig` is an `Object.assign` onto the live
- * cache instance and nothing persists, so the values are gone on reload.
- * The section says so on screen — the lifetime boundary has to be
- * visible, not just true in the code.
+ * The four session-scoped `CpuCache` knobs: `updateConfig` assigns onto the
+ * live cache and nothing persists. The section says so on screen.
  *
- * The displayed values are read straight off the live config rather than
- * copied into React state, which could only go stale. The cache arrives
- * with the session, which attaches (and can be replaced) independently of
- * this surface, so it comes in as a getter re-read on a slow tick — the
- * same reason the panel this replaced polled.
+ * Values are read off the live config rather than copied into React state,
+ * which could go stale. The session can be replaced independently of this
+ * surface, so the cache comes in as a getter re-read on a slow tick.
  */
 const CACHE_POLL_INTERVAL_MS = 1000;
 
@@ -370,13 +336,11 @@ function SessionCacheKnobs({
 export function DevControls({
   getCpuCache = () => null,
   editable = import.meta.env.DEV,
-  style,
 }: {
   /** Live cache for the session-scoped knobs; null when no session is up. */
   getCpuCache?: () => LiveCacheKnobs | null;
   /** Whether the knobs accept edits. Defaults to dev-build-only. */
   editable?: boolean;
-  style?: React.CSSProperties;
 } = {}) {
   const cfg = usePlanningConfig();
   // Lane offsets default to collapsed — they're a structural knob most
@@ -391,7 +355,7 @@ export function DevControls({
     .every((k) => cfg[k] === DEFAULT_PLANNING_CONFIG[k]);
 
   return (
-    <div className="dev-controls" style={style}>
+    <div className="dev-controls">
       <div className="dev-controls-content">
         <div className="dev-controls-section">
           <div className="dev-controls-title">Dev controls</div>
@@ -412,14 +376,9 @@ export function DevControls({
               still steer the planner in prod, and moving toward defaults
               is a safety valve — without it the only recovery from stale
               persisted knobs would be a manual localStorage wipe. */}
-          <button
-            type="button"
-            onClick={() => configStore.reset()}
-            disabled={allDefaults}
-            className="dev-controls-reset-all"
-          >
+          <Button size="sm" onPress={() => configStore.reset()} isDisabled={allDefaults}>
             Reset all to defaults
-          </button>
+          </Button>
         </div>
 
         <div className="dev-controls-section">
@@ -467,15 +426,16 @@ export function DevControls({
         <div className="dev-controls-section">
           <div className="dev-controls-title dev-controls-title-split">
             <span>Lane offsets</span>
-            <button
-              type="button"
-              className="dev-controls-toggle"
-              onClick={() => setLaneOffsetsExpanded((v) => !v)}
+            <Button
+              size="sm"
+              variant="ghost"
+              trailingIcon={laneOffsetsExpanded ? CaretDownIcon : CaretRightIcon}
+              onPress={() => setLaneOffsetsExpanded((v) => !v)}
               aria-expanded={laneOffsetsExpanded}
               aria-controls="cfg-lane-offsets"
             >
               {laneOffsetsExpanded ? "Hide" : "Show"}
-            </button>
+            </Button>
           </div>
           {laneOffsetsExpanded && (
             <div id="cfg-lane-offsets">

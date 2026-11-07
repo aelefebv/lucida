@@ -1,29 +1,12 @@
 /**
  * The timeline: what the dock draws, derived as fields of the diagnostic
- * document.
+ * document. The dock computes nothing of its own, so the picture a person
+ * reads and the text an agent reads cannot disagree.
  *
- * A continuous time axis divided into a fixed number of buckets, and one
- * chart per entry of {@link TIMELINE_CHARTS}, each a reading of one of the
- * run's tiers binned over the axis. The dock draws these series and computes
- * nothing of its own, so the picture a person reads and the text an agent
- * reads come from one object and cannot disagree.
- *
- * Two entry points, one derivation. {@link deriveTimeline} reads a closed
- * run, walks its rows once, and bins the row-derived charts beside the
- * per-tick ones. {@link deriveLiveTimeline} reads the open run's per-tick
- * tiers alone: the readings, the tick samples, the point events and the
- * connection records. It marks the row-derived charts absent, with the
- * moment they are read. That is the rule ADR 0049 as amended puts on every
- * live surface: draw from the per-tick aggregate at the tick cadence, and
- * walk rows only when the run closes or somebody asks for a verdict.
- *
- * Absent is a value here, never a zero. A chart whose data this build does
- * not record, a series no reading carried, and a bucket before the first
- * sample all say so in the document, so a quiet chart is qualified by what
- * was recorded rather than read as a quiet pipeline.
- *
- * Pure, like the rest of the derivation: everything it needs is in the run
- * or the sample it is handed.
+ * A closed run walks its rows once. An open run reads the per-tick tiers alone
+ * and marks the row-derived charts absent until it closes (ADR 0049). Absent
+ * is a value here, never a zero, so a quiet chart is qualified by what was
+ * recorded rather than read as a quiet pipeline.
  */
 
 import {
@@ -128,10 +111,6 @@ const POOLS_NOT_RECORDED =
 
 const NOT_A_HEALTH_SIGNAL =
   "a zero here is not a health signal, since these paths may not have been exercised";
-
-// ---------------------------------------------------------------------------
-// Entry points
-// ---------------------------------------------------------------------------
 
 /** The recording an interval list is read from: the document's runs and steady-state intervals. */
 export type TimelineRecording = Pick<TraceDocument, "runs" | "steadyState">;
@@ -267,10 +246,6 @@ export function deriveLiveTimeline(
   };
 }
 
-// ---------------------------------------------------------------------------
-// The derivation
-// ---------------------------------------------------------------------------
-
 interface RowTiers {
   rows: TraceRow[];
   serverRows: TraceServerRow[];
@@ -379,10 +354,6 @@ function absent(id: string, label: string, statement: string): TimelineSeries {
   return { id, label, recorded: false, statement };
 }
 
-// ---------------------------------------------------------------------------
-// The row-derived charts
-// ---------------------------------------------------------------------------
-
 function browserOccupancy(spec: TimelineChartSpec, input: DeriveInput, axis: Axis): TimelineChart {
   const rows = input.rows;
   if (!rows) return buildChart(spec, [], ROWS_AT_CLOSE);
@@ -403,8 +374,8 @@ function browserOccupancy(spec: TimelineChartSpec, input: DeriveInput, axis: Axi
 
 /**
  * The server draws as one series: rows inside their browser brackets. Where
- * inside the bracket the server's phases sat is unknowable from this side
- * (ADR 0050), so the phases are not drawn at positions they never had; the
+ * inside the bracket the server's phases sat is unknowable from this side,
+ * so the phases are not drawn at positions they never had; the
  * phase table beneath the timeline carries their durations.
  */
 function serverOccupancy(spec: TimelineChartSpec, input: DeriveInput, axis: Axis): TimelineChart {
@@ -482,10 +453,6 @@ function inFlightByLane(spec: TimelineChartSpec, input: DeriveInput, axis: Axis)
     `rows alive per lane per bucket, from each row's first boundary to its last or to run close, from ${rows.rows.length} lifecycle row(s)`,
   );
 }
-
-// ---------------------------------------------------------------------------
-// The per-tick charts
-// ---------------------------------------------------------------------------
 
 const NO_READING = "no reading in the window carried a value";
 const NO_FRAME_TIME = "no reading in the window carried a frame time above the clock floor";
@@ -660,10 +627,6 @@ function unreadBefore(records: { atUs: number }[], droppedCount: number): number
   if (droppedCount <= 0 || records.length === 0) return null;
   return records[0].atUs;
 }
-
-// ---------------------------------------------------------------------------
-// Binning
-// ---------------------------------------------------------------------------
 
 interface Span {
   startUs: number;
@@ -846,10 +809,6 @@ function round(value: number, decimals: number): number {
 function usToMsExact(us: number): number {
   return us / 1_000;
 }
-
-// ---------------------------------------------------------------------------
-// The intervals on the axis
-// ---------------------------------------------------------------------------
 
 /**
  * One retained interval placed on another run's clock, from its header and

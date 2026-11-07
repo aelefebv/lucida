@@ -55,15 +55,25 @@ afterEach(() => {
 });
 
 describe("ProfileMenu", () => {
-  it("renders the display name on the trigger button", () => {
+  it("names the person on the trigger button", () => {
     render(<ProfileMenu />);
-    const triggers = screen.getAllByText("Local Dev");
-    expect(triggers.length).toBeGreaterThanOrEqual(1);
+    const trigger = screen.getByRole("button", { name: /account menu/i });
+    expect(trigger.getAttribute("title")).toBe("Local Dev");
   });
 
-  it("falls back to first-letter avatar when picture_url is null", () => {
+  it("falls back to initials when picture_url is null", () => {
     render(<ProfileMenu />);
-    expect(screen.getByText("L")).toBeTruthy();
+    expect(screen.getByText("LD")).toBeTruthy();
+  });
+
+  it("closes on Escape and returns focus to the trigger", () => {
+    render(<ProfileMenu />);
+    const trigger = screen.getByRole("button", { name: /account menu/i });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("menu")).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("opens the dropdown and shows email + Sign out when the trigger is clicked", () => {
@@ -142,7 +152,7 @@ describe("ProfileMenu", () => {
     fireEvent.error(container.querySelector("img") as HTMLImageElement);
 
     expect(container.querySelector("img")).toBeNull();
-    expect(screen.getByText("L")).toBeTruthy();
+    expect(screen.getByText("LD")).toBeTruthy();
   });
 
   it("retries the image when the picture URL changes after a failure", () => {

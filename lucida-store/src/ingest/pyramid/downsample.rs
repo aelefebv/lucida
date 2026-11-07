@@ -398,8 +398,6 @@ mod tests {
         assert_eq!(levels[1].width, 256);
     }
 
-    // --- downsample_z_only tests ---
-
     #[test]
     fn downsample_z_even_depth() {
         // 2x2, depth=2 → depth=1, averaging z-planes
@@ -458,8 +456,6 @@ mod tests {
         assert_eq!(dst.data[0], 15); // c0: (10+20)/2
         assert_eq!(dst.data[1], 150); // c1: (100+200)/2
     }
-
-    // --- downsample_xyz tests ---
 
     #[test]
     fn downsample_xyz_2x2x2() {
@@ -525,8 +521,6 @@ mod tests {
         assert_eq!(dst.data[0], 45); // c0
         assert_eq!(dst.data[1], 450); // c1
     }
-
-    // --- downsample dispatcher test ---
 
     #[test]
     fn downsample_dispatcher() {

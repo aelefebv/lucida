@@ -1,0 +1,24 @@
+/* The card's image area. Its size and placeholder look come from
+   `.lc-ws-card-preview` in WorkspaceDashboard.css; this adds the image. */
+.lc-ws-preview {
+  position: relative;
+  overflow: hidden;
+}
+
+.lc-ws-preview-image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: 0;
+  transition: opacity var(--lc-motion) var(--lc-ease);
+}
+
+.lc-ws-preview[data-shown] .lc-ws-preview-image {
+  opacity: 1;
+}
+
+.lc-ws-preview[data-shown] .lc-ws-preview-placeholder {
+  visibility: hidden;
+}

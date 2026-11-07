@@ -1,7 +1,7 @@
 /**
  * Viewport-derived visible-region descriptor. Computed by WASM each tick
  * from camera + selection; consumed by planning and the renderer for
- * clip / cull / sort. See ADR 0028.
+ * clip / cull / sort.
  */
 export interface VisibleRegion {
   /** [minX, minY, maxX, maxY] in voxel coordinates. */

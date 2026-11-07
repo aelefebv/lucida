@@ -17,9 +17,7 @@ beforeEach(() => {
   vi.mocked(debugLog).mockClear();
 });
 
-// ---------------------------------------------------------------------------
 // Test fixtures
-// ---------------------------------------------------------------------------
 
 interface TestRequest {
   datasetId: string;
@@ -76,9 +74,7 @@ function makeScheduler(opts?: {
   return { scheduler, startCalls };
 }
 
-// ---------------------------------------------------------------------------
 // enqueue + drain
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.enqueue + drain", () => {
   it("drain calls startFn for each pending request up to maxConcurrentFetches", () => {
@@ -154,7 +150,7 @@ describe("Scheduler.enqueue + drain", () => {
 
   it("dates a backlog entry from its promotion into the window", () => {
     // A window of one: the second entry sits in the backlog, and the
-    // scheduler deliberately keeps no bookkeeping for it (ADR 0044).
+    // scheduler deliberately keeps no bookkeeping for it.
     const { scheduler, startCalls } = makeScheduler({
       maxConcurrentFetches: 1,
       admissionWindow: 1,
@@ -171,9 +167,7 @@ describe("Scheduler.enqueue + drain", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // preserveEnqueueTime
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.enqueue preserves original timestamps", () => {
   it("re-enqueueing the same key keeps the original enqueue time", () => {
@@ -216,9 +210,7 @@ describe("Scheduler.enqueue preserves original timestamps", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // correctInFlightBytes
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.correctInFlightBytes", () => {
   it("adjusts the bytes counter from estimate to actual", () => {
@@ -261,9 +253,7 @@ describe("Scheduler.correctInFlightBytes", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // markInFlightDone
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.markInFlightDone", () => {
   it("removes the entry and decrements bytes", () => {
@@ -301,9 +291,7 @@ describe("Scheduler.markInFlightDone", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // markInFlightDoneIfCurrent
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.markInFlightDoneIfCurrent", () => {
   it("releases and returns true when the caller's controller still holds the key", () => {
@@ -357,9 +345,7 @@ describe("Scheduler.markInFlightDoneIfCurrent", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // cancelOne
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.cancelOne", () => {
   it("aborts the controller, releases the slot, and drops bytes", () => {
@@ -384,9 +370,7 @@ describe("Scheduler.cancelOne", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // cancelDataset
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.cancelDataset", () => {
   it("aborts in-flight entries matching the predicate, leaves others", () => {
@@ -449,9 +433,7 @@ describe("Scheduler.cancelDataset", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // cancelWhere
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.cancelWhere", () => {
   it("returns keys removed from in-flight and pending queues", () => {
@@ -475,9 +457,7 @@ describe("Scheduler.cancelWhere", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // reset
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.reset", () => {
   it("aborts all in-flight + drops pending + zeros bytes", () => {
@@ -507,9 +487,7 @@ describe("Scheduler.reset", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Backpressure log
-// ---------------------------------------------------------------------------
 
 describe("Scheduler backpressure log", () => {
   it("fires when pending > 0 and a cap is hit", () => {
@@ -636,9 +614,7 @@ describe("Scheduler backpressure log", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // siblingInFlight (proxy <-> chunk shared caps)
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.siblingInFlight", () => {
   it("counts sibling in-flight against the concurrency cap", () => {
@@ -677,9 +653,7 @@ describe("Scheduler.siblingInFlight", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // dump
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.dump", () => {
   it("returns shallow copies of pending + in-flight", () => {
@@ -699,9 +673,7 @@ describe("Scheduler.dump", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // inFlightEntries iteration (used by snapshot())
-// ---------------------------------------------------------------------------
 
 describe("Scheduler.inFlightEntries", () => {
   it("yields [key, entry] pairs for every in-flight request", () => {
@@ -721,10 +693,6 @@ describe("Scheduler.inFlightEntries", () => {
     expect(collected.get(keyOf(req({ chunkKey: "b" })))?.request.chunkKey).toBe("b");
   });
 });
-
-// ---------------------------------------------------------------------------
-// Bounded admission window (issue #900)
-// ---------------------------------------------------------------------------
 
 describe("Scheduler admission window", () => {
   function manyReqs(n: number): TestRequest[] {

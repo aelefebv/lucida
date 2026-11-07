@@ -29,15 +29,19 @@
  * ## What this cannot measure
  *
  * The draw is issued against a recording context, so what is timed is the
- * layout and the calls, not the rasterizer. The pixels' cost on a real
- * adapter is the A/B at device pixel ratio 2 that `docs/perf/hud-cost/`
- * describes, which CI cannot run.
+ * layout and the calls, not the rasterizer. The pixels' cost needs an A/B on
+ * a hardware adapter, which CI does not have. Open a large three-dimensional
+ * fixture at device pixel ratio 2 and wait for quiescence. Orbit for ten
+ * seconds with the HUD hidden and note the rendered frame count. Show the HUD
+ * with the `h` key and repeat the same orbit. The HUD draws four times a
+ * second against up to sixty frames, so the two counts should agree within
+ * run-to-run noise. A larger gap is a finding.
  */
 
 import { describe, expect, it } from "vitest";
 
 import { drawHud, hudHeight } from "./hudDraw.ts";
-import { fakeCache, HARDWARE, makeRecorder, MIB, RecordingContext } from "./hudFixtures.ts";
+import { fakeCache, HARDWARE, HUD_TEST_COLORS, makeRecorder, MIB, RecordingContext } from "./hudFixtures.ts";
 import { buildHudView, createHudHistory, HUD_HISTORY, HUD_TICK_MS, pushSample, type HudSample } from "./hudModel.ts";
 import { emptyLaneOutstanding, HudSource } from "./hudSource.ts";
 import { Scheduler } from "../pipeline/fetch/scheduler.ts";
@@ -161,17 +165,17 @@ describe("HUD cost contract", () => {
     const box = { width: WIDTH, height: hudHeight(view, WIDTH), dpr: 2 };
 
     const early = new RecordingContext();
-    drawHud(early, view, box);
+    drawHud(early, view, box, HUD_TEST_COLORS);
 
     for (let tick = HUD_HISTORY * 2; tick < HUD_HISTORY * 40; tick++) pushSample(history, sampleAt(tick));
     const later = buildHudView(history);
     const late = new RecordingContext();
-    drawHud(late, later, box);
+    drawHud(late, later, box, HUD_TEST_COLORS);
 
     const ctx = new RecordingContext();
     const draw = measure(() => {
       ctx.texts.length = 0;
-      drawHud(ctx, later, box);
+      drawHud(ctx, later, box, HUD_TEST_COLORS);
     }, 500);
     log(
       `draw tick: ${WIDTH}px strip at ratio 2, ${late.calls} context calls (${late.texts.length} text) | ` +

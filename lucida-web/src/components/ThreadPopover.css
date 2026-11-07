@@ -1,0 +1,193 @@
+/* A pin's comment thread. It has the popover surface, but it is anchored to a
+   point on the canvas that moves every frame, so it lives in the annotation
+   layer beside its pin rather than in a portal. Script places it beside the
+   pin and reports the room on screen (threadPlacement.ts). */
+.lc-thread {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: min(288px, var(--thread-room-width, 288px));
+  max-height: min(340px, var(--thread-room-height, 340px));
+  overflow: hidden;
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  background: var(--lc-surface-2);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
+  cursor: auto;
+  pointer-events: auto;
+}
+
+/* Finger-sized buttons outgrow a narrow thread, so the actions wrap under
+   the title rather than push Close out of reach. */
+.lc-thread-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--lc-space-2);
+  padding: var(--lc-space-1) var(--lc-space-1) var(--lc-space-1) var(--lc-space-3);
+  border-bottom: 1px solid var(--lc-border);
+}
+
+.lc-thread-title {
+  font-weight: 600;
+}
+
+.lc-thread-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.lc-thread-confirm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+  padding: var(--lc-space-3);
+  border-bottom: 1px solid var(--lc-border);
+  background: var(--lc-danger-subtle);
+}
+
+.lc-thread-confirm-text {
+  margin: 0;
+}
+
+.lc-thread-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--lc-space-2);
+}
+
+.lc-thread-comments {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--lc-space-1) 0;
+}
+
+.lc-thread-empty {
+  margin: 0;
+  padding: var(--lc-space-2) var(--lc-space-3);
+  color: var(--lc-text-muted);
+}
+
+.lc-thread-comment {
+  padding: var(--lc-space-1) var(--lc-space-3) var(--lc-space-2);
+}
+
+.lc-thread-comment + .lc-thread-comment {
+  border-top: 1px solid var(--lc-border);
+}
+
+.lc-thread-comment-head {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  min-height: var(--lc-control-h-sm);
+}
+
+.lc-thread-author {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lc-thread-comment-actions {
+  display: flex;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.lc-thread-text {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.lc-thread-mention {
+  padding: 0 3px;
+  border-radius: var(--lc-radius-sm);
+  background: var(--lc-accent-subtle);
+  color: var(--lc-accent-text);
+  font-weight: 600;
+}
+
+/* A composer: the field, its action, and the mention picker floating above. */
+.lc-thread-composer {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+}
+
+.lc-thread-composer-field {
+  flex: 1;
+}
+
+.lc-thread-footer {
+  padding: var(--lc-space-2);
+  border-top: 1px solid var(--lc-border);
+}
+
+.lc-thread-picker {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + var(--lc-space-1));
+  left: 0;
+  z-index: 1;
+  box-sizing: border-box;
+  max-height: 140px;
+  overflow-y: auto;
+  padding: var(--lc-space-1);
+  border: 1px solid var(--lc-border-strong);
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-2);
+  box-shadow: var(--lc-shadow-2);
+}
+
+.lc-thread-footer > .lc-thread-picker {
+  right: var(--lc-space-2);
+  left: var(--lc-space-2);
+}
+
+.lc-thread-picker-option {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--lc-control-h-sm);
+  margin: 0;
+  padding: 0 var(--lc-space-2);
+  border: none;
+  border-radius: var(--lc-radius-sm);
+  background: transparent;
+  color: var(--lc-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.lc-thread-picker-option[aria-selected="true"],
+.lc-thread-picker-option:hover {
+  background: var(--lc-surface-3);
+}
+
+.lc-thread-picker-option:focus-visible {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: -2px;
+}
+
+.lc-thread-picker-at {
+  color: var(--lc-accent-text);
+  font-weight: 600;
+}

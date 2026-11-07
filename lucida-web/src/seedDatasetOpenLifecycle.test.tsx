@@ -1,24 +1,15 @@
 // @vitest-environment happy-dom
 //
-// Lifecycle regression test for the #697 seed-open race: the seed open must be
-// sent ONLY when the WebSocket transport is GENUINELY ready (OPEN), and must
-// not be silently dropped against a still-CONNECTING socket.
+// The seed open must wait for the WebSocket to be OPEN. `Bridge.send` drops
+// anything sent while CONNECTING, with no queue or resend, and the hook's
+// one-shot guard would latch after a dropped send, so gating on the Bridge
+// object's existence loses the open for good.
 //
-// The original bug: `useSeedDatasetOpens` was gated on `Boolean(bridge.bridge)`,
-// which flips true SYNCHRONOUSLY when the Bridge is constructed — while its
-// WebSocket is still CONNECTING. `Bridge.send` drops anything sent before OPEN
-// (no queue, no resend), and the hook latched its one-shot guard after that
-// premature send, so the open never reached the server and never retried.
-//
-// This test drives the REAL `Bridge` over a controllable mock WebSocket so the
-// CONNECTING→OPEN transition is explicit, wires it to `useSeedDatasetOpens`
-// through the SAME readiness gate the app now uses (a `connected` flag flipped
-// by the bridge's `onConnected`/`onopen`), and asserts:
-//   - while CONNECTING: nothing is sent (no silent drop, the hook waits);
-//   - after OPEN: the open frame is sent EXACTLY ONCE and reaches the socket;
-//   - a re-render after open does not re-open (one-shot holds).
-// It also pins the bridge-level invariants the fix relies on: `send` drops
-// before OPEN, and `onConnected` fires on `onopen`.
+// Drives the real `Bridge` over a controllable mock WebSocket through the same
+// `connected` gate the app uses, and asserts: nothing is sent while
+// CONNECTING, the open is sent exactly once after OPEN, and a re-render does
+// not re-open. Also pins that `send` drops before OPEN and that `onConnected`
+// fires on `onopen`.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { useEffect, useRef, useState } from "react";
@@ -27,13 +18,9 @@ import { Bridge, type BridgeHandlers } from "./bridge.ts";
 import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
 
 /**
- * Minimal controllable WebSocket stand-in. Starts in CONNECTING; `send`
- * mirrors the browser contract by THROWING if called before OPEN (the real
- * `Bridge.send` guards against this with a `readyState === OPEN` check, so a
- * correct bridge never triggers the throw — and an incorrect one that sends
- * early is caught by `sent` staying empty + this throw). `flipOpen()` moves it
- * to OPEN and fires `onopen`, exactly like a real socket completing its
- * handshake on a later tick.
+ * Minimal controllable WebSocket stand-in. Starts in CONNECTING; `send` throws
+ * before OPEN as a browser does, so a bridge that skips its `readyState` check
+ * fails loudly. `flipOpen()` moves it to OPEN and fires `onopen`.
  */
 class MockWebSocket {
   static CONNECTING = 0 as const;
@@ -99,11 +86,9 @@ function openFramesFor(ws: MockWebSocket, url: string): unknown[] {
 }
 
 /**
- * Harness that mirrors App.tsx's wiring: construct the real Bridge, flip a
- * `connected` flag from the bridge's `onConnected` (the readiness signal the
- * fix added), and gate `useSeedDatasetOpens` on it. The seed open is issued via
- * the real `bridge.sendOpenRemoteDataset` — the exact path App uses — so a send
- * that fires too early hits the CONNECTING socket and is dropped by `Bridge.send`.
+ * Mirrors App.tsx's wiring: the real Bridge flips a `connected` flag from
+ * `onConnected`, which gates `useSeedDatasetOpens`. The open goes through the
+ * real `bridge.sendOpenRemoteDataset`, so a too-early send would be dropped.
  */
 function SeedHarness({ url }: { url: string }) {
   const [connected, setConnected] = useState(false);
@@ -126,7 +111,7 @@ function SeedHarness({ url }: { url: string }) {
 
   useSeedDatasetOpens({
     initialDatasetUrls: [url],
-    // The REAL gate: WS open, not merely `Boolean(bridge)`.
+    // The gate is the socket being open, not `Boolean(bridge)`.
     ready: connected,
     openDataset: (u) => bridgeRef.current?.sendOpenRemoteDataset(u),
   });
@@ -144,13 +129,11 @@ describe("seed dataset open lifecycle (CONNECTING → OPEN), #697 race", () => {
     });
 
     const ws = MockWebSocket.latest();
-    // The bridge object exists and its socket is CONNECTING — the OLD gate
-    // (`Boolean(bridge)`) would have fired the open here, into a socket that
-    // drops it. The real gate keeps it pending: nothing sent yet.
+    // The bridge exists but its socket is CONNECTING, so nothing is sent yet.
     expect(ws.readyState).toBe(MockWebSocket.CONNECTING);
     expect(ws.sent).toEqual([]);
 
-    // Socket completes its handshake on a later tick → `onopen` → `connected`.
+    // The socket completes its handshake on a later tick, firing `onopen`.
     act(() => {
       ws.flipOpen();
     });
@@ -176,7 +159,7 @@ describe("seed dataset open lifecycle (CONNECTING → OPEN), #697 race", () => {
     });
     expect(openFramesFor(ws, url)).toHaveLength(1);
 
-    // Force a re-render with the same seed — must not re-send.
+    // Force a re-render with the same seed: must not re-send.
     act(() => {
       rerender(<SeedHarness url={url} />);
     });
@@ -197,14 +180,13 @@ describe("seed dataset open lifecycle (CONNECTING → OPEN), #697 race", () => {
     );
     const ws = MockWebSocket.latest();
 
-    // Before OPEN: a send is silently dropped (guarded) — it must NOT throw and
-    // must NOT reach the socket. (If the guard regressed, MockWebSocket.send
-    // would throw INVALID_STATE_ERR.)
+    // Before OPEN a send is dropped by the guard: it must not throw or reach the
+    // socket. Without the guard, MockWebSocket.send would throw.
     expect(() => bridge.sendOpenRemoteDataset("/early.zarr")).not.toThrow();
     expect(ws.sent).toEqual([]);
     expect(onConnected).not.toHaveBeenCalled();
 
-    // onopen → onConnected fires; subsequent sends now reach the socket.
+    // onopen fires onConnected; later sends reach the socket.
     ws.flipOpen();
     expect(onConnected).toHaveBeenCalledTimes(1);
     bridge.sendOpenRemoteDataset("/ready.zarr");

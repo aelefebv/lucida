@@ -1,10 +1,8 @@
 /**
- * TickCoordinator — planner role. Builds the `PlanningSnapshot` from live
- * WASM scene state per tick, calls `plan()` per dataset, caches on the
- * epoch ladder, and routes output through {@link Uploader} for
- * cold-state emission and chunk delivery.
- *
- * See `wiki/decisions/0034-orchestrator-split-into-pipeline-upload.md`.
+ * Planner role. Builds the `PlanningSnapshot` from live WASM scene state
+ * each tick, calls `plan()` per dataset, caches on the epoch ladder, and
+ * routes output through {@link Uploader} for cold-state emission and chunk
+ * delivery.
  */
 
 import type { TickContext } from "../renderLoopTypes.ts";
@@ -51,7 +49,6 @@ import type {
 import type { SceneEpochs } from "./epochs.ts";
 import type { VisibleRegion } from "./viewport.ts";
 
-// Re-export: canonical declaration lives in `pipeline/planning/index.ts`.
 export type { MinimapChunkCoord } from "./planning/index.ts";
 import type { CpuCache } from "./fetch/index.ts";
 import type { ProxyRequest } from "./planning/index.ts";
@@ -127,9 +124,9 @@ interface PlannedDataset {
   selection: SelectionState;
   result: RequestPlan;
   /**
-   * The active set the worker currently holds for this dataset — captured from
-   * `PlanningState.previousActiveSet` BEFORE `plan()`'s `nextState` overwrote it.
-   * The view-move delta diffs `result.activeSet` against this.
+   * The active set the worker holds for this dataset, captured from
+   * `PlanningState.previousActiveSet` before `plan()`'s `nextState` overwrote
+   * it. The view-move delta diffs `result.activeSet` against this.
    */
   previousActiveSet: ActiveSetEntry[];
 }
@@ -138,12 +135,10 @@ const VIEWER_INTEREST_TTL_MS = 2_000;
 const VIEWER_INTEREST_KEY_CAP = 512;
 
 /**
- * Coalescing window for interactive view changes (pan/zoom). During a
- * continuous camera move the render pass already reflects the fresh
- * camera every frame from the cached roster, so the O(visible-entities)
- * residency rebuild is skipped and only re-run at this coarse cadence —
- * enough to fetch tiles that scroll into view while the view keeps
- * moving. The trailing rebuild after the view settles applies the final
+ * Coalescing window for interactive view changes (pan/zoom). The render
+ * pass reflects the fresh camera every frame from the cached roster, so the
+ * O(visible-entities) rebuild only re-runs at this cadence, enough to fetch
+ * tiles that scroll into view. The trailing rebuild applies the final
  * viewport.
  */
 const VIEW_REPLAN_INTERVAL_MS = 200;
@@ -160,29 +155,22 @@ const SELECTION_COALESCE_INTERVAL_MS = 150;
 
 /**
  * Per-dataset carry-forward captured at each full rebuild. Lets the next
- * rebuild prove — cheaply, without re-running the O(active-set) rebuild —
- * that the ONLY thing that changed is the per-channel intensity display
- * state (contrast / gamma / colormap / opacity). When that holds, a small
- * descriptor patch is pushed to the worker instead of replanning; any other
- * change falls through to a full rebuild.
- *
- * Every non-display signal the render depends on is captured here, so a
- * match guarantees the reused roster + residency are still exact. When any
- * signal is uncertain the caller falls back to a full rebuild.
+ * rebuild prove cheaply that only the per-channel intensity display state
+ * (contrast, gamma, colormap, opacity) changed, so a descriptor patch can
+ * replace a replan. Every non-display signal the render depends on is
+ * captured here, so a match guarantees the reused roster and residency are
+ * still exact.
  */
 interface DatasetRebuildSignature {
-  /** Visible channels this rebuild planned for. */
   visibleChannels: number[];
   /** Per-channel intensity display state emitted to the worker. */
   displayState: Record<number, ColdStateDisplayState>;
   /** Full [start, end) voxel z-range this rebuild planned for. */
   zRangeVox: [number, number];
   /**
-   * Serialized dataset settings with only the pure intensity-display
-   * fields removed. Any other field — visibility, blend mode, render mode,
-   * level pin, channel visibility, per-label state, or a field
-   * added in the future — is retained, so it forces a rebuild by default
-   * until proven display-only.
+   * Serialized dataset settings minus the pure intensity-display fields.
+   * Every other field, including one added later, stays in, so it forces a
+   * rebuild until proven display-only.
    */
   nonDisplayKey: string;
 }
@@ -212,14 +200,11 @@ function numberArraysEqual(a: readonly number[], b: readonly number[]): boolean 
 }
 
 /**
- * A dataset's settings with only the pure intensity-display fields
- * removed. Those fields — dataset-level contrast / gamma / opacity and
- * per-channel contrast / gamma / colormap — are the entire payload of the
- * display patch, so a change confined to them (and nothing else) can take
- * the display-only path. Every other field is kept by construction (spread
- * rest), including a field added in the future, so it stays in the
- * fingerprint and forces a full rebuild. Per-channel `visible` is kept
- * because it drives the visible-channel set. Does not mutate its input.
+ * A dataset's settings without the fields the display patch carries:
+ * dataset-level contrast, gamma, opacity and per-channel contrast, gamma,
+ * colormap. The spread rest keeps every other field, including one added
+ * later, so it stays in the fingerprint and forces a full rebuild.
+ * Per-channel `visible` is kept because it drives the visible-channel set.
  */
 function nonDisplayDatasetShape(ds: DatasetSettings): unknown {
   const {
@@ -246,26 +231,22 @@ function nonDisplayDatasetShape(ds: DatasetSettings): unknown {
 }
 
 /**
- * Fingerprint of everything about a dataset's settings EXCEPT the pure
- * intensity-display fields. Equal fingerprints across two ticks prove no
- * non-display setting changed: `label_settings`, blend mode, render mode,
- * level pin, channel visibility, and dataset visibility are all
- * retained. `opacity` is a per-fragment alpha with no effect on translucent
- * draw order (layer/quad order is fixed by roster + layer order, never
- * opacity), so it is treated as display; blend mode changes compositing, so
- * it stays in the fingerprint and forces a rebuild.
+ * Fingerprint of a dataset's settings minus the intensity-display fields.
+ * Equal fingerprints across two ticks prove no non-display setting changed.
+ * `opacity` counts as display because it is per-fragment alpha and never
+ * changes draw order, which the roster and layer order fix. Blend mode
+ * changes compositing, so it stays in and forces a rebuild.
  */
 function nonDisplayKeyForDataset(ds: DatasetSettings | undefined): string {
   return JSON.stringify(ds ? nonDisplayDatasetShape(ds) : null);
 }
 
 /**
- * The [start, end) voxel z-range WASM currently reports for a dataset —
- * the same value {@link buildPlanningSnapshot} reads, with matching null
- * handling so the fast-path comparison lines up with the captured range
- * exactly. Read directly (rather than inferred from `scene.z()`, which is
- * only the slab START) so the display-only path notices a z-slab extension
- * — which moves the range END — and falls through to a full rebuild.
+ * The [start, end) voxel z-range WASM reports for a dataset, with the same
+ * null handling as {@link buildPlanningSnapshot} so it compares exactly
+ * against the captured range. Read directly rather than from `scene.z()`,
+ * which is only the slab start, so the fast paths notice a slab extension
+ * that moves the end.
  */
 function readZRangeVox(
   scene: TickContext["scene"],
@@ -279,20 +260,16 @@ function readZRangeVox(
 
 /**
  * True when two intensity display states are value-equal
- * (order-independent). Compares only the fields the display patch carries
- * and can change: contrast, gamma, opacity, and colormap. `channelMask` is
- * a pure function of the channel index (already pinned via
- * `visibleChannels`), and `colormapMode` / `labelOpacity` are constant on
- * the intensity path — label-overlay state never reaches here because a
- * `label_settings` change fails the non-display fingerprint first.
+ * (order-independent). Compares only the fields the display patch carries:
+ * contrast, gamma, opacity, colormap. `channelMask` follows from the channel
+ * index, and `colormapMode` / `labelOpacity` are constant on the intensity
+ * path because a `label_settings` change fails the non-display fingerprint
+ * first.
  *
- * MAINTENANCE: this equality gates BOTH cheap paths — the display-only patch
- * AND the selection-scrub fast path (which fires only when display is proven
- * UNCHANGED). Any NEW field added to {@link ColdStateDisplayState} that a user
- * edit can move must be compared here (or folded into the non-display
- * fingerprint), or an edit to it could silently slip through a scrub as a stale
- * display. The three omitted fields above are safe only because they cannot
- * change on this path today.
+ * This equality gates both the display-only patch and the selection-scrub
+ * path, which fires only when display is unchanged. A new user-editable
+ * field on {@link ColdStateDisplayState} must be compared here or folded
+ * into the non-display fingerprint, or a scrub could ship a stale display.
  */
 function displayStatesEqual(
   a: Record<number, ColdStateDisplayState>,
@@ -363,7 +340,6 @@ function emitViewerInterestHint(
   });
 }
 
-// Re-export: canonical home is `pipeline/upload/coldState/roster.ts`.
 export { synthesizeGroupRosterEntry } from "./upload/coldState/roster.ts";
 
 export class TickCoordinator {
@@ -378,35 +354,26 @@ export class TickCoordinator {
   private lastEpochs: SceneEpochs | null = null;
   private cachedResult: TickCoordinatorResult | null = null;
   /**
-   * Timestamp (`performance.now()`) at the COMPLETION of the last full
-   * rebuild. Interactive view/selection changes within a coalescing
-   * window of this are served from the cached result instead of paying
-   * another O(visible-entities) rebuild. Stamped at completion — not at
-   * the start of the tick — so the window measures idle time since the
-   * rebuild finished. Anchoring it at the start would charge the
-   * rebuild's own wall-clock cost against the window, so a rebuild that
-   * runs longer than the window (routine on a wide collection, where a
-   * single rebuild is tens to hundreds of ms) would leave every
-   * following interactive frame already past the window and coalescing
-   * would never engage on exactly the collections it exists to protect.
+   * `performance.now()` at the completion of the last full rebuild.
+   * Interactive changes within a coalescing window of this are served from
+   * the cached result. Stamped at completion, not tick start, so the window
+   * measures idle time. A rebuild longer than the window (routine on a wide
+   * collection) would otherwise leave every following frame past the window,
+   * and coalescing would never engage where it matters.
    */
   private lastRebuildAt = Number.NEGATIVE_INFINITY;
   /**
-   * True when an interactive (view/selection) change was coalesced —
-   * skipped this tick — and its trailing rebuild has not yet run. The
-   * render loop reads this to keep ticking until the coalescing window
-   * elapses and the rebuild fires, so the settled state always renders
-   * even if the user has stopped interacting (the trailing-edge
-   * guarantee). While it is set, `lastEpochs` is deliberately left stale
-   * so the pending change is re-detected next tick and never lost.
+   * True when an interactive change was coalesced and its trailing rebuild
+   * has not run. The render loop keeps ticking while this is set, so the
+   * settled state renders even after the user stops. While set, `lastEpochs`
+   * stays stale on purpose so the pending change is re-detected next tick.
    */
   private pendingDeferredRebuild = false;
   /**
-   * Scene scalars captured at the last full rebuild. The display-only fast
-   * path consults these (with {@link lastRebuildByDataset}) to prove the
-   * change is a pure intensity-display edit. The z-range lives per-dataset
-   * in {@link DatasetRebuildSignature} (it is per-dataset voxel space and
-   * carries the slab END, which `scene.z()` omits).
+   * Scene scalars captured at the last full rebuild, for the fast-path
+   * proofs. The z-range lives per dataset in {@link DatasetRebuildSignature}
+   * because it is in per-dataset voxel space and carries the slab end, which
+   * `scene.z()` omits.
    */
   private lastRebuildScalars: {
     t: number;
@@ -421,15 +388,12 @@ export class TickCoordinator {
   /** Per-planned-dataset carry-forward for the display-only fast path. */
   private readonly lastRebuildByDataset = new Map<string, DatasetRebuildSignature>();
   /**
-   * Per-dataset cache of layout-derived per-entity tile model matrices, reused
-   * across rebuilds while placement is unchanged. Tile matrices come from
-   * `scene.member_model_matrix` (a pure function of layout, no camera input), so
-   * a view move — which advances only the view epoch — leaves them byte-
-   * identical; only tiles new to a rebuild's roster are recomputed. Keyed by an
-   * epoch fingerprint so a content/layout/asset change (a reflow or add/remove
-   * that moves placement) discards the stale matrices. `group-as-proxy` matrices
-   * are never cached (they are synthesized from the visible child-tile set, which
-   * a view move changes).
+   * Per-dataset cache of tile model matrices, reused while placement is
+   * unchanged. They come from `scene.member_model_matrix`, which has no
+   * camera input, so a view move leaves them identical. Keyed by an epoch
+   * fingerprint so a content, layout, or asset change discards them.
+   * `group-as-proxy` matrices are never cached because they derive from the
+   * visible child-tile set, which a view move changes.
    */
   private readonly matrixCacheByDataset = new Map<string, {
     epochKey: string;
@@ -437,31 +401,14 @@ export class TickCoordinator {
   }>();
   /**
    * Per-dataset cache of the camera-independent inputs to
-   * {@link buildPlanningSnapshot}: the parsed `member_positions` record
-   * (the fixed 2D layout placement) and the two manifest-derived maps
-   * (`imageSpecById`, `parentByEntityId`). All three are pure functions of
-   * the scene's layout placement and the current dataset manifest, so a
-   * view move — which advances only the view epoch — leaves them
-   * byte-identical; recomputing them on every view-only replan is a wasted
-   * `member_positions` serde + JSON.parse plus two manifest walks on the
-   * interaction hot path.
-   *
-   * An entry is valid only when BOTH signals still match:
-   *   - `epochKey` — the content|layout|asset fingerprint (as
-   *     {@link matrixCacheByDataset}). `member_positions` is layout-derived,
-   *     so a reflow or an add/remove that moves placement bumps the epoch
-   *     and must recompute `positions`.
-   *   - `manifestRef` — the `ds.manifest` object reference. The manifest
-   *     maps derive from `ds.manifest`, which is swapped for a NEW object
-   *     when progressively-generated coarse/downsampled levels merge in —
-   *     a manifest change that carries no epoch bump. Reference identity is
-   *     the reliable change signal for that path, so a stale entry can
-   *     never serve outdated `imageSpecById` / `parentByEntityId` (and the
-   *     wrong level-of-detail set) after a new level arrives.
-   * On any mismatch all three inputs are recomputed and re-stored with the
-   * current epoch key and manifest reference. A manifest swap under an
-   * unchanged epoch also recomputes `positions`, which is harmless — it
-   * comes from the scene and is consistent within the tick.
+   * {@link buildPlanningSnapshot}: parsed `member_positions` and the
+   * `imageSpecById` / `parentByEntityId` manifest maps. A view move leaves
+   * all three identical. An entry is valid only while both keys match:
+   *   - `epochKey`, the content|layout|asset fingerprint. A reflow or
+   *     add/remove that moves placement bumps it.
+   *   - `manifestRef`, the `ds.manifest` reference. Progressively generated
+   *     levels swap in a new manifest object with no epoch bump, so
+   *     reference identity is the only signal the manifest maps are stale.
    */
   private readonly snapshotInputCacheByDataset = new Map<string, {
     epochKey: string;
@@ -472,42 +419,22 @@ export class TickCoordinator {
   }>();
   /**
    * Per-dataset cursor for the incremental view-query fold: the last
-   * reconstructed `image_id → EntitySnapshot` map, plus the basis it was
-   * built against. The next replan asks the scene for a `view_query_delta`
-   * and folds it onto `map` (deleting `left`, upserting `entered` ∪
-   * `changed`) instead of parsing the full visible set — the O(delta) win on
-   * a camera move.
+   * reconstructed `image_id → EntitySnapshot` map and the basis it was built
+   * against. A replan folds the scene's `view_query_delta` onto `map` instead
+   * of parsing the full visible set.
    *
-   * # Why a per-record projection map
+   * The fold is safe because every active-set input is either in the delta's
+   * quantized projection (`visible`, and the target level with the pin folded
+   * in) or in the basis (the manifest join for `levels` and `coarseLevel`).
+   * The active set never reads `projected_diagonal_px`, which the delta does
+   * not track.
    *
-   * A delta reports only the *quantized* projection
-   * (`{ membership, visible, target_level, kind }`) of each record. The
-   * fold is safe to feed the planner because every active-set input is
-   * either in that quantized set (`visible`, and the target level with the
-   * level pin folded in by the core, so a zoom or a pin edit that moves a
-   * level arrives as a `changed` record) or in the cursor basis below (the
-   * manifest join for `levels` and `coarseLevel`). The active set never
-   * reads the continuous `projected_diagonal_px`, which the delta does NOT
-   * track.
-   *
-   * # Cursor lifecycle (silent-wrong-data guard)
-   *
-   * The scene holds the matching Rust cursor; the two MUST advance together.
-   *   - `scene`: a reconstructed `WasmScene` starts with an empty Rust cursor
-   *     (it is `#[serde(skip)]`), so its first `view_query_delta` is a Full.
-   *     Any cursor held here belongs to the prior scene, so a scene-identity
-   *     change drops every entry — folding a delta against a foreign cursor
-   *     would ship wrong tiles.
-   *   - `basis`: the record shape a delta does NOT re-report depends on the
-   *     manifest join, which can move WITHOUT a structural epoch bump (a
-   *     progressively-merged level swaps the manifest object) and is no
-   *     trigger for the Rust delta, so a record absent from the delta would
-   *     keep a stale `levels`/`coarseLevel`. Invalidating the cursor when the
-   *     basis changes forces a reseed from the full query with the new basis.
-   * A dropped entry means the next fold has no prior; the fold then reseeds
-   * from the full `view_query` at that same tick (matching the Rust cursor,
-   * which the delta call just advanced), so a Delta is never folded against a
-   * missing base.
+   * This cursor and the scene's Rust cursor must advance together, or the
+   * fold ships wrong tiles. A reconstructed `WasmScene` starts with an empty
+   * Rust cursor (`#[serde(skip)]`), so a scene change drops every entry. The
+   * manifest join can change with no epoch bump and no Rust delta, so a basis
+   * change drops the entry too. A dropped entry reseeds from the full
+   * `view_query` at the same tick, so a Delta never folds onto a missing base.
    */
   private readonly viewDeltaCursor = new Map<string, {
     /** Identity of the snapshot-inputs entry (manifest maps + placement). */
@@ -524,12 +451,11 @@ export class TickCoordinator {
   private viewDeltaScene: WasmScene | null = null;
 
   /**
-   * Datasets whose worker-side cold state is known to hold exactly this
-   * coordinator's `previousActiveSet` — the precondition for a view-move delta.
-   * Set after a full cold state (or a delta) lands; a delta keeps it set because
-   * the worker's reconstructed active set equals the new `result.activeSet`. The
-   * scrub / display fast paths never change the active set, so they leave it set.
-   * Cleared on dataset removal so a re-added dataset re-syncs with a full send.
+   * Datasets whose worker cold state holds exactly this coordinator's
+   * `previousActiveSet`, the precondition for a view-move delta. Set after a
+   * full cold state or a delta lands. The scrub and display fast paths never
+   * change the active set, so they leave it set. Cleared on dataset removal
+   * so a re-added dataset re-syncs with a full send.
    */
   private readonly coldStateSyncedDatasets = new Set<string>();
   private requestEpoch = 0;
@@ -543,10 +469,9 @@ export class TickCoordinator {
   private configStoreUnsub: () => void;
 
   /**
-   * The planner entry point. Defaults to the module-level {@link plan};
-   * injectable so tests can pass a spy/stub directly instead of
-   * `vi.resetModules()`-mocking the planning singleton (that pattern raced
-   * across shuffled tests — see lucida-i7r). Production never passes it.
+   * The planner entry point. Injectable so tests can pass a stub instead of
+   * `vi.resetModules()`-mocking the planning singleton, which races across
+   * shuffled tests. Production never passes it.
    */
   private readonly planFn: typeof plan;
 
@@ -574,20 +499,17 @@ export class TickCoordinator {
   ): TickCoordinatorResult | null {
     const tickStart = performance.now();
     // Opens the `plan` phase: everything from here to the submit that hands
-    // the wanted set to the scheduler, synchronous wasm calls included. Not a
-    // separate timing source — one recorder, one clock, so plan time is
-    // comparable with the phases downstream of it.
+    // the wanted set to the scheduler, synchronous wasm calls included. One
+    // recorder and one clock, so plan time compares with the phases after it.
     traceRecorder.markPlanStart();
 
-    // Step 1 — Epoch check
     const rawEpochs = JSON.parse(ctx.scene.epochs());
     const currentEpochs: SceneEpochs = {
       content: rawEpochs.content,
       layout: rawEpochs.layout,
       view: rawEpochs.view,
       selection: rawEpochs.selection,
-      // `asset_epoch()` is the authoritative source. Older WASM builds
-      // without the binding fall back to 0 (functional no-op).
+      // Compat for WASM builds without the `asset_epoch()` binding.
       asset:
         typeof ctx.scene.asset_epoch === "function"
           ? ctx.scene.asset_epoch()
@@ -610,23 +532,15 @@ export class TickCoordinator {
       isHit = causes.length === 0;
     }
 
-    // Coalescing gate. A full rebuild is O(visible-entities) (descriptor
-    // build + O(N) worker cold-state message), so paying it on every
-    // interactive frame collapses frame rate on a wide collection. When
-    // only interactive-class epochs moved, serve the cached result and
-    // defer the rebuild:
-    //   - view only (pan/zoom): the render pass reads the camera fresh
-    //     every frame and transforms the cached roster's world-space
-    //     positions at draw time, so a moved camera renders correctly
-    //     from the cached roster. Replan only at a coarse cadence to
-    //     fetch tiles that scroll into view.
-    //   - selection (T/C/Z, contrast/gamma/colormap/display): the
-    //     leading change rebuilds promptly, then further changes within
-    //     the window coalesce so a continuous scrub doesn't rebuild
-    //     every frame.
-    // Structural changes (content/layout/asset) are never coalesced —
-    // a newly-added dataset, layout change, or catalog change must
-    // render immediately.
+    // Coalescing gate. A full rebuild is O(visible entities), so paying it
+    // every interactive frame collapses frame rate on a wide collection.
+    // When only interactive epochs moved, serve the cached result and defer:
+    //   - view only: the render pass reads the camera fresh each frame and
+    //     transforms the cached roster at draw time, so replan only at a
+    //     coarse cadence to fetch tiles that scroll into view.
+    //   - selection: the leading change rebuilds promptly, and further
+    //     changes within the window coalesce.
+    // Structural changes (content, layout, asset) must render immediately.
     let coalescedSkip = false;
     if (!isHit && hasPrior) {
       const structural =
@@ -648,16 +562,11 @@ export class TickCoordinator {
     }
 
     if (isHit || coalescedSkip) {
-      // A genuine cache hit (no interactive epochs moved) clears any owed
-      // deferral: nothing is left to rebuild, so the loop must be free to
-      // go idle. A coalesced skip is the opposite — it keeps the flag set
-      // (assigned above) so the render loop keeps ticking until the
-      // trailing rebuild lands. The two are mutually exclusive
-      // (`coalescedSkip` is only ever set when `!isHit`), so clearing here
-      // can never drop a live deferral. Without this, a cache hit that
-      // arrives while a deferral is still owed (reachable only if an epoch
-      // counter regresses, e.g. a scene reset) would leave the flag stuck
-      // true forever and spin the loop at full frame rate.
+      // A genuine cache hit clears any owed deferral so the loop can idle.
+      // A coalesced skip keeps it set. The two are mutually exclusive, so
+      // this never drops a live deferral. Without it, a hit while a deferral
+      // is owed (an epoch counter regressing on a scene reset) would leave
+      // the flag stuck and spin the loop at full frame rate.
       if (isHit) {
         this.pendingDeferredRebuild = false;
       }
@@ -677,23 +586,15 @@ export class TickCoordinator {
       causes.includes("asset");
     const selectionOnly =
       !structural && causes.length === 1 && causes[0] === "selection";
-    // A pure view move (pan / zoom / orbit): only the camera moved, so T/Z/C,
-    // the channel set, per-channel display state, and layout are all unchanged
-    // and the active set is a pure function of the new view. This is the sole
-    // gate for the view-move cold-state delta — anything bundled with the view
-    // change (a selection edit, a structural change) fails it and takes the full
-    // rebuild, so the delta's retained descriptors are always safe.
+    // A pure view move: only the camera moved, so the active set is a pure
+    // function of the new view. This is the sole gate for the view-move
+    // cold-state delta. Anything bundled with the view change fails it and
+    // takes the full rebuild, so the delta's retained descriptors are safe.
     const viewOnly = !structural && causes.length === 1 && causes[0] === "view";
 
-    // Display-only fast path — a per-channel intensity edit (contrast /
-    // gamma / colormap / opacity) with nothing else changed. When it can
-    // prove that, the camera, T/Z/C, z-range, visible set, and every
-    // non-display setting are unchanged, so the visible set, active set,
-    // and residency are all identical; only the shader's display fields
-    // differ. Push a cheap descriptor patch to the worker and reuse the
-    // cached roster instead of paying a full O(active-set) replan +
-    // cold-state rebuild. No plan()/roster/submit runs. Any non-display
-    // change fails the proof inside and falls through to the full rebuild.
+    // Display-only fast path: a per-channel intensity edit with nothing else
+    // changed. The active set and residency are then identical, so push a
+    // descriptor patch and reuse the cached roster instead of a full replan.
     if (
       selectionOnly &&
       this.tryDisplayOnlyUpdate({ ctx, currentEpochs, settings, multiChannel, tickStart })
@@ -702,17 +603,9 @@ export class TickCoordinator {
       return this.cachedResult;
     }
 
-    // Selection-scrub fast path — a pure T-scrub or Z-plane move in the 2D
-    // slice view, with the visible set, per-entity geometry/LOD, matrices, and
-    // display state all unchanged. Because only the selection epoch moved (the
-    // caller's `selectionOnly` gate), the view/content/layout inputs the active
-    // set derives from are byte-identical, so the roster and residency shape are
-    // unchanged; only the top-level currentT/currentZ (and, on a Z move, the
-    // visible region) differ. Re-plan + submit to fetch the new T/Z's chunks,
-    // but push a compact selection patch to the worker instead of rebuilding and
-    // re-transmitting the O(active-set) descriptor array — and reuse the cached
-    // roster. Any change beyond a pure scrub fails the proof inside and falls
-    // through to the full rebuild.
+    // Selection-scrub fast path: a pure T or Z-plane move in the slice view.
+    // Fetch the new T/Z chunks, but push a compact selection patch instead of
+    // the O(active-set) descriptor array, and reuse the cached roster.
     if (
       selectionOnly &&
       this.tryScrubOnlyUpdate({
@@ -724,13 +617,8 @@ export class TickCoordinator {
       return this.cachedResult;
     }
 
-    // Full rebuild (structural change, a non-display selection change, a
-    // view move, the coalescing window elapsing, or the first/forced plan).
-    // Clear any pending deferral — the settled state is being applied now.
-    // The coalescing anchor (`lastRebuildAt`) is stamped at rebuild
-    // COMPLETION further below, not here, so the window measures idle time
-    // since the rebuild finished rather than charging the rebuild's own
-    // duration against it.
+    // Full rebuild. The settled state is applied now, so clear any deferral.
+    // `lastRebuildAt` is stamped at completion below, not here.
     this.pendingDeferredRebuild = false;
 
     // CpuCache owns wanted-generation and delivery/rejection state, so the
@@ -743,22 +631,10 @@ export class TickCoordinator {
     const plannedDatasets: PlannedDataset[] = [];
 
     for (const [dsId, ds] of ctx.datasets) {
-      // Skip invisible datasets.
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
 
-      // Compute-or-reuse the camera-independent snapshot inputs (parsed
-      // `member_positions` + the two manifest maps). The entry is valid only
-      // when BOTH the placement epoch fingerprint AND the `ds.manifest`
-      // object reference are unchanged: `member_positions` is layout-derived
-      // (a reflow bumps the epoch), while the two manifest maps track
-      // `ds.manifest`, which is swapped for a new object — with no epoch bump
-      // — when progressively-generated levels merge in. A pure view move
-      // leaves both stable, so the whole entry is reused across the
-      // interaction hot path; any mismatch recomputes all three and re-stores
-      // the fresh key + manifest reference (recomputing `positions` on a
-      // manifest-only swap is harmless — the scene reports it consistently
-      // within the tick). Mirrors `matrixCacheByDataset` below.
+      // See `snapshotInputCacheByDataset` for why both keys are checked.
       const snapshotInputEpochKey =
         `${currentEpochs.content}|${currentEpochs.layout}|${currentEpochs.asset}`;
       let snapshotInputs = this.snapshotInputCacheByDataset.get(dsId);
@@ -804,7 +680,7 @@ export class TickCoordinator {
       // The builder skips `view_query` when given `entitiesOverride` but
       // still computes `visible_region` and `selection` fresh.
       // `minimapPendingFetch` flows into the snapshot so the minimap lane
-      // plans first (ADR 0023).
+      // plans first.
       const built = buildPlanningSnapshot({
         scene: ctx.scene,
         datasetId: dsId,
@@ -831,8 +707,8 @@ export class TickCoordinator {
       // `nextState` is stored for the next tick.
       const planningStateForDataset = this.planningState.get(dsId)
         ?? initialPlanningState();
-      // Capture what the worker currently holds BEFORE `nextState` overwrites it
-      // — the view-move delta diffs the fresh active set against this.
+      // Capture what the worker holds before `nextState` overwrites it. The
+      // view-move delta diffs the fresh active set against this.
       const previousActiveSet = planningStateForDataset.previousActiveSet;
       const result = this.planFn(snapshot, planningStateForDataset, planningConfig);
       this.planningState.set(dsId, result.nextState);
@@ -841,9 +717,8 @@ export class TickCoordinator {
       this._lastEntities.set(dsId, entities);
       emitViewerInterestHint(ctx, dsId, selection, visibleRegion, result.requests, this.requestEpoch);
 
-      // The trace's per-tick aggregate, recorded from the same plan and
-      // before the same side-effects — but unconditionally, because
-      // recording does not wait for somebody to open a panel (ADR 0049).
+      // Recorded unconditionally, unlike the `orch` telemetry: recording
+      // does not wait for somebody to open a panel (ADR 0049).
       recordPlanningTick(
         dsId,
         result,
@@ -903,9 +778,7 @@ export class TickCoordinator {
       };
       this._lastPlanByDataset.set(dsId, budgetedResult);
 
-      // 3d. Build member roster + per-entity matrix map in one walk. Reuse
-      // layout-derived tile matrices across a view move via a per-dataset cache
-      // invalidated whenever placement changes (content/layout/asset epoch).
+      // Build the member roster and per-entity matrix map in one walk.
       const matrixEpochKey =
         `${currentEpochs.content}|${currentEpochs.layout}|${currentEpochs.asset}`;
       let matrixCacheEntry = this.matrixCacheByDataset.get(dsId);
@@ -922,12 +795,9 @@ export class TickCoordinator {
       });
       memberRoster.set(dsId, rosterEntries);
 
-      // View-move fast path: the active set genuinely changed (tiles scroll
-      // in/out, LODs change) but only the camera moved, and the worker holds
-      // exactly this coordinator's `previousActiveSet`. Diff and ship only the
-      // delta instead of rebuilding + re-cloning the whole O(active-set)
-      // descriptor array. Any other case (first sync, a bundled selection/
-      // structural change) falls through to the full send below.
+      // View-move fast path: only the camera moved and the worker holds
+      // exactly this coordinator's `previousActiveSet`, so ship only the
+      // active-set delta instead of the whole descriptor array.
       const canDelta =
         viewOnly &&
         this.coldStateSyncedDatasets.has(dsId) &&
@@ -952,7 +822,7 @@ export class TickCoordinator {
           dsSettings,
         });
         // The worker rebuilds its descriptor buffer from the reordered active
-        // set in the SAME canonical order this walks, so the indices agree.
+        // set in the same canonical order this walks, so the indices agree.
         entityIndexByDataset.set(
           dsId,
           computeActiveSetIndexMap(result.activeSet, selection.visibleChannels, multiChannel),
@@ -1052,7 +922,6 @@ export class TickCoordinator {
     }
 
 
-    // Step 5 — Cache and return
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
     this.cachedResult = { memberRoster, settings, multiChannel, epochs: outputEpochs, entityIndexByDataset };
@@ -1073,11 +942,7 @@ export class TickCoordinator {
       if (dsSettings.visible) this.lastVisibleDatasetIds.add(dsId);
     }
 
-    // Stamp the coalescing anchor at rebuild COMPLETION. The window then
-    // measures idle time since the rebuild finished, so coalescing engages
-    // for the next interactive frame regardless of how long this rebuild
-    // took — the property that makes the fast-path effective on a wide
-    // collection, where a single rebuild can exceed the window on its own.
+    // Stamped at completion; see `lastRebuildAt`.
     const rebuildEnd = performance.now();
     this.lastRebuildAt = rebuildEnd;
 
@@ -1105,22 +970,15 @@ export class TickCoordinator {
   }
 
   /**
-   * The display-only fast path. Fires only when it can PROVE the sole
-   * change since the last rebuild is the per-channel intensity display
-   * state (contrast / gamma / colormap / opacity). It proves this
-   * conservatively — every non-display signal must match the captured
-   * baseline, and the settings fingerprint retains any unrecognized field —
-   * so a change to anything else (a bundled `label_settings` toggle, a
-   * z-slab extension, a channel-visibility flip, blend mode, layer order, a
-   * field added later, …) fails the proof and the caller falls through to a
-   * full rebuild. When it fires it pushes a small descriptor patch to the
-   * worker and reuses the cached roster — no plan(), roster, submit, or
-   * proxy residency.
+   * Display-only fast path. Fires only when it can prove the sole change
+   * since the last rebuild is per-channel intensity display state. Every
+   * non-display signal must match the captured baseline and the settings
+   * fingerprint keeps unknown fields, so any other change fails the proof.
+   * When it fires it pushes a descriptor patch and reuses the cached roster,
+   * with no plan(), roster, submit, or proxy residency.
    *
-   * Returns `true` when it fully handled the tick (caller serves the cached
-   * result); `false` when the change is not provably display-only, or when
-   * nothing display-relevant actually changed. On `false` no worker message
-   * is sent.
+   * Returns `true` when it handled the tick. On `false` no worker message is
+   * sent.
    */
   private tryDisplayOnlyUpdate(args: {
     ctx: TickContext;
@@ -1138,10 +996,9 @@ export class TickCoordinator {
       return false;
     }
 
-    // Scene scalars must be unchanged — a T/C or mode change needs
-    // different chunks, and multi-channel mode changes the member shape.
-    // (Z is proven per-dataset below via the full z-range, which also
-    // catches a slab extension that `scene.z()` alone would miss.)
+    // A T/C or mode change needs different chunks, and multi-channel mode
+    // changes the member shape. Z is proven per dataset below via the full
+    // z-range, which also catches a slab extension.
     const scalars = this.lastRebuildScalars;
     if (
       ctx.scene.t() !== scalars.t ||
@@ -1153,15 +1010,13 @@ export class TickCoordinator {
     }
     const sceneC = scalars.c;
 
-    // Layer participation + order must be unchanged — a reorder changes the
-    // composite draw order, which is applied from the roster.
+    // A layer reorder changes the composite draw order, which comes from
+    // the roster.
     if (JSON.stringify(settings.layerOrder) !== this.lastLayerOrderKey) return false;
 
-    // The set of settings-visible datasets must be unchanged — a
-    // visibility toggle also bumps the selection epoch but changes the
-    // roster, so it needs a real rebuild. (Catches a dataset turning
-    // visible, which would otherwise never appear in the per-dataset loop
-    // below.)
+    // A visibility toggle bumps the selection epoch but changes the roster.
+    // This also catches a dataset turning visible, which the per-dataset
+    // loop below would never see.
     let visibleCount = 0;
     for (const [dsId, dsSettings] of Object.entries(settings.allSettings)) {
       if (!dsSettings.visible) continue;
@@ -1170,12 +1025,9 @@ export class TickCoordinator {
     }
     if (visibleCount !== this.lastVisibleDatasetIds.size) return false;
 
-    // Precheck (no side effects). For every planned dataset prove: still
-    // visible; its non-display settings fingerprint (label state, blend
-    // mode, render mode, level pin, channel visibility, …) unchanged;
-    // its full z-range unchanged; its visible-channel set unchanged. Only
-    // then is a display difference safe to push as a patch. Fresh display
-    // state is computed once and reused for the push.
+    // Precheck with no side effects. Each planned dataset must still be
+    // visible with an unchanged non-display fingerprint, z-range, and
+    // visible-channel set before any patch is pushed.
     const updates: Array<{
       dsId: string;
       displayState: Record<number, ColdStateDisplayState>;
@@ -1213,15 +1065,12 @@ export class TickCoordinator {
       if (sig) sig.displayState = u.displayState;
     }
 
-    // Refresh the reused result's settings so display-field readers of the
-    // cached settings (e.g. the minimap's contrast/colormap) see current
-    // values. Only intensity-display fields can differ here — the proof
-    // above pinned everything else — so the roster, geometry, layer order,
-    // and blend modes are unchanged.
+    // Refresh the cached settings so display readers such as the minimap see
+    // current values. The proof above pinned everything else.
     this.cachedResult = { ...this.cachedResult, settings };
 
-    // The change is fully applied — advance the epoch anchor so the loop
-    // can idle, re-anchor coalescing, and clear any owed deferral.
+    // Applied: advance the epoch anchor so the loop can idle, re-anchor
+    // coalescing, and clear any owed deferral.
     this.lastEpochs = currentEpochs;
     this.lastRebuildAt = tickStart;
     this.pendingDeferredRebuild = false;
@@ -1229,35 +1078,18 @@ export class TickCoordinator {
   }
 
   /**
-   * The selection-scrub fast path. Fires only when it can PROVE the sole
-   * change since the last rebuild is a pure T-scrub and/or Z-plane move in the
-   * 2D slice view — the visible set, per-entity geometry/LOD, matrices, and
-   * per-channel display state are all unchanged. `currentT`/`currentZ` are
-   * top-level cold-state scalars (never part of a per-entity descriptor), so on
-   * a pure scrub the whole descriptor array is byte-identical; only the top
-   * scalars (and, on a Z move, the visible region) differ.
+   * Selection-scrub fast path. Fires only when it can prove the sole change
+   * since the last rebuild is a T scrub and/or Z-plane move in the slice view.
+   * `currentT`/`currentZ` are top-level cold-state scalars, never part of a
+   * descriptor, so the descriptor array is unchanged. A scrub still needs new
+   * chunks, so this emits requests and submits them, but pushes a selection
+   * patch instead of a full cold state. The caller's `selectionOnly` gate
+   * keeps the active set's inputs unchanged, which is why the cached roster
+   * can be reused. Any other difference, a z-range width change included,
+   * fails the proof.
    *
-   * Unlike {@link tryDisplayOnlyUpdate}, a scrub needs different chunks, so this
-   * still runs the planner and `cpuCache.submit` to fetch the new T/Z's keys —
-   * it only skips the O(active-set) descriptor rebuild + roster rebuild + full
-   * cold-state resend, pushing a compact selection patch to the worker (which
-   * re-ingests its retained cold state at the new selection) and reusing the
-   * cached roster.
-   *
-   * Correctness rests on the caller's `selectionOnly` gate: only the selection
-   * epoch moved, so the view/content/layout/asset inputs the active set is a
-   * pure function of are byte-identical — the roster and residency shape are
-   * provably unchanged, which is why the cached roster can be reused.
-   *
-   * Conservative by construction: it is scoped to slice mode, requires an
-   * actual T or Z move, and any other difference (a display edit, a bundled
-   * label/blend/visibility change, a channel change, a z-range WIDTH change such
-   * as a slab extension, a new/dropped dataset, a layer reorder, or a field
-   * added later) fails the proof and the caller falls through to a full rebuild.
-   *
-   * Returns `true` when it fully handled the tick (caller serves the cached
-   * result); `false` when the change is not a provable pure scrub or nothing
-   * scrubbed. On `false` no worker message is sent and no fetch is submitted.
+   * Returns `true` when it handled the tick. On `false` nothing is sent or
+   * submitted.
    */
   private tryScrubOnlyUpdate(args: {
     ctx: TickContext;
@@ -1277,17 +1109,15 @@ export class TickCoordinator {
       return false;
     }
 
-    // Scoped to the 2D slice view: a Z-plane move is a slice-view concept, and
-    // the volume path's proxy residency keys on T in ways this compact patch is
-    // deliberately not trying to cover. Volume T changes fall through to the
-    // full rebuild.
+    // Slice view only: the volume path's proxy residency keys on T in ways
+    // this compact patch does not cover.
     const scalars = this.lastRebuildScalars;
     const mode = ctx.mode as "slice" | "volume";
     if (mode !== "slice" || scalars.mode !== "slice") return false;
 
-    // C, multi-channel, layer order, and the visible-dataset set must be
-    // unchanged — each changes the member shape or roster and needs a real
-    // rebuild. (T is the scrub axis; Z is proven per-dataset via the z-range.)
+    // C, multi-channel, layer order, and the visible-dataset set each change
+    // the member shape or roster. T is the scrub axis; Z is proven per
+    // dataset via the z-range.
     if (ctx.scene.c() !== scalars.c) return false;
     if (multiChannel !== scalars.multiChannel) return false;
     if (JSON.stringify(settings.layerOrder) !== this.lastLayerOrderKey) return false;
@@ -1305,16 +1135,12 @@ export class TickCoordinator {
     const newZ = ctx.scene.z();
     let anyScrub = newT !== scalars.t;
 
-    // Per-dataset precheck (no side effects). Prove for every planned dataset:
-    // still visible; non-display settings fingerprint unchanged (label state,
-    // blend mode, render mode, level pin, channel visibility, …);
-    // display state unchanged (a bundled display edit falls through so both
-    // edits settle via the full rebuild); visible-channel set unchanged; and
-    // the z-range WIDTH unchanged (a same-width shift is a plane move; a widen
-    // is a slab extension that changes which chunks/entities are wanted and
-    // must rebuild). A within-width z shift is the Z-scrub signal. The cached
-    // active set / entities / visible region needed to regenerate requests must
-    // all still be present, or the fast path bails to the full rebuild.
+    // Precheck with no side effects. Each planned dataset must still be
+    // visible with unchanged non-display fingerprint, display state, and
+    // visible channels. The z-range width must match: a same-width shift is a
+    // plane move (the Z-scrub signal), while a widen is a slab extension that
+    // changes the wanted set. The cached state needed to regenerate requests
+    // must be present.
     interface ScrubDataset {
       dsId: string;
       dsSettings: DatasetSettings | undefined;
@@ -1351,20 +1177,13 @@ export class TickCoordinator {
         newZRange: zRange,
       });
     }
-    // Nothing actually scrubbed — let the caller fall through (a genuine cache
-    // hit / display path already handled the no-op display case).
     if (!anyScrub) return false;
 
-    // Regenerate ONLY the changed-T/Z chunk requests. The pure-scrub premise
-    // (only the selection epoch moved) makes the active set, entities, and
-    // camera-derived visible region byte-identical to the last rebuild, so the
-    // requests are re-emitted from the cached active set + a snapshot whose only
-    // difference is the new selection (and, on a Z move, the new z-range read
-    // via one cheap `visible_region` call). This skips the O(N)
-    // `view_query`/`member_positions` serde AND `buildActiveSet` — the dominant
-    // remaining boundary cost — while producing exactly the requests a full
-    // `plan()` would for the new T/Z. `assetCatalog.snapshot()` is dataset-
-    // agnostic, so one shared snapshot serves every dataset's proxy budgeting.
+    // Re-emit requests from the cached active set with only the selection
+    // (and z-range, on a Z move) changed. This skips the O(N) `view_query`
+    // and `member_positions` serde and `buildActiveSet`, yet yields the same
+    // requests a full `plan()` would. `assetCatalog.snapshot()` is
+    // dataset-agnostic, so one snapshot serves every dataset.
     const scrubRequestEpoch = currentEpochs.request + 1;
     const scrubEpochs: SceneEpochs = { ...currentEpochs, request: scrubRequestEpoch };
     const assetCatalog = ctx.assetCatalog.snapshot();
@@ -1445,12 +1264,9 @@ export class TickCoordinator {
       desiredProxyKeysByDataset.set(datasetId, set);
     }
 
-    // Commit. Advance the fetch lifecycle exactly once (the delivery ledger is
-    // cleared because the worker repacks its atlas indirection for the new T/Z,
-    // so the new plane/timepoint's chunks must be re-delivered), then per
-    // dataset: submit the new fetch, push the compact selection patch, and
-    // refresh carry-forward state so a later full rebuild is coherent. The
-    // active set is unchanged, so `planningState` is deliberately left as-is.
+    // Advance the fetch lifecycle once. This clears the delivery ledger,
+    // which is needed because the worker repacks its atlas indirection for
+    // the new T/Z. The active set is unchanged, so `planningState` stays.
     ctx.cpuCache.onPlanRebuildStart();
     for (const p of planned) {
       this.requestEpoch = scrubRequestEpoch;
@@ -1470,8 +1286,7 @@ export class TickCoordinator {
         nextState: p.planningState,
       });
 
-      // Categorical label overlays follow the plane/timepoint too — merge their
-      // synthesized requests exactly as the full rebuild does.
+      // Label overlays follow the plane and timepoint too.
       const labelRequests = computeLabelChunkRequests({
         datasetId: p.dsId,
         manifest: ctx.datasets.get(p.dsId)!.manifest,
@@ -1511,10 +1326,9 @@ export class TickCoordinator {
       if (scrubSig) scrubSig.zRangeVox = p.visibleRegion.zRangeVox;
     }
 
-    // Reuse the cached roster + entity index (identical on a pure scrub);
-    // refresh only the epochs it carries. Advance the scrubbed T scalar and the
-    // epoch/coalescing anchors so a later display edit / pan / zoom compares
-    // against the scrubbed state.
+    // Reuse the cached roster and entity index, refreshing only the epochs.
+    // Advance T and the anchors so later edits compare against the scrubbed
+    // state.
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
     this.cachedResult = { ...this.cachedResult, settings, epochs: outputEpochs };
@@ -1525,29 +1339,17 @@ export class TickCoordinator {
   }
 
   /**
-   * Reconstruct a dataset's `entities` incrementally by folding the scene's
-   * `view_query_delta` onto the per-dataset cursor, instead of parsing the
-   * full visible set. Returns the entity array on success, `"skip"` when the
-   * dataset is not registered (the scene reports `null`, exactly as the full
-   * `view_query` path skips it).
+   * Reconstruct a dataset's `entities` by folding the scene's
+   * `view_query_delta` onto the per-dataset cursor. Returns `"skip"` when the
+   * dataset is not registered, as the full `view_query` path does.
+   * `inputsRef` is the identity of the snapshot-inputs entry `deps` came
+   * from, which is the cursor's basis.
    *
-   * Called only from the full-rebuild path. `deps` is the same
-   * manifest/placement join the full builder uses; `inputsRef` is the
-   * identity of the cached snapshot-inputs entry `deps` came from (the
-   * cursor's manifest/placement basis).
-   *
-   * Correctness: the returned array reconstructs the SAME snapshot a fresh
-   * full build produces, on the render-affecting projection
-   * ({@link EntitySnapshot} `visible` / `targetLevel` / `kind` /
-   * `coarseLevel` / `parentId`, keyed by `image_id`). Records in `entered` /
-   * `changed` are freshly assembled this tick, so a record whose target level
-   * moved carries its new `targetLevel`; a carried-over record was assembled
-   * on a prior tick with a basis proven identical (scene identity +
-   * `basisInputs`), so its quantized and manifest-derived fields match a
-   * fresh build. Continuous fields (`importance` /
-   * `projectedDiagonalPx` / `projectedAreaPx2` / `centroidWorld`) may be
-   * stale on a carried-over record. That is intended, and they are never an
-   * active-set input.
+   * The result matches a fresh full build on the render-affecting fields
+   * (`visible`, `targetLevel`, `kind`, `coarseLevel`, `parentId`). Continuous
+   * fields (`importance`, `projectedDiagonalPx`, `projectedAreaPx2`,
+   * `centroidWorld`) may be stale on a carried-over record; none of them
+   * feeds the active set.
    */
   private foldViewDeltaEntities(
     scene: TickContext["scene"],
@@ -1555,18 +1357,16 @@ export class TickCoordinator {
     deps: SnapshotEntityDeps,
     inputsRef: object,
   ): EntitySnapshot[] | "skip" {
-    // Scene-identity guard. A reconstructed scene starts with an empty Rust
-    // cursor, so any cursor held here belongs to a scene that no longer
-    // exists; drop all of them before folding against the new scene.
+    // A reconstructed scene starts with an empty Rust cursor, so every
+    // cursor held here belongs to a dead scene.
     if (scene !== this.viewDeltaScene) {
       this.viewDeltaCursor.clear();
       this.viewDeltaScene = scene;
     }
 
     const deltaJson = scene.view_query_delta(datasetId);
-    // Advancing the Rust cursor and skipping are mutually exclusive: a `null`
-    // means the dataset is unknown and the Rust cursor was NOT advanced, so
-    // dropping our cursor keeps the two consistent for a later re-add.
+    // `null` means the dataset is unknown and the Rust cursor did not
+    // advance, so dropping ours keeps the two consistent for a later re-add.
     if (!deltaJson || deltaJson === "null") {
       this.viewDeltaCursor.delete(datasetId);
       return "skip";
@@ -1579,28 +1379,18 @@ export class TickCoordinator {
     const prev =
       existing && existing.basisInputs === inputsRef ? existing.map : null;
 
-    // Drop-on-throw invariant: `view_query_delta` above already advanced the
-    // Rust cursor to this tick's state, but the map build below is fallible —
-    // `makeEntitySnapshot` throws on a producer-invariant violation (a Tile
-    // with no parent edge). Advancing the Rust cursor and setting the TS cursor
-    // must not straddle that fallible build without a drop on throw: if a throw
-    // left the TS cursor holding the PRIOR tick's map, the next tick would fold
-    // a Delta onto that stale base and silently drop this tick's
-    // entered/left/changed forever (the offending record is now
-    // quantized-stable in the Rust cursor, so it never re-throws). On a throw,
-    // drop the entry so the next tick reseeds from the full query (matching the
-    // already-advanced Rust cursor), then rethrow so the failure stays loud —
-    // exactly as the non-folding full path throws every tick.
+    // Drop on throw. `view_query_delta` already advanced the Rust cursor, and
+    // `makeEntitySnapshot` throws on a Tile with no parent edge. If a throw
+    // left the prior map in place, the next tick would fold onto a stale base
+    // and lose this tick's changes for good. Dropping the entry makes the
+    // next tick reseed from the full query; the rethrow keeps it loud.
     try {
       let next: Map<string, EntitySnapshot>;
       if (prev === null && "Delta" in delta) {
-        // The Rust cursor is ahead of this consumer (a new coordinator against
-        // a persisting scene, or a basis change), so the delta reports changes
-        // since a base we never held and cannot be folded. Reseed from the
-        // authoritative full query at this same tick: the delta call above just
-        // advanced the Rust cursor to this tick's quantized state, so a
-        // snapshot built from the full query now matches it and the next delta
-        // folds.
+        // The Rust cursor is ahead of us (a new coordinator on a persisting
+        // scene, or a basis change), so this delta is against a base we never
+        // held. Reseed from the full query at this tick, which matches the
+        // Rust cursor the delta call just advanced.
         const seeded = this.buildEntityMapFromViewQuery(scene, datasetId, deps);
         if (seeded === null) {
           this.viewDeltaCursor.delete(datasetId);
@@ -1620,11 +1410,8 @@ export class TickCoordinator {
   }
 
   /**
-   * Build a fresh `image_id → EntitySnapshot` map from the full `view_query`,
-   * via the same {@link makeEntitySnapshot} the fold uses. Returns `null`
-   * when the dataset is unknown (scene reports `null` / no visible set) — the
-   * caller treats that as skip. Used to seed the fold cursor when a delta
-   * cannot be folded (no matching prior).
+   * Build a fresh `image_id → EntitySnapshot` map from the full `view_query`
+   * to seed the fold cursor. Returns `null` when the dataset is unknown.
    */
   private buildEntityMapFromViewQuery(
     scene: TickContext["scene"],
@@ -1658,9 +1445,8 @@ export class TickCoordinator {
     // Without this delete, a dataset removed and re-added would keep
     // its prior `PlanningState` (`previousActiveSet` etc.) across the gap.
     this.planningState.delete(workerMemberId);
-    // Drop the skip-decision signature so a fast path can never reuse a
-    // removed dataset's roster. (It is also rebuilt from scratch on the
-    // next full rebuild.)
+    // Drop the fast-path signature so a fast path can never reuse a removed
+    // dataset's roster.
     this.lastRebuildByDataset.delete(workerMemberId);
     this.lastVisibleDatasetIds.delete(workerMemberId);
     // Drop the cached tile matrices, the cached snapshot inputs, and the
@@ -1680,11 +1466,9 @@ export class TickCoordinator {
   }
 
   /**
-   * True when an interactive change was coalesced this tick and its
-   * trailing rebuild is still owed. The render loop keeps ticking while
-   * this holds so the rebuild fires — and renders — once the coalescing
-   * window elapses, even if the user has stopped interacting. Clears the
-   * next time a full rebuild runs.
+   * True while a coalesced change's trailing rebuild is owed. The render
+   * loop keeps ticking while this holds so the rebuild fires after the user
+   * stops.
    */
   hasPendingRebuild(): boolean {
     return this.pendingDeferredRebuild;

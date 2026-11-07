@@ -173,8 +173,8 @@ describe("label slice pool cleanup on dataset removal", () => {
     const pool = ctx.state.labelSlicePools.get("img-0:label:region-b")!;
     const destroyed = pool.texture.destroy as unknown as ReturnType<typeof vi.fn>;
 
-    // removeLayerResources passes the DATASET id ("ds-0"), which is NOT the
-    // pool's key ("img-0:label:region-b") — the leak was the lookup missing here.
+    // removeLayerResources passes the dataset id ("ds-0"), which is not the
+    // pool's key ("img-0:label:region-b").
     removeSliceResources(ctx, "ds-0");
 
     expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);

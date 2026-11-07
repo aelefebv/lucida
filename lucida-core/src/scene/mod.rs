@@ -381,28 +381,21 @@ impl Scene {
     /// the multi-dataset global normalization (`global_max_physical_extent`), and
     /// the 3D top-alignment (`global_max_physical_y`).
     ///
-    /// This is a **thin wrapper** over the single source of member world
-    /// placement, [`Self::rendering_transform`]: it returns that transform's
-    /// forward `model`. The wasm renderer's `member_model_matrix`, the minimap's
-    /// framing, and [`Self::dataset_world_bounds`] all route through here, so the
-    /// auto-fit can never drift from what is actually drawn. A member with no
-    /// levels yields the identity matrix (matching the renderer's fallback), so
-    /// callers can fold it in without a special case.
+    /// Returns the forward `model` of [`Self::rendering_transform`], so the
+    /// renderer, minimap framing, and [`Self::dataset_world_bounds`] cannot
+    /// drift from what is drawn. A member with no levels yields the identity.
     pub fn member_world_matrix(&self, member: &MemberState) -> [f32; 16] {
         self.rendering_transform(member).0.model
     }
 
-    /// Every member's forward + inverse world matrix for one dataset in a
-    /// single pass: for member `i` (in `derived.members` order), floats
-    /// `i*32 .. i*32+16` are the forward `model` and `i*32+16 .. i*32+32` its
-    /// `inv_model` — exactly the pair [`Self::rendering_transform`] produces,
-    /// i.e. the same values the per-id `member_world_matrix` /
-    /// `rendering_transform(..).1.inv_model` lookups return one at a time.
+    /// Every member's forward and inverse world matrix for one dataset: for
+    /// member `i`, floats `i*32 .. i*32+16` are the forward `model` and
+    /// `i*32+16 .. i*32+32` its `inv_model`, as [`Self::rendering_transform`]
+    /// produces them.
     ///
-    /// The flat layout exists so a binding can hand a whole collection's
-    /// placement to a consumer in one crossing instead of two calls per
-    /// member; pair with [`Self::member_render_ids`] for the id of each
-    /// 32-float block. Empty for an unknown dataset.
+    /// The flat layout lets a binding hand a whole collection's placement over
+    /// in one crossing instead of two calls per member. Pair it with
+    /// [`Self::member_render_ids`]. Empty for an unknown dataset.
     pub fn member_render_matrices(&self, dataset_id: &str) -> Vec<f32> {
         let ds_id = DatasetId(dataset_id.to_string());
         let Some(derived) = self.derived.get(&ds_id) else {
@@ -432,15 +425,13 @@ impl Scene {
             .collect()
     }
 
-    /// World-space axis-aligned bounds (`(min, max)`) of **a single dataset's**
-    /// members — never the union across datasets — so the caller can frame the
-    /// newly-opened dataset alone.
+    /// World-space bounds (`(min, max)`) of a single dataset's members, never
+    /// the union across datasets, so the caller can frame the newly opened
+    /// dataset alone.
     ///
-    /// Each member's unit-cube corners are transformed by the renderer's own
-    /// forward transform ([`Self::rendering_transform`], the exact matrix the
-    /// renderer/minimap use) and folded into a [`framing::Aabb`]. Returns `None`
-    /// for an unknown id or a dataset whose members contribute no box (none with
-    /// levels) — that is the "nothing to frame" signal
+    /// Each member's unit-cube corners go through
+    /// [`Self::rendering_transform`] into a [`framing::Aabb`]. Returns `None`
+    /// when no member has levels, the "nothing to frame" signal
     /// [`Self::fit_camera_to_dataset`] checks.
     pub fn dataset_world_bounds(&self, dataset_id: &str) -> Option<([f64; 3], [f64; 3])> {
         let ds_id = DatasetId(dataset_id.to_string());
@@ -463,24 +454,15 @@ impl Scene {
         }
     }
 
-    /// Axis-aligned bounds (`(min, max)`) of **a single dataset's** members in
-    /// the **2D Slice (voxel) space** — the coordinate system the [`Camera::Slice`]
-    /// camera actually operates in (member XY position + the level-0 XY voxel
-    /// extent), *not* the normalized unit-cube space [`Self::dataset_world_bounds`]
-    /// uses for the 3D arcball/minimap.
+    /// Bounds (`(min, max)`) of a single dataset's members in the 2D voxel
+    /// space the [`Camera::Slice`] camera works in, the 2D twin of
+    /// [`Self::dataset_world_bounds`].
     ///
-    /// This is the 2D twin of [`Self::dataset_world_bounds`]: each member with a
-    /// level 0 contributes the AABB
-    /// `[position[0], position[1]] .. [position[0] + X, position[1] + Y]` where
-    /// `X = level0.shape[4]` and `Y = level0.shape[3]` (shape is `[t,c,z,y,x]`),
-    /// using the *exact* voxel convention the slice-mode ray pick and chunk
-    /// culling use (see [`Self::ray_pick`]). The result is the min/max over all
-    /// such members. Members with no levels are skipped (they have no voxel
-    /// extent), matching the renderer's "nothing to draw" handling.
-    ///
-    /// Returns `None` for an unknown id or a dataset whose members contribute no
-    /// box (none with levels) — the "nothing to frame" signal
-    /// [`Self::fit_camera_to_dataset`] checks in 2D.
+    /// Each member with a level 0 contributes
+    /// `[position[0], position[1]] .. [position[0] + X, position[1] + Y]`, with
+    /// `X = level0.shape[4]` and `Y = level0.shape[3]`, the voxel convention
+    /// the slice-mode ray pick and chunk culling use. Returns `None` when no
+    /// member has levels.
     pub fn dataset_voxel_bounds_2d(&self, dataset_id: &str) -> Option<([f64; 2], [f64; 2])> {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = self.derived.get(&ds_id)?;
@@ -506,43 +488,37 @@ impl Scene {
         if any { Some((min, max)) } else { None }
     }
 
-    /// Frame the named dataset's full extent in the current camera, **dispatching
-    /// on the camera mode** so each mode is fed bounds in the coordinate space it
-    /// actually uses:
+    /// The named dataset's bounds in the coordinate space the current camera
+    /// works in, the box [`Camera::fit_to_bounds`] frames:
     ///
-    /// - In 2D [`Camera::Slice`] mode the Slice camera works in **voxel** space,
-    ///   so it is framed with [`Self::dataset_voxel_bounds_2d`] (member XY +
-    ///   level-0 XY voxel extent) via [`Slice::fit_to_bounds`] with
-    ///   [`crate::framing::FIT_MARGIN_2D`]. Feeding it the normalized unit-cube
-    ///   bounds instead would center on ~`[0.5, 0.5]` and zoom onto a sub-pixel
-    ///   speck at the origin while the data sits at voxel `[0..width]`.
-    /// - In 3D ([`Camera::Arcball`]/[`Camera::Fly`]) modes the camera works in the
-    ///   **normalized** world space, so it keeps using
-    ///   [`Self::dataset_world_bounds`] via [`Camera::fit_to_bounds`] — the 3D
-    ///   path is unchanged.
+    /// - The 2D [`Camera::Slice`] camera works in voxel space, so this is
+    ///   [`Self::dataset_voxel_bounds_2d`] with a zero Z extent. Normalized
+    ///   unit-cube bounds would zoom onto a sub-pixel speck at the origin.
+    /// - The 3D [`Camera::Arcball`]/[`Camera::Fly`] cameras work in normalized
+    ///   world space, so this is [`Self::dataset_world_bounds`]. Voxel bounds
+    ///   would aim the camera at empty space far from the data.
     ///
-    /// Returns `true` if it framed something, `false` if the dataset has no bounds
-    /// in the active space (unknown id / no members) — in which case the camera is
-    /// left untouched (and no epoch bumps). The borrow is resolved by computing
-    /// the bounds *before* mutating the camera. On success it bumps `epochs.view`
-    /// (exactly as pan/zoom/rotate do) so viewport consumers re-read the camera
-    /// and redraw with the new framing.
-    pub fn fit_camera_to_dataset(&mut self, dataset_id: &str) -> bool {
+    /// `None` when the dataset has no bounds in that space.
+    pub fn dataset_fit_bounds(&self, dataset_id: &str) -> Option<([f64; 3], [f64; 3])> {
         if let Camera::Slice(_) = self.camera {
-            // 2D: the Slice camera lives in voxel space — frame the voxel AABB.
-            let Some((min, max)) = self.dataset_voxel_bounds_2d(dataset_id) else {
-                return false;
-            };
-            if let Camera::Slice(s) = &mut self.camera {
-                s.fit_to_bounds(min, max, crate::framing::FIT_MARGIN_2D);
-            }
+            let (min, max) = self.dataset_voxel_bounds_2d(dataset_id)?;
+            Some(([min[0], min[1], 0.0], [max[0], max[1], 0.0]))
         } else {
-            // 3D (Arcball/Fly): the camera lives in normalized world space.
-            let Some((min, max)) = self.dataset_world_bounds(dataset_id) else {
-                return false;
-            };
-            self.camera.fit_to_bounds(min, max);
+            self.dataset_world_bounds(dataset_id)
         }
+    }
+
+    /// Frame the named dataset's full extent in the current camera, using
+    /// [`Self::dataset_fit_bounds`] for the camera's coordinate space.
+    ///
+    /// Returns `false`, leaving the camera and epochs untouched, if the dataset
+    /// has no bounds in the active space. On success it bumps `epochs.view`, as
+    /// pan, zoom, and rotate do.
+    pub fn fit_camera_to_dataset(&mut self, dataset_id: &str) -> bool {
+        let Some((min, max)) = self.dataset_fit_bounds(dataset_id) else {
+            return false;
+        };
+        self.camera.fit_to_bounds(min, max);
         self.epochs.view += 1;
         true
     }
@@ -641,9 +617,7 @@ impl Scene {
 
     /// Compute the chunk request plan for a specific dataset by ID.
     ///
-    /// Returns one `MemberChunkPlan` per visible member. For the common
-    /// single-member-at-origin case this is a single element whose
-    /// `needed`/`prefetch` lists are identical to the old flat plan.
+    /// Returns one `MemberChunkPlan` per visible member.
     ///
     /// Every chunk of a member is at the member's target level, from
     /// [`Scene::member_target_level`]. That is the rule and the hysteresis
@@ -761,13 +735,8 @@ impl Scene {
     /// and the 3D top-alignment translation
     /// (`(global_max_physical_y - phys_y) / global_max`).
     ///
-    /// This is the **single owner** of that arithmetic. Every consumer of
-    /// placement — [`Self::rendering_transform`] (and through it
-    /// [`Self::member_world_matrix`] / `dataset_world_bounds`), the
-    /// dataset-level [`Self::dataset_model_matrix`] /
-    /// [`Self::dataset_inv_model_matrix`], and [`Self::volume_diagonal`] —
-    /// derives its correction from here, so a policy change propagates to the
-    /// renderer, the minimap, picking, and framing together.
+    /// The only owner of that arithmetic, so a policy change reaches the
+    /// renderer, minimap, picking, and framing together.
     fn placement_correction(&self, t: &VolumeTransform) -> PlacementCorrection {
         let max_phys = if t.max_physical_extent > 0.0 {
             t.max_physical_extent
@@ -867,21 +836,13 @@ impl Scene {
         (fwd, inv)
     }
 
-    /// The **dataset-level** model matrix (column-major `[f32; 16]`): the first
-    /// member's unit-cube volume transform with the same global correction and
-    /// top-alignment as [`Self::rendering_transform`], but **without** the
-    /// member's layout position offset — the dataset's volume treated as if it
-    /// sat at the scene origin. The minimap projects orbit rays through this
-    /// (and its inverse) to relate whole-dataset unit space to world space, and
-    /// `ray_hit_local` uses the inverse to express hits in `[0,1]³`.
+    /// The dataset-level model matrix (column-major `[f32; 16]`): the first
+    /// member's volume transform with the same correction and top-alignment as
+    /// [`Self::rendering_transform`], but without the member's layout offset.
+    /// The minimap projects orbit rays through it, and `ray_hit_local` uses the
+    /// inverse to express hits in `[0,1]³`.
     ///
-    /// For a dataset whose first member has layout position `[0, 0]` this
-    /// equals [`Self::member_world_matrix`]; for an offset member (e.g. a collection
-    /// group) the two differ only by the corrected XY translation.
-    ///
-    /// Returns the identity for an unknown dataset or one with no members, so
-    /// consumers degrade to an uncorrected unit cube rather than a special
-    /// case.
+    /// Returns the identity for an unknown dataset or one with no members.
     pub fn dataset_model_matrix(&self, dataset_id: &str) -> [f32; 16] {
         self.dataset_placement_matrices(dataset_id).0
     }
@@ -990,17 +951,12 @@ impl Scene {
         closest
     }
 
-    // --- 3D annotation anchoring ---
-    //
-    // A pin's stored world point `(position[0], position[1], z)` lives in the
-    // SAME in-plane-voxel + voxel-depth frame the 2D pin position has always
-    // used (image convention: x right, y down, z = slice index). The helpers
-    // below convert that point to/from the arcball camera's world space by
-    // **reusing** `rendering_transform` (the exact model matrix the volume
-    // render pass uses — Y-flip, global normalization, top-alignment) and the
-    // camera's own `project_to_screen` / `ray_pick`. Nothing is re-derived, so
-    // a marker tracks the volume identically to how the volume itself renders,
-    // and a depth pick is the exact inverse of the projection used to draw it.
+    // A pin's stored world point `(position[0], position[1], z)` is in the 2D
+    // pin frame: in-plane voxels plus voxel depth (x right, y down, z = slice
+    // index). The helpers below convert it to and from arcball world space by
+    // reusing `rendering_transform` and the camera's own `project_to_screen` /
+    // `ray_pick`, so a marker tracks the volume exactly and a depth pick is the
+    // exact inverse of the projection that draws it.
 
     /// Resolve the first member of `dataset_id`, with its level-0 voxel shape
     /// `[X, Y, Z]`. Pins are dataset-scoped and anchored against the dataset's
@@ -1052,13 +1008,11 @@ impl Scene {
     /// Project a pin's stored world point `(x, y, z)` (in-plane voxel + voxel
     /// depth) to screen-space pixels through the active camera.
     ///
-    /// In 2D slice mode this is just the in-plane projection the 2D overlay has
-    /// always used (depth ignored, matching `Camera::project_to_screen`). In a
-    /// 3D mode the point is first lifted to arcball-world via the rendering
+    /// In 2D slice mode this is the in-plane projection, depth ignored. In a 3D
+    /// mode the point is first lifted to arcball world via the rendering
     /// transform, so the marker tracks the volume as the camera orbits.
-    /// Returns `None` when the point is behind the camera (3D only) or the
-    /// dataset has no anchorable member — the caller hides the marker, which is
-    /// also what makes a marker vanish as it swings behind the volume.
+    /// Returns `None` when the point is behind the camera or the dataset has no
+    /// anchorable member; the caller then hides the marker.
     pub fn project_annotation(
         &self,
         dataset_id: &DatasetId,
@@ -1075,15 +1029,12 @@ impl Scene {
         self.camera.project_to_screen(world)
     }
 
-    /// Lift a pin's stored voxel point `(x, y, z)` (in-plane voxel + voxel depth)
-    /// to arcball-WORLD space via the dataset's rendering transform — the SAME
-    /// lift [`Self::project_annotation`] does before projecting, so a point fed
-    /// here lands where its marker is drawn. Returns `None` for an
-    /// unknown/unanchorable dataset (caller treats it as a no-op).
+    /// Lift a pin's stored voxel point `(x, y, z)` to arcball world space, the
+    /// same lift [`Self::project_annotation`] does before projecting. Returns
+    /// `None` for an unknown or unanchorable dataset.
     ///
-    /// This is the world point the 3D "center on a pin" viewport command
-    /// (`CenterOnVoxel3D`) makes the arcball target, so the recenter and the
-    /// marker projection share one definition of the pin's world position.
+    /// `CenterOnVoxel3D` targets this point, so the recenter and the marker
+    /// projection share one definition of the pin's world position.
     pub(crate) fn annotation_world_point_for(
         &self,
         dataset_id: &DatasetId,
@@ -1121,22 +1072,16 @@ impl Scene {
     /// state consistent with it:
     ///
     /// - `derived` is rebuilt for all manifests (via [`Self::rebuild_derived`]).
-    /// - `dataset_order` gains any restored dataset it didn't already list and
-    ///   drops ids no longer in the document.
-    /// - `dataset_settings` is seeded for each restored manifest with the
-    ///   COMPLETE per-channel + per-label settings (the same
-    ///   [`DatasetDisplaySettings::seeded_for`] the `DatasetOpened` apply path
-    ///   uses) rather than a bare `Default` — the empty default has NO
-    ///   channel/label entries, which would leave the layer panel's per-channel
-    ///   and per-label controls unable to render on a document restore. Entries
-    ///   that already exist (locally adjusted settings) are kept untouched;
-    ///   entries for removed datasets are pruned.
+    /// - `dataset_order` gains any restored dataset it did not list and drops
+    ///   ids missing from the document.
+    /// - `dataset_settings` is seeded for each new manifest with
+    ///   [`DatasetDisplaySettings::seeded_for`], not a bare `Default`, which has
+    ///   no channel or label entries for the layer panel to render. Existing
+    ///   entries are kept; entries for removed datasets are pruned.
     ///
-    /// A document load can change any document-scoped state, so it bumps every
-    /// document-scoped epoch (`content`, `layout`, `asset`, `annotation`) plus
-    /// `selection` (dataset order/settings may have changed) — consumers must
-    /// re-read rather than render from a stale plan. `view` is deliberately NOT
-    /// bumped: the local camera is untouched by design.
+    /// It bumps every document-scoped epoch (`content`, `layout`, `asset`,
+    /// `annotation`) plus `selection`. `view` is not bumped because the local
+    /// camera is untouched.
     pub fn load_document(&mut self, doc: DocumentState) {
         self.document = doc;
         self.rebuild_derived();
@@ -1163,13 +1108,9 @@ impl Scene {
         self.view_query_cursors
             .retain(|id, _| dataset_ids.contains(id));
 
-        // Realign any KEPT per-label settings that carry the author's label
-        // names onto the restored manifest's CURRENT label order (occurrence-
-        // aware), so a settings entry adopted before this document arrived (e.g.
-        // from a peer whose label list differs) lands on the matching current
-        // label rather than by raw index. Freshly seeded entries already match
-        // their manifest; a legacy entry (empty `label_names`) is left
-        // positional. Fresh-seed policy is untouched.
+        // Kept settings may have been adopted from a peer whose label list
+        // differs; realign them to the restored manifest's labels by name.
+        // Entries without `label_names` stay positional.
         for (id, settings) in self.dataset_settings.iter_mut() {
             if settings.label_names.is_empty() {
                 continue;
@@ -1202,22 +1143,17 @@ impl Scene {
     /// restore), preserving the local viewport size — the follower's canvas
     /// dimensions are its own.
     ///
-    /// Epoch semantics match [`Scene::apply`]'s viewport policy: `epochs.view`
-    /// bumps iff the (viewport-preserving) camera actually changed, and
-    /// `epochs.selection` bumps iff view or display changed. The change checks
-    /// keep an unchanged presence heartbeat from invalidating consumers' caches
-    /// every message, while a real remote camera move reliably invalidates the
-    /// chunk plan instead of leaving the renderer on a stale one.
+    /// `epochs.view` bumps iff the camera changed, and `epochs.selection` iff
+    /// view or display changed, so an unchanged presence heartbeat does not
+    /// invalidate consumers' caches but a real remote camera move does.
     pub fn import_presence(&mut self, camera: Camera, view: ViewState, display: DisplayState) {
         let viewport = self.camera.viewport();
         let mut camera = camera;
         camera.set_viewport(viewport[0], viewport[1]);
-        // A peer's camera is clamped into the same ranges the local mutators
-        // enforce (`Camera::sanitize`): a follow target must not be able to
-        // hand this scene state its own mutation paths could never produce —
-        // e.g. a finite `zoom: 0.0` that would NaN-poison the next pan.
-        // Sanitize is bit-preserving for in-range cameras, so the equality
-        // check below still sees an unchanged re-import as unchanged.
+        // A follow target must not hand this scene state its own mutators could
+        // never produce, such as a `zoom: 0.0` that would NaN-poison the next
+        // pan. Sanitize is bit-preserving in range, so the equality check below
+        // still sees an unchanged re-import as unchanged.
         camera.sanitize();
         if self.camera != camera {
             self.camera = camera;
@@ -1240,15 +1176,9 @@ impl Scene {
         dataset_order: Vec<DatasetId>,
         mut dataset_settings: HashMap<DatasetId, DatasetDisplaySettings>,
     ) {
-        // Remap each incoming per-dataset settings blob that carries the peer's
-        // label names onto THIS scene's current label order for that dataset
-        // (occurrence-aware), so a peer whose label list differs (reordered, a
-        // label added/removed, or repeated names on a collection) has its
-        // per-label visibility/opacity land on the matching current label rather
-        // than by raw index. A blob with no `label_names` (a peer that predates
-        // the field) stays positional. When the recipient does not yet hold the
-        // dataset's manifest, the blob is left as-is; a later `DatasetOpened`
-        // for that dataset reconciles it against the arriving manifest.
+        // Remap each peer blob onto this scene's label order by name. A blob
+        // without `label_names`, from an older peer, stays positional. Without a
+        // manifest yet, the blob is left as-is and `DatasetOpened` reconciles it.
         for (id, settings) in dataset_settings.iter_mut() {
             if settings.label_names.is_empty() {
                 continue;
@@ -2211,8 +2141,7 @@ pub(crate) mod test_helpers {
 
     /// Like [`make_dataset_opened_with_labels`] but with an explicit per-label
     /// dtype list, so tests can exercise mixed-dtype ordering (e.g. a uint16
-    /// label sorting before a uint32 one), which drives the "first DRAWABLE
-    /// label visible" seeding policy.
+    /// label sorting before a uint32 one).
     pub fn make_dataset_opened_with_label_dtypes(
         id: &str,
         name: &str,
@@ -2430,8 +2359,8 @@ pub(crate) mod test_helpers {
         }
     }
 
-    /// A Single-kind dataset with ONE entity (`owner`, EntityKind::Image) at `position`,
-    /// owning multiple images with DIFFERING pyramid depths — for exercising the
+    /// A Single-kind dataset with one entity (`owner`, EntityKind::Image) at `position`,
+    /// owning multiple images with differing pyramid depths, for exercising the
     /// duplicate-owner delta path. Each `(image_id, num_levels, base_px)` yields an
     /// ImageSpec owned by `owner` whose multiscale has `num_levels` levels (level i is a
     /// square `base_px >> i` on X/Y, single Z/T/C, chunk 256), Uint16, Proxied fetch.
@@ -2966,8 +2895,6 @@ mod tests {
         assert!(scene.chunk_plan_for(&ds_id).is_none());
     }
 
-    // --- the level a chunk plan fetches ---
-
     fn set_slice_zoom(scene: &mut Scene, zoom: f64) {
         if let Camera::Slice(s) = &mut scene.camera {
             s.set_zoom(zoom);
@@ -3455,13 +3382,10 @@ mod tests {
         );
     }
 
-    // --- 3D annotation anchoring ---
-
     #[test]
     fn project_annotation_2d_matches_in_plane_projection() {
-        // In slice mode the pin projection must be byte-for-byte the in-plane
-        // projection the 2D overlay already relied on (depth ignored), so the
-        // existing 2D overlay keeps working unchanged when a pin gains a z.
+        // In slice mode the pin projection is exactly the in-plane projection
+        // the 2D overlay uses; depth is ignored.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -3473,12 +3397,10 @@ mod tests {
 
     #[test]
     fn pick_annotation_voxel_round_trips_through_projection_in_3d() {
-        // The core of the 3D path: a depth pick at a screen point, stored as a
-        // voxel triple, must re-project to (essentially) that same screen point
-        // — i.e. the marker lands under the cursor that dropped it. This proves
-        // the drop math is the inverse of the render math (both reuse the
-        // rendering transform), independent of camera angle. A cubic volume is
-        // used so the viewport-center ray reliably strikes a face.
+        // A depth pick stored as a voxel triple must re-project to the same
+        // screen point, so the marker lands under the cursor that dropped it at
+        // any camera angle. A cubic volume makes the viewport-center ray
+        // reliably strike a face.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1",
@@ -3576,13 +3498,10 @@ mod tests {
 
     #[test]
     fn center_on_voxel_3d_brings_an_off_center_pin_to_the_viewport_center() {
-        // The 3D "jump to a mention" mechanism (issue #526): in arcball mode the
-        // 2D `SetCenter` is a no-op (it only moves the slice camera), so a pin
-        // off-center stays off-center. `CenterOnVoxel3D` must actually MOVE the
-        // 3D projection — proving it, since happy-dom can't see the camera math:
-        // project an off-center pin BEFORE and AFTER the op and assert (a) the
-        // screen point moved, and (b) it lands at the viewport center, mirroring
-        // how the 2D `SetCenter` centers its own camera.
+        // Jumping to a mention in 3D: the 2D `SetCenter` only moves the slice
+        // camera, so `CenterOnVoxel3D` must move the 3D projection itself. The
+        // web tests cannot see the camera math, so this checks the pin moves
+        // and lands at the viewport center.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1",
@@ -3606,8 +3525,8 @@ mod tests {
         let id = DatasetId::from("ds1");
         let center = [400.0, 300.0]; // viewport center in pixels (800x600)
 
-        // A pin near a corner of the volume — deliberately NOT the voxel center —
-        // so its marker starts well away from the viewport center.
+        // A pin near a corner of the volume, so its marker starts well away
+        // from the viewport center.
         let pin = [8.0, 8.0, 8.0];
         let before = scene
             .project_annotation(&id, pin[0], pin[1], pin[2])
@@ -3632,17 +3551,14 @@ mod tests {
             .project_annotation(&id, pin[0], pin[1], pin[2])
             .expect("pin should still project in front of the camera after centering");
 
-        // (a) The op actually moved the 3D projection (the no-op bug would leave
-        // `after == before`).
         let moved = ((after[0] - before[0]).powi(2) + (after[1] - before[1]).powi(2)).sqrt();
         assert!(
             moved > 1.0,
             "CenterOnVoxel3D should move the projection: before {before:?}, after {after:?}",
         );
 
-        // (b) The pin now sits at the viewport center — setting the arcball
-        // target puts the look-at axis through the pin's world point, so it
-        // projects to screen center (the 3D analogue of `SetCenter`).
+        // The arcball target puts the look-at axis through the pin's world
+        // point, so it projects to screen center.
         assert!(
             (after[0] - center[0]).abs() < 1.0 && (after[1] - center[1]).abs() < 1.0,
             "after centering the pin {after:?} should land at the viewport center {center:?}",
@@ -3709,8 +3625,6 @@ mod tests {
         );
     }
 
-    // --- dataset_world_bounds / fit_camera_to_dataset (slice 2) ---
-
     #[test]
     fn dataset_world_bounds_is_some_and_finite_for_known_id() {
         let mut scene = Scene::new([800, 600]);
@@ -3774,8 +3688,8 @@ mod tests {
             b_width > a_width + 1e-9,
             "collection width {b_width} should exceed single-image width {a_width}"
         );
-        // Crucially, "a" must NOT have grown to the union: its max-x stays near
-        // its own footprint, group short of the offset collection's far edge.
+        // "a" must not grow to the union: its max-x stays near its own
+        // footprint, short of the offset collection's far edge.
         assert!(
             a_max[0] < b_max[0] - 1e-9,
             "dataset_world_bounds('a') leaked the union (max-x {} vs collection max-x {})",
@@ -3786,8 +3700,8 @@ mod tests {
 
     #[test]
     fn dataset_world_bounds_matches_member_world_matrix_corners() {
-        // The bounds must be exactly the AABB of the SAME per-member world matrix
-        // the renderer/minimap use — no second, drifting path.
+        // The bounds are exactly the AABB of the per-member world matrix the
+        // renderer and minimap use.
         let mut scene = Scene::new([800, 600]);
         scene.apply(
             DocumentCommand::DatasetOpened(test_helpers::make_collection_dataset_opened(
@@ -3821,11 +3735,9 @@ mod tests {
         assert_eq!(max, expected.max);
     }
 
-    /// `member_world_matrix` is now a thin wrapper over `rendering_transform`
-    /// (the single source — what is actually drawn). Assert it returns the
-    /// forward `model` element-for-element, across a single dataset, an
-    /// XY-offset member, and a multi-dataset scene, so the wrapper can never
-    /// drift from the render path.
+    /// `member_world_matrix` returns `rendering_transform`'s forward `model`
+    /// element for element, for a single dataset, an XY-offset member, and a
+    /// multi-dataset scene, so it cannot drift from the render path.
     #[test]
     fn member_world_matrix_equals_rendering_transform_forward_model() {
         let mut scene = Scene::new([800, 600]);
@@ -3970,14 +3882,10 @@ mod tests {
         scene
     }
 
-    /// The dataset-level model matrix must carry the SAME global correction
-    /// and top-alignment as the render path: for a first member at the layout
-    /// origin it equals `rendering_transform`'s forward model
-    /// element-for-element (the dataset-level matrix omits layout offsets, and
-    /// an origin member has none). Checked for a single-image dataset and a
-    /// collection whose correction is a real 0.5 — so a policy change in
-    /// `rendering_transform`'s placement would be caught here, not silently
-    /// desync the minimap.
+    /// For a first member at the layout origin, the dataset-level model matrix
+    /// equals `rendering_transform`'s forward model, so a placement policy
+    /// change cannot silently desync the minimap. Checked for a single-image
+    /// dataset and a collection whose correction is a real 0.5.
     #[test]
     fn dataset_model_matrix_matches_rendering_transform_for_origin_member() {
         let scene = scene_with_big_and_collection();
@@ -4007,8 +3915,7 @@ mod tests {
         }
 
         // The collection is half the physical size of "big": its correction is a
-        // real 0.5 (halved scales) and it is top-aligned below the taller
-        // dataset's rim — this is NOT an identity or uncorrected transform.
+        // real 0.5 and it is top-aligned below the taller dataset's rim.
         let collection = scene.dataset_model_matrix("collection");
         assert!(
             (collection[0] - 0.5).abs() < 1e-6,
@@ -4092,9 +3999,8 @@ mod tests {
         }
     }
 
-    /// `volume_diagonal` must be the diagonal of the CORRECTED render scale —
-    /// the world-space size the volume is actually drawn at (fly base speed
-    /// and framing are seeded from it), not the uncorrected unit-cube size.
+    /// `volume_diagonal` must be the diagonal of the corrected render scale,
+    /// the size the volume is drawn at, not the uncorrected unit-cube size.
     #[test]
     fn volume_diagonal_is_the_corrected_scale_diagonal() {
         // Alone in the scene, the collection needs no correction: the diagonal is
@@ -4234,11 +4140,9 @@ mod tests {
 
     #[test]
     fn fit_camera_to_dataset_centers_slice_on_voxel_xy_midpoint() {
-        // The Slice camera lives in VOXEL space (see ray_pick), so the 2D fit must
-        // center on the VOXEL midpoint [W/2, H/2] — not the normalized unit-cube
-        // midpoint (~0.5) that dataset_world_bounds yields for the 3D arcball.
-        // Centering on ~0.5 would frame a sub-pixel speck at the origin while the
-        // data sits at voxel [0..W] — the auto-fit bug this slice fixes.
+        // The Slice camera lives in voxel space (see ray_pick), so the 2D fit
+        // centers on the voxel midpoint [W/2, H/2]. The normalized midpoint
+        // (~0.5) would frame a sub-pixel speck at the origin.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1); // 256x256 XY
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -4257,8 +4161,6 @@ mod tests {
                     "2D center {:?} should be the VOXEL XY midpoint ({mid_x}, {mid_y})",
                     s.center
                 );
-                // Sanity: this is the voxel midpoint of a 256x256 footprint, NOT
-                // the normalized ~[0.5, 0.5] the buggy path produced.
                 assert!(
                     (s.center[0] - 128.0).abs() < 1e-9 && (s.center[1] - 128.0).abs() < 1e-9,
                     "2D center {:?} should be [128, 128] (256/2), not normalized ~[0.5, 0.5]",
@@ -4323,13 +4225,10 @@ mod tests {
         );
     }
 
-    // --- dataset_voxel_bounds_2d / mode-aware fit (slice 2) ---
-
     #[test]
     fn dataset_voxel_bounds_2d_is_origin_to_voxel_extent() {
-        // A single image of shape [1,1,Z,H,W] at the default origin placement
-        // must yield voxel bounds [0,0]..[W,H] — exactly the AABB the slice-mode
-        // ray pick / chunk culling test against (X = shape[4], Y = shape[3]).
+        // A single image of shape [1,1,Z,H,W] at the origin yields [0,0]..[W,H],
+        // the AABB the slice-mode ray pick and chunk culling test against.
         let mut scene = Scene::new([800, 600]);
         let (w, h) = (2048u64, 2048u64);
         let reg = test_helpers::make_dataset_opened_with_shape(
@@ -4361,6 +4260,32 @@ mod tests {
     }
 
     #[test]
+    fn dataset_fit_bounds_follows_the_camera_space() {
+        // The box a Home move frames must be the one the viewer's own fit
+        // uses: voxel space for the slice camera, normalized world space for 3D.
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "ds1",
+            "test",
+            1,
+            [1, 1, 16, 1024, 2048],
+            [1, 1, 1, 256, 256],
+            1,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+
+        let (min, max) = scene.dataset_fit_bounds("ds1").expect("slice bounds");
+        assert_eq!((min, max), ([0.0, 0.0, 0.0], [2048.0, 1024.0, 0.0]));
+
+        scene.camera = Camera::new_3d([800, 600]);
+        assert_eq!(
+            scene.dataset_fit_bounds("ds1"),
+            scene.dataset_world_bounds("ds1"),
+        );
+        assert!(scene.dataset_fit_bounds("nope").is_none());
+    }
+
+    #[test]
     fn dataset_voxel_bounds_2d_none_for_unknown_id() {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
@@ -4370,10 +4295,8 @@ mod tests {
 
     #[test]
     fn fit_camera_to_dataset_2d_puts_data_on_screen_in_voxel_space() {
-        // The core fix: in 2D the fit must center on the VOXEL midpoint [W/2, H/2]
-        // (NOT the normalized ~[0.5, 0.5] that the 3D bounds produce) and the
-        // resulting world_bounds() must CONTAIN the full voxel footprint
-        // [0,0,W,H] — i.e. the data is actually visible, not a speck at the origin.
+        // In 2D the fit centers on the voxel midpoint [W/2, H/2] and the
+        // resulting world_bounds() contains the full footprint [0,0,W,H].
         let (vw, vh) = (1280u32, 800u32);
         let (w, h) = (2048u64, 2048u64);
         let mut scene = Scene::new([vw, vh]);
@@ -4400,8 +4323,7 @@ mod tests {
                     w as f64 / 2.0,
                     h as f64 / 2.0,
                 );
-                // world_bounds() = [min_x, min_y, max_x, max_y] must contain the
-                // whole footprint, so the data is on-screen with margin to spare.
+                // world_bounds() is [min_x, min_y, max_x, max_y].
                 let [bx0, by0, bx1, by1] = s.world_bounds();
                 assert!(
                     bx0 <= 0.0 && by0 <= 0.0 && bx1 >= w as f64 && by1 >= h as f64,
@@ -4415,10 +4337,8 @@ mod tests {
 
     #[test]
     fn fit_camera_to_dataset_3d_path_is_unchanged_and_uses_normalized_bounds() {
-        // The 3D dispatch must still frame the NORMALIZED unit-cube bounds via
-        // dataset_world_bounds: the arcball target is the normalized midpoint
-        // (~[0.5, 0.5, ..]) with a positive distance — proving the 3D path was
-        // left intact while only 2D became voxel-aware.
+        // In 3D the fit frames the normalized unit-cube bounds from
+        // dataset_world_bounds, so the arcball target is the normalized midpoint.
         let (vw, vh) = (1280u32, 800u32);
         let mut scene = Scene::new([vw, vh]);
         let reg = test_helpers::make_dataset_opened_with_shape(
@@ -4452,7 +4372,6 @@ mod tests {
                         a.target[axis],
                     );
                 }
-                // Normalized space → the XY midpoint is ~0.5, decidedly not voxel.
                 assert!(
                     a.target[0] < 2.0 && a.target[1] < 2.0,
                     "3D target {:?} should be normalized (~0.5), not voxel (~1024)",
@@ -4475,20 +4394,16 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let baseline = scene.epochs.clone();
 
-        // Unknown id: camera untouched, no bump — the caller can ignore the
-        // failure without side effects.
         assert!(!scene.fit_camera_to_dataset("ghost"));
         assert_eq!(scene.epochs, baseline);
 
-        // Success: exactly one view bump (like pan/zoom/rotate), nothing else.
+        // Success bumps only the view epoch, once.
         assert!(scene.fit_camera_to_dataset("ds1"));
         assert_eq!(scene.epochs.view, baseline.view + 1);
         assert_eq!(scene.epochs.selection, baseline.selection);
         assert_eq!(scene.epochs.content, baseline.content);
         assert_eq!(scene.epochs.layout, baseline.layout);
     }
-
-    // --- load_document ---
 
     #[test]
     fn load_document_restores_state_and_advances_epochs() {
@@ -4513,8 +4428,7 @@ mod tests {
             "derived must be rebuilt"
         );
         assert!(scene.dataset_order.contains(&ds_id));
-        // Settings must be seeded COMPLETE (per-channel entries present), not a
-        // bare Default with an empty channel list.
+        // Settings are seeded with per-channel entries, not a bare Default.
         let settings = scene
             .dataset_settings
             .get(&ds_id)
@@ -4572,8 +4486,6 @@ mod tests {
         assert!(!scene.dataset_settings.contains_key(&stale));
     }
 
-    // --- import_presence / import_dataset_presence ---
-
     #[test]
     fn import_presence_preserves_viewport_and_bumps_iff_changed() {
         let mut scene = Scene::new([800, 600]);
@@ -4622,9 +4534,8 @@ mod tests {
         use crate::camera::{Arcball, SLICE_ZOOM_MIN, Slice};
         use crate::scene::DisplayState;
 
-        // A peer's slice camera with zoom 0.0 is finite, serializes fine, and
-        // — unclamped — would turn the next pan into a 0/0 = NaN center. The
-        // import must clamp it into the range local mutators enforce.
+        // A peer's zoom of 0.0 is finite and serializes fine, but unclamped it
+        // turns the next pan into a 0/0 = NaN center.
         let mut scene = Scene::new([800, 600]);
         let zero_zoom = Camera::Slice(Slice {
             center: [10.0, 20.0],
@@ -4706,10 +4617,9 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         let ds_id = DatasetId("ds1".into());
 
-        // A peer broadcasts settings whose label list is in a DIFFERENT order
-        // (label-2, label-0, label-1), with per-label opacity parallel to that
-        // order. Applied positionally this would land each opacity on the wrong
-        // label; keyed by name it must follow the name.
+        // The peer's label list is in a different order (label-2, label-0,
+        // label-1). Applied positionally each opacity would land on the wrong
+        // label.
         let mut settings = scene.dataset_settings.clone();
         {
             let s = settings.get_mut(&ds_id).unwrap();
@@ -4743,8 +4653,7 @@ mod tests {
 
     #[test]
     fn import_dataset_presence_legacy_blob_stays_positional() {
-        // A peer that predates label-name capture sends no label_names; the
-        // per-label settings must apply index-for-index (back-compat).
+        // An older peer sends no label_names, so settings apply by index.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 3);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -4778,13 +4687,10 @@ mod tests {
         assert_eq!(applied.label_settings[2].opacity, 0.2);
     }
 
-    // --- Indexed-lookup equivalence ---
-    //
-    // The hash indexes below (member_index, LayoutPositionIndex, the
-    // per-dataset extent maxima, the bulk matrix export) exist purely for
-    // speed; each test pins its output to the linear-scan definition it
-    // replaces, on fixtures that include the ambiguous cases (duplicate ids,
-    // unplaced parents, missing transform edges).
+    // The hash indexes (member_index, LayoutPositionIndex, the per-dataset
+    // extent maxima, the bulk matrix export) exist only for speed. Each test
+    // pins one to its linear-scan definition, on fixtures with duplicate ids,
+    // unplaced parents, and missing transform edges.
 
     #[test]
     fn member_by_id_matches_linear_scan_for_both_id_namespaces() {
@@ -4963,8 +4869,6 @@ mod tests {
         assert!(scene.member_render_matrices("missing").is_empty());
     }
 
-    // --- Scaling regressions ---
-    //
     // Wide collections (hundreds of groups × tens of thousands of tiles) make
     // any per-member linear scan quadratic in the member count. Each test
     // times the same operation at 1× and 4× member count and bounds the
@@ -5070,8 +4974,6 @@ mod tests {
              expected near-linear scaling"
         );
     }
-
-    // ---- view_query_diff (pure classifier) ----
 
     fn record(id: &str, visible: bool, lod: u32, kind: EntityKind) -> EntityQueryResult {
         EntityQueryResult {
@@ -5197,11 +5099,9 @@ mod tests {
 
     #[test]
     fn diff_vectors_are_sorted_by_image_id() {
-        // Records are keyed and ordered by `image_id`, not `entity_id`. Build a
-        // fixture where the two orders DIVERGE — entity_id lexical order is the
-        // reverse of image_id lexical order — so the assertions genuinely pin
-        // the `image_id` sort contract and would fail if the sort regressed to
-        // `entity_id`.
+        // Records are keyed and ordered by `image_id`, not `entity_id`. Here
+        // entity_id order is the reverse of image_id order, so sorting by
+        // `entity_id` would fail.
         let rec = |entity_id: &str, image_id: &str, lod: u32| EntityQueryResult {
             entity_id: EntityId(entity_id.to_string()),
             image_id: ImageId(image_id.to_string()),

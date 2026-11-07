@@ -1,0 +1,79 @@
+.lc-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lc-space-4);
+  min-height: var(--lc-control-h);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
+  outline: none;
+  cursor: default;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.lc-switch[data-label-position="hidden"] {
+  display: inline-flex;
+  min-height: var(--lc-target-min);
+}
+
+.lc-switch-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.lc-switch-description {
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+}
+
+/* Sized from the slider thumb, so the two grow together under touch. */
+.lc-switch-track {
+  position: relative;
+  flex: none;
+  box-sizing: border-box;
+  width: calc(2 * var(--lc-thumb-size));
+  height: calc(var(--lc-thumb-size) + 2px);
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-border-strong);
+  transition: background-color var(--lc-motion) var(--lc-ease);
+}
+
+.lc-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: calc(var(--lc-thumb-size) - 2px);
+  height: calc(var(--lc-thumb-size) - 2px);
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-thumb);
+  box-shadow: var(--lc-shadow-1);
+  transition: translate var(--lc-motion) var(--lc-ease);
+}
+
+.lc-switch[data-hovered] .lc-switch-track {
+  background: color-mix(in srgb, var(--lc-border-strong), var(--lc-text) 15%);
+}
+
+.lc-switch[data-selected] .lc-switch-track {
+  background: var(--lc-accent);
+}
+
+.lc-switch[data-selected][data-hovered] .lc-switch-track {
+  background: var(--lc-accent-hover);
+}
+
+.lc-switch[data-selected] .lc-switch-thumb {
+  translate: calc(var(--lc-thumb-size) - 2px) 0;
+}
+
+.lc-switch[data-focus-visible] .lc-switch-track {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 2px;
+}
+
+.lc-switch[data-disabled] {
+  opacity: 0.45;
+}

@@ -1,22 +1,12 @@
-//! Auth subsystem runtime configuration.
+//! Auth subsystem runtime configuration, read from the environment at boot.
 //!
-//! Covers cookie name, the database connection string, idle timeout, hard cap,
-//! the `LUCIDA_AUTH` mode selector with the Google OAuth credentials and the
-//! IAP audience each of those modes needs, the
-//! `LUCIDA_BIND` socket, and the auto-detect-by-bind policy from
-//! ADR-0018: when `LUCIDA_AUTH` is unset, the auth mode is inferred
-//! from whether the bind address is loopback (→ `Disabled`) or public
-//! (→ `Google`), and the dangerous "disabled + non-loopback"
-//! combination requires an explicit `LUCIDA_INSECURE=1` opt-in.
+//! When `LUCIDA_AUTH` is unset, the mode is inferred from the bind address
+//! (ADR-0018): loopback means `Disabled`, anything else means `Google`, and
+//! disabled auth on a non-loopback bind needs an explicit `LUCIDA_INSECURE=1`.
 //!
-//! `from_env_map` is the testable seam: it takes any `Fn(&str) ->
-//! Option<String>` so unit tests can exercise every env-var permutation
-//! without mutating process state. `from_env` is a thin wrapper that
-//! plumbs `std::env::var` into it.
-//!
-//! The `Secure` cookie attribute is decided per-request, not at startup,
-//! so it lives on `CookieConfig` next to the request scheme rather than
-//! being baked in here.
+//! `from_env_map` takes any `Fn(&str) -> Option<String>` so tests can cover
+//! every env permutation without mutating process state. The `Secure` cookie
+//! attribute is decided per request on `CookieConfig`, not here.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -82,7 +72,7 @@ pub const DEFAULT_IAP_ISSUER: &str = "https://cloud.google.com/iap";
 /// whatever hostname the deployment answers on.
 pub const IAP_CLEAR_LOGIN_COOKIE_URL: &str = "/?gcp-iap-mode=CLEAR_LOGIN_COOKIE";
 
-/// Default listen address. ADR-0018: loopback-by-default makes the
+/// Default listen address. Loopback by default makes the
 /// auto-detect-by-bind safety property hold for the zero-config dev
 /// path (`cargo run --bin lucida-server` → localhost-only, auth off).
 /// Production deployments override via `LUCIDA_BIND=0.0.0.0:9876` (or
@@ -159,7 +149,7 @@ impl SecureCookieMode {
 /// Auth backend selector.
 ///
 /// Explicit `Disabled` / `Google` toggle, plus an
-/// auto-detect-by-bind-address policy (ADR-0018): when `LUCIDA_AUTH`
+/// auto-detect-by-bind-address policy: when `LUCIDA_AUTH`
 /// is unset, the mode is inferred from the bind IP (loopback →
 /// `Disabled`, public → `Google`). Explicit `LUCIDA_AUTH` always wins
 /// over the auto-detect.
@@ -338,8 +328,8 @@ pub enum AuthConfigError {
     InvalidBindAddr { value: String, reason: String },
     /// `LUCIDA_AUTH=disabled` on a non-loopback bind requires
     /// `LUCIDA_INSECURE=1` as an explicit acknowledgment that the
-    /// server will be exposed without authentication. ADR-0018: the
-    /// dangerous combination must be impossible to reach by accident.
+    /// server will be exposed without authentication. The dangerous
+    /// combination must be impossible to reach by accident.
     #[error(
         "LUCIDA_AUTH=disabled with non-loopback LUCIDA_BIND={bind} requires LUCIDA_INSECURE=1 \
          (set it to acknowledge that the server will be exposed without authentication)"
@@ -421,13 +411,13 @@ pub struct AuthConfig {
     /// promote/demote is a config-change-and-restart that takes effect
     /// on the next request.
     pub admin_emails: HashSet<String>,
-    /// The socket the server binds (ADR-0018). Default is loopback
+    /// The socket the server binds. Default is loopback
     /// (`127.0.0.1:9876`); production deployments override via
     /// `LUCIDA_BIND`. Ask [`AuthConfig::bind_is_loopback`] rather than
     /// re-deriving the loopback answer from this field.
     pub bind_addr: SocketAddr,
     /// Explicit acknowledgment that the operator is intentionally
-    /// running with auth disabled on a non-loopback bind (ADR-0018).
+    /// running with auth disabled on a non-loopback bind.
     /// Always `false` on the safe paths; `true` only when the operator
     /// set `LUCIDA_INSECURE=1`. Preserved for startup-logging and
     /// audit purposes; the must-be-set validation has already happened
@@ -438,8 +428,8 @@ pub struct AuthConfig {
 impl AuthConfig {
     /// Whether the server is bound to loopback.
     ///
-    /// ADR-0018 decides two things by this answer: the auth-mode
-    /// auto-detect and the `LUCIDA_INSECURE` gate. So does anything
+    /// Two things are decided by this answer: the auth-mode
+    /// auto-detect and the `LUCIDA_INSECURE` gate. So is anything
     /// else that is safe only while nothing but this machine can reach
     /// the server. Boot calls the free function of the same name,
     /// before there is a `Self` to call. Both read `bind_addr`, so
@@ -486,7 +476,7 @@ impl AuthConfig {
         let mode = match nonempty("LUCIDA_AUTH") {
             Some(raw) => AuthMode::parse(&raw)
                 .map_err(|UnknownAuthMode(s)| AuthConfigError::UnknownAuthMode(s))?,
-            // ADR-0018 auto-detect: loopback → safe to default off,
+            // Auto-detect: loopback → safe to default off,
             // public → require Google (fail-fasts below if creds missing).
             None => {
                 if bind_is_loopback {
@@ -867,7 +857,7 @@ mod tests {
 
     #[test]
     fn auth_mode_parses_unknown_value_fails() {
-        // Silent fallthrough was a footgun (ADR-0018). The operator
+        // Silent fallthrough would be a footgun. The operator
         // who typed `microsoft` in their deploy script wants a fail-fast
         // at boot, not a server that quietly disabled auth.
         let err = AuthMode::parse("microsoft").unwrap_err();
@@ -1090,9 +1080,8 @@ mod tests {
         assert!(cfg.admin_emails.is_empty(), "tests start with no admins");
     }
 
-    // -- LUCIDA_BIND + auto-detect (ADR-0018) ---------------------------
-    //
-    // All permutations driven through `from_env_map` so we never touch
+    // LUCIDA_BIND and auto-detect. All permutations go through
+    // `from_env_map` so we never touch
     // process-global env vars: tests can run in parallel without
     // racing on `set_var`/`remove_var`.
 
@@ -1269,8 +1258,8 @@ mod tests {
 
     #[test]
     fn explicit_disabled_non_loopback_without_insecure_fails() {
-        // The dangerous combination. ADR-0018: must be impossible to
-        // reach by accident.
+        // The dangerous combination must be impossible to reach by
+        // accident.
         let err = AuthConfig::from_env_map(reader(&[
             ("LUCIDA_AUTH", "disabled"),
             ("LUCIDA_BIND", "0.0.0.0:9876"),

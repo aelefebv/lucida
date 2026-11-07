@@ -1,0 +1,42 @@
+.lc-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lc-space-1);
+  box-sizing: border-box;
+  height: 18px;
+  padding: 0 var(--lc-space-2);
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-surface-3);
+  color: var(--lc-text-muted);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-xs);
+  font-weight: 500;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.lc-badge[data-tone="accent"] {
+  background: var(--lc-accent-subtle);
+  color: var(--lc-accent-text);
+}
+
+.lc-badge[data-tone="success"] {
+  background: var(--lc-success-subtle);
+  color: var(--lc-success);
+}
+
+.lc-badge[data-tone="warning"] {
+  background: var(--lc-warning-subtle);
+  color: var(--lc-warning);
+}
+
+.lc-badge[data-tone="danger"] {
+  background: var(--lc-danger-subtle);
+  color: var(--lc-danger);
+}
+
+.lc-badge[data-tone="info"] {
+  background: var(--lc-info-subtle);
+  color: var(--lc-info);
+}

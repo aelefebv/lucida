@@ -1,23 +1,10 @@
 //! The inbox's REST surface: what the CLI lists and fetches.
 //!
-//! Two routes, both under a workspace and both read-only. Nothing here
-//! writes: a bundle arrives over the session socket, because that is
-//! where the page already is, and it is read over HTTP, because that is
-//! where the CLI already is. Neither half is a second way to do the
-//! other's job.
-//!
-//! The routes live in this module rather than in `workspace/http.rs`
-//! for the reason the bookmark routes do: the store behind them is this
-//! feature's, and the only thing it needs from the workspace layer is
-//! the membership check, which it makes through the manager like any
-//! other caller. `main.rs` merges this router into the protected half,
-//! so every handler sees an `AuthPrincipal` in extensions.
-//!
-//! **Members only, all of them.** A viewer can read the inbox and a
-//! viewer can send to it. Somebody who can see the workspace can see
-//! what went wrong in it, and needing edit rights to report a problem
-//! would put the field report behind the very permission the reporter
-//! is least likely to hold.
+//! Two read-only routes under a workspace. A bundle arrives over the
+//! session socket and is read over HTTP, because that is where the page
+//! and the CLI already are. Any member, viewers included, can read and
+//! send: needing edit rights to report a problem would gate the report
+//! behind the permission the reporter is least likely to hold.
 
 use std::sync::Arc;
 

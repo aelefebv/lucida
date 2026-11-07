@@ -16,6 +16,7 @@ use tower_http::cors::CorsLayer;
 use lucida_server::admin::{self, admin_clear_proxy_cache};
 use lucida_server::auth;
 use lucida_server::bookmarks;
+use lucida_server::deployment_theme::{self, DeploymentTheme};
 use lucida_server::health;
 use lucida_server::inbox;
 use lucida_server::session::Session;
@@ -165,8 +166,7 @@ async fn main() -> std::io::Result<()> {
             tracing_subscriber::fmt()
                 .with_env_filter(env_filter)
                 // Emit a span-close event with elapsed time for every
-                // #[tracing::instrument]-wrapped function. See
-                // wiki/decisions/0012-logging-conventions.
+                // #[tracing::instrument]-wrapped function.
                 .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
                 .init();
         }
@@ -220,7 +220,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         generated_disk_budget_bytes: args.generated_coarse_disk_budget_bytes,
     };
     // Operational logs go through the configured tracing subscriber
-    // so RUST_LOG filtering applies (ADR 0012).
+    // so RUST_LOG filtering applies.
     tracing::info!(
         cache_dir = %proxy_config.cache_dir.display(),
         concurrency = proxy_config.concurrency,
@@ -278,6 +278,21 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             return Err(std::io::Error::other(e.to_string()));
         }
     };
+    let deployment_theme = match DeploymentTheme::from_env() {
+        Ok(theme) => theme,
+        Err(e) => {
+            tracing::error!(error = %e, "theme.startup.config_error");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    };
+    if let Some(theme) = deployment_theme.as_ref() {
+        tracing::info!(
+            file = %std::env::var(deployment_theme::FILE_VAR).unwrap_or_default().trim(),
+            dark_tokens = theme.tokens.dark.len(),
+            light_tokens = theme.tokens.light.len(),
+            "theme.configured",
+        );
+    }
     // Operator-facing startup line: mode + bind together so a glance
     // at the boot log answers "is this server reachable, and is it
     // protected?" Per ADR-0018 both signals should be visible together.
@@ -301,7 +316,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     );
     // Audit signal: explicit acknowledgment that we're running with
     // auth disabled on a non-loopback bind. This combination should
-    // raise eyebrows in code review (ADR-0018 §"Consequences"); the
+    // raise eyebrows in code review; the
     // banner is multi-line on purpose so it survives log truncation
     // and stands out in `journalctl` / k8s logs.
     if auth_config.insecure_acknowledged {
@@ -382,7 +397,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
 
     // Two auth-route flavors so the OAuth flow doesn't bounce itself:
     //   * `authed_router` — `/auth/whoami` and `/auth/logout`. These
-    //     read the principal/cookie, so they MUST run through the auth
+    //     read the principal/cookie, so they must run through the auth
     //     middleware (whoami specifically returns 401 when missing).
     //   * `public_router` — `/auth/start` and `/auth/callback`. These
     //     mint sessions and must NOT be wrapped — otherwise an unauthed
@@ -507,13 +522,8 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
                 get(auth::handlers::auth_callback).with_state(oauth_state),
             );
     }
-    // Liveness/readiness probes mounted on the public router half so
-    // the kubelet (which presents no session cookie) can hit them
-    // without being 401'd. Always-200 today; the split between
-    // `/healthz` and `/readyz` exists so future drain-on-shutdown can
-    // flip readiness to 503 while liveness stays 200, letting the LB
-    // stop routing without the kubelet restarting the pod mid-drain.
-    // See `lucida-server/src/health.rs`.
+    // Liveness and readiness probes go on the public router half, because
+    // the kubelet presents no session cookie. See `health.rs`.
     public_auth_router = public_auth_router.merge(health::router());
     // Public half, for the same reason as the probes: an external
     // monitor presents no session. The startup line is the one place the
@@ -529,16 +539,15 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     }
     public_auth_router =
         public_auth_router.merge(status::router(status_config, Arc::clone(&storage)));
+    // Public because the sign-in screen is themed before anyone has a
+    // session. It answers whether or not a theme is configured.
+    public_auth_router =
+        public_auth_router.merge(deployment_theme::router(deployment_theme.as_ref()));
 
-    // ADR-0020: serve the SPA bundle from `LUCIDA_WEB_DIST` (default
-    // `./lucida-web/dist`) via `tower-http::ServeDir`. Lands on the
-    // public router half so HTML/JS/CSS aren't 401'd by the auth
-    // middleware — auth gates remain on `/auth/whoami` polling and
-    // `/api/*` calls. Merged LAST below so route-specific handlers
-    // (`/auth/*`, `/api/*`, `/admin/*`, `/ws`) take precedence and the
-    // SPA fallback only fires for truly unknown paths. The dist
-    // directory is re-stat'd on every request, so a dev who builds the
-    // SPA mid-session sees fresh content without restarting the server.
+    // Serve the SPA bundle from `LUCIDA_WEB_DIST` (default
+    // `./lucida-web/dist`) on the public router half (ADR-0020). Merged
+    // last so `/auth/*`, `/api/*`, `/admin/*`, and `/ws` take precedence
+    // and the SPA fallback only fires for unknown paths.
     let web_dist = PathBuf::from(
         std::env::var("LUCIDA_WEB_DIST").unwrap_or_else(|_| "./lucida-web/dist".to_string()),
     );
@@ -546,17 +555,11 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         web_dist = %web_dist.display(),
         "static_serve.config",
     );
-    let static_serve_router = static_serve::router(web_dist);
+    let static_serve_router = static_serve::router(web_dist, deployment_theme.as_ref());
 
     // App routes carry the auth middleware; public auth routes don't.
-    //
-    // ADR-0020: `/` no longer routes to the WebSocket handler — it now
-    // falls through to the SPA `static_serve` fallback below so a browser
-    // hitting `:9876` directly sees the app instead of a 401 / unauth
-    // landing. WebSocket clients use `/ws` (already the canonical path
-    // used by `lucida-web/src/bridge.ts`); `lucida-cli` callers that
-    // relied on the legacy `ws://localhost:9876` default URL must now
-    // pass `--server ws://localhost:9876/ws` explicitly.
+    // `/` falls through to the SPA so a browser hitting `:9876` sees the
+    // app. WebSocket clients use `/ws`.
     let app_state_router = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/browse", get(browse::browse_handler))
@@ -573,8 +576,8 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
 
     let app = app_state_router
         .merge(public_auth_router)
-        // ADR-0020: SPA static-serve catch-all. Merged last so the
-        // fallback only fires for paths no other route claimed.
+        // SPA catch-all. Merged last so the fallback only fires for paths
+        // no other route claimed.
         .merge(static_serve_router)
         .layer(CorsLayer::permissive());
 
@@ -597,7 +600,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         "auth.cleanup.spawned",
     );
 
-    // ADR-0018: LUCIDA_BIND defaults to 127.0.0.1:9876 (loopback) so
+    // LUCIDA_BIND defaults to 127.0.0.1:9876 (loopback) so
     // `cargo run --bin lucida-server` is friction-free for local dev.
     // Set LUCIDA_BIND=0.0.0.0:9876 (or a deployment-specific interface)
     // to expose on all interfaces; production deployments must do so

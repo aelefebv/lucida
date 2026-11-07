@@ -1,0 +1,35 @@
+.lc-webgpu-unavailable {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--lc-space-2);
+  max-width: 420px;
+  padding: var(--lc-space-6) var(--lc-space-7);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  background: var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text-muted);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.45;
+  text-align: center;
+}
+
+.lc-webgpu-unavailable p {
+  margin: 0;
+}
+
+.lc-webgpu-unavailable-title {
+  color: var(--lc-text);
+  font-size: var(--lc-text-lg);
+  font-weight: 600;
+}
+
+.lc-webgpu-unavailable .lc-webgpu-unavailable-hint {
+  margin-bottom: var(--lc-space-2);
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+}

@@ -35,6 +35,12 @@ export interface MinimapOverlayData {
     depth: number;
   }[];
   mode: "slice" | "volume";
+  /**
+   * The minimap camera looks straight down Z because every framed member has
+   * one Z plane. The orientation cube, axis arrows, and slice planes then have
+   * nothing to show, so they are not drawn.
+   */
+  topDown: boolean;
   theta: number;
   phi: number;
   canvasW: number;
@@ -43,11 +49,10 @@ export interface MinimapOverlayData {
   datasetDims: Map<string, { width: number; height: number; depth: number }>;
   mainInvViewProj: Float32Array | null;
   /**
-   * True when the camera- and geometry-derived (Z-invariant) overlay layer —
-   * member bounding boxes, axis arrows, the volume frustum — changed since the
-   * last overlay callback and must be re-stroked. False on a pure Z-scrub: the
-   * consumer reuses the cached static layer and re-strokes only the cheap
-   * Z-dependent indicators (slice plane + viewport rect), skipping the O(N)
+   * True when the Z-invariant overlay layer (member bounding boxes, axis
+   * arrows, the volume frustum) changed since the last overlay callback.
+   * False on a pure Z-scrub, where the consumer reuses the cached layer and
+   * re-strokes only the slice plane and viewport rect, skipping the O(N)
    * bounding-box redraw each Z step.
    */
   staticDirty: boolean;
@@ -60,18 +65,13 @@ export const RESIDENCY_RENDER_INTERVAL_MS = 33;
 export const MINIMAP_UPLOAD_BUDGET_BYTES = 2 * 1024 * 1024; // 2 MB per frame
 
 /**
- * Minimum wall-clock gap between minimap overview seed-scans. The scan polls the
- * CPU cache for every not-yet-seeded member's coarse-chunk grid, which is
- * O(members × chunks) per frame — the dominant per-move CPU cost on large
- * collections, because the members stay unseeded during interaction (the fetch
- * scheduler prioritizes visible tiles over the minimap's bulk seed lane). Seeding
- * is background/cosmetic-latency, so it is capped to this cadence rather than run
- * every rAF; a fully-seeded member is skipped by the per-member gate regardless.
+ * Minimum gap between minimap overview seed-scans. The scan polls the CPU cache
+ * for every unseeded member's coarse-chunk grid, O(members × chunks) per frame.
+ * That dominates per-move CPU on large collections, since members stay
+ * unseeded while visible tiles take fetch priority. Seeding is cosmetic
+ * latency, so it runs at this cadence rather than every rAF.
  */
 export const MINIMAP_OVERVIEW_SCAN_INTERVAL_MS = 100;
-
-// `MAIN_VIEW_UPLOAD_BUDGET_BYTES` lives in `pipeline/upload/constants.ts`
-// because it's an upload-phase constant, not a render-loop one.
 
 /** Shared dependency bag passed to all tick functions. */
 export interface TickContext {
@@ -80,7 +80,14 @@ export interface TickContext {
   client: RenderClient;
   canvas: HTMLCanvasElement;
   mode: "slice" | "volume";
+  /** The volume path's interaction scale: lower while the camera moves. */
   renderScale: number;
+  /**
+   * The share of device pixels the render target gets in both modes: the
+   * pixel-ratio cap times the adaptive resolution (ADR 0068). Planning and
+   * the camera keep the full device-pixel viewport.
+   */
+  resolutionScale: number;
   cpuCache: CpuCache;
   sendViewerInterest?: (interest: unknown) => void;
   /**

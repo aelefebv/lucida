@@ -1,21 +1,10 @@
-//! REST handlers under `/api/bookmarks`.
+//! REST handlers under `/api/bookmarks`, on the protected router half. A
+//! handler that runs without an `AuthPrincipal` is a wiring bug, so it
+//! logs `bookmarks.no_principal_in_extensions` and returns 500, not 401.
 //!
-//! Mounted on the protected (post-auth-middleware) router half so every
-//! handler can rely on an `AuthPrincipal` being attached to request
-//! extensions. A handler that runs without one is a wiring bug — we
-//! emit `bookmarks.no_principal_in_extensions` and 500 to surface it
-//! rather than silently 401'ing on a missing extension.
-//!
-//! Permission boundary (ADR-0015):
-//!
-//! - GET (single + list) — every authenticated principal can read every
-//!   bookmark. Cross-user discovery is the headline feature; "Mine only"
-//!   filtering is a client-side sidebar concern, not a server-side gate.
-//! - POST — server overwrites `created_by` / `created_by_name` from the
-//!   principal. The body type [`CreateRequest`] doesn't even surface
-//!   those fields, so a misbehaving client can't spoof them.
-//! - PATCH / DELETE — gated on
-//!   `bookmark.created_by == principal.email || principal.is_admin`.
+//! Every principal can read every bookmark (ADR-0015). POST takes
+//! `created_by` from the principal, and [`CreateRequest`] has no field to
+//! spoof it with. PATCH and DELETE need the creator or an admin.
 
 use std::sync::Arc;
 
@@ -106,7 +95,7 @@ pub struct PatchRequest {
     pub name: String,
 }
 
-/// What goes back on the wire. Mirrors `Bookmark` exactly today; the
+/// What goes back on the wire. Mirrors `Bookmark` field for field; the
 /// separate type exists so we can evolve serialization (e.g., omitting
 /// large blobs from list responses) without leaking the storage shape.
 ///

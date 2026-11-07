@@ -1,27 +1,10 @@
-//! Stable, content-derived DatasetId behavior.
+//! Stable, content-derived DatasetId behavior: the id for a URL is the same
+//! across restarts and repeated opens, distinct URLs get distinct ids, and
+//! a second open finds and reuses the existing `ServerBinding`.
 //!
-//! The DatasetId for a given URL must be stable across server restarts
-//! and across multiple `OpenRemoteDataset` commands, and a second open
-//! of the same URL must reuse the existing `ServerBinding` rather than
-//! re-importing.
-//!
-//! These are integration tests against the public surface of
-//! `lucida_server`. They cover:
-//!
-//!   1. Stability: two computations of the ID for URL `X` agree, even
-//!      across freshly-constructed `Session`s (the server-restart proxy).
-//!   2. Distinctness: distinct URLs yield distinct IDs.
-//!   3. Reuse: when a `ServerBinding` for URL `X` is already present, a
-//!      lookup at `dataset_id_for_url("X")` finds it (i.e. the second
-//!      open would short-circuit and reuse the cached state, rather than
-//!      re-importing). We assert on observable binding state
-//!      (`source_url`, `dataset_opened`, and the `Arc<CachedStore>`
-//!      pointer identity) to confirm the same binding is reused.
-//!
-//! Running an actual end-to-end `handle_open_remote_dataset` requires a
-//! WebSocket client and a populated Zarr store, so we instead exercise
-//! the underlying invariants the handler relies on: a pure ID function
-//! and `Session::server_bindings.contains_key` keyed by that ID.
+//! A real `handle_open_remote_dataset` needs a WebSocket client and a Zarr
+//! store, so these test the invariants it relies on: a pure id function and
+//! `Session::server_bindings` keyed by it.
 
 use std::sync::Arc;
 
@@ -56,18 +39,11 @@ fn id_is_stable_across_repeat_invocations() {
 
 #[test]
 fn id_is_stable_across_windows_spelling_variants() {
-    // ADR-0042: a single Windows file has many legal spellings
-    // (`C:\foo`, `c:/foo`, `file:///C:/foo`). The server normalizes
-    // every incoming URL via `normalize_dataset_url` before deriving
-    // the `DatasetId`, so all spellings dedup to the same id — which
-    // is what makes the `handle_open_remote_dataset` short-circuit
-    // re-bind the existing dataset on second open instead of
-    // re-importing the (multi-GB) backing store.
-    //
-    // This test mirrors the handler's normalize-then-hash pipeline at
-    // the same boundary the handler does (after the URL is in hand,
-    // before `dataset_id_for_url`). Each group is a set of equivalent
-    // spellings; every spelling in the group must produce the same id.
+    // A single Windows file has many legal spellings (`C:\foo`, `c:/foo`,
+    // `file:///C:/foo`). The server normalizes every URL before deriving
+    // the `DatasetId` (ADR-0042), so all spellings dedup to one id and a
+    // second open re-binds instead of re-importing. Each group below is a
+    // set of equivalent spellings that must produce the same id.
     let groups: Vec<Vec<&str>> = vec![
         vec![
             "C:\\foo",

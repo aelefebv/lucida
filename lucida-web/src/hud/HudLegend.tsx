@@ -1,10 +1,9 @@
 /**
  * The HUD legend: the overlay toggles, in every build.
  *
- * The overlays are product surfaces (ADR 0052 as amended), so the toggles
- * that used to sit in the dev-gated Dev controls panel live here, with no
- * editable gate. They write through the same registry and the same browser
- * storage key as before, so a setting made before the move survives it.
+ * The overlays are product surfaces (ADR 0052), so the toggles have no
+ * editable gate. They keep the Dev controls panel's storage key, so existing
+ * settings carry over.
  *
  * The churn toggle states its window beside its name, because a fetch count
  * without a denominator is not a measurement: the tint counts fetches over

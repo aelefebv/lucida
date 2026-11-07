@@ -51,9 +51,8 @@ export class ChunkStore {
   private readonly recordEviction: (tier: EvictionRecordTier, entry: CacheEntry) => void;
   /**
    * Resident chunks per pyramid level, maintained incrementally because the
-   * trace samples it every tick. Counting it by walking the store would be
-   * O(resident chunks) per tick — tens of thousands on a wide collection —
-   * which is exactly the cost that made the old debug stats opt-in.
+   * trace samples it every tick. Walking the store would cost O(resident
+   * chunks) per tick, tens of thousands on a wide collection.
    */
   private readonly levelCounts: number[] = [];
   private readonly onEvictionBurst?: (info: EvictionBurstInfo) => void;

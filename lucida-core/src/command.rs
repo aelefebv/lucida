@@ -19,19 +19,13 @@ pub enum DocumentCommand {
     RemoveDataset {
         id: DatasetId,
     },
-    /// Rename a dataset's display label by `id`. Overwrites
-    /// `manifests[id].name` in the shared document — the single source of
-    /// truth the viewer reads (`scene.dataset_name(id)` →
-    /// `document.manifests[id].name`). Because it is an ordinary document
-    /// command, it sequences, broadcasts to co-present peers, and persists
-    /// through `document_json` exactly like every other live edit, so the
-    /// new name survives reopen for free. No-op if `id` is unknown (a
-    /// rename of a dataset that has since been removed is harmless). Does
-    /// not touch the dataset's source URL or any saved view (saved views
-    /// reference dataset ids, not names). Bumps `epochs.content` — the
-    /// layer label is content state, mirroring `RemoveDataset`. The server
-    /// authorizes it editor-only and keeps the DB `display_name` in sync;
-    /// see `lucida-server`'s `WorkspaceManager::rename_dataset`.
+    /// Rename a dataset's display label by `id`, overwriting
+    /// `manifests[id].name`, which the viewer reads. As an ordinary document
+    /// command it sequences, broadcasts, and persists, so the name survives
+    /// reopen. An unknown `id` is a no-op. Saved views reference ids, not
+    /// names, so they are untouched. Bumps `epochs.content`. The server
+    /// authorizes it editor-only and keeps the DB `display_name` in sync (see
+    /// `lucida-server`'s `WorkspaceManager::rename_dataset`).
     RenameDataset {
         id: DatasetId,
         name: String,
@@ -50,64 +44,33 @@ pub enum DocumentCommand {
         dataset_id: DatasetId,
         delta: AssetCatalogDelta,
     },
-    /// Drop a collaborative annotation (point pin) onto `dataset_id` at an
-    /// in-plane world-space `position` and additive depth `z` (the pin's world
-    /// point is `(position[0], position[1], z)`). The `id` is client-supplied
-    /// (a uuid string) so this command and its rebroadcast are byte-identical
-    /// and apply identically on every peer. Idempotent on a repeated `id` (last
-    /// write wins). Bumps `epochs.annotation`.
+    /// Drop a collaborative annotation onto `dataset_id` at in-plane world
+    /// `position` and depth `z`. The `id` is client-supplied (a uuid string) so
+    /// this command and its rebroadcast are byte-identical and apply
+    /// identically on every peer. Last write wins on a repeated `id`. Bumps
+    /// `epochs.annotation`.
     ///
-    /// `z` is `#[serde(default)]` so this stays wire-compatible with slices
-    /// 1/2: an `add_annotation` command with no `z` field (an older client, or
-    /// a replayed older log entry) applies with `z = 0.0` rather than failing
-    /// to parse. There is no `[2] -> [3]` break — `position` is unchanged.
+    /// - `end`: the second in-plane vertex, a line's far endpoint or a box's
+    ///   opposite corner. Omitted for a `Point`. Both vertices share `z`.
+    /// - `t`, `c`: the view's timepoint and channel at creation. The pin
+    ///   belongs to them, and the overlay shows it off-context elsewhere.
+    /// - `view`: the author's [`SavedView`] at creation, in
+    ///   workspace-dataset-id form so no source URL reaches the document wire.
     ///
-    /// `end` is the **second** in-plane vertex — a line's far endpoint or a
-    /// box's opposite corner (for a `Point`, omit it / send `null`). Like `z`
-    /// and `kind`, it is `#[serde(default)]`, so a slice-1..4 `add_annotation`
-    /// (no `end` field) applies as `end: None`, i.e. a plain point — additive,
-    /// no wire break. The shared depth `z` applies to both vertices.
+    /// Every field but `dataset_id`, `id`, `position`, and `author` is
+    /// `#[serde(default)]`, so older clients and replayed log entries still
+    /// parse.
     ///
-    /// `t` (timepoint) and `c` (channel) record the **current view's** discrete
-    /// T/C selectors at creation, so a pin belongs to the slice/timepoint/channel
-    /// it was dropped on (issue #779) and the overlay can show it off-context when
-    /// the view differs. Both are `#[serde(default)]`, mirroring `z`/`end`/`kind`,
-    /// so an `add_annotation` from a client that predates this slice (or a
-    /// replayed older log entry) applies with `t = 0, c = 0` rather than failing
-    /// to parse — additive, no wire break.
+    /// A command with a view also rebroadcasts byte-identically through the
+    /// server's `from_str` → `to_string` round-trip, because [`SavedView`]'s
+    /// per-dataset maps are `IndexMap`, not `HashMap` with its randomized
+    /// order. Locked by
+    /// `protocol::tests::add_annotation_with_multi_dataset_view_rebroadcasts_byte_identical`.
     ///
-    /// `view` is the author's **full view at creation** — a [`SavedView`] capture
-    /// (camera + slice/timepoint/channel + per-dataset display) carried through to
-    /// the created annotation so a later slice can restore it on navigation. It is
-    /// captured in workspace-dataset-id form (empty `datasets`, no source URLs) so
-    /// it never leaks dataset URLs onto the document wire. Like `z`/`end`/`kind`,
-    /// it is `#[serde(default, skip_serializing_if = "Option::is_none")]`: an
-    /// `add_annotation` from a client that predates this slice (or a replayed older
-    /// log entry) applies with `view = None`, and a command WITHOUT a view
-    /// serializes byte-identically (the key is omitted) — additive, no wire break.
-    ///
-    /// A command WITH a view also rebroadcasts **byte-identically**: the server
-    /// rebroadcasts by `serde_json::from_str` → `to_string` (lucida-server's
-    /// `handler`), and that round-trip reproduces the inbound bytes exactly,
-    /// preserving the locked "inbound command and its rebroadcast are
-    /// byte-identical" invariant even for a multi-dataset embedded view. This
-    /// holds because [`SavedView`]'s per-dataset maps are `IndexMap` (NOT
-    /// `std::collections::HashMap`, whose `serde_json` order is
-    /// per-process-randomized): `IndexMap` preserves insertion/parse order, so
-    /// deserialize→serialize round-trips key order verbatim. (`SavedView: PartialEq`
-    /// additionally makes the round-trip equality-preserving for the stored pin.)
-    /// Regression-locked by
-    /// `protocol::tests::add_annotation_with_multi_dataset_view_rebroadcasts_byte_identical`
-    /// and the `saved_view` determinism tests.
-    ///
-    /// The view is **boxed** (`Option<Box<SavedView>>`): a `SavedView` is large
-    /// (camera + per-dataset display maps), so inlining it would bloat every
-    /// `DocumentCommand` (and the `ClientMessage`/`ServerMessage` that wrap it) —
-    /// `clippy`'s `large_enum_variant`. Boxing keeps the common command small and
-    /// only pays a heap allocation on the cold path where a view is actually
-    /// captured. `Box` is serde-transparent, so the wire form is unchanged, and
-    /// the stored [`crate::scene::Annotation::view`] stays an unboxed
-    /// `Option<SavedView>` (the hot read path) — `apply` unboxes via `.map(|b| *b)`.
+    /// The view is boxed because a `SavedView` is large and would bloat every
+    /// `DocumentCommand` (clippy's `large_enum_variant`). `Box` is
+    /// serde-transparent, and the stored [`crate::scene::Annotation::view`]
+    /// stays unboxed.
     AddAnnotation {
         dataset_id: DatasetId,
         id: String,
@@ -134,11 +97,9 @@ pub enum DocumentCommand {
     },
     /// Attach a text comment to the pin `annotation_id` under `dataset_id`,
     /// forming a flat discussion thread. The comment `id` is client-supplied
-    /// (a uuid string) so this command and its rebroadcast are byte-identical
-    /// and apply identically on every peer. Idempotent on a repeated comment
-    /// `id` (last write wins on `text`/`author`). A `add_comment` to a missing
-    /// annotation or dataset is a clean no-op — it must not mint a phantom pin.
-    /// Bumps `epochs.annotation` (the pin's thread is part of annotation state).
+    /// (a uuid string) so this command and its rebroadcast are byte-identical.
+    /// Last write wins on a repeated comment `id`. A missing pin or dataset is
+    /// a no-op that never mints a phantom pin. Bumps `epochs.annotation`.
     AddComment {
         dataset_id: DatasetId,
         annotation_id: String,
@@ -154,35 +115,25 @@ pub enum DocumentCommand {
         annotation_id: String,
         id: String,
     },
-    /// Reposition an existing pin: find the annotation by `id` within
-    /// `dataset_id` and overwrite its in-plane `position` and depth `z`. A
-    /// **no-op** if the pin or dataset is absent — this command must NOT mint a
-    /// pin (that is `AddAnnotation`'s job), so a stray move for an unknown id
-    /// leaves the document untouched. Every other field (author, kind, and the
-    /// pin's comment thread) is preserved. Idempotent: re-applying the same move
-    /// is equivalent to applying it once, so a replayed/twice-delivered command
-    /// keeps every peer convergent. Bumps `epochs.annotation`.
+    /// Reposition an existing pin by `id` within `dataset_id`. A missing pin
+    /// or dataset is a no-op; only `AddAnnotation` mints pins. Author, kind,
+    /// and the comment thread are preserved. Re-applying the same move is
+    /// idempotent, so a replayed command keeps every peer convergent. Bumps
+    /// `epochs.annotation`.
     ///
-    /// `z` is `#[serde(default)]`, mirroring [`Self::AddAnnotation`], so a move
-    /// emitted by a depth-unaware client (or a replayed older log entry) applies
-    /// with `z = 0.0` rather than failing to parse.
+    /// `end` picks the move:
     ///
-    /// `end` is the optional second in-plane vertex (a box's opposite corner /
-    /// a line's far endpoint). It distinguishes the two move shapes:
-    /// - `end: None` (the slice #776 default) → **rigid whole-shape translate**:
-    ///   the anchor goes to `position`/`z` and any second vertex rides along by
-    ///   the same in-plane delta, so a box/line keeps its size, length, and
-    ///   angle (see [`crate::scene::Annotation::set_position`]).
-    /// - `end: Some([x, y])` → **reshape**: `position`, `end`, and `z` are set
-    ///   to exactly the given values — the two opposite corners are placed
-    ///   independently, no rigid translate (see
-    ///   [`crate::scene::Annotation::set_vertices`]). This is how a corner/edge
-    ///   resize lands: the handle recomputes the two opposite corners and sends
-    ///   both. A `Point` has no second vertex and ignores `end`.
+    /// - `end: None`: whole-shape move. The anchor goes to `position`/`z` and
+    ///   any second vertex moves by the same delta, so a box or line keeps its
+    ///   size, length, and angle (see
+    ///   [`crate::scene::Annotation::set_position`]).
+    /// - `end: Some([x, y])`: reshape. `position`, `end`, and `z` are set
+    ///   exactly, which is how a corner or edge resize lands (see
+    ///   [`crate::scene::Annotation::set_vertices`]). A `Point` ignores `end`.
     ///
-    /// `#[serde(default)]` keeps this additive — an existing `move_annotation`
-    /// with no `end` field (a slice-#776 client, or a replayed older log entry)
-    /// parses as `end: None`, i.e. the rigid translate. No wire break.
+    /// `z` and `end` are `#[serde(default)]`, so a move from a client that
+    /// sends neither, or a replayed log entry, parses as a whole-shape move at
+    /// `z = 0.0`.
     MoveAnnotation {
         dataset_id: DatasetId,
         id: String,
@@ -192,12 +143,9 @@ pub enum DocumentCommand {
         #[serde(default)]
         z: f64,
     },
-    /// Edit an existing comment's text: find the comment by `id` within the pin
-    /// `annotation_id` under `dataset_id` and overwrite its `text`. A **no-op**
-    /// if the dataset, pin, or comment id is unknown — this command must NOT mint
-    /// a comment (that is `AddComment`'s job). The comment's `id` and `author`
-    /// are preserved, as is its position in the thread. Idempotent: re-applying
-    /// the same edit is a no-op-equivalent. Bumps `epochs.annotation`.
+    /// Overwrite the `text` of comment `id` on the pin `annotation_id` under
+    /// `dataset_id`. An unknown dataset, pin, or comment is a no-op; only
+    /// `AddComment` mints comments. Idempotent. Bumps `epochs.annotation`.
     EditComment {
         dataset_id: DatasetId,
         annotation_id: String,
@@ -253,17 +201,12 @@ pub enum ViewportCommand {
         dx: f64,
         dy: f64,
     },
-    /// Recenter the 3D arcball camera on an annotation's voxel point so the pin
-    /// comes into view (issue #526, "jump to a mention" in 3D). The 2D
-    /// `SetCenter` only moves the slice camera, so it is a no-op in arcball/fly
-    /// mode; this variant moves the camera the 3D view actually uses. The voxel
-    /// point `(x, y, z)` (in-plane voxel + voxel depth, the same frame a pin's
-    /// `position`/`z` are stored in) is lifted to arcball-WORLD space via the
-    /// dataset's rendering transform — the exact lift `project_annotation` uses
-    /// to draw the marker — and assigned to the arcball `target`, so projecting
-    /// that same world point lands at the viewport center. A purely ephemeral
-    /// camera op (like the other 3D variants): NOT a document mutation, never
-    /// persisted or broadcast as a doc command.
+    /// Recenter the 3D arcball camera on a pin's voxel point, for jumping to a
+    /// mention in 3D. The 2D `SetCenter` only moves the slice camera. The point
+    /// `(x, y, z)`, in the frame a pin's `position`/`z` use, is lifted to
+    /// arcball world space by the same transform `project_annotation` draws
+    /// with and becomes the arcball `target`, so it lands at the viewport
+    /// center. An ephemeral camera op, never persisted or broadcast.
     #[serde(rename = "arcball_center_on_voxel")]
     CenterOnVoxel3D {
         dataset_id: String,
@@ -372,12 +315,10 @@ pub enum ViewportCommand {
         channel: u32,
         colormap: Colormap,
     },
-    /// Set (or clear) a user display-name override for a single channel. A
-    /// local-only per-channel display setting, exactly like
-    /// [`Self::SetChannelColormap`]: applied locally, emitted as a presence
-    /// update, persisted in saved views, and broadcast to followers via the
-    /// selection epoch. `name: None` clears the override, falling the UI back
-    /// to the manifest's omero label and then `Ch {channel}`.
+    /// Set or clear a display-name override for a single channel. Local-only
+    /// like [`Self::SetChannelColormap`]: it rides presence and saved views.
+    /// `name: None` falls the UI back to the manifest's omero label, then
+    /// `Ch {channel}`.
     SetChannelName {
         dataset_id: String,
         channel: u32,
@@ -399,10 +340,8 @@ pub enum ViewportCommand {
         blend_mode: BlendMode,
     },
     // Per-label overlay controls. `label` indexes the dataset's attached labels
-    // in manifest (OME `labels`) order. Both are local-only per-client display
-    // ops (exactly like the per-channel commands): applied locally, emitted as
-    // presence, persisted in saved views, and broadcast to followers via the
-    // selection epoch. Neither ever reframes the camera.
+    // in manifest (OME `labels`) order. Local-only like the per-channel
+    // commands, and neither reframes the camera.
     SetLabelVisible {
         dataset_id: String,
         label: u32,
@@ -415,8 +354,8 @@ pub enum ViewportCommand {
     },
 }
 
-/// Wrapper enum for serde compatibility. Deserializes from the same
-/// JSON format as before (e.g. `{"type":"pan","dx":10.0,"dy":-5.0}`).
+/// Untagged wrapper, so either kind parses from its flat tagged JSON
+/// (e.g. `{"type":"pan","dx":10.0,"dy":-5.0}`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 // Command is dispatched per UI interaction (keypress, mouse, presence event);
@@ -442,14 +381,11 @@ impl From<ViewportCommand> for Command {
 
 /// The slice of scene state a [`ViewportCommand`] is allowed to mutate.
 ///
-/// `Scene::apply` snapshots ONLY the classified slice before mutating and
-/// diffs it after to decide the epoch bump, so a per-animation-frame command
-/// (`FlyTick`, the per-render-tick `SetViewport`/`SetZ`/`SetT`/`SetC`
-/// re-asserts) never clones the per-dataset settings map — at
-/// many-dataset × many-channel scale that map is the one snapshot with real
-/// cost. Classification is exhaustive on purpose: adding a `ViewportCommand`
-/// variant without classifying it here is a compile error, so no command can
-/// mutate state outside its declared slice without the diff seeing it.
+/// `Scene::apply` snapshots only this slice before mutating and diffs it after
+/// to decide the epoch bump, so per-frame commands (`FlyTick`, the per-tick
+/// `SetViewport`/`SetZ`/`SetT`/`SetC` re-asserts) never clone the per-dataset
+/// settings map, the one snapshot with real cost at scale. Classification is
+/// exhaustive, so an unclassified new variant is a compile error.
 enum ViewportScope {
     /// Mutates `Scene::camera` only. A change bumps `epochs.view`.
     Camera,
@@ -515,18 +451,13 @@ impl ViewportCommand {
     /// Whether every raw floating-point payload on this command is finite.
     ///
     /// `Scene::apply` drops a command carrying NaN/Inf before it touches any
-    /// state. This must happen at the apply boundary, not in a binding: a NaN
-    /// that reaches camera state is sticky (`NaN * x` stays NaN through
-    /// `clamp`) and self-unequal, so the change-detection diff would read
-    /// `camera != camera_before` on EVERY subsequent command and bump the view
-    /// epoch each render tick forever — a permanent replan storm. JSON cannot
-    /// encode non-finite numbers (`serde_json` rejects them), so the wire
-    /// paths are already safe; this guards the numeric entry points
-    /// (`fly_tick`, speed/clip nudges, pan/zoom) that take raw floats.
+    /// state. A NaN in camera state is sticky and self-unequal, so the change
+    /// diff would bump the view epoch on every later command, a permanent
+    /// replan storm. JSON cannot encode non-finite numbers, so this guards the
+    /// numeric entry points that take raw floats.
     ///
-    /// `SetLabelOpacity` is exempt: its apply arm sanitizes a non-finite
-    /// opacity to the 0.5 default (mirroring the web's `normalizeLabelOpacity`
-    /// contract) rather than dropping the command.
+    /// `SetLabelOpacity` is exempt: its apply arm maps a non-finite opacity to
+    /// the 0.5 default, matching the web's `normalizeLabelOpacity`.
     fn inputs_finite(&self) -> bool {
         match self {
             ViewportCommand::SetMode2D
@@ -639,22 +570,11 @@ impl Scene {
                             .map(|l| l.shape[1] as usize)
                             .unwrap_or(1);
 
-                        // Display settings. For a dataset not yet present, seed
-                        // the COMPLETE per-channel + per-label settings from the
-                        // manifest via the SAME constructor `load_document` uses
-                        // on restore, so the layer panel + render path always
-                        // find full-length `channel_settings` / `label_settings`
-                        // regardless of how the dataset entered the scene (fresh
-                        // open vs. restore).
-                        //
-                        // For a dataset whose settings ALREADY exist (e.g.
-                        // adopted from a peer's presence before its manifest
-                        // arrived), realign any per-label settings that carry the
-                        // author's label names onto THIS manifest's current label
-                        // order (occurrence-aware), so the adopted state lands on
-                        // the matching current label rather than by raw index. A
-                        // settings entry with no `label_names` (a legacy adopter)
-                        // is left positional.
+                        // A new dataset seeds full settings with the same
+                        // constructor `load_document` uses. Settings adopted from
+                        // a peer before the manifest arrived are realigned to its
+                        // labels by name; entries without `label_names` stay
+                        // positional.
                         match self.dataset_settings.entry(dataset_id.clone()) {
                             std::collections::hash_map::Entry::Vacant(slot) => {
                                 slot.insert(crate::scene::DatasetDisplaySettings::seeded_for(
@@ -735,28 +655,20 @@ impl Scene {
                         self.epochs.layout += 1;
                     }
                     DocumentCommand::RenameDataset { .. } => {
-                        // A rename only changes the manifest's display label
-                        // (applied below via self.document.apply). No derived
-                        // state, ordering, or per-dataset settings depend on the
-                        // name, so nothing to rebuild — just bump the content
-                        // epoch so name-reading consumers (the layer panel)
-                        // re-read promptly.
+                        // Nothing derived depends on the name, so only the
+                        // content epoch bumps for the layer panel to re-read.
                         self.epochs.content += 1;
                     }
                     DocumentCommand::RegisterLayout { .. } => {
-                        // Document state update happens below via self.document.apply().
-                        // No derived rebuild needed for register alone (a registered
-                        // layout doesn't take effect until SetActiveLayout selects it),
-                        // but bump layout epoch so consumers (e.g., LayoutSwitcher
-                        // populating its dropdown) see the new option promptly.
+                        // A registered layout takes effect only once
+                        // SetActiveLayout selects it, but the layout switcher
+                        // lists it now.
                         self.epochs.layout += 1;
                     }
                     DocumentCommand::SetActiveLayout { .. } => {
                         unreachable!("handled above");
                     }
                     DocumentCommand::ApplyAssetCatalogDelta { .. } => {
-                        // Bump the asset epoch. Document state update happens
-                        // below via self.document.apply().
                         self.epochs.asset += 1;
                     }
                     DocumentCommand::AddAnnotation { .. }
@@ -765,11 +677,8 @@ impl Scene {
                     | DocumentCommand::AddComment { .. }
                     | DocumentCommand::RemoveComment { .. }
                     | DocumentCommand::EditComment { .. } => {
-                        // Bump the annotation epoch. A pin's comment thread is
-                        // part of its annotation state, so add/remove/edit_comment
-                        // and move_annotation all invalidate the same epoch as
-                        // add/remove_annotation. Document state update happens
-                        // below via self.document.apply().
+                        // A pin's comment thread is part of its annotation
+                        // state, so comment edits share the annotation epoch.
                         self.epochs.annotation += 1;
                     }
                 }
@@ -779,31 +688,22 @@ impl Scene {
         }
     }
 
-    /// Apply a local viewport command, then bump epochs under ONE policy for
-    /// every command: an epoch advances iff the state in its category actually
-    /// changed.
+    /// Apply a local viewport command, then bump an epoch iff the state in its
+    /// category changed:
     ///
-    /// - `epochs.view` ← the camera (mode, viewport, pan/zoom/rotate, fly,
+    /// - `epochs.view`: the camera (mode, viewport, pan/zoom/rotate, fly,
     ///   clip, fly speed).
-    /// - `epochs.selection` ← the view selectors + display + per-dataset
-    ///   order/settings.
+    /// - `epochs.selection`: the view selectors, display, and per-dataset
+    ///   order and settings.
     ///
-    /// The change check is a before/after comparison of the state slice the
-    /// command is classified to touch ([`ViewportCommand::scope`]) — only that
-    /// slice is snapshotted, so the hot per-frame commands never clone the
-    /// per-dataset settings map. The no-change guard is load-bearing: no-op
-    /// commands (a `SetViewport` to the current size on every render tick, a
-    /// `SetZ`/`SetT`/`SetC` re-assert of the current slice) must not
-    /// invalidate consumers' epoch-keyed caches — the chunk-plan cache keys
-    /// off these counters each tick, so an unconditional bump would force a
-    /// full replan per frame. Conversely, every real change bumps, no matter
-    /// which entry point produced it, so a mutation can never leave consumers
-    /// on stale reads.
+    /// The check diffs only the slice [`ViewportCommand::scope`] declares. The
+    /// no-change guard is load-bearing: the chunk-plan cache keys off these
+    /// counters each tick, and `SetViewport`/`SetZ`/`SetT`/`SetC` are
+    /// re-asserted every render tick, so an unconditional bump would force a
+    /// full replan per frame.
     ///
-    /// A command carrying a non-finite float is dropped whole before any state
-    /// is touched ([`ViewportCommand::inputs_finite`]): stored NaN is both
-    /// sticky and self-unequal, which would turn the change-detection diff
-    /// into a permanent every-command epoch bump.
+    /// A command with a non-finite float is dropped before any state is
+    /// touched (see [`ViewportCommand::inputs_finite`]).
     fn apply_viewport(&mut self, cmd: ViewportCommand) {
         if !cmd.inputs_finite() {
             crate::wasm_log!("viewport_command.non_finite_input_dropped", {
@@ -844,10 +744,9 @@ impl Scene {
         }
     }
 
-    /// The mutation arms for [`Self::apply_viewport`]. Pure state writes — no
-    /// epoch bumps here; the caller diffs the command's scoped state slice and
-    /// owns the bump. Each arm must stay inside the slice its
-    /// [`ViewportCommand::scope`] declares, or the diff won't see the change.
+    /// The mutation arms for [`Self::apply_viewport`], which owns the epoch
+    /// bumps. Each arm must stay inside the slice its
+    /// [`ViewportCommand::scope`] declares, or the diff will not see the change.
     fn mutate_viewport(&mut self, cmd: ViewportCommand) {
         match cmd {
             ViewportCommand::SetMode2D => {
@@ -903,22 +802,16 @@ impl Scene {
                 y,
                 z,
             } => {
-                // Lift the pin's voxel point to arcball-WORLD space first (an
-                // immutable borrow that ends before we touch the camera), then
-                // make that world point the arcball target. Setting `target`
-                // means the look-at axis passes through the point, so it
-                // projects to the viewport center — the 3D analogue of the 2D
-                // `SetCenter`. A missing/unanchorable dataset yields no world
-                // point and is a safe no-op (mirrors `project_annotation`),
-                // matching how the other camera ops do nothing off their mode.
+                // The world lift borrows the scene immutably, so it runs before
+                // the camera is touched. A missing or unanchorable dataset is a
+                // no-op, like the other camera ops off their mode.
                 if let Some(world) =
                     self.annotation_world_point_for(&DatasetId(dataset_id), [x, y, z])
                     && world.iter().all(|c| c.is_finite())
                     && let Camera::Arcball(ref mut v) = self.camera
                 {
                     // Absolute positional write: same component bound as the
-                    // pan path (and skipped entirely should the world lift
-                    // ever produce a non-finite point).
+                    // pan path.
                     use crate::camera::CAMERA_POSITION_MAX;
                     for (dst, src) in v.target.iter_mut().zip(world) {
                         *dst = src.clamp(-CAMERA_POSITION_MAX, CAMERA_POSITION_MAX);
@@ -955,11 +848,9 @@ impl Scene {
                 }
             }
             ViewportCommand::AdjustClipDistance { delta } => {
-                // Saturating accumulate: the stored clip stays inside
-                // [0, CLIP_DISTANCE_MAX], so repeated huge deltas cannot
-                // stack to Inf (which would serialize as `null` and break
-                // every peer's presence parse) and a huge negative delta
-                // always recovers to 0.
+                // Saturate inside [0, CLIP_DISTANCE_MAX] so huge deltas cannot
+                // stack to Inf, which serializes as `null` and breaks every
+                // peer's presence parse.
                 use crate::camera::CLIP_DISTANCE_MAX;
                 match &mut self.camera {
                     Camera::Arcball(v) => {
@@ -1112,9 +1003,8 @@ impl Scene {
                 visible,
             } => {
                 let ds = DatasetId(dataset_id);
-                // Bound the index to the dataset's actual label count so a
-                // stray/huge `label` (e.g. from a malformed non-web client) can
-                // never `ensure_label`-grow the vec unboundedly.
+                // Bound the index to the real label count so a malformed
+                // client cannot grow the vec without limit.
                 if self.label_index_in_range(&ds, label)
                     && let Some(s) = self.dataset_settings.get_mut(&ds)
                 {
@@ -1144,10 +1034,9 @@ impl Scene {
         }
     }
 
-    /// Whether `label` is a valid label index for `dataset_id` — i.e. strictly
-    /// less than the dataset's attached-label count. Guards the per-label apply
-    /// arms so an out-of-range index is ignored rather than growing the settings
-    /// vec. `false` for an unknown dataset (no manifest, no labels).
+    /// Whether `label` is below the dataset's attached-label count, so the
+    /// per-label apply arms ignore an out-of-range index rather than growing
+    /// the settings vec. `false` for an unknown dataset.
     fn label_index_in_range(&self, dataset_id: &DatasetId, label: u32) -> bool {
         self.document
             .manifests
@@ -1715,8 +1604,6 @@ mod tests {
         }
     }
 
-    // --- Colormap / Channel tests ---
-
     #[test]
     fn colormap_serde_round_trips() {
         use crate::scene::Colormap;
@@ -1767,10 +1654,8 @@ mod tests {
 
     #[test]
     fn channel_settings_without_name_round_trips_and_omits_key() {
-        // Back-compat: a default `ChannelSettings` (no override) must
-        // deserialize WITHOUT a `name` key (→ None) and serialize WITHOUT the
-        // key, so old saved views / presence snapshots load and a name-less
-        // channel is byte-identical to a pre-slice one.
+        // A channel with no override serializes without `name`, and a blob
+        // without `name` loads as None.
         use crate::scene::ChannelSettings;
         let cs = ChannelSettings::default();
         let json = serde_json::to_string(&cs).unwrap();
@@ -1778,7 +1663,6 @@ mod tests {
             !json.contains("\"name\""),
             "a channel with no override must not emit a `name` key: {json}"
         );
-        // An older blob with no `name` field deserializes as None.
         let old = r#"{"visible":true,"colormap":"gray","contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0}"#;
         let parsed: ChannelSettings = serde_json::from_str(old).unwrap();
         assert_eq!(parsed.name, None);
@@ -1822,10 +1706,9 @@ mod tests {
 
     #[test]
     fn center_on_voxel_3d_round_trips_and_parses_as_viewport_command() {
-        // Guards the TS<->Rust wire for "jump to a mention" in 3D: the overlay
-        // sends exactly this object through `apply_command(json)`, so it MUST
-        // deserialize into the viewport variant (a presence-only camera op), not
-        // a DocumentCommand. The field names match what `focusPin` emits.
+        // The overlay sends exactly this object through `apply_command(json)`
+        // to jump to a mention in 3D, so it must parse as a viewport command,
+        // not a DocumentCommand. The field names match what `focusPin` emits.
         let cmd = ViewportCommand::CenterOnVoxel3D {
             dataset_id: "ds1".into(),
             x: 12.0,
@@ -2140,8 +2023,6 @@ mod tests {
         }
     }
 
-    // --- Per-label overlay command tests (mirror the set_channel_* tests) ---
-
     #[test]
     fn set_label_visible_round_trips() {
         let cmd = ViewportCommand::SetLabelVisible {
@@ -2204,9 +2085,7 @@ mod tests {
         let ls = &scene.dataset_settings[&ds_id].label_settings;
         // One settings entry per attached label, seeded on open.
         assert_eq!(ls.len(), 3);
-        // Masks are opt-in: every one seeds HIDDEN, so a dataset opens with no
-        // overlays until the user reveals a mask via the per-label toggle. All at
-        // 0.5 (the opacity a mask composites at once turned on).
+        // Masks are opt-in: every one seeds hidden at opacity 0.5.
         assert!(ls.iter().all(|l| !l.visible));
         for l in ls {
             assert_eq!(l.opacity, 0.5);
@@ -2215,9 +2094,8 @@ mod tests {
 
     #[test]
     fn seeded_for_marks_all_labels_hidden() {
-        // The shared seeding constructor (used by BOTH the DatasetOpened apply
-        // path and the document-restore path) produces complete channel + label
-        // settings, with every label hidden by default (opt-in per mask).
+        // The constructor shared by DatasetOpened and document restore seeds
+        // complete channel and label settings, every label hidden.
         let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 2, 3);
         let s = crate::scene::DatasetDisplaySettings::seeded_for(&reg.manifest);
         // Channels seeded full-length from the C dimension.
@@ -2332,9 +2210,8 @@ mod tests {
 
     #[test]
     fn apply_set_label_ignores_out_of_range_index() {
-        // A label index past the dataset's real label count is ignored — it must
-        // NOT `ensure_label`-grow the vec (a huge/stray index can't balloon
-        // memory), and a label-less dataset accepts no per-label edits at all.
+        // A label index past the real label count is ignored rather than
+        // growing the vec, and a label-less dataset accepts no per-label edits.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened_with_labels("ds1", "test", 1, 2);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -2451,8 +2328,6 @@ mod tests {
         assert_eq!(scene.epochs.layout, layout_before);
     }
 
-    // --- Epoch tests ---
-
     #[test]
     fn dataset_opened_bumps_content_and_layout_epochs() {
         let mut scene = Scene::new([800, 600]);
@@ -2531,8 +2406,6 @@ mod tests {
         assert_eq!(scene.epochs.view, 3);
     }
 
-    // --- No-change guard: a command that leaves state as-is bumps nothing ---
-    //
     // `set_viewport`/`set_z`/`set_t`/`set_c` are re-asserted every render tick;
     // the chunk-plan cache keys off the epochs each tick, so a no-op re-assert
     // must not read as a change (it would force a full replan per frame).
@@ -2592,13 +2465,9 @@ mod tests {
         assert_eq!(scene.epochs.selection, 0);
     }
 
-    // --- Non-finite inputs are dropped before touching state ---
-    //
-    // A stored NaN is self-unequal, so if it ever reached camera state the
-    // change-detection diff would see `camera != camera_before` on every
-    // subsequent command and bump the view epoch each render tick forever.
-    // Each test therefore checks BOTH that the field is unchanged AND that a
-    // later no-op command stays epoch-silent (no poisoning).
+    // A stored NaN is self-unequal, so in camera state it would bump the view
+    // epoch on every later command. Each test checks that the field is
+    // unchanged and that a later no-op command stays epoch-silent.
 
     #[test]
     fn non_finite_fly_and_clip_inputs_are_dropped_without_poisoning_epochs() {
@@ -2806,15 +2675,11 @@ mod tests {
         assert_eq!(scene.epochs, baseline, "dropped commands are silent");
     }
 
-    // --- Scoped change detection ---
-
     #[test]
     fn camera_and_selector_commands_do_not_diff_dataset_display_state() {
-        // Plant a self-unequal (NaN) value directly into the per-dataset
-        // settings. If a camera or selector command compared the settings map,
-        // NaN != NaN would read as "changed" and bump selection on EVERY such
-        // command; scoped comparison must ignore state outside the command's
-        // declared slice.
+        // Plant a NaN in the per-dataset settings. A camera or selector command
+        // that compared the settings map would read NaN != NaN as a change and
+        // bump selection every time.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -2843,8 +2708,6 @@ mod tests {
         );
         assert_eq!(scene.epochs.view, baseline.view + 1);
     }
-
-    // --- Fly speed commands ---
 
     #[test]
     fn fly_set_base_speed_round_trips() {
@@ -2901,8 +2764,6 @@ mod tests {
         assert_eq!(scene2.epochs.view, 0);
         assert_eq!(scene2.epochs.selection, 0);
     }
-
-    // --- Clip distance nudge ---
 
     #[test]
     fn adjust_clip_distance_round_trips() {
@@ -2965,13 +2826,9 @@ mod tests {
         }
     }
 
-    // --- Finite inputs must produce finite state ---
-    //
-    // The input gate rejects NaN/Inf, but FINITE inputs can still drive
-    // unclamped math into non-finite state: `zoom` underflowing to exactly
-    // 0.0 turns the next pan's divide into NaN, and NaN state defeats change
-    // detection permanently (self-unequal → every camera command reads as a
-    // change). The camera mutators clamp for this; these tests lock it.
+    // Finite inputs can still drive unclamped math into non-finite state:
+    // `zoom` underflowing to 0.0 turns the next pan's divide into NaN. The
+    // camera mutators clamp for this; these tests lock it.
 
     #[test]
     fn set_zoom_zero_saturates_and_keeps_pan_finite() {
@@ -3200,10 +3057,8 @@ mod tests {
         }
     }
 
-    /// Recursively assert a wire value carries no `null` — serde_json writes
-    /// a non-finite f64 as `null`, which every peer's presence parse rejects,
-    /// so "no null anywhere in the serialized camera" IS the cross-client
-    /// parseability contract.
+    /// Recursively assert a wire value carries no `null`. serde_json writes a
+    /// non-finite f64 as `null`, which every peer's presence parse rejects.
     fn assert_no_null(value: &serde_json::Value) {
         match value {
             serde_json::Value::Null => panic!("serialized camera contains null (non-finite f64)"),
@@ -3345,8 +3200,6 @@ mod tests {
         }
         assert_no_null(&serde_json::to_value(&scene.camera).unwrap());
     }
-
-    // --- Asset catalog tests ---
 
     #[test]
     fn apply_asset_catalog_delta_bumps_only_asset_epoch() {
@@ -3543,8 +3396,6 @@ mod tests {
             crate::scene::BlendMode::Additive
         );
     }
-
-    // --- Layout registration and switching tests ---
 
     #[test]
     fn register_layout_command_serde_round_trip() {
@@ -3748,11 +3599,9 @@ mod tests {
         );
     }
 
-    // --- Annotation tests ---
-
     #[test]
     fn add_annotation_command_matches_wire_contract() {
-        // Field-for-field check against the slice's documented add wire shape.
+        // Field-for-field check against the documented add wire shape.
         let cmd = DocumentCommand::AddAnnotation {
             dataset_id: DatasetId("wds-abc".into()),
             id: "11111111-2222-3333-4444-555555555555".into(),
@@ -3812,8 +3661,7 @@ mod tests {
 
     #[test]
     fn add_annotation_parses_from_documented_client_payload() {
-        // Verbatim client->server payload from the slice-3 wire contract,
-        // which now carries an additive `z` depth alongside `position`.
+        // A client payload with `z` but no `end`, `t`, or `c`.
         let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"z":5.0,"author":"alice","kind":"point"}"#;
         let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
         match parsed {
@@ -3832,10 +3680,8 @@ mod tests {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
                 assert_eq!(position, [3.0, 4.0]);
-                // No `end` in the slice-1..4 payload → a point.
                 assert_eq!(end, None);
                 assert_eq!(z, 5.0);
-                // This payload predates t/c → they default to 0 (no wire break).
                 assert_eq!(t, 0);
                 assert_eq!(c, 0);
                 assert_eq!(author, "alice");
@@ -3847,9 +3693,7 @@ mod tests {
 
     #[test]
     fn add_annotation_z_defaults_to_zero_for_slice12_payload() {
-        // A slice-1/2 client (or a replayed older log entry) sends no `z`.
-        // #[serde(default)] must parse it as z = 0.0 rather than failing —
-        // this is the wire backward-compatibility guarantee, no [2]->[3] break.
+        // A client or replayed log entry without `z` parses as z = 0.0.
         let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"author":"alice","kind":"point"}"#;
         let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
         match parsed {
@@ -3860,8 +3704,6 @@ mod tests {
             _ => panic!("expected AddAnnotation"),
         }
     }
-
-    // --- slice 014: a pin records its view T/C (issue #779) ---
 
     #[test]
     fn add_annotation_t_c_round_trip_through_command_wire() {
@@ -3910,15 +3752,12 @@ mod tests {
         let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
         assert_eq!(pin.t, 9);
         assert_eq!(pin.c, 5);
-        // z still rides through unchanged alongside the new t/c.
         assert_eq!(pin.z, 4.0);
     }
 
     #[test]
     fn add_annotation_t_c_default_to_zero_for_pre_slice14_payload() {
-        // A pin payload from before this slice carries neither `t` nor `c`.
-        // #[serde(default)] must parse them as 0 rather than failing — the wire
-        // backward-compatibility guarantee (additive, no break).
+        // A payload without `t` and `c` parses them as 0.
         let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"pin-old","position":[3.0,4.0],"z":5.0,"author":"alice","kind":"point"}"#;
         let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
         match parsed {
@@ -3933,15 +3772,12 @@ mod tests {
 
     #[test]
     fn old_pin_blob_without_t_c_deserializes_with_t0_c0() {
-        // A persisted `Annotation` blob (a snapshot pin) from before this slice
-        // has no t/c keys. It must deserialize with t = 0, c = 0 so an older
-        // document loads without a wire break.
+        // A persisted pin blob without t/c keys loads with t = 0, c = 0.
         let json =
             r#"{"id":"pin-old","position":[3.0,4.0],"z":2.0,"author":"alice","kind":"point"}"#;
         let pin: crate::scene::Annotation = serde_json::from_str(json).unwrap();
         assert_eq!(pin.t, 0);
         assert_eq!(pin.c, 0);
-        // The pre-existing fields still load as before.
         assert_eq!(pin.z, 2.0);
         assert_eq!(pin.position, [3.0, 4.0]);
         assert_eq!(pin.end, None);
@@ -4002,8 +3838,6 @@ mod tests {
             _ => panic!("expected AddAnnotation"),
         }
     }
-
-    // --- slice 005: line + box (kind + end) ---
 
     #[test]
     fn add_annotation_line_round_trips_kind_and_end() {
@@ -4067,8 +3901,7 @@ mod tests {
 
     #[test]
     fn add_annotation_end_defaults_to_none_when_absent() {
-        // The backward-compat guarantee: a slice-1..4 command (no `end` key)
-        // parses as `end: None` — a plain point — rather than failing.
+        // A command without an `end` key parses as `end: None`, a plain point.
         let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"p","position":[3.0,4.0],"z":1.0,"author":"a","kind":"point"}"#;
         let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
         match parsed {
@@ -4080,7 +3913,7 @@ mod tests {
     #[test]
     fn document_state_add_line_and_box_store_kind_and_end() {
         // Applying line/box commands lands kind + end on the stored pins, and a
-        // point still stores end: None — the state the WS harness reads back.
+        // point stores end: None.
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_shape_cmd(
             "wds-1",
@@ -4116,8 +3949,8 @@ mod tests {
 
     #[test]
     fn line_and_box_survive_document_round_trip() {
-        // Restart durability: a line and a box serialize into the document blob
-        // and restore with kind + end intact (acceptance behavior 3).
+        // A line and a box survive the document blob round-trip with kind and
+        // end intact.
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_shape_cmd(
             "wds-1",
@@ -4146,11 +3979,9 @@ mod tests {
 
     #[test]
     fn move_annotation_translates_a_lines_end_vertex_rigidly() {
-        // MoveAnnotation moves the WHOLE line: the anchor goes to position/z and
-        // the far vertex `end` rides along by the same delta, so length/angle are
-        // preserved (not a stretch/rotate). The wire still carries only
-        // position + z, and `kind` is untouched. Anchor (0,0) -> (2,3) is a
-        // +2,+3 delta, so end (10,10) -> (12,13).
+        // MoveAnnotation without `end` moves the whole line: `end` rides the
+        // anchor's delta, so length and angle are preserved and `kind` is
+        // untouched. Anchor (0,0) -> (2,3) moves end (10,10) -> (12,13).
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_shape_cmd(
             "wds-1",
@@ -4163,7 +3994,7 @@ mod tests {
             dataset_id: DatasetId("wds-1".into()),
             id: "ln".into(),
             position: [2.0, 3.0],
-            // No `end` → the rigid #776 whole-shape translate.
+            // No `end`: whole-shape move.
             end: None,
             z: 5.0,
         });
@@ -4174,14 +4005,10 @@ mod tests {
         assert_eq!(line.end, Some([12.0, 13.0]));
     }
 
-    // --- Collection annotation anchoring (issue #780) ---
-
-    /// A two-group collection driven entirely through `DocumentState::apply` (the
-    /// server's canonical, persisted path), plus a second registered layout
-    /// "moved" in which group `w1` shifts by `+[0, 50]` and group `w2` stays put.
-    /// The base/source layout is "default" (from `make_collection_dataset_opened`),
-    /// placing `w1` at `[0, 0]` and `w2` at `[100, 0]`. Returns the populated
-    /// document and the dataset id.
+    /// A two-group collection driven through `DocumentState::apply`, the
+    /// server's canonical path. The "default" layout places `w1` at `[0, 0]`
+    /// and `w2` at `[100, 0]`; a second layout "moved" shifts `w1` by
+    /// `+[0, 50]`. Returns the document and the dataset id.
     fn collection_with_two_layouts() -> (crate::scene::DocumentState, DatasetId) {
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut doc = crate::scene::DocumentState::default();
@@ -4275,9 +4102,8 @@ mod tests {
 
     #[test]
     fn point_pin_reanchors_across_layout_switch_and_back_is_exact() {
-        // The crux (critical): a point glued to the MOVING group rides the group's
-        // +[0,50] delta on switch, and switching back restores the original
-        // position exactly.
+        // A point glued to the moving group rides its +[0,50] delta on switch,
+        // and switching back restores the original position exactly.
         let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
         assert_eq!(pin(&doc, &ds, "p").position, [5.0, 5.0]);
@@ -4299,8 +4125,7 @@ mod tests {
 
     #[test]
     fn line_reanchors_both_vertices_by_the_group_delta() {
-        // A line on the moving group: BOTH position and end shift by the same
-        // delta (rigid whole-shape translate), length/angle preserved.
+        // A line on the moving group: position and end shift by the same delta.
         let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_shape_cmd(
             "collection",
@@ -4342,8 +4167,7 @@ mod tests {
 
     #[test]
     fn pin_on_static_group_does_not_move_across_switch() {
-        // Per-entity (critical): a pin glued to w2 (which doesn't move between the
-        // two layouts) stays exactly where it was after the switch.
+        // A pin glued to w2, which does not move between the layouts, stays put.
         let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_annotation_cmd(
             "collection",
@@ -4357,8 +4181,8 @@ mod tests {
 
     #[test]
     fn two_pins_each_follow_their_own_group() {
-        // Per-entity (critical): in one switch, the w1 pin moves by the w1 delta
-        // and the w2 pin doesn't move — each tracks its own anchor independently.
+        // In one switch, the w1 pin moves by the w1 delta and the w2 pin does
+        // not; each tracks its own anchor.
         let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_annotation_cmd(
             "collection",
@@ -4379,11 +4203,9 @@ mod tests {
 
     #[test]
     fn pin_without_anchor_is_left_in_place_on_switch() {
-        // Backward-compat (critical): an annotation inserted with NO anchor (as a
-        // pre-slice pin would deserialize) is untouched by a layout switch.
+        // An unanchored pin is untouched by a layout switch.
         let (mut doc, ds) = collection_with_two_layouts();
-        // Insert a pin directly with anchor == None (bypasses the auto-anchor at
-        // creation, mimicking a pin that predates this slice).
+        // Insert directly with anchor == None to bypass the auto-anchor.
         doc.add_annotation(
             ds.clone(),
             crate::scene::Annotation {
@@ -4406,8 +4228,7 @@ mod tests {
 
     #[test]
     fn pre_slice_json_without_anchor_parses_and_is_not_moved() {
-        // The exact interaction contract: an Annotation deserialized from
-        // pre-slice JSON (no `anchor` key) must still parse (as None) and not be
+        // A pin from JSON without an `anchor` key parses as None and is not
         // moved by a layout switch.
         let legacy_json = r#"{
             "id": "old",
@@ -4428,8 +4249,8 @@ mod tests {
 
     #[test]
     fn anchor_survives_document_state_serde_round_trip() {
-        // Critical: after serialize -> deserialize, the anchor is preserved and a
-        // SetActiveLayout still re-anchors correctly on the restored document.
+        // After a serde round-trip the anchor survives and SetActiveLayout still
+        // re-anchors the restored document.
         use lucida_content::EntityId;
         let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
@@ -4452,9 +4273,8 @@ mod tests {
 
     #[test]
     fn switch_between_three_positions_tracks_group_each_time() {
-        // Robustness beyond the two-layout contract: a third layout moves w1 to a
-        // different delta; the pin tracks w1 across default -> moved -> far ->
-        // default, each hop applying the displacement between just those two.
+        // With a third layout, the pin tracks w1 across default -> moved -> far
+        // -> default, each hop applying the displacement between those two.
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(DocumentCommand::RegisterLayout {
@@ -4486,22 +4306,20 @@ mod tests {
 
     #[test]
     fn switching_to_the_already_active_layout_does_not_shift_pins() {
-        // Convergence/idempotency: a replayed or echoed `set_active_layout` to the
-        // layout that's already active must not translate pins a second time. The
-        // pin should sit where the first switch left it, not double-shifted.
+        // A replayed `set_active_layout` to the already active layout must not
+        // translate pins a second time.
         let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_annotation_cmd("collection", "p", [5.0, 5.0], "alice"));
         switch_to(&mut doc, &ds, "moved");
         assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0]);
-        // Re-apply the SAME switch (as a duplicate/echo would): no further move.
+        // Re-apply the same switch, as an echo would.
         switch_to(&mut doc, &ds, "moved");
         assert_eq!(pin(&doc, &ds, "p").position, [5.0, 55.0]);
     }
 
     #[test]
     fn reanchor_leaves_z_unchanged() {
-        // Layouts are 2-D in-plane: the pin's depth must not be touched by a
-        // re-anchor, only its in-plane position.
+        // Layouts are in-plane, so a re-anchor never touches depth.
         let (mut doc, ds) = collection_with_two_layouts();
         doc.apply(add_annotation_cmd_z(
             "collection",
@@ -4518,9 +4336,8 @@ mod tests {
 
     #[test]
     fn reanchor_runs_identically_through_scene_apply() {
-        // The re-anchor lives in DocumentState::apply, so it also fires when the
-        // command flows through the wasm Scene::apply wrapper (which delegates to
-        // document.apply) — same corrected position the server would persist.
+        // The re-anchor lives in DocumentState::apply, so the wasm Scene::apply
+        // wrapper lands on the same position the server persists.
         use lucida_content::{EntityId, LayoutId, LayoutSpec, layout::EntityPlacement};
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_collection_dataset_opened(
@@ -4633,7 +4450,7 @@ mod tests {
 
     #[test]
     fn document_state_add_annotation_default_z_is_zero() {
-        // A pin dropped without depth (the slice-1/2 path) stores z = 0.0.
+        // A pin dropped without depth stores z = 0.0.
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
         assert_eq!(doc.annotations[&DatasetId("wds-1".into())][0].z, 0.0);
@@ -4703,8 +4520,7 @@ mod tests {
 
     #[test]
     fn slice12_persisted_pin_without_z_loads_as_zero() {
-        // A pin blob written by slice 1/2 has no `z` key. #[serde(default)] on
-        // Annotation::z must load it as 0.0 (and the comment thread still works).
+        // A pin blob without a `z` key loads as 0.0.
         let json = r#"{"manifests":{},"annotations":{"wds-1":[
             {"id":"p1","position":[10.0,20.0],"author":"alice","kind":"point",
              "comments":[{"id":"c1","author":"bob","text":"hi"}]}
@@ -4863,9 +4679,8 @@ mod tests {
 
     #[test]
     fn snapshot_document_annotations_shape_matches_wire_contract() {
-        // The snapshot ships `DocumentState` whole under `document`, so its
-        // serialized shape IS `snapshot.document.annotations`. Assert the
-        // documented nested shape:
+        // The snapshot ships `DocumentState` whole under `document`. Assert the
+        // documented shape:
         // { "<dataset_id>": [ {id,position,z,author,kind,comments} ] }.
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_annotation_cmd_z(
@@ -4889,8 +4704,7 @@ mod tests {
 
     #[test]
     fn document_state_without_annotations_field_deserializes() {
-        // Older persisted snapshots predate the field; #[serde(default)]
-        // must let them load with an empty annotations map.
+        // A snapshot without the field loads with an empty annotations map.
         let json = r#"{"manifests":{}}"#;
         let doc: crate::scene::DocumentState = serde_json::from_str(json).unwrap();
         assert!(doc.annotations.is_empty());
@@ -4911,15 +4725,7 @@ mod tests {
         assert_eq!(pins[0].author, "alice");
     }
 
-    // --- Move-annotation (reposition) tests ---
-    //
-    // The reposition mutation lives on `Annotation::set_position` and is
-    // unit-testable on a bare pin with no DocumentState scaffolding. The
-    // DocumentState arm only locates the pin (via the same find-by-id used by
-    // add/remove) and delegates.
-
-    /// A whole-shape move (no `end`) — the rigid #776 translate path. The
-    /// existing move tests all exercise this shape.
+    /// A whole-shape move (no `end`).
     fn move_annotation_cmd(ds: &str, id: &str, position: [f64; 2], z: f64) -> DocumentCommand {
         DocumentCommand::MoveAnnotation {
             dataset_id: DatasetId(ds.into()),
@@ -4930,8 +4736,7 @@ mod tests {
         }
     }
 
-    /// A reshape move (`end: Some`) — the resize path: the two opposite corners
-    /// are placed explicitly, no rigid translate.
+    /// A reshape move (`end: Some`): both opposite corners placed explicitly.
     fn reshape_annotation_cmd(
         ds: &str,
         id: &str,
@@ -4950,7 +4755,7 @@ mod tests {
 
     #[test]
     fn move_annotation_command_matches_wire_contract() {
-        // Field-for-field check against the slice's documented move wire shape.
+        // Field-for-field check against the documented move wire shape.
         let cmd = move_annotation_cmd("wds-abc", "pin-1", [12.5, -7.25], 3.5);
         let json = serde_json::to_string(&cmd).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -4989,7 +4794,7 @@ mod tests {
 
     #[test]
     fn move_annotation_parses_from_documented_client_payload() {
-        // Verbatim client->server payload from the slice wire contract.
+        // A documented client payload, verbatim.
         let json = r#"{"type":"move_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0],"z":5.0}"#;
         let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
         match parsed {
@@ -5003,7 +4808,6 @@ mod tests {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
                 assert_eq!(id, "pin-1");
                 assert_eq!(position, [3.0, 4.0]);
-                // A slice-#776 client payload carries no `end` → None.
                 assert_eq!(end, None);
                 assert_eq!(z, 5.0);
             }
@@ -5013,9 +4817,7 @@ mod tests {
 
     #[test]
     fn move_annotation_z_defaults_to_zero_when_absent() {
-        // A depth-unaware client (or a replayed older log entry) sends no `z`.
-        // #[serde(default)] must parse it as z = 0.0 rather than failing —
-        // mirroring AddAnnotation's wire backward-compatibility guarantee.
+        // A client or replayed log entry without `z` parses as z = 0.0.
         let json =
             r#"{"type":"move_annotation","dataset_id":"wds-1","id":"pin-1","position":[3.0,4.0]}"#;
         let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
@@ -5050,8 +4852,6 @@ mod tests {
         assert_eq!(broadcast_v["command"]["z"], 8.5);
         assert_eq!(broadcast_v["seq"], 11);
     }
-
-    // --- Annotation-level reposition helper (no DocumentState) ---
 
     #[test]
     fn annotation_set_position_overwrites_position_and_z() {
@@ -5160,8 +4960,6 @@ mod tests {
         assert_eq!(line.end, Some([10.0, 2.0]));
     }
 
-    // --- DocumentState delegation ---
-
     #[test]
     fn document_state_move_annotation_overwrites_position_and_z() {
         let mut doc = crate::scene::DocumentState::default();
@@ -5212,7 +5010,7 @@ mod tests {
     fn document_state_move_missing_pin_is_noop_no_phantom() {
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_annotation_cmd("wds-1", "p1", [1.0, 2.0], "alice"));
-        // Wrong pin id, wrong dataset id: both must be clean no-ops that do NOT
+        // Wrong pin id, wrong dataset id: both must be no-ops that do not
         // create a phantom pin or dataset entry.
         doc.apply(move_annotation_cmd("wds-1", "p-missing", [7.0, 7.0], 7.0));
         doc.apply(move_annotation_cmd("wds-missing", "p1", [7.0, 7.0], 7.0));
@@ -5309,8 +5107,8 @@ mod tests {
 
     #[test]
     fn moved_line_whole_shape_survives_document_serde_round_trip() {
-        // Persistence of a whole-line move: both the moved anchor AND the
-        // rigidly-carried far endpoint must restore after a (simulated) restart.
+        // After a whole-line move, both the anchor and the carried far endpoint
+        // survive a simulated restart.
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_shape_cmd(
             "wds-1",
@@ -5341,15 +5139,13 @@ mod tests {
         assert_eq!(pin.kind, crate::scene::AnnotationKind::Point);
     }
 
-    // --- Reshape: MoveAnnotation with `end: Some` (the resize path) ----------
-    // A whole-shape move (`end: None`) rigidly translates both vertices (#776,
-    // covered above). A reshape (`end: Some`) sets the two opposite corners
-    // EXACTLY — that is how a corner/edge resize lands. These pin both shapes.
+    // A whole-shape move (`end: None`) translates both vertices. A reshape
+    // (`end: Some`) sets both opposite corners exactly, which is how a corner
+    // or edge resize lands.
 
     #[test]
     fn annotation_set_vertices_places_both_corners_exactly() {
-        // The reshape owner on a bare pin: position AND end are set verbatim,
-        // with NO delta math — the box takes the passed geometry as-is.
+        // A reshape sets position and end verbatim, with no delta math.
         let mut r#box = shape_pin(
             "bx",
             [0.0, 0.0],
@@ -5364,10 +5160,9 @@ mod tests {
 
     #[test]
     fn annotation_set_vertices_is_not_a_rigid_translate() {
-        // The crux of the slice: contrast with set_position. Moving the anchor
-        // 0,0 -> 1,1 via a RESHAPE that holds the opposite corner at 4,4 must
-        // leave end at 4,4 (the box shrinks). A rigid translate would have
-        // dragged end to 5,5 instead. This is what makes a corner resize work.
+        // Moving the anchor 0,0 -> 1,1 by a reshape that holds the opposite
+        // corner at 4,4 leaves end at 4,4, so the box shrinks. A rigid
+        // translate would drag end to 5,5, and a corner resize would not work.
         let mut r#box = shape_pin(
             "bx",
             [0.0, 0.0],
@@ -5405,8 +5200,8 @@ mod tests {
 
     #[test]
     fn annotation_set_vertices_on_point_keeps_end_none() {
-        // A point has no second vertex; a reshape of one repositions its anchor
-        // but must NOT invent an `end` (that would silently make it a line/box).
+        // A reshape of a point repositions its anchor but must not invent an
+        // `end`, which would silently make it a line or box.
         let mut pin = point_pin("p1");
         pin.set_vertices([3.0, 4.0], [9.0, 9.0], 5.0);
         assert_eq!(pin.position, [3.0, 4.0]);
@@ -5479,9 +5274,8 @@ mod tests {
 
     #[test]
     fn document_state_move_without_end_still_rigid_translates() {
-        // The #776 guarantee, asserted side-by-side with the reshape test: the
-        // SAME anchor move, but with NO `end`, carries the opposite corner along
-        // (a whole-shape slide), proving the two shapes are distinct paths.
+        // The same anchor move without `end` carries the opposite corner along,
+        // so whole-shape move and reshape stay distinct paths.
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_shape_cmd(
             "wds-1",
@@ -5679,13 +5473,6 @@ mod tests {
         );
     }
 
-    // --- Comment thread tests ---
-    //
-    // Comments nest on the annotation, so the dedup + insertion-order
-    // invariants live on `Annotation` (`add_comment`/`remove_comment`) and are
-    // unit-testable on a bare pin with no DocumentState scaffolding. The
-    // DocumentState arms below only locate the pin and delegate.
-
     fn add_comment_cmd(ds: &str, ann: &str, id: &str, author: &str, text: &str) -> DocumentCommand {
         DocumentCommand::AddComment {
             dataset_id: DatasetId(ds.into()),
@@ -5802,7 +5589,7 @@ mod tests {
 
     #[test]
     fn add_comment_command_matches_wire_contract() {
-        // Field-for-field check against the slice's documented add wire shape.
+        // Field-for-field check against the documented add wire shape.
         let cmd = add_comment_cmd("wds-abc", "pin-1", "c-1", "analyst", "nice finding");
         let json = serde_json::to_string(&cmd).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -5835,7 +5622,7 @@ mod tests {
 
     #[test]
     fn add_comment_parses_from_documented_client_payload() {
-        // Verbatim client->server payload from the slice wire contract.
+        // A documented client payload, verbatim.
         let json = r#"{"type":"add_comment","dataset_id":"wds-1","annotation_id":"pin-1","id":"c-1","author":"alice","text":"hello"}"#;
         let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
         match parsed {
@@ -5903,8 +5690,6 @@ mod tests {
         assert_eq!(broadcast_v["seq"], 9);
     }
 
-    // --- Annotation-level helpers (no DocumentState) ---
-
     #[test]
     fn annotation_add_comment_appends_in_insertion_order() {
         let mut pin = point_pin("pin-1");
@@ -5942,8 +5727,6 @@ mod tests {
         assert!(!pin.remove_comment("c2"));
         assert_eq!(pin.comments.len(), 2);
     }
-
-    // --- DocumentState delegation ---
 
     #[test]
     fn document_state_add_comment_nests_on_the_pin_in_order() {
@@ -5987,8 +5770,8 @@ mod tests {
     fn document_state_add_comment_to_missing_pin_is_noop_no_phantom() {
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_annotation_cmd("wds-1", "pin-1", [1.0, 2.0], "alice"));
-        // Wrong pin id, wrong dataset id: both must be clean no-ops that do
-        // NOT create a phantom pin or dataset entry.
+        // Wrong pin id, wrong dataset id: both must be no-ops that do not
+        // create a phantom pin or dataset entry.
         doc.apply(add_comment_cmd("wds-1", "pin-missing", "c1", "alice", "x"));
         doc.apply(add_comment_cmd("wds-missing", "pin-1", "c1", "alice", "x"));
         let pins = &doc.annotations[&DatasetId("wds-1".into())];
@@ -6142,8 +5925,7 @@ mod tests {
 
     #[test]
     fn slice1_pin_without_comments_field_deserializes_with_empty_thread() {
-        // A pin persisted by slice 1 (before threads existed) has no `comments`
-        // field; #[serde(default)] must load it with an empty thread.
+        // A pin persisted without a `comments` field loads with an empty thread.
         let json = r#"{"manifests":{},"annotations":{"wds-1":[{"id":"pin-1","position":[1.0,2.0],"author":"alice","kind":"point"}]}}"#;
         let doc: crate::scene::DocumentState = serde_json::from_str(json).unwrap();
         let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
@@ -6152,8 +5934,8 @@ mod tests {
 
     #[test]
     fn pin_with_empty_thread_serializes_like_a_slice1_pin() {
-        // A comment-less pin must still expose the documented snapshot shape;
-        // `comments` serializes as an empty array (harmless for old clients).
+        // A comment-less pin keeps the documented snapshot shape, with
+        // `comments` as an empty array.
         let mut doc = crate::scene::DocumentState::default();
         doc.apply(add_annotation_cmd("wds-1", "pin-1", [10.0, 20.0], "alice"));
         let v: serde_json::Value =
@@ -6164,13 +5946,6 @@ mod tests {
         assert!(pin["comments"].is_array());
         assert_eq!(pin["comments"].as_array().unwrap().len(), 0);
     }
-
-    // --- Edit-comment tests ---
-    //
-    // The text-overwrite mutation lives on `Annotation::edit_comment`, sibling
-    // to add/remove_comment, and is unit-testable on a bare pin. The
-    // DocumentState arm only locates the pin (via the shared find-by-id) and
-    // delegates.
 
     fn edit_comment_cmd(ds: &str, ann: &str, id: &str, text: &str) -> DocumentCommand {
         DocumentCommand::EditComment {
@@ -6183,7 +5958,7 @@ mod tests {
 
     #[test]
     fn edit_comment_command_matches_wire_contract() {
-        // Field-for-field check against the slice's documented edit wire shape.
+        // Field-for-field check against the documented edit wire shape.
         let cmd = edit_comment_cmd("wds-abc", "pin-1", "c-1", "fixed typo");
         let json = serde_json::to_string(&cmd).unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -6215,7 +5990,7 @@ mod tests {
 
     #[test]
     fn edit_comment_parses_from_documented_client_payload() {
-        // Verbatim client->server payload from the slice wire contract.
+        // A documented client payload, verbatim.
         let json = r#"{"type":"edit_comment","dataset_id":"wds-1","annotation_id":"pin-1","id":"c-1","text":"edited"}"#;
         let parsed: DocumentCommand = serde_json::from_str(json).unwrap();
         match parsed {
@@ -6256,8 +6031,6 @@ mod tests {
         assert_eq!(broadcast_v["seq"], 13);
     }
 
-    // --- Annotation-level edit helper (no DocumentState) ---
-
     #[test]
     fn annotation_edit_comment_overwrites_text_in_place() {
         let mut pin = point_pin("pin-1");
@@ -6290,8 +6063,6 @@ mod tests {
         assert!(!pin.edit_comment("c1", "x".into()));
         assert!(pin.comments.is_empty());
     }
-
-    // --- DocumentState delegation ---
 
     #[test]
     fn document_state_edit_comment_overwrites_text() {

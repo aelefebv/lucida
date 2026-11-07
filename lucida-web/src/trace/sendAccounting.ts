@@ -1,18 +1,11 @@
 /**
- * Send-side accounting: how a message the page transmits over the session
- * socket becomes a count in the trace.
+ * Send-side accounting: how a message the page sends over the session socket
+ * becomes a count in the trace. The bridge measures each message's type and
+ * bytes, and the recorder tallies them per tick and per interval.
  *
- * The bridge makes two measurements per transmitted message, its type and
- * its bytes, and hands them to the recorder, which tallies them per tick and
- * per interval against {@link CLIENT_MESSAGES}. Both measurements live here
- * rather than in the bridge so the tests that pin them need no socket, and
- * the column arithmetic the tick ring and the recorder share lives beside
- * them so a byte is counted the same way everywhere.
- *
- * Nothing here parses a message or copies one. Each send already pays a
- * `JSON.stringify` and the socket's own encode, and the accounting stays
- * small next to both: a prefix comparison for the type and one pass over
- * the code units for the bytes.
+ * The measurements live here rather than in the bridge so their tests need no
+ * socket. Nothing here parses or copies a message: a prefix comparison finds
+ * the type and one pass over the code units counts the bytes.
  */
 
 import {

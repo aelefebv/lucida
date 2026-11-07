@@ -1,13 +1,10 @@
 //! The watch stream, end to end: one socket publishes, another subscribes,
-//! and what came out the far end is the relay's whole contract (ADR 0051 as
-//! amended).
+//! and what comes out the far end is the relay's contract (ADR 0051).
 //!
-//! The relay's unit tests drive `WatchRelay` directly. What they cannot see
-//! is the part that only exists on the live path: the inbound loop routing
-//! `watch_subscribe` and `watch_publish`, the per-connection channel the ring
-//! is replayed into, and the ordering between the two — a late joiner must
-//! read the recent past before the live items, and neither twice. So this
-//! drives real sockets against a real handler and asserts on the frames.
+//! Only the live path routes `watch_subscribe` and `watch_publish` and
+//! replays the ring into the per-connection channel, so this drives real
+//! sockets and asserts that a late joiner reads the recent past before the
+//! live items, and neither twice.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;

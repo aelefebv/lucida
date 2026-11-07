@@ -1,0 +1,38 @@
+.lc-settings {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-3);
+  width: 320px;
+  max-width: 100%;
+}
+
+.lc-settings-heading {
+  margin: 0;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-xs);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.lc-settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lc-space-4);
+  min-height: var(--lc-control-h-sm);
+}
+
+.lc-settings-label {
+  color: var(--lc-text);
+  font-size: var(--lc-text-md);
+}
+
+.lc-settings > .lc-settings-select {
+  grid-template-columns: minmax(0, 1fr) 140px;
+}
+
+.lc-settings-divider {
+  height: 1px;
+  margin: 0 calc(-1 * var(--lc-space-3));
+  background: var(--lc-border);
+}

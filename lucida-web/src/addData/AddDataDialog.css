@@ -1,0 +1,98 @@
+/* A fixed height, so the dialog keeps its size while folders of different
+   lengths load; the file list takes what the field and recents leave. */
+.lc-add-data {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-4);
+  height: min(560px, calc(85vh - 96px));
+  min-height: 0;
+}
+
+.lc-add-data-heading {
+  margin: 0 0 var(--lc-space-1);
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  font-weight: 500;
+}
+
+.lc-add-data-recent {
+  flex: none;
+}
+
+.lc-add-data-recent-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.lc-add-data-recent-item {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-1);
+  border-radius: var(--lc-radius);
+}
+
+.lc-add-data-recent-item:hover {
+  background: var(--lc-surface-3);
+}
+
+.lc-add-data-recent-open {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--lc-space-2);
+  min-width: 0;
+  height: var(--lc-control-h);
+  margin: 0;
+  padding: 0 var(--lc-space-2);
+  border: none;
+  border-radius: var(--lc-radius);
+  background: transparent;
+  color: var(--lc-text);
+  font: inherit;
+  text-align: left;
+  cursor: default;
+}
+
+.lc-add-data-recent-open:focus-visible {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: -2px;
+}
+
+.lc-add-data-recent-open > svg {
+  flex: none;
+  color: var(--lc-text-subtle);
+}
+
+.lc-add-data-recent-name {
+  flex: none;
+  max-width: 50%;
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The full path clips at its start, so the end that tells sources apart shows. */
+.lc-add-data-recent-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.lc-add-data-browse {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.lc-add-data-browse-pane {
+  flex: 1 1 auto;
+}

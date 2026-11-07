@@ -14,9 +14,7 @@ import type { TickContext } from "./renderLoopTypes.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
 import { compositeKey } from "./tickCommon.ts";
 
-// ---------------------------------------------------------------------------
-// pushMemberLayers — the per-(dataset, channel) member-pass budget
-// ---------------------------------------------------------------------------
+// pushMemberLayers: the per-(dataset, channel) member-pass budget
 
 function rosterGrid(n: number, cols: number, pitch: number): MemberRosterEntry[] {
   const out: MemberRosterEntry[] = [];
@@ -98,7 +96,7 @@ describe("pushMemberLayers", () => {
   });
 
   it("caps individual passes at the budget and folds the excess into the aggregate", () => {
-    // 600 members all ABOVE the aggregate threshold: without a hard cap
+    // 600 members all above the aggregate threshold: without a hard cap
     // the pass count would track member count.
     const zoom = (MEMBER_AGGREGATE_MAX_DIAG_PX + 8) / Math.hypot(1024, 1024);
     const members = rosterGrid(600, 25, 1024);
@@ -199,7 +197,7 @@ describe("pushMemberLayers", () => {
   it("holds the pass cap EXACTLY at the 257-member boundary (folds two, never unfolds past the cap)", () => {
     // One member over the cap, all above the size threshold. Unfolding the
     // lone overflow member (aggregation "needs 2 to engage") would emit 257
-    // individual passes — the cap must instead fold a second member so the
+    // individual passes, so the cap must instead fold a second member so the
     // budget holds: 255 individual + 1 aggregate of 2 = 256 layers.
     const zoom = (MEMBER_AGGREGATE_MAX_DIAG_PX + 8) / Math.hypot(1024, 1024);
     const members = rosterGrid(MAX_INDIVIDUAL_MEMBER_PASSES + 1, 20, 1024);
@@ -269,9 +267,9 @@ describe("pushMemberLayers", () => {
   });
 
   it("folds cap overflow in roster order so aggregate quad z-order is stable", () => {
-    // Sizes INCREASE with roster index, so the overflow (smallest) members
-    // are roster indices 0..3. Their quads must appear in roster order —
-    // not size order — because quad order is the aggregate's draw order.
+    // Sizes increase with roster index, so the overflow (smallest) members
+    // are roster indices 0..3. Their quads must appear in roster order,
+    // not size order, because quad order is the aggregate's draw order.
     const members: MemberRosterEntry[] = [];
     const n = MAX_INDIVIDUAL_MEMBER_PASSES + 4;
     for (let i = 0; i < n; i++) {
@@ -302,9 +300,7 @@ describe("pushMemberLayers", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// sliceBackingScale — bounded render-resolution fallback
-// ---------------------------------------------------------------------------
+// sliceBackingScale: bounded render-resolution fallback
 
 describe("sliceBackingScale", () => {
   it("leaves ordinary backings (including 800×600 CSS at DPR 2) at full resolution", () => {
@@ -320,9 +316,7 @@ describe("sliceBackingScale", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// tickSlice → posted sliceRenderMultiPass (the render-message seam)
-// ---------------------------------------------------------------------------
+// tickSlice to the posted sliceRenderMultiPass (the render-message seam)
 
 interface SeamHarness {
   ctx: TickContext;
@@ -419,6 +413,7 @@ function makeSeamHarness(opts: {
     },
     mode: "slice",
     renderScale: 1,
+    resolutionScale: 1,
   } as unknown as TickContext;
 
   return {
@@ -473,7 +468,7 @@ describe("tickSlice render-message seam", () => {
     expect(canvasW / zoom).toBeCloseTo(6000 / 1, 0);
     // The presented canvas is resized to the same clamped backing.
     expect(h.resize).toHaveBeenCalledWith(canvasW, canvasH);
-    // Planning still sees the FULL device-pixel viewport.
+    // Planning still sees the full device-pixel viewport.
     expect((h.ctx.scene as unknown as { set_viewport: ReturnType<typeof vi.fn> }).set_viewport)
       .toHaveBeenCalledWith(6000, 4000);
   });

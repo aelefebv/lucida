@@ -1,24 +1,13 @@
 /**
- * A run or a bundle read back from a file (#1066), the way the CLI reads
- * one.
+ * Reads a bundle, a run file, or a saved run (the monitor's **Save run**)
+ * back from a file. Bundles and run files are told apart the way the CLI's
+ * `read_artifact` does, by the bundle's `format` field and then the run
+ * file's version, and an unknown version is refused by number. The CLI does
+ * not take a saved run, since it has no renderings to print without a page.
  *
- * Three files carry a trace document: the bundle either entry point writes,
- * the run file the trace driver writes around the page's export, and the
- * document alone, which is what the monitor's **Save run** writes. The
- * CLI's `read_artifact` tells the first two apart the same way this does,
- * by the bundle's own `format` field and then the run file's version, and
- * refuses a version it does not know by number rather than guessing. The
- * saved run is the page's own export, so this reader takes it too, and the
- * CLI, which has no renderings to print for it without a page, does not.
- *
- * What a file knows beyond its document decides what a comparison can list.
- * A bundle carries the whole planning configuration and no cache knobs. A
- * run file carries the knobs the driver set, with every other field at the
- * page's default, and the server's warmth as a condition. A saved run knows
- * nothing beyond the document. {@link compareSideOf} writes each of those
- * into the side the seam's compare function takes, field for field as the
- * CLI's `CompareSide::from_bundle` and `from_run_file` do, so the dock and
- * `lucida trace diff` hand the one compare function the same input.
+ * {@link compareSideOf} must match the CLI's `CompareSide::from_bundle` and
+ * `from_run_file` field for field, so the dock and `lucida trace diff` hand
+ * the one compare function the same input.
  */
 
 import type { CacheKnobs } from "../pipeline/fetch/cacheKnobs.ts";

@@ -1,26 +1,10 @@
 /**
- * Vocabulary lock for the `apply_command` JSON boundary: every command type in
- * `commands.ts` round-trips through the REAL wasm `scene.apply_command`
- * (`lucida-core/pkg`, the same bundle production loads), so the hand-written
- * TS mirrors cannot drift from the Rust serde shapes — a Rust-side tag or
- * field rename fails this suite even though the wire goldens deliberately
- * stop at the WebSocket envelope and never cross the TS->wasm seam.
- *
- * Three layers of lock:
- *  1. Type level: the case tables are `Record`s keyed by each union's `type`
- *     tags, so tsc rejects a vocabulary variant with no representative here
- *     (and a case whose body doesn't match its variant).
- *  2. Acceptance: every representative deserializes on the Rust side —
- *     `apply_command` throws on any JSON that matches neither enum.
- *  3. State: a handful of commands assert the scene actually changed via the
- *     scene's query surface, proving the values land (not just parse).
- *
- * Division of labor with `wireGoldens.test.ts`: the goldens lock the
- * client<->server envelopes (including the document-command bodies as
- * producers serialize them) against Rust-generated fixtures — field presence
- * and values via parsed comparison; JSON key order is serde-irrelevant and
- * not locked. This suite locks the local-apply vocabulary — including every
- * viewport command, which never crosses the server wire at all.
+ * Locks the `apply_command` vocabulary: every command type in `commands.ts`
+ * round-trips through the real wasm `scene.apply_command`, so the hand-written
+ * mirrors can't drift from the Rust serde shapes. The case tables are `Record`s
+ * keyed by tag, so tsc rejects a variant with no representative. The wire
+ * goldens stop at the WebSocket envelope; this suite covers the TS-to-wasm
+ * seam, including viewport commands that never cross the wire.
  */
 
 import { beforeAll, describe, expect, it } from "vitest";
@@ -136,8 +120,8 @@ function apply(scene: WasmScene, cmd: DocumentCommand | ViewportCommand): void {
   scene.apply_command(JSON.stringify(cmd));
 }
 
-/** The author-view capture embedded in the `add_annotation` representative —
- *  exercises the one nested-document payload in the vocabulary. */
+/** The author-view capture in the `add_annotation` representative, the one
+ *  nested-document payload in the vocabulary. */
 const pinView: SavedView = {
   v: 1,
   datasets: [],
@@ -150,10 +134,8 @@ const pinView: SavedView = {
   auto_contrast: { [DS]: false },
 };
 
-// ---------------------------------------------------------------------------
-// Representative values — one per union member, keyed by tag so tsc enforces
-// exhaustiveness against the vocabulary module.
-// ---------------------------------------------------------------------------
+// One representative per union member, keyed by tag so tsc enforces
+// exhaustiveness.
 
 const documentCases: {
   [K in DocumentCommand["type"]]: Extract<DocumentCommand, { type: K }>;
@@ -331,10 +313,6 @@ const viewportCases: {
   },
 };
 
-// ---------------------------------------------------------------------------
-// Acceptance: every representative parses on the Rust side
-// ---------------------------------------------------------------------------
-
 describe("command vocabulary: every DocumentCommand is accepted by the real wasm apply_command", () => {
   it.each(Object.entries(documentCases))("%s", (_tag, cmd) => {
     const scene = freshScene();
@@ -348,10 +326,6 @@ describe("command vocabulary: every ViewportCommand is accepted by the real wasm
     expect(() => apply(scene, cmd)).not.toThrow();
   });
 });
-
-// ---------------------------------------------------------------------------
-// State visibility: the values land, not just parse
-// ---------------------------------------------------------------------------
 
 describe("command vocabulary: state-visible commands change the scene", () => {
   it("set_z moves the z selector", () => {
@@ -400,10 +374,6 @@ describe("command vocabulary: state-visible commands change the scene", () => {
     expect(pin!.z).toBe(3);
   });
 });
-
-// ---------------------------------------------------------------------------
-// Rejection: a bad command fails loudly at the boundary
-// ---------------------------------------------------------------------------
 
 describe("command vocabulary: malformed commands throw at apply_command", () => {
   it("an unknown type tag throws (a tag typo cannot silently no-op)", () => {

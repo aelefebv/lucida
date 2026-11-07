@@ -48,6 +48,13 @@ pub enum ImportWarningKind {
     /// representatives unreadable at once. The message names a few affected
     /// tiles and the likely store-side causes.
     UnreadableTileGeometry,
+    /// One or more tiles' own geometry could not be used: their metadata
+    /// was unreadable, or their axes, data type, or codec chain differ from
+    /// the first readable tile's. Those tiles are read as if they were
+    /// stored like the first readable tile, which is wrong wherever they
+    /// differ. Always aggregated, for the same reason as
+    /// [`Self::UnreadableTileGeometry`].
+    UnusableTileGeometry,
     /// Label discovery on a large collection probed only a sample of tiles, so
     /// labels present only on unsampled tiles were not discovered. The message
     /// names the environment variable that forces exhaustive discovery.
@@ -93,28 +100,15 @@ pub struct ImageBindingSeed {
 }
 
 /// What the chunk-fetch path needs to know about one level of one image:
-/// how the bytes are compressed on disk, the on-disk chunk shape (parallels
+/// the on-disk compression, the on-disk chunk shape (parallels
 /// `ImageBindingSeed.axes_names`), the canonical-byte slice layout, and,
 /// for a sharded level, how an inner chunk is found in its shard.
 ///
-/// `chunk_shape` is needed by the resolver to divide wire `t`/`c` voxel
-/// coords by the on-disk chunk size on those axes. The slice step on
-/// the server uses the same shape to compute the intra-chunk `(t, c)`
-/// indices passed into [`ChunkByteLayout::slice_range`].
-///
-/// On a sharded level every field describes the inner chunk: the shape the
-/// viewer plans and fetches in, the codec each inner chunk is stored with,
-/// and the slice layout of one decoded inner chunk. That is what lets
-/// bundled timepoints and channels compose with sharding. The server cuts
-/// the slice from an inner chunk exactly as it cuts it from an object. The
-/// shard itself appears only in `shard`, which only the server's resolver
-/// reads.
-///
-/// Built at import time from a strict-validated codec chain
-/// ([`crate::codec::parse_codec_chain`], or
-/// [`ShardLayout::from_codec_chain`] when the outer codec is the sharding
-/// codec) and the level's chunk shape
-/// ([`crate::layout::compute_chunk_byte_layout`]).
+/// On a sharded level every field describes the inner chunk, so bundled
+/// timepoints and channels compose with sharding: the server cuts the
+/// slice from an inner chunk exactly as from an object. Only the server's
+/// resolver reads `shard`. Built at import time from a strictly validated
+/// codec chain and the level's chunk shape.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LevelBindingInfo {
     pub level_index: u32,
@@ -124,4 +118,30 @@ pub struct LevelBindingInfo {
     /// How this level's chunks are packed into shards, or `None` when each
     /// chunk is an object of its own.
     pub shard: Option<ShardLayout>,
+    /// The chunk grid this level is served at, when it is not the one it is
+    /// stored in. Every other field still describes the stored chunks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regrid: Option<Regrid>,
+}
+
+/// A level whose chunk keys address a declared chunk grid rather than its
+/// stored one.
+///
+/// A collection declares one geometry for all of its tiles, but the format
+/// lets each tile have its own level shapes and chunk shapes. A tile whose
+/// stored chunk shape differs from the declared one is served one declared
+/// chunk at a time, assembled from the stored chunks it overlaps, with fill
+/// past the tile's own extent.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Regrid {
+    /// The declared chunk shape a key addresses, parallel to
+    /// `ImageBindingSeed.axes_names`.
+    pub chunk_shape: Vec<u64>,
+    /// The byte layout of one declared chunk. Only `canonical_byte_size`
+    /// matters on the wire, since a served chunk is always one `t` and one
+    /// `c`.
+    pub chunk_byte_layout: ChunkByteLayout,
+    /// The stored level's shape, parallel to `ImageBindingSeed.axes_names`.
+    /// Samples past it are fill.
+    pub stored_shape: Vec<u64>,
 }

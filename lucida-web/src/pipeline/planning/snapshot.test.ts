@@ -12,15 +12,9 @@ import {
   type SnapshotDatasetEntry,
 } from "./snapshot.ts";
 
-// ---------------------------------------------------------------------------
-// Stub WasmScene
-// ---------------------------------------------------------------------------
-//
-// `buildPlanningSnapshot` only reads a small slice of the WasmScene
-// surface: `view_query`, `member_positions`, `visible_region`, and the
-// scalar accessors `c() / t() / z()`. The stub below honours that
-// minimal contract and is then cast to `WasmScene` so callers don't
-// need a full WASM bundle to test the translation logic.
+// `buildPlanningSnapshot` reads only `view_query`, `member_positions`,
+// `visible_region`, and `c() / t() / z()`, so the stub covers just those
+// and is cast to `WasmScene`; no WASM bundle is needed.
 
 interface VisibleEntityRow {
   entity_id: string;
@@ -97,10 +91,6 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
   };
   return stub as unknown as WasmScene;
 }
-
-// ---------------------------------------------------------------------------
-// Manifest / settings / args helpers
-// ---------------------------------------------------------------------------
 
 function makeLevels(): LevelGeometry[] {
   return [
@@ -197,10 +187,6 @@ function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
     config: DEFAULT_PLANNING_CONFIG,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 describe("buildPlanningSnapshot — typical case", () => {
   it("produces an EntitySnapshot joined with manifest data", () => {
@@ -517,8 +503,7 @@ describe("buildPlanningSnapshot — minimapPending tile", () => {
       minimapPending,
     });
     expect(built).not.toBeNull();
-    // Per ADR 0023 the slot is exposed on the snapshot so `plan()`'s
-    // `emitMinimapLane` can consume it.
+    // The slot is on the snapshot so `plan()`'s `emitMinimapLane` can read it.
     expect(built!.snapshot.minimapPending).toBe(minimapPending);
     expect(built!.snapshot.minimapPending.get("img-0")).toEqual([
       { level: 0, x: 0, y: 0, z: 0, t: 0, c: 0, key: "0/0/0/0/0/0" },

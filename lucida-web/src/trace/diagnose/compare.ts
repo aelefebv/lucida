@@ -1,21 +1,14 @@
 /**
- * Two runs compared (#1059): header differences with a comparability
- * warning, phase deltas, and finding deltas, as one document and one text.
+ * Two runs compared: header differences with a comparability warning, phase
+ * deltas, and finding deltas. Each side is derived by {@link diagnoseDocument}
+ * first, so a number here is a number in one of the two diagnostics or the
+ * difference of two such numbers.
  *
- * The subtraction lives behind the trace seam, as the diagnostic does, so
- * every reader of it prints the same deltas: `lucida trace diff` today, and
- * any viewer surface that sets two runs side by side. Each side is derived
- * by {@link diagnoseDocument} first, and the comparison selects from the two
- * diagnostics and computes nothing of its own beyond a subtraction: a number
- * here is a number in one of the two documents, or the difference of two
- * such numbers.
- *
- * The header comparison is what makes a diff honest. Two runs at different
- * device pixel ratios, on different adapters, or of different datasets are
- * incomparable, and a diff that prints their deltas without saying so is
- * worse than no diff (ADR 0047). Those fields break comparability when they
- * differ. The planning configuration and the CPU cache knobs are the
- * experiment: they are listed, never warned about.
+ * Runs at different device pixel ratios, on different adapters, or of
+ * different datasets are incomparable, and a diff that prints their deltas
+ * without saying so is worse than no diff (ADR 0047). The planning
+ * configuration and the CPU cache knobs are the experiment: listed, never
+ * warned about.
  */
 
 import { CACHE_KNOB_FIELDS, type CacheKnobs } from "../../pipeline/fetch/cacheKnobs.ts";
@@ -160,10 +153,6 @@ export interface RunComparison {
   next: NextStep[];
 }
 
-// ---------------------------------------------------------------------------
-// The comparison
-// ---------------------------------------------------------------------------
-
 /**
  * Compare `right` against `left`: every delta is right minus left, so a
  * baseline on the left and a candidate on the right read as "what the
@@ -256,8 +245,8 @@ function compareHeaders(left: ResolvedSide, right: ResolvedSide): HeaderDifferen
     fields.push({ field, group, left: l, right: r, same: l === r, breaksComparability: false });
 
   // The fields the trace header records so two runs are comparable or
-  // visibly not (ADR 0047). Read off the diagnostic's identity block where
-  // it phrases them; mode and the quiescence hold come off the header.
+  // visibly not. Read off the diagnostic's identity block where it phrases
+  // them; mode and the quiescence hold come off the header.
   breaking("dataset", left.doc.run.datasetIds.join(", "), right.doc.run.datasetIds.join(", "));
   breaking("cause", formatCause(left.doc.run.cause), formatCause(right.doc.run.cause));
   breaking("mode", left.run.composedView.mode, right.run.composedView.mode);
@@ -405,10 +394,6 @@ function observationDelta(left: FindingObservation, right: FindingObservation): 
 function round(value: number): number {
   return Math.round(value * 1000) / 1000;
 }
-
-// ---------------------------------------------------------------------------
-// The text
-// ---------------------------------------------------------------------------
 
 /**
  * The comparison as text. One renderer, so every number in the text exists

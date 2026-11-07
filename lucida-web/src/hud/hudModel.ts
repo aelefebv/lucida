@@ -1,29 +1,14 @@
 /**
  * The HUD model: what the strip in the viewport says, as pure data.
  *
- * A sample comes in once per HUD tick, the model keeps a rolling history of
- * them and turns the latest into readouts, each a label paired with a tone,
- * so a state is never a color alone. Nothing here touches a canvas, the
- * recorder, or the cache: the page assembles the sample, the model reads
- * it, and the strip draws the result. That split is what lets these
- * readouts be asserted from fixtures.
- *
- * Cadence. The HUD has a tick of its own, {@link HUD_TICK_MS}, and draws
- * once per tick. It hooks nothing into the render loop and asks for no
- * animation frame, so its cost is bounded per tick and nothing per frame
- * (ADR 0049 as amended).
- *
- * Sources. The levels per dataset come from the per-tick aggregate, through
- * the recorder's tick observer. Frame time and GPU pass time come from the
- * latest reading. Three readouts are gauges the trace does not record, so
- * the strip reads them live instead of inventing a record. Bytes each way
- * are differenced from page-scoped totals, because the aggregate's send
- * tally is per planning pass and a pass can be seconds apart while the
- * socket stays busy. Resident bytes per pool and outstanding work per lane
- * are read from the cache, because the reading ring carries one resident
- * total and widening it is a budget decision ADR 0049 reserves. Each is a
- * value now, not a series the document derives, and nothing here turns one
- * into a finding.
+ * Each tick's sample joins a rolling history, and the latest becomes readouts
+ * that pair a label with a tone, so a state is never a color alone. Nothing
+ * here touches a canvas, the recorder, or the cache, so fixtures can assert
+ * the readouts. Bytes each way are differenced from page-scoped totals: the
+ * aggregate's send tally is per planning pass, and passes can be seconds apart
+ * while the socket stays busy. Pool and lane figures come from the cache
+ * because the reading ring carries one resident total, and widening it is a
+ * budget decision (ADR 0049).
  */
 
 import type { Lane, LaneOutstanding, PoolResidencyReport } from "../pipeline/fetch/types.ts";
@@ -31,7 +16,8 @@ import type { LevelRange } from "../renderer/workerProtocol.ts";
 import { adapterKindOf, adapterName } from "../trace/diagnose/renderTiming.ts";
 import type { GpuIdentity } from "../trace/types.ts";
 
-/** How often the HUD samples and draws. */
+/** How often the HUD samples and draws. It hooks nothing into the render
+ *  loop, so its cost is per tick, never per frame. */
 export const HUD_TICK_MS = 250;
 
 /** How many ticks the sparklines show: fifteen seconds at the tick above. */
@@ -39,14 +25,6 @@ export const HUD_HISTORY = 60;
 
 /** A state's color, always paired with a label. */
 export type HudTone = "ok" | "busy" | "warn" | "absent" | "info";
-
-export const HUD_COLORS: Record<HudTone, string> = {
-  ok: "#5ec269",
-  busy: "#f0b429",
-  warn: "#ef5350",
-  absent: "#9aa0a6",
-  info: "#64b5f6",
-};
 
 /** One dataset's levels, from its latest per-tick aggregate sample. */
 export interface HudLevelSample {
@@ -355,7 +333,7 @@ function poolsOf(last: HudSample | null): HudPoolView[] {
     return { label, text, fill, state: "under budget", tone: "ok" };
   });
   // The render worker reports no resident bytes, so the GPU pool is drawn as
-  // absent rather than as zero (ADR 0052's confident-zero failure).
+  // absent rather than as a confident zero.
   out.push({ label: "GPU", text: "not reported", fill: null, state: "not reported", tone: "absent" });
   return out;
 }

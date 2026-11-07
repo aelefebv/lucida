@@ -1,0 +1,113 @@
+/*
+ * The debug overlay layer. Chunk cells and wireframes take their colors from
+ * the draw list; what is styled here is the layer's own furniture: the
+ * captions, the hover inspector, the group badges, and the render-radius
+ * rings. Text sits on floating cards, so it reads in either theme over any
+ * data. What is drawn straight onto the picture takes its contrast from the
+ * canvas background instead.
+ */
+
+.debug-overlays {
+  position: absolute;
+  top: 0;
+  left: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.debug-overlays-cell {
+  position: absolute;
+  box-sizing: border-box;
+}
+
+.debug-overlays-svg {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.debug-overlays-hovered-box {
+  stroke: var(--lc-canvas-stroke);
+}
+
+/* The render-radius rings, drawn over the picture: detail in the success
+   color, coarse in the warning color, as the tier overlay colors them. */
+.debug-overlays-radius[data-tier="detail"] {
+  stroke: var(--lc-canvas-success);
+}
+
+.debug-overlays-radius[data-tier="coarse"] {
+  stroke: var(--lc-canvas-warning);
+}
+
+.debug-overlays-card {
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-sm);
+  background: var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-1);
+  color: var(--lc-text-muted);
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+}
+
+.debug-overlays-inspector {
+  position: absolute;
+  max-width: 360px;
+  padding: var(--lc-space-1) 7px;
+  color: var(--lc-text);
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+.debug-overlays-inspector-title {
+  font-weight: 600;
+}
+
+/* The captions in the corner: what an empty picture means, and what a brushed one shows. */
+.debug-overlays-captions {
+  position: absolute;
+  left: var(--lc-space-2);
+  bottom: var(--lc-space-2);
+  max-width: 70%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+}
+
+.debug-overlays-caption {
+  padding: 3px 7px;
+}
+
+/* One badge per group, centered on it: the mode's tone as text and border on
+   a floating surface. Many sit on screen at once, so no blur. */
+.debug-overlays-badge {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  padding: 1px 5px;
+  border: 1px solid currentColor;
+  border-radius: var(--lc-radius-sm);
+  background: var(--lc-surface-float);
+  color: var(--lc-text);
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.debug-overlays-badge[data-mode="tiles-with-detail"],
+.debug-overlays-badge[data-mode="render-detail"] {
+  color: var(--lc-success);
+}
+
+.debug-overlays-badge[data-mode="tiles-with-proxy-fallback"],
+.debug-overlays-badge[data-mode="render-waiting"] {
+  color: var(--lc-warning);
+}
+
+.debug-overlays-badge[data-mode="group-as-proxy"],
+.debug-overlays-badge[data-mode="render-coarse"] {
+  color: var(--lc-info);
+}

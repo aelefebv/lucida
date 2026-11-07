@@ -20,6 +20,7 @@ import {
 import type { ViewportCommand } from "./commands.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
 import { readCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
+import { pageDeviceBudgets } from "./deviceBudget.ts";
 import type {
   WireGeneratedAvailabilityByDataset,
   WireGeneratedAvailabilityDelta,
@@ -37,52 +38,34 @@ import { classifySceneError, guardedSceneCall, observeSceneCalls } from "./scene
 import { traceRecorder } from "./trace/recorder.ts";
 import { watchStream } from "./trace/watchStream.ts";
 
-/** Consecutive scene-mutation failures (local, remote, or snapshot — every
- *  mutation reports through the scene-call guard) before the scene is
- *  treated as unable to apply updates and the error becomes user-visible.
- *  A single bad command stays in the log (the streak resets on the next
- *  successful mutation, again from any origin); fatal-class engine errors
- *  skip the streak entirely. */
+/** Consecutive scene-mutation failures, from any origin, before the error
+ *  becomes user-visible. One bad command only logs; the streak resets on the
+ *  next successful mutation. Fatal engine errors skip the streak. */
 const SCENE_APPLY_FAILURE_LIMIT = 3;
 
-/** Upper bound on how many distinct import-warning messages are retained in
- *  the store and surfaced through [`RemoteDatasetActivity.warnings`]. A single
- *  open can emit one distinct notice per malformed member (thousands for a
- *  large collection), each unique so dedup never collapses them; retaining and
- *  re-projecting all of them would grow the observable list without bound and
- *  stall the tab. Past this many, further distinct warnings are counted (see
- *  [`RemoteDatasetActivity.warningsOverflow`]) rather than stored — the list
- *  stays bounded while the FACT that more warnings occurred is never lost. */
+/** Cap on distinct import warnings retained in
+ *  [`RemoteDatasetActivity.warnings`]. One open can emit a unique notice per
+ *  malformed member (thousands for a large collection), and keeping them all
+ *  stalls the tab. Past the cap, warnings are counted in
+ *  [`RemoteDatasetActivity.warningsOverflow`] instead of stored. */
 export const MAX_OPEN_WARNINGS = 50;
 
 /**
- * The kinds of user-visible errors competing for the single
- * [`RemoteDatasetActivity`]`.error` slot. There is one banner, so
- * collisions are resolved by rank ([`SURFACED_ERROR_RANK`]): a candidate
- * never displaces a standing error of strictly higher rank, equal-or-lower
- * standing errors yield to it. Each kind also has its own retirement
- * signal — see [`clearSurfacedError`] call sites:
+ * User-visible errors competing for the single
+ * [`RemoteDatasetActivity`]`.error` slot. A candidate never displaces a
+ * standing error of strictly higher rank ([`SURFACED_ERROR_RANK`]). Each kind
+ * retires only through its own signal:
  *
- * - `engine-fatal`: the wasm scene is unrecoverably dead. Outranks
- *   everything and is never cleared — only a reload recovers.
- * - `engine`: scene mutations keep failing (non-fatal streak). Cleared by
- *   the next successful mutation, which disproves persistent apply death.
- * - `open`: a dataset open failed. Cleared when a new open attempt (or its
- *   progress) supersedes it.
- * - `data`: chunk delivery keeps failing. Cleared by the next delivered
- *   (fetched AND decoded) chunk.
- * - `incompatible`: inbound commands were refused at the parse boundary
- *   (e.g. version skew with a peer) while the scene stays healthy.
- *   Advisory only; cleared by the next successful mutation.
+ * - `engine-fatal`: the wasm scene is dead. Never cleared; only a reload recovers.
+ * - `engine`: mutations keep failing. Cleared by the next successful mutation.
+ * - `open`: a dataset open failed. Cleared by a new open attempt or its progress.
+ * - `data`: chunk delivery keeps failing. Cleared by the next delivered chunk.
+ * - `incompatible`: inbound commands refused at the parse boundary (e.g.
+ *   version skew). Advisory; cleared by the next successful mutation.
  *
- * `open`, `data`, and `incompatible` share the lowest rank and resolve by
- * last-writer-wins. Ranking any of them above the others would let a stale
- * one-shot banner mask a live, ongoing condition — e.g. a standing open
- * failure hiding a delivery-failure streak that began afterwards, leaving
- * the stalling canvas unexplained. Each kind still retires only through
- * its own signal, and `data`/`incompatible` re-emit while their condition
- * persists, so the newest actionable signal wins the slot without losing
- * anything durable.
+ * `open`, `data`, and `incompatible` share the lowest rank and resolve
+ * last-writer-wins, so a stale one-shot banner can't mask a live condition
+ * that started after it.
  */
 type SurfacedErrorKind = "engine-fatal" | "engine" | "open" | "data" | "incompatible";
 
@@ -100,9 +83,9 @@ const SURFACED_ERROR_RANK: Record<SurfacedErrorKind, number> = {
 export interface SavedViewBridgeHooks {
   onDatasetOpened: (datasetId: string) => void;
   onOpenDatasetFailed: (url: string, error: string) => void;
-  /** `true` while a saved/last view is mid-restore (start of apply through its
-   * camera step). The controller consults this to suppress auto-fit-on-open so
-   * a restore's camera wins (#700). Optional so older callers stay compatible. */
+  /** `true` while a saved or last view is mid-restore, through its camera step.
+   * Suppresses auto-fit-on-open so the restore's camera wins. Optional so
+   * older callers stay compatible. */
   isInProgress?: () => boolean;
 }
 
@@ -112,39 +95,27 @@ export interface RemoteDatasetActivity {
   loading: boolean;
   error: string | null;
   progress: string | null;
-  /** Non-fatal import warnings collected across the session, kept durably
-   *  after each open completes (unlike `progress`, which is transient). This
-   *  is the flattened, order-preserving, deduplicated projection of every
-   *  source's collected warnings, so datasets opened together in one pass
-   *  (multi-seed workspace creation, source-url view restores) each surface
-   *  their warnings — not just the last open's. Cleared wholesale by
-   *  [`dismissOpenWarnings`] and on connection loss; a single failed open
-   *  clears only its own. Capped at [`MAX_OPEN_WARNINGS`] distinct messages —
-   *  see `warningsOverflow` for what the cap elides. */
+  /** Non-fatal import warnings, kept after each open completes (unlike
+   *  `progress`). Deduplicated across sources so datasets opened together in
+   *  one pass each surface their warnings. Cleared by [`dismissOpenWarnings`]
+   *  and on connection loss; a failed open clears only its own. Capped at
+   *  [`MAX_OPEN_WARNINGS`]. */
   warnings: readonly string[];
-  /** How many further distinct warnings occurred beyond the ones retained in
-   *  `warnings` (the [`MAX_OPEN_WARNINGS`] cap). Zero unless a flood exceeded
-   *  the cap; lets a banner render a "+N more" affordance so a bounded display
-   *  never hides that more warnings happened. Retired by the same signals as
-   *  `warnings`. */
+  /** Distinct warnings beyond the [`MAX_OPEN_WARNINGS`] cap, so a banner can
+   *  show "+N more". Retired with `warnings`. */
   warningsOverflow: number;
 }
 
 /**
- * Notifications the controller emits toward its owner (in the app, the
- * `useBridge` adapter, which mirrors them into React state). Deliberately
- * narrow: values flow one way, out of the controller — the owner never has
- * to reach back in to keep its mirrors consistent.
+ * Notifications toward the controller's owner (in the app, `useBridge`, which
+ * mirrors them into React state). Values flow one way, out of the controller.
  *
- * Every callback fires synchronously from within a bridge handler (or a
- * controller method), never from a deferred task, so a listener that mirrors
- * into React state observes events in exactly the order the protocol
- * delivered them. One deliberate exception: `onRemoteDocumentChanged` for a
- * snapshot burst — see its doc below.
+ * Every callback fires synchronously from a bridge handler or controller
+ * method, so listeners see events in protocol order. The exception is
+ * `onRemoteDocumentChanged` for a snapshot burst; see its doc.
  *
- * `onPeersChanged` hands over a freshly built `Map` on every change (the
- * controller never mutates a map it has emitted), so the owner may store the
- * reference directly and rely on identity inequality for change detection.
+ * `onPeersChanged` hands over a fresh `Map` each time, so the owner can rely
+ * on identity inequality for change detection.
  */
 export interface SessionControllerEvents {
   /** WebSocket OPEN / closed (see the readiness notes on [`useBridge`]'s
@@ -164,15 +135,11 @@ export interface SessionControllerEvents {
   onDatasetsChanged: () => void;
   /** The shared document changed (any applied command or snapshot).
    *
-   *  Emission timing: a live command emits synchronously from its handler.
-   *  A snapshot is different — the bridge synchronously replays pending
-   *  local commands (and drains gap-buffered ones) right after `onSnapshot`
-   *  returns, so per-change emission would fire 1 + N times for one document
-   *  adoption, and the early emissions would let a synchronous listener read
-   *  the scene BEFORE the replays restored the author's own edits. The
-   *  controller therefore coalesces the whole burst into ONE emission,
-   *  delivered from a microtask after the burst completes — post-replay
-   *  state, exactly once. */
+   *  A live command emits synchronously. A snapshot is followed by the
+   *  bridge's synchronous replay of pending local commands, so the controller
+   *  coalesces the whole burst into one emission from a microtask. Emitting
+   *  earlier would let a listener read the scene before the replays restored
+   *  the author's own edits. */
   onRemoteDocumentChanged: () => void;
   onWorkspaceArchived: () => void;
 }
@@ -183,6 +150,12 @@ export interface SessionControllerEvents {
  * time (scene, render loop, callback registries) are reached through getters
  * so the controller always sees the current one.
  */
+/** A canvas size in device pixels. */
+export interface ViewportSize {
+  width: number;
+  height: number;
+}
+
 export interface SessionControllerDeps {
   workspaceId: string;
   /** Construct-or-return the WasmScene (see `useWasmScene.ensureScene`). */
@@ -192,11 +165,15 @@ export interface SessionControllerDeps {
   /** Current render loop, or null while no viewer is mounted. */
   getLoop: () => RenderLoop | null;
   /**
-   * Shared dataset registry. The host owns the Map's *identity* (other
-   * consumers hold the same reference); the controller owns its *contents* —
-   * it is the only writer, and `destroy()` clears it so a successor
-   * controller re-registers every fetch pipeline against its own content
-   * source (stale entries would leave chunk fetches unroutable).
+   * The canvas's size in device pixels, or null before it is laid out. The
+   * auto-fit frames against it: the scene otherwise learns its size only from
+   * render ticks, and none has run before the first dataset opens.
+   */
+  getViewportSize: () => ViewportSize | null;
+  /**
+   * Shared dataset registry. The host owns the Map's identity; the controller
+   * is its only writer. `destroy()` clears it so a successor controller
+   * re-registers every fetch pipeline against its own content source.
    */
   datasets: Map<string, DatasetState>;
   /** Tear down host-side per-dataset state (layer maps, selection, …). */
@@ -213,28 +190,17 @@ export interface SessionControllerDeps {
 }
 
 /**
- * Owner of the per-workspace collaboration stack: constructs the
- * DecodePool → ProxiedContentSource → CpuCache → Bridge → Session chain,
- * wires every bridge handler, and holds the connection-scoped state those
- * handlers need (self id, peers, follow target, open-in-flight bookkeeping,
- * the dataset registry contents).
+ * Owner of the per-workspace collaboration stack: builds the DecodePool →
+ * ProxiedContentSource → CpuCache → Bridge → Session chain, wires every bridge
+ * handler, and holds the connection-scoped state they need.
  *
- * Lifecycle is explicit and single-shot: `new SessionController(deps)`
- * connects; `destroy()` (idempotent) tears the whole stack down — WebSocket
- * plus reconnect/throttle timers, in-flight fetches, pending request
- * timeouts, decode workers — and clears the dataset registry. A host that
- * needs a session again constructs a fresh controller; nothing here is
- * re-armable (the instance-per-mount resolution).
+ * Single-shot: the constructor connects and `destroy()` (idempotent) tears it
+ * all down. A host that needs a session again builds a fresh controller.
+ * Framework-free so the session doesn't care how often a UI re-renders.
  *
- * This module is framework-free on purpose: the session must not care how
- * often a UI re-renders or re-runs effects. React (or a test) adapts via
- * [`SessionControllerDeps`] / [`SessionControllerEvents`].
- *
- * Handler timing contract: the bridge re-feeds pending local commands
- * through `onCommand` *synchronously* right after `onSnapshot` returns, and
- * drains gap-buffered messages the same way — so every handler here runs its
- * effects inline. Deferring any of this (microtask, RAF, state batch) would
- * let a replayed command observe pre-snapshot state.
+ * Handlers run their effects inline: the bridge replays pending local commands
+ * through `onCommand` synchronously right after `onSnapshot` returns, and
+ * deferring anything would let a replayed command see pre-snapshot state.
  */
 export class SessionController {
   readonly session: Session;
@@ -243,14 +209,13 @@ export class SessionController {
   private readonly contentSource: ProxiedContentSource;
 
   private destroyed = false;
-  /** Server-assigned id, from the snapshot. Id 0 is a legitimate first-client
-   *  id, not a sentinel — but until the first snapshot no `dataset_opened`
-   *  can arrive either (the snapshot is always the connection's first
-   *  message), so the initial 0 is never consulted for opener matching. */
+  /** Server-assigned id from the snapshot. 0 is a valid id, not a sentinel;
+   *  the snapshot is always the first message, so the initial 0 is never used
+   *  for opener matching. */
   private myId: ClientId = 0;
   private followTarget: ClientId | null = null;
-  /** Co-present peers (self excluded). Replace-on-write: every mutation
-   *  builds a new Map and emits it — see [`SessionControllerEvents`]. */
+  /** Co-present peers, self excluded. Replace-on-write: every mutation builds
+   *  and emits a new Map. */
   private peers = new Map<ClientId, PresenceState>();
   private remoteActivity: RemoteDatasetActivity = {
     loading: false,
@@ -259,51 +224,35 @@ export class SessionController {
     warnings: [],
     warningsOverflow: 0,
   };
-  /** Last `open_remote_dataset` send timestamp (performance.now() ms). Used
-   *  to derive a round-trip on receipt. Approximate when concurrent opens
-   *  are in flight — overwritten by each send. */
+  /** Last `open_remote_dataset` send time (performance.now() ms), for a
+   *  round-trip on receipt. Approximate with concurrent opens, since each
+   *  send overwrites it. */
   private lastOpenSendTime: number | null = null;
-  /** Non-fatal import warnings grouped by the source url that produced them
-   *  (the `url` every `onDatasetOpenProgress` frame carries). Collection is
-   *  session-level and never reset per open, so datasets opened together in
-   *  one synchronous pass (multi-seed workspace creation, source-url view
-   *  restores) each contribute their warnings instead of the last open's reset
-   *  erasing the rest. Grouping by source lets a failed open retire only its
-   *  own warnings while sibling opens' warnings stand. The observable
-   *  [`RemoteDatasetActivity.warnings`] is the flattened, deduplicated
-   *  projection of this map (see [`publishWarnings`]). Bounded: no more than
-   *  [`MAX_OPEN_WARNINGS`] distinct messages are retained across all sources —
-   *  further distinct ones are counted into [`overflowByUrl`] instead. */
+  /** Import warnings grouped by source url. Never reset per open, so datasets
+   *  opened together in one pass each keep their warnings; grouping lets a
+   *  failed open retire only its own. At most [`MAX_OPEN_WARNINGS`] distinct
+   *  messages across all sources; further ones count into [`overflowByUrl`]. */
   private readonly warningsByUrl = new Map<string, string[]>();
-  /** The distinct messages currently retained in [`warningsByUrl`] (its
-   *  cross-source dedup, materialized). Consulted on collect for O(1)
-   *  membership and size so the cap decision does not rescan the store, and so
-   *  a message already shown via one source is never miscounted as overflow
-   *  when a second source reports it. Kept in lock-step with the store. */
+  /** Distinct messages in [`warningsByUrl`], kept in lock-step with it. Makes
+   *  the cap check O(1), and stops a message already shown via one source from
+   *  counting as overflow when another source reports it. */
   private readonly retainedMessages = new Set<string>();
-  /** Per-source count of distinct warnings dropped once the retention cap was
-   *  reached (the source produced them but they are not stored). Keyed by
-   *  source url so a failed open retires exactly its own overflow alongside its
-   *  retained warnings, leaving siblings' counts intact. Summed into
-   *  [`overflowWarnings`]. */
+  /** Per-source count of distinct warnings dropped at the cap, so a failed
+   *  open retires exactly its own overflow. */
   private readonly overflowByUrl = new Map<string, number>();
-  /** Running total of [`overflowByUrl`] — how many distinct warnings occurred
-   *  beyond the retained cap. Surfaced as
-   *  [`RemoteDatasetActivity.warningsOverflow`] so the cap bounds the DISPLAY
-   *  without ever dropping the fact that more warnings happened. */
+  /** Sum of [`overflowByUrl`], surfaced as
+   *  [`RemoteDatasetActivity.warningsOverflow`]. */
   private overflowWarnings = 0;
-  /** True while a coalesced `onRemoteDocumentChanged` emission is scheduled
-   *  for the current snapshot burst (see the event's doc). Commands applied
-   *  while it is set — the bridge's synchronous pending-command replays and
-   *  gap-buffer drain — are covered by that one emission. */
+  /** True while a coalesced `onRemoteDocumentChanged` is scheduled for a
+   *  snapshot burst. Commands applied meanwhile (replays, gap-buffer drain)
+   *  are covered by that one emission. */
   private docChangedEmitPending = false;
   /** Consecutive scene-mutation failures reported by the scene-call guard;
    *  reset by each successful mutation. See [`handleSceneCallFailed`]. */
   private sceneApplyFailureStreak = 0;
-  /** Kind of the currently displayed `remoteActivity.error`, or null when
-   *  no error is showing. Kept in lock-step with the error string by
-   *  [`surfaceError`] / [`clearSurfacedError`] — never write the error
-   *  field around them. */
+  /** Kind of the displayed `remoteActivity.error`, or null. Only
+   *  [`surfaceError`] and [`clearSurfacedError`] write the error field, which
+   *  keeps the two in lock-step. */
   private surfacedErrorKind: SurfacedErrorKind | null = null;
   /** Unsubscribes this controller from the scene-call guard on destroy. */
   private readonly stopObservingSceneCalls: () => void;
@@ -315,18 +264,19 @@ export class SessionController {
     this.contentSource = new ProxiedContentSource(
       (json) => this.session?.bridge.send(json),
     );
+    const budgets = pageDeviceBudgets();
     this.cpuCache = new CpuCache(this.contentSource, decodePool, {
-      // The knobs the trace driver left in browser storage for this page,
-      // if any. Read once, here, so the cache starts under them.
+      mainBudgetBytes: budgets.cpuMainBytes,
+      overviewBudgetBytes: budgets.cpuOverviewBytes,
+      proxyBudgetBytes: budgets.cpuProxyBytes,
+      maxBytesInFlight: budgets.cpuBytesInFlight,
+      // Knobs the trace driver left in browser storage, read once so the
+      // cache starts under them.
       ...readCacheKnobs(),
-      // Chunk deliveries failing without interruption would otherwise
-      // present as a silently stalling canvas; route the cache's
-      // aggregated, throttled signal to the visible error banner, and
-      // retire it when delivery recovers. Access revoked after a
-      // successful open lands here because the server reports store
-      // failures as per-chunk `source_chunk_status` frames (permanent
-      // rejections); a source serving undecodable bytes lands here via
-      // the decode boundary.
+      // Without this, failing deliveries present as a silently stalling
+      // canvas. Store failures after a successful open (e.g. revoked access)
+      // arrive as per-chunk `source_chunk_status` rejections; undecodable
+      // bytes arrive via the decode boundary.
       onChunkFailureStreak: (consecutiveFailures, lastError) => {
         if (this.destroyed) return;
         this.surfaceError(
@@ -348,14 +298,11 @@ export class SessionController {
       cpuCache: this.cpuCache,
       decodePool,
     });
-    // Scene mutations report their outcome through the guard from every
-    // module (the remote handlers here, but also local UI paths, saved-view
-    // restores, registries), so a solo session's engine failure surfaces
-    // exactly like a collaborative one's. Reports are scoped to THIS
-    // session's scene via the guard's subject: sessions can coexist
-    // transiently (overlapping mounts during a workspace switch), and
-    // another session's successful apply on its own scene must not reset
-    // this one's failure streak or retire its banner.
+    // Every module reports scene mutations through the guard, so a solo
+    // session's engine failure surfaces like a collaborative one's. Reports
+    // are scoped to this session's scene: sessions can briefly coexist during
+    // a workspace switch, and another session's success must not reset this
+    // one's streak or retire its banner.
     this.stopObservingSceneCalls = observeSceneCalls({
       onSceneCallApplied: (_context, subject) => {
         if (subject !== this.deps.getScene()) return;
@@ -373,16 +320,12 @@ export class SessionController {
   }
 
   /**
-   * Tear down the whole stack this controller constructed: the WebSocket +
-   * reconnect/throttle timers, in-flight fetches, pending request timeouts,
-   * and the decode workers (all via `Session.destroy`, itself idempotent —
-   * this composes safely with the workspace-archived path, which already
-   * destroyed the bridge). Also clears the shared dataset registry: a
-   * successor session must rebuild fetch pipelines from its own snapshot,
-   * and stale entries would make the exists-checks skip registration
-   * against the new content source, leaving every chunk fetch unroutable.
+   * Tear down the stack (via `Session.destroy`, which is idempotent and so
+   * composes with the workspace-archived path) and clear the shared dataset
+   * registry. Stale entries would make a successor skip registration against
+   * its new content source, leaving every chunk fetch unroutable.
    *
-   * Emits no events — the owner resets its own mirrors on teardown.
+   * Emits no events; the owner resets its own mirrors.
    */
   destroy(): void {
     if (this.destroyed) return;
@@ -400,9 +343,7 @@ export class SessionController {
     this.overflowWarnings = 0;
   }
 
-  // ---------------------------------------------------------------------
-  // Outbound surface (user-initiated sends).
-  // ---------------------------------------------------------------------
+  // Outbound surface: user-initiated sends.
 
   sendCommand(json: string): void {
     this.session.bridge.sendCommand(json);
@@ -427,16 +368,12 @@ export class SessionController {
   openRemoteDataset(url: string): void {
     this.lastOpenSendTime = performance.now();
     bridgeLog("open_remote_dataset.loading_start", { url });
-    // A new open attempt supersedes a previous open's failure. Other error
-    // kinds keep their own retirement signals (delivery recovery, apply
-    // recovery, never for fatal) — an unrelated open must not mask them.
+    // A new open supersedes a previous open's failure. Other error kinds keep
+    // their own retirement signals, so an unrelated open must not mask them.
     this.clearSurfacedError(["open"]);
-    // Collected warnings are NOT reset here: several opens can be issued in one
-    // synchronous pass (multi-seed workspace creation, source-url view
-    // restores), and resetting per open would erase every earlier open's
-    // warnings before its progress frames arrived. Each source's warnings are
-    // retired by their own signal instead — that open failing, or a dismiss /
-    // connection loss.
+    // Warnings are not reset here: several opens can go out in one
+    // synchronous pass, and a reset would erase earlier opens' warnings
+    // before their progress frames arrive.
     this.updateRemoteActivity({
       loading: true,
       progress: "dataset open request sent",
@@ -447,9 +384,8 @@ export class SessionController {
     traceRecorder.noteOpenSent(this.session.bridge.sendOpenRemoteDataset(url));
   }
 
-  /** Clear the durable import warnings (the user dismissed the surface). Emits
-   *  through the same activity path so listeners re-render without the notice.
-   *  A no-op when nothing is collected. */
+  /** Clear the import warnings after the user dismissed them. No-op when
+   *  nothing is collected. */
   dismissOpenWarnings(): void {
     this.clearAllOpenWarnings();
   }
@@ -500,9 +436,7 @@ export class SessionController {
     }
   }
 
-  // ---------------------------------------------------------------------
   // Connection-scoped state, mirrored out through events.
-  // ---------------------------------------------------------------------
 
   private setMyId(id: ClientId): void {
     this.myId = id;
@@ -524,22 +458,14 @@ export class SessionController {
     this.deps.events.onRemoteDatasetActivity(this.remoteActivity);
   }
 
-  /** Record one import warning under the source url that produced it,
-   *  preserving every warning already collected (for this source and for
-   *  others). An empty/whitespace-only message is ignored (no blank bullet),
-   *  and a message already recorded for this source collapses to the existing
-   *  entry (identical notices — the same skipped-group notice repeated across
-   *  tiles, or replayed on resync — never stack).
+  /** Record one import warning under its source url. Blank messages are
+   *  ignored, and a message already recorded for this source collapses (the
+   *  same notice repeats across tiles and on resync).
    *
-   *  Retention is capped at [`MAX_OPEN_WARNINGS`] distinct messages: once the
-   *  cap is reached, a further NEW distinct message is not stored but is
-   *  counted into [`overflowByUrl`], so a flood (one distinct notice per
-   *  malformed member of a large collection) leaves the store bounded and the
-   *  observable list capped while the overflow count preserves the fact that
-   *  more warnings occurred. A message already shown (via this or another
-   *  source) is never counted as overflow — it collapses as before. Both the
-   *  store growth and the cap decision are O(1) here, so collecting N warnings
-   *  is O(N), never O(N²). Republishes only when something observable changed. */
+   *  Past [`MAX_OPEN_WARNINGS`] distinct messages, a new one is counted into
+   *  [`overflowByUrl`] instead of stored. A message already shown via any
+   *  source never counts as overflow. Both checks are O(1), so collecting N
+   *  warnings stays O(N). */
   private collectOpenWarning(url: string, message: string): void {
     if (message.trim() === "") return;
     const existing = this.warningsByUrl.get(url);
@@ -553,7 +479,7 @@ export class SessionController {
       return;
     }
     if (this.retainedMessages.size >= MAX_OPEN_WARNINGS) {
-      // The display is full of distinct notices; retain the FACT, not the text.
+      // The display is full; keep the count, not the text.
       this.overflowByUrl.set(url, (this.overflowByUrl.get(url) ?? 0) + 1);
       this.overflowWarnings += 1;
       this.publishWarnings();
@@ -565,10 +491,9 @@ export class SessionController {
     this.publishWarnings();
   }
 
-  /** Drop every warning recorded for `url` — used when that specific open
-   *  fails, so its own notice does not sit beside its error, WITHOUT touching
-   *  warnings collected for other sources opened in the same batch. Retires the
-   *  source's overflow count too. Republishes only when something was removed. */
+  /** Drop every warning and the overflow count recorded for `url`, when that
+   *  open fails, so its notice doesn't sit beside its error. Other sources in
+   *  the same batch keep theirs. */
   private clearOpenWarningsForUrl(url: string): void {
     const removedWarnings = this.warningsByUrl.delete(url);
     const removedOverflow = this.overflowByUrl.get(url);
@@ -581,9 +506,7 @@ export class SessionController {
     this.publishWarnings();
   }
 
-  /** Drop every collected warning across all sources — used when the whole
-   *  session/connection is gone (disconnect, workspace archived) or the user
-   *  dismissed the surface. Republishes only when something was cleared. */
+  /** Drop every collected warning: on disconnect, archive, or user dismiss. */
   private clearAllOpenWarnings(): void {
     if (this.warningsByUrl.size === 0 && this.overflowWarnings === 0) return;
     this.warningsByUrl.clear();
@@ -593,10 +516,8 @@ export class SessionController {
     this.publishWarnings();
   }
 
-  /** Recompute [`retainedMessages`] as the distinct messages currently in
-   *  [`warningsByUrl`]. Called after a per-source removal, whose dropped
-   *  messages may or may not still be held by another source. Bounded work:
-   *  the store never holds more than [`MAX_OPEN_WARNINGS`] distinct messages. */
+  /** Recompute [`retainedMessages`] after a per-source removal, since another
+   *  source may still hold a dropped message. Bounded by [`MAX_OPEN_WARNINGS`]. */
   private rebuildRetainedMessages(): void {
     this.retainedMessages.clear();
     for (const messages of this.warningsByUrl.values()) {
@@ -604,13 +525,9 @@ export class SessionController {
     }
   }
 
-  /** Rebuild [`RemoteDatasetActivity.warnings`] from [`warningsByUrl`]: every
-   *  source's messages in insertion order, deduplicated across sources so a
-   *  notice reported by two opens shows once. The store is bounded to
-   *  [`MAX_OPEN_WARNINGS`] distinct messages, so this projection is bounded
-   *  work per call rather than growing with the number of warnings seen. Emits
-   *  only when the flattened list OR the overflow count actually changed, so a
-   *  duplicate collect or a no-op clear stays silent. */
+  /** Rebuild [`RemoteDatasetActivity.warnings`] from [`warningsByUrl`] in
+   *  insertion order, deduplicated across sources. Emits only when the list or
+   *  the overflow count changed. */
   private publishWarnings(): void {
     const flattened: string[] = [];
     const seen = new Set<string>();
@@ -629,20 +546,17 @@ export class SessionController {
       return;
     }
     this.updateRemoteActivity({
-      // Reuse the existing array when only the overflow count moved (the common
-      // case past the cap): keeps the list's identity stable so nothing
-      // downstream re-derives from an unchanged list on every flood frame.
+      // Reuse the array when only the overflow count moved (the common case
+      // past the cap), so nothing downstream re-derives on every flood frame.
       warnings: listUnchanged ? current : flattened,
       warningsOverflow: this.overflowWarnings,
     });
   }
 
   /**
-   * Show `message` in the single visible error slot, unless a standing
-   * error of strictly higher rank holds it (see [`SurfacedErrorKind`] for
-   * the ranking rationale). Re-surfacing the identical kind+message is a
-   * no-op so an endlessly failing source sets the banner once, not once
-   * per failure.
+   * Show `message` in the error slot unless a standing error of strictly
+   * higher rank holds it. The identical kind and message is a no-op, so an
+   * endlessly failing source sets the banner once.
    */
   private surfaceError(
     kind: SurfacedErrorKind,
@@ -660,10 +574,9 @@ export class SessionController {
     this.updateRemoteActivity({ ...extra, error: message });
   }
 
-  /** Retire the visible error if (and only if) its kind is one of `kinds`.
-   *  Every kind has exactly one retirement signal wired to this — a
-   *  recovery event can never wipe a banner it doesn't own, which is what
-   *  keeps fatal banners standing for the life of the page. */
+  /** Retire the visible error only if its kind is in `kinds`. A recovery
+   *  event can't wipe a banner it doesn't own, which keeps fatal banners up
+   *  for the life of the page. */
   private clearSurfacedError(kinds: readonly SurfacedErrorKind[]): void {
     if (this.surfacedErrorKind === null) return;
     if (!kinds.includes(this.surfacedErrorKind)) return;
@@ -681,18 +594,14 @@ export class SessionController {
   }
 
   /**
-   * Route a failed scene mutation to the visible error slot by consequence
-   * class. A dead scene keeps every JS panel healthy while the canvas stays
-   * blank, so silence here would leave nothing for the user to act on:
+   * Route a failed scene mutation to the error slot by class. A dead scene
+   * leaves every JS panel healthy and the canvas blank, so it must surface.
    *
-   * - fatal (trap / borrow poisoning): the engine banner, immediately.
-   * - incompatible (parse-boundary rejection, e.g. version skew): a softer
-   *   advisory. The scene never executed the command, so this neither
-   *   feeds nor resets the death streak — three skewed commands from a
-   *   newer peer must not read as an engine failure.
-   * - recoverable: counts toward the consecutive-failure streak; the
-   *   engine banner appears only once the scene evidently cannot apply
-   *   anything (no success since [`SCENE_APPLY_FAILURE_LIMIT`] failures).
+   * - fatal (trap, borrow poisoning): the engine banner, immediately.
+   * - incompatible (parse-boundary rejection): an advisory that neither feeds
+   *   nor resets the streak, so skewed commands from a newer peer don't read
+   *   as an engine failure.
+   * - recoverable: counts toward [`SCENE_APPLY_FAILURE_LIMIT`].
    */
   private handleSceneCallFailed(e: unknown): void {
     const cls = classifySceneError(e);
@@ -718,26 +627,16 @@ export class SessionController {
     );
   }
 
-  /**
-   * Emit `onRemoteDocumentChanged` for a live command: synchronous, unless a
-   * snapshot-burst emission is already scheduled (the bridge replays pending
-   * commands and drains its gap buffer synchronously after `onSnapshot`, all
-   * within the flag's window) — then the scheduled emission covers this
-   * change too, keeping the whole burst at exactly one signal.
-   */
+  /** Emit `onRemoteDocumentChanged` for a live command, unless a snapshot-burst
+   *  emission is already scheduled to cover it. */
   private notifyRemoteDocumentChanged(): void {
     if (this.docChangedEmitPending) return;
     this.deps.events.onRemoteDocumentChanged();
   }
 
-  /**
-   * Schedule ONE `onRemoteDocumentChanged` for a snapshot burst. The bridge
-   * hands over the snapshot and then synchronously replays every pending
-   * local command through `onCommand`; emitting per change would signal
-   * 1 + N times and expose pre-replay document state to the early listeners.
-   * A microtask runs after that entire synchronous burst, so the single
-   * emission observes post-replay state.
-   */
+  /** Schedule one `onRemoteDocumentChanged` for a snapshot burst. The
+   *  microtask runs after the bridge's synchronous replay of pending
+   *  commands, so the emission sees post-replay state. */
   private scheduleRemoteDocumentChanged(): void {
     if (this.docChangedEmitPending) return;
     this.docChangedEmitPending = true;
@@ -748,12 +647,9 @@ export class SessionController {
     });
   }
 
-  // ---------------------------------------------------------------------
-  // Dataset registration/removal — the single home for `dataset_opened`
-  // setup. Both arrival paths (join/resync snapshot, live broadcast) call
-  // `ensureDatasetRegistered`; both removal paths (snapshot membership
-  // sweep, `remove_dataset` broadcast) call `removeDataset`.
-  // ---------------------------------------------------------------------
+  // Dataset registration and removal. Snapshot and live broadcast both call
+  // `ensureDatasetRegistered`; the snapshot sweep and `remove_dataset` both
+  // call `removeDataset`.
 
   private ensureDatasetRegistered(reg: {
     manifest: DatasetManifest;
@@ -762,14 +658,12 @@ export class SessionController {
      *  via `load_document` / `apply_command`). */
     catalog: WireAssetCatalog | null | undefined;
     /**
-     * How to activate a layout after registering the browser-authored
-     * derived builders (registration itself is idempotent via lucida-core's
-     * RegisterLayout dedupe):
-     *  - `"local"` (snapshot): refresh the mirror and adopt the document's
-     *    active id without re-broadcasting — a snapshot is a join/repair,
-     *    not an edit, so it must not emit commands on behalf of this client.
+     * How to activate a layout after registering the derived builders
+     * (registration is idempotent):
+     *  - `"local"` (snapshot): adopt the document's active id without
+     *    broadcasting. A snapshot is a join or repair, not an edit.
      *  - `"broadcast"` (live open): `setActive` sends the command so every
-     *    peer converges on the opened dataset's default layout.
+     *    peer converges on the default layout.
      */
     layoutActivation:
       | { kind: "local"; activeId: string | null | undefined }
@@ -807,14 +701,9 @@ export class SessionController {
     this.session.ensureAssetCatalog()?.removeDataset(datasetId);
     this.session.generatedAvailability.removeDataset(datasetId);
     this.session.ensureLayoutRegistry()?.removeDataset(datasetId);
-    // Warnings are collected by source url, not by workspace dataset id, and
-    // both removal paths here (the `remove_dataset` broadcast and the snapshot
-    // membership sweep) carry only the dataset id — there is no clean mapping
-    // back to the source that warned. Clearing wholesale on any removal would
-    // drop unrelated datasets' live warnings (and warnings swept in during a
-    // resync), so removal leaves the collected warnings alone; they retire on
-    // dismiss or connection loss. A warning about a just-removed dataset
-    // lingering until dismissed is the accepted, bounded cost.
+    // Warnings are keyed by source url and removal carries only the dataset
+    // id, so they stay until dismiss or connection loss. Clearing wholesale
+    // would drop other datasets' live warnings.
   }
 
   private setupFetchPipeline(manifest: DatasetManifest, fetchDesc: FetchSource): void {
@@ -823,9 +712,9 @@ export class SessionController {
     const channelCount = firstImage?.multiscale.levels[0]?.shape[Axis.C] ?? 1; // [T, C, Z, Y, X]
     const fetchVariant = Object.keys(fetchDesc as object)[0] ?? "unknown";
 
-    // Shape summary — mirrors the WASM-side `analyze_manifest_shape`
-    // counts so a JS-only debugger can spot Collection vs. Single anomalies
-    // without enabling the wasm category.
+    // Mirrors the wasm-side `analyze_manifest_shape` counts so a JS-only
+    // debugger can spot Collection vs. Single anomalies without enabling the
+    // wasm category.
     const entityIds = new Set(manifest.entities.map(e => e.id));
     let nGroups = 0;
     let nTiles = 0;
@@ -859,11 +748,9 @@ export class SessionController {
         this.contentSource.registerImage(spec.image_id, spec.wire_format);
         registeredImages++;
       }
-      // Labels carry their OWN image (distinct id + integer dtype) and are
-      // kept out of `images`, so register them separately so their chunks
-      // are fetchable when a label overlay requests them. The server serves
-      // a label image by its own id; wire format is derived from the
-      // label's declared dtype (e.g. Uint32).
+      // Labels carry their own image (distinct id, integer dtype) outside
+      // `images`, so register them for label overlay fetches. Wire format
+      // comes from the label's declared dtype (e.g. Uint32).
       for (const label of manifest.labels ?? []) {
         this.contentSource.registerImage(label.image.image_id, {
           Raw: { data_type: label.image.multiscale.data_type },
@@ -937,10 +824,6 @@ export class SessionController {
     });
   }
 
-  // ---------------------------------------------------------------------
-  // Generated-availability bookkeeping.
-  // ---------------------------------------------------------------------
-
   private applyGeneratedAvailabilitySnapshots(
     snapshots: WireGeneratedAvailabilityByDataset,
   ): void {
@@ -976,24 +859,19 @@ export class SessionController {
     loop?.markResidencyDirty(AVAILABILITY_UPDATE_SOURCE);
   }
 
-  // ---------------------------------------------------------------------
-  // Bridge handlers. All synchronous — see the class docs for why.
-  // ---------------------------------------------------------------------
+  // Bridge handlers. All synchronous; see the class doc.
 
   private buildHandlers(): BridgeHandlers {
     return {
       onSnapshot: (_seq, documentJson, snapshotPeers, yourId, generatedAvailability) => {
         try {
-          // The scene is obtained first so the guarded load carries it as
-          // its subject; the guard makes a fatal load failure (trap,
-          // borrow poisoning) surface even though the enclosing catch
-          // swallows the throw — a client whose snapshot cannot load is a
-          // blank shell otherwise.
+          // The guarded load carries the scene as its subject, so a fatal
+          // load failure still surfaces though the catch below swallows the
+          // throw. Otherwise a client whose snapshot can't load is a blank shell.
           const scene = this.deps.ensureScene();
           guardedSceneCall("load_document", scene, () => scene.load_document(documentJson));
-          // Adopt the self id BEFORE any registration work: a
-          // `dataset_opened` replayed in the same tick as this snapshot
-          // must never read a stale self-id when deriving `isOpener`.
+          // Adopt the self id before any registration: a `dataset_opened`
+          // replayed in this tick must not read a stale id for `isOpener`.
           this.setMyId(yourId);
 
           const peerMap = new Map<ClientId, PresenceState>();
@@ -1009,14 +887,11 @@ export class SessionController {
           const doc = JSON.parse(documentJson);
           if (doc.manifests) {
             for (const [dsId, manifestWire] of Object.entries(doc.manifests as Record<string, DatasetManifestWire>)) {
-              // Resolve the wire encoding (shared multiscale table etc.) up
-              // front so everything downstream sees effective per-image
-              // metadata.
+              // Resolve the wire encoding up front so everything downstream
+              // sees effective per-image metadata.
               const manifest = resolveDatasetManifest(manifestWire);
-              // A snapshot carries no fetch source; synthesize a proxied one
-              // from the manifest's images. Only consulted when the dataset
-              // isn't registered yet — an existing registration keeps the
-              // fetch source it was created with.
+              // A snapshot carries no fetch source, so synthesize a proxied
+              // one. Only used when the dataset isn't registered yet.
               const fetchDesc: FetchSource = {
                 Proxied: {
                   images: manifest.images.map(img => ({
@@ -1036,12 +911,10 @@ export class SessionController {
                 },
               });
             }
-            // A snapshot is authoritative for membership, and this handler
-            // also runs mid-session (reconnect, or a server-pushed /
-            // requested resync after broadcast loss). Drop any local dataset
-            // the document no longer contains — its `remove_dataset`
-            // broadcast may be exactly what was lost. A first snapshot sees
-            // an empty registry and this is a no-op.
+            // A snapshot is authoritative for membership and also arrives
+            // mid-session (reconnect, resync after broadcast loss). Drop any
+            // local dataset it no longer contains; the `remove_dataset`
+            // broadcast may be what was lost.
             for (const dsId of Array.from(this.deps.datasets.keys())) {
               if (!(dsId in doc.manifests)) {
                 bridgeLog("snapshot.stale_dataset_removed", { datasetId: dsId });
@@ -1054,9 +927,9 @@ export class SessionController {
           this.scheduleRemoteDocumentChanged();
           this.deps.events.onDatasetsChanged();
           this.deps.events.onSceneChanged(scene);
-          // The session is fully established (WS open + first snapshot
-          // applied): an open sent now reliably reaches the server. One-shot
-          // sends (the #697 seed open) gate on this signal.
+          // The session is established (socket open, first snapshot applied),
+          // so an open sent now reaches the server. One-shot sends such as
+          // the seed open gate on this signal.
           this.deps.events.onSessionReadyChanged(true);
         } catch (e) {
           console.warn("[Bridge] bad snapshot:", e);
@@ -1088,19 +961,13 @@ export class SessionController {
             cmd.type === "add_comment" ||
             cmd.type === "remove_comment"
           ) {
-            // A peer dropped/removed a pin, or added/removed a comment on one.
-            // WASM authoritative state (pins and their nested threads) was
-            // already updated by apply_command above; mark the canvas dirty so
-            // the overlay re-projects. The onRemoteDocumentChanged below
-            // re-renders the overlay with the new annotation/thread set.
+            // apply_command already updated pins and threads; mark the canvas
+            // dirty so the overlay re-projects.
             this.deps.getLoop()?.markInteractiveDirty();
           }
           if (cmd.type === "register_layout" || cmd.type === "set_active_layout") {
-            // Inbound layout broadcast: refresh the mirror so peers' changes
-            // appear locally. setActiveLocal updates the active id without
-            // re-broadcasting (the WASM side already applied via apply_command
-            // above). markInteractiveDirty so the GPU canvas re-renders without
-            // requiring local user interaction.
+            // Refresh the mirror so peers' layout changes appear locally.
+            // setActiveLocal doesn't re-broadcast; apply_command already ran.
             const registry = this.session.ensureLayoutRegistry();
             if (registry && cmd.dataset_id) {
               registry.refresh(cmd.dataset_id);
@@ -1116,7 +983,7 @@ export class SessionController {
           try {
             cmdType = JSON.parse(commandJson)?.type;
           } catch {
-            // commandJson itself wasn't valid JSON — fall through with undefined
+            // commandJson wasn't valid JSON; log with an undefined type.
           }
           // Surfacing already happened through the scene-call guard (the
           // controller observes every guarded mutation); this log adds the
@@ -1181,8 +1048,8 @@ export class SessionController {
           this.setPeersMap(next);
         }
         if (clientId !== this.myId) return;
-        // The server steered US (e.g. follow set by another surface):
-        // adopt the target's last known presence immediately.
+        // The server steered this client (e.g. follow set by another
+        // surface): adopt the target's last known presence now.
         if (target !== null) {
           const peer = this.peers.get(target);
           const scene = this.deps.getScene();
@@ -1236,11 +1103,9 @@ export class SessionController {
         // rows already arrived on the timing ticker, and they are the ones
         // most worth having.
         traceRecorder.noteOpenSettled(requestId);
-        // Spinner/progress always stop; the error surfaces through the ranked
-        // slot (a fatal engine banner outranks an open failure). Only THIS
-        // source's warnings clear — a failed open must not leave its own
-        // "opened with a warning" notice beside its error, but a sibling open
-        // from the same batch keeps its warnings.
+        // Spinner and progress stop; the error goes through the ranked slot.
+        // Only this source's warnings clear, so a sibling open from the same
+        // batch keeps its own.
         this.clearOpenWarningsForUrl(url);
         this.updateRemoteActivity({ loading: false, progress: null });
         this.surfaceError("open", error);
@@ -1255,25 +1120,20 @@ export class SessionController {
           warning: diagnostic.warning === true,
         });
         if (diagnostic.warning === true) {
-          // A non-fatal import concern (e.g. the sampled-label-discovery
-          // notice) must outlive the transient progress line, so record it in
-          // the durable list keyed by its source url. EVERY warning frame is
-          // collected regardless of which open it belongs to — datasets opened
-          // together in one pass must each surface their warnings, and a frame
-          // arriving after a later open began must not be dropped.
+          // A non-fatal concern must outlive the transient progress line.
+          // Every warning frame is collected, whichever open it belongs to,
+          // so datasets opened together each surface theirs.
           this.collectOpenWarning(url, diagnostic.message);
         }
         if (diagnostic.stage === "complete") {
           traceRecorder.noteOpenSettled(requestId);
-          // Clear the transient spinner/progress only; the durable warnings
-          // survive completion — that is the whole point of collecting them.
+          // Clear the transient spinner and progress only; warnings survive
+          // completion.
           this.updateRemoteActivity({ loading: false, progress: null });
           return;
         }
         // Progress of a fresh open retires only a previous open's failure.
-        // Engine/data banners have their own recovery signals — and a
-        // fatal banner in particular must never be wiped by an unrelated
-        // open making progress.
+        // Engine and data banners have their own recovery signals.
         this.clearSurfacedError(["open"]);
         this.updateRemoteActivity({
           loading: true,
@@ -1309,14 +1169,12 @@ export class SessionController {
         // Correlation labels are per connection: the counter restarts here
         // and the generation goes on every row minted from now on.
         this.contentSource.resetConnection(generation);
-        // The trace hears about it too: a run can span two sockets, and the
-        // browser is the only side that can say so — the server sees a close
-        // and a stranger, and discards what it had buffered for the dead one.
+        // A run can span two sockets and only the browser can say so. The
+        // server sees a close and a stranger, and drops what it buffered.
         traceRecorder.noteConnected(generation);
         // Attaching also turns the toggle off: the server forgot this page's
-        // stream when the old connection closed, and a page that resumed
-        // publishing on its own would be pushing without anyone having asked
-        // on this socket (ADR 0051 as amended).
+        // stream when the old connection closed, and nobody has asked for one
+        // on this socket (ADR 0051).
         watchStream.attach(this.session.bridge);
         this.deps.events.onConnectedChanged(true);
       },
@@ -1334,11 +1192,10 @@ export class SessionController {
         this.deps.events.onWorkspaceArchived();
       },
       onDisconnect: () => {
-        // The transport dropped: re-arm both readiness signals so a
-        // reconnect's `onopen` + fresh snapshot must re-establish them before
-        // gated work (e.g. a still-pending seed open) fires. Every collected
-        // warning clears too — they described opens on the dead connection, and
-        // the reconnect's snapshot is the fresh truth.
+        // Re-arm both readiness signals so a reconnect's `onopen` and fresh
+        // snapshot must re-establish them before gated work (e.g. a pending
+        // seed open) fires. Warnings described opens on the dead connection,
+        // so they clear too.
         this.deps.events.onConnectedChanged(false);
         this.deps.events.onSessionReadyChanged(false);
         this.clearAllOpenWarnings();
@@ -1353,10 +1210,9 @@ export class SessionController {
     };
   }
 
-  /** The `dataset_opened` broadcast arm: registration via the shared path,
-   *  then the open-reaction policies (loading clear, auto-fit, applier
-   *  notification) that only a LIVE open triggers — a snapshot registration
-   *  deliberately skips these (a join/repair is not a user-initiated open). */
+  /** The live `dataset_opened` arm: shared registration, then the policies
+   *  only a live open triggers (loading clear, auto-fit, applier notification).
+   *  A snapshot skips them, since a join or repair is not a user open. */
   private handleDatasetOpened(
     cmd: {
       type: string;
@@ -1404,30 +1260,21 @@ export class SessionController {
       reason: "success",
     });
     this.deps.events.onSceneChanged(scene);
-    // Auto-fit the camera to the freshly-opened dataset so it lands
-    // centered and fully in view (2D + 3D). `dataset_opened` is a
-    // BROADCAST that runs on every co-present peer, so we frame ONLY for
-    // the client that opened it: the server stamps the broadcast with
-    // `opener_client_id` and we fit only when it matches our own id.
-    // (See `shouldAutoFitOnOpen` for the full gate.) We additionally
-    // suppress the two camera-owning cases:
-    //   - !restoreInProgress: a saved/last view restoring its camera
-    //     wins (#700);
-    //   - !following: a follower stays glued to the leader's camera.
-    // The server sends the `your_id` snapshot as a client's FIRST message,
-    // before any CommandBroadcast, so by the time a `dataset_opened` is
-    // handled `myId` holds our real id — id 0 is a legitimate first-client
-    // id here, NOT a sentinel to exclude (the single-user opener is often
-    // client 0). When the broadcast carries no opener id (older server),
-    // `isOpener` is false and no one fits — fail-safe, never a stray
-    // reframe. The fit itself is best-effort and wrapped so a failure
-    // (e.g. a dataset with no bounds yet) can never break the open.
+    // Auto-fit only on the client that opened the dataset: `dataset_opened`
+    // runs on every peer, and the server stamps `opener_client_id`. Also
+    // suppressed while a saved view restores its camera and while following.
+    // Id 0 is a real id here since the snapshot arrives first; a missing
+    // opener id fits no one. Best-effort, so a failed fit can't break the open.
     const isOpener = isOpenerOf(cmd.opener_client_id, this.myId);
     const restoreInProgress =
       this.deps.getSavedViewHooks()?.isInProgress?.() ?? false;
     const following = this.followTarget !== null;
     if (shouldAutoFitOnOpen(cmd.type, { isOpener, restoreInProgress, following })) {
       try {
+        // Until a render tick asserts the canvas size, the scene holds its
+        // construction default, which is not the canvas the user sees.
+        const viewport = this.deps.getViewportSize();
+        if (viewport) scene.set_viewport(viewport.width, viewport.height);
         // Untyped call: the wasm export may predate the regenerated
         // bindings, so reach it structurally rather than via the type.
         (
@@ -1451,9 +1298,8 @@ export class SessionController {
         following,
       });
     }
-    // Notify the saved-view applier (if registered) so its pending-open
-    // promise resolves. Safe even when the open wasn't applier-initiated —
-    // `notifyDatasetOpened` is a no-op for ids it doesn't know.
+    // Resolve the saved-view applier's pending open. Safe for opens it didn't
+    // start: `notifyDatasetOpened` ignores unknown ids.
     this.deps.getSavedViewHooks()?.onDatasetOpened(datasetId);
   }
 }

@@ -1,10 +1,32 @@
 import {
+  ArrowsClockwiseIcon,
+  CheckIcon,
+  DotsThreeIcon,
+  LinkIcon,
+  PaperPlaneTiltIcon,
+  PencilSimpleIcon,
+  PlusIcon,
+  PushPinIcon,
+  PushPinSlashIcon,
+  ShareNetworkIcon,
+  TrashIcon,
+  ArrowUUpLeftIcon,
+} from "@phosphor-icons/react";
+import {
   useCallback,
   useEffect,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { relativeTimeFromIso } from "../savedView/useBookmarks.ts";
+import { Badge } from "../ui/Badge.tsx";
+import { Button, IconButton } from "../ui/Button.tsx";
+import { Dialog } from "../ui/Dialog.tsx";
+import { Menu, MenuItem } from "../ui/Menu.tsx";
+import { PanelHeader } from "../ui/PanelHeader.tsx";
+import { Switch } from "../ui/Switch.tsx";
+import { SearchField, TextField } from "../ui/TextField.tsx";
 import {
   defaultWorkspaceSavedViewName,
   useWorkspaceSavedViews,
@@ -12,7 +34,11 @@ import {
   type WorkspaceSavedViewVisibility,
 } from "../savedView/useWorkspaceSavedViews.ts";
 import type { SavedView } from "../savedView/types.ts";
+import { openRightPanel } from "../shell/sidePanels.ts";
+import { useCommand } from "../ui/commands.ts";
+import { dismissToast, toast } from "../ui/toastQueue.ts";
 import "./BookmarkSidebar.css";
+import "./WorkspaceSavedViewsSidebar.css";
 
 // How long a rejected proposal lingers (hidden, undoable) before the reject
 // PATCH actually fires. Long enough to read the toast and hit Undo; short
@@ -29,51 +55,22 @@ export interface WorkspaceSavedViewsSidebarProps {
   activeLayoutName?: string | null;
   defaultSavedViewId: string | null;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
-  /** Id of the saved view currently applied to the viewer, if any. The matching
-   *  row renders as active so the user can see which view they're looking at. */
+  /** Id of the saved view currently applied to the viewer; its row renders as
+   *  active. */
   currentOpenSavedViewId?: string | null;
-  /** Called when the saved view that is currently open (`currentOpenSavedViewId`)
-   *  stops existing as the user acts on it — deleted, withdrawn, or its deferred
-   *  reject commits. The host clears its active-row id so the highlight doesn't
-   *  dangle on a view that's gone (#818). Viewport changes are cleared host-side
-   *  off the live-view signal; this covers the "the open view went away" case. */
+  /** Called when the open view stops existing through an action here: deleted,
+   *  withdrawn, or its deferred reject commits. The host clears its active-row id
+   *  so the highlight doesn't dangle. Viewport changes are cleared host-side. */
   onActiveSavedViewInvalidated?: (savedViewId: string) => void;
-  style?: React.CSSProperties;
   visible: boolean;
 }
 
-interface ToastAction {
-  label: string;
-  onClick: () => void;
-}
-
-interface ToastMessage {
-  /** Stable identity for this toast. Plain status toasts get an auto-generated
-   *  id; an Undo toast for a deferred reject is keyed by `reject:<savedViewId>`
-   *  so each pending reject owns its OWN dismissible toast (the data layer
-   *  already supports independent multi-undo via the per-id timer Map — the
-   *  toast stack is the matching presentation). */
-  id: string;
-  text: string;
-  kind: "info" | "warn";
-  /** Optional inline action (e.g. "Undo") rendered as a button in the toast. */
-  action?: ToastAction;
-}
-
-/** Stable toast id for a deferred reject so its Undo toast never collides with
- *  (or gets clobbered by) another pending reject's toast. */
-function rejectToastId(savedViewId: string): string {
-  return `reject:${savedViewId}`;
+function failed(title: string, e: unknown): void {
+  toast({ title, description: e instanceof Error ? e.message : String(e), tone: "danger" });
 }
 
 interface ConfirmRequest {
   savedView: WorkspaceSavedView;
-}
-
-interface MenuState {
-  savedViewId: string;
-  x: number;
-  y: number;
 }
 
 export function WorkspaceSavedViewsSidebar({
@@ -88,7 +85,6 @@ export function WorkspaceSavedViewsSidebar({
   onSetDefaultSavedView,
   currentOpenSavedViewId,
   onActiveSavedViewInvalidated,
-  style,
   visible,
 }: WorkspaceSavedViewsSidebarProps) {
   const {
@@ -110,10 +106,9 @@ export function WorkspaceSavedViewsSidebar({
     currentUserEmail,
   });
 
-  // A personal view may be promoted to shared only by the member who created
-  // it, and only when they have edit access (the server enforces all three;
-  // the UI just avoids offering an action that would 403). Mirrors the
-  // hook's "mine only" lowercase email comparison.
+  // Only the creator, with edit access, may promote a personal view to shared.
+  // The server enforces this; the UI just avoids offering an action that would
+  // 403. Mirrors the hook's lowercase email comparison.
   const normalizedCurrentUserEmail = currentUserEmail?.toLowerCase() ?? null;
   const isMine = useCallback(
     (view: WorkspaceSavedView): boolean =>
@@ -126,19 +121,15 @@ export function WorkspaceSavedViewsSidebar({
       canEdit && view.visibility === "personal" && isMine(view),
     [canEdit, isMine],
   );
-  // A viewer (no edit access) can't share directly, so they instead *propose*
-  // their own personal view to the team for an editor to approve (#702). An
-  // editor uses the direct "Share with team" action above, so the two never
-  // overlap.
+  // A viewer can't share directly, so they propose their own personal view for
+  // an editor to approve. Editors share directly, so the two never overlap.
   const canProposeToTeam = useCallback(
     (view: WorkspaceSavedView): boolean =>
       !canEdit && view.visibility === "personal" && isMine(view),
     [canEdit, isMine],
   );
-  // The proposer can pull their own still-pending proposal back to private at
-  // any time (the server permits a creator's Proposed -> Personal). Scoped to
-  // the proposer's *own* proposed view — never another member's, never an
-  // already-approved/shared one. Available whether or not they can edit.
+  // A proposer can withdraw their own pending proposal back to personal at any
+  // time, whether or not they can edit.
   const canWithdrawProposal = useCallback(
     (view: WorkspaceSavedView): boolean =>
       view.visibility === "proposed" && isMine(view),
@@ -146,134 +137,86 @@ export function WorkspaceSavedViewsSidebar({
   );
 
   const [savePromptOpen, setSavePromptOpen] = useState(false);
+  // The prompt renders only while this panel shows, so the command opens it.
+  useCommand({
+    id: "views.save",
+    label: "Save view…",
+    group: "View",
+    keywords: ["bookmark"],
+    run: () => {
+      openRightPanel("savedViews");
+      setSavePromptOpen(true);
+    },
+  });
   const [renameId, setRenameId] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<ConfirmRequest | null>(null);
   const [confirmPropose, setConfirmPropose] = useState<ConfirmRequest | null>(null);
-  const [menu, setMenu] = useState<MenuState | null>(null);
-  // A STACK of toasts, not a single slot: rejecting view B must not evict view
-  // A's still-live "Undo" toast while A's reject timer keeps running (#818).
-  // Newest renders on top of the stack.
-  const [toasts, setToasts] = useState<readonly ToastMessage[]>([]);
   // Ids whose Reject is in its cancelable window: hidden from the review queue
-  // optimistically, but NOT yet sent to the server (Undo can still cancel).
+  // but not yet sent to the server.
   const [pendingReject, setPendingReject] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
 
-  // One auto-dismiss timer per toast id (toasts are now a stack, so a single
-  // shared timer would let one toast's expiry tear down another's). Cleaned up
-  // on unmount so no timer can setState after the sidebar is gone.
-  const dismissTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
-  const seqRef = useRef(0);
-  const dismissToast = useCallback((id: string) => {
-    const timer = dismissTimers.current.get(id);
-    if (timer) {
-      clearTimeout(timer);
-      dismissTimers.current.delete(id);
-    }
-    setToasts((prev) => {
-      if (!prev.some((t) => t.id === id)) return prev;
-      return prev.filter((t) => t.id !== id);
-    });
-  }, []);
-  const showToast = useCallback(
-    (
-      text: string,
-      kind: ToastMessage["kind"] = "info",
-      opts?: { action?: ToastAction; durationMs?: number; id?: string },
-    ) => {
-      // Reject toasts pass a stable id (keyed by saved-view id) so re-issuing
-      // replaces that view's own toast in place; status toasts get a fresh id
-      // so each pushes onto the stack independently.
-      const id = opts?.id ?? `toast:${seqRef.current++}`;
-      const next: ToastMessage = { id, text, kind, action: opts?.action };
-      setToasts((prev) => [...prev.filter((t) => t.id !== id), next]);
-      const existing = dismissTimers.current.get(id);
-      if (existing) clearTimeout(existing);
-      const timer = setTimeout(() => {
-        dismissTimers.current.delete(id);
-        setToasts((prev) => prev.filter((t) => t.id !== id));
-      }, opts?.durationMs ?? 3000);
-      dismissTimers.current.set(id, timer);
-    },
-    [],
-  );
-
-  // Latest open-view id + invalidation callback, mirrored into refs so the
-  // action handlers can fire "the open view went away" WITHOUT taking these as
-  // deps (which would churn every callback identity each time the active row
-  // changes). Read at call time only (from event handlers / settled async),
-  // never during render — same latest-value-in-a-ref pattern as
-  // useSavedViewSync.ts, so the react-hooks/refs render-write rule is disabled
-  // on the assignment lines.
+  // Mirrored into refs so handlers can report "the open view went away" without
+  // taking these as deps, which would churn every callback identity when the
+  // active row changes. Read at call time only, never during render, so the
+  // react-hooks/refs render-write rule is disabled on the assignment lines.
   const currentOpenSavedViewIdRef = useRef(currentOpenSavedViewId);
   // eslint-disable-next-line react-hooks/refs
   currentOpenSavedViewIdRef.current = currentOpenSavedViewId;
   const onActiveSavedViewInvalidatedRef = useRef(onActiveSavedViewInvalidated);
   // eslint-disable-next-line react-hooks/refs
   onActiveSavedViewInvalidatedRef.current = onActiveSavedViewInvalidated;
-  // If `id` is the view currently flagged active, tell the host it's gone so the
-  // stale highlight clears (#818). No-op otherwise, so it's always safe to call.
+  // If `id` is the active view, tell the host it's gone. Safe to call for any id.
   const invalidateIfOpen = useCallback((id: string) => {
     if (currentOpenSavedViewIdRef.current === id) {
       onActiveSavedViewInvalidatedRef.current?.(id);
     }
   }, []);
 
-  // One timer per deferred reject so a power-user can stack several at once and
-  // Undo each independently. Cleaned up on unmount so a pending PATCH never
-  // fires after the sidebar is gone.
+  // One timer and one Undo toast per deferred reject, so several can be undone
+  // independently. Both go on unmount: a pending PATCH never fires after the
+  // sidebar is gone, and an Undo with nothing left to undo never lingers.
   const rejectTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const rejectToasts = useRef(new Map<string, string>());
+  const closeRejectToast = useCallback((id: string) => {
+    const toastId = rejectToasts.current.get(id);
+    if (toastId === undefined) return;
+    rejectToasts.current.delete(id);
+    dismissToast(toastId);
+  }, []);
   useEffect(() => {
     const rejects = rejectTimers.current;
-    const dismisses = dismissTimers.current;
+    const undoToasts = rejectToasts.current;
     return () => {
       for (const timer of rejects.values()) clearTimeout(timer);
       rejects.clear();
-      // Also clear every toast auto-dismiss timer so none can setState after unmount.
-      for (const timer of dismisses.values()) clearTimeout(timer);
-      dismisses.clear();
+      for (const toastId of undoToasts.values()) dismissToast(toastId);
+      undoToasts.clear();
     };
   }, []);
-
-  useEffect(() => {
-    if (menu === null) return;
-    const onDoc = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target?.closest(".bookmark-menu")) return;
-      if (target?.closest(".bookmark-menu-btn")) return;
-      setMenu(null);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setMenu(null);
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [menu]);
 
   const handleSave = useCallback(
     async (name: string, visibility: WorkspaceSavedViewVisibility) => {
       const view = getCurrentSavedView();
       if (!view) {
-        showToast("No active view to save", "warn");
+        toast({ title: "No active view to save", tone: "warning" });
         return;
       }
       try {
         await createSavedView(name, view, visibility);
-        showToast(
-          visibility === "personal"
-            ? `Saved "${name}" to your personal views`
-            : `Saved "${name}" for the team`,
-        );
+        toast({
+          title:
+            visibility === "personal"
+              ? `Saved "${name}" to your personal views`
+              : `Saved "${name}" for the team`,
+          tone: "success",
+        });
       } catch (e) {
-        showToast(`Save failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Save failed", e);
       }
     },
-    [createSavedView, getCurrentSavedView, showToast],
+    [createSavedView, getCurrentSavedView],
   );
 
   const handleOpen = useCallback(
@@ -281,10 +224,10 @@ export function WorkspaceSavedViewsSidebar({
       try {
         await onOpenSavedView(view.view, view.id);
       } catch (e) {
-        showToast(`Open failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Open failed", e);
       }
     },
-    [onOpenSavedView, showToast],
+    [onOpenSavedView],
   );
 
   const handleRenameCommit = useCallback(
@@ -297,94 +240,85 @@ export function WorkspaceSavedViewsSidebar({
       try {
         await renameSavedView(id, trimmed);
       } catch (e) {
-        showToast(`Rename failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Rename failed", e);
       } finally {
         setRenameId(null);
       }
     },
-    [renameSavedView, showToast],
+    [renameSavedView],
   );
 
   const handleReplace = useCallback(
     async (view: WorkspaceSavedView) => {
       const current = getCurrentSavedView();
       if (!current) {
-        showToast("No active view to save", "warn");
+        toast({ title: "No active view to save", tone: "warning" });
         return;
       }
       try {
         await replaceSavedView(view.id, current);
-        showToast(`Updated "${view.name}"`);
+        toast({ title: `Updated "${view.name}"`, tone: "success" });
       } catch (e) {
-        showToast(`Update failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Update failed", e);
       }
     },
-    [getCurrentSavedView, replaceSavedView, showToast],
+    [getCurrentSavedView, replaceSavedView],
   );
 
   const handlePromote = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
         await setSavedViewVisibility(view.id, "shared");
-        showToast(`Shared "${view.name}" with the team`);
+        toast({ title: `Shared "${view.name}" with the team`, tone: "success" });
       } catch (e) {
-        showToast(`Share failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Share failed", e);
       }
     },
-    [setSavedViewVisibility, showToast],
+    [setSavedViewVisibility],
   );
 
-  // Sending the proposal only happens after the confirm step (confirmPropose);
-  // this is the actual PATCH the modal's confirm button triggers.
+  // Runs from the confirm modal, never directly from the menu.
   const handlePropose = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
         await setSavedViewVisibility(view.id, "proposed");
-        showToast(`Proposed "${view.name}" to the team for review`);
+        toast({ title: `Proposed "${view.name}" to the team for review`, tone: "success" });
       } catch (e) {
-        showToast(`Propose failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Propose failed", e);
       } finally {
         setConfirmPropose(null);
       }
     },
-    [setSavedViewVisibility, showToast],
+    [setSavedViewVisibility],
   );
 
-  // Withdraw: the proposer pulls their own pending proposal back to a private
-  // personal view (the server allows a creator's Proposed -> Personal). Same
-  // visibility PATCH the rest of the flow uses, so the chip/filters reconcile
-  // off the server's canonical row.
   const handleWithdraw = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
         await setSavedViewVisibility(view.id, "personal");
-        // Withdrawing changes the view out from under the active-row claim, so
-        // drop the highlight if this was the open view (#818).
         invalidateIfOpen(view.id);
-        showToast(`Withdrew "${view.name}" — back to your personal views`);
+        toast({ title: `Withdrew "${view.name}"`, description: "It is back in your personal views." });
       } catch (e) {
-        showToast(`Withdraw failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Withdraw failed", e);
       }
     },
-    [invalidateIfOpen, setSavedViewVisibility, showToast],
+    [invalidateIfOpen, setSavedViewVisibility],
   );
 
   const handleApprove = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
         await approveSavedView(view.id);
-        showToast(`Approved "${view.name}" — now shared with the team`);
+        toast({ title: `Approved "${view.name}"`, description: "It is now shared with the team.", tone: "success" });
       } catch (e) {
-        showToast(`Approve failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Approve failed", e);
       }
     },
-    [approveSavedView, showToast],
+    [approveSavedView],
   );
 
-  // Cancel a pending reject before it commits: clear its timer, un-hide the
-  // row (it was only hidden locally — never sent), and drop ONLY this view's
-  // Undo toast (others stay). No PATCH ever happens, so the rejection simply
-  // never occurred.
+  // Cancel a pending reject before it commits. The row was only hidden locally,
+  // so no PATCH is ever sent. Other views' Undo toasts stay.
   const cancelReject = useCallback(
     (id: string) => {
       const timer = rejectTimers.current.get(id);
@@ -398,14 +332,13 @@ export function WorkspaceSavedViewsSidebar({
         next.delete(id);
         return next;
       });
-      dismissToast(rejectToastId(id));
+      closeRejectToast(id);
     },
-    [dismissToast],
+    [closeRejectToast],
   );
 
-  // Reject is a delayed, cancelable send: hide the row immediately and offer an
-  // Undo, but only fire the reject PATCH once the window elapses. Approve stays
-  // immediate (see handleApprove) — only rejection is recoverable.
+  // Reject is a delayed, cancelable send: hide the row now, offer Undo, and fire
+  // the PATCH once the window elapses. Approve stays immediate.
   const handleReject = useCallback(
     (view: WorkspaceSavedView) => {
       const id = view.id;
@@ -420,22 +353,19 @@ export function WorkspaceSavedViewsSidebar({
 
       const timer = setTimeout(() => {
         rejectTimers.current.delete(id);
-        // The window elapsed without an Undo: commit the rejection. The hook
-        // drops it from the list and refreshes; clear our local hide once it
-        // settles (on failure the refresh restores the row, so it reappears).
+        // A hovered or focused toast holds its own timer, so close it here,
+        // where the Undo stops meaning anything.
+        closeRejectToast(id);
+        // Clear the local hide once it settles; on failure the hook's refresh
+        // restores the row.
         void rejectSavedView(id)
           .then(() => {
-            // The view is really gone now — if it was the open/active row, tell
-            // the host so the highlight doesn't dangle (#818). Undo never
-            // reaches here (it clears the timer first), so the live view is
-            // still flagged active across the whole cancelable window.
+            // Only here, not at click time: the view stays active through the
+            // whole cancelable window.
             invalidateIfOpen(id);
           })
           .catch((e) => {
-            showToast(
-              `Reject failed: ${e instanceof Error ? e.message : String(e)}`,
-              "warn",
-            );
+            failed("Reject failed", e);
           })
           .finally(() => {
             setPendingReject((prev) => {
@@ -448,17 +378,17 @@ export function WorkspaceSavedViewsSidebar({
       }, REJECT_UNDO_WINDOW_MS);
       rejectTimers.current.set(id, timer);
 
-      // Keep the toast (and its Undo) alive for the whole cancelable window so
-      // the affordance never vanishes while the reject can still be undone. The
-      // toast is keyed by the saved-view id, so rejecting a second view pushes
-      // its OWN Undo toast onto the stack instead of evicting this one (#818).
-      showToast(`Rejected "${view.name}"`, "info", {
-        durationMs: REJECT_UNDO_WINDOW_MS,
-        id: rejectToastId(id),
-        action: { label: "Undo", onClick: () => cancelReject(id) },
-      });
+      // The Undo toast lives for the whole cancelable window.
+      rejectToasts.current.set(
+        id,
+        toast({
+          title: `Rejected "${view.name}"`,
+          action: { label: "Undo", onPress: () => cancelReject(id) },
+          timeout: REJECT_UNDO_WINDOW_MS,
+        }),
+      );
     },
-    [cancelReject, invalidateIfOpen, rejectSavedView, showToast],
+    [cancelReject, closeRejectToast, invalidateIfOpen, rejectSavedView],
   );
 
   const handleSetDefault = useCallback(
@@ -466,33 +396,35 @@ export function WorkspaceSavedViewsSidebar({
       const nextDefaultId = defaultSavedViewId === view.id ? null : view.id;
       try {
         await onSetDefaultSavedView(nextDefaultId);
-        showToast(nextDefaultId === null ? "Default view cleared" : `"${view.name}" set as default`);
+        toast({
+          title: nextDefaultId === null ? "Default view cleared" : `"${view.name}" set as default`,
+          tone: "success",
+        });
       } catch (e) {
-        showToast(`Default update failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Default update failed", e);
       }
     },
-    [defaultSavedViewId, onSetDefaultSavedView, showToast],
+    [defaultSavedViewId, onSetDefaultSavedView],
   );
 
   const handleDelete = useCallback(
     async (view: WorkspaceSavedView) => {
       try {
         await deleteSavedView(view.id);
-        // The view no longer exists — clear the active highlight if it was open (#818).
         invalidateIfOpen(view.id);
         if (defaultSavedViewId === view.id) {
           await onSetDefaultSavedView(null).catch((e) => {
             console.warn("[WorkspaceSavedViewsSidebar] default clear after delete failed:", e);
           });
         }
-        showToast(`Deleted "${view.name}"`);
+        toast({ title: `Deleted "${view.name}"` });
       } catch (e) {
-        showToast(`Delete failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Delete failed", e);
       } finally {
         setConfirmDelete(null);
       }
     },
-    [defaultSavedViewId, deleteSavedView, invalidateIfOpen, onSetDefaultSavedView, showToast],
+    [defaultSavedViewId, deleteSavedView, invalidateIfOpen, onSetDefaultSavedView],
   );
 
   const handleCopyLink = useCallback(
@@ -500,17 +432,16 @@ export function WorkspaceSavedViewsSidebar({
       try {
         const url = `${window.location.origin}${window.location.pathname}${window.location.search}#b=${encodeURIComponent(view.id)}`;
         await navigator.clipboard.writeText(url);
-        showToast("View link copied");
+        toast({ title: "View link copied", tone: "success" });
       } catch (e) {
-        showToast(`Copy failed: ${e instanceof Error ? e.message : String(e)}`, "warn");
+        failed("Copy failed", e);
       }
     },
-    [showToast],
+    [],
   );
 
-  // Built fresh when the Save dialog opens (the modal seeds its own state once
-  // from this prop) so the suggested name reflects the position — Z plane, and
-  // T/C when non-default — at the moment of saving.
+  // Called when the Save dialog opens (the modal seeds its state once), so the
+  // suggested name reflects the position at the moment of saving.
   const makeDefaultName = useCallback(
     () =>
       defaultWorkspaceSavedViewName(
@@ -529,15 +460,10 @@ export function WorkspaceSavedViewsSidebar({
     filterActive: filter.search.trim().length > 0 || filter.mineOnly,
   });
 
-  // Editors get a dedicated review queue: every pending proposal the server
-  // surfaced to them (their own + every other member's) is pulled out of the
-  // main list into its own section with Approve / Reject. For a plain viewer
-  // there is no review queue — their own proposals just stay inline with a
-  // "Proposed" chip so they can see the pending status. Keeping the partition
-  // local means shared/personal rows render exactly as before.
-  // A row whose Reject is mid-window is hidden from the queue right away (the
-  // optimistic removal) even though its PATCH hasn't been sent yet; Undo brings
-  // it straight back because it was never actually removed from the data.
+  // Editors get a review queue holding every pending proposal, with Approve and
+  // Reject. Viewers have none: their own proposals stay inline with a "Proposed"
+  // chip. A row mid-reject is hidden from the queue before its PATCH is sent;
+  // Undo brings it back because it never left the data.
   const reviewQueue = canEdit
     ? savedViews.filter(
         (view) => view.visibility === "proposed" && !pendingReject.has(view.id),
@@ -547,183 +473,121 @@ export function WorkspaceSavedViewsSidebar({
     ? savedViews.filter((view) => view.visibility !== "proposed")
     : savedViews;
 
-  return (
-    <div className="bookmark-sidebar" style={style}>
-      <div className="bookmark-sidebar-header">
-        <h3>Saved Views</h3>
-        <button
-          type="button"
-          className="primary"
-          onClick={() => setSavePromptOpen(true)}
-          title={
-            canEdit
-              ? "Save the current workspace view"
-              : "Save the current view to your personal views"
-          }
-        >
-          Save view
-        </button>
-      </div>
-
-      <div className="bookmark-filter-row">
-        <input
-          type="text"
-          className="bookmark-search"
-          placeholder="Search name or creator..."
-          value={filter.search}
-          onChange={(e) => setSearch(e.target.value)}
-        />
-        <label className="bookmark-mine-toggle">
-          <input
-            type="checkbox"
-            checked={filter.mineOnly}
-            onChange={(e) => setMineOnly(e.target.checked)}
-          />
-          Mine only
-        </label>
-      </div>
-
-      {error && <div className="bookmark-error">Error: {error}</div>}
-      {isLoading && <div className="bookmark-loading">Loading saved views...</div>}
-
-      {reviewQueue.length > 0 && (
-        <div className="bookmark-review-section" data-testid="saved-view-review-queue">
-          <div className="bookmark-section-header">
-            Proposed for review ({reviewQueue.length})
-          </div>
-          <div className="bookmark-list" role="list">
-            {reviewQueue.map((view) => (
-              <SavedViewRow
-                key={view.id}
-                view={view}
-                isRenaming={renameId === view.id}
-                isDefault={defaultSavedViewId === view.id}
-                isActive={currentOpenSavedViewId === view.id}
-                onRenameCommit={(n) => handleRenameCommit(view.id, n)}
-                onRenameCancel={() => setRenameId(null)}
-                onOpen={() => void handleOpen(view)}
-                onMenu={(rect) =>
-                  setMenu({ savedViewId: view.id, x: rect.right, y: rect.bottom })}
-              >
-                <div className="bookmark-review-actions">
-                  <button
-                    type="button"
-                    className="primary"
-                    data-testid={`saved-view-approve-${view.id}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      void handleApprove(view);
-                    }}
-                  >
-                    Approve
-                  </button>
-                  <button
-                    type="button"
-                    className="danger"
-                    data-testid={`saved-view-reject-${view.id}`}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleReject(view);
-                    }}
-                  >
-                    Reject
-                  </button>
-                </div>
-              </SavedViewRow>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div className="bookmark-list" role="list">
-        {mainList.map((view) => (
-          <SavedViewRow
-            key={view.id}
-            view={view}
-            isRenaming={renameId === view.id}
-            isDefault={defaultSavedViewId === view.id}
-            isActive={currentOpenSavedViewId === view.id}
-            onRenameCommit={(n) => handleRenameCommit(view.id, n)}
-            onRenameCancel={() => setRenameId(null)}
-            onOpen={() => void handleOpen(view)}
-            onMenu={(rect) =>
-              setMenu({ savedViewId: view.id, x: rect.right, y: rect.bottom })}
-          />
-        ))}
-        {showEmptyState && <div className="bookmark-empty">{emptyText}</div>}
-      </div>
-
-      {menu && (
-        <WorkspaceSavedViewActionsMenu
-          x={menu.x}
-          y={menu.y}
+  const renderRow = (view: WorkspaceSavedView, actions?: ReactNode) => (
+    <SavedViewRow
+      key={view.id}
+      view={view}
+      isRenaming={renameId === view.id}
+      isDefault={defaultSavedViewId === view.id}
+      isActive={currentOpenSavedViewId === view.id}
+      onRenameCommit={(n) => handleRenameCommit(view.id, n)}
+      onRenameCancel={() => setRenameId(null)}
+      onOpen={() => void handleOpen(view)}
+      menu={
+        <SavedViewActionsMenu
           canEdit={canEdit}
-          isMine={(() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            // Own-management (Rename/Delete) is scoped to a creator's own
-            // personal/proposed view — a shared view is editor-only (the server
-            // enforces this), so don't offer it for an own *shared* view.
-            return view ? isMine(view) && view.visibility !== "shared" : false;
-          })()}
-          isDefault={defaultSavedViewId === menu.savedViewId}
-          savedViewId={menu.savedViewId}
-          canPromote={(() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            return view ? canPromoteToShared(view) : false;
-          })()}
-          canPropose={(() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            return view ? canProposeToTeam(view) : false;
-          })()}
-          canWithdraw={(() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            return view ? canWithdrawProposal(view) : false;
-          })()}
-          onPromote={() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) void handlePromote(view);
-          }}
-          onPropose={() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            // Confirm first — proposing makes the view visible to every editor.
-            if (view) setConfirmPropose({ savedView: view });
-          }}
-          onWithdraw={() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) void handleWithdraw(view);
-          }}
-          onRename={() => {
-            setRenameId(menu.savedViewId);
-            setMenu(null);
-          }}
-          onSetDefault={() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) void handleSetDefault(view);
-          }}
-          onReplace={() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) void handleReplace(view);
-          }}
-          onDelete={() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) setConfirmDelete({ savedView: view });
-          }}
-          onCopyLink={() => {
-            const view = savedViews.find((item) => item.id === menu.savedViewId);
-            setMenu(null);
-            if (view) void handleCopyLink(view);
-          }}
+          // Rename/Delete of your own view, except a shared one: those are
+          // editor-only, and the server enforces it.
+          isMine={isMine(view) && view.visibility !== "shared"}
+          isDefault={defaultSavedViewId === view.id}
+          canPromote={canPromoteToShared(view)}
+          canPropose={canProposeToTeam(view)}
+          canWithdraw={canWithdrawProposal(view)}
+          onPromote={() => void handlePromote(view)}
+          // Confirm first: proposing makes the view visible to every editor.
+          onPropose={() => setConfirmPropose({ savedView: view })}
+          onWithdraw={() => void handleWithdraw(view)}
+          onRename={() => setRenameId(view.id)}
+          onSetDefault={() => void handleSetDefault(view)}
+          onReplace={() => void handleReplace(view)}
+          onDelete={() => setConfirmDelete({ savedView: view })}
+          onCopyLink={() => void handleCopyLink(view)}
         />
-      )}
+      }
+      actions={actions}
+    />
+  );
+
+  return (
+    <section className="lc-rail-panel" aria-label="Saved views">
+      <PanelHeader
+        className="lc-rail-panel-header"
+        title="Saved views"
+        meta={savedViews.length > 0 ? savedViews.length : undefined}
+        actions={
+          <Button
+            size="sm"
+            variant="primary"
+            icon={PlusIcon}
+            onPress={() => setSavePromptOpen(true)}
+          >
+            Save view
+          </Button>
+        }
+      />
+
+      <div className="lc-rail-panel-toolbar">
+        <SearchField
+          label="Search saved views"
+          placeholder="Search name or creator"
+          value={filter.search}
+          onChange={setSearch}
+        />
+        <Switch label="Mine only" isSelected={filter.mineOnly} onChange={setMineOnly} />
+      </div>
+
+      <div className="lc-rail-panel-body">
+        {error && (
+          <p className="lc-rail-panel-note" data-tone="danger" role="alert">
+            Error: {error}
+          </p>
+        )}
+        {isLoading && <p className="lc-rail-panel-note">Loading saved views…</p>}
+
+        {reviewQueue.length > 0 && (
+          <section className="lc-rail-panel-section" data-testid="saved-view-review-queue">
+            <h3 className="lc-rail-panel-section-title">
+              Proposed for review ({reviewQueue.length})
+            </h3>
+            <ul className="lc-rail-list">
+              {reviewQueue.map((view) =>
+                renderRow(
+                  view,
+                  <>
+                    <Button
+                      size="sm"
+                      icon={CheckIcon}
+                      data-testid={`saved-view-approve-${view.id}`}
+                      onPress={() => void handleApprove(view)}
+                    >
+                      Approve
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      data-testid={`saved-view-reject-${view.id}`}
+                      onPress={() => handleReject(view)}
+                    >
+                      Reject
+                    </Button>
+                  </>,
+                ),
+              )}
+            </ul>
+          </section>
+        )}
+
+        <section className="lc-rail-panel-section">
+          {reviewQueue.length > 0 && mainList.length > 0 && (
+            <h3 className="lc-rail-panel-section-title">Views</h3>
+          )}
+          <ul className="lc-rail-list">{mainList.map((view) => renderRow(view))}</ul>
+          {showEmptyState && <p className="lc-rail-panel-empty">{emptyText}</p>}
+        </section>
+      </div>
 
       {savePromptOpen && (
-        <SaveWorkspaceSavedViewModal
+        <SaveSavedViewDialog
           defaultName={makeDefaultName()}
           canSaveShared={canEdit}
           onCancel={() => setSavePromptOpen(false)}
@@ -735,15 +599,14 @@ export function WorkspaceSavedViewsSidebar({
       )}
 
       {confirmDelete && (
-        <ConfirmModal
-          ariaLabel="Confirm delete"
+        <ConfirmDialog
           tone="danger"
           title="Delete saved view?"
           confirmLabel="Delete"
           body={
             <>
-              Delete saved view <strong>"{confirmDelete.savedView.name}"</strong>?
-              {" "}This cannot be undone.
+              Delete <strong>{confirmDelete.savedView.name}</strong>? This can&rsquo;t be
+              undone.
             </>
           }
           onCancel={() => setConfirmDelete(null)}
@@ -752,17 +615,16 @@ export function WorkspaceSavedViewsSidebar({
       )}
 
       {confirmPropose && (
-        <ConfirmModal
-          ariaLabel="Confirm propose"
+        <ConfirmDialog
           tone="primary"
           title="Propose to the team?"
           confirmLabel="Propose to team"
           confirmTestId="saved-view-propose-confirm"
           body={
             <>
-              Propose <strong>"{confirmPropose.savedView.name}"</strong> to the
-              team? Every editor will see it in their review queue and can approve
-              it to share it with the whole workspace.
+              Propose <strong>{confirmPropose.savedView.name}</strong> to the team? Every
+              editor sees it in their review queue and can approve it to share it with the
+              whole workspace.
             </>
           }
           onCancel={() => setConfirmPropose(null)}
@@ -770,43 +632,20 @@ export function WorkspaceSavedViewsSidebar({
         />
       )}
 
-      {toasts.length > 0 && (
-        <div className="bookmark-toast-stack" data-testid="saved-view-toast-stack">
-          {toasts.map((t) => (
-            <div
-              key={t.id}
-              role="status"
-              className={`bookmark-toast${t.kind === "warn" ? " warn" : ""}`}
-              data-testid="saved-view-toast"
-            >
-              <span className="bookmark-toast-text">{t.text}</span>
-              {t.action && (
-                <button
-                  type="button"
-                  className="bookmark-toast-action"
-                  data-testid="saved-view-toast-action"
-                  onClick={t.action.onClick}
-                >
-                  {t.action.label}
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+    </section>
   );
 }
 
 const VISIBILITY_CHIP: Record<
   WorkspaceSavedView["visibility"],
-  { label: string; title: string } | null
+  { label: string; title: string; tone: "neutral" | "warning" } | null
 > = {
-  shared: { label: "Shared", title: "Shared with the whole team" },
-  personal: { label: "Personal", title: "Only you can see this saved view" },
+  shared: null,
+  personal: { label: "Personal", title: "Only you can see this saved view", tone: "neutral" },
   proposed: {
     label: "Proposed",
     title: "Pending: proposed to the team, awaiting an editor's review",
+    tone: "warning",
   },
 };
 
@@ -818,8 +657,8 @@ function SavedViewRow({
   onRenameCommit,
   onRenameCancel,
   onOpen,
-  onMenu,
-  children,
+  menu,
+  actions,
 }: {
   view: WorkspaceSavedView;
   isRenaming: boolean;
@@ -828,64 +667,51 @@ function SavedViewRow({
   onRenameCommit: (name: string) => void;
   onRenameCancel: () => void;
   onOpen: () => void;
-  onMenu: (rect: DOMRect) => void;
-  children?: React.ReactNode;
+  menu: ReactNode;
+  actions?: ReactNode;
 }) {
   const chip = VISIBILITY_CHIP[view.visibility];
+  const updated = relativeTimeFromIso(view.updated_at);
+  const meta = [view.created_by_name || view.created_by, updated, isDefault ? "default" : null]
+    .filter(Boolean)
+    .join(" · ");
   return (
-    <div
-      role="listitem"
-      className="bookmark-row"
+    <li
+      className="lc-rail-row"
       data-testid="saved-view-row"
       data-visibility={view.visibility}
       data-active={isActive ? "true" : undefined}
       aria-current={isActive ? "true" : undefined}
-      onClick={(e) => {
-        const target = e.target as HTMLElement | null;
-        if (target?.closest(".bookmark-menu-btn")) return;
-        if (target?.closest(".bookmark-name-input")) return;
-        if (target?.closest(".bookmark-review-actions")) return;
-        if (isRenaming) return;
-        onOpen();
-      }}
     >
-      <div className="bookmark-row-top">
+      <div className="lc-rail-row-line">
         {isRenaming ? (
-          <RenameInput
-            initial={view.name}
-            onCommit={onRenameCommit}
-            onCancel={onRenameCancel}
-          />
+          <RenameField initial={view.name} onCommit={onRenameCommit} onCancel={onRenameCancel} />
         ) : (
-          <span className="bookmark-name" title={view.name}>{view.name}</span>
+          <button type="button" className="lc-rail-row-open" onClick={onOpen} title={view.name}>
+            <span className="lc-rail-row-text">
+              <span className="lc-rail-row-title">
+                <span className="lc-rail-row-name">{view.name}</span>
+                {isDefault && (
+                  <PushPinIcon className="lc-saved-view-default" size={12} weight="fill" aria-label="Default view" />
+                )}
+                {chip && (
+                  <span
+                    className="lc-saved-view-chip"
+                    data-testid={`saved-view-visibility-${view.id}`}
+                    title={chip.title}
+                  >
+                    <Badge tone={chip.tone}>{chip.label}</Badge>
+                  </span>
+                )}
+              </span>
+              <span className="lc-rail-row-meta">{meta}</span>
+            </span>
+          </button>
         )}
-        {chip && (
-          <span
-            className={`bookmark-visibility-chip bookmark-visibility-chip-${view.visibility}`}
-            data-testid={`saved-view-visibility-${view.id}`}
-            title={chip.title}
-          >
-            {chip.label}
-          </span>
-        )}
-        <button
-          type="button"
-          className="bookmark-menu-btn"
-          aria-label="Saved view actions"
-          onClick={(e) => {
-            e.stopPropagation();
-            onMenu((e.currentTarget as HTMLElement).getBoundingClientRect());
-          }}
-        >
-          ...
-        </button>
+        <div className="lc-rail-row-trailing">{menu}</div>
       </div>
-      <div className="bookmark-row-meta">
-        {view.created_by_name || view.created_by} | {relativeTimeFromIso(view.updated_at)}
-        {isDefault ? " | default" : ""}
-      </div>
-      {children}
-    </div>
+      {actions && <div className="lc-rail-row-actions">{actions}</div>}
+    </li>
   );
 }
 
@@ -901,7 +727,7 @@ function pickEmptyMessage({
   return "No saved views yet.";
 }
 
-function RenameInput({
+function RenameField({
   initial,
   onCommit,
   onCancel,
@@ -912,39 +738,43 @@ function RenameInput({
 }) {
   const [value, setValue] = useState(initial);
   const ref = useRef<HTMLInputElement | null>(null);
+  // Escape cancels, and the blur that follows must not commit the draft.
+  const cancelled = useRef(false);
   useEffect(() => {
     ref.current?.focus();
     ref.current?.select();
   }, []);
   return (
-    <input
-      ref={ref}
-      type="text"
-      className="bookmark-name-input"
-      value={value}
-      onChange={(e) => setValue(e.target.value)}
-      onClick={(e) => e.stopPropagation()}
-      onBlur={() => onCommit(value)}
-      onKeyDown={(e) => {
-        if (e.key === "Enter") {
-          e.preventDefault();
-          onCommit(value);
-        } else if (e.key === "Escape") {
-          e.preventDefault();
-          onCancel();
-        }
-      }}
-    />
+    <div className="lc-saved-view-rename">
+      <TextField
+        label="Saved view name"
+        labelPosition="hidden"
+        value={value}
+        onChange={setValue}
+        inputRef={ref}
+        data-testid="saved-view-rename-input"
+        onBlur={() => {
+          if (!cancelled.current) onCommit(value);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            onCommit(value);
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            cancelled.current = true;
+            onCancel();
+          }
+        }}
+      />
+    </div>
   );
 }
 
-function WorkspaceSavedViewActionsMenu({
-  x,
-  y,
+function SavedViewActionsMenu({
   canEdit,
   isMine,
   isDefault,
-  savedViewId,
   canPromote,
   canPropose,
   canWithdraw,
@@ -957,12 +787,9 @@ function WorkspaceSavedViewActionsMenu({
   onDelete,
   onCopyLink,
 }: {
-  x: number;
-  y: number;
   canEdit: boolean;
   isMine: boolean;
   isDefault: boolean;
-  savedViewId: string;
   canPromote: boolean;
   canPropose: boolean;
   canWithdraw: boolean;
@@ -975,69 +802,61 @@ function WorkspaceSavedViewActionsMenu({
   onDelete: () => void;
   onCopyLink: () => void;
 }) {
-  // Renaming/deleting a row you created is a personal action the server already
-  // permits its creator (workspace_personal_saved_view_mutations_are_creator_only),
-  // so offer it whenever the row is mine — even to a viewer. Set-default /
-  // Update / promote act on the shared document and stay gated by edit access.
+  // The server lets a creator rename or delete their own view, so offer it even
+  // to a viewer. Set-default, Update, and promote act on the shared document and
+  // stay gated by edit access.
   const canManageOwn = canEdit || isMine;
   return (
-    <div
-      className="bookmark-menu"
-      style={{ left: x - 180, top: y + 4 }}
-      role="menu"
+    <Menu
+      label="Saved view actions"
+      placement="bottom end"
+      trigger={
+        <IconButton icon={DotsThreeIcon} label="Saved view actions" size="sm" tooltipPlacement="left" />
+      }
     >
-      <button type="button" role="menuitem" onClick={onCopyLink}>Copy view link</button>
+      <MenuItem icon={LinkIcon} onAction={onCopyLink}>
+        Copy view link
+      </MenuItem>
       {canPromote && (
-        <button
-          type="button"
-          role="menuitem"
-          data-testid={`saved-view-promote-${savedViewId}`}
-          onClick={onPromote}
-        >
+        <MenuItem icon={ShareNetworkIcon} onAction={onPromote}>
           Share with team
-        </button>
+        </MenuItem>
       )}
       {canPropose && (
-        <button
-          type="button"
-          role="menuitem"
-          data-testid={`saved-view-propose-${savedViewId}`}
-          onClick={onPropose}
-        >
+        <MenuItem icon={PaperPlaneTiltIcon} onAction={onPropose}>
           Propose to team
-        </button>
+        </MenuItem>
       )}
       {canWithdraw && (
-        <button
-          type="button"
-          role="menuitem"
-          data-testid={`saved-view-withdraw-${savedViewId}`}
-          onClick={onWithdraw}
-        >
+        <MenuItem icon={ArrowUUpLeftIcon} onAction={onWithdraw}>
           Withdraw proposal
-        </button>
+        </MenuItem>
       )}
       {canEdit && (
-        <>
-          <button type="button" role="menuitem" onClick={onSetDefault}>
-            {isDefault ? "Clear default" : "Set as default"}
-          </button>
-          <button type="button" role="menuitem" onClick={onReplace}>Update from current view</button>
-        </>
+        <MenuItem icon={isDefault ? PushPinSlashIcon : PushPinIcon} onAction={onSetDefault}>
+          {isDefault ? "Clear default" : "Set as default"}
+        </MenuItem>
+      )}
+      {canEdit && (
+        <MenuItem icon={ArrowsClockwiseIcon} onAction={onReplace}>
+          Update from current view
+        </MenuItem>
       )}
       {canManageOwn && (
-        <>
-          <button type="button" role="menuitem" onClick={onRename}>Rename</button>
-          <button type="button" role="menuitem" className="danger" onClick={onDelete}>
-            Delete
-          </button>
-        </>
+        <MenuItem icon={PencilSimpleIcon} onAction={onRename}>
+          Rename
+        </MenuItem>
       )}
-    </div>
+      {canManageOwn && (
+        <MenuItem icon={TrashIcon} variant="danger" onAction={onDelete}>
+          Delete
+        </MenuItem>
+      )}
+    </Menu>
   );
 }
 
-function SaveWorkspaceSavedViewModal({
+function SaveSavedViewDialog({
   defaultName,
   canSaveShared,
   onCancel,
@@ -1052,16 +871,13 @@ function SaveWorkspaceSavedViewModal({
   ) => void | Promise<void>;
 }) {
   const [name, setName] = useState(defaultName);
-  // Personal is the default for everyone — sharing stays a deliberate one-click
-  // choice. Viewers can only save personally, so for them it's also the only
-  // enabled option.
+  // Personal is the default for everyone, so sharing stays a deliberate choice.
   const [visibility, setVisibility] = useState<WorkspaceSavedViewVisibility>(
     "personal",
   );
-  const ref = useRef<HTMLInputElement | null>(null);
+  const nameRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
-    ref.current?.focus();
-    ref.current?.select();
+    nameRef.current?.select();
   }, []);
 
   const trimmed = name.trim();
@@ -1070,109 +886,98 @@ function SaveWorkspaceSavedViewModal({
     onSave(trimmed, visibility);
   };
 
+  const options: {
+    value: WorkspaceSavedViewVisibility;
+    title: string;
+    hint: string;
+    disabled?: boolean;
+  }[] = [
+    {
+      value: "personal",
+      title: "Personal",
+      hint: "Saved to your account. Teammates won't see it.",
+    },
+    {
+      value: "shared",
+      title: "Shared with the team",
+      hint: canSaveShared
+        ? "Everyone in this workspace can open it."
+        : "Needs edit access. Viewers can save personal views only.",
+      disabled: !canSaveShared,
+    },
+  ];
+
   return (
-    <div className="bookmark-save-overlay" onClick={onCancel}>
-      <div
-        className="bookmark-save-modal"
-        onClick={(e) => e.stopPropagation()}
-        role="dialog"
-        aria-modal="true"
-        aria-label="Save current view"
-      >
-        <h4>Save current view</h4>
-        <label className="bookmark-save-field">
-          <span className="bookmark-save-tile-label">Name</span>
-          <input
-            ref={ref}
-            type="text"
-            data-testid="saved-view-name-input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                submit();
-              } else if (e.key === "Escape") {
-                e.preventDefault();
-                onCancel();
-              }
-            }}
-          />
-        </label>
-
-        <fieldset className="bookmark-visibility-fieldset">
-          <legend className="bookmark-save-tile-label">Who can see this</legend>
-          <div className="bookmark-visibility-options" role="radiogroup" aria-label="Who can see this view">
-            <label
-              className={`bookmark-visibility-option${
-                visibility === "personal" ? " selected" : ""
-              }`}
-            >
-              <input
-                type="radio"
-                name="saved-view-visibility"
-                data-testid="visibility-personal"
-                value="personal"
-                checked={visibility === "personal"}
-                onChange={() => setVisibility("personal")}
-              />
-              <span className="bookmark-visibility-option-text">
-                <span className="bookmark-visibility-option-title">Personal (only me)</span>
-                <span className="bookmark-visibility-option-hint">
-                  Saved to your account; teammates won't see it.
-                </span>
-              </span>
-            </label>
-
-            <label
-              className={`bookmark-visibility-option${
-                visibility === "shared" ? " selected" : ""
-              }${canSaveShared ? "" : " disabled"}`}
-            >
-              <input
-                type="radio"
-                name="saved-view-visibility"
-                data-testid="visibility-shared"
-                value="shared"
-                checked={visibility === "shared"}
-                disabled={!canSaveShared}
-                onChange={() => setVisibility("shared")}
-              />
-              <span className="bookmark-visibility-option-text">
-                <span className="bookmark-visibility-option-title">Shared (team)</span>
-                <span className="bookmark-visibility-option-hint">
-                  {canSaveShared
-                    ? "Everyone in this workspace can open it."
-                    : "Needs edit access — viewers can only save personal views."}
-                </span>
-              </span>
-            </label>
-          </div>
-        </fieldset>
-
-        <div className="bookmark-save-modal-actions">
-          <button type="button" onClick={onCancel}>Cancel</button>
-          <button
-            type="button"
-            className="primary"
+    <Dialog
+      title="Save current view"
+      size="sm"
+      isOpen
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+      footer={
+        <>
+          <Button onPress={onCancel}>Cancel</Button>
+          <Button
+            variant="primary"
             data-testid="saved-view-save-confirm"
-            disabled={trimmed.length === 0}
-            onClick={submit}
+            isDisabled={trimmed.length === 0}
+            onPress={submit}
           >
             Save
-          </button>
-        </div>
+          </Button>
+        </>
+      }
+    >
+      <div className="lc-saved-view-form">
+        <TextField
+          label="Name"
+          value={name}
+          onChange={setName}
+          autoFocus
+          inputRef={nameRef}
+          data-testid="saved-view-name-input"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              submit();
+            }
+          }}
+        />
+        <fieldset className="lc-saved-view-visibility">
+          <legend className="lc-saved-view-visibility-legend">Who can see this</legend>
+          {options.map((option) => (
+            <label
+              key={option.value}
+              className="lc-saved-view-visibility-option"
+              data-selected={visibility === option.value || undefined}
+              data-disabled={option.disabled || undefined}
+            >
+              <input
+                type="radio"
+                name="saved-view-visibility"
+                data-testid={`visibility-${option.value}`}
+                value={option.value}
+                checked={visibility === option.value}
+                disabled={option.disabled}
+                onChange={() => setVisibility(option.value)}
+              />
+              <span className="lc-saved-view-visibility-text">
+                <span className="lc-saved-view-visibility-title">{option.title}</span>
+                <span className="lc-saved-view-visibility-hint">{option.hint}</span>
+              </span>
+            </label>
+          ))}
+        </fieldset>
       </div>
-    </div>
+    </Dialog>
   );
 }
 
-// One confirm affordance for any irreversible-or-broadcasting action (delete,
-// propose). `tone` only swaps the accent on the confirm button — a warm danger
-// for destructive actions, the brand primary for a benign-but-deliberate one
-// like proposing — so the two flows stay visually consistent.
-function ConfirmModal({
-  ariaLabel,
+// One confirm dialog for irreversible or broadcasting actions (delete, propose).
+// `tone` only swaps the confirm button: danger for destructive actions, primary
+// for deliberate ones like proposing.
+function ConfirmDialog({
   title,
   body,
   confirmLabel,
@@ -1181,9 +986,8 @@ function ConfirmModal({
   onCancel,
   onConfirm,
 }: {
-  ariaLabel: string;
   title: string;
-  body: React.ReactNode;
+  body: ReactNode;
   confirmLabel: string;
   tone: "danger" | "primary";
   confirmTestId?: string;
@@ -1191,27 +995,31 @@ function ConfirmModal({
   onConfirm: () => void;
 }) {
   return (
-    <div className="bookmark-confirm-overlay" onClick={onCancel}>
-      <div
-        className={`bookmark-confirm-modal bookmark-confirm-modal-${tone}`}
-        onClick={(e) => e.stopPropagation()}
-        role="alertdialog"
-        aria-label={ariaLabel}
-      >
-        <h4>{title}</h4>
-        <p>{body}</p>
-        <div className="bookmark-confirm-modal-actions">
-          <button type="button" onClick={onCancel}>Cancel</button>
-          <button
-            type="button"
-            className={tone}
+    <Dialog
+      title={title}
+      size="sm"
+      isOpen
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+      footer={
+        <>
+          {/* A destructive confirm starts on Cancel, so a stray Enter never deletes. */}
+          <Button onPress={onCancel} autoFocus={tone === "danger"}>
+            Cancel
+          </Button>
+          <Button
+            variant={tone}
             data-testid={confirmTestId}
-            onClick={onConfirm}
+            onPress={onConfirm}
+            autoFocus={tone !== "danger"}
           >
             {confirmLabel}
-          </button>
-        </div>
-      </div>
-    </div>
+          </Button>
+        </>
+      }
+    >
+      <p className="lc-saved-view-confirm">{body}</p>
+    </Dialog>
   );
 }

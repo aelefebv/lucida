@@ -1,22 +1,12 @@
 /**
  * The resident-level rule for one image-bearing entity, in one place.
  *
- * A cold-state tile entry names its target level (`detailLevels[0]`). The
- * detail tier holds an indirection section for the target and for the
- * next coarser levels the pyramid has, up to {@link
- * DESCRIPTOR_MAX_LEVEL_SOURCES} levels, so chunks already resident at a
- * coarser level stay mapped and fill the screen where the target is
- * missing. Planning still requests chunks at `detailLevels` only; the
- * extra sections cost indirection entries, never fetches.
- *
- * The renderer samples those same sections finest first, then the coarse
- * tier, then blank. A level finer than the target is never a level
- * source: shown zoomed out it would be the decimated picture the target
- * level replaces (ADR 0061).
- *
- * Pure functions, no GPU coupling: `groupEntriesByPool` allocates the
- * sections {@link detailTierLevels} lists, and {@link selectEntitySources}
- * names sources from that same list, so the two cannot disagree.
+ * The detail tier holds sections for the target level and the next coarser
+ * levels, so resident coarser chunks fill the screen where the target is
+ * missing. Planning still requests `detailLevels` only, so the extra
+ * sections cost indirection entries, never fetches. A level finer than the
+ * target is never a source: zoomed out it would show the decimated picture
+ * the target replaces (ADR 0061).
  */
 
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";

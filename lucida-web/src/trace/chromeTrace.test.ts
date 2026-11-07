@@ -1,5 +1,5 @@
 /**
- * The Chrome Trace Event projection (#934). These cases assert on the
+ * The Chrome Trace Event projection. These cases assert on the
  * *document* — track names, span placement, counter series, what the header
  * declares — because that is the external behaviour a reader opening the file
  * in Perfetto depends on. How the projection walks the table is not.

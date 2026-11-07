@@ -3,22 +3,10 @@
 //! request extensions, and short-circuits with 401 when extraction
 //! fails.
 //!
-//! ## 401 response shape
-//!
-//! Unauthenticated requests to HTML routes render the `UnauthLanding`
-//! page (so the JS shim can capture `location.hash` for the OAuth
-//! roundtrip): `200 + text/html` carrying the JS shim. API clients get
-//! `401 + JSON`. The classification helper (`accepts_html`) is also
-//! used by the integration test to assert correct branching without
-//! standing up a real browser.
-//!
-//! ## Avoiding redirect loops
-//!
-//! `/auth/start`, `/auth/callback`, `/auth/whoami`, and `/auth/logout`
-//! MUST NOT serve the unauth landing themselves — doing so would either
-//! bounce the user back to `/auth/start` from `/auth/start` (infinite
-//! loop) or hide the callback's session-mint from the browser. These
-//! routes live on a separate router that the auth middleware never wraps.
+//! An unauthenticated HTML navigation gets the `UnauthLanding` page (200)
+//! so its shim can capture `location.hash`. API clients get 401 JSON. The
+//! `/auth/*` sign-in routes live on a router this middleware never wraps,
+//! because serving the landing there would loop or hide the callback.
 
 use std::sync::Arc;
 
@@ -138,38 +126,16 @@ pub async fn auth_middleware(
 
 /// Build a 401 (or 5xx) response.
 ///
-/// Branches HTML vs JSON on the request's `Accept` header. HTML
-/// navigations get the unauth landing page (which JS-shims to
-/// `/auth/start`) at `200 OK` so the page actually renders — a 401
-/// with HTML body would still show the body, but keeping the success
-/// status removes one source of confused browser devtools chatter for
-/// the handoff page. API clients keep the bare JSON 401. `Internal`
-/// errors stay bare-JSON for both shapes; an HTML page that says
-/// "internal error" without context is worse than a 500 that the
-/// browser renders as plain text.
+/// HTML navigations get the unauth landing at 200, or the static
+/// signed-out page when the `lucida_signed_out` marker is present, so a
+/// refresh after logout does not silently sign back in. API clients get
+/// a JSON 401 that carries `"signedOut": true` for the marker, because
+/// the SPA cannot read the HttpOnly cookie. `Internal` errors stay JSON.
 ///
-/// A mode whose extractor answers no to
-/// [`PrincipalExtractor::offers_sign_in`] gets the JSON 401 whatever it
-/// asked for. The landing page's only move is to bounce to
-/// `/auth/start`, and where no provider registered that route the
-/// bounce lands on the SPA catch-all, which serves the app, which polls
-/// whoami, which 401s, which bounces again. ADR-0018 records the last
-/// time that loop shipped.
-///
-/// On HTML routes the page also branches on the `lucida_signed_out`
-/// marker cookie (set by `/auth/logout`). When present, the user just
-/// explicitly logged out — serve the static `SIGNED_OUT_LANDING_HTML`
-/// instead of the auto-bouncing landing, otherwise a refresh would
-/// silently re-auth them through Google's still-active session and
-/// defeat their intent.
-///
-/// On JSON routes (the SPA's `/auth/whoami` polling) we also surface
-/// the marker as `"signedOut": true` in the 401 body. In dev, vite
-/// serves `/` directly so the SPA never sees `SIGNED_OUT_LANDING_HTML`;
-/// the JSON signal is what lets `UnauthLanding` render its static
-/// "Signed out — Sign in again" card instead of auto-bouncing back
-/// through Google. (HttpOnly cookie ⇒ JS can't read the marker
-/// directly; this signal is the SPA's only window into it.)
+/// A mode whose extractor does not [`PrincipalExtractor::offers_sign_in`]
+/// always gets the JSON 401. The landing bounces to `/auth/start`, which
+/// that mode never registered, and the SPA catch-all turns the bounce
+/// into a redirect loop.
 fn unauthenticated_response(
     err: &AuthError,
     headers: &HeaderMap,
@@ -219,29 +185,16 @@ pub fn accepts_html(headers: &HeaderMap) -> bool {
 
 /// Pick the active extractor for the configured `AuthMode`.
 ///
-/// `Disabled` → [`StubPrincipalExtractor`]: every request resolves to
-/// the selected local-dev principal, falling back to `dev@local`.
-/// ADR-0018's loopback-default safety promise relies on this branch
-/// existing — without it the cookie extractor would 401 every request
-/// and the SPA would loop into a `/auth/start` that isn't registered.
+/// `Disabled` → [`StubPrincipalExtractor`]. The loopback default relies
+/// on it: without it every request would 401 and the SPA would loop into
+/// an unregistered `/auth/start`. `Google` → [`SessionCookieExtractor`]
+/// behind the bearer path. `Iap` → [`IapAssertionExtractor`] behind the
+/// bearer path.
 ///
-/// `Google` → [`SessionCookieExtractor`] behind the bearer path: read
-/// the `lucida_session` cookie, look up the row, enforce idle +
-/// hard-cap, derive `is_admin` from the configured allowlist. The OAuth
-/// callback handler mints rows into the same store this extractor reads
-/// from.
-///
-/// `Iap` → [`IapAssertionExtractor`] behind the bearer path: verify the
-/// assertion the perimeter attached and read its `email` claim. Nothing
-/// here mints a session, because nothing here ran a sign-in.
-///
-/// Fallible because IAP mode reads its key set before serving a single
-/// request (ADR-0060), and a key set it cannot read is a server that
-/// can never authenticate anybody. The other two modes cannot fail.
-///
-/// The match is exhaustive so adding a new `AuthMode` variant later
-/// will fail-compile here rather than silently falling through to the
-/// wrong extractor.
+/// Fallible because IAP mode reads its key set before serving a request
+/// (ADR-0060), and a server that cannot read it can never authenticate
+/// anybody. The match is exhaustive so a new `AuthMode` fails to compile
+/// here.
 pub async fn build_extractor(
     config: Arc<AuthConfig>,
     store: Arc<dyn LoginSessionStore>,
@@ -415,9 +368,8 @@ mod tests {
     }
 
     /// Disabled-mode wiring: `build_extractor` returns the stub, and
-    /// the middleware attaches `dev@local` even with no cookie. Pins
-    /// the regression where `build_extractor` always returned the
-    /// cookie extractor regardless of `AuthMode`, 401ing every request.
+    /// the middleware attaches `dev@local` even with no cookie, rather
+    /// than the cookie extractor 401ing every request.
     #[tokio::test]
     async fn build_extractor_disabled_mode_attaches_dev_principal_with_no_cookie() {
         let store = Arc::new(MemorySessionStore::new());
@@ -1134,7 +1086,7 @@ mod tests {
         // Static signed-out landing markers.
         assert!(body.contains("Signed out"));
         assert!(body.contains("Sign in again"));
-        // Crucially: must NOT auto-bounce.
+        // Must not auto-bounce.
         assert!(
             !body.contains("window.location.replace"),
             "marker present → static landing, no auto-bounce",

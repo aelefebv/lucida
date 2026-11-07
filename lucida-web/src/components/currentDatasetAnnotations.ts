@@ -1,33 +1,17 @@
 /**
- * Resolve the annotations the mention machinery should read (issue #526 / the
- * #802 fix).
+ * Resolve which dataset's annotations the mention badge and candidate builder
+ * read.
  *
- * The "mentions of me" badge and the @-mention candidate builder both read the
- * CURRENT dataset's annotations. "Current" is normally the user's selected
- * dataset — but `selectedDatasetId` is `null` until a dataset is actually
- * selected, and the auto-select only fires when exactly one dataset is open
- * (see `setupFetchPipeline` in sessionController.ts). That leaves a real window — a
- * peer-opened dataset, or a multi-/zero-dataset snapshot — where a peer's
- * annotations have ALREADY landed in the scene while nothing is selected.
- *
- * Bug #802: in that window, reading `null` returned `[]`, so the FIRST inbound
- * @-mention was invisible in the indicator until a later selection (or a page
- * refresh whose snapshot carries the manifest) happened to re-run the read; a
- * LATER mention then appeared "live" only because selection had since occurred.
- *
- * The fix: when nothing is selected, fall back to the first dataset that
- * actually HAS annotations. That set is keyed independently of the manifests
- * (`annotation_dataset_ids()` reads `document.annotations`, not `manifests`), so
- * it surfaces a peer's pin even for a dataset this client hasn't opened yet — so
- * the indicator reflects a mention the moment it arrives rather than waiting on
- * a selection. A truthy `selectedDatasetId` always wins, so a user who has a
- * dataset selected sees exactly the previous behavior (their dataset, scoped).
+ * `selectedDatasetId` is null until a dataset is selected, and auto-select only
+ * fires when exactly one dataset is open. A peer's annotations can land in that
+ * window, so with nothing selected this falls back to the first dataset that has
+ * annotations. That set is keyed off `document.annotations`, not manifests, so
+ * it works for a dataset this client hasn't opened.
  */
 import type { Annotation } from "./annotationDocument.ts";
 
-/** The minimal slice of `WasmScene` this resolver reads — kept structural so it
- * needn't depend on the WASM type and is trivial to drive in a test (the real
- * `WasmScene` is assignable to it). Both methods return JSON strings. */
+/** The slice of `WasmScene` this resolver reads, structural so tests can drive
+ * it. Both methods return JSON strings. */
 export interface AnnotationScene {
   /** Pins (with nested comments) for `datasetId` as a JSON array, `"[]"` when
    * none. */
@@ -38,21 +22,14 @@ export interface AnnotationScene {
 }
 
 /**
- * Resolve WHICH dataset the mention machinery (and, crucially, the annotation
- * navigation) should treat as "current": `selectedDatasetId` if truthy, else the
- * first dataset that actually HAS annotations. Returns `null` when there is no
- * scene, nothing is selected, and no dataset has annotations (or the scene
- * returns malformed JSON).
+ * The dataset the mention machinery and annotation navigation treat as current:
+ * `selectedDatasetId` if truthy, else the first dataset with annotations, else
+ * null.
  *
- * This is the SAME id the pin set below was read from, so a caller that found a
- * pin in `currentDatasetAnnotations(scene, selectedDatasetId)` can recover the
- * pin's OWNING dataset id with `resolveAnnotationDatasetId(scene,
- * selectedDatasetId)` — even in the null-selection window (multi-/zero-dataset
- * snapshots) where `selectedDatasetId` is null but a peer's pin has already
- * landed via the inbox. Restore uses this to clamp a captured Z/T/C against the
- * pin's real extents instead of `""` (whose WASM `dataset_volume_shape` is the
- * `[1,1,1]` sentinel — clamping against it collapses a deep slab to plane 0, the
- * #814 regression class).
+ * This is the id {@link currentDatasetAnnotations} reads from, so a caller can
+ * recover a found pin's owning dataset even with nothing selected. Restore
+ * clamps Z/T/C against that dataset's extents; clamping against `""` would hit
+ * the `[1,1,1]` sentinel shape and collapse a deep slab to plane 0.
  */
 export function resolveAnnotationDatasetId(
   scene: AnnotationScene | null,
@@ -72,14 +49,9 @@ export function resolveAnnotationDatasetId(
 }
 
 /**
- * The annotations for the mention indicator/candidate builder, given the live
- * scene (or `null` before it exists) and the user's selected dataset (or `null`
- * before one is selected).
- *
- * Resolution: `selectedDatasetId` if truthy, else the first dataset that has
- * annotations. Returns `[]` (never throws) when there is no scene, no resolvable
- * dataset, or the scene returns malformed JSON — degrading to "no mentions"
- * rather than surfacing a false count.
+ * The current dataset's annotations for the mention indicator and candidate
+ * builder. Returns `[]` rather than throwing on a missing scene or bad JSON, so
+ * a failure reads as "no mentions", not a false count.
  */
 export function currentDatasetAnnotations(
   scene: AnnotationScene | null,

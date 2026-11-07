@@ -25,9 +25,7 @@ import {
   iterateActiveSetMembers,
 } from "./build.ts";
 
-// ---------------------------------------------------------------------------
 // Fixtures
-// ---------------------------------------------------------------------------
 
 function makeTile(
   entityId: string,
@@ -105,9 +103,7 @@ function makeMatrices(): Map<string, { model: Float32Array; inv: Float32Array }>
   return m;
 }
 
-// ---------------------------------------------------------------------------
 // Cases
-// ---------------------------------------------------------------------------
 
 describe("buildColdActiveEntry", () => {
   it("maps a `tile` entry forwarding tier levels + mode + proxy flags + parentGroupId", () => {
@@ -441,9 +437,7 @@ describe("buildColdState", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // View-move delta
-// ---------------------------------------------------------------------------
 
 function tileEntry(over: Partial<Extract<ActiveSetEntry, { kind: "tile" }>>): ActiveSetEntry {
   return {
@@ -577,18 +571,16 @@ describe("buildColdStateDelta", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Reuse-key ⇔ descriptor contract
 //
 // The view-move delta reuses a retained descriptor whenever `activeEntryReuseKey`
-// is unchanged, so the key MUST distinguish every field the descriptor build
+// is unchanged, so the key must distinguish every field the descriptor build
 // reads. These two properties bound that contract from both sides:
 //   (a) mutating any descriptor-affecting field the builder reads changes the key
 //       (so no such field can be silently dropped from the key), and
 //   (b) two entries with the same key build byte-identical descriptors (so a
 //       future descriptor field that isn't folded into the key can't slip a
 //       stale descriptor through a pan without failing this test).
-// ---------------------------------------------------------------------------
 
 describe("reuse-key ⇔ descriptor contract", () => {
   // A fully-populated tile entry: every descriptor-affecting field set to a
@@ -606,8 +598,8 @@ describe("reuse-key ⇔ descriptor contract", () => {
       groupProxyAvailable: true,
     }) as Extract<ActiveSetEntry, { kind: "tile" }>;
 
-  // Every field `buildColdActiveEntry` reads from a TILE entry, each paired with
-  // a mutation to a DIFFERENT value. Adding a new descriptor-affecting field
+  // Every field `buildColdActiveEntry` reads from a tile entry, each paired with
+  // a mutation to a different value. Adding a new descriptor-affecting field
   // without a case here (and without folding it into the key) is exactly the
   // regression this guards.
   const tileMutations: Array<[string, (t: Extract<ActiveSetEntry, { kind: "tile" }>) => void]> = [

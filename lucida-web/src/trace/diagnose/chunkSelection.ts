@@ -3,20 +3,11 @@
  * window of the run's clock, narrowed to one phase when the reader has
  * scoped to one.
  *
- * This is the link between the dock and the overlay. The dock is the
- * temporal surface and the overlay the spatial one, and they do not merge:
- * a window brushed on the dock's axis becomes a set of row identities here,
- * the dock publishes it, and the overlay highlights the cells whose identity
- * is in it (ADR 0052 as amended). Derived beside the chunk lookup and the
- * spatial summary so the set reads the same rows by the same rules: a row's
- * position is its boundaries, a row still in flight is charged to the run's
- * close, and a row that crosses the window's edge counts for the part
- * inside, as it does in the phase rollup.
- *
- * Like the per-chunk states, this grows with the chunks the window touched,
- * so it is not a section of the diagnostic document. Its counts and its
- * statement still reach a reader. The dock prints them beside the window,
- * and a test asserts them.
+ * This links the dock and the overlay without merging them: a window brushed
+ * on the dock becomes a set of row identities, and the overlay highlights the
+ * cells whose identity is in it (ADR 0052). Rows are read by the phase
+ * rollup's rules: a row still in flight is charged to the run's close, and a
+ * row that crosses the window's edge counts for the part inside.
  */
 
 import { labelKey } from "../merge.ts";

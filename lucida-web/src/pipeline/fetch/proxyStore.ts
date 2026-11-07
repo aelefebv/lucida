@@ -1,28 +1,18 @@
 /**
- * ProxyStore — per-dataset cache of decoded proxy assets (Group/Tile).
+ * Per-dataset cache of decoded proxy assets (Group/Tile), internal to
+ * `pipeline/fetch/`. The two-level map lets dataset removal drop a whole
+ * subtree via {@link cancelDataset}.
  *
- * Wraps `Map<datasetId, Map<innerKey, ProxyCacheEntry>>` plus a bytes
- * counter, a budget, and an {@link EvictionPolicy}. The two-level Map
- * lets dataset removal drop the whole subtree in one shot via
- * {@link cancelDataset}.
- *
- * Eviction is pure LRU across datasets — proxies are sacrificial; the
- * orchestrator re-fetches via {@link getCachedProxy} when the worker
- * reports a slot eviction. Insert + eviction collapse into one call.
- *
- * Public surface of {@link CpuCache} is unchanged; this is an internal
- * collaborator. Nothing outside `pipeline/fetch/` should import it.
+ * Eviction is LRU across datasets because proxies are sacrificial: the
+ * orchestrator re-fetches via `CpuCache.getCachedProxy` when the worker
+ * reports a slot eviction.
  */
 
 import type { ProxyHeaderJs } from "./contentSource.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { EvictableEntry, EvictionPolicy } from "./eviction.ts";
 
-/**
- * Per-entry record for the proxy cache. Owned by ProxyStore — the
- * shape is internal to fetch/. Re-exported via cpuCache.ts only as
- * needed; callers outside fetch/ don't see it.
- */
+/** Per-entry record for the proxy cache. */
 export interface ProxyCacheEntry {
   header: ProxyHeaderJs;
   data: ArrayBuffer;
@@ -53,7 +43,6 @@ export interface ProxyEvictable extends EvictableEntry {
   entry: ProxyCacheEntry;
 }
 
-/** Constructor options for {@link ProxyStore}. */
 export interface ProxyStoreOptions {
   /** Eviction policy (pure LRU across all datasets). */
   policy: EvictionPolicy<ProxyEvictable>;
@@ -79,7 +68,6 @@ export function proxyInnerKey(req: {
 }
 
 export class ProxyStore {
-  /** `Map<datasetId, Map<innerKey, ProxyCacheEntry>>`. */
   private store = new Map<string, Map<string, ProxyCacheEntry>>();
   private bytesCounter = 0;
   readonly budgetBytes: number;
@@ -114,12 +102,8 @@ export class ProxyStore {
     if (this.bytesCounter + incomingBytes <= this.budgetBytes) return;
     const needed = this.bytesCounter + incomingBytes - this.budgetBytes;
 
-    // Flatten into an adapter shape that exposes `sizeBytes` to the
-    // policy while keeping the back-references needed to remove
-    // entries from the two-level Map. The proxy entry's own `bytes`
-    // tile is mapped to `sizeBytes` so {@link LRUPolicy} can serve
-    // both cache shapes without ProxyCacheEntry having to rename its
-    // tile.
+    // Flatten into the policy's shape, keeping the back-references needed
+    // to remove victims from the two-level map.
     const evictables: ProxyEvictable[] = [];
     for (const [datasetId, inner] of this.store) {
       for (const [k, e] of inner) {

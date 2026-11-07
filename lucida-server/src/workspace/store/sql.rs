@@ -1,47 +1,14 @@
 //! What both SQL-backed `WorkspaceStore` implementations share: the
 //! statements they run, and the one query they assemble at runtime.
 //!
-//! One text, two engines. Every statement below is valid SQLite and valid
-//! PostgreSQL, so the SQLite and PostgreSQL stores execute the same
-//! characters and a change to a query lands once. ADR-0058 records the
-//! decision and what it measured.
-//!
-//! **Placeholders are numbered, `$1` and up, in every statement here.**
-//! That is PostgreSQL's spelling, and sqlx's SQLite driver reads the
-//! number out of the parameter name and binds argument N to `$N`, so the
-//! numbered form means the same thing on both sides. SQLite's bare `?` has
-//! no PostgreSQL counterpart, which is why the numbered form is the one
-//! that travels.
-//!
-//! **Do not mix the two forms in one statement.** A statement holding both
-//! `$1` and `?` binds the same argument to both and reports no error, so
-//! it returns a wrong answer rather than failing. Convert a statement
-//! whole or leave it alone.
-//!
-//! **One placeholder per bound argument, numbered in the order they
-//! appear.** A number may legally repeat — the driver takes one argument
-//! for it on either engine — but nothing here does, so a caller's bind
-//! list reads straight down the statement. Several statements pass one
-//! value twice under two numbers rather than sharing one number, which
-//! costs a bind and buys an implementation that can be checked by eye.
-//!
-//! A backend is free to run a statement of its own where the engines
-//! genuinely differ. Nothing in this store needs one. The seven
-//! `ON CONFLICT ... DO UPDATE` clauses and the one `DO NOTHING`, the
-//! `COALESCE` over `excluded` in an upsert's update list, and the
-//! correlated subquery that appends a dataset to the end of a workspace's
-//! order are all standard on both.
-//!
-//! Two things here are not what they were before the port, and both are
-//! portable rather than a divergence: the `GROUP BY` of the four workspace
-//! listings, which the note above them explains, and
-//! [`admin_search_query`], the query this store assembles at runtime.
+//! Every statement is valid on both engines (ADR-0058) and uses numbered
+//! `$N` placeholders, which sqlx's SQLite driver binds by number. Do not
+//! mix `$1` and `?` in one statement: it binds the same argument to both
+//! and returns a wrong answer without an error. Each bound argument gets
+//! its own number, in order of appearance, so a bind list reads straight
+//! down the statement even where that passes one value twice.
 
 use sqlx::{Database, Encode, QueryBuilder, Type};
-
-// ---------------------------------------------------------------------
-// Workspaces
-// ---------------------------------------------------------------------
 
 /// Whether a live workspace exists, for the paths that answer `None`
 /// rather than writing into a workspace that is gone or archived.
@@ -63,7 +30,7 @@ pub(crate) const GET_WORKSPACE: &str = r#"
 /// The workspace row of a brand-new, owner-only workspace.
 ///
 /// `link_access` and `link_role` are deliberately absent, so they take
-/// their table defaults — link access OFF. See
+/// their table defaults — link access off. See
 /// `insert_blank_owned_workspace` in either store for why that belongs in
 /// one statement rather than at every call site.
 pub(crate) const INSERT_WORKSPACE: &str = r#"
@@ -127,10 +94,6 @@ pub(crate) const SHARING_SETTINGS: &str = r#"
     WHERE id = $1 AND archived_at IS NULL
 "#;
 
-// ---------------------------------------------------------------------
-// Workspace listings
-// ---------------------------------------------------------------------
-
 // The four listings below group by `w.id` and select columns from the
 // tables joined onto it. PostgreSQL lets a grouped query select any column
 // of a table whose primary key is in the `GROUP BY`, but that reasoning
@@ -139,13 +102,31 @@ pub(crate) const SHARING_SETTINGS: &str = r#"
 // each is on the whole of that table's primary key — so naming them splits
 // no group and the answer is the same on either engine. SQLite would have
 // accepted the shorter form; only PostgreSQL asks.
+//
+// `first_dataset_url` is a correlated subquery because no aggregate both
+// engines share picks one row of a group by order. "First" is the order
+// `LIST_DATASET_SOURCES` lists them in. `preview_updated_at` is one too,
+// so it needs no place in the `GROUP BY`.
 
 pub(crate) const LIST_WORKSPACES_AS_ADMIN: &str = r#"
     SELECT
         w.id, w.name, w.created_by, w.created_at, w.updated_at,
         w.archived_at, w.seq, w.default_saved_view_id, 'owner' AS role,
         uws.last_opened_at, uws.pinned_at,
-        COALESCE(COUNT(wd.id), 0) AS dataset_count
+        COALESCE(COUNT(wd.id), 0) AS dataset_count,
+        (
+            SELECT ds.canonical_url
+            FROM workspace_datasets first_wd
+            INNER JOIN dataset_sources ds ON ds.id = first_wd.dataset_source_id
+            WHERE first_wd.workspace_id = w.id
+            ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
+            LIMIT 1
+        ) AS first_dataset_url,
+        (
+            SELECT wp.updated_at
+            FROM workspace_previews wp
+            WHERE wp.workspace_id = w.id
+        ) AS preview_updated_at
     FROM workspaces w
     LEFT JOIN user_workspace_state uws
         ON uws.workspace_id = w.id AND uws.user_email = $1
@@ -164,7 +145,20 @@ pub(crate) const LIST_WORKSPACES: &str = r#"
         w.archived_at, w.seq, w.default_saved_view_id,
         COALESCE(wm.role, w.link_role) AS role,
         uws.last_opened_at, uws.pinned_at,
-        COALESCE(COUNT(wd.id), 0) AS dataset_count
+        COALESCE(COUNT(wd.id), 0) AS dataset_count,
+        (
+            SELECT ds.canonical_url
+            FROM workspace_datasets first_wd
+            INNER JOIN dataset_sources ds ON ds.id = first_wd.dataset_source_id
+            WHERE first_wd.workspace_id = w.id
+            ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
+            LIMIT 1
+        ) AS first_dataset_url,
+        (
+            SELECT wp.updated_at
+            FROM workspace_previews wp
+            WHERE wp.workspace_id = w.id
+        ) AS preview_updated_at
     FROM workspaces w
     LEFT JOIN workspace_members wm
         ON wm.workspace_id = w.id AND wm.email = $1
@@ -192,7 +186,20 @@ pub(crate) const LIST_ARCHIVED_WORKSPACES_AS_ADMIN: &str = r#"
         w.id, w.name, w.created_by, w.created_at, w.updated_at,
         w.archived_at, w.seq, w.default_saved_view_id, 'owner' AS role,
         uws.last_opened_at, uws.pinned_at,
-        COALESCE(COUNT(wd.id), 0) AS dataset_count
+        COALESCE(COUNT(wd.id), 0) AS dataset_count,
+        (
+            SELECT ds.canonical_url
+            FROM workspace_datasets first_wd
+            INNER JOIN dataset_sources ds ON ds.id = first_wd.dataset_source_id
+            WHERE first_wd.workspace_id = w.id
+            ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
+            LIMIT 1
+        ) AS first_dataset_url,
+        (
+            SELECT wp.updated_at
+            FROM workspace_previews wp
+            WHERE wp.workspace_id = w.id
+        ) AS preview_updated_at
     FROM workspaces w
     LEFT JOIN user_workspace_state uws
         ON uws.workspace_id = w.id AND uws.user_email = $1
@@ -207,7 +214,20 @@ pub(crate) const LIST_ARCHIVED_WORKSPACES: &str = r#"
         w.id, w.name, w.created_by, w.created_at, w.updated_at,
         w.archived_at, w.seq, w.default_saved_view_id, wm.role,
         uws.last_opened_at, uws.pinned_at,
-        COALESCE(COUNT(wd.id), 0) AS dataset_count
+        COALESCE(COUNT(wd.id), 0) AS dataset_count,
+        (
+            SELECT ds.canonical_url
+            FROM workspace_datasets first_wd
+            INNER JOIN dataset_sources ds ON ds.id = first_wd.dataset_source_id
+            WHERE first_wd.workspace_id = w.id
+            ORDER BY first_wd.sort_order ASC, first_wd.added_at ASC
+            LIMIT 1
+        ) AS first_dataset_url,
+        (
+            SELECT wp.updated_at
+            FROM workspace_previews wp
+            WHERE wp.workspace_id = w.id
+        ) AS preview_updated_at
     FROM workspaces w
     INNER JOIN workspace_members wm
         ON wm.workspace_id = w.id AND wm.email = $1 AND wm.role = 'owner'
@@ -218,10 +238,6 @@ pub(crate) const LIST_ARCHIVED_WORKSPACES: &str = r#"
     GROUP BY w.id, wm.role, uws.last_opened_at, uws.pinned_at
     ORDER BY w.archived_at DESC, w.updated_at DESC
 "#;
-
-// ---------------------------------------------------------------------
-// The admin search
-// ---------------------------------------------------------------------
 
 /// Everything before the optional filters. Split from the tail because
 /// what sits between them depends on the arguments; see
@@ -253,47 +269,20 @@ const ADMIN_SEARCH_TAIL: &str = r#"
 /// The widest result set the admin console will ask for in one call.
 const ADMIN_SEARCH_MAX_ROWS: usize = 100;
 
-/// The one query in this store assembled at runtime rather than written
-/// out: the admin console's workspace search, whose shape depends on
-/// whether a query string and archived workspaces were asked for.
+/// The one query this store assembles at runtime: the admin console's
+/// workspace search, whose shape depends on whether a query string and
+/// archived workspaces were asked for.
 ///
 /// Generic over the engine because a `QueryBuilder` writes its own
-/// placeholders — `?` for SQLite, `$1` and up for PostgreSQL — which is
-/// the one place the numbered-placeholder rule above cannot reach. Both
-/// stores call this, so the fragments, the order they go in, and how the
-/// arguments are shaped on the way past are still written once; the two
-/// `Encode` bounds are the price. The alternative was two copies of the
-/// same thirty lines of `push`, which is exactly the shape a typo hides
-/// in.
+/// placeholders (`?` on SQLite, `$N` on PostgreSQL), which the numbered
+/// rule above cannot reach. Writing it once is worth the two `Encode` bounds.
 ///
-/// **The search scans, and that is the decision.** Every term is matched
-/// with `LOWER(column) LIKE '%term%'`, and a leading wildcard rules out an
-/// ordinary index on either engine, so both plan a sequential scan today.
-/// PostgreSQL could index it with a `pg_trgm` GIN index and SQLite could
-/// not, and that is the reason not to: the two baselines are held to the
-/// same named indexes by `the_two_baselines_declare_the_same_indexes`, and
-/// `pg_trgm` is an extension a deployment has to be allowed to install
-/// rather than a line in a schema file. Against that, this is an
-/// admin-only query over one row per workspace, capped at
-/// [`ADMIN_SEARCH_MAX_ROWS`]. If the workspace table ever reaches a size
-/// where the scan is felt, the index is worth its deployment step, and it
-/// arrives with a second decision about what the SQLite side does
-/// instead.
-///
-/// **`LOWER` folds a different alphabet on each engine.** SQLite's is
-/// ASCII-only; PostgreSQL's follows the database locale and folds the rest
-/// of Unicode too, so a workspace named `ÉCLAIR` is found by the query
-/// `éclair` on PostgreSQL and not on SQLite. Only `workspaces.name` can
-/// hold the difference — ids are UUIDs and every stored address is
-/// normalized to lowercase ASCII on the way in — and no portable spelling
-/// closes it, because the folding belongs to the engine. The conformance
-/// suite pins the ASCII behavior, which is what both engines agree on.
-///
-/// A backslash in the query is the same story in miniature: PostgreSQL
-/// reads it as `LIKE`'s escape character and SQLite has no default escape,
-/// so `a\b` matches on one engine and not the other. An `ESCAPE '\'`
-/// clause would settle it, at the cost of changing what the SQLite search
-/// has always done with a backslash, which is not this port's to trade.
+/// The search scans on purpose. A leading-wildcard `LIKE` rules out an
+/// ordinary index, and a `pg_trgm` index would break the rule that both
+/// baselines declare the same indexes, for an admin-only query capped at
+/// [`ADMIN_SEARCH_MAX_ROWS`]. `LOWER` folds only ASCII on SQLite but more
+/// of Unicode on PostgreSQL, and a backslash is a `LIKE` escape only on
+/// PostgreSQL. The conformance suite pins the ASCII behavior both share.
 pub(crate) fn admin_search_query<DB>(
     query: Option<&str>,
     include_archived: bool,
@@ -352,10 +341,6 @@ pub(crate) const ADMIN_WORKSPACE_DETAILS: &str = r#"
     WHERE w.id = $1
     GROUP BY w.id
 "#;
-
-// ---------------------------------------------------------------------
-// Members
-// ---------------------------------------------------------------------
 
 pub(crate) const LIST_MEMBERS: &str = r#"
     SELECT email, role, display_name, added_at
@@ -427,10 +412,6 @@ pub(crate) const UPDATE_MEMBER_ROLE: &str = r#"
 
 pub(crate) const DELETE_MEMBER: &str =
     "DELETE FROM workspace_members WHERE workspace_id = $1 AND email = $2";
-
-// ---------------------------------------------------------------------
-// Datasets
-// ---------------------------------------------------------------------
 
 pub(crate) const UPSERT_DATASET_SOURCE: &str = r#"
     INSERT INTO dataset_sources (id, canonical_url, default_name, created_at, updated_at)
@@ -510,10 +491,6 @@ pub(crate) const DATASET_BY_WORKSPACE_DATASET: &str = r#"
     WHERE wd.workspace_id = $1 AND wd.id = $2
 "#;
 
-// ---------------------------------------------------------------------
-// Saved views
-// ---------------------------------------------------------------------
-
 /// The whole visibility predicate, resolved in SQL: a row is visible when
 /// it is shared, when it is the caller's own — personal or proposed — or,
 /// only when the caller can edit, when it is any proposed row at all (the
@@ -591,10 +568,6 @@ pub(crate) const SET_SAVED_VIEW_VISIBILITY: &str = r#"
 pub(crate) const DELETE_SAVED_VIEW: &str =
     "DELETE FROM workspace_saved_views WHERE workspace_id = $1 AND id = $2";
 
-// ---------------------------------------------------------------------
-// Duplication
-// ---------------------------------------------------------------------
-
 /// The source workspace, read inside the copy's transaction so the copy is
 /// a consistent snapshot. `archived_at IS NULL` because a duplicate is
 /// only meaningful for a live workspace.
@@ -628,10 +601,6 @@ pub(crate) const SET_DEFAULT_SAVED_VIEW_ON_COPY: &str = r#"
     SET default_saved_view_id = $1
     WHERE id = $2
 "#;
-
-// ---------------------------------------------------------------------
-// Viewer profiles and per-member state
-// ---------------------------------------------------------------------
 
 pub(crate) const GET_VIEWER_PROFILE: &str = r#"
     SELECT
@@ -709,6 +678,35 @@ pub(crate) const SET_USER_LAST_VIEW: &str = r#"
     ON CONFLICT(user_email, workspace_id) DO UPDATE SET
         updated_at = excluded.updated_at,
         last_view_json = excluded.last_view_json
+"#;
+
+/// Write a workspace's one preview, replacing the existing one only if it
+/// was written at or before `$7`.
+///
+/// The `WHERE` on the update is the rate limit, and it is part of the
+/// write so concurrent uploads cannot both pass it. An insert has no row
+/// to compare and always lands. Either way the statement changes one row
+/// or none, and none means the existing preview was too recent.
+pub(crate) const UPSERT_PREVIEW: &str = r#"
+    INSERT INTO workspace_previews
+        (workspace_id, content_type, size_bytes, image, updated_at, updated_by)
+    VALUES ($1, $2, $3, $4, $5, $6)
+    ON CONFLICT(workspace_id) DO UPDATE SET
+        content_type = excluded.content_type,
+        size_bytes = excluded.size_bytes,
+        image = excluded.image,
+        updated_at = excluded.updated_at,
+        updated_by = excluded.updated_by
+    WHERE workspace_previews.updated_at <= $7
+"#;
+
+pub(crate) const PREVIEW_UPDATED_AT: &str =
+    "SELECT updated_at FROM workspace_previews WHERE workspace_id = $1";
+
+pub(crate) const GET_PREVIEW: &str = r#"
+    SELECT workspace_id, content_type, size_bytes, image, updated_at, updated_by
+    FROM workspace_previews
+    WHERE workspace_id = $1
 "#;
 
 #[cfg(test)]

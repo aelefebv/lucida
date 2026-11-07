@@ -63,7 +63,7 @@ function makeCtx(renderer: ReturnType<typeof makeVolumeRenderer>["renderer"]) {
     },
     format: "bgra8unorm",
     getVolumeRenderer: () => renderer,
-    getCompositor: () => ({ isCompiled: true, compiled: Promise.resolve(), composite }),
+    getCompositor: () => ({ isCompiled: true, compiled: Promise.resolve(), composite, underlayBackground: vi.fn() }),
     getOrCreateLUT: () => ({}),
     post(msg: WorkerToMainMessage) {
       posts.push(msg);
@@ -143,7 +143,7 @@ describe("the minimap's overview render", () => {
     expect(composite).toHaveBeenCalledOnce();
   });
 
-  // The reason is on `handleMinimapRender` in minimapHandlers.ts (#1101).
+  // The reason is on `handleMinimapRender` in minimapHandlers.ts.
   it("defers its draw until the volume renderer has compiled and then draws the latest request once", async () => {
     const { renderer, compile } = makeVolumeRenderer();
     const { ctx, composite } = makeCtx(renderer);

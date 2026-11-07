@@ -1,7 +1,7 @@
 /**
  * Lane emission helpers + priority computation. Translates active-set
  * entries and minimap-pending coords into {@link ChunkRequest} /
- * {@link ProxyRequest} streams, one per lane. See ADR 0029.
+ * {@link ProxyRequest} streams, one per lane.
  */
 
 import { Axis } from "../../axes.ts";
@@ -68,30 +68,17 @@ function stampRequest(
 }
 
 /**
- * Minimap lane (see ADR 0023). For every {@link EntitySnapshot} in
- * `entities`, look up `minimapPending.get(entity.imageId)` and emit one
- * {@link ChunkRequest} per coord (no importance / distance terms —
- * minimap chunks are per-dataset, not per-entity-importance).
+ * Minimap lane (ADR 0023). Emits one {@link ChunkRequest} per pending coord
+ * of each entity's image, with no importance or distance terms.
  *
- * Priority is two-mode. The dedicated top lane
- * (`config.minimapLaneOffset`) is justified by the seed set being SMALL
- * — a bounded ~1 s starvation window for the view lanes. On a wide
- * collection the whole-collection seed set is tens of thousands of
- * chunks; at top priority it would hold every fetch slot for tens of
- * minutes while the visible band waits. Once the pending map's TOTAL
- * demand exceeds `config.minimapSeedFastMaxChunks` (module default when
- * the caller's config lacks the knob), everything emitted here rides
- * the bulk lane: `max(bulk offset, bulkPriorityFloor)`, strictly behind
- * every request the plan emitted before this call — a constant offset
- * alone cannot guarantee that, because the other lanes' distance terms
- * are unbounded. Bulk seeding then fills opportunistically as fetch
- * slots free up: the minimap can fill over minutes; the view cannot.
- *
- * `bulkPriorityFloor` — a priority strictly greater than every request
- * already emitted into this plan (the caller computes it; this emitter
- * must run after the view-serving lanes).
- *
- * Mutates `out`.
+ * The top lane (`config.minimapLaneOffset`) is safe only while the seed set
+ * is small. On a wide collection it is tens of thousands of chunks and would
+ * hold every fetch slot for minutes while the view waits. Past
+ * `minimapSeedFastMaxChunks` of total demand, everything here rides the bulk
+ * lane at `max(bulk offset, bulkPriorityFloor)`. `bulkPriorityFloor` is above
+ * every request already in the plan, which a constant offset cannot promise
+ * because other lanes' distance terms are unbounded, so this must run after
+ * the view lanes. Mutates `out`.
  */
 export function emitMinimapLane(
   minimapPending: Map<string, MinimapChunkCoord[]>,
@@ -102,18 +89,15 @@ export function emitMinimapLane(
   out: ChunkRequest[],
 ): void {
   if (minimapPending.size === 0) return;
-  // The fast/bulk decision reads the WHOLE pending map, not the
-  // entity-joined subset this call happens to emit: seeding producers
-  // enumerate every dataset image (the map can cover members outside
-  // this call's entity set) and the fetch queue the demand lands in is
-  // shared, so the starvation cost is a property of the full demand.
+  // The fast/bulk decision reads the whole pending map, not this call's
+  // entity subset: seeding covers every dataset image and the fetch queue is
+  // shared, so starvation depends on the full demand.
   let pendingTotal = 0;
   for (const coords of minimapPending.values()) {
     pendingTotal += coords.length;
   }
-  // Fall back to the module defaults when the caller's config predates
-  // the seed knobs (structural typing admits such objects) — large
-  // demand must never ride the fast lane because a knob is absent.
+  // Defaults cover configs without the seed knobs, so large demand never
+  // rides the fast lane because a knob is absent.
   const fastMax = config.minimapSeedFastMaxChunks ?? MINIMAP_SEED_FAST_MAX_CHUNKS;
   const bulkBase = config.minimapSeedBulkLaneOffset ?? MINIMAP_SEED_BULK_LANE_OFFSET;
   const priority =
@@ -167,8 +151,7 @@ export function emitDetailLane(
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
     if (entry.kind === "group-as-proxy") {
-      // `imageId: ""` matches the pre-discrimination convention — groups
-      // have no single owning image.
+      // Groups have no single owning image.
       for (const c of snapshot.selection.visibleChannels) {
         proxyRequests.push({
           datasetId,
@@ -185,7 +168,6 @@ export function emitDetailLane(
 
     if (entry.kind === "invisible") continue;
 
-    // Narrowed: entry is TileEntry below this point.
     const entity = entityById.get(entry.entityId);
     if (entity === undefined) continue;
 
@@ -251,7 +233,7 @@ export function emitDetailLane(
 /**
  * The target's neighbor among the source levels in the zoom direction. A
  * pinned target never moves with the zoom, so it gets none. Generated coarse
- * levels are absent from `sourceLevels`, so they are never returned (ADR 0040).
+ * levels are absent from `sourceLevels`, so they are never returned.
  */
 function levelInZoomDirection(
   entity: EntitySnapshot,
@@ -271,7 +253,7 @@ function levelInZoomDirection(
  *
  * The lane's budget per entity is `prefetchDepth` steps, each the visible
  * target-level set. With no level to prefetch, every step is a future
- * timepoint, as before. With one, the level step takes the lane's last
+ * timepoint. With one, the level step takes the lane's last
  * step and the timepoint steps keep the ones before it. The level step
  * also takes any step the timepoints cannot fill, nearest the view center
  * first. The lane never exceeds the budget either way.
@@ -430,16 +412,10 @@ export function emitCoarseLane(
 /**
  * Compute distance from a chunk's world-space center to the view center.
  *
- * Uses the visible region's sortCenter if available, otherwise the visible
- * region midpoint — offset by entity position to get local coordinates.
- * Converts grid indices to world-voxel positions using per-level chunk
- * world sizes so that distance is comparable across levels.
- *
- * `depthBiasView` (issue #532) shifts the focal Z — the center-out
- * spawn origin along the near↔far axis — by a fraction of the visible
- * region's half-depth. It is `0` by default, which adds exactly nothing
- * to `centerZ`, so the distance (and thus priority) is byte-identical to
- * the unbiased computation. See {@link applyDepthBias}.
+ * Uses the visible region's sortCenter if available, otherwise its
+ * midpoint, offset by entity position. Grid indices become world-voxel
+ * positions via per-level chunk world sizes so distance compares across
+ * levels. `depthBiasView` shifts the focal Z; see {@link applyDepthBias}.
  */
 function chunkDistanceFromCenter(
   req: ChunkRequest,
@@ -484,18 +460,11 @@ function chunkDistanceFromCenter(
 }
 
 /**
- * Shift the focal Z (the center-out spawn origin along the near↔far
- * axis) by `depthBiasView`, a fraction of the visible region's
- * half-depth (issue #532).
- *
- * The bias is clamped to `[-1, 1]`; `-1` lands the focal Z on the near
- * plane (`zRangeVox[0]`), `+1` on the far plane (`zRangeVox[1]`). The
- * shifted value is clamped to the visible Z range.
- *
- * **Safety property:** when `depthBiasView === 0` this returns `centerZ`
- * unchanged — no arithmetic, no clamp — so the caller's distance and
- * priority are byte-identical to the unbiased path. Only a non-zero
- * bias ever moves the focal Z.
+ * Shift the focal Z (the center-out spawn origin along the near↔far axis)
+ * by `depthBiasView`, a fraction of the visible half-depth. The bias is
+ * clamped to `[-1, 1]`: `-1` is the near plane, `+1` the far plane. At `0`
+ * this returns `centerZ` with no arithmetic or clamp, so the default
+ * priority is byte-identical to no bias.
  */
 function applyDepthBias(
   centerZ: number,

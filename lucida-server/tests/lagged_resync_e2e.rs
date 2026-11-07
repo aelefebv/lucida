@@ -1,26 +1,12 @@
-//! Broadcast-loss recovery e2e over real WebSockets.
+//! Broadcast-loss recovery over real WebSockets, against the real
+//! `handle_client` stack.
 //!
-//! The per-client outbound loop forwards a bounded `tokio::sync::broadcast`
-//! stream to the socket. A client that reads too slowly makes its receiver
-//! overflow (`RecvError::Lagged`), silently skipping sequenced
-//! `CommandBroadcast`s — a divergent document unless repaired. Two repair
-//! paths are covered here, both against the REAL `handle_client` stack (an
-//! axum server on an ephemeral port, tokio-tungstenite clients):
-//!
-//! - **Server push on lag**: one client floods large document commands while
-//!   another stops reading; when the stalled client resumes, its outbound
-//!   loop hits `Lagged` and pushes a fresh `Snapshot` taken under the
-//!   session lock after the receiver was repositioned past the loss. The
-//!   slow client, following the seq discipline (apply `last+1`, drop stale,
-//!   adopt snapshots), converges to the exact server document.
-//! - **Client request**: `ClientMessage::RequestSnapshot` is answered with
-//!   the same fresh snapshot on the requester's connection — throttled to
-//!   one served snapshot per interval per client.
-//!
-//! The tiny broadcast capacity (8) plus ~64 KiB command payloads make the
-//! overflow deterministic: the stalled client's socket backpressure blocks
-//! its outbound task after a bounded number of frames while ~600 items
-//! pass through the ring.
+//! A client that reads too slowly overflows its bounded broadcast receiver
+//! and skips sequenced `CommandBroadcast`s. Two repairs are covered: the
+//! server pushes a fresh `Snapshot` on `Lagged` and the slow client
+//! converges to the server document, and `ClientMessage::RequestSnapshot`
+//! gets the same snapshot, throttled per client. A broadcast capacity of 8
+//! and ~64 KiB payloads make the overflow deterministic.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;

@@ -2,15 +2,10 @@
  * The derivation: one pure function from a trace document to a diagnostic
  * document.
  *
- * Both surfaces read this. The agent text and the monitor's cards render from
- * the same object, so they cannot disagree about which phase stalled or how
- * much of the run was measured — #892 found #893's threshold rules transferred
- * to the visual surface unchanged, which is the evidence for one module rather
- * than two.
- *
- * Pure, with no browser and no clock of its own: everything it needs is in the
- * document it was handed, which is what lets the whole ruleset be tested over
- * fixture runs.
+ * The agent text and the monitor's cards both render from this one object, so
+ * they cannot disagree about which phase stalled or how much of the run was
+ * measured. Pure, with no browser and no clock of its own, so the whole
+ * ruleset can be tested over fixture runs.
  */
 
 import { accountedWithin, couldHideBottleneck } from "../coverage.ts";
@@ -254,17 +249,13 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
   };
 }
 
-// ---------------------------------------------------------------------------
-// Coverage
-// ---------------------------------------------------------------------------
-
 /**
  * The trace already computed which wall clock no phase covers; this restates
  * it in the diagnostic's own terms and adds the judgement a reader needs
  * attached to a verdict.
  *
- * The percentage is **floored, never rounded**. 99.6% printing as 100% in the
- * honesty block is the exact failure #893 hit.
+ * The percentage is floored, never rounded, so 99.6% never prints as 100% in
+ * the honesty block.
  */
 function deriveCoverage(
   run: TraceRun,
@@ -332,9 +323,9 @@ function deriveCoverage(
       : null,
     limits: traceCoverage.limits,
     countedPhases: window.whole ? traceCoverage.countedPhases : countedWithin(run, window),
-    // #899 recorded zero retries, zero failures and zero evictions while the
-    // pipeline ran 20,000 requests behind. A zero here means the path was not
-    // exercised, which is not the same news as the path being healthy.
+    // A zero here means the path was not exercised, which is not the same news
+    // as the path being healthy. A run 20,000 requests behind can record zero
+    // of each.
     notHealthSignals: [
       { metric: "retries", value: countEvents(events, "retry") },
       { metric: "failures", value: countEvents(events, "failure") },
@@ -387,10 +378,6 @@ function countedWithin(run: TraceRun, window: RunWindow): Record<CountedPhase, n
   }
   return totals;
 }
-
-// ---------------------------------------------------------------------------
-// Attribution
-// ---------------------------------------------------------------------------
 
 interface AttributionInput {
   run: TraceRun;
@@ -589,10 +576,6 @@ function ceilingBreaches(phases: PhaseRollup[]): CeilingBreach[] {
   return breaches.sort((a, b) => b.ratio - a.ratio);
 }
 
-// ---------------------------------------------------------------------------
-// Findings
-// ---------------------------------------------------------------------------
-
 /** A finding before it is ranked: rank is what assigns an id and a confidence. */
 type RawFinding = Omit<Finding, "id" | "confidence" | "attribution">;
 
@@ -668,8 +651,8 @@ function rankFindings(input: FindingsInput): Finding[] {
         threshold: { kind: "backlog", value: RULESET.backlog.maxEtaS, why: RULESET.backlog.why },
       });
     } else if (isPinned(limiter)) {
-      // Pinned but not backlogged is worth a line rather than a stall: #899
-      // found two chokepoints, and a report naming only the loudest teaches the
+      // Pinned but not backlogged is worth a line rather than a stall: a run can
+      // have two chokepoints, and a report naming only the loudest teaches the
       // reader the other one is fine.
       raw.push({
         severity: "note",
@@ -691,9 +674,9 @@ function rankFindings(input: FindingsInput): Finding[] {
   }
 
   for (const segment of input.path.segments) {
-    // An unrecorded prefix large enough to hide the answer is a *note*, never a
-    // stall: nothing measured that stretch, so nothing can be blamed for it —
-    // but a reader deciding whether to trust the chain has to be told the chain
+    // An unrecorded prefix large enough to hide the answer is a note, never a
+    // stall: nothing measured that stretch, so nothing can be blamed for it.
+    // But a reader deciding whether to trust the chain has to be told the chain
     // is led by a hole.
     if (segment.label === UNRECORDED_PREFIX) {
       if (segment.sharePct >= RULESET.prefix.maxPct) {
@@ -797,12 +780,10 @@ function rankFindings(input: FindingsInput): Finding[] {
 }
 
 /**
- * Comparison against a named baseline run, and only above 2x: #899 measured
- * that much run-to-run weather between two runs of the same fixture minutes
- * apart, so anything below that spread reports weather as regression.
- *
- * Nothing here resolves or stores a baseline — the caller hands one over or
- * there is no comparison.
+ * Comparison against a named baseline run, and only above 2x: two runs of the
+ * same fixture minutes apart can differ that much, so anything below that
+ * spread reports weather as regression. Nothing here resolves or stores a
+ * baseline. The caller hands one over or there is no comparison.
  */
 function comparativeFindings(
   input: FindingsInput,
@@ -832,10 +813,6 @@ function comparativeFindings(
   }
   return out;
 }
-
-// ---------------------------------------------------------------------------
-// Verdict and next steps
-// ---------------------------------------------------------------------------
 
 function buildVerdict(
   run: TraceRun,
@@ -980,12 +957,9 @@ const INCONCLUSIVE: readonly Confidence[] = [
 ];
 
 /**
- * The commands that go deeper.
- *
- * `lucida trace perfetto` exists today. The `show` verbs are the CLI surface
- * #935 builds, and these strings are the contract it has to honour — a
+ * The commands that go deeper. These strings must match the CLI's verbs: a
  * diagnostic that prints a command which does not run is worse than one that
- * prints none, so if that ticket names them differently, it changes them here.
+ * prints none.
  */
 function nextSteps(
   run: TraceRun,

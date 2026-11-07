@@ -11,7 +11,7 @@
 #   4. Server    — `cargo build -p lucida-server` (cargo tracks staleness itself).
 #   5. Run       — start the server + Vite, stream both logs, reap both on Ctrl-C.
 #
-# Then open http://localhost:5173 (you land as admin dev@local; auth is
+# Then open http://localhost:5173 (you land as dev@local, not an admin; auth is
 # auto-disabled on loopback per ADR-0018). The backend is on :9876 and Vite
 # proxies /auth /api /admin /ws to it.
 #
@@ -57,9 +57,8 @@ if [ "${#busy[@]}" -gt 0 ]; then
 fi
 
 # --- 2. wasm (rebuild only when lucida-* Rust sources actually changed) ------
-# Hash the CONTENT of every workspace Rust source + manifest. The wiki gotcha
-# 'wasm-rebuild-after-rust-changes' says any lucida-* crate change must trigger a
-# rebuild; mtime alone lies after a git checkout, so we hash bytes, not times.
+# Hash the CONTENT of every workspace Rust source + manifest. Any lucida-* crate
+# change must trigger a wasm rebuild, and mtime alone lies after a git checkout, so we hash bytes, not times.
 # (Cargo.lock is committed and hashed too: a dep bump changes the compiled
 # wasm just like a source edit would.)
 # `|| true` keeps a transient file hiccup from aborting under set -e/pipefail; an

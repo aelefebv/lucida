@@ -1,47 +1,13 @@
 //! Detect pyramid levels that are declared but have no chunks written.
 //!
-//! A Zarr level whose chunks were never written is legal: a missing chunk
-//! reads as `fill_value`, so the level is fully declared and entirely empty.
-//! The viewer then serves a correct-by-spec, all-zero level and the screen
-//! goes black with nothing said about it — a partially-written export read as
-//! genuinely dark data. Nothing rendered is wrong, but the reading a user
-//! takes from it is, which is the failure `intention.md` names.
-//!
-//! Proving a level is empty would mean listing its whole chunk prefix, which
-//! is far too many requests on the remote-first open path. What this module
-//! does instead is a **relative** test that costs one small request per
-//! level, issued concurrently so the whole check is a single round trip:
-//!
-//! 1. probe the origin chunk (`.../c/0/0/…`) of every declared level, then
-//! 2. call a level unwritten only when its origin is absent **while some
-//!    sibling level whose origin chunk covers a smaller-or-equal patch of
-//!    source space has its origin present**.
-//!
-//! On an unsharded level the probe is a HEAD of the origin chunk's object.
-//! On a sharded level that object is the origin shard, and a shard can be
-//! there while the origin inner chunk inside it was never written. The probe
-//! reads the shard's index instead and asks it about the origin inner
-//! chunk. Stopping at the shard object would err both ways: a shard written
-//! everywhere but its first inner chunk would clear the level, and it would
-//! stand as a witness against a coarser level whose origin patch its data
-//! never reached. Either probe is a metadata read, because the question is
-//! about the dataset's shape and is asked while the open is resolving it.
-//!
-//! Step 2's footprint condition is what makes one probe trustworthy. Every
-//! level's origin chunk starts at the same corner, but they do not span the
-//! same amount of source space: a level with 2048-wide chunks covers 2048
-//! source pixels at its origin, while a half-scale level with 256-wide chunks
-//! covers only 512. So a *bigger* origin chunk missing while a *smaller* one
-//! inside it holds data is a contradiction — the data proven to exist in the
-//! smaller patch must also lie in the bigger one, and only an export that
-//! stopped early explains its absence. The reverse tells us nothing: a
-//! sparse dataset whose first signal falls outside the smaller patch is
-//! legitimately missing that chunk, and accusing it would fire on healthy
-//! data.
-//!
-//! A dataset with no chunk at any origin — including every metadata-only
-//! fixture in this repo's own tests — stays silent for the same reason:
-//! absence everywhere is not evidence of a partial write.
+//! A missing chunk reads as `fill_value`, so a never-written level is legal
+//! and renders as zeros: a partial export passing for dark data. Each
+//! level's origin chunk is probed once, concurrently. A level is unwritten
+//! only when its origin is absent while a sibling whose origin covers a
+//! smaller or equal patch of source space is present, since that data must
+//! lie in the bigger patch too. The reverse proves nothing for sparse data,
+//! and absence everywhere stays silent. On a sharded level the probe asks
+//! the shard index, because a shard can exist without its origin chunk.
 
 use std::sync::Arc;
 
@@ -240,7 +206,7 @@ mod tests {
 
     #[test]
     fn origin_path_emits_one_zero_per_on_disk_axis() {
-        // The real fixture behind issue #904: 7 axes (m, p, t, z, c, y, x).
+        // A real 7-axis layout (m, p, t, z, c, y, x).
         assert_eq!(origin_chunk_path("", "1", 7), "1/c/0/0/0/0/0/0/0");
         assert_eq!(origin_chunk_path("", "0", 5), "0/c/0/0/0/0/0");
     }
@@ -250,7 +216,7 @@ mod tests {
         assert_eq!(origin_chunk_path("A/1/0", "2", 3), "A/1/0/2/c/0/0/0");
     }
 
-    /// Issue #904's dataset to scale: level 0 declared with 2048-wide chunks
+    /// A partial export to scale: level 0 declared with 2048-wide chunks
     /// and no data, level 1 written with 256-wide chunks at 2× (512 source
     /// units). Level 0's origin chunk contains level 1's, so level 1 holding
     /// data proves level 0 should have some.

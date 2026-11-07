@@ -1,10 +1,7 @@
 /**
- * Group → tiles proxy-handle fan-out.
- *
- * When a `GroupProxy3D` upload lands for a group, every tile-mode entity
- * descended from that group needs its `groupProxyHandle` updated so the
- * shader can fall back to the parent's proxy when the tile's own
- * detail chunks (and its `TileProxy3D`, if any) haven't arrived.
+ * Group → tiles proxy-handle fan-out. Every tile under a group carries the
+ * group's `groupProxyHandle`, so the shader can fall back to the parent's
+ * proxy before the tile's own chunks or `TileProxy3D` arrive.
  */
 
 import type { ProxyHandle } from "../proxyAtlas.ts";
@@ -13,14 +10,7 @@ import {
   type EntityProxyDescriptor,
 } from "../workerContext.ts";
 
-/**
- * Propagate a `GroupProxy3D` handle to every child tile's descriptor.
- *
- * Pure mutation over the passed Maps — no GPU work, no side effects
- * besides writing into `proxyDescriptorsByEntity`. The group's own
- * descriptor is not touched here; the caller sets that before calling
- * (since this helper only knows about the children).
- */
+/** Propagate a `GroupProxy3D` handle to every child tile's descriptor. The caller sets the group's own. */
 export function propagateGroupProxyToTiles(
   handle: ProxyHandle,
   groupId: string,

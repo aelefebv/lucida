@@ -2,7 +2,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::framing::{Aabb, arcball_containment, slice_framing};
+use crate::framing::{Aabb, arcball_containment, arcball_view_containment, slice_framing};
 use crate::mat4::{
     cross3, invert4_f32, invert4_f64, look_at, mul4, normalize3, perspective, transform_point,
     unproject,
@@ -205,17 +205,14 @@ impl Camera {
     }
 
     /// Clamp an externally sourced camera (a peer's presence, a saved view)
-    /// into the same ranges the interactive mutators enforce, and repair
-    /// non-finite or degenerate fields, so an import can never install state
-    /// the local mutation paths could not produce — e.g. a `Slice` with
-    /// `zoom: 0.0` (finite, serializes fine) would otherwise turn the next
-    /// `pan` into a `0/0 = NaN` center, and NaN state defeats epoch change
-    /// detection permanently (NaN is self-unequal, so every subsequent camera
-    /// command reads as a change).
+    /// into the ranges the interactive mutators enforce, and repair
+    /// non-finite or degenerate fields, so an import never installs state the
+    /// local paths could not produce. A `Slice` with `zoom: 0.0` would turn
+    /// the next `pan` into a NaN center, and NaN is self-unequal, so every
+    /// later camera command would read as an epoch change.
     ///
-    /// Idempotent, and bit-preserving for any camera already in range: values
-    /// inside the clamp bounds pass through untouched (no renormalization),
-    /// so an unchanged presence re-import still compares equal and stays
+    /// Idempotent, and bit-preserving for a camera already in range, so an
+    /// unchanged presence re-import still compares equal and stays
     /// epoch-silent.
     pub fn sanitize(&mut self) {
         fn finite_or(v: &mut f64, fallback: f64) {
@@ -340,24 +337,15 @@ impl Camera {
     }
 
     /// GPU view matrices for an off-screen volume render at `viewport`:
-    /// `(inv_view_proj, eye, view_proj)` in the exact layout the volume
-    /// renderer's uniform buffer wants (the same triple
-    /// [`crate::scene::Scene::minimap_camera`] packs).
+    /// `(inv_view_proj, eye, view_proj)` in the layout the volume renderer's
+    /// uniform buffer wants, the same triple
+    /// [`crate::scene::Scene::minimap_camera`] packs.
     ///
-    /// The `viewport` argument overrides the camera's own viewport so a
-    /// caller can render a small thumbnail of a view whose stored camera was
-    /// sized for the full canvas — the aspect ratio comes from `viewport`,
-    /// not from `self`.
-    ///
-    /// 3D modes ([`Camera::Arcball`]/[`Camera::Fly`]) project their actual
-    /// orbit/fly view, so a rotated/elevated child camera renders the volume
-    /// from that angle. A 2D [`Camera::Slice`] has no perspective view of a
-    /// volume, so this synthesizes a front-on arcball that frames the unit
-    /// `[0,1]^3` cube — mirroring how the minimap always shows the volume even
-    /// while the main view is a 2D slice. This is the thumbnail analogue of
-    /// `minimap_camera`; the scene-level framing (target/distance from the
-    /// member boxes) is applied by the caller's transient descriptor model
-    /// matrix, exactly as in the minimap path.
+    /// `viewport` overrides the camera's own, so a thumbnail takes its aspect
+    /// ratio from `viewport`. 3D modes project their actual view. A 2D
+    /// [`Camera::Slice`] gets a synthesized front-on arcball framing the unit
+    /// `[0,1]^3` cube, as the minimap does; the caller's descriptor model
+    /// matrix applies the scene-level framing.
     pub fn gpu_view_matrices(&self, viewport: [u32; 2]) -> ([f32; 16], [f32; 3], [f32; 16]) {
         let (vp_f64, eye) = match self {
             Camera::Arcball(a) => {
@@ -456,19 +444,14 @@ impl Camera {
         }
     }
 
-    /// Frame the world-space box `[min, max]` so the **whole** dataset lands
+    /// Frame the world-space box `[min, max]` so the whole dataset lands
     /// centered and fully in view.
     ///
-    /// Dispatches on the current variant and **preserves the mode** — a 2D
-    /// `Slice` stays 2D ([`FIT_MARGIN_2D`]), a 3D `Arcball` stays 3D
-    /// ([`FIT_MARGIN_3D`], true bounding-sphere containment plus a depth-clip
-    /// range that contains the box); this never flips between them. The 2D path
-    /// uses only the XY extent of the box. The `Fly` camera keeps its
-    /// orientation and is repositioned to look at the box from a containing
-    /// distance (best-effort; the contract pins 2D/3D).
-    ///
-    /// This is a complete framing decision: the caller need not patch
-    /// `near`/`far` afterward.
+    /// Preserves the mode: a 2D `Slice` stays 2D ([`FIT_MARGIN_2D`], XY extent
+    /// only), a 3D `Arcball` stays 3D ([`FIT_MARGIN_3D`], bounding-sphere
+    /// containment plus a depth range that contains the box). `Fly` keeps its
+    /// orientation and backs off to a containing distance, best-effort. The
+    /// caller need not patch `near`/`far` afterward.
     pub fn fit_to_bounds(&mut self, min: [f64; 3], max: [f64; 3]) {
         match self {
             Camera::Slice(s) => {
@@ -480,41 +463,18 @@ impl Camera {
     }
 }
 
-// --- Interactive-range clamps ---
+// Every camera mutator clamps its writes into these ranges so finite inputs
+// of any magnitude can only produce finite state. `Scene::apply` diffs camera
+// state around each command, and a stored NaN is self-unequal, so every later
+// camera command would read as changed and force a full replan per frame. A
+// NaN also serializes to JSON `null` and breaks every peer's presence parse.
 //
-// Every camera mutator clamps its writes into these ranges so that FINITE
-// inputs — of ANY magnitude — can only ever produce FINITE state. This is
-// load-bearing for epoch change detection: `Scene::apply` diffs camera state
-// before/after each command, and a non-finite value minted by camera math is
-// self-unequal once a NaN lands (NaN != NaN), so every later camera-scope
-// command (including the per-render-tick viewport re-assert) would read as
-// "changed" and force a full replan per frame, permanently; a stored NaN
-// also serializes to JSON `null`, which breaks every peer's presence parse.
-// Every kind of accumulator gets its own guard, closing every way camera
-// math can go non-finite:
-//
-// - multiplicative state (`Slice::zoom`, `Arcball::distance`) saturates at a
-//   floor/ceiling, so repeated scaling can neither underflow to exactly 0.0
-//   (poisoning later divides) nor overflow to Inf;
-// - additive accumulators (`clip_distance`) saturate at
-//   `[0, CLIP_DISTANCE_MAX]` on every nudge, so repeated huge deltas cannot
-//   stack to Inf, and a huge negative delta always comes back down to 0;
-// - positional state (`Slice::center`, `Arcball::target`, `Fly::position`)
-//   accumulates through [`step_position`], which saturates an overflowing
-//   step at the bound and drops a NaN step (an `Inf − Inf` cancellation from
-//   an extreme finite input) instead of storing it; absolute positional
-//   writes (set-center, center-on-voxel, the fit targets) clamp to the same
-//   bound;
-// - orbit angles accumulate through [`wrap_angle`]: a bit-identical
-//   pass-through across the whole interactive range, wrapping by 2π (which
-//   is trig-periodic — the identical camera) only past a huge guard, so
-//   repeated huge deltas cannot reach ±Inf, where `sin(Inf) = NaN` would
-//   poison `eye_position` every frame.
-//
-// The bounds are far beyond any dataset scale (world space is normalized;
-// slice space is voxels; slice zoom is screen pixels per world unit) yet far
-// inside f64 range, so the multiplies/divides downstream of a clamped value
-// stay finite by construction.
+// Multiplicative state (`Slice::zoom`, `Arcball::distance`) saturates at a
+// floor and ceiling. `clip_distance` saturates at `[0, CLIP_DISTANCE_MAX]`.
+// Positional state goes through [`step_position`], which saturates overflow
+// and drops a NaN step. Orbit angles go through [`wrap_angle`], which wraps
+// by 2π only past a huge guard so `sin` never sees ±Inf. The bounds are far
+// beyond any dataset scale yet far inside f64 range.
 
 /// Floor for [`Slice::zoom`]. Keeps `Slice::pan`'s divide-by-zoom finite.
 pub const SLICE_ZOOM_MIN: f64 = 1e-9;
@@ -525,6 +485,9 @@ pub const SLICE_ZOOM_MAX: f64 = 1e9;
 /// zoom-out multiplies `distance` to Inf, and `Arcball::pan` with a zero
 /// delta then computes `0 × Inf = NaN` into `target`.
 pub const ARCBALL_DISTANCE_MAX: f64 = 1e9;
+/// The least `near` an arcball zoom-in pulls the near plane down to, as a
+/// share of `far`: a fresh arcball's 0.01 against 100.
+const NEAR_PER_FAR: f64 = 1e-4;
 /// Component-wise bound for positional camera state (slice `center`, arcball
 /// `target`, fly `position`). Generous for any real world coordinate (slice
 /// space is voxels; the largest images are ~1e9 voxels across) while keeping
@@ -605,8 +568,6 @@ fn sanitize_projection(fov: &mut f64, near: &mut f64, far: &mut f64) {
         *far = *near * 1e4;
     }
 }
-
-// --- Slice implementation ---
 
 impl Slice {
     pub fn new(viewport: [u32; 2]) -> Self {
@@ -729,8 +690,6 @@ fn pixels_per_sample_from_eye(
     pixels_per_world_at_unit_distance / distance / densest
 }
 
-// --- Arcball implementation ---
-
 impl Arcball {
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
@@ -747,28 +706,34 @@ impl Arcball {
         }
     }
 
-    /// Frame the world-space box `[min, max]` so the **whole** box is in view at
-    /// the current orbit angle, with `margin` slack — true containment, not a
-    /// rough framing.
+    /// Frame the world-space box `[min, max]` so the whole box is in view at
+    /// the current orbit angle, with `margin` slack: true containment.
     ///
-    /// Sets `target = midpoint`, then sits back along the view ray by
-    /// `distance = (R / sin(limiting)) · margin`, where `R` is the box's
-    /// bounding-sphere radius (half the space diagonal — so containment holds at
-    /// *any* `theta`/`phi`) and `limiting = min(fov/2, atan(tan(fov/2)·aspect))`
-    /// is the narrower frustum half-angle (so the sphere fits both viewport
-    /// axes). Also sets `near`/`far` to bracket the box
-    /// (`near = max(distance − R, distance·1e-3, 1e-4)`,
-    /// `far = (distance + R)·1.05`, `0 < near < far`) so a large or offset
-    /// dataset is not clipped to a blank viewport. `theta`/`phi`/`fov` are left
-    /// untouched.
-    ///
-    /// Inverted (`min > max`) and non-finite inputs are normalized/sanitized so
-    /// `target`, `distance`, `near`, and `far` stay finite with `distance > 0`
-    /// and `0 < near < far`. The shared math lives in
+    /// `target` is the midpoint and `distance = (R / sin(limiting)) · margin`,
+    /// where `R` is the bounding-sphere radius, so containment holds at any
+    /// `theta`/`phi`, and `limiting` is the narrower frustum half-angle.
+    /// `near`/`far` bracket the box so a large or offset dataset is not
+    /// clipped. `theta`/`phi`/`fov` are untouched, and inverted or non-finite
+    /// inputs are sanitized. The math lives in
     /// [`crate::framing::arcball_containment`].
+    ///
+    /// A portrait viewport frames the box as it is seen now instead
+    /// ([`crate::framing::arcball_view_containment`]): there the sphere is fit
+    /// into the narrow horizontal angle and leaves most of the height empty,
+    /// so the data would sit small in the middle of a phone's canvas.
     pub fn fit_to_bounds(&mut self, min: [f64; 3], max: [f64; 3], margin: f64) {
-        let (target, distance, near, far) =
-            arcball_containment(min, max, self.viewport, self.fov, margin);
+        let (target, distance, near, far) = if self.viewport[0] < self.viewport[1] {
+            arcball_view_containment(
+                min,
+                max,
+                self.viewport,
+                self.fov,
+                margin,
+                self.screen_axes(),
+            )
+        } else {
+            arcball_containment(min, max, self.viewport, self.fov, margin)
+        };
         // Positional write: same component bound as the pan path.
         for (dst, src) in self.target.iter_mut().zip(target) {
             *dst = src.clamp(-CAMERA_POSITION_MAX, CAMERA_POSITION_MAX);
@@ -798,7 +763,7 @@ impl Arcball {
     }
 
     pub fn rotate(&mut self, d_theta: f64, d_phi: f64) {
-        // Unconstrained across the whole interactive range (phi is NOT
+        // Unconstrained across the whole interactive range (phi is not
         // clamped to a hemisphere — rotating over the pole accumulates
         // freely); `wrap_angle` only steps in past its huge guard so the
         // angles can never accumulate to ±Inf.
@@ -807,13 +772,21 @@ impl Arcball {
     }
 
     pub fn zoom(&mut self, delta: f64) {
+        let next = self.distance * (1.0 + delta);
+        // A fit puts `near` just short of the data, where it would stop a
+        // zoom-in at the data's edge. Moving in, the near plane comes in by as
+        // much, down to the ratio to `far` a fresh camera has, so the camera
+        // can still reach the target. Never raised, so a fresh camera keeps
+        // its floor. A NaN `next` fails the comparison and leaves it alone.
+        if next < self.distance {
+            let floor = (self.far * NEAR_PER_FAR).min(self.near);
+            self.near = (self.near - (self.distance - next)).max(floor);
+        }
         // Floor at `near` (a zoom-in can't pass through the target plane) and
         // ceiling at the interactive range end so repeated zoom-out saturates
         // instead of multiplying `distance` to Inf — `pan` scales by
         // `distance`, and `0 × Inf` would put NaN into `target`.
-        self.distance = (self.distance * (1.0 + delta))
-            .max(self.near)
-            .min(ARCBALL_DISTANCE_MAX);
+        self.distance = next.max(self.near).min(ARCBALL_DISTANCE_MAX);
     }
 
     pub fn pan(&mut self, dx: f64, dy: f64) {
@@ -829,7 +802,7 @@ impl Arcball {
         // `step_position` keeps `target` inside ±CAMERA_POSITION_MAX: a huge
         // finite delta saturates instead of storing Inf, and an Inf − Inf
         // cancellation between the two terms is dropped instead of storing
-        // NaN. Without the bound, an Inf target would make the NEXT pan's
+        // NaN. Without the bound, an Inf target would make the next pan's
         // `normalize3(target − eye)` all-NaN and poison every component.
         for i in 0..3 {
             self.target[i] = step_position(self.target[i], (right[i] * -dx + up[i] * dy) * scale);
@@ -843,6 +816,20 @@ impl Arcball {
             self.target[1] + self.distance * self.phi.cos(),
             self.target[2] + self.distance * sin_phi * self.theta.cos(),
         ]
+    }
+
+    /// The view's `[right, up, back]` unit axes, as [`look_at`] builds them;
+    /// `back` points from the target toward the eye. They depend only on the
+    /// orbit angles.
+    fn screen_axes(&self) -> [[f64; 3]; 3] {
+        let sin_phi = self.phi.sin();
+        let back = [
+            sin_phi * self.theta.sin(),
+            self.phi.cos(),
+            sin_phi * self.theta.cos(),
+        ];
+        let right = normalize3(cross3(self.up_vector(), back));
+        [right, cross3(back, right), back]
     }
 
     /// Up vector derived from spherical coordinates (tangent along phi meridian).
@@ -982,7 +969,7 @@ impl Arcball {
         }
 
         // Clamp Z to volume bounds (members don't have Z offsets).
-        // XY bounds are NOT clamped to [0, shape] — for collections, the camera
+        // XY bounds are not clamped to [0, shape] — for collections, the camera
         // may be looking at a group at a large XY offset. The per-member AABB
         // test in chunk_plan_for handles member-level visibility, and the
         // chunk grid iteration in visible_chunks clamps to valid grid indices.
@@ -1048,8 +1035,6 @@ impl Arcball {
         }
     }
 }
-
-// --- Quaternion math ---
 
 /// Hamilton product of two quaternions (x, y, z, w).
 pub(crate) fn quat_multiply(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
@@ -1119,8 +1104,6 @@ pub(crate) fn quat_to_rotation_matrix(q: [f64; 4]) -> [[f64; 3]; 3] {
     ]
 }
 
-// --- Fly camera implementation ---
-
 impl Fly {
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
@@ -1137,17 +1120,12 @@ impl Fly {
         }
     }
 
-    /// Frame the world-space box `[min, max]` best-effort: keep the current
-    /// orientation and pull `position` back along the view direction so the box
-    /// center sits ahead at a *containing* distance, with `near`/`far` bracketing
-    /// the box. Uses the same containment math as the arcball
-    /// ([`crate::framing::arcball_containment`]) so a large/offset dataset isn't
-    /// clipped. `base_speed` is refreshed to the documented `volume_diagonal ·
-    /// 0.3` so navigation stays scaled to the data.
-    ///
-    /// The 2D/3D fit contract is pinned by `Slice`/`Arcball`; this keeps the fly
-    /// camera coherent (and finite) when a fit lands in fly mode — it never
-    /// panics, and normalizes/sanitizes inverted or non-finite input.
+    /// Frame the world-space box `[min, max]` best-effort: keep the
+    /// orientation and pull `position` back so the box center sits ahead at a
+    /// containing distance ([`crate::framing::arcball_containment`]), with
+    /// `near`/`far` bracketing the box. `base_speed` becomes
+    /// `volume_diagonal · 0.3` so navigation stays scaled to the data. Never
+    /// panics, and sanitizes inverted or non-finite input.
     pub fn fit_to_bounds(&mut self, min: [f64; 3], max: [f64; 3], margin: f64) {
         let (center, distance, near, far) =
             arcball_containment(min, max, self.viewport, self.fov, margin);
@@ -1437,8 +1415,6 @@ impl Fly {
     }
 }
 
-// --- Fly to Arcball conversion ---
-
 impl Fly {
     /// Convert this fly camera to an arcball camera, preserving eye position and view direction.
     ///
@@ -1498,8 +1474,6 @@ impl Fly {
         }
     }
 }
-
-// --- Arcball to Fly conversion ---
 
 impl Arcball {
     /// Convert this arcball camera to a fly camera, preserving eye position and view direction.
@@ -1756,8 +1730,6 @@ pub(crate) fn ray_aabb_hit(
 mod tests {
     use super::*;
 
-    // --- Slice tests (preserved from original Camera tests) ---
-
     #[test]
     fn initial_camera_centered_at_origin() {
         let cam = Camera::new_2d([800, 600]);
@@ -1809,8 +1781,6 @@ mod tests {
         assert_eq!(max_y, 150.0);
     }
 
-    // --- Arcball tests (preserved from original Camera3D tests) ---
-
     #[test]
     fn default_eye_position() {
         let cam = Arcball::new([800, 600]);
@@ -1849,6 +1819,54 @@ mod tests {
     }
 
     #[test]
+    fn zoom_keeps_a_fresh_cameras_floor() {
+        let mut cam = Arcball::new([800, 600]);
+        for _ in 0..50 {
+            cam.zoom(-0.5);
+        }
+        assert_eq!((cam.near, cam.distance), (0.01, 0.01));
+    }
+
+    #[test]
+    fn zoom_moves_in_past_a_fitted_near_plane() {
+        // A fit sets `near` at the data's front; zooming in carries it along
+        // instead of stopping there, down to a fresh camera's share of `far`.
+        let mut cam = Arcball::new([390, 608]);
+        cam.fit_to_bounds([0.0; 3], [1.0, 1.0, 0.25], FIT_MARGIN_3D);
+        let (fitted, near, far) = (cam.distance, cam.near, cam.far);
+        cam.zoom(-0.5);
+        assert!(
+            (cam.distance - fitted * 0.5).abs() < 1e-12,
+            "distance {}",
+            cam.distance
+        );
+        let expected = (near - fitted * 0.5).max(far * NEAR_PER_FAR);
+        assert!(
+            (cam.near - expected).abs() < 1e-12,
+            "near {} vs {expected}",
+            cam.near
+        );
+        for _ in 0..60 {
+            cam.zoom(-0.5);
+        }
+        assert!(
+            (cam.near - far * NEAR_PER_FAR).abs() < 1e-12,
+            "near {}",
+            cam.near
+        );
+        assert_eq!(cam.distance, cam.near);
+        assert_eq!(cam.far, far);
+        // Zooming back out leaves the near plane where it came to.
+        let near_in = cam.near;
+        cam.zoom(1.0);
+        assert_eq!(cam.near, near_in);
+        // A NaN step changes nothing it shouldn't.
+        cam.zoom(f64::NAN);
+        assert_eq!(cam.near, near_in);
+        assert!(cam.distance.is_finite());
+    }
+
+    #[test]
     fn pan_moves_target() {
         let mut cam = Arcball::new([800, 600]);
         let orig = cam.target;
@@ -1864,8 +1882,6 @@ mod tests {
             assert!(val.is_finite(), "Matrix contains non-finite value: {}", val);
         }
     }
-
-    // --- New unified camera tests ---
 
     #[test]
     fn effective_zoom_2d_returns_zoom() {
@@ -1954,8 +1970,6 @@ mod tests {
         assert_eq!(cam.viewport(), [1920, 1080]);
     }
 
-    // --- Quaternion tests ---
-
     #[test]
     fn quat_multiply_identity() {
         let identity = [0.0, 0.0, 0.0, 1.0];
@@ -2024,8 +2038,6 @@ mod tests {
         let len = (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
         assert!((len - 1.0).abs() < 1e-12, "normalized length: {len}");
     }
-
-    // --- Fly camera tests ---
 
     #[test]
     fn fly_tick_forward_moves_minus_z() {
@@ -2176,8 +2188,6 @@ mod tests {
         assert_eq!(cam.viewport(), [1920, 1080]);
     }
 
-    // --- Clip distance tests ---
-
     #[test]
     fn arcball_clip_distance_defaults_to_zero() {
         let cam = Arcball::new([800, 600]);
@@ -2191,8 +2201,6 @@ mod tests {
         assert_eq!(cam.clip_distance, 0.0);
         assert_eq!(cam.clip_mode, ClipMode::Plane);
     }
-
-    // --- Fly to Arcball conversion tests ---
 
     #[test]
     fn fly_to_arcball_produces_reasonable_values() {
@@ -2321,8 +2329,6 @@ mod tests {
         }
     }
 
-    // --- Fly camera serde round-trip tests ---
-
     #[test]
     fn fly_camera_serde_roundtrip_with_state() {
         let mut fly = Fly::new([1024, 768]);
@@ -2376,8 +2382,6 @@ mod tests {
             panic!("expected Fly");
         }
     }
-
-    // --- fit_to_bounds tests (Slice / Arcball / Camera dispatch) ---
 
     /// Every corner of the world rect `[min, max]` must project inside the
     /// viewport `[0, vw] × [0, vh]`.
@@ -2610,8 +2614,8 @@ mod tests {
 
     #[test]
     fn arcball_fit_contains_isotropic_cube() {
-        // The gen-0 bug: a cube's corners clipped ~10% off-screen with
-        // distance = max_extent·1.8. True containment must keep ALL corners in.
+        // A loose fit (distance = max_extent·1.8) clips a cube's corners ~10%
+        // off-screen. True containment must keep all corners in.
         let min = [0.0, 0.0, 0.0];
         let max = [10.0, 10.0, 10.0];
         let mut cam = Camera::new_3d([800, 600]);
@@ -2624,9 +2628,9 @@ mod tests {
 
     #[test]
     fn arcball_fit_contains_large_offset_box_without_blanking() {
-        // The gen-0 far-plane bug: a large offset box left near/far at
-        // 0.01/100, so the eye sat beyond `far` → blank viewport. fit must now
-        // set the clip range so every corner is visible AND within [near, far].
+        // A large offset box with near/far left at 0.01/100 puts the eye beyond
+        // `far` and blanks the viewport. fit must set the clip range so every
+        // corner is visible and within [near, far].
         let min = [10_000.0, 20_000.0, 5_000.0];
         let max = [10_300.0, 20_150.0, 5_080.0];
         let mut cam = Camera::new_3d([800, 600]);
@@ -2648,6 +2652,90 @@ mod tests {
             let mut cam = Camera::new_3d(vp);
             cam.fit_to_bounds(min, max);
             assert_box_corners_visible(&cam, min, max);
+        }
+    }
+
+    /// The widest share of the viewport any corner of the box reaches, per
+    /// axis, measured from the center (1.0 is the edge).
+    fn box_screen_reach(cam: &Camera, min: [f64; 3], max: [f64; 3]) -> [f64; 2] {
+        let [vw, vh] = cam.viewport();
+        let (half_w, half_h) = (vw as f64 / 2.0, vh as f64 / 2.0);
+        let mut reach = [0.0_f64; 2];
+        for corner in 0..8 {
+            let p: [f64; 3] = std::array::from_fn(|i| {
+                if corner & (1 << i) == 0 {
+                    min[i]
+                } else {
+                    max[i]
+                }
+            });
+            let s = cam.project_to_screen(p).expect("corner projects");
+            reach[0] = reach[0].max((s[0] - half_w).abs() / half_w);
+            reach[1] = reach[1].max((s[1] - half_h).abs() / half_h);
+        }
+        reach
+    }
+
+    #[test]
+    fn arcball_fit_frames_a_flat_box_tightly_in_a_portrait_viewport() {
+        // A flat volume on a phone-shaped canvas, at the default orbit angle:
+        // the box keeps all its corners in view and reaches near the edge of
+        // the binding axis, instead of sitting small inside its bounding sphere.
+        let (min, max) = ([0.0, 0.0, 0.0], [1.0, 1.0, 0.25]);
+        let mut cam = Camera::new_3d([1170, 1824]);
+        cam.fit_to_bounds(min, max);
+        assert_box_corners_visible(&cam, min, max);
+        if let Camera::Arcball(a) = &cam {
+            assert_box_within_depth_clip(a, min, max);
+            let (_, sphere, _, _) = arcball_containment(min, max, a.viewport, a.fov, FIT_MARGIN_3D);
+            assert!(
+                a.distance < sphere * 0.9,
+                "distance {} vs sphere {sphere}",
+                a.distance
+            );
+        }
+        let reach = box_screen_reach(&cam, min, max);
+        let widest = reach[0].max(reach[1]);
+        assert!(
+            widest > 0.85 && widest <= 1.0 / FIT_MARGIN_3D + 1e-6,
+            "reach {reach:?}"
+        );
+    }
+
+    #[test]
+    fn arcball_fit_keeps_the_sphere_fit_in_landscape_viewports() {
+        // Wider than tall, the fit still holds at every orbit angle.
+        let (min, max) = ([0.0, 0.0, 0.0], [1.0, 1.0, 0.25]);
+        for vp in [[1280, 800], [1000, 1000]] {
+            let mut a = Arcball::new(vp);
+            a.fit_to_bounds(min, max, FIT_MARGIN_3D);
+            let (_, sphere, near, far) = arcball_containment(min, max, vp, a.fov, FIT_MARGIN_3D);
+            assert_eq!((a.distance, a.near, a.far), (sphere, near, far));
+        }
+    }
+
+    #[test]
+    fn arcball_fit_contains_boxes_from_any_angle_in_a_portrait_viewport() {
+        let boxes = [
+            ([0.0, 0.0, 0.0], [1.0, 1.0, 0.25]),
+            ([0.0, 0.0, 0.0], [0.1, 1.0, 0.1]),
+            ([-3.0, 2.0, 5.0], [4.0, 2.5, 9.0]),
+        ];
+        for (min, max) in boxes {
+            for (theta, phi) in [
+                (0.0, 0.01),
+                (0.5, 0.8),
+                (2.0, 1.5),
+                (-1.0, 3.0),
+                (0.785, 0.955),
+            ] {
+                let mut a = Arcball::new([390, 608]);
+                a.theta = theta;
+                a.phi = phi;
+                a.fit_to_bounds(min, max, FIT_MARGIN_3D);
+                assert_box_within_depth_clip(&a, min, max);
+                assert_box_corners_visible(&Camera::Arcball(a), min, max);
+            }
         }
     }
 
@@ -2734,10 +2822,9 @@ mod tests {
 
     #[test]
     fn arcball_fit_does_not_change_minimap_framing() {
-        // The minimap keeps its OWN overview heuristic (max_extent · FIT_PADDING),
-        // distinct from the main camera's containment fit — they must NOT agree
-        // on distance (that would mean we regressed the minimap into the main
-        // fit, or vice versa).
+        // The minimap keeps its own overview heuristic (max_extent · FIT_PADDING),
+        // distinct from the main camera's containment fit, so the two must not
+        // agree on distance.
         let make_mat = |scale: f32, tx: f32, ty: f32, tz: f32| {
             let mut m = [0.0f32; 16];
             m[0] = scale;
@@ -2750,8 +2837,18 @@ mod tests {
             m
         };
         let (scale, tx, ty, tz) = (4.0f32, 10.0f32, -3.0f32, 2.0f32);
-        let (mm_center, mm_distance) =
-            crate::minimap::minimap_framing_boxes(&[(make_mat(scale, tx, ty, tz), true)]);
+        let framing = crate::minimap::minimap_framing(&[crate::minimap::MinimapMember {
+            model: make_mat(scale, tx, ty, tz),
+            visible: true,
+            z_planes: 8,
+        }]);
+        let crate::minimap::MinimapFraming::Orbit {
+            target: mm_center,
+            distance: mm_distance,
+        } = framing
+        else {
+            panic!("a volume must get the orbit framing: {framing:?}");
+        };
         // Minimap still uses the overview heuristic exactly.
         assert!(
             (mm_distance - (scale as f64) * FIT_PADDING).abs() < 1e-9,
@@ -2767,7 +2864,7 @@ mod tests {
         let mut a = Arcball::new([800, 600]);
         a.fit_to_bounds(min, max, FIT_MARGIN_3D);
 
-        // Centers agree (shared Aabb/center), distances do NOT (different fits).
+        // Centers agree (shared Aabb/center), distances do not (different fits).
         for (i, &c) in mm_center.iter().enumerate() {
             assert!((a.target[i] - c).abs() < 1e-12, "target[{i}] vs minimap");
         }
@@ -2879,8 +2976,6 @@ mod tests {
         );
     }
 
-    // --- gpu_view_matrices (thumbnail / minimap off-screen render) ---
-
     /// `view_proj * inv_view_proj` should be (near) identity — the inverse is
     /// what the volume shader unprojects with, so a bad inverse means a blank
     /// thumbnail.
@@ -2933,8 +3028,6 @@ mod tests {
         assert!((eye[1] as f64 - 0.5).abs() < 1e-4, "eye y centered");
         assert!(eye[2] as f64 > 0.5, "eye sits in front of the cube on +Z");
     }
-
-    // --- Finite inputs must produce finite state (camera-level) ---
 
     #[test]
     fn arcball_fit_caps_distance_and_keeps_bracket_consistent() {
@@ -3048,8 +3141,6 @@ mod tests {
         cam.sanitize();
         assert_eq!(cam, once);
     }
-
-    // --- pixels per sample at the hit ---
 
     #[test]
     fn slice_pixels_per_sample_is_the_zoom() {

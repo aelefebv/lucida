@@ -1,17 +1,10 @@
 /**
  * A FIFO ring buffer of timestamped entries, pruned from the front by time.
  *
- * The naive form of this — an array plus `shift()` in a `while` loop — has a
- * cliff. V8 left-trims the backing store, so `shift()` is cheap right up
- * until the store outgrows a regular heap object; past that it becomes a full
- * memmove and pruning k of n entries costs O(k·n). Measured on the upload
- * event ring (#898): ~1.4 µs per prune at 1 event/tick, ~1.15 ms at 128
- * events/tick (≈15k entries resident). That curve is exactly backwards for a
- * telemetry path — it gets most expensive when the thing being measured is
- * already under load, and misattributes its own cost to that stage.
- *
- * Head/count indices over circular storage make push and prune O(1) per
- * entry with no cliff, at the price of not being a plain array.
+ * Not an array with `shift()`: once V8's backing store outgrows a regular
+ * heap object, `shift()` becomes a memmove and pruning k of n entries costs
+ * O(k·n), worst exactly when the measured stage is under load. Head/count
+ * indices over circular storage keep push and prune O(1) per entry.
  */
 
 /** Anything the window can hold: an entry stamped with its arrival time. */
@@ -59,10 +52,9 @@ export class TimeWindow<T extends Timestamped> {
       this.head = (this.head + 1) % capacity;
       this.count -= 1;
     }
-    // A burst grows the storage; without this it would stay burst-sized
-    // forever, which the array it replaced did not. Quarter-full against
-    // doubling growth gives enough hysteresis that a steady rate never
-    // oscillates between grow and shrink.
+    // Shrink after a burst so storage doesn't stay burst-sized forever.
+    // Quarter-full against doubling growth gives enough hysteresis that a
+    // steady rate never oscillates between grow and shrink.
     if (capacity > INITIAL_CAPACITY && this.count * 4 <= capacity) {
       this.resize(Math.max(INITIAL_CAPACITY, capacity >> 1));
     }

@@ -29,3 +29,9 @@ uv run "$gen" "$dest/level-index.ome.zarr" \
 # Three tiles fill a 2x2 grid, so one slot is empty.
 uv run "$gen" "$dest/collection-unsharded.ome.zarr" \
   --tiles 3 --size 24,24 --levels 2 --factor 3,2 --chunk 8 --seed 1 --overwrite
+
+# The first tile is smaller than the second and larger than the third, and level
+# 1's chunk is clipped to each tile's level, so the tiles disagree on its shape.
+uv run "$gen" "$dest/collection-mixed.ome.zarr" \
+  --tiles 3 --size 14,12 --size 16,16 --size 12,10 --channels 2 --levels 2 \
+  --chunk 8 --chunk 16 --clip-chunks --seed 1 --overwrite

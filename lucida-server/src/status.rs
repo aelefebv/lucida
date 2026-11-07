@@ -1,12 +1,6 @@
 //! An opt-in status route that tells an external monitor whether the
-//! storage backend answers.
-//!
-//! `/healthz` and `/readyz` say whether this process is alive and ready.
-//! Neither says whether the database behind it can be reached, and an
-//! external monitor that shows each service's dependencies side by side
-//! has nowhere to read that from. This route is that place: one trivial
-//! query through the [`StorageBackend`] the server already holds, under
-//! a short timeout, rendered in one fixed JSON shape:
+//! storage backend answers, from one trivial query through the
+//! [`StorageBackend`] under a short timeout:
 //!
 //! ```json
 //! {"details": {"dependencies": {"database": [
@@ -14,29 +8,10 @@
 //! ]}}}
 //! ```
 //!
-//! Three things about it are deliberate, and ADR-0064 says why:
-//!
-//! - **Off unless `LUCIDA_STATUS_PATH` is set.** A deployment that never
-//!   configures it exposes nothing new.
-//! - **Always `200 OK`.** The external monitor reads a non-200 as "could
-//!   not read the status" and `connected: false` as "the dependency is
-//!   down". An outage reported as a 503 would show as the wrong one.
-//! - **The body carries a resource name, a flag, and a fixed message,
-//!   and nothing else.** The resource name defaults to the database
-//!   name alone, so the route can sit on the public router half and
-//!   never show a host or a credential.
-//!
-//! Configuration follows the `LUCIDA_*` contract of ADR-0017 and reads
-//! the way the profile directory of ADR-0063 does: a blank path is the
-//! same as an unset one, and nothing else is read; a label or resource
-//! name that is present and blank is refused at boot, because a
-//! template that rendered nothing into it is a mistake worth reporting.
-//!
-//! ## Auth interaction
-//!
-//! Mounts on the public router half beside the probes in
-//! [`crate::health`], for the same reason they do: an external monitor
-//! has no session.
+//! It is off unless `LUCIDA_STATUS_PATH` is set and always answers 200,
+//! because the monitor reads a non-200 as "could not read the status",
+//! not "down" (ADR-0064). The body names only the database, never a host
+//! or a credential, so it mounts on the public router half.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

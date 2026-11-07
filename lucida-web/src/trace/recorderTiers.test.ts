@@ -144,7 +144,7 @@ describe("per-tick aggregates", () => {
 
   /**
    * Recording is continuous, so a reading taken between runs is retained in
-   * the unlabelled interval rather than discarded (#927).
+   * the unlabelled interval rather than discarded.
    */
   it("keeps a reading in the unlabelled interval while no run is open", () => {
     const { recorder } = makeRecorder();

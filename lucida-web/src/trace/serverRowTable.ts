@@ -218,8 +218,7 @@ export class ServerRowTable {
    * cannot produce rows made of other rows' numbers.
    *
    * The caller owns the accept decision because only the recorder knows which
-   * labels and which opens the interval holds. This side only knows not to
-   * store what it is told nothing can place.
+   * labels and which opens the interval holds.
    */
   ingest(
     batch: ServerTimingBatch,

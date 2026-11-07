@@ -1,0 +1,52 @@
+/* Near the top, where the eye already is, and steady as the list shrinks. */
+.lc-dialog-overlay.lc-command-overlay {
+  align-items: flex-start;
+  padding-top: max(min(14vh, 120px), var(--lc-safe-top));
+}
+
+.lc-command-palette {
+  width: 560px;
+}
+
+.lc-command-dialog {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  outline: none;
+}
+
+.lc-command-search {
+  padding: var(--lc-space-3);
+  border-bottom: 1px solid var(--lc-border);
+}
+
+.lc-command-list {
+  max-height: min(380px, 55vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.lc-command-item {
+  gap: var(--lc-space-3);
+}
+
+.lc-command-group {
+  flex: none;
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+}
+
+/* A column of its own, so the group names line up with or without keys. */
+.lc-command-keys {
+  display: flex;
+  flex: none;
+  justify-content: flex-end;
+  min-width: 64px;
+}
+
+.lc-command-empty {
+  padding: var(--lc-space-5) var(--lc-space-3);
+  color: var(--lc-text-muted);
+  text-align: center;
+}

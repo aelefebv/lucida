@@ -3,12 +3,10 @@
  * **Send report**, from the page's side: what the action sends, and what
  * nothing else does.
  *
- * The first case is the one the feature turns on. A run opening,
- * settling and being read is the whole ordinary life of the recorder,
- * and none of it may put a byte outside the page. Everything after it is
- * about the action itself: it serialises once, it refuses a bundle the
- * inbox would refuse, and it says what to do instead when there is no
- * session to send over.
+ * The first case is the one the feature turns on: a run opening, settling,
+ * and being read puts no byte outside the page. The rest cover the action:
+ * it serialises once, refuses a bundle the inbox would refuse, and says what
+ * to do instead when there is no session to send over.
  */
 
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -61,7 +59,7 @@ describe("Send report", () => {
   });
 
   /**
-   * The invariant the inbox is built on (ADR 0049 as amended): the
+   * The invariant the inbox is built on (ADR 0049): the
    * recording leaves the page when somebody asks, and at no other time.
    */
   it("sends nothing while a run opens, closes and is read — and sends when the action does", async () => {

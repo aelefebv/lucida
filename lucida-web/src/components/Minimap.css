@@ -1,12 +1,6 @@
+/* The card draws the frame; the overlay sits exactly over the GPU canvas. */
 .minimap-panel {
-  position: absolute;
-  bottom: 16px;
-  right: 16px;
-  border-radius: 8px;
-  overflow: hidden;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
-  border: 1px solid rgba(255, 255, 255, 0.15);
-  z-index: 10;
+  position: relative;
 }
 .minimap-panel canvas { display: block; }
 .minimap-overlay {

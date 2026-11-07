@@ -22,11 +22,8 @@ interface PendingEntry {
   reject: (err: Error) => void;
   /**
    * The caller's lifecycle-row handle for the chunk these bytes belong to.
-   *
-   * The pool's own `id` is a slot number that means nothing outside the pool,
-   * and the chunk key survives only in the caller's promise closure — so
-   * without this the one stage in the pipeline with no identity at all stays
-   * unjoinable. -1 when the caller holds no row (no run open).
+   * The pool's own `id` is a slot number with no meaning outside the pool,
+   * so this is what joins a decode to its chunk. -1 when no run is open.
    */
   traceRow: number;
 }

@@ -1,18 +1,12 @@
 /**
- * Fixture runs for the derivation module.
+ * Fixture runs for the derivation module, built on the real trace types so
+ * every threshold, the attribution back-walk and the coverage block are tested
+ * with no browser involved.
  *
- * These are #893's five synthesised runs rebuilt against the real trace types
- * rather than the prototype's private shapes. They exist so every threshold,
- * the attribution back-walk and the coverage block are tested over a document
- * with no browser involved — the derivation is a pure function, so its tests
- * should be too.
- *
- * Two of them are regression fixtures for the prototype's sharpest findings
- * and are named for what they must *not* produce: {@link healthyLocalOpen}
- * must not report a stall, and {@link uninstrumentedPrefixOpen} must not
- * report full coverage.
- *
- * Imported only from tests, so nothing here reaches a bundle.
+ * Two are regression fixtures named for what they must not produce:
+ * {@link healthyLocalOpen} must not report a stall, and
+ * {@link uninstrumentedPrefixOpen} must not report full coverage. Imported
+ * only from tests, so nothing here reaches a bundle.
  */
 
 import { computeCoverage } from "../coverage.ts";
@@ -309,13 +303,8 @@ export function makeRun(spec: RunSpec = {}): TraceRun {
   };
 }
 
-// ---------------------------------------------------------------------------
-// The five runs
-// ---------------------------------------------------------------------------
-
 /**
- * #893's headline healthy run: a 368 ms local cold open, everything fast,
- * settled by quiescence.
+ * A healthy local cold open: everything fast, settled by quiescence.
  *
  * The regression fixture for the share threshold. A relative rule with no
  * absolute floor reports `STALL fetch.wire, 70% of the run` here, because a
@@ -358,9 +347,8 @@ export function healthyLocalOpen(): TraceRun {
 
 /**
  * A cold remote open: 4.1 s, of which the metadata reads before the first
- * chunk are the overwhelming majority. #893 measured those reads at 91% of the
- * headline run, and a timeline that draws silence over them is the defect to
- * avoid.
+ * chunk are the overwhelming majority. A timeline that draws silence over
+ * them is the defect to avoid.
  */
 export function coldRemoteOpen(): TraceRun {
   const openEndUs = 3_700 * MS;
@@ -534,7 +522,7 @@ export function interactionRunFor(input: InputKind, spec: InteractionRunSpec = {
 export type FrameBoundPhase = Extract<Phase, "upload" | "present">;
 
 /**
- * The shape a cold open recorded on a hardware adapter (#1094): every chunk
+ * The shape a cold open records on a hardware adapter: every chunk
  * holds `heldUs` in one frame-bound phase, over its ceiling, and nothing else
  * is slow.
  */
@@ -637,19 +625,15 @@ export function quietRun(): TraceRun {
 }
 
 /**
- * The field report's run: the view looks loaded, and the socket does not go
- * quiet. A pan settles inside the first 100 ms, nothing re-plans afterwards,
- * and for the rest of ten seconds the client keeps sending: cursor positions,
- * presence, viewer interest. The person stops the run to read it.
+ * The view looks loaded and the socket does not go quiet. A pan settles inside
+ * the first 100 ms, nothing re-plans afterwards, and for the rest of ten
+ * seconds the client keeps sending cursor positions, presence and viewer
+ * interest, until the person stops the run.
  *
  * The regression fixture for send-side accounting. Only two planning passes
- * exist, so the samples carry the chunk requests and one viewer-interest
- * message and nothing of the idle stretch. The run's totals carry all of it,
- * which is why the recorder counts totals at send time rather than summing
- * the samples. The per-type totals here are what the text and the JSON have
- * to agree on. The idle stretch is modelled inside a run rather than as a
- * steady-state interval because a steady-state interval has no reading of
- * its own: the run is the unit the text and the JSON are derived for.
+ * sample the sends, so the run's totals carry the idle stretch and the samples
+ * do not. The idle stretch is a run rather than a steady-state interval
+ * because the run is the unit the text and the JSON are derived for.
  */
 export function sendHeavyIdleRun(): TraceRun {
   const rows = Array.from({ length: 12 }, (_, i) =>
@@ -729,8 +713,8 @@ export function lateStallOpen(): TraceRun {
 
 /**
  * The coverage regression fixture: a 3 s run whose first 2.6 s are before any
- * instrument existed. #893's critical path started at the first recorded row
- * and reported `100% accounted` for exactly this shape.
+ * instrument existed. A critical path that starts at the first recorded row
+ * reports `100% accounted` for exactly this shape.
  */
 export function uninstrumentedPrefixOpen(): TraceRun {
   const prefixUs = 2_600 * MS;
@@ -760,10 +744,6 @@ export function uninstrumentedPrefixOpen(): TraceRun {
     readings: [makeReading(2_700 * MS, { queueDepth: 2, inFlight: 4 })],
   });
 }
-
-// ---------------------------------------------------------------------------
-// Render timing and the adapter
-// ---------------------------------------------------------------------------
 
 /**
  * The healthy open again, on an adapter that offers timestamp queries. Every
@@ -832,10 +812,6 @@ export function fallbackAdapterOpen(): TraceRun {
   });
 }
 
-// ---------------------------------------------------------------------------
-// The steady state
-// ---------------------------------------------------------------------------
-
 export interface SteadySpec extends RunSpec {
   /** How long the interval lasted, in milliseconds. */
   spanMs: number;
@@ -902,8 +878,8 @@ export function quietSteadyState(run: TraceRun): TraceRun {
 }
 
 /**
- * The field report's reading half: the view settled and the prefetch lane
- * kept fetching, eight chunks a second for twelve seconds, beside two
+ * The view settled and the prefetch lane kept fetching, eight chunks a
+ * second for twelve seconds, beside two
  * detail chunks that arrived just after settle. Every second is busy, so
  * the received rule fires and names prefetch.
  */
@@ -972,8 +948,8 @@ export function availabilityLoopSteadyState(run: TraceRun): TraceRun {
 }
 
 /**
- * The field report's writing half after settle: cursor positions, presence
- * and viewer interest for ten seconds with one planning pass. The interval's
+ * Sends after settle: cursor positions, presence and viewer interest for ten
+ * seconds with one planning pass. The interval's
  * totals carry the sends, as the recorder's do; the one sample carries
  * almost none of them.
  */

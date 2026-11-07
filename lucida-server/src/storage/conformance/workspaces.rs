@@ -6,16 +6,18 @@
 
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use lucida_content::{DatasetId, DatasetKind, DatasetManifest};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
 
+use super::instant;
 use crate::storage::StorageBackend;
 use crate::storage::test_support::{postgres_backend, sqlite_backend};
 use crate::workspace::{
-    SavedViewVisibility, WorkspaceLinkAccess, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
-    WorkspaceStore,
+    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceLinkAccess, WorkspaceRecord,
+    WorkspaceRole, WorkspaceSavedView, WorkspaceStore, WorkspaceSummary,
 };
 
 conformance_suite! {
@@ -42,6 +44,7 @@ conformance_suite! {
         one_source_gets_its_own_workspace_local_id_in_each_workspace,
         a_rejected_dataset_open_leaves_the_workspace_untouched,
         datasets_list_in_the_order_they_were_opened,
+        listings_say_where_each_workspaces_first_dataset_lives,
         renaming_a_dataset_stays_inside_its_own_workspace,
         removing_a_dataset_drops_the_membership,
         members_can_be_added_promoted_and_removed,
@@ -65,6 +68,13 @@ conformance_suite! {
         recording_a_last_view_leaves_the_shared_default_alone,
         duplicating_copies_the_content_and_none_of_the_sharing,
         duplicating_an_absent_workspace_is_none,
+        a_preview_reads_back_byte_for_byte,
+        a_workspace_without_a_preview_reads_as_none,
+        a_later_preview_replaces_the_earlier_one,
+        a_preview_newer_than_the_write_allows_stays,
+        each_workspace_keeps_its_own_preview,
+        writing_a_preview_into_an_absent_or_archived_workspace_is_none,
+        listings_say_when_each_workspaces_preview_changed,
     ],
     over: [sqlite],
     when_available: [postgres],
@@ -873,6 +883,62 @@ async fn datasets_list_in_the_order_they_were_opened(store: Arc<dyn WorkspaceSto
     assert_eq!(
         listed, opened,
         "the layer panel's order is the order datasets were opened, not their names",
+    );
+}
+
+async fn listings_say_where_each_workspaces_first_dataset_lives(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let support = admin("support@example.com");
+    let here = workspace_named(&store, &owner, "sample.zarr").await;
+    let there = workspace_named(&store, &owner, "sample.zarr").await;
+    let empty = workspace_named(&store, &owner, "Empty").await;
+    for (workspace_id, source, url, seq) in [
+        (&here.id, "source-here", "/data/here/sample.zarr", 1),
+        (&here.id, "source-later", "/data/here/later.zarr", 2),
+        (&there.id, "source-there", "/data/there/sample.zarr", 1),
+    ] {
+        open_dataset(&store, workspace_id, &owner, source, url, source, seq).await;
+    }
+
+    let first_urls = |listed: Vec<WorkspaceSummary>| -> Vec<(String, Option<String>)> {
+        let mut pairs: Vec<_> = listed
+            .into_iter()
+            .map(|summary| (summary.id, summary.first_dataset_url))
+            .collect();
+        pairs.sort();
+        pairs
+    };
+    let mut expected = vec![
+        (here.id.clone(), Some("/data/here/sample.zarr".to_string())),
+        (
+            there.id.clone(),
+            Some("/data/there/sample.zarr".to_string()),
+        ),
+        (empty.id.clone(), None),
+    ];
+    expected.sort();
+    assert_eq!(
+        first_urls(store.list_workspaces(&owner).await.unwrap()),
+        expected,
+        "two workspaces with one name differ by where their first dataset lives",
+    );
+    assert_eq!(
+        first_urls(store.list_workspaces(&support).await.unwrap()),
+        expected
+    );
+
+    store.archive_workspace(&there.id).await.unwrap().unwrap();
+    let archived = vec![(
+        there.id.clone(),
+        Some("/data/there/sample.zarr".to_string()),
+    )];
+    assert_eq!(
+        first_urls(store.list_archived_workspaces(&owner).await.unwrap()),
+        archived
+    );
+    assert_eq!(
+        first_urls(store.list_archived_workspaces(&support).await.unwrap()),
+        archived
     );
 }
 
@@ -1827,5 +1893,210 @@ async fn duplicating_an_absent_workspace_is_none(store: Arc<dyn WorkspaceStore>)
             .await
             .unwrap()
             .is_none()
+    );
+}
+
+/// Bytes that stand in for an image. The store keeps whatever the caller
+/// validated, so a case needs only something it can recognize coming back,
+/// with a zero and a high byte in it so nothing can treat it as text.
+fn preview_bytes(tag: u8) -> Vec<u8> {
+    vec![
+        b'R', b'I', b'F', b'F', 0, 0xff, tag, b'W', b'E', b'B', b'P', tag,
+    ]
+}
+
+/// A preview written at `instant(at)` that replaces one written at or
+/// before `instant(replaces_up_to)`.
+fn new_preview<'a>(
+    workspace_id: &'a str,
+    image: &'a [u8],
+    at: i64,
+    replaces_up_to: i64,
+) -> NewWorkspacePreview<'a> {
+    NewWorkspacePreview {
+        workspace_id,
+        content_type: "image/webp",
+        image,
+        updated_by: "Owner@Example.com",
+        updated_at: instant(at),
+        replaces_up_to: instant(replaces_up_to),
+    }
+}
+
+async fn put(store: &Arc<dyn WorkspaceStore>, preview: NewWorkspacePreview<'_>) -> PreviewWrite {
+    store.put_preview(preview).await.unwrap().unwrap()
+}
+
+async fn a_preview_reads_back_byte_for_byte(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let workspace = workspace_named(&store, &owner, "Demo").await;
+    let image = preview_bytes(1);
+
+    let written = put(&store, new_preview(&workspace.id, &image, 0, -5)).await;
+    let PreviewWrite::Stored(meta) = written else {
+        panic!("a first preview has nothing to be too soon after: {written:?}");
+    };
+    assert_eq!(meta.workspace_id, workspace.id);
+    assert_eq!(meta.content_type, "image/webp");
+    assert_eq!(meta.size_bytes, image.len() as i64);
+    assert_eq!(meta.updated_at, instant(0));
+    assert_eq!(
+        meta.updated_by, "owner@example.com",
+        "the uploader is stored the way member emails are",
+    );
+
+    let read = store.get_preview(&workspace.id).await.unwrap().unwrap();
+    assert_eq!(read.meta, meta, "the write hands back what a read finds");
+    assert_eq!(read.image, image);
+}
+
+async fn a_workspace_without_a_preview_reads_as_none(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let workspace = workspace_named(&store, &owner, "Demo").await;
+    assert!(store.get_preview(&workspace.id).await.unwrap().is_none());
+    assert!(store.get_preview("never-created").await.unwrap().is_none());
+}
+
+async fn a_later_preview_replaces_the_earlier_one(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let workspace = workspace_named(&store, &owner, "Demo").await;
+    let (first, second) = (preview_bytes(1), preview_bytes(2));
+    put(&store, new_preview(&workspace.id, &first, 0, -5)).await;
+
+    let written = put(&store, new_preview(&workspace.id, &second, 60, 55)).await;
+    assert!(matches!(written, PreviewWrite::Stored(_)), "{written:?}");
+
+    let read = store.get_preview(&workspace.id).await.unwrap().unwrap();
+    assert_eq!(read.image, second);
+    assert_eq!(read.meta.updated_at, instant(60));
+}
+
+async fn a_preview_newer_than_the_write_allows_stays(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let workspace = workspace_named(&store, &owner, "Demo").await;
+    let (first, second) = (preview_bytes(1), preview_bytes(2));
+    put(&store, new_preview(&workspace.id, &first, 0, -5)).await;
+
+    assert_eq!(
+        put(&store, new_preview(&workspace.id, &second, 2, -3)).await,
+        PreviewWrite::TooSoon {
+            last_updated_at: instant(0)
+        },
+        "the refusal names the preview that stayed, so the caller can say when to retry",
+    );
+    let read = store.get_preview(&workspace.id).await.unwrap().unwrap();
+    assert_eq!(read.image, first);
+    assert_eq!(read.meta.updated_at, instant(0));
+
+    // The bound is inclusive: a preview written exactly at it is replaceable.
+    let at_the_bound = put(&store, new_preview(&workspace.id, &second, 5, 0)).await;
+    assert!(
+        matches!(at_the_bound, PreviewWrite::Stored(_)),
+        "{at_the_bound:?}"
+    );
+}
+
+async fn each_workspace_keeps_its_own_preview(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let here = workspace_named(&store, &owner, "Here").await;
+    let there = workspace_named(&store, &owner, "There").await;
+    let image = preview_bytes(1);
+    put(&store, new_preview(&here.id, &image, 0, -5)).await;
+
+    assert!(store.get_preview(&there.id).await.unwrap().is_none());
+    let elsewhere = put(&store, new_preview(&there.id, &image, 1, -4)).await;
+    assert!(
+        matches!(elsewhere, PreviewWrite::Stored(_)),
+        "a recent preview in one workspace does not hold back another's: {elsewhere:?}",
+    );
+}
+
+async fn writing_a_preview_into_an_absent_or_archived_workspace_is_none(
+    store: Arc<dyn WorkspaceStore>,
+) {
+    let owner = member("owner@example.com");
+    let image = preview_bytes(1);
+    assert!(
+        store
+            .put_preview(new_preview("never-created", &image, 0, -5))
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let archived = workspace_named(&store, &owner, "Shelved").await;
+    store
+        .archive_workspace(&archived.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        store
+            .put_preview(new_preview(&archived.id, &image, 0, -5))
+            .await
+            .unwrap()
+            .is_none(),
+        "an archived workspace takes no writes",
+    );
+    assert!(store.get_preview(&archived.id).await.unwrap().is_none());
+}
+
+async fn listings_say_when_each_workspaces_preview_changed(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let support = admin("support@example.com");
+    let pictured = workspace_named(&store, &owner, "Pictured").await;
+    let bare = workspace_named(&store, &owner, "Bare").await;
+    let image = preview_bytes(1);
+    put(&store, new_preview(&pictured.id, &image, 0, -5)).await;
+
+    let updated = |listed: Vec<WorkspaceSummary>| -> Vec<(String, Option<DateTime<Utc>>)> {
+        let mut pairs: Vec<_> = listed
+            .into_iter()
+            .map(|summary| (summary.id, summary.preview_updated_at))
+            .collect();
+        pairs.sort();
+        pairs
+    };
+    let mut expected = vec![
+        (pictured.id.clone(), Some(instant(0))),
+        (bare.id.clone(), None),
+    ];
+    expected.sort();
+    assert_eq!(
+        updated(store.list_workspaces(&owner).await.unwrap()),
+        expected
+    );
+    assert_eq!(
+        updated(store.list_workspaces(&support).await.unwrap()),
+        expected
+    );
+
+    // Archiving keeps the preview, so the archived shelf shows it and a
+    // restore brings it back.
+    store
+        .archive_workspace(&pictured.id)
+        .await
+        .unwrap()
+        .unwrap();
+    let archived = vec![(pictured.id.clone(), Some(instant(0)))];
+    assert_eq!(
+        updated(store.list_archived_workspaces(&owner).await.unwrap()),
+        archived
+    );
+    assert_eq!(
+        updated(store.list_archived_workspaces(&support).await.unwrap()),
+        archived
+    );
+    let kept = store.get_preview(&pictured.id).await.unwrap().unwrap();
+    assert_eq!(kept.image, image);
+
+    store
+        .restore_workspace(&pictured.id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        updated(store.list_workspaces(&owner).await.unwrap()),
+        expected
     );
 }

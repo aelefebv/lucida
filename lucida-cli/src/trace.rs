@@ -1,19 +1,12 @@
 //! `lucida trace`: an agent measures an open with no human present.
 //!
-//! The command drives headless Chrome itself and reads the trace off the page
-//! seam (ADR 0051). It fetches no trace from the server, because the server
-//! pushes its rows to the browser (ADR 0050) and the document handed back is
-//! already merged — there is deliberately no server-side trace endpoint to ask.
-//!
-//! Everything diagnostic happens behind the seam. Thresholds, the attribution
-//! back-walk and the verdict are the page's, and both renderings are the page's
-//! renderer; this module composes the workload, records what only the driver
-//! knows (the composed view, the hold window, server warmth), persists the run
-//! and prints what it was handed. A verdict computed here would quietly make an
-//! agent driving its own browser a second-class citizen.
-//!
-//! `lucida debug state` is not this pipe and is left alone: it opens a socket to
-//! the *server*, computes its answer inside the CLI and reaches no renderer.
+//! The command drives headless Chrome and reads the already-merged trace off
+//! the page seam (ADR 0051). The server pushes its rows to the browser, so
+//! there is no server-side trace endpoint to ask. Thresholds, attribution, the
+//! verdict and both renderings are the page's. This module composes the
+//! workload, records what only the driver knows, persists the run and prints
+//! what it was handed: a verdict computed here would make an agent driving its
+//! own browser a second-class citizen.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -43,7 +36,7 @@ use crate::trace_script::{
 /// A reader that does not know this number should say so rather than guess.
 pub const RUN_FILE_VERSION: u32 = 1;
 
-/// What a bundle file says it is (#1055), so `show` can tell it from a run
+/// What a bundle file says it is, so `show` can tell it from a run
 /// file without guessing from the name.
 pub const BUNDLE_FORMAT: &str = "lucida-trace-bundle";
 
@@ -56,10 +49,9 @@ pub const BUNDLE_VERSION: u32 = 1;
 pub const DEFAULT_WIDTH: u32 = 1440;
 pub const DEFAULT_HEIGHT: u32 = 900;
 
-/// Device pixel ratio defaults to 2 because that is the condition under which
-/// the defects this monitor exists to find actually appear — DPR 2 quadruples
-/// the pixels the pipeline must fill, and DPR-1-only verification has hidden
-/// whole defect classes in this project more than once.
+/// Device pixel ratio defaults to 2 because that is where the defects this
+/// monitor exists to find appear: DPR 2 quadruples the pixels the pipeline
+/// must fill, and DPR-1-only verification hides whole defect classes.
 pub const DEFAULT_DEVICE_PIXEL_RATIO: f64 = 2.0;
 
 /// Only used when the page is too old to publish one; the page's own value wins.
@@ -179,7 +171,7 @@ fn run_export_expression(with_chrome_trace: bool) -> String {
     )
 }
 
-/// One evaluation for the bundle (#1055). It calls the page's own bundle
+/// One evaluation for the bundle. It calls the page's own bundle
 /// function with the run the driver waited for, so the file the driver
 /// writes is the file the monitor's **Save bundle** writes. Awaited, because
 /// the page asks the server for its health and the render worker for its
@@ -191,7 +183,7 @@ fn run_export_expression(with_chrome_trace: bool) -> String {
 /// exists even when the render worker never came up, and a page that never
 /// drew is the finding. The page carries it only when its own capture
 /// fails, and not when its canvas region is one flat colour, since a
-/// DevTools screenshot can leave the WebGPU canvas out (#1098).
+/// DevTools screenshot can leave the WebGPU canvas out.
 ///
 /// The script the driver ran, if any, rides along as the run export left it
 /// on the page, so the bundle's steps carry the same runs and verdicts the
@@ -218,7 +210,7 @@ fn bundle_export_expression(fallback_frame: &BundleFrame, perfetto: bool) -> Str
 /// The file carries the whole-run reading and no other, and a window cannot
 /// be rendered at export because there is no finite set of them. So a page
 /// derives the reading, where the derivation lives, and this CLI still
-/// computes nothing (ADR 0051). The page's own recording is never read. The
+/// computes nothing. The page's own recording is never read. The
 /// document is the file's, and the run is named so a document holding several
 /// reads the one the file is about.
 fn window_read_expression(trace: &Value, run_id: Option<&str>, window: WindowRequest) -> String {
@@ -255,14 +247,14 @@ fn window_read_expression(trace: &Value, run_id: Option<&str>, window: WindowReq
 const WINDOWED_SEAM_PROBE: &str =
     "window.lucidaTrace ? (typeof window.lucidaTrace.diagnoseTrace === 'function') : null";
 
-/// Whether the page can compare two supplied documents (#1059). Null until
+/// Whether the page can compare two supplied documents. Null until
 /// the bundle has installed the seam; false on a page older than the diff.
 const COMPARE_SEAM_PROBE: &str =
     "window.lucidaTrace ? (typeof window.lucidaTrace.compareTraces === 'function') : null";
 
 /// The evaluation behind `trace diff` and `--versus`: two documents handed
 /// to the page's compare function. The subtraction lives behind the seam as
-/// the diagnostic does (ADR 0051), so this CLI holds no diff of its own: the
+/// the diagnostic does, so this CLI holds no diff of its own: the
 /// page derives each side and subtracts, and this CLI hands over the
 /// documents and what it alone knows about them, and prints what comes back.
 fn compare_read_expression(left: &CompareSide<'_>, right: &CompareSide<'_>) -> String {
@@ -390,11 +382,11 @@ impl DisplayPins {
 
 /// What the *server* already held when the run started.
 ///
-/// A browser-cold open can run against an arbitrarily warm server — a repeat
-/// open measured 5.8 s against 0.02 s through the source cache (#902) — so
-/// without this two runs are incomparable *and look comparable*, which is worse
-/// than being obviously incomparable. Browser-side warmth is the page's own
-/// header field and is not restated here.
+/// A browser-cold open can run against an arbitrarily warm server: a repeat
+/// open measured 5.8 s against 0.02 s through the source cache. Without this,
+/// two runs are incomparable *and look comparable*, which is worse than being
+/// obviously incomparable. Browser-side warmth is the page's own header field
+/// and is not restated here.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServerWarmth {
@@ -464,7 +456,7 @@ pub struct TraceRunHeader {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knobs: Option<KnobSettings>,
     /// The bundle this run replayed, and which of its header's replay
-    /// inputs the driver restored and could not (#1060). Absent for a run
+    /// inputs the driver restored and could not. Absent for a run
     /// the driver composed from the command line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ReplayRecord>,
@@ -537,7 +529,7 @@ pub struct TraceRunFile {
     pub renderings: TraceRenderings,
     /// The diagnostic exactly as the page derived it.
     pub diagnostic: Value,
-    /// The full ADR 0047 document the diagnostic was derived from.
+    /// The full trace document the diagnostic was derived from.
     pub trace: Value,
 }
 
@@ -566,11 +558,7 @@ struct SeamExport {
     trace: Value,
 }
 
-// ---------------------------------------------------------------------------
-// The bundle
-// ---------------------------------------------------------------------------
-
-/// A bundle (#1055) as the page writes it: the trace document, the diagnostic
+/// A bundle as the page writes it: the trace document, the diagnostic
 /// with its renderings, the settled frame, the server's dataset health, and a
 /// header sufficient to replay the run. This CLI reads it and adds nothing.
 /// The page is the one writer, whichever caller asked.
@@ -678,7 +666,7 @@ pub struct BundleBuild {
     pub dev: bool,
 }
 
-/// The adapter, as the page's header records it (ADR 0047 as amended).
+/// The adapter, as the page's header records it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleGpu {
@@ -697,7 +685,7 @@ pub struct BundleGpu {
 /// exists even when the worker never came up, and hands it to the page as
 /// the fallback. The page carries it only when its own capture fails, and
 /// not when its canvas region is one flat colour, since a screenshot that
-/// left the canvas out is not a frame (#1098). `captured_by` says which was
+/// left the canvas out is not a frame. `captured_by` says which was
 /// kept, and `fallback_reason` says why the page's own was not.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -780,7 +768,7 @@ pub struct ReplayInput {
     pub field: &'static str,
 }
 
-/// What the driver needs from a bundle's header to replay the run (#1055),
+/// What the driver needs from a bundle's header to replay the run,
 /// each named by the header field that carries it. The page keeps the same
 /// list beside its bundle function, and the golden bundle under
 /// `trace-fixtures/` is where a test holds the two to each other.
@@ -978,12 +966,8 @@ fn windowed_run(export: WindowExport, window: WindowRequest) -> WindowedRun {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Comparing two runs
-// ---------------------------------------------------------------------------
-
 /// What this CLI knows about one side of a comparison that the trace document
-/// does not (#1059): which run, how the side is named, and the conditions the
+/// does not: which run, how the side is named, and the conditions the
 /// driver or the bundle recorded around the run. The page's compare function
 /// takes this beside the document.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1157,10 +1141,6 @@ pub fn format_versus_human(first: VersusSide<'_>, second: VersusSide<'_>, text: 
         second.path.display(),
     )
 }
-
-// ---------------------------------------------------------------------------
-// Composing the workload
-// ---------------------------------------------------------------------------
 
 /// The view the driver opens: one dataset, nothing else, at the run's viewport.
 ///
@@ -1501,10 +1481,6 @@ pub fn summarise_server_warmth(dataset_url: &str, health: &[DatasetSourceHealth]
     }
 }
 
-// ---------------------------------------------------------------------------
-// Where a run lands
-// ---------------------------------------------------------------------------
-
 /// Where runs land: what the caller asked for, or beside the config.
 ///
 /// Beside the config rather than in the working directory, because the
@@ -1597,39 +1573,20 @@ fn parse_run_file(text: &str, path: &Path) -> Result<TraceRunFile, CliError> {
     Ok(file)
 }
 
-// ---------------------------------------------------------------------------
-// The gate
-// ---------------------------------------------------------------------------
-
 /// Why an opt-in gate should fail, or `None`.
 ///
 /// A stall verdict and a run that never finished are one result in CI, so they
 /// share one flag. Coverage never fails a gate: 87% of a healthy local cold
 /// open is pre-instrument boot, so a gate that fires on coverage fires on every
-/// green run.
+/// green run. A steady-state verdict fails too: the view settled and the
+/// pipeline went on, and a regression there is as much a build failure as a
+/// stall.
 ///
-/// A steady-state verdict fails too. It is the page saying the view settled
-/// and the pipeline went on — sustained traffic, a refetch loop, a
-/// feedback loop with the server, or a residency tier that cannot fit what the
-/// view wants — and a regression in any of those is as much a build failure as
-/// a stall. The verdict is derived only from closed intervals: the export
-/// closes the interval in progress before the page reads it, and a reading
-/// scoped to a window of the run's clock leaves the steady state out
-/// altogether.
-///
-/// The gate reads closed runs only. A run file is written after the export
-/// closed the run, and a run that closed without going quiescent fails here
-/// before its verdict is consulted, so no reading taken while a run was still
-/// open can fail a build. An interaction run over the page's frame-time
-/// ceiling arrives as a stall verdict like any other. Every ceiling and its
-/// rationale live in the page's ruleset, not here.
-///
-/// The gate reads two things and nothing else: the header's settled flag and
-/// the closed run's verdict. A provisional reading, the statement the seam's
-/// `provisional()` makes over a moving window of an open run, is not one of
-/// them: it carries no verdict, and whatever it said while the run was open,
-/// a saturated limiter or a stall in its window, cannot fail a build. Only
-/// the verdict of a closed run is one the gate trusts.
+/// The gate reads two things: the header's settled flag and the closed run's
+/// verdict. A run that closed without going quiescent fails before its verdict
+/// is consulted, and a provisional reading over an open run carries no
+/// verdict, so nothing read while a run was still open can fail a build. Every
+/// ceiling and its rationale live in the page's ruleset, not here.
 pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
     if !file.header.settled {
         return Some(format!(
@@ -1657,10 +1614,6 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
     // gate whether or not a scrub came after it.
     file.header.script.as_ref().and_then(script_gate_failure)
 }
-
-// ---------------------------------------------------------------------------
-// Printing
-// ---------------------------------------------------------------------------
 
 /// The default rendering: the page's own text, under the three things the page
 /// could not know about its own run. `bundle` is where the bundle went, when
@@ -1746,7 +1699,7 @@ pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
 /// about the conditions the run happened under and what the server held at
 /// the end. Every line reads a field of the file, and the one line that
 /// derives anything, `replay`, only says which replay inputs the header
-/// lacks. No verdict or threshold is computed here (ADR 0051).
+/// lacks. No verdict or threshold is computed here.
 pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> String {
     let header = &bundle.header;
     let mut lines = vec![format!("bundle    {}", path.display())];
@@ -2089,10 +2042,6 @@ pub fn chunk_section<'a>(renderings: &'a TraceRenderings, depth: &ShowDepth) -> 
     }
 }
 
-// ---------------------------------------------------------------------------
-// Driving
-// ---------------------------------------------------------------------------
-
 /// Drive `url` at `viewport`, wait for the page to settle, and take the run.
 ///
 /// The wait is the page's published `quiescent`, held for the page's own hold
@@ -2156,7 +2105,7 @@ pub struct DrivenRun {
     pub bundle: Option<PathBuf>,
 }
 
-/// A bundle the caller asked the drive to write (#1055).
+/// A bundle the caller asked the drive to write.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BundleRequest {
     pub path: PathBuf,
@@ -2193,7 +2142,7 @@ struct DriveRequest<'a> {
 /// the export because the export closes the run: the screenshot is the run's
 /// last state. A bundle's frame is the page's own capture of its canvas, and
 /// the same screenshot rides along as the fallback for a page whose capture
-/// fails, whether or not the caller also wanted it as a file (#1098).
+/// fails, whether or not the caller also wanted it as a file.
 ///
 /// `request.script` runs once the open has settled or been given up on,
 /// step by step, each gesture settling before the next. The frame is then
@@ -2441,26 +2390,20 @@ pub async fn write_run_file(
 
 /// Wait until the page has closed a run, and let it decide when that is.
 ///
-/// The definition of settled is the page's: it publishes `quiescent`, holds it
-/// for its own hold window, and closes the run itself. So the driver waits for
-/// a *closed run* rather than for the boolean. Two traps make the boolean alone
-/// the wrong thing to watch, and both are silent:
+/// Settled is the page's call: it publishes `quiescent`, holds it for its own
+/// hold window, and closes the run itself. The driver waits for a *closed run*
+/// rather than the boolean, because the boolean alone fails silently:
 ///
-/// - **Before a run opens the predicate is trivially true.** Nothing is dirty
-///   and nothing is wanted, so a driver polling `quiescent` can declare a cold
-///   remote open settled while the page is still shaking hands, and export a
-///   trace with no run in it.
-/// - **Exporting on the first `true` pre-empts the page's own close**, so every
-///   run it takes lands as `explicit` when it settled.
+/// - Before a run opens the predicate is trivially true, so a cold remote open
+///   reads as settled while the page is still shaking hands.
+/// - Exporting on the first `true` pre-empts the page's own close, so every
+///   run lands as `explicit`.
+/// - A page torn down and rebuilt, as a development bundle is on every mount,
+///   hands back a sub-millisecond run closed `explicit`.
 ///
-/// A third trap sits behind the second: a page torn down and rebuilt — which
-/// a development bundle does on every mount — hands back a run that lived under
-/// a millisecond and closed `explicit`. So the wait is for a run that concluded
-/// *on its own*, by settling or by timing out.
-///
-/// Returns whether one did, inside the deadline. It does not say *how* — the
-/// run's own end reason does, and the recorder's own timeout can conclude a run
-/// without this wait ever reaching its deadline.
+/// So the wait is for a run that concluded on its own, by settling or by
+/// timing out. Returns whether one did inside the deadline; the run's own end
+/// reason says how.
 async fn wait_for_settled_run(page: &mut browser::Page, wait: Duration) -> Result<bool, CliError> {
     let deadline = tokio::time::Instant::now() + wait;
     let concluded_before = read_run_state(page, wait).await?.concluded;
@@ -2538,10 +2481,6 @@ pub(crate) struct RunState {
     #[serde(default)]
     pub(crate) last_concluded_run_id: Option<String>,
 }
-
-// ---------------------------------------------------------------------------
-// The Perfetto projection
-// ---------------------------------------------------------------------------
 
 /// A Chrome Trace Event capture, summarised from the file it just wrote.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -2874,8 +2813,7 @@ mod tests {
     }
 
     /// Spelling is not warmth: the same dataset typed two legal ways is one
-    /// dataset (ADR 0042), and matching raw strings would report a warm server
-    /// as cold.
+    /// dataset, and matching raw strings would report a warm server as cold.
     #[test]
     fn server_warmth_matches_across_canonical_spellings() {
         let health = vec![health_entry("file:///C:/data/set.zarr", None)];
@@ -3001,11 +2939,8 @@ mod tests {
     }
 
     /// A provisional reading is a statement over a moving window of an open
-    /// run, and the gate trusts only the verdict of a closed one. No run
-    /// file carries a reading today; this pins that one riding beside a
-    /// clear verdict, whatever its window saw, changes nothing. The other
-    /// half of the proof is the recorder's: a window that reads saturated
-    /// closes to a clear verdict, which is the field this gate reads.
+    /// run, and the gate trusts only the verdict of a closed one, so a reading
+    /// riding beside a clear verdict changes nothing, whatever its window saw.
     #[test]
     fn the_gate_ignores_a_stall_in_a_provisional_window_beside_a_clear_verdict() {
         let provisional = json!({
@@ -4486,8 +4421,8 @@ mod tests {
         assert!(view.auto_contrast.is_empty());
     }
 
-    /// Level 0 is a pin like any other, and pinning to it is how a run
-    /// measures the level-0 default ADR 0061 replaced.
+    /// Level 0 is a pin like any other, so a run can hold the view at full
+    /// resolution however the camera moves.
     #[test]
     fn a_level_pin_rides_the_view_and_level_0_is_one_of_them() {
         let id = volume_id();

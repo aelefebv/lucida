@@ -1,44 +1,12 @@
 /**
- * The borrowed path: a {@link TraceDocument} projected into Chrome Trace Event
- * JSON, so anyone can open a run in Perfetto and lucida never has to build a
- * span wall (#934).
+ * A {@link TraceDocument} projected into Chrome Trace Event JSON, so a run
+ * opens in Perfetto. The in-memory model stays a table (ADR 0047), and rows
+ * fan out into spans here, at serialisation, and nowhere else.
  *
- * **This is the only module that knows about spans.** ADR 0047 keeps the
- * in-memory model a table — thirteen columnar bytes a row against about 189
- * for a span object — and a lifecycle row fans out into its phases here, at
- * serialisation, and nowhere else. A future format change is therefore local
- * to this file.
- *
- * The emit shape is not the obvious one, and the difference was measured
- * against ui.perfetto.dev in #892 rather than assumed:
- *
- *   Async events (`ph: "b"/"e"`, one id per chunk) are the natural encoding
- *   for work that is not a call stack, and Perfetto *ingests* them correctly.
- *   But it renders them as one collapsed "Global Legacy Events" group per
- *   process, hundreds of rows deep with every phase interleaved. The phase is
- *   a slice name, so there is no track to read.
- *
- *   One thread id per phase plus `thread_name` metadata, with complete events
- *   (`ph: "X"`), renders as one named track per phase with the counter tracks
- *   below it — the whole raw-span surface, for free. It is also smaller: 2.7 MB
- *   against 3.9 MB, because a complete event is one object rather than two.
- *
- * "Thread" here is a *display track*, not a real thread — and not a request
- * lane either, which is what `lane` means everywhere else in lucida. That is a
- * lie the format requires and it is worth paying: the alternative is a viewer
- * nobody can read.
- *
- * What borrowing cannot do, and what the native surfaces are therefore for:
- * append (so this is never the live view), load quickly (about 25 s for
- * 2.7 MB), or emit a callout, ever.
- *
- * One known consequence of the track-per-phase shape, seen on every real
- * export: chunks are fetched concurrently, so their spans on one track overlap
- * and cannot nest. Perfetto reports these as
- * `slice_spill_overlapping_complete_event` import notices and moves them to
- * overflow tracks merged back in at display time. Nothing is lost — the track
- * renders as one track with the overlaps stacked — and the alternative
- * encodings that avoid it are the ones this shape was chosen over.
+ * Each phase gets its own thread id with complete events (`ph: "X"`). Async
+ * events are the natural encoding, but Perfetto renders them as one collapsed
+ * group with every phase interleaved. "Thread" is therefore a display track,
+ * not a real thread and not a request lane.
  */
 
 import type { LevelRange } from "../renderer/workerProtocol.ts";
@@ -128,13 +96,11 @@ export const DERIVED_VALUE_NOTES: readonly string[] = [
 ];
 
 /**
- * Positions and durations in this file that were **constructed at export
- * rather than measured**. Two of them, and a timeline cannot show a span
- * without committing to a position, so the honest move is to name them rather
- * than to claim the file contains no invented numbers.
- *
- * Every other value in the file is a measurement; the assembly the export does
- * on top of measured values is in {@link DERIVED_VALUE_NOTES}.
+ * Positions and durations in this file that were constructed at export
+ * rather than measured. A timeline cannot show a span without committing to
+ * a position, so the file names them rather than claiming it has no invented
+ * numbers. The assembly done on measured values is in
+ * {@link DERIVED_VALUE_NOTES}.
  */
 export const SYNTHETIC_VALUE_NOTES: readonly string[] = [
   "A server span's DURATION is the server's own measurement, but its POSITION is not measured: it is centred inside the browser's bracket for the same request, which splits the unattributed remainder evenly between the outbound and inbound legs because nothing measures them apart. Read `gapUs`, not the position.",
@@ -276,8 +242,8 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
 
   for (const serverRow of run.serverRows) {
     // An unplaced row has no position on the browser's clock, and inventing
-    // one is exactly the confidently-wrong merged timeline ADR 0050 refused.
-    // Its reason is counted in the header instead.
+    // one would draw a confidently wrong merged timeline. Its reason is
+    // counted in the header instead.
     if (!serverRow.placement) continue;
     const { placement } = serverRow;
     events.push({

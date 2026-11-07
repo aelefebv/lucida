@@ -1,24 +1,12 @@
 /**
- * The one renderer. Text is a *reading* of the diagnostic document, never a
- * parallel design.
+ * The one renderer. Text is a reading of the diagnostic document, never a
+ * parallel design: every number printed here exists in the document at a
+ * stated path, recorded by {@link Provenance}. Text is the agent's default
+ * because the JSON is several times larger for the same content.
  *
- * Text is the agent's default because the JSON is several times larger for the
- * same content, and a diagnostic that does not fit in a context window is a
- * diagnostic nobody reads. Parity is one-directional and enforced: every
- * number printed here exists in the document at a stated path, recorded as it
- * is printed by {@link Provenance}. The converse does not hold — the document
- * is a superset and this renderer selects from it.
- *
- * The default rendering is bounded: **30 lines and 3 kB**. The bound is
- * enforced by construction rather than hoped for. Lines carry a priority, and
- * when the budget is exceeded the lowest-priority ones are dropped and the
- * drop is stated — a report that silently loses its last finding is worse than
- * one that says it did.
- *
- * Nothing per-row appears at any depth, with one exception: the `chunk` depth
- * is about one chunk's rows by definition, and the lookup it prints is capped
- * at a handful. A warm re-open is tens of thousands of rows; Perfetto is the
- * raw-row answer and the last line says so.
+ * The default rendering is bounded at 30 lines and 3 kB by construction: lines
+ * carry a priority, and over budget the lowest bands are dropped and the drop
+ * is stated. Nothing per-row appears except the `chunk` depth's capped lookup.
  */
 
 import type { RunCause } from "../types.ts";
@@ -37,8 +25,8 @@ export const DEFAULT_MAX_LINES = 30;
 export const DEFAULT_MAX_BYTES = 3_072;
 
 /**
- * `phase` is one phase's reading, named by {@link RenderOptions.phase} — the
- * depth #893's "the shape behind X" follow-up prints. It renders here rather
+ * `phase` is one phase's reading, named by {@link RenderOptions.phase}: the
+ * depth the "the shape behind X" next step prints. It renders here rather
  * than in whoever asked, so a CLI never grows a second renderer.
  *
  * `chunk` and `spatial` are the two readings the overlay gives a person,
@@ -116,11 +104,10 @@ export function renderDiagnostic(
     lines.push({ band, text });
   };
 
-  // --- verdict -------------------------------------------------------------
   push(REQUIRED, `lucida trace ${document.runId} — VERDICT: ${document.verdict.text}`);
   push(REQUIRED, `confidence: ${document.verdict.confidence} · degraded: ${document.attribution.degraded}`);
 
-  // --- truncation and coverage lead, they do not footnote --------------------
+  // Truncation and coverage lead; they do not footnote.
   const truncated = document.coverage.truncated;
   if (truncated) {
     push(
@@ -155,7 +142,6 @@ export function renderDiagnostic(
       (document.coverage.incomplete ? " · a gap could hide the bottleneck" : ""),
   );
 
-  // --- run identity --------------------------------------------------------
   push(
     IDENTITY,
     `run       ${document.run.datasetIds.join(", ")} · cause=${causeOf(document)} · ${document.run.warmth} · ` +
@@ -168,7 +154,6 @@ export function renderDiagnostic(
   );
   push(IDENTITY, `render    ${renderTimingOf(document, p)}`);
 
-  // --- what the client sent -------------------------------------------------
   // The identity line names only the types that sent anything. The SENT table
   // at DETAIL lists the whole closed set, zeros included.
   const sentTypes = document.sent.byType
@@ -198,7 +183,6 @@ export function renderDiagnostic(
     );
   });
 
-  // --- the reading this depth is about ---------------------------------------
   // The chunk and spatial readings replace the findings block rather than
   // sitting under it: the budget is thirty lines either way.
   const onlyPhase = depth === "phase" ? (options.phase ?? "") : null;
@@ -207,7 +191,6 @@ export function renderDiagnostic(
   else if (depth === "timeline") renderTimeline(document.timeline, LEAD_FINDING, push, p);
   else renderFindings(document, depth, onlyPhase, push, p);
 
-  // --- the anti-signal, unconditional --------------------------------------
   push(
     REQUIRED,
     `NOT A HEALTH SIGNAL  ${document.coverage.notHealthSignals

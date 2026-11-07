@@ -137,19 +137,16 @@ export function buildRoster(args: {
   datasetId: string;
   /**
    * Optional entityId → tile matrices cache carried across rebuilds. A tile's
-   * model matrix comes from `scene.member_model_matrix` (a pure function of
-   * layout, no camera input), so it is byte-identical across a view move; when
-   * a cache is supplied, tile matrices already in it are reused and matrices for
-   * tiles new to the walk are computed and written back. `group-as-proxy`
-   * matrices are NEVER cached here — they are synthesized from the currently-
-   * visible child-tile set, which a view move changes. The caller invalidates
-   * the cache when layout/content/asset changes.
+   * model matrix depends only on layout, so it is reused across a view move.
+   * `group-as-proxy` matrices are never cached: they come from the visible
+   * child-tile set, which a view move changes. The caller invalidates the
+   * cache when layout, content, or asset changes.
    */
   tileMatrixCache?: Map<string, { model: Float32Array; inv: Float32Array }>;
 }): BuildRosterResult {
   const { activeSet, entities, ctx, datasetId, tileMatrixCache } = args;
 
-  // Use the planning module's canonical grouping (ADR 0025) so the
+  // Use the planning module's canonical grouping so the
   // roster builder agrees with `buildActiveSet` on which tiles make up
   // each group.
   const tilesByGroup = new Map<string, EntitySnapshot[]>();

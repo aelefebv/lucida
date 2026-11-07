@@ -1,43 +1,14 @@
 /**
- * Debug overlay layer. Sits absolutely-positioned above the canvas with
- * pointer-events: none, so it never steals interaction from the viewer.
- * Reads from existing scene + orchestrator + cache state — no new
- * production-side state added for it to work.
+ * Debug overlay layer over the canvas, with pointer-events: none so it never
+ * steals interaction. It reads existing scene, orchestrator, and cache state;
+ * production code carries nothing for it. Colors and text come from the pure
+ * `overlayDrawList.ts`; this file projects and mounts. The brushed selection
+ * is read from `trace/linkedSelection.ts`, never from the dock (ADR 0052).
  *
- * Primary overlays, each gated by its own toggle in the HUD legend:
- *  - groupModes: per-group badge with detail/coarse worker-delivered coverage
- *  - chunkGrid: planned LOD chunk grid for every visible tile, colored
- *    by status or tier. Capped at MAX_CHUNK_RECTS per tick as a backstop for
- *    pathological cases. In volume mode the same cells draw as wireframe
- *    boxes (#1063): each chunk box's eight corners go through the camera,
- *    the shared draw list colors the cell, and `volumeWireframe.ts` turns
- *    the cell into edges, a silhouette for the hit test, and a stroke.
- *  - phaseColor and churnTint: the same grid colored from the trace rather
- *    than the cache. Phase color is the phase each chunk's newest row is
- *    in, in the timeline's palette, and churn tint is how many times the
- *    open interval fetched it.
- *    Both read the recorder's identity index cell by cell, which walks no
- *    row, and both say in words what they cannot show. Hovering a cell
- *    opens an inspector with the chunk's phase, queue rank and age from the
- *    document's chunk lookup (#1062). The colors and the text come from
- *    `overlayDrawList.ts`, which is pure; this file projects and mounts.
- *  - the linked selection: while a window is brushed on the dock's axis,
- *    the chunk set it published is read from `trace/linkedSelection.ts`
- *    and highlighted on the grid, and on the boxes in volume mode, which
- *    mount for it even with every toggle off. The set is a published slot, so this layer never reads
- *    the dock and the dock never reaches in here (ADR 0052 as amended).
- *  - renderRadius: actual detail/coarse render-radius boundary, projected
- *    through the same voxel→world→screen path as chunk overlays.
- *
- * Both modes (slice + volume) share the same projection pipeline:
- *
- *   voxel coords  →  world coords  →  WasmScene.project_to_screen
- *
- * The middle step differs by mode. Slice: world == voxel + tile
- * position offset (camera projects voxel space directly). Volume: world
- * == tile model matrix * (voxel / fullVoxel), which maps the tile's
- * unit cube into normalized world space and bakes in the Y-flip and
- * physical-extent normalization the renderer applies.
+ * Both modes project voxel to world to `WasmScene.project_to_screen`. Slice:
+ * world is voxel plus the tile position. Volume: world is the tile model
+ * matrix times voxel / fullVoxel, which bakes in the renderer's Y-flip and
+ * physical-extent normalization.
  */
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
@@ -74,6 +45,7 @@ import {
   describeHoverInspector,
   hitTestChunk,
   overlayAbsence,
+  readOverlayColors,
   selectionCaption,
   type ChunkCell,
   type ChunkDrawItem,
@@ -91,6 +63,7 @@ import {
   type Projector,
   type Vec3,
 } from "./volumeWireframe.ts";
+import "./DebugOverlays.css";
 
 interface Props {
   wasmSceneRef: RefObject<WasmScene | null>;
@@ -103,15 +76,6 @@ interface Props {
 
 const POLL_MS = 100;
 const MAX_CHUNK_RECTS = 600;
-
-const MODE_COLOR: Record<string, string> = {
-  "group-as-proxy": "#88f",
-  "tiles-with-proxy-fallback": "#fb4",
-  "tiles-with-detail": "#4f4",
-  "render-detail": "#4f4",
-  "render-coarse": "#6cf",
-  "render-waiting": "#fb4",
-};
 
 const MODE_LABEL: Record<string, string> = {
   "group-as-proxy": "WP",
@@ -156,8 +120,6 @@ interface RadiusPath {
   title: string;
 }
 
-const RADIUS_DETAIL_STROKE = "rgba(80, 255, 130, 0.90)";
-const RADIUS_COARSE_STROKE = "rgba(255, 220, 70, 0.90)";
 const RADIUS_SAMPLE_COUNT = 96;
 
 function tierDrawOrder(cell: ChunkCell): number {
@@ -175,17 +137,7 @@ const UNSELECTED_OPACITY = 0.35;
 /** Where the inspector sits relative to the pointer, in CSS pixels. */
 const INSPECTOR_OFFSET = 14;
 
-/** The captions in the corner: what an empty picture means, and what a brushed one shows. */
-const CAPTION_STYLE: React.CSSProperties = {
-  padding: "3px 7px",
-  background: "rgba(12, 14, 18, 0.8)",
-  color: "#c8ccd0",
-  borderRadius: 4,
-  fontFamily: "ui-monospace, Menlo, Consolas, monospace",
-  fontSize: 11,
-};
-/** The box the inspector describes gets a wide white stroke under its own edges, so it stands out of the stack. */
-const HOVERED_BOX_STROKE = "rgba(255, 255, 255, 0.95)";
+/** The box the inspector describes gets a wide stroke under its own edges, so it stands out of the stack. */
 const HOVERED_BOX_EXTRA_WIDTH = 3;
 
 function emptyTierCoverageCounts(): TierCoverageCounts {
@@ -634,8 +586,8 @@ export function DebugOverlays({
 
   useEffect(() => {
     if (!anyEnabled) {
-      // Reset to empty when overlays are toggled off — no external state
-      // to subscribe to, the toggle IS the state change we react to.
+      // Reset when overlays are toggled off. There is no external state to
+      // subscribe to; the toggle is the state change we react to.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setBadges([]);
       drawListRef.current = EMPTY_DRAW_LIST;
@@ -796,7 +748,6 @@ export function DebugOverlays({
         setRadiusPaths([]);
       }
 
-      // Group badges
       if (enabled.groupModes && plans) {
         const out: GroupBadge[] = [];
         for (const [dsId, plan] of plans) {
@@ -913,9 +864,7 @@ export function DebugOverlays({
         setBadges([]);
       }
 
-      // Chunk grid for every visible tile-mode entry.
-      // (group-as-proxy entries don't iterate chunks — they're served by
-      // a single proxy asset.)
+      // Group-as-proxy entries have no chunks; one proxy asset serves them.
       if (showGrid && plans && cpuCache) {
         const out: ChunkCell[] = [];
         const t = ws.t();
@@ -1217,6 +1166,7 @@ export function DebugOverlays({
         const window = traceRecorder.openIntervalMs;
         const input = {
           cells: out,
+          colors: readOverlayColors(),
           modes: enabled,
           readingOf: (cell: ChunkCell) => traceRecorder.readChunk(cell),
           windowMs: window,
@@ -1248,30 +1198,19 @@ export function DebugOverlays({
   const hoveredBox = volumeList && inspector ? volumeList.items.find(item => item.key === inspector.key) ?? null : null;
 
   return (
-    <div
-      style={{
-        position: "absolute",
-        top: 0,
-        left: 0,
-        width: size.w,
-        height: size.h,
-        pointerEvents: "none",
-        overflow: "hidden",
-      }}
-    >
+    <div className="debug-overlays" style={{ width: size.w, height: size.h }}>
       {showGrid && viewMode !== "3d" && drawList.items.map(item => (
         <div
           key={item.key}
+          className="debug-overlays-cell"
           data-selected={item.selected ? "true" : undefined}
           style={{
-            position: "absolute",
             left: item.left,
             top: item.top,
             width: item.width,
             height: item.height,
             background: item.fill,
             border: item.border,
-            boxSizing: "border-box",
             opacity: selection !== null && !item.selected ? UNSELECTED_OPACITY : undefined,
           }}
           title={item.tooltip}
@@ -1280,15 +1219,10 @@ export function DebugOverlays({
       {showGrid && volumeList && volumeList.batches.length > 0 && (
         <svg
           data-testid="overlay-boxes"
+          className="debug-overlays-svg"
           width={size.w}
           height={size.h}
           viewBox={`0 0 ${size.w} ${size.h}`}
-          style={{
-            position: "absolute",
-            inset: 0,
-            pointerEvents: "none",
-            overflow: "hidden",
-          }}
         >
           {/* Halos first, so every edge draws over every halo. */}
           {volumeList.batches.map((batch, i) =>
@@ -1308,9 +1242,9 @@ export function DebugOverlays({
             <path
               data-testid="overlay-box-hovered"
               data-chunk={hoveredBox.cell.chunkKey}
+              className="debug-overlays-hovered-box"
               d={hoveredBox.path}
               fill="none"
-              stroke={HOVERED_BOX_STROKE}
               strokeWidth={hoveredBox.style.strokeWidth + HOVERED_BOX_EXTRA_WIDTH}
               strokeLinecap="round"
             />
@@ -1336,47 +1270,24 @@ export function DebugOverlays({
         <div
           data-testid="overlay-inspector"
           role="tooltip"
-          style={{
-            position: "absolute",
-            left: inspector.left,
-            top: inspector.top,
-            maxWidth: 360,
-            padding: "4px 7px",
-            background: "rgba(12, 14, 18, 0.9)",
-            color: "#e6e6e6",
-            border: "1px solid rgba(255, 255, 255, 0.25)",
-            borderRadius: 4,
-            fontFamily: "ui-monospace, Menlo, Consolas, monospace",
-            fontSize: 11,
-            lineHeight: 1.35,
-            whiteSpace: "pre-wrap",
-          }}
+          className="debug-overlays-card debug-overlays-inspector"
+          style={{ left: inspector.left, top: inspector.top }}
         >
-          <div style={{ color: "#fff" }}>{inspector.view.title}</div>
+          <div className="debug-overlays-inspector-title">{inspector.view.title}</div>
           {inspector.view.lines.map((line, i) => (
             <div key={i}>{line}</div>
           ))}
         </div>
       )}
       {(absence || brushed) && (
-        <div
-          style={{
-            position: "absolute",
-            left: 8,
-            bottom: 8,
-            maxWidth: "70%",
-            display: "flex",
-            flexDirection: "column",
-            gap: 4,
-          }}
-        >
+        <div className="debug-overlays-captions">
           {brushed && (
-            <div data-testid="overlay-selection" style={CAPTION_STYLE}>
+            <div data-testid="overlay-selection" className="debug-overlays-card debug-overlays-caption">
               {brushed}
             </div>
           )}
           {absence && (
-            <div data-testid="overlay-absence" style={CAPTION_STYLE}>
+            <div data-testid="overlay-absence" className="debug-overlays-card debug-overlays-caption">
               {absence}
             </div>
           )}
@@ -1384,18 +1295,12 @@ export function DebugOverlays({
       )}
       {(enabled.renderRadius || radiusPreviewTier !== null) && radiusPaths.length > 0 && (
         <svg
+          className="debug-overlays-svg"
           width={size.w}
           height={size.h}
           viewBox={`0 0 ${size.w} ${size.h}`}
-          style={{
-            position: "absolute",
-            inset: 0,
-            pointerEvents: "none",
-            overflow: "hidden",
-          }}
         >
           {radiusPaths.map(r => {
-            const stroke = r.tier === "detail" ? RADIUS_DETAIL_STROKE : RADIUS_COARSE_STROKE;
             const isPrimaryPlane = r.plane === "xy";
             const dash = r.tier === "coarse"
               ? isPrimaryPlane ? "8 5" : "4 6"
@@ -1403,9 +1308,10 @@ export function DebugOverlays({
             return (
               <path
                 key={r.key}
+                className="debug-overlays-radius"
+                data-tier={r.tier}
                 d={r.d}
                 fill="none"
-                stroke={stroke}
                 strokeWidth={isPrimaryPlane ? 2.25 : 1.5}
                 strokeDasharray={dash}
                 opacity={isPrimaryPlane ? 1 : 0.72}
@@ -1420,21 +1326,9 @@ export function DebugOverlays({
       {enabled.groupModes && badges.map(b => (
         <div
           key={b.key}
-          style={{
-            position: "absolute",
-            left: b.centerX,
-            top: b.centerY,
-            transform: "translate(-50%, -50%)",
-            padding: "1px 5px",
-            background: "rgba(0, 0, 0, 0.7)",
-            color: MODE_COLOR[b.mode] ?? "#fff",
-            border: `1px solid ${MODE_COLOR[b.mode] ?? "#fff"}`,
-            borderRadius: 3,
-            fontFamily: "monospace",
-            fontSize: 10,
-            lineHeight: 1.2,
-            whiteSpace: "nowrap",
-          }}
+          className="debug-overlays-badge"
+          data-mode={b.mode}
+          style={{ left: b.centerX, top: b.centerY }}
           title={b.title}
         >
           {b.label}

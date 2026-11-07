@@ -19,18 +19,13 @@ import { initialPlanningState } from "./planning/index.ts";
 // Planner-only tests: epoch caching + multi-dataset planning state.
 // Upload-side describes live in `upload/uploader.test.ts`.
 //
-// The planner-mocking describes below INJECT their `plan` spy into the
-// TickCoordinator constructor rather than `vi.resetModules()`-mocking the
-// planning singleton. That older pattern (async `vi.doMock` factory + dynamic
-// imports) raced under `--sequence.shuffle`: a spy from one test could be
-// invoked before another test's own `planAndFetch`, inflating its call count
-// (lucida-i7r). Direct injection removes the module-registry indirection
-// entirely — each orchestrator calls exactly the spy it was handed.
+// The planner-mocking describes inject their `plan` spy into the
+// TickCoordinator constructor. `vi.resetModules()`-mocking the planning
+// singleton races under `--sequence.shuffle`, inflating call counts.
 //
-// Because injection means the describes now share the real module singletons
-// (no per-test module reset), reset the ones tests mutate after every test so
-// order can't leak: configStore (which persists planning knobs to happy-dom
-// localStorage) and localStorage.
+// The describes share the real module singletons, so reset the ones tests
+// mutate after every test: configStore (which persists planning knobs to
+// happy-dom localStorage) and localStorage.
 afterEach(() => {
   configStore.__resetForTesting();
   if (typeof localStorage !== "undefined") localStorage.clear();
@@ -302,6 +297,7 @@ describe("epoch caching", () => {
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
+      resolutionScale: 1,
       cpuCache: createMockCpuCache(),
       assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
@@ -375,11 +371,9 @@ describe("epoch caching", () => {
 
   it("never takes the panel's per-rebuild cache snapshot", () => {
     // `snapshot()` walks every resident entity in the chunk and overview
-    // stores. It existed for the debug panel's planning/entityDiag rows and
-    // ran only while the panel was open. Recording is unconditional
-    // (ADR 0049), so there is no longer a gate that could keep this walk off
-    // a rebuild — which means the walk itself has to be gone, not merely
-    // ungated. The trace reads counts the cache already keeps instead.
+    // stores. Recording is unconditional (ADR 0049), so no gate can keep
+    // that walk off a rebuild; the trace must read counts the cache already
+    // keeps instead.
     const { scene, datasets } = makeTickCoordinatorDeps();
     const orch = makeOrch();
     const cpuCache = createMockCpuCache();
@@ -406,11 +400,10 @@ describe("epoch caching", () => {
   });
 
   it("coalesces rapid view changes and re-plans once the view settles", () => {
-    // A camera move (viewEpoch) no longer pays the O(visible-entities)
+    // A camera move (viewEpoch) does not pay the O(visible-entities)
     // rebuild every frame: the render pass reflects the fresh camera from
-    // the cached roster, so a rapid pan is coalesced. The change is not
-    // lost — a trailing rebuild is owed and fires once the view settles
-    // past the coalescing window.
+    // the cached roster, so a rapid pan is coalesced. A trailing rebuild is
+    // owed and fires once the view settles past the coalescing window.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
       const { datasets } = makeTickCoordinatorDeps();
@@ -466,14 +459,10 @@ describe("epoch caching", () => {
   });
 
   it("re-derives manifest-based planning inputs when ds.manifest is replaced without an epoch bump", () => {
-    // The per-dataset snapshot-input cache keys camera-independent positions on
-    // the content|layout|asset epoch, but the manifest-derived maps
-    // (imageSpecById / parentByEntityId) track ds.manifest — which the
-    // generated-availability path replaces with a NEW manifest object WITHOUT
-    // bumping any scene epoch (renderLoop.updateDatasetManifest only setDirty()s).
-    // The cache must therefore also invalidate on ds.manifest reference identity;
-    // an epoch-only key would serve a stale ImageSpec and the planner would never
-    // request the progressively-generated coarse level (a silent wrong LOD set).
+    // The generated-availability path replaces ds.manifest with a new object
+    // without bumping any scene epoch (renderLoop.updateDatasetManifest only
+    // calls setDirty()). An epoch-only cache key would serve a stale ImageSpec
+    // and never request the generated coarse level.
     const manifestFor = (coarseLevelIndex: number | null): DatasetManifest =>
       ({
         dataset_id: "ds1",
@@ -515,8 +504,8 @@ describe("epoch caching", () => {
       );
       planSpy.mockClear();
 
-      // Generated-availability arrives: ds.manifest is REPLACED (new object) with
-      // coarse level 1 now advertised. No scene epoch changes.
+      // Generated-availability arrives: ds.manifest is replaced (new object)
+      // with coarse level 1 now advertised. No scene epoch changes.
       datasets.set("ds1", { manifest: manifestFor(1) });
 
       // A settled camera move (view epoch only) forces a full replan at the
@@ -599,14 +588,10 @@ describe("epoch caching", () => {
   });
 
   it("keeps coalescing when a single rebuild runs longer than the window", () => {
-    // The coalescing anchor is stamped at rebuild COMPLETION, so the
-    // window measures idle time since the rebuild finished. A single
-    // rebuild that itself takes longer than the window — routine on a
-    // wide collection, where one rebuild is tens to hundreds of ms —
-    // must still coalesce the frames that follow it. If the anchor were
-    // the tick start, the rebuild's own duration would consume the whole
-    // window and every interactive frame would rebuild, which is the
-    // frame-rate collapse the fast-path exists to prevent.
+    // The coalescing anchor is stamped at rebuild completion, so a rebuild
+    // longer than the window (routine on a wide collection) must still
+    // coalesce the frames after it. Anchored at tick start, every
+    // interactive frame would rebuild.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
       const { datasets } = makeTickCoordinatorDeps();
@@ -837,6 +822,7 @@ describe("display-only fast path", () => {
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
+      resolutionScale: 1,
       cpuCache: over?.cpuCache ?? createMockCpuCache(),
       assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
@@ -1475,6 +1461,7 @@ describe("multi-dataset planning", () => {
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
+      resolutionScale: 1,
       cpuCache: createMockCpuCache(),
       assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
@@ -1627,6 +1614,7 @@ describe("incremental delta fold", () => {
       canvas: { clientWidth: 800, clientHeight: 600 } as unknown as HTMLCanvasElement,
       mode: "slice",
       renderScale: 1,
+      resolutionScale: 1,
       cpuCache: createMockCpuCache(),
       assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;

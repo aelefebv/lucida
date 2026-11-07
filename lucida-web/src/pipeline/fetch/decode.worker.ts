@@ -20,10 +20,6 @@ interface DecodeError {
   error: string;
 }
 
-// ---------------------------------------------------------------------------
-// Decompression
-// ---------------------------------------------------------------------------
-
 function decompressLz4(src: ArrayBuffer): ArrayBuffer {
   const input = new Uint8Array(src);
 
@@ -91,10 +87,6 @@ function decompress(bytes: ArrayBuffer, wireFormat: WireFormat): ArrayBuffer | P
   return bytes; // Raw
 }
 
-// ---------------------------------------------------------------------------
-// Pixel-format normalization → GPU-ready Uint16
-// ---------------------------------------------------------------------------
-
 function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
   switch (dataType.toLowerCase()) {
     case "uint8":
@@ -130,10 +122,6 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
       return buf;
   }
 }
-
-// ---------------------------------------------------------------------------
-// Message handler
-// ---------------------------------------------------------------------------
 
 self.onmessage = async (e: MessageEvent<DecodeRequest>) => {
   const { id, bytes, wireFormat } = e.data;

@@ -2,14 +2,9 @@
  * The published quiescence predicate (ADR 0051).
  *
  * Quiescence is a boolean the page publishes, never something inferred from
- * outside. Watching the frame counter stop is the only thing possible from a
- * driver, and it is wrong in the one case that matters: a stalled pipeline
- * and a finished one both stop drawing.
- *
- * Both halves of the predicate already existed unpublished — the render loop
- * knows when no dirty flag is set and no frame is in flight, and the CPU
- * cache already computes resident detail against desired detail next to its
- * pending and in-flight counts. This module is where they meet.
+ * outside. A driver can only watch the frame counter stop, and that is wrong
+ * in the one case that matters: a stalled pipeline and a finished one both
+ * stop drawing.
  */
 
 import type { Outstanding } from "./types.ts";
@@ -45,9 +40,8 @@ export interface QuiescenceState extends QuiescenceInputs {
 
 /**
  * A zeroed state, for a caller that will reuse one instance across ticks.
- * The publish path runs every tick, and ADR 0049 asks the monitor not to
- * allocate in steady state: its own GC pauses would appear as stalls in its
- * own trace.
+ * The publish path runs every tick, and the monitor must not allocate in
+ * steady state: its own GC pauses would appear as stalls in its own trace.
  */
 export function createQuiescenceState(): QuiescenceState {
   return {

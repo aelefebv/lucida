@@ -271,10 +271,8 @@ struct DerivedDiskCache {
 
 /// In-memory runtime registry for generated levels and seeded fake chunks.
 ///
-/// Durable cache materialization lands in the next slice. This registry still
-/// gives the server a source-aware resolver contract now: generated level keys
-/// do not hit source storage, and unready generated chunks return explicit
-/// statuses instead of disappearing as timeouts.
+/// Generated level keys never hit source storage, and unready generated
+/// chunks return explicit statuses instead of disappearing as timeouts.
 #[derive(Debug, Clone, Default)]
 pub struct DerivedChunkCache {
     inner: Arc<Mutex<DerivedChunkState>>,
@@ -2968,6 +2966,7 @@ mod tests {
                             chunk_size_c: 1,
                         },
                         shard: None,
+                        regrid: None,
                     })
                     .collect(),
             }],

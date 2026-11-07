@@ -1,33 +1,12 @@
 /**
- * Typed vocabulary for the `scene.apply_command(json)` boundary — hand-written
- * TS mirrors of the serde wire shapes of `lucida_core::command::DocumentCommand`
- * and `lucida_core::command::ViewportCommand` (snake_case `type` tags; see
- * `lucida-core/src/command.rs` for the canonical definitions), in the style of
- * `manifestTypes.ts`.
+ * Hand-written TS mirrors of `lucida_core::command::DocumentCommand` and
+ * `ViewportCommand` for the `scene.apply_command(json)` boundary. Covers every
+ * command the web produces as a literal; server-originated commands and camera
+ * ops with typed wasm methods are absent because other locks cover them.
  *
- * Scope: every command the web produces as a JSON literal, plus `set_zoom`
- * (no producer authors it today — interactive 2D zoom is the relative
- * `zoom_by` — but it is kept so the 2D camera's absolute setters, `set_center`
- * and `set_zoom`, travel together). Commands the web only consumes
- * (`dataset_opened`, `apply_asset_catalog_delta` — both server-originated; the
- * web applies their inbound JSON verbatim) and camera ops issued through
- * dedicated typed wasm methods (`set_viewport`, `fly_set_base_speed`,
- * `fly_adjust_speed`, `adjust_clip_distance`) are deliberately absent: their
- * contracts are locked elsewhere (wire goldens / the wasm-bindgen `.d.ts`).
- *
- * The two unions are tag-disjoint by construction, mirroring the Rust enums
- * (`wiki/decisions/0001-document-vs-viewport-split.md`): a command is either
- * shared document state (sequenced + broadcast via `applyDocumentCommand`) or
- * local viewport state (`applyViewportCommand`), never both. The assertion at
- * the bottom of this file makes any future tag collision a compile error.
- *
- * Runtime lock: `commands.test.ts` round-trips one representative value of
- * every variant below through the REAL wasm `apply_command`, so a Rust-side
- * tag/field rename fails that suite even though these mirrors are hand-written.
- * The wire goldens lock producer field PRESENCE and VALUES, not key order:
- * the web suite compares parsed frames (`toStrictEqual`), and serde ignores
- * JSON key order — so reordering fields in a producer literal is safe, while
- * adding/dropping/renaming one fails the goldens.
+ * The unions are tag-disjoint, as the Rust enums are (ADR 0001): document state
+ * is sequenced and broadcast, viewport state stays local. `commands.test.ts`
+ * round-trips every variant through the real wasm so a Rust rename fails it.
  */
 
 import type { LayoutSpec } from "./manifestTypes.ts";
@@ -41,10 +20,7 @@ import type {
 /** Mirrors `lucida_core::scene::AnnotationKind` (serde snake_case). */
 export type AnnotationKind = "point" | "line" | "box";
 
-// ---------------------------------------------------------------------------
-// Document commands — shared state; sequenced, persisted, broadcast to peers.
-// Mirrors `lucida_core::command::DocumentCommand` (web-produced variants).
-// ---------------------------------------------------------------------------
+// Document commands: shared state, sequenced, persisted, broadcast to peers.
 
 export interface RemoveDatasetCommand {
   type: "remove_dataset";
@@ -70,9 +46,9 @@ export interface SetActiveLayoutCommand {
 }
 
 /**
- * Drop a pin. `end`/`z`/`t`/`c`/`kind`/`view` are `#[serde(default)]` on the
- * Rust side (optional on the wire); `view` must be OMITTED — not `null` — when
- * absent, so the command and its rebroadcast stay byte-identical.
+ * Drop a pin. The optional fields are `#[serde(default)]` in Rust. Omit `view`
+ * rather than sending `null`, so the command and its rebroadcast stay
+ * byte-identical.
  */
 export interface AddAnnotationCommand {
   type: "add_annotation";
@@ -143,10 +119,7 @@ export type DocumentCommand =
   | RemoveCommentCommand
   | EditCommentCommand;
 
-// ---------------------------------------------------------------------------
-// Viewport commands — local-only camera/view/display state; never sequenced.
-// Mirrors `lucida_core::command::ViewportCommand` (web-produced variants).
-// ---------------------------------------------------------------------------
+// Viewport commands: local camera, view, and display state, never sequenced.
 
 /** Rust `SetMode2D` (`#[serde(rename = "set_mode_slice")]`). */
 export interface SetModeSliceCommand {
@@ -404,11 +377,8 @@ export type ViewportCommand =
   | SetLabelVisibleCommand
   | SetLabelOpacityCommand;
 
-// ---------------------------------------------------------------------------
-// Compile-time disjointness lock (ADR-0001): the document and viewport tag
-// sets must never intersect. If a variant is ever added to both unions, the
-// intersection below stops being `never` and this line fails to compile.
-// ---------------------------------------------------------------------------
+// A tag added to both unions makes this intersection non-`never` and fails to
+// compile.
 
 type SharedCommandTags = DocumentCommand["type"] & ViewportCommand["type"];
 const documentAndViewportTagsAreDisjoint: [SharedCommandTags] extends [never]

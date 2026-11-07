@@ -1,14 +1,10 @@
 //! `SqliteWorkspaceStore`: the production SQLite backend for
-//! [`WorkspaceStore`], including the row mappers that decode persisted
-//! rows back into the domain structs.
+//! [`WorkspaceStore`], including the row mappers.
 //!
-//! The statements come from [`super::sql`], which the PostgreSQL store
-//! runs too, so this module holds the binding and the row mapping and no
-//! SQL of its own. Read it beside `postgres`: what differs is the pool
-//! type, the row type, and how a JSON column is bound and decoded — a
-//! `TEXT` column here takes the serialized string, where a `JSONB` column
-//! there refuses it. ADR-0058 records why the text is shared and the Rust
-//! is not.
+//! The statements come from [`super::sql`], shared with the PostgreSQL
+//! store (ADR-0058). What differs is the pool, the row type, and JSON
+//! columns: a `TEXT` column here takes the serialized string, where a
+//! `JSONB` column there refuses it.
 
 use std::collections::HashMap;
 
@@ -20,8 +16,9 @@ use lucida_core::scene::DocumentState;
 use sqlx::{Row, Sqlite, SqlitePool};
 
 use crate::workspace::types::{
-    SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
-    WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
+    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
+    WorkspacePreview, WorkspacePreviewMeta, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
     WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
 };
 
@@ -123,19 +120,14 @@ async fn touch_workspace(
     Ok(())
 }
 
-/// Insert a brand-new, owner-only workspace row plus its owner membership row
-/// inside `tx`. Shared by `create_workspace` and `duplicate_workspace` so the
-/// "blank owned workspace" shape is defined in exactly one place.
+/// Insert a new owner-only workspace row and its owner membership row in
+/// `tx`. `create_workspace` and `duplicate_workspace` share it so the blank
+/// owned workspace is defined once.
 ///
-/// `link_access` / `link_role` are deliberately NOT bound: the `workspaces`
-/// columns take their table defaults ('restricted' / 'viewer'), i.e. link
-/// access OFF. A duplicate therefore never inherits the source's sharing, and a
-/// freshly created workspace starts private — the security-critical invariant.
-/// Keeping the INSERT in one place hardens that link-off guarantee against
-/// future drift (a column added with a non-OFF default would otherwise have to
-/// be remembered at every call site). Callers pass pre-normalized values
-/// (`owner_email`, `name`, serialized `document_json`, `now`) so this is a pure
-/// persistence step with no policy of its own; `seq` is initialized to 0.
+/// `link_access` and `link_role` are deliberately not bound, so they take
+/// the table defaults and link access starts off. That keeps a duplicate
+/// from inheriting the source's sharing. Callers pass pre-normalized
+/// values; `seq` starts at 0.
 async fn insert_blank_owned_workspace(
     tx: &mut sqlx::Transaction<'_, Sqlite>,
     id: &str,
@@ -231,9 +223,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             return Ok(None);
         };
 
-        // --- Dataset memberships: copy with FRESH workspace-local ids, and
-        // build the old->new remap that keeps the document + saved views
-        // consistent against the copy's datasets (the id-consistency trap). ---
+        // Dataset memberships get fresh workspace-local ids, and the old->new
+        // remap keeps the document and saved views consistent with them.
         let dataset_rows = sqlx::query(sql::DUPLICATE_SOURCE_DATASETS)
             .bind(source_workspace_id)
             .fetch_all(&mut *tx)
@@ -260,7 +251,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             });
         }
 
-        // --- Document: remap every dataset-id reference onto the copy's ids. ---
+        // Document: remap every dataset-id reference onto the copy's ids.
         let source_document_json: String = source_row.get("document_json");
         let mut document: DocumentState =
             serde_json::from_str(&source_document_json).map_err(map_json_in)?;
@@ -271,7 +262,7 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         // `create_workspace` via `insert_blank_owned_workspace`, which also owns
         // the link-off guarantee: `link_access`/`link_role` are left to their
         // table defaults ('restricted' / 'viewer'), so the copy never inherits
-        // the source's sharing, and the source's OTHER members are not copied —
+        // the source's sharing, and the source's other members are not copied —
         // the security-critical invariant.
         insert_blank_owned_workspace(
             &mut tx,
@@ -299,9 +290,9 @@ impl WorkspaceStore for SqliteWorkspaceStore {
                 .map_err(map_sql)?;
         }
 
-        // --- Shared saved views only, re-attributed to the duplicator and
-        // kept Shared. Personal/Proposed views (anyone's) are NOT copied. The
-        // active/default-view pointer is remapped to the copied view. ---
+        // Shared saved views only, re-attributed to the duplicator. Personal
+        // and Proposed views are not copied. The default-view pointer is
+        // remapped to the copied view.
         let source_view_rows = sqlx::query(sql::DUPLICATE_SOURCE_SHARED_VIEWS)
             .bind(source_workspace_id)
             .fetch_all(&mut *tx)
@@ -1281,6 +1272,63 @@ impl WorkspaceStore for SqliteWorkspaceStore {
         let email = normalize_email(&principal.email);
         self.get_user_workspace_state(workspace_id, &email).await
     }
+
+    async fn put_preview(
+        &self,
+        preview: NewWorkspacePreview<'_>,
+    ) -> Result<Option<PreviewWrite>, StoreError> {
+        if !self.workspace_exists(preview.workspace_id).await? {
+            return Ok(None);
+        }
+        let meta = WorkspacePreviewMeta {
+            workspace_id: preview.workspace_id.to_string(),
+            content_type: preview.content_type.to_string(),
+            size_bytes: preview.image.len() as i64,
+            updated_at: preview.updated_at,
+            updated_by: normalize_email(preview.updated_by),
+        };
+        let result = sqlx::query(sql::UPSERT_PREVIEW)
+            .bind(&meta.workspace_id)
+            .bind(&meta.content_type)
+            .bind(meta.size_bytes)
+            .bind(preview.image)
+            .bind(meta.updated_at)
+            .bind(&meta.updated_by)
+            .bind(preview.replaces_up_to)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        if result.rows_affected() > 0 {
+            return Ok(Some(PreviewWrite::Stored(meta)));
+        }
+        let (last_updated_at,): (DateTime<Utc>,) = sqlx::query_as(sql::PREVIEW_UPDATED_AT)
+            .bind(preview.workspace_id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        Ok(Some(PreviewWrite::TooSoon { last_updated_at }))
+    }
+
+    async fn get_preview(
+        &self,
+        workspace_id: &str,
+    ) -> Result<Option<WorkspacePreview>, StoreError> {
+        let row = sqlx::query(sql::GET_PREVIEW)
+            .bind(workspace_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_sql)?;
+        Ok(row.map(|row| WorkspacePreview {
+            meta: WorkspacePreviewMeta {
+                workspace_id: row.get("workspace_id"),
+                content_type: row.get("content_type"),
+                size_bytes: row.get("size_bytes"),
+                updated_at: row.get("updated_at"),
+                updated_by: row.get("updated_by"),
+            },
+            image: row.get("image"),
+        }))
+    }
 }
 
 fn row_to_dataset_source(row: sqlx::sqlite::SqliteRow) -> WorkspaceDatasetSource {
@@ -1307,6 +1355,8 @@ fn row_to_summary(row: sqlx::sqlite::SqliteRow) -> Result<WorkspaceSummary, Stor
         default_saved_view_id: row.get("default_saved_view_id"),
         last_opened_at: row.get("last_opened_at"),
         pinned_at: row.get("pinned_at"),
+        first_dataset_url: row.get("first_dataset_url"),
+        preview_updated_at: row.get("preview_updated_at"),
     })
 }
 
@@ -1393,7 +1443,7 @@ fn row_to_user_workspace_state(row: sqlx::sqlite::SqliteRow) -> WorkspaceUserSta
     }
 }
 
-/// Decode the persisted `last_view_json` (#700). `None` for the common
+/// Decode the persisted `last_view_json`. `None` for the common
 /// "never set" case (NULL/empty). A malformed payload (e.g. from a future
 /// schema or a partial write) degrades to `None` rather than erroring the
 /// whole user-state read — the member simply gets no restored view and

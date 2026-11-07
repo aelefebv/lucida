@@ -26,18 +26,11 @@ pub struct MultiscaleInfo {
     /// Per-channel display metadata parsed from the OME `omero.channels` block
     /// (label and optional color), in channel order.
     ///
-    /// This is immutable manifest data — channel *names* live here, not in the
-    /// mutable scene state. Empty when the source has no `omero` block (e.g.
-    /// raw OME-Zarr without rendering metadata), so consumers must fall back to
-    /// a positional `Ch N` label.
-    ///
-    /// Positional and best-effort: entries are kept in the order omero lists
-    /// them and are *not* forced to match the C-axis length. A producer whose
-    /// omero list is shorter, longer, or partly blank still yields a valid
-    /// manifest; consumers index by channel and fall back per-index when an
-    /// entry is missing. `#[serde(default)]` keeps older snapshots (written
-    /// before this field existed) deserializable, and `skip_serializing_if`
-    /// keeps channel-less datasets from emitting it.
+    /// Empty when the source has no `omero` block, so consumers fall back to
+    /// a positional `Ch N` label. Positional and best-effort: entries are not
+    /// forced to match the C-axis length, so consumers index by channel and
+    /// fall back per index. `#[serde(default)]` keeps older snapshots
+    /// deserializable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channel_infos: Vec<ChannelInfo>,
     /// The method the writer used to derive each coarser level from the one
@@ -286,7 +279,7 @@ mod tests {
     #[test]
     fn empty_channel_infos_is_skipped_on_the_wire() {
         // skip_serializing_if keeps channel-less datasets from emitting the
-        // field at all, so the wire stays identical to pre-slice output.
+        // field at all, so their wire form carries no `channel_infos` key.
         let info = minimal_multiscale(Vec::new());
         let json = serde_json::to_value(&info).unwrap();
         assert!(

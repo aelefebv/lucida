@@ -1,0 +1,31 @@
+.lc-tooltip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  max-width: 280px;
+  padding: var(--lc-space-1) var(--lc-space-2);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-2);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-sm);
+  line-height: 1.4;
+  z-index: var(--lc-z-popover);
+  pointer-events: none;
+}
+
+.lc-tooltip[data-entering] {
+  animation: lc-tooltip-in var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-tooltip[data-exiting] {
+  animation: lc-tooltip-in var(--lc-motion-fast) var(--lc-ease) reverse;
+}
+
+@keyframes lc-tooltip-in {
+  from {
+    opacity: 0;
+  }
+}

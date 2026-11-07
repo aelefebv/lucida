@@ -1,5 +1,5 @@
 /**
- * The page's end of the watch stream (#1068): what a toggled-on session
+ * The page's end of the watch stream: what a toggled-on session
  * publishes, and what it never publishes.
  *
  * Driven against a real `TraceRecorder` rather than a stubbed one, because

@@ -1,14 +1,9 @@
 //! Shared identity contract between auth code and feature code.
 //!
-//! The `AuthPrincipal` is what feature code (saved views, future
-//! admin-gated endpoints, audit logs) consumes after authentication. It
-//! deliberately knows nothing about how it was derived: stub for dev,
-//! Google JWT in production, future providers all flow through the same
-//! shape.
-//!
-//! See `wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md`
-//! for the rationale behind landing this in lucida-core (the shared
-//! type) rather than in lucida-server (the trait + extractors).
+//! The `AuthPrincipal` is what feature code consumes after authentication.
+//! It knows nothing about how it was derived, so every provider flows through
+//! the same shape. The type lives here and the trait and extractors live in
+//! lucida-server (ADR 0015).
 
 use serde::{Deserialize, Serialize};
 

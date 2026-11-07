@@ -1,18 +1,11 @@
 //! What a deployer sees when `LUCIDA_DB_URL` is wrong, unreachable, or
 //! absent.
 //!
-//! These run the server binary rather than calling into the library,
-//! because the claim under test is about the process: it exits, it exits
-//! non-zero, and what it leaves on stderr names the database and not the
-//! password. A library-level test cannot tell a returned `Err` from a
-//! panic that happens to print something similar.
-//!
-//! Every case here fails before the socket is bound, except the last,
-//! which has to come up. None needs a database server, which is what
-//! makes them deterministic: the failing connection strings point at a
-//! port nothing answers on, and the migration case is a SQLite file this
-//! test writes. The PostgreSQL path that succeeds is covered by
-//! `storage::end_to_end`, where a real server is available.
+//! These run the server binary, because the claim is about the process:
+//! it exits non-zero, and stderr names the database but not the password.
+//! None needs a database server, since the failing URLs point at a port
+//! nothing answers on. The PostgreSQL success path is in
+//! `storage::end_to_end`.
 
 mod boot;
 

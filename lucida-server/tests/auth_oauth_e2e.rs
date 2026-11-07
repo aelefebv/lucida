@@ -1,27 +1,10 @@
-//! End-to-end OAuth flow test.
+//! End-to-end OAuth flow test against a mock Google (`/token` and `/certs`
+//! on an ephemeral port, wired in with `for_tests_google`) and the lucida
+//! routes `main.rs` wires, over in-memory stores and `oneshot`.
 //!
-//! Stands up two axum apps inside the test process:
-//!
-//! 1. A **mock Google**: serves `/token` (returns a fake JWT) and
-//!    `/certs` (returns the JWKS for the test signing key). Listens
-//!    on an ephemeral 127.0.0.1 port; the URL is plumbed into the
-//!    lucida server's `AuthConfig` via `for_tests_google`.
-//! 2. The **lucida server under test**: built from the same `Router`
-//!    pieces `main.rs` wires (auth_start + auth_callback + whoami +
-//!    middleware) but with a `MemorySessionStore` +
-//!    `MemoryPendingAuthStore` in place of SQLite. We drive it
-//!    directly via `tower::ServiceExt::oneshot`; no real listener.
-//!
-//! The test then walks the full flow:
-//!
-//!   - POST /auth/start with `{path, hash}` → 302 with state in the
-//!     Location header. We capture the state token.
-//!   - Forge a code, mint a JWT with the test key, ride the JWT through
-//!     the mock token endpoint by wiring the mock to return it.
-//!   - GET /auth/callback?code=…&state=… → 302 with Set-Cookie + the
-//!     reconstructed Location (path#hash).
-//!   - GET /auth/whoami with the captured cookie → 200 with the
-//!     extracted principal JSON.
+//! `POST /auth/start` returns a state token. The callback trades a forged
+//! code for a JWT signed with the test key, sets the cookie, and redirects
+//! to the captured path and hash. `whoami` then returns the principal.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -635,7 +618,7 @@ async fn auth_start_without_marker_cookie_omits_prompt() {
 // -- hosted-domain + email_verified -----------------------------------
 
 /// `LUCIDA_ALLOWED_HOSTED_DOMAINS=allowedcorp.com` + a JWT with
-/// `hd: othercorp.com`: callback must NOT mint a session, MUST 302 to
+/// `hd: othercorp.com`: callback must not mint a session, must 302 to
 /// `/auth/error?code=hd_mismatch&attempted_email=…&allowed_domains=…`.
 #[tokio::test]
 async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
@@ -698,7 +681,7 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
 
     // Spot-check the rendered error page since the redirect target
     // is server-rendered: GET it and assert the message contains the
-    // user-facing copy from the PRD.
+    // expected user-facing copy.
     let err_req = Request::builder()
         .uri(location)
         .body(Body::empty())
@@ -718,8 +701,8 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
     );
 }
 
-/// Same setup, but JWT's hd matches the allowlist: callback must mint
-/// the session as today (slice-4 happy path is preserved).
+/// Same setup, but the JWT's hd matches the allowlist: callback must mint
+/// the session.
 #[tokio::test]
 async fn callback_with_allowed_hd_succeeds_and_mints_session() {
     let keys = build_test_keys();

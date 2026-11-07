@@ -1,26 +1,11 @@
 /**
- * Per-dataset entity descriptor buffer.
+ * Per-dataset entity descriptor buffer: the geometry, level sources, proxy
+ * handles, and display state the shaders read per member.
  *
- * Holds the geometric/level/proxy/display fields the shader reads per
- * sample: model matrix + inverse, up to four level sources (chunk/grid/
- * level dims, indirection offset, and the level pool binding each reads)
- * plus the coarse source, proxy handles (pool index + slot index), proxy
- * slot dims, and per-channel display state (contrast/gamma/opacity/
- * colormapLutIndex/channelMask).
- *
- * The descriptor lives entirely in worker-side state. TickCoordinator and
- * worker converge on entity indices by construction — both walk
- * `cold.activeSet × cold.visibleChannels` in the same canonical order
- * (see {@link iterateColdMembers}), so no readback is needed.
- *
- * Display-state changes (contrast slider, colormap dropdown, etc.) bump
- * `epochs.selection`. When only the per-channel intensity display changed,
- * the orchestrator sends a dedicated {@link ColdStateDisplayMessage}: the
- * worker rebuilds just this descriptor buffer from the dataset's most
- * recent cold state with the new display values swapped in, skipping the
- * pool/atlas/active-set work. Any other change (geometry, active set, label
- * overlays, z-range, …) re-runs `plan()` and re-emits full cold state,
- * which rebuilds the descriptor the same way.
+ * The orchestrator and the worker agree on entity indices without a
+ * readback because both walk `cold.activeSet × cold.visibleChannels` in the
+ * same order (see {@link iterateColdMembers}). A display-only change
+ * rebuilds just this buffer from the last cold state.
  */
 
 import type {
@@ -90,10 +75,8 @@ export interface EntityDescriptorIndex {
   /** memberId → entity index in {@link buffer}. */
   indexByMember: Map<string, number>;
   /**
-   * Inverse of {@link indexByMember}: entity index → memberId. The
-   * aggregate render path uses it to resolve each quad's member (pool
-   * lookup, residency check, camera-UV recency) from the entity index
-   * the quad record carries. 1:1 with `indexByMember` by construction.
+   * Inverse of {@link indexByMember}. The aggregate path resolves each
+   * quad's member from the entity index its record carries.
    */
   memberByIndex: string[];
   /** memberId → the level and coarse pools its descriptor entry samples. */
@@ -106,11 +89,8 @@ export interface EntityDescriptorIndex {
   /** Number of populated descriptor entries (== `indexByMember.size`). */
   entityCount: number;
   /**
-   * Colormap name → dense LUT index (matches GPU descriptor's
-   * `colormapLutIndex` field). Stable across rebuilds in the
-   * insertion-order they were first seen for this dataset; the GPU
-   * descriptor's index is informational, with the CPU resolving
-   * `colormapNameByMember` per draw to bind the right LUT texture.
+   * Colormap name → dense LUT index, in first-seen order. The GPU field is
+   * informational; the CPU binds each draw's LUT from `colormapNameByMember`.
    */
   colormapLutIndices: Map<string, number>;
   /** memberId → colormap name. Drives per-draw LUT texture binding. */
@@ -120,20 +100,8 @@ export interface EntityDescriptorIndex {
 }
 
 /**
- * Canonical memberId for a (cold-state entry, channel) pair. Both the
- * orchestrator (when assembling render messages) and the worker (when
- * building the descriptor buffer) call this so entity indices agree by
- * construction.
- *
- * Mirrors the keying in `gpu.worker.ts`'s cold-state handler:
- *   - Single-channel field:           `entry.imageId`
- *   - Multi-channel field:            `${entry.imageId}:ch${channel}`
- *   - Single-channel group-as-proxy:   `entry.entityId`
- *   - Multi-channel group-as-proxy:    `${entry.entityId}:ch${channel}`
- *
- * `ColdStateActiveEntry` is a discriminated union on `kind`; narrowing
- * through `entry.kind` makes the group-as-proxy variant TS-visible (it
- * has no `imageId`).
+ * Canonical memberId for a (cold-state entry, channel) pair. The
+ * orchestrator and the worker both call this so entity indices agree.
  */
 export function memberIdForColdEntry(
   entry: ColdStateActiveEntry,
@@ -145,10 +113,8 @@ export function memberIdForColdEntry(
 }
 
 /**
- * Canonical iteration that yields (memberId, entry, channel) tuples in
- * the order both worker and orchestrator visit. Walks
- * `cold.activeSet × cold.visibleChannels` (channel as the inner loop —
- * matches how poolGroups are built in the cold-state handler).
+ * Yields members in the order both worker and orchestrator visit. Channel
+ * is the inner loop, matching how the cold-state handler builds pool groups.
  */
 export function* iterateColdMembers(
   cold: ColdStateMessage,
@@ -184,15 +150,8 @@ export function computeMemberIndexMap(
 }
 
 /**
- * Build a per-dataset entity descriptor buffer from cold state.
- *
- * The buffer covers every (entry, channel) combination from
- * `cold.activeSet × cold.visibleChannels` in canonical iteration order.
- * Proxy pool indices and colormap LUT indices are assigned dense from
- * the set of poolKeys / colormap names referenced by the active entries.
- * `sourcesByMember` holds the indirection sections the worker allocated
- * for each member in this cold state; {@link selectEntitySources} picks
- * the level sources and the coarse source from them.
+ * Build a per-dataset descriptor buffer from cold state, one entry per
+ * member in canonical order, with dense proxy pool and colormap indices.
  */
 export function buildDescriptorBuffer(
   device: GPUDevice,
@@ -210,10 +169,8 @@ export function buildDescriptorBuffer(
   const proxyDescriptorByMember = new Map<string, EntityProxyDescriptor>();
   const dsPools = proxyPoolsByDataset.get(cold.datasetId) ?? null;
 
-  // Pass 1: assign entity + pool + colormap indices in canonical order
-  // (stable by construction — the orchestrator walks the same order).
-  // Indices are recorded eagerly so the descriptor write below sees fully-
-  // populated maps.
+  // Pass 1: assign entity, pool, and colormap indices in the order the
+  // orchestrator also walks, so the serialize pass sees complete maps.
   const recordPool = (poolKey: string): void => {
     if (proxyPoolIndexByKey.has(poolKey)) return;
     const pool = dsPools?.get(poolKey);
@@ -346,11 +303,8 @@ export function destroyDescriptorBuffer(idx: EntityDescriptorIndex): void {
 }
 
 /**
- * Per-channel display state lookup helper. Falls back to a "no-op
- * display" default if the channel slot is missing — this should not
- * happen in normal operation (the orchestrator populates every
- * `cold.visibleChannels` entry) but defensive defaults keep the
- * descriptor well-formed if a channel index drifts during transition.
+ * Per-channel display state, with a no-op default that keeps the descriptor
+ * well-formed if a channel index drifts during a transition.
  */
 export function displayStateForChannel(
   entry: ColdStateActiveEntry,
@@ -372,17 +326,7 @@ export function displayStateForChannel(
 
 /**
  * Serialize one EntityDescriptor into `target` at byte offset `offset`.
- * Exposed for tests so they can verify the byte layout without a GPU.
- *
- * `selection` is what {@link selectEntitySources} chose for the entry:
- * the level sources are written finest first into `levelSources[0..n)`
- * with their pool binding slots, the remaining slots are zeroed, and the
- * coarse section lands in `coarseSource`.
- *
- * Display state (`channelMask`, `contrastMin/Max`, `gamma`, `opacity`,
- * `colormapLutIndex`) is sourced from a per-channel `displayState`
- * lookup against `entry.displayStateByChannel`. The orchestrator
- * populates this from `selection.channelSettings`.
+ * Exported so tests can check the byte layout without a GPU.
  */
 export function serializeEntityDescriptor(
   target: ArrayBuffer,

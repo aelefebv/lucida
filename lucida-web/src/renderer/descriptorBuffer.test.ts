@@ -1,17 +1,7 @@
 /**
- * Per-dataset entity descriptor buffer tests.
- *
- * Locks down:
- *   1. Entity-index assignment is deterministic across cold-state churn
- *      (orchestrator and worker converge on the same indices).
- *   2. Pool-index assignment is stable when descriptors rebuild over the
- *      same poolKeys.
- *   3. Descriptor struct serialization byte layout matches the WGSL
- *      `EntityDescriptor` declaration: up to four level sources finest
- *      first, each naming its pool binding, plus the coarse source.
- *   4. `mode` → renderMode is the orchestrator's job, but the descriptor
- *      assigns the same memberId conventions the worker uses for
- *      `group-as-proxy` vs field modes.
+ * Per-dataset entity descriptor buffer. Entity and pool indices must stay
+ * deterministic across rebuilds so the orchestrator and worker agree, and
+ * the serialized bytes must match the WGSL `EntityDescriptor` layout.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -66,9 +56,7 @@ import {
 import type { ColdStateActiveEntry, ColdStateMessage, ColdStateTileEntry } from "./workerProtocol.ts";
 import type { ProxyAtlasState } from "./proxyAtlas.ts";
 
-// ---------------------------------------------------------------------------
 // Mock GPU device — buffer creation only.
-// ---------------------------------------------------------------------------
 
 interface MockBuffer {
   size: number;
@@ -98,7 +86,7 @@ function makeMockDevice(): { device: GPUDevice; lastWrite: () => ArrayBuffer | n
           (data as ArrayBufferView).byteOffset + (data as ArrayBufferView).byteLength,
         );
     // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
-    // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app). See #438.
+    // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app).
     lastWriteCopy = ab.slice(0) as ArrayBuffer;
     (buffer as unknown as MockBuffer).contents = lastWriteCopy;
   });
@@ -304,9 +292,7 @@ const PYRAMID: ColdStateTileEntry["levels"] = [
   { level: 3, chunkShape: [1, 64, 64], gridShape: [1, 1, 1], levelDims: [1, 64, 64] },
 ];
 
-// ---------------------------------------------------------------------------
 // memberIdForColdEntry / iterateColdMembers
-// ---------------------------------------------------------------------------
 
 describe("memberIdForColdEntry", () => {
   it("uses imageId for fields (single-channel)", () => {
@@ -351,9 +337,7 @@ describe("iterateColdMembers", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // computeMemberIndexMap — determinism
-// ---------------------------------------------------------------------------
 
 describe("computeMemberIndexMap", () => {
   it("assigns dense indices in canonical iteration order", () => {
@@ -401,9 +385,7 @@ describe("computeMemberIndexMap", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Pool index assignment (proxy pools)
-// ---------------------------------------------------------------------------
 
 describe("pool index assignment", () => {
   it("assigns dense indices to referenced poolKeys in first-seen order", () => {
@@ -452,9 +434,7 @@ describe("pool index assignment", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Byte layout
-// ---------------------------------------------------------------------------
 
 describe("EntityDescriptor byte layout", () => {
   it("writes modelMatrix at offset 0 and invModelMatrix at offset 64", () => {
@@ -644,9 +624,7 @@ describe("EntityDescriptor byte layout", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Display state (contrast/gamma/opacity/colormap/channelMask)
-// ---------------------------------------------------------------------------
 
 describe("EntityDescriptor display state", () => {
   it("writes contrastMin/contrastMax/gamma/opacity at offsets 192..208", () => {
@@ -678,9 +656,7 @@ describe("EntityDescriptor display state", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Colormap LUT index assignment
-// ---------------------------------------------------------------------------
 
 describe("buildDescriptorBuffer colormap LUT assignment", () => {
   it("assigns dense indices to referenced colormap names in first-seen order", () => {
@@ -821,9 +797,7 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Mode handling (group-as-proxy vs field modes)
-// ---------------------------------------------------------------------------
 
 describe("mode → memberId conventions", () => {
   it("group-as-proxy entries use entityId, field entries use imageId", () => {
@@ -857,9 +831,7 @@ describe("mode → memberId conventions", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Buffer sizing + GPU write
-// ---------------------------------------------------------------------------
 
 describe("buildDescriptorBuffer GPU write", () => {
   it("creates a buffer sized to entityCount * DESCRIPTOR_ENTRY_SIZE", () => {
@@ -884,10 +856,9 @@ describe("buildDescriptorBuffer GPU write", () => {
   });
 
   it("each entity's level source offsets come from the worker's sections (shared-pool absolute offsets, not per-entity-local)", () => {
-    // Regression: descriptor used to compute per-entity-local offsets
-    // starting at 0, so every entity addressed offset 0 in the shared
-    // pool indirection buffer = entity 0's data. Symptom in collection mode:
-    // all fields rendered the same image, panning changed which.
+    // Per-entity-local offsets starting at 0 would point every entity at
+    // entity 0's data in the shared indirection buffer, so every field
+    // would render the same image.
     const cold = makeCold([
       makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" }),
       makeEntry({ entityId: "e2", imageId: "img-1", mode: "tiles-with-detail" }),
@@ -942,9 +913,7 @@ describe("buildDescriptorBuffer GPU write", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Transient ↔ canonical byte equivalence
-// ---------------------------------------------------------------------------
 
 describe("transient descriptor matches canonical for equivalent params", () => {
   it("agrees byte-for-byte on modelMatrix, invModelMatrix, display state, sentinel proxy handles, and the single level source", () => {

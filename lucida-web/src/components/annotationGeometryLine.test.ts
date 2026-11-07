@@ -6,10 +6,8 @@ import {
   type LineEndpoints,
 } from "./annotationGeometry.ts";
 
-// Slice 18 (issue #790): the pure line analog of `reshapeBox` — dragging one
-// endpoint moves ONLY that vertex; the other stays exactly where it was. These
-// lock the helper at the unit level (the overlay tests exercise it end-to-end
-// through the gesture).
+// Dragging one endpoint moves only that vertex. The overlay tests cover the
+// gesture end to end.
 
 const base: LineEndpoints = { position: [1, 2], end: [5, 6] };
 

@@ -20,11 +20,7 @@ import {
 /** localStorage key for the persisted config envelope. */
 const STORAGE_KEY = "lucida.planning.config";
 
-/**
- * Schema version for the persisted envelope. Bump on breaking changes.
- * Version 3 dropped the pre-tier planner's knobs (the mode thresholds,
- * the overview lane offset, and the path toggle).
- */
+/** Schema version for the persisted envelope. Bump on breaking changes. */
 const SCHEMA_VERSION = 3;
 
 type Listener = () => void;

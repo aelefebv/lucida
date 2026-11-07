@@ -1,11 +1,6 @@
-//! The CLI's headless browser driver.
-//!
-//! One owner for the three things every browser-driving command needs: the
-//! headless launch, CDP evaluation against a loaded page, and waiting until the
-//! viewer has actually rendered. `viewer screenshot` and `dataset montage`
-//! (both its capture pass and its auto-contrast pre-pass) route through here
-//! rather than carrying a copy each, and the trace driver joins them as a
-//! caller rather than a fourth copy.
+//! The CLI's headless browser driver: the headless launch, CDP evaluation
+//! against a loaded page, and waiting until the viewer has rendered, owned
+//! once for every browser-driving command.
 //!
 //! Viewport and device pixel ratio are [`Viewport`] parameters, not constants
 //! baked into the launch: screenshot and montage want scale factor 1 because
@@ -34,10 +29,9 @@ const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 /// How large a single CDP reply may be.
 ///
 /// The default 16 MiB is a denial-of-service guard for a socket facing the
-/// internet; this one faces a browser we launched. It is not a theoretical
-/// limit either: a trace export of a warm open on a real dataset came back at
-/// 22 MB and was refused, and a screenshot of a large retina viewport is the
-/// same shape of problem.
+/// internet; this one faces a browser we launched. A trace export of a warm
+/// open on a real dataset can reach 22 MB, and a screenshot of a large
+/// retina viewport is the same shape of problem.
 const MAX_CDP_MESSAGE_BYTES: usize = 512 << 20;
 
 fn cdp_socket_config() -> WebSocketConfig {
@@ -243,10 +237,10 @@ impl HeadlessBrowser {
     ) -> Result<Page, CliError> {
         let mut page = Page::attach(&self.endpoint, wait).await?;
         // Only when there is a header to set. An enabled Network domain
-        // mirrors every WebSocket frame the page receives back over CDP —
-        // megabytes of chunk payload per second on a real dataset — which
-        // costs main-thread time in the page being measured and once
-        // overflowed the CDP message limit outright.
+        // mirrors every WebSocket frame the page receives back over CDP,
+        // megabytes of chunk payload per second on a real dataset, which
+        // costs main-thread time in the page being measured and can overflow
+        // the CDP message limit.
         if let Some(token) = token {
             page.call("Network.enable", json!({}), wait).await?;
             page.call(
@@ -473,7 +467,7 @@ impl Page {
     /// request, with `x` and `y` in CSS pixels. The page sees the pointer or
     /// wheel event a person's mouse would raise, at the emulated device
     /// pixel ratio, so a scripted gesture measures the path a person's takes
-    /// (ADR 0051, as amended).
+    /// (ADR 0051).
     pub async fn dispatch_mouse_event(
         &mut self,
         params: Value,
@@ -487,7 +481,7 @@ impl Page {
     /// always what the page drew: headless Chrome on Vulkan leaves a WebGPU
     /// canvas out and returns solid black in its place, so a caller that
     /// wants the canvas asks the page to capture it and keeps this as the
-    /// fallback (#1098).
+    /// fallback.
     pub async fn screenshot_png(&mut self, wait: Duration) -> Result<Vec<u8>, CliError> {
         let captured = self
             .call(

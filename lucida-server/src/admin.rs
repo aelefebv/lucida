@@ -1,33 +1,11 @@
 //! Admin endpoints and the shared `clear_proxy_cache` helper.
 //!
-//! ## CLI vs HTTP
-//!
-//! Two surfaces invoke the same underlying logic:
-//!
-//! - The `clear-proxy-cache` subcommand in `main.rs` calls
-//!   [`clear_proxy_cache`] directly (synchronous, no auth).
-//! - `POST /admin/clear-proxy-cache?dataset=<url>` invokes
-//!   [`admin_clear_proxy_cache`], which runs [`clear_proxy_cache`] inside a
-//!   `spawn_blocking` after the auth middleware + `AdminRequired`
-//!   extractor confirm an admin principal.
-//!
-//! ## Auth
-//!
-//! Admin routes go through the auth-middleware path: the request must
-//! carry a valid session cookie (or the admin route 401s through the
-//! middleware), and the resulting `AuthPrincipal` must have
-//! `is_admin: true` (or [`AdminRequired`](crate::auth::AdminRequired)
-//! 403s with `{"error":"forbidden"}`). Admin status itself is derived
-//! per-request from `LUCIDA_ADMIN_EMAILS`; if the env var is unset
-//! the route 403s for everyone.
-//!
-//! ## URL hash scheme
-//!
-//! The on-disk layout — `{cache_dir}/{url_hash hex}/{entity_id}/{kind}/...`
-//! — is owned by `proxy::ProxyCache`. We use
-//! [`lucida_content::url::dataset_url_hash16`] to compute the same 16-byte
-//! BLAKE3-prefix hash that the cache uses for its per-dataset directory
-//! name, formatted as 32 lowercase hex chars.
+//! The `clear-proxy-cache` subcommand calls [`clear_proxy_cache`] directly,
+//! with no auth. `POST /admin/clear-proxy-cache?dataset=<url>` runs it in
+//! `spawn_blocking` behind the auth middleware and
+//! [`AdminRequired`](crate::auth::AdminRequired). The per-dataset directory
+//! name must match `proxy::ProxyCache`, so both derive it with
+//! [`lucida_content::url::dataset_url_hash16`].
 
 use std::fs;
 use std::io;
@@ -54,22 +32,11 @@ pub struct ClearOutcome {
     pub files: usize,
 }
 
-/// Synchronously clear cached proxies under `cache_dir`.
-///
-/// - If `dataset_url` is `Some(url)`: compute the URL hash via
-///   [`dataset_url_hash16`] and recursively remove the matching
-///   `{cache_dir}/{hex}` subdirectory. Returns `datasets = 1` if it
-///   existed; `0` if not.
-/// - If `dataset_url` is `None`: enumerate every subdirectory of
-///   `cache_dir` and recursively remove each. Skips files in the root
-///   (the cache layout never puts files at the top level).
-///
-/// A missing `cache_dir` is treated as "0 cleared", not an error — this
-/// matches the user-facing semantics of "nothing to clean up".
-///
-/// File counts are best-effort: we sum a quick recursive count *before*
-/// each removal so we can report it. If the count or removal hits a
-/// transient I/O error, that error propagates.
+/// Synchronously clear cached proxies under `cache_dir`: the one
+/// `{cache_dir}/{hex}` directory from [`dataset_url_hash16`] when
+/// `dataset_url` is given, otherwise every subdirectory. A missing
+/// `cache_dir` clears nothing and is not an error. File counts are taken
+/// before each removal; an I/O error in the count or removal propagates.
 pub fn clear_proxy_cache(cache_dir: &Path, dataset_url: Option<&str>) -> io::Result<ClearOutcome> {
     if !cache_dir.exists() {
         return Ok(ClearOutcome::default());

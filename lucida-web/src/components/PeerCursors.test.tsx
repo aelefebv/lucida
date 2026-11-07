@@ -1,14 +1,21 @@
 // @vitest-environment happy-dom
 //
-// Component test for PeerCursors peer identity rendering (#540). The cursor
-// label pill, avatar image, and initial-chip fallback are rendered straight
-// from JSX for every peer (the RAF tick only positions/toggles them), so we
-// can assert on them with a null scene ref and a stub canvas — no WebGPU.
+// Peer identity rendering. The label pill, avatar, and initial chip render from
+// JSX for every peer (the RAF tick only positions them), so a null scene ref and
+// a stub canvas are enough, with no WebGPU. The pill's color comes from the
+// wasm module's peer palette, so the module is initialized.
 
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeAll } from "vitest";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
+import initWasm, { peer_palette } from "lucida-core";
 import { PeerCursors, type CursorLabel } from "./PeerCursors.tsx";
 import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
+
+beforeAll(async () => {
+  await initWasm({ module_or_path: readFileSync(resolve(process.cwd(), "../lucida-core/pkg/lucida_core_bg.wasm")) });
+});
 
 function makePeer(
   clientId: ClientId,
@@ -131,16 +138,15 @@ describe("PeerCursors identity", () => {
     const peers = new Map<ClientId, PresenceState>([[42, makePeer(42)]]);
     renderPeers(peers);
 
-    // No crash; the historic numeric-id label is used.
+    // No crash; the numeric-id label is used.
     expect(screen.getByTestId("peer-cursor-name").textContent).toBe("42");
     expect(screen.getByTestId("peer-cursor-initial").textContent).toBe("?");
     expect(screen.queryByTestId("peer-cursor-avatar")).toBeNull();
   });
 
   it("uses the server-sent initial when the display name is blank", () => {
-    // #540 privacy: the raw email is no longer on the wire — the server
-    // precomputes a single-char `initial` (from display-name-or-email
-    // server-side), and the chip falls back to it when the name is blank.
+    // The raw email never reaches the client; the server sends a one-char
+    // `initial`, and the chip falls back to it when the name is blank.
     const peers = new Map<ClientId, PresenceState>([
       [9, makePeer(9, { display_name: "   ", initial: "Z" })],
     ]);
@@ -162,5 +168,13 @@ describe("PeerCursors identity", () => {
     // myId is 0 → only the peer (id 1) renders.
     expect(screen.queryByText("Me")).toBeNull();
     expect(screen.getByText("Other")).toBeTruthy();
+  });
+
+  it("colors a peer's pill from the palette its GPU cursor is drawn in", () => {
+    const palette = peer_palette();
+    const id = palette.length + 3;
+    renderPeers(new Map([[id, makePeer(id, { display_name: "Wrapped" })]]));
+    const cursor = screen.getByText("Wrapped").closest<HTMLElement>(".lc-peer-cursor")!;
+    expect(cursor.style.getPropertyValue("--peer-color")).toBe(palette[3]);
   });
 });

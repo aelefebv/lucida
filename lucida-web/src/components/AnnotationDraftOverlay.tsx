@@ -1,42 +1,29 @@
 /**
- * Live preview of a box/line annotation while it is being drawn.
+ * Live preview of a box or line while it is being drawn. The canvas gesture
+ * writes the in-progress shape into a shared ref and this draws it on the
+ * frame clock.
  *
- * Creation gestures live on the canvas (SliceViewer in 2D, VolumeViewer in 3D)
- * and previously only committed the shape on pointer release, so a new box/line
- * popped into existence at the end instead of growing under the cursor — unlike
- * RESIZING an existing shape, which previews live. This overlay closes that gap:
- * the gesture writes the in-progress shape (screen-space CSS px, relative to the
- * canvas) into a shared ref, and this component draws it every frame so the shape
- * grows/shrinks interactively, then clears when the gesture ends and the real
- * annotation is committed.
- *
- * Screen-space (not world-space) is correct here because a shift-drag DRAWS — it
- * never pans/zooms (2D) or orbits (3D) — so the camera is static for the whole
- * gesture and the raw pointer coordinates line up with where the committed shape
- * lands on release. One screen-space overlay therefore serves both 2D and 3D.
+ * Screen space is correct because a shift-drag draws and never moves the
+ * camera, so raw pointer coords match where the committed shape lands. One
+ * overlay serves both 2D and 3D.
  */
 import { useEffect, useRef, type RefObject } from "react";
 import { type AnnotationDraft, draftBoxRect } from "./annotationDraft.ts";
+import { frameClock } from "../frameClock.ts";
+import "./AnnotationOverlay.css";
 
 interface Props {
   /** Shared with the canvas gesture handlers; they write the live draw here. */
   draftRef: RefObject<AnnotationDraft | null>;
-  /** Personal annotation-visibility toggle; when false, draw nothing (matches
-   * the annotation overlays hiding everything). */
+  /** Personal annotation visibility; false draws nothing. */
   visible?: boolean;
 }
-
-// Own-annotation color + stroke, matching a freshly-created own shape in
-// AnnotationOverlay so the preview reads as "this shape, growing".
-const DRAFT_COLOR = "#FF3B30";
-const DRAFT_STROKE = 2.5;
 
 export function AnnotationDraftOverlay({ draftRef, visible = true }: Props) {
   const rectRef = useRef<SVGRectElement>(null);
   const lineRef = useRef<SVGLineElement>(null);
 
   useEffect(() => {
-    let rafId: number;
     const tick = () => {
       const rect = rectRef.current;
       const line = lineRef.current;
@@ -64,19 +51,17 @@ export function AnnotationDraftOverlay({ draftRef, visible = true }: Props) {
           line.style.display = "";
         }
       }
-      rafId = requestAnimationFrame(tick);
     };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
+    // The draft moves only with the pointer, whose events wake the clock.
+    return frameClock.subscribe(tick);
   }, [draftRef, visible]);
 
+  // Drawn with the own-shape style, so the draft matches the shape it becomes.
   return (
-    <div
-      style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", pointerEvents: "none", overflow: "hidden", zIndex: 11 }}
-    >
-      <svg width="100%" height="100%" style={{ position: "absolute", top: 0, left: 0, pointerEvents: "none", overflow: "visible" }}>
-        <rect ref={rectRef} style={{ display: "none" }} fill={DRAFT_COLOR} fillOpacity={0.12} stroke={DRAFT_COLOR} strokeWidth={DRAFT_STROKE} strokeLinejoin="round" />
-        <line ref={lineRef} style={{ display: "none" }} stroke={DRAFT_COLOR} strokeWidth={DRAFT_STROKE} strokeLinecap="round" />
+    <div className="lc-annotation-layer" data-layer="draft">
+      <svg className="lc-annotation-svg" width="100%" height="100%">
+        <rect ref={rectRef} className="lc-annotation-shape" style={{ display: "none" }} />
+        <line ref={lineRef} className="lc-annotation-shape" style={{ display: "none" }} />
       </svg>
     </div>
   );

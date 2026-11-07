@@ -1,36 +1,15 @@
 /**
- * The dock's live draw, under the cost contract (ADR 0049 as amended).
+ * The dock's live draw, under the cost contract (ADR 0049): a surface that
+ * draws while a run is open must not show up in the run it draws. Timed here:
+ * deriving the live timeline from the open run's per-tick tiers, and laying
+ * it out as a draw list. The canvas replay is bounded by the list's
+ * primitive count instead, since a test runner has no rendering context.
  *
- * The dock's live charts join the recorder under one rule: a surface that
- * draws while a run is open must not show up in the run it draws. This file
- * is where that rule is a measurement. One poll of the live charts is two
- * pure steps, the derivation of the live timeline from the open run's
- * per-tick tiers and the layout of that section into a draw list, and both
- * are timed here. The third step, replaying the list on a canvas, needs a
- * rendering context a test runner does not have; it is bounded instead by
- * the list's primitive count, which is asserted, and measured by the
- * documented A/B on a hardware adapter at device pixel ratio 2, which CI
- * does not have either.
- *
- * **Flat in the run's rows.** The live timeline reads the readings, the tick
- * samples, the point events and the connection records, and never a row,
- * so it costs the same at two thousand rows and past the per-run cap. The
- * gate holds the derivation at the largest population a run can hold to a
- * small factor of the derivation at a small one, the flatness shape the
- * recorder's own gates use.
- *
- * **Bounded by the window, not the ring.** Each ring is read from its newest
- * slot back to the window's start, so a ring that has wrapped costs what the
- * window costs.
- *
- * **Absolute ceilings, at slack.** The dock polls twice a second and never
- * per tick or per frame, so a poll of a few milliseconds is a fraction of a
- * percent of the main thread. The derivation gets two milliseconds over a
- * thirty-second window holding the reading ring's whole capacity, and the
- * draw list gets two more at a retina width. Both gates sit at
- * {@link CI_SLACK}× those figures, for the recorder's reason: a
- * microbenchmark of a millisecond on a CI runner measures the runner. The
- * real figures are logged on every run; read the `[#1064]` lines for them.
+ * The derivation reads no row, so it is gated flat in rows. The dock polls
+ * twice a second, so the derivation over a thirty-second window holding the
+ * whole reading ring gets 2 ms and the draw list 2 ms more at a retina width,
+ * both at {@link CI_SLACK}x because a CI runner measures the runner. The real
+ * figures are logged on every run.
  */
 
 import { describe, expect, it } from "vitest";

@@ -2,10 +2,8 @@ import { describe, it, expect } from "vitest";
 
 import { RejectionTracker } from "./rejection.ts";
 
-// ---------------------------------------------------------------------------
 // Tests — synthetic input only; the cache integration tests in
 // cpuCache.test.ts cover the wire-up to the chunk scheduler.
-// ---------------------------------------------------------------------------
 
 describe("RejectionTracker", () => {
   it("mark() returns true on first add and false on duplicate", () => {

@@ -41,7 +41,7 @@ lucida.db-wal
 .claude/
 
 # --- documentation (not in the image) -------------------------------
-wiki/
+docs/
 # Top-level docs only (README.md / CHUNK_PIPELINE.md / CLAUDE.md /
 # AGENTS.md). Leading slash anchors at the build-context root so
 # any future per-crate README.md keeps shipping into the build.

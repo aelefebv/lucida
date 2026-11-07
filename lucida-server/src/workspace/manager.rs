@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
+use chrono::{DateTime, Utc};
 use lucida_content::DatasetId;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
@@ -24,10 +25,12 @@ use crate::inbox::InboxStore;
 use crate::session::Session;
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
 
+use super::preview::{MIN_PREVIEW_INTERVAL, PreviewError, retry_after_secs, validate_preview};
 use super::store::{StoreError, WorkspaceStore, normalize_email};
 use super::types::{
-    SavedViewVisibility, WorkspaceAdminDetails, WorkspaceAdminSummary, WorkspaceDatasetSource,
-    WorkspaceLinkAccess, WorkspaceMember, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
+    NewWorkspacePreview, PreviewWrite, SavedViewVisibility, WorkspaceAdminDetails,
+    WorkspaceAdminSummary, WorkspaceDatasetSource, WorkspaceLinkAccess, WorkspaceMember,
+    WorkspacePreview, WorkspacePreviewMeta, WorkspaceRecord, WorkspaceRole, WorkspaceSavedView,
     WorkspaceSharingSettings, WorkspaceSummary, WorkspaceUserState, WorkspaceViewerProfile,
 };
 
@@ -280,17 +283,12 @@ impl WorkspaceManager {
 
     /// Duplicate the source workspace into a private copy owned by the caller.
     ///
-    /// Authorization: ANYONE who can *access* the source (any role, viewer
-    /// included) may duplicate it — the copy becomes their own owned workspace.
-    /// Access is checked via [`get_workspace_for`], so a non-member gets the
-    /// uniform never-leak `NotFound` (byte-identical to a missing workspace):
-    /// duplication must not reveal a workspace the caller can't see.
-    ///
-    /// The copy is named `Copy of <source name>` (an explicit `name` overrides
-    /// this), created with the new-workspace defaults (restricted, owner-only,
-    /// link OFF), and deep-copies datasets + Shared saved views + the document
-    /// in one transaction — never the source's members or any permission. See
-    /// [`WorkspaceStore::duplicate_workspace`].
+    /// Anyone who can access the source, viewers included, may duplicate it.
+    /// Access goes through [`get_workspace_for`], so a non-member gets the
+    /// same `NotFound` as for a missing workspace. The copy is named
+    /// `Copy of <source name>` unless `name` is given, starts with the
+    /// new-workspace defaults (restricted, owner-only, link off), and never
+    /// copies members or permissions. See [`WorkspaceStore::duplicate_workspace`].
     pub async fn duplicate_workspace(
         &self,
         source_workspace_id: &str,
@@ -320,19 +318,12 @@ impl WorkspaceManager {
         workspace_id: &str,
         principal: &AuthPrincipal,
     ) -> Result<(WorkspaceRecord, WorkspaceRole), WorkspaceError> {
-        // NEVER-LEAK (workspace-open path). This path is reachable by *anyone*
-        // who is handed a `/w/<id>` deep-link (annotation share-by-link), so a
-        // caller with no access must not be able to tell "exists but denied"
-        // from "does not exist": both collapse to NotFound (404), byte-identical
-        // to a missing row. This mirrors the saved-views never-leak discipline
-        // (see `get_saved_view`). The role check therefore comes FIRST, and a
-        // missing role yields NotFound, not Forbidden.
-        //
-        // Archived is surfaced (Gone/410) only to a real member — the one party
-        // that already knows the workspace exists; to a non-member an archived
-        // workspace is also indistinguishable from a missing one (NotFound).
-        // The anyone-with-link grant is honored by `role_for` (active rows
-        // only), so a valid link still resolves to a role → 200.
+        // Never-leak: anyone handed a `/w/<id>` link reaches this path, so a
+        // caller without access must not tell "exists but denied" from "does
+        // not exist". Both are NotFound, byte-identical to a missing row, so
+        // the role check comes first and a missing role is NotFound, not
+        // Forbidden. Archived (410) is shown only to a real member. The
+        // anyone-with-link grant is honored by `role_for`.
         let record = self
             .store
             .get_workspace(workspace_id)
@@ -571,7 +562,7 @@ impl WorkspaceManager {
         // Members only — a non-member is denied by the viewer gate before any
         // row is read. The shared-∪-own-(personal|proposed) filter is then
         // applied in SQL, scoped to this caller's normalized email; editors
-        // additionally get every proposed view in the workspace (the #702
+        // additionally get every proposed view in the workspace (the
         // review queue), so the caller's edit-ness is pushed into the query.
         let role = self.require_viewer(workspace_id, principal).await?;
         self.store
@@ -597,17 +588,14 @@ impl WorkspaceManager {
             .await
             .map_err(WorkspaceError::Store)?
             .ok_or(WorkspaceError::NotFound)?;
-        // Never-leak boundary: a personal view — and a pending proposed view —
-        // is disclosed by the role-blind gate only to its creator; any other
-        // caller gets NotFound, identical to a missing row, so existence is
-        // never confirmed.
+        // Never-leak: a personal view, or a pending proposed one, is shown by
+        // the role-blind gate only to its creator. Anyone else gets NotFound,
+        // identical to a missing row.
         //
-        // The one role-dependent exception (#702): an *editor* reviewing the
-        // workspace may read ANY pending proposal. It is layered here, not in
-        // the pure gate, so the never-leak default stays deny-by-construction.
-        // A rejected proposal becomes `Personal`, at which point this exception
-        // no longer applies and the editor loses visibility unless it is their
-        // own — exactly the personal-view boundary.
+        // The one role-dependent exception: an editor may read any pending
+        // proposal. It is layered here, not in the pure gate, so the default
+        // stays deny-by-construction. A rejected proposal becomes `Personal`
+        // and the exception stops applying.
         match ensure_saved_view_readable(&saved_view, principal) {
             Ok(()) => Ok(saved_view),
             Err(err) => {
@@ -631,7 +619,7 @@ impl WorkspaceManager {
         // Personal views are private and never mutate shared state, so any
         // member (viewer+) may save one. A Proposed view is a viewer's *bid* to
         // share: it likewise touches no shared state until an editor approves
-        // it, so a plain viewer may create one too (#702). Only directly
+        // it, so a plain viewer may create one too. Only directly
         // creating a Shared view remains editor-gated.
         match visibility {
             SavedViewVisibility::Personal | SavedViewVisibility::Proposed => {
@@ -723,37 +711,19 @@ impl WorkspaceManager {
             .ok_or(WorkspaceError::NotFound)
     }
 
-    /// Approve a viewer's proposed saved view (#702): it becomes `Shared`.
+    /// Approve a viewer's proposed saved view: it becomes `Shared`.
     ///
-    /// This is **editor authority over another member's proposal**, which is
-    /// fundamentally different from the creator-only re-scope path
-    /// (`set_saved_view_visibility` / `ensure_saved_view_rescopable`): the
-    /// approving editor is, by design, *not* the author. So it does NOT route
-    /// through that creator-only gate. Instead `require_editor` is the single
-    /// authority check — a viewer cannot approve (`Forbidden`).
+    /// This is editor authority over another member's proposal, so it skips
+    /// the creator-only re-scope gate and `require_editor` is the authority
+    /// check. `created_by` is never written, so the proposer stays the
+    /// author. The view must be `Proposed`, or the call is `BadRequest`,
+    /// except that another member's personal view stays `NotFound`.
     ///
-    /// `created_by` is never written, so the proposer stays the author once the
-    /// view goes shared (attribution is preserved). The view MUST currently be
-    /// `Proposed`: approving an already-shared (or anyone's personal) view is a
-    /// `BadRequest`, not a silent no-op — except that another member's personal
-    /// view stays `NotFound` even to an editor, preserving the never-leak rule.
-    ///
-    /// **Self-approve guard (#817):** a proposer cannot be their own reviewer.
-    /// The whole point of the review queue is that a *second* party signs off, so
-    /// even an editor/owner who created the proposal may not approve it — that
-    /// would reach `Proposed->Shared` with no reviewer, the exact transition the
-    /// `/visibility` allow-list (`ensure_saved_view_rescopable`) forbids for the
-    /// creator. The guard is placed here (the approve path), *after* the shared
-    /// review gate, so (a) the readability/role checks in
-    /// `ensure_proposal_reviewable` still run first — a stranger keeps getting
-    /// `Forbidden`/`NotFound` and never learns the view exists — and (b) it does
-    /// NOT apply to `reject_saved_view`: a creator self-rejecting is just
-    /// withdrawing their own proposal (Proposed->Personal), which is already
-    /// legal via `/visibility`. A sole editor wanting to share their own view
-    /// uses the legal `Personal->Shared` re-scope directly; the queue is for a
-    /// *different* editor. The denial is `Forbidden` (an authorization act on the
-    /// view, like the creator-only re-scope gate), not `BadRequest` (a state
-    /// error).
+    /// A proposer cannot approve their own proposal, even as an editor: the
+    /// review queue exists so a second party signs off. The guard runs after
+    /// `ensure_proposal_reviewable`, so a stranger still never learns the
+    /// view exists. It does not apply to `reject_saved_view`, where a creator
+    /// is only withdrawing. The denial is `Forbidden`, not `BadRequest`.
     pub async fn approve_saved_view(
         &self,
         workspace_id: &str,
@@ -777,14 +747,12 @@ impl WorkspaceManager {
             .ok_or(WorkspaceError::NotFound)
     }
 
-    /// Reject a viewer's proposed saved view (#702): it reverts to the
-    /// proposer's own `Personal` view — non-destructive, the saved camera and
-    /// attribution are untouched, the proposer simply keeps it privately.
+    /// Reject a viewer's proposed saved view: it reverts to the proposer's
+    /// own `Personal` view, with the saved camera and attribution untouched.
     ///
-    /// Same authority as `approve_saved_view`: `require_editor` (a viewer
-    /// cannot reject), editor-over-another-member's-proposal, NOT the
-    /// creator-only re-scope gate. The view MUST currently be `Proposed`
-    /// (`BadRequest` otherwise; never-leak preserved for others' personal).
+    /// Same authority as `approve_saved_view`. The view must currently be
+    /// `Proposed` (`BadRequest` otherwise; never-leak preserved for others'
+    /// personal views).
     pub async fn reject_saved_view(
         &self,
         workspace_id: &str,
@@ -800,24 +768,15 @@ impl WorkspaceManager {
             .ok_or(WorkspaceError::NotFound)
     }
 
-    /// The shared authority gate for the two editor review actions
-    /// (`approve` / `reject`), kept distinct from the creator-only re-scope
-    /// gate because the authority is genuinely different: here the reviewer is
-    /// an editor acting on *someone else's* proposal.
+    /// The shared authority gate for approve and reject, separate from the
+    /// creator-only re-scope gate because here an editor acts on someone
+    /// else's proposal.
     ///
-    /// Order, and why:
-    /// 1. `require_editor` — a viewer (or non-member) cannot review at all
-    ///    (`Forbidden`); this is the entire authority for the action.
-    /// 2. fetch — a missing id is `NotFound`.
-    /// 3. never-leak guard — a `Personal` view that is not the editor's own is
-    ///    still `NotFound`, exactly as the read gate would say, so reviewing a
-    ///    proposal can never be used to probe for another member's hidden
-    ///    personal views.
-    /// 4. **must be `Proposed`** — any other (readable) state is a `BadRequest`;
-    ///    approve/reject only ever act on a pending proposal.
-    ///
-    /// Returns the confirmed-`Proposed` view so callers can persist without
-    /// re-fetching.
+    /// Order: `require_editor` (`Forbidden`), fetch (`NotFound`), then
+    /// never-leak (another member's `Personal` view is still `NotFound`, so
+    /// review cannot probe for hidden views), then the view must be
+    /// `Proposed` (`BadRequest`). Returns the view so callers can persist
+    /// without re-fetching.
     async fn ensure_proposal_reviewable(
         &self,
         workspace_id: &str,
@@ -847,16 +806,11 @@ impl WorkspaceManager {
     }
 
     /// The single mutation-authorization gate for saved views, mirroring the
-    /// read path. Membership is required first (a non-member gets `Forbidden`
-    /// before any row is read, exactly like `get_saved_view`); the row is then
-    /// fetched and funnelled through `ensure_saved_view_readable`, so a
-    /// personal view that is not the caller's own yields `NotFound` and is
-    /// never confirmed to exist — for editors, owners, and admins alike. Only
-    /// after the view is confirmed visible do `Shared` views additionally
-    /// require editor, leaving today's shared-view behavior intact while
-    /// letting a viewer mutate their own personal view (as `create` allows a
-    /// viewer to make one). Routing both `update` and `delete` through here
-    /// keeps the never-leak rule in one place.
+    /// read path. Membership comes first (a non-member gets `Forbidden` before
+    /// any row is read), then `ensure_saved_view_readable`, so another
+    /// member's personal view is `NotFound` even for editors and admins. Only
+    /// a visible `Shared` view also requires editor. Both `update` and
+    /// `delete` route through here to keep the never-leak rule in one place.
     async fn ensure_saved_view_mutable(
         &self,
         workspace_id: &str,
@@ -877,44 +831,19 @@ impl WorkspaceManager {
         Ok(saved_view)
     }
 
-    /// The single authorization gate for *changing a saved view's visibility*
-    /// (re-scoping it between `Personal` and `Shared`), kept separate from the
-    /// read gate (`get_saved_view`) and the content-mutation gate
-    /// (`ensure_saved_view_mutable`) because the authority is genuinely
-    /// different: re-scoping is restricted to the **creator**, and *who else*
-    /// is allowed depends on the *target* visibility.
+    /// The single authorization gate for re-scoping a saved view's
+    /// visibility. Re-scoping is creator-only, and whether editor is also
+    /// needed depends on the target.
     ///
-    /// The check order — and the reasons — are:
-    /// 1. `require_viewer` — a non-member is denied (`Forbidden`) before any
-    ///    row is read, so membership is never disclosed by a re-scope attempt.
-    /// 2. fetch + `ensure_saved_view_readable` — never-leak in one place: a
-    ///    personal (or pending proposed) view the caller cannot see yields
-    ///    `NotFound` (identical to a missing row), so even editors/owners/admins
-    ///    never learn it exists.
-    /// 3. **creator-only** — a shared view is readable by everyone, but only
-    ///    the original creator may re-scope it; anyone else gets `Forbidden`.
-    /// 4. **transition allow-list** — the source→target re-scope must be one of
-    ///    the legal creator transitions (`saved_view_transition_allowed`); any
-    ///    other pair is `BadRequest`. This is the structural gate (#817): it
-    ///    rejects `Shared→Proposed` and, crucially, `Proposed→Shared` — the
-    ///    self-approve bypass — so sharing a proposal stays exclusively the
-    ///    editor review queue's job (`approve_saved_view`), never `/visibility`.
-    ///    A same-state request is an idempotent no-op and falls through to a
-    ///    (value-preserving) persist by the caller.
-    /// 5. **target-visibility authority** — making a view `Shared` is a
-    ///    shared-state mutation (exactly like creating a `Shared` view), so it
-    ///    additionally requires editor; demoting back to `Personal`, or
-    ///    proposing, needs no editor (the creator is acting on their own view).
-    ///    Checked last so an illegal transition is `BadRequest` regardless of
-    ///    the caller's role — the deny is by construction, not role-dependent.
-    ///
-    /// Returns the (now-confirmed-visible) view so callers can persist without
-    /// re-fetching. The #702 review actions (`approve_saved_view` /
-    /// `reject_saved_view`, the Proposed→Shared / Proposed→Personal review
-    /// queue) deliberately do NOT route through this creator-only gate: their
-    /// authority is an *editor acting on another member's* proposal, so they use
-    /// `ensure_proposal_reviewable` instead — keeping the review queue the only
-    /// path that shares a proposal.
+    /// Order: `require_viewer` (`Forbidden` before any row is read), then
+    /// fetch and `ensure_saved_view_readable` (`NotFound` for a view the
+    /// caller cannot see), then creator-only (`Forbidden`), then the
+    /// transition allow-list (`BadRequest`), then editor for a `→Shared`
+    /// target. The allow-list comes before the role check so an illegal
+    /// transition is `BadRequest` whatever the caller's role. It rejects
+    /// `Proposed→Shared`, so sharing a proposal stays the review queue's job
+    /// (`approve_saved_view`, which uses `ensure_proposal_reviewable`).
+    /// Returns the view so callers can persist without re-fetching.
     async fn ensure_saved_view_rescopable(
         &self,
         workspace_id: &str,
@@ -1031,12 +960,12 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)
     }
 
-    /// Record the caller's own last-open view (#700). Any member (viewer+)
-    /// may remember their own view; the write is scoped to
-    /// `(workspace_id, principal.email)` and stores ONLY the per-user
-    /// `last_view` — it never mutates the shared `default_saved_view_id`.
-    /// Source URLs are stripped (mirroring `upsert_viewer_profile`) since
-    /// workspace views address datasets by workspace-local id.
+    /// Record the caller's own last-open view. Any member may record their
+    /// own; the write is scoped to `(workspace_id, principal.email)`, stores
+    /// only the per-user `last_view`, and never touches the shared
+    /// `default_saved_view_id`. Source URLs are stripped, as in
+    /// `upsert_viewer_profile`, since workspace views address datasets by
+    /// workspace-local id.
     pub async fn set_user_workspace_last_view(
         &self,
         workspace_id: &str,
@@ -1051,7 +980,7 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)
     }
 
-    /// Read the caller's own workspace state including `last_view` (#700).
+    /// Read the caller's own workspace state including `last_view`.
     /// `require_viewer` gates access; the store keys on `principal.email`, so
     /// the result is the caller's own row only — never another member's, and
     /// `last_view = None` when they've never recorded one.
@@ -1065,6 +994,67 @@ impl WorkspaceManager {
             .get_user_workspace_state_for(workspace_id, principal)
             .await
             .map_err(WorkspaceError::Store)
+    }
+
+    /// The workspace's preview, for anyone who may view the workspace. An
+    /// archived workspace's preview stays readable by its owners, who still
+    /// see its card on the archived shelf.
+    pub async fn workspace_preview(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+    ) -> Result<Option<WorkspacePreview>, WorkspaceError> {
+        let viewer = self
+            .store
+            .role_for(workspace_id, principal)
+            .await
+            .map_err(WorkspaceError::Store)?;
+        if viewer.is_none() {
+            self.require_owner_any_state(workspace_id, principal)
+                .await?;
+        }
+        self.store
+            .get_preview(workspace_id)
+            .await
+            .map_err(WorkspaceError::Store)
+    }
+
+    /// Store a preview uploaded by an owner or editor at `now`.
+    ///
+    /// The role is checked before the bytes, so a viewer is told it may not
+    /// upload whatever it sent. The rate limit is the store's conditional
+    /// write rather than a read here, so two racing uploads cannot both
+    /// pass it.
+    pub async fn put_workspace_preview(
+        &self,
+        workspace_id: &str,
+        principal: &AuthPrincipal,
+        declared_type: Option<&str>,
+        image: &[u8],
+        now: DateTime<Utc>,
+    ) -> Result<WorkspacePreviewMeta, PreviewError> {
+        self.require_editor(workspace_id, principal).await?;
+        let content_type = validate_preview(declared_type, image)?;
+        let interval = chrono::Duration::from_std(MIN_PREVIEW_INTERVAL).expect("a few seconds fit");
+        let written = self
+            .store
+            .put_preview(NewWorkspacePreview {
+                workspace_id,
+                content_type,
+                image,
+                updated_by: &principal.email,
+                updated_at: now,
+                replaces_up_to: now - interval,
+            })
+            .await
+            .map_err(WorkspaceError::Store)?;
+        match written {
+            Some(PreviewWrite::Stored(meta)) => Ok(meta),
+            Some(PreviewWrite::TooSoon { last_updated_at }) => Err(PreviewError::TooSoon {
+                retry_after_secs: retry_after_secs(last_updated_at, now),
+            }),
+            None => Err(WorkspaceError::NotFound.into()),
+        }
     }
 
     pub async fn live_workspace(
@@ -1283,30 +1273,16 @@ impl WorkspaceManager {
             .map_err(WorkspaceError::Store)
     }
 
-    /// Rename a workspace dataset's display label, the right way: mutate the
-    /// shared collaborative document so the change broadcasts to co-present
-    /// peers and survives reopen, and keep the server-private DB
+    /// Rename a workspace dataset's display label in the shared document, so
+    /// it broadcasts to peers and survives reopen, and keep the DB
     /// `display_name` in sync so listings and restored bindings agree.
     ///
-    /// The new name flows as a `DocumentCommand::RenameDataset`, returned to
-    /// the caller (the WS handler) so it can broadcast + ack it on the live
-    /// channel exactly like every other document command — that is what
-    /// delivers it live to peers. Persistence is handled here:
-    /// [`Store::persist_dataset_renamed`] writes both the `workspace_datasets`
-    /// row and the full `document_json` in one transaction, so reopening the
-    /// workspace (which loads `document_json` into `session.document`) shows
-    /// the new name.
-    ///
-    /// Authority + safety, role-first to preserve never-leak:
-    /// 1. `require_editor` — a viewer or non-member gets `Forbidden` before
-    ///    any document/row is read (uniform with `open_remote_dataset` and the
-    ///    other editor-gated mutations).
-    /// 2. validation — empty/whitespace/over-long names are `BadRequest`.
-    /// 3. the dataset must exist in the live document — a missing id is
-    ///    `NotFound`, identical to a dataset that was never opened, so the
-    ///    rename never confirms which ids exist.
-    ///
-    /// Returns the applied `(seq, command)` so the handler can broadcast.
+    /// Returns the applied `(seq, RenameDataset)` for the WS handler to
+    /// broadcast like any other document command.
+    /// [`Store::persist_dataset_renamed`] writes the row and `document_json`
+    /// in one transaction. `require_editor` runs before anything is read; a
+    /// bad name is `BadRequest`, and a missing id is `NotFound`, so the
+    /// rename never confirms which ids exist.
     pub async fn rename_dataset(
         &self,
         live: &LiveWorkspace,
@@ -1353,21 +1329,14 @@ impl WorkspaceManager {
     }
 
     /// Apply a client-issued document command to the live workspace: editor
-    /// gate first, then apply to the shared session, then persist. Together
-    /// with [`Self::rename_dataset`] (which adds validation and DB
-    /// display-name sync on top of the same editor gate) this is the single
-    /// authorization + persistence path for workspace-scoped document
-    /// commands — the WS handler only translates the returned
-    /// `(seq, command)` or [`CommandApplyError`] into wire traffic, it
-    /// holds no policy.
+    /// gate, apply, persist. With [`Self::rename_dataset`] this is the only
+    /// authorization and persistence path for workspace document commands;
+    /// the WS handler holds no policy.
     ///
-    /// The error is split by phase (see [`CommandApplyError`]): a role that
-    /// denies is `Forbidden`, a role lookup that *errors* is
-    /// `GateUnavailable` (transient store failure is not an authorization
-    /// verdict), and `PersistFailed` means the command HAS already been
-    /// applied to the in-memory session (the seq advanced) — the caller
-    /// must not broadcast it, so peers converge again from the next
-    /// snapshot.
+    /// A denying role is `Forbidden`, and a role lookup that errors is
+    /// `GateUnavailable`, not a verdict. `PersistFailed` means the command
+    /// was already applied in memory, so the caller must not broadcast it and
+    /// peers converge from the next snapshot.
     pub async fn apply_document_command(
         &self,
         live: &LiveWorkspace,
@@ -1432,18 +1401,14 @@ fn normalize_request_email(email: &str) -> Result<String, WorkspaceError> {
     Ok(normalized)
 }
 
-/// The never-leak rule for non-shared views, in one place: a `Personal` view —
-/// and a still-pending `Proposed` view — is readable here only by its creator
-/// (matched on normalized email); everyone else is told `NotFound` so the
-/// row's existence is never confirmed. `Shared` views are readable by any
-/// viewer (membership is enforced upstream).
+/// The never-leak rule for non-shared views: a `Personal` or pending
+/// `Proposed` view is readable here only by its creator (normalized email),
+/// and everyone else gets `NotFound`. `Shared` views are readable by any
+/// member.
 ///
-/// This gate is intentionally **role-blind**: the editor review exception for
-/// `Proposed` views (an editor may read *any* member's pending proposal) is
-/// genuinely role-dependent and is therefore layered at the manager
-/// (`get_saved_view`, `list_saved_views`, `approve`/`reject`), not here.
-/// Keeping the pure match creator-only means a refactor cannot accidentally
-/// disclose another viewer's pending proposal: the default is always deny.
+/// Role-blind on purpose. The editor exception for pending proposals is
+/// layered at the manager, so a refactor here cannot disclose another
+/// member's proposal: the default is deny.
 pub(crate) fn ensure_saved_view_readable(
     saved_view: &WorkspaceSavedView,
     principal: &AuthPrincipal,
@@ -1460,28 +1425,20 @@ pub(crate) fn ensure_saved_view_readable(
     }
 }
 
-/// The creator-driven `/visibility` transition allow-list — the *only* source→
-/// target re-scopes the direct REST endpoint may perform, closed by
-/// construction so an illegal transition is unreachable rather than merely
-/// unsent by today's web UI.
+/// The creator-driven `/visibility` transition allow-list, closed by
+/// construction so an illegal transition is unreachable from the REST
+/// endpoint, not merely unsent by the web UI.
 ///
-/// Allowed (all by the creator; the `→Shared` editor authority is enforced
-/// separately by the caller, not here):
-/// - `Personal → Shared`  (creator shares; caller additionally requires editor)
-/// - `Shared   → Personal` (creator makes their own shared view private again)
-/// - `Personal → Proposed` (creator proposes their view for review)
-/// - `Proposed → Personal` (creator withdraws their own pending proposal)
-/// - a same-state request (`X → X`) — an idempotent no-op (`Ok`), so a benign
-///   "set it to what it already is" never errors.
+/// Allowed, all by the creator:
+/// - `Personal → Shared` (the caller also requires editor)
+/// - `Shared → Personal`
+/// - `Personal → Proposed`
+/// - `Proposed → Personal`
+/// - `X → X`, an idempotent no-op
 ///
-/// Everything else is `BadRequest`. In particular this is what closes the gate
-/// on the two illegal direct transitions #817 calls out:
-/// - `Shared   → Proposed` — a shared view cannot be demoted into the review
-///   queue.
-/// - `Proposed → Shared` — the self-approve bypass: a creator (even an editor)
-///   cannot move their OWN proposal straight to shared and skip the editor
-///   review queue. Sharing a proposal is exclusively `approve_saved_view`'s job
-///   (editor authority over *another member's* bid), never `/visibility`.
+/// Everything else is `BadRequest`. That rejects `Shared → Proposed` and the
+/// self-approve bypass `Proposed → Shared`: sharing a proposal is only
+/// `approve_saved_view`'s job.
 pub(crate) fn saved_view_transition_allowed(
     source: SavedViewVisibility,
     target: SavedViewVisibility,
@@ -1621,7 +1578,7 @@ pub enum CommandApplyError {
     /// infrastructure trouble, never as a permissions verdict.
     #[error("workspace role lookup failed: {0}")]
     GateUnavailable(StoreError),
-    /// The command WAS applied to the in-memory session (the seq advanced)
+    /// The command was applied to the in-memory session (the seq advanced)
     /// but persistence failed. The caller must not broadcast it, so peers
     /// converge again from the next snapshot.
     #[error("{0}")]

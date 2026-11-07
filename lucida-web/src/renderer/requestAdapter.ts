@@ -1,16 +1,11 @@
 /**
  * Ask for the default WebGPU adapter, allowing for a GPU process that is
- * still starting.
- *
- * On a cold headless launch with a hardware backend, the first
- * `requestAdapter()` can resolve to `null` for a few seconds and then start
- * answering with the real adapter. `null` is also the permanent answer on a
- * machine with no usable GPU, so the retry is bounded: twenty attempts half a
- * second apart cover the start-up observed on a Linux host with a discrete
- * GPU (about four seconds) without holding a GPU-less page for long.
- *
- * Both the render worker and the trace seam go through here, so the adapter
- * the seam records is the one the worker's device came from.
+ * still starting. On a cold headless launch `requestAdapter()` can resolve
+ * `null` for a few seconds. `null` is also the permanent answer without a
+ * usable GPU, so the retry is bounded: twenty tries half a second apart cover
+ * the four seconds seen on a Linux host with a discrete GPU. The render
+ * worker and the trace seam both come through here, so the recorded adapter
+ * is the worker's.
  */
 
 export const ADAPTER_ATTEMPTS = 20;

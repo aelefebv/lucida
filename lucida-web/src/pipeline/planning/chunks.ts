@@ -1,6 +1,6 @@
 /**
  * Chunk enumeration + frustum culling primitives. Pure (only mutates
- * the caller-supplied `stats` accumulator). See ADR 0029.
+ * the caller-supplied `stats` accumulator).
  */
 
 import { Axis } from "../../axes.ts";
@@ -77,9 +77,6 @@ export function chunkOutsideFrustum(
  * voxel units. Returns `[x, y, z]`. Used by both spatial enumeration
  * (`iterateGridCells`) and distance scoring (`chunkDistanceFromCenter`)
  * so they agree on the same conversion.
- *
- * Indexing follows the 5-D layout: `[T, C, Z, Y, X]` — see
- * `lucida-web/src/axes.ts` for the named-axis constants.
  */
 export function chunkWorldDims(
   geo: LevelGeometry,
@@ -96,27 +93,11 @@ export function chunkWorldDims(
 }
 
 /**
- * Enumerate chunk grid cells for a tile entry's detail tier, applying
- * spatial culling. Iterates every level in the entry's detail-tier list,
- * all visible channels, and the spatial grid cells that overlap the
- * visible region.
- *
- * Ported from Rust `visible_chunks()` in lucida-core/src/chunk.rs.
- *
- * Accepts the full {@link ActiveSetEntry} union so callers don't have to
- * pre-narrow. Short-circuits to an empty list for non-tile entries:
- *   - `group-as-proxy` — the group is served by a single proxy asset,
- *     not by chunk requests.
- *   - `invisible` — pass-through entry; no chunk requests apply.
- *
- * Returned `ChunkRequest`s are placeholders: `priority` is `0`, `lane`
- * is `"detail"`, and `datasetId` is stamped from the caller-supplied
- * arg (defaults to the empty string for synthetic test snapshots that
- * don't model dataset ownership). The caller (`plan()`) finalises
- * `priority`/`lane` per lane before they leave the planner.
- *
- * Thin wrapper around {@link iterateChunksAtLevels}: short-circuits for
- * non-tile entries and forwards the tile entry's detail-tier levels.
+ * Enumerate culled chunk grid cells for a tile entry's detail-tier levels.
+ * Non-tile entries return `[]`: a `group-as-proxy` is served by one proxy
+ * asset, and `invisible` has no chunks. Returned requests are placeholders
+ * (`priority` 0, `lane` `"detail"`) that `plan()` stamps per lane.
+ * `datasetId` defaults to empty for synthetic test snapshots.
  */
 export function iterateChunks(
   entity: EntitySnapshot,
@@ -189,13 +170,6 @@ export function iterateChunksAtLevels(
  * Channel is the innermost loop so equal-priority multi-channel chunks
  * are spatially interleaved. That lets upload budget reach all channels
  * for the focal cells before walking farther cells.
- *
- * Decomposes into named primitives:
- *   - {@link clipGridCellsToRegion}: reduces the full grid to the
- *     index range that overlaps the visible region; mutates `stats`
- *     for `considered`/`afterXyBounds`/`afterZRange`.
- *   - {@link cellSurvivesFrustum}: per-cell frustum test.
- *   - {@link makeChunkRequest}: emit a placeholder ChunkRequest.
  */
 function iterateGridCells(
   entity: EntitySnapshot,
@@ -284,7 +258,6 @@ function clipGridCellsToRegion(
   stats: PlanStats | null,
   channelCount = 1,
 ): ClippedGridRange | null {
-  // 5D indices: [T=0, C=1, Z=2, Y=3, X=4] — see `axes.ts` (Axis namespace).
   const fullX = level0.shape[Axis.X];
   const fullY = level0.shape[Axis.Y];
 
@@ -359,17 +332,12 @@ function cellSurvivesFrustum(
 }
 
 /**
- * Build a placeholder {@link ChunkRequest} for a surviving (level,
- * channel, z, y, x) cell. `priority`/`lane` are stamped by the caller
- * per lane; `datasetId` is plumbed through from
- * `PlanningSnapshot.datasetId` so every emitted request leaves
- * the planner fully addressed.
+ * Build a placeholder {@link ChunkRequest} for a surviving cell. The caller
+ * stamps `priority` and `lane` per lane.
  *
- * NOTE: cached chunks are NOT filtered here. They flow through
- * `submit()` so the cache can refresh their priority and
- * lastSeenTick — eviction relies on those signals to spare
- * still-wanted chunks. Dedup against the cache happens in
- * `CpuCache.submit`.
+ * Cached chunks are not filtered here. They flow through `submit()` so the
+ * cache refreshes their priority and lastSeenTick, which eviction uses to
+ * spare still-wanted chunks. `CpuCache.submit` dedups against the cache.
  */
 function makeChunkRequest(
   entity: EntitySnapshot,

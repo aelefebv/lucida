@@ -28,10 +28,8 @@ describe("resolveAnnotationDatasetId", () => {
   });
 
   it("falls back to the FIRST annotated dataset when nothing is selected (the inbox window)", () => {
-    // This is the linchpin of the #814-class fix: in the null-selection window
-    // (0 datasets, or >=2 with none clicked) the Mentions inbox still resolves
-    // the pin's REAL dataset, so restore clamps against its true extents instead
-    // of "" (whose WASM volume shape is the [1,1,1] sentinel).
+    // With nothing selected the inbox still resolves the pin's real dataset, so
+    // restore clamps against its extents instead of the `""` [1,1,1] sentinel.
     const scene = makeScene({ annotated: ["wds-deep", "wds-2"] });
     expect(resolveAnnotationDatasetId(scene, null)).toBe("wds-deep");
   });
@@ -60,8 +58,8 @@ describe("currentDatasetAnnotations resolves through the same dataset id", () =>
   });
 
   it("reads the first-annotated dataset's pins in the null-selection window", () => {
-    // The pin set and resolveAnnotationDatasetId agree on the SAME dataset, so a
-    // caller that found a pin here can recover its owning dataset for the clamp.
+    // Agrees with resolveAnnotationDatasetId, so a caller can recover the pin's
+    // owning dataset for the clamp.
     const scene = makeScene({
       annotated: ["wds-deep"],
       byDataset: { "wds-deep": [{ id: "p9" }] },

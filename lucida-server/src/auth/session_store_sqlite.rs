@@ -1,20 +1,10 @@
 //! SQLite-backed `LoginSessionStore`.
 //!
-//! Serves session reads and writes from the pool the SQLite storage
-//! backend opened. The `login_sessions` table and its indexes are defined
-//! in the baseline migration.
-//!
-//! Connecting and migrating belong to [`crate::storage`], not here. A
-//! store that opened its own database would be the only one that could,
-//! and the other five would have to borrow its pool — which is the
-//! arrangement the storage backend replaced.
-//!
-//! The statements come from [`super::session_store_sql`], which the
-//! PostgreSQL store runs too, so this module holds the binding and the
-//! row mapping and no SQL of its own. The numbered placeholders in those
-//! statements are PostgreSQL's spelling, and
-//! `numbered_placeholders_bind_by_number` in [`crate::storage`] is what
-//! pins sqlx's SQLite driver to reading them the same way.
+//! Runs on the pool [`crate::storage`] opened, which owns connecting and
+//! migrating so every store shares one pool. The statements come from
+//! [`super::session_store_sql`], shared with the PostgreSQL store, and
+//! `numbered_placeholders_bind_by_number` in [`crate::storage`] pins how
+//! sqlx's SQLite driver binds their numbered placeholders.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

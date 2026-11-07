@@ -1,22 +1,12 @@
 /**
  * The steady-state ruleset: what the pipeline did after the view settled.
  *
- * The other three threshold families judge a run — a stretch with a cause, a
- * settle and a critical path. None of them can answer the field report's
- * question, because a settled view has no stall to find: the view looks
- * loaded and the network monitor keeps moving. So this family reads the
+ * The other threshold families judge a run, and a settled view has no stall
+ * to find even while the network keeps moving. So this family reads the
  * unlabelled interval that opened when the run closed, and the run's own
- * settle block, and gives "is this expected" a named answer.
- *
- * Five rules, each with its floor and its rationale in {@link RULESET}:
- * sustained bytes received, chunks fetched again, a tier that cannot fit what
- * the view wants, planning passes woken by an availability update alone, and
- * sustained bytes sent. Every number a finding prints is a field of
- * {@link SteadyStateReading}, so the dock, the overlays and this text read one
- * document rather than three.
- *
- * Pure, like the rest of the derivation: everything it needs is in the run and
- * the interval it was handed.
+ * settle block, and gives "is this expected" a named answer. Every number a
+ * finding prints is a field of {@link SteadyStateReading}, so the dock, the
+ * overlays and this text read one document.
  */
 
 import { RESIDENCY_TIERS, type ResidencyTier } from "../../pipeline/residencyTier.ts";
@@ -99,10 +89,6 @@ export function deriveSteadyState(
   };
 }
 
-// ---------------------------------------------------------------------------
-// The interval
-// ---------------------------------------------------------------------------
-
 function describeInterval(interval: TraceRun, replans: ReplanSummary): SteadyStateInterval {
   return {
     id: interval.header.runId,
@@ -124,8 +110,8 @@ interface Delivery {
 /**
  * The interval's deliveries, one per wire request.
  *
- * Several rows can ride one request — the transport coalesces duplicate
- * in-flight fetches onto the first sender's — and each carries that request's
+ * Several rows can ride one request, because the transport coalesces duplicate
+ * in-flight fetches onto the first sender's, and each carries that request's
  * bytes, so a sum over rows would multiply what the wire actually delivered.
  * A row with no wire request of its own has no generation to join on and is
  * counted once, as itself.
@@ -234,10 +220,6 @@ function summariseReplans(interval: TraceRun): ReplanSummary {
   return { passes: busiest(passes), availabilityWoken: busiest(woken) };
 }
 
-// ---------------------------------------------------------------------------
-// The tiers at settle
-// ---------------------------------------------------------------------------
-
 function tiersAtSettle(run: TraceRun): TierAtSettle[] {
   const settle = run.header.outstandingAtSettle;
   const minFillPct = RULESET.steadyState.budgetBound.minFillPct;
@@ -280,10 +262,6 @@ function tiersAtSettle(run: TraceRun): TierAtSettle[] {
     };
   });
 }
-
-// ---------------------------------------------------------------------------
-// The five rules
-// ---------------------------------------------------------------------------
 
 /**
  * What each rule fires on. Distinct strings, because the findings list keeps
@@ -408,10 +386,6 @@ function sentFinding(
     },
   ];
 }
-
-// ---------------------------------------------------------------------------
-// Saying it
-// ---------------------------------------------------------------------------
 
 /**
  * One steady-state finding as a sentence, for the verdict and the reading's

@@ -62,16 +62,13 @@ impl ShardLayout {
     /// the chain does not start with the sharding codec.
     ///
     /// `shard_shape` is the level's `chunk_grid` chunk shape, which for a
-    /// sharded array is the shape of one shard. A chain that names the
-    /// sharding codec but describes a layout this module does not read
-    /// returns an error naming what it found: the sharding codec with other
-    /// codecs beside it, an inner chunk shape that does not tile the shard,
-    /// a nested sharding codec, an inner chain outside the codec allowlist,
-    /// an index codec chain other than `bytes` optionally followed by
-    /// `crc32c`, or an index location other than `start` or `end`. Every
-    /// such error opens by naming the sharding codec, so an import that
-    /// fails on one is classified as an unsupported codec and the layout it
-    /// refused is findable in the metadata.
+    /// sharded array is one shard. A sharding layout this module does not
+    /// read (other codecs beside it, an inner shape that does not tile the
+    /// shard, nested sharding, an inner chain outside the allowlist, an
+    /// index chain other than `bytes` plus optional `crc32c`, or an index
+    /// location other than `start` or `end`) is an error that opens by
+    /// naming the sharding codec, so the import classifies it as an
+    /// unsupported codec.
     pub fn from_codec_chain(
         codecs: &[serde_json::Value],
         shard_shape: &[u64],
@@ -217,17 +214,11 @@ pub struct ShardLocation {
 /// Reads inner chunks out of shards, remembering what each shard's index
 /// says.
 ///
-/// One per binding, held beside the per-level layouts by the resolver that
-/// maps a chunk key to its location. The indexes live as long as the binding
-/// does, so a shard's index is read once and every later inner chunk of
-/// that shard is one range read. A shard object that is not there is
-/// remembered the same way, so an unwritten shard costs one read rather
-/// than one per inner chunk. The cached store beneath still coalesces two
-/// callers who reach a cold shard together onto one index read, so the
-/// once-per-shard rule holds under concurrency as well as in sequence.
-///
-/// The indexes are keyed by shard path alone, so every read through one
-/// cache must go to the one store its binding reads.
+/// One per binding. A shard's index is read once, and a missing shard
+/// object is remembered the same way, so every later inner chunk costs one
+/// range read. The cached store beneath coalesces concurrent cold reads of
+/// one index. Indexes are keyed by shard path alone, so every read through
+/// one cache must go to the one store its binding reads.
 #[derive(Default)]
 pub struct ShardIndexCache {
     indexes: Mutex<HashMap<Path, Arc<ShardIndex>>>,

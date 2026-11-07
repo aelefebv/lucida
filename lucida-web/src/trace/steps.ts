@@ -1,20 +1,12 @@
 /**
- * The page's side of the trace driver's scripted steps (ADR 0051, as
- * amended).
+ * The page's side of the trace driver's scripted steps (ADR 0051).
  *
- * A script's pan, zoom, and orbit reach the page as the pointer and wheel
- * events the driver synthesizes over the DevTools protocol, so they need
- * nothing here: the viewers' own handlers take them. Scrub and select have no
- * such path on the capture surface, where the selectors and the layer panel
- * are hidden and a synthesized click has nothing to land on. So the viewer
- * registers the handlers those controls call, and the driver reaches them
- * through the trace seam. From the handler on, the path is the one a drag of
- * the slider or a click on the checkbox takes, and the recorder hears the
- * input where it always does: at the control.
- *
- * `view` is how the driver learns what a step did. It is the view as the page
- * would save it, read before and after each step, so a step that did not
- * land is a fact in the run rather than a silence.
+ * Pan, zoom, and orbit arrive as synthesized pointer and wheel events and need
+ * nothing here. Scrub and select have nothing to click on the capture surface,
+ * so the viewer registers the handlers those controls call and the driver
+ * reaches them through the trace seam. The recorder still hears the input at
+ * the control. `view` is read before and after each step, so a step that did
+ * not land is a fact in the run rather than a silence.
  */
 
 import type { DatasetId, SavedView, ViewState } from "../savedView/types.ts";

@@ -1,5 +1,5 @@
 /**
- * Two runs compared (#1059). Every case asserts on the comparison document or
+ * Two runs compared. Every case asserts on the comparison document or
  * its text, never on how the deltas were walked: which phase grew, which
  * finding appeared, which header field makes the pair incomparable.
  */

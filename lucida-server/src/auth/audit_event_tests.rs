@@ -1,16 +1,10 @@
 //! Audit-event coverage tests.
 //!
 //! A fixed table of `tracing` events (`auth.signin.*`, `auth.session.*`,
-//! `auth.failure.*`, `auth.startup.*`) is the audit-log surface. This
-//! module spins up an in-process tracing subscriber, exercises the
-//! production code path that should emit each event, and asserts the
-//! event fired with the documented level.
-//!
-//! The capture helper is small and bespoke rather than pulling in the
-//! `tracing-test` crate: we only need event-name + level (+ structured
-//! fields, where the test cares); the subscriber implementation is
-//! ~30 lines of `tracing::Subscriber` glue. Keeping it in-tree avoids a
-//! dev-dependency for one test module.
+//! `auth.failure.*`, `auth.startup.*`) is the audit-log surface. Each test
+//! drives the production path that should emit an event and asserts it
+//! fired at the documented level. The capture subscriber is in-tree glue
+//! rather than the `tracing-test` crate, to avoid a dev-dependency.
 
 #![cfg(test)]
 
@@ -52,9 +46,8 @@ impl CapturedEvent {
 }
 
 /// Subscriber that records every event it sees into a shared `Vec`.
-/// Spans are accepted (so `#[instrument]` attributes don't error) but
-/// not recorded — this slice's events all fire outside instrumented
-/// spans.
+/// Spans are accepted, so `#[instrument]` does not error, but not
+/// recorded: the audited events fire outside instrumented spans.
 #[derive(Clone)]
 struct CaptureSubscriber {
     events: Arc<Mutex<Vec<CapturedEvent>>>,
@@ -437,7 +430,7 @@ async fn hard_cap_expired_emits_auth_session_expired_hard_cap() {
 // auth.startup.insecure_mode — emit pattern matches main.rs branch.
 /// We don't run `main.rs` in a unit test; instead we exercise the same
 /// `tracing::warn!` call shape with the same fields and assert the
-/// captured event matches the PRD's schema. If the structured form drifts
+/// captured event matches the documented schema. If the structured form drifts
 /// in `main.rs`, mirror the change here so the contract stays explicit.
 #[test]
 fn insecure_mode_event_fires_at_warn_with_bind_field() {

@@ -1,34 +1,9 @@
 /**
- * Suite B — proxy upload characterization.
+ * Suite B: proxy upload characterization. Locks the behavior of
+ * `handleProxyUpload`. Suite E, the dispatcher's descriptor-rebuild gating,
+ * is folded in at the end.
  *
- * Locks the behavior of `handleProxyUpload`. Covers the variant matrix
- * for Suites B + E:
- *
- *   1. First proxy upload for an entity → pool created, slot 0 allocated,
- *      descriptor populated.
- *   2. Same proxy upload again (same composite key) → no new allocation,
- *      existing slot reused, LRU touched.
- *   3. Pool fills, new upload arrives → oldest LRU evicted, slot reused,
- *      proxyStats.evicted incremented.
- *   4. `GroupProxy3D` upload for a group with two child tiles → both
- *      children's `groupProxyHandle` populated with same handle.
- *   5. `TileProxy3D` upload → only tile descriptor gets
- *      `tileProxyHandle`; no fan-out happens to other entities.
- *   6. Stale upload (`epochs.selection` < current) → dropped,
- *      proxyStats.dropped incremented, returns no-change outcome.
- *   7. Short-buffer upload (`data.byteLength` < expected) → warned +
- *      dropped, no slot allocated.
- *   8. Outcome.rebuildDescriptor is true on every successful upload —
- *      caller decides whether to act on it based on current cold state.
- *   9. Outcome.wantedSetChanged is true on every successful upload.
- *
- * Suite E (descriptor-rebuild trigger) is folded in below — items 2 + 3
- * are covered by Suite B test #1, and the dispatcher-side rebuild gating
- * (only-rebuild-when-dataset-matches) is exercised as a thin extra block
- * since the dispatcher's policy is what the suite locks.
- *
- * Mocks `WorkerCtx.device` + `GPUDevice` — no real GPU. Registries and
- * the current epochs pointer live on `ctx.state`; tests set
+ * Mocks `WorkerCtx.device` and `GPUDevice`, no real GPU. Tests set
  * `ctx.state.currentEpochs` to drive the staleness check.
  */
 
@@ -54,9 +29,7 @@ import { allocateProxySlot, proxySlotKey } from "../proxyAtlas.ts";
 import { createInitialState } from "../worker/state.ts";
 import { UNTIMED } from "../passTiming.ts";
 
-// ---------------------------------------------------------------------------
 // Mock GPU device — texture creation + writeTexture calls only.
-// ---------------------------------------------------------------------------
 
 interface MockTexture { destroyed: boolean; destroy: () => void; size: [number, number, number] }
 
@@ -167,9 +140,7 @@ function makeColdState(
   };
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 describe("Suite B — handleProxyUpload", () => {
   let handle: MockDeviceHandle;
@@ -182,9 +153,7 @@ describe("Suite B — handleProxyUpload", () => {
     ctx = makeCtx(handle.device, currentEpochs);
   });
 
-  // -------------------------------------------------------------------------
   // 1. First proxy upload for an entity
-  // -------------------------------------------------------------------------
   it("first proxy upload → pool created, slot 0 allocated, descriptor populated", () => {
     const msg = makeMsg({ entityId: "tileA", kind: "TileProxy3D" });
     const outcome = handleProxyUpload(ctx, msg);
@@ -217,9 +186,7 @@ describe("Suite B — handleProxyUpload", () => {
     expect(outcome).toEqual({ rebuildDescriptor: true, wantedSetChanged: true });
   });
 
-  // -------------------------------------------------------------------------
   // 2. Same proxy upload again (same composite key)
-  // -------------------------------------------------------------------------
   it("repeat upload with same key → no new slot, existing slot reused, LRU touched", () => {
     const msg = makeMsg({ entityId: "tileA", kind: "TileProxy3D" });
     handleProxyUpload(ctx, msg);
@@ -247,12 +214,9 @@ describe("Suite B — handleProxyUpload", () => {
     expect(outcome.rebuildDescriptor).toBe(true);
   });
 
-  // -------------------------------------------------------------------------
   // 3. Pool fills, new upload arrives → eviction
-  // -------------------------------------------------------------------------
   it("pool full + new key → oldest LRU evicted, slot reused, evicted stat incremented", () => {
-    // Seed the pool to capacity by pre-allocating directly. PROXY_POOL_CAPACITY=64;
-    // simpler to use a tiny mock by hand-allocating slots through the pool API.
+    // Fill the pool by allocating slots through the pool API.
     const msg0 = makeMsg({ entityId: "tileA", kind: "TileProxy3D" });
     handleProxyUpload(ctx, msg0);
     const pool = [...ctx.state.proxyPoolsByDataset.get("ds1")!.values()][0];
@@ -280,9 +244,7 @@ describe("Suite B — handleProxyUpload", () => {
     expect(outcome).toEqual({ rebuildDescriptor: true, wantedSetChanged: true });
   });
 
-  // -------------------------------------------------------------------------
   // 4. GroupProxy3D upload fans out to child tiles
-  // -------------------------------------------------------------------------
   it("GroupProxy3D upload for group with two child tiles → both child groupProxyHandles set", () => {
     ctx.state.groupToTiles.set("groupA", new Set(["tileA", "tileB"]));
     const outcome = handleProxyUpload(
@@ -330,9 +292,7 @@ describe("Suite B — handleProxyUpload", () => {
     ).toBeNull();
   });
 
-  // -------------------------------------------------------------------------
   // 5. TileProxy3D upload — no fan-out
-  // -------------------------------------------------------------------------
   it("TileProxy3D upload → only tile descriptor mutated; no fan-out to other entities", () => {
     // Preload groupToTiles with another group's children (irrelevant to
     // this upload — should not be touched).
@@ -348,9 +308,7 @@ describe("Suite B — handleProxyUpload", () => {
     expect(ctx.state.proxyDescriptorsByEntity.has(proxyDescriptorKey("tileOther", 0, 0))).toBe(false);
   });
 
-  // -------------------------------------------------------------------------
   // 6. Stale upload — dropped
-  // -------------------------------------------------------------------------
   it("stale upload (epochs.selection < current) → dropped, dropped stat incremented, no slot allocated", () => {
     const stale = makeEpochs({ selection: 3 });
     const current = makeEpochs({ selection: 5 });
@@ -524,9 +482,7 @@ describe("Suite B — handleProxyUpload", () => {
     expect(outcome).toEqual({ rebuildDescriptor: false, wantedSetChanged: true });
   });
 
-  // -------------------------------------------------------------------------
   // 7. Short buffer — dropped with warning
-  // -------------------------------------------------------------------------
   it("short-buffer upload (byteLength < expected) → dropped + warned, no slot allocated", () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     // Build a buffer too small for the declared dims [8,8,8] => 8*8*8*2 = 1024 bytes.
@@ -543,10 +499,8 @@ describe("Suite B — handleProxyUpload", () => {
     warnSpy.mockRestore();
   });
 
-  // -------------------------------------------------------------------------
   // 8. Successful upload always returns rebuildDescriptor=true; caller
   //    decides whether to act on it based on cold-state policy.
-  // -------------------------------------------------------------------------
   it("outcome.rebuildDescriptor is true for any successful upload (caller gates by dataset)", () => {
     const ok1 = handleProxyUpload(
       ctx,
@@ -560,9 +514,7 @@ describe("Suite B — handleProxyUpload", () => {
     expect(ok2.rebuildDescriptor).toBe(true);
   });
 
-  // -------------------------------------------------------------------------
   // 9. Successful upload always returns wantedSetChanged=true
-  // -------------------------------------------------------------------------
   it("outcome.wantedSetChanged is true for successful uploads, false when dropped", () => {
     expect(
       handleProxyUpload(
@@ -586,7 +538,6 @@ describe("Suite B — handleProxyUpload", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Suite E — descriptor-rebuild trigger characterization.
 //
 // The rebuild + wanted-set decisions live in the worker dispatcher
@@ -599,7 +550,6 @@ describe("Suite B — handleProxyUpload", () => {
 // (see `gpu.worker.ts` cases). They don't have a unit-testable surface
 // in this slice without a full worker harness, so we document the
 // expectation here for traceability.
-// ---------------------------------------------------------------------------
 
 describe("Suite E — descriptor-rebuild trigger gating (dispatcher policy)", () => {
   let handle: MockDeviceHandle;

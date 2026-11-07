@@ -1,5 +1,5 @@
 /**
- * The provisional reading (#1057), over synthetic samples.
+ * The provisional reading, over synthetic samples.
  *
  * The cases are about what an open run is allowed to say: the label on every
  * rendering, the window it states, the rows it did not see, and the three

@@ -1,7 +1,7 @@
 //! Collection layout construction functions.
 //!
 //! Builds [`LayoutSpec`] placements and [`TransformEdge`]s for collection-based
-//! datasets, replacing the old mutate-in-place approach with declarative output.
+//! datasets as declarative output.
 
 use std::collections::HashMap;
 

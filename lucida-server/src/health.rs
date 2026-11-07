@@ -1,35 +1,10 @@
-//! Liveness, readiness, and version endpoints for containerized deploys.
+//! Liveness (`/healthz`), readiness (`/readyz`), and version (`/version`)
+//! endpoints for containerized deploys.
 //!
-//! `GET /healthz` answers liveness ("is this process alive?"). The
-//! kubelet uses it to decide "kill and restart this pod."
-//!
-//! `GET /readyz` answers readiness ("should I send traffic to this
-//! pod?"). The Service / load balancer uses it to decide whether to
-//! route requests here.
-//!
-//! `GET /version` returns the running server version (sourced from
-//! `Cargo.toml` at build time). Lets ops confirm what's deployed
-//! without `kubectl exec`-ing in to run `lucida-server --version`.
-//!
-//! The probe routes return `200 OK` with body `"ok"` today. The
-//! liveness/readiness split is intentional even though they behave
-//! identically: future drain-on-shutdown semantics will flip readiness
-//! to 503 while liveness stays 200, so the LB stops routing but the
-//! kubelet doesn't restart the pod mid-drain. The boundary belongs in
-//! code now so the manifests (and any future drain logic) have stable
-//! URLs to point at.
-//!
-//! None of the three says whether the storage backend answers. That is
-//! the opt-in status route in [`crate::status`], mounted beside these
-//! when `LUCIDA_STATUS_PATH` is set.
-//!
-//! ## Auth interaction
-//!
-//! All three routes MUST land on the public router half — the kubelet
-//! does not present a session cookie, and probes timing out due to a
-//! 401 would defeat their entire purpose. /version is similarly public
-//! so it's reachable from monitoring/alerting that may not authenticate.
-//! See [[subsystems/auth]] for the public/protected split.
+//! Liveness and readiness answer the same. They are separate routes so a
+//! drain can flip readiness to 503 while liveness stays 200. None of them
+//! checks the storage backend; that is [`crate::status`]. All three mount
+//! on the public router half, because probes and monitors carry no session.
 
 use axum::Router;
 use axum::http::StatusCode;
@@ -45,15 +20,14 @@ pub const VERSION_PATH: &str = "/version";
 /// router panic on the collision.
 pub const PATHS: [&str; 3] = [HEALTHZ_PATH, READYZ_PATH, VERSION_PATH];
 
-/// Liveness probe handler. Always 200 today; the moment we have an
-/// "I should be killed" condition (e.g. fatal background-task failure)
-/// this is where it surfaces.
+/// Liveness probe handler. Always 200; an "I should be killed" condition,
+/// such as a fatal background-task failure, would surface here.
 async fn healthz() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
 }
 
-/// Readiness probe handler. Always 200 today; future drain-on-shutdown
-/// will flip this to 503 while liveness stays 200.
+/// Readiness probe handler. Always 200; a drain on shutdown would flip it
+/// to 503 while liveness stays 200.
 async fn readyz() -> (StatusCode, &'static str) {
     (StatusCode::OK, "ok")
 }

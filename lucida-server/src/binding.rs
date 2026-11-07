@@ -15,15 +15,10 @@ use crate::proxy::{ProxyCache, ProxyGenerator};
 /// Operational storage binding. Owns live resources.
 /// Built from ServerBindingSeed + source URL + store + cache.
 ///
-/// `dataset_opened` is retained so that subsequent opens of the same URL
-/// (which now resolve to the same DatasetId) can reuse the import work and
-/// rebroadcast the canonical DatasetOpened to the requesting client.
-///
-/// Each binding has its own per-dataset proxy cache directory keyed by
-/// the URL hash, and its own bounded-concurrency generator scoped to
-/// that dataset's content graph and store. They are only built once
-/// per dataset, so the dedup map and semaphore live as long as the
-/// binding.
+/// `dataset_opened` is kept so a later open of the same URL can reuse the
+/// import and rebroadcast the canonical DatasetOpened. The per-dataset
+/// proxy cache directory and bounded generator are built once and live as
+/// long as the binding.
 pub struct ServerBinding {
     pub source_url: String,
     pub store: Arc<dyn ObjectStore>,
@@ -137,6 +132,13 @@ impl ChunkResolver {
     /// [`InnerChunk`]: ChunkLocation::InnerChunk
     pub fn shard_indexes(&self) -> &ShardIndexCache {
         &self.shard_indexes
+    }
+
+    /// The image's raw axes, which every per-level shape parallels.
+    pub fn axes_names(&self, image_id: &ImageId) -> Option<&[String]> {
+        self.images
+            .get(image_id)
+            .map(|img| img.axes_names.as_slice())
     }
 
     /// Look up per-level info (compression + byte layout + chunk shape) for
@@ -256,6 +258,7 @@ mod tests {
                     chunk_size_c: 1,
                 },
                 shard,
+                regrid: None,
             }],
         }
     }

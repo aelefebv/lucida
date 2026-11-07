@@ -1,27 +1,12 @@
 /**
- * View-move cold-state delta.
+ * View-move cold-state delta: patch the dataset's retained cold state in place
+ * (remove, upsert, reorder to `activeSetOrder`) and re-ingest it through
+ * {@link applyColdState}, so departed entities release exactly as in a full
+ * rebuild.
  *
- * Applies a {@link ColdStateDeltaMessage}: patch the dataset's most recent cold
- * state in place — remove the removed entity ids, upsert the changed/added
- * descriptors by entity id, and reorder the active set to the message's
- * `activeSetOrder` — then re-ingest it via the same {@link applyColdState} path a
- * full cold state uses.
- *
- * The reordering is what keeps the worker and main thread agreeing on
- * descriptor-buffer entity indices: `activeSetOrder` is the exact order the main
- * thread's fresh plan produced, and `applyColdState` walks the active set in
- * that order to build the buffer, so an index computed on the main thread from
- * the same order binds to the right entity by construction.
- *
- * Because the re-ingest goes through `applyColdState`, entities that left the
- * view (dropped from the order) release their pool routing + descriptor exactly
- * as a full rebuild would — no ghost tiles — and the freshly-wanted chunks are
- * posted by the caller.
- *
- * No-op when no cold state has landed for the dataset yet: the delta can race
- * ahead of the first full cold state (which the caller's conservative gate makes
- * unlikely, but the worker stays defensive). A full cold state will follow and
- * carry the whole active set itself.
+ * The reorder keeps descriptor-buffer entity indices in agreement with the main
+ * thread, which computes them from the same order. No-op when no cold state
+ * has landed for the dataset yet; a full one will follow.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -38,8 +23,6 @@ export function applyColdStateDelta(
   const cold = ctx.state.coldStateByDataset.get(msg.datasetId);
   if (!cold) return;
 
-  // Build the patched active set keyed by entity id: retained entries (minus
-  // removed) plus upserts, then materialised in the new active-set order.
   const removed = new Set(msg.removedEntityIds);
   const byEntity = new Map<string, ColdStateActiveEntry>();
   for (const entry of cold.activeSet) {
@@ -52,13 +35,9 @@ export function applyColdStateDelta(
   const nextActiveSet: ColdStateActiveEntry[] = [];
   for (const entityId of msg.activeSetOrder) {
     const entry = byEntity.get(entityId);
-    // Every id in the order MUST be either retained (in the prior active set and
-    // not removed) or present in `upserts` — `buildColdStateDelta` guarantees
-    // this by always upserting a non-reusable entry. A miss is a producer-
-    // invariant violation: silently skipping it would shift every subsequent
-    // descriptor index by one and bind wrong-entity descriptors on screen with
-    // no error. Fail loudly instead so such a regression can never surface as
-    // silent wrong-tile corruption.
+    // `buildColdStateDelta` guarantees every id is retained or upserted.
+    // Skipping a miss would shift every later descriptor index and draw the
+    // wrong tiles silently, so fail loudly.
     if (!entry) {
       throw new Error(
         `applyColdStateDelta: activeSetOrder id ${entityId} missing from ` +

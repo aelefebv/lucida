@@ -1,34 +1,11 @@
-//! Cross-peer bookmark broadcast e2e.
+//! Cross-peer bookmark broadcast e2e: the real bookmarks router and auth
+//! middleware wired to a real `Session` and `UnicastRoutes` map.
 //!
-//! Stands up the real bookmarks router behind the real auth middleware
-//! and wires it to a real `Session` + `UnicastRoutes` map. Exercises:
-//!
-//! - POST → `BookmarkChanged { Created }` lands on every connected
-//!   client whose session has at least one overlapping loaded dataset
-//!   URL; clients with no overlap see nothing.
-//! - PATCH → `BookmarkChanged { Updated }` follows the same scope rule.
-//! - DELETE → `BookmarkChanged { Deleted }` follows the same scope rule
-//!   *based on the bookmark's stored dataset URLs*, even if the deleter
-//!   has none of those datasets currently loaded.
-//! - Multi-dataset bookmark touching both sets reaches every client
-//!   regardless of which subset they have loaded (the scope is "any
-//!   overlap", not "all overlap").
-//! - Self-broadcast: the originating client receives the broadcast too
-//!   (we don't filter sender server-side — the optimistic local state
-//!   in the web client reconciles cleanly via the broadcast-driven
-//!   refetch).
-//!
-//! ## Why mpsc receivers stand in for WebSockets
-//!
-//! The `unicast_routes` map is the same `HashMap<ClientId,
-//! mpsc::UnboundedSender<Message>>` the WebSocket handler uses to
-//! deliver per-client frames. Inserting a receiver under a synthetic
-//! `ClientId` is exactly what `handle_client` does on connect, minus
-//! the WebSocket transport. The broadcast helper enqueues
-//! `Message::Text` items into those senders; the WS outbound loop
-//! would forward each verbatim to the wire. Avoiding tungstenite
-//! keeps the dep budget flat and the test deterministic (no port
-//! flakiness, no async accept loops to teardown).
+//! Create, update, and delete each reach every client with any overlapping
+//! loaded dataset and no other; delete scopes by the bookmark's stored
+//! URLs. The originator receives its own broadcast. Receivers registered in
+//! `unicast_routes`, as `handle_client` does on connect, stand in for
+//! sockets so the test stays deterministic.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -285,16 +262,11 @@ async fn read_json(res: axum::response::Response) -> Value {
 const URL_A: &str = "gs://bucket/a.zarr";
 const URL_B: &str = "gs://bucket/b.zarr";
 
-/// Two clients connected to the same Session. Client A has dataset
-/// URL_A loaded; client B has URL_B (in this test rig the session is
-/// shared so both URLs end up loaded once we install both bindings —
-/// see the "broadcast scope" note in the broadcast module docs).
-///
-/// Acceptance criterion §"affected-client computation": the broadcast
-/// scope is decided by the bookmark's `dataset_urls` overlapping any
-/// loaded URL. With both URL_A and URL_B installed, a bookmark
-/// referencing URL_A reaches both clients (both share the session),
-/// and a bookmark referencing URL_C reaches neither.
+/// Two clients on the same Session, one with URL_A loaded and one with
+/// URL_B. The session is shared, so installing both bindings loads both
+/// URLs. Scope is the bookmark's `dataset_urls` overlapping any loaded
+/// URL: a bookmark on URL_A reaches both clients, and one on URL_C
+/// reaches neither.
 #[tokio::test]
 async fn post_broadcasts_to_clients_with_overlapping_datasets() {
     let rig = build_rig().await;

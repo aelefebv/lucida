@@ -122,7 +122,7 @@ export function buildColdActiveEntry(
 /**
  * Pure end-to-end builder. Per-tick invariant: every call corresponds
  * to a worker atlas rebuild; the chunk delivery tracker is cleared once
- * per tick via `Uploader.onPlanRebuildStart` before the first call.
+ * per tick via `CpuCache.onPlanRebuildStart` before the first call.
  */
 export function buildColdState(args: {
   datasetId: string;
@@ -202,19 +202,14 @@ export function computeActiveSetIndexMap(
 }
 
 /**
- * Stable key over EVERY field {@link buildColdActiveEntry} reads from a planner
- * entry to build a descriptor — so two entries with equal keys produce a
- * byte-identical descriptor and one can be reused across a view move.
+ * Stable key over every view-dependent field {@link buildColdActiveEntry}
+ * reads from a planner entry, so equal keys mean a byte-identical descriptor
+ * that can be reused across a view move. Fields left out cannot change when
+ * only the camera moved, which is the only case the caller emits a delta for.
  *
- * Returns `null` for `group-as-proxy`: its model matrix is synthesized from the
- * currently-visible child-tile set (see `synthesizeGroupRosterEntry`), which a
- * view move changes, so a group-as-proxy descriptor is never safe to reuse and
- * is always rebuilt.
- *
- * Fields NOT included are those that are view-independent within a view move
- * (levels geometry, layout position, model matrix for tiles, per-channel display
- * state, parent group id) — the caller only emits a delta when nothing but the
- * camera moved, so those are provably unchanged and need not be compared.
+ * Returns `null` for `group-as-proxy`: its model matrix comes from the
+ * visible child-tile set (see `synthesizeGroupRosterEntry`), which a view
+ * move changes, so it is always rebuilt.
  */
 export function activeEntryReuseKey(entry: ActiveSetEntry): string | null {
   if (entry.kind === "group-as-proxy") return null;

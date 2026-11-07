@@ -1,23 +1,12 @@
 /**
  * The trace seam: the page-level export function every reader goes through
- * (ADR 0051).
+ * (ADR 0051). `lucida trace`, an agent driving its own browser, and the
+ * monitor's save button all call it, so no surface gets a privately shaped
+ * copy.
  *
- * `lucida trace`, an agent driving its own browser, and the monitor's save
- * button are three callers of one function, so no surface gets a privately
- * shaped copy. It is **public interface in every build** — the existing dev
- * globals are `import.meta.env.DEV`-gated and therefore invisible to a
- * driver running against a real bundle, and a diagnostic that only exists in
- * development cannot explain a field report.
- *
- * Treat this object like a wire type: versioned, and not reshaped casually.
- *
- * ```js
- * // From a console, or over CDP against a production page:
- * const doc = window.lucidaTrace.exportTrace();
- * window.lucidaTrace.quiescence.quiescent;  // has the page settled?
- * window.lucidaTrace.provisional();         // a labelled reading of the open run, closing nothing
- * window.lucidaTrace.liveTimeline();        // the dock's live charts as fields, closing nothing
- * ```
+ * Installed in every build, because a diagnostic that only exists in
+ * development cannot explain a field report. Treat this object like a wire
+ * type: versioned, and not reshaped casually.
  */
 
 import { configStore } from "../pipeline/planning/configStore.ts";
@@ -83,17 +72,16 @@ export interface LucidaTraceSeam {
    */
   readonly quiescence: QuiescenceState | null;
   /**
-   * How long `quiescent` must hold before the run closes itself (ADR 0051).
-   * A driver that exports the moment the boolean first goes true closes the
-   * run as `explicit` instead, losing the one field that says the page
-   * settled — so the wait belongs to whoever polls, and this is the number
-   * they have to wait.
+   * How long `quiescent` must hold before the run closes itself. A driver
+   * that exports the moment the boolean first goes true closes the run as
+   * `explicit` instead, losing the one field that says the page settled, so
+   * the wait belongs to whoever polls, and this is how long to wait.
    */
   readonly quiescenceHoldMs: number;
   /**
    * Whether a labelled run is open right now, and how many have concluded on
-   * their own — both readable without exporting, which would close the run
-   * being asked about.
+   * their own. Both are readable without exporting, which would close the
+   * run being asked about.
    *
    * A driver needs this to read {@link quiescence} honestly. Before a run
    * begins nothing is dirty and nothing is wanted, so the predicate is
@@ -105,31 +93,27 @@ export interface LucidaTraceSeam {
   readonly runState: { open: boolean; concluded: number; lastConcludedRunId: string | null };
   /**
    * What the run in progress can say about itself, or null when no run is
-   * open (#937): counts of the rows it has made, where the unfinished ones
-   * are sitting, and how long it has been going.
+   * open: counts of the rows it has made, where the unfinished ones are
+   * sitting, and how long it has been going.
    *
-   * One of the two reads here that do **not** close the run, which is what
-   * makes a live view possible at all. The other is {@link provisional}. It
-   * deliberately carries no verdict: the attribution back-walk needs an end
-   * to walk back from, and a headline that changes while you read it is not
-   * a headline. Poll it, then read {@link diagnose} for the run named in
-   * `runId` once it closes.
+   * Like {@link provisional}, it does not close the run. It carries no
+   * verdict: the attribution back-walk needs an end to walk back from. Poll
+   * it, then read {@link diagnose} for the run named in `runId` once it
+   * closes.
    */
   progress(): LiveProgress | null;
   /**
-   * A provisional reading over a trailing window of the run in progress
-   * (#1057), or null when no run is open: the phase occupancy this instant,
-   * the top finding over the window, and the page's quiescence reason, with
-   * the window it read and the rows it did not see. Labelled provisional in
-   * the document and in every rendering, because it changes while you read
-   * it. It is not a verdict, it carries no `verdict` field, and a gate reads
-   * only the verdict of a closed run.
+   * A provisional reading over a trailing window of the run in progress, or
+   * null when no run is open: the phase occupancy this instant, the top
+   * finding over the window, and the page's quiescence reason, with the
+   * window it read and the rows it did not see. Labelled provisional in the
+   * document and in every rendering, because it changes while you read it.
+   * It carries no `verdict` field; a gate reads only the verdict of a closed
+   * run.
    *
-   * Does **not** close the run, and walks no row: a session that never
-   * quiesces can be polled at the tick cadence without being perturbed. The
-   * live view draws from this object, the watch stream carries it, and an
-   * agent driving its own browser reads it as JSON. `windowMs` sets how far
-   * back it looks; the default is five seconds.
+   * Does not close the run, and walks no row, so a session that never
+   * quiesces can be polled at the tick cadence without being perturbed.
+   * `windowMs` sets how far back it looks; the default is five seconds.
    */
   provisional(options?: ProvisionalOptions): ProvisionalReading | null;
   /** {@link provisional} rendered as text, or null when no run is open. */
@@ -157,16 +141,15 @@ export interface LucidaTraceSeam {
   exportTrace(): TraceDocument;
   /**
    * The same document projected into Chrome Trace Event JSON, ready to open
-   * in Perfetto (#934). A string rather than an object: every caller writes
-   * it to a file or a blob, and handing a driver a 13,000-slice object graph
-   * to re-serialise over CDP would cost more than the projection.
+   * in Perfetto. A string rather than an object: every caller writes it to
+   * a file or a blob, and handing a driver a 13,000-slice object graph to
+   * re-serialise over CDP would cost more than the projection.
    *
-   * Closes the run in progress, exactly as {@link exportTrace} does — it is
-   * the same export, in the other format.
+   * Closes the run in progress, exactly as {@link exportTrace} does.
    */
   exportChromeTrace(): string;
   /**
-   * The bundle (#1055): the trace document, the diagnostic with every text
+   * The bundle: the trace document, the diagnostic with every text
    * rendering, the settled frame, the view URL, the planning configuration,
    * the pins, the server's dataset health counters, and a header sufficient
    * to replay the run. The monitor's **Save bundle** and `lucida trace
@@ -176,19 +159,17 @@ export interface LucidaTraceSeam {
    * Asynchronous because the health is a socket round trip and the frame is
    * read off the render worker's canvas. A driver that took its own
    * screenshot passes it as `fallbackFrame`, and the page carries it only
-   * when that read fails (#1098). Closes the run in progress, exactly as
+   * when that read fails. Closes the run in progress, exactly as
    * {@link exportTrace} does: it is the same export with more around it.
    * The Perfetto projection is included only when `perfetto` is set.
    */
   exportBundle(options?: BundleOptions): Promise<TraceBundle>;
   /**
-   * The trace read as a diagnostic (#933): thresholds, the attribution
-   * back-walk, the coverage block and the verdict. Defaults to the newest run.
+   * The trace read as a diagnostic: thresholds, the attribution back-walk,
+   * the coverage block and the verdict. Defaults to the newest run.
    *
-   * The derivation lives behind the seam because both surfaces read it — the
-   * monitor's cards and the agent's text render from this one object, so they
-   * cannot disagree — and because a CLI that computed its own verdict would
-   * make the second entry point a second-class citizen.
+   * The derivation lives behind the seam so the monitor's cards and the
+   * agent's text render from this one object and cannot disagree.
    *
    * Closes the run in progress, exactly as {@link exportTrace} does: asking
    * what a run means concludes the interval being asked about.
@@ -202,7 +183,7 @@ export interface LucidaTraceSeam {
   diagnose(runId?: string, scope?: Omit<DiagnoseScope, "runId">): DiagnosticDocument;
   /**
    * The same diagnostic rendered as the default text. One renderer, so every
-   * number in the text exists in {@link diagnose}'s output — a caller drops to
+   * number in the text exists in {@link diagnose}'s output. A caller drops to
    * the JSON for the fields the text selected against, never for a different
    * answer.
    *
@@ -231,7 +212,7 @@ export interface LucidaTraceSeam {
   /** {@link diagnoseTrace} rendered as text, at any depth {@link diagnoseText} renders. */
   diagnoseTraceText(document: TraceDocument, options?: DiagnoseTextScope): string;
   /**
-   * Two runs compared (#1059): header differences with a warning when they
+   * Two runs compared: header differences with a warning when they
    * make the runs incomparable, phase deltas, and finding deltas, every
    * delta right minus left. The subtraction lives here, behind the seam, so
    * `lucida trace diff` and any viewer surface that sets two runs side by
@@ -284,7 +265,7 @@ export interface LucidaTraceSeam {
    */
   select(target: SelectTarget, visible?: boolean): StepOutcome;
   /**
-   * Close the run in progress without exporting — the *Stop & analyse* path.
+   * Close the run in progress without exporting: the *Stop & analyse* path.
    *
    * A driver that gave up on a run that never settled passes `"timeout"`:
    * every run carries an end reason, and `explicit` would claim the run was
@@ -432,9 +413,9 @@ export async function resolveGpuIdentity(retry?: AdapterRetry): Promise<GpuIdent
 }
 
 /**
- * `isFallbackAdapter` moved from the adapter to its info record. Read
- * whichever the browser has, and answer null rather than hardware when it
- * has neither.
+ * Browsers expose `isFallbackAdapter` on the adapter or on its info record.
+ * Read whichever the browser has, and answer null rather than hardware when
+ * it has neither.
  */
 function isFallbackAdapter(adapter: GPUAdapter): boolean | null {
   const onInfo = (adapter.info as { isFallbackAdapter?: boolean }).isFallbackAdapter;

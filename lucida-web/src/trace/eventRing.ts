@@ -1,16 +1,12 @@
 /**
  * Tier three: point events, on a drop-oldest ring.
  *
- * Eviction, rejection, retry and failure are the least-understood part of the
- * pipeline precisely because nobody has caught them happening — #899 observed
- * zero retries and zero real failures across 3,781 remote reads, so those
- * paths have never executed under measurement. That is the argument against
- * designing a rich surface for them: they get one shape, and their diagnostic
- * value is that they appear at all.
+ * Eviction, rejection, retry, and failure are rare: one measurement saw zero
+ * retries and zero real failures across 3,781 remote reads. So they get one
+ * shape, and their diagnostic value is that they appear at all.
  *
- * Like the tick ring and unlike the per-chunk tier, this drops oldest. It is
- * a steady-state stream with no privileged start, and it reports what it
- * dropped so a wrapped ring is visible rather than inferred.
+ * Like the tick ring and unlike the per-chunk tier, this drops oldest, and it
+ * reports what it dropped so a wrapped ring is visible rather than inferred.
  */
 
 import { RESIDENCY_TIERS } from "../pipeline/residencyTier.ts";

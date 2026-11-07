@@ -1,23 +1,12 @@
 /**
- * The bundle: one file that carries everything a reader needs to read a run
- * and everything the driver needs to replay it (#1055).
+ * The bundle: one file with everything a reader needs to read a run and the
+ * driver needs to replay it. One function makes it behind the trace seam, so
+ * the monitor and `lucida trace` write the same artifact (ADR 0051).
  *
- * A saved run is the trace document alone. A bundle adds the settled frame as
- * a PNG at the run's device pixel ratio, the view URL, the planning
- * configuration, the level and display pins, the server's dataset health
- * counters, the diagnostic with its text renderings, and a header sufficient
- * for replay. One function produces it behind the trace seam, so the bundle a
- * person saves from the monitor and the bundle `lucida trace` writes are the
- * same artifact (ADR 0051 as amended).
- *
- * Where a field comes from decides what it means. The view URL, viewport,
- * device pixel ratio, mode, build, adapter, and cache warmth are read off the
- * header the recorder closed the run with, so a bundle saved long after a run
- * describes the view the run measured rather than the view on screen when
- * somebody pressed the button. The pins are decoded from that same view URL
- * for the same reason. Two things have no record in the trace and are read
- * when the bundle is made: the planning configuration and the server's health
- * counters. The header says when that was.
+ * View fields and pins are read off the header the run closed with, so a
+ * bundle saved long after a run describes the view the run measured. The
+ * planning configuration and the server's health counters have no record in
+ * the trace and are read when the bundle is made.
  */
 
 import type { DatasetSourceHealth } from "../bridge.ts";
@@ -51,11 +40,8 @@ export const BUNDLE_FORMAT = "lucida-trace-bundle";
 export const BUNDLE_VERSION = 1;
 
 /**
- * The header fields the driver needs to replay a bundle, in the order the
- * spec names them (#1048): dataset, view URL, viewport, device pixel ratio,
- * mode, planning configuration, the level, render mode, contrast and colormap
- * pins, build, adapter, and cache warmth. `pins` carries the four pin kinds
- * per dataset. Every other header field is in {@link IDENTITY_HEADER_FIELDS};
+ * The header fields the driver needs to replay a bundle. Every other header
+ * field is in {@link IDENTITY_HEADER_FIELDS};
  * the two lists partition the header, and tests on both sides of the golden
  * fixture assert that, so a field added to the header lands in one list or
  * fails.
@@ -100,7 +86,7 @@ export interface BundleDataset {
  */
 export interface DatasetPins {
   datasetId: string;
-  /** The level pin. Absent means the target followed the screen (ADR 0061). */
+  /** The level pin. Absent means the target followed the screen. */
   level: number | null;
   renderMode: RenderMode | null;
   /** One window per channel. */
@@ -269,7 +255,7 @@ export interface BundleOptions {
    * how the driver hands over its DevTools screenshot. The page's capture
    * comes first because it copies the canvas texture from inside a rendered
    * frame, while a screenshot can leave a WebGPU canvas out: headless Chrome
-   * on Vulkan returns solid black for it (#1098). So a fallback whose canvas
+   * on Vulkan returns solid black for it. So a fallback whose canvas
    * region decodes to one flat colour is not carried either. The bundle
    * records the frame as absent and names the colour. Ignored when `frame`
    * is given.

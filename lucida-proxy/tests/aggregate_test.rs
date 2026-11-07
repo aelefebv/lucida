@@ -292,7 +292,7 @@ fn aggregate_overlapping_tiles_average() {
     assert_eq!(v_overlap, 150, "overlap region should average");
 }
 
-/// Regression for #417: when a tile's volume is read at a downsampled level,
+/// When a tile's volume is read at a downsampled level,
 /// the source must provide a `voxel_to_image` scale transform mapping the
 /// level's voxel coords back to full-res-equivalent units. Without it, tiles
 /// shrink to `full_res / 2^level` in the group-space proxy.

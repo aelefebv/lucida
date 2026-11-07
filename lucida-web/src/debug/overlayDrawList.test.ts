@@ -28,21 +28,19 @@ import { currentChunkSelection, publishChunkSelection } from "../trace/linkedSel
 import { PHASES, type TraceRun } from "../trace/types.ts";
 import {
   buildChunkDrawList,
-  CELL_BORDER,
-  CHURN_BANDS,
   churnBand,
   churnWindowLabel,
   describeHoverInspector,
   hitTestChunk,
-  NO_ROW_FILL,
   overlayAbsence,
+  overlayPaints,
   PHASE_FILL_ALPHA,
-  SELECTED_BORDER,
-  SELECTED_FILL,
   selectionCaption,
   type ChunkCell,
   type OverlayModes,
 } from "./overlayDrawList.ts";
+import { OVERLAY_TEST_COLORS, OVERLAY_TEST_PAINTS } from "./overlayFixtures.ts";
+import { rgbColor } from "../theme/tokenColors.ts";
 
 const MS = 1_000;
 
@@ -85,7 +83,7 @@ function drawOver(run: TraceRun, cells: ChunkCell[], modes: Partial<OverlayModes
   const states = deriveChunkStates(run);
   return {
     states,
-    list: buildChunkDrawList({ cells, modes: { ...OFF, ...modes }, readingOf: readerOver(states), windowMs: states.windowMs }),
+    list: buildChunkDrawList({ colors: OVERLAY_TEST_COLORS, cells, modes: { ...OFF, ...modes }, readingOf: readerOver(states), windowMs: states.windowMs }),
   };
 }
 
@@ -114,20 +112,15 @@ describe("phase color", () => {
       makeRow({ startUs: 10 * MS, durations: { plan: 100, queue: MS, wire: 5 * MS }, outcome: "in-flight" }, 0),
     ];
     const { list } = drawOver(makeRun({ header: { durationUs: 100 * MS }, rows }), [cell(0)], { phaseColor: true });
-    const hex = PHASE_COLORS.decode;
-    const r = Number.parseInt(hex.slice(1, 3), 16);
-    const g = Number.parseInt(hex.slice(3, 5), 16);
-    const b = Number.parseInt(hex.slice(5, 7), 16);
-    // The rgba the overlay paints is the timeline's hex with an alpha, nothing else.
-    expect(list.items[0].fill).toBe(`rgba(${r}, ${g}, ${b}, ${PHASE_FILL_ALPHA})`);
+    // The rgba the overlay paints is the timeline's color with an alpha, nothing else.
     expect(list.items[0].fill).toBe(withAlpha(seriesColor("occupancy.browser", "decode"), PHASE_FILL_ALPHA));
   });
 
   it("leaves a cell with no row unpainted and says why, rather than giving it a phase", () => {
     const { list } = drawOver(healthyLocalOpen(), [cell(999)], { phaseColor: true });
 
-    expect(list.items[0].fill).toBe(NO_ROW_FILL);
-    expect(list.items[0].border).not.toBe(CELL_BORDER);
+    expect(list.items[0].fill).toBe(OVERLAY_TEST_PAINTS.noRowFill);
+    expect(list.items[0].border).not.toBe(OVERLAY_TEST_PAINTS.cellBorder);
     expect(list.items[0].reading).toBeNull();
     expect(list.items[0].tooltip).toContain("no row in the open interval");
     expect(list.items[0].tooltip).toContain("resident before it opened, still queued, or never wanted");
@@ -152,23 +145,23 @@ describe("churn tint", () => {
       churnTint: true,
     });
 
-    const three = churnBand(3)!;
+    const three = churnBand(3, OVERLAY_TEST_PAINTS)!;
     for (const item of list.items.slice(0, 12)) {
       expect(item.fill).toBe(three.fill);
       expect(item.tooltip).toContain(`fetched 3× ${churnWindowLabel(states.windowMs)}`);
       expect(item.tooltip).toContain("8.0 s");
     }
     expect(list.churned).toBe(12);
-    expect(list.items[12].fill).toBe(NO_ROW_FILL);
+    expect(list.items[12].fill).toBe(OVERLAY_TEST_PAINTS.noRowFill);
   });
 
   it("bands the count so a loop reads at a glance, with one fetch barely tinted", () => {
-    expect(churnBand(0)).toBeNull();
-    expect(churnBand(1)?.label).toBe("1 fetch");
-    expect(churnBand(2)?.label).toBe("2 fetches");
-    expect(churnBand(3)?.label).toBe("3 fetches");
-    expect(churnBand(9)?.label).toBe("4 or more fetches");
-    expect(CHURN_BANDS.map((band) => band.minFetches)).toEqual([4, 3, 2, 1]);
+    expect(churnBand(0, OVERLAY_TEST_PAINTS)).toBeNull();
+    expect(churnBand(1, OVERLAY_TEST_PAINTS)?.label).toBe("1 fetch");
+    expect(churnBand(2, OVERLAY_TEST_PAINTS)?.label).toBe("2 fetches");
+    expect(churnBand(3, OVERLAY_TEST_PAINTS)?.label).toBe("3 fetches");
+    expect(churnBand(9, OVERLAY_TEST_PAINTS)?.label).toBe("4 or more fetches");
+    expect(OVERLAY_TEST_PAINTS.churnBands.map((band) => band.minFetches)).toEqual([4, 3, 2, 1]);
   });
 
   it("draws churn as the border when phase color has the fill", () => {
@@ -177,7 +170,7 @@ describe("churn tint", () => {
       churnTint: true,
     });
     expect(list.items[0].fill).toBe(withAlpha(ROW_STATE_COLORS.complete, PHASE_FILL_ALPHA));
-    expect(list.items[0].border).toBe(churnBand(3)!.border);
+    expect(list.items[0].border).toBe(churnBand(3, OVERLAY_TEST_PAINTS)!.border);
     expect(list.items[0].tooltip).toContain("phase complete");
     expect(list.items[0].tooltip).toContain("fetched 3×");
   });
@@ -191,7 +184,7 @@ describe("churn tint", () => {
 describe("the cache modes", () => {
   it("never ask the trace for a reading, and color as the grid always has", () => {
     let asked = 0;
-    const list = buildChunkDrawList({
+    const list = buildChunkDrawList({ colors: OVERLAY_TEST_COLORS,
       cells: [cell(0), cell(1, { status: "in-flight" }), cell(2, { status: "planned", priorityRank: 3 })],
       modes: { ...OFF, plannedRank: true },
       readingOf: () => {
@@ -202,9 +195,9 @@ describe("the cache modes", () => {
     });
     expect(asked).toBe(0);
     expect(list.items.map((item) => item.fill)).toEqual([
-      "rgba(80, 220, 120, 0.30)",
-      "rgba(240, 200, 70, 0.35)",
-      "rgba(255, 180, 60, 0.50)",
+      OVERLAY_TEST_PAINTS.cached,
+      OVERLAY_TEST_PAINTS.inFlight,
+      OVERLAY_TEST_PAINTS.plannedRank.under5,
     ]);
     expect(list.items[2].tooltip).toBe("detail · planned · queue rank 3");
   });
@@ -313,7 +306,7 @@ describe("what an empty picture means", () => {
 
   it("names each nothing: no interval, no cell, no row, and no chunk fetched twice", () => {
     const modes = { ...OFF, phaseColor: true, churnTint: true };
-    const empty = buildChunkDrawList({ cells: [], modes, readingOf: () => null, windowMs: null });
+    const empty = buildChunkDrawList({ colors: OVERLAY_TEST_COLORS, cells: [], modes, readingOf: () => null, windowMs: null });
     expect(overlayAbsence(modes, empty, null)).toContain("no interval is open");
     expect(overlayAbsence(modes, empty, 4_000)).toContain("no chunk on screen to color");
 
@@ -341,7 +334,7 @@ describe("the brushed selection", () => {
   /** The store's current set, as the overlay reads it: never the dock. */
   function drawWithSelection(run: TraceRun, cells: ChunkCell[], modes: Partial<OverlayModes>) {
     const states = deriveChunkStates(run);
-    return buildChunkDrawList({
+    return buildChunkDrawList({ colors: OVERLAY_TEST_COLORS,
       cells,
       modes: { ...OFF, ...modes },
       readingOf: readerOver(states),
@@ -358,10 +351,10 @@ describe("the brushed selection", () => {
     const list = drawWithSelection(run, [cell(0), cell(70), cell(999)], {});
 
     expect(list.items.map((item) => item.selected)).toEqual([false, true, false]);
-    expect(list.items[1].border).toBe(SELECTED_BORDER);
-    expect(list.items[1].fill).toBe(SELECTED_FILL);
+    expect(list.items[1].border).toBe(OVERLAY_TEST_PAINTS.selectedBorder);
+    expect(list.items[1].fill).toBe(OVERLAY_TEST_PAINTS.selectedFill);
     expect(list.items[1].tooltip).toContain("in the brushed window");
-    expect(list.items[0].border).toBe(CELL_BORDER);
+    expect(list.items[0].border).toBe(OVERLAY_TEST_PAINTS.cellBorder);
     expect(list.items[0].tooltip).not.toContain("brushed");
     expect(list.selected).toBe(1);
   });
@@ -374,7 +367,7 @@ describe("the brushed selection", () => {
 
     expect(list.items[0].selected).toBe(true);
     expect(list.items[0].fill).toBe(withAlpha(ROW_STATE_COLORS.complete, PHASE_FILL_ALPHA));
-    expect(list.items[0].border).toBe(SELECTED_BORDER);
+    expect(list.items[0].border).toBe(OVERLAY_TEST_PAINTS.selectedBorder);
   });
 
   it("selects nothing once the set is cleared, and nothing when none was published", () => {
@@ -385,7 +378,7 @@ describe("the brushed selection", () => {
     const list = drawWithSelection(run, [cell(70)], {});
 
     expect(list.items[0].selected).toBe(false);
-    expect(list.items[0].border).toBe(CELL_BORDER);
+    expect(list.items[0].border).toBe(OVERLAY_TEST_PAINTS.cellBorder);
     expect(list.selected).toBe(0);
     expect(selectionCaption(null, list)).toBeNull();
   });
@@ -429,5 +422,33 @@ describe("the brushed selection", () => {
     for (const source of [overlay, drawList]) {
       expect(source).not.toMatch(/monitor\/(MonitorDock|TimelineCanvas|monitorSource|MonitorReport)/);
     }
+  });
+});
+
+describe("overlay paints", () => {
+  /** Every color string in a set of paints, by path. */
+  function leaves(value: unknown, path = ""): [string, string][] {
+    if (typeof value === "string") return path.endsWith(".label") ? [] : [[path, value]];
+    if (typeof value !== "object" || value === null) return [];
+    return Object.entries(value).flatMap(([key, child]) => leaves(child, `${path}.${key}`));
+  }
+
+  it("takes every color from the canvas tokens it is given", () => {
+    const light = overlayPaints({
+      stroke: rgbColor(0, 0, 0, 0.75),
+      label: rgbColor(0, 0, 0, 0.85),
+      success: rgbColor(23, 128, 61),
+      warning: rgbColor(154, 87, 0),
+      danger: rgbColor(212, 42, 42),
+      info: rgbColor(37, 99, 235),
+    });
+    const dark = leaves(OVERLAY_TEST_PAINTS);
+    const other = new Map(leaves(light));
+    expect(dark.length).toBeGreaterThan(20);
+    for (const [path, color] of dark) expect(other.get(path), path).not.toBe(color);
+  });
+
+  it("builds once per set of colors", () => {
+    expect(overlayPaints(OVERLAY_TEST_COLORS)).toBe(OVERLAY_TEST_PAINTS);
   });
 });

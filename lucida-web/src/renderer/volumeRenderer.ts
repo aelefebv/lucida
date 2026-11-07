@@ -68,10 +68,9 @@ export class VolumeRenderer {
   private singleSlotIndirectionBuf: GPUBuffer | null = null;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
-  // Proxy textures for binding. The descriptor carries pool/slot
-  // indices + dims; the texture handle stays CPU-side because WebGPU
-  // bind groups can't index into a texture array without a texture-
-  // array binding (future optimization).
+  // The descriptor carries proxy pool and slot indices; the texture handle
+  // stays CPU-side because a bind group cannot index a texture array
+  // without a texture-array binding.
   private tileProxyTexture: GPUTexture | null = null;
   private groupProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
@@ -246,9 +245,7 @@ export class VolumeRenderer {
     // Bind group will be rebuilt on the next setTierAtlases call
   }
 
-  /** Lazily allocate the 1×1×1 dummy proxy texture used when no real
-   *  proxy is bound. Same r16uint format as the real proxy atlases so
-   *  the bind-group layout is satisfied. */
+  /** r16uint like the real proxy atlases, so the bind-group layout is satisfied. */
   private getDummyProxyTexture(): GPUTexture {
     if (!this.dummyProxyTexture) {
       this.dummyProxyTexture = this.device.createTexture({
@@ -312,8 +309,8 @@ export class VolumeRenderer {
 
   /**
    * Set the declared-label-palette storage buffer for the next categorical
-   * draw ([id, packedRgba] pairs). Pass `null` (or omit) for intensity
-   * draws — a dummy is bound so the layout stays satisfied.
+   * draw ([id, packedRgba] pairs). Pass `null` for intensity draws; a
+   * dummy keeps the layout satisfied.
    */
   setLabelColorBuffer(buffer: GPUBuffer | null) {
     this.labelColorBuffer = buffer;
@@ -322,9 +319,7 @@ export class VolumeRenderer {
   /**
    * Bind the per-dataset entity descriptor buffer and write the entity
    * index (and, for categorical label draws, the declared-palette count)
-   * for the next draw. Rebuilds the descriptor bind group if the descriptor
-   * or label-palette buffer pointer changed (cold-state churn → buffer
-   * recreated; label vs. intensity draw → palette swapped).
+   * for the next draw.
    */
   setDescriptorBinding(descriptorBuffer: GPUBuffer, entityIndex: number, labelColorCount = 0) {
     const labelColors = this.labelColorBuffer ?? this.dummyLabelColorBuffer;
@@ -349,15 +344,9 @@ export class VolumeRenderer {
   }
 
   /**
-   * Bind a single-entity transient descriptor for callers that don't
-   * have a cold-state-backed descriptor buffer (minimap path). Writes
-   * `modelMatrix` + `invModelMatrix` and one level source covering the
-   * full volume from level pool binding 0; the ray march takes its step
-   * from that source's `volumeDims`.
-   *
-   * Callers also pass display state (contrast/gamma/opacity) since the
-   * shader reads it from the descriptor. Minimap supplies its own
-   * values so the contrast slider still affects the minimap.
+   * Bind a single-entity descriptor for callers with no cold-state
+   * descriptor buffer (the minimap). The caller passes display state so
+   * the contrast slider still affects the minimap.
    */
   setTransientDescriptor(
     modelMatrix: Float32Array,
@@ -411,10 +400,7 @@ export class VolumeRenderer {
     this.renderMode = mode;
   }
 
-  /**
-   * Per-frame matrices. Model + invModel moved into the descriptor
-   * buffer; this only carries view-projection / eye / clip params.
-   */
+  /** Per-frame view-projection, eye, and clip params. Model matrices live in the descriptor. */
   setMatrices(
     invViewProj: Float32Array<ArrayBufferLike>,
     eye: Float32Array<ArrayBufferLike>,
