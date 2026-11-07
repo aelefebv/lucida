@@ -1,0 +1,53 @@
+{
+  "type": "watch_publish",
+  "item": {
+    "kind": "aggregate",
+    "at_epoch_ms": 1767225600250,
+    "run_id": "run-3",
+    "reading": {
+      "atUs": 4200000.0,
+      "queueDepth": 20480.0,
+      "inFlight": 24.0,
+      "frameTimeUs": 8300.0,
+      "residentBytes": 402653184.0,
+      "gpuPassUs": 2100.0
+    },
+    "counted": {
+      "cache-admission": 48
+    },
+    "sent": {
+      "chunkRequest": {
+        "messages": 12,
+        "bytes": 1140
+      }
+    },
+    "ticks": [
+      {
+        "atUs": 4199000,
+        "datasetId": "wds-0f3a",
+        "counters": {
+          "laneDetail": 12
+        },
+        "levels": [
+          {
+            "level": 1,
+            "planned": 48,
+            "cached": 40,
+            "inFlight": 8
+          }
+        ],
+        "levelsDropped": 0,
+        "targetLevel": {
+          "min": 1,
+          "max": 1
+        },
+        "levelPinned": false,
+        "displayedLevel": {
+          "min": 1,
+          "max": 2
+        },
+        "availabilityWoken": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,791 @@
+/*
+ * The dock.
+ *
+ * The report beneath the timeline is laid out in DOM, not on a canvas: track
+ * geometry is percentages of the run's wall clock, so it is
+ * resolution-independent and reads the same at device pixel ratio 1 and 2
+ * without a redraw. The timeline is the one canvas, and it sizes its backing
+ * store to the device pixel ratio for the same reason: #862 and #864 both
+ * hid behind DPR-1-only verification.
+ *
+ * Colors are theme tokens only (ADR 0066). Chart colors come from
+ * timelinePalette.ts, which names the same tokens, so a series is one color
+ * in the DOM and on the canvas.
+ */
+
+.monitor-dock {
+  position: fixed;
+  right: 0;
+  bottom: 0;
+  /* Under the dialogs, over the canvas and its overlays. */
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  color: var(--lc-text);
+  background: var(--lc-surface-1);
+  border-top: 1px solid var(--lc-border);
+  box-shadow: var(--lc-shadow-2);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.5;
+}
+
+.monitor-dock-resize {
+  flex-shrink: 0;
+  height: 6px;
+  cursor: row-resize;
+  background: transparent;
+  transition: background-color var(--lc-motion-fast) var(--lc-ease);
+}
+
+.monitor-dock-resize:hover,
+.monitor-dock-resize:active {
+  background: var(--lc-accent);
+}
+
+.monitor-dock-body {
+  flex: 1;
+  min-height: 0;
+  padding: var(--lc-space-2) var(--lc-space-5) 48px;
+  overflow-y: auto;
+}
+
+/* Popped out, the dock is the whole window rather than a strip of one. */
+.monitor-popout-body {
+  margin: 0;
+  background: var(--lc-surface-1);
+}
+
+.monitor-dock-popout {
+  position: static;
+  min-height: 100vh;
+  padding: var(--lc-space-4) var(--lc-space-5) 48px;
+  border-top: none;
+  box-shadow: none;
+}
+
+.monitor-dock code {
+  font-family: var(--lc-font-mono);
+  font-size: 0.92em;
+}
+
+/* Run choosers stay native selects: a change event picks the run, as the
+   dock's tests and its keyboard users expect. Styled as a field well. */
+.monitor-select {
+  box-sizing: border-box;
+  height: var(--lc-control-h-sm);
+  max-width: 100%;
+  padding: 0 var(--lc-space-2);
+  border: 1px solid var(--lc-border-strong);
+  border-radius: var(--lc-radius);
+  background: var(--lc-field-bg);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-sm);
+}
+
+.monitor-select:focus-visible {
+  outline: none;
+  border-color: var(--lc-focus-ring);
+  box-shadow: 0 0 0 1px var(--lc-focus-ring);
+}
+
+.monitor-select option {
+  background: var(--lc-surface-2);
+  color: var(--lc-text);
+}
+
+/* --- the timeline ---------------------------------------------------------- */
+
+.monitor-timeline {
+  margin: var(--lc-space-3) 0 var(--lc-space-5);
+}
+
+.monitor-timeline-canvas-wrap {
+  position: relative;
+  width: 100%;
+  overflow-x: auto;
+}
+
+.monitor-timeline-canvas {
+  display: block;
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-sm);
+}
+
+.monitor-timeline-canvas-brushable {
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* Placed in CSS pixels off the same scale the drag was read with, so it sits
+   on the axis at any pixel ratio. */
+.monitor-brush {
+  position: absolute;
+  top: 0;
+  pointer-events: none;
+  background: var(--lc-accent-subtle);
+  border-left: 1px solid var(--lc-accent);
+  border-right: 1px solid var(--lc-accent);
+  box-sizing: border-box;
+}
+
+.monitor-brush-line code {
+  color: var(--lc-text);
+}
+
+.monitor-brush-line .lc-button {
+  margin-left: var(--lc-space-2);
+  vertical-align: middle;
+}
+
+.monitor-timeline-legend {
+  margin-top: var(--lc-space-2);
+}
+
+.monitor-timeline-charts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: var(--lc-space-1) var(--lc-space-5);
+  margin: 0;
+  font-size: var(--lc-text-xs);
+}
+
+.monitor-timeline-chart dt {
+  color: var(--lc-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: var(--lc-text-xs);
+  font-weight: 600;
+}
+
+.monitor-timeline-chart dd {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  font-family: var(--lc-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor-timeline-absent {
+  color: var(--lc-warning);
+}
+
+.monitor-chrome {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-3);
+  flex-wrap: wrap;
+  padding-bottom: var(--lc-space-3);
+  border-bottom: 1px solid var(--lc-border);
+}
+
+.monitor-chrome h1 {
+  font-size: var(--lc-text-xl);
+  font-weight: 600;
+  line-height: 1.3;
+  margin: 0;
+}
+
+.monitor-run-id {
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-sm);
+  color: var(--lc-text-muted);
+}
+
+/* Read mode offers every action at once, and at 1440 px they do not fit on
+   one line (#1093). Wrap rather than squeeze each control to its narrowest
+   word. Center so a control keeps its own height, not its tallest
+   neighbor's. */
+.monitor-chrome-actions {
+  margin-left: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--lc-space-2);
+}
+
+.monitor-hint {
+  display: inline-flex;
+}
+
+.monitor-observation-only,
+.monitor-note {
+  color: var(--lc-text-muted);
+  margin: var(--lc-space-2) 0;
+}
+
+.monitor-saved {
+  color: var(--lc-success);
+  margin: var(--lc-space-2) 0;
+}
+
+.monitor-save-failed {
+  color: var(--lc-danger);
+  margin: var(--lc-space-2) 0;
+}
+
+.monitor-empty {
+  margin: var(--lc-space-6) 0;
+  color: var(--lc-warning);
+}
+
+/* --- banners: truncation and coverage lead, they do not footnote ---------- */
+
+.monitor-banners {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: var(--lc-space-3) 0 var(--lc-space-5);
+}
+
+.monitor-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--lc-space-2) 10px;
+  border-left: 3px solid var(--lc-border-strong);
+  border-radius: 0 var(--lc-radius) var(--lc-radius) 0;
+  background: var(--lc-surface-3);
+}
+
+.monitor-banner span {
+  color: var(--lc-text-muted);
+}
+
+.monitor-banner-severe {
+  border-left-color: var(--lc-warning);
+  background: var(--lc-warning-subtle);
+}
+
+.monitor-banner-truncation {
+  border-left-color: var(--lc-danger);
+  background: var(--lc-danger-subtle);
+}
+
+/* The same accent as the brush on the axis. */
+.monitor-banner-window {
+  border-left-color: var(--lc-accent);
+  background: var(--lc-accent-subtle);
+}
+
+/* --- callouts: the verdict, then the ranked findings ---------------------- */
+
+.monitor-section {
+  margin: var(--lc-space-6) 0;
+}
+
+.monitor-section h2 {
+  font-size: var(--lc-text-sm);
+  font-weight: 600;
+  margin: 0 0 var(--lc-space-2);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--lc-text-muted);
+}
+
+.monitor-section h3,
+.monitor-track-band h3 {
+  font-size: var(--lc-text-md);
+  font-weight: 600;
+}
+
+.monitor-callouts {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.monitor-callout {
+  padding: var(--lc-space-3) 14px;
+  border: 1px solid var(--lc-border);
+  border-left-width: 3px;
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-3);
+}
+
+.monitor-callout h3 {
+  margin: 0 0 6px;
+  font-size: var(--lc-text-lg);
+  font-weight: 600;
+}
+
+.monitor-callout-verdict {
+  border-left-color: var(--lc-accent);
+}
+
+.monitor-callout-stall {
+  border-left-color: var(--lc-danger);
+}
+
+.monitor-callout-saturated {
+  border-left-color: var(--lc-warning);
+}
+
+.monitor-callout-steady-state {
+  border-left-color: var(--lc-success);
+}
+
+.monitor-callout-note {
+  border-left-color: var(--lc-border-strong);
+}
+
+.monitor-callout .lc-button,
+.monitor-drill-panel .lc-button {
+  margin-top: var(--lc-space-1);
+}
+
+.monitor-confidence {
+  margin: 0 0 6px;
+  display: flex;
+  gap: 6px;
+}
+
+.monitor-chip {
+  display: inline-block;
+  padding: 0 6px;
+  border: 1px solid var(--lc-border-strong);
+  border-radius: var(--lc-radius-sm);
+  font-size: var(--lc-text-xs);
+  line-height: 1.6;
+  color: var(--lc-text-muted);
+}
+
+.monitor-chip-rule {
+  font-family: var(--lc-font-mono);
+}
+
+/* The provisional reading (#1057): a statement over a moving window, marked
+   as one wherever it appears, and never dressed as the verdict callout. */
+.monitor-chip-provisional {
+  margin-left: 6px;
+  border-color: var(--lc-warning);
+  background: var(--lc-warning-subtle);
+  color: var(--lc-warning);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.monitor-provisional {
+  margin: 0 0 14px;
+  padding: var(--lc-space-3) 14px;
+  border: 1px dashed var(--lc-border-strong);
+  border-radius: var(--lc-radius);
+  background: var(--lc-field-bg);
+}
+
+.monitor-provisional h3 {
+  margin: 0 0 6px;
+  font-size: var(--lc-text-lg);
+  font-weight: 600;
+}
+
+.monitor-provisional-statement {
+  margin: 0 0 var(--lc-space-2);
+}
+
+.monitor-provisional-finding {
+  margin: 0 0 var(--lc-space-2);
+  padding: 6px 10px;
+  border-left: 3px solid var(--lc-border-strong);
+}
+
+.monitor-provisional-stall {
+  border-left-color: var(--lc-danger);
+}
+
+.monitor-provisional-saturated {
+  border-left-color: var(--lc-warning);
+}
+
+.monitor-provisional-note {
+  border-left-color: var(--lc-border-strong);
+}
+
+.monitor-numbers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lc-space-1) var(--lc-space-4);
+  margin: 0 0 var(--lc-space-2);
+  padding: 0;
+  list-style: none;
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor-dim {
+  color: var(--lc-text-subtle);
+}
+
+.monitor-detail {
+  margin: 0 0 var(--lc-space-2);
+  color: var(--lc-text-muted);
+}
+
+/* --- drill-down ----------------------------------------------------------- */
+
+.monitor-drill-panel {
+  padding: var(--lc-space-3) 14px;
+  border: 1px solid var(--lc-border-strong);
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-3);
+}
+
+.monitor-question {
+  margin: 0 0 var(--lc-space-2);
+  font-size: var(--lc-text-lg);
+  font-weight: 600;
+}
+
+/* --- the run in progress (#937) -------------------------------------------- *
+ * Counters big enough to read from across a desk while an open is happening,
+ * and one bar for where the rows in flight are sitting. Percentages, like the
+ * tracks above, so it reads the same at device pixel ratio 1 and 2.
+ */
+
+.monitor-live-counters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lc-space-6);
+  margin: var(--lc-space-3) 0 var(--lc-space-5);
+}
+
+.monitor-live-counter dt {
+  font-size: var(--lc-text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--lc-text-muted);
+}
+
+.monitor-live-counter dd {
+  margin: 2px 0;
+  font-size: calc(var(--lc-text-2xl) * 1.3);
+  font-weight: 600;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: var(--lc-text);
+}
+
+.monitor-live-counter p {
+  margin: 0;
+  font-size: var(--lc-text-xs);
+  max-width: 22ch;
+}
+
+.monitor-live-bar {
+  display: flex;
+  height: 18px;
+  margin: var(--lc-space-2) 0;
+  background: var(--lc-field-bg);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-sm);
+  overflow: hidden;
+}
+
+/* The bar's segment and swatch colors are set inline from timelinePalette.ts,
+   so a phase is one color in the bar and on the axis. */
+.monitor-live-bar-segment {
+  display: block;
+  min-width: 2px;
+  background: var(--lc-chart-neutral);
+}
+
+.monitor-live-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--lc-text-xs);
+  font-family: var(--lc-font-mono);
+}
+
+.monitor-live-legend li {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.monitor-live-swatch {
+  display: inline-block;
+  flex: none;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  background: var(--lc-chart-neutral);
+}
+
+/* --- tracks ---------------------------------------------------------------- */
+
+.monitor-track-band {
+  margin: 0 0 var(--lc-space-4);
+}
+
+.monitor-track-band h3 {
+  margin: 0;
+}
+
+.monitor-track {
+  display: grid;
+  grid-template-columns: 210px 1fr 260px;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.monitor-track-label,
+.monitor-track-note {
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+  color: var(--lc-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-track-note {
+  color: var(--lc-text-subtle);
+}
+
+.monitor-track-gutter {
+  position: relative;
+  display: block;
+  height: 14px;
+  background: var(--lc-field-bg);
+  border: 1px solid var(--lc-border);
+  border-radius: 2px;
+}
+
+/* A track's class takes the color of the phase it is named for, the slot
+   timelinePalette.ts gives that phase: io the wire's, queue the queue's,
+   compute the decode's. */
+.monitor-track-bar {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  min-width: 2px;
+  background: var(--lc-chart-neutral);
+}
+
+.monitor-track-bar-io {
+  background: var(--lc-chart-3);
+}
+
+.monitor-track-bar-queue {
+  background: var(--lc-chart-2);
+}
+
+.monitor-track-bar-compute {
+  background: var(--lc-chart-4);
+}
+
+.monitor-track-bar-unrecorded {
+  background: var(--lc-chart-neutral);
+}
+
+.monitor-track-unplaced {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding-left: 6px;
+  font-size: var(--lc-text-xs);
+  color: var(--lc-text-subtle);
+}
+
+/* --- tables --------------------------------------------------------------- */
+
+.monitor-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.monitor-table caption {
+  text-align: left;
+  color: var(--lc-text-subtle);
+  padding: 6px 0;
+  font-family: var(--lc-font);
+}
+
+.monitor-table th,
+.monitor-table td {
+  text-align: left;
+  padding: 3px var(--lc-space-2) 3px 0;
+  border-bottom: 1px solid var(--lc-border);
+  white-space: nowrap;
+}
+
+.monitor-table thead th {
+  color: var(--lc-text-subtle);
+  font-weight: 500;
+}
+
+.monitor-row-scoped {
+  background: var(--lc-accent-subtle);
+}
+
+.monitor-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: var(--lc-space-1) var(--lc-space-5);
+  margin: 0;
+}
+
+.monitor-fact {
+  display: flex;
+  gap: var(--lc-space-2);
+}
+
+.monitor-fact dt {
+  color: var(--lc-text-subtle);
+  min-width: 140px;
+}
+
+.monitor-fact dd {
+  margin: 0;
+  font-family: var(--lc-font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- a dropped file, and two runs compared (#1066) ------------------------- *
+ * The whole dock is the drop target, and says so while a file is over it.
+ * A bundle's frame takes a column of its own beside the report, and is
+ * sticky so it stays alongside as the report scrolls.
+ */
+
+.monitor-dock-dropping {
+  outline: 2px dashed var(--lc-accent);
+  outline-offset: -2px;
+}
+
+.monitor-file-input {
+  display: none;
+}
+
+.monitor-file-with-frame {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 360px);
+  gap: 0 var(--lc-space-6);
+  align-items: start;
+}
+
+.monitor-file-report {
+  min-width: 0;
+}
+
+.monitor-frame {
+  position: sticky;
+  top: 0;
+  margin: var(--lc-space-3) 0;
+}
+
+/* The canvas background, so a frame still loading reads as the canvas. */
+.monitor-frame img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-sm);
+  background: var(--lc-canvas-bg);
+}
+
+.monitor-frame figcaption,
+.monitor-frame-absent {
+  margin: 6px 0 0;
+  font-size: var(--lc-text-xs);
+  color: var(--lc-text-muted);
+}
+
+.monitor-compare-slots {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--lc-space-3);
+  margin: var(--lc-space-3) 0;
+}
+
+.monitor-compare-slot {
+  padding: 10px var(--lc-space-3);
+  border: 1px dashed var(--lc-border-strong);
+  border-radius: var(--lc-radius);
+  background: var(--lc-field-bg);
+}
+
+.monitor-compare-slot h3 {
+  margin: 0 0 6px;
+}
+
+.monitor-compare-slot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lc-space-2);
+  margin-top: var(--lc-space-2);
+}
+
+.monitor-compare-identities {
+  margin: var(--lc-space-3) 0;
+}
+
+.monitor-compare-identity {
+  display: flex;
+  gap: 10px;
+  margin: 2px 0;
+}
+
+.monitor-compare-identity dt {
+  min-width: 48px;
+  color: var(--lc-text-subtle);
+}
+
+.monitor-compare-identity dd {
+  margin: 0;
+}
+
+.monitor-banner-incomparable {
+  border-left-color: var(--lc-danger);
+  background: var(--lc-danger-subtle);
+}
+
+.monitor-compare-side h3 {
+  margin: var(--lc-space-3) 0 0;
+  font-size: var(--lc-text-md);
+  font-weight: 500;
+  color: var(--lc-text-muted);
+}
+
+.monitor-row-differs {
+  background: var(--lc-accent-subtle);
+}
+
+.monitor-row-incomparable {
+  background: var(--lc-danger-subtle);
+}
+
+.monitor-compare-text-details {
+  margin: var(--lc-space-4) 0;
+}
+
+.monitor-compare-text-details summary {
+  cursor: pointer;
+  color: var(--lc-text-muted);
+}
+
+.monitor-compare-text {
+  margin: var(--lc-space-2) 0 0;
+  padding: 10px var(--lc-space-3);
+  overflow-x: auto;
+  white-space: pre;
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+  line-height: 1.45;
+  background: var(--lc-field-bg);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius);
+}

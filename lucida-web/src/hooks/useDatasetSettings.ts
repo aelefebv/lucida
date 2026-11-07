@@ -9,9 +9,11 @@ import { applyDocumentCommand } from "../applyAndSend.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import type { ViewportCommand } from "../commands.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
-import { invalidateDisplaySettings, requestRender } from "../invalidation.ts";
+import { invalidateDisplaySettings, invalidateSelection } from "../invalidation.ts";
 import { Axis } from "../axes.ts";
 import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/labelRequests.ts";
+import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
+import { channelDisplayName, channelRangeKey, parseChannelRangeKey } from "../components/channels.ts";
 
 /** A per-label overlay row for the layer panel, keyed by manifest index. */
 interface PanelLabelRow {
@@ -23,28 +25,14 @@ interface PanelLabelRow {
 }
 
 /**
- * The per-label rows for one dataset, VIEW-MODE-AWARE.
+ * The per-label rows for one dataset, aware of the view mode.
  *
- * The panel lists every label drawable in EITHER view mode (the union of the
- * slice- and volume-eligible sets), so it is stable across a 2D/3D switch. A
- * label drawable in the CURRENT mode is a normal, interactive row; a label
- * drawable ONLY in the other mode carries a `disabledReason` so its controls
- * render disabled with the reason shown — never an "on" toggle that draws
- * nothing (the render/fetch paths drop it under this mode's caps). Volume caps
- * are stricter than slice, so the realistic disabled case is a slice-eligible
- * label that busts the volume caps, viewed in 3D. Visibility mirrors
- * `resolveVisibleLabels` (the render path): masks are opt-in, so with settings
- * the stored flag drives it (a label with no explicit setting defaults to
- * HIDDEN), and with NO settings every row starts hidden — the panel still lists
- * every drawable mask so any can be toggled on with one click.
- *
- * In 3D there is a second disabled case: a visible + volume-eligible mask that
- * falls past the TOTAL label-volume memory budget. The panel applies the SAME
- * manifest-order budget prefix ({@link volumeBudgetPrefix}) the render path
- * does, and gives each budget-skipped mask a `disabledReason` naming the memory
- * limit — so it never renders as a plain interactive "on" row that draws
- * nothing. This is distinct from the "too large to render in 3D" reason a
- * per-mask volume-INELIGIBLE label carries.
+ * Lists every label drawable in either mode, so the panel is stable across a
+ * 2D/3D switch. A label drawable only in the other mode, or past the 3D
+ * label-volume memory budget ({@link volumeBudgetPrefix}, the same prefix the
+ * render path applies), gets a `disabledReason`. A control must never show "on"
+ * for a label that draws nothing. Visibility mirrors `resolveVisibleLabels`:
+ * masks are opt-in, so a label with no explicit setting starts hidden.
  */
 function buildLabelRows(
   manifest: DatasetManifest,
@@ -73,9 +61,6 @@ function buildLabelRows(
     const row: PanelLabelRow = {
       index: i,
       name: labels[i].name,
-      // Masks are opt-in: a label with no explicit setting defaults to HIDDEN; an
-      // explicit flag is honored. With NO settings, every row starts hidden.
-      // Mirrors `resolveVisibleLabels`.
       visible: hasLabelSettings ? (ls?.visible ?? false) : false,
       opacity: ls?.opacity ?? 0.5,
     };
@@ -87,10 +72,8 @@ function buildLabelRows(
     rows.push(row);
   }
 
-  // 3D total-volume memory fail-safe: over the VISIBLE + volume-eligible rows in
-  // manifest order, keep masks up to the memory budget and mark the rest
-  // disabled — the SAME manifest-order prefix the render path applies, so the
-  // panel and the screen agree on which masks 3D actually shows.
+  // Same manifest-order budget prefix as the render path, so the panel and the
+  // screen agree on which masks 3D shows.
   if (is3d) {
     const candidateIndices = rows
       .filter((r) => volumeEligible.has(r.index) && r.visible)
@@ -107,28 +90,52 @@ function buildLabelRows(
 
 /** Apply a display-settings command and signal the change: the planner's
  *  settings cache is invalidated and the render loop (when mounted) is asked
- *  for a frame, in one composed intent so neither tap can be forgotten. */
+ *  for a frame, in one composed intent so neither tap can be forgotten.
+ *  Showing or hiding a channel, a dataset, or a label is a select, so the
+ *  trace recorder opens an interaction run under that name. */
 function applySettingsCommand(
   scene: WasmScene,
   cmd: ViewportCommand,
   loop: RenderLoop | null,
 ): void {
   guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
-  invalidateDisplaySettings(loop);
+  if (
+    cmd.type === "set_dataset_visible" ||
+    cmd.type === "set_channel_visible" ||
+    cmd.type === "set_label_visible"
+  ) {
+    invalidateSelection(loop);
+  } else {
+    invalidateDisplaySettings(loop);
+  }
 }
 
-function detailLevelOptions(ds: DatasetState | undefined): { level: number; label: string }[] {
-  const multiscale = ds?.manifest.images[0]?.multiscale;
-  if (!multiscale) return [];
-  const generated = new Set(
-    (multiscale.generated_levels ?? []).map((level) => level.level_index),
-  );
-  return multiscale.levels
-    .filter((level) => level.level_index !== 0 && !generated.has(level.level_index))
-    .map((level) => ({
-      level: level.level_index,
-      label: `${level.shape[Axis.X]} x ${level.shape[Axis.Y]}`,
-    }));
+/**
+ * The scene owns which levels a pin may hold (`pinnable_levels`). The
+ * manifest only supplies each level's shape for the label.
+ */
+function levelPinOptions(
+  scene: WasmScene,
+  id: string,
+  ds: DatasetState | undefined,
+): { level: number; label: string }[] {
+  const levels = ds?.manifest.images[0]?.multiscale.levels ?? [];
+  return Array.from(scene.pinnable_levels(id), (level) => {
+    const geometry = levels.find((candidate) => candidate.level_index === level);
+    const shape = geometry ? ` (${geometry.shape[Axis.X]} x ${geometry.shape[Axis.Y]})` : "";
+    return { level, label: `Level ${level}${shape}` };
+  });
+}
+
+/** How many channel entries the scene holds for a dataset, at least one. */
+function settingsChannelCount(scene: WasmScene | null, id: string): number {
+  if (!scene) return 0;
+  try {
+    const all = JSON.parse(scene.all_dataset_settings()) as Record<string, RawDatasetSettings>;
+    return Math.max(1, all[id]?.channel_settings?.length ?? 1);
+  } catch {
+    return 1;
+  }
 }
 
 /** The per-dataset display settings shape `scene.all_dataset_settings()`
@@ -148,27 +155,20 @@ interface RawDatasetSettings {
 }
 
 /**
- * Derive the layer panel's per-layer view models from the live scene + dataset
- * state. Pure and standalone (no refs/React) so the scene→`LayerInfo` seam —
- * in particular that per-channel AND per-label settings from
- * `scene.all_dataset_settings()` reach the panel — is unit-testable with a stub
- * scene, which a component-with-injected-props test cannot cover.
- *
- * Label rows are VIEW-MODE-AWARE (see {@link buildLabelRows}): they list every
- * label drawable in either mode, each carrying its MANIFEST index so the
- * toggle / opacity handlers target the right `label_settings` entry even when
- * earlier (ineligible) labels are omitted, and a `disabledReason` when a label
- * can't draw in the CURRENT mode — a control never lies about a label that
- * can't render. `viewMode` defaults to `"2d"` (slice caps) so 3-arg callers
- * keep today's behavior.
+ * Derive the layer panel's view models from the live scene and dataset state.
+ * Pure, so the scene-to-`LayerInfo` seam is unit-testable with a stub scene.
+ * Label rows carry their manifest index, so handlers hit the right
+ * `label_settings` entry even when earlier ineligible labels are omitted.
  */
 export function buildLayerInfos(
   scene: WasmScene,
   datasets: Map<string, DatasetState>,
   maps: {
     autoContrast: Map<string, boolean>;
-    fullRange: Map<string, boolean>;
+    /** Keyed by {@link channelRangeKey}. */
     dataRange: Map<string, { min: number; max: number }>;
+    /** The worker's per-dataset level readout; a dataset it has not reported yet is absent. */
+    levels: Map<string, DatasetLevels>;
   },
   viewMode: ViewMode = "2d",
 ): LayerInfo[] {
@@ -181,47 +181,55 @@ export function buildLayerInfos(
     return [];
   }
 
-  const currentC = scene.c();
-
   return layerOrder.slice().reverse().map((id) => {
     const settings = allSettings[id];
     const ds = datasets.get(id);
-    const dr = maps.dataRange.get(id) ?? null;
-    const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
+    const multiscale = ds?.manifest.images[0]?.multiscale;
+    const dataType = multiscale?.data_type ?? "uint16";
 
-    const chSettings = settings?.channel_settings?.[currentC];
-
-    // One row per label drawable in EITHER view mode, keyed by manifest index
-    // (see buildLabelRows). Visibility mirrors `resolveVisibleLabels` (the
-    // render path); a row not drawable in the CURRENT mode carries a
-    // disabledReason so the panel never shows an "on" toggle that draws nothing.
     const rawLabelSettings = settings?.label_settings;
     const labelRows = ds ? buildLabelRows(ds.manifest, rawLabelSettings, viewMode) : [];
+    const levels = maps.levels.get(id) ?? null;
+
+    // The data's channel count is authoritative; the settings may still be
+    // growing to match it while the dataset registers.
+    const rawChannels = settings?.channel_settings ?? [];
+    const channelCount = Math.max(1, multiscale?.levels[0]?.shape[Axis.C] ?? rawChannels.length);
+    const channels = Array.from({ length: channelCount }, (_, i) => {
+      const raw = rawChannels[i];
+      const label = multiscale?.channel_infos?.[i]?.label;
+      return {
+        name: channelDisplayName(i, raw?.name, label),
+        nameOverride: raw?.name?.trim() ? raw.name : null,
+        inheritedName: channelDisplayName(i, null, label),
+        visible: raw?.visible ?? true,
+        colormap: raw?.colormap ?? "gray",
+        contrastMin: raw?.contrast_min ?? settings?.contrast_min ?? 0,
+        contrastMax: raw?.contrast_max ?? settings?.contrast_max ?? 65535,
+        gamma: raw?.gamma ?? settings?.gamma ?? 1,
+        dataRange: maps.dataRange.get(channelRangeKey(id, i)) ?? null,
+      };
+    });
 
     return {
       id,
       name: scene.dataset_name(id),
       visible: settings?.visible ?? true,
       opacity: settings?.opacity ?? 1,
-      contrastMin: chSettings?.contrast_min ?? settings?.contrast_min ?? 0,
-      contrastMax: chSettings?.contrast_max ?? settings?.contrast_max ?? 65535,
-      gamma: chSettings?.gamma ?? settings?.gamma ?? 1,
-      colormap: chSettings?.colormap ?? "gray",
+      channels,
       blendMode: settings?.blend_mode ?? "alpha",
       renderMode: settings?.render_mode ?? "translucent",
       autoContrast: maps.autoContrast.get(id) ?? true,
-      fullRange: maps.fullRange.get(id) ?? false,
-      dataRange: dr,
-      fullRangeMax: frMax,
-      channelSettings: settings?.channel_settings,
-      // Immutable channel labels from the manifest's omero block (positional;
-      // may be absent/short — LayerPanel falls back to `Ch {i}` per index).
-      channelInfos: ds?.manifest.images[0]?.multiscale.channel_infos,
-      // Per-label rows for the Labels subsection + count badge (drawable only).
+      fullRangeMax: dtypeMax(dataType),
+      integerData: !dataType.toLowerCase().startsWith("float"),
       labelRows: labelRows.length > 0 ? labelRows : undefined,
       channelBlendMode: settings?.channel_blend_mode ?? "additive",
-      detailLevelOverride: settings?.detail_level_override ?? null,
-      detailLevelOptions: detailLevelOptions(ds),
+      levelPin: settings?.detail_level_override ?? null,
+      levelPinOptions: levelPinOptions(scene, id, ds),
+      targetLevel: levels?.target ?? null,
+      displayedLevel: levels?.displayed ?? null,
+      displayedCoarserThanTarget: levels?.coarserThanTarget ?? false,
+      downsamplingMethod: ds?.manifest.images[0]?.multiscale.downsampling_method ?? null,
     };
   });
 }
@@ -247,9 +255,10 @@ interface Params {
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
   datasetsVersion: number;
   remoteDocumentVersion: number;
-  /** Active view mode. Drives the label rows' eligibility caps (slice vs volume)
-   *  so the panel marks labels that can't draw in the current mode as disabled. */
+  /** Picks the label rows' eligibility caps (slice or volume). */
   viewMode: ViewMode;
+  /** The worker's per-dataset target and displayed levels (see `useDatasetLevels`). */
+  datasetLevels: Map<string, DatasetLevels>;
 }
 
 export function useDatasetSettings({
@@ -263,16 +272,14 @@ export function useDatasetSettings({
   datasetsVersion,
   remoteDocumentVersion,
   viewMode,
+  datasetLevels,
 }: Params) {
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
-  const [fullRangeMap, setFullRangeMap] = useState<Map<string, boolean>>(new Map());
   const [dataRangeMap, setDataRangeMap] = useState<Map<string, { min: number; max: number }>>(new Map());
   const [expandedLayerId, setExpandedLayerId] = useState<string | null>(null);
   const [layerSettingsVersion, setLayerSettingsVersion] = useState(0);
   const lastAutoExpandedLayerRef = useRef<string | null>(null);
-  // Mirror the autoContrast map into a ref so the buildLayerInfos closure
-  // (called during render and from event handlers) reads the latest map
-  // without depending on it identity-wise.
+  // Event handlers read the latest map without depending on its identity.
   const autoContrastMapRef = useRef<Map<string, boolean>>(new Map());
   // eslint-disable-next-line react-hooks/refs
   autoContrastMapRef.current = autoContrastMap;
@@ -283,13 +290,15 @@ export function useDatasetSettings({
 
   const initLayerMaps = useCallback((id: string) => {
     setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, true); return next; });
-    setFullRangeMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
   }, []);
 
   const cleanupLayerMaps = useCallback((id: string) => {
     setAutoContrastMap(prev => { const next = new Map(prev); next.delete(id); return next; });
-    setFullRangeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
-    setDataRangeMap(prev => { const next = new Map(prev); next.delete(id); return next; });
+    setDataRangeMap(prev => {
+      const next = new Map(prev);
+      for (const key of prev.keys()) if (parseChannelRangeKey(key)?.datasetId === id) next.delete(key);
+      return next;
+    });
   }, []);
 
   const handleLayerSelect = useCallback((id: string) => {
@@ -328,40 +337,6 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetContrast = useCallback((id: string, min: number, max: number) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min, max }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
-    }
-    setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, false); return next; });
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  const handleLayerSetGamma = useCallback((id: string, gamma: number) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_gamma", dataset_id: id, channel: c, gamma }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
-      setLayerSettingsVersion((v) => v + 1);
-    }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  const handleLayerSetColormap = useCallback((id: string, colormap: Colormap) => {
-    const scene = wasmSceneRef.current;
-    if (scene) {
-      bridgeCallbacksRef.current.breakFollow();
-      const c = scene.c();
-      applySettingsCommand(scene, { type: "set_channel_colormap", dataset_id: id, channel: c, colormap }, loopRef.current);
-      bridgeCallbacksRef.current.emitDatasetPresence();
-      setLayerSettingsVersion((v) => v + 1);
-    }
-  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  // Channel-specific handlers for multi-channel sublayer controls
   const handleChannelSetVisible = useCallback((id: string, channel: number, visible: boolean) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -382,12 +357,9 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  // Set (or clear) a user display-name override for one channel. A
-  // viewport/display command exactly like handleChannelSetColormap — applies
-  // locally, breaks follow, marks dirty, and emits presence so followers see
-  // it via the selection epoch. `name === null` (an emptied input) clears the
-  // override, falling the label back to the omero name / `Ch N`. Whitespace is
-  // trimmed before this is called; the caller passes null for a blank value.
+  // A viewport command, not a document edit: followers see it via presence.
+  // `null` clears the override, falling back to the metadata label or
+  // `Channel n`. The caller trims and passes null for a blank value.
   const handleChannelSetName = useCallback((id: string, channel: number, name: string | null) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -398,7 +370,7 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleChannelSetContrast = useCallback((id: string, channel: number, min: number, max: number) => {
+  const applyChannelContrast = useCallback((id: string, channel: number, min: number, max: number) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
@@ -407,6 +379,30 @@ export function useDatasetSettings({
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  // A hand-set limit stops continuous auto-contrast for the layer, or the next
+  // loaded chunk would refit over it.
+  const handleChannelSetContrast = useCallback((id: string, channel: number, min: number, max: number) => {
+    applyChannelContrast(id, channel, min, max);
+    setAutoContrastMap((prev) => (prev.get(id) === false ? prev : new Map(prev).set(id, false)));
+  }, [applyChannelContrast]);
+
+  /** Fit a channel's limits to its loaded data once. */
+  const handleChannelAutoFit = useCallback((id: string, channel: number) => {
+    const range = dataRangeMap.get(channelRangeKey(id, channel));
+    if (range) applyChannelContrast(id, channel, range.min, range.max);
+  }, [dataRangeMap, applyChannelContrast]);
+
+  /** Keep every channel of the layer fitted to its loaded data, or stop. */
+  const handleAutoContrastChange = useCallback((id: string, on: boolean) => {
+    setAutoContrastMap((prev) => new Map(prev).set(id, on));
+    if (!on) return;
+    const count = settingsChannelCount(wasmSceneRef.current, id);
+    for (let channel = 0; channel < count; channel++) {
+      const range = dataRangeMap.get(channelRangeKey(id, channel));
+      if (range) applyChannelContrast(id, channel, range.min, range.max);
+    }
+  }, [dataRangeMap, wasmSceneRef, applyChannelContrast]);
 
   const handleChannelSetGamma = useCallback((id: string, channel: number, gamma: number) => {
     const scene = wasmSceneRef.current;
@@ -428,11 +424,8 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  // Per-label overlay handlers. Mirror handleChannelSetVisible exactly (a
-  // viewport/display command — applies locally, breaks follow, marks dirty,
-  // emits presence so followers see it via the selection epoch), scoped to a
-  // single label overlay. Toggling / adjusting a label NEVER reframes the
-  // camera (view-state only), mirroring the per-channel behavior.
+  // Label settings are view state like channel settings: they never reframe
+  // the camera.
   const handleLabelSetVisible = useCallback((id: string, label: number, visible: boolean) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -473,7 +466,9 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleLayerSetDetailLevelOverride = useCallback((id: string, level: number | null) => {
+  // The wire command keeps the field's old name. The core clamps the level
+  // to the pinnable levels.
+  const handleLayerSetLevelPin = useCallback((id: string, level: number | null) => {
     const scene = wasmSceneRef.current;
     if (scene) {
       bridgeCallbacksRef.current.breakFollow();
@@ -482,73 +477,6 @@ export function useDatasetSettings({
       setLayerSettingsVersion((v) => v + 1);
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  const handleLayerAutoContrast = useCallback((id: string) => {
-    const dr = dataRangeMap.get(id);
-    if (dr) {
-      const scene = wasmSceneRef.current;
-      if (scene) {
-        bridgeCallbacksRef.current.breakFollow();
-        const c = scene.c();
-        applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
-        bridgeCallbacksRef.current.emitDatasetPresence();
-      }
-    }
-    setAutoContrastMap(prev => { const next = new Map(prev); next.set(id, true); return next; });
-  }, [dataRangeMap, wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  const handleLayerAutoContrastToggle = useCallback((id: string) => {
-    setAutoContrastMap(prev => {
-      const next = new Map(prev);
-      const wasAuto = prev.get(id) ?? true;
-      next.set(id, !wasAuto);
-      if (!wasAuto) {
-        const dr = dataRangeMap.get(id);
-        if (dr) {
-          const scene = wasmSceneRef.current;
-          if (scene) {
-            bridgeCallbacksRef.current.breakFollow();
-            const c = scene.c();
-            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
-            bridgeCallbacksRef.current.emitDatasetPresence();
-          }
-        }
-      }
-      return next;
-    });
-  }, [dataRangeMap, wasmSceneRef, loopRef, bridgeCallbacksRef]);
-
-  const handleLayerFullRangeToggle = useCallback((id: string) => {
-    setFullRangeMap(prev => {
-      const next = new Map(prev);
-      const wasFull = prev.get(id) ?? false;
-      next.set(id, !wasFull);
-      const scene = wasmSceneRef.current;
-      if (scene) {
-        bridgeCallbacksRef.current.breakFollow();
-        const c = scene.c();
-        if (!wasFull) {
-          const ds = datasetsRef.current.get(id);
-          const frMax = ds ? dtypeMax(ds.manifest.images[0].multiscale.data_type) : 65535;
-          applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: 0, max: frMax }, loopRef.current);
-          setAutoContrastMap(p => { const n = new Map(p); n.set(id, false); return n; });
-        } else {
-          const dr = dataRangeMap.get(id);
-          if (dr) {
-            applySettingsCommand(scene, { type: "set_channel_contrast", dataset_id: id, channel: c, min: dr.min, max: dr.max }, loopRef.current);
-          } else {
-            // No recorded data range to return to: the scene is unchanged,
-            // but keep the frame this toggle has always requested so the
-            // panel state flip is reflected promptly.
-            requestRender(loopRef.current);
-          }
-          setAutoContrastMap(p => { const n = new Map(p); n.set(id, true); return n; });
-        }
-        bridgeCallbacksRef.current.emitDatasetPresence();
-      }
-      return next;
-    });
-  }, [dataRangeMap, wasmSceneRef, datasetsRef, loopRef, bridgeCallbacksRef]);
 
   const handleLayerMove = useCallback((id: string, direction: "up" | "down") => {
     const scene = wasmSceneRef.current;
@@ -577,12 +505,8 @@ export function useDatasetSettings({
     datasetCallbacksRef.current.removeDataset(id);
   }, [wasmSceneRef, datasetsRef, bridgeCallbacksRef, datasetCallbacksRef]);
 
-  // Rename a layer (dataset) by mutating the shared document. Like
-  // handleRemoveLayer, this is a document command: it applies locally for
-  // immediate feedback and sends to the server, which authorizes it
-  // editor-only, broadcasts it to co-present peers, and persists it so the
-  // new name survives reopen. A blank/whitespace name is ignored client-side
-  // (the server also rejects it); the trimmed name is sent.
+  // A document command: the server authorizes it editor-only, broadcasts it,
+  // and persists it. A blank name is ignored here; the server rejects it too.
   const handleLayerRename = useCallback((id: string, name: string) => {
     const trimmed = name.trim();
     if (trimmed.length === 0) return;
@@ -597,11 +521,8 @@ export function useDatasetSettings({
     setLayerSettingsVersion((v) => v + 1);
   }, [wasmSceneRef, bridgeCallbacksRef]);
 
-  // buildLayerInfos (the module-scope pure fn) reads the scene + datasets refs
-  // and the state maps; all are mirrored from state via the version counters
-  // above (datasetsVersion, remoteDocumentVersion, layerSettingsVersion) so
-  // re-renders pick up the latest values. Reading the refs during render is
-  // intentional here (the layer panel view models are derived per render).
+  // Reading refs during render is intentional: the view models are derived per
+  // render, and the version counters below trigger the re-renders.
   // eslint-disable-next-line react-hooks/refs
   const scene = wasmSceneRef.current;
   // eslint-disable-next-line react-hooks/refs
@@ -609,8 +530,8 @@ export function useDatasetSettings({
   const layerInfos = scene
     ? buildLayerInfos(scene, datasets, {
         autoContrast: autoContrastMap,
-        fullRange: fullRangeMap,
         dataRange: dataRangeMap,
+        levels: datasetLevels,
       }, viewMode)
     : [];
   void datasetsVersion;
@@ -622,8 +543,6 @@ export function useDatasetSettings({
     autoContrastMap,
     setAutoContrastMap,
     autoContrastMapRef,
-    fullRangeMap,
-    setFullRangeMap,
     dataRangeMap,
     setDataRangeMap,
     expandedLayerId,
@@ -636,23 +555,19 @@ export function useDatasetSettings({
     handleLayerToggleExpand,
     handleLayerSetVisible,
     handleLayerSetOpacity,
-    handleLayerSetContrast,
-    handleLayerSetGamma,
-    handleLayerSetColormap,
     handleChannelSetVisible,
     handleChannelSetColormap,
     handleChannelSetName,
     handleChannelSetContrast,
     handleChannelSetGamma,
     handleChannelSetBlendMode,
+    handleChannelAutoFit,
+    handleAutoContrastChange,
     handleLabelSetVisible,
     handleLabelSetOpacity,
     handleLayerSetBlendMode,
     handleLayerSetRenderMode,
-    handleLayerSetDetailLevelOverride,
-    handleLayerAutoContrast,
-    handleLayerAutoContrastToggle,
-    handleLayerFullRangeToggle,
+    handleLayerSetLevelPin,
     handleLayerMove,
     handleRemoveLayer,
     handleLayerRename,

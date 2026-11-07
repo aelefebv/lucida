@@ -12,15 +12,9 @@ import {
   type SnapshotDatasetEntry,
 } from "./snapshot.ts";
 
-// ---------------------------------------------------------------------------
-// Stub WasmScene
-// ---------------------------------------------------------------------------
-//
-// `buildPlanningSnapshot` only reads a small slice of the WasmScene
-// surface: `view_query`, `member_positions`, `visible_region`, and the
-// scalar accessors `c() / t() / z()`. The stub below honours that
-// minimal contract and is then cast to `WasmScene` so callers don't
-// need a full WASM bundle to test the translation logic.
+// `buildPlanningSnapshot` reads only `view_query`, `member_positions`,
+// `visible_region`, and `c() / t() / z()`, so the stub covers just those
+// and is cast to `WasmScene`; no WASM bundle is needed.
 
 interface VisibleEntityRow {
   entity_id: string;
@@ -30,7 +24,8 @@ interface VisibleEntityRow {
   projected_diagonal_px: number;
   projected_area_px2: number;
   centroid_world: [number, number, number];
-  ideal_target_lod: number;
+  target_level: number;
+  level_pinned: boolean;
   importance: number;
 }
 
@@ -63,7 +58,8 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
         projected_diagonal_px: 100,
         projected_area_px2: 10000,
         centroid_world: [10, 20, 30],
-        ideal_target_lod: 2,
+        target_level: 2,
+        level_pinned: false,
         importance: 0.7,
       },
     ],
@@ -95,10 +91,6 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
   };
   return stub as unknown as WasmScene;
 }
-
-// ---------------------------------------------------------------------------
-// Manifest / settings / args helpers
-// ---------------------------------------------------------------------------
 
 function makeLevels(): LevelGeometry[] {
   return [
@@ -196,10 +188,6 @@ function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 describe("buildPlanningSnapshot — typical case", () => {
   it("produces an EntitySnapshot joined with manifest data", () => {
     const built = buildPlanningSnapshot(makeArgs());
@@ -241,7 +229,8 @@ describe("buildPlanningSnapshot — snake_case → camelCase", () => {
           projected_diagonal_px: 234.5,
           projected_area_px2: 5678,
           centroid_world: [1, 2, 3],
-          ideal_target_lod: 4,
+          target_level: 1,
+          level_pinned: false,
           importance: 0.42,
         },
       ],
@@ -255,7 +244,7 @@ describe("buildPlanningSnapshot — snake_case → camelCase", () => {
     expect(e.projectedDiagonalPx).toBe(234.5);
     expect(e.projectedAreaPx2).toBe(5678);
     expect(e.centroidWorld).toEqual([1, 2, 3]);
-    expect(e.idealTargetLod).toBe(4);
+    expect(e.targetLevel).toBe(1);
     expect(e.importance).toBeCloseTo(0.42);
   });
 });
@@ -272,7 +261,8 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
           projected_diagonal_px: 90,
           projected_area_px2: 9000,
           centroid_world: [0, 0, 0],
-          ideal_target_lod: 0,
+          target_level: 0,
+          level_pinned: false,
           importance: 1,
         },
       ],
@@ -318,7 +308,8 @@ describe("buildPlanningSnapshot — parent-id stitching", () => {
           projected_diagonal_px: 100,
           projected_area_px2: 10000,
           centroid_world: [0, 0, 0],
-          ideal_target_lod: 0,
+          target_level: 0,
+          level_pinned: false,
           importance: 1,
         },
       ],
@@ -444,57 +435,40 @@ describe("buildPlanningSnapshot — pass-through tiles", () => {
   });
 });
 
-describe("buildPlanningSnapshot — coarse/detail metadata", () => {
-  it("defaults detail to source level 0 when no override is present", () => {
-    const built = buildPlanningSnapshot(makeArgs());
-    expect(built!.entities[0].detailLevel).toBe(0);
-  });
-
-  it("clamps stale detail overrides to selectable source levels", () => {
-    const levels = [
-      ...makeLevels(),
-      {
-        level_index: 2,
-        shape: [1, 1, 1, 256, 256],
-        chunk_shape: [1, 1, 1, 256, 256],
-        grid_shape: [1, 1, 1, 1, 1],
-        scale: [1, 1, 1, 4, 4],
-      },
-    ];
-    const dataset = makeDataset({
-      images: [makeImageSpec("img-0", { levels })],
-    });
-    const built = buildPlanningSnapshot(makeArgs({
-      dataset,
-      dsSettings: makeDsSettings({ detail_level_override: 99 }),
-    }));
-    expect(built!.entities[0].detailLevel).toBe(2);
-  });
-
-  it("excludes generated levels from detail selection and clamps below them", () => {
-    const levels = [
-      ...makeLevels(),
-      {
-        level_index: 2,
-        shape: [1, 1, 1, 256, 256],
-        chunk_shape: [1, 1, 1, 256, 256],
-        grid_shape: [1, 1, 1, 1, 1],
-        scale: [1, 1, 1, 4, 4],
-      },
-    ];
-    const dataset = makeDataset({
-      images: [
-        makeImageSpec("img-0", {
-          levels,
-          generated_levels: [{ level_index: 2, role: "coarse" }],
-        }),
+describe("buildPlanningSnapshot — target level", () => {
+  function sceneAtScreenLevel(screenLevel: number): WasmScene {
+    return makeStubScene({
+      visibleEntities: [
+        {
+          entity_id: "tile-0",
+          image_id: "img-0",
+          kind: "Tile",
+          visible: true,
+          projected_diagonal_px: 100,
+          projected_area_px2: 10000,
+          centroid_world: [10, 20, 30],
+          target_level: screenLevel,
+          level_pinned: false,
+          importance: 0.7,
+        },
       ],
     });
-    const built = buildPlanningSnapshot(makeArgs({
-      dataset,
-      dsSettings: makeDsSettings({ detail_level_override: 2 }),
-    }));
-    expect(built!.entities[0].detailLevel).toBe(1);
+  }
+
+  it("reads the target level the core reports, pin folded in, and clamps nothing", () => {
+    // The browser neither applies the pin nor clamps. Level 7 is one the
+    // two-level manifest lacks.
+    for (const level of [0, 1, 7]) {
+      expect(
+        buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(level) }))!.entities[0]
+          .targetLevel,
+      ).toBe(level);
+    }
+    const pinned = makeDsSettings({ detail_level_override: 0 });
+    expect(
+      buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(1), dsSettings: pinned }))!
+        .entities[0].targetLevel,
+    ).toBe(1);
   });
 
   it("uses an explicit valid coarse pointer", () => {
@@ -514,17 +488,6 @@ describe("buildPlanningSnapshot — coarse/detail metadata", () => {
     const img = makeImageSpec("img-0", { coarse_level_index: 99 });
     expect(resolveCoarseLevel(img)).toBeNull();
   });
-
-  it("treats absent generated metadata as an empty generated-level set", () => {
-    const dataset = makeDataset({
-      images: [makeImageSpec("img-0", { generated_levels: undefined })],
-    });
-    const built = buildPlanningSnapshot(makeArgs({
-      dataset,
-      dsSettings: makeDsSettings({ detail_level_override: 1 }),
-    }));
-    expect(built!.entities[0].detailLevel).toBe(1);
-  });
 });
 
 describe("buildPlanningSnapshot — minimapPending tile", () => {
@@ -540,8 +503,7 @@ describe("buildPlanningSnapshot — minimapPending tile", () => {
       minimapPending,
     });
     expect(built).not.toBeNull();
-    // Per ADR 0023 the slot is exposed on the snapshot so `plan()`'s
-    // `emitMinimapLane` can consume it.
+    // The slot is on the snapshot so `plan()`'s `emitMinimapLane` can read it.
     expect(built!.snapshot.minimapPending).toBe(minimapPending);
     expect(built!.snapshot.minimapPending.get("img-0")).toEqual([
       { level: 0, x: 0, y: 0, z: 0, t: 0, c: 0, key: "0/0/0/0/0/0" },

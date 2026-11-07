@@ -2,6 +2,7 @@
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { RESIDENCY_RENDER_INTERVAL_MS } from "./renderLoopTypes.ts";
+import { TickWake } from "./invalidation.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import { debugLog } from "./debug/logging.ts";
 import { type SliceState, createSliceState, tickSlice, clearSliceForDataset, clearSliceForMembers } from "./slicePath.ts";
@@ -12,12 +13,17 @@ import { configStore } from "./pipeline/planning/configStore.ts";
 import type { CpuCache } from "./pipeline/fetch/index.ts";
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
-import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset } from "./minimapPath.ts";
+import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview } from "./minimapPath.ts";
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./trace/quiescence.ts";
-import type { CacheWarmth, Outstanding, RunConditions } from "./trace/types.ts";
+import type { CacheWarmth, InputKind, Outstanding, RunConditions } from "./trace/types.ts";
+import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
+import { readCanvasColors } from "./renderer/renderClient.ts";
+import { subscribeAppearance } from "./theme/appearance.ts";
+import { AdaptiveResolution, cappedPixelRatioScale } from "./renderResolution.ts";
+import { wakeFrames } from "./frameClock.ts";
 
-// Re-export types so downstream imports stay unchanged
+// Re-exported so imports of these types from the render loop keep working.
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
 
 export interface LucidaCaptureReadyState {
@@ -46,6 +52,8 @@ export class RenderLoop implements TraceEnvironment {
 
   private interactiveDirty = true;
   private residencyDirty = false;
+  /** What has dirtied the loop since the tick before; the tick tells the recorder. */
+  private readonly wake = new TickWake();
   private lastResidencyRenderTime = 0;
   private rafId: number | null = null;
   private unsubs = new Map<string, () => void>();
@@ -83,8 +91,12 @@ export class RenderLoop implements TraceEnvironment {
   private tickCoordinator = new TickCoordinator(this.uploader);
   private cpuCacheUnsub: () => void;
   private configStoreUnsub: () => void;
+  private appearanceUnsub: () => void;
 
   private _renderScale = 1.0;
+  /** Lowers the render resolution while a gesture's frames run long (ADR 0068). */
+  private readonly resolution = new AdaptiveResolution();
+  private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Track previous multi_channel state to detect transitions and clean up. */
   private prevMultiChannel = false;
@@ -113,14 +125,24 @@ export class RenderLoop implements TraceEnvironment {
     this.configStoreUnsub = configStore.subscribe(() => {
       this.setDirty("interactive", "planning_config_changed");
     });
+    // The worker cannot read styles, so the loop sends it the canvas colors
+    // before its first frame and again after every appearance change.
+    this.client.setCanvasColors(readCanvasColors());
+    this.appearanceUnsub = subscribeAppearance(() => {
+      this.client.setCanvasColors(readCanvasColors());
+      // The minimap caches its overview and overlay until their inputs
+      // change, and the colors are not among those inputs.
+      invalidateMinimapOverview(this.minimapState);
+      this.setDirty("interactive", "appearance_changed");
+    });
     this.publishCaptureReady(false, "initializing");
     // The render loop is the one place that holds the canvas, the mode, the
     // dataset set and the CPU cache at once, so it is what the recorder asks
     // for a run's conditions.
     traceRecorder.setEnvironment(this);
     // A workspace reload hands the loop its datasets up front rather than
-    // through `addDataset`, and that path is the cold open the monitor
-    // exists to explain — so it opens a run too, under its own cause.
+    // through `addDataset`. That is the cold open the monitor exists to
+    // explain, so it opens a run too, under its own cause.
     if (this.datasets.size > 0) this.openDatasetRun("loop_start");
     this.publishQuiescence();
   }
@@ -163,10 +185,15 @@ export class RenderLoop implements TraceEnvironment {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
+    if (this.resolutionRestoreTimer !== null) {
+      clearTimeout(this.resolutionRestoreTimer);
+      this.resolutionRestoreTimer = null;
+    }
     this.client.onChunksEvicted = null;
     this.client.onWantedSetDelta = null;
     this.cpuCacheUnsub();
     this.configStoreUnsub();
+    this.appearanceUnsub();
     for (const unsub of this.unsubs.values()) {
       unsub();
     }
@@ -214,10 +241,9 @@ export class RenderLoop implements TraceEnvironment {
       unsub();
       this.unsubs.delete(id);
     }
-    // Capture image IDs from the manifest BEFORE deleting the dataset
-    // entry so we can pair the cache cleanup with a wire-format
-    // unregistration on the content source (closes the
-    // imageWireFormats leak; see contentSource.unregisterDataset).
+    // Capture image IDs before deleting the dataset entry so the cache
+    // cleanup can pair with a wire-format unregistration on the content
+    // source (see contentSource.unregisterDataset).
     const manifest = this.datasets.get(id)?.manifest;
     const imageIds = manifest ? manifest.images.map(img => img.image_id) : [];
     this.datasets.delete(id);
@@ -285,8 +311,8 @@ export class RenderLoop implements TraceEnvironment {
    * Publish the page's quiescence (ADR 0051). Called at the end of every
    * tick, which is also the only moment it can change: every arrival,
    * eviction and view change dirties a flag, and a dirty flag schedules a
-   * tick. Nothing polls — an idle viewer publishes nothing because an idle
-   * viewer does not tick.
+   * tick. Nothing polls: an idle viewer publishes nothing because it does
+   * not tick.
    *
    * `frameInFlight` reads the RAF handle after the tick has had its chance
    * to reschedule, so a loop with work left to do never looks settled.
@@ -299,15 +325,18 @@ export class RenderLoop implements TraceEnvironment {
     state.frameInFlight = this.rafId !== null;
     traceRecorder.noteQuiescence(evaluateQuiescence(state, performance.now()));
 
-    // The reading tier rides the same moment (#934). Queue depth and in-flight
+    // The reading tier rides the same moment. Queue depth and in-flight
     // come off the reading just taken rather than a second scan, and both
     // include speculative prefetch: the queue is as deep as it is, whatever
-    // the settle predicate chooses to ignore.
+    // the settle predicate chooses to ignore. The GPU pass time is whatever
+    // the render worker read back since the last tick, usually the previous
+    // tick's frame.
     traceRecorder.noteReading(
       state.pending + state.speculativePending,
       state.inFlight + state.speculativeInFlight,
       this.lastFrameTimeUs,
       this.session.cpuCache.residentBytes(),
+      this.client.takeGpuPassUs(),
     );
   }
 
@@ -350,7 +379,7 @@ export class RenderLoop implements TraceEnvironment {
 
   /**
    * {@link TraceEnvironment}: what was still outstanding when the run closed.
-   * Read fresh rather than off the last publication — a run can be closed
+   * Read fresh rather than off the last publication: a run can be closed
    * explicitly between ticks, and a stale reading would understate it.
    */
   captureOutstanding(): Outstanding {
@@ -402,6 +431,51 @@ export class RenderLoop implements TraceEnvironment {
 
   markInteractiveDirty(source: string = "external"): void {
     this.setDirty("interactive", source);
+  }
+
+  /**
+   * The frame on the canvas as a PNG, for the trace bundle. The worker takes
+   * it from inside the next frame it renders, so this asks for one under a
+   * name the trace records as what woke the tick. A loop that renders no
+   * frame leaves the worker to answer after its own wait.
+   */
+  captureFrame(): Promise<FrameCaptureResult> {
+    const capture = this.client.captureFrame();
+    this.setDirty("interactive", "frame_capture");
+    return capture;
+  }
+
+  /**
+   * One of the five inputs landed: pan, zoom, orbit, scrub, or select. The
+   * recorder hears it by name, so the run it opens or extends carries the
+   * input as its cause, and the loop is dirtied under the same name.
+   *
+   * An input on a page with nothing open moves nothing through the pipeline
+   * and opens no run. The next thing that happens on such a page is a
+   * dataset open, and that run has to carry its own cause rather than
+   * inherit the label of a gesture made over an empty canvas.
+   */
+  markInput(input: InputKind): void {
+    if (this.datasets.size > 0) traceRecorder.noteInput(input);
+    this.resolution.noteInput();
+    this.setDirty("interactive", input);
+  }
+
+  /**
+   * Feed the newest finished frame to the adaptive resolution, and arrange
+   * for a lowered resolution to come back once input stops, with a frame to
+   * show it.
+   */
+  private adaptResolution(): void {
+    const frame = this.client.takeFrameLatency();
+    if (frame) this.resolution.noteFrame(frame.frameSeq, frame.ms, this.client.lastFrameSeq());
+    const wait = this.resolution.msUntilRestore();
+    if (wait === null || this.resolutionRestoreTimer !== null) return;
+    this.resolutionRestoreTimer = setTimeout(() => {
+      this.resolutionRestoreTimer = null;
+      if (this.resolution.restoreIfIdle()) this.setDirty("interactive", "resolution_restored");
+      else this.adaptResolution();
+    }, wait);
   }
 
   markResidencyDirty(source: string = "external"): void {
@@ -471,7 +545,10 @@ export class RenderLoop implements TraceEnvironment {
     } else {
       this.residencyDirty = true;
     }
+    this.wake.note(source);
     this.scheduleIfNeeded();
+    // Whatever dirties the frame can move what the overlays show.
+    wakeFrames();
 
     const key = `${kind}:${source}`;
     const now = performance.now();
@@ -502,6 +579,7 @@ export class RenderLoop implements TraceEnvironment {
       canvas: this.canvas,
       mode: this.mode,
       renderScale: this._renderScale,
+      resolutionScale: cappedPixelRatioScale(devicePixelRatio) * this.resolution.scale,
       cpuCache: this.session.cpuCache,
       sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
       assetCatalog: this.session.assetCatalog!,
@@ -513,34 +591,38 @@ export class RenderLoop implements TraceEnvironment {
 
     if (!this.interactiveDirty && !this.residencyDirty) return;
 
-    // AssetCatalog not yet wired (brief window before the first server
-    // snapshot lazily constructs it on Session). Reschedule — once the
-    // catalog appears, the next markInteractiveDirty/markResidencyDirty triggers a tick.
+    // AssetCatalog not yet wired (the brief window before the first server
+    // snapshot constructs it on Session). Once the catalog appears, the next
+    // markInteractiveDirty/markResidencyDirty triggers a tick.
     if (!this.session.assetCatalog) {
       this.scheduleIfNeeded();
       return;
     }
 
+    // Before anything in this tick can dirty the loop again: what woke this
+    // one is what the samples it publishes carry.
+    traceRecorder.noteTickWake(this.wake.take());
+    this.adaptResolution();
+
     const now = performance.now();
     let shouldRender = false;
 
     if (this.interactiveDirty) {
-      // View changed — render immediately
+      // View changed: render immediately.
       this.interactiveDirty = false;
       this.residencyDirty = false;
       this.lastResidencyRenderTime = now;
       shouldRender = true;
     } else if (this.residencyDirty) {
       if (now - this.lastResidencyRenderTime >= RESIDENCY_RENDER_INTERVAL_MS) {
-        // Enough time elapsed since last data render — render now
+        // Enough time elapsed since the last data render: render now.
         this.residencyDirty = false;
         this.lastResidencyRenderTime = now;
         shouldRender = true;
       } else {
-        // Residency dirty but debounce not elapsed — tick still runs for
-        // uploads; only the render is suppressed. Aggregate skip counts
-        // and emit one log per second so chunk-burst loading doesn't
-        // flood the console.
+        // Residency dirty but debounce not elapsed: the tick still runs for
+        // uploads and only the render is suppressed. Skip counts aggregate
+        // into one log per second so chunk bursts don't flood the console.
         this.throttleSkipPending++;
         if (now - this.lastThrottleEmit > RenderLoop.THROTTLE_EMIT_INTERVAL_MS) {
           debugLog("render", "residency_throttled", {
@@ -575,18 +657,15 @@ export class RenderLoop implements TraceEnvironment {
       }
     }
 
-    // A coalesced view/selection change still owes a trailing rebuild.
-    // Mark interactive so the loop re-ticks and the rebuild renders
-    // immediately once the coalescing window elapses — otherwise the
-    // change would be lost if the user stopped moving. This is the
-    // interactive-class continuation ADR-0009 describes: the render stays
-    // immediate; only the residency-class rebuild is what was throttled.
+    // A coalesced view/selection change still owes a trailing rebuild. Mark
+    // interactive so it renders once the coalescing window elapses;
+    // otherwise the change is lost when the user stops moving.
     if (this.tickCoordinator.hasPendingRebuild()) {
       this.setDirty("interactive", "pending_residency_rebuild");
     }
 
-    // Recording is unconditional (ADR 0049), and one subtraction is not a
-    // cost worth gating.
+    // Recording is unconditional, and one subtraction is not a cost worth
+    // gating.
     this.lastFrameTimeUs = (performance.now() - now) * 1000;
 
     if (shouldRender) {

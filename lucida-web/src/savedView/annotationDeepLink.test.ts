@@ -5,10 +5,7 @@ import {
 } from "./annotationDeepLink.ts";
 import type { Annotation } from "../components/annotationDocument.ts";
 
-/** A structural scene stub exposing only what the resolver reads:
- *  annotation_dataset_ids() (the annotated datasets in doc order) and
- *  annotations(id) (the pins for a dataset). `byDataset` maps dataset id ->
- *  pins; unknown ids return "[]". */
+/** Scene stub: `byDataset` maps dataset id to pins; unknown ids return "[]". */
 function makeScene(byDataset: Record<string, Annotation[]>): AnnotationDocScene {
   return {
     annotation_dataset_ids: () => JSON.stringify(Object.keys(byDataset)),
@@ -82,9 +79,8 @@ describe("resolveAnnotationDeepLink (slice 3)", () => {
   });
 
   it("never throws on a null pin element and still finds a valid later pin (totality)", () => {
-    // A malformed doc could carry a null/non-object entry in the pins array;
-    // reading `.id` off it must not throw (the resolver documents "never
-    // throws"). The bad element is skipped and a valid pin still resolves.
+    // Reading `.id` off a null entry must not throw; the bad element is
+    // skipped and a valid pin still resolves.
     const scene: AnnotationDocScene = {
       annotation_dataset_ids: () => JSON.stringify(["wds-1"]),
       annotations: () => JSON.stringify([null, pin("p-real")]),

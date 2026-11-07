@@ -30,7 +30,8 @@ interface MockSceneConfig {
       projected_diagonal_px: number;
       projected_area_px2: number;
       centroid_world: [number, number, number];
-      ideal_target_lod: number;
+      target_level: number;
+      level_pinned: boolean;
       importance: number;
     }[];
   };
@@ -63,7 +64,8 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
           projected_diagonal_px: 100,
           projected_area_px2: 10000,
           centroid_world: [0, 0, 0],
-          ideal_target_lod: 0,
+          target_level: 0,
+          level_pinned: false,
           importance: 1,
         },
       ],
@@ -203,6 +205,7 @@ function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkD
     dataType: "uint16",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
     lane: "detail",
+    residencyTier: "detail",
     priority: 10,
     ...overrides,
   };
@@ -249,6 +252,7 @@ function makeCtx(args: {
       sliceChunkData: vi.fn(),
       volumeChunkData: vi.fn(),
       removeLayerResources: vi.fn(),
+      datasetLevels: vi.fn(() => null),
       onChunksEvicted: null,
       onWantedSetDelta: null,
       ...args.client,
@@ -256,6 +260,7 @@ function makeCtx(args: {
     canvas: { clientWidth: 800, clientHeight: 600 } as unknown,
     mode: args.mode ?? "slice",
     renderScale: 1,
+    resolutionScale: 1,
     cpuCache: args.cpuCache ?? makeCpuCache(),
     assetCatalog: createMockAssetCatalog(),
   } as TickContext;
@@ -267,10 +272,9 @@ describe("Uploader unified delivery", () => {
 
   /**
    * The per-tick stats are handed to `UploadTelemetry.publish`, which the
-   * Uploader calls only while the `orch` log category is on — the one gate
-   * left now that the debug panel's is gone (ADR 0049). Open the category
-   * with an in-memory `localStorage` shim and read the stats off the spy,
-   * rather than out of a global sink.
+   * Uploader calls only while the `orch` log category is on. Open the
+   * category with an in-memory `localStorage` shim and read the stats off
+   * the spy.
    */
   function captureTickStats(uploader: InstanceType<typeof Uploader>) {
     return vi.spyOn(uploader.uploadTelemetry, "publish");
@@ -425,8 +429,7 @@ describe("Uploader unified delivery", () => {
   });
 
   it("skips telemetry aggregation when the orch category is off", async () => {
-    // The debug panel's gate is gone (ADR 0049), so the `orch` log category
-    // is the only thing left that can turn the aggregators on.
+    // The `orch` log category is the only thing that turns the aggregators on.
     localStorage.removeItem("debug");
     // The category set is cached at module load; this is the documented
     // same-tab refresh path.
@@ -517,6 +520,7 @@ describe("Uploader worker feedback", () => {
     const missing: MissingChunk = {
       kind: "chunk",
       datasetId: "ds1",
+      tier: "detail",
       entityId: "tile-0",
       memberId: "img-0:ch2",
       c: 2,
@@ -529,6 +533,7 @@ describe("Uploader worker feedback", () => {
       "img-0",
       2,
       "0/0/2/0/0/0",
+      "detail",
     );
   });
 });

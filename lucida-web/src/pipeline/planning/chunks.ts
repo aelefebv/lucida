@@ -1,6 +1,6 @@
 /**
  * Chunk enumeration + frustum culling primitives. Pure (only mutates
- * the caller-supplied `stats` accumulator). See ADR 0029.
+ * the caller-supplied `stats` accumulator).
  */
 
 import { Axis } from "../../axes.ts";
@@ -13,6 +13,29 @@ import type {
   PlanStats,
   SelectionState,
 } from "./types.ts";
+
+/**
+ * The planner's request order: ascending priority (lower is more urgent),
+ * then a spatial-first, channel-second tiebreak so equal-priority
+ * multi-channel chunks interleave by cell instead of by channel.
+ */
+export function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
+  const priority = a.priority - b.priority;
+  if (priority !== 0) return priority;
+
+  const image = a.imageId.localeCompare(b.imageId);
+  if (image !== 0) return image;
+
+  return (
+    a.level - b.level ||
+    a.t - b.t ||
+    a.z - b.z ||
+    a.y - b.y ||
+    a.x - b.x ||
+    a.c - b.c ||
+    a.chunkKey.localeCompare(b.chunkKey)
+  );
+}
 
 /** Canonical chunk key: "level/t/c/z/y/x". */
 export function chunkKey(
@@ -50,13 +73,10 @@ export function chunkOutsideFrustum(
 }
 
 /**
- * Per-axis world size of a chunk at a given LOD, expressed in level-0
+ * Per-axis world size of a chunk at a given level, expressed in level-0
  * voxel units. Returns `[x, y, z]`. Used by both spatial enumeration
  * (`iterateGridCells`) and distance scoring (`chunkDistanceFromCenter`)
  * so they agree on the same conversion.
- *
- * Indexing follows the 5-D layout: `[T, C, Z, Y, X]` — see
- * `lucida-web/src/axes.ts` for the named-axis constants.
  */
 export function chunkWorldDims(
   geo: LevelGeometry,
@@ -73,27 +93,11 @@ export function chunkWorldDims(
 }
 
 /**
- * Enumerate chunk grid cells for a promoted entity, applying spatial culling
- * and cache filtering.  Iterates all LOD levels in the entry's owned range,
- * all visible channels, and the spatial grid cells that overlap the visible
- * region.
- *
- * Ported from Rust `visible_chunks()` in lucida-core/src/chunk.rs.
- *
- * Accepts the full {@link ActiveSetEntry} union so callers don't have to
- * pre-narrow. Short-circuits to an empty list for non-tile entries:
- *   - `group-as-proxy` — the group is served by a single proxy asset,
- *     not by chunk requests.
- *   - `invisible` — pass-through entry; no chunk requests apply.
- *
- * Returned `ChunkRequest`s are placeholders: `priority` is `0`, `lane`
- * is `"detail"`, and `datasetId` is stamped from the caller-supplied
- * arg (defaults to the empty string for synthetic test snapshots that
- * don't model dataset ownership). The caller (`plan()`) finalises
- * `priority`/`lane` per lane before they leave the planner.
- *
- * Thin wrapper around {@link iterateChunksAtLodRange}: short-circuits
- * for non-tile entries and reads the LOD range from the tile entry.
+ * Enumerate culled chunk grid cells for a tile entry's detail-tier levels.
+ * Non-tile entries return `[]`: a `group-as-proxy` is served by one proxy
+ * asset, and `invisible` has no chunks. Returned requests are placeholders
+ * (`priority` 0, `lane` `"detail"`) that `plan()` stamps per lane.
+ * `datasetId` defaults to empty for synthetic test snapshots.
  */
 export function iterateChunks(
   entity: EntitySnapshot,
@@ -104,9 +108,9 @@ export function iterateChunks(
   datasetId = "",
 ): ChunkRequest[] {
   if (entry.kind !== "tile") return [];
-  return iterateChunksAtLodRange(
+  return iterateChunksAtLevels(
     entity,
-    entry.detailOwnedLodRange,
+    entry.detailLevels,
     visibleRegion,
     selection,
     stats,
@@ -115,18 +119,17 @@ export function iterateChunks(
 }
 
 /**
- * Spatial enumeration primitive. Iterates the LOD range from coarsest
- * down to finest, all visible channels, and pushes one
- * {@link ChunkRequest} per surviving grid cell.
+ * Spatial enumeration primitive. Iterates the given levels in order, all
+ * visible channels, and pushes one {@link ChunkRequest} per surviving
+ * grid cell. It skips levels the entity's pyramid lacks.
  *
- * This is the form used directly by the overview lane (which doesn't
- * need an `ActiveSetEntry` to supply the range — it always wants the
- * coarsest level). The detail/prefetch lanes call {@link iterateChunks}
- * which forwards the range from the active-set entry.
+ * The coarse lane calls this with the entry's coarse level. The detail
+ * and prefetch lanes call {@link iterateChunks}, which forwards the
+ * entry's detail-tier levels.
  */
-export function iterateChunksAtLodRange(
+export function iterateChunksAtLevels(
   entity: EntitySnapshot,
-  lodRange: [number, number],
+  levels: readonly number[],
   visibleRegion: VisibleRegion,
   selection: SelectionState,
   stats: PlanStats | null = null,
@@ -134,19 +137,14 @@ export function iterateChunksAtLodRange(
 ): ChunkRequest[] {
   const requests: ChunkRequest[] = [];
 
-  if (entity.levels.length === 0) {
+  const level0 = entity.levels[0];
+  if (level0 === undefined) {
     return requests;
   }
 
-  const [finest, coarsest] = lodRange;
-
-  // Iterate from coarsest (seed) down to finest (target).
-  for (let level = coarsest; level >= finest; level--) {
+  for (const level of levels) {
     const levelGeo = entity.levels[level];
     if (levelGeo === undefined) continue;
-
-    const level0 = entity.levels[0];
-    if (level0 === undefined) continue;
 
     iterateGridCells(
       entity,
@@ -172,13 +170,6 @@ export function iterateChunksAtLodRange(
  * Channel is the innermost loop so equal-priority multi-channel chunks
  * are spatially interleaved. That lets upload budget reach all channels
  * for the focal cells before walking farther cells.
- *
- * Decomposes into named primitives:
- *   - {@link clipGridCellsToRegion}: reduces the full grid to the
- *     index range that overlaps the visible region; mutates `stats`
- *     for `considered`/`afterXyBounds`/`afterZRange`.
- *   - {@link cellSurvivesFrustum}: per-cell frustum test.
- *   - {@link makeChunkRequest}: emit a placeholder ChunkRequest.
  */
 function iterateGridCells(
   entity: EntitySnapshot,
@@ -267,7 +258,6 @@ function clipGridCellsToRegion(
   stats: PlanStats | null,
   channelCount = 1,
 ): ClippedGridRange | null {
-  // 5D indices: [T=0, C=1, Z=2, Y=3, X=4] — see `axes.ts` (Axis namespace).
   const fullX = level0.shape[Axis.X];
   const fullY = level0.shape[Axis.Y];
 
@@ -342,17 +332,12 @@ function cellSurvivesFrustum(
 }
 
 /**
- * Build a placeholder {@link ChunkRequest} for a surviving (level,
- * channel, z, y, x) cell. `priority`/`lane` are stamped by the caller
- * per lane; `datasetId` is plumbed through from
- * `PlanningSnapshot.datasetId` so every emitted request leaves
- * the planner fully addressed.
+ * Build a placeholder {@link ChunkRequest} for a surviving cell. The caller
+ * stamps `priority` and `lane` per lane.
  *
- * NOTE: cached chunks are NOT filtered here. They flow through
- * `submit()` so the cache can refresh their priority and
- * lastSeenTick — eviction relies on those signals to spare
- * still-wanted chunks. Dedup against the cache happens in
- * `CpuCache.submit`.
+ * Cached chunks are not filtered here. They flow through `submit()` so the
+ * cache refreshes their priority and lastSeenTick, which eviction uses to
+ * spare still-wanted chunks. `CpuCache.submit` dedups against the cache.
  */
 function makeChunkRequest(
   entity: EntitySnapshot,

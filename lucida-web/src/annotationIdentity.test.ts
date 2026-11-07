@@ -37,9 +37,9 @@ describe("annotationAuthorId", () => {
 
     const id = annotationAuthorId();
 
-    // Returned verbatim — ownership of prior pins/comments is preserved.
+    // Returned verbatim, so ownership of prior pins and comments is preserved.
     expect(id).toBe(persisted);
-    // And it was NOT regenerated/overwritten in storage.
+    // And it was not regenerated or overwritten in storage.
     expect(localStorage.getItem(ANNOTATION_AUTHOR_KEY)).toBe(persisted);
   });
 
@@ -55,7 +55,7 @@ describe("annotationAuthorId", () => {
 
   it("a fresh resolve after persist reuses the same stored id (next-visit reuse)", () => {
     const first = annotationAuthorId();
-    // Drop only the in-memory cache, leaving localStorage intact — this models a
+    // Drop only the in-memory cache, leaving localStorage intact. This models a
     // brand-new page load (or rejoin) reading what the previous visit stored.
     __resetAnnotationIdentityForTesting();
 
@@ -114,7 +114,7 @@ describe("annotationAuthorId", () => {
     // First call can't persist, but must still return a usable id…
     const a = annotationAuthorId();
     expect(a.length).toBeGreaterThan(0);
-    // …and a second call returns the SAME id (memoized), so ownership is
+    // …and a second call returns the same id (memoized), so ownership is
     // consistent for the session despite storage being unwritable.
     const b = annotationAuthorId();
     expect(b).toBe(a);

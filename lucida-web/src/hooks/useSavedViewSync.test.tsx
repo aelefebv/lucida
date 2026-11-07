@@ -1,19 +1,14 @@
 // @vitest-environment happy-dom
 //
-// Hook-level tests for useSavedViewSync. Covers the post-fix wiring:
-//   - Bug 1: notifyChange is exposed and forwards to UrlSync.
-//   - Bug 2: applier's apply-complete fires markInteractiveDirty/Residency.
-//   - Bug 3: applier's apply-complete pushes post-apply C/T/Z/viewMode
-//     and multiChannel back to the React-side dim mirrors.
-//
-// Mocks `lucida-core`'s `dataset_id_for_url` so the hook can construct
-// without a wasm init (mirrors applier.test.ts's injected fakeIdForUrl).
+// Hook wiring: notifyChange forwards to UrlSync, and apply-complete wakes the
+// render loop and pushes C/T/Z, viewMode, and multiChannel back to React.
+// `dataset_id_for_url` is mocked so the hook builds without a wasm init.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { act, render } from "@testing-library/react";
 
-// Mock lucida-core BEFORE importing the hook so the import-time
+// Mock lucida-core before importing the hook so the import-time
 // `dataset_id_for_url` reference picks up the stub.
 vi.mock("lucida-core", () => ({
   dataset_id_for_url: (url: string) => `ds-stub-${url.length.toString(16)}`,
@@ -22,6 +17,7 @@ vi.mock("lucida-core", () => ({
 import { useSavedViewSync } from "./useSavedViewSync.ts";
 import type { SavedView } from "../savedView/types.ts";
 import { SAVED_VIEW_VERSION } from "../savedView/types.ts";
+import { decode, encode } from "../savedView/encoder.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 
 interface MockScene {
@@ -408,5 +404,30 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
 
     expect(scene.multiChannelVal).toBe(true);
     expect(outRef.current?.multiChannel).toBe(true);
+  });
+
+  // The layer panel reads single-channel mode on `c` as that channel soloed.
+  it("restores a URL recorded in single-channel mode on its channel, from a composite", async () => {
+    const loop = makeMockLoop();
+    scene.multiChannelVal = true;
+    await act(async () => {
+      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+    });
+
+    // Single-channel views were recorded without the flag.
+    const recorded = emptyView();
+    recorded.view.c = 1;
+    delete recorded.view.multi_channel;
+    const restored = await decode(await encode(recorded));
+
+    await act(async () => {
+      await outRef.current!.handle.applier.apply(restored);
+    });
+    await act(async () => { /* flush pending effects */ });
+
+    expect(scene.multiChannelVal).toBe(false);
+    expect(scene.cVal).toBe(1);
+    expect(outRef.current?.multiChannel).toBe(false);
+    expect(outRef.current?.c).toBe(1);
   });
 });

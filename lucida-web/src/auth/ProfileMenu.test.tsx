@@ -14,13 +14,13 @@ const PRINCIPAL: AuthPrincipal = {
   email: "dev@local",
   display_name: "Local Dev",
   picture_url: null,
-  is_admin: true,
+  is_admin: false,
 };
 
 let session: {
   principal: AuthPrincipal;
   refresh: () => Promise<void>;
-  signOut: () => Promise<void>;
+  signOut: (() => Promise<void>) | null;
 } = {
   principal: PRINCIPAL,
   refresh: async () => {},
@@ -55,15 +55,25 @@ afterEach(() => {
 });
 
 describe("ProfileMenu", () => {
-  it("renders the display name on the trigger button", () => {
+  it("names the person on the trigger button", () => {
     render(<ProfileMenu />);
-    const triggers = screen.getAllByText("Local Dev");
-    expect(triggers.length).toBeGreaterThanOrEqual(1);
+    const trigger = screen.getByRole("button", { name: /account menu/i });
+    expect(trigger.getAttribute("title")).toBe("Local Dev");
   });
 
-  it("falls back to first-letter avatar when picture_url is null", () => {
+  it("falls back to initials when picture_url is null", () => {
     render(<ProfileMenu />);
-    expect(screen.getByText("L")).toBeTruthy();
+    expect(screen.getByText("LD")).toBeTruthy();
+  });
+
+  it("closes on Escape and returns focus to the trigger", () => {
+    render(<ProfileMenu />);
+    const trigger = screen.getByRole("button", { name: /account menu/i });
+    fireEvent.click(trigger);
+    expect(screen.getByRole("menu")).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("menu")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
   });
 
   it("opens the dropdown and shows email + Sign out when the trigger is clicked", () => {
@@ -110,6 +120,16 @@ describe("ProfileMenu", () => {
     });
   });
 
+  it("leaves Sign out out of the menu when the mode declares no sign-out URL", () => {
+    // Absent, not present-and-inert.
+    session = { principal: PRINCIPAL, refresh: async () => {}, signOut: null };
+    render(<ProfileMenu />);
+    fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
+
+    expect(screen.getByText("dev@local")).toBeTruthy();
+    expect(screen.queryByRole("menuitem", { name: /sign out/i })).toBeNull();
+  });
+
   it("renders an <img> avatar when picture_url is set", () => {
     session = {
       principal: { ...PRINCIPAL, picture_url: "https://example.com/me.png" },
@@ -120,6 +140,40 @@ describe("ProfileMenu", () => {
     const img = container.querySelector("img");
     expect(img).toBeTruthy();
     expect(img?.getAttribute("src")).toBe("https://example.com/me.png");
+  });
+
+  it("falls back to the initial when the picture fails to load", () => {
+    session = {
+      principal: { ...PRINCIPAL, picture_url: "https://example.com/gone.png" },
+      refresh: async () => {},
+      signOut: async () => {},
+    };
+    const { container } = render(<ProfileMenu />);
+    fireEvent.error(container.querySelector("img") as HTMLImageElement);
+
+    expect(container.querySelector("img")).toBeNull();
+    expect(screen.getByText("LD")).toBeTruthy();
+  });
+
+  it("retries the image when the picture URL changes after a failure", () => {
+    session = {
+      principal: { ...PRINCIPAL, picture_url: "https://example.com/gone.png" },
+      refresh: async () => {},
+      signOut: async () => {},
+    };
+    const { container, rerender } = render(<ProfileMenu />);
+    fireEvent.error(container.querySelector("img") as HTMLImageElement);
+    expect(container.querySelector("img")).toBeNull();
+
+    session = {
+      ...session,
+      principal: { ...PRINCIPAL, picture_url: "https://example.com/new.png" },
+    };
+    rerender(<ProfileMenu />);
+
+    expect(container.querySelector("img")?.getAttribute("src")).toBe(
+      "https://example.com/new.png",
+    );
   });
 
   it("switches the local dev user when dev auth is enabled", async () => {

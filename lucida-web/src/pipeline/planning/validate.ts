@@ -1,45 +1,20 @@
 /**
- * Planning domain — dev-mode boundary validator for `plan()`'s inputs.
+ * Dev-mode validator for `plan()`'s snapshot and state: producer
+ * invariants the type system can't express but the planner relies on.
+ * Each check throws an `Error` naming the invariant and the offending id.
  *
- * `validatePlanningInputs(snapshot, state)` runs nine semantic-invariant
- * checks against the planner's two non-config inputs. Each check
- * corresponds to a producer-side invariant the type system can't
- * express but the runtime depends on (referential integrity, uniqueness
- * of ids, manifest-shape arity, …). Violations throw an `Error` whose
- * message names the violated invariant and (where applicable) the
- * offending id.
- *
- * Posture: throw, don't degrade. Throwing surfaces the bug at the call
- * site; degrading would defeat the point. `plan()` calls this only when
- * `import.meta.env.DEV` is true so Vite dead-code-eliminates the call in
- * production builds. See ADR `0031-validate-planning-inputs-dev-mode-
- * boundary-check.md` for the rationale and the full check list.
- *
- * Cost: O(N) in entities (one map-build pass + one scan), plus O(L) in
- * total levels for the level-shape arity check. Cheap enough to run on
- * every dev-mode `plan()` call.
- *
- * Each check is exported individually for direct test coverage; the
- * composing {@link validatePlanningInputs} runs them in order and
- * throws on first failure.
+ * Throw, don't degrade: the point is to surface the producer bug at the
+ * call site. `plan()` calls this only under `import.meta.env.DEV`, so
+ * Vite strips it from production builds.
  */
 
 import type { ActiveSetEntry, EntitySnapshot, PlanningSnapshot, PlanningState } from "./types.ts";
 
 /**
- * Check 1 — TileSnapshot.parentId references a known GroupSnapshot.
- *
- * Every {@link TileSnapshot}'s `parentId`, when present in
- * `snapshot.entities`, must refer to an entity whose `kind === "Group"`.
- *
- * The snapshot only carries entities WASM's `view_query` returned this
- * tick — a visible tile can have an invisible parent group that doesn't
- * appear at all. The planner's `groupMembers` already handles this via a
- * `groupEntity: null` group (see `pipeline/planning/modes.ts`); treating
- * a missing parent as a violation would false-positive on every
- * legitimate tile-without-visible-parent snapshot the orchestrator
- * builds. This narrowed form catches the genuinely-broken case (parent
- * IS in entities but it's not a Group) without contradicting reality.
+ * Check 1: a tile's `parentId`, when that entity is in the snapshot,
+ * names a Group. A missing parent is fine: the snapshot holds only this
+ * tick's `view_query` entities, so a visible tile's group can be absent,
+ * and `groupMembers` handles that with `groupEntity: null`.
  */
 export function checkTileParentRefs(snapshot: PlanningSnapshot): void {
   const byId = new Map<string, EntitySnapshot>();
@@ -57,11 +32,8 @@ export function checkTileParentRefs(snapshot: PlanningSnapshot): void {
 }
 
 /**
- * Check 2 — entityId uniqueness.
- *
- * Every `entityId` must be unique across `snapshot.entities`. Duplicate
- * ids cause `prevModeByGroup` (and other entity-keyed maps inside the
- * planner and downstream consumers) to silently drop earlier values.
+ * Check 2: `entityId` is unique across `snapshot.entities`. Duplicates
+ * make entity-keyed maps silently drop earlier values.
  */
 export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
   const seen = new Set<string>();
@@ -76,18 +48,9 @@ export function checkUniqueEntityIds(snapshot: PlanningSnapshot): void {
 }
 
 /**
- * Check 3 — imageId uniqueness.
- *
- * Every non-empty `imageId` must be unique across `snapshot.entities`.
- * Duplicate `imageId`s break `minimapPending` keying and any
- * image-keyed downstream lookup (cache keys, residency tables).
- *
- * Empty-string `imageId` is the conventional placeholder for `Group`
- * entities (the group IS the proxy — there is no image to key against);
- * a multi-group collection snapshot legitimately carries multiple
- * `imageId: ""` entries. The check only flags duplicates among the
- * non-empty image ids that actually drive image-keyed downstream
- * lookups.
+ * Check 3: each non-empty `imageId` is unique. Duplicates break
+ * `minimapPending` and other image-keyed lookups. Groups carry
+ * `imageId: ""`, so a multi-group snapshot repeats the empty id legitimately.
  */
 export function checkUniqueImageIds(snapshot: PlanningSnapshot): void {
   const seen = new Set<string>();
@@ -103,12 +66,9 @@ export function checkUniqueImageIds(snapshot: PlanningSnapshot): void {
 }
 
 /**
- * Check 4 — level shape arity (TCZYX = 5).
- *
- * Every level on every entity must have `shape.length === 5` and
- * `chunk_shape.length === 5`. The TCZYX axis convention is a hard
- * precondition for `iterateChunks`, `chunkOutsideFrustum`, and every
- * `Axis.X` / `Axis.Y` / `Axis.Z` indexed read in the planner.
+ * Check 4: every level's `shape` and `chunk_shape` have five axes (TCZYX).
+ * `iterateChunks`, `chunkOutsideFrustum`, and every `Axis`-indexed read
+ * in the planner assume it.
  */
 export function checkLevelShapeArity(snapshot: PlanningSnapshot): void {
   for (const e of snapshot.entities) {
@@ -129,14 +89,9 @@ export function checkLevelShapeArity(snapshot: PlanningSnapshot): void {
 }
 
 /**
- * Check 5 — visibleRegion bbox + z-range validity.
- *
- * `visibleRegion.xyBoundsVox` must be a valid bbox: `xMin <= xMax` and
- * `yMin <= yMax`. `zRangeVox[0] <= zRangeVox[1]`. The tile shape is
- * `[minX, minY, maxX, maxY]` (see `pipeline/viewport.ts`).
- *
- * A degenerate bbox produces no chunks, but it's a producer bug worth
- * surfacing rather than silently emitting an empty plan.
+ * Check 5: `visibleRegion.xyBoundsVox` (`[minX, minY, maxX, maxY]`) and
+ * `zRangeVox` are ordered. A degenerate box yields no chunks, which would
+ * hide a producer bug behind an empty plan.
  */
 export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
   const [xMin, yMin, xMax, yMax] = snapshot.visibleRegion.xyBoundsVox;
@@ -158,25 +113,12 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
   }
 }
 
-// Check 6 (assetCatalog → entityId referential integrity) withdrawn:
-// `assetCatalog.byEntity` is flattened across ALL datasets ever seen,
-// while `snapshot.entities` is for ONE dataset's current tick. They
-// legitimately diverge; dangling catalog entries are harmless because
-// lookups go snapshot-entity → catalog (per-id `get()`).
-//
-// Check 7 (minimapPending → imageId referential integrity) withdrawn for
-// the same producer-scope mismatch: minimapPath enumerates all
-// `dataset_images()`, snapshot.entities is `view_query` output, and
-// `emitMinimapLane` only walks images in the active set.
-//
-// Numbers preserved so cross-references in ADR 0031 stay stable.
+// No check 6 (catalog entries name snapshot entities): the catalog spans every dataset seen.
+// No check 7 (minimapPending keys name snapshot images): the minimap covers images view_query omits.
 
 /**
- * Check 8 — previousActiveSet has no duplicate entityIds.
- *
- * `state.previousActiveSet` must have no duplicate `entityId` entries.
- * Duplicates break `prevModeByGroup`'s last-write-wins indexing
- * downstream of the planner.
+ * Check 8: `state.previousActiveSet` has no duplicate `entityId`. The
+ * cold-state delta indexes it by entity.
  */
 export function checkPrevActiveSetUnique(state: PlanningState): void {
   const seen = new Set<string>();
@@ -191,30 +133,12 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
 }
 
 /**
- * Check 9 — previousActiveSet entry kind agrees with snapshot entity kind.
- *
- * For each `state.previousActiveSet` entry whose `entityId` is also in
- * `snapshot.entities`, the entry's `kind` must agree with the entity's
- * `kind`:
- *
- *   - `kind: "group-as-proxy"` ⇒ entity must be `kind: "Group"`.
- *   - `kind: "tile"`         ⇒ entity must be `kind: "Tile"` OR
- *     `kind: "Image"`. The planner's `groupMembers` synthesizes an
- *     `__image__${entityId}` group for `Image` entities (singletons,
- *     non-collection datasets) so they go through the same tile-mode
- *     code path as collection tiles. The active-set entry it produces is
- *     therefore a `TileEntry` even though the entity itself is an
- *     `ImageSnapshot`. See `pipeline/planning/modes.ts::groupMembers`.
- *   - `kind: "invisible"`     ⇒ NOT validated against entity kind. An
- *     entity can become invisible regardless of its kind, so the
- *     invisible variant is intentionally permissive.
- *
- * Disappeared entities (entry's `entityId` no longer in
- * `snapshot.entities`) are explicitly NOT a violation — entities can
- * come and go across ticks (datasets opened/closed, layout changes,
- * selection shifts). The planner already handles disappeared entries
- * gracefully; surfacing them here would generate false positives on
- * every legitimate state transition.
+ * Check 9: each previous active-set entry whose entity is still in the
+ * snapshot agrees with that entity's kind. `group-as-proxy` needs a
+ * Group. `tile` accepts Tile or Image, because `groupMembers` wraps each
+ * Image in a synthetic one-tile group. `invisible` accepts any kind. An
+ * entity missing from the snapshot is not a violation; entities come and
+ * go across ticks.
  */
 export function checkPrevActiveSetKindAgreement(
   snapshot: PlanningSnapshot,
@@ -237,12 +161,8 @@ export function checkPrevActiveSetKindAgreement(
 }
 
 /**
- * Map an {@link ActiveSetEntry} kind to the set of {@link EntitySnapshot}
- * kinds it may correspond to. Returns `null` for `kind: "invisible"` —
- * invisible entries are permissive (any entity can become invisible).
- *
- * `tile` accepts both `Tile` and `Image`: see the comment on
- * {@link checkPrevActiveSetKindAgreement} for the singleton rationale.
+ * Entity kinds an active-set entry may correspond to, or `null` for
+ * `invisible` (any kind). See {@link checkPrevActiveSetKindAgreement}.
  */
 function allowedEntityKindsFor(
   entry: ActiveSetEntry,
@@ -258,14 +178,8 @@ function allowedEntityKindsFor(
 }
 
 /**
- * Run the seven semantic-invariant checks on `plan()`'s inputs. Throws
- * on first failure with the violated invariant and the offending id.
- * Called from {@link plan} only when `import.meta.env.DEV` is true.
- *
- * Order is fixed (see ADR 0031): earlier checks build referential
- * context later checks rely on (e.g. uniqueness before reference
- * resolution), so a violation fires before a downstream check could be
- * misled.
+ * Run every check and throw on the first failure. {@link plan} calls
+ * this only when `import.meta.env.DEV` is true.
  */
 export function validatePlanningInputs(
   snapshot: PlanningSnapshot,
@@ -276,8 +190,6 @@ export function validatePlanningInputs(
   checkUniqueImageIds(snapshot);
   checkLevelShapeArity(snapshot);
   checkVisibleRegionBounds(snapshot);
-  // Check 6 withdrawn — see comment above the block.
-  // Check 7 withdrawn — see comment above the block.
   checkPrevActiveSetUnique(state);
   checkPrevActiveSetKindAgreement(snapshot, state);
 }

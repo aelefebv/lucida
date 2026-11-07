@@ -177,18 +177,12 @@ pub(crate) fn open_success(
     }
 }
 
-/// What one dataset open's metadata reads cost, taken as the difference of
-/// two [`lucida_store::cache::CacheStats`] snapshots around the import.
+/// What one dataset open's metadata reads cost: the difference of two
+/// [`lucida_store::cache::CacheStats`] snapshots around the import.
 ///
-/// The import reads through the same `CachedStore` the chunk path uses, so
-/// the cache's own counters already observe it; this is the per-open slice of
-/// those counters, which is the number an operator wants when asking why an
-/// open took seconds. The cache is shared per source, so two opens of one
-/// source running at the same time — or chunk reads on an already-open
-/// binding — attribute some of each other's reads; the slice is exact only
-/// for an open that does not overlap another reader of the same source. Both open paths report it — the interactive open on the
-/// progress trail the CLI and the web's open view render, the workspace
-/// restore in its log line.
+/// The cache is shared per source, so concurrent opens of one source, or
+/// chunk reads on an open binding, attribute some of each other's reads.
+/// The number is exact only for an open with no overlapping reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) struct MetadataReadCost {
     /// Backend round trips performed during the import.
@@ -263,6 +257,48 @@ mod tests {
 
     fn boxed(message: &str) -> Box<dyn std::error::Error + Send + Sync> {
         message.to_string().into()
+    }
+
+    fn sharded_chain(inner: serde_json::Value, index_location: &str) -> Vec<serde_json::Value> {
+        vec![serde_json::json!({
+            "name": "sharding_indexed",
+            "configuration": {
+                "chunk_shape": [8, 8],
+                "codecs": inner,
+                "index_codecs": [
+                    {"name": "bytes", "configuration": {"endian": "little"}},
+                    {"name": "crc32c"}
+                ],
+                "index_location": index_location
+            }
+        })]
+    }
+
+    /// Whichever part of the layout was refused, the open is triaged as an
+    /// unsupported codec and not as malformed metadata.
+    #[test]
+    fn a_refused_sharded_layout_is_an_unsupported_codec() {
+        let bytes = serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}});
+        let refused = [
+            sharded_chain(
+                serde_json::json!([{"name": "sharding_indexed", "configuration": {}}]),
+                "end",
+            ),
+            sharded_chain(serde_json::json!([bytes, {"name": "gzip"}]), "end"),
+            sharded_chain(serde_json::json!([bytes, {"name": "zstd"}]), "middle"),
+        ];
+        for chain in refused {
+            let error =
+                lucida_store::shard::ShardLayout::from_codec_chain(&chain, &[16, 16]).unwrap_err();
+            let diagnostic = import_failure(&error);
+            assert_eq!(
+                diagnostic.kind,
+                DatasetOpenFailureKind::UnsupportedCodec,
+                "{error}"
+            );
+            assert_eq!(diagnostic.stage, DatasetOpenStage::MetadataImport);
+            assert!(!diagnostic.retryable);
+        }
     }
 
     #[test]

@@ -1,5 +1,194 @@
 # Changelog
 
+## [0.20.0](https://github.com/aelefebv/lucida/compare/v0.19.0...v0.20.0) (2026-11-06)
+
+
+### Features
+
+* snapshot previews on dashboard workspace cards ([#1186](https://github.com/aelefebv/lucida/issues/1186)) ([97dad75](https://github.com/aelefebv/lucida/commit/97dad7558c4972903cdbf87a1c1c0ee6b852720a))
+* **web:** fit GPU and memory budgets to the device, idle the frame loop, explain missing WebGPU ([#1182](https://github.com/aelefebv/lucida/issues/1182)) ([3fba27e](https://github.com/aelefebv/lucida/commit/3fba27eb2d96f94c655cdc38a3ef81ba1802fed7))
+* **web:** phone shell with a full-screen canvas and one bottom sheet ([#1189](https://github.com/aelefebv/lucida/issues/1189)) ([dc7c782](https://github.com/aelefebv/lucida/commit/dc7c782acc329abe8a13a656aefa08f7b469502b))
+* **web:** responsive foundation with width classes, touch sizing, safe areas, and long-press tooltips ([#1181](https://github.com/aelefebv/lucida/issues/1181)) ([beb09b8](https://github.com/aelefebv/lucida/commit/beb09b8230f0b8614beca2047553d453010be3e8))
+* **web:** side panels slide over the canvas below 1024 px; dashboard and dialogs fit small screens ([#1184](https://github.com/aelefebv/lucida/issues/1184)) ([080feaa](https://github.com/aelefebv/lucida/commit/080feaad9aeb82d2912b6eb740a33424b18596c7))
+* **web:** touch gestures on the canvas ([#1179](https://github.com/aelefebv/lucida/issues/1179)) ([40b5b8a](https://github.com/aelefebv/lucida/commit/40b5b8a558e99f1694fcbea035fb2f921d9c6dfa))
+* **web:** touch-reachable editing with select to edit, a canvas menu, and on-screen paths for keyboard-only features ([#1185](https://github.com/aelefebv/lucida/issues/1185)) ([d2232d3](https://github.com/aelefebv/lucida/commit/d2232d370b6f600854d50377520f27e3a43638ef))
+
+
+### Bug Fixes
+
+* **web:** mobile QA pass with 3D framing on phones, phone presence, and sheet, toast, and menu fixes ([#1190](https://github.com/aelefebv/lucida/issues/1190)) ([ba61a1c](https://github.com/aelefebv/lucida/commit/ba61a1c5bee0e4eb09e23ad26bf75c8d7dfc2d96))
+
+## [0.19.0](https://github.com/aelefebv/lucida/compare/v0.18.0...v0.19.0) (2026-11-06)
+
+
+### Features
+
+* **web:** composite channels with solo, typed contrast limits, and a tidier layer panel ([#1157](https://github.com/aelefebv/lucida/issues/1157)) ([aba5443](https://github.com/aelefebv/lucida/commit/aba5443ceafba8d2f1f0dfdf3794cc5cfba920c3))
+* **web:** floating dimension bar with a 2D/3D switch and Z/T scrubbers ([#1151](https://github.com/aelefebv/lucida/issues/1151)) ([fddaaa7](https://github.com/aelefebv/lucida/commit/fddaaa7bd55c7a29dcbe3692a4775af11ef7e62b))
+* **web:** fold, hide, and restore the collection selector and minimap cards ([#1153](https://github.com/aelefebv/lucida/issues/1153)) ([2e60278](https://github.com/aelefebv/lucida/commit/2e60278baf66684b93cbb167de2e93eb8175ea03))
+* **web:** one Add data dialog for paths, URLs, recent datasets, and browsing ([#1154](https://github.com/aelefebv/lucida/issues/1154)) ([9188c24](https://github.com/aelefebv/lucida/commit/9188c249300a6c83f046aefeea8adab668e5c4c4))
+* **web:** one Share popover with copy-link first, and one toast system ([#1152](https://github.com/aelefebv/lucida/issues/1152)) ([3e48af0](https://github.com/aelefebv/lucida/commit/3e48af064ac1ca865041b41ffadf6f1d45895400))
+* **web:** saved views, comments, explore, and info in the right rail ([#1158](https://github.com/aelefebv/lucida/issues/1158)) ([2cc1b3c](https://github.com/aelefebv/lucida/commit/2cc1b3c4a4bb1a8a7ba490c0706a9928eaf8ac45))
+* **web:** tool palette, viewer shortcuts, command palette, and shortcut sheet ([#1156](https://github.com/aelefebv/lucida/issues/1156)) ([8c50adf](https://github.com/aelefebv/lucida/commit/8c50adfc5f9973de8c44f343d5469b8e45ccc3f6))
+* **web:** workspace dashboard with a card grid, an Open data field, and distinguishable names ([#1160](https://github.com/aelefebv/lucida/issues/1160)) ([4f5aef8](https://github.com/aelefebv/lucida/commit/4f5aef83c8ea7076a8e8502b33d0c9cbb70a0433))
+
+
+### Bug Fixes
+
+* **web:** visual QA pass across sizes, pixel ratios, themes, and densities ([#1161](https://github.com/aelefebv/lucida/issues/1161)) ([6deab1a](https://github.com/aelefebv/lucida/commit/6deab1ade35c452d8775f06efe1fb27d062904dc))
+
+## [0.18.0](https://github.com/aelefebv/lucida/compare/v0.17.1...v0.18.0) (2026-11-06)
+
+
+### Features
+
+* let a deployment set the default theme and override tokens ([#1145](https://github.com/aelefebv/lucida/issues/1145)) ([9def114](https://github.com/aelefebv/lucida/commit/9def1141c10954b3042efd69a6d19ec60f50773d))
+* **web:** draw canvas-side UI and the canvas background from theme tokens ([#1147](https://github.com/aelefebv/lucida/issues/1147)) ([21d850a](https://github.com/aelefebv/lucida/commit/21d850a575ba1860afd3599578e7f85da6eff6e9))
+* **web:** move annotations, comments, mentions, and sign-in screens onto theme tokens ([#1148](https://github.com/aelefebv/lucida/issues/1148)) ([3413fde](https://github.com/aelefebv/lucida/commit/3413fde3f41e7ccb0ae0d944e92656cec5b45125))
+* **web:** move the developer surfaces onto theme tokens ([#1146](https://github.com/aelefebv/lucida/issues/1146)) ([771c4e3](https://github.com/aelefebv/lucida/commit/771c4e3ce4cf1a1b08f901e5af64919d23f21dd3))
+* **web:** UI foundation: theme tokens, preferences, accessible primitives, icons, and a shortcut registry ([#1144](https://github.com/aelefebv/lucida/issues/1144)) ([72a02a1](https://github.com/aelefebv/lucida/commit/72a02a19a3ef346a759154f0ad68993434e1055d))
+* **web:** viewer shell with a full-window canvas, top bar, and side panels ([#1149](https://github.com/aelefebv/lucida/issues/1149)) ([df7c781](https://github.com/aelefebv/lucida/commit/df7c7816b9d7d6f004a5dbb1427c95a5a075cbb3))
+
+
+### Bug Fixes
+
+* frame the whole group when clicking it in the collection selector ([#1140](https://github.com/aelefebv/lucida/issues/1140)) ([32bb4ef](https://github.com/aelefebv/lucida/commit/32bb4ef842a871f34763e32089428e3956ee39c3))
+* **minimap:** look straight down at data with one Z plane ([#1141](https://github.com/aelefebv/lucida/issues/1141)) ([24e7669](https://github.com/aelefebv/lucida/commit/24e766991bc31454b18608c9901e70bf738fb353))
+* **web:** fit a newly opened dataset to the canvas's real size ([#1150](https://github.com/aelefebv/lucida/issues/1150)) ([3b28813](https://github.com/aelefebv/lucida/commit/3b28813b8f357d4c825bbafa14723fdc053da345))
+
+## [0.17.1](https://github.com/aelefebv/lucida/compare/v0.17.0...v0.17.1) (2026-11-05)
+
+
+### Bug Fixes
+
+* serve collection tiles with differing level geometry ([#1119](https://github.com/aelefebv/lucida/issues/1119)) ([efa0655](https://github.com/aelefebv/lucida/commit/efa0655eda643ed397cdb97c16cbaa83f6a841fa)), closes [#1118](https://github.com/aelefebv/lucida/issues/1118)
+
+
+### Refactors
+
+* trim comments to the why ([#1116](https://github.com/aelefebv/lucida/issues/1116)) ([bbd633f](https://github.com/aelefebv/lucida/commit/bbd633fd756336353ca222a6b016e02bb60be967))
+
+## [0.17.0](https://github.com/aelefebv/lucida/compare/v0.16.0...v0.17.0) (2026-11-04)
+
+
+### Features
+
+* **workspace:** open a dataset in a new workspace from an /open link ([#1108](https://github.com/aelefebv/lucida/issues/1108)) ([64d3e0b](https://github.com/aelefebv/lucida/commit/64d3e0bc7bb541090c80230086753af715c7f070)), closes [#1107](https://github.com/aelefebv/lucida/issues/1107)
+
+## [0.16.0](https://github.com/aelefebv/lucida/compare/v0.15.0...v0.16.0) (2026-09-11)
+
+
+### Features
+
+* **hud:** show the pipeline in a HUD strip in the viewport ([#1079](https://github.com/aelefebv/lucida/issues/1079)) ([d03ffd3](https://github.com/aelefebv/lucida/commit/d03ffd333c584a12a39d279824e395ce51495a78))
+* **monitor:** brush a window in the dock and highlight its chunks on the viewport ([#1087](https://github.com/aelefebv/lucida/issues/1087)) ([7e84d38](https://github.com/aelefebv/lucida/commit/7e84d3820f323a7aa809a85786c588b733f934ac))
+* **monitor:** compare two runs in the dock and read a dropped file ([#1089](https://github.com/aelefebv/lucida/issues/1089)) ([307743e](https://github.com/aelefebv/lucida/commit/307743e68386c8bb2e2f03198013a2ed32f38fa0))
+* **monitor:** read a dropped run or bundle in the dock and compare two runs ([307743e](https://github.com/aelefebv/lucida/commit/307743e68386c8bb2e2f03198013a2ed32f38fa0))
+* **monitor:** replace the monitor page with a timeline dock in the viewer ([#1082](https://github.com/aelefebv/lucida/issues/1082)) ([d961dc3](https://github.com/aelefebv/lucida/commit/d961dc3149b2430d9d47f2e022d46fffd3896aa8))
+* **overlay:** color chunks by phase and churn, and inspect a chunk on hover ([#1084](https://github.com/aelefebv/lucida/issues/1084)) ([d274635](https://github.com/aelefebv/lucida/commit/d274635e5fca67f930d82cc3e78340e1c0efa937))
+* **overlay:** draw chunk states as wireframe boxes in volume mode ([#1086](https://github.com/aelefebv/lucida/issues/1086)) ([1d4924d](https://github.com/aelefebv/lucida/commit/1d4924df59580bf4a5504e29bc05872da31cdc86))
+* **trace:** look up one chunk and summarise space in the diagnostic ([#1071](https://github.com/aelefebv/lucida/issues/1071)) ([3341557](https://github.com/aelefebv/lucida/commit/3341557db3f9d1c4a477263f8c266b9db9a0b314))
+* **trace:** name what the pipeline does after the view settles ([#1078](https://github.com/aelefebv/lucida/issues/1078)) ([8ba225d](https://github.com/aelefebv/lucida/commit/8ba225d33edbde65bafca4d52acd363dab2d4086))
+* **trace:** open runs on pan, zoom, orbit, scrub, and select ([#1075](https://github.com/aelefebv/lucida/issues/1075)) ([fbd02c3](https://github.com/aelefebv/lucida/commit/fbd02c3e8e2edb7a7a05aa1d663cf9f4ac5d8f49)), closes [#1051](https://github.com/aelefebv/lucida/issues/1051)
+* **trace:** produce a provisional reading over a rolling window of an open run ([#1077](https://github.com/aelefebv/lucida/issues/1077)) ([c14ceea](https://github.com/aelefebv/lucida/commit/c14ceea6cb9de1dcd664b818bda044f2942d7052))
+* **trace:** record bytes and counts per client message type ([#1074](https://github.com/aelefebv/lucida/issues/1074)) ([b931d3e](https://github.com/aelefebv/lucida/commit/b931d3e0715293d03b134b82df0dab8869959bca)), closes [#1052](https://github.com/aelefebv/lucida/issues/1052)
+* **trace:** record GPU pass time and the adapter's fallback status ([#1070](https://github.com/aelefebv/lucida/issues/1070)) ([9593862](https://github.com/aelefebv/lucida/commit/95938625126f7fbe86eacaa71130a28feee65131)), closes [#1053](https://github.com/aelefebv/lucida/issues/1053)
+* **trace:** replay a bundle in the trace driver ([#1088](https://github.com/aelefebv/lucida/issues/1088)) ([92b3353](https://github.com/aelefebv/lucida/commit/92b335356f947ef5bd15fdb80d2981595f9362d6)), closes [#1060](https://github.com/aelefebv/lucida/issues/1060)
+* **trace:** save one bundle that carries everything a reader needs ([#1076](https://github.com/aelefebv/lucida/issues/1076)) ([af0034a](https://github.com/aelefebv/lucida/commit/af0034ad672ff82e3a8948b9c2a016866dd537f7)), closes [#1055](https://github.com/aelefebv/lucida/issues/1055)
+* **trace:** scope the diagnostic to a window of the run's clock ([#1073](https://github.com/aelefebv/lucida/issues/1073)) ([3f61a1d](https://github.com/aelefebv/lucida/commit/3f61a1d075043c414385c77e5d01231af2b77df9))
+* **trace:** script pan, zoom, orbit, scrub, and select in the trace driver ([#1080](https://github.com/aelefebv/lucida/issues/1080)) ([8df4315](https://github.com/aelefebv/lucida/commit/8df4315a43f0e7fab1381b18a4a4ce0f57a0c386))
+* **trace:** send a report to a workspace inbox that the CLI reads ([#1081](https://github.com/aelefebv/lucida/issues/1081)) ([bfbddad](https://github.com/aelefebv/lucida/commit/bfbddadbc14875ae979c5cfe95ec6a122eeeea8c))
+* **trace:** set Dev controls knobs from the driver and diff two runs ([#1085](https://github.com/aelefebv/lucida/issues/1085)) ([963dea7](https://github.com/aelefebv/lucida/commit/963dea76733e9b91810fcf70d802319ae6bc2c36)), closes [#1059](https://github.com/aelefebv/lucida/issues/1059)
+* **trace:** stream a session's aggregates to a CLI watcher ([#1083](https://github.com/aelefebv/lucida/issues/1083)) ([95ddee5](https://github.com/aelefebv/lucida/commit/95ddee5ecaba22d5b774844fd986ba229aaf4006))
+
+
+### Bug Fixes
+
+* **monitor:** create the render pipelines asynchronously and take the minimap overlay's first draw off the open ([#1102](https://github.com/aelefebv/lucida/issues/1102)) ([171e777](https://github.com/aelefebv/lucida/commit/171e77771d6abfbad9c2678e0af84766d1206de5))
+* **monitor:** take the compile and the minimap raster off the page's first paint, and read what remains as first paint ([#1099](https://github.com/aelefebv/lucida/issues/1099)) ([235c9d2](https://github.com/aelefebv/lucida/commit/235c9d2275b6228700ec6d34d06f3bc74cd0041b)), closes [#1094](https://github.com/aelefebv/lucida/issues/1094)
+* **monitor:** take the page's bundle frame from inside the next frame and name the inbox adapter ([#1097](https://github.com/aelefebv/lucida/issues/1097)) ([8fb1d4a](https://github.com/aelefebv/lucida/commit/8fb1d4ae6dcfd0bf681259c23ee1d0b379f59401))
+* **monitor:** wrap the dock's action row and keep the watch status to one line ([#1096](https://github.com/aelefebv/lucida/issues/1096)) ([d7a1e60](https://github.com/aelefebv/lucida/commit/d7a1e601621e959b9935833b77bb0c0573ad9085)), closes [#1093](https://github.com/aelefebv/lucida/issues/1093)
+* **trace:** put headless Chrome on the GPU and retry the adapter after a cold launch ([#1091](https://github.com/aelefebv/lucida/issues/1091)) ([16e36a1](https://github.com/aelefebv/lucida/commit/16e36a194b0ed2412ecf01fce1e514a8f483859d))
+* **trace:** take the driver's bundle frame from the page and check the screenshot it falls back to ([#1100](https://github.com/aelefebv/lucida/issues/1100)) ([1405f52](https://github.com/aelefebv/lucida/commit/1405f523bd11f1b38a4a8e5886b5c402c822be19))
+
+## [0.15.0](https://github.com/aelefebv/lucida/compare/v0.14.0...v0.15.0) (2026-09-09)
+
+
+### Features
+
+* **server:** expose a dependency status route for external monitors ([9d5c255](https://github.com/aelefebv/lucida/commit/9d5c25548f93a568f6f3c46d56a4d642436e7aea)), closes [#1045](https://github.com/aelefebv/lucida/issues/1045)
+
+## [0.14.0](https://github.com/aelefebv/lucida/compare/v0.13.0...v0.14.0) (2026-09-05)
+
+
+### Features
+
+* **auth:** enrich the principal from a profile directory ([#1035](https://github.com/aelefebv/lucida/issues/1035)) ([3e8b0df](https://github.com/aelefebv/lucida/commit/3e8b0dfadc6d2ea30aeefb32cb0b4d57db61906e))
+* **auth:** keep the profile directory loaded on a background schedule ([#1040](https://github.com/aelefebv/lucida/issues/1040)) ([ab80cf3](https://github.com/aelefebv/lucida/commit/ab80cf3ea1840bedcbfc377d3b0e11f052db921c))
+* **core:** compute the target level in the core with hysteresis ([#1017](https://github.com/aelefebv/lucida/issues/1017)) ([15023a0](https://github.com/aelefebv/lucida/commit/15023a072e90885c4de12c3893cfe66391866149)), closes [#992](https://github.com/aelefebv/lucida/issues/992)
+* **core:** make level 0 pinnable and clamp pins with one rule ([#1029](https://github.com/aelefebv/lucida/issues/1029)) ([de5be07](https://github.com/aelefebv/lucida/commit/de5be07c3cd54045742d6b06b5b0dba0e1f50b14))
+* **core:** plan chunks at the target level the browser targets ([#1022](https://github.com/aelefebv/lucida/issues/1022)) ([1850bb6](https://github.com/aelefebv/lucida/commit/1850bb6cbf13f89193d9fd0a6f6a4ef385a13616)), closes [#996](https://github.com/aelefebv/lucida/issues/996)
+* **e2e:** verify a sharded collection end to end at device pixel ratio 2 ([#1039](https://github.com/aelefebv/lucida/issues/1039)) ([988cf55](https://github.com/aelefebv/lucida/commit/988cf5542a4a5fc77fb7fc4d9c0f85a599ead489))
+* **e2e:** verify the level chain at device pixel ratio 2 and measure ADR 0061 before and after ([#1044](https://github.com/aelefebv/lucida/issues/1044)) ([39cb0b0](https://github.com/aelefebv/lucida/commit/39cb0b03520ca3582e969c137ffeb02f02b5de23))
+* **extras:** generate synthetic OME-Zarr fixtures, sharded and unsharded ([#1018](https://github.com/aelefebv/lucida/issues/1018)) ([e0eb435](https://github.com/aelefebv/lucida/commit/e0eb435137960e7fc926d9064c893fbc189529f0)), closes [#1006](https://github.com/aelefebv/lucida/issues/1006)
+* **store:** accept the sharding codec at import and serve inner chunks ([#1025](https://github.com/aelefebv/lucida/issues/1025)) ([2a20325](https://github.com/aelefebv/lucida/commit/2a203257a03d50011e9a7bc6f8ea9740e8c0da08)), closes [#1009](https://github.com/aelefebv/lucida/issues/1009)
+* **store:** add range reads to the cached store ([#1014](https://github.com/aelefebv/lucida/issues/1014)) ([96bfc17](https://github.com/aelefebv/lucida/commit/96bfc176cc196ef0d0ff01367b5533ea4c6d17c5)), closes [#1005](https://github.com/aelefebv/lucida/issues/1005)
+* **store:** detect unwritten levels behind the sharding codec ([#1030](https://github.com/aelefebv/lucida/issues/1030)) ([847b0ea](https://github.com/aelefebv/lucida/commit/847b0ea768ba21e776d6b33d413303102769f1db)), closes [#1010](https://github.com/aelefebv/lucida/issues/1010)
+* **store:** merge contiguous range reads queued for a permit into one request ([#1033](https://github.com/aelefebv/lucida/issues/1033)) ([3ecb294](https://github.com/aelefebv/lucida/commit/3ecb2949013562a65392d837c1204cb158a73e33))
+* **store:** read an inner chunk from a shard ([#1021](https://github.com/aelefebv/lucida/issues/1021)) ([544a5c0](https://github.com/aelefebv/lucida/commit/544a5c01af7ac3ecf6023768f8fa42d41dca87df)), closes [#1008](https://github.com/aelefebv/lucida/issues/1008)
+* **web:** evict chunks finer than the target first, then farthest ([#1026](https://github.com/aelefebv/lucida/issues/1026)) ([aaffccf](https://github.com/aelefebv/lucida/commit/aaffccfcdc087df95c91e99933e1ce44a4abbcc0))
+* **web:** keep up to four resident levels per entity in the renderer ([#1024](https://github.com/aelefebv/lucida/issues/1024)) ([90813dd](https://github.com/aelefebv/lucida/commit/90813dd0f5ce293a6cfc787cbce06360ed2563d1)), closes [#995](https://github.com/aelefebv/lucida/issues/995)
+* **web:** plan detail requests at the target level, or the pin ([#1027](https://github.com/aelefebv/lucida/issues/1027)) ([5f948f3](https://github.com/aelefebv/lucida/commit/5f948f3e36f3ddd0a444d41b533a512cce6f0f0d)), closes [#998](https://github.com/aelefebv/lucida/issues/998)
+* **web:** prefetch the next level in the zoom direction ([#1028](https://github.com/aelefebv/lucida/issues/1028)) ([4591790](https://github.com/aelefebv/lucida/commit/4591790d45c36e9bd79371b88f7444f82f567e13)), closes [#1000](https://github.com/aelefebv/lucida/issues/1000)
+* **web:** record the target and displayed level in the trace ([#1036](https://github.com/aelefebv/lucida/issues/1036)) ([c3157f0](https://github.com/aelefebv/lucida/commit/c3157f0f7685c409bf56ddfb226b5eda8f1c9e09)), closes [#1002](https://github.com/aelefebv/lucida/issues/1002)
+* **web:** show the target and displayed level in the layer panel ([#1031](https://github.com/aelefebv/lucida/issues/1031)) ([645c3e9](https://github.com/aelefebv/lucida/commit/645c3e95fdea57cea8209c398632d46bd14be484)), closes [#1001](https://github.com/aelefebv/lucida/issues/1001)
+
+
+### Bug Fixes
+
+* **web:** fall back to the initial when an avatar image fails to load ([#1032](https://github.com/aelefebv/lucida/issues/1032)) ([fef823a](https://github.com/aelefebv/lucida/commit/fef823a16f588e61a9bf621378c2642399beadd7))
+
+
+### Refactors
+
+* **server:** read every source chunk through one pipeline ([#1020](https://github.com/aelefebv/lucida/issues/1020)) ([43f0001](https://github.com/aelefebv/lucida/commit/43f00014ac0eff616b0eabfa834ae7038654ab8d))
+* **web:** delete the legacy single-level planning path ([#1019](https://github.com/aelefebv/lucida/issues/1019)) ([55bd5b4](https://github.com/aelefebv/lucida/commit/55bd5b4efea1224caf207d2d0552f5dc87f9a78e))
+
+## [0.13.0](https://github.com/aelefebv/lucida/compare/v0.12.0...v0.13.0) (2026-09-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **server:** a deployment that runs `LUCIDA_AUTH=disabled` on a non-loopback bind loses `/auth/dev/login`, which now answers 404. That was its only route to an administrator-gated endpoint. `/auth/dev/status` reports `enabled: false` there, so the app hides the switcher and otherwise serves as before.
+
+### Features
+
+* **auth:** read the identity Identity-Aware Proxy established ([#985](https://github.com/aelefebv/lucida/issues/985)) ([972cff3](https://github.com/aelefebv/lucida/commit/972cff3560ac3a28bdbc37fec66abacc43aeec4c))
+
+
+### Bug Fixes
+
+* **auth:** give each auth mode its own sign-out URL ([#984](https://github.com/aelefebv/lucida/issues/984)) ([ee4ab97](https://github.com/aelefebv/lucida/commit/ee4ab9772c2ccb2a5658268fae46548cb3f20f12))
+* **server:** stop disabled mode from handing out admin identities ([#982](https://github.com/aelefebv/lucida/issues/982)) ([01f2c3f](https://github.com/aelefebv/lucida/commit/01f2c3f5b31bc8c45936b950d27bf92f5540b58d))
+
+## [0.12.0](https://github.com/aelefebv/lucida/compare/v0.11.0...v0.12.0) (2026-09-03)
+
+
+### ⚠ BREAKING CHANGES
+
+* **server:** the schema is one baseline and no earlier database upgrades into it. sqlx compares the migrations it finds against the ones the database recorded and reports a mismatch, so an existing database has to be replaced with a fresh one rather than migrated.
+* **server:** LUCIDA_DB_PATH is removed with no alias. Set LUCIDA_DB_URL instead, so LUCIDA_DB_PATH=/x/y.db becomes LUCIDA_DB_URL=sqlite:///x/y.db. Leaving it unset still opens sqlite://lucida.db, so a default install needs no change. A bare path in the new variable fails startup rather than silently opening the wrong database.
+
+### Features
+
+* **server:** collapse the schema to one baseline ([#973](https://github.com/aelefebv/lucida/issues/973)) ([dd4dcd4](https://github.com/aelefebv/lucida/commit/dd4dcd4c7e4c5f0943c76554b8e1ce67ec36ce57))
+* **server:** make PostgreSQL selectable at runtime ([#978](https://github.com/aelefebv/lucida/issues/978)) ([0441e98](https://github.com/aelefebv/lucida/commit/0441e98bb068735457b7f7466c0d93ce5de81301))
+* **server:** run the bookmark store on PostgreSQL ([#976](https://github.com/aelefebv/lucida/issues/976)) ([02bc56a](https://github.com/aelefebv/lucida/commit/02bc56aa14081520db38057ec7b1fe78f4b4f5aa))
+* **server:** run the pending-authentication store on PostgreSQL ([#974](https://github.com/aelefebv/lucida/issues/974)) ([88fa60b](https://github.com/aelefebv/lucida/commit/88fa60b3e14c2fc23282829096381368b2c5d160))
+* **server:** run the remaining authentication stores on PostgreSQL ([#975](https://github.com/aelefebv/lucida/issues/975)) ([1a2e5bd](https://github.com/aelefebv/lucida/commit/1a2e5bdb69741e7874c4ad28efca89aa0c84fbf3))
+* **server:** run the workspace store on PostgreSQL ([#977](https://github.com/aelefebv/lucida/issues/977)) ([5af57a8](https://github.com/aelefebv/lucida/commit/5af57a8670caa4c8114c08a390f8ffcf2e5c25a5))
+* **server:** select the storage backend from a connection string ([#970](https://github.com/aelefebv/lucida/issues/970)) ([861ca44](https://github.com/aelefebv/lucida/commit/861ca44c9bcbf5e1d73ec068b4b51d9b9e116cf3))
+
 ## [0.11.0](https://github.com/aelefebv/lucida/compare/v0.10.0...v0.11.0) (2026-08-28)
 
 

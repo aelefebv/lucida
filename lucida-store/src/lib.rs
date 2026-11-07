@@ -2,73 +2,81 @@ pub mod backend;
 pub mod cache;
 pub(crate) mod coarse;
 pub mod codec;
+pub(crate) mod collection_geometry;
 pub mod import;
 pub mod import_types;
 pub mod ingest;
 pub mod layout;
 pub mod metadata_reads;
 pub(crate) mod parse;
+pub mod shard;
 pub mod source_limiter;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod unwritten;
 
 /// The canonical 5D axis names in order.
 const ALL_DIMS: [&str; 5] = ["t", "c", "z", "y", "x"];
 
 /// Convert a logical chunk key `"level/t/c/z/y/x"` to the on-disk Zarr v3
-/// store path. The on-disk path always follows the dataset's raw axes order,
-/// emitting one coordinate per dimension actually present on disk.
+/// store path: one coordinate per axis actually on disk, in raw axes order.
 ///
-/// The wire chunk key encodes `t` and `c` as **voxel coordinates** (e.g.
-/// `c=3` means channel 3) and `z`, `y`, `x` as **chunk-grid coordinates**
-/// (e.g. `y=3` means the 3rd chunk row). For typical OME-Zarrs with
-/// `chunk_shape[t] == chunk_shape[c] == 1`, the two interpretations
-/// coincide. When `chunk_shape[t] > 1` or `chunk_shape[c] > 1`, this
-/// function divides the wire `t`/`c` value by the on-disk chunk size to
-/// produce the correct disk-grid coordinate.
+/// The wire key carries `t` and `c` as voxel coordinates and `z`, `y`, `x`
+/// as chunk-grid coordinates, so `t` and `c` are divided by their on-disk
+/// chunk size. `chunk_shape` parallels `axes`.
 ///
-/// `chunk_shape` parallels `axes` (one entry per on-disk axis).
-///
-/// Three cases handled uniformly by walking the raw `axes` list in order:
 /// - canonical-equal `["t","c","z","y","x"]` → `"{level}/c/{t}/{c}/{z}/{y}/{x}"`
 /// - canonical-subset `["c","y","x"]` → `"{level}/c/{c}/{y}/{x}"` (only the dims that exist)
 /// - canonical-superset `["t","c","z","m","y","x"]` → `"{level}/c/{t}/{c}/{z}/0/{y}/{x}"`
 ///   (a `"0"` is injected for each non-canonical axis — these axes are pinned
 ///   to index 0; see `lucida-content::normalize` for the canonical set)
 pub fn chunk_key_to_store_path(key: &str, axes: &[String], chunk_shape: &[u64]) -> String {
+    match chunk_key_grid_coords(key, axes, chunk_shape) {
+        Some((level, coords)) => chunk_grid_store_path(level, &coords),
+        None => key.to_string(),
+    }
+}
+
+/// Split a chunk key `"level/t/c/z/y/x"` into its level segment and the
+/// on-disk chunk-grid coordinate it names, one coordinate per on-disk axis.
+/// The rules are those of [`chunk_key_to_store_path`]: a wire `t` or `c` is
+/// divided by the on-disk chunk size on that axis, and a non-canonical axis
+/// is pinned to `0`. `None` when the key does not have six numeric parts.
+pub(crate) fn chunk_key_grid_coords<'a>(
+    key: &'a str,
+    axes: &[String],
+    chunk_shape: &[u64],
+) -> Option<(&'a str, Vec<u64>)> {
     let parts: Vec<&str> = key.splitn(6, '/').collect();
     if parts.len() != 6 {
-        return key.to_string();
+        return None;
     }
     // parts[0] = level, parts[1..6] = canonical 5D coords in t,c,z,y,x order.
-    let coords: Vec<String> = axes
+    let coords = axes
         .iter()
         .enumerate()
         .map(|(axis_idx, name)| {
-            let canonical_pos = ALL_DIMS.iter().position(|d| d.eq_ignore_ascii_case(name));
-            match canonical_pos {
-                None => "0".to_string(),
-                Some(canon_idx) => {
-                    let wire_value = parts[canon_idx + 1];
-                    // For t (canon_idx 0) and c (canon_idx 1), wire is voxel
-                    // coord — divide by chunk_shape on this axis to get the
-                    // disk-grid coord. For z, y, x the wire is already a
-                    // disk-grid coord; chunk_shape divisor is 1 (no-op).
-                    if (canon_idx == 0 || canon_idx == 1)
-                        && axis_idx < chunk_shape.len()
-                        && chunk_shape[axis_idx] > 1
-                    {
-                        match wire_value.parse::<u64>() {
-                            Ok(v) => (v / chunk_shape[axis_idx]).to_string(),
-                            Err(_) => wire_value.to_string(),
-                        }
-                    } else {
-                        wire_value.to_string()
-                    }
-                }
-            }
+            let Some(canon_idx) = ALL_DIMS.iter().position(|d| d.eq_ignore_ascii_case(name)) else {
+                return Some(0);
+            };
+            let wire_value: u64 = parts[canon_idx + 1].parse().ok()?;
+            let bundled = (canon_idx == 0 || canon_idx == 1)
+                && axis_idx < chunk_shape.len()
+                && chunk_shape[axis_idx] > 1;
+            Some(if bundled {
+                wire_value / chunk_shape[axis_idx]
+            } else {
+                wire_value
+            })
         })
-        .collect();
-    format!("{}/c/{}", parts[0], coords.join("/"))
+        .collect::<Option<Vec<u64>>>()?;
+    Some((parts[0], coords))
+}
+
+/// The Zarr v3 store path of the chunk at `coords` in `level`'s chunk grid.
+pub(crate) fn chunk_grid_store_path(level: &str, coords: &[u64]) -> String {
+    let coords: Vec<String> = coords.iter().map(u64::to_string).collect();
+    format!("{level}/c/{}", coords.join("/"))
 }
 
 /// Legacy 5D convenience wrapper — assumes all 5 axes are present and

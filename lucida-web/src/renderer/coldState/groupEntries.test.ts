@@ -4,7 +4,8 @@
  * Locks the partition matrix the worker's previous inline code
  * implemented: shared chunk dims → one group; mismatched chunk dims →
  * multiple groups; multi-channel → channel suffix on the pool key;
- * `group-as-proxy` (no matching target level) → skipped from groups.
+ * `group-as-proxy` (no detail levels) → skipped from groups; one entry per
+ * (member, level) section for the target and the coarser levels under it.
  */
 
 import { describe, it, expect } from "vitest";
@@ -12,6 +13,7 @@ import { groupEntriesByPool } from "./groupEntries.ts";
 import type {
   ColdStateMessage,
   ColdStateActiveEntry,
+  ColdStateTileEntry,
 } from "../workerProtocol.ts";
 
 function identityMatrix(): Float32Array {
@@ -32,7 +34,7 @@ function defaultDisplay(): ColdStateActiveEntry["displayStateByChannel"][number]
 }
 
 function makeEntry(
-  opts: Partial<Omit<ColdStateActiveEntry, "kind">> & {
+  opts: Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & {
     entityId: string;
     imageId: string;
     mode: ColdStateActiveEntry["mode"];
@@ -40,11 +42,6 @@ function makeEntry(
 ): ColdStateActiveEntry {
   const base = {
     entityId: opts.entityId,
-    targetLod: opts.targetLod ?? 0,
-    detailOwnedLodRange: opts.detailOwnedLodRange ?? [0, 0] as [number, number],
-    detailLevel: opts.detailLevel,
-    coarseLevel: opts.coarseLevel,
-    wantedLodLevels: opts.wantedLodLevels,
     levels: opts.levels ?? [
       { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
@@ -68,6 +65,8 @@ function makeEntry(
     kind: "tile",
     imageId: opts.imageId,
     mode: opts.mode,
+    detailLevels: opts.detailLevels ?? [0],
+    coarseLevel: opts.coarseLevel ?? null,
     parentGroupId: opts.parentGroupId ?? null,
   };
 }
@@ -175,7 +174,7 @@ describe("groupEntriesByPool — volume", () => {
     const cold = makeCold([
       makeEntry({
         entityId: "groupA", imageId: "", mode: "group-as-proxy",
-        levels: [], detailOwnedLodRange: [0, 0],
+        levels: [],
       }),
       makeEntry({
         entityId: "imgB", imageId: "imgB", mode: "tiles-with-detail",
@@ -191,9 +190,8 @@ describe("groupEntriesByPool — volume", () => {
     const cold = makeCold([
       makeEntry({
         entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
-        detailLevel: 0,
+        detailLevels: [0],
         coarseLevel: 2,
-        wantedLodLevels: [0, 2],
         levels: [
           { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
           { level: 2, chunkShape: [8, 128, 128], gridShape: [8, 2, 2], levelDims: [64, 256, 256] },
@@ -201,12 +199,20 @@ describe("groupEntriesByPool — volume", () => {
       }),
     ]);
     const groups = groupEntriesByPool(cold, "volume");
+    // Level 2 is both a coarser resident level of the detail tier and the
+    // coarse tier's level: its chunk shape gives it a detail pool of its
+    // own, and the coarse tier keeps a separate pool at the same shape.
     expect(Array.from(groups.keys()).sort()).toEqual([
       "ds1:128x128x8:coarse",
+      "ds1:128x128x8:detail",
       "ds1:64x64x32:detail",
     ]);
-    expect(groups.get("ds1:64x64x32:detail")?.level).toBe(0);
-    expect(groups.get("ds1:128x128x8:coarse")?.level).toBe(2);
+    expect(groups.get("ds1:64x64x32:detail")?.entries).toEqual([
+      expect.objectContaining({ memberId: "imgA", tier: "detail", level: 0 }),
+    ]);
+    expect(groups.get("ds1:128x128x8:detail")?.entries).toEqual([
+      expect.objectContaining({ memberId: "imgA", tier: "detail", level: 2 }),
+    ]);
     expect(groups.get("ds1:128x128x8:coarse")?.entries[0]).toMatchObject({
       memberId: "imgA",
       tier: "coarse",
@@ -214,13 +220,32 @@ describe("groupEntriesByPool — volume", () => {
     });
   });
 
+  it("one pool holds one section per (member, level) for the target and the coarser levels under it", () => {
+    const cold = makeCold([
+      makeEntry({
+        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+        detailLevels: [1],
+        levels: [0, 1, 2, 3, 4, 5].map((level) => ({
+          level,
+          chunkShape: [32, 64, 64] as [number, number, number],
+          gridShape: [1, 1, 1] as [number, number, number],
+          levelDims: [32, 64, 64] as [number, number, number],
+        })),
+      }),
+    ]);
+    const groups = groupEntriesByPool(cold, "volume");
+    expect(groups.size).toBe(1);
+    const [g] = groups.values();
+    expect(g.entries.map((e) => e.level)).toEqual([1, 2, 3, 4]);
+    expect(g.entries.every((e) => e.tier === "detail" && e.memberId === "imgA")).toBe(true);
+  });
+
   it("detail and coarse sources stay separate when they share the same level", () => {
     const cold = makeCold([
       makeEntry({
         entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
-        detailLevel: 1,
+        detailLevels: [1],
         coarseLevel: 1,
-        wantedLodLevels: [1],
         levels: [
           { level: 1, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
         ],

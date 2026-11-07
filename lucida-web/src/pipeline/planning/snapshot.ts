@@ -1,9 +1,8 @@
 /**
- * Snapshot builder — translates live WASM scene state into a
- * {@link PlanningSnapshot}. Single boundary between WASM scene queries
- * and the pure planning core: snake_case normalised to camelCase here,
- * fallbacks explicit. Pure (no module state, no input mutation).
- * See `wiki/principles/planning.md` §4 and §5.
+ * Translates live WASM scene state into a {@link PlanningSnapshot}. The
+ * one boundary between WASM scene queries and the pure planning core:
+ * snake_case becomes camelCase here and fallbacks are explicit. Pure: no
+ * module state, no input mutation.
  */
 
 import type { WasmScene } from "lucida-core";
@@ -26,10 +25,8 @@ import {
   type ViewQueryEntityJson,
 } from "./snapshotDelta.ts";
 
-// Re-export from canonical home in `./index.ts`.
 export type { MinimapChunkCoord } from "./index.ts";
-// Re-export the coarse-level resolver — its canonical home is the shared
-// per-row translation module, but consumers historically import it here.
+// Kept for consumers that import the resolver from this module.
 export { resolveCoarseLevel } from "./snapshotDelta.ts";
 
 /** Wire shape of `view_query`'s top-level object. */
@@ -48,9 +45,8 @@ interface VisibleRegionJson {
 }
 
 /**
- * Default {@link VisibleRegion} returned when WASM hands back `null`
- * for `visible_region(dsId)` (e.g. dataset not yet registered). The
- * 1024×1024 bounds match the historical orchestrator fallback.
+ * Used when `visible_region(dsId)` returns `null`, as before the dataset
+ * is registered. Finite bounds keep xy/z culling defined.
  */
 const DEFAULT_VISIBLE_REGION: VisibleRegion = {
   xyBoundsVox: [0, 0, 1024, 1024],
@@ -61,65 +57,40 @@ const DEFAULT_VISIBLE_REGION: VisibleRegion = {
 };
 
 /**
- * Minimal `DatasetEntry` shape consumed by the snapshot builder.
- * Mirrors `renderLoopTypes.ts::DatasetEntry` but locally redeclared
- * to avoid a dependency on the render-loop types from the planning
- * directory.
+ * The part of `renderLoopTypes.ts::DatasetEntry` the builder reads,
+ * redeclared so planning does not depend on render-loop types.
  */
 export interface SnapshotDatasetEntry {
   manifest: DatasetManifest;
 }
 
-/**
- * Inputs to {@link buildPlanningSnapshot}. Options-object signature so
- * callers can drop new tiles in without churning every test stub.
- */
+/** Inputs to {@link buildPlanningSnapshot}. */
 export interface BuildPlanningSnapshotArgs {
-  /** Live WASM scene — queried for view, positions, visible region, selection. */
   scene: WasmScene;
-  /** Dataset id — passed to every per-dataset WASM query. */
   datasetId: string;
-  /** Manifest entry for `datasetId`; supplies image specs + parent stitching. */
+  /** Manifest entry for `datasetId`; supplies image specs and parent edges. */
   dataset: SnapshotDatasetEntry;
-  /** Per-dataset settings — drives multi-channel selection assembly. */
+  /** Drives multi-channel selection. */
   dsSettings: DatasetSettings | undefined;
-  /** Current asset catalog snapshot threaded through into the result. */
   assetCatalog: AssetCatalogSnapshot;
   /**
-   * Per-image pending minimap fetches the orchestrator has
-   * accumulated this tick. Forwarded verbatim into
-   * {@link PlanningSnapshot.minimapPending}; the planner emits one
-   * minimap-lane request per coord at {@link MINIMAP_LANE_OFFSET}
-   * (highest priority).
-   *
-   * Pass `new Map()` if the caller has nothing to forward — the
-   * planner then emits no minimap requests.
+   * Forwarded verbatim into {@link PlanningSnapshot.minimapPending}. Pass
+   * `new Map()` for no minimap requests.
    */
   minimapPending: Map<string, MinimapChunkCoord[]>;
-  /** Render mode of the current tick (`slice` vs `volume`). */
   mode: "slice" | "volume";
-  /** True when the dataset is being viewed in multi-channel mode. */
   multiChannel: boolean;
-  /** Epoch counters parsed by the orchestrator — passed through verbatim. */
+  /** Passed through verbatim. */
   currentEpochs: SceneEpochs;
-  /** The orchestrator's request epoch — copied into the snapshot's epochs. */
   requestEpoch: number;
-  /** Per-tick planning tunables — threaded through into downstream callers. */
   config: PlanningConfig;
   /**
-   * Optional precomputed camera-independent inputs. These derive solely
-   * from the scene's fixed 2D layout placement and the immutable dataset
-   * manifest — they change only when the content / layout / asset epoch
-   * moves, never on a camera move. A caller that caches them per-dataset
-   * across view-only replans passes them here so the snapshot builder
-   * skips the `member_positions` serde and the two manifest-map rebuilds.
-   *
-   * All three are optional and independent. When a field is absent the
-   * builder computes it internally, identically to a caller that never
-   * caches — the internal path is the byte-for-byte default. When
-   * provided, the value MUST equal what the internal path would produce
-   * for the current scene state (same content / layout / asset epoch);
-   * a stale value yields wrong tile positions or parent edges.
+   * Camera-independent inputs a caller may cache per dataset across
+   * view-only replans, to skip the `member_positions` parse and the
+   * manifest-map rebuilds. Each is optional; an absent one is computed
+   * here. A provided value must equal what this builder would compute for
+   * the current content, layout, and asset epochs, or tile positions and
+   * parent edges go wrong.
    */
   precomputed?: {
     /** Parsed `member_positions(datasetId)` — entityId → 2D layout position. */
@@ -130,30 +101,19 @@ export interface BuildPlanningSnapshotArgs {
     parentByEntityId?: Map<string, string | null>;
   };
   /**
-   * Precomputed per-entity snapshots to use verbatim as `entities`, in place
-   * of parsing `view_query` and translating each row here. Supplied by a
-   * caller that reconstructs the entity set incrementally (folding
-   * `view_query_delta`) so the O(N) full parse + per-row translation is
-   * skipped on a camera move.
-   *
-   * When provided, the builder does NOT call `view_query`: `entities` is the
-   * passed array (empty is valid — the dataset is registered but nothing is
-   * visible). Every other output — `visibleRegion`, `selection`, the
-   * assembled snapshot — is still derived FRESH from the live scene, so a
-   * selection change (timepoint / channel / slice) is never served stale from
-   * this override. The records MUST be assembled via the shared
-   * {@link makeEntitySnapshot} so they are identical to the full path.
+   * Entity snapshots to use verbatim instead of parsing `view_query`, from
+   * a caller that folds `view_query_delta` incrementally. Empty is valid.
+   * `visibleRegion` and `selection` are still read fresh, so a selection
+   * change is never served stale. Records must come from
+   * {@link makeEntitySnapshot} so they match the full path.
    */
   entitiesOverride?: EntitySnapshot[];
 }
 
 /**
- * Result from {@link buildPlanningSnapshot}. Consumers receive both the
- * assembled {@link PlanningSnapshot} and the raw helper artifacts the
- * orchestrator still needs (the parsed `entities` list — for telemetry
- * and roster construction — and the `visibleRegion` it stashes for the
- * coordinate-diagnostic panel). `null` when this dataset has no
- * visible entities (the orchestrator should `continue` past it).
+ * The snapshot plus the parts the orchestrator uses directly: `entities`
+ * for telemetry and the roster, `visibleRegion` for the
+ * coordinate-diagnostic panel.
  */
 export interface BuildPlanningSnapshotResult {
   snapshot: PlanningSnapshot;
@@ -163,18 +123,8 @@ export interface BuildPlanningSnapshotResult {
 }
 
 /**
- * Translate live WASM scene state into a {@link PlanningSnapshot}.
- *
- * Pure with respect to its inputs: identical args produce identical
- * outputs, no module state is touched, no parameter is mutated. Returns
- * `null` if `view_query(datasetId)` produces a missing or empty
- * `visible_entities` payload — the caller should skip this dataset.
- *
- * Assembly order: `view_query` → `member_positions` → `visible_region`
- * → stitch in `imageSpec` + `parentId` → assemble `EntitySnapshot[]` →
- * compute selection. `minimapPending` is forwarded into
- * {@link PlanningSnapshot.minimapPending} so the planner can emit
- * minimap-lane requests at the highest priority.
+ * Translate live WASM scene state into a {@link PlanningSnapshot}. Returns
+ * `null` when `view_query` has no `visible_entities`; the caller skips the dataset.
  */
 export function buildPlanningSnapshot(
   args: BuildPlanningSnapshotArgs,
@@ -190,24 +140,16 @@ export function buildPlanningSnapshot(
     multiChannel,
     currentEpochs,
   } = args;
-  // `requestEpoch` and `config` are accepted in the arg shape for
-  // forward compatibility but aren't read here: the caller has
-  // already folded `requestEpoch` into `currentEpochs`, and the
-  // config is consumed by `plan()` (not the snapshot).
+  // Not read here: the caller already folded `requestEpoch` into
+  // `currentEpochs`, and `plan()` reads `config`.
   void args.requestEpoch;
   void args.config;
 
-  // When the caller supplies `entitiesOverride`, the entity set is taken
-  // verbatim (it was reconstructed incrementally from `view_query_delta`) and
-  // steps 1–4 below — the full `view_query` parse, `member_positions`, the
-  // manifest maps, and the per-row translation — are all skipped. Only
-  // `visibleRegion` and `selection` (steps 5–6) run, so they stay fresh.
+  // With `entitiesOverride`, steps 1 to 4 are skipped. Steps 5 and 6 still
+  // run so the region and selection stay fresh.
   const entitiesOverride = args.entitiesOverride;
 
-  // 1. view_query — may be null / empty when the dataset isn't yet
-  //    registered in the scene. Caller treats this as "skip this
-  //    dataset" (matches the historical `continue`). Skipped entirely on
-  //    the override path.
+  // 1. view_query: null or empty before the dataset is registered.
   let vq: ViewQueryJson | null = null;
   if (!entitiesOverride) {
     const vqJson = scene.view_query(datasetId);
@@ -215,10 +157,7 @@ export function buildPlanningSnapshot(
     if (!vq || !vq.visible_entities) return null;
   }
 
-  // 2. member_positions — keyed by entityId, 2D layout placement. Reuse a
-  //    caller-cached parse when one is supplied (it is camera-independent,
-  //    keyed by the layout epoch); otherwise parse it here. Not needed on
-  //    the override path (the caller already joined placement into the rows).
+  // 2. member_positions: entityId to 2D layout placement.
   const precomputed = args.precomputed;
   let positions: Record<string, [number, number]> = {};
   if (!entitiesOverride) {
@@ -230,20 +169,10 @@ export function buildPlanningSnapshot(
     }
   }
 
-  // 3. Build helper maps from the dataset manifest:
-  //   - imageSpecById: per-image multiscale levels
-  //   - parentByEntityId: stitches `Tile.parent === groupId` so promotion
-  //     can group tiles by their parent group (ADR 0025).
-  //   Both derive from the immutable manifest (camera-independent), so a
-  //   caller may supply them prebuilt; otherwise build them here. Not needed
-  //   on the override path (the rows were already joined with the manifest).
-  // 4. Snake-case → camelCase translation for every visible entity, via the
-  //    shared per-row builder so the full path and the delta fold produce
-  //    byte-identical records. Joins the WASM payload with the manifest for
-  //    `levels`, `detailLevel`, `coarseLevel`, and `parentId`, and with the
-  //    layout for `layoutPositionVox`. A `Tile` with no parent edge throws
-  //    inside {@link makeEntitySnapshot}, surfacing the producer-invariant
-  //    violation at assembly rather than later in `groupMembers`.
+  // 3. Manifest maps: image specs, and the parent edges that group tiles.
+  // 4. Translate rows with the shared builder so the full path and the
+  //    delta fold produce identical records. A Tile with no parent edge
+  //    throws in {@link makeEntitySnapshot}, at assembly, not in `groupMembers`.
   let entities: EntitySnapshot[];
   if (entitiesOverride) {
     entities = entitiesOverride;
@@ -266,20 +195,12 @@ export function buildPlanningSnapshot(
         parentByEntityId.set(ent.id, ent.parent ?? null);
       }
     }
-    const deps: SnapshotEntityDeps = {
-      imageSpecById,
-      parentByEntityId,
-      positions,
-      dsSettings,
-    };
-    // `vq` is non-null here — the override branch is the only path that
-    // leaves it null, and it's taken above.
+    const deps: SnapshotEntityDeps = { imageSpecById, parentByEntityId, positions };
+    // Only the override branch leaves `vq` null.
     entities = vq!.visible_entities!.map((e) => makeEntitySnapshot(e, deps));
   }
 
-  // 5. visible_region — null when WASM has nothing yet for this dataset.
-  //    Snake_case → camelCase; fall back to the historical
-  //    1024×1024 default so downstream xy/z culling has finite bounds.
+  // 5. visible_region: null until WASM has one for this dataset.
   const vrJson = scene.visible_region(datasetId);
   const vr = vrJson && vrJson !== "null"
     ? (JSON.parse(vrJson) as VisibleRegionJson | null)
@@ -295,10 +216,10 @@ export function buildPlanningSnapshot(
       }
     : DEFAULT_VISIBLE_REGION;
 
-  // 6. Selection — single-channel mode plans only for the current C
-  //    (the upload path sends one atlas config with one channel; other
-  //    channels' data would contaminate the atlas). Multi-channel mode
-  //    fans out to every visible channel via composite member keys.
+  // 6. Selection. Single-channel mode plans only the current channel: the
+  //    upload path sends one atlas config with one channel, and other
+  //    channels' data would contaminate the atlas. Multi-channel mode fans
+  //    out to every visible channel.
   let visibleChannels: number[];
   if (multiChannel && dsSettings?.channel_settings?.length) {
     visibleChannels = getActiveChannels(dsSettings);
@@ -314,15 +235,8 @@ export function buildPlanningSnapshot(
     interactionState: "idle",
   };
 
-  // 7. Assemble the final snapshot. `currentEpochs` already carries
-  //    the orchestrator's `requestEpoch` (folded in by the caller).
-  //    `minimapPending` is forwarded verbatim — the planner consumes
-  //    it via `emitMinimapLane` to build minimap-lane requests at
-  //    {@link MINIMAP_LANE_OFFSET}. `datasetId` is plumbed onto the
-  //    snapshot so the planner stamps it onto every emitted request.
-  //    `previousActiveSet` does not live on the snapshot — it travels
-  //    via {@link PlanningState} which the orchestrator passes
-  //    separately to `plan()`.
+  // `previousActiveSet` is not on the snapshot; it travels in
+  // {@link PlanningState}.
   const snapshot: PlanningSnapshot = {
     datasetId,
     epochs: currentEpochs,

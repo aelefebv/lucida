@@ -5,14 +5,18 @@ import { describe, expect, it, vi } from "vitest";
   COPY_DST: 0x08,
 };
 
-import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
+import type { EntityDescriptorIndex, MemberSourceBinding } from "../descriptorBuffer.ts";
 import type { WorkerCtx } from "../workerContext.ts";
-import type { AggregateDrawParams } from "../sliceRenderer.ts";
+import { UNTIMED } from "../passTiming.ts";
+import type { AggregateDrawParams, SlicePoolBinding } from "../sliceRenderer.ts";
 import type { SliceRenderMultiPassMessage } from "../workerProtocol.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
 import type { SliceAtlasState } from "./atlas.ts";
+import { captureRenderedFrame } from "../worker/captureFrame.ts";
 import { handleSliceRenderMultiPass } from "./render.ts";
+
+vi.mock("../worker/captureFrame.ts", () => ({ captureRenderedFrame: vi.fn() }));
 
 function makeDevice(): GPUDevice {
   const encoder = {
@@ -53,10 +57,20 @@ function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState
   };
 }
 
-/** One resident single-LOD meta list, enough to count as chunk-backed. */
-function residentMetas(): LodIndirectionMeta[] {
+/** The binding the renderer receives for `atlas`. */
+function bindingOf(atlas: SliceAtlasState): SlicePoolBinding {
+  return {
+    texture: atlas.texture,
+    indirectionBuf: atlas.indirectionBuf,
+    slotsX: atlas.slotsX,
+    slotsY: atlas.slotsY,
+  };
+}
+
+/** One resident single-level meta list, enough to count as chunk-backed. */
+function residentMetas(level = 2): LodIndirectionMeta[] {
   return [{
-    level: 2,
+    level,
     gridDims: [1, 2, 2],
     chunkDims: [1, 64, 64],
     levelDims: [1, 128, 128],
@@ -72,6 +86,7 @@ function makeDescIndex(
     buffer: {} as GPUBuffer,
     indexByMember: new Map(memberIds.map((id, i) => [id, i])),
     memberByIndex: [...memberIds],
+    sourceBindingByMember: new Map(),
     proxyPoolIndexByKey: new Map(),
     proxyPoolsByIndex: [],
     entityCount: memberIds.length,
@@ -80,6 +95,11 @@ function makeDescIndex(
     proxyDescriptorByMember: new Map(),
     ...overrides,
   };
+}
+
+/** memberId → the pools its descriptor entry names. */
+function bindings(entries: Record<string, MemberSourceBinding>): Map<string, MemberSourceBinding> {
+  return new Map(Object.entries(entries));
 }
 
 /** Pack `SliceAggregateParams.quads` records (rect f32×4 + entityIndex u32). */
@@ -99,27 +119,40 @@ function makeQuads(
 interface MockRenderer {
   setColormapTexture: ReturnType<typeof vi.fn>;
   setProxyTextures: ReturnType<typeof vi.fn>;
-  setAtlas: ReturnType<typeof vi.fn>;
   setTierAtlases: ReturnType<typeof vi.fn>;
   setTransform: ReturnType<typeof vi.fn>;
   setLabelColorBuffer: ReturnType<typeof vi.fn>;
   setDescriptorBinding: ReturnType<typeof vi.fn>;
   renderTo: ReturnType<typeof vi.fn>;
   renderAggregateBatches: ReturnType<typeof vi.fn>;
+  compiled: Promise<void>;
 }
 
 function makeRenderer(): MockRenderer {
   return {
     setColormapTexture: vi.fn(),
     setProxyTextures: vi.fn(),
-    setAtlas: vi.fn(),
     setTierAtlases: vi.fn(),
     setTransform: vi.fn(),
     setLabelColorBuffer: vi.fn(),
     setDescriptorBinding: vi.fn(),
     renderTo: vi.fn(),
     renderAggregateBatches: vi.fn(),
+    compiled: Promise.resolve(),
   };
+}
+
+/** A compile the test finishes by hand. */
+function pendingCompile(): { compiled: Promise<void>; finish: () => void } {
+  let finish!: () => void;
+  const compiled = new Promise<void>((resolve) => {
+    finish = resolve;
+  });
+  return { compiled, finish };
+}
+
+async function flush(): Promise<void> {
+  for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
 function makeCtx(opts: {
@@ -128,7 +161,12 @@ function makeCtx(opts: {
   renderer: MockRenderer;
   composite: ReturnType<typeof vi.fn>;
   descIndex: EntityDescriptorIndex;
+  compositorCompiled?: Promise<void>;
+  cursorCompiled?: Promise<void>;
 }): WorkerCtx {
+  for (const memberId of opts.descIndex.memberByIndex) {
+    opts.state.memberToDataset.set(memberId, "ds-0");
+  }
   return {
     device: opts.device,
     context: {
@@ -136,21 +174,100 @@ function makeCtx(opts: {
       getCurrentTexture: () => ({ createView: () => ({}) }),
     },
     state: opts.state,
+    passTimer: UNTIMED,
     getSliceRenderer: () => opts.renderer,
-    getCompositor: () => ({ composite: opts.composite }),
-    getCursorRenderer: () => ({ hasData: () => false }),
+    getCompositor: () => ({
+      composite: opts.composite,
+      underlayBackground: () => {},
+      compiled: opts.compositorCompiled ?? Promise.resolve(),
+    }),
+    getCursorRenderer: () => ({ hasData: () => false, compiled: opts.cursorCompiled ?? Promise.resolve() }),
     ensureOffscreenPool: (n: number) =>
       Array.from({ length: n }, () => ({ createView: () => ({}) })),
     getOrCreateLUT: () => ({}),
     lookupEntityDescriptor: () => opts.descIndex,
-    getDummyTexture: () => ({}),
   } as unknown as WorkerCtx;
 }
 
 const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 };
 
+function memberMsg(memberId: string, dataW = 128, dataH = 128): SliceRenderMultiPassMessage {
+  return {
+    type: "sliceRenderMultiPass",
+    epochs: EPOCHS,
+    layers: [
+      { datasetId: memberId, entityId: "entity-a", entityIndex: 0, blendMode: "alpha", dataW, dataH },
+    ],
+    zoom: 1,
+    cx: dataW / 2,
+    cy: dataH / 2,
+    canvasW: 64,
+    canvasH: 64,
+  };
+}
+
+describe("handleSliceRenderMultiPass — the compile", () => {
+  // The reason is in `pipelineCompile.ts`.
+  it.each([
+    ["slice renderer", "renderer"],
+    ["layer compositor", "compositor"],
+    ["cursor renderer", "cursor"],
+  ] as const)("waits for the %s before it draws", async (_name, which) => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const gate = pendingCompile();
+    if (which === "renderer") renderer.compiled = gate.compiled;
+    const state = createInitialState();
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map([["img-a", residentMetas()]])));
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: "coarse-pool" } }),
+    });
+    const ctx = makeCtx({
+      device, state, renderer, composite, descIndex,
+      compositorCompiled: which === "compositor" ? gate.compiled : undefined,
+      cursorCompiled: which === "cursor" ? gate.compiled : undefined,
+    });
+
+    const frame = handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+    await flush();
+    expect(renderer.renderTo).not.toHaveBeenCalled();
+    expect(composite).not.toHaveBeenCalled();
+    expect(device.queue.submit).not.toHaveBeenCalled();
+
+    gate.finish();
+    await frame;
+    expect(renderer.renderTo).toHaveBeenCalledOnce();
+    expect(composite).toHaveBeenCalledOnce();
+  });
+});
+
 describe("handleSliceRenderMultiPass", () => {
-  it("renders a layer backed only by a resident coarse chunk tier", () => {
+  it("hands the canvas texture it drew to the frame capture, after the frame's last submit", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map([["img-a", residentMetas()]])));
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: "coarse-pool" } }),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+    const canvasTexture = { createView: () => ({}) };
+    ctx.context.getCurrentTexture = () => canvasTexture as unknown as GPUTexture;
+    const capture = vi.mocked(captureRenderedFrame);
+    capture.mockClear();
+
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+
+    expect(capture).toHaveBeenCalledOnce();
+    expect(capture).toHaveBeenCalledWith(ctx, canvasTexture);
+    const submit = vi.mocked(device.queue.submit);
+    const lastSubmit = submit.mock.invocationCallOrder[submit.mock.invocationCallOrder.length - 1];
+    expect(capture.mock.invocationCallOrder[0]).toBeGreaterThan(lastSubmit);
+  });
+
+  it("renders a layer backed only by a resident coarse chunk tier", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -158,39 +275,79 @@ describe("handleSliceRenderMultiPass", () => {
     const coarseAtlas = makeAtlas(new Map([["img-a", residentMetas()]]));
     state.sliceAtlases.set("coarse-pool", coarseAtlas);
 
-    const descIndex = makeDescIndex(["img-a"]);
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({ "img-a": { levelPoolKeys: [], coarsePoolKey: "coarse-pool" } }),
+    });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(
-      ctx,
-      {
-        type: "sliceRenderMultiPass",
-        epochs: EPOCHS,
-        layers: [
-          { datasetId: "img-a", entityId: "entity-a", entityIndex: 0, blendMode: "alpha", dataW: 128, dataH: 128 },
-        ],
-        zoom: 1,
-        cx: 64,
-        cy: 64,
-        canvasW: 64,
-        canvasH: 64,
-      },
-      () => ({ detailPoolKey: null, coarsePoolKey: "coarse-pool", datasetId: "ds-0" }),
-    );
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
 
     expect(renderer.renderTo).toHaveBeenCalledTimes(1);
-    expect(renderer.setTierAtlases).toHaveBeenCalledWith(
-      null,
-      null,
-      [0, 0],
-      coarseAtlas.texture,
-      coarseAtlas.indirectionBuf,
-      [1, 1],
-    );
+    expect(renderer.setTierAtlases).toHaveBeenCalledWith([], bindingOf(coarseAtlas));
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
-  it("renders a layer backed only by a resident tile proxy", () => {
+  it("binds every level pool the entity's level sources name, in slot order", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    // Level 0 lives in a 64×64-chunk pool; level 1 (a different chunk
+    // shape) in its own pool. The descriptor names slot 0 = fine pool,
+    // slot 1 = small-chunk pool.
+    const finePool = makeAtlas(new Map([["img-a", residentMetas(0)]]));
+    const smallChunkPool = makeAtlas(new Map([["img-a", residentMetas(1)]]));
+    state.sliceAtlases.set("ds-0:64x64:detail", finePool);
+    state.sliceAtlases.set("ds-0:32x32:detail", smallChunkPool);
+
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({
+        "img-a": { levelPoolKeys: ["ds-0:64x64:detail", "ds-0:32x32:detail"], coarsePoolKey: null },
+      }),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+
+    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
+    expect(renderer.setTierAtlases).toHaveBeenCalledWith(
+      [bindingOf(finePool), bindingOf(smallChunkPool)],
+      null,
+    );
+    // Both pools' indirections are flushed before the draw.
+    finePool.indirectionDirty = true;
+    smallChunkPool.indirectionDirty = true;
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+    expect(finePool.indirectionDirty).toBe(false);
+    expect(smallChunkPool.indirectionDirty).toBe(false);
+  });
+
+  it("leaves a level slot unbound when its pool holds no section for the member", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const finePool = makeAtlas(new Map([["img-a", residentMetas(0)]]));
+    // The second pool exists but a stale binding names it for a member it
+    // no longer holds; the slot binds the dummy, the draw still happens.
+    const otherPool = makeAtlas(new Map([["img-z", residentMetas(1)]]));
+    state.sliceAtlases.set("pool-fine", finePool);
+    state.sliceAtlases.set("pool-other", otherPool);
+
+    const descIndex = makeDescIndex(["img-a"], {
+      sourceBindingByMember: bindings({
+        "img-a": { levelPoolKeys: ["pool-fine", "pool-other"], coarsePoolKey: null },
+      }),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+
+    expect(renderer.setTierAtlases).toHaveBeenCalledWith([bindingOf(finePool), null], null);
+    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders a layer backed only by a resident tile proxy", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -223,26 +380,37 @@ describe("handleSliceRenderMultiPass", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(
-      ctx,
-      {
-        type: "sliceRenderMultiPass",
-        epochs: EPOCHS,
-        layers: [
-          { datasetId: "img-a:ch1", entityId: "entity-a", entityIndex: 0, blendMode: "additive", dataW: 256, dataH: 256 },
-        ],
-        zoom: 1,
-        cx: 128,
-        cy: 128,
-        canvasW: 64,
-        canvasH: 64,
-      },
-      () => ({ detailPoolKey: null, coarsePoolKey: null, datasetId: "ds-0" }),
-    );
+    await handleSliceRenderMultiPass(ctx, {
+      type: "sliceRenderMultiPass",
+      epochs: EPOCHS,
+      layers: [
+        { datasetId: "img-a:ch1", entityId: "entity-a", entityIndex: 0, blendMode: "additive", dataW: 256, dataH: 256 },
+      ],
+      zoom: 1,
+      cx: 128,
+      cy: 128,
+      canvasW: 64,
+      canvasH: 64,
+    });
 
     expect(renderer.renderTo).toHaveBeenCalledTimes(1);
     expect(renderer.setProxyTextures).toHaveBeenCalledWith(tileProxyTexture, null);
+    expect(renderer.setTierAtlases).toHaveBeenCalledWith([], null);
     expect(composite).toHaveBeenCalledTimes(1);
+  });
+
+  it("skips a member whose descriptor names no pool and that has no resident proxy", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const descIndex = makeDescIndex(["img-a"]);
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+
+    await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
+
+    expect(renderer.renderTo).not.toHaveBeenCalled();
+    expect(composite.mock.calls[0][1]).toHaveLength(0);
   });
 });
 
@@ -281,7 +449,9 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     { rect: [0.5, 0.5, 0.5, 0.5], entityIndex: 1 },
   ]);
 
-  it("draws resident members in ONE pass bound to the current descriptor buffer", () => {
+  const coarseOnly = (poolKey: string): MemberSourceBinding => ({ levelPoolKeys: [], coarsePoolKey: poolKey });
+
+  it("draws resident members in ONE pass bound to the current descriptor buffer", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -292,14 +462,12 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     ]));
     coarseAtlas.indirectionDirty = true;
     state.sliceAtlases.set("coarse-pool", coarseAtlas);
-    const descIndex = makeDescIndex(["img-0", "img-1"]);
+    const descIndex = makeDescIndex(["img-0", "img-1"], {
+      sourceBindingByMember: bindings({ "img-0": coarseOnly("coarse-pool"), "img-1": coarseOnly("coarse-pool") }),
+    });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(
-      ctx,
-      aggregateMsg(twoMemberQuads(), 2),
-      () => ({ detailPoolKey: null, coarsePoolKey: "coarse-pool", datasetId: "ds-0" }),
-    );
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     expect(renderer.renderAggregateBatches).toHaveBeenCalledTimes(1);
     expect(renderer.renderTo).not.toHaveBeenCalled();
@@ -313,7 +481,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(params.batches[0].firstInstance).toBe(0);
     expect(params.batches[0].count).toBe(2);
     expect(params.batches[0].coarse?.texture).toBe(coarseAtlas.texture);
-    expect(params.batches[0].detail).toBeNull();
+    expect(params.batches[0].levels).toEqual([]);
     // Quad order preserved (roster order = aggregate draw order).
     const u32 = new Uint32Array(params.quadData);
     expect([u32[4], u32[12]]).toEqual([0, 1]);
@@ -326,7 +494,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
-  it("updates camera-UV eviction recency for chunk-backed batched members", () => {
+  it("updates camera-UV eviction recency for chunk-backed batched members", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -337,14 +505,12 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     ])));
     const ctx = makeCtx({
       device, state, renderer, composite,
-      descIndex: makeDescIndex(["img-0", "img-1"]),
+      descIndex: makeDescIndex(["img-0", "img-1"], {
+        sourceBindingByMember: bindings({ "img-0": coarseOnly("coarse-pool"), "img-1": coarseOnly("coarse-pool") }),
+      }),
     });
 
-    handleSliceRenderMultiPass(
-      ctx,
-      aggregateMsg(twoMemberQuads(), 2),
-      () => ({ detailPoolKey: null, coarsePoolKey: "coarse-pool", datasetId: "ds-0" }),
-    );
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     // View center (cx=1124, cy=712) in each member's own UV space:
     // img-0 spans [100..1124]×[200..712], img-1 spans [1124..2148]×[712..1224].
@@ -352,28 +518,26 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(state.cameraUVPerEntity.get("img-1")).toEqual([0, 0]);
   });
 
-  it("skips the whole layer when no batched member has resident content", () => {
+  it("skips the whole layer when no batched member has resident content", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
     const state = createInitialState(); // no atlases, no proxies
     const ctx = makeCtx({
       device, state, renderer, composite,
-      descIndex: makeDescIndex(["img-0", "img-1"]),
+      descIndex: makeDescIndex(["img-0", "img-1"], {
+        sourceBindingByMember: bindings({ "img-0": coarseOnly("coarse-pool"), "img-1": coarseOnly("coarse-pool") }),
+      }),
     });
 
-    handleSliceRenderMultiPass(
-      ctx,
-      aggregateMsg(twoMemberQuads(), 2),
-      () => ({ detailPoolKey: null, coarsePoolKey: "coarse-pool", datasetId: "ds-0" }),
-    );
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     expect(renderer.renderAggregateBatches).not.toHaveBeenCalled();
     expect(renderer.renderTo).not.toHaveBeenCalled();
     expect(composite.mock.calls[0][1]).toHaveLength(0);
   });
 
-  it("drops quads for members with nothing resident while keeping the rest", () => {
+  it("drops quads for members with nothing resident while keeping the rest", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -384,14 +548,12 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     ])));
     const ctx = makeCtx({
       device, state, renderer, composite,
-      descIndex: makeDescIndex(["img-0", "img-1"]),
+      descIndex: makeDescIndex(["img-0", "img-1"], {
+        sourceBindingByMember: bindings({ "img-0": coarseOnly("coarse-pool"), "img-1": coarseOnly("coarse-pool") }),
+      }),
     });
 
-    handleSliceRenderMultiPass(
-      ctx,
-      aggregateMsg(twoMemberQuads(), 2),
-      () => ({ detailPoolKey: null, coarsePoolKey: "coarse-pool", datasetId: "ds-0" }),
-    );
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
     expect(params.batches).toHaveLength(1);
@@ -403,7 +565,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(state.cameraUVPerEntity.has("img-1")).toBe(false);
   });
 
-  it("sub-batches by pool-binding set so members never sample another pool", () => {
+  it("sub-batches by pool-binding set so members never sample another pool", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -414,21 +576,15 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     state.sliceAtlases.set("pool-b", atlasB);
     const ctx = makeCtx({
       device, state, renderer, composite,
-      descIndex: makeDescIndex(["img-0", "img-1"]),
+      descIndex: makeDescIndex(["img-0", "img-1"], {
+        sourceBindingByMember: bindings({ "img-0": coarseOnly("pool-a"), "img-1": coarseOnly("pool-b") }),
+      }),
     });
 
-    handleSliceRenderMultiPass(
-      ctx,
-      aggregateMsg(twoMemberQuads(), 2),
-      (memberId) => ({
-        detailPoolKey: null,
-        coarsePoolKey: memberId === "img-0" ? "pool-a" : "pool-b",
-        datasetId: "ds-0",
-      }),
-    );
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
-    // Two binding sets → two instanced draws in ONE pass, roster order.
+    // Two binding sets → two instanced draws in one pass, roster order.
     expect(params.batches).toHaveLength(2);
     expect(params.batches[0].coarse?.texture).toBe(atlasA.texture);
     expect(params.batches[0].firstInstance).toBe(0);
@@ -441,7 +597,37 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
-  it("binds a proxy-backed batched member's own pool texture", () => {
+  it("sub-batches by the full level pool slot list, binding each member's pools in slot order", async () => {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const finePool = makeAtlas(new Map([["img-0", residentMetas(0)], ["img-1", residentMetas(0)]]));
+    const smallChunkPool = makeAtlas(new Map([["img-1", residentMetas(1)]]));
+    state.sliceAtlases.set("pool-fine", finePool);
+    state.sliceAtlases.set("pool-small", smallChunkPool);
+    const ctx = makeCtx({
+      device, state, renderer, composite,
+      descIndex: makeDescIndex(["img-0", "img-1"], {
+        sourceBindingByMember: bindings({
+          "img-0": { levelPoolKeys: ["pool-fine"], coarsePoolKey: null },
+          "img-1": { levelPoolKeys: ["pool-fine", "pool-small"], coarsePoolKey: null },
+        }),
+      }),
+    });
+
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
+
+    const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
+    expect(params.batches).toHaveLength(2);
+    expect(params.batches[0].levels).toEqual([bindingOf(finePool)]);
+    expect(params.batches[0].count).toBe(1);
+    expect(params.batches[1].levels).toEqual([bindingOf(finePool), bindingOf(smallChunkPool)]);
+    expect(params.batches[1].count).toBe(1);
+    expect(params.batches.every((b) => b.coarse === null)).toBe(true);
+  });
+
+  it("binds a proxy-backed batched member's own pool texture", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -472,18 +658,14 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     });
     const ctx = makeCtx({ device, state, renderer, composite, descIndex });
 
-    handleSliceRenderMultiPass(
-      ctx,
-      aggregateMsg(twoMemberQuads(), 2),
-      () => ({ detailPoolKey: null, coarsePoolKey: null, datasetId: "ds-0" }),
-    );
+    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
     const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
     // img-0 rides its proxy pool; img-1 (nothing resident) is dropped.
     expect(params.batches).toHaveLength(1);
     expect(params.batches[0].count).toBe(1);
     expect(params.batches[0].tileProxyTexture).toBe(tileProxyTexture);
-    expect(params.batches[0].detail).toBeNull();
+    expect(params.batches[0].levels).toEqual([]);
     expect(params.batches[0].coarse).toBeNull();
     // Proxy-only members carry no chunk residency → no camera-UV update.
     expect(state.cameraUVPerEntity.size).toBe(0);

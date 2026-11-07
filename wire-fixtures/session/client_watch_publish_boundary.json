@@ -1,0 +1,16 @@
+{
+  "type": "watch_publish",
+  "item": {
+    "kind": "boundary",
+    "at_epoch_ms": 1767225604700,
+    "event": "run_closed",
+    "run_id": "run-3",
+    "cause": {
+      "epoch": "view",
+      "dirtyKind": "interactive",
+      "source": "orbit"
+    },
+    "end_reason": "quiescent",
+    "duration_us": 4700000
+  }
+}

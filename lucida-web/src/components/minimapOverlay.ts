@@ -1,9 +1,36 @@
 import type { MinimapOverlayData } from "../renderLoop.ts";
+import { paint, tokenColors } from "../theme/tokenColors.ts";
+import type { ResolvedColor, TokenName } from "../theme/tokens.ts";
 import { transformPoint, projectToCanvas } from "./minimapMath.ts";
-import { drawOrientationCube } from "./orientationCube.ts";
+import { drawOrientationCube, type CubeColors } from "./orientationCube.ts";
 import { drawFrustumIntersection } from "./frustumOverlay.ts";
 
-// Bounding box
+const MINIMAP_COLOR_TOKENS = {
+  background: "--lc-canvas-bg",
+  stroke: "--lc-canvas-stroke",
+  label: "--lc-canvas-label",
+  axisX: "--lc-canvas-axis-x",
+  axisY: "--lc-canvas-axis-y",
+  axisZ: "--lc-canvas-axis-z",
+  viewport: "--lc-canvas-viewport",
+  plane: "--lc-canvas-plane",
+} as const satisfies Record<string, TokenName>;
+
+/** What the overlay is drawn in: canvas tokens, which follow the canvas background. */
+export interface MinimapColors extends CubeColors {
+  stroke: ResolvedColor;
+  /** The main view's footprint: the slice view's rectangle, the volume camera's frustum. */
+  viewport: ResolvedColor;
+  /** The current Z plane. */
+  plane: ResolvedColor;
+}
+
+export function readMinimapColors(): MinimapColors {
+  return tokenColors(MINIMAP_COLOR_TOKENS);
+}
+
+/** How much of the canvas stroke a member's outline takes, so many outlines don't hide the data. */
+const MEMBER_OUTLINE_ALPHA = 0.6;
 
 const CUBE_EDGES: [number, number][] = [
   [0, 1], [2, 3], [4, 5], [6, 7], // X edges
@@ -41,19 +68,18 @@ function drawBoundingBox(
   ctx.stroke();
 }
 
-// Axis arrows
-
 function drawAxisArrows(
   ctx: CanvasRenderingContext2D,
   viewProj: Float32Array,
   canvasW: number, canvasH: number,
+  colors: MinimapColors,
 ) {
   const origin: [number, number, number] = [-0.12, -0.12, -0.12];
   const len = 0.18;
   const axes: { dir: [number, number, number]; color: string; label: string }[] = [
-    { dir: [len, 0, 0], color: "#ff4444", label: "X" },
-    { dir: [0, len, 0], color: "#44cc44", label: "Y" },
-    { dir: [0, 0, len], color: "#4488ff", label: "Z" },
+    { dir: [len, 0, 0], color: paint(colors.axisX), label: "X" },
+    { dir: [0, len, 0], color: paint(colors.axisY), label: "Y" },
+    { dir: [0, 0, len], color: paint(colors.axisZ), label: "Z" },
   ];
 
   const o = projectToCanvas(viewProj, ...origin, canvasW, canvasH);
@@ -107,15 +133,13 @@ function drawAxisArrows(
   }
 }
 
-// Slice plane (volume mode, shows current Z)
-
 function drawSlicePlane(
   ctx: CanvasRenderingContext2D,
   viewProj: Float32Array,
   modelMatrix: Float32Array,
   currentZ: number, depth: number,
   canvasW: number, canvasH: number,
-  color: string,
+  color: ResolvedColor,
 ) {
   const nz = currentZ / Math.max(depth - 1, 1);
   const overhang = 0.1;
@@ -133,7 +157,7 @@ function drawSlicePlane(
   const pts = projected as [number, number][];
 
   // Filled quad
-  ctx.fillStyle = color;
+  ctx.fillStyle = paint(color, 0.25);
   ctx.beginPath();
   ctx.moveTo(pts[0][0], pts[0][1]);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
@@ -141,12 +165,10 @@ function drawSlicePlane(
   ctx.fill();
 
   // Outline
-  ctx.strokeStyle = color.replace(/[\d.]+\)$/, "0.8)");
+  ctx.strokeStyle = paint(color, 0.8);
   ctx.lineWidth = 1 * devicePixelRatio;
   ctx.stroke();
 }
-
-// Slice viewport rectangle
 
 function drawSliceViewportRect(
   ctx: CanvasRenderingContext2D,
@@ -156,7 +178,7 @@ function drawSliceViewportRect(
   currentZ: number,
   width: number, height: number, depth: number,
   canvasW: number, canvasH: number,
-  color: string,
+  color: ResolvedColor,
 ) {
   const nz = currentZ / Math.max(depth - 1, 1);
   // Normalize voxel bounds to unit space (unbounded).
@@ -179,7 +201,7 @@ function drawSliceViewportRect(
   const pts = projected as [number, number][];
 
   // Filled rect
-  ctx.fillStyle = color;
+  ctx.fillStyle = paint(color, 0.3);
   ctx.beginPath();
   ctx.moveTo(pts[0][0], pts[0][1]);
   for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
@@ -187,74 +209,68 @@ function drawSliceViewportRect(
   ctx.fill();
 
   // Outline
-  ctx.strokeStyle = color.replace(/[\d.]+\)$/, "0.9)");
+  ctx.strokeStyle = paint(color, 0.9);
   ctx.lineWidth = 1.5 * devicePixelRatio;
   ctx.stroke();
 }
 
-// Entry points
-
 /**
- * Draw the Z-INVARIANT overlay layer — member bounding boxes, axis arrows, and
- * (in volume mode) the camera frustum. These depend only on the minimap camera
- * and member geometry, never on the current Z-plane, so on a Z-scrub the
- * consumer reuses a cached copy of this layer instead of re-stroking it.
- *
- * Clears the target first, so it owns the full background of whatever surface
- * it draws onto (a dedicated offscreen cache canvas).
+ * Draw the Z-invariant layer: member bounding boxes, axis arrows (orbit only),
+ * and in volume mode the camera frustum. None of it depends on the current
+ * Z-plane, so a Z-scrub reuses a cached copy. Clears the target first.
  */
-export function drawStaticMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, layers, datasetLayers, mode, canvasW, canvasH, mainInvViewProj } = data;
+export function drawStaticMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData, colors: MinimapColors): void {
+  const { viewProj, layers, datasetLayers, mode, topDown, canvasW, canvasH, mainInvViewProj } = data;
 
   ctx.clearRect(0, 0, canvasW, canvasH);
 
-  // Bounding boxes (per-member — shows each tile's outline)
+  // One bounding box per member, outlining each tile.
+  const outline = paint(colors.stroke, MEMBER_OUTLINE_ALPHA);
   for (const layer of layers) {
-    drawBoundingBox(ctx, viewProj, layer.modelMatrix, canvasW, canvasH, "rgba(255,255,255,0.5)");
+    drawBoundingBox(ctx, viewProj, layer.modelMatrix, canvasW, canvasH, outline);
   }
 
-  // Axis arrows (once, not per-dataset)
-  drawAxisArrows(ctx, viewProj, canvasW, canvasH);
+  // Axis arrows (once, not per-dataset). Looking straight down Z, the Z arrow
+  // collapses to a point and X and Y only repeat the slice view's orientation.
+  if (!topDown) drawAxisArrows(ctx, viewProj, canvasW, canvasH, colors);
 
   if (mode === "volume" && mainInvViewProj) {
     // Frustum intersection (per-dataset)
     for (const dl of datasetLayers) {
       drawFrustumIntersection(
         ctx, viewProj, dl.modelMatrix, dl.invModelMatrix, mainInvViewProj,
-        canvasW, canvasH, "rgba(100,200,255,0.5)",
+        canvasW, canvasH, colors.viewport,
       );
     }
   }
 }
 
 /**
- * Draw the Z-plane sub-layer — the per-member slice planes (slice mode only),
- * which depend on the current Z-plane but not on pan/zoom. Draws NOTHING in
- * volume mode. Does NOT clear: it strokes over whatever surface it targets
- * (a dedicated offscreen cache canvas), so the consumer clears first.
- * Re-stroked only on a Z-scrub or geometry change, not on a pan/zoom.
+ * Draw the per-member slice planes (slice mode only), which depend on Z but not
+ * on pan/zoom. Does not clear, so the consumer clears its cache canvas first.
  */
-export function drawZPlaneOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, layers, mode, canvasW, canvasH, currentZ, datasetDims } = data;
+export function drawZPlaneOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData, colors: MinimapColors): void {
+  const { viewProj, layers, mode, topDown, canvasW, canvasH, currentZ, datasetDims } = data;
 
-  if (mode === "slice") {
-    // Slice plane (per-member — shows Z within each tile)
+  // Top-down means one plane per member, so a plane marker would only tint
+  // every member.
+  if (mode === "slice" && !topDown) {
+    // One slice plane per member, showing Z within each tile.
     for (const layer of layers) {
       const dims = datasetDims.get(layer.datasetId);
       if (!dims) continue;
-      drawSlicePlane(ctx, viewProj, layer.modelMatrix, currentZ, dims.depth, canvasW, canvasH, "rgba(255,200,50,0.25)");
+      drawSlicePlane(ctx, viewProj, layer.modelMatrix, currentZ, dims.depth, canvasW, canvasH, colors.plane);
     }
   }
 }
 
 /**
- * Draw the viewport sub-layer — the per-member viewport rectangles (slice mode)
- * plus the orientation cube (both modes, drawn last). These are cheap (bounded
- * by the visible viewports, not the member count) and are re-stroked every
- * overlay callback. Does NOT clear: it strokes over the composited layers.
+ * Draw the viewport rectangles (slice mode) and, for the orbit, the orientation
+ * cube. Cheap, since it scales with visible viewports rather than member count,
+ * so it is re-stroked every callback. Does not clear.
  */
-export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  const { viewProj, sliceViewports, mode, canvasW, canvasH, currentZ, theta, phi } = data;
+export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData, colors: MinimapColors): void {
+  const { viewProj, sliceViewports, mode, topDown, canvasW, canvasH, currentZ, theta, phi } = data;
 
   if (mode === "slice") {
     // View rectangle intersections (per-member, in member-local voxel coordinates)
@@ -262,43 +278,34 @@ export function drawViewportOverlays(ctx: CanvasRenderingContext2D, data: Minima
       drawSliceViewportRect(
         ctx, viewProj, viewport.modelMatrix, viewport.bounds,
         currentZ, viewport.width, viewport.height, viewport.depth,
-        canvasW, canvasH, "rgba(100,180,255,0.3)",
+        canvasW, canvasH, colors.viewport,
       );
     }
   }
 
-  // Orientation cube (drawn last, on top of everything)
-  drawOrientationCube(ctx, theta, phi, canvasW, canvasH);
+  // Orientation cube (drawn last, on top of everything). A top-down camera
+  // doesn't follow the main camera's angles, so the cube would orient nothing.
+  if (!topDown) drawOrientationCube(ctx, theta, phi, canvasW, canvasH, colors);
 }
 
 /**
- * Whether the Z-plane sub-layer cache must be redrawn: on a geometry change
- * (`staticDirty`), the first draw (`prevZ === null`), or a Z-scrub
- * (`currentZ !== prevZ`). A pan/zoom with unchanged Z reuses the cached layer.
+ * Whether the Z-plane layer cache must be redrawn. A pan/zoom with unchanged Z
+ * reuses it.
  */
 export function zPlaneLayerDirty(data: MinimapOverlayData, prevZ: number | null): boolean {
   return data.staticDirty || prevZ === null || data.currentZ !== prevZ;
 }
 
 /**
- * Draw the Z-DEPENDENT overlay layer — the per-member slice plane and viewport
- * rectangle (slice mode) — plus the orientation cube, on top of the (already
- * composited) static layer. Does NOT clear: it strokes over the static layer.
- * Re-run every overlay callback, including a pure Z-scrub, because the slice
- * plane / viewport indicators track the current plane.
+ * Draw the Z-dependent layer over the composited static layer. Does not clear.
  */
-export function drawDynamicMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  drawZPlaneOverlays(ctx, data);
-  drawViewportOverlays(ctx, data);
+export function drawDynamicMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData, colors: MinimapColors): void {
+  drawZPlaneOverlays(ctx, data, colors);
+  drawViewportOverlays(ctx, data, colors);
 }
 
-/**
- * Full overlay redraw (static layer + dynamic layer) onto a single context, in
- * the original draw order. Retained for callers that don't cache the static
- * layer; the minimap component splits the two so a Z-scrub reuses the cached
- * static layer.
- */
-export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData): void {
-  drawStaticMinimapOverlays(ctx, data);
-  drawDynamicMinimapOverlays(ctx, data);
+/** Full redraw onto one context, for callers that don't cache the static layer. */
+export function drawMinimapOverlays(ctx: CanvasRenderingContext2D, data: MinimapOverlayData, colors: MinimapColors): void {
+  drawStaticMinimapOverlays(ctx, data, colors);
+  drawDynamicMinimapOverlays(ctx, data, colors);
 }

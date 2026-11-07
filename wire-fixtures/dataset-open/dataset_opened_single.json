@@ -189,7 +189,8 @@
             {
               "label": "Channel 1"
             }
-          ]
+          ],
+          "downsampling_method": "mean"
         }
       }
     ],

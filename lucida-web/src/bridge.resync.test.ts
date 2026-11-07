@@ -5,22 +5,15 @@ import { Bridge, type BridgeHandlers } from "./bridge.ts";
  * Seq discipline of the sequenced document stream, driven through the real
  * `Bridge` dispatch:
  *
- * - in-order broadcasts/acks apply and advance tracking;
- * - a seq hole is buffered behind a short grace timer — a late
- *   out-of-order arrival fills it silently (the server sends broadcasts
- *   after releasing the session lock, so concurrent editors reorder
- *   without loss), and only a persistent hole produces exactly one
- *   `request_snapshot`;
- * - the answering snapshot re-baselines tracking, drops already-covered
- *   entries (no double-apply), and applies the newer tail in order;
- * - stale `dataset_opened` rebroadcasts (open-dedup) pass through ONLY
- *   for datasets the document still contains — a retained rebroadcast
- *   must not resurrect a dataset the snapshot deleted;
- * - the author's locally-applied-but-unacked commands are replayed after
- *   a snapshot full-replace and retired by their acks — including the
- *   accepted tradeoff when a snapshot outruns an ack and the replay
- *   stomps a newer peer value (local-only, bounded by the next
- *   edit/snapshot).
+ * - in-order broadcasts and acks apply and advance tracking;
+ * - a seq hole waits out a short grace, and only a persistent one sends
+ *   exactly one `request_snapshot`;
+ * - the answering snapshot re-baselines, drops covered entries, and applies
+ *   the newer tail in order;
+ * - stale `dataset_opened` rebroadcasts pass only for datasets the document
+ *   still contains;
+ * - unacked local commands replay after a snapshot and retire on their acks,
+ *   including the accepted case where the replay overwrites a newer peer value.
  */
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -199,7 +192,7 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
     expect(resyncRequests(ws)).toBe(1);
 
     // The snapshot was taken at seq 14, so 14 is already reflected in it
-    // (must NOT re-apply) while 15 is newer and must apply.
+    // (must not re-apply) while 15 is newer and must apply.
     deliver(ws, snapshotMsg(14));
     expect(handlers.onSnapshot).toHaveBeenCalledTimes(2);
     expect(appliedSeqs(handlers)).toEqual([11, 15]);
@@ -227,7 +220,7 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
     const { ws, handlers } = openBridge();
     deliver(ws, snapshotMsg(5, { "wds-1": {} }));
     // The server rebroadcasts an already-applied DatasetOpened at the
-    // CURRENT seq when an open dedups onto an existing binding; its apply
+    // current seq when an open dedups onto an existing binding; its apply
     // is an idempotent full-replace and carries the re-stamped opener.
     deliver(ws, broadcastMsg(5, datasetOpenedCmd("wds-1")));
 
@@ -263,8 +256,8 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
     vi.advanceTimersByTime(PAST_GRACE_MS);
     expect(resyncRequests(ws)).toBe(1);
 
-    // The snapshot (seq 13) no longer contains wds-D — the buffered entry
-    // is covered AND deleted; it must not be delivered on drain.
+    // The snapshot (seq 13) no longer contains wds-D, so the buffered entry
+    // is covered and deleted; it must not be delivered on drain.
     deliver(ws, snapshotMsg(13, { "wds-A": {} }));
     expect(appliedSeqs(handlers)).toEqual([]);
 
@@ -278,7 +271,7 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
   it("membership for the stale-dataset_opened gate tracks live commands, not just the snapshot", () => {
     const { ws, handlers } = openBridge();
     deliver(ws, snapshotMsg(5));
-    // wds-N opened AFTER the snapshot: the mirror must learn it so its
+    // wds-N opened after the snapshot: the mirror must learn it so its
     // dedup rebroadcast still passes.
     deliver(ws, broadcastMsg(6, datasetOpenedCmd("wds-N")));
     deliver(ws, broadcastMsg(6, datasetOpenedCmd("wds-N"))); // dedup rebroadcast at current seq
@@ -323,7 +316,7 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
     vi.advanceTimersByTime(PAST_GRACE_MS); // persists → request #1
     expect(resyncRequests(ws)).toBe(1);
 
-    // Snapshot answers, but was taken at seq 12 — 13–14 are still missing
+    // Snapshot answers, but was taken at seq 12: 13–14 are still missing
     // below the buffered 15, so the drain must ask again.
     deliver(ws, snapshotMsg(12));
     vi.advanceTimersByTime(PAST_GRACE_MS);
@@ -390,7 +383,7 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
     vi.advanceTimersByTime(PAST_GRACE_MS); // drain → grace → request #2
     expect(resyncRequests(ws)).toBe(2);
 
-    // Request #2 landed within ~1s of the served snapshot, so the server's
+    // The second request landed within ~1s of the served snapshot, so the server's
     // throttle may have eaten it. With no further inbound traffic, only
     // the retry timer can save the buffered tail.
     vi.advanceTimersByTime(5000);
@@ -405,8 +398,8 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
     deliver(ws, snapshotMsg(14)); // ...then the (Lagged-pushed) snapshot repairs it
 
     deliver(ws, broadcastMsg(16)); // NEW hole (15 in flight) right after adoption
-    // Inside the fresh window — a leftover timer would have fired by now
-    // and pushed a premature request straight into the server's throttle.
+    // Inside the fresh window. A leftover timer would have fired by now and
+    // pushed a premature request into the server's throttle.
     vi.advanceTimersByTime(150);
     expect(resyncRequests(ws)).toBe(0);
 
@@ -427,8 +420,8 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
     // 11–14 applied as they arrived; 15 drained from the buffer.
     expect(appliedSeqs(handlers)).toEqual([11, 12, 13, 14, 15]);
 
-    // The requested snapshot raced the late broadcasts and reflects seq 12
-    // — strictly older than our applied state. It must be skipped, not
+    // The requested snapshot raced the late broadcasts and reflects seq 12,
+    // strictly older than our applied state. It must be skipped, not
     // adopted (adopting would rewind the document to the seq-12 state).
     deliver(ws, snapshotMsg(12));
     expect(handlers.onSnapshot).toHaveBeenCalledTimes(1); // join snapshot only
@@ -482,7 +475,7 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
 
     // Snapshot at 4097: everything retained at/below is covered-dropped;
     // the kept-highest tail (4098, 4099) applies. Had the shed dropped the
-    // HIGHEST seqs instead, nothing above the snapshot would remain.
+    // highest seqs instead, nothing above the snapshot would remain.
     deliver(ws, snapshotMsg(4097));
     expect(appliedSeqs(handlers)).toEqual([4098, 4099]);
   });
@@ -514,7 +507,7 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
       command: RENAME,
     });
 
-    // The server built this snapshot BEFORE applying our command (its ack
+    // The server built this snapshot before applying our command (its ack
     // is still in flight): full-replace would erase the optimistic local
     // effect, so the bridge replays it locally.
     deliver(ws, snapshotMsg(12, { "wds-1": {} }));
@@ -527,20 +520,18 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
   });
 
   it("accepted tradeoff: a snapshot outrunning our ack replays our stale value over the newer peer value it carried (local-only, bounded by the next edit/snapshot)", () => {
-    // The premise behind pending replay — "the server built the snapshot
-    // before applying our command" — loses a queue race: acks ride the
-    // broadcast queue, snapshots ride the per-client unicast queue, so a
-    // snapshot whose seq already COVERS our command (here seq 12 >= our
-    // command's seq 11, and it carries a peer's even newer value for the
-    // same entity) can arrive before our ack does.
+    // Acks ride the broadcast queue and snapshots the per-client unicast
+    // queue, so a snapshot that already covers our command (seq 12 >= our
+    // seq 11, carrying a peer's newer value for the same entity) can arrive
+    // before our ack does.
     const OURS = JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "Ours" });
     const { bridge, ws, handlers } = openBridge();
     deliver(ws, snapshotMsg(10, { "wds-1": { name: "Original" } }));
     bridge.sendCommand(OURS); // sequenced server-side at 11; ack in flight
 
     // Peer renamed to "Theirs" at seq 12; the snapshot (built at 12) holds
-    // the peer's value AND already reflects our seq-11 command. It arrives
-    // ahead of our ack — the bridge cannot tell covered from pre-apply, so
+    // the peer's value and already reflects our seq-11 command. It arrives
+    // ahead of our ack; the bridge can't tell covered from pre-apply, so
     // it replays "Ours" over the snapshot's newer "Theirs".
     deliver(ws, snapshotMsg(12, { "wds-1": { name: "Theirs" } }));
     const snapshotDoc = (handlers.onSnapshot as ReturnType<typeof vi.fn>).mock.calls[1][1] as string;
@@ -548,10 +539,8 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     expect(appliedCommands(handlers)).toEqual([OURS]); // the stomp
 
     // The late ack retires the pending entry but corrects nothing: no
-    // further apply, no resync — the divergence stands, local-only, until
-    // the next edit or snapshot converges it. This is accepted over the
-    // alternative (skipping replay), which would erase the author's own
-    // edit in the common pre-apply case.
+    // further apply, no resync. The local divergence stands until the next
+    // edit or snapshot converges it.
     deliver(ws, ackMsg(11));
     expect(handlers.onAck).toHaveBeenCalledWith(11);
     expect(appliedCommands(handlers)).toEqual([OURS]);
@@ -620,14 +609,12 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     const { bridge, ws, handlers } = openBridge();
     deliver(ws, snapshotMsg(10, { "wds-1": {} }));
 
-    // Server-side rejections are log-only — this command will never ack,
-    // and blind FIFO would misalign every retirement after it (its worst
-    // case: a stale remove_dataset replayed by a much-later snapshot,
-    // deleting a re-opened dataset and poisoning the membership mirror).
+    // Server-side rejections are log-only, so this command never acks, and
+    // blind FIFO would misalign every retirement after it.
     bridge.sendCommand(JSON.stringify({ type: "remove_dataset", id: "wds-1" }));
     vi.advanceTimersByTime(11_000); // well past the pending TTL
 
-    // Two healthy commands afterwards. Their acks must retire THEM — the
+    // Two healthy commands afterwards. Their acks must retire them: the
     // expired entry is pruned before each retirement, realigning FIFO.
     bridge.sendCommand(JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "a" }));
     bridge.sendCommand(JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "b" }));
@@ -647,7 +634,7 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     bridge.sendCommand(JSON.stringify({ type: "remove_dataset", id: "wds-1" }));
 
     // Snapshot still contains wds-1 (built pre-apply): the replay re-runs
-    // the removal locally AND the membership mirror must follow, so a
+    // the removal locally and the membership mirror must follow, so a
     // retained dataset_opened rebroadcast can't resurrect it.
     deliver(ws, snapshotMsg(12, { "wds-1": {} }));
     expect(appliedCommands(handlers)).toEqual([

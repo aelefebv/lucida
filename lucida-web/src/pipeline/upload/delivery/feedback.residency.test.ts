@@ -20,6 +20,7 @@ describe("WorkerFeedback residency reconciliation", () => {
       {
         kind: "chunk",
         datasetId: "ds-0",
+        tier: "detail",
         entityId: "tile-0",
         memberId: "img-0:ch2",
         c: 2,
@@ -31,6 +32,7 @@ describe("WorkerFeedback residency reconciliation", () => {
       "img-0",
       2,
       "0/0/2/0/0/0",
+      "detail",
     );
     expect(cpuCache.markProxyMissing).not.toHaveBeenCalled();
   });

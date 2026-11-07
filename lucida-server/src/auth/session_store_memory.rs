@@ -1,9 +1,9 @@
 //! In-memory `LoginSessionStore` implementation.
 //!
 //! Used by unit tests and integration tests so they don't need to spin
-//! up a SQLite database on disk. The semantics deliberately mirror the
-//! SQLite implementation: get returns `Ok(None)` when missing, touch is
-//! racy, delete is idempotent, delete_expired removes by `<= now`.
+//! up a SQLite database on disk. It answers exactly as the SQLite store
+//! does, and that is checked rather than intended: both run the
+//! `LoginSessionStore` conformance suite in [`crate::storage`].
 //!
 //! Production code never reaches this — `main.rs` always wires the
 //! SQLite implementation. Lives behind a regular module rather than
@@ -43,6 +43,11 @@ impl MemorySessionStore {
 impl LoginSessionStore for MemorySessionStore {
     async fn create(&self, session: LoginSession) -> Result<(), SessionStoreError> {
         let mut rows = self.rows.lock().expect("memory store mutex poisoned");
+        // Reject a reused id rather than overwrite it, as the SQL primary
+        // key does.
+        if rows.contains_key(&session.id) {
+            return Err(SessionStoreError::Backend("duplicate session id".into()));
+        }
         rows.insert(session.id.clone(), session);
         Ok(())
     }
@@ -75,84 +80,5 @@ impl LoginSessionStore for MemorySessionStore {
         let before = rows.len();
         rows.retain(|_, row| row.expires_at > now);
         Ok((before - rows.len()) as u64)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use chrono::Duration as ChronoDuration;
-
-    fn sample(id: &str, now: DateTime<Utc>, expires_in_hours: i64) -> LoginSession {
-        LoginSession {
-            id: id.to_string(),
-            email: "dev@local".to_string(),
-            display_name: "Local Dev".to_string(),
-            picture_url: None,
-            created_at: now,
-            last_used_at: now,
-            expires_at: now + ChronoDuration::hours(expires_in_hours),
-        }
-    }
-
-    #[tokio::test]
-    async fn roundtrip_get_after_create() {
-        let store = MemorySessionStore::new();
-        let now = Utc::now();
-        let s = sample("id-a", now, 24);
-        store.create(s.clone()).await.unwrap();
-
-        let got = store.get("id-a").await.unwrap();
-        assert_eq!(got.as_ref(), Some(&s));
-    }
-
-    #[tokio::test]
-    async fn get_missing_returns_none_not_error() {
-        let store = MemorySessionStore::new();
-        assert!(store.get("nope").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn touch_bumps_last_used() {
-        let store = MemorySessionStore::new();
-        let now = Utc::now();
-        let later = now + ChronoDuration::seconds(60);
-        store.create(sample("id-a", now, 24)).await.unwrap();
-
-        store.touch_last_used("id-a", later).await.unwrap();
-        let got = store.get("id-a").await.unwrap().unwrap();
-        assert_eq!(got.last_used_at, later);
-    }
-
-    #[tokio::test]
-    async fn touch_missing_id_is_silent() {
-        let store = MemorySessionStore::new();
-        store
-            .touch_last_used("nope", Utc::now())
-            .await
-            .expect("missing-id touch must not error");
-    }
-
-    #[tokio::test]
-    async fn delete_is_idempotent() {
-        let store = MemorySessionStore::new();
-        store.delete("nope").await.unwrap();
-        store.create(sample("id-a", Utc::now(), 1)).await.unwrap();
-        store.delete("id-a").await.unwrap();
-        store.delete("id-a").await.unwrap();
-        assert!(store.get("id-a").await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn delete_expired_removes_only_past_rows() {
-        let store = MemorySessionStore::new();
-        let now = Utc::now();
-        store.create(sample("dead", now, -1)).await.unwrap();
-        store.create(sample("alive", now, 24)).await.unwrap();
-
-        let removed = store.delete_expired(now).await.unwrap();
-        assert_eq!(removed, 1);
-        assert!(store.get("dead").await.unwrap().is_none());
-        assert!(store.get("alive").await.unwrap().is_some());
     }
 }

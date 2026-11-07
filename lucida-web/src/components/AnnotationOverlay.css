@@ -1,0 +1,210 @@
+/* Annotations drawn over the canvas, shared by the 2D, 3D, and draft overlays.
+   Colors come from the canvas-keyed annotation tokens, so shapes keep their
+   contrast whichever canvas background is chosen. Positions are written per
+   frame as inline transforms; everything static lives here. */
+
+.lc-annotation-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* Only markers, handles, and an open thread take the pointer; the layer
+     never blocks canvas pan, zoom, or drawing. */
+  pointer-events: none;
+  z-index: var(--lc-z-float);
+}
+
+/* The live draft sits just above the committed shapes. */
+.lc-annotation-layer[data-layer="draft"] {
+  z-index: calc(var(--lc-z-float) + 1);
+}
+
+.lc-annotation-svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  overflow: visible;
+  pointer-events: none;
+  /* Shapes inside take a finger's drag; the browser reads touch-action from
+     this box, not from the shapes. */
+  touch-action: none;
+}
+
+.lc-annotation-shape {
+  --annotation-color: var(--lc-annotation-own);
+  fill: var(--annotation-color);
+  fill-opacity: 0.12;
+  stroke: var(--annotation-color);
+  stroke-width: 2.5;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.lc-annotation-shape[data-author="peer"] {
+  --annotation-color: var(--lc-annotation-peer);
+}
+
+.lc-annotation-shape[data-off-context] {
+  opacity: 0.5;
+}
+
+/* Hit-test only the stroke, so a press inside a box still reaches the canvas.
+   Hover reveals the handles and a click selects; the canvas hit-tests taps on
+   a wider band, so a finger never has to land on the stroke itself, and one
+   that does is handed on to the canvas. */
+.lc-annotation-shape[data-hoverable] {
+  pointer-events: stroke;
+  cursor: pointer;
+}
+
+.lc-annotation-shape[data-selected] {
+  stroke-width: 3.5;
+}
+
+/* The selected shape's drag target: invisible, covering its inside and a band
+   around its stroke. */
+.lc-annotation-body {
+  fill: transparent;
+  stroke: transparent;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  pointer-events: all;
+  cursor: move;
+}
+
+/* Carries a pin's dot, badges, and open thread; the tick moves it. */
+.lc-annotation-anchor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  will-change: transform;
+  pointer-events: none;
+}
+
+.lc-annotation-pin {
+  --annotation-color: var(--lc-annotation-own);
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: 16px;
+  height: 16px;
+  margin: -8px 0 0 -8px;
+  border: 2px solid var(--lc-annotation-ring);
+  border-radius: var(--lc-radius-full);
+  background: var(--annotation-color);
+  box-shadow: var(--lc-annotation-shadow);
+  pointer-events: auto;
+  /* A finger's drag on a pin goes to the canvas, never to the page. */
+  touch-action: none;
+}
+
+.lc-annotation-pin[data-selected] {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 2px;
+}
+
+.lc-annotation-pin[data-author="peer"] {
+  --annotation-color: var(--lc-annotation-peer);
+}
+
+/* Dashed off-context, on top of the anchor's dimming. */
+.lc-annotation-pin[data-off-context] {
+  border-style: dashed;
+}
+
+/* Resize and endpoint grips, centered on their projected point. */
+.lc-annotation-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  box-sizing: border-box;
+  width: 10px;
+  height: 10px;
+  margin: -5px 0 0 -5px;
+  border: 1.5px solid var(--lc-annotation-own);
+  border-radius: calc(var(--lc-radius-sm) / 2);
+  background: var(--lc-annotation-ring);
+  box-shadow: var(--lc-annotation-shadow);
+  will-change: transform;
+  pointer-events: auto;
+  touch-action: none;
+  z-index: 3;
+}
+
+.lc-annotation-count {
+  position: absolute;
+  top: -18px;
+  left: 4px;
+  box-sizing: border-box;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 var(--lc-space-1);
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-accent);
+  box-shadow: var(--lc-annotation-shadow);
+  color: var(--lc-text-on-accent);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-xs);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+/* A finger gets targets of --lc-target-min without the marks growing:
+   pseudo-elements widen the hit area around each mark's 12px inner box. The
+   badge's grows up and to the right, away from its pin. With a mouse the
+   target is 0 and the pseudo-elements sit inside their marks. */
+.lc-annotation-pin::before,
+.lc-annotation-handle::before,
+.lc-annotation-count::before {
+  content: "";
+  position: absolute;
+}
+
+.lc-annotation-pin::before,
+.lc-annotation-handle::before {
+  inset: min(0px, calc((12px - var(--lc-target-min)) / 2));
+  border-radius: var(--lc-radius-full);
+}
+
+.lc-annotation-count::before {
+  inset: min(0px, calc(16px - var(--lc-target-min))) min(0px, calc(16px - var(--lc-target-min))) 0 0;
+}
+
+.lc-annotation-body {
+  stroke-width: max(12px, var(--lc-target-min));
+}
+
+/* Handles also grow on screen under a finger, since they appear only when
+   asked for. */
+@media (pointer: coarse) {
+  .lc-annotation-handle {
+    width: 16px;
+    height: 16px;
+    margin: -8px 0 0 -8px;
+    border-width: 2px;
+  }
+}
+
+/* Where an off-context pin lives. Sits below the dot so it never collides
+   with the comment count above it. */
+.lc-annotation-locator {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  padding: 1px var(--lc-space-1);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-sm);
+  background: var(--lc-surface-float);
+  box-shadow: var(--lc-shadow-1);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-xs);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  white-space: nowrap;
+  pointer-events: none;
+}

@@ -179,16 +179,9 @@ async fn bounded_concurrency_respects_limit() {
         .max_active
         .load(std::sync::atomic::Ordering::SeqCst);
 
-    // The generator semaphore bounds *concurrent generations*, not raw
-    // store calls — but each generation does its own pre-fetch loop, so
-    // observed peak concurrent store fetches is bounded by `limit` *
-    // (number of fetches per generation that happen in parallel within
-    // one task). Since pre-fetches inside one generation are sequential
-    // (we await each one), the peak parallel store calls is just `limit`.
-    //
-    // We assert max_active ≤ `limit` strictly. The token bucket may also
-    // briefly show 0 due to scheduler interleavings; we only care about
-    // the upper bound.
+    // The semaphore bounds concurrent generations, and pre-fetches inside
+    // one generation are awaited in sequence, so peak parallel store calls
+    // is `limit`. Only the upper bound matters.
     assert!(
         max_active <= limit,
         "max concurrent store fetches ({max_active}) exceeded generator concurrency limit ({limit})"

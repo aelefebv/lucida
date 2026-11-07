@@ -19,10 +19,14 @@ import type { ContentSource, FetchRequest, FetchResult } from "../pipeline/fetch
 import { DecodePool } from "../pipeline/fetch/decodePool.ts";
 import type { ChunkRequest, RequestPlan } from "../pipeline/planning/index.ts";
 import { emptyPlanStats } from "../pipeline/planning/index.ts";
-import { installTraceSeam } from "./seam.ts";
+import { configStore } from "../pipeline/planning/configStore.ts";
+import { setBundleServices } from "./bundle.ts";
+import { setScriptControls } from "./steps.ts";
+import { installTraceSeam, resolveGpuIdentity } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
-import { createQuiescenceState } from "./quiescence.ts";
+import { createQuiescenceState, evaluateQuiescence } from "./quiescence.ts";
 import { TRACE_SCHEMA_VERSION } from "./types.ts";
+import { initialPlanningState } from "../pipeline/planning/index.ts";
 
 const OPEN_CAUSE = { epoch: "content", dirtyKind: "interactive", source: "dataset_added" } as const;
 
@@ -54,8 +58,8 @@ class ControlledSource implements ContentSource {
 }
 
 /**
- * Stand-in for the browser Worker so the real {@link DecodePool} — and the
- * correlation id it now carries — is what the lifecycle runs through. Replies
+ * Stand-in for the browser Worker so the real {@link DecodePool}, and the
+ * correlation id it carries, is what the lifecycle runs through. Replies
  * land on a later task, so the `decode` round trip has a real duration.
  */
 class EchoWorker {
@@ -101,7 +105,7 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
     proxyRequests: [],
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
     stats: emptyPlanStats(),
-    nextState: { previousActiveSet: [] },
+    nextState: initialPlanningState(),
   };
 }
 
@@ -294,8 +298,62 @@ describe("the trace seam", () => {
   });
 
   /**
+   * The bundle is the same export with more around it: one function
+   * behind the seam, so the monitor's save and the driver's file agree.
+   */
+  it("offers the run as a bundle, closing it the same way and naming what the page could not add", async () => {
+    installTraceSeam();
+    setBundleServices(null);
+    traceRecorder.openRun(OPEN_CAUSE);
+
+    const bundle = await window.lucidaTrace!.exportBundle();
+    expect(traceRecorder.isRunOpen).toBe(false);
+    expect(bundle.format).toBe("lucida-trace-bundle");
+    expect(bundle.header.runId).toBe(bundle.trace.runs[0].header.runId);
+    expect(bundle.header.endReason).toBe("explicit");
+    expect(bundle.header.viewUrl).toBe(`${window.location.origin}/w/ws-1`);
+    expect(bundle.header.devicePixelRatio).toBe(2);
+    expect(bundle.header.planning).toEqual(configStore.get());
+    // No viewer registered its services on this page, so the frame and the
+    // health are absent and say so, rather than the export failing.
+    expect(bundle.frame).toBeNull();
+    expect(bundle.health).toBeNull();
+    expect(bundle.absent.map(entry => entry.section)).toEqual(["frame", "health"]);
+    expect(bundle.perfetto).toBeNull();
+  });
+
+  it("carries the frame and the health the viewer registered, and the projection only when asked", async () => {
+    installTraceSeam();
+    setBundleServices({
+      requestDatasetHealth: () => Promise.resolve([]),
+      captureFrame: () =>
+        Promise.resolve({ frame: { png: new Uint8Array([1, 2, 3]).buffer, width: 4, height: 2 }, reason: null }),
+      canvasRect: () => null,
+    });
+    try {
+      traceRecorder.openRun(OPEN_CAUSE);
+      const bundle = await window.lucidaTrace!.exportBundle({ perfetto: true });
+      // The frame is labelled with the page's ratio when it was taken, not
+      // the run's. The two agree on a page that stayed on one screen, and
+      // the frame says what it is when they do not.
+      expect(bundle.frame).toEqual({
+        png: "AQID",
+        width: 4,
+        height: 2,
+        devicePixelRatio: window.devicePixelRatio,
+        capturedBy: "page",
+      });
+      expect(bundle.health?.datasets).toEqual([]);
+      expect(bundle.absent).toEqual([]);
+      expect(JSON.parse(bundle.perfetto!).displayTimeUnit).toBe("ms");
+    } finally {
+      setBundleServices(null);
+    }
+  });
+
+  /**
    * The borrowed path goes through the same seam as the native one, so no
-   * surface gets a privately shaped copy of the trace (#934).
+   * surface gets a privately shaped copy of the trace.
    */
   it("offers the same run projected for Perfetto, closing it the same way", async () => {
     installTraceSeam();
@@ -318,8 +376,8 @@ describe("the trace seam", () => {
 
   /**
    * The derivation lives behind the seam, so the agent's text and the
-   * monitor's cards are two readings of one object rather than two opinions
-   * (#933). The CLI holding no diagnostic logic is what this protects.
+   * monitor's cards are two readings of one object rather than two opinions.
+   * The CLI holding no diagnostic logic is what this protects.
    */
   it("reads the run as a diagnostic, and renders that same object as text", async () => {
     installTraceSeam();
@@ -363,6 +421,98 @@ describe("the trace seam", () => {
   });
 
   /**
+   * A window is the same derivation over an interval of the run, reached
+   * through the same seam, so a brushed interval in the monitor and the
+   * CLI's window flag cannot disagree about it.
+   */
+  it("scopes the diagnostic to a window through the same derivation", async () => {
+    installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    // The run's wall is whatever the test took, so a window past it is clamped
+    // to it. Either way the reading is scoped, and the text names the window.
+    const windowed = window.lucidaTrace!.diagnose(undefined, {
+      window: { startMs: 0, endMs: 0.5 },
+    });
+    expect(windowed.window).toMatchObject({ startMs: 0 });
+    expect(windowed.window!.endMs).toBeLessThanOrEqual(0.5);
+    expect(windowed.coverage.wallMs).toBeLessThanOrEqual(0.5);
+    expect(window.lucidaTrace!.diagnoseText(windowed.runId, { window: { startMs: 0, endMs: 0.5 } })).toContain(
+      `window    0..${windowed.window!.endMs} ms`,
+    );
+  });
+
+  /**
+   * A run file read back after its browser is gone carries the whole-run
+   * reading and no other, so the CLI hands the document back to a page and
+   * asks for the window there. The recorder is not involved: reading a
+   * document someone else recorded closes nothing here.
+   */
+  it("diagnoses a supplied trace document without touching the recording", async () => {
+    const seam = installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    seam.closeRun("timeout");
+    const document = seam.exportTrace();
+    const runId = seam.runState.lastConcludedRunId!;
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const diagnostic = seam.diagnoseTrace(document, { runId, window: { startMs: 0, endMs: 1 } });
+    const text = seam.diagnoseTraceText(document, { runId, depth: "phases" });
+    expect(traceRecorder.isRunOpen).toBe(true);
+
+    expect(diagnostic.runId).toBe(runId);
+    // Clamped to the run's own wall when the run took under a millisecond.
+    const wallMs = document.runs.find((run) => run.header.runId === runId)!.header.durationUs / 1_000;
+    expect(diagnostic.window).toMatchObject({ startMs: 0 });
+    expect([1, wallMs]).toContain(diagnostic.window!.endMs);
+    expect(text).toContain(`lucida trace ${runId}`);
+    expect(text).toContain("CRITICAL PATH");
+  });
+
+  it("compares two supplied trace documents without touching the recording", async () => {
+    const seam = installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    seam.closeRun("timeout");
+    const document = seam.exportTrace();
+    const runId = seam.runState.lastConcludedRunId!;
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const comparison = seam.compareTraces(
+      { trace: document, runId, label: "baseline.json", planning: { prefetchDepth: 0 } },
+      { trace: document, runId },
+    );
+    const text = seam.compareTracesText({ trace: document, runId }, { trace: document, runId });
+    expect(traceRecorder.isRunOpen).toBe(true);
+
+    expect(comparison.left.runId).toBe(runId);
+    expect(comparison.right.runId).toBe(runId);
+    expect(comparison.comparable).toBe(true);
+    expect(comparison.header.find((field) => field.field === "planning.prefetchDepth")).toMatchObject({
+      left: 0,
+      same: false,
+      breaksComparability: false,
+    });
+    expect(comparison.wall.deltaMs).toBe(0);
+    expect(text).toContain(`lucida trace diff ${runId} ${runId}`);
+    expect(text).toContain("PHASES");
+  });
+
+  /**
    * "The shape behind X" is a depth of the page's renderer too, so the CLI
    * that prints it never becomes a second renderer with its own opinions.
    */
@@ -387,6 +537,121 @@ describe("the trace seam", () => {
       phase: "nonsense",
     });
     expect(absent).toContain("not in this run");
+  });
+
+  /**
+   * One chunk and what is where are readings of the document too, so an
+   * agent driving its own browser asks for them through the seam, and the
+   * chunk it names is the one the document is about.
+   */
+  it("looks up a chunk and summarises space through the same derivation", async () => {
+    installTraceSeam();
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    const document = window.lucidaTrace!.diagnose();
+    expect(document.chunk.selector).not.toBeNull();
+    expect(document.spatial.rowCount).toBeGreaterThan(0);
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const named = window.lucidaTrace!.diagnose(undefined, { chunk: "9/9/9/9/9/9" });
+    expect(named.chunk.chosen).toBe("named by the caller");
+    expect(named.chunk.statement).toContain("not in this run");
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const text = window.lucidaTrace!.diagnoseText(undefined, { depth: "chunk", chunk: "9/9/9/9/9/9" });
+    expect(text).toContain("CHUNK     9/9/9/9/9/9");
+    expect(text).toContain("not in this run");
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const spatial = window.lucidaTrace!.diagnoseText(undefined, { depth: "spatial" });
+    expect(spatial).toContain("SPATIAL");
+    expect(spatial).toContain("chunk indices");
+  });
+
+  /**
+   * The driver's scripted steps. Pan, zoom, and
+   * orbit arrive as synthesized pointer events and need nothing here. Scrub
+   * and select go through the handlers the viewer registers, because the
+   * capture surface hides the controls they would otherwise land on, and
+   * the view is read the same way before and after every step.
+   */
+  it("reads the view and takes a scrub or a select through the registered controls", () => {
+    const seam = installTraceSeam();
+    const calls: unknown[] = [];
+    const view = { v: 1, camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [8, 6] } };
+    setScriptControls({
+      view: () => view as never,
+      scrub: (axis, count) => {
+        calls.push(["scrub", axis, count]);
+        return { applied: true, reason: null };
+      },
+      select: (target, visible) => {
+        calls.push(["select", target, visible]);
+        return { applied: true, reason: null };
+      },
+    });
+    try {
+      expect(seam.view()).toBe(view);
+      expect(seam.viewSignature()).toEqual({
+        camera: { mode: "slice", center: [0, 0], zoom: 1 },
+        view: null,
+        visibility: {},
+      });
+      // The viewers' own constants, so the driver's pixels are the page's.
+      expect(seam.inputScale.orbitRadiansPerPixel).toBe(0.005);
+      expect(seam.inputScale.sliceZoomInPerNotch).toBe(1.1);
+      expect(seam.scrub("t", 3)).toEqual({ applied: true, reason: null });
+      expect(seam.select({ channel: 1 }, false)).toEqual({ applied: true, reason: null });
+      expect(seam.select({ layer: "ds-2" })).toEqual({ applied: true, reason: null });
+      expect(calls).toEqual([
+        ["scrub", "t", 3],
+        ["select", { channel: 1 }, false],
+        ["select", { layer: "ds-2" }, true],
+      ]);
+    } finally {
+      setScriptControls(null);
+    }
+  });
+
+  it("answers a step with nothing registered, and a malformed one, by saying so rather than throwing", () => {
+    const seam = installTraceSeam();
+    setScriptControls(null);
+    expect(seam.view()).toBeNull();
+    expect(seam.viewSignature()).toBeNull();
+    expect(seam.scrub("z", 1)).toEqual({
+      applied: false,
+      reason: "no viewer has registered its controls on this page",
+    });
+    expect(seam.select({ channel: 0 })).toEqual({
+      applied: false,
+      reason: "no viewer has registered its controls on this page",
+    });
+
+    setScriptControls({
+      view: () => null,
+      scrub: () => ({ applied: true, reason: null }),
+      select: () => ({ applied: true, reason: null }),
+    });
+    try {
+      // The arguments arrive over the DevTools protocol, so the seam checks
+      // them before any handler sees them.
+      expect(seam.scrub("q" as never, 1)).toEqual({ applied: false, reason: "no selector is called q" });
+      expect(seam.select({} as never)).toEqual({
+        applied: false,
+        reason: "a select names a channel index or a layer id",
+      });
+      expect(seam.select({ channel: -1 })).toEqual({
+        applied: false,
+        reason: "a channel is a whole number from 0, not -1",
+      });
+    } finally {
+      setScriptControls(null);
+    }
   });
 
   /**
@@ -421,7 +686,7 @@ describe("the trace seam", () => {
   });
 
   /**
-   * The live view's read (#937). Everything else through this seam concludes
+   * The live view's read. Everything else through this seam concludes
    * the interval it is asked about, which is the one thing a surface watching
    * an open run must not do.
    */
@@ -447,6 +712,83 @@ describe("the trace seam", () => {
     seam.closeRun();
     expect(seam.progress()).toBeNull();
     expect(seam.diagnose(progress.runId).runId).toBe(progress.runId);
+  });
+
+  it("produces a provisional reading as JSON and as text without closing the run", async () => {
+    const seam = installTraceSeam();
+    expect(seam.provisional()).toBeNull();
+    expect(seam.provisionalText()).toBeNull();
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    traceRecorder.noteReading(0, 1, 2_000, 8);
+    traceRecorder.noteQuiescence(
+      evaluateQuiescence(Object.assign(createQuiescenceState(), { inFlight: 1 }), performance.now()),
+    );
+
+    const reading = seam.provisional()!;
+    expect(reading.provisional).toBe(true);
+    expect(reading.runId).toBe(seam.progress()!.runId);
+    expect(reading.occupancy.inFlight).toBe(1);
+    expect(reading.rows.made).toBe(1);
+    expect(reading.rows.walked).toBe(0);
+    expect(reading.quiescence.reason).toBe("chunks_in_flight");
+    expect(reading.statement.startsWith("provisional")).toBe(true);
+    expect("verdict" in reading).toBe(false);
+    // An agent over CDP and the watch stream both get the JSON of this
+    // object, so the round trip must lose nothing.
+    expect(JSON.parse(JSON.stringify(reading))).toEqual(reading);
+
+    const text = seam.provisionalText()!;
+    expect(text.split("\n")[0]).toContain(`lucida trace ${reading.runId} — PROVISIONAL:`);
+    expect(text).toContain("not a verdict");
+
+    expect(seam.runState.open).toBe(true);
+    expect(seam.provisional({ windowMs: 1_000 })!.window.requestedMs).toBe(1_000);
+
+    seam.closeRun();
+    expect(seam.provisional()).toBeNull();
+    expect("provisional" in seam.diagnose(reading.runId)).toBe(false);
+  });
+
+  it("offers the open run's live timeline as JSON and as text without closing the run", async () => {
+    const seam = installTraceSeam();
+    expect(seam.liveTimeline()).toBeNull();
+    expect(seam.liveTimelineText()).toBeNull();
+
+    traceRecorder.openRun(OPEN_CAUSE);
+    const source = new ControlledSource();
+    const cache = new CpuCache(source, makeDecode());
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    traceRecorder.noteReading(0, 1, 2_000, 8);
+
+    const live = seam.liveTimeline()!;
+    expect(live.provisional).toBe(true);
+    expect(live.runId).toBe(seam.progress()!.runId);
+    expect(live.timeline.rowsWalked).toBe(false);
+    expect(live.timeline.charts.find((chart) => chart.id === "in-flight")?.recorded).toBe(true);
+    expect(live.timeline.charts.find((chart) => chart.id === "occupancy.browser")?.recorded).toBe(false);
+    // An agent over CDP gets the JSON of this object, so the round trip must lose nothing.
+    expect(JSON.parse(JSON.stringify(live))).toEqual(live);
+
+    const text = seam.liveTimelineText()!;
+    expect(text.split("\n")[0]).toContain(`lucida trace ${live.runId} — PROVISIONAL TIMELINE:`);
+    expect(text).toContain("not a verdict");
+    expect(seam.liveTimeline({ windowMs: 1_000 })!.window.requestedMs).toBe(1_000);
+
+    // Reading it changed nothing, and the closed run's timeline is the same
+    // closed set with the rows walked.
+    expect(seam.runState.open).toBe(true);
+    seam.closeRun();
+    expect(seam.liveTimeline()).toBeNull();
+    const closed = seam.diagnose(live.runId).timeline;
+    expect(closed.rowsWalked).toBe(true);
+    expect(closed.charts.map((chart) => chart.id)).toEqual(live.timeline.charts.map((chart) => chart.id));
+    expect(seam.diagnoseText(live.runId, { depth: "timeline" })).toContain("TIMELINE");
   });
 
   it("stops a run without exporting it", () => {
@@ -504,5 +846,89 @@ describe("the cache's half of the quiescence predicate", () => {
     // Demand stays on the cache's own prefetch-inclusive basis, so resident
     // and desired are counted the same way; the exclusion is in the queues.
     expect(inputs.desiredDetailChunks).toBe(2);
+  });
+});
+
+describe("the adapter identity the header carries", () => {
+  interface FakeAdapter {
+    info: Record<string, unknown>;
+    features: Set<string>;
+    isFallbackAdapter?: boolean;
+  }
+
+  function withAdapter(adapter: FakeAdapter | null | (() => never)): void {
+    Object.defineProperty(navigator, "gpu", {
+      configurable: true,
+      value: {
+        requestAdapter: () =>
+          typeof adapter === "function" ? adapter() : Promise.resolve(adapter),
+      },
+    });
+  }
+
+  function hardwareInfo(): Record<string, unknown> {
+    return { vendor: "v", architecture: "a", device: "d", description: "desc", isFallbackAdapter: false };
+  }
+
+  it("is null where there is no WebGPU at all", async () => {
+    Object.defineProperty(navigator, "gpu", { configurable: true, value: undefined });
+    expect(await resolveGpuIdentity()).toBeNull();
+  });
+
+  it("names the adapter and whether it offers timestamp queries", async () => {
+    withAdapter({ info: hardwareInfo(), features: new Set(["timestamp-query"]) });
+    expect(await resolveGpuIdentity()).toEqual({
+      vendor: "v",
+      architecture: "a",
+      device: "d",
+      description: "desc",
+      fallback: false,
+      timestampQueries: true,
+    });
+  });
+
+  it("records a software fallback from the adapter info", async () => {
+    withAdapter({ info: { ...hardwareInfo(), isFallbackAdapter: true }, features: new Set() });
+    const identity = await resolveGpuIdentity();
+    expect(identity?.fallback).toBe(true);
+    expect(identity?.timestampQueries).toBe(false);
+  });
+
+  it("falls back to the adapter's own flag where the info lacks one", async () => {
+    const info = hardwareInfo();
+    delete info.isFallbackAdapter;
+    withAdapter({ info, features: new Set(), isFallbackAdapter: true });
+    expect((await resolveGpuIdentity())?.fallback).toBe(true);
+  });
+
+  it("records an adapter that says nothing about fallback as saying nothing", async () => {
+    const info = hardwareInfo();
+    delete info.isFallbackAdapter;
+    withAdapter({ info, features: new Set() });
+    expect((await resolveGpuIdentity())?.fallback).toBeNull();
+  });
+
+  it("is null when the adapter request fails", async () => {
+    withAdapter(() => {
+      throw new Error("no adapter");
+    });
+    expect(await resolveGpuIdentity()).toBeNull();
+  });
+
+  it("asks again when the first answer after launch is null", async () => {
+    const answers: Array<FakeAdapter | null> = [null, null, { info: hardwareInfo(), features: new Set() }];
+    let calls = 0;
+    Object.defineProperty(navigator, "gpu", {
+      configurable: true,
+      value: { requestAdapter: () => Promise.resolve(answers[Math.min(calls++, answers.length - 1)]) },
+    });
+    const identity = await resolveGpuIdentity({ attempts: 5, retryMs: 0 });
+    expect(identity?.vendor).toBe("v");
+    expect(calls).toBe(3);
+  });
+
+  it("takes null as final once the attempts are spent", async () => {
+    withAdapter(null);
+    expect(await resolveGpuIdentity({ attempts: 2, retryMs: 0 })).toBeNull();
   });
 });

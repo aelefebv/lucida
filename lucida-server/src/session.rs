@@ -11,6 +11,7 @@ use lucida_protocol::{
 };
 
 use crate::binding::ServerBinding;
+use crate::watch::WatchRelay;
 
 const HISTORY_CAPACITY: usize = 256;
 
@@ -30,6 +31,12 @@ pub struct Session {
     pub generated_availability: HashMap<DatasetId, GeneratedAvailabilitySnapshot>,
     /// Per-client ephemeral presence state.
     pub clients: HashMap<ClientId, PresenceState>,
+    /// The workspace's watch stream: who is subscribed, and the ring of what
+    /// pages published (ADR 0051). Kept beside the session's other
+    /// live-connection state rather than in its own lock, so one lock orders
+    /// a publish against a subscribe and a late joiner cannot read the ring
+    /// and an item twice.
+    pub watch: WatchRelay,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +63,7 @@ impl Session {
             binding_runtime: HashMap::new(),
             generated_availability: HashMap::new(),
             clients: HashMap::new(),
+            watch: WatchRelay::new(),
         }
     }
 
@@ -146,7 +154,7 @@ impl Session {
     /// Register a newly connected client.
     ///
     /// `identity` is the server-authored presentational identity for the
-    /// peer's cursor (#540), derived from the connection's authenticated
+    /// peer's cursor, derived from the connection's authenticated
     /// principal. The non-workspace `/ws` path has no principal and passes
     /// `None`, so anonymous peers still join and render via the numeric-id
     /// fallback.
@@ -320,6 +328,7 @@ mod tests {
                     generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
+                    downsampling_method: None,
                     channel_infos: vec![],
                 },
             }],
@@ -474,8 +483,8 @@ mod tests {
 
     #[test]
     fn add_client_attaches_identity_to_presence_and_snapshot() {
-        // #540: a workspace client connects with a server-authored identity.
-        // It rides on the returned presence (broadcast as PeerJoined) AND on
+        // A workspace client connects with a server-authored identity.
+        // It rides on the returned presence (broadcast as PeerJoined) and on
         // the snapshot peer list a late joiner receives.
         let mut session = Session::new();
         let identity = PeerIdentity {

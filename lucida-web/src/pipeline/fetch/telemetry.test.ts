@@ -157,7 +157,7 @@ describe("BurstLogger", () => {
     vi.advanceTimersByTime(2000);
     const log = new BurstLogger("cache", "cache.failure_burst", 1000);
 
-    // First event starts the window and does NOT emit.
+    // First event starts the window and does not emit.
     log.recordBurst(4, (count) => ({ count }));
     expect(debugLog).toHaveBeenCalledTimes(0);
 
@@ -171,7 +171,7 @@ describe("BurstLogger", () => {
     expect(debugLog).toHaveBeenCalledTimes(1);
     expect(vi.mocked(debugLog).mock.calls[0][2]).toEqual({ count: 4 });
 
-    // Events 5, 6 — still in the same window, do NOT re-emit.
+    // Events 5, 6 — still in the same window, do not re-emit.
     log.recordBurst(4, (count) => ({ count }));
     log.recordBurst(4, (count) => ({ count }));
     expect(debugLog).toHaveBeenCalledTimes(1);
@@ -202,7 +202,7 @@ describe("BurstLogger", () => {
     log.recordSkipped(1, payloadFn);
     expect(callCount).toBe(1);
 
-    // Suppressed within window: payload should NOT be built.
+    // Suppressed within window: payload should not be built.
     log.recordSkipped(1, payloadFn);
     expect(callCount).toBe(1);
   });

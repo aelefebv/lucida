@@ -1,14 +1,10 @@
 /**
- * Worker `destroy` handler — tears down every renderer-owned resource
- * the worker has accumulated, then calls `self.close()` so the worker
- * thread exits cleanly.
+ * Worker `destroy` handler: tears down every renderer-owned resource, then
+ * calls `self.close()`.
  *
- * Teardown order matters: clear cold-state pointers first (so any
- * in-flight async handlers can't reschedule work), then drop proxy
- * pools + descriptor buffers (they hold GPU resources), then per-mode
- * atlas + minimap resources, then the worker-process resource caches
- * (LUT, offscreen pool, dummies). Finally, close the worker so any
- * stragglers don't continue processing.
+ * Order matters: cold-state pointers are cleared first so in-flight async
+ * handlers can't reschedule work, and the worker closes last so stragglers
+ * stop.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -18,16 +14,17 @@ import { destroyAllSliceResources } from "../slice/index.ts";
 import { destroyAllVolumeResources } from "../volume/index.ts";
 import { destroyAllMinimapResources } from "../minimapHandlers.ts";
 import { destroyAllResources } from "./resources.ts";
+import { clearFrameCaptures } from "./captureFrame.ts";
 
 export function handleDestroy(ctx: WorkerCtx): void {
   const state = ctx.state;
   state.currentEpochs = null;
   state.currentColdState = null;
+  clearFrameCaptures(state);
   state.memberToDataset.clear();
-  state.memberToPool.clear();
-  state.memberTierToPool.clear();
-  state.currentEntityMetasByDataset.clear();
-  // Tear down proxy atlas pools and descriptors.
+  state.memberSourcePools.clear();
+  state.targetLevelByMember.clear();
+  state.currentSourcesByDataset.clear();
   for (const dsPools of state.proxyPoolsByDataset.values()) {
     for (const pool of dsPools.values()) destroyProxyAtlas(pool);
   }
@@ -35,7 +32,6 @@ export function handleDestroy(ctx: WorkerCtx): void {
   state.proxyDescriptorsByEntity.clear();
   state.groupToTiles.clear();
   state.groupsByDataset.clear();
-  // Tear down all entity descriptor buffers.
   for (const desc of state.descriptorBuffersByDataset.values()) {
     destroyDescriptorBuffer(desc);
   }
@@ -43,7 +39,7 @@ export function handleDestroy(ctx: WorkerCtx): void {
   destroyAllSliceResources(ctx);
   destroyAllVolumeResources(ctx);
   destroyAllMinimapResources();
-  // Drop worker-process resource caches (LUT, offscreen pool, dummies).
+  ctx.passTimer.destroy();
   destroyAllResources();
   self.close();
 }

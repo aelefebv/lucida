@@ -2,18 +2,28 @@
 import shaderSource from "./slice.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import type { BlendMode } from "./layerCompositor.ts";
+import type { PassTiming } from "./passTiming.ts";
+import { DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
+import { requireCompiled } from "./pipelineCompile.ts";
+import type { RgbaColor } from "./workerProtocol.ts";
 
-// Uniform buffer layout (128 bytes):
-//   offset 0:   transform           mat4x4f (64B)
-//   offset 64:  detailAtlasSlotDims vec4u   (16B)
-//   offset 80:  coarseAtlasSlotDims vec4u   (16B)
-//   offset 96:  memberScreenSize    vec4f   (16B)
-//   offset 112: lodParams           vec4u   (16B) — x=targetLodIdx
-const UNIFORM_SIZE = 128;
+/**
+ * Byte offsets of the shader's `Uniforms` fields (slice.wgsl). The
+ * writer below and descriptor/layout.test.ts both read this table, so a
+ * reordered struct fails the test instead of skewing the draw.
+ */
+export const SLICE_UNIFORM_OFFSETS = {
+  transform: 0,            // mat4x4f (64B)
+  levelAtlasSlotDims: 64,  // array<vec4u, 4> (64B) — xy=slots per axis per level pool binding
+  coarseAtlasSlotDims: 128, // vec4u (16B)
+  memberScreenSize: 144,   // vec4f (16B)
+  borderColor: 160,        // vec4f (16B) — premultiplied
+} as const;
+export const SLICE_UNIFORM_SIZE = 176;
 const ENTITY_REF_SIZE = 16;
 
-/** One chunk-tier atlas binding for an aggregate sub-batch draw. */
-export interface AggregateTierBinding {
+/** One chunk pool bound to a slice draw: its atlas texture, indirection buffer, and slot grid. */
+export interface SlicePoolBinding {
   texture: GPUTexture;
   indirectionBuf: GPUBuffer;
   slotsX: number;
@@ -22,13 +32,15 @@ export interface AggregateTierBinding {
 
 /**
  * One aggregate sub-batch: a contiguous run of quad records that share
- * the same pool bindings (detail atlas, coarse atlas, tile/group proxy
- * pools), drawn with exactly those resources bound. `firstInstance` /
- * `count` address the run inside the layer's quad storage buffer.
+ * the same pool bindings (level pools in slot order, coarse pool,
+ * tile/group proxy pools), drawn with exactly those resources bound.
+ * `firstInstance` / `count` address the run inside the layer's quad
+ * storage buffer.
  */
 export interface AggregateBatch {
-  detail: AggregateTierBinding | null;
-  coarse: AggregateTierBinding | null;
+  /** Level pool bindings in slot order (index = the descriptor's `poolIndex`); at most four. */
+  levels: Array<SlicePoolBinding | null>;
+  coarse: SlicePoolBinding | null;
   tileProxyTexture: GPUTexture | null;
   groupProxyTexture: GPUTexture | null;
   firstInstance: number;
@@ -37,13 +49,13 @@ export interface AggregateBatch {
 
 /** Inputs for {@link SliceRenderer.renderAggregateBatches}. */
 export interface AggregateDrawParams {
-  /** CURRENT per-dataset descriptor buffer — bound fresh every draw. */
+  /** Per-dataset descriptor buffer, bound fresh every draw. */
   descriptorBuffer: GPUBuffer;
   /** Batch-ordered quad records (32 bytes each, shader `MemberQuad`). */
   quadData: ArrayBuffer;
   batches: AggregateBatch[];
   blendMode: BlendMode;
-  /** Layer transform inputs — same meaning as {@link SliceRenderer.setTransform}. */
+  /** Layer transform inputs, as in {@link SliceRenderer.setTransform}. */
   zoom: number;
   cx: number;
   cy: number;
@@ -51,6 +63,18 @@ export interface AggregateDrawParams {
   canvasH: number;
   dataW: number;
   dataH: number;
+}
+
+/** Slot dims of each level pool binding, `[0, 0]` for an unbound slot. */
+type LevelSlotDims = Array<[number, number]>;
+
+function levelSlotDimsOf(levels: ReadonlyArray<SlicePoolBinding | null>): LevelSlotDims {
+  const out: LevelSlotDims = [];
+  for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+    const b = levels[i] ?? null;
+    out.push(b ? [b.slotsX, b.slotsY] : [0, 0]);
+  }
+  return out;
 }
 
 /**
@@ -66,8 +90,9 @@ function buildSliceUniformData(
   canvasH: number,
   dataW: number,
   dataH: number,
-  detailSlotDims: [number, number],
+  levelSlotDims: LevelSlotDims,
   coarseSlotDims: [number, number],
+  borderColor: RgbaColor,
 ): Float32Array<ArrayBuffer> {
   const sx = canvasW / (dataW * zoom);
   const sy = canvasH / (dataH * zoom);
@@ -75,7 +100,7 @@ function buildSliceUniformData(
   const ty = -0.5 * canvasH / (dataH * zoom) + cy / dataH;
 
   // mat4x4 in column-major order
-  const uniformData = new Float32Array(UNIFORM_SIZE / 4);
+  const uniformData = new Float32Array(SLICE_UNIFORM_SIZE / 4);
   uniformData[0] = sx;  // col0.x
   uniformData[5] = sy;  // col1.y
   uniformData[10] = 1;  // col2.z
@@ -85,24 +110,29 @@ function buildSliceUniformData(
 
   // Atlas params (u32 written via Uint32Array view)
   const u32View = new Uint32Array(uniformData.buffer);
-  u32View.set([detailSlotDims[0], detailSlotDims[1], 0, 0], 16);
-  u32View.set([coarseSlotDims[0], coarseSlotDims[1], 0, 0], 20);
+  for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+    const [sxSlots, sySlots] = levelSlotDims[i] ?? [0, 0];
+    u32View.set([sxSlots, sySlots, 0, 0], SLICE_UNIFORM_OFFSETS.levelAtlasSlotDims / 4 + i * 4);
+  }
+  u32View.set([coarseSlotDims[0], coarseSlotDims[1], 0, 0], SLICE_UNIFORM_OFFSETS.coarseAtlasSlotDims / 4);
 
   // Layer screen-pixel size for border detection (per-member layers:
   // the member's own size; aggregate layers: the union extent, scaled
   // to each member's fraction in the vertex stage).
-  uniformData.set([dataW * zoom, dataH * zoom, 0, 0], 24);
-
-  // lodParams.x = targetLodIdx (always 0 — descriptor lods start at
-  // finest LOD).
-  u32View.set([0, 0, 0, 0], 28);
+  uniformData.set([dataW * zoom, dataH * zoom, 0, 0], SLICE_UNIFORM_OFFSETS.memberScreenSize / 4);
+  const [r, g, b, a] = borderColor;
+  uniformData.set([r * a, g * a, b * a, a], SLICE_UNIFORM_OFFSETS.borderColor / 4);
   return uniformData;
 }
 
 export class SliceRenderer {
   private device: GPUDevice;
-  private pipeline: GPURenderPipeline;
-  private aggregatePipelines: Record<BlendMode, GPURenderPipeline>;
+  private pipeline: GPURenderPipeline | null = null;
+  private aggregatePipelines: Record<BlendMode, GPURenderPipeline> | null = null;
+  /** Faint white until the page sends the theme's color. */
+  private tileBorderColor: RgbaColor = [1, 1, 1, 0.3];
+  /** Resolves once the per-member and the three aggregate pipelines have compiled. See `pipelineCompile.ts`. */
+  readonly compiled: Promise<void>;
   private uniformBuffer: GPUBuffer;
   private entityRefBuffer: GPUBuffer;
   private bindGroupLayout: GPUBindGroupLayout;
@@ -113,39 +143,51 @@ export class SliceRenderer {
   private currentDescriptorBuffer: GPUBuffer | null = null;
   private currentLabelColorBuffer: GPUBuffer | null = null;
   private labelColorBuffer: GPUBuffer | null = null;
-  // Aggregate draw RESOURCES: grow-only pools whose contents are
-  // rewritten on every draw. Deliberately no bind-group or
-  // descriptor-identity caching here — descriptor buffers are rebuilt
-  // whenever display settings or residency change, and the aggregate
-  // must bind whatever is current at draw time, exactly like the
-  // per-member path.
+  // Aggregate draw resources: grow-only pools rewritten every draw. No
+  // bind-group caching, because descriptor buffers are rebuilt whenever
+  // display settings or residency change and the draw must bind whatever
+  // is current.
   private aggregateQuadBuffer: GPUBuffer | null = null;
   private aggregateQuadCapacity = 0;
   private aggregateUniformBuffers: GPUBuffer[] = [];
 
-  private detailAtlasTexture: GPUTexture | null = null;
-  private detailIndirectionBuffer: GPUBuffer | null = null;
-  private coarseAtlasTexture: GPUTexture | null = null;
-  private coarseIndirectionBuffer: GPUBuffer | null = null;
+  private levelBindings: Array<SlicePoolBinding | null> = [];
+  private coarseBinding: SlicePoolBinding | null = null;
   private dummyTexture: GPUTexture;
   private dummyIndirectionBuffer: GPUBuffer;
   private dummyLabelColorBuffer: GPUBuffer;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
 
-  private detailAtlasSlotDims: [number, number] = [0, 0];
-  private coarseAtlasSlotDims: [number, number] = [0, 0];
   // Proxy textures still bound CPU-side (slot indices and dims come
   // from the descriptor).
   private tileProxyTexture: GPUTexture | null = null;
   private groupProxyTexture: GPUTexture | null = null;
   private dummyProxyTexture: GPUTexture | null = null;
 
+  get isCompiled(): boolean {
+    return this.pipeline !== null && this.aggregatePipelines !== null;
+  }
+
   constructor(device: GPUDevice) {
     this.device = device;
 
     const shaderModule = device.createShaderModule({ code: shaderSource });
 
+    const levelTextureEntries: GPUBindGroupLayoutEntry[] = [];
+    const levelIndirectionEntries: GPUBindGroupLayoutEntry[] = [];
+    for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+      levelTextureEntries.push({
+        binding: 7 + i,
+        visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: "uint", viewDimension: "2d" },
+      });
+      levelIndirectionEntries.push({
+        binding: 7 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
+        visibility: GPUShaderStage.FRAGMENT,
+        buffer: { type: "read-only-storage" },
+      });
+    }
     this.bindGroupLayout = device.createBindGroupLayout({
       entries: [
         {
@@ -156,45 +198,39 @@ export class SliceRenderer {
         {
           binding: 1,
           visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "2d" },
+          texture: { sampleType: "float" },
         },
         {
           binding: 2,
           visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: "read-only-storage" },
+          sampler: { type: "filtering" },
         },
         {
           binding: 3,
           visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "float" },
+          texture: { sampleType: "uint", viewDimension: "2d" },
         },
         {
           binding: 4,
           visibility: GPUShaderStage.FRAGMENT,
-          sampler: { type: "filtering" },
+          buffer: { type: "read-only-storage" },
         },
+        // Proxy textures (tileProxy + groupProxy), 3D r16uint as in
+        // volume.wgsl. Slice mode reads at the slot's Z midpoint.
         {
           binding: 5,
           visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "2d" },
+          texture: { sampleType: "uint", viewDimension: "3d" },
         },
         {
           binding: 6,
           visibility: GPUShaderStage.FRAGMENT,
-          buffer: { type: "read-only-storage" },
-        },
-        // Proxy textures (tileProxy + groupProxy). 3D r16uint, same as
-        // volume.wgsl — slice mode reads at the slot's Z midpoint.
-        {
-          binding: 7,
-          visibility: GPUShaderStage.FRAGMENT,
           texture: { sampleType: "uint", viewDimension: "3d" },
         },
-        {
-          binding: 8,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
-        },
+        // One level pool per resident-level slot: textures at 7..10,
+        // their indirection buffers at 11..14.
+        ...levelTextureEntries,
+        ...levelIndirectionEntries,
       ],
     });
 
@@ -240,7 +276,7 @@ export class SliceRenderer {
       ],
     });
 
-    this.pipeline = device.createRenderPipeline({
+    const memberPipeline = device.createRenderPipelineAsync({
       layout: device.createPipelineLayout({
         bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout],
       }),
@@ -254,24 +290,19 @@ export class SliceRenderer {
         targets: [{ format: OFFSCREEN_FORMAT }],
       },
       primitive: { topology: "triangle-list" },
+    }).then((pipeline) => {
+      this.pipeline = pipeline;
     });
 
-    // Aggregate pipelines: one per blend mode, mirroring the compositor's
-    // blend states EXACTLY (the fragment stage outputs premultiplied
-    // color, same as the offscreen layers the compositor consumes), so
-    // members that overlap WITHIN a batch combine the way two individual
-    // layers of that mode would. Draw order in the pass is quad (roster)
-    // order within a batch, batches in first-seen roster order. Residual
-    // vs. true per-member layering: two overlapping members that landed
-    // in DIFFERENT pool-binding batches blend in batch order rather than
-    // global roster order (only visible for alpha-mode overlap across
-    // heterogeneous pools), and a batched member overlapping an
-    // INDIVIDUAL layer composites beneath it (the aggregate layer is
-    // emitted below the individual layers).
+    // One pipeline per blend mode, with the compositor's exact blend states
+    // (premultiplied output), so members overlapping within a batch combine
+    // like two layers of that mode. Overlapping members in different batches
+    // blend in batch order rather than roster order, and the aggregate layer
+    // sits beneath the individual layers.
     const aggregateLayout = device.createPipelineLayout({
       bindGroupLayouts: [this.bindGroupLayout, this.aggregateBindGroupLayout],
     });
-    const makeAggregatePipeline = (blend: GPUBlendState) => device.createRenderPipeline({
+    const makeAggregatePipeline = (blend: GPUBlendState) => device.createRenderPipelineAsync({
       layout: aggregateLayout,
       vertex: {
         module: shaderModule,
@@ -284,23 +315,26 @@ export class SliceRenderer {
       },
       primitive: { topology: "triangle-list" },
     });
-    this.aggregatePipelines = {
-      alpha: makeAggregatePipeline({
+    const aggregatePipelines = Promise.all([
+      makeAggregatePipeline({
         color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
         alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
       }),
-      additive: makeAggregatePipeline({
+      makeAggregatePipeline({
         color: { srcFactor: "one", dstFactor: "one", operation: "add" },
         alpha: { srcFactor: "one", dstFactor: "one", operation: "add" },
       }),
-      max: makeAggregatePipeline({
+      makeAggregatePipeline({
         color: { srcFactor: "one", dstFactor: "one", operation: "max" },
         alpha: { srcFactor: "one", dstFactor: "one", operation: "max" },
       }),
-    };
+    ]).then(([alpha, additive, max]) => {
+      this.aggregatePipelines = { alpha, additive, max };
+    });
+    this.compiled = Promise.all([memberPipeline, aggregatePipelines]).then(() => undefined);
 
     this.uniformBuffer = device.createBuffer({
-      size: UNIFORM_SIZE,
+      size: SLICE_UNIFORM_SIZE,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
     this.entityRefBuffer = device.createBuffer({
@@ -356,36 +390,20 @@ export class SliceRenderer {
   }
 
   /**
-   * Per-entity chunkDims/gridDims/levelDims live in the descriptor.
-   * atlasSlotDims still per-frame for the shader's slot-coord
-   * computation in the chunk path.
+   * Bind the level pools a member's level sources name, in slot order
+   * (index = the descriptor's `poolIndex`), plus the coarse pool. `null`
+   * or a missing slot binds the dummy texture and sentinel indirection;
+   * the shader's slot-dims guard makes such a slot read as a miss.
    */
-  setAtlas(
-    texture: GPUTexture,
-    indirectionBuf: GPUBuffer,
-    atlasSlotDims: [number, number],
-  ) {
-    this.setTierAtlases(texture, indirectionBuf, atlasSlotDims, null, null, [0, 0]);
-  }
-
   setTierAtlases(
-    detailTexture: GPUTexture | null,
-    detailIndirectionBuf: GPUBuffer | null,
-    detailAtlasSlotDims: [number, number],
-    coarseTexture: GPUTexture | null,
-    coarseIndirectionBuf: GPUBuffer | null,
-    coarseAtlasSlotDims: [number, number],
+    levels: ReadonlyArray<SlicePoolBinding | null>,
+    coarse: SlicePoolBinding | null,
   ) {
-    this.detailAtlasTexture = detailTexture;
-    this.detailIndirectionBuffer = detailIndirectionBuf;
-    this.detailAtlasSlotDims = detailTexture && detailIndirectionBuf ? detailAtlasSlotDims : [0, 0];
-    this.coarseAtlasTexture = coarseTexture;
-    this.coarseIndirectionBuffer = coarseIndirectionBuf;
-    this.coarseAtlasSlotDims = coarseTexture && coarseIndirectionBuf ? coarseAtlasSlotDims : [0, 0];
+    this.levelBindings = levels.slice(0, DESCRIPTOR_MAX_LEVEL_SOURCES);
+    this.coarseBinding = coarse;
     this.rebuildBindGroup();
   }
 
-  /** Lazily allocate the 1×1×1 dummy proxy texture. */
   private getDummyProxyTexture(): GPUTexture {
     if (!this.dummyProxyTexture) {
       this.dummyProxyTexture = this.device.createTexture({
@@ -400,8 +418,8 @@ export class SliceRenderer {
 
   /**
    * Configure proxy textures for the next draw. Slot indices and dims
-   * live in the per-entity descriptor; the shader's unified fallback
-   * chain decides per-fragment whether to consult them.
+   * live in the per-entity descriptor; the shader consults them only
+   * when the entity binds no chunk tier.
    */
   setProxyTextures(
     tileTexture: GPUTexture | null,
@@ -414,8 +432,8 @@ export class SliceRenderer {
 
   /**
    * Set the declared-label-palette storage buffer for the next categorical
-   * draw ([id, packedRgba] pairs). Pass `null` (or omit) for intensity
-   * draws — a dummy is bound so the layout stays satisfied.
+   * draw ([id, packedRgba] pairs). Pass `null` for intensity draws; a
+   * dummy keeps the layout satisfied.
    */
   setLabelColorBuffer(buffer: GPUBuffer | null) {
     this.labelColorBuffer = buffer;
@@ -448,40 +466,67 @@ export class SliceRenderer {
     this.device.queue.writeBuffer(this.entityRefBuffer, 0, refData);
   }
 
-  private rebuildBindGroup() {
-    const detailAtlas = this.detailAtlasTexture ?? this.dummyTexture;
-    const detailIndirection = this.detailIndirectionBuffer ?? this.dummyIndirectionBuffer;
-    const coarseAtlas = this.coarseAtlasTexture ?? this.dummyTexture;
-    const coarseIndirection = this.coarseIndirectionBuffer ?? this.dummyIndirectionBuffer;
+  /** The group-0 bind group entries for one set of pool bindings. */
+  private poolBindGroupEntries(
+    uniformBuffer: GPUBuffer,
+    levels: ReadonlyArray<SlicePoolBinding | null>,
+    coarse: SlicePoolBinding | null,
+    tileProxyTexture: GPUTexture | null,
+    groupProxyTexture: GPUTexture | null,
+  ): GPUBindGroupEntry[] {
     const dummyProxy = this.getDummyProxyTexture();
-    const tileProxyView = (this.tileProxyTexture ?? dummyProxy).createView();
-    const groupProxyView = (this.groupProxyTexture ?? dummyProxy).createView();
+    const entries: GPUBindGroupEntry[] = [
+      { binding: 0, resource: { buffer: uniformBuffer } },
+      { binding: 1, resource: this.lutTexture.createView() },
+      { binding: 2, resource: this.lutSampler },
+      { binding: 3, resource: (coarse?.texture ?? this.dummyTexture).createView() },
+      { binding: 4, resource: { buffer: coarse?.indirectionBuf ?? this.dummyIndirectionBuffer } },
+      { binding: 5, resource: (tileProxyTexture ?? dummyProxy).createView() },
+      { binding: 6, resource: (groupProxyTexture ?? dummyProxy).createView() },
+    ];
+    for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
+      const b = levels[i] ?? null;
+      entries.push({ binding: 7 + i, resource: (b?.texture ?? this.dummyTexture).createView() });
+      entries.push({
+        binding: 7 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
+        resource: { buffer: b?.indirectionBuf ?? this.dummyIndirectionBuffer },
+      });
+    }
+    return entries;
+  }
+
+  private rebuildBindGroup() {
     this.bindGroup = this.device.createBindGroup({
       layout: this.bindGroupLayout,
-      entries: [
-        { binding: 0, resource: { buffer: this.uniformBuffer } },
-        { binding: 1, resource: detailAtlas.createView() },
-        { binding: 2, resource: { buffer: detailIndirection } },
-        { binding: 3, resource: this.lutTexture.createView() },
-        { binding: 4, resource: this.lutSampler },
-        { binding: 5, resource: coarseAtlas.createView() },
-        { binding: 6, resource: { buffer: coarseIndirection } },
-        { binding: 7, resource: tileProxyView },
-        { binding: 8, resource: groupProxyView },
-      ],
+      entries: this.poolBindGroupEntries(
+        this.uniformBuffer,
+        this.levelBindings,
+        this.coarseBinding,
+        this.tileProxyTexture,
+        this.groupProxyTexture,
+      ),
     });
   }
 
   setTransform(zoom: number, cx: number, cy: number, canvasW: number, canvasH: number, dataW: number, dataH: number) {
     const uniformData = buildSliceUniformData(
       zoom, cx, cy, canvasW, canvasH, dataW, dataH,
-      this.detailAtlasSlotDims, this.coarseAtlasSlotDims,
+      levelSlotDimsOf(this.levelBindings),
+      this.coarseBinding ? [this.coarseBinding.slotsX, this.coarseBinding.slotsY] : [0, 0],
+      this.tileBorderColor,
     );
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
   }
 
-  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder) {
+  /** The member footprint border, from the next draw on. */
+  setTileBorderColor(color: RgbaColor) {
+    this.tileBorderColor = color;
+  }
+
+  /** `timing` stamps the pass for the trace's GPU pass time; viewport frames pass it, the minimap does not. */
+  renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, timing?: PassTiming) {
     if (!this.bindGroup || !this.descriptorBindGroup) return;
+    const pipeline = requireCompiled(this.pipeline, "slice renderer");
 
     const pass = encoder.beginRenderPass({
       colorAttachments: [
@@ -492,9 +537,10 @@ export class SliceRenderer {
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
         },
       ],
+      timestampWrites: timing?.nextPass(),
     });
 
-    pass.setPipeline(this.pipeline);
+    pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.bindGroup);
     pass.setBindGroup(1, this.descriptorBindGroup);
     pass.draw(3);
@@ -502,29 +548,19 @@ export class SliceRenderer {
   }
 
   /**
-   * Draw an aggregate layer's member quads in ONE render pass, one
-   * instanced draw per pool-binding sub-batch. Each batch binds its
-   * members' OWN detail/coarse atlases and tile/group proxy pool
-   * textures, so every quad samples the same resources the per-member
-   * pass would have bound for it; slot indices, dims, and display state
-   * (contrast/gamma/opacity) come from `descriptorBuffer`, which is
-   * re-bound fresh on every call so the draw always reflects the
-   * current descriptor contents.
-   *
-   * `quadData` holds the batch-ordered 32-byte quad records
-   * (`SliceAggregateParams` layout == shader `MemberQuad`); the layer's
-   * colormap LUT is configured via {@link setColormapTexture} before
-   * the call. Blending per {@link AggregateDrawParams.blendMode} — see
-   * the pipeline construction note for the exact states + the ordering
-   * residual.
+   * Draw an aggregate layer's member quads in one render pass, one instanced
+   * draw per pool-binding batch. Each batch binds its members' own pools, so
+   * every quad samples what the per-member pass would have bound for it.
    */
   renderAggregateBatches(
     target: GPUTextureView,
     encoder: GPUCommandEncoder,
     params: AggregateDrawParams,
+    timing?: PassTiming,
   ) {
     const { batches, quadData } = params;
     if (batches.length === 0 || quadData.byteLength === 0) return;
+    const pipelines = requireCompiled(this.aggregatePipelines, "slice renderer");
 
     if (!this.aggregateQuadBuffer || this.aggregateQuadCapacity < quadData.byteLength) {
       this.aggregateQuadBuffer?.destroy();
@@ -536,9 +572,8 @@ export class SliceRenderer {
     }
     this.device.queue.writeBuffer(this.aggregateQuadBuffer, 0, quadData);
 
-    // Descriptor + quad storage (group 1) — built fresh so the CURRENT
-    // descriptor buffer is bound even when it was rebuilt since the
-    // last frame (cold-state rebuilds replace the buffer object).
+    // Built fresh so the current descriptor buffer is bound even when a
+    // cold-state rebuild replaced the buffer object since the last frame.
     const quadBindGroup = this.device.createBindGroup({
       layout: this.aggregateBindGroupLayout,
       entries: [
@@ -552,34 +587,30 @@ export class SliceRenderer {
     // contents are rewritten before every submit.
     while (this.aggregateUniformBuffers.length < batches.length) {
       this.aggregateUniformBuffers.push(this.device.createBuffer({
-        size: UNIFORM_SIZE,
+        size: SLICE_UNIFORM_SIZE,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
       }));
     }
 
-    const dummyProxy = this.getDummyProxyTexture();
     const batchBindGroups = batches.map((batch, i) => {
       const uniformData = buildSliceUniformData(
         params.zoom, params.cx, params.cy,
         params.canvasW, params.canvasH,
         params.dataW, params.dataH,
-        batch.detail ? [batch.detail.slotsX, batch.detail.slotsY] : [0, 0],
+        levelSlotDimsOf(batch.levels),
         batch.coarse ? [batch.coarse.slotsX, batch.coarse.slotsY] : [0, 0],
+        this.tileBorderColor,
       );
       this.device.queue.writeBuffer(this.aggregateUniformBuffers[i], 0, uniformData);
       return this.device.createBindGroup({
         layout: this.bindGroupLayout,
-        entries: [
-          { binding: 0, resource: { buffer: this.aggregateUniformBuffers[i] } },
-          { binding: 1, resource: (batch.detail?.texture ?? this.dummyTexture).createView() },
-          { binding: 2, resource: { buffer: batch.detail?.indirectionBuf ?? this.dummyIndirectionBuffer } },
-          { binding: 3, resource: this.lutTexture.createView() },
-          { binding: 4, resource: this.lutSampler },
-          { binding: 5, resource: (batch.coarse?.texture ?? this.dummyTexture).createView() },
-          { binding: 6, resource: { buffer: batch.coarse?.indirectionBuf ?? this.dummyIndirectionBuffer } },
-          { binding: 7, resource: (batch.tileProxyTexture ?? dummyProxy).createView() },
-          { binding: 8, resource: (batch.groupProxyTexture ?? dummyProxy).createView() },
-        ],
+        entries: this.poolBindGroupEntries(
+          this.aggregateUniformBuffers[i],
+          batch.levels,
+          batch.coarse,
+          batch.tileProxyTexture,
+          batch.groupProxyTexture,
+        ),
       });
     });
 
@@ -592,8 +623,9 @@ export class SliceRenderer {
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
         },
       ],
+      timestampWrites: timing?.nextPass(),
     });
-    pass.setPipeline(this.aggregatePipelines[params.blendMode]);
+    pass.setPipeline(pipelines[params.blendMode]);
     pass.setBindGroup(1, quadBindGroup);
     batches.forEach((batch, i) => {
       if (batch.count <= 0) return;

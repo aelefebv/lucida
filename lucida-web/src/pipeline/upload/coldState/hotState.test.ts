@@ -1,28 +1,21 @@
 /**
- * Unit tests for `buildViewHotState` — pure builder that mirrors
- * `iterateColdMembers`, fanning the per-dataset ray hit out to every
- * member.
- *
- * Cases:
- *   1. Per-member fan-out — one rayHit entry per cold-state member.
- *   2. Composite member id dedup — if two entries produce the same
- *      `memberId` (e.g. group-as-proxy with entityId X and a tile with
- *      imageId X), only the first emits a rayHit.
- *   3. Empty cold msg → empty rayHitsByEntity.
+ * Unit tests for `buildViewHotState`, which mirrors `iterateColdMembers` and
+ * emits one ray hit per unique member id.
  */
 import { describe, it, expect } from "vitest";
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
+  ColdStateTileEntry,
 } from "../../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import { buildViewHotState } from "./hotState.ts";
 
-function makeEntry(over: Partial<Omit<ColdStateActiveEntry, "kind">>): ColdStateActiveEntry {
+function makeEntry(
+  over: Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & { mode?: ColdStateActiveEntry["mode"] },
+): ColdStateActiveEntry {
   const base = {
     entityId: over.entityId ?? "ent",
-    targetLod: over.targetLod ?? 0,
-    detailOwnedLodRange: over.detailOwnedLodRange ?? [0, 0] as [number, number],
     levels: over.levels ?? [],
     proxyKind: over.proxyKind,
     proxyAvailable: over.proxyAvailable ?? false,
@@ -47,6 +40,8 @@ function makeEntry(over: Partial<Omit<ColdStateActiveEntry, "kind">>): ColdState
     kind: "tile",
     imageId: over.imageId ?? "img",
     mode,
+    detailLevels: over.detailLevels ?? [0],
+    coarseLevel: over.coarseLevel ?? null,
     parentGroupId: over.parentGroupId ?? null,
   };
 }

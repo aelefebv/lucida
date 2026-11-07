@@ -1,39 +1,17 @@
 //! SQLite-backed `LoginSessionStore`.
 //!
-//! Opens — and creates if missing — the lucida database file, runs the
-//! bundled migrations, and serves session reads/writes from it. The
-//! schema and indexes are defined in
-//! `migrations/20260508000001_create_login_sessions.sql`; the migration
-//! is run idempotently at startup via `sqlx::migrate!`.
-//!
-//! Connection-pool sizing: a single SQLite file is the bottleneck
-//! anyway; the default pool of 5 is plenty for the loopback-only
-//! deployment shape.
-
-use std::path::Path;
+//! Runs on the pool [`crate::storage`] opened, which owns connecting and
+//! migrating so every store shares one pool. The statements come from
+//! [`super::session_store_sql`], shared with the PostgreSQL store, and
+//! `numbered_placeholders_bind_by_number` in [`crate::storage`] pins how
+//! sqlx's SQLite driver binds their numbered placeholders.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
-use thiserror::Error;
 
 use super::session_store::{LoginSession, LoginSessionStore, SessionStoreError};
-
-/// Migrations bundled into the binary at compile time. Adding a new
-/// `.sql` file to `migrations/` and rebuilding picks it up.
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
-
-/// Errors from opening the database. Distinct from `SessionStoreError`
-/// because they only occur during startup; the boot path needs them
-/// before the store handle exists.
-#[derive(Debug, Error)]
-pub enum StoreOpenError {
-    #[error("failed to open SQLite at {0}: {1}")]
-    Connect(String, sqlx::Error),
-    #[error("migration failed: {0}")]
-    Migrate(sqlx::migrate::MigrateError),
-}
+use super::session_store_sql::{self as sql, map_err};
 
 /// Production session store. Wraps a `SqlitePool` and runs queries
 /// against it. The pool is `Clone` so this struct is cheap to share.
@@ -43,101 +21,34 @@ pub struct SqliteSessionStore {
 }
 
 impl SqliteSessionStore {
-    /// Open (or create) a SQLite file at `path`, run any pending
-    /// migrations, and return a ready-to-use store. Idempotent: calling
-    /// twice on the same file is harmless.
-    pub async fn open(path: &Path) -> Result<Self, StoreOpenError> {
-        let path_str = path.display().to_string();
-        let opts = SqliteConnectOptions::new()
-            .filename(path)
-            .create_if_missing(true)
-            // WAL keeps readers and the touch-writer non-blocking
-            // relative to each other; the touch fire-and-forget would
-            // otherwise occasionally serialize behind a long read.
-            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect_with(opts)
-            .await
-            .map_err(|e| StoreOpenError::Connect(path_str, e))?;
-
-        MIGRATOR.run(&pool).await.map_err(StoreOpenError::Migrate)?;
-
-        Ok(Self { pool })
+    pub(crate) fn new(pool: SqlitePool) -> Self {
+        Self { pool }
     }
-
-    /// Tests construct an in-memory pool by passing `":memory:"` as the
-    /// path. `:memory:` databases are scoped to the connection that
-    /// opened them, so we cap the pool at 1 and disable idle eviction
-    /// (`min_connections = 1`) so the schema persists for the lifetime
-    /// of the store.
-    pub async fn open_in_memory() -> Result<Self, StoreOpenError> {
-        let opts = SqliteConnectOptions::new()
-            .filename(":memory:")
-            .create_if_missing(true);
-
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .min_connections(1)
-            .idle_timeout(None)
-            .max_lifetime(None)
-            .connect_with(opts)
-            .await
-            .map_err(|e| StoreOpenError::Connect(":memory:".into(), e))?;
-
-        MIGRATOR.run(&pool).await.map_err(StoreOpenError::Migrate)?;
-
-        Ok(Self { pool })
-    }
-
-    /// Borrow the underlying connection pool. `SqlitePendingAuthStore`
-    /// is derived from the same pool so both stores share a single
-    /// SQLite file + connection budget.
-    pub fn pool(&self) -> &SqlitePool {
-        &self.pool
-    }
-}
-
-fn map_err(e: sqlx::Error) -> SessionStoreError {
-    SessionStoreError::Backend(e.to_string())
 }
 
 #[async_trait]
 impl LoginSessionStore for SqliteSessionStore {
     async fn create(&self, session: LoginSession) -> Result<(), SessionStoreError> {
-        sqlx::query(
-            r#"
-            INSERT INTO login_sessions
-                (id, email, display_name, picture_url, created_at, last_used_at, expires_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            "#,
-        )
-        .bind(&session.id)
-        .bind(&session.email)
-        .bind(&session.display_name)
-        .bind(&session.picture_url)
-        .bind(session.created_at)
-        .bind(session.last_used_at)
-        .bind(session.expires_at)
-        .execute(&self.pool)
-        .await
-        .map_err(map_err)?;
+        sqlx::query(sql::INSERT)
+            .bind(&session.id)
+            .bind(&session.email)
+            .bind(&session.display_name)
+            .bind(&session.picture_url)
+            .bind(session.created_at)
+            .bind(session.last_used_at)
+            .bind(session.expires_at)
+            .execute(&self.pool)
+            .await
+            .map_err(map_err)?;
         Ok(())
     }
 
     async fn get(&self, id: &str) -> Result<Option<LoginSession>, SessionStoreError> {
-        let row = sqlx::query(
-            r#"
-            SELECT id, email, display_name, picture_url, created_at, last_used_at, expires_at
-            FROM login_sessions
-            WHERE id = ?
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(map_err)?;
+        let row = sqlx::query(sql::SELECT_BY_ID)
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(map_err)?;
 
         Ok(row.map(|r| LoginSession {
             id: r.get("id"),
@@ -151,9 +62,7 @@ impl LoginSessionStore for SqliteSessionStore {
     }
 
     async fn touch_last_used(&self, id: &str, now: DateTime<Utc>) -> Result<(), SessionStoreError> {
-        // Affecting 0 rows is fine: the session might have been deleted
-        // between extractor lookup and this update. Race-and-tolerate.
-        sqlx::query("UPDATE login_sessions SET last_used_at = ? WHERE id = ?")
+        sqlx::query(sql::TOUCH_LAST_USED)
             .bind(now)
             .bind(id)
             .execute(&self.pool)
@@ -163,7 +72,7 @@ impl LoginSessionStore for SqliteSessionStore {
     }
 
     async fn delete(&self, id: &str) -> Result<(), SessionStoreError> {
-        sqlx::query("DELETE FROM login_sessions WHERE id = ?")
+        sqlx::query(sql::DELETE)
             .bind(id)
             .execute(&self.pool)
             .await
@@ -172,7 +81,7 @@ impl LoginSessionStore for SqliteSessionStore {
     }
 
     async fn delete_expired(&self, now: DateTime<Utc>) -> Result<u64, SessionStoreError> {
-        let result = sqlx::query("DELETE FROM login_sessions WHERE expires_at <= ?")
+        let result = sqlx::query(sql::DELETE_EXPIRED)
             .bind(now)
             .execute(&self.pool)
             .await
@@ -184,101 +93,42 @@ impl LoginSessionStore for SqliteSessionStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Duration as ChronoDuration;
+    use crate::storage::StorageBackend;
+    use crate::storage::test_support::sqlite_backend;
+    use chrono::TimeZone;
 
-    fn sample(id: &str, now: DateTime<Utc>, expires_in_hours: i64) -> LoginSession {
-        LoginSession {
-            id: id.to_string(),
-            email: "dev@local".to_string(),
-            display_name: "Local Dev".to_string(),
-            picture_url: None,
-            created_at: now,
-            last_used_at: now,
-            expires_at: now + ChronoDuration::hours(expires_in_hours),
-        }
-    }
-
+    /// RFC 3339 text carries whatever chrono formatted, down to the
+    /// nanosecond.
+    ///
+    /// The conformance suite cannot ask this, because the answer differs
+    /// by engine: `a_sub_microsecond_expiry_is_truncated` beside the
+    /// PostgreSQL store pins the other half, where a `TIMESTAMPTZ` drops
+    /// everything below the microsecond.
     #[tokio::test]
-    async fn migrations_run_and_roundtrip_works() {
-        let store = SqliteSessionStore::open_in_memory().await.unwrap();
-        let now = Utc::now();
-        let s = sample("uuid-a", now, 24);
-        store.create(s.clone()).await.unwrap();
+    async fn a_sub_microsecond_expiry_survives() {
+        let expires_at = Utc
+            .with_ymd_and_hms(2026, 1, 2, 3, 4, 0)
+            .single()
+            .expect("the test names a real instant")
+            + chrono::Duration::nanoseconds(1_500);
 
-        let got = store.get("uuid-a").await.unwrap().unwrap();
-        assert_eq!(got.id, s.id);
-        assert_eq!(got.email, s.email);
-        assert_eq!(got.display_name, s.display_name);
-        assert_eq!(got.picture_url, s.picture_url);
-        // Timestamps roundtrip with <1s precision (TIMESTAMP storage):
-        // we wrote and read on the same machine so equality is fine,
-        // but compare with millisecond tolerance to be defensive.
-        assert!((got.created_at - s.created_at).num_milliseconds().abs() < 1);
-    }
-
-    #[tokio::test]
-    async fn touch_last_used_updates_row() {
-        let store = SqliteSessionStore::open_in_memory().await.unwrap();
-        let now = Utc::now();
-        store.create(sample("a", now, 24)).await.unwrap();
-
-        let later = now + ChronoDuration::seconds(120);
-        store.touch_last_used("a", later).await.unwrap();
-        let got = store.get("a").await.unwrap().unwrap();
-        assert!((got.last_used_at - later).num_milliseconds().abs() < 1);
-    }
-
-    #[tokio::test]
-    async fn delete_expired_removes_only_past_rows() {
-        let store = SqliteSessionStore::open_in_memory().await.unwrap();
-        let now = Utc::now();
-        store.create(sample("dead", now, -1)).await.unwrap();
-        store.create(sample("alive", now, 24)).await.unwrap();
-
-        let removed = store.delete_expired(now).await.unwrap();
-        assert_eq!(removed, 1);
-        assert!(store.get("dead").await.unwrap().is_none());
-        assert!(store.get("alive").await.unwrap().is_some());
-    }
-
-    #[tokio::test]
-    async fn delete_is_idempotent() {
-        let store = SqliteSessionStore::open_in_memory().await.unwrap();
-        let now = Utc::now();
-        store.create(sample("a", now, 1)).await.unwrap();
-        store.delete("a").await.unwrap();
-        store.delete("a").await.unwrap();
-        assert!(store.get("a").await.unwrap().is_none());
-    }
-
-    /// Smoke test for the production "mint a session per request" path:
-    /// 16 concurrent inserts with UUID v4 ids must all land successfully
-    /// and produce 16 distinct rows. (The OAuth callback calls
-    /// `create()` with a fresh UUID per call.)
-    #[tokio::test]
-    async fn parallel_inserts_produce_distinct_ids() {
-        let store = SqliteSessionStore::open_in_memory().await.unwrap();
-        let now = Utc::now();
-
-        let mut handles = Vec::new();
-        for _ in 0..16 {
-            let store = store.clone();
-            handles.push(tokio::spawn(async move {
-                let id = uuid::Uuid::new_v4().to_string();
-                store.create(sample(&id, now, 24)).await.unwrap();
-                id
-            }));
-        }
-        let mut ids = std::collections::HashSet::new();
-        for h in handles {
-            ids.insert(h.await.unwrap());
-        }
-        assert_eq!(ids.len(), 16);
-
-        let removed = store
-            .delete_expired(now + chrono::Duration::hours(48))
+        let store = sqlite_backend().await.login_sessions();
+        store
+            .create(LoginSession {
+                id: "session-a".to_string(),
+                email: "dev@example.com".to_string(),
+                display_name: "Dev".to_string(),
+                picture_url: None,
+                created_at: expires_at - chrono::Duration::hours(1),
+                last_used_at: expires_at - chrono::Duration::hours(1),
+                expires_at,
+            })
             .await
             .unwrap();
-        assert_eq!(removed, 16);
+
+        assert_eq!(
+            store.get("session-a").await.unwrap().unwrap().expires_at,
+            expires_at,
+        );
     }
 }

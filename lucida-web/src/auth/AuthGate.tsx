@@ -16,6 +16,7 @@ import type { ReactNode } from "react";
 import { AuthSessionContext } from "./AuthSession.ts";
 import { UnauthLanding } from "./UnauthLanding.tsx";
 import { useAuthState } from "./useAuthState.ts";
+import "./auth.css";
 
 interface AuthGateProps {
   children: ReactNode;
@@ -48,8 +49,10 @@ export function AuthGate({ children }: AuthGateProps) {
 // happy path so this is rarely visible.
 function AuthLoading() {
   return (
-    <div style={{ padding: "2rem", color: "#888" }}>
-      Checking authentication...
+    <div className="lc-auth-screen">
+      <p className="lc-auth-status" role="status">
+        Checking authentication…
+      </p>
     </div>
   );
 }

@@ -1,20 +1,10 @@
 /**
- * Categorical colors for integer segmentation-label ids.
+ * Categorical colors for integer label ids; id 0 is background. Ids
+ * routinely exceed 16 bits, so the hash uses the full 32-bit id.
  *
- * A label mask stores an integer id per voxel; id 0 is background. Each
- * distinct id renders as a distinct, opaque color so neighbouring objects
- * read apart at a glance. Ids come from arbitrary uint32 masks and
- * routinely exceed the 16-bit range, so the color derivation hashes the
- * FULL 32-bit id — masking to 16 bits would collapse every id above
- * 65535 onto a handful of colors.
- *
- * The fallback color is produced by a deterministic hash in fixed-point
- * integer arithmetic (id -> HSV -> RGB), so it can be reproduced
- * bit-for-bit inside `slice.wgsl` (see `labelGlasbey` there). The
- * TS<->WGSL agreement is locked by `labelColorParity.test.ts`, which
- * ports the shader math and cross-checks it against {@link glasbeyRgb}.
- * Keep the two implementations in lockstep: any change here must be
- * mirrored in the shader and vice versa.
+ * The fallback color uses fixed-point integer math (id -> HSV -> RGB) so
+ * `labelGlasbey` in `slice.wgsl` reproduces it bit for bit.
+ * `labelColorParity.test.ts` locks the two together: change both or neither.
  */
 
 export type RGBA = [number, number, number, number]; // each 0..255
@@ -24,9 +14,9 @@ export type RGBA = [number, number, number, number]; // each 0..255
  * neighbouring ids to unrelated outputs so `id` and `id + 1` get visibly
  * different colors.
  *
- * Written with `Math.imul` + `>>> 0` so every step matches WGSL's native
- * wrap-around `u32` arithmetic exactly — plain `*` would overflow past
- * 2^53 and diverge from the shader.
+ * Written with `Math.imul` + `>>> 0` so every step matches WGSL's
+ * wrap-around `u32` arithmetic. Plain `*` would overflow past 2^53 and
+ * diverge from the shader.
  */
 function fmix32(value: number): number {
   let h = value >>> 0;
@@ -44,17 +34,9 @@ function idiv(a: number, b: number): number {
 }
 
 /**
- * Deterministic, group-distributed fallback color for a label id.
- *
- * Distinct across the whole uint32 range: the id is hashed twice (a
- * second round decorrelates the bits feeding hue vs. saturation/value),
- * then mapped through a fixed-point integer HSV->RGB so distinct ids land
- * on distinct, saturated, mid-to-bright colors. Returns three bytes
- * (0..255); id 0 is background and never reaches here (see
- * {@link labelColor}).
- *
- * The hue spans all six sextants (0..1529); saturation and value vary
- * over narrow high ranges so colors stay vivid rather than washing out.
+ * Deterministic fallback RGB for a nonzero label id. The second hash round
+ * decorrelates hue from saturation and value, which stay in narrow high
+ * ranges so colors stay vivid.
  */
 export function glasbeyRgb(value: number): [number, number, number] {
   const a = fmix32(value);
@@ -91,28 +73,14 @@ export function glasbeyRgb(value: number): [number, number, number] {
 }
 
 /**
- * Resolve a label id to its rgba (each channel 0..255).
+ * Resolve a label id to rgba (0..255). Id 0 is transparent; an id in
+ * `explicit` (OME `image-label.colors`) gets its declared RGB; any other
+ * id gets {@link glasbeyRgb}. Alpha is always 255: some writers declare
+ * partial alpha, and honoring it per id leaves a patchwork the layer
+ * opacity can't fix.
  *
- *   - id 0 (background) -> fully transparent.
- *   - id present in `explicit` (the OME `image-label.colors` table) ->
- *     that RGB, so a dataset's declared palette is honored, but ALPHA is
- *     normalized to opaque (255) — the overlay's transparency is controlled
- *     uniformly by the per-label opacity, not by a per-id declared alpha.
- *   - otherwise -> the deterministic {@link glasbeyRgb} fallback, opaque.
- *
- * Why normalize alpha: some writers author `image-label.colors` with a
- * partial alpha (e.g. 128). Respecting it per id would render those cells
- * semi-transparent while glasbey-fallback ids (opaque) stayed solid — a
- * confusing patchwork the opacity slider can't correct. So alpha is uniform
- * and the layer's label opacity is the single transparency control.
- *
- * `explicit` keys are the raw integer ids (which may exceed 65535).
- *
- * NOTE: `0xFFFFFFFF` (4294967295) doubles as the renderer's no-data
- * sentinel — the slice shader treats it (like id 0) as fully transparent
- * before ever computing a color, so this function is not consulted for it
- * on the GPU path. It still hashes to a valid color here if called
- * directly (e.g. a legitimately-declared max-u32 id in `explicit`).
+ * `0xFFFFFFFF` is also the renderer's no-data sentinel. The shader drops
+ * it before coloring, so only direct calls reach here with it.
  */
 export function labelColor(
   value: number,
@@ -121,8 +89,6 @@ export function labelColor(
   if (value === 0) return [0, 0, 0, 0];
   if (explicit) {
     const declared = explicit.get(value);
-    // Declared RGB honored; alpha normalized to opaque so overlay
-    // transparency is uniform (layer opacity is the sole control).
     if (declared) return [declared[0], declared[1], declared[2], 255];
   }
   const [r, g, b] = glasbeyRgb(value);
@@ -142,11 +108,7 @@ export const MAX_GPU_LABEL_COLORS = 256;
  * Pack a declared palette into the flat `[id0, rgba0, id1, rgba1, ...]`
  * `u32` layout the shader's `labelColorFor` scans, capped at
  * {@link MAX_GPU_LABEL_COLORS} pairs. `rgba` is packed
- * `r | g<<8 | b<<16 | a<<24`. The declared RGB is preserved; the ALPHA byte
- * is forced to opaque (255) — matching {@link labelColor} — so a declared
- * partial alpha never makes some cells semi-transparent while glasbey ids
- * stay opaque. Overlay transparency is the layer opacity's job, uniformly.
- * Pure — no GPU.
+ * `r | g<<8 | b<<16 | a<<24`, with alpha forced to 255 as in {@link labelColor}.
  */
 export function packLabelPalette(
   colors: ReadonlyArray<{ value: number; rgba: readonly [number, number, number, number] }>,
@@ -157,7 +119,7 @@ export function packLabelPalette(
   for (let i = 0; i < count; i++) {
     const { value, rgba } = colors[i];
     out[2 * i] = value >>> 0;
-    // Alpha normalized to opaque (see doc): overlay opacity is uniform.
+    // Alpha forced to 255; see the doc comment.
     out[2 * i + 1] =
       ((rgba[0] & 0xff) |
         ((rgba[1] & 0xff) << 8) |

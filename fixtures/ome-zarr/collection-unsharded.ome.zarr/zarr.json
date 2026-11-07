@@ -1,0 +1,46 @@
+{
+  "attributes": {
+    "ome": {
+      "version": "0.5",
+      "plate": {
+        "name": "collection-unsharded",
+        "rows": [
+          {
+            "name": "A"
+          },
+          {
+            "name": "B"
+          }
+        ],
+        "columns": [
+          {
+            "name": "1"
+          },
+          {
+            "name": "2"
+          }
+        ],
+        "wells": [
+          {
+            "path": "A/1",
+            "rowIndex": 0,
+            "columnIndex": 0
+          },
+          {
+            "path": "A/2",
+            "rowIndex": 0,
+            "columnIndex": 1
+          },
+          {
+            "path": "B/1",
+            "rowIndex": 1,
+            "columnIndex": 0
+          }
+        ],
+        "field_count": 1
+      }
+    }
+  },
+  "zarr_format": 3,
+  "node_type": "group"
+}

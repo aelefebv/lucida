@@ -1,19 +1,18 @@
 /** Discriminated-union message types for main <-> render worker communication. */
 
 import type { SceneEpochs } from "../pipeline/epochs.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
-
-/** Atlas budget for the fixed-size 3D volume atlas (per dataset). */
-export const VOLUME_ATLAS_BUDGET = 512 * 1024 * 1024; // 512 MB
-
-/** Atlas budget for the fixed-size 2D slice atlas (per dataset). */
-export const SLICE_ATLAS_BUDGET = 64 * 1024 * 1024; // 64 MB
-
-// --- Main -> Worker ---
 
 export interface InitMessage {
   type: "init";
   canvas: OffscreenCanvas;
+  /**
+   * The page's reading of the device's memory, in GiB, or null when unknown.
+   * The page reads it because only it can tell a touch-only device that
+   * reports none; the worker fits its atlas budgets from it (ADR 0068).
+   */
+  deviceMemoryGiB?: number | null;
 }
 
 export interface ResizeMessage {
@@ -22,11 +21,29 @@ export interface ResizeMessage {
   height: number;
 }
 
+/** An sRGB color with straight alpha, channels in 0..1. */
+export type RgbaColor = readonly [number, number, number, number];
+
 /**
- * A single chunk payload carried by `sliceChunkData`,
- * `volumeChunkData`, and `minimapUploadOverviewChunksForLayer`. The
- * shape is identical across all three callers; one `Chunk` type rather
- * than two parallel `SliceChunk` / `VolumeChunk` interfaces.
+ * The colors the renderer draws that are not data. The worker cannot read
+ * styles, so the page resolves them from theme tokens and sends them again
+ * whenever the appearance changes.
+ */
+export interface CanvasColors {
+  /** Beneath every layer, in the viewport, the minimap, and thumbnails. */
+  background: RgbaColor;
+  /** The frame inside each collection member's footprint. */
+  tileBorder: RgbaColor;
+}
+
+export interface CanvasColorsMessage {
+  type: "canvasColors";
+  colors: CanvasColors;
+}
+
+/**
+ * A single chunk payload carried by `sliceChunkData`, `volumeChunkData`,
+ * and `minimapUploadOverviewChunksForLayer`.
  */
 export interface Chunk {
   data: ArrayBuffer;
@@ -40,7 +57,7 @@ export interface Chunk {
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
   epochs: SceneEpochs;
-  tier?: "detail" | "coarse";
+  tier: ResidencyTier;
   /**
    * Worker-side member id (the per-channel chunk owner). Format:
    * `imageId` for single-channel layers, `imageId:chN` for
@@ -63,14 +80,12 @@ export interface SliceChunkDataMessage {
 }
 
 /**
- * A batch of PRE-SLICED uint32 label planes for one label overlay member,
+ * A batch of pre-sliced uint32 label planes for one label overlay member,
  * routed to the r32uint label pool and drawn categorically. Each
- * `chunk.data` is a single 2D Z-plane of `chunkY*chunkX` ids (the delivery
- * path extracts it from the 3D chunk, so ~64 KB crosses the wire, not the
- * full ~8 MB 3D chunk — critical so a whole label lands within one upload
- * budget). `chunk.dataType` is `"Uint32"`; ids are never narrowed to 16
- * bits. `level`/`t`/`c` are informational; `chunk.z` is the plane's own
- * (already-resolved) index and is unused by the writer.
+ * `chunk.data` is one 2D Z-plane of `chunkY*chunkX` ids, cut from the 3D
+ * chunk so ~64 KB crosses the wire instead of ~8 MB and a whole label fits
+ * one upload budget. `chunk.dataType` is `"Uint32"`; ids are never narrowed
+ * to 16 bits. `level`/`t`/`c` are informational; the writer ignores `chunk.z`.
  */
 export interface LabelSliceChunkDataMessage {
   type: "labelSliceChunkData";
@@ -79,8 +94,8 @@ export interface LabelSliceChunkDataMessage {
   memberId: string;
   /**
    * Owning dataset id (the `ctx.datasets` key / `removeLayerResources` id).
-   * Stamped on the label slice pool so dataset removal can free it — the pool
-   * is keyed by {@link memberId} (the label image id), which removal never sees.
+   * Stamped on the label slice pool so dataset removal can free it, because
+   * the pool is keyed by {@link memberId}, which removal never sees.
    */
   datasetId: string;
   chunks: Chunk[];
@@ -96,7 +111,7 @@ export interface LabelSliceChunkDataMessage {
 export interface VolumeChunkDataMessage {
   type: "volumeChunkData";
   epochs: SceneEpochs;
-  tier?: "detail" | "coarse";
+  tier: ResidencyTier;
   /** See {@link SliceChunkDataMessage.memberId}. */
   memberId: string;
   chunks: Chunk[];
@@ -112,24 +127,19 @@ export interface VolumeChunkDataMessage {
 }
 
 /**
- * A batch of WHOLE 3D uint32 label chunks for one label overlay member,
- * routed to the r32uint label VOLUME pool and drawn categorically. Unlike
- * {@link LabelSliceChunkDataMessage} (which pre-slices to a single ~64 KB
- * Z-plane), the 3D first-hit surface needs the full volume, so each
- * `chunk.data` is the entire 3D chunk (~8 MB for a 128³ tile). `chunk.dataType`
- * is `"Uint32"`; ids are never narrowed to 16 bits. `chunk.x/y/z` are the
- * chunk's grid coords, used to place it within the single-tile texture.
+ * A batch of whole 3D uint32 label chunks for one label overlay member,
+ * routed to the r32uint label volume pool and drawn categorically. The 3D
+ * first-hit surface needs the full volume, so unlike
+ * {@link LabelSliceChunkDataMessage} each `chunk.data` is the entire 3D chunk
+ * (~8 MB for a 128³ tile). `chunk.dataType` is `"Uint32"`; ids are never
+ * narrowed to 16 bits. `chunk.x/y/z` place the chunk in the single-tile texture.
  */
 export interface LabelVolumeChunkDataMessage {
   type: "labelVolumeChunkData";
   epochs: SceneEpochs;
   /** Label overlay member id (the label image id). */
   memberId: string;
-  /**
-   * Owning dataset id (the `ctx.datasets` key / `removeLayerResources` id).
-   * Stamped on the label volume pool so dataset removal can free it — the pool
-   * is keyed by {@link memberId} (the label image id), which removal never sees.
-   */
+  /** See {@link LabelSliceChunkDataMessage.datasetId}. */
   datasetId: string;
   chunks: Chunk[];
   level: number;
@@ -163,31 +173,24 @@ export interface ProxyAssetDataMessage {
   data: ArrayBuffer;
 }
 
-// Multi-pass render messages
-
 export interface VolumeLayerParams {
   datasetId: string;
   blendMode: "alpha" | "additive" | "max";
   renderMode: "translucent" | "max_intensity";
   scissorRect?: [number, number, number, number];
   /**
-   * Per-entity id retained for compatibility and inspection. For tile
-   * entries this is the tile's entity id; for `group-as-proxy` entries
-   * this is the group's entity id. Proxy binding is selected from the
-   * member id because proxy residency is scoped by `(entity, t, c)`.
+   * The tile's entity id, or the group's for `group-as-proxy` entries. For
+   * inspection only: proxy binding comes from the member id, because proxy
+   * residency is scoped by `(entity, t, c)`.
    */
   entityId?: string;
-  /**
-   * Index into the per-dataset entity descriptor buffer. Required for
-   * the worker to resolve descriptor + display state.
-   */
+  /** Index into the per-dataset entity descriptor buffer. */
   entityIndex: number;
   /**
    * Categorical label overlay marker. When true the layer is drawn from
-   * the r32uint label VOLUME pool via the categorical first-hit shader path
-   * (a colored surface over the translucent intensity volume) using a
-   * transient descriptor, not the cold-state entity buffer. Absent/false for
-   * ordinary intensity layers.
+   * the r32uint label volume pool via the categorical first-hit path (a
+   * colored surface over the translucent intensity volume), using a
+   * transient descriptor rather than the cold-state entity buffer.
    */
   isLabel?: boolean;
   /**
@@ -217,17 +220,11 @@ export interface VolumeLayerParams {
 /**
  * Multi-pass volume render request.
  *
- * **Stale-tolerant**: the worker draws with whatever state it has at
- * draw time. Render messages do not run through `isStaleDelivery` —
- * the latest geometry/material state simply renders against the most
- * recent residency. Contrast with chunk + proxy data messages, which
- * carry `epochs` for stale-rejection (`isStaleDelivery` drops a
- * delivery whose epoch is older than the worker's current view of the
- * world).
- *
- * Asymmetry rationale: re-issuing a render is cheap and the next
- * viewEpoch will fire one anyway; dropping a stale chunk avoids
- * permanently writing wrong-epoch voxels into the atlas.
+ * Stale-tolerant: the worker draws with whatever residency it has, and
+ * render messages skip `isStaleDelivery`. Chunk and proxy data messages are
+ * stale-rejected by `epochs` instead. Re-issuing a render is cheap and the
+ * next view epoch sends one anyway, while a stale chunk would write
+ * wrong-epoch voxels into the atlas for good.
  */
 export interface VolumeRenderMultiPassMessage {
   type: "volumeRenderMultiPass";
@@ -244,30 +241,21 @@ export interface VolumeRenderMultiPassMessage {
   camForward?: Float32Array;
   clipDistance?: number;
   clipMode?: number;
+  /** Echoed in the frame's {@link FrameDoneMessage}. */
+  frameSeq?: number;
 }
 
 /**
  * Batched member draw for one aggregate slice layer.
  *
  * A wide collection at overview zoom has tens of thousands of visible
- * members, each covering at most a few device pixels. Rendering one
- * offscreen pass per member makes the frame cost track member count, so
- * members below the pass budget's size threshold are folded into a
- * single layer: one render pass, one quad per member.
- *
- * The quads here are the CANDIDATE set, in roster order (their order is
- * the aggregate's internal draw order). At draw time the worker:
- *   - drops quads for members with nothing resident in any tier
- *     (detail metas, coarse metas, resident proxy) — the same skip rule
- *     the per-member path applies, so residency is judged where it
- *     lives (evictions included);
- *   - groups survivors by pool binding set (detail/coarse chunk pools +
- *     tile/group proxy pools) and issues one instanced draw per group
- *     with exactly those pools bound — members of heterogeneous chunk
- *     shapes/pyramid depths never sample another pool's indirection;
- *   - reads each quad's own descriptor entry in-shader, so display
- *     state (contrast/gamma/opacity/colormap) tracks the CURRENT
- *     descriptor build every frame, like the per-member passes.
+ * members a few device pixels each, so members below the pass budget's size
+ * threshold fold into one render pass with one quad per member. The quads
+ * are the candidate set, in roster order. At draw time the worker drops
+ * members with nothing resident in any tier (the per-member skip rule),
+ * groups the rest by pool binding set so no member samples another pool's
+ * indirection, and reads each quad's descriptor entry in-shader so display
+ * state stays current.
  */
 export interface SliceAggregateParams {
   /**
@@ -277,7 +265,6 @@ export interface SliceAggregateParams {
    * first.
    */
   poolMemberId: string;
-  /** Number of member quads in {@link quads}. */
   count: number;
   /**
    * Interleaved per-member records, 32 bytes each, matching the
@@ -311,22 +298,13 @@ export interface SliceLayerParams {
    * ramp. Absent/false for ordinary intensity layers.
    */
   isLabel?: boolean;
-  /**
-   * Overlay opacity for a label layer (0..1). Ignored for intensity
-   * layers, whose opacity is carried by the descriptor. Defaults to ~0.5
-   * so a label is visible on open without hiding the image underneath.
-   */
+  /** See {@link VolumeLayerParams.opacity}. */
   opacity?: number;
-  /**
-   * Declared `image-label.colors` for a label layer: exact rgba per id from
-   * the OME metadata. Rendered verbatim for matching ids (via a small
-   * shader-side palette), with the glasbey hash as the fallback for the
-   * rest. Absent/empty → every id uses the hash.
-   */
+  /** See {@link VolumeLayerParams.labelColors}. */
   labelColors?: { value: number; rgba: [number, number, number, number] }[];
   /**
    * Batched member quads for an aggregate layer. When present the
-   * worker renders the whole batch in ONE pass (one instanced draw)
+   * worker renders the whole batch in one pass (one instanced draw)
    * instead of one pass per member; `datasetId`, `offsetX/offsetY`,
    * `dataW/dataH` describe the batch's union extent, and per-member
    * geometry + descriptor indices ride in {@link SliceAggregateParams}.
@@ -336,11 +314,9 @@ export interface SliceLayerParams {
 }
 
 /**
- * Multi-pass slice render request.
- *
- * **Stale-tolerant**: see {@link VolumeRenderMultiPassMessage} — same
- * contract. The worker draws with the latest residency at draw time;
- * `epochs` is informational only on this message (no stale-rejection).
+ * Multi-pass slice render request. Stale-tolerant like
+ * {@link VolumeRenderMultiPassMessage}: `epochs` is informational here and
+ * never rejects the message.
  */
 export interface SliceRenderMultiPassMessage {
   type: "sliceRenderMultiPass";
@@ -351,6 +327,8 @@ export interface SliceRenderMultiPassMessage {
   cy: number;
   canvasW: number;
   canvasH: number;
+  /** Echoed in the frame's {@link FrameDoneMessage}. */
+  frameSeq?: number;
 }
 
 export interface MinimapLayerParams {
@@ -398,19 +376,12 @@ export interface MinimapUploadOverviewChunksForLayerMessage {
 }
 
 /**
- * Off-screen render of a single Explore-panel candidate thumbnail.
- *
- * Mirrors {@link MinimapRenderMessage} — same coarse per-dataset overview
- * texture, same transient single-entity descriptor, same `renderTo` — but draws
- * to a tiny ({@link size}px) target from the candidate child view's camera and
- * returns one {@link ThumbnailResultMessage} carrying an `ImageBitmap`. The
- * `id` correlates the async reply (the main thread resolves a pending promise
- * by id); `layers` reuse the minimap's per-member model matrix + contrast +
- * colormap so a thumbnail matches the minimap/main view.
- *
- * Stale-tolerant like the other render messages: if the overview texture for a
- * layer isn't resident yet the worker simply renders whatever layers are
- * present (possibly none → a cleared tile), and the panel will re-request.
+ * Off-screen render of one Explore-panel candidate thumbnail. Uses the
+ * minimap's overview texture, transient descriptor, and layer params, drawn
+ * to a {@link size}px target from the candidate view's camera, so a
+ * thumbnail matches the minimap. Stale-tolerant: layers without a resident
+ * overview are skipped (possibly all, giving a cleared tile) and the panel
+ * re-requests.
  */
 export interface ThumbnailRenderMessage {
   type: "thumbnailRender";
@@ -438,22 +409,28 @@ export interface DestroyMessage {
   type: "destroy";
 }
 
-// --- Cold state (main → worker, per epoch change) ---
+/**
+ * Ask the worker for the frame on its canvas as a PNG, for the trace
+ * bundle. `id` correlates the {@link FrameCapturedMessage} reply. The
+ * worker takes the frame from inside the next frame it renders, because
+ * reading a WebGPU canvas after its frame is presented was refused on a
+ * hardware host, so the sender asks the render loop for a frame as well. A
+ * worker that renders none answers after a wait, from the canvas as
+ * presented.
+ */
+export interface CaptureFrameMessage {
+  type: "captureFrame";
+  id: number;
+}
 
 /**
- * Shared tiles across both {@link ColdStateActiveEntry} variants. Not
- * exported — consumers should use the discriminated union below and
- * narrow via `entry.kind`.
+ * Fields shared by both {@link ColdStateActiveEntry} variants. Not
+ * exported; narrow the union on `kind` instead.
  */
 interface ColdStateActiveEntryBase {
   entityId: string;
   /** Layout placement in full-resolution voxel coordinates. */
   layoutPositionVox?: [number, number];
-  targetLod: number;
-  detailOwnedLodRange: [number, number]; // [finest, coarsest]
-  detailLevel?: number;
-  coarseLevel?: number | null;
-  wantedLodLevels?: number[];
   levels: Array<{
     level: number;
     chunkShape: [number, number, number]; // [Z, Y, X]
@@ -475,50 +452,35 @@ interface ColdStateActiveEntryBase {
    */
   groupProxyAvailable: boolean;
   /**
-   * Precomputed column-major model matrix mapping the entity's
-   * `[0,1]^3` unit cube to world space. The orchestrator derives this
-   * from `scene.member_model_matrix` for tile entries and synthesises
-   * it from the group AABB for `group-as-proxy` entries (see
-   * `synthesizeGroupRosterEntry` in tickCoordinator.ts). The worker writes
-   * this straight into the descriptor buffer; render messages do not
-   * carry per-frame model matrices.
+   * Column-major model matrix from the entity's `[0,1]^3` unit cube to
+   * world space. Group-as-proxy entries synthesise it from the group AABB
+   * (see `synthesizeGroupRosterEntry`). The worker writes it straight into
+   * the descriptor buffer; render messages carry no per-frame model matrices.
    */
   modelMatrix: Float32Array;
   /** Inverse of {@link modelMatrix}. */
   invModelMatrix: Float32Array;
   /**
-   * Per-channel display state, keyed by channel index. Iteration yields
-   * one descriptor entry per (entry, channel), so the worker indexes
-   * this map by `cold.visibleChannels[ch]` for each yielded
-   * combination. Single-channel mode populates the lone active channel;
-   * multi-channel composite populates each visible channel with its own
-   * contrast/gamma/opacity/colormap. Display-state changes bump
-   * `epochs.selection`, which re-runs the orchestrator and re-emits
-   * cold state — this map is the worker's sole source of display state
-   * for the descriptor buffer.
+   * Per-channel display state, keyed by channel index; the worker indexes it
+   * by `cold.visibleChannels[ch]` for each (entry, channel) it yields. This
+   * is the worker's only source of display state for the descriptor buffer.
    */
   displayStateByChannel: Record<number, ColdStateDisplayState>;
 }
 
 /**
- * Per-entity cold-state record. Discriminated union on `kind`:
+ * Per-entity cold-state record, discriminated on `kind`:
  *
- *   - `kind: "tile"` — an image member with a real `imageId` and
- *     (usually) chunks to upload. `mode` distinguishes whether the
- *     worker should serve the proxy alongside the chunks
- *     (`tiles-with-proxy-fallback`) or rely on chunks only
- *     (`tiles-with-detail`). Invisible entries from the planner also
- *     surface as `tile` with `mode: "tiles-with-detail"` so the
- *     worker doesn't try to fetch proxies for them.
- *   - `kind: "group-as-proxy"` — a synthesised group-level entry with no
- *     backing image; the worker renders the group's proxy directly.
- *     `imageId` is intentionally absent (`?: never`) — use `entityId`
- *     as the routing key throughout the pipeline.
+ *   - `"tile"`: an image member with a real `imageId`. `mode` says whether
+ *     the worker serves the proxy alongside chunks
+ *     (`tiles-with-proxy-fallback`) or chunks only (`tiles-with-detail`).
+ *     Invisible planner entries also arrive as `tiles-with-detail`, so the
+ *     worker fetches no proxies for them.
+ *   - `"group-as-proxy"`: a synthesised group entry with no backing image;
+ *     the worker renders the group's proxy. Route by `entityId`.
  *
- * `kind` lets TypeScript narrow the variant without the `imageId === ""`
- * sentinel. `mode` is retained for backward compat (logging, debug,
- * existing inspection paths); future work can drop it once every
- * consumer routes through `kind`.
+ * Narrow on `kind`. `mode` overlaps it and is kept for logging and
+ * inspection paths that read it.
  */
 export type ColdStateActiveEntry =
   | (ColdStateActiveEntryBase & {
@@ -527,20 +489,27 @@ export type ColdStateActiveEntry =
       imageId: string;
       mode: "tiles-with-detail" | "tiles-with-proxy-fallback";
       /**
-       * Parent group id for tile entries (so the worker can map a
-       * tile's descriptor back to its parent's groupProxyHandle).
-       * `null` for tiles that don't belong to a group. The orchestrator
-       * always emits a string or null — never `undefined`.
+       * Levels the detail tier requests, target level first (the planner's
+       * `TileEntry.detailLevels`). The worker allocates detail sections for
+       * the target and the next coarser levels (see
+       * `entitySources.detailTierLevels`), reports missing chunks at these
+       * levels, and samples the target first, then coarser resident levels,
+       * never a finer one.
+       */
+      detailLevels: number[];
+      /** Level the coarse tier holds for this entity, or `null` for none. */
+      coarseLevel: number | null;
+      /**
+       * Parent group id, so the worker can map a tile's descriptor to its
+       * parent's groupProxyHandle. A string or `null`, never `undefined`.
        */
       parentGroupId: string | null;
     })
   | (ColdStateActiveEntryBase & {
       kind: "group-as-proxy";
       /**
-       * Group-as-proxy entries have no backing image — use the group's
-       * `entityId` as the routing key throughout the pipeline.
-       * Declared `?: never` so the type system rejects any consumer
-       * that tries to read it.
+       * No backing image; route by `entityId`. `?: never` makes the compiler
+       * reject any read.
        */
       imageId?: never;
       mode: "group-as-proxy";
@@ -548,15 +517,17 @@ export type ColdStateActiveEntry =
       parentGroupId: null;
     });
 
+/** The tile variant of {@link ColdStateActiveEntry}, the entries that carry chunks. */
+export type ColdStateTileEntry = Extract<ColdStateActiveEntry, { kind: "tile" }>;
+
 /**
- * Per-channel display state in cold state. The worker writes these
- * tiles into the GPU `EntityDescriptor` and resolves `colormapName` to
- * a CPU-side LUT texture binding per draw (the descriptor's
- * `colormapLutIndex` is informational, not authoritative).
+ * Per-channel display state in cold state. The worker writes these fields
+ * into the GPU `EntityDescriptor` and resolves `colormapName` to a LUT
+ * texture binding per draw; the descriptor's `colormapLutIndex` is
+ * informational, not authoritative.
  *
- * `channelMask` is a single-bit-per-active-channel flag used as a
- * forward-compatibility marker; the existing `imageId:chN` memberId
- * encoding fully captures channel selection.
+ * `channelMask` has one bit per active channel but is not authoritative:
+ * the `imageId:chN` member id already encodes channel selection.
  */
 export interface ColdStateDisplayState {
   contrastMin: number;
@@ -567,9 +538,8 @@ export interface ColdStateDisplayState {
   channelMask: number;
   /**
    * Shader color model: `0` = continuous colormap ramp (intensity images,
-   * the default), `1` = categorical label overlay (integer id → distinct
-   * color, id 0 transparent). Absent on states built before labels
-   * existed; the descriptor writer defaults it to `0`.
+   * the default when absent), `1` = categorical label overlay (integer id →
+   * distinct color, id 0 transparent).
    */
   colormapMode?: number;
   /** Overlay opacity applied in categorical mode. Defaults to `1`. */
@@ -602,11 +572,9 @@ export interface ColdStateMessage {
 }
 
 /**
- * Per-viewEpoch hot-state delivery of camera-ray pick coordinates for
- * chunk eviction prioritization. Residency-only (CPU-side) — never
- * read by the shader. The orchestrator emits one message per dataset
- * when `epochs.view` advances; the worker writes each entry into
- * `rayHitPerEntity` so subsequent chunk-data messages can use it for
+ * Camera-ray pick coordinates for chunk eviction priority, sent once per
+ * dataset when `epochs.view` advances. CPU-side residency only; the shader
+ * never reads them. The worker stores them in `rayHitPerEntity` for
  * `findFarthestSlot`'s distance metric.
  */
 export interface ViewHotStateMessage {
@@ -618,20 +586,12 @@ export interface ViewHotStateMessage {
 }
 
 /**
- * Display-only update for a dataset whose geometry, active set, and
- * residency are unchanged (a contrast / gamma / colormap / opacity edit).
- *
- * Carries just the per-channel display state — no active set, no matrices,
- * no LOD geometry — so the sender builds it in O(visible-channels) and the
- * worker re-applies it to the resident entity descriptor buffer without
- * re-ingesting cold state (no pool/atlas/indirection work). The descriptor
- * is rebuilt from the dataset's most recent {@link ColdStateMessage} with
- * these values swapped in, so the result is byte-identical to a full cold
- * state carrying the same display values.
- *
- * Keyed by channel index exactly like
- * {@link ColdStateActiveEntryBase.displayStateByChannel}; the worker indexes
- * it by `visibleChannels[ch]` per yielded (entry, channel) combination.
+ * Display-only update (contrast, gamma, colormap, opacity) for a dataset
+ * whose geometry, active set, and residency are unchanged. The worker swaps
+ * these values into the dataset's most recent {@link ColdStateMessage} and
+ * rebuilds the descriptor buffer without re-ingesting cold state, so the
+ * result is byte-identical to a full cold state with the same values. Keyed
+ * like {@link ColdStateActiveEntryBase.displayStateByChannel}.
  */
 export interface ColdStateDisplayMessage {
   type: "coldStateDisplay";
@@ -640,19 +600,11 @@ export interface ColdStateDisplayMessage {
 }
 
 /**
- * Selection-scrub update for a dataset whose visible set, per-entity geometry,
- * LOD, matrices, and display state are all unchanged — only the current
- * timepoint (T) and/or Z-plane moved.
- *
- * `currentT` / `currentZ` are top-level scalars on {@link ColdStateMessage},
- * never part of a per-entity descriptor, so a pure scrub carries just the new
- * selection scalars, the new visible region, and the budget-admitted proxy
- * keys for that selection — no active set, no matrices, no LOD geometry. The
- * worker re-points the dataset's most recent {@link ColdStateMessage} at the
- * new selection and re-ingests it (repacking the atlas indirection for the new
- * plane/timepoint), so the result is identical to a full cold state at the new
- * T / Z without the sender building or re-transmitting the O(active-set)
- * descriptor array.
+ * Selection-scrub update: only the current T and/or Z moved. `currentT` and
+ * `currentZ` are not part of any per-entity descriptor, so the worker
+ * re-points the dataset's most recent {@link ColdStateMessage} at the new
+ * selection and re-ingests it. The result matches a full cold state at the
+ * new T/Z without the sender rebuilding the O(active-set) descriptor array.
  */
 export interface ColdStateSelectionMessage {
   type: "coldStateSelection";
@@ -666,31 +618,15 @@ export interface ColdStateSelectionMessage {
 }
 
 /**
- * View-move update for a dataset whose active set genuinely changed (a 2D pan,
- * a 2D/3D zoom, or a 3D orbit): tiles scroll in/out and LODs change, but only
- * the camera moved — the timepoint, Z-plane, channel set, per-channel display
- * state, and layout are all unchanged.
+ * View-move update (2D pan, zoom, 3D orbit) for a dataset whose active set
+ * changed while T, Z, channels, display state, and layout did not. Carries
+ * only the delta against the most recent {@link ColdStateMessage};
+ * `upserts` come from the same `buildColdActiveEntry` a full cold state uses.
  *
- * Rather than re-transmitting the whole O(active-set) descriptor array, this
- * carries only the delta against the dataset's most recent {@link ColdStateMessage}:
- *
- *   - `upserts` — descriptors for entities that are new to the active set or
- *     whose view-dependent fields (target LOD, LOD range, mode, proxy flags)
- *     changed. Built by the exact same `buildColdActiveEntry` path a full cold
- *     state uses, so they are byte-identical to what a full rebuild would emit.
- *   - `removedEntityIds` — entities that left the active set.
- *   - `activeSetOrder` — the full new active-set order, as entity ids. The
- *     worker reorders its patched active set to match, so the descriptor-buffer
- *     entity indices agree with the main thread's by construction.
- *
- * The worker patches its retained cold state (remove removed ids, upsert
- * changed/added by entity id, reorder to `activeSetOrder`) and re-runs the same
- * `applyColdState` a full cold state uses — so the visible result is identical
- * to a full rebuild at the new view, including releasing resources for entities
- * that left. An entity whose view-dependent fields are unchanged keeps its
- * retained descriptor: its model matrix, LOD geometry, and display state are all
- * view-independent (the caller only emits a delta when nothing but the camera
- * moved), so the retained descriptor is exactly what a fresh build would produce.
+ * The worker patches its retained cold state and re-runs `applyColdState`,
+ * so the result is identical to a full rebuild. An entity absent from
+ * `upserts` keeps its retained descriptor, which is safe because only the
+ * camera moved.
  */
 export interface ColdStateDeltaMessage {
   type: "coldStateDelta";
@@ -717,6 +653,7 @@ export interface ColdStateDeltaMessage {
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
+  | CanvasColorsMessage
   | SliceChunkDataMessage
   | LabelSliceChunkDataMessage
   | VolumeChunkDataMessage
@@ -736,12 +673,21 @@ export type MainToWorkerMessage =
   | ColdStateDisplayMessage
   | ColdStateSelectionMessage
   | ColdStateDeltaMessage
-  | ViewHotStateMessage;
-
-// --- Worker -> Main ---
+  | ViewHotStateMessage
+  | CaptureFrameMessage;
 
 export interface ReadyMessage {
   type: "ready";
+}
+
+/**
+ * The pipelines built at bootstrap, the slice path's, have compiled. Sent
+ * once, after `ready`. The page holds the minimap overlay's content draws
+ * until then (Minimap.tsx). The volume renderer is built on first need and
+ * is not part of this report.
+ */
+export interface PipelinesCompiledMessage {
+  type: "pipelinesCompiled";
 }
 
 export interface ErrorMessage {
@@ -780,15 +726,12 @@ export type ChunkFeedbackReason =
 
 export interface ChunksEvictedMessage {
   type: "chunksEvicted";
-  /**
-   * Worker-side member id (the per-channel chunk owner). Format:
-   * `imageId` for single-channel layers, `imageId:chN` for
-   * multi-channel composites. Not a dataset id.
-   */
+  /** See {@link SliceChunkDataMessage.memberId}. */
   memberId: string;
   /**
    * Chunks that should be eligible for delivery again. Usually these
-   * were present and got evicted by closer chunks; stale-epoch and
+   * were present and got evicted, either as finer than their member's
+   * target level or because a closer chunk took their slot. Stale-epoch and
    * wrong-slice deliveries also use this path because they should clear
    * optimistic sent state without entering the rejection tracker.
    */
@@ -803,7 +746,7 @@ export interface ChunksEvictedMessage {
 export type MissingChunk = {
   kind: "chunk";
   datasetId: string;
-  tier?: "detail" | "coarse";
+  tier: ResidencyTier;
   entityId: string;
   /**
    * Worker-side member id that owns the missing chunk. Single-channel
@@ -835,19 +778,118 @@ export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
   datasetId: string;
   epochs: SceneEpochs;
-  /**
-   * Discriminated union over chunks and proxies. Existing chunk
-   * consumers should match on `kind === "chunk"` to extract `chunkKey`;
-   * the orchestrator uses proxy entries to know which proxies to
-   * re-deliver from CpuCache.
-   */
+  /** The orchestrator re-delivers missing proxies from CpuCache too, not only chunks. */
   missing: Array<MissingChunk | MissingProxy>;
 }
 
+/** A closed range of levels; `min === max` for a single level. */
+export interface LevelRange {
+  min: number;
+  max: number;
+}
+
+/**
+ * Which level one image-bearing entity's visible pixels come from, as the
+ * worker last computed it from the chunk positions its wanted set walks.
+ * `targetLevel` is the level pin or the level the screen calls for;
+ * `displayed` spans the finest and coarsest level the renderer samples
+ * for those positions today: the target level once resident, else the
+ * coarser resident sections, else the coarse tier. Every position is
+ * served by exactly one level, so `min === max` means the whole visible
+ * footprint comes from one level. `displayed` is `null` when no visible
+ * position has any resident level yet. `visible` is false when none of
+ * the entity's target-level chunks lies in the visible region, in which
+ * case `displayed` is `null` too.
+ */
+export interface EntityLevelReport {
+  entityId: string;
+  targetLevel: number;
+  visible: boolean;
+  displayed: LevelRange | null;
+}
+
+/**
+ * Posted alongside every {@link WantedSetDeltaMessage}: the wanted set walks
+ * the visible target-level chunks, and this is what those same chunks say
+ * about which level is on screen. Feeds the layer panel's level readout.
+ */
+export interface EntityLevelsMessage {
+  type: "entityLevels";
+  datasetId: string;
+  entities: EntityLevelReport[];
+}
+
+/**
+ * The GPU pass time of one viewport frame, in microseconds on the GPU's own
+ * clock: from the start of the frame's first render pass to the end of its
+ * last, read back through timestamp queries. Posted once per frame whose
+ * read-back landed, and never on a device without the `timestamp-query`
+ * feature, so a frame with no message is unmeasured rather than free. The
+ * minimap and thumbnail renders are not viewport frames and are never timed.
+ */
+export interface GpuPassTimeMessage {
+  type: "gpuPassTime";
+  gpuPassUs: number;
+}
+
+/**
+ * A viewport frame's GPU work has finished. Posted for every frame on every
+ * device, unlike {@link GpuPassTimeMessage}, so the page can time a frame
+ * from dispatch to done on its own clock and lower the render resolution
+ * when frames run long (ADR 0068).
+ */
+export interface FrameDoneMessage {
+  type: "frameDone";
+  frameSeq: number;
+}
+
+/** Why a frame could not be read: the error's name and message, as the bundle's reason carries them. */
+export interface CaptureFailure {
+  name: string;
+  message: string;
+}
+
+/**
+ * Reply to a {@link CaptureFrameMessage}, correlated by `id`. `png` is the
+ * frame encoded as PNG and transferred, or null when it could not be read,
+ * in which case `failure` says what refused it. `width` and `height` are the
+ * frame's device pixels either way.
+ */
+export interface FrameCapturedMessage {
+  type: "frameCaptured";
+  id: number;
+  png: ArrayBuffer | null;
+  width: number;
+  height: number;
+  failure: CaptureFailure | null;
+}
+
+/** A frame the render worker took, as the main thread resolves it. */
+export interface CapturedFrame {
+  png: ArrayBuffer;
+  /** Device pixels. */
+  width: number;
+  height: number;
+}
+
+/**
+ * What a capture request settles with: the frame, or the reason there is
+ * none. Every path settles, so a bundle never waits on a frame that is not
+ * coming.
+ */
+export type FrameCaptureResult =
+  | { frame: CapturedFrame; reason: null }
+  | { frame: null; reason: string };
+
 export type WorkerToMainMessage =
   | ReadyMessage
+  | PipelinesCompiledMessage
   | ErrorMessage
   | IntensityRangeMessage
   | ThumbnailResultMessage
   | ChunksEvictedMessage
-  | WantedSetDeltaMessage;
+  | WantedSetDeltaMessage
+  | EntityLevelsMessage
+  | GpuPassTimeMessage
+  | FrameDoneMessage
+  | FrameCapturedMessage;

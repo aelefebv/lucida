@@ -1,5 +1,7 @@
 /** WebGPU device/canvas initialization and texture helpers. */
 
+import { requestAdapterWithRetry } from "./requestAdapter.ts";
+
 export const OFFSCREEN_FORMAT: GPUTextureFormat = "rgba16float";
 
 /**
@@ -15,11 +17,9 @@ export interface DeviceLimits {
 }
 
 /**
- * Read the queried device limits with WebGPU-spec-minimum fallbacks.
- * If a device reports a lower value than the spec minimum (rare but
- * legal), the queried value wins. `device.limits` itself is optional
- * here so partial mocks in unit tests (which may stub out only some
- * of the device surface) fall back to the spec minimums.
+ * Read the queried device limits with WebGPU spec-minimum fallbacks. A
+ * queried value below the minimum still wins. `device.limits` is optional
+ * so partial test mocks fall back to the minimums.
  */
 export function getDeviceLimits(device: GPUDevice): DeviceLimits {
   const limits = device.limits as Partial<GPUSupportedLimits> | undefined;
@@ -46,29 +46,68 @@ export interface GPUContext {
   format: GPUTextureFormat;
 }
 
+const WEBGPU_MISSING = "WebGPU is not supported in this browser";
+const NO_ADAPTER = "Failed to get WebGPU adapter";
+
+/** Why the viewer can't draw: no WebGPU at all, or no adapter behind it. */
+export type WebGpuUnavailableReason = "missing" | "no-adapter";
+
+/**
+ * Whether a render-worker init failure means the browser can't draw at all,
+ * which the page explains in place of the viewer rather than as an error.
+ */
+export function webGpuUnavailableReason(message: string): WebGpuUnavailableReason | null {
+  if (message.includes(WEBGPU_MISSING)) return "missing";
+  if (message.includes(NO_ADAPTER)) return "no-adapter";
+  return null;
+}
+
 export async function initGPU(canvas: HTMLCanvasElement | OffscreenCanvas): Promise<GPUContext> {
   if (!navigator.gpu) {
-    throw new Error("WebGPU is not supported in this browser");
+    throw new Error(WEBGPU_MISSING);
   }
 
-  const adapter = await navigator.gpu.requestAdapter();
+  const adapter = await requestAdapterWithRetry(navigator.gpu);
   if (!adapter) {
-    throw new Error("Failed to get WebGPU adapter");
+    throw new Error(NO_ADAPTER);
   }
 
-  const device = await adapter.requestDevice({
-    requiredLimits: {
-      maxBufferSize: adapter.limits.maxBufferSize,
-      maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
-    },
-  });
+  // `timestamp-query` lets the render worker read a GPU pass time back per
+  // frame for the trace. A device without it initializes untimed.
+  const requiredFeatures: GPUFeatureName[] = adapter.features.has("timestamp-query") ? ["timestamp-query"] : [];
+  let device: GPUDevice;
+  try {
+    device = await adapter.requestDevice({
+      requiredFeatures,
+      requiredLimits: {
+        maxBufferSize: adapter.limits.maxBufferSize,
+        maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+      },
+    });
+  } catch (err) {
+    // A driver can advertise limits it then refuses to grant. The default
+    // limits still draw, and the atlas budgets follow the smaller buffers.
+    // The retry takes a fresh adapter, in case the refusal consumed this one.
+    console.warn("WebGPU device at adapter limits refused; using default limits", err);
+    const retry = (await requestAdapterWithRetry(navigator.gpu)) ?? adapter;
+    device = await retry.requestDevice({
+      requiredFeatures: retry.features.has("timestamp-query") ? ["timestamp-query"] : [],
+    });
+  }
   const context = canvas.getContext("webgpu");
   if (!context) {
     throw new Error("Failed to get WebGPU canvas context");
   }
 
   const format = navigator.gpu.getPreferredCanvasFormat();
-  context.configure({ device, format, alphaMode: "opaque" });
+  // `COPY_SRC` lets the frame capture copy the canvas texture out from
+  // inside a frame, for the trace bundle. See `worker/captureFrame.ts`.
+  context.configure({
+    device,
+    format,
+    alphaMode: "opaque",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+  });
 
   return { device, context, format };
 }

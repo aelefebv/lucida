@@ -26,20 +26,20 @@ pub struct MultiscaleInfo {
     /// Per-channel display metadata parsed from the OME `omero.channels` block
     /// (label and optional color), in channel order.
     ///
-    /// This is immutable manifest data — channel *names* live here, not in the
-    /// mutable scene state. Empty when the source has no `omero` block (e.g.
-    /// raw OME-Zarr without rendering metadata), so consumers must fall back to
-    /// a positional `Ch N` label.
-    ///
-    /// Positional and best-effort: entries are kept in the order omero lists
-    /// them and are *not* forced to match the C-axis length. A producer whose
-    /// omero list is shorter, longer, or partly blank still yields a valid
-    /// manifest; consumers index by channel and fall back per-index when an
-    /// entry is missing. `#[serde(default)]` keeps older snapshots (written
-    /// before this field existed) deserializable, and `skip_serializing_if`
-    /// keeps channel-less datasets from emitting it.
+    /// Empty when the source has no `omero` block, so consumers fall back to
+    /// a positional `Ch N` label. Positional and best-effort: entries are not
+    /// forced to match the C-axis length, so consumers index by channel and
+    /// fall back per index. `#[serde(default)]` keeps older snapshots
+    /// deserializable.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub channel_infos: Vec<ChannelInfo>,
+    /// The method the writer used to derive each coarser level from the one
+    /// above it, as the OME multiscale `type` declares it (for example
+    /// `"gaussian"` or `"mean"`). Carried verbatim so a viewer can say how a
+    /// displayed level was downsampled. `None` when the source declares no
+    /// method; a viewer then shows nothing rather than guessing one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub downsampling_method: Option<String>,
 }
 
 /// Display metadata for a single channel, sourced from the OME `omero.channels`
@@ -71,6 +71,25 @@ impl MultiscaleInfo {
             .map(|level| level.level_index)
             .filter(|level_index| !self.is_generated_level(*level_index))
             .collect()
+    }
+
+    /// The source level a request for `requested` lands on: `requested` when
+    /// it is a selectable level, else the coarsest selectable level finer
+    /// than it, else the finest selectable level. `None` when no level is
+    /// selectable. The one clamp rule for a level pin, at set time and at
+    /// plan time, and for the level the screen calls for, so a generated
+    /// coarse level is never a target.
+    pub fn clamp_to_source_levels(&self, requested: u32) -> Option<u32> {
+        let levels = self.selectable_detail_levels();
+        if levels.contains(&requested) {
+            return Some(requested);
+        }
+        levels
+            .iter()
+            .copied()
+            .filter(|level| *level <= requested)
+            .max()
+            .or_else(|| levels.first().copied())
     }
 }
 
@@ -231,6 +250,7 @@ mod tests {
             generated_levels: Vec::new(),
             data_type: DataType::Uint16,
             pinned_axes: Vec::new(),
+            downsampling_method: None,
             channel_infos,
         }
     }
@@ -259,7 +279,7 @@ mod tests {
     #[test]
     fn empty_channel_infos_is_skipped_on_the_wire() {
         // skip_serializing_if keeps channel-less datasets from emitting the
-        // field at all, so the wire stays identical to pre-slice output.
+        // field at all, so their wire form carries no `channel_infos` key.
         let info = minimal_multiscale(Vec::new());
         let json = serde_json::to_value(&info).unwrap();
         assert!(
@@ -325,5 +345,56 @@ mod tests {
         assert!(info.is_generated_level(1));
         assert_eq!(info.selectable_detail_levels(), vec![0]);
         assert_eq!(info.generated_levels[0].provenance.generator, "coarse-v1");
+    }
+
+    #[test]
+    fn a_pin_holds_the_requested_level_or_the_coarsest_selectable_level_finer_than_it() {
+        let level = |index: u32| LevelGeometry {
+            level_index: index,
+            shape: [1, 1, 1, 64 >> index, 64 >> index],
+            chunk_shape: [1, 1, 1, 8, 8],
+            grid_shape: [1, 1, 1, 1, 1],
+            scale: [1.0; 5],
+        };
+        let mut info = MultiscaleInfo {
+            axes: Vec::new(),
+            levels: vec![level(0), level(1), level(2), level(3)],
+            coarse_level_index: Some(3),
+            generated_levels: vec![GeneratedLevelInfo {
+                level_index: 3,
+                role: GeneratedLevelRole::Coarse,
+                provenance: GeneratedLevelProvenance::default(),
+            }],
+            data_type: DataType::Uint16,
+            pinned_axes: Vec::new(),
+            downsampling_method: None,
+            channel_infos: Vec::new(),
+        };
+        assert_eq!(info.clamp_to_source_levels(0), Some(0));
+        assert_eq!(info.clamp_to_source_levels(2), Some(2));
+        assert_eq!(
+            info.clamp_to_source_levels(3),
+            Some(2),
+            "a generated level is never pinned"
+        );
+        assert_eq!(
+            info.clamp_to_source_levels(9),
+            Some(2),
+            "a stale pin clamps to the coarsest"
+        );
+
+        info.generated_levels.push(GeneratedLevelInfo {
+            level_index: 0,
+            role: GeneratedLevelRole::Coarse,
+            provenance: GeneratedLevelProvenance::default(),
+        });
+        assert_eq!(
+            info.clamp_to_source_levels(0),
+            Some(1),
+            "below the finest selectable level the pin rises to it"
+        );
+
+        info.levels.clear();
+        assert_eq!(info.clamp_to_source_levels(0), None);
     }
 }

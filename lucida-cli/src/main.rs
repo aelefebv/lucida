@@ -6,6 +6,7 @@ mod credentials;
 mod dataset;
 mod error;
 mod http;
+mod inbox;
 mod layout;
 mod montage;
 mod output;
@@ -13,7 +14,11 @@ mod saved_view;
 mod session;
 mod status;
 mod trace;
+mod trace_knobs;
+mod trace_replay;
+mod trace_script;
 mod view;
+mod watch;
 mod workspace;
 
 use std::io::Write;
@@ -54,6 +59,10 @@ use crate::dataset::{
 };
 
 use crate::error::{CliError, ErrorKind};
+use crate::inbox::{
+    InboxClient, InboxFetchOutput, InboxListOutput, fetch_path, format_inbox_fetch_human,
+    format_inbox_list_human, resolve_entry,
+};
 use crate::layout::{
     LayoutActiveOutput, LayoutListOutput, LayoutSetOutput, LayoutWorkspaceClient,
     format_layout_active_human, format_layout_list_human, format_layout_set_human,
@@ -110,6 +119,10 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+// The trace subcommand carries every show flag inline, so its variant is
+// several times the size of the next one. One parse per process, so boxing
+// it would buy nothing but pattern noise at every match on it.
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Summarize configured server, auth, and connection health
     Status,
@@ -882,8 +895,13 @@ enum LayerCommand {
         dataset: String,
         mode: RenderModeValue,
     },
-    /// Set or clear selectable detail-level override
-    DetailLevel { dataset: String, level: Option<u32> },
+    /// Pin the dataset's target level to one source level, or clear the pin
+    /// so the target follows the screen
+    LevelPin {
+        dataset: String,
+        /// The level to pin, 0 being the finest. Omit it to follow the screen
+        level: Option<u32>,
+    },
 }
 
 impl LayerCommand {
@@ -957,7 +975,7 @@ impl LayerCommand {
                     render_mode: (*mode).into(),
                 })
             }
-            LayerCommand::DetailLevel { dataset, level } => {
+            LayerCommand::LevelPin { dataset, level } => {
                 Some(DatasetDisplayCommand::SetDatasetDetailLevelOverride {
                     selector: dataset.clone(),
                     level: *level,
@@ -1193,16 +1211,65 @@ struct TraceRunArgs {
     /// Also write this run's raw spans as Chrome Trace Event JSON, for Perfetto
     #[arg(long, value_name = "PATH")]
     perfetto: Option<String>,
+    /// Also write the frame the page shows once it has settled, as a PNG at
+    /// the run's device pixel ratio
+    #[arg(long, value_name = "PATH")]
+    screenshot: Option<PathBuf>,
+    /// Also write the run as a bundle: the trace, the settled frame, the view
+    /// URL, the planning configuration, the pins, the server's dataset health
+    /// counters, and a header sufficient to replay the run, in one file that
+    /// `trace show` reads and the monitor's Save bundle also writes
+    #[arg(long, value_name = "PATH")]
+    bundle: Option<PathBuf>,
+    /// Include the Perfetto projection in the bundle. Off by default, because
+    /// it is megabytes a reader rarely needs, and --perfetto writes it on its
+    /// own
+    #[arg(long, requires = "bundle")]
+    bundle_perfetto: bool,
+    /// Frame the dataset with this camera, fitted to the dataset, instead of
+    /// leaving the framing to the page
+    #[arg(long, value_name = "CAMERA")]
+    camera: Option<trace::CameraKind>,
+    /// Device pixels per level-0 sample at the center of the view, the
+    /// measure the target level is chosen from. Implies --camera slice
+    #[arg(long, value_name = "PIXELS")]
+    zoom: Option<f64>,
+    /// Pin the dataset's contrast window to MIN..MAX on every channel instead
+    /// of fitting it to the data as it arrives
+    #[arg(long, num_args = 2, value_names = ["MIN", "MAX"], allow_hyphen_values = true)]
+    contrast: Option<Vec<f64>>,
+    /// Pin every channel of the dataset to this colormap
+    #[arg(long, value_name = "NAME")]
+    colormap: Option<ColormapValue>,
+    /// Pin the dataset's volume render mode
+    #[arg(long, value_name = "MODE")]
+    render_mode: Option<RenderModeValue>,
+    /// Pin the dataset's target level instead of letting it follow the
+    /// screen. Pinning to 0 is the level-0 default ADR 0061 replaced
+    #[arg(long, value_name = "LEVEL")]
+    level_pin: Option<u32>,
+    /// Keep the dataset's contrast window at its default instead of fitting it
+    /// to the data as it arrives, so frames of two runs can be compared
+    #[arg(long)]
+    pin_contrast: bool,
     /// Seconds to wait for the page to load and settle
     #[arg(long, default_value_t = 120)]
     timeout_seconds: u64,
-    /// Fail (non-zero) on a stall verdict or a run that never settled
+    /// Fail (non-zero) on a stall or steady-state verdict, or a run that never settled
     ///
     /// Opt-in, because every other non-zero exit in this CLI means the command
     /// itself failed. Never fires on coverage: most of a healthy cold open is
     /// pre-instrument boot, so a coverage gate fires on every green run.
     #[arg(long)]
     gate: bool,
+    /// The steps to run after the open settles, in command-line order, or a
+    /// script file of them. None by default: the driver measures the open.
+    #[command(flatten)]
+    script: trace_script::ScriptArgs,
+    /// Every Dev controls knob, by the name the panel shows, and `--versus`
+    /// to run the same script under a second set of them.
+    #[command(flatten)]
+    knobs: trace_knobs::KnobArgs,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1218,9 +1285,111 @@ enum TraceCommand {
         /// One phase's numbers and the findings against it
         #[arg(long, value_name = "PHASE", conflicts_with = "phases")]
         phase: Option<String>,
+        /// Read only this interval of the run, START..END in milliseconds from
+        /// run start, as the text's own follow-up commands spell it. The run
+        /// file holds the whole-run reading only, so a window is derived by
+        /// the page's own derivation in a headless browser against the
+        /// configured server; nothing is re-recorded
+        #[arg(long, value_name = "START..END", conflicts_with_all = ["chunk", "spatial"])]
+        window: Option<trace::WindowRequest>,
+        /// Seconds to wait for the page that derives a --window reading
+        #[arg(long, default_value_t = 60)]
+        timeout_seconds: u64,
+        /// One chunk's phase history, queue rank and age, as [entity/]level/t/c/z/y/x
+        #[arg(long, value_name = "CHUNK", conflicts_with_all = ["phases", "phase", "spatial"])]
+        chunk: Option<String>,
+        /// What is where: rows by state and level, each with its bounding box
+        #[arg(long, conflicts_with_all = ["phases", "phase"])]
+        spatial: bool,
         /// Directory runs are read back from
         #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
         trace_dir: Option<PathBuf>,
+    },
+    /// Follow a live session's watch stream as line-delimited JSON
+    ///
+    /// Somebody in the workspace turns the watch toggle on in their monitor;
+    /// this prints what their page publishes — one JSON object per line, a
+    /// per-tick aggregate, a run boundary, or a provisional reading. No
+    /// per-chunk record ever rides the stream. Subscribing hands over the
+    /// server's small ring first, so a watch that starts mid-stall still sees
+    /// the recent past. Runs until the socket closes unless --seconds says
+    /// otherwise
+    Watch {
+        /// Follow one page by the client id its items carry. Every publishing
+        /// page in the workspace when absent
+        #[arg(long, value_name = "ID")]
+        client_id: Option<u64>,
+        /// Stop after this many seconds instead of following until the socket
+        /// closes
+        #[arg(long, value_name = "SECONDS")]
+        seconds: Option<u64>,
+    },
+    /// List and fetch the reports people sent to this workspace's inbox
+    Inbox {
+        #[command(subcommand)]
+        command: TraceInboxCommand,
+    },
+    /// Compare two runs or bundles: phase, finding, and header deltas
+    ///
+    /// Every delta is right minus left, with a warning when the headers make
+    /// the two incomparable. The diff is the page's own, derived behind the
+    /// trace seam, so a headless page is opened against the configured
+    /// server to derive it; nothing is re-recorded.
+    Diff {
+        /// The left run: a run id, or a path to a run file or bundle
+        #[arg(value_name = "LEFT")]
+        left: String,
+        /// The right run, whose deltas against the left are printed
+        #[arg(value_name = "RIGHT")]
+        right: String,
+        /// Seconds to wait for the page that derives the comparison
+        #[arg(long, default_value_t = 60)]
+        timeout_seconds: u64,
+        /// Directory runs are read back from
+        #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
+        trace_dir: Option<PathBuf>,
+    },
+    /// Replay a bundle: open its dataset, restore its view and knobs, run
+    /// its script, and diff the new run against it
+    ///
+    /// The header carries what the driver needs: the dataset, the view URL,
+    /// the viewport and device pixel ratio, the planning configuration, and
+    /// the pins. The build, the adapter, and the browser's cache warmth
+    /// cannot be restored, and the run records every input it could not.
+    /// A bundle without a script replays as a cold open. The diff is the
+    /// page's own, so it warns when the two runs are not comparable, as a
+    /// bundle from a different adapter is not.
+    Replay {
+        /// Path to a bundle, or the name of one under the trace directory
+        #[arg(value_name = "BUNDLE")]
+        original: String,
+        /// Write the run here instead of the trace directory beside the config
+        #[arg(long, short, value_name = "PATH")]
+        output: Option<String>,
+        /// Directory runs are written to and read back from
+        #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
+        trace_dir: Option<PathBuf>,
+        /// Also write the replay's raw spans as Chrome Trace Event JSON, for Perfetto
+        #[arg(long, value_name = "PATH")]
+        perfetto: Option<String>,
+        /// Also write the frame the page shows once the replay has settled,
+        /// as a PNG at the bundle's device pixel ratio
+        #[arg(long, value_name = "PATH")]
+        screenshot: Option<PathBuf>,
+        /// Also write the replay as a bundle of its own, the same file that
+        /// running a dataset with --bundle writes
+        #[arg(long, value_name = "PATH")]
+        bundle: Option<PathBuf>,
+        /// Include the Perfetto projection in the replay's bundle
+        #[arg(long, requires = "bundle")]
+        bundle_perfetto: bool,
+        /// Seconds to wait for the page to load and settle
+        #[arg(long, default_value_t = 120)]
+        timeout_seconds: u64,
+        /// Fail (non-zero) on a stall or steady-state verdict, or a replay
+        /// that never settled, as --gate does on a run
+        #[arg(long)]
+        gate: bool,
     },
     /// Write the page's trace as Chrome Trace Event JSON, for ui.perfetto.dev
     Perfetto {
@@ -1242,6 +1411,25 @@ enum TraceCommand {
         /// Device pixel ratio to drive the page at
         #[arg(long, default_value_t = trace::DEFAULT_DEVICE_PIXEL_RATIO, value_name = "RATIO")]
         device_pixel_ratio: f64,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum TraceInboxCommand {
+    /// List the reports in the selected workspace's inbox, newest first
+    List,
+    /// Fetch one report to a file that `lucida trace show` reads
+    Fetch {
+        /// Inbox entry id, or enough of one to name a single report
+        #[arg(value_name = "ENTRY")]
+        entry: String,
+        /// File to write the bundle to, instead of naming it for its run
+        /// under the trace directory
+        #[arg(long, short, value_name = "PATH")]
+        output: Option<PathBuf>,
+        /// Directory fetched bundles land in, beside the driver's runs
+        #[arg(long, value_name = "DIR", env = "LUCIDA_TRACE_DIR")]
+        trace_dir: Option<PathBuf>,
     },
 }
 
@@ -3525,6 +3713,8 @@ async fn emit_trace_command(
 
     match (dataset, command) {
         (Some(dataset), _) => {
+            let trace_dir = trace::resolve_trace_dir(trace_args.trace_dir.as_deref(), &config_path);
+            let wait = Duration::from_secs(trace_args.timeout_seconds);
             let outcome = run_trace(
                 &server,
                 &workspace,
@@ -3532,22 +3722,186 @@ async fn emit_trace_command(
                 token.as_ref(),
                 dataset,
                 trace_args,
-                &trace::resolve_trace_dir(trace_args.trace_dir.as_deref(), &config_path),
-                Duration::from_secs(trace_args.timeout_seconds),
+                &trace_dir,
+                wait,
+                &trace_args.knobs.first,
+                None,
             )
             .await?;
+            let Some(second_knobs) = &trace_args.knobs.versus else {
+                let mut payload = serde_json::Map::new();
+                payload.insert("server".to_string(), serde_json::json!(server));
+                payload.insert("workspace".to_string(), serde_json::json!(workspace));
+                payload.insert("target".to_string(), serde_json::json!(target));
+                payload.extend(run_payload(&outcome));
+                payload.insert(
+                    "text".to_string(),
+                    serde_json::json!(outcome.file.renderings.summary),
+                );
+                output.print_either(&payload, || {
+                    trace::format_run_human(&outcome.file, &outcome.path, outcome.bundle.as_deref())
+                })?;
+                if let Some(reason) = outcome.gate {
+                    return Err(CliError::new(ErrorKind::GateFailed, reason));
+                }
+                return Ok(());
+            };
+            // The second run finds the server warm from the first; the diff
+            // lists that as a condition rather than judging it.
+            let second = run_trace(
+                &server,
+                &workspace,
+                &target,
+                token.as_ref(),
+                dataset,
+                trace_args,
+                &trace_dir,
+                wait,
+                second_knobs,
+                Some(trace::VERSUS_SUFFIX),
+            )
+            .await?;
+            let comparison = diff_runs(
+                &target,
+                token.as_ref(),
+                wait,
+                &trace::CompareSide::from_run_file(&outcome.file, &outcome.path),
+                &trace::CompareSide::from_run_file(&second.file, &second.path),
+            )
+            .await?;
+            let gate: Vec<String> = [outcome.gate.clone(), second.gate.clone()]
+                .into_iter()
+                .flatten()
+                .collect();
             let payload = serde_json::json!({
                 "server": server,
                 "workspace": workspace,
                 "target": target,
-                "runFile": outcome.path,
-                "header": outcome.file.header,
-                "verdict": outcome.file.diagnostic.get("verdict"),
-                "text": outcome.file.renderings.summary,
-                "gate": outcome.gate,
+                "left": run_payload(&outcome),
+                "right": run_payload(&second),
+                "comparison": comparison.comparison,
+                "text": comparison.text,
+                "gate": (!gate.is_empty()).then(|| gate.join("; ")),
             });
             output.print_either(&payload, || {
-                trace::format_run_human(&outcome.file, &outcome.path)
+                trace::format_versus_human(
+                    trace::VersusSide {
+                        file: &outcome.file,
+                        path: &outcome.path,
+                        bundle: outcome.bundle.as_deref(),
+                    },
+                    trace::VersusSide {
+                        file: &second.file,
+                        path: &second.path,
+                        bundle: second.bundle.as_deref(),
+                    },
+                    &comparison.text,
+                )
+            })?;
+            if !gate.is_empty() {
+                return Err(CliError::new(ErrorKind::GateFailed, gate.join("; ")));
+            }
+        }
+        (
+            None,
+            Some(TraceCommand::Diff {
+                left,
+                right,
+                timeout_seconds,
+                trace_dir,
+            }),
+        ) => {
+            let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
+            let left_path = trace::resolve_run_file(&dir, left);
+            let right_path = trace::resolve_run_file(&dir, right);
+            let left_artifact = trace::read_artifact(&left_path)?;
+            let right_artifact = trace::read_artifact(&right_path)?;
+            let comparison = diff_runs(
+                &target,
+                token.as_ref(),
+                Duration::from_secs(*timeout_seconds),
+                &trace::CompareSide::from_artifact(&left_artifact, &left_path),
+                &trace::CompareSide::from_artifact(&right_artifact, &right_path),
+            )
+            .await?;
+            let payload = serde_json::json!({
+                "left": { "file": left_path, "runId": left_artifact.run_id() },
+                "right": { "file": right_path, "runId": right_artifact.run_id() },
+                "comparison": comparison.comparison,
+                "text": comparison.text,
+            });
+            output.print_either(&payload, || comparison.text.clone())?;
+        }
+        (
+            None,
+            Some(TraceCommand::Replay {
+                original,
+                output: run_output,
+                trace_dir,
+                perfetto,
+                screenshot,
+                bundle,
+                bundle_perfetto,
+                timeout_seconds,
+                gate,
+            }),
+        ) => {
+            let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
+            let original_path = trace::resolve_run_file(&dir, original);
+            let artifact = trace::read_artifact(&original_path)?;
+            let trace::TraceArtifact::Bundle(original) = &artifact else {
+                return Err(CliError::config(format!(
+                    "{} is a run file, not a bundle; replay reads the header a bundle carries, \
+                     which running a dataset with --bundle writes",
+                    original_path.display()
+                )));
+            };
+            let plan = trace_replay::ReplayPlan::from_bundle(original, &original_path)?;
+            let wait = Duration::from_secs(*timeout_seconds);
+            let sidecars = RunSidecars {
+                output: run_output.as_deref(),
+                perfetto: perfetto.as_deref(),
+                bundle: bundle.as_deref(),
+                bundle_perfetto: *bundle_perfetto,
+                gate: *gate,
+            };
+            let outcome = run_replay(
+                &server,
+                &workspace,
+                &target,
+                token.as_ref(),
+                plan,
+                screenshot.as_deref(),
+                &sidecars,
+                &dir,
+                wait,
+            )
+            .await?;
+            // Original on the left, so the deltas read as what replaying changed.
+            let comparison = diff_runs(
+                &target,
+                token.as_ref(),
+                wait,
+                &trace::CompareSide::from_artifact(&artifact, &original_path),
+                &trace::CompareSide::from_run_file(&outcome.file, &outcome.path),
+            )
+            .await?;
+            let mut payload = serde_json::Map::new();
+            payload.insert("server".to_string(), serde_json::json!(server));
+            payload.insert("workspace".to_string(), serde_json::json!(workspace));
+            payload.insert("target".to_string(), serde_json::json!(target));
+            payload.insert("original".to_string(), serde_json::json!(original_path));
+            payload.extend(run_payload(&outcome));
+            payload.insert("comparison".to_string(), comparison.comparison.clone());
+            payload.insert("text".to_string(), serde_json::json!(comparison.text));
+            output.print_either(&payload, || {
+                trace_replay::format_replay_human(
+                    &outcome.file,
+                    &outcome.path,
+                    outcome.bundle.as_deref(),
+                    &original_path,
+                    &comparison.text,
+                )
             })?;
             if let Some(reason) = outcome.gate {
                 return Err(CliError::new(ErrorKind::GateFailed, reason));
@@ -3559,25 +3913,88 @@ async fn emit_trace_command(
                 run,
                 phases,
                 phase,
+                window,
+                timeout_seconds,
+                chunk,
+                spatial,
                 trace_dir,
             }),
         ) => {
             let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
             let path = trace::resolve_run_file(&dir, run);
-            let file = trace::read_run_file(&path)?;
-            let depth = match (phase, phases) {
-                (Some(phase), _) => trace::ShowDepth::Phase(phase.clone()),
-                (None, true) => trace::ShowDepth::Phases,
-                (None, false) => trace::ShowDepth::Summary,
+            // A bundle carries the same renderings as a run file, so every depth reads either.
+            let artifact = trace::read_artifact(&path)?;
+            let depth = match (phase, phases, chunk, spatial) {
+                (Some(phase), ..) => trace::ShowDepth::Phase(phase.clone()),
+                (None, true, ..) => trace::ShowDepth::Phases,
+                (None, false, Some(chunk), _) => trace::ShowDepth::Chunk(chunk.clone()),
+                (None, false, None, true) => trace::ShowDepth::Spatial,
+                (None, false, None, false) => trace::ShowDepth::Summary,
             };
-            let text = trace::render_show(&file, &depth);
-            let payload = serde_json::json!({
-                "runFile": path,
-                "header": file.header,
-                "diagnostic": file.diagnostic,
-                "text": text,
-            });
-            output.print_either(&payload, || text.clone())?;
+            // The page is opened on an empty inline view: it is there to reach
+            // the derivation, not to load anything.
+            let windowed = match window {
+                Some(window) => {
+                    let empty = SavedView::empty([trace::DEFAULT_WIDTH, trace::DEFAULT_HEIGHT]);
+                    let url =
+                        montage::with_render_param(&viewer_inline_view_web_url(&target, &empty)?);
+                    let read = trace::read_window(
+                        &url,
+                        token.as_ref(),
+                        Duration::from_secs(*timeout_seconds),
+                        artifact.trace(),
+                        artifact.run_id(),
+                        *window,
+                    )
+                    .await
+                    .map_err(|error| error.with_context("url", &url))?;
+                    Some(read)
+                }
+                None => None,
+            };
+            let diagnostic = match &windowed {
+                Some(read) => &read.diagnostic,
+                None => artifact.diagnostic(),
+            };
+            let text = match (&windowed, &artifact) {
+                (Some(read), _) => trace::render_depth(&read.renderings, &depth),
+                (None, trace::TraceArtifact::Run(file)) => trace::render_show(file, &depth),
+                (None, trace::TraceArtifact::Bundle(bundle)) => {
+                    trace::render_depth(&bundle.renderings, &depth)
+                }
+            };
+            // `diagnostic` already carries a `chunk` section, but it is the
+            // worst row's. A chunk named with `--chunk` gets its section
+            // here, beside the text rendered from it.
+            let chunk = trace::chunk_section(artifact.renderings(), &depth);
+            let (payload, human) = match &artifact {
+                trace::TraceArtifact::Run(file) => (
+                    serde_json::json!({
+                        "runFile": path,
+                        "header": file.header,
+                        "window": window,
+                        "diagnostic": diagnostic,
+                        "chunk": chunk,
+                        "text": text,
+                    }),
+                    text.clone(),
+                ),
+                trace::TraceArtifact::Bundle(bundle) => (
+                    serde_json::json!({
+                        "bundle": path,
+                        "header": bundle.header,
+                        "health": bundle.health,
+                        "frame": bundle.frame.as_ref().map(trace::BundleFrame::describe),
+                        "absent": bundle.absent,
+                        "window": window,
+                        "diagnostic": diagnostic,
+                        "chunk": chunk,
+                        "text": text,
+                    }),
+                    trace::format_bundle_human(bundle, &path, &text),
+                ),
+            };
+            output.print_either(&payload, || human.clone())?;
         }
         (
             None,
@@ -3618,9 +4035,65 @@ async fn emit_trace_command(
                 trace::format_chrome_trace_human(output_path, &capture)
             })?;
         }
+        (None, Some(TraceCommand::Watch { client_id, seconds })) => {
+            // No trailing summary: the command's whole output is the stream it
+            // already printed, and a closing object would be a line a reader
+            // has to learn not to parse as an item.
+            watch::watch_workspace(
+                &target.ws_url,
+                token.as_ref().map(|token| token.token.as_str()),
+                output,
+                watch::WatchOptions {
+                    client_id: *client_id,
+                    duration: seconds.map(Duration::from_secs),
+                },
+            )
+            .await?;
+        }
+        (None, Some(TraceCommand::Inbox { command })) => {
+            let inbox = InboxClient::new(server.url.clone(), token.clone());
+            let entries = inbox.list(&workspace).await?;
+            match command {
+                TraceInboxCommand::List => {
+                    let payload = InboxListOutput {
+                        server,
+                        workspace,
+                        entries,
+                    };
+                    output.print_either(&payload, || format_inbox_list_human(&payload))?;
+                }
+                TraceInboxCommand::Fetch {
+                    entry,
+                    output: output_path,
+                    trace_dir,
+                } => {
+                    // The listing first, so the report can be named by a
+                    // few characters of its id and the file by the run it
+                    // holds. Both need the entry, and the entry is only in
+                    // the listing.
+                    let entry = resolve_entry(&entries, entry)?.clone();
+                    let dir = trace::resolve_trace_dir(trace_dir.as_deref(), &config_path);
+                    let path = fetch_path(&dir, &entry, output_path.as_deref());
+                    // Written as the server handed it over: the file on
+                    // disk is the file the sender's page produced.
+                    let bundle = inbox.fetch(&workspace, &entry.id).await?;
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent).map_err(CliError::from)?;
+                    }
+                    std::fs::write(&path, bundle).map_err(CliError::from)?;
+                    let payload = InboxFetchOutput {
+                        server,
+                        workspace,
+                        entry,
+                        path,
+                    };
+                    output.print_either(&payload, || format_inbox_fetch_human(&payload))?;
+                }
+            }
+        }
         (None, None) => {
             return Err(CliError::config(
-                "lucida trace takes a dataset URL to measure, or a subcommand (show, perfetto)",
+                "lucida trace takes a dataset URL to measure, or a subcommand (show, diff, replay, inbox, watch, perfetto)",
             ));
         }
     }
@@ -3628,11 +4101,47 @@ async fn emit_trace_command(
     Ok(())
 }
 
-/// A driven run, its file, and whether an opt-in gate should fail on it.
+/// A driven run, its file, where its bundle went when one was asked for, and
+/// whether an opt-in gate should fail on it.
 struct TraceRunOutcome {
     file: trace::TraceRunFile,
     path: PathBuf,
+    bundle: Option<PathBuf>,
     gate: Option<String>,
+}
+
+/// The JSON for one driven run: its files, header, verdict, and gate, without
+/// the trace document itself. A single run prints these beside where it ran;
+/// a `--versus` pair prints one set per side.
+fn run_payload(outcome: &TraceRunOutcome) -> serde_json::Map<String, serde_json::Value> {
+    let serde_json::Value::Object(fields) = serde_json::json!({
+        "runFile": outcome.path,
+        "screenshot": outcome.file.header.screenshot,
+        "bundle": outcome.bundle,
+        "header": outcome.file.header,
+        "verdict": outcome.file.diagnostic.get("verdict"),
+        "gate": outcome.gate,
+    }) else {
+        unreachable!("an object literal")
+    };
+    fields
+}
+
+/// Compare two runs through a page opened on an empty inline view, as
+/// `show --window` opens one: the page is there to reach the derivation, not
+/// to load anything.
+async fn diff_runs(
+    target: &WorkspaceTarget,
+    token: Option<&EffectiveToken>,
+    wait: Duration,
+    left: &trace::CompareSide<'_>,
+    right: &trace::CompareSide<'_>,
+) -> Result<trace::Comparison, CliError> {
+    let empty = SavedView::empty([trace::DEFAULT_WIDTH, trace::DEFAULT_HEIGHT]);
+    let url = montage::with_render_param(&viewer_inline_view_web_url(target, &empty)?);
+    trace::read_comparison(&url, token, wait, left, right)
+        .await
+        .map_err(|error| error.with_context("url", &url))
 }
 
 /// Drive one run: read the server's warmth, compose the view, take the trace,
@@ -3641,6 +4150,11 @@ struct TraceRunOutcome {
 /// The server is required, as it is for montage — spawning one is a different
 /// command — and reading its warmth first is also how that requirement is felt:
 /// a run measured against a server nobody can reach is not a measurement.
+///
+/// `knobs` are the Dev controls knobs this run is given. `sidecar_suffix`
+/// names the second run of a `--versus` pair: its run file, frame, bundle,
+/// and Perfetto projection take the suffix so they land beside the first's
+/// rather than over them.
 #[allow(clippy::too_many_arguments)]
 async fn run_trace(
     server: &EffectiveServer,
@@ -3651,7 +4165,21 @@ async fn run_trace(
     args: &TraceRunArgs,
     trace_dir: &Path,
     wait: Duration,
+    knobs: &trace_knobs::KnobSettings,
+    sidecar_suffix: Option<&str>,
 ) -> Result<TraceRunOutcome, CliError> {
+    // Read first, so a script that cannot run fails before a server is
+    // reached or a dataset opened on its behalf.
+    let script = args.script.resolve()?;
+    let sidecar = |path: &Path| match sidecar_suffix {
+        Some(suffix) => trace::suffixed(path, suffix),
+        None => path.to_path_buf(),
+    };
+    let sidecar_text = |path: &str| sidecar(Path::new(path)).to_string_lossy().into_owned();
+    let output_path = args.output.as_deref().map(sidecar_text);
+    let perfetto = args.perfetto.as_deref().map(sidecar_text);
+    let screenshot = args.screenshot.as_deref().map(sidecar);
+    let bundle_path = args.bundle.as_deref().map(sidecar);
     let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
     let (_seq, health) = dataset_client.health(None, wait).await?;
     let dataset_url = dataset_source_url(dataset, &health)?;
@@ -3662,14 +4190,64 @@ async fn run_trace(
     // empty viewer until the deadline. Opening it here is what makes a
     // first-time dataset measurable; the warmth block says the driver did it,
     // because it warms the server the run is about to be measured against.
+    let mut dataset_id = trace::dataset_id_for_source(&dataset_url, &health);
     if !warmth.dataset_open_before_run {
-        DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
+        let opened = DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
             .open(&dataset_url, &workspace.id, wait)
             .await?;
+        dataset_id = Some(lucida_core::DatasetId(opened.workspace_dataset_id));
         warmth.note_driver_open();
     }
 
-    let view = trace::compose_dataset_view(&dataset_url, args.width, args.height);
+    let pin_contrast_for = if args.pin_contrast {
+        dataset_id.as_ref()
+    } else {
+        None
+    };
+    let mut view =
+        trace::compose_dataset_view(&dataset_url, args.width, args.height, pin_contrast_for);
+    let pins = trace::DisplayPins {
+        contrast: args
+            .contrast
+            .as_deref()
+            .map(trace::contrast_window)
+            .transpose()?,
+        colormap: args.colormap.map(Into::into),
+        render_mode: args.render_mode.map(Into::into),
+        level: args.level_pin,
+    };
+    // A zoom without a camera is a slice camera: the page's own mode, and the
+    // one where the zoom is the whole framing.
+    let camera_request = args
+        .camera
+        .or(args.zoom.map(|_| trace::CameraKind::Slice))
+        .map(|kind| trace::CameraRequest {
+            kind,
+            zoom: args.zoom,
+        });
+    let mut composed_camera = None;
+    if camera_request.is_some() || !pins.is_empty() {
+        // The document is a second socket round trip, so it is read only when
+        // a camera or a pin needs the image geometry it carries.
+        let dataset_id = dataset_id.ok_or_else(|| {
+            CliError::new(
+                ErrorKind::MissingResource,
+                format!("the server reports no workspace dataset for {dataset_url}"),
+            )
+        })?;
+        let document = trace::workspace_document(&target.ws_url, token, wait).await?;
+        if let Some(request) = camera_request {
+            let device_viewport = [
+                (args.width as f64 * args.device_pixel_ratio).round() as u32,
+                (args.height as f64 * args.device_pixel_ratio).round() as u32,
+            ];
+            let framing = trace::compose_camera(&document, &dataset_id, device_viewport, request)?;
+            view.camera = framing.camera;
+            composed_camera = Some(framing.record);
+        }
+        let channels = trace::channel_count(&document, &dataset_id);
+        trace::pin_display(&mut view, &dataset_id, channels, pins);
+    }
     let url = montage::with_render_param(&viewer_inline_view_web_url(target, &view)?);
     let composed = trace::ComposedView {
         dataset: normalize_dataset_url(&dataset_url),
@@ -3677,28 +4255,143 @@ async fn run_trace(
         width: args.width,
         height: args.height,
         device_pixel_ratio: args.device_pixel_ratio,
+        camera: composed_camera,
     };
 
-    let perfetto = args.perfetto.clone();
     let facts = trace::DriverFacts {
         composed_view: composed,
         server_warmth: warmth,
         server_url: server.url.clone(),
         workspace_id: workspace.id.clone(),
+        screenshot,
+        script,
+        knobs: knobs.clone(),
+        replay: None,
     };
     let viewport = Viewport::new(args.width, args.height, args.device_pixel_ratio);
+    let sidecars = RunSidecars {
+        output: output_path.as_deref(),
+        perfetto: perfetto.as_deref(),
+        bundle: bundle_path.as_deref(),
+        bundle_perfetto: args.bundle_perfetto,
+        gate: args.gate,
+    };
+    drive_and_persist(&url, token, viewport, wait, &facts, &sidecars, trace_dir).await
+}
+
+/// The files a run writes besides its run file, and whether the gate reads
+/// it. The frame is not here because the driver's facts carry it: the run
+/// header names the screenshot, and the drive takes it before the export.
+struct RunSidecars<'a> {
+    output: Option<&'a str>,
+    perfetto: Option<&'a str>,
+    bundle: Option<&'a Path>,
+    bundle_perfetto: bool,
+    gate: bool,
+}
+
+/// Drive one run at `url` under `facts`, write it, and read the gate: the
+/// tail a run composed from the command line and a replay share.
+async fn drive_and_persist(
+    url: &str,
+    token: Option<&EffectiveToken>,
+    viewport: Viewport,
+    wait: Duration,
+    facts: &trace::DriverFacts,
+    sidecars: &RunSidecars<'_>,
+    trace_dir: &Path,
+) -> Result<TraceRunOutcome, CliError> {
+    let bundle = sidecars.bundle.map(|path| trace::BundleRequest {
+        path: path.to_path_buf(),
+        perfetto: sidecars.bundle_perfetto,
+    });
     // A drive that fails says what it drove: the composed URL is the whole
     // workload, and without it a timeout is unreproducible by hand.
-    let file = trace::drive_run(&url, token, viewport, wait, &facts, perfetto.as_deref())
-        .await
-        .map_err(|error| error.with_context("url", &url))?;
-    let path = trace::write_run_file(&file, trace_dir, args.output.as_deref()).await?;
-    let gate = if args.gate {
-        trace::gate_failure(&file)
+    let driven = trace::drive_run(
+        url,
+        token,
+        viewport,
+        wait,
+        facts,
+        sidecars.perfetto,
+        bundle.as_ref(),
+    )
+    .await
+    .map_err(|error| error.with_context("url", url))?;
+    let path = trace::write_run_file(&driven.file, trace_dir, sidecars.output).await?;
+    let gate = if sidecars.gate {
+        trace::gate_failure(&driven.file)
     } else {
         None
     };
-    Ok(TraceRunOutcome { file, path, gate })
+    Ok(TraceRunOutcome {
+        file: driven.file,
+        path,
+        bundle: driven.bundle,
+        gate,
+    })
+}
+
+/// Replay a bundle by its plan: have its datasets in the workspace, re-host
+/// its view on this workspace, and drive the run under its knobs and its
+/// script, with the replay record in the new run's header.
+///
+/// It reads the server's warmth first, as `run_trace` does, and opens every
+/// dataset the bundle names by URL before the page loads, for the reason a
+/// cold open opens its one: a dataset the workspace lacks never reaches a
+/// scene, and the restored view would have nothing to apply to.
+#[allow(clippy::too_many_arguments)]
+async fn run_replay(
+    server: &EffectiveServer,
+    workspace: &WorkspaceRecord,
+    target: &WorkspaceTarget,
+    token: Option<&EffectiveToken>,
+    plan: trace_replay::ReplayPlan,
+    screenshot: Option<&Path>,
+    sidecars: &RunSidecars<'_>,
+    trace_dir: &Path,
+    wait: Duration,
+) -> Result<TraceRunOutcome, CliError> {
+    let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
+    let (_seq, health) = dataset_client.health(None, wait).await?;
+    let mut warmth = trace::summarise_server_warmth(&plan.dataset_url, &health);
+    for dataset_url in std::iter::once(&plan.dataset_url).chain(&plan.other_dataset_urls) {
+        if trace::dataset_id_for_source(dataset_url, &health).is_some() {
+            continue;
+        }
+        DatasetOpenClient::new(target.ws_url.clone(), token.cloned())
+            .open(dataset_url, &workspace.id, wait)
+            .await?;
+        warmth.note_driver_open();
+    }
+
+    let url = match &plan.view_fragment {
+        Some(fragment) => trace_replay::rehost_view(&target.web_url, fragment),
+        None => {
+            let view =
+                trace::compose_dataset_view(&plan.dataset_url, plan.width, plan.height, None);
+            montage::with_render_param(&viewer_inline_view_web_url(target, &view)?)
+        }
+    };
+    let facts = trace::DriverFacts {
+        composed_view: trace::ComposedView {
+            dataset: plan.dataset_url,
+            url: url.clone(),
+            width: plan.width,
+            height: plan.height,
+            device_pixel_ratio: plan.device_pixel_ratio,
+            camera: None,
+        },
+        server_warmth: warmth,
+        server_url: server.url.clone(),
+        workspace_id: workspace.id.clone(),
+        screenshot: screenshot.map(Path::to_path_buf),
+        script: plan.script,
+        knobs: plan.knobs,
+        replay: Some(plan.record),
+    };
+    let viewport = Viewport::new(plan.width, plan.height, plan.device_pixel_ratio);
+    drive_and_persist(&url, token, viewport, wait, &facts, sidecars, trace_dir).await
 }
 
 /// A dataset argument is a URL in canonical form, or the id of a dataset the
@@ -3860,7 +4553,13 @@ fn viewer_inline_view_web_url(
     Ok(url.to_string())
 }
 
-fn encode_saved_view_url_payload(saved_view: &SavedView) -> Result<String, CliError> {
+/// A view as the page carries one in a URL fragment: gzip, then base64url
+/// without padding. Generic so the trace driver can encode a view it holds
+/// as JSON, as the page handed it over, without reading it into a `SavedView`
+/// first and losing whatever fields this build does not know.
+pub(crate) fn encode_saved_view_url_payload<T: serde::Serialize + ?Sized>(
+    saved_view: &T,
+) -> Result<String, CliError> {
     let json = serde_json::to_vec(saved_view)?;
     let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(&json)?;
@@ -5606,14 +6305,508 @@ mod tests {
             "--gate",
             "--output",
             "/tmp/r.json",
+            "--screenshot",
+            "/tmp/r.png",
+            "--camera",
+            "arcball",
+            "--zoom",
+            "0.08",
+            "--contrast",
+            "0",
+            "3",
+            "--colormap",
+            "gray",
+            "--render-mode",
+            "max-intensity",
+            "--level-pin",
+            "0",
+            "--pin-contrast",
         ]);
         match gated.command {
             Command::Trace { run, .. } => {
                 assert!(run.gate);
                 assert_eq!(run.output.as_deref(), Some("/tmp/r.json"));
+                assert_eq!(run.screenshot.as_deref(), Some(Path::new("/tmp/r.png")));
+                assert!(matches!(run.camera, Some(trace::CameraKind::Arcball)));
+                assert_eq!(run.zoom, Some(0.08));
+                assert_eq!(run.contrast.as_deref(), Some(&[0.0, 3.0][..]));
+                assert!(matches!(run.colormap, Some(ColormapValue::Gray)));
+                assert!(matches!(
+                    run.render_mode,
+                    Some(RenderModeValue::MaxIntensity)
+                ));
+                assert_eq!(run.level_pin, Some(0));
+                assert!(run.pin_contrast);
+                assert_eq!(run.bundle, None);
+                assert!(!run.bundle_perfetto);
             }
             _ => panic!("expected a trace run"),
         }
+    }
+
+    /// A replay takes the bundle and the same sidecar opt-ins a run takes,
+    /// and nothing that would override the header: the viewport, the ratio,
+    /// the knobs, and the pins are the bundle's.
+    #[test]
+    fn trace_replay_takes_a_bundle_and_the_runs_sidecars() {
+        let replay = parse(&["trace", "replay", "field.bundle.json"]);
+        match replay.command {
+            Command::Trace {
+                dataset,
+                command:
+                    Some(TraceCommand::Replay {
+                        original,
+                        output,
+                        perfetto,
+                        screenshot,
+                        bundle,
+                        bundle_perfetto,
+                        timeout_seconds,
+                        gate,
+                        ..
+                    }),
+                ..
+            } => {
+                assert!(dataset.is_none());
+                assert_eq!(original, "field.bundle.json");
+                assert_eq!(output, None);
+                assert_eq!(perfetto, None);
+                assert_eq!(screenshot, None);
+                assert_eq!(bundle, None);
+                assert!(!bundle_perfetto);
+                assert_eq!(timeout_seconds, 120);
+                assert!(!gate);
+            }
+            _ => panic!("expected a trace replay"),
+        }
+
+        let with = parse(&[
+            "trace",
+            "replay",
+            "/inbox/report.bundle.json",
+            "--output",
+            "/tmp/again.json",
+            "--bundle",
+            "/tmp/again.bundle.json",
+            "--bundle-perfetto",
+            "--screenshot",
+            "/tmp/again.png",
+            "--timeout-seconds",
+            "30",
+            "--gate",
+        ]);
+        match with.command {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Replay {
+                        original,
+                        output,
+                        screenshot,
+                        bundle,
+                        bundle_perfetto,
+                        timeout_seconds,
+                        gate,
+                        ..
+                    }),
+                ..
+            } => {
+                assert_eq!(original, "/inbox/report.bundle.json");
+                assert_eq!(output.as_deref(), Some("/tmp/again.json"));
+                assert_eq!(screenshot.as_deref(), Some(Path::new("/tmp/again.png")));
+                assert_eq!(bundle.as_deref(), Some(Path::new("/tmp/again.bundle.json")));
+                assert!(bundle_perfetto);
+                assert_eq!(timeout_seconds, 30);
+                assert!(gate);
+            }
+            _ => panic!("expected a trace replay"),
+        }
+
+        // The projection rides the replay's bundle, so it needs one.
+        assert!(try_parse(&["trace", "replay", "b.json", "--bundle-perfetto"]).is_err());
+        assert!(try_parse(&["trace", "replay", "b.json", "--width", "800"]).is_err());
+    }
+
+    /// The bundle is opt-in like the other sidecars, and its Perfetto
+    /// projection is a second opt-in on top of it (#1055).
+    #[test]
+    fn trace_writes_a_bundle_only_when_asked_and_its_projection_only_on_top_of_that() {
+        match parse(&[
+            "trace",
+            "/data/set.zarr",
+            "--bundle",
+            "/tmp/report.bundle.json",
+            "--bundle-perfetto",
+        ])
+        .command
+        {
+            Command::Trace { run, .. } => {
+                assert_eq!(
+                    run.bundle.as_deref(),
+                    Some(Path::new("/tmp/report.bundle.json"))
+                );
+                assert!(run.bundle_perfetto);
+            }
+            _ => panic!("expected a trace run"),
+        }
+
+        match parse(&["trace", "/data/set.zarr", "--bundle", "/tmp/r.bundle.json"]).command {
+            Command::Trace { run, .. } => assert!(!run.bundle_perfetto),
+            _ => panic!("expected a trace run"),
+        }
+
+        assert!(try_parse(&["trace", "/data/set.zarr", "--bundle-perfetto"]).is_err());
+    }
+
+    /// The inbox is two commands: what is there, and one of them to a
+    /// file. `fetch` names a report by id and takes the file name from
+    /// the run unless the caller says otherwise.
+    #[test]
+    fn trace_inbox_commands_parse_product_shape() {
+        match parse(&["trace", "inbox", "list"]).command {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Inbox {
+                        command: TraceInboxCommand::List,
+                    }),
+                ..
+            } => {}
+            other => panic!("expected an inbox listing, got {other:?}"),
+        }
+
+        match parse(&[
+            "trace",
+            "inbox",
+            "fetch",
+            "5d1f0c2e",
+            "--output",
+            "/tmp/report.bundle.json",
+            "--trace-dir",
+            "/runs",
+        ])
+        .command
+        {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Inbox {
+                        command:
+                            TraceInboxCommand::Fetch {
+                                entry,
+                                output,
+                                trace_dir,
+                            },
+                    }),
+                ..
+            } => {
+                assert_eq!(entry, "5d1f0c2e");
+                assert_eq!(
+                    output.as_deref(),
+                    Some(Path::new("/tmp/report.bundle.json"))
+                );
+                assert_eq!(trace_dir.as_deref(), Some(Path::new("/runs")));
+            }
+            other => panic!("expected an inbox fetch, got {other:?}"),
+        }
+
+        match parse(&["trace", "inbox", "fetch", "5d1f0c2e"]).command {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Inbox {
+                        command: TraceInboxCommand::Fetch { output, .. },
+                    }),
+                ..
+            } => assert_eq!(output, None, "the file is named for its run by default"),
+            other => panic!("expected an inbox fetch, got {other:?}"),
+        }
+
+        // A report to fetch is not optional: there is no newest-report
+        // default, because a listing is one command away and picking for
+        // somebody would fetch the wrong megabytes.
+        assert!(try_parse(&["trace", "inbox", "fetch"]).is_err());
+    }
+
+    /// The bundle header lists every field the replay needs (#1055): each
+    /// argument of `trace` that shapes the workload maps onto a header field
+    /// the replay list names, and the rest are the sidecars and the deadline.
+    /// An argument added to the command lands in one list or fails here.
+    #[test]
+    fn every_workload_argument_of_trace_has_a_bundle_header_field() {
+        use clap::CommandFactory;
+        use std::collections::{BTreeMap, BTreeSet};
+        let mut replayed_by: BTreeMap<&str, &str> = BTreeMap::from([
+            ("dataset", "datasets"),
+            ("width", "viewport"),
+            ("height", "viewport"),
+            ("device_pixel_ratio", "devicePixelRatio"),
+            ("camera", "viewUrl"),
+            ("zoom", "viewUrl"),
+            ("contrast", "pins"),
+            ("colormap", "pins"),
+            ("render_mode", "pins"),
+            ("level_pin", "pins"),
+            ("pin_contrast", "pins"),
+        ]);
+        // The planning knobs replay through the header's planning
+        // configuration. The cache knobs have no header field: the panel's
+        // own edits to them die on reload, so a replay runs the cache at
+        // its defaults.
+        let mut session_scoped = Vec::new();
+        for knob in trace_knobs::KNOBS {
+            match knob.store {
+                trace_knobs::KnobStore::Planning => {
+                    replayed_by.insert(knob.field, "planning");
+                }
+                trace_knobs::KnobStore::Cache => session_scoped.push(knob.field),
+            }
+        }
+        let not_workload = [
+            "output",
+            "trace_dir",
+            "perfetto",
+            "screenshot",
+            "bundle",
+            "bundle_perfetto",
+            "timeout_seconds",
+            "gate",
+            "help",
+            // A second workload, replayed from its own run's header.
+            trace_knobs::VERSUS,
+        ];
+        // The steps ride the bundle's own script section, which a replay runs
+        // again, rather than a header field the replay list names.
+        let carried_by_script = [
+            "script", "wait", "hold", "pan", "zoom_by", "orbit", "scrub", "select",
+        ];
+
+        let command = Cli::command();
+        let trace = command
+            .find_subcommand("trace")
+            .expect("the trace command exists");
+        let fields: BTreeSet<&str> = trace::REPLAY_INPUTS
+            .iter()
+            .map(|input| input.field)
+            .collect();
+        for argument in trace.get_arguments() {
+            let id = argument.get_id().as_str();
+            match replayed_by.get(id) {
+                Some(field) => assert!(
+                    fields.contains(field),
+                    "{id} replays through {field}, which the replay list does not name"
+                ),
+                None if carried_by_script.contains(&id) => {}
+                None if session_scoped.contains(&id) => {}
+                None => assert!(
+                    not_workload.contains(&id),
+                    "{id} is neither a workload argument with a header field nor a sidecar"
+                ),
+            }
+        }
+    }
+
+    /// Every Dev controls knob is a flag on `trace`, the knobs after
+    /// `--versus` are the second run's, and the script is shared by both.
+    #[test]
+    fn trace_takes_every_dev_controls_knob_and_splits_them_at_versus() {
+        use trace_script::ScriptStep;
+        for knob in trace_knobs::KNOBS {
+            let value = knob.min.to_string();
+            let parsed = try_parse(&[
+                "trace",
+                "/data/set.zarr",
+                &format!("--{}", knob.flag),
+                &value,
+            ]);
+            assert!(
+                parsed.is_ok(),
+                "--{} {value}: {:?}",
+                knob.flag,
+                parsed.err()
+            );
+        }
+
+        match parse(&["trace", "/data/set.zarr", "--prefetch-depth", "0"]).command {
+            Command::Trace { run, .. } => {
+                assert_eq!(
+                    run.knobs.first.planning["prefetchDepth"],
+                    serde_json::json!(0)
+                );
+                assert!(run.knobs.first.cache.is_empty());
+                assert_eq!(run.knobs.versus, None);
+            }
+            _ => panic!("expected a trace run"),
+        }
+
+        match parse(&[
+            "trace",
+            "/data/set.zarr",
+            "--prefetch-depth",
+            "0",
+            "--orbit",
+            "30,0",
+            "--versus",
+            "--prefetch-depth",
+            "3",
+            "--max-fetches",
+            "2",
+        ])
+        .command
+        {
+            Command::Trace { run, .. } => {
+                assert_eq!(
+                    run.knobs.first.planning["prefetchDepth"],
+                    serde_json::json!(0)
+                );
+                let second = run.knobs.versus.expect("a second configuration");
+                assert_eq!(second.planning["prefetchDepth"], serde_json::json!(3));
+                assert_eq!(second.cache["maxConcurrentFetches"], serde_json::json!(2));
+                assert_eq!(
+                    run.script.steps,
+                    vec![ScriptStep::Orbit {
+                        theta: 30.0,
+                        phi: 0.0
+                    }]
+                );
+            }
+            _ => panic!("expected a trace run"),
+        }
+
+        assert!(try_parse(&["trace", "/data/set.zarr", "--prefetch-depth", "9"]).is_err());
+        assert!(try_parse(&["trace", "/data/set.zarr", "--prefetch-depth", "0.5"]).is_err());
+    }
+
+    #[test]
+    fn trace_diff_takes_two_runs_and_a_deadline() {
+        match parse(&["trace", "diff", "run-1-1", "runs/second.json"]).command {
+            Command::Trace {
+                dataset: None,
+                command:
+                    Some(TraceCommand::Diff {
+                        left,
+                        right,
+                        timeout_seconds,
+                        trace_dir,
+                    }),
+                ..
+            } => {
+                assert_eq!(left, "run-1-1");
+                assert_eq!(right, "runs/second.json");
+                assert_eq!(timeout_seconds, 60);
+                assert_eq!(trace_dir, None);
+            }
+            _ => panic!("expected trace diff"),
+        }
+        assert!(try_parse(&["trace", "diff", "run-1-1"]).is_err());
+        match parse(&[
+            "trace",
+            "diff",
+            "a.json",
+            "b.json",
+            "--timeout-seconds",
+            "5",
+        ])
+        .command
+        {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Diff {
+                        timeout_seconds, ..
+                    }),
+                ..
+            } => assert_eq!(timeout_seconds, 5),
+            _ => panic!("expected trace diff"),
+        }
+    }
+
+    /// The steps run in the order they were typed, whatever their kinds, and
+    /// a run with none is the driver's default: an open and nothing after it.
+    #[test]
+    fn trace_runs_the_step_flags_in_command_line_order_and_none_by_default() {
+        use trace_script::{ScriptStep, ScrubAxis};
+        match parse(&[
+            "trace",
+            "/data/set.zarr",
+            "--camera",
+            "arcball",
+            "--wait",
+            "--orbit",
+            "30,15",
+            "--scrub",
+            "t:1",
+            "--select",
+            "channel:0=off",
+            "--zoom-by",
+            "2",
+            "--pan",
+            "-100,40",
+            "--hold",
+            "250",
+        ])
+        .command
+        {
+            Command::Trace { run, .. } => {
+                assert_eq!(
+                    run.script.steps,
+                    vec![
+                        ScriptStep::Wait,
+                        ScriptStep::Orbit {
+                            theta: 30.0,
+                            phi: 15.0
+                        },
+                        ScriptStep::Scrub {
+                            axis: ScrubAxis::T,
+                            count: 1
+                        },
+                        ScriptStep::Select {
+                            channel: Some(0),
+                            layer: None,
+                            visible: false
+                        },
+                        ScriptStep::Zoom {
+                            factor: 2.0,
+                            at: None
+                        },
+                        ScriptStep::Pan {
+                            dx: -100.0,
+                            dy: 40.0
+                        },
+                        ScriptStep::Hold { ms: 250 },
+                    ]
+                );
+                assert!(run.script.file.is_none());
+                // --zoom-by is a step, not the framing --zoom.
+                assert!(run.zoom.is_none());
+            }
+            _ => panic!("expected a trace run"),
+        }
+        match parse(&["trace", "/data/set.zarr"]).command {
+            Command::Trace { run, .. } => {
+                assert!(run.script.steps.is_empty());
+                assert!(run.script.resolve().unwrap().is_empty());
+            }
+            _ => panic!("expected a trace run"),
+        }
+    }
+
+    #[test]
+    fn trace_takes_a_script_file_in_place_of_step_flags() {
+        match parse(&["trace", "/data/set.zarr", "--script", "steps.json"]).command {
+            Command::Trace { run, .. } => {
+                assert_eq!(run.script.file, Some(PathBuf::from("steps.json")));
+                assert!(run.script.steps.is_empty());
+            }
+            _ => panic!("expected a trace run"),
+        }
+        assert!(
+            try_parse(&[
+                "trace",
+                "/data/set.zarr",
+                "--script",
+                "steps.json",
+                "--wait"
+            ])
+            .is_err()
+        );
+        assert!(try_parse(&["trace", "/data/set.zarr", "--scrub", "q:1"]).is_err());
+        assert!(try_parse(&["trace", "/data/set.zarr", "--orbit", "0,0"]).is_err());
     }
 
     /// The follow-up depths the diagnostic prints have to parse, or the default
@@ -5645,8 +6838,127 @@ mod tests {
             _ => panic!("expected trace show"),
         }
 
-        // One depth at a time: the two flags would otherwise both apply.
+        match parse(&[
+            "trace",
+            "show",
+            "run-17-3",
+            "--chunk",
+            "member-7/1/0/0/0/119/0",
+        ])
+        .command
+        {
+            Command::Trace {
+                command: Some(TraceCommand::Show { chunk, spatial, .. }),
+                ..
+            } => {
+                assert_eq!(chunk.as_deref(), Some("member-7/1/0/0/0/119/0"));
+                assert!(!spatial);
+            }
+            _ => panic!("expected trace show"),
+        }
+        match parse(&["trace", "show", "run-17-3", "--spatial"]).command {
+            Command::Trace {
+                command: Some(TraceCommand::Show { chunk, spatial, .. }),
+                ..
+            } => {
+                assert_eq!(chunk, None);
+                assert!(spatial);
+            }
+            _ => panic!("expected trace show"),
+        }
+
+        // One depth at a time: two flags would otherwise both apply.
         assert!(try_parse(&["trace", "show", "r", "--phases", "--phase", "wire"]).is_err());
+        assert!(try_parse(&["trace", "show", "r", "--chunk", "1/0/0/0/0/0", "--spatial"]).is_err());
+        assert!(try_parse(&["trace", "show", "r", "--spatial", "--phases"]).is_err());
+        assert!(
+            try_parse(&[
+                "trace",
+                "show",
+                "r",
+                "--chunk",
+                "1/0/0/0/0/0",
+                "--phase",
+                "wire"
+            ])
+            .is_err()
+        );
+    }
+
+    /// Both flags are optional, because the shape the command exists for is a
+    /// person's session on another machine that nobody can put a duration on.
+    #[test]
+    fn trace_watch_follows_the_workspace_until_asked_otherwise() {
+        match parse(&["trace", "watch"]).command {
+            Command::Trace {
+                dataset,
+                command: Some(TraceCommand::Watch { client_id, seconds }),
+                ..
+            } => {
+                assert_eq!(dataset, None);
+                assert_eq!(client_id, None);
+                assert_eq!(seconds, None);
+            }
+            _ => panic!("expected trace watch"),
+        }
+
+        match parse(&["trace", "watch", "--client-id", "3", "--seconds", "30"]).command {
+            Command::Trace {
+                command: Some(TraceCommand::Watch { client_id, seconds }),
+                ..
+            } => {
+                assert_eq!(client_id, Some(3));
+                assert_eq!(seconds, Some(30));
+            }
+            _ => panic!("expected trace watch"),
+        }
+    }
+
+    /// The narrower-window follow-up the text prints has to parse, and a
+    /// window composes with a depth: the window's phases are the phases asked
+    /// for.
+    #[test]
+    fn trace_show_takes_a_window_in_milliseconds() {
+        match parse(&["trace", "show", "run-17-3", "--window", "1200..4120"]).command {
+            Command::Trace {
+                command:
+                    Some(TraceCommand::Show {
+                        window,
+                        phases,
+                        timeout_seconds,
+                        ..
+                    }),
+                ..
+            } => {
+                assert_eq!(
+                    window,
+                    Some(trace::WindowRequest {
+                        start_ms: 1200.0,
+                        end_ms: 4120.0
+                    })
+                );
+                assert!(!phases);
+                assert_eq!(timeout_seconds, 60);
+            }
+            _ => panic!("expected trace show"),
+        }
+
+        match parse(&["trace", "show", "r", "--phases", "--window", "0..500"]).command {
+            Command::Trace {
+                command: Some(TraceCommand::Show { window, phases, .. }),
+                ..
+            } => {
+                assert!(phases);
+                assert_eq!(
+                    window.map(|window| window.to_string()).as_deref(),
+                    Some("0..500")
+                );
+            }
+            _ => panic!("expected trace show"),
+        }
+
+        assert!(try_parse(&["trace", "show", "r", "--window", "500..500"]).is_err());
+        assert!(try_parse(&["trace", "show", "r", "--window", "soon"]).is_err());
     }
 
     #[test]

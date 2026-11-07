@@ -1,38 +1,15 @@
 /**
- * Incremental per-entity snapshot assembly. Holds the single per-row
- * translation from a scene view-query record into an {@link EntitySnapshot}
- * (snake_case → camelCase plus the manifest join for `levels`,
- * `detailLevel`, `coarseLevel`, `parentId`, and `layoutPositionVox`), and
- * the fold that applies an incremental view-query delta on top of a prior
- * per-image snapshot map.
- *
- * The full builder (`snapshot.ts`) and the fold below share
- * {@link makeEntitySnapshot} so a delta-reconstructed snapshot is identical,
- * per row, to one assembled from the full visible set — the two paths cannot
- * drift because they run the same code.
- *
- * # Keying
- *
- * The snapshot map is keyed by `image_id`, the unique per-record identity. An
- * entity can own several images at different pyramid depths (distinct
- * `ideal_target_lod`); keying by `entity_id` would collapse those into one and
- * lose a level. See `lucida-core/src/query.rs`.
- *
- * # What a delta does and does not carry
- *
- * A delta reports only the *quantized* projection of each record —
- * `{ membership, visible, ideal_target_lod, kind }`. The continuous fields
- * (`importance`, `projectedDiagonalPx`, `projectedAreaPx2`, `centroidWorld`)
- * are excluded, so a record that appears in no delta between two full
- * snapshots keeps its last-reported continuous values, which may be stale.
- * That staleness is the source of the O(delta) win: a small camera nudge that
- * shifts only continuous fields yields an empty delta and no rebuild. Any
- * consumer that turns a continuous field into a discrete decision must
- * recompute that decision itself rather than infer it from delta membership.
+ * Per-row translation from a view-query record into an {@link EntitySnapshot},
+ * and the fold that applies a view-query delta onto a prior snapshot map. The
+ * full builder (`snapshot.ts`) and the fold share {@link makeEntitySnapshot},
+ * so the two paths cannot drift. `targetLevel` arrives from the core already
+ * pinned and clamped (ADR 0061); nothing here picks a level. The map is keyed
+ * by `image_id` because one entity can own images at several pyramid depths.
+ * A delta carries only quantized fields, so continuous fields on a carried-over
+ * record may be stale: never derive a discrete decision from them.
  */
 
 import type { ImageSpec } from "../../manifestTypes.ts";
-import type { DatasetSettings } from "../../tickCommon.ts";
 import type { EntitySnapshot } from "./types.ts";
 import type { SceneEpochs } from "../epochs.ts";
 
@@ -49,7 +26,8 @@ export interface ViewQueryEntityJson {
   projected_diagonal_px: number;
   projected_area_px2: number;
   centroid_world: [number, number, number];
-  ideal_target_lod: number;
+  target_level: number;
+  level_pinned: boolean;
   importance: number;
 }
 
@@ -74,47 +52,31 @@ export type ViewQueryDeltaJson =
 /**
  * Camera-independent inputs to {@link makeEntitySnapshot}: the manifest
  * joins (`imageSpecById`, `parentByEntityId`) and the fixed layout placement
- * (`positions`), plus the per-dataset settings that supply the detail-level
- * override. All four are stable across a camera move, so a caller assembles
- * them once and reuses them for every record in a delta.
+ * (`positions`). All three are stable across a camera move, so a caller
+ * assembles them once and reuses them for every record in a delta.
  */
 export interface SnapshotEntityDeps {
   imageSpecById: Map<string, ImageSpec>;
   parentByEntityId: Map<string, string | null>;
   positions: Record<string, [number, number]>;
-  dsSettings: DatasetSettings | undefined;
 }
 
-function generatedLevelIndices(imgSpec: ImageSpec | undefined): Set<number> {
-  return new Set(
-    (imgSpec?.multiscale.generated_levels ?? []).map((level) => level.level_index),
-  );
-}
-
-function selectableDetailLevels(imgSpec: ImageSpec | undefined): number[] {
+/**
+ * The image's source levels, ascending: every listed level except the
+ * generated coarse levels, which belong to the coarse tier. The
+ * set the prefetch lane's level step stays inside. The target level arrives
+ * from the core already inside it, so nothing here clamps.
+ */
+function sourceLevelsOf(imgSpec: ImageSpec | undefined): number[] {
   if (!imgSpec) return [0];
-  const generated = generatedLevelIndices(imgSpec);
+  const generated = new Set(
+    (imgSpec.multiscale.generated_levels ?? []).map((level) => level.level_index),
+  );
   const sourceLevels = imgSpec.multiscale.levels
     .map((level, idx) => level.level_index ?? idx)
     .filter((level) => !generated.has(level))
     .sort((a, b) => a - b);
   return sourceLevels.length > 0 ? sourceLevels : [0];
-}
-
-function resolveDetailLevel(
-  imgSpec: ImageSpec | undefined,
-  override: number | null | undefined,
-): number {
-  const selectable = selectableDetailLevels(imgSpec);
-  if (typeof override === "number" && selectable.includes(override)) {
-    return override;
-  }
-  if (typeof override === "number") {
-    const lowerOrEqual = selectable.filter((level) => level <= override).at(-1);
-    if (lowerOrEqual !== undefined) return lowerOrEqual;
-    return selectable[0] ?? 0;
-  }
-  return selectable.includes(0) ? 0 : selectable[0] ?? 0;
 }
 
 /**
@@ -133,16 +95,13 @@ export function resolveCoarseLevel(imgSpec: ImageSpec | undefined): number | nul
 
 /**
  * Translate one view-query record into an {@link EntitySnapshot}, joining the
- * scene payload with the manifest for `levels`, `detailLevel`, `coarseLevel`,
- * `parentId`, and `layoutPositionVox`.
+ * scene payload with the manifest for `levels`, `coarseLevel`, `parentId`,
+ * and `layoutPositionVox`. `targetLevel` is the record's own, as the core
+ * reported it.
  *
- * {@link EntitySnapshot} is a discriminated union: the record's `kind`
- * selects the variant. A `Tile` requires a non-null parent edge in the
- * manifest — a missing edge is a producer-invariant violation and throws
- * here, surfacing it at assembly rather than later in grouping.
- *
- * The single source of the per-row shape: both the full builder and the
- * delta fold call this, so the two paths produce byte-identical records.
+ * The record's `kind` selects the variant. A `Tile` with no parent edge in
+ * the manifest is a producer-invariant violation and throws here, at
+ * assembly, rather than later in grouping.
  */
 export function makeEntitySnapshot(
   row: ViewQueryEntityJson,
@@ -150,7 +109,6 @@ export function makeEntitySnapshot(
 ): EntitySnapshot {
   const imgSpec = deps.imageSpecById.get(row.image_id);
   const levels = imgSpec ? imgSpec.multiscale.levels : [];
-  const detailLevel = resolveDetailLevel(imgSpec, deps.dsSettings?.detail_level_override);
   const coarseLevel = resolveCoarseLevel(imgSpec);
   const layoutPositionVox =
     deps.positions[row.entity_id] ?? ([0, 0] as [number, number]);
@@ -161,8 +119,9 @@ export function makeEntitySnapshot(
     projectedDiagonalPx: row.projected_diagonal_px,
     projectedAreaPx2: row.projected_area_px2,
     centroidWorld: row.centroid_world,
-    idealTargetLod: row.ideal_target_lod,
-    detailLevel,
+    targetLevel: row.target_level,
+    levelPinned: row.level_pinned,
+    sourceLevels: sourceLevelsOf(imgSpec),
     coarseLevel,
     importance: row.importance,
     layoutPositionVox,
@@ -188,16 +147,13 @@ export function makeEntitySnapshot(
  * Fold a view-query delta onto the prior per-image snapshot map, producing
  * the next map keyed by `image_id`.
  *
- * - A `Full` payload (or `prev === null`) builds a fresh map from
- *   `visible_entities` — a self-contained snapshot that ignores any prior.
+ * - A `Full` payload builds a fresh map from `visible_entities`, ignoring
+ *   any prior.
  * - A `Delta` payload clones `prev`, deletes every `image_id` in `left`,
  *   then upserts every record in `entered` and `changed`.
  *
- * A `Delta` requires a non-null `prev`: the caller keys the fast path on a
- * live cursor and seeds from a full query otherwise (a fresh consumer's
- * first delta must be a `Full`). Applying a `Delta` against a null prior
- * would fabricate a snapshot from only the changed records, so it is a
- * caller error and throws rather than silently returning a partial map.
+ * A `Delta` with a null `prev` throws: it would fabricate a snapshot from
+ * only the changed records. The caller seeds from a full query instead.
  *
  * The returned map is a new object; `prev` is never mutated.
  */

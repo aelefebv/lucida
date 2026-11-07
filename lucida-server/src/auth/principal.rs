@@ -1,17 +1,11 @@
-//! `PrincipalExtractor` trait + its three production implementations.
+//! `PrincipalExtractor` trait + its production implementations.
 //!
-//! The trait is the OSS extension point (per ADR 0017): a self-hoster
-//! adding a new auth provider implements this trait once and wires it
-//! into the middleware. Saved-views, admin endpoints, and any future
-//! per-user feature consume the resulting `AuthPrincipal` and never
-//! see provider-specific details.
+//! The trait is the extension point for a new auth provider (ADR 0017).
+//! Everything downstream sees only the resulting `AuthPrincipal`.
 //!
-//! The production protected surface uses [`DualCredentialExtractor`]:
-//! explicit `Authorization: Bearer ...` credentials are resolved through
-//! [`BearerTokenExtractor`], while browser requests without an
-//! Authorization header fall back to [`SessionCookieExtractor`].
-//! Disabled auth still uses [`StubPrincipalExtractor`]. The older
-//! [`GoogleJwtPrincipalExtractor`] remains available for tests and
+//! [`DualCredentialExtractor`] resolves `Authorization: Bearer` through
+//! [`BearerTokenExtractor`] and otherwise falls through to the mode's own
+//! extractor. [`GoogleJwtPrincipalExtractor`] serves tests and
 //! integrations that validate Google ID tokens directly.
 
 use std::sync::Arc;
@@ -30,15 +24,13 @@ use super::dev::{default_dev_principal, read_dev_principal_cookie};
 use super::google_oauth::{GoogleOAuthClient, OAuthError, VerifiedClaims};
 use super::session_store::{LoginSession, LoginSessionStore};
 
-/// Best-effort client-IP for slice-8 audit-event fields. Looks at
-/// `X-Forwarded-For` first (proxy-aware) and falls back to the connection
-/// info axum exposes via `Parts::extensions` if present. Returns `None`
-/// when nothing is available — empty string in the audit field is fine
-/// (the operator running localhost dev won't have a forwarded IP).
+/// Best-effort client IP for audit-event fields: `X-Forwarded-For`
+/// first, then the connection info axum exposes. `None` when neither is
+/// present.
 ///
-/// We deliberately don't promise this is the *real* client; an attacker
-/// can spoof `X-Forwarded-For` if no trusted proxy strips it. The audit
-/// log is a starting point for forensics, not a source of truth.
+/// Not proof of the real client: `X-Forwarded-For` is spoofable without
+/// a trusted proxy that strips it. The audit log is a starting point for
+/// forensics, not a source of truth.
 pub(crate) fn client_ip(parts: &Parts) -> Option<String> {
     if let Some(hv) = parts.headers.get("x-forwarded-for")
         && let Ok(s) = hv.to_str()
@@ -88,6 +80,54 @@ impl AuthError {
 #[async_trait]
 pub trait PrincipalExtractor: Send + Sync + 'static {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError>;
+
+    /// Whether this server has a sign-in flow to send an
+    /// unauthenticated browser to.
+    ///
+    /// The middleware asks before serving the unauth landing page,
+    /// which bounces to `/auth/start`. That route exists only where a
+    /// provider runs its own sign-in, and a provider that authenticates
+    /// at a perimeter does not — so answering yes there would bounce
+    /// the browser into the SPA catch-all and straight back around.
+    /// Defaults to yes, which is right for every provider that mints
+    /// its own sessions.
+    fn offers_sign_in(&self) -> bool {
+        true
+    }
+}
+
+/// The one email normalization. Trims, lowercases, and refuses
+/// anything that is not an address.
+///
+/// Every provider runs its claim through this, so which provider a
+/// principal arrived through cannot change whether
+/// `LUCIDA_ADMIN_EMAILS` matches it. `None` means the value was blank
+/// or had no `@`, which callers treat as "this credential names
+/// nobody" rather than substituting a guess.
+pub(crate) fn normalize_email(raw: &str) -> Option<String> {
+    let email = raw.trim().to_ascii_lowercase();
+    (!email.is_empty() && email.contains('@')).then_some(email)
+}
+
+/// A display name for a provider that supplies none, built from the
+/// local part of the email: `test.viewer@example.com` → `Test Viewer`.
+pub(crate) fn display_name_from_email(email: &str) -> String {
+    let local = email.split('@').next().unwrap_or(email).trim();
+    if local.is_empty() {
+        return email.to_string();
+    }
+    local
+        .split(['.', '_', '-'])
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Read an RFC 6750-style bearer token from an Authorization header.
@@ -125,7 +165,7 @@ impl SessionCookieExtractor {
         Self { config, store }
     }
 
-    /// Why a row failed activeness, for slice-8 audit-logging branching.
+    /// Why a row failed activeness, for audit logging.
     /// `Active` = still valid. The two failure variants drive distinct
     /// `auth.session.expired.*` event names so ops can tell idle drift
     /// (a quiet user) apart from hard-cap rotations (a 30-day re-auth).
@@ -316,26 +356,44 @@ impl PrincipalExtractor for BearerTokenExtractor {
     }
 }
 
-/// Cookie + bearer extractor used by protected app routes.
+/// Bearer token first, then whatever else the mode accepts.
 ///
 /// If the request carries any Authorization header, treat it as an
-/// explicit bearer-auth attempt. This prevents a bad bearer token from
-/// silently falling back to an unrelated browser cookie.
+/// explicit bearer-auth attempt and answer on that alone. This prevents
+/// a bad bearer token from silently falling back to an unrelated
+/// browser credential — a caller who names a token and gets in as
+/// somebody else has been lied to.
+///
+/// Google mode falls back to the session cookie; IAP mode falls back to
+/// the assertion its perimeter attached. The order lives here once so
+/// the two modes cannot come to different conclusions about which
+/// credential wins, and so the command-line client keeps working under
+/// either without a per-mode branch.
 pub struct DualCredentialExtractor {
-    cookie: SessionCookieExtractor,
+    fallback: Arc<dyn PrincipalExtractor>,
     bearer: BearerTokenExtractor,
 }
 
 impl DualCredentialExtractor {
+    /// Bearer in front of the session cookie: the Google-mode pairing.
     pub fn new(
         config: Arc<AuthConfig>,
         session_store: Arc<dyn LoginSessionStore>,
         token_store: Arc<dyn BearerTokenStore>,
     ) -> Self {
-        Self {
-            cookie: SessionCookieExtractor::new(Arc::clone(&config), session_store),
-            bearer: BearerTokenExtractor::new(config, token_store),
-        }
+        let cookie = SessionCookieExtractor::new(Arc::clone(&config), session_store);
+        Self::with_fallback(
+            Arc::new(cookie),
+            BearerTokenExtractor::new(config, token_store),
+        )
+    }
+
+    /// Bearer in front of any other extractor.
+    pub fn with_fallback(
+        fallback: Arc<dyn PrincipalExtractor>,
+        bearer: BearerTokenExtractor,
+    ) -> Self {
+        Self { fallback, bearer }
     }
 }
 
@@ -345,25 +403,25 @@ impl PrincipalExtractor for DualCredentialExtractor {
         if req.headers.contains_key(axum::http::header::AUTHORIZATION) {
             self.bearer.extract(req).await
         } else {
-            self.cookie.extract(req).await
+            self.fallback.extract(req).await
         }
+    }
+
+    /// Whatever the fallback says. A browser never reaches the bearer
+    /// half, so the second position is the one that answers for the
+    /// mode.
+    fn offers_sign_in(&self) -> bool {
+        self.fallback.offers_sign_in()
     }
 }
 
-/// Convert a Google ID-token's verified claims into the
-/// `AuthPrincipal` we persist on the new `LoginSession` row at
-/// callback time.
+/// Convert a Google ID token's verified claims into the `AuthPrincipal`
+/// stored on the new `LoginSession` at callback time.
 ///
-/// Pure mapping (no policy). [`principal_or_rejection_from_claims`]
-/// layers hosted-domain + `email_verified` checks on top; other call
-/// sites that already enforce policy elsewhere aren't double-checking.
-///
-/// `display_name` falls back to the local part of the email when
-/// Google's `name` claim is absent (rare, but happens for accounts
-/// without a populated profile). `is_admin` is left `false` here;
-/// [`principal_or_rejection_from_claims`] overlays the derived value
-/// after the policy checks pass. Direct callers that don't go through
-/// that wrapper would need to apply the admin lookup themselves.
+/// Pure mapping, no policy: `display_name` falls back to the email's
+/// local part and `is_admin` stays `false`.
+/// [`principal_or_rejection_from_claims`] adds the policy checks and the
+/// admin lookup. A direct caller must apply the admin lookup itself.
 pub fn principal_from_claims(claims: &VerifiedClaims) -> AuthPrincipal {
     let display_name = claims.name.clone().unwrap_or_else(|| {
         claims
@@ -381,22 +439,14 @@ pub fn principal_from_claims(claims: &VerifiedClaims) -> AuthPrincipal {
     }
 }
 
-/// Why a callback rejected an otherwise-valid JWT.
+/// Why a callback rejected an otherwise-valid JWT. Each variant maps to
+/// a user-fixable error page.
 ///
-/// The two variants map 1:1 to user-fixable error pages:
-///
-/// * `Unverified` — Google says `email_verified: false`. User can fix
-///   this in their Google account settings; we don't accept the email
-///   either way (not knowing whether the address is theirs is the
-///   whole point of `email_verified`).
-/// * `HdMismatch` — JWT was valid but `hd` claim is missing or not in
-///   `LUCIDA_ALLOWED_HOSTED_DOMAINS`. User can fix by signing in with
-///   a different account that matches the allowed domain.
-///
-/// Carries the structured fields the callback handler logs and the
-/// error page renders. `attempted_hd` is `None` when the user signed
-/// in with a personal Gmail (no `hd` claim); the error page surfaces
-/// that case as "personal account".
+/// * `Unverified`: Google says `email_verified: false`, so the address
+///   is not proven to be theirs.
+/// * `HdMismatch`: the `hd` claim is missing or not in
+///   `LUCIDA_ALLOWED_HOSTED_DOMAINS`. `attempted_hd` is `None` for a
+///   personal account.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RejectionReason {
     Unverified {
@@ -409,25 +459,15 @@ pub enum RejectionReason {
     },
 }
 
-/// Apply the hosted-domain + email-verified policy on top of the raw
-/// mapping. Returns the principal on accept, or a structured rejection
-/// that the handler turns into a `/auth/error` redirect.
+/// Apply the hosted-domain and email-verified policy on top of the raw
+/// mapping, returning the principal or a rejection the handler turns into
+/// a `/auth/error` redirect.
 ///
-/// Order matters: `email_verified` is checked first because an
-/// unverified email shouldn't be considered for *any* allow-list
-/// decision (an attacker who can claim "alice@calicolabs.com" without
-/// proving control would otherwise look like a legitimate Calico user
-/// to the hd check). When `allowed` is empty the hd branch is skipped
-/// entirely — the OSS-permissive default per ADR-0017.
-///
-/// `allowed` contains lowercased domain strings; we lowercase the
-/// claim's `hd` value before comparison. Both sides being lowercased
-/// matches Calico's `calicolabs.com` and any future domain entries
-/// the operator might author with mixed case.
-///
-/// `admin_emails` (lowercased entries) drives `is_admin` on the
-/// accepted principal — same mechanism the cookie extractor uses, so
-/// callback-minted and cookie-extracted principals can't disagree.
+/// `email_verified` is checked first: an unproven address must not reach
+/// any allow-list decision. An empty `allowed` skips the hd check, the
+/// permissive default. Both sides of the hd comparison are lowercased.
+/// `admin_emails` sets `is_admin` the same way the cookie extractor does,
+/// so the two paths cannot disagree.
 pub fn principal_or_rejection_from_claims(
     claims: &VerifiedClaims,
     allowed: &std::collections::HashSet<String>,
@@ -514,17 +554,13 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
 /// Disabled-mode extractor: yields the browser's selected local-dev
 /// principal, falling back to `dev@local`. Touches no store.
 ///
-/// Wired in by [`crate::auth::middleware::build_extractor`] when
-/// `AuthMode::Disabled`. ADR-0018 promises that loopback default (and
-/// `LUCIDA_AUTH=disabled` more generally) bypasses sign-in entirely;
-/// this is the implementation that delivers on that promise. Without
-/// it, the cookie extractor would 401 every request and the SPA's
-/// `UnauthLanding` would bounce into a `/auth/start` that isn't
-/// registered → infinite redirect loop.
+/// Disabled mode bypasses sign-in entirely, and this is what delivers
+/// that. Without it the cookie extractor would 401 every request and the
+/// SPA would loop into an unregistered `/auth/start`.
 ///
-/// The fallback `dev@local` has `is_admin: true`: "no auth" means no
-/// gating unless the developer intentionally switches this browser to
-/// a non-admin dev principal for role/manual-testing.
+/// The fallback `dev@local` is not an admin: it is what a caller gets
+/// for presenting nothing. Admin paths need a deliberate switch to an
+/// admin dev principal on a loopback bind.
 pub struct StubPrincipalExtractor;
 
 #[async_trait]
@@ -1115,7 +1151,10 @@ mod tests {
         assert_eq!(p.email, "dev@local");
         assert_eq!(p.display_name, "Local Dev");
         assert!(p.picture_url.is_none());
-        assert!(p.is_admin);
+        assert!(
+            !p.is_admin,
+            "an identity nobody had to ask for is not an admin"
+        );
     }
 
     #[tokio::test]
@@ -1129,6 +1168,22 @@ mod tests {
         assert_eq!(p.email, "dev@local");
         assert_eq!(p.display_name, "Local Dev");
         assert!(p.picture_url.is_none());
+        assert!(!p.is_admin);
+    }
+
+    #[tokio::test]
+    async fn stub_extractor_grants_admin_only_through_the_dev_cookie() {
+        let config = AuthConfig::for_tests();
+        let dev = normalize_dev_principal("Admin@Example.com", Some("Admin"), true).unwrap();
+        let set_cookie = build_dev_principal_cookie(&config, &dev, false);
+        let inbound_cookie = set_cookie.split(';').next().unwrap();
+
+        let p = StubPrincipalExtractor
+            .extract(&parts_with_raw_cookie(inbound_cookie))
+            .await
+            .unwrap();
+
+        assert_eq!(p.email, "admin@example.com");
         assert!(p.is_admin);
     }
 

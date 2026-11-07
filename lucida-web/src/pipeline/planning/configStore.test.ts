@@ -3,6 +3,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { configStore } from "./configStore.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
+import {
+  createSyntheticEntity,
+  createSyntheticSnapshot,
+  createSyntheticState,
+  plan,
+} from "./index.ts";
+import type { LevelGeometry } from "../../manifestTypes.ts";
 
 const STORAGE_KEY = "lucida.planning.config";
 
@@ -27,59 +34,59 @@ describe("configStore — initial state", () => {
 
 describe("configStore — set", () => {
   it("updates the field and reflects via get", () => {
-    configStore.set("farThresholdPx", 99);
-    expect(configStore.get().farThresholdPx).toBe(99);
+    configStore.set("prefetchDepth", 99);
+    expect(configStore.get().prefetchDepth).toBe(99);
     // Other fields untouched.
-    expect(configStore.get().detailThresholdPx).toBe(
-      DEFAULT_PLANNING_CONFIG.detailThresholdPx,
+    expect(configStore.get().importanceWeight).toBe(
+      DEFAULT_PLANNING_CONFIG.importanceWeight,
     );
   });
 
   it("persists to localStorage under the schema-versioned envelope", () => {
-    configStore.set("farThresholdPx", 99);
+    configStore.set("prefetchDepth", 99);
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw!);
-    expect(parsed.schemaVersion).toBe(2);
-    expect(parsed.config.farThresholdPx).toBe(99);
+    expect(parsed.schemaVersion).toBe(3);
+    expect(parsed.config.prefetchDepth).toBe(99);
   });
 
   it("notifies subscribers", () => {
     const listener = vi.fn();
     configStore.subscribe(listener);
-    configStore.set("farThresholdPx", 99);
+    configStore.set("prefetchDepth", 99);
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
   it("is a no-op when the field already has the new value", () => {
     const listener = vi.fn();
     configStore.subscribe(listener);
-    configStore.set("farThresholdPx", DEFAULT_PLANNING_CONFIG.farThresholdPx);
+    configStore.set("prefetchDepth", DEFAULT_PLANNING_CONFIG.prefetchDepth);
     expect(listener).not.toHaveBeenCalled();
   });
 });
 
 describe("configStore — reset", () => {
   it("reset(field) restores that field to default and notifies", () => {
-    configStore.set("farThresholdPx", 99);
+    configStore.set("prefetchDepth", 99);
     const listener = vi.fn();
     configStore.subscribe(listener);
-    configStore.reset("farThresholdPx");
-    expect(configStore.get().farThresholdPx).toBe(
-      DEFAULT_PLANNING_CONFIG.farThresholdPx,
+    configStore.reset("prefetchDepth");
+    expect(configStore.get().prefetchDepth).toBe(
+      DEFAULT_PLANNING_CONFIG.prefetchDepth,
     );
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
   it("reset() with no arg restores every field to default", () => {
-    configStore.set("farThresholdPx", 99);
-    configStore.set("hysteresisPx", 12);
+    configStore.set("prefetchDepth", 99);
+    configStore.set("distanceWeight", 12);
     configStore.reset();
     expect(configStore.get()).toEqual(DEFAULT_PLANNING_CONFIG);
   });
 
   it("reset() clears localStorage when state matches defaults", () => {
-    configStore.set("farThresholdPx", 99);
+    configStore.set("prefetchDepth", 99);
     expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull();
     configStore.reset();
     expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
@@ -88,23 +95,23 @@ describe("configStore — reset", () => {
   it("reset(field) is a no-op when the field is already at default", () => {
     const listener = vi.fn();
     configStore.subscribe(listener);
-    configStore.reset("farThresholdPx");
+    configStore.reset("prefetchDepth");
     expect(listener).not.toHaveBeenCalled();
   });
 
   it("reset(field) leaves other tweaks intact and keeps localStorage populated", () => {
-    configStore.set("farThresholdPx", 99);
-    configStore.set("hysteresisPx", 12);
-    configStore.reset("farThresholdPx");
-    expect(configStore.get().farThresholdPx).toBe(
-      DEFAULT_PLANNING_CONFIG.farThresholdPx,
+    configStore.set("prefetchDepth", 99);
+    configStore.set("distanceWeight", 12);
+    configStore.reset("prefetchDepth");
+    expect(configStore.get().prefetchDepth).toBe(
+      DEFAULT_PLANNING_CONFIG.prefetchDepth,
     );
-    expect(configStore.get().hysteresisPx).toBe(12);
+    expect(configStore.get().distanceWeight).toBe(12);
     // Storage still holds the remaining tweak.
     const raw = localStorage.getItem(STORAGE_KEY);
     expect(raw).not.toBeNull();
     const parsed = JSON.parse(raw!);
-    expect(parsed.config.hysteresisPx).toBe(12);
+    expect(parsed.config.distanceWeight).toBe(12);
   });
 });
 
@@ -112,10 +119,10 @@ describe("configStore — subscribe", () => {
   it("returns an unsubscribe function that removes the listener", () => {
     const listener = vi.fn();
     const unsub = configStore.subscribe(listener);
-    configStore.set("farThresholdPx", 99);
+    configStore.set("prefetchDepth", 99);
     expect(listener).toHaveBeenCalledTimes(1);
     unsub();
-    configStore.set("farThresholdPx", 100);
+    configStore.set("prefetchDepth", 100);
     expect(listener).toHaveBeenCalledTimes(1);
   });
 
@@ -124,8 +131,8 @@ describe("configStore — subscribe", () => {
     const b = vi.fn();
     configStore.subscribe(a);
     configStore.subscribe(b);
-    configStore.set("farThresholdPx", 99);
-    configStore.set("hysteresisPx", 12);
+    configStore.set("prefetchDepth", 99);
+    configStore.set("distanceWeight", 12);
     expect(a).toHaveBeenCalledTimes(2);
     expect(b).toHaveBeenCalledTimes(2);
   });
@@ -137,17 +144,17 @@ describe("configStore — localStorage round-trip on module load", () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        schemaVersion: 2,
-        config: { farThresholdPx: 42 },
+        schemaVersion: 3,
+        config: { prefetchDepth: 42 },
       }),
     );
     // Re-import to force module re-evaluation.
     vi.resetModules();
     const mod = await import("./configStore.ts");
-    expect(mod.configStore.get().farThresholdPx).toBe(42);
+    expect(mod.configStore.get().prefetchDepth).toBe(42);
     // Other fields default.
-    expect(mod.configStore.get().detailThresholdPx).toBe(
-      DEFAULT_PLANNING_CONFIG.detailThresholdPx,
+    expect(mod.configStore.get().importanceWeight).toBe(
+      DEFAULT_PLANNING_CONFIG.importanceWeight,
     );
     mod.configStore.__resetForTesting();
   });
@@ -158,7 +165,7 @@ describe("configStore — localStorage round-trip on module load", () => {
       STORAGE_KEY,
       JSON.stringify({
         schemaVersion: 99,
-        config: { farThresholdPx: 42 },
+        config: { prefetchDepth: 42 },
       }),
     );
     vi.resetModules();
@@ -194,19 +201,75 @@ describe("configStore — localStorage round-trip on module load", () => {
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
-        schemaVersion: 2,
-        config: { farThresholdPx: 42 },
+        schemaVersion: 3,
+        config: { prefetchDepth: 42 },
       }),
     );
     vi.resetModules();
     const mod = await import("./configStore.ts");
     const cfg = mod.configStore.get();
-    expect(cfg.farThresholdPx).toBe(42);
+    expect(cfg.prefetchDepth).toBe(42);
     // Every other field present and default.
     for (const k of Object.keys(DEFAULT_PLANNING_CONFIG) as (keyof typeof DEFAULT_PLANNING_CONFIG)[]) {
-      if (k === "farThresholdPx") continue;
+      if (k === "prefetchDepth") continue;
       expect(cfg[k]).toBe(DEFAULT_PLANNING_CONFIG[k]);
     }
+    mod.configStore.__resetForTesting();
+  });
+});
+
+describe("configStore — the envelope the trace driver writes", () => {
+  /**
+   * The string is what `lucida trace --prefetch-depth 0` writes before the
+   * page loads, and the driver's own test holds its script to that shape.
+   * Together they are the browser-free half of "prefetch depth zero from
+   * the driver leaves the prefetch lane empty".
+   */
+  it("hydrates prefetch depth zero from the driver's envelope, and the plan has no prefetch lane", async () => {
+    localStorage.setItem(STORAGE_KEY, '{"schemaVersion":3,"config":{"prefetchDepth":0}}');
+    vi.resetModules();
+    const mod = await import("./configStore.ts");
+    const config = mod.configStore.get();
+    expect(config.prefetchDepth).toBe(0);
+
+    // A timeseries with ten timepoints at one level, so the default depth
+    // has something to look ahead to and depth zero visibly does not.
+    const level0: LevelGeometry = {
+      level_index: 0,
+      shape: [10, 1, 1, 256, 256],
+      chunk_shape: [1, 1, 1, 256, 256],
+      grid_shape: [10, 1, 1, 1, 1],
+      scale: [1, 1, 1, 1, 1],
+    };
+    const entity = createSyntheticEntity({
+      entityId: "e0",
+      kind: "Image",
+      projectedDiagonalPx: 200,
+      targetLevel: 0,
+      levels: [level0],
+    });
+    const snapshot = createSyntheticSnapshot({
+      entities: [entity],
+      visibleRegion: {
+        xyBoundsVox: [0, 0, 256, 256],
+        zRangeVox: [0, 1],
+        effectiveZoom: 1,
+        sortCenterVox: null,
+        frustumPlanes: null,
+      },
+      selection: {
+        t: 0,
+        c: 0,
+        z: 0,
+        visibleChannels: [0],
+        renderMode: "slice",
+        interactionState: "idle",
+      },
+    });
+    const driven = plan(snapshot, createSyntheticState(), config);
+    expect(driven.requests.some((request) => request.lane === "prefetch")).toBe(false);
+    const defaults = plan(snapshot, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
+    expect(defaults.requests.some((request) => request.lane === "prefetch")).toBe(true);
     mod.configStore.__resetForTesting();
   });
 });

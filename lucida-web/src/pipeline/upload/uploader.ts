@@ -1,12 +1,11 @@
 /**
- * Uploader — owns the CPU → GPU worker hand-off.
- *
- * CpuCache now owns delivery eligibility and optimistic sent state; the
- * uploader constructs wire messages, posts them, records telemetry, and
- * handles worker-feedback parsing.
+ * Owns the CPU-to-GPU worker hand-off: builds wire messages, posts them,
+ * records telemetry, and parses worker feedback. CpuCache decides delivery
+ * eligibility and tracks optimistic sent state.
  */
 
-import type { CpuCache, ReadyDelivery, ResidencyTier } from "../fetch/index.ts";
+import type { CpuCache, ReadyDelivery } from "../fetch/index.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -128,16 +127,11 @@ export class Uploader {
   }
 
   /**
-   * Push a selection-scrub update to the worker for a dataset whose visible
-   * set, geometry, LOD, matrices, and display state are unchanged — only the
-   * current T and/or Z moved. The worker re-points the dataset's most recent
-   * cold state at the new selection and re-ingests it, repacking the atlas
-   * indirection for the new plane/timepoint without re-transmitting the
-   * O(active-set) descriptor array.
-   *
-   * Snapshots `epochs` (like {@link sendColdState}) so a later
-   * {@link deliverToWorker} stamps the freshly-fetched T/Z chunks with the
-   * selection's epochs — the worker's retained cold state now expects them.
+   * Push a selection-scrub update for a dataset where only T and/or Z moved.
+   * The worker re-points its latest cold state at the new selection and
+   * re-ingests it, so the O(active-set) descriptor array is not re-sent.
+   * Snapshots `epochs` so a later {@link deliverToWorker} stamps the newly
+   * fetched T/Z chunks with the epochs the worker now expects.
    */
   sendColdStateSelection(args: {
     ctx: TickContext;
@@ -369,13 +363,10 @@ export class Uploader {
       return 0;
     }
 
-    // Categorical label overlays route to the r32uint label pool via a
-    // distinct message. In the 2D slice view the dispatch pre-slices to one
-    // Z-plane and reports the bytes actually sent (~64 KB); in the 3D volume
-    // view it forwards the whole ~8 MB chunk for the first-hit surface. Both
-    // report the REAL bytes sent so the per-frame budget throttles the
-    // upload (one item per frame) instead of fanning every chunk out at once
-    // — and labels never blank/starve because at least one always goes.
+    // Label overlays go to the r32uint label pool. The slice view pre-slices
+    // to one Z-plane (~64 KB); the volume view sends the whole ~8 MB chunk.
+    // Both report the real bytes sent so the frame budget throttles uploads,
+    // and at least one always goes so labels never starve.
     if (meta.isLabel) {
       const label = ctx.mode === "slice"
         ? dispatchLabelChunkDelivery(ctx.client, delivery, meta, sliceZ, epochs)
@@ -416,11 +407,7 @@ export class Uploader {
   }
 
   private deliveryResidencyTier(delivery: ReadyDelivery): ResidencyTier | null {
-    if (delivery.kind !== "chunk") return null;
-    return delivery.residencyTier ??
-      (delivery.lane === "coarse" || delivery.lane === "overview" || delivery.lane === "minimap"
-        ? "coarse"
-        : "detail");
+    return delivery.kind === "chunk" ? delivery.residencyTier : null;
   }
 
   // Worker feedback (wired in renderLoop.start)

@@ -1,18 +1,7 @@
-//! End-to-end happy-path lifecycle for server-stored bookmarks.
-//!
-//! Stands up the bookmarks router behind the real auth middleware
-//! (driven by a `MemorySessionStore` seeded with a known cookie) and
-//! walks through the full CRUD cycle the way a curl smoke test would:
-//!
-//!   POST   /api/bookmarks            → 201 with Location header
-//!   GET    /api/bookmarks            → 200 with the new entry visible
-//!   GET    /api/bookmarks/:id        → 200 with single body
-//!   PATCH  /api/bookmarks/:id        → 200 with renamed body
-//!   DELETE /api/bookmarks/:id        → 204
-//!   GET    /api/bookmarks/:id        → 404
-//!
-//! Plus the cross-user permission boundary: a second principal (Bob)
-//! gets 403 when trying to PATCH or DELETE Alice's bookmark.
+//! End-to-end happy-path lifecycle for server-stored bookmarks, behind the
+//! real auth middleware with a seeded `MemorySessionStore`: create, list,
+//! get, rename, delete, then 404. A second principal gets 403 on PATCH and
+//! DELETE of another user's bookmark.
 
 use std::sync::Arc;
 
@@ -32,10 +21,9 @@ use lucida_server::bookmarks::handlers::BookmarksState;
 use lucida_server::bookmarks::routes::router as bookmarks_router;
 use lucida_server::bookmarks::{BookmarkStore, MemoryBookmarkStore};
 
-/// Pre-seeded cookie value for the dev session — matches the canned
-/// principal `StubPrincipalExtractor` would yield in disabled mode, so
-/// the bookmarks lifecycle test that used to walk through `/auth/dev/login`
-/// still exercises the same `dev@local` identity.
+/// Pre-seeded cookie for the dev session. It matches the canned principal
+/// `StubPrincipalExtractor` yields in disabled mode, so the lifecycle test
+/// runs as `dev@local`.
 const DEV_COOKIE: &str = "dev-cookie";
 
 /// Build the test app. Three prebaked sessions: `alice@x`, `bob@x`,

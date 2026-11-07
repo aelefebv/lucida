@@ -1,5 +1,5 @@
 /**
- * The derivation module (#933). Every case asserts on the *diagnostic
+ * The derivation module. Every case asserts on the *diagnostic
  * document* — the verdict, the findings, the chain, the coverage block — and
  * never on how the derivation walked the tables. Which module owns a rollup is
  * not external behaviour; what the document says about a run is.
@@ -14,18 +14,35 @@ import { describe, expect, it } from "vitest";
 
 import {
   coldRemoteOpen,
+  fallbackAdapterOpen,
+  firstPaintOpen,
+  gpuTimedOpen,
   healthyLocalOpen,
   interactionRun,
+  interactionRunFor,
+  lateStallOpen,
+  mainThreadOnlyOpen,
+  makeHeader,
   makeReading,
   makeRow,
   makeRun,
   quietRun,
   saturatedReopen,
+  sendHeavyIdleRun,
+  slowPresentInteraction,
   uninstrumentedPrefixOpen,
 } from "./fixtures.ts";
 import { CONFIDENCE_WORDS, diagnoseDocument, diagnoseRun } from "./diagnose.ts";
 import { RULESET, RULESET_VERSION, PHASE_CLASSES } from "./ruleset.ts";
-import type { TraceDocument } from "../types.ts";
+import type { DiagnosticDocument } from "./types.ts";
+import {
+  CLIENT_MESSAGE_TYPES,
+  INPUT_KINDS,
+  interactionCause,
+  TRACE_SCHEMA_VERSION,
+  type GpuIdentity,
+  type TraceDocument,
+} from "../types.ts";
 
 const MS = 1_000;
 
@@ -137,6 +154,10 @@ describe("thresholds", () => {
           residentDetailChunks: 0,
           desiredCoarseChunks: 0,
           residentCoarseChunks: 0,
+          detailBytes: 0,
+          detailBudgetBytes: 0,
+          coarseBytes: 0,
+          coarseBudgetBytes: 0,
         },
       },
       rows: Array.from({ length: 30 }, (_, i) =>
@@ -272,6 +293,7 @@ describe("attribution", () => {
       diagnoseRun(coldRemoteOpen()),
       diagnoseRun(saturatedReopen()),
       diagnoseRun(interactionRun()),
+      diagnoseRun(interactionRunFor("orbit", { frameTimeUs: 80 * MS })),
       diagnoseRun(uninstrumentedPrefixOpen()),
       diagnoseRun(tiedChain()),
       diagnoseRun(rollupOnlyRun()),
@@ -287,6 +309,221 @@ describe("attribution", () => {
   });
 });
 
+describe("first paint on a cold open", () => {
+  const presentCeiling = RULESET.absolute.find((rule) => rule.phase === "browser.present")!;
+
+  it("reads a present breach on a run opened by content as a first-paint note, not a stall", () => {
+    const doc = diagnoseRun(firstPaintOpen());
+
+    expect(doc.findings.filter((finding) => finding.severity !== "note")).toEqual([]);
+    const note = doc.findings.find((finding) => finding.rule === RULESET.firstPaint.id);
+    expect(note).toBeDefined();
+    expect(note?.subject).toBe("browser.present");
+    expect(note?.observed.stat).toBe("p95");
+    expect(note?.observed.ms).toBeGreaterThan(presentCeiling.ceilMs);
+    // The ceiling that measured it still prints; the rationale is first paint's.
+    expect(note?.threshold).toEqual({
+      kind: "absolute",
+      value: presentCeiling.ceilMs,
+      why: RULESET.firstPaint.why,
+    });
+    expect(doc.findings.some((finding) => finding.rule === presentCeiling.id)).toBe(false);
+  });
+
+  it("reads an upload breach the same way, because upload also runs to a frame dispatch", () => {
+    const uploadCeiling = RULESET.absolute.find((rule) => rule.phase === "browser.upload")!;
+    const doc = diagnoseRun(firstPaintOpen("upload"));
+
+    expect(doc.findings.filter((finding) => finding.severity !== "note")).toEqual([]);
+    const note = doc.findings.find((finding) => finding.rule === RULESET.firstPaint.id);
+    expect(note?.subject).toBe("browser.upload");
+    expect(note?.observed.ms).toBeGreaterThan(uploadCeiling.ceilMs);
+    expect(doc.verdict.kind).toBe("clear");
+    expect(doc.verdict.text).toContain("browser.upload ran p95");
+    expect(doc.verdict.text).toContain("first paint");
+  });
+
+  it("says first paint in the verdict and offers the interaction run that confirms a regression", () => {
+    const doc = diagnoseRun(firstPaintOpen());
+
+    expect(doc.verdict.kind).toBe("clear");
+    expect(doc.verdict.text).toContain("first paint");
+    expect(doc.verdict.text).toContain("browser.present ran p95");
+    expect(doc.verdict.text).toContain("interaction run after settle");
+    const confirm = doc.next.find((step) => step.why.includes("first paint"));
+    expect(confirm?.why).toContain("browser.present");
+    expect(confirm?.command).toBe("lucida trace ds --pan 120,60");
+  });
+
+  it("says what a phase held when it led the chain, as a volume open's upload does", () => {
+    const doc = diagnoseRun(firstPaintOpen("upload", { heldMs: 800 }));
+
+    expect(doc.findings.filter((finding) => finding.severity !== "note")).toEqual([]);
+    expect(doc.verdict.kind).toBe("clear");
+    expect(doc.verdict.text).toMatch(/browser\.upload held 800 ms \(\d+% of the chain\) on the first paint/);
+  });
+
+  it("keeps the stall when a dataset is added to a live page, whose cache is warm", () => {
+    const doc = diagnoseRun(firstPaintOpen("present", { warm: true }));
+
+    expect(doc.run.cause?.epoch).toBe("content");
+    expect(doc.run.warmth).toContain("warm");
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.findings[0].rule).toBe(presentCeiling.id);
+    expect(doc.findings.some((finding) => finding.rule === RULESET.firstPaint.id)).toBe(false);
+  });
+
+  it("keeps the stall on an interaction run with the same present, for each of the five", () => {
+    for (const input of INPUT_KINDS) {
+      const doc = diagnoseRun(slowPresentInteraction(input));
+
+      const lead = doc.findings[0];
+      expect(lead.severity, input).toBe("stall");
+      expect(lead.rule, input).toBe(presentCeiling.id);
+      expect(lead.subject, input).toBe("browser.present");
+      expect(doc.verdict.kind, input).toBe("stall");
+      expect(doc.verdict.text, input).toContain("browser.present ran p95");
+      expect(doc.findings.some((finding) => finding.rule === RULESET.firstPaint.id), input).toBe(false);
+      expect(doc.next.some((step) => step.why.includes("first paint")), input).toBe(false);
+    }
+  });
+
+  it("leaves every other ceiling a stall on a cold open", () => {
+    const doc = diagnoseRun(coldRemoteOpen());
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.findings.some((finding) => finding.rule === RULESET.firstPaint.id)).toBe(false);
+  });
+});
+
+describe("interaction runs", () => {
+  it("carries the cause that names the input, for each of the five", () => {
+    for (const input of INPUT_KINDS) {
+      const doc = diagnoseRun(interactionRunFor(input));
+
+      expect(doc.run.cause, input).toEqual(interactionCause(input));
+      expect(doc.run.cause?.source, input).toBe(input);
+    }
+  });
+
+  it("does not call a gesture at a healthy frame rate a stall", () => {
+    // A drag ticks every frame, so its main-thread share is near total at any
+    // frame rate. The ceiling, not share, is the criterion.
+    for (const input of INPUT_KINDS) {
+      const doc = diagnoseRun(interactionRunFor(input));
+
+      expect(doc.verdict.kind, input).toBe("clear");
+      expect(doc.findings.filter((f) => f.severity !== "note"), input).toEqual([]);
+      expect(doc.attribution.confidence, input).toBe("unattributed");
+    }
+  });
+
+  it("fails a gesture whose frame time exceeds the ceiling, naming the input", () => {
+    const doc = diagnoseRun(interactionRunFor("orbit", { frameTimeUs: 80 * MS }));
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain("orbit");
+    expect(doc.verdict.text).toContain(`${RULESET.interaction.ceilMs} ms`);
+    const lead = doc.findings[0];
+    expect(lead.rule).toBe(RULESET.interaction.id);
+    expect(lead.subject).toBe(RULESET.interaction.phase);
+    expect(lead.observed.stat).toBe("p95");
+    expect(lead.observed.ms).toBe(80);
+    expect(lead.threshold).toEqual({
+      kind: "absolute",
+      value: RULESET.interaction.ceilMs,
+      why: RULESET.interaction.why,
+    });
+    expect(doc.attribution.confidence).toBe("aggregate-only");
+    expect(doc.attribution.cause).toBe(RULESET.interaction.phase);
+    expect(doc.attribution.why).toContain(`${RULESET.interaction.ceilMs} ms`);
+  });
+
+  it("applies the ceiling to interaction runs only", () => {
+    const open = interactionRunFor("orbit", { frameTimeUs: 80 * MS });
+    open.header.cause = { epoch: "content", dirtyKind: "interactive", source: "dataset_added" };
+    const doc = diagnoseRun(open);
+
+    expect(doc.findings.some((f) => f.rule === RULESET.interaction.id)).toBe(false);
+  });
+});
+
+describe("render timing and the adapter", () => {
+  it("carries GPU pass time beside main-thread time when the adapter offers timestamp queries", () => {
+    const doc = diagnoseRun(gpuTimedOpen());
+
+    expect(doc.run.adapter?.timestampQueries).toBe(true);
+    expect(doc.renderTiming.mainThread).toEqual({ samples: 12, p50Ms: 3.5, p95Ms: 3.5, maxMs: 3.5 });
+    // Eleven, not twelve: the first tick's frame had not been read back yet.
+    expect(doc.renderTiming.gpuPass).toEqual({
+      recorded: true,
+      samples: 11,
+      p50Ms: 1.2,
+      p95Ms: 2.4,
+      maxMs: 2.4,
+    });
+  });
+
+  it("states why GPU time is absent instead of reporting a zero", () => {
+    const doc = diagnoseRun(mainThreadOnlyOpen());
+
+    expect(doc.renderTiming.mainThread?.samples).toBe(12);
+    expect(doc.renderTiming.gpuPass).toMatchObject({ recorded: false, reason: "no-timestamp-queries" });
+    expect(doc.renderTiming.gpuPass).toHaveProperty("statement", expect.stringContaining("main-thread time"));
+  });
+
+  it("tells an adapter that offers timestamp queries from one whose frames were never read back", () => {
+    const gpu = { ...makeHeader().gpu!, timestampQueries: true };
+    const doc = diagnoseRun(makeRun({ header: { gpu }, readings: [makeReading(10 * MS)] }));
+
+    expect(doc.renderTiming.gpuPass).toMatchObject({ recorded: false, reason: "no-frame-read-back" });
+  });
+
+  it("says the adapter is unknown when the run closed before one was identified", () => {
+    const doc = diagnoseRun(makeRun({ header: { gpu: null }, readings: [makeReading(10 * MS)] }));
+
+    expect(doc.run.adapter).toBeNull();
+    expect(doc.run.gpu).toBe("unknown");
+    expect(doc.run.adapterKind).toEqual({ kind: "not-identified", label: "adapter not identified" });
+    expect(doc.renderTiming.gpuPass).toMatchObject({ recorded: false, reason: "adapter-unknown" });
+  });
+
+  it("names the adapter's kind in the run identity, in both states", () => {
+    const fallback = diagnoseRun(fallbackAdapterOpen());
+    expect(fallback.run.adapter?.fallback).toBe(true);
+    expect(fallback.run.gpu).toBe("generic software (software rasterizer)");
+    expect(fallback.run.adapterKind).toEqual({
+      kind: "software-fallback",
+      label: "software fallback adapter",
+    });
+    expect(fallback.renderTiming.mainThread?.p95Ms).toBe(42);
+
+    const hardware = diagnoseRun(healthyLocalOpen());
+    expect(hardware.run.gpu).toBe("apple metal-3");
+    expect(hardware.run.adapterKind).toEqual({ kind: "hardware", label: "hardware adapter" });
+  });
+
+  it("reads a header that never recorded the new adapter facts as not having recorded them", () => {
+    // The shape of a run file written before the adapter record carried these fields.
+    const old = { vendor: "v", architecture: "a", device: "", description: "" } as GpuIdentity;
+    const doc = diagnoseRun(makeRun({ header: { gpu: old }, readings: [makeReading(10 * MS)] }));
+
+    expect(doc.run.adapterKind).toEqual({ kind: "not-recorded", label: "adapter kind not recorded" });
+    expect(doc.renderTiming.gpuPass).toMatchObject({ recorded: false, reason: "not-recorded" });
+
+    // A browser that reported neither fallback flag is the same answer.
+    const unsaid = { ...makeHeader().gpu!, fallback: null };
+    expect(diagnoseRun(makeRun({ header: { gpu: unsaid } })).run.adapterKind.kind).toBe("not-recorded");
+  });
+
+  it("has no main-thread figure either when the run recorded no readings", () => {
+    const doc = diagnoseRun(makeRun({ readings: [] }));
+
+    expect(doc.renderTiming.mainThread).toBeNull();
+    expect(doc.renderTiming.gpuPass.recorded).toBe(false);
+  });
+});
+
 describe("the document", () => {
   it("ships the versioned ruleset with every rationale", () => {
     const doc = diagnoseRun(healthyLocalOpen());
@@ -299,6 +536,7 @@ describe("the document", () => {
       doc.ruleset.share,
       doc.ruleset.prefix,
       doc.ruleset.compare,
+      doc.ruleset.interaction,
     ]) {
       expect(rule.why).not.toBe("");
     }
@@ -310,8 +548,8 @@ describe("the document", () => {
 
     // Twenty rows against four thousand: two hundred times the rows for a few
     // hundred bytes. What moves is the width of a count and of a named chunk
-    // key — the rollup now names the worst row per phase (#936), so there are
-    // a handful of those rather than one, and still no per-row list anywhere.
+    // key: the rollup names the worst row per phase, so there are a handful
+    // of those rather than one, and still no per-row list anywhere.
     expect(large).toBeLessThan(small + 400);
   });
 
@@ -329,9 +567,18 @@ describe("the document", () => {
     expect(doc.coverage.notHealthSignals.every((s) => s.value === 0)).toBe(true);
   });
 
+  it("refuses a run recorded under another trace schema, and says which", () => {
+    const old = TRACE_SCHEMA_VERSION - 1;
+    const run = makeRun({ header: { schemaVersion: old } });
+
+    expect(() => diagnoseRun(run)).toThrow(
+      new RegExp(`trace schema ${old}; this build reads schema ${TRACE_SCHEMA_VERSION}`),
+    );
+  });
+
   it("reads the newest run out of a trace document", () => {
     const traceDocument: TraceDocument = {
-      schemaVersion: 1,
+      schemaVersion: TRACE_SCHEMA_VERSION,
       exportedAtEpochMs: 1_700_000_000_000,
       retention: {
         residentCapBytes: 8_000_000,
@@ -351,6 +598,50 @@ describe("the document", () => {
 
     expect(diagnoseDocument(traceDocument).runId).toBe("remote-cold");
     expect(diagnoseDocument(traceDocument, { runId: "local-healthy" }).runId).toBe("local-healthy");
+  });
+
+  it("carries the worst row's chunk and the spatial summary, and names both as next steps", () => {
+    const doc = diagnoseRun(healthyLocalOpen());
+
+    // The healthy open's largest browser phase is the wire, and row 119 is the
+    // one that spent 240 ms on it.
+    expect(doc.chunk.selector).toBe("member-7/1/0/0/0/119/0");
+    expect(doc.chunk.chosen).toContain("browser.wire");
+    expect(doc.chunk.rows).toHaveLength(1);
+    expect(doc.chunk.rows[0].phases.map((phase) => phase.phase)).toHaveLength(6);
+    expect(doc.chunk.rows[0].queue).not.toBeNull();
+    expect(doc.chunk.rows[0].ageMs).toBe(246.5);
+    expect(doc.spatial.groupCount).toBe(1);
+    expect(doc.spatial.groups[0].n).toBe(120);
+
+    const commands = doc.next.map((step) => step.command);
+    expect(commands).toContain("lucida trace show local-healthy --chunk member-7/1/0/0/0/119/0");
+    expect(commands).toContain("lucida trace show local-healthy --spatial");
+  });
+
+  it("looks up the chunk the caller names, and still points the next step at the worst row", () => {
+    const named = diagnoseRun(healthyLocalOpen(), { chunk: "1/0/0/0/5/0" });
+    expect(named.chunk.chosen).toBe("named by the caller");
+    expect(named.chunk.rowCount).toBe(1);
+    expect(named.chunk.rows[0].entityId).toBe("member-5");
+    expect(named.next.map((step) => step.command)).toContain(
+      "lucida trace show local-healthy --chunk member-7/1/0/0/0/119/0",
+    );
+
+    const absent = diagnoseRun(healthyLocalOpen(), { chunk: "1/0/0/0/999/0" });
+    expect(absent.chunk.rowCount).toBe(0);
+    expect(absent.chunk.statement).toContain("not in this run");
+  });
+
+  it("has an empty lookup and no chunk step on a run with no rows, and a spatial step regardless", () => {
+    const doc = diagnoseRun(makeRun({ header: { runId: "empty", durationUs: 100 * MS } }));
+
+    expect(doc.chunk.selector).toBeNull();
+    expect(doc.chunk.rowCount).toBe(0);
+    expect(doc.spatial.rowCount).toBe(0);
+    const commands = doc.next.map((step) => step.command);
+    expect(commands.some((command) => command.includes("--chunk"))).toBe(false);
+    expect(commands).toContain("lucida trace show empty --spatial");
   });
 
   it("leads with truncation rather than footnoting it", () => {
@@ -379,9 +670,202 @@ describe("the document", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+describe("the send side", () => {
+  it("carries the per-type totals of a send-heavy idle run as rates over the wall clock", () => {
+    const doc = diagnoseRun(sendHeavyIdleRun());
+
+    expect(doc.sent.messages).toBe(462);
+    expect(doc.sent.bytes).toBe(30_376);
+    expect(doc.sent.bytesPerS).toBe(3_038);
+    const byType = Object.fromEntries(doc.sent.byType.map((entry) => [entry.type, entry]));
+    expect(byType.cursor).toEqual({
+      type: "cursor", label: "cursor", messages: 400, bytes: 16_000, bytesPerS: 1_600,
+    });
+    expect(byType.presence).toMatchObject({ messages: 40, bytes: 12_000, bytesPerS: 1_200 });
+    expect(byType.viewerInterest).toMatchObject({ messages: 10, bytes: 1_200, bytesPerS: 120 });
+    expect(byType.chunkRequest).toMatchObject({ messages: 12, bytes: 1_176, bytesPerS: 118 });
+    expect(byType.assetRequest).toMatchObject({ messages: 0, bytes: 0, bytesPerS: 0 });
+  });
+
+  it("reads the run's totals rather than summing the tick samples", () => {
+    const run = sendHeavyIdleRun();
+    expect(run.ticks.every((tick) => tick.sent.cursor.messages === 0)).toBe(true);
+
+    const cursor = diagnoseRun(run).sent.byType.find((entry) => entry.type === "cursor");
+    expect(cursor?.messages).toBe(400);
+  });
+
+  it("names every type of the closed set, in its order, zeros included", () => {
+    const doc = diagnoseRun(quietRun());
+
+    expect(doc.sent.byType.map((entry) => entry.type)).toEqual([...CLIENT_MESSAGE_TYPES]);
+    expect(doc.sent.byType.every((entry) => entry.messages === 0 && entry.bytesPerS === 0)).toBe(true);
+    expect(doc.sent.bytesPerS).toBe(0);
+  });
+});
+
+describe("a window", () => {
+  /** Everything the window scopes, with the fields that merely name the window set aside. */
+  function scoped(doc: DiagnosticDocument) {
+    const { window: _window, next: _next, coverage, ...rest } = doc;
+    const { window: _clip, ...coverageRest } = coverage;
+    return { ...rest, coverage: coverageRest };
+  }
+
+  function windowOf(command: string): [number, number] {
+    const match = /--window (\d+(?:\.\d+)?)\.\.(\d+(?:\.\d+)?)/.exec(command);
+    if (!match) throw new Error(`no --window on ${command}`);
+    return [Number(match[1]), Number(match[2])];
+  }
+
+  it("reads the whole run when the window is the whole run", () => {
+    for (const run of [
+      healthyLocalOpen(),
+      coldRemoteOpen(),
+      saturatedReopen(),
+      interactionRun(),
+      uninstrumentedPrefixOpen(),
+      lateStallOpen(),
+    ]) {
+      const whole = diagnoseRun(run);
+      const wallMs = whole.run.wallMs;
+      const windowed = diagnoseRun(run, { window: { startMs: 0, endMs: wallMs } });
+
+      expect(scoped(windowed), run.header.runId).toEqual(scoped(whole));
+      expect(whole.window).toBeNull();
+      expect(windowed.window).toEqual({
+        startMs: 0,
+        endMs: wallMs,
+        spanMs: wallMs,
+        ofWallMs: wallMs,
+        whole: true,
+      });
+      expect(windowed.coverage.window).toMatchObject({ clippedRows: 0, unplacedRows: 0 });
+    }
+  });
+
+  it("moves the verdict when the window excludes a stall in the second half", () => {
+    const run = lateStallOpen();
+    const decodeCeilMs = RULESET.absolute.find((rule) => rule.phase === "browser.decode")!.ceilMs;
+
+    const whole = diagnoseRun(run);
+    expect(whole.verdict.kind).toBe("stall");
+    expect(whole.verdict.text).toContain("browser.decode");
+
+    const firstHalf = diagnoseRun(run, { window: { startMs: 0, endMs: 1_000 } });
+    expect(firstHalf.window).toEqual({
+      startMs: 0,
+      endMs: 1_000,
+      spanMs: 1_000,
+      ofWallMs: 2_000,
+      whole: false,
+    });
+    expect(firstHalf.verdict.kind).toBe("clear");
+    expect(firstHalf.findings.filter((f) => f.severity !== "note")).toEqual([]);
+    const decode = firstHalf.phases.find((phase) => phase.id === "browser.decode");
+    expect(decode?.n).toBe(60);
+    expect(decode!.p95Ms).toBeLessThan(decodeCeilMs);
+
+    const secondHalf = diagnoseRun(run, { window: { startMs: 1_000, endMs: 2_000 } });
+    expect(secondHalf.verdict.kind).toBe("stall");
+    expect(secondHalf.verdict.text).toContain("browser.decode");
+    expect(secondHalf.phases.find((phase) => phase.id === "browser.decode")?.n).toBe(40);
+  });
+
+  it("counts a row that crosses an edge for the part inside, and says so", () => {
+    const run = makeRun({
+      header: { durationUs: 1_000 * MS },
+      rows: [makeRow({ startUs: 100 * MS, durations: { wire: 200 * MS } }, 0)],
+    });
+    const doc = diagnoseRun(run, { window: { startMs: 200, endMs: 400 } });
+
+    const wire = doc.phases.find((phase) => phase.id === "browser.wire");
+    expect(wire).toMatchObject({ n: 1, p50Ms: 100, maxMs: 100, totalMs: 100, concurrencyFactor: 0.5 });
+    expect(wire!.extent).toEqual({ firstStartMs: 200, lastEndMs: 300, positionedN: 1 });
+    expect(doc.coverage.wallMs).toBe(200);
+    expect(doc.coverage.accountedMs).toBe(100);
+    expect(doc.coverage.accountedPct).toBe(50);
+    expect(doc.coverage.window).toMatchObject({ clippedRows: 1, unplacedRows: 0 });
+    expect(doc.coverage.window!.statement).toContain("part inside");
+  });
+
+  it("clamps a window to the run and refuses an empty one", () => {
+    const run = quietRun();
+    const clamped = diagnoseRun(run, { window: { startMs: 500, endMs: 99_999 } });
+    expect(clamped.window).toMatchObject({ startMs: 500, endMs: 1_500, spanMs: 1_000, whole: false });
+
+    expect(() => diagnoseRun(run, { window: { startMs: 800, endMs: 300 } })).toThrow(/empty/);
+    expect(() => diagnoseRun(run, { window: { startMs: 2_000, endMs: 3_000 } })).toThrow(/empty/);
+  });
+
+  it("reads the wall the document prints as the whole run", () => {
+    // The document rounds the wall to a tenth of a millisecond. A reader who
+    // types that figure back must get the whole run, not a window a few
+    // microseconds short of it that leaves the unplaced rows out.
+    const run = coldRemoteOpen();
+    run.header.durationUs = 4_120_320;
+    const whole = diagnoseRun(run);
+    expect(whole.run.wallMs).toBe(4_120.3);
+
+    const typedBack = diagnoseRun(run, { window: { startMs: 0, endMs: whole.run.wallMs } });
+    expect(typedBack.window).toMatchObject({ endMs: 4_120.32, whole: true });
+    expect(typedBack.phases.find((phase) => phase.id === "server.backend-read")?.n).toBe(60);
+    expect(typedBack.coverage.window).toMatchObject({ unplacedRows: 0 });
+  });
+
+  it("leaves rows it cannot place out of a narrower window, and counts them", () => {
+    // The cold open's sixty server-side chunk rows carry no placement: they
+    // are real, and a window cannot say whether they fell inside it.
+    const whole = diagnoseRun(coldRemoteOpen());
+    expect(whole.phases.find((phase) => phase.id === "server.backend-read")?.n).toBe(60);
+    expect(whole.coverage.window).toBeNull();
+
+    const tail = diagnoseRun(coldRemoteOpen(), { window: { startMs: 3_700, endMs: 4_120 } });
+    expect(tail.phases.find((phase) => phase.id === "server.backend-read")).toBeUndefined();
+    expect(tail.phases.find((phase) => phase.id === "browser.wire")?.n).toBe(60);
+    expect(tail.coverage.window).toMatchObject({ unplacedRows: 60 });
+    expect(tail.coverage.window!.statement).toContain("no position");
+  });
+
+  it("starts the critical path at the window and ends it at the last chunk presented inside", () => {
+    const run = healthyLocalOpen();
+    const doc = diagnoseRun(run, { window: { startMs: 100, endMs: 330 } });
+    expect(doc.criticalPath.kind).toBe("chain");
+    expect(doc.criticalPath.fromMs).toBe(100);
+    expect(doc.criticalPath.targetAtMs).toBeGreaterThan(300);
+    // The one slow row was already on the wire when the window opened, so the
+    // chain begins on its wire rather than on an unrecorded prefix, and the
+    // open, settled long before the window, is not on it.
+    expect(doc.criticalPath.segments[0].label).toBe("browser.wire");
+    expect(doc.criticalPath.segments.some((s) => s.label === "open.metadata-read")).toBe(false);
+    expect(doc.criticalPath.chainAccountedPct).toBe(100);
+
+    // Nothing reaches a frame between 100 and 250 ms.
+    const between = diagnoseRun(run, { window: { startMs: 100, endMs: 250 } });
+    expect(between.criticalPath.kind).toBe("undefined");
+    expect(between.criticalPath.undefinedReason).toContain("100..250");
+  });
+
+  it("carries the window on every follow-up command and names a narrower one inside it", () => {
+    const whole = diagnoseRun(lateStallOpen());
+    const narrower = whole.next.find((step) => step.command.includes("--window"));
+    expect(narrower).toBeDefined();
+    const [start, end] = windowOf(narrower!.command);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeLessThanOrEqual(whole.run.wallMs);
+    expect(end - start).toBeLessThan(whole.run.wallMs);
+
+    const windowed = diagnoseRun(lateStallOpen(), { window: { startMs: start, endMs: end } });
+    const shows = windowed.next.filter((step) => step.command.startsWith("lucida trace show"));
+    expect(shows.length).toBeGreaterThan(1);
+    for (const step of shows) expect(step.command).toContain("--window ");
+    const inner = shows.map((step) => windowOf(step.command));
+    expect(inner.some(([a, b]) => a === start && b === end)).toBe(true);
+    expect(inner.some(([a, b]) => a >= start && b <= end && b - a < end - start)).toBe(true);
+  });
+});
+
 // Runs built for one case each.
-// ---------------------------------------------------------------------------
 
 /** The healthy open with every duration multiplied, for the comparative rule. */
 function scaledOpen(factor: number) {

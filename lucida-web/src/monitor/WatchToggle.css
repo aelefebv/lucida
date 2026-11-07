@@ -1,0 +1,60 @@
+.monitor-watch {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+}
+
+/* Left to wrap, this sentence sets the height of the dock's header row.
+   The span's title carries the whole of it. The dock decides the text color,
+   so the status follows it: dimmed while off, full strength while on. */
+.monitor-watch-status {
+  color: color-mix(in srgb, currentColor 68%, transparent);
+  font-size: var(--lc-text-sm);
+  max-width: 32ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitor-watch-on .monitor-watch-status {
+  color: inherit;
+}
+
+.monitor-watch .lc-button[data-selected] {
+  box-shadow: inset 0 0 0 1px var(--lc-accent);
+  color: var(--lc-accent-text);
+}
+
+/* Fixed and above every surface: a stream that is on has to be visible from
+   wherever somebody is, not only from where they started it. */
+.watch-stream-banner {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: var(--lc-z-toast);
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  padding: var(--lc-space-1) var(--lc-space-1) var(--lc-space-1) var(--lc-space-3);
+  border: 1px solid var(--lc-border);
+  border-top: none;
+  border-radius: 0 0 var(--lc-radius-lg) var(--lc-radius-lg);
+  background: var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-sm);
+}
+
+/* The live indicator: a stream that is on reads as on at a glance. */
+.watch-stream-banner-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-danger);
+  box-shadow: 0 0 0 3px var(--lc-danger-subtle);
+}

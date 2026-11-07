@@ -10,9 +10,7 @@ import {
 import type { DatasetManifest, ImageSpec, LabelSpec } from "../../manifestTypes.ts";
 
 /** Explicit all-visible settings of length `n`. Masks are opt-in (hidden by
- *  default), so a test that exercises level selection / the 3D memory budget /
- *  mode-eligibility with every mask SHOWN must turn them on explicitly rather
- *  than relying on an all-visible default (there no longer is one). */
+ *  default), so a test that needs every mask shown must turn them on. */
 function allOn(n: number): { visible: boolean; opacity: number }[] {
   return Array.from({ length: n }, () => ({ visible: true, opacity: 0.5 }));
 }
@@ -130,7 +128,7 @@ describe("computeLabelChunkRequests", () => {
     ).toEqual([]);
   });
 
-  // --- MAJOR 2: clamp/map label t to the label's own T extent ---
+  // --- clamp/map label t to the label's own T extent ---
 
   function image5(id: string, shape5: number[], chunk5: number[], scale5: number[], dtype = "Uint32"): ImageSpec {
     return {
@@ -168,7 +166,7 @@ describe("computeLabelChunkRequests", () => {
     expect(reqs[0].chunkKey).toBe("0/0/0/0/0/0"); // t component is 0, not 7
   });
 
-  // --- MAJOR 3: bounded level pick / no oversized texture ---
+  // --- bounded level pick / no oversized texture ---
 
   it("skips a giant single-scale label with no fitting level", () => {
     const manifest: DatasetManifest = {
@@ -219,7 +217,7 @@ describe("computeLabelChunkRequests", () => {
     expect(reqs.every((r) => r.level === 1)).toBe(true);
   });
 
-  // --- MAJOR: shared default-label resolution (fetch + render agree) ---
+  // --- shared default-label resolution (fetch + render agree) ---
 
   function singleLevelLabel(id: string, dtype: string, yx: [number, number]): LabelSpec {
     return {
@@ -727,7 +725,7 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
       labels: [{ name: "seg", source_image_id: "img-0", image: img("img-0:label:seg", labelLevels, "Uint32") }],
     };
   }
-  // Masks are opt-in; these tests exercise LEVEL SELECTION with the mask turned
+  // Masks are opt-in; these tests exercise level selection with the mask turned
   // on, so `vol`/`slice` carry an explicit all-visible setting (one label each).
   const vol = { datasetId: "ds-0", t: 0, z: 0, mode: "volume" as const, labelSettings: allOn(1) };
   const slice = { datasetId: "ds-0", t: 0, z: 0, mode: "slice" as const, labelSettings: allOn(1) };
@@ -735,8 +733,8 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
   it("renders a label whose Z busts the monolithic 3D limit when its bricks fit", () => {
     // Z=2100 > the 2048 monolithic-texture limit, but bricking tiles it across
     // slots: chunk-Z 64 → 33 z-bricks, X=Y=64 → one brick each → 33 chunks,
-    // ~33 MB padded. Under the old per-axis cap this was skipped; now the
-    // chunk-count + byte budgets admit it and it renders as bricks.
+    // ~33 MB padded. The chunk-count and byte budgets admit it and it renders
+    // as bricks.
     const m = manifestFor([{ shape: [1, 1, 2100, 64, 64], chunk: [1, 1, 64, 64, 64], scale: SCALE1 }]);
     const reqs = computeLabelChunkRequests({ ...vol, manifest: m });
     expect(reqs.length).toBe(33); // gz=33, gy=gx=1
@@ -758,8 +756,8 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
     // A "one chunk per plane" layout (common OME-Zarr): level 0 is a single
     // 2100-wide brick, which exceeds the 2048 3D-texture floor. Its padded bytes
     // (~40 MB) and chunk count (1) fit the budgets, so the byte/chunk checks alone
-    // would ADMIT it — but the atlas can't pack a 2100-wide brick, so it would
-    // render BLANK. The per-brick cap skips level 0 for the coarser level 1
+    // would admit it, but the atlas can't pack a 2100-wide brick, so it would
+    // render blank. The per-brick cap skips level 0 for the coarser level 1
     // (1050-wide brick), which packs and renders.
     const m = manifestFor([
       { shape: [1, 1, 8, 600, 2100], chunk: [1, 1, 8, 600, 2100], scale: SCALE1 },
@@ -773,7 +771,7 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
 
   it("skips a label whose only level's brick busts the 3D limit — no blank; slice stays eligible", () => {
     // The sole level is a single 2100-wide brick with no coarser fallback: volume
-    // mode is INELIGIBLE (renders nothing, a clean escape hatch) rather than
+    // mode is ineligible (renders nothing, a clean escape hatch) rather than
     // admitting a level the atlas can't allocate. Slice mode draws from a single
     // 2D tile bounded by the far larger 2D texture limit, so it stays eligible.
     const m = manifestFor([{ shape: [1, 1, 8, 600, 2100], chunk: [1, 1, 8, 600, 2100], scale: SCALE1 }]);
@@ -784,9 +782,8 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
 
   it("DC1: a huge-Z level whose CHUNKED brick fits stays eligible under the per-brick cap", () => {
     // Z=2100 busts the monolithic 3D limit, but the chunk-Z 64 brick (64 <= 2048)
-    // packs across slots. The per-brick cap gates the BRICK, not the extent, so
-    // this deep label remains eligible at level 0 (33 z-bricks) — the per-axis
-    // relax the feature depends on is preserved.
+    // packs across slots. The per-brick cap gates the brick, not the extent, so
+    // this deep label remains eligible at level 0 (33 z-bricks).
     const m = manifestFor([{ shape: [1, 1, 2100, 64, 64], chunk: [1, 1, 64, 64, 64], scale: SCALE1 }]);
     expect(resolveVisibleLabels(m, allOn(1), { mode: "volume" })[0].levelIdx).toBe(0);
     expect(computeLabelChunkRequests({ ...vol, manifest: m })).toHaveLength(33);
@@ -806,7 +803,7 @@ describe("computeLabelChunkRequests — volume level selection (3D caps)", () =>
   });
 
   it("skips a label whose padded bricks bust the byte budget — slice mode stays eligible", () => {
-    // 512×512×3000 in 256²×64 chunks: the per-axis dims no longer gate, and the
+    // 512×512×3000 in 256²×64 chunks: the per-axis dims do not gate, and the
     // chunk count fits (188), but the padded footprint (~3 GB) busts the 512 MB
     // budget with no coarser level — volume-ineligible, slice unaffected.
     const m = manifestFor([{ shape: [1, 1, 3000, 512, 512], chunk: [1, 1, 64, 256, 256], scale: SCALE1 }]);

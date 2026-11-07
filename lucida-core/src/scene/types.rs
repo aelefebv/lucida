@@ -64,18 +64,12 @@ pub struct ChannelSettings {
     pub contrast_min: f64,
     pub contrast_max: f64,
     pub gamma: f64,
-    /// User-supplied display name override for this channel. `None` (the
-    /// default) means "no override" — the UI falls back to the manifest's
-    /// omero label and then `Ch {index}`. A local-only per-channel display
-    /// setting like `colormap`/`contrast`: set via `SetChannelName`, it rides
-    /// saved views and broadcasts to followers via the selection epoch, but is
-    /// NOT durable document state (out of scope for this slice).
+    /// Display name override for this channel. `None` falls back to the
+    /// manifest's omero label, then `Ch {index}`. Like `colormap`, it rides
+    /// saved views and presence but is not durable document state.
     ///
-    /// `#[serde(default, skip_serializing_if = "Option::is_none")]` keeps this
-    /// strictly additive: a presence snapshot / saved view persisted before
-    /// this slice carries no `name` key and deserializes as `None`, and a
-    /// channel WITHOUT an override serializes byte-identically to a pre-slice
-    /// one (the key is omitted). No wire break.
+    /// The serde attributes keep it additive: a blob without `name` loads as
+    /// `None`, and a channel with no override serializes without the key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 }
@@ -97,19 +91,13 @@ fn default_channel_blend_mode() -> BlendMode {
     BlendMode::Additive
 }
 
-/// Per-label overlay display state: whether a segmentation-mask label is drawn,
-/// and how strongly it composites over the intensity image. The per-label
-/// analogue of [`ChannelSettings`] — a local, per-client display setting that
-/// rides presence and saved views (via the enclosing [`DatasetDisplaySettings`])
-/// but is not durable document state.
+/// Per-label overlay display state: whether a label mask is drawn and how
+/// strongly it composites over the intensity image. Like [`ChannelSettings`],
+/// it rides presence and saved views but is not durable document state.
 ///
-/// `visible` defaults to `false` and `opacity` to `0.5`: a freshly opened
-/// dataset shows NO label overlays — masks are opt-in, the user reveals the ones
-/// they want via the per-label toggles — and any mask they do turn on composites
-/// at half strength (the same fixed opacity used before per-label controls
-/// existed), leaving the intensity data visible underneath. This hidden default
-/// is what a label with no explicit per-mask setting resolves to; an explicit
-/// on/off recorded by the user is honored verbatim and never overridden.
+/// Masks are opt-in: `visible` defaults to `false`, so a freshly opened
+/// dataset shows no label overlays, and a mask turned on composites at `0.5`.
+/// An explicit on/off the user records is honored verbatim.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LabelSettings {
     pub visible: bool,
@@ -137,38 +125,24 @@ pub struct DatasetDisplaySettings {
     pub render_mode: RenderMode,
     #[serde(default)]
     pub channel_settings: Vec<ChannelSettings>,
-    /// Per-label overlay settings, positional by manifest (OME `labels`) order:
-    /// index `i` controls the visibility/opacity of the `i`-th attached label.
-    /// Seeded on open from the manifest's label count. `#[serde(default)]` keeps
-    /// this additive — a presence snapshot or saved view persisted before
-    /// per-label controls existed carries no `label_settings` key and
-    /// deserializes as an empty Vec (the render path then falls back to showing
-    /// every mode-eligible mask at the default opacity), so there is no wire break.
+    /// Per-label overlay settings in manifest (OME `labels`) order: index `i`
+    /// controls the `i`-th attached label. `#[serde(default)]` loads a blob
+    /// without the key as an empty Vec, which the render path treats as every
+    /// mode-eligible mask at the default opacity.
     #[serde(default)]
     pub label_settings: Vec<LabelSettings>,
     #[serde(default = "default_channel_blend_mode")]
     pub channel_blend_mode: BlendMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail_level_override: Option<u32>,
-    /// The author's label names at capture time, positionally parallel to
-    /// `label_settings` (entry `i` names the label `label_settings[i]`
-    /// controls). Stamped from the dataset's current `label_specs()` order when
-    /// these settings are seeded, so it rides presence and saved views next to
-    /// the per-label state it describes.
+    /// The author's label names at capture time, parallel to `label_settings`.
+    /// They let [`Self::reconcile_label_settings`] place each saved entry on
+    /// the matching current label by name when the recipient's label list is
+    /// reordered, grown, shrunk, or repeats names.
     ///
-    /// This is what lets an adopted settings blob key its per-label state by
-    /// label NAME instead of by raw array index: when the recipient's current
-    /// label list differs (reordered, a label added or removed, or repeated
-    /// names across a collection), [`Self::reconcile_label_settings`] uses these
-    /// names to place each saved entry on the matching current label rather than
-    /// the one that merely shares its old index.
-    ///
-    /// `#[serde(default, skip_serializing_if = "Vec::is_empty")]` keeps this
-    /// strictly additive: a presence snapshot or saved view persisted before
-    /// this field existed carries no `label_names` key and deserializes as an
-    /// empty Vec — which the reconcile treats as "legacy, positional" — and a
-    /// settings blob with no labels serializes byte-identically to a pre-field
-    /// one (the key is omitted). No wire break.
+    /// The serde attributes keep it additive: a blob without `label_names`
+    /// loads as empty, which reconcile treats as positional, and a blob with no
+    /// labels serializes without the key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label_names: Vec<String>,
 }
@@ -188,22 +162,11 @@ impl DatasetDisplaySettings {
     }
 
     /// Get a mutable reference to label settings at the given index, growing
-    /// the vec if needed. The per-label mirror of [`Self::ensure_channel`]: a
-    /// per-label edit that targets an index past the seeded count back-fills
-    /// intervening entries rather than panicking. Callers bound the index to the
+    /// the vec with hidden defaults if needed. Callers bound the index to the
     /// dataset's real label count first (see the `SetLabel*` apply arms), so a
-    /// stray/huge index can never balloon the vec.
-    ///
-    /// Back-filled entries — including the target index itself — are seeded
-    /// [`LabelSettings::default`] (hidden): a materialised entry stands for a
-    /// label with no explicit per-mask setting, which resolves to the
-    /// hidden-by-default policy (masks are opt-in). This NEVER overwrites an
-    /// EXISTING entry, so an explicit on (`visible: true`) an earlier
-    /// `SetLabelVisible(index, true)` recorded is left untouched by a later grow.
-    /// An explicit `SetLabelVisible(index, true)` still sets `.visible = true` on
-    /// the returned target after the grow; a `SetLabelOpacity` on a high-index
-    /// label only tunes opacity, leaving each back-filled entry hidden at its
-    /// default (opacity alone never reveals a mask).
+    /// stray index cannot balloon the vec. Growing never overwrites an existing
+    /// entry, so an explicit on survives, and opacity alone never reveals a
+    /// mask.
     pub fn ensure_label(&mut self, index: usize) -> &mut LabelSettings {
         while self.label_settings.len() <= index {
             self.label_settings.push(LabelSettings::default());
@@ -211,30 +174,17 @@ impl DatasetDisplaySettings {
         &mut self.label_settings[index]
     }
 
-    /// Build the complete default per-dataset display settings for a freshly
-    /// opened OR restored dataset: one channel-settings entry per channel
-    /// (cycling the default colormaps) and one label-settings entry per attached
-    /// label. This is the single seeding source shared by the `DatasetOpened`
-    /// apply path and the document-restore path (`load_document`), so both
-    /// produce identical, COMPLETE settings — the layer panel and render path
-    /// depend on `label_settings` / `channel_settings` being present and
-    /// full-length however the dataset entered the scene.
+    /// Build the complete default display settings for a freshly opened or
+    /// restored dataset: one channel entry per channel (cycling the default
+    /// colormaps) and one label entry per attached label. Both the
+    /// `DatasetOpened` apply path and `load_document` seed from here, because
+    /// the layer panel and render path need full-length `channel_settings` and
+    /// `label_settings` however the dataset entered the scene.
     ///
-    /// Label policy: EVERY label seeds HIDDEN, all at opacity 0.5 — a
-    /// freshly-opened dataset shows NO mask overlays, and the user reveals the
-    /// ones they want via the per-label toggles (masks are opt-in). Only the
-    /// DEFAULT is hidden: an explicit on/off the user later records is honored
-    /// verbatim and rides presence / saved views. The opacity a mask composites
-    /// at once turned on stays 0.5.
-    ///
-    /// This is the coarse, mode-agnostic default. The layer panel still lists
-    /// every drawable (uint32) mask so any can be toggled on with one click; the
-    /// render/fetch path filters the visible set by the current mode's
-    /// eligibility (footprint / device texture limits — a render-side,
-    /// device-dependent check the web `resolveVisibleLabels` owns), and the 3D
-    /// memory guard caps the number of monolithic volume textures shown at once
-    /// (both apply only once the user turns masks on). The layer panel's count
-    /// badge surfaces that labels exist even while all are hidden.
+    /// Every label seeds hidden at opacity 0.5, since masks are opt-in. This
+    /// default is mode-agnostic: once the user turns masks on, the web
+    /// `resolveVisibleLabels` filters them by device limits and the 3D memory
+    /// guard caps how many volume textures show at once.
     pub fn seeded_for(manifest: &DatasetManifest) -> Self {
         let channel_count = manifest
             .images()
@@ -252,66 +202,39 @@ impl DatasetDisplaySettings {
                 .collect(),
             label_settings: labels
                 .iter()
-                // Every label starts hidden — masks are opt-in, the user reveals
-                // the ones they want. All at 0.5 (the opacity a mask composites
-                // at once turned on).
                 .map(|_| LabelSettings {
                     visible: false,
                     opacity: 0.5,
                 })
                 .collect(),
-            // Stamp the current label names alongside the per-label settings so
-            // the pair travels together on presence / saved views. This does
-            // NOT alter the visibility policy above; it only records which label
-            // each seeded entry describes, so an adopter can key by name.
+            // Stamp the label names next to the settings so an adopter can key
+            // by name.
             label_names: labels.iter().map(|l| l.name.clone()).collect(),
             ..Default::default()
         }
     }
 
-    /// Remap a saved per-label settings list onto a recipient's CURRENT label
-    /// order, keyed by label NAME and aware of repeated names.
+    /// Remap a saved per-label settings list onto a recipient's current label
+    /// order, keyed by label name and aware of repeated names. The result is
+    /// aligned to `current_names`.
     ///
-    /// The result is always aligned to `current_names`: `result.len() ==
-    /// current_names.len()`, with `result[i]` the settings that should apply to
-    /// the current label at index `i`.
+    /// - `author_names` empty: positional. A blob captured before label names
+    ///   were recorded can only map by index.
+    /// - `author_names` non-empty: name-keyed. `saved` is parallel to
+    ///   `author_names`. The `k`-th current label named `N` takes the `k`-th
+    ///   saved entry whose author name is `N`, so two labels both called
+    ///   `region-a` do not collapse onto the author's first one.
     ///
-    /// - `author_names` EMPTY → **legacy, positional**. A settings blob captured
-    ///   before label names were recorded carries no names, so the only mapping
-    ///   available is by index: `result[i] = saved.get(i)` (or the default when
-    ///   the saved list is shorter). This preserves the old behaviour exactly.
-    /// - `author_names` non-empty → **name-keyed, occurrence-aware**. `saved` is
-    ///   positionally parallel to `author_names` (the pair captured together).
-    ///   For the current label at index `i` with name `N` — being the `k`-th
-    ///   occurrence of `N` within `current_names[0..=i]` — the mapping picks the
-    ///   `k`-th entry of `saved` whose `author_names` entry equals `N`. A current
-    ///   label with no matching author entry (a label the author never had, or
-    ///   one occurrence too many of a repeated name) takes
-    ///   [`LabelSettings::default`].
-    ///
-    /// Every fallback for a current label the save never addressed —
-    /// positionally, an out-of-range positional index, a name the author never
-    /// had, or a defensively-missing parallel `saved` slot — resolves to
-    /// [`LabelSettings::default`] (hidden): a label the save never named has no
-    /// explicit setting, so it follows the hidden-by-default policy (masks are
-    /// opt-in). A label the save MATCHED restores that saved entry verbatim — so
-    /// a matched explicit on (`visible: true`) comes back on, and a matched
-    /// explicit off (`visible: false`) comes back off; the hidden default only
-    /// touches labels the save never addressed.
-    ///
-    /// Occurrence-awareness is what keeps a collection whose plate repeats a
-    /// name (e.g. two labels both called `region-a`) from collapsing both onto
-    /// the author's first `region-a`: the first current `region-a` takes the
-    /// author's first, the second takes the author's second, and so on.
+    /// A current label the save never addressed takes
+    /// [`LabelSettings::default`] (hidden). A matched label restores its saved
+    /// entry verbatim.
     pub fn reconcile_label_settings(
         saved: &[LabelSettings],
         author_names: &[String],
         current_names: &[String],
     ) -> Vec<LabelSettings> {
         if author_names.is_empty() {
-            // Legacy blob: no names to key on, so fall back to positional. A
-            // current index with no saved entry was never addressed by the save,
-            // so it has no explicit setting and takes the hidden-by-default.
+            // No names to key on, so map by position.
             return (0..current_names.len())
                 .map(|i| saved.get(i).cloned().unwrap_or_default())
                 .collect();
@@ -334,18 +257,14 @@ impl DatasetDisplaySettings {
                 for (author_index, author_name) in author_names.iter().enumerate() {
                     if author_name == name {
                         if matched == target_occurrence {
-                            // Name matched, but a malformed blob whose `saved` is
-                            // shorter than `author_names` may lack the parallel
-                            // slot — treat that missing entry as never-addressed,
-                            // taking the hidden-by-default.
+                            // A malformed blob may lack the parallel `saved`
+                            // slot; treat it as never addressed.
                             return saved.get(author_index).cloned().unwrap_or_default();
                         }
                         matched += 1;
                     }
                 }
-                // No matching author entry (or not enough occurrences of a
-                // repeated name): the save never addressed this current label, so
-                // it has no explicit setting and takes the hidden-by-default.
+                // The save never addressed this label.
                 LabelSettings::default()
             })
             .collect()
@@ -391,15 +310,14 @@ impl Default for DisplayState {
 
 /// The shape of a collaborative annotation.
 ///
-/// - `Point` — a single pin at `position` (no second vertex). The `#[default]`,
-///   so a kind-less command/blob (slices 1..4) loads as a point.
-/// - `Line` — a segment from `position` to `end`.
-/// - `Box` — an axis-aligned rectangle whose opposite corners are `position`
+/// - `Point`: a single pin at `position`. The default, so a command or blob
+///   with no `kind` loads as a point.
+/// - `Line`: a segment from `position` to `end`.
+/// - `Box`: an axis-aligned rectangle whose opposite corners are `position`
 ///   and `end`.
 ///
 /// `Line`/`Box` carry their second vertex in [`Annotation::end`]; a `Point`
-/// leaves `end` `None`. Freehand (an N-point polyline) is intentionally not a
-/// variant here — it needs a `Vec` of vertices and is a later slice.
+/// leaves `end` `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -413,12 +331,10 @@ pub enum AnnotationKind {
 /// A single text comment attached to an [`Annotation`], forming a flat
 /// discussion thread on a pin.
 ///
-/// The `id` is client-supplied (a uuid string) so — exactly like the pin
-/// itself — an inbound `add_comment` command and its rebroadcast are
-/// byte-identical and apply identically on every peer. Comments live
-/// nested on the annotation (`Annotation::comments`), so they ride the
-/// existing snapshot, broadcast, and `document_json` persistence machinery
-/// for free, and cascade away when the pin (or its dataset) is removed.
+/// The `id` is client-supplied (a uuid string) so an inbound `add_comment`
+/// and its rebroadcast are byte-identical and apply identically on every
+/// peer. Comments nest on the annotation, so they ride the pin's snapshot,
+/// broadcast, and persistence, and go away with the pin.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Comment {
     pub id: String,
@@ -432,127 +348,78 @@ pub struct Comment {
 /// their viewport.
 ///
 /// The `id` is client-supplied (a uuid string) so an inbound command and
-/// its rebroadcast are byte-identical — one command applied identically on
-/// every peer, with no server-side id asymmetry. Apply is idempotent on a
-/// repeated `id` (last write wins; see [`DocumentState::add_annotation`]).
+/// its rebroadcast are byte-identical and apply identically on every peer.
+/// Apply is idempotent on a repeated `id` (last write wins; see
+/// [`DocumentState::add_annotation`]).
 ///
-/// `comments` is the pin's discussion thread (insertion-ordered, deduped by
-/// comment id). It is `#[serde(default)]` so pins persisted by slice 1
-/// (before threads existed) still deserialize with an empty thread, and so a
-/// pin with no comments serializes/round-trips identically to a slice-1 pin.
+/// Every field but `id`, `position`, and `author` is `#[serde(default)]`, so
+/// pins persisted or broadcast without the newer fields still load.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Annotation {
     pub id: String,
     /// In-plane world-space position `[x, y]`.
     pub position: [f64; 2],
-    /// Additive depth (the third coordinate) in the same world frame as
-    /// `position`, so the pin's full world point is `(position[0],
-    /// position[1], z)`. Kept as a separate scalar — rather than widening
-    /// `position` to `[f64; 3]` — so the wire stays backward compatible with
-    /// slices 1/2: `#[serde(default)]` means pins (and persisted documents)
-    /// written before depth existed deserialize with `z = 0.0`, and a pin at
-    /// `z = 0.0` serializes identically whether or not it carries depth.
+    /// Depth in the same world frame as `position`, so the pin's world point
+    /// is `(position[0], position[1], z)`. A separate scalar rather than a
+    /// wider `position` keeps the wire compatible: pins without `z` load at
+    /// `z = 0.0`.
     #[serde(default)]
     pub z: f64,
-    /// The **timepoint** (T) the pin was placed on — the view's `t` at creation,
-    /// an integer frame index. Unlike `z` (a world-space depth in the same
-    /// continuous frame as `position`), `t`/`c` are discrete view selectors: a
-    /// pin "belongs to" the slice/timepoint/channel it was dropped on, and the
-    /// overlay renders it off-context (dimmed + a "where it lives" helptext, like
-    /// an off-view peer cursor) when the current view differs.
-    ///
-    /// `#[serde(default)]` keeps this additive — a pin persisted (or broadcast)
-    /// before this slice carries no `t` key and deserializes as `t = 0`, and a
-    /// pin at `t = 0` serializes identically whether or not it predates the
-    /// field. No wire break.
+    /// The timepoint (T) the pin was placed on, the view's `t` at creation.
+    /// Unlike `z`, `t` and `c` are discrete view selectors: the pin belongs to
+    /// the timepoint and channel it was dropped on, and the overlay dims it
+    /// off-context when the current view differs.
     #[serde(default)]
     pub t: i64,
-    /// The **channel** (C) the pin was placed on — the view's `c` at creation,
-    /// an integer channel index. Like `t`, it is a discrete view selector that
-    /// drives off-context rendering, and is `#[serde(default)]` so an older pin
-    /// (no `c` key) deserializes as `c = 0` with no wire break.
+    /// The channel (C) the pin was placed on, the view's `c` at creation.
     #[serde(default)]
     pub c: i64,
     pub author: String,
     #[serde(default)]
     pub kind: AnnotationKind,
-    /// The annotation's **second** in-plane world-space vertex: a line's far
-    /// endpoint, or a box's opposite corner (the first corner is `position`).
-    /// `None` for a `Point` (which has only one vertex).
-    ///
-    /// `#[serde(default)]` so this stays wire/blob compatible with slices 1..4:
-    /// a pin persisted (or broadcast) before this slice carries no `end` key and
-    /// deserializes as `None`, i.e. a plain point. A `Point` with `end == None`
-    /// serializes identically to a slice-1..4 pin. Depth (`z`) is shared by both
-    /// vertices — per-vertex depth is a later slice.
+    /// The second in-plane world-space vertex: a line's far endpoint, or a
+    /// box's opposite corner. `None` for a `Point`. Both vertices share `z`.
     #[serde(default)]
     pub end: Option<[f64; 2]>,
     /// Flat, ordered comment thread on this pin. Owns its dedup/order
     /// invariants via [`Annotation::add_comment`] / [`Annotation::remove_comment`].
     #[serde(default)]
     pub comments: Vec<Comment>,
-    /// The **collection entity (group/tile) this pin is glued to** (issue #780). Set
-    /// once at creation, inside [`DocumentState::apply`] for `AddAnnotation`, to
-    /// the nearest placeable entity in the dataset's resolved active layout (see
-    /// [`DocumentState::nearest_anchor`]). `None` for a non-collection dataset, when no
-    /// entity position is resolvable, and for any pin created before this slice.
+    /// The collection entity (group or tile) this pin is glued to. Set once in
+    /// [`DocumentState::apply`] for `AddAnnotation`, to the nearest placeable
+    /// entity in the active layout (see [`DocumentState::nearest_anchor`]).
+    /// `None` for a non-collection dataset or when no entity position resolves;
+    /// an unanchored pin stays put on a layout switch.
     ///
-    /// When the active layout changes, an anchored pin's whole shape is translated
-    /// by the displacement of *this* entity between the old and new layouts (see
-    /// [`DocumentState::reanchor_for_layout`]), so the pin stays on the data it was
-    /// dropped on in every layout — synced and persisted, since this is a
-    /// deterministic effect of the canonical `apply` path.
-    ///
-    /// `#[serde(default)]` keeps this additive: a pin persisted (or broadcast)
-    /// before this slice carries no `anchor` key and deserializes as `None` (so it
-    /// is left in place by a layout switch), and an unanchored pin serializes
-    /// identically to a pre-slice one. No wire break.
+    /// When the active layout changes, an anchored pin's whole shape moves by
+    /// this entity's displacement (see [`DocumentState::reanchor_for_layout`]),
+    /// so the pin stays on the data it was dropped on in every layout.
     #[serde(default)]
     pub anchor: Option<EntityId>,
-    /// The **author's view at creation** — a snapshot of how they were looking
-    /// at the data when they dropped this pin (camera, slice/timepoint/channel,
-    /// per-dataset display), so a later slice can restore that exact view on
-    /// navigation. Reuses the existing [`SavedView`] capture type.
+    /// The author's view when they dropped this pin (camera, slice, timepoint,
+    /// channel, per-dataset display), so navigation can restore it.
     ///
-    /// Captured in **workspace-dataset-id** form: its `datasets` Vec is left
-    /// EMPTY (no source URLs), so embedding a view on a pin never leaks dataset
-    /// URLs into broadcast/persisted document state — membership is already owned
-    /// by the workspace document. `z`/`t`/`c` already record the discrete slice
-    /// context; this view carries the *full* viewport (camera + display) on top.
-    ///
-    /// `#[serde(default, skip_serializing_if = "Option::is_none")]` keeps this
-    /// strictly additive: a pin persisted (or broadcast) before this slice carries
-    /// no `view` key and deserializes as `None`, and a pin WITHOUT a captured view
-    /// serializes byte-identically to a pre-slice pin (the key is omitted). No wire
-    /// break.
+    /// Captured in workspace-dataset-id form with an empty `datasets` Vec, so a
+    /// view on a pin never leaks source URLs into broadcast or persisted
+    /// document state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<crate::saved_view::SavedView>,
 }
 
 impl Annotation {
-    /// The in-plane world-space vertices that make up this annotation's shape,
-    /// in draw order — the single source of geometry for every kind.
+    /// The in-plane world-space vertices of this annotation's shape, in draw
+    /// order. The 2D and 3D overlays both project these per vertex, so the
+    /// per-kind layout lives here rather than in each renderer.
     ///
-    /// This is the geometry helper the renderers iterate: each returned vertex
-    /// is projected to screen by the *same* per-vertex marker projection a point
-    /// pin already uses, and then connected by the shared draw path (a dot for
-    /// one vertex, a stroked polyline for an open run, a closed ring for a box).
-    /// Keeping the per-kind vertex layout here — rather than branching inside
-    /// each renderer — means the 2D and 3D overlays share one code path and a
-    /// future kind only has to extend this function.
+    /// - Point: `[position]`.
+    /// - Line: `[position, end]`.
+    /// - Box: the four corners, wound `position → (end.x, position.y) → end →
+    ///   (position.x, end.y)`. Four corners rather than two so each projects
+    ///   through the volume transform in 3D; a screen-space rect built from two
+    ///   projected corners would shear as the camera orbits.
     ///
-    /// - **Point** → `[position]` (one vertex).
-    /// - **Line** → `[position, end]` (the two endpoints).
-    /// - **Box** → the four corners of the axis-aligned rectangle whose opposite
-    ///   corners are `position` and `end`, wound `position → (end.x, position.y)
-    ///   → end → (position.x, end.y)`. Returned as a 4-corner ring (not 2
-    ///   corners) so that in 3D each corner projects independently through the
-    ///   volume transform and the box tracks the data as the camera orbits — a
-    ///   screen-space rect built from two projected corners would shear.
-    ///
-    /// A `Line`/`Box` whose `end` is absent (a malformed or partially-applied
-    /// command) gracefully collapses to its single anchor `position`, so the
-    /// shape always has at least one vertex and never panics or vanishes.
+    /// A `Line`/`Box` with no `end` collapses to `position`, so the shape always
+    /// has at least one vertex.
     pub fn vertices(&self) -> Vec<[f64; 2]> {
         match (self.kind, self.end) {
             (AnnotationKind::Line, Some(end)) => vec![self.position, end],
@@ -575,14 +442,9 @@ impl Annotation {
 
     /// Append (or replace) a comment on this annotation's thread.
     ///
-    /// Idempotent / last-write-wins on a repeated comment `id`: re-applying a
-    /// command with an existing id replaces that comment in place (updating its
-    /// text/author) rather than appending a duplicate — so a replayed or
-    /// twice-delivered `add_comment` keeps every peer convergent. Distinct ids
-    /// are appended, preserving insertion order. This is the single owner of the
-    /// thread's dedup + ordering invariants; `DocumentState` only locates the
-    /// pin and delegates here, which keeps the comment logic unit-testable on a
-    /// bare `Annotation`.
+    /// Last write wins on a repeated comment `id`: it replaces that comment in
+    /// place, so a replayed or twice-delivered `add_comment` keeps every peer
+    /// convergent. Distinct ids append in insertion order.
     pub fn add_comment(&mut self, comment: Comment) {
         if let Some(existing) = self.comments.iter_mut().find(|c| c.id == comment.id) {
             *existing = comment;
@@ -601,89 +463,47 @@ impl Annotation {
         self.comments.len() != before
     }
 
-    /// Reposition this pin, moving the **whole shape** rigidly.
+    /// Reposition this pin, moving the whole shape rigidly.
     ///
-    /// The given `position`/`z` become the anchor vertex, and any second vertex
-    /// (`end` — a line's far endpoint or a box's opposite corner) is translated
-    /// by the *same* in-plane delta the anchor moved, so a line keeps its
-    /// length/angle and a box keeps its size: dragging slides the shape, it does
-    /// not stretch or rotate it. A `Point` (`end == None`) has no second vertex
-    /// and is simply repositioned.
-    ///
-    /// The delta is `position − self.position` and MUST be read **before**
-    /// `self.position` is overwritten — taking it after would always be zero,
-    /// silently reverting this to the deform-the-shape behaviour. Depth `z` is
-    /// shared by both vertices (per-vertex depth is a later slice), so it is a
-    /// plain overwrite, not a delta.
-    ///
-    /// Every other field — `id`, `author`, `kind`, and the comment thread — is
-    /// left untouched: a move repositions the existing pin, it does not replace
-    /// it (and editing an *individual* vertex / resizing is a later slice). This
-    /// is the single owner of the reposition mutation, so it is unit-testable on
-    /// a bare `Annotation`; `DocumentState` only locates the pin and delegates
-    /// here. Idempotent by construction (a move by a zero delta — i.e. to the
-    /// same anchor/z — leaves the shape unchanged).
+    /// `position`/`z` become the anchor vertex, and any `end` moves by the same
+    /// in-plane delta, so a line keeps its length and angle and a box keeps its
+    /// size. Depth `z` is shared by both vertices, so it is a plain overwrite.
+    /// Every other field is left untouched.
     pub fn set_position(&mut self, position: [f64; 2], z: f64) {
-        // Delta of the anchor move, captured BEFORE overwriting `position`.
+        // Read the delta before overwriting `position`, or it is always zero.
         let [dx, dy] = [
             position[0] - self.position[0],
             position[1] - self.position[1],
         ];
         self.position = position;
         self.z = z;
-        // Carry the second vertex rigidly so the whole line/box translates
-        // (length/angle and size preserved). A point has no `end`, so this is
-        // a no-op for it.
         if let Some(end) = self.end.as_mut() {
             end[0] += dx;
             end[1] += dy;
         }
     }
 
-    /// **Reshape** this annotation by placing its two opposite vertices
-    /// *explicitly* — the resize sibling of [`Self::set_position`].
+    /// Reshape this annotation by setting both opposite vertices explicitly,
+    /// the resize sibling of [`Self::set_position`].
     ///
-    /// Where [`Self::set_position`] slides the *whole* shape rigidly (a box
-    /// keeps its size; the second vertex rides the anchor delta), this sets the
-    /// anchor (`position`) and the second vertex (`end`) to exactly the given
-    /// values with **no delta math**, so a box/line can grow, shrink, or flip
-    /// about a held corner/edge. That is precisely what a corner/edge resize
-    /// needs: the handle recomputes the two opposite corners and hands both
-    /// here, and the shape takes that geometry verbatim. Depth `z` is shared by
-    /// both vertices (per-vertex depth is a later slice), so it is a plain
-    /// overwrite.
-    ///
-    /// A `Point` has no second vertex, so a reshape of one is meaningless: this
-    /// repositions its anchor/`z` and leaves `end` `None` (it never *invents* a
-    /// second vertex on a point — that would silently turn a point into a
-    /// line/box). For a `Line`/`Box` the passed `end` becomes the new opposite
-    /// vertex. Every other field — `id`, `author`, `kind`, and the comment
-    /// thread — is preserved, exactly like [`Self::set_position`], so a reshape
-    /// edits the existing pin in place. Idempotent by construction (re-applying
-    /// the same vertices is a no-op), which keeps a replayed/twice-delivered
-    /// reshape convergent across peers. This is the single owner of the reshape
-    /// mutation, so it is unit-testable on a bare `Annotation`; `DocumentState`
-    /// only locates the pin and delegates here.
+    /// No delta math: `position` and `end` take the given values, so a corner
+    /// or edge handle can grow, shrink, or flip the shape about a held corner.
+    /// A `Point` only moves its anchor and `z`. Every other field is preserved,
+    /// and re-applying the same vertices is a no-op, so a replayed reshape
+    /// stays convergent across peers.
     pub fn set_vertices(&mut self, position: [f64; 2], end: [f64; 2], z: f64) {
         self.position = position;
         self.z = z;
-        // Only a shape that already has a second vertex is reshaped to the new
-        // `end`. A point keeps `end == None` — a resize never mints a vertex on
-        // a shape that has none (that is `AddAnnotation`'s job, and would change
-        // the pin's kind out from under it).
+        // A resize never mints a second vertex on a point; that would change
+        // the pin's kind out from under it.
         if self.end.is_some() {
             self.end = Some(end);
         }
     }
 
     /// Overwrite an existing comment's `text` by `id`. Returns `true` if a
-    /// comment matched and was edited. No-op (returns `false`) if the id is
-    /// unknown, so an edit targeting a comment that was never added (or has since
-    /// been removed) is harmless and never appends a phantom. The comment's `id`
-    /// and `author` — and its position in the thread — are preserved; only the
-    /// text changes. The sibling of [`Self::add_comment`] /
-    /// [`Self::remove_comment`]: the thread's mutation invariants live here on
-    /// `Annotation`, so this is unit-testable on a bare pin.
+    /// comment matched. An unknown id is a no-op, so an edit never appends a
+    /// phantom comment. Only the text changes.
     pub fn edit_comment(&mut self, id: &str, text: String) -> bool {
         if let Some(existing) = self.comments.iter_mut().find(|c| c.id == id) {
             existing.text = text;
@@ -707,11 +527,8 @@ pub struct DocumentState {
     /// `DocumentCommand::ApplyAssetCatalogDelta`.
     #[serde(default)]
     pub asset_catalogs: IndexMap<DatasetId, AssetCatalog>,
-    /// Per-dataset collaborative annotations, keyed by dataset id (mirrors
-    /// `asset_catalogs`). Populated via `DocumentCommand::AddAnnotation` /
-    /// `RemoveAnnotation`. `#[serde(default)]` so this persists and restores
-    /// for free through the existing `document_json` blob and older snapshots
-    /// (without the field) still deserialize.
+    /// Per-dataset collaborative annotations, keyed by dataset id. Populated
+    /// via `DocumentCommand::AddAnnotation` / `RemoveAnnotation`.
     #[serde(default)]
     pub annotations: IndexMap<DatasetId, Vec<Annotation>>,
 }
@@ -722,34 +539,22 @@ impl DocumentState {
         self.manifests.insert(manifest.dataset_id.clone(), manifest);
     }
 
-    /// The **single source of truth** for which fields of a [`DocumentState`]
-    /// are keyed by (or embed) a workspace-local [`DatasetId`] — the one place
-    /// that must be touched when a new id-keyed field is added.
+    /// The one place that lists which [`DocumentState`] fields are keyed by, or
+    /// embed, a workspace-local [`DatasetId`]. Add any new id-keyed field here.
     ///
-    /// Drives every such field from one walk: for each existing entry it calls
-    /// `fate(&old_key)` and either
-    /// - `Some(new_key)` → **keeps** the entry, rekeyed to `new_key`
-    ///   (insertion order preserved), or
-    /// - `None` → **drops** the entry entirely.
+    /// For each entry it calls `fate(&old_key)`:
     ///
-    /// The id-keyed maps it covers are `manifests`, `registered_layouts`,
-    /// `active_layout_ids`, `asset_catalogs`, and `annotations`. It also keeps
-    /// the two *embedded* ids consistent on kept entries: a manifest's own
-    /// `manifest.dataset_id` is rewritten to its entry's new key, and each kept
-    /// annotation list is handed (with its new key) to `on_kept_annotations`
-    /// so a caller can descend into the per-pin captured view
-    /// ([`Annotation::view`]) — which carries its *own* id-keyed maps. Dropped
-    /// entries need no embedded fixup: their manifest and pins (views included)
-    /// go away with them.
+    /// - `Some(new_key)` keeps the entry, rekeyed, in insertion order.
+    /// - `None` drops it.
     ///
-    /// Both [`Self::remap_dataset_ids`] (remap = `Some(new)`) and
-    /// [`Self::remove_dataset`] (remove = `None`) are implemented on this, so
-    /// the set of fields they walk can never silently diverge — the exact class
-    /// of bug that previously left `remove_dataset` orphaning layout entries and
-    /// once dropped the embedded-annotation-view remap. A unit test
-    /// (`rekey_dataset_ids_covers_every_id_keyed_field`) asserts a removal
-    /// clears the removed id from every field this walks, so a future id-keyed
-    /// field that isn't wired in here shows up as a failure.
+    /// On kept entries it rewrites the manifest's own `dataset_id` and hands
+    /// each annotation list to `on_kept_annotations`, so a caller can fix the
+    /// id-keyed maps inside each pin's [`Annotation::view`].
+    ///
+    /// [`Self::remap_dataset_ids`] and [`Self::remove_dataset`] both run on this
+    /// so the fields they walk cannot diverge.
+    /// `rekey_dataset_ids_covers_every_id_keyed_field` fails if a new id-keyed
+    /// field is not wired in.
     fn rekey_dataset_ids(
         &mut self,
         fate: impl Fn(&DatasetId) -> Option<DatasetId>,
@@ -791,52 +596,22 @@ impl DocumentState {
     /// Rewrite every workspace-local [`DatasetId`] in the document through
     /// `remap` (old id → new id), preserving insertion order.
     ///
-    /// Every map in the document is keyed by the workspace-local dataset id
-    /// (`manifests`, `registered_layouts`, `active_layout_ids`,
-    /// `asset_catalogs`, `annotations`), and each manifest *also* carries its
-    /// own id in `manifest.dataset_id`. When a workspace is duplicated the copy
-    /// mints fresh ids for its datasets, so the source document copied verbatim
-    /// would reference the source's (now-foreign) ids. This remaps both the
-    /// keys and the embedded `manifest.dataset_id` so the duplicated document
-    /// resolves against the copy's own `workspace_datasets`. An id missing from
-    /// `remap` is left unchanged (safe no-op); the caller supplies a map
-    /// covering every dataset membership of the source.
-    ///
-    /// This also descends into each annotation's captured author view
-    /// ([`Annotation::view`], an embedded [`SavedView`](crate::saved_view::SavedView)),
-    /// which carries its own workspace-dataset-id-keyed maps, and remaps it with
-    /// the same mapping — otherwise a copied pin's "go to author's view" would
-    /// dangle against the source workspace's ids in the duplicate.
-    ///
-    /// Implemented on [`Self::rekey_dataset_ids`] (the single source of truth
-    /// for the id-keyed field set) with a `fate` that maps every key to
-    /// `Some(new)` — a remap keeps every entry — so it can never walk a
-    /// different set of fields than [`Self::remove_dataset`].
+    /// A duplicated workspace mints fresh dataset ids, so the copied document
+    /// must be remapped to resolve against the copy's own
+    /// `workspace_datasets`. This rewrites every id-keyed map, each manifest's
+    /// own `dataset_id`, and each pin's captured
+    /// [`SavedView`](crate::saved_view::SavedView), so a copied pin's "go to
+    /// author's view" does not dangle. An id missing from `remap` is left
+    /// unchanged.
     pub fn remap_dataset_ids(&mut self, remap: &HashMap<DatasetId, DatasetId>) {
         self.rekey_dataset_ids(
-            // Remap keeps every entry, rekeyed; an id missing from `remap` maps
-            // to itself (safe no-op).
             |id| Some(remap.get(id).cloned().unwrap_or_else(|| id.clone())),
             |_new_id, anns| {
-                // Each annotation may carry the author's captured view
-                // (`Annotation::view: Option<SavedView>`), itself keyed by the
-                // workspace's dataset ids (active_layouts / dataset_order /
-                // dataset_settings / auto_contrast). Remapping only the
-                // `annotations` map KEY leaves that embedded view pointing at
-                // the source workspace's ids, so a copied pin's "go to author's
-                // view" would dangle in the duplicate. Descend into the stored
-                // view and remap it with the same mapping (mutating in place so
-                // the change lands on the annotation we keep, not a copy).
                 for ann in anns {
                     if let Some(view) = ann.view.as_mut() {
                         view.remap_dataset_ids(remap);
-                        // Copy-point defense: even though `AddAnnotation` now
-                        // strips an embedded view's source URLs on apply, a
-                        // document persisted BEFORE that fix may carry a pin
-                        // whose view still holds them. `remap_dataset_ids` is
-                        // only ever run when duplicating a workspace, so clear
-                        // `datasets` here too — the COPY's embedded views carry
-                        // NO source URLs regardless of how dirty the source is.
+                        // Older documents can hold pins whose view still has
+                        // source URLs; the copy's views carry none.
                         view.clear_source_urls();
                     }
                 }
@@ -844,21 +619,9 @@ impl DocumentState {
         );
     }
 
-    /// Remove a dataset by id, clearing it from **every** id-keyed field of the
-    /// document: its manifest, registered layouts, active-layout id, asset
-    /// catalog, and annotations. Annotations are scoped per dataset, so a
-    /// removed dataset's pins must not linger; likewise its layout entries —
-    /// leaving `registered_layouts` / `active_layout_ids` behind would orphan
-    /// them against a dataset that no longer exists.
-    ///
-    /// Implemented on [`Self::rekey_dataset_ids`] (the single source of truth
-    /// for the id-keyed field set) with a `fate` that drops the target id
-    /// (`None`) and keeps every other entry unchanged — so it can never walk a
-    /// different set of fields than [`Self::remap_dataset_ids`]. Dropping an
-    /// `active_layout_ids` entry simply removes the active selection for the
-    /// (now gone) dataset; resolution for any *surviving* dataset is unaffected
-    /// (it falls back to that dataset's own manifest default, exactly as for a
-    /// dataset that never had an active id set).
+    /// Remove a dataset by id from every id-keyed field of the document: its
+    /// manifest, registered layouts, active-layout id, asset catalog, and
+    /// annotations, so nothing is left orphaned.
     pub fn remove_dataset(&mut self, id: &DatasetId) {
         self.rekey_dataset_ids(
             |candidate| {
@@ -868,20 +631,13 @@ impl DocumentState {
                     Some(candidate.clone())
                 }
             },
-            // Surviving annotation lists are untouched by a removal — only the
-            // removed dataset's pins drop (with the whole entry).
             |_new_id, _anns| {},
         );
     }
 
     /// Rename a dataset's display label in place by id. Overwrites only the
-    /// manifest's `name`; the manifest's `dataset_id`, images, transforms,
-    /// and the dataset's asset catalog / annotations are untouched. No-op if
-    /// `id` is unknown, so a rename racing a removal is harmless and never
-    /// mints a phantom manifest. The viewer reads this `name` via
-    /// `scene.dataset_name(id)`, so an in-place edit here is what the layer
-    /// panel shows — and, because the manifest lives in the persisted
-    /// document, what reopen restores.
+    /// manifest's `name`. An unknown `id` is a no-op, so a rename racing a
+    /// removal never mints a phantom manifest.
     pub fn rename_dataset(&mut self, id: &DatasetId, name: String) {
         if let Some(manifest) = self.manifests.get_mut(id) {
             manifest.name = name;
@@ -890,17 +646,12 @@ impl DocumentState {
 
     /// Add (or replace) an annotation under `dataset_id`.
     ///
-    /// Idempotent / last-write-wins on a repeated `id`: re-applying a command
-    /// with an existing id replaces that annotation's position/author/kind in
-    /// place rather than appending a duplicate. This keeps every peer convergent
-    /// even if a command is delivered or replayed more than once. Distinct ids
-    /// are kept as independent entries, preserving insertion order.
+    /// Last write wins on a repeated `id`: the annotation is replaced in place,
+    /// so a replayed command keeps every peer convergent. Distinct ids append in
+    /// insertion order.
     ///
-    /// The pin's existing comment thread is **preserved** across such a
-    /// re-apply: an `add_annotation` rebroadcast/replay must not silently wipe a
-    /// discussion that has since accrued on that pin. (Threads are mutated only
-    /// via add/remove_comment.) A genuinely new pin carries an empty thread, so
-    /// for the common unique-id-per-drop case this is a no-op.
+    /// A replace keeps the pin's existing comment thread, so a replayed
+    /// `add_annotation` does not wipe a discussion that has since accrued.
     pub fn add_annotation(&mut self, dataset_id: DatasetId, annotation: Annotation) {
         let list = self.annotations.entry(dataset_id).or_default();
         if let Some(existing) = list.iter_mut().find(|a| a.id == annotation.id) {
@@ -912,10 +663,9 @@ impl DocumentState {
         }
     }
 
-    /// Remove an annotation by id from `dataset_id`. No-op if the dataset or
-    /// the id is unknown (so a duplicate/late removal is harmless). Drops the
-    /// dataset's now-empty entry to keep the map tidy. The pin's comment thread
-    /// cascades away with it (comments nest on the annotation).
+    /// Remove an annotation by id from `dataset_id`. An unknown dataset or id
+    /// is a no-op, so a late removal is harmless. Drops the dataset's entry
+    /// once it is empty.
     pub fn remove_annotation(&mut self, dataset_id: &DatasetId, id: &str) {
         if let Some(list) = self.annotations.get_mut(dataset_id) {
             list.retain(|a| a.id != id);
@@ -925,13 +675,9 @@ impl DocumentState {
         }
     }
 
-    /// Locate the pin `annotation_id` under `dataset_id` for mutation.
-    ///
-    /// Shared by [`Self::move_annotation`] / [`Self::add_comment`] /
-    /// [`Self::remove_comment`] / [`Self::edit_comment`]: each must target an
-    /// existing pin and otherwise be a clean no-op. Centralizing the lookup keeps
-    /// that "missing pin/dataset is harmless" rule in one place — the same
-    /// find-by-id used by `add`/`remove`.
+    /// Locate the pin `annotation_id` under `dataset_id` for mutation. Every
+    /// pin mutation goes through here, so a missing pin or dataset is a no-op
+    /// and never mints a phantom.
     fn annotation_mut(
         &mut self,
         dataset_id: &DatasetId,
@@ -943,24 +689,15 @@ impl DocumentState {
             .find(|a| a.id == annotation_id)
     }
 
-    /// Move the pin `id` under `dataset_id`. The optional `end` picks the move
-    /// shape, so this one entry point serves both the whole-shape drag (#776)
-    /// and the corner/edge resize (this slice):
+    /// Move the pin `id` under `dataset_id`. The optional `end` picks the move:
     ///
-    /// - `end: None` → **rigid whole-shape translate**: the anchor goes to
-    ///   `position`/`z` and any second vertex rides the same in-plane delta, so
-    ///   a line/box keeps its length, angle, and size (see
+    /// - `end: None`: whole-shape drag. The anchor goes to `position`/`z` and
+    ///   any second vertex rides the same delta (see
     ///   [`Annotation::set_position`]).
-    /// - `end: Some(end)` → **reshape**: `position`, `end`, and `z` are placed
-    ///   exactly — the two opposite corners are set independently, no rigid
-    ///   translate (see [`Annotation::set_vertices`]). This is the resize path.
+    /// - `end: Some(end)`: corner or edge resize. `position`, `end`, and `z`
+    ///   are placed exactly (see [`Annotation::set_vertices`]).
     ///
-    /// Pure delegation either way: locate the pin via the shared
-    /// [`Self::annotation_mut`] lookup, then hand the mutation to the matching
-    /// owner on `Annotation` (so the same geometry applies in 2D and 3D). Moving
-    /// a missing pin or dataset is a clean no-op — it must NOT create a phantom
-    /// pin (a move acts on an existing pin, never a way to mint one). The pin's
-    /// author, kind, and comment thread are preserved.
+    /// A missing pin or dataset is a no-op.
     pub fn move_annotation(
         &mut self,
         dataset_id: &DatasetId,
@@ -977,12 +714,8 @@ impl DocumentState {
         }
     }
 
-    /// Add (or replace) a comment on the pin `annotation_id` under `dataset_id`.
-    ///
-    /// Pure delegation: locate the pin, then hand the dedup + insertion-order
-    /// invariants to [`Annotation::add_comment`]. Adding a comment to a missing
-    /// annotation or dataset is a clean no-op — it must NOT create a phantom pin
-    /// (comments are content *on* an existing pin, never a way to mint one).
+    /// Add (or replace) a comment on the pin `annotation_id` under `dataset_id`
+    /// (see [`Annotation::add_comment`]). A missing pin or dataset is a no-op.
     pub fn add_comment(&mut self, dataset_id: &DatasetId, annotation_id: &str, comment: Comment) {
         if let Some(annotation) = self.annotation_mut(dataset_id, annotation_id) {
             annotation.add_comment(comment);
@@ -990,9 +723,7 @@ impl DocumentState {
     }
 
     /// Remove a comment by `comment_id` from the pin `annotation_id` under
-    /// `dataset_id`. No-op if the dataset, pin, or comment id is unknown (so a
-    /// duplicate/late removal is harmless). Delegates the actual removal to
-    /// [`Annotation::remove_comment`].
+    /// `dataset_id`. An unknown dataset, pin, or comment id is a no-op.
     pub fn remove_comment(
         &mut self,
         dataset_id: &DatasetId,
@@ -1005,14 +736,8 @@ impl DocumentState {
     }
 
     /// Overwrite the `text` of the comment `comment_id` on the pin
-    /// `annotation_id` under `dataset_id`.
-    ///
-    /// Pure delegation: locate the pin via the shared [`Self::annotation_mut`]
-    /// lookup, then hand the edit to [`Annotation::edit_comment`]. Editing a
-    /// comment on a missing dataset, pin, or comment id is a clean no-op — it
-    /// must NOT create a phantom pin or comment (an edit acts on an existing
-    /// comment, never a way to mint one). The comment's `id`/`author` and its
-    /// place in the thread are preserved.
+    /// `annotation_id` under `dataset_id`. An unknown dataset, pin, or comment
+    /// id is a no-op.
     pub fn edit_comment(
         &mut self,
         dataset_id: &DatasetId,
@@ -1073,26 +798,21 @@ impl DocumentState {
         }
     }
 
-    /// Pick the collection entity a freshly-dropped pin should be glued to: the entity
-    /// **nearest** to `position` (Euclidean) in `dataset_id`'s currently-resolved
-    /// active layout (issue #780).
+    /// Pick the collection entity a freshly dropped pin is glued to: the entity
+    /// nearest to `position` in the dataset's active layout.
     ///
-    /// Returns `None` — leaving the pin unanchored — when the dataset is not a
-    /// collection, is unknown, or has no entity with a resolvable position in the active
-    /// layout. Only entities that are actually placed (directly, or as a tile via
-    /// a placed parent) are candidates; an unplaceable entity is never treated as
-    /// if it sat at the origin (that is the whole point of using
-    /// [`resolve_entity_position`] rather than the render-path fallback).
+    /// Returns `None` when the dataset is unknown, not a collection, or has no
+    /// placed entity. It uses [`resolve_entity_position`] rather than the
+    /// render-path fallback so an unplaceable entity never counts as sitting at
+    /// the origin.
     ///
-    /// Determinism: ties (equal distance) are broken by **manifest entity order** —
-    /// the iteration walks `entities()` in order and only adopts a strictly-closer
-    /// candidate, so the first-listed of any tie wins. Both the server and every
-    /// client derive the same anchor from the same synced state, so the choice is
-    /// convergent without traveling on the wire.
+    /// Ties go to the first entity in manifest order. The server and every
+    /// client derive the same anchor from the same synced state, so the anchor
+    /// never travels on the wire.
     fn nearest_anchor(&self, dataset_id: &DatasetId, position: [f64; 2]) -> Option<EntityId> {
         let manifest = self.manifests.get(dataset_id)?;
-        // Anchoring is collection-only (issue #780): a single-image dataset has no
-        // group/tile to glue to, and its lone image doesn't move between layouts.
+        // A single-image dataset has no group or tile to glue to, and its lone
+        // image does not move between layouts.
         if !matches!(manifest.kind, DatasetKind::Collection { .. }) {
             return None;
         }
@@ -1116,8 +836,7 @@ impl DocumentState {
             let dx = pos[0] - position[0];
             let dy = pos[1] - position[1];
             let dist2 = dx * dx + dy * dy;
-            // Strictly-less keeps the FIRST entity (in manifest order) on a tie,
-            // making the tiebreak deterministic across server and all clients.
+            // Strictly less keeps the first entity on a tie.
             if best.as_ref().is_none_or(|(_, b)| dist2 < *b) {
                 best = Some((entity.id.clone(), dist2));
             }
@@ -1127,20 +846,14 @@ impl DocumentState {
     }
 
     /// Re-anchor every anchored pin in `dataset_id` for a layout change from
-    /// `from_id` to `to_id` (issue #780).
+    /// `from_id` to `to_id`.
     ///
-    /// For each pin with an anchor `e`, the whole shape is translated rigidly by
-    /// `delta = pos(e, to) − pos(e, from)` — `position += delta` and, for a
-    /// line/box, `end += delta` too — exactly the rigid translate
-    /// [`Annotation::set_position`] performs for a drag. `z` is untouched (layouts
-    /// are 2-D in-plane). A pin whose anchor doesn't move has a zero delta and so
-    /// stays put; an unanchored pin (`anchor == None`) is left entirely alone, as
-    /// is one whose anchor isn't placed in *both* layouts (defensive — no phantom
-    /// `[0, 0]` jump).
+    /// Each anchored pin's whole shape moves by `pos(anchor, to) − pos(anchor,
+    /// from)`; `z` is untouched because layouts are in-plane. An unanchored pin,
+    /// or one whose anchor is not placed in both layouts, stays put.
     ///
-    /// The caller MUST pass the **previous** active layout id as `from_id`, read
-    /// before `active_layout_ids` is overwritten, so the `from` positions are
-    /// correct.
+    /// The caller must pass the previous active layout id as `from_id`, read
+    /// before `active_layout_ids` is overwritten.
     fn reanchor_for_layout(
         &mut self,
         dataset_id: &DatasetId,
@@ -1169,8 +882,8 @@ impl DocumentState {
             let Some(anchor) = pin.anchor.as_ref() else {
                 continue;
             };
-            // Skip a pin whose anchor isn't placed in BOTH layouts — translating
-            // it would otherwise drag it toward a fallback origin in one of them.
+            // Translating a pin whose anchor is unplaced in either layout would
+            // drag it toward a fallback origin.
             let (Some(from_pos), Some(to_pos)) = (
                 crate::scene::resolve_entity_position(
                     anchor,
@@ -1188,8 +901,6 @@ impl DocumentState {
                 continue;
             };
             let delta = [to_pos[0] - from_pos[0], to_pos[1] - from_pos[1]];
-            // Whole-shape rigid translate (position + any second vertex); z is
-            // an in-plane-invariant, so it is never touched here.
             pin.position[0] += delta[0];
             pin.position[1] += delta[1];
             if let Some(end) = pin.end.as_mut() {
@@ -1225,13 +936,11 @@ impl DocumentState {
                 dataset_id,
                 layout_id,
             } => {
-                // Read the PREVIOUS active layout before overwriting it, so the
-                // re-anchor's `from` positions are the layout being replaced. A
+                // Read the previous active layout before overwriting it. A
                 // dataset with no active id yet resolves via the manifest default.
                 let from_id = self.active_layout_ids.get(&dataset_id).cloned();
-                // Re-anchor every glued pin by the displacement of its anchor
-                // entity between the old and new layouts (issue #780). Done here in
-                // the canonical apply path so it persists and reaches every peer.
+                // Re-anchoring in the canonical apply path makes it persist and
+                // reach every peer.
                 self.reanchor_for_layout(&dataset_id, from_id.as_ref(), &layout_id);
                 self.active_layout_ids.insert(dataset_id, layout_id);
             }
@@ -1250,52 +959,30 @@ impl DocumentState {
                 kind,
                 view,
             } => {
-                // Glue the new pin to the nearest collection group/tile in the resolved
-                // active layout (issue #780), so a later layout switch moves it
-                // with that entity. Computed here, inside the canonical apply, from
-                // synced state — so the server and every client derive the SAME
-                // anchor without it riding the `add_annotation` wire shape. `None`
-                // for a non-collection dataset or when nothing is placeable.
+                // Computed from synced state inside the canonical apply, so the
+                // server and every client derive the same anchor without it
+                // riding the `add_annotation` wire shape.
                 let anchor = self.nearest_anchor(&dataset_id, position);
                 self.add_annotation(
                     dataset_id,
                     Annotation {
                         id,
                         position,
-                        // Second vertex (line endpoint / box opposite corner).
-                        // `None` for a point, or for a slice-1..4 command with
-                        // no `end` field.
                         end,
                         z,
-                        // The view's timepoint/channel at creation (the slice
-                        // context the pin belongs to). Defaulted to 0 for an
-                        // older command with no t/c field.
                         t,
                         c,
                         author,
                         kind,
-                        // A freshly dropped pin starts with an empty thread.
-                        // On a re-applied (duplicate) pin id, add_annotation
-                        // preserves any thread already accrued on that pin.
+                        // A replayed pin id keeps its accrued thread; see
+                        // `add_annotation`.
                         comments: Vec::new(),
                         anchor,
-                        // The author's captured view at creation. `None` for a
-                        // command from a client that predates this slice. The
-                        // command boxes the view to keep the enum small; the
-                        // stored pin holds it unboxed, so unbox here.
-                        //
-                        // ENFORCE the documented "embedded view carries NO
-                        // source URLs" guarantee (see the `Annotation::view`
-                        // field doc + decision 0014): a well-behaved client
-                        // already captures in workspace-dataset-id form (empty
-                        // `datasets`), but a malformed/hostile command could
-                        // smuggle source dataset URLs (incl. local `file:///`
-                        // paths) in here, and storing them verbatim would leak
-                        // them into broadcast/persisted document state. Strip
-                        // `datasets` on every applied annotation so the
-                        // invariant holds for ALL new pins (live + persisted +
-                        // broadcast); the id-keyed fields that the restore path
-                        // actually reads are untouched.
+                        // A malformed or hostile command could smuggle source
+                        // URLs (including local `file:///` paths) into the
+                        // view. Strip them so they never reach broadcast or
+                        // persisted state; the id-keyed fields restore reads
+                        // are untouched.
                         view: view.map(|v| {
                             let mut view = *v;
                             view.clear_source_urls();
@@ -1349,30 +1036,29 @@ impl DocumentState {
 pub struct MemberChunkPlan {
     pub image_id: lucida_content::ImageId,
     pub position: [f64; 2],
+    /// The level every chunk below is at, this member's target level, which
+    /// is the value the view query reports for it. A level pin, clamped to
+    /// the member's source levels, wins over the level the screen calls for.
+    pub target_level: u32,
     pub needed: Vec<ChunkCoord>,
     pub prefetch: Vec<ChunkCoord>,
 }
 
 #[cfg(test)]
 mod annotation_view_tests {
-    //! Slice 1 (annotation views): a pin captures its author's view at
-    //! creation as an embedded [`SavedView`]. These lock the wire/blob
-    //! contract — round-trip equality, strict backward-compat (a view-less
-    //! pin is byte-identical to a pre-slice pin), the command carrying the
-    //! view through to the stored pin, and the embedded view being in
-    //! workspace-dataset-id form (no source URLs). They ship as permanent
-    //! regression tests; see [[gotchas/scene-document-state-json-compat]].
+    //! A pin captures its author's view as an embedded [`SavedView`]. These
+    //! lock the wire and blob contract: round-trip equality, additive serde,
+    //! the command carrying the view to the stored pin, and the embedded view
+    //! holding no source URLs.
 
     use super::*;
     use crate::saved_view::SavedView;
 
-    /// A sample captured view in **workspace-dataset-id form**: its `datasets`
-    /// Vec is intentionally EMPTY (no source URLs), exactly as `buildCapture`
-    /// emits in `workspace-dataset-id` mode. Carries some non-default
-    /// camera/slice/display state so equality is meaningful.
+    /// A sample captured view in workspace-dataset-id form: empty `datasets`,
+    /// as `buildCapture` emits in that mode, with non-default slice and
+    /// display state so equality is meaningful.
     fn workspace_view() -> SavedView {
         let mut v = SavedView::empty([1024, 768]);
-        // datasets stays empty (workspace-dataset-id mode) — assert it below.
         v.view.t = 7;
         v.view.c = 2;
         v.view.set_z_range(10..15);
@@ -1398,9 +1084,6 @@ mod annotation_view_tests {
         }
     }
 
-    /// (1) An `Annotation` carrying a captured view round-trips through
-    /// `serde_json` (serialize → deserialize → `==`). Equality holds because
-    /// `Annotation: PartialEq`, which in turn relies on `SavedView: PartialEq`.
     #[test]
     fn annotation_with_view_round_trips() {
         let pin = pin_with_view(Some(workspace_view()));
@@ -1412,21 +1095,14 @@ mod annotation_view_tests {
         assert_eq!(back.view.unwrap().view.t, 7);
     }
 
-    /// (2a) Backward-compat: an annotation JSON written WITHOUT the `view` key
-    /// deserializes with `view == None` — a pin persisted/broadcast before this
-    /// slice still loads, no wire break.
     #[test]
     fn pin_without_view_key_deserializes_as_none() {
-        // No `view` key — exactly what a pre-slice snapshot pin looks like.
         let json =
             r#"{"id":"pin-old","position":[3.0,4.0],"z":2.0,"author":"alice","kind":"point"}"#;
         let pin: Annotation = serde_json::from_str(json).unwrap();
         assert_eq!(pin.view, None);
     }
 
-    /// (2b) Byte-compat: a pin with NO captured view serializes with NO `view`
-    /// key, so a view-less pin is byte-identical to a pre-slice pin (the
-    /// `skip_serializing_if = "Option::is_none"` guarantee).
     #[test]
     fn pin_without_view_serializes_without_view_key() {
         let pin = pin_with_view(None);
@@ -1437,10 +1113,8 @@ mod annotation_view_tests {
         );
     }
 
-    /// (3) `AddAnnotation` carries the view through a serde round-trip AND
-    /// `DocumentState::add_annotation` (via `apply`) stores it on the created
-    /// pin. Also guards the "inbound command == rebroadcast" invariant: the
-    /// command round-trips equality-preserving.
+    /// `AddAnnotation` carries the view through a serde round-trip, so the
+    /// inbound command equals its rebroadcast, and `apply` stores it on the pin.
     #[test]
     fn add_annotation_command_carries_view_to_stored_pin() {
         let cmd = DocumentCommand::AddAnnotation {
@@ -1453,16 +1127,10 @@ mod annotation_view_tests {
             c: 2,
             author: "alice".into(),
             kind: AnnotationKind::Point,
-            // The command boxes the view (keeps the enum small); the stored
-            // pin holds it unboxed.
             view: Some(Box::new(workspace_view())),
         };
 
-        // Equality-preserving serde round-trip (inbound command == its
-        // rebroadcast). `DocumentCommand` is not `PartialEq`, so — like the
-        // existing `add_annotation_broadcast_is_byte_identical_to_inbound_command`
-        // test — assert byte-identity via the normalized JSON value: re-encoding
-        // the parsed command must reproduce the original wire form, view and all.
+        // `DocumentCommand` is not `PartialEq`, so compare normalized JSON.
         let json = serde_json::to_string(&cmd).unwrap();
         let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
         let reser = serde_json::to_string(&parsed).unwrap();
@@ -1470,33 +1138,23 @@ mod annotation_view_tests {
             serde_json::from_str::<serde_json::Value>(&json).unwrap(),
             serde_json::from_str::<serde_json::Value>(&reser).unwrap(),
         );
-        // The view survived on the wire (not silently stripped).
         let v: serde_json::Value = serde_json::from_str(&reser).unwrap();
         assert_eq!(v["view"]["view"]["t"], 7);
 
-        // Applying lands the view on the stored pin (Annotation: PartialEq).
         let mut doc = DocumentState::default();
         doc.apply(parsed);
         let pin = &doc.annotations[&DatasetId("wds-1".into())][0];
         assert_eq!(pin.view.as_ref(), Some(&workspace_view()));
     }
 
-    /// (3c) ROOT-CAUSE GUARANTEE: applying an `AddAnnotation` whose embedded
-    /// view carries source URLs (a malformed/hostile command — a well-behaved
-    /// client captures in workspace-dataset-id form) stores a pin whose
-    /// `view.datasets` is EMPTY, enforcing the documented "embedded view
-    /// carries NO source URLs" invariant on the canonical apply path. The
-    /// id-keyed fields the restore path actually reads (active_layouts /
-    /// dataset_order / dataset_settings / auto_contrast) are PRESERVED — only
-    /// the URL list is dropped.
+    /// An `AddAnnotation` whose embedded view carries source URLs stores a pin
+    /// with empty `view.datasets`. The id-keyed fields restore reads survive.
     #[test]
     fn add_annotation_strips_embedded_view_source_urls_but_keeps_id_keyed_fields() {
         use lucida_content::LayoutId;
 
         let ds = DatasetId("wds-1".into());
 
-        // A captured view that (wrongly) carries source URLs AND the id-keyed
-        // fields the light restore depends on.
         let mut view = workspace_view();
         view.datasets.push("file:///private/secret.zarr".into());
         view.datasets.push("gs://corp/restricted.zarr".into());
@@ -1525,25 +1183,19 @@ mod annotation_view_tests {
             .view
             .as_ref()
             .expect("applied pin must carry its captured view");
-        // The source-URL list was stripped — no leak into document state.
         assert!(
             stored.datasets.is_empty(),
             "AddAnnotation must store an embedded view with NO source URLs, got {:?}",
             stored.datasets
         );
-        // The id-keyed fields the restore path reads are preserved verbatim.
         assert!(stored.active_layouts.contains_key(&ds));
         assert_eq!(stored.dataset_order, vec![ds.clone()]);
         assert!(stored.dataset_settings.contains_key(&ds));
         assert_eq!(stored.auto_contrast.get(&ds), Some(&false));
-        // And the non-membership view state (slice/contrast) still rode along.
         assert_eq!(stored.view.t, 7);
         assert_eq!(stored.display.contrast_max, 5000.0);
     }
 
-    /// (3b) An `add_annotation` command WITHOUT a `view` key parses with
-    /// `view == None` (the additive backward-compat guarantee), and a command
-    /// without a view serializes with no `view` key.
     #[test]
     fn add_annotation_view_defaults_to_none_and_is_skipped() {
         let json = r#"{"type":"add_annotation","dataset_id":"wds-1","id":"p","position":[3.0,4.0],"author":"alice","kind":"point"}"#;
@@ -1559,9 +1211,6 @@ mod annotation_view_tests {
         );
     }
 
-    /// (4) The captured view, as embedded, is in workspace-dataset-id form:
-    /// its `datasets` is EMPTY, so embedding a view on a pin never leaks
-    /// dataset source URLs onto the document wire.
     #[test]
     fn embedded_view_is_workspace_dataset_id_form_no_source_urls() {
         let pin = pin_with_view(Some(workspace_view()));
@@ -1572,18 +1221,14 @@ mod annotation_view_tests {
             view.datasets.is_empty(),
             "embedded view must carry no source URLs (workspace-dataset-id form)"
         );
-        // And the serialized blob carries an empty datasets array, not URLs.
         assert!(
             !json.contains("zarr") && !json.contains("gs://") && !json.contains("s3://"),
             "no dataset source URL should appear in a pin's serialized view: {json}"
         );
     }
 
-    /// `DocumentState::remap_dataset_ids` moves every dataset-id-keyed map AND
-    /// the embedded `manifest.dataset_id` onto the new id. This is the
-    /// workspace-duplicate id-consistency contract: a document copied verbatim
-    /// would reference the source workspace's ids; after remap it must resolve
-    /// entirely against the copy's fresh ids, with no trace of the old id left.
+    /// After a remap the document resolves entirely against the new ids, with
+    /// no trace of the old id in any map or in `manifest.dataset_id`.
     #[test]
     fn remap_dataset_ids_rewrites_every_keyed_map_and_manifest_id() {
         use lucida_content::{DatasetKind, LayoutId, LayoutSpec};
@@ -1621,7 +1266,6 @@ mod annotation_view_tests {
         remap.insert(old.clone(), new.clone());
         doc.remap_dataset_ids(&remap);
 
-        // Every map is now keyed by the new id, and the old id is gone.
         assert!(doc.manifests.contains_key(&new));
         assert!(!doc.manifests.contains_key(&old));
         assert!(doc.registered_layouts.contains_key(&new));
@@ -1632,20 +1276,12 @@ mod annotation_view_tests {
         assert!(!doc.asset_catalogs.contains_key(&old));
         assert!(doc.annotations.contains_key(&new));
         assert!(!doc.annotations.contains_key(&old));
-        // The embedded id inside the manifest moved too (not just the map key).
         assert_eq!(doc.manifests.get(&new).unwrap().dataset_id, new);
     }
 
-    /// `remap_dataset_ids` descends into each annotation's captured author view
-    /// (`Annotation::view`) and remaps its workspace-dataset-id-keyed maps too —
-    /// not just the `annotations` map key. Without this an embedded view in a
-    /// duplicated workspace would still point at the SOURCE workspace's ids
-    /// (dangling), so a copied pin's "go to author's view" would silently lose
-    /// its per-channel colors/contrast. Builds an annotation whose `view` is
-    /// keyed by the source id, remaps source→copy, and asserts the embedded view
-    /// now references the COPY id with NO source id left in any of its
-    /// id-keyed fields (active_layouts / dataset_order / dataset_settings /
-    /// auto_contrast).
+    /// A remap also rewrites the id-keyed maps inside each pin's captured view;
+    /// otherwise a copied pin's "go to author's view" loses its per-channel
+    /// colors and contrast.
     #[test]
     fn remap_dataset_ids_remaps_embedded_annotation_view() {
         use lucida_content::LayoutId;
@@ -1653,7 +1289,6 @@ mod annotation_view_tests {
         let old = DatasetId("wds-old".into());
         let new = DatasetId("wds-new".into());
 
-        // A captured view keyed by the SOURCE id across every id-keyed field.
         let mut view = workspace_view();
         view.active_layouts
             .insert(old.clone(), LayoutId("img".into()));
@@ -1669,11 +1304,9 @@ mod annotation_view_tests {
         remap.insert(old.clone(), new.clone());
         doc.remap_dataset_ids(&remap);
 
-        // The annotations map key moved (existing contract).
         assert!(doc.annotations.contains_key(&new));
         assert!(!doc.annotations.contains_key(&old));
 
-        // The embedded captured view moved too — the whole point of this test.
         let embedded = doc.annotations[&new][0]
             .view
             .as_ref()
@@ -1687,8 +1320,7 @@ mod annotation_view_tests {
         assert!(!embedded.auto_contrast.contains_key(&old));
     }
 
-    /// An id absent from the remap is left untouched (safe no-op), so a partial
-    /// map never corrupts unrelated datasets.
+    /// A partial remap never corrupts unrelated datasets.
     #[test]
     fn remap_dataset_ids_leaves_unmapped_ids_unchanged() {
         let kept = DatasetId("wds-kept".into());
@@ -1699,11 +1331,8 @@ mod annotation_view_tests {
         assert!(doc.active_layout_ids.contains_key(&kept));
     }
 
-    /// Build a `DocumentState` with `id` present in EVERY dataset-id-keyed
-    /// field — the five id-keyed maps plus the manifest's embedded
-    /// `dataset_id`. Used by the `remove_dataset` coverage tests so a future
-    /// id-keyed field that isn't wired into the single-source walk surfaces as
-    /// a leftover.
+    /// A `DocumentState` with `id` in every id-keyed field, so a field missing
+    /// from `rekey_dataset_ids` shows up as a leftover.
     fn doc_with_id_in_every_field(id: &DatasetId) -> DocumentState {
         use lucida_content::{DatasetKind, LayoutId, LayoutSpec};
 
@@ -1734,11 +1363,9 @@ mod annotation_view_tests {
         doc
     }
 
-    /// `DocumentState::remove_dataset` clears the removed id from **every**
-    /// id-keyed field — including `registered_layouts` and `active_layout_ids`,
-    /// which the pre-refactor implementation left orphaned (the bug this slice
-    /// fixes). A second, unrelated dataset is fully preserved, proving removal
-    /// targets only the requested id.
+    /// `remove_dataset` clears the id from every id-keyed field, including
+    /// `registered_layouts` and `active_layout_ids`, and leaves an unrelated
+    /// dataset intact.
     #[test]
     fn remove_dataset_clears_id_from_all_id_keyed_fields() {
         use lucida_content::{DatasetKind, LayoutId, LayoutSpec};
@@ -1747,7 +1374,6 @@ mod annotation_view_tests {
         let kept = DatasetId("wds-kept".into());
 
         let mut doc = doc_with_id_in_every_field(&gone);
-        // A second dataset that must survive the removal untouched.
         doc.register_dataset(lucida_content::DatasetManifest::new(
             kept.clone(),
             "Kept".into(),
@@ -1774,10 +1400,6 @@ mod annotation_view_tests {
 
         doc.remove_dataset(&gone);
 
-        // The removed id is gone from every id-keyed field — the previously
-        // ORPHANED `registered_layouts` / `active_layout_ids` are asserted
-        // explicitly (they are the bug fix), alongside the fields removal
-        // already cleared.
         assert!(!doc.manifests.contains_key(&gone));
         assert!(
             !doc.registered_layouts.contains_key(&gone),
@@ -1790,7 +1412,6 @@ mod annotation_view_tests {
         assert!(!doc.asset_catalogs.contains_key(&gone));
         assert!(!doc.annotations.contains_key(&gone));
 
-        // The unrelated dataset is fully intact across every field.
         assert!(doc.manifests.contains_key(&kept));
         assert!(doc.registered_layouts.contains_key(&kept));
         assert!(doc.active_layout_ids.contains_key(&kept));
@@ -1798,12 +1419,9 @@ mod annotation_view_tests {
         assert!(doc.annotations.contains_key(&kept));
     }
 
-    /// Coverage guard for the single-source [`DocumentState::rekey_dataset_ids`]
-    /// walk: removing the only dataset present in EVERY id-keyed field must
-    /// leave the whole document empty. If a future id-keyed field is added to
-    /// `DocumentState` but not wired into `rekey_dataset_ids`, that field will
-    /// still reference the removed id and this test fails — making the
-    /// single-source invariant enforced, not just documented.
+    /// Removing the only dataset must leave the whole document empty. An
+    /// id-keyed field not wired into [`DocumentState::rekey_dataset_ids`] keeps
+    /// the id and fails this test.
     #[test]
     fn rekey_dataset_ids_covers_every_id_keyed_field() {
         let id = DatasetId("wds-only".into());
@@ -1818,20 +1436,11 @@ mod annotation_view_tests {
         assert!(doc.annotations.is_empty());
     }
 
-    /// DETERMINISM GUARD: a remap (middle rename) and a removal (middle drop)
-    /// must preserve the **iteration order** of the id-keyed `IndexMap` fields
-    /// (`manifests`, `asset_catalogs`, `annotations`) — not merely their
-    /// membership. These maps are `IndexMap` *specifically* to guarantee
-    /// byte-identical serialization order on the collaborative-document wire (a
-    /// determinism invariant); the sibling `remap`/`remove` tests above assert
-    /// only `contains_key`, so a future change that round-tripped one of these
-    /// fields through a `HashMap` would silently scramble wire order yet pass
-    /// every other test. This locks position, not just presence.
-    ///
-    /// Both halves rename/remove a **middle** entry (B) of a known A, B, C
-    /// insertion order so the assertion is non-vacuous: a sorted or
-    /// reordered rebuild would land B (or B') somewhere other than the middle
-    /// slot and fail. A membership-only check could not catch that.
+    /// A remap and a removal preserve the iteration order of the `IndexMap`
+    /// fields, not just membership. They are `IndexMap` so serialization order
+    /// on the document wire is deterministic; a rebuild through a `HashMap`
+    /// would scramble it and pass every membership test. Both halves touch the
+    /// middle entry so a sorted or reordered rebuild fails.
     #[test]
     fn rekey_dataset_ids_preserves_index_map_iteration_order() {
         use lucida_content::DatasetKind;
@@ -1841,8 +1450,6 @@ mod annotation_view_tests {
         let c = DatasetId("wds-c".into());
         let b_prime = DatasetId("wds-b-prime".into());
 
-        // Seed a doc with A, B, C inserted in that exact order across the three
-        // order-bearing IndexMap fields.
         fn seed(ids: &[&DatasetId]) -> DocumentState {
             let mut doc = DocumentState::default();
             for id in ids {
@@ -1863,16 +1470,12 @@ mod annotation_view_tests {
             doc
         }
 
-        // --- Remap case: rename the MIDDLE entry B -> B', leave A and C ---
+        // Rename the middle entry in place.
         let mut doc = seed(&[&a, &b, &c]);
         let mut remap = HashMap::new();
         remap.insert(b.clone(), b_prime.clone());
         doc.remap_dataset_ids(&remap);
 
-        // B is replaced IN PLACE by B' — A and C keep their original slots, so
-        // the order is exactly [A, B', C], not reordered (and not sorted, which
-        // would be [A, B', C] only by accident — see the removal half below for
-        // the order-sensitive check that a sort could not satisfy).
         let expected = vec![a.clone(), b_prime.clone(), c.clone()];
         assert_eq!(doc.manifests.keys().cloned().collect::<Vec<_>>(), expected);
         assert_eq!(
@@ -1883,16 +1486,12 @@ mod annotation_view_tests {
             doc.annotations.keys().cloned().collect::<Vec<_>>(),
             expected,
         );
-        // The embedded manifest id rode along with its in-place slot.
         assert_eq!(doc.manifests[&b_prime].dataset_id, b_prime);
 
-        // --- Remove case: drop the MIDDLE entry B from a fresh A, B, C doc ---
+        // Drop the middle entry; the survivors keep their order.
         let mut doc = seed(&[&a, &b, &c]);
         doc.remove_dataset(&b);
 
-        // The survivors keep their relative order: exactly [A, C]. A reordering
-        // rebuild (e.g. via HashMap) could leave [C, A]; this asserts it does
-        // not.
         let expected = vec![a.clone(), c.clone()];
         assert_eq!(doc.manifests.keys().cloned().collect::<Vec<_>>(), expected);
         assert_eq!(
@@ -1908,20 +1507,13 @@ mod annotation_view_tests {
 
 #[cfg(test)]
 mod ensure_label_tests {
-    //! Growing `label_settings` to reach a per-label edit's index. These lock the
-    //! contract that back-filling the vec materialises entries at the hidden
-    //! default (a label with no explicit setting follows the hidden-by-default
-    //! policy — masks are opt-in) while NEVER overwriting an existing entry — so
-    //! an explicit on is sacred across a later grow, and an explicit visible-set
-    //! still targets its own entry.
+    //! Growing `label_settings` back-fills hidden defaults and never overwrites
+    //! an existing entry, so an explicit on survives a later grow.
 
     use super::*;
 
-    /// Settings with a SHORT `label_settings` vec — the shape a per-label edit
-    /// can outrun (e.g. a blob seeded before the full label count was known).
-    /// Only index 0 exists, and it carries an explicit ON: with masks hidden by
-    /// default, `visible: true` is the non-default state a grow must never clobber
-    /// back to the hidden default.
+    /// A short `label_settings` vec a per-label edit can outrun. Index 0 is an
+    /// explicit on, the non-default state a grow must not clobber.
     fn short() -> DatasetDisplaySettings {
         DatasetDisplaySettings {
             label_settings: vec![LabelSettings {
@@ -1934,28 +1526,21 @@ mod ensure_label_tests {
 
     #[test]
     fn opacity_edit_at_high_index_backfills_hidden_and_preserves_existing_on() {
-        // Mirrors the `SetLabelOpacity` apply arm: `ensure_label(idx).opacity =`.
-        // The grow back-fills intervening entries at the hidden default, tunes
-        // the target's opacity, and leaves the existing explicit on untouched.
+        // Mirrors the `SetLabelOpacity` apply arm.
         let mut s = short();
         s.ensure_label(3).opacity = 0.2;
         assert_eq!(s.label_settings.len(), 4);
-        // The pre-existing explicit-on entry is sacred — untouched by the grow.
         assert!(s.label_settings[0].visible);
-        // Back-filled intermediates take the hidden default at 0.5.
         assert_eq!(s.label_settings[1], LabelSettings::default());
         assert_eq!(s.label_settings[2], LabelSettings::default());
-        // The target took the opacity edit and stays hidden by default —
-        // tuning opacity alone never reveals a mask.
+        // Opacity alone never reveals a mask.
         assert!(!s.label_settings[3].visible);
         assert_eq!(s.label_settings[3].opacity, 0.2);
     }
 
     #[test]
     fn explicit_visible_set_targets_its_entry_and_backfills_hidden() {
-        // Mirrors the `SetLabelVisible(.., true)` apply arm: the target turns on,
-        // the back-filled intermediate stays hidden by default, and the existing
-        // explicit on is left on.
+        // Mirrors the `SetLabelVisible(.., true)` apply arm.
         let mut s = short();
         s.ensure_label(2).visible = true;
         assert_eq!(s.label_settings.len(), 3);
@@ -1979,11 +1564,9 @@ mod ensure_label_tests {
 
 #[cfg(test)]
 mod reconcile_label_settings_tests {
-    //! Name-keyed, occurrence-aware remap of saved per-label settings onto a
-    //! recipient's current label order. These lock the contract that a saved
-    //! view / bookmark / peer restore matches per-label visibility+opacity to
-    //! the RIGHT current label after the label list changed, and that a legacy
-    //! blob (no captured names) still applies positionally.
+    //! A saved view, bookmark, or peer restore matches per-label settings to
+    //! the right current label after the label list changed. A blob with no
+    //! captured names still applies positionally.
 
     use super::*;
 
@@ -1991,12 +1574,8 @@ mod reconcile_label_settings_tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
-    /// A marker settings value carrying a distinctive opacity, so a matched
-    /// (reconciled) entry is trivially distinguishable from the
-    /// [`LabelSettings::default`] a miss produces (hidden, at opacity `0.5`). The
-    /// distinctive (non-`0.5`) opacity is what separates a match from a miss:
-    /// both are `visible: false`, but only a matched entry carries the marker
-    /// opacity.
+    /// Hidden settings with a non-`0.5` opacity, so a match is distinguishable
+    /// from the [`LabelSettings::default`] a miss produces.
     fn marked(opacity: f32) -> LabelSettings {
         LabelSettings {
             visible: false,
@@ -2004,10 +1583,8 @@ mod reconcile_label_settings_tests {
         }
     }
 
-    /// A matched entry that is explicitly VISIBLE, used to assert that a save
-    /// which marked a label visible restores it visible (matched settings are
-    /// never touched by the hidden-fallback policy — the mirror of the hidden
-    /// default: an explicit on survives reconcile just as an explicit off does).
+    /// An explicitly visible entry, to show a matched explicit on survives
+    /// reconcile.
     fn visible_marked(opacity: f32) -> LabelSettings {
         LabelSettings {
             visible: true,
@@ -2017,9 +1594,7 @@ mod reconcile_label_settings_tests {
 
     #[test]
     fn result_is_always_aligned_to_current_names() {
-        // Even a total mismatch produces exactly one entry per current label,
-        // and every unmatched current label — having no explicit setting — takes
-        // the hidden-by-default (hidden at 0.5).
+        // A total mismatch still yields one hidden default per current label.
         let saved = vec![marked(0.1)];
         let out = DatasetDisplaySettings::reconcile_label_settings(
             &saved,
@@ -2039,22 +1614,20 @@ mod reconcile_label_settings_tests {
             &[],
             &names(&["whatever", "these", "are"]),
         );
-        // Index-for-index, exactly the old behaviour.
         assert_eq!(out, saved);
     }
 
     #[test]
     fn legacy_positional_pads_and_truncates_to_current_len() {
         let saved = vec![marked(0.1), marked(0.2)];
-        // Current is LONGER: extra current labels take the default.
+        // Current is longer: extra current labels take the default.
         let longer =
             DatasetDisplaySettings::reconcile_label_settings(&saved, &[], &names(&["a", "b", "c"]));
-        // The extra current label the save never covered takes the shown-by-default.
         assert_eq!(
             longer,
             vec![marked(0.1), marked(0.2), LabelSettings::default()]
         );
-        // Current is SHORTER: trailing saved entries are dropped.
+        // Current is shorter: trailing saved entries are dropped.
         let shorter = DatasetDisplaySettings::reconcile_label_settings(&saved, &[], &names(&["a"]));
         assert_eq!(shorter, vec![marked(0.1)]);
     }
@@ -2073,8 +1646,7 @@ mod reconcile_label_settings_tests {
     fn added_current_label_takes_the_default() {
         let author = names(&["region-a", "region-b"]);
         let saved = vec![marked(0.11), marked(0.22)];
-        // "region-c" is new to the recipient — the author never named it, so it
-        // has no explicit setting and follows the hidden-by-default policy.
+        // The author never named "region-c", so it takes the hidden default.
         let current = names(&["region-a", "region-c", "region-b"]);
         let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
         assert_eq!(
@@ -2106,7 +1678,7 @@ mod reconcile_label_settings_tests {
         assert_eq!(out, saved);
 
         // More current occurrences than the author had: the surplus takes the
-        // shown-by-default.
+        // default.
         let current_more = names(&["region-a", "region-a", "region-a", "region-a"]);
         let out_more =
             DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current_more);
@@ -2125,9 +1697,7 @@ mod reconcile_label_settings_tests {
     fn mixed_repeats_and_uniques_stay_occurrence_aligned() {
         let author = names(&["region-a", "region-b", "region-a"]);
         let saved = vec![marked(0.11), marked(0.22), marked(0.33)];
-        // Recipient reorders and the two "region-a"s swap relative screen order:
-        // occurrence order is preserved, so the FIRST current "region-a" still takes
-        // the author's FIRST "region-a".
+        // The first current "region-a" still takes the author's first one.
         let current = names(&["region-a", "region-a", "region-b"]);
         let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
         assert_eq!(out, vec![marked(0.11), marked(0.33), marked(0.22)]);
@@ -2135,10 +1705,8 @@ mod reconcile_label_settings_tests {
 
     #[test]
     fn shorter_saved_than_author_names_defaults_the_gap() {
-        // Defensive: a malformed blob whose `saved` is shorter than its
-        // `label_names` must not panic — a name whose parallel saved slot is
-        // missing was never really addressed by the save, so it takes the
-        // hidden-by-default.
+        // A malformed blob whose `saved` is shorter than its `label_names` must
+        // not panic; a name with no saved slot takes the hidden default.
         let author = names(&["a", "b", "c"]);
         let saved = vec![marked(0.11)]; // only "a" has a settings entry
         let current = names(&["c", "a"]);
@@ -2149,23 +1717,17 @@ mod reconcile_label_settings_tests {
 
     #[test]
     fn matched_visible_setting_restores_visible() {
-        // A save that MATCHED a label and marked it visible must restore that
-        // label visible — the hidden-fallback policy only touches labels the save
-        // never addressed, never a matched entry.
+        // The hidden fallback only touches labels the save never addressed.
         let author = names(&["region-a", "region-b"]);
-        // region-a was saved VISIBLE; region-b saved hidden.
         let saved = vec![visible_marked(0.8), marked(0.3)];
         let current = names(&["region-b", "region-a"]);
         let out = DatasetDisplaySettings::reconcile_label_settings(&saved, &author, &current);
-        // region-b (hidden) then region-a (visible) — each follows its own name.
         assert_eq!(out, vec![marked(0.3), visible_marked(0.8)]);
         assert!(out[1].visible);
     }
 
     #[test]
     fn legacy_positional_restores_a_matched_visible_entry() {
-        // The positional (legacy, no author names) path likewise restores an
-        // in-range saved entry verbatim — a visible one stays visible.
         let saved = vec![visible_marked(0.7), marked(0.2)];
         let out =
             DatasetDisplaySettings::reconcile_label_settings(&saved, &[], &names(&["a", "b"]));

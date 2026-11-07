@@ -7,7 +7,7 @@ import type { WorkerCtx } from "../workerContext.ts";
 import type { LabelVolumeChunkDataMessage } from "../workerProtocol.ts";
 import type { Chunk } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
-import { VOLUME_ATLAS_BUDGET } from "../workerProtocol.ts";
+import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import { handleLabelVolumeChunkData } from "./upload.ts";
 import { computeLabelVolumeSizing, labelPaddedVolumeBytes } from "./atlas.ts";
 import { destroyAllVolumeResources, removeVolumeResources } from "./index.ts";
@@ -80,7 +80,7 @@ function mkChunk(ids: Uint32Array, x: number, y: number, z: number): Chunk {
   } as Chunk;
 }
 
-/** A message with one or more WHOLE 3D chunks for one label overlay member. */
+/** A message with one or more whole 3D chunks for one label overlay member. */
 function labelVolumeMsg(chunks: Chunk[], dims: Dims): LabelVolumeChunkDataMessage {
   return {
     type: "labelVolumeChunkData",
@@ -175,12 +175,12 @@ describe("handleLabelVolumeChunkData", () => {
     expect(slot7).not.toBe(SENTINEL);
     // Distinct chunks land in distinct slots — a shared slot would alias ids.
     expect(slot0).not.toBe(slot7);
-    // Every cell NOT delivered stays sentinel (absent).
+    // Every cell not delivered stays sentinel (absent).
     for (const gi of [1, 2, 3, 4, 5, 6]) {
       expect(pool.indirectionData[gi]).toBe(SENTINEL);
     }
 
-    // Each write lands at its slot's origin (NOT the chunk's grid offset).
+    // Each write lands at its slot's origin (not the chunk's grid offset).
     expect(writes).toHaveLength(2);
     const originForSlot = (s: number): [number, number, number] => [
       (s % pool.slotsX) * pool.chunkX,
@@ -277,8 +277,8 @@ describe("label volume pool cleanup on dataset removal", () => {
     const pool = ctx.state.labelVolumePools.get("img-0:label:region-b")!;
     const destroyed = pool.texture.destroy as unknown as ReturnType<typeof vi.fn>;
 
-    // removeLayerResources passes the DATASET id ("ds-0"), which is NOT the
-    // pool's key ("img-0:label:region-b") — the leak was the lookup missing here.
+    // removeLayerResources passes the dataset id ("ds-0"), which is not the
+    // pool's key ("img-0:label:region-b").
     removeVolumeResources(ctx, "ds-0");
 
     expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
@@ -304,22 +304,17 @@ describe("label volume pool cleanup on dataset removal", () => {
 
 describe("computeLabelVolumeSizing", () => {
   it("sizes the atlas to the WHOLE grid for an eligible level whose PADDED bricks bust the byte budget", () => {
-    // A real downsampled level: the chunk shape does not evenly divide the
-    // extent (the norm), so padding the boundary bricks pushes the PADDED total
-    // (gridCellCount * paddedChunkBytes) over the 512 MB budget while the TRUE
-    // (unpadded) volume still fits it. Sizing the atlas on padded bytes would
-    // leave fewer slots than grid cells, evicting delivered bricks and punching
-    // transparent holes where real data exists — the atlas must hold the whole
-    // grid instead.
+    // The chunk shape does not evenly divide the extent, so the padded total
+    // exceeds the 512 MB budget while the true volume fits. Sizing on padded
+    // bytes would leave fewer slots than cells and render holes.
     const w = 1088, h = 1024, d = 120, chunk = 128, maxDim = 2048;
     const s = computeLabelVolumeSizing(w, h, d, chunk, chunk, chunk, maxDim);
 
-    // The TRUE volume fits the budget (this is why the level is eligible)...
-    expect(w * h * d * 4).toBeLessThanOrEqual(VOLUME_ATLAS_BUDGET);
-    // ...but the PADDED bricks would exceed it — so a byte-budget clamp on the
-    // padded total would under-provision the atlas.
+    // The true volume fits the budget, which is why the level is eligible...
+    expect(w * h * d * 4).toBeLessThanOrEqual(CEILING_BUDGETS.volumeAtlasBytes);
+    // ...but the padded bricks would exceed it.
     const paddedBytes = s.gridCellCount * s.chunkX * s.chunkY * s.chunkZ * 4;
-    expect(paddedBytes).toBeGreaterThan(VOLUME_ATLAS_BUDGET);
+    expect(paddedBytes).toBeGreaterThan(CEILING_BUDGETS.volumeAtlasBytes);
 
     // Residency invariant: capacity is the whole grid, never clamped to bytes.
     expect(s.capacity).toBe(s.gridCellCount);
@@ -394,9 +389,9 @@ describe("labelPaddedVolumeBytes", () => {
   it("counts the rectangular slot-grid OVERSHOOT (totalSlots), not just gridCellCount", () => {
     // 13 z-bricks of 512³: 13 is prime and every atlas axis holds at most
     // floor(2048/512)=4 slots, so the grid can't pack as a 13-slot line — it
-    // rounds up to 16 slots, reserving 3 MORE than the 13 grid cells. The byte
+    // rounds up to 16 slots, reserving 3 more than the 13 grid cells. The byte
     // figure must reflect that actual textureSize allocation; a gridCellCount*brick
-    // count would UNDER-count and over-admit a mask the atlas can't hold.
+    // count would under-count and over-admit a mask the atlas can't hold.
     const s = computeLabelVolumeSizing(512, 512, 6656, 512, 512, 512, 2048);
     expect(s.gridCellCount).toBe(13);
     expect(s.totalSlots).toBeGreaterThan(s.gridCellCount); // rectangular overshoot

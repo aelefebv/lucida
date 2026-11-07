@@ -1,22 +1,11 @@
-//! End-to-end HTTP tests for `AuthMode::Disabled`.
+//! End-to-end HTTP tests for `AuthMode::Disabled`: spawn the real binary
+//! in disabled mode and drive it over HTTP. They guard against
+//! `build_extractor` returning the cookie extractor in every mode, which
+//! would 401 every request from a binary that boots fine.
 //!
-//! Spawn the actual `lucida-server` binary in disabled mode, then drive
-//! it over real HTTP via `reqwest`. The regression these tests close: if
-//! `build_extractor` returned the cookie extractor regardless of
-//! `AuthMode`, every request would 401 even though the binary booted
-//! fine. `auth_config_e2e.rs` only checks that the binary boots and
-//! binds; these tests close the gap by exercising actual HTTP
-//! request/response.
-//!
-//! Each test:
-//! - Picks a unique loopback (or `0.0.0.0`) port via `pick_loopback_port`.
-//! - Wipes the parent process env with `env_clear` so the test
-//!   environment can't smuggle in `LUCIDA_*` overrides.
-//! - Sets a tempdir-scoped `LUCIDA_DB_PATH` so the SQLite store doesn't
-//!   write `lucida.db` into the workspace root.
-//! - Drains stdout/stderr in background threads to avoid the child
-//!   blocking on a full pipe (axum + tracing chatter fills 64K fast).
-//! - Kills the child + drops the tempdir on test end.
+//! Each test uses its own port, clears the parent env, points
+//! `LUCIDA_DB_URL` at a tempdir, and drains the child's stdout and stderr
+//! so it never blocks on a full pipe.
 
 use std::io::Read;
 use std::net::TcpListener;
@@ -45,7 +34,10 @@ fn server_command(tmp_db: &std::path::Path, env: &[(&str, &str)]) -> Command {
     cmd.env_clear()
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("LUCIDA_DB_PATH", tmp_db.to_str().expect("utf-8"))
+        .env(
+            "LUCIDA_DB_URL",
+            format!("sqlite://{}", tmp_db.to_str().expect("utf-8")),
+        )
         .env("RUST_LOG", "lucida_server=warn");
     for (k, v) in env {
         cmd.env(k, v);
@@ -172,7 +164,10 @@ async fn assert_whoami_returns_dev_principal(server: &SpawnedServer) {
         "whoami must yield the canned dev principal; got {body}",
     );
     assert_eq!(body["display_name"], "Local Dev");
-    assert_eq!(body["is_admin"], true);
+    assert_eq!(
+        body["is_admin"], false,
+        "the identity every caller gets for free carries no admin rights; got {body}",
+    );
     // picture_url is JSON null in the canned principal.
     assert!(
         body["picture_url"].is_null(),
@@ -189,6 +184,25 @@ async fn loopback_default_whoami_returns_dev_principal() {
     let bind = format!("127.0.0.1:{port}");
     let server = spawn_server(&bind, &bind, &[]);
     assert_whoami_returns_dev_principal(&server).await;
+}
+
+// The SPA draws its sign-out control off this answer, so disabled
+// mode ends up with no control rather than one that clears nothing.
+#[tokio::test]
+async fn disabled_mode_advertises_no_sign_out_url() {
+    let port = pick_loopback_port();
+    let bind = format!("127.0.0.1:{port}");
+    let server = spawn_server(&bind, &bind, &[]);
+
+    let mode: Value = http_client()
+        .get(format!("{}/auth/mode", server.base_url))
+        .send()
+        .await
+        .expect("GET /auth/mode")
+        .json()
+        .await
+        .expect("json body");
+    assert!(mode["sign_out_url"].is_null(), "got {mode}");
 }
 
 // Docker quickstart path: explicit LUCIDA_AUTH=disabled +
@@ -268,41 +282,103 @@ async fn browse_works_without_cookie_in_disabled_mode() {
     );
 }
 
-// POST /auth/dev/login is gone — the route was retired in favour of
-// the stub extractor. `LUCIDA_WEB_DIST` points at an empty tempdir so
-// the SPA fallback returns its missing-dist landing instead of
-// ServeDir's 405; assert on the meaningful negative: no session cookie
-// set, body is NOT a JSON principal.
+// Both directions of the loopback gate need a test: an always-off
+// switcher passes the non-loopback case, and an always-on one passes
+// the loopback case.
+
+/// Hit `GET /auth/dev/status` and assert the verdict the SPA reads to
+/// decide whether to draw the switcher.
+async fn assert_dev_switcher_advertised(server: &SpawnedServer, expected: bool) {
+    let status: Value = http_client()
+        .get(format!("{}/auth/dev/status", server.base_url))
+        .send()
+        .await
+        .expect("GET /auth/dev/status")
+        .json()
+        .await
+        .expect("json body");
+    assert_eq!(status["enabled"], expected, "got {status}");
+}
+
 #[tokio::test]
-async fn dev_login_route_is_gone_in_disabled_mode() {
+async fn dev_login_switches_identity_on_a_loopback_bind() {
     let port = pick_loopback_port();
     let bind = format!("127.0.0.1:{port}");
-    let empty_dist = tempfile::tempdir().unwrap();
-    let dist_str = empty_dist.path().to_str().unwrap().to_string();
-    let server = spawn_server(&bind, &bind, &[("LUCIDA_WEB_DIST", &dist_str)]);
-
+    let server = spawn_server(&bind, &bind, &[]);
     let client = http_client();
+
+    assert_dev_switcher_advertised(&server, true).await;
+
     let res = client
         .post(format!("{}/auth/dev/login", server.base_url))
+        .json(&serde_json::json!({
+            "email": "owner@example.com",
+            "display_name": "Owner",
+            "is_admin": true,
+        }))
         .send()
         .await
         .expect("POST /auth/dev/login");
-
-    // The dev_login handler used to set `Set-Cookie: lucida_session=…`
-    // and return a JSON `AuthPrincipal` body. Both must be absent now
-    // — whatever else the response looks like (404 from a route-not-
-    // found, 405 from ServeDir, 200 from the missing-dist landing),
-    // it must NOT be a session-mint.
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
     assert!(
         res.headers()
             .get_all(reqwest::header::SET_COOKIE)
             .iter()
-            .all(|v| !v.to_str().unwrap_or("").contains("lucida_session=")),
-        "/auth/dev/login was retired; must not set lucida_session",
+            .any(|v| v.to_str().unwrap_or("").contains("lucida_dev_principal=")),
+        "a successful switch sets the dev principal cookie",
     );
-    let body = res.text().await.expect("body");
+    let principal: Value = res.json().await.expect("json body");
+    assert_eq!(principal["email"], "owner@example.com");
+    assert_eq!(principal["is_admin"], true);
+}
+
+// `LUCIDA_INSECURE=1` is what lets a disabled-mode server boot on an
+// exposed bind. It does not buy back the switcher.
+#[tokio::test]
+async fn dev_login_404s_on_a_non_loopback_bind() {
+    let port = pick_loopback_port();
+    let bind = format!("0.0.0.0:{port}");
+    let connect = format!("127.0.0.1:{port}");
+    let dist = tempfile::tempdir().unwrap();
+    let index_html = "<html>lucida</html>";
+    std::fs::write(dist.path().join("index.html"), index_html).unwrap();
+    let dist_str = dist.path().to_str().unwrap().to_string();
+    let server = spawn_server(
+        &bind,
+        &connect,
+        &[
+            ("LUCIDA_AUTH", "disabled"),
+            ("LUCIDA_INSECURE", "1"),
+            ("LUCIDA_WEB_DIST", &dist_str),
+        ],
+    );
+    let client = http_client();
+
+    let res = client
+        .post(format!("{}/auth/dev/login", server.base_url))
+        .json(&serde_json::json!({ "email": "owner@example.com", "is_admin": true }))
+        .send()
+        .await
+        .expect("POST /auth/dev/login");
+    assert_eq!(
+        res.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "an exposed server must not let a caller choose an identity",
+    );
     assert!(
-        !body.contains("\"email\":\"dev@local\""),
-        "/auth/dev/login was retired; must not return a JSON dev principal; body=\n{body}",
+        res.headers()
+            .get_all(reqwest::header::SET_COOKIE)
+            .iter()
+            .all(|v| !v.to_str().unwrap_or("").contains("lucida_dev_principal=")),
+        "a 404 must not carry a principal cookie",
     );
+
+    assert_dev_switcher_advertised(&server, false).await;
+
+    // The gate is the only difference: disabled mode still serves the
+    // app and still attaches the stub principal.
+    let res = client.get(&server.base_url).send().await.expect("GET /");
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    assert_eq!(res.text().await.expect("body"), index_html);
+    assert_whoami_returns_dev_principal(&server).await;
 }

@@ -2,22 +2,46 @@
  * The derivation: one pure function from a trace document to a diagnostic
  * document.
  *
- * Both surfaces read this. The agent text and the monitor's cards render from
- * the same object, so they cannot disagree about which phase stalled or how
- * much of the run was measured — #892 found #893's threshold rules transferred
- * to the visual surface unchanged, which is the evidence for one module rather
- * than two.
- *
- * Pure, with no browser and no clock of its own: everything it needs is in the
- * document it was handed, which is what lets the whole ruleset be tested over
- * fixture runs.
+ * The agent text and the monitor's cards both render from this one object, so
+ * they cannot disagree about which phase stalled or how much of the run was
+ * measured. Pure, with no browser and no clock of its own, so the whole
+ * ruleset can be tested over fixture runs.
  */
 
-import type { TraceCoverage, TraceDocument, TraceRun } from "../types.ts";
+import { accountedWithin, couldHideBottleneck } from "../coverage.ts";
+import {
+  COUNTED_PHASES,
+  TRACE_SCHEMA_VERSION,
+  isDatasetOpenCause,
+  isInteractionCause,
+  type CacheWarmth,
+  type CountedPhase,
+  type CoverageGap,
+  type TraceCoverage,
+  type TraceDocument,
+  type TracePointEvent,
+  type TraceRun,
+} from "../types.ts";
+import { emptyChunkLookup, lookupChunk, worstRowSelector, type WorstRow } from "./chunkLookup.ts";
 import { buildCriticalPath, UNRECORDED_PREFIX } from "./criticalPath.ts";
 import { backlogExceeded, isPinned, summariseLimiters } from "./limiters.ts";
 import { RULESET, type AbsoluteRule } from "./ruleset.ts";
-import { aggregateCandidates, metadataReadRows, rollupPhases, usToMs } from "./phaseRollup.ts";
+import {
+  aggregateCandidates,
+  metadataReadRows,
+  rollupWindow,
+  usToMs,
+  type WindowRollup,
+} from "./phaseRollup.ts";
+import { adapterKindOf, adapterName, deriveRenderTiming } from "./renderTiming.ts";
+import { summariseSent } from "./sent.ts";
+import { summariseSpace } from "./spatialSummary.ts";
+import { deriveTimeline, type TimelineRecording } from "./timeline.ts";
+import {
+  describeSteadyStateFinding,
+  deriveSteadyState,
+  type SteadyStateFinding,
+} from "./steadyState.ts";
 import {
   DIAGNOSTIC_SCHEMA_VERSION,
   type AggregateCandidate,
@@ -31,7 +55,17 @@ import {
   type RunIdentity,
   type PhaseRollup,
   type Verdict,
+  type WindowRequest,
 } from "./types.ts";
+import {
+  clipSpan,
+  describeWindow,
+  inWindow,
+  labelMs,
+  resolveWindow,
+  windowLabel,
+  type RunWindow,
+} from "./window.ts";
 
 /**
  * The seven words, listed so a surface can enumerate them and a test can
@@ -61,6 +95,31 @@ export interface DiagnoseOptions {
   baseline?: DiagnosticDocument | null;
   /** The run to read out of a trace document. Defaults to the newest. */
   runId?: string;
+  /**
+   * The interval of the run to read, in milliseconds from run start. Scopes
+   * the phase rollup, the findings and the critical path to it; the whole run
+   * when absent. Brushing the interval in the monitor and the CLI's window
+   * flag are both this option.
+   */
+  window?: WindowRequest;
+  /**
+   * The chunk the document's lookup is about, as `[entity/]level/t/c/z/y/x`.
+   * Defaults to the worst row's chunk, so the default text has one to name.
+   */
+  chunk?: string;
+  /**
+   * The recording the run came from, so the timeline can place the other
+   * retained intervals on this run's clock. Without it the axis carries this
+   * run alone. {@link diagnoseDocument} supplies it from the document.
+   */
+  recording?: TimelineRecording;
+  /**
+   * The steady-state interval that opened when this run closed, for the
+   * steady-state ruleset. {@link diagnoseDocument} finds it in the document;
+   * a caller with one run and no document passes it here, or passes nothing
+   * and gets a reading that says it had no interval to read.
+   */
+  steadyState?: TraceRun | null;
 }
 
 /**
@@ -77,24 +136,81 @@ export function diagnoseDocument(
     ? document.runs.find((candidate) => candidate.header.runId === options.runId)
     : document.runs[document.runs.length - 1];
   if (!run) throw new Error(`no run ${options.runId ?? "(newest)"} in this trace document`);
-  return diagnoseRun(run, options);
+  return diagnoseRun(run, {
+    ...options,
+    recording: options.recording ?? { runs: document.runs, steadyState: document.steadyState },
+    // An explicit null is a caller saying there is no interval, which is not
+    // the same as not asking.
+    steadyState:
+      options.steadyState !== undefined ? options.steadyState : intervalAfter(document, run),
+  });
+}
+
+/**
+ * The steady-state interval that opened when `run` closed: the earliest
+ * unlabelled one that starts no earlier than the run does.
+ *
+ * Both lists are chronological and only one interval is ever open, so the
+ * first match is the successor. An interval and the run that follows it can
+ * share a start millisecond only if the interval lasted less than one, and an
+ * interval that short has nothing in it to read.
+ */
+function intervalAfter(document: TraceDocument, run: TraceRun): TraceRun | null {
+  const openedAt = run.header.startedAtEpochMs;
+  return (
+    document.steadyState.find((interval) => interval.header.startedAtEpochMs >= openedAt) ?? null
+  );
 }
 
 export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): DiagnosticDocument {
-  const phases = rollupPhases(run);
-  const limiters = summariseLimiters(run);
-  const aggregates = aggregateCandidates(run);
-  const path = buildCriticalPath(run);
-  const coverage = deriveCoverage(run);
-  const attribution = attribute({ run, path, phases, limiters, aggregates, coverage });
+  // A run from another schema fails here, by name, rather than partway through
+  // the derivation on a field that schema never had (ADR 0047).
+  if (run.header.schemaVersion !== TRACE_SCHEMA_VERSION) {
+    throw new Error(
+      `run ${run.header.runId} was recorded under trace schema ${run.header.schemaVersion}; ` +
+        `this build reads schema ${TRACE_SCHEMA_VERSION}`,
+    );
+  }
+  const window = resolveWindow(run, options.window);
+  const rollup = rollupWindow(run, window);
+  const phases = rollup.phases;
+  const limiters = summariseLimiters(run, window);
+  const aggregates = aggregateCandidates(run, window);
+  const path = buildCriticalPath(run, window);
+  const coverage = deriveCoverage(run, window, rollup);
+  const interaction = isInteractionCause(run.header.cause);
+  const attribution = attribute({ run, path, phases, limiters, aggregates, coverage, interaction });
+  // A window is an interval of the run's clock, and the steady state begins
+  // where that clock ends, so a narrower window cannot reach it and says so
+  // rather than reporting the whole interval as if the window had scoped it.
+  const steady = deriveSteadyState(
+    run,
+    window.whole ? (options.steadyState ?? null) : null,
+    window.whole
+      ? "no steady-state interval followed this run in the document"
+      : "this reading is scoped to a window of the run's clock, which ends where the run does",
+  );
   const findings = rankFindings({
     path,
     phases,
     limiters,
     aggregates,
     attribution,
+    interaction,
+    // A dataset added to a live page also opens a content run, but its
+    // pipelines are compiled and its caches hold chunks: only an open on a
+    // cold browser cache is the page's first paint.
+    coldOpen: isDatasetOpenCause(run.header.cause) && browserCacheCold(run.header.cacheWarmth),
+    steadyState: steady.findings,
     baseline: options.baseline ?? null,
   });
+  const worst = worstRowSelector(run, phases, findings);
+  const chunk =
+    options.chunk !== undefined
+      ? lookupChunk(run, options.chunk, "named by the caller")
+      : worst
+        ? lookupChunk(run, worst.selector, worst.chosen)
+        : emptyChunkLookup("no chunk row in this run to choose from");
 
   return {
     schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
@@ -102,6 +218,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     traceSchemaVersion: run.header.schemaVersion,
     verdict: buildVerdict(run, findings, attribution, path, coverage),
     run: runIdentity(run),
+    window: window.requested ? describeWindow(run, window) : null,
     coverage,
     attribution,
     findings,
@@ -109,6 +226,9 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     phases,
     limiters,
     aggregates,
+    renderTiming: deriveRenderTiming(run),
+    sent: summariseSent(run.sent, run.header.durationUs),
+    steadyState: steady.reading,
     counts: {
       rows: run.rows.length,
       serverRows: run.serverRows.length - metadataReadRows(run.serverRows).length,
@@ -116,38 +236,58 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
       ticks: run.ticks.length,
       pointEvents: run.events.length,
     },
+    chunk,
+    spatial: summariseSpace(run),
+    timeline: deriveTimeline(run, window, options.recording),
     raw: {
       inlined: false,
-      why: "Raw spans are for a viewer, not a context window: a warm re-open is tens of thousands of rows, and nothing per-row appears at any depth here.",
+      why: "Raw spans are for a viewer, not a context window: a warm re-open is tens of thousands of rows, and nothing per-row appears at any depth here beyond the one chunk the lookup is about.",
       command: "lucida trace perfetto",
     },
-    next: nextSteps(run, findings, attribution),
+    next: nextSteps(run, findings, attribution, phases, window, worst),
     ruleset: RULESET,
   };
 }
-
-// ---------------------------------------------------------------------------
-// Coverage
-// ---------------------------------------------------------------------------
 
 /**
  * The trace already computed which wall clock no phase covers; this restates
  * it in the diagnostic's own terms and adds the judgement a reader needs
  * attached to a verdict.
  *
- * The percentage is **floored, never rounded**. 99.6% printing as 100% in the
- * honesty block is the exact failure #893 hit.
+ * The percentage is floored, never rounded, so 99.6% never prints as 100% in
+ * the honesty block.
  */
-function deriveCoverage(run: TraceRun): DiagnosticCoverage {
+function deriveCoverage(
+  run: TraceRun,
+  window: RunWindow,
+  rollup: WindowRollup,
+): DiagnosticCoverage {
   const traceCoverage: TraceCoverage = run.coverage;
-  const wallUs = Math.max(1, traceCoverage.wallClockUs);
-  const truncation = run.header.truncation;
+  const spanUs = window.endUs - window.startUs;
+  // The whole run reads the trace's own block verbatim. A narrower window
+  // measures its own accounted time, because a union cannot be apportioned,
+  // and clips the gaps to itself, re-judging each against its own span.
+  const accountedUs = window.whole
+    ? traceCoverage.accountedUs
+    : accountedWithin(run.rows, window.startUs, window.endUs);
+  const gaps = window.whole
+    ? traceCoverage.gaps
+    : traceCoverage.gaps.flatMap((gap) => gapWithin(gap, window));
+  // A truncation the window never reaches did not stop the window from
+  // looking; one it does reach leaves the remainder as unbounded as ever.
+  const truncation =
+    run.header.truncation && run.header.truncation.atUs < window.endUs
+      ? run.header.truncation
+      : null;
+  const events = window.whole
+    ? run.events
+    : run.events.filter((event) => inWindow(event.atUs, window));
 
   return {
-    wallMs: usToMs(traceCoverage.wallClockUs),
-    accountedMs: usToMs(traceCoverage.accountedUs),
-    accountedPct: Math.floor((traceCoverage.accountedUs / wallUs) * 100),
-    gaps: traceCoverage.gaps.map((gap) => ({
+    wallMs: usToMs(spanUs),
+    accountedMs: usToMs(accountedUs),
+    accountedPct: Math.floor((accountedUs / Math.max(1, spanUs)) * 100),
+    gaps: gaps.map((gap) => ({
       kind: gap.kind,
       startMs: gap.startUs == null ? null : usToMs(gap.startUs),
       endMs: gap.endUs == null ? null : usToMs(gap.endUs),
@@ -156,10 +296,10 @@ function deriveCoverage(run: TraceRun): DiagnosticCoverage {
       couldHideBottleneck: gap.couldHideBottleneck,
       statement: gap.statement,
     })),
-    gapCount: traceCoverage.gaps.length,
+    gapCount: gaps.length,
     // A truncated run is incomplete by definition: it stopped looking, so the
     // remainder is not merely unmeasured but unbounded.
-    incomplete: truncation != null || traceCoverage.gaps.some((gap) => gap.couldHideBottleneck),
+    incomplete: truncation != null || gaps.some((gap) => gap.couldHideBottleneck),
     truncated: truncation
       ? {
           reason: truncation.reason,
@@ -174,27 +314,70 @@ function deriveCoverage(run: TraceRun): DiagnosticCoverage {
           ),
         }
       : null,
+    window: window.requested
+      ? {
+          clippedRows: rollup.clippedRows,
+          unplacedRows: rollup.unplacedRows,
+          statement: window.whole ? WHOLE_WINDOW_STATEMENT : NARROWER_WINDOW_STATEMENT,
+        }
+      : null,
     limits: traceCoverage.limits,
-    countedPhases: traceCoverage.countedPhases,
-    // #899 recorded zero retries, zero failures and zero evictions while the
-    // pipeline ran 20,000 requests behind. A zero here means the path was not
-    // exercised, which is not the same news as the path being healthy.
+    countedPhases: window.whole ? traceCoverage.countedPhases : countedWithin(run, window),
+    // A zero here means the path was not exercised, which is not the same news
+    // as the path being healthy. A run 20,000 requests behind can record zero
+    // of each.
     notHealthSignals: [
-      { metric: "retries", value: countEvents(run, "retry") },
-      { metric: "failures", value: countEvents(run, "failure") },
-      { metric: "evictions", value: countEvents(run, "eviction") },
-      { metric: "rejections", value: countEvents(run, "rejection") },
+      { metric: "retries", value: countEvents(events, "retry") },
+      { metric: "failures", value: countEvents(events, "failure") },
+      { metric: "evictions", value: countEvents(events, "eviction") },
+      { metric: "rejections", value: countEvents(events, "rejection") },
     ],
   };
 }
 
-function countEvents(run: TraceRun, kind: string): number {
-  return run.events.filter((event) => event.kind === kind).length;
+function countEvents(events: TracePointEvent[], kind: string): number {
+  return events.filter((event) => event.kind === kind).length;
 }
 
-// ---------------------------------------------------------------------------
-// Attribution
-// ---------------------------------------------------------------------------
+/** Numberless on purpose: the counts sit beside the statement, as a gap's do. */
+const WHOLE_WINDOW_STATEMENT =
+  "The window is the whole run, so no row crosses an edge and no row is left out for want of a position.";
+const NARROWER_WINDOW_STATEMENT =
+  "A row that crosses the window's edge counts for the part inside it. A row with no position on the run's clock cannot be placed inside a narrower window and is left out; the whole run still counts it.";
+
+/**
+ * The part of a gap inside the window, re-judged against the window's span,
+ * or nothing when none of it is. A stream loss has no position and costs
+ * records rather than time, so it passes through: the window cannot say the
+ * dropped records were not about it.
+ */
+function gapWithin(gap: CoverageGap, window: RunWindow): CoverageGap[] {
+  if (gap.startUs == null || gap.endUs == null) return [gap];
+  const span = clipSpan(gap.startUs, gap.endUs, window);
+  if (!span) return [];
+  return [
+    {
+      ...gap,
+      startUs: span.startUs,
+      endUs: span.endUs,
+      durationUs: span.us,
+      // A truncation is unbounded wherever the window meets it; every other
+      // interval gap is judged by how much of the window it takes.
+      couldHideBottleneck:
+        gap.kind === "truncated" || couldHideBottleneck(span.us, window.endUs - window.startUs),
+    },
+  ];
+}
+
+function countedWithin(run: TraceRun, window: RunWindow): Record<CountedPhase, number> {
+  const totals = {} as Record<CountedPhase, number>;
+  for (const phase of COUNTED_PHASES) totals[phase] = 0;
+  for (const tick of run.ticks) {
+    if (!inWindow(tick.atUs, window)) continue;
+    for (const phase of COUNTED_PHASES) totals[phase] += tick.counted[phase] ?? 0;
+  }
+  return totals;
+}
 
 interface AttributionInput {
   run: TraceRun;
@@ -203,6 +386,22 @@ interface AttributionInput {
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
   coverage: DiagnosticCoverage;
+  interaction: boolean;
+}
+
+/**
+ * The frame-time reading of an interaction run, judged by the ceiling rather
+ * than by share. A drag ticks every frame, so its main-thread share is near
+ * total by construction. Null on any other run, where the reading stays a
+ * share candidate like the rest.
+ */
+function frameTimeOf(
+  aggregates: AggregateCandidate[],
+  interaction: boolean,
+): { frame: AggregateCandidate; slow: boolean } | null {
+  if (!interaction) return null;
+  const frame = aggregates.find((candidate) => candidate.phase === RULESET.interaction.phase);
+  return frame ? { frame, slow: frame.p95Ms > RULESET.interaction.ceilMs } : null;
 }
 
 /** What every confidence, including the strongest, still cannot see. */
@@ -214,9 +413,22 @@ function passesShare(ms: number, sharePct: number): boolean {
 }
 
 function attribute(input: AttributionInput): Attribution {
-  const { path, phases, limiters, aggregates, coverage } = input;
+  const { path, phases, limiters, aggregates, coverage, interaction } = input;
   const saturated = limiters.find((limiter) => backlogExceeded(limiter));
-  const aggregate = aggregates.find((candidate) => passesShare(candidate.busyMs, candidate.sharePct));
+  const frameTime = frameTimeOf(aggregates, interaction);
+  const aggregate = aggregates.find(
+    (candidate) => candidate !== frameTime?.frame && passesShare(candidate.busyMs, candidate.sharePct),
+  );
+  const slowFrames: Attribution | null = frameTime?.slow
+    ? {
+        confidence: "aggregate-only",
+        cause: frameTime.frame.phase,
+        why: `${frameTime.frame.phase} p95 ${frameTime.frame.p95Ms} ms over the ${RULESET.interaction.ceilMs} ms ceiling for an interaction run, across ${frameTime.frame.samples.toLocaleString()} ticks`,
+        degraded:
+          "per-tick readings show that the main thread was held, not which phase held it, and the reading is main-thread time rather than GPU time",
+        runnerUp: null,
+      }
+    : null;
 
   if (path.kind === "undefined") {
     const reason = path.undefinedReason ?? "no critical path could be walked";
@@ -229,6 +441,7 @@ function attribute(input: AttributionInput): Attribution {
         runnerUp: null,
       };
     }
+    if (slowFrames) return { ...slowFrames, degraded: `${reason}; ${slowFrames.degraded}` };
     if (aggregate) {
       return {
         confidence: "aggregate-only",
@@ -273,6 +486,10 @@ function attribute(input: AttributionInput): Attribution {
       runnerUp: second ? { label: second.label, ms: second.ms } : null,
     };
   }
+
+  // On an interaction run the frame time is the question, so slow frames
+  // outrank the chain leader whatever its size.
+  if (slowFrames) return { ...slowFrames, runnerUp: { label: leader.label, ms: leader.ms } };
 
   // An aggregate phase large enough to rival the chain leader. It cannot be
   // placed on the path, only shown to overlap it — a weaker claim, said plainly.
@@ -324,10 +541,13 @@ function attribute(input: AttributionInput): Attribution {
   }
 
   const strong = coverage.accountedPct >= ATTRIBUTED_MIN_COVERAGE_PCT && !coverage.truncated;
+  // The chain's length, not the target's position: inside a window the two
+  // differ by the window's start.
+  const chainMs = Math.round(((path.targetAtMs ?? 0) - path.fromMs) * 10) / 10;
   return {
     confidence: strong ? "attributed" : "partial",
     cause: leader.label,
-    why: `back-walk from ${path.target}: ${leader.ms} ms of a ${path.targetAtMs} ms chain`,
+    why: `back-walk from ${path.target}: ${leader.ms} ms of a ${chainMs} ms chain`,
     degraded: strong
       ? ALWAYS_DEGRADED
       : `only ${coverage.accountedPct}% of the run's wall clock is covered by a recorded phase, so the chain may be leading past the real bottleneck; ${ALWAYS_DEGRADED}`,
@@ -356,10 +576,6 @@ function ceilingBreaches(phases: PhaseRollup[]): CeilingBreach[] {
   return breaches.sort((a, b) => b.ratio - a.ratio);
 }
 
-// ---------------------------------------------------------------------------
-// Findings
-// ---------------------------------------------------------------------------
-
 /** A finding before it is ranked: rank is what assigns an id and a confidence. */
 type RawFinding = Omit<Finding, "id" | "confidence" | "attribution">;
 
@@ -369,19 +585,53 @@ interface FindingsInput {
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
   attribution: Attribution;
+  interaction: boolean;
+  /** Whether content opened the run on a cold browser cache: the page's first paint. */
+  coldOpen: boolean;
+  /** What the steady-state ruleset found, ranked here with the run's own. */
+  steadyState: SteadyStateFinding[];
   baseline: DiagnosticDocument | null;
 }
+
+/**
+ * The stall `rule` names, or — on a cold open, for a phase a frame dispatch
+ * bounds — the first-paint note. The finding keeps the measuring rule's
+ * threshold and takes the first-paint rule's id and rationale.
+ */
+function readBreach(
+  input: FindingsInput,
+  phase: string,
+  rule: { id: string; why: string },
+): { severity: Finding["severity"]; rule: string; why: string } {
+  if (input.coldOpen && RULESET.firstPaint.phases.includes(phase)) {
+    return { severity: "note", rule: RULESET.firstPaint.id, why: RULESET.firstPaint.why };
+  }
+  return { severity: "stall", rule: rule.id, why: rule.why };
+}
+
+/**
+ * Which findings outrank which. A stall or a saturation is about the run, so
+ * it leads; a steady-state finding is about the interval after it, so it
+ * follows; a note is worth a line rather than blame, so it comes last.
+ */
+const SEVERITY_RANK: Record<Finding["severity"], number> = {
+  stall: 2,
+  saturated: 2,
+  "steady-state": 1,
+  note: 0,
+};
 
 function rankFindings(input: FindingsInput): Finding[] {
   const raw: RawFinding[] = [];
 
   for (const breach of ceilingBreaches(input.phases)) {
+    const reading = readBreach(input, breach.phase.id, breach.rule);
     raw.push({
-      severity: "stall",
-      rule: breach.rule.id,
+      severity: reading.severity,
+      rule: reading.rule,
       subject: breach.phase.id,
       observed: { stat: breach.rule.stat, ms: breach.phase.p95Ms, n: breach.phase.n },
-      threshold: { kind: "absolute", value: breach.rule.ceilMs, why: breach.rule.why },
+      threshold: { kind: "absolute", value: breach.rule.ceilMs, why: reading.why },
     });
   }
 
@@ -401,8 +651,8 @@ function rankFindings(input: FindingsInput): Finding[] {
         threshold: { kind: "backlog", value: RULESET.backlog.maxEtaS, why: RULESET.backlog.why },
       });
     } else if (isPinned(limiter)) {
-      // Pinned but not backlogged is worth a line rather than a stall: #899
-      // found two chokepoints, and a report naming only the loudest teaches the
+      // Pinned but not backlogged is worth a line rather than a stall: a run can
+      // have two chokepoints, and a report naming only the loudest teaches the
       // reader the other one is fine.
       raw.push({
         severity: "note",
@@ -424,9 +674,9 @@ function rankFindings(input: FindingsInput): Finding[] {
   }
 
   for (const segment of input.path.segments) {
-    // An unrecorded prefix large enough to hide the answer is a *note*, never a
-    // stall: nothing measured that stretch, so nothing can be blamed for it —
-    // but a reader deciding whether to trust the chain has to be told the chain
+    // An unrecorded prefix large enough to hide the answer is a note, never a
+    // stall: nothing measured that stretch, so nothing can be blamed for it.
+    // But a reader deciding whether to trust the chain has to be told the chain
     // is led by a hole.
     if (segment.label === UNRECORDED_PREFIX) {
       if (segment.sharePct >= RULESET.prefix.maxPct) {
@@ -444,9 +694,10 @@ function rankFindings(input: FindingsInput): Finding[] {
     // how much of the chain it holds.
     if (segment.class === "unrecorded" || segment.class === "queue") continue;
     if (!passesShare(segment.ms, segment.sharePct)) continue;
+    const reading = readBreach(input, segment.label, RULESET.share);
     raw.push({
-      severity: "stall",
-      rule: RULESET.share.id,
+      severity: reading.severity,
+      rule: reading.rule,
       subject: segment.label,
       observed: {
         ms: segment.ms,
@@ -455,11 +706,13 @@ function rankFindings(input: FindingsInput): Finding[] {
         rows: segment.rows,
         ...(segment.breakdown ? { breakdown: segment.breakdown } : {}),
       },
-      threshold: { kind: "relative", value: RULESET.share.minPct, why: RULESET.share.why },
+      threshold: { kind: "relative", value: RULESET.share.minPct, why: reading.why },
     });
   }
 
+  const frameTime = frameTimeOf(input.aggregates, input.interaction);
   for (const candidate of input.aggregates) {
+    if (candidate === frameTime?.frame) continue;
     if (!passesShare(candidate.busyMs, candidate.sharePct)) continue;
     raw.push({
       severity: "stall",
@@ -476,14 +729,34 @@ function rankFindings(input: FindingsInput): Finding[] {
     });
   }
 
+  if (frameTime?.slow) {
+    raw.push({
+      severity: "stall",
+      rule: RULESET.interaction.id,
+      subject: frameTime.frame.phase,
+      observed: {
+        stat: RULESET.interaction.stat,
+        ms: frameTime.frame.p95Ms,
+        n: frameTime.frame.samples,
+        rows: 0,
+        tier: "per-tick readings",
+      },
+      threshold: {
+        kind: "absolute",
+        value: RULESET.interaction.ceilMs,
+        why: RULESET.interaction.why,
+      },
+    });
+  }
+
   raw.push(...comparativeFindings(input));
+  raw.push(...input.steadyState);
 
   const seen = new Set<string>();
-  const weight = (finding: { severity: string }): number => (finding.severity === "note" ? 0 : 1);
-  return raw
+  const ranked = raw
     .sort(
       (a, b) =>
-        weight(b) - weight(a) ||
+        SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] ||
         (b.observed.sharePct ?? 0) - (a.observed.sharePct ?? 0) ||
         (b.observed.ms ?? 0) - (a.observed.ms ?? 0),
     )
@@ -493,22 +766,24 @@ function rankFindings(input: FindingsInput): Finding[] {
       if (seen.has(finding.subject)) return false;
       seen.add(finding.subject);
       return true;
-    })
-    .map((finding, index) => ({
-      ...finding,
-      id: index + 1,
-      confidence: index === 0 ? input.attribution.confidence : ("observed" as const),
-      attribution: index === 0 ? input.attribution : null,
-    }));
+    });
+  // The attribution is the run's answer to "what was this waiting on", so it
+  // rides the leading finding about the run. A steady-state finding is about
+  // the interval after the run and carries the ruleset's rationale instead.
+  const leader = ranked.findIndex((finding) => finding.severity !== "steady-state");
+  return ranked.map((finding, index) => ({
+    ...finding,
+    id: index + 1,
+    confidence: index === leader ? input.attribution.confidence : ("observed" as const),
+    attribution: index === leader ? input.attribution : null,
+  }));
 }
 
 /**
- * Comparison against a named baseline run, and only above 2x: #899 measured
- * that much run-to-run weather between two runs of the same fixture minutes
- * apart, so anything below that spread reports weather as regression.
- *
- * Nothing here resolves or stores a baseline — the caller hands one over or
- * there is no comparison.
+ * Comparison against a named baseline run, and only above 2x: two runs of the
+ * same fixture minutes apart can differ that much, so anything below that
+ * spread reports weather as regression. Nothing here resolves or stores a
+ * baseline. The caller hands one over or there is no comparison.
  */
 function comparativeFindings(
   input: FindingsInput,
@@ -539,10 +814,6 @@ function comparativeFindings(
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Verdict and next steps
-// ---------------------------------------------------------------------------
-
 function buildVerdict(
   run: TraceRun,
   findings: Finding[],
@@ -567,9 +838,30 @@ function buildVerdict(
         confidence: attribution.confidence,
       };
     }
+    // A clear run can still carry a number over its ceiling. The verdict says
+    // why, rather than sending the reader to the findings to find out.
+    const firstPaint = findings.find((finding) => finding.rule === RULESET.firstPaint.id);
+    if (firstPaint) {
+      return {
+        kind: "clear",
+        text: `${describeFirstPaint(firstPaint)}${caveat}`,
+        confidence: attribution.confidence,
+      };
+    }
     return {
       kind: "clear",
       text: `no stall — nothing crossed a threshold; ${tail}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
+  // Nothing about the run itself crossed a threshold, but something after it
+  // did. On a budget-bound tier this is also what replaces "the run timed
+  // out" with the coverage the screen went without, which is the news.
+  if (lead.severity === "steady-state") {
+    return {
+      kind: "steady-state",
+      text: `${describeSteadyStateFinding(lead)}${caveat}`,
       confidence: attribution.confidence,
     };
   }
@@ -582,6 +874,18 @@ function buildVerdict(
     return {
       kind: "saturated",
       text: `saturated — ${lead.subject} held ${(lead.observed.pending ?? 0).toLocaleString()} requests behind a cap of ${lead.observed.inFlightCap}; ${eta}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
+  // A gate's one line has to say which input was slow, not which reading
+  // measured it.
+  if (lead.rule === RULESET.interaction.id) {
+    return {
+      kind: "stall",
+      text:
+        `${run.header.cause?.source ?? "input"} ran at ${lead.observed.stat} ${lead.observed.ms} ms ` +
+        `per main-thread frame, over the ${lead.threshold.value} ms ceiling for an interaction run${caveat}`,
       confidence: attribution.confidence,
     };
   }
@@ -600,6 +904,22 @@ function buildVerdict(
   };
 }
 
+function describeFirstPaint(finding: Finding): string {
+  const observed = finding.observed;
+  const amount = observed.stat
+    ? `ran ${observed.stat} ${observed.ms} ms on the first paint of a cold open, over the ${finding.threshold.value} ms ceiling`
+    : `held ${observed.ms} ms (${observed.sharePct}% of the chain) on the first paint of a cold open`;
+  return (
+    `no stall — ${finding.subject} ${amount}; the frame that first drew the chunks also compiled ` +
+    `the render pipelines, so this is first paint rather than a stall; an interaction run after ` +
+    `settle confirms a regression`
+  );
+}
+
+function browserCacheCold(warmth: CacheWarmth): boolean {
+  return warmth.detailChunks + warmth.coarseChunks === 0;
+}
+
 function runIdentity(run: TraceRun): RunIdentity {
   const header = run.header;
   const warmth = header.cacheWarmth;
@@ -611,11 +931,12 @@ function runIdentity(run: TraceRun): RunIdentity {
     devicePixelRatio: header.devicePixelRatio,
     viewport: `${header.viewport.deviceWidth}x${header.viewport.deviceHeight}px`,
     build: `${header.build.version} ${header.build.mode}`,
-    gpu: header.gpu ? `${header.gpu.vendor} ${header.gpu.architecture}`.trim() : "unknown",
-    warmth:
-      warmth.detailChunks + warmth.coarseChunks === 0
-        ? "browser cache cold"
-        : `browser cache warm (${warmth.detailChunks} detail, ${warmth.coarseChunks} coarse)`,
+    gpu: adapterName(header.gpu),
+    adapter: header.gpu,
+    adapterKind: adapterKindOf(header.gpu),
+    warmth: browserCacheCold(warmth)
+      ? "browser cache cold"
+      : `browser cache warm (${warmth.detailChunks} detail, ${warmth.coarseChunks} coarse)`,
     outstanding: {
       pending: header.outstandingAtSettle.pending,
       inFlight: header.outstandingAtSettle.inFlight,
@@ -636,23 +957,68 @@ const INCONCLUSIVE: readonly Confidence[] = [
 ];
 
 /**
- * The commands that go deeper.
- *
- * `lucida trace perfetto` exists today. The `show` verbs are the CLI surface
- * #935 builds, and these strings are the contract it has to honour — a
+ * The commands that go deeper. These strings must match the CLI's verbs: a
  * diagnostic that prints a command which does not run is worse than one that
- * prints none, so if that ticket names them differently, it changes them here.
+ * prints none.
  */
-function nextSteps(run: TraceRun, findings: Finding[], attribution: Attribution): DiagnosticDocument["next"] {
+function nextSteps(
+  run: TraceRun,
+  findings: Finding[],
+  attribution: Attribution,
+  phases: PhaseRollup[],
+  window: RunWindow,
+  worst: WorstRow | null,
+): DiagnosticDocument["next"] {
   const runId = run.header.runId;
+  // A reader inside a window stays inside it: the depths carry the window, so
+  // "every phase" means every phase of the interval being read.
+  const scope = window.requested ? ` --window ${windowLabel(window)}` : "";
   const steps: DiagnosticDocument["next"] = [
-    { why: "every phase, one row each", command: `lucida trace show ${runId} --phases` },
+    { why: "every phase, one row each", command: `lucida trace show ${runId} --phases${scope}` },
   ];
   const lead = findings.find((finding) => finding.severity !== "note");
-  if (lead) {
+  // Only a phase has a shape to show. A steady-state finding's subject is the
+  // interval after the run, and a command that does not run is worse than no
+  // command at all.
+  if (lead && phases.some((phase) => phase.id === lead.subject)) {
     steps.unshift({
       why: `the shape behind ${lead.subject}`,
-      command: `lucida trace show ${runId} --phase ${lead.subject}`,
+      command: `lucida trace show ${runId} --phase ${lead.subject}${scope}`,
+    });
+  }
+  const narrower = narrowerWindow(window, lead, phases);
+  if (narrower) {
+    steps.push({
+      why: narrower.why,
+      command: `lucida trace show ${runId} --window ${narrower.label}`,
+    });
+  }
+  // The overlay's two readings, one chunk and what is where, as commands an
+  // agent can run. Both read the whole run, so a windowed reading offers
+  // neither: a follow-up that leaves the window would not be a follow-up.
+  // The chunk step names the worst row even when the caller named a
+  // different chunk for this document's lookup.
+  if (!window.requested) {
+    if (worst) {
+      steps.push({
+        why: `${worst.chosen}: its phase history, queue rank and age`,
+        command: `lucida trace show ${runId} --chunk ${worst.selector}`,
+      });
+    }
+    steps.push({
+      why: "what is where: rows by state and level, with their boxes",
+      command: `lucida trace show ${runId} --spatial`,
+    });
+    steps.push({
+      why: "this run against a baseline: phase, finding, and header deltas",
+      command: `lucida trace diff <baseline-run> ${runId}`,
+    });
+  }
+  const firstPaint = findings.find((finding) => finding.rule === RULESET.firstPaint.id);
+  if (firstPaint) {
+    steps.push({
+      why: `${firstPaint.subject} on a cold open is first paint; an interaction run after settle confirms a regression`,
+      command: `lucida trace ${run.header.datasetIds[0] ?? "<dataset>"} --pan 120,60`,
     });
   }
   if (INCONCLUSIVE.includes(attribution.confidence)) {
@@ -666,4 +1032,43 @@ function nextSteps(run: TraceRun, findings: Finding[], attribution: Attribution)
     command: "lucida trace perfetto",
   });
   return steps;
+}
+
+/**
+ * The narrower window the text offers next, always strictly inside the one
+ * being read, so following the offer moves the reader.
+ *
+ * First the stretch the lead finding's phase occupied, when the rollup can
+ * place it and it is narrower than the window. Otherwise the second half: on
+ * a run that never settled the recent half is where it stalled, and on a
+ * clean run it is the half after the open. Whole milliseconds, because they
+ * are typed back in by hand.
+ */
+function narrowerWindow(
+  window: RunWindow,
+  lead: Finding | undefined,
+  phases: PhaseRollup[],
+): { label: string; why: string } | null {
+  const startMs = window.startUs / 1_000;
+  const endMs = window.endUs / 1_000;
+  const spanMs = endMs - startMs;
+
+  const phase = lead ? phases.find((candidate) => candidate.id === lead.subject) : undefined;
+  if (phase?.extent) {
+    const fromMs = Math.max(startMs, Math.floor(phase.extent.firstStartMs));
+    const toMs = Math.min(endMs, Math.ceil(phase.extent.lastEndMs));
+    if (toMs > fromMs && toMs - fromMs < spanMs) {
+      return {
+        label: labelMs(fromMs, toMs),
+        why: `the same reading over just the stretch ${phase.id} occupied`,
+      };
+    }
+  }
+
+  const midMs = Math.floor((startMs + endMs) / 2);
+  if (midMs <= startMs || endMs - midMs < 1) return null;
+  return {
+    label: labelMs(midMs, endMs),
+    why: `the same reading over the second half of the ${window.whole ? "run" : "window"}`,
+  };
 }

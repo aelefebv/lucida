@@ -22,7 +22,6 @@ use super::store::normalize_email;
 
 use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request};
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tower::ServiceExt;
 
@@ -31,14 +30,15 @@ use crate::auth::{
     MemorySessionStore, hash_bearer_token,
 };
 use crate::auth::{DualCredentialExtractor, PrincipalExtractor};
+use crate::storage::test_support::sqlite_pool;
 
 use super::*;
 mod access;
 mod datasets;
 mod duplicate;
+mod previews;
+mod profile_directory;
 mod saved_views;
-
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
 pub fn principal(email: &str, is_admin: bool) -> AuthPrincipal {
     AuthPrincipal {
@@ -58,15 +58,7 @@ async fn fresh_store() -> SqliteWorkspaceStore {
 /// errors) — e.g. to prove that a failed role lookup is reported as
 /// infrastructure trouble, not as an authorization verdict.
 async fn fresh_store_with_pool() -> (SqliteWorkspaceStore, sqlx::sqlite::SqlitePool) {
-    let opts = SqliteConnectOptions::new()
-        .filename(":memory:")
-        .create_if_missing(true);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect_with(opts)
-        .await
-        .unwrap();
-    MIGRATOR.run(&pool).await.unwrap();
+    let pool = sqlite_pool().await;
     (SqliteWorkspaceStore::new(pool.clone()), pool)
 }
 
@@ -225,7 +217,7 @@ fn view_over(order: &[DatasetId]) -> SavedView {
 /// view (`Annotation::view`), keyed by `dataset_id` across every id-keyed
 /// field of the embedded view. Applies the same `AddAnnotation` command the
 /// runtime does and persists the document, so a later duplicate must remap
-/// the embedded view onto the copy's ids (the regression this guards).
+/// the embedded view onto the copy's ids.
 async fn seed_pin_with_view(
     store: &SqliteWorkspaceStore,
     workspace_id: &str,
@@ -367,10 +359,9 @@ fn manager_for(store: &SqliteWorkspaceStore) -> WorkspaceManager {
     WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults())
 }
 
-/// Seed a pin whose captured author view embeds SOURCE dataset *URLs* in
-/// its `datasets` Vec — simulating a document PERSISTED BEFORE the apply-path
-/// strip existed (a genuinely DIRTY source). `DocumentState::apply` now
-/// strips such URLs, so we deliberately bypass it: `add_annotation` stores
+/// Seed a pin whose captured author view embeds source dataset URLs in
+/// its `datasets` Vec: a dirty document that bypassed the apply-path strip.
+/// `DocumentState::apply` strips such URLs, so we deliberately bypass it: `add_annotation` stores
 /// the view verbatim and `persist_document` serializes the `DocumentState`
 /// as-is (no apply). This is the dirty carrier the duplicate's copy-point
 /// defense must clean — `remap_dataset_ids` remaps ids but the explicit

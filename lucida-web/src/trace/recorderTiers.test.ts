@@ -6,8 +6,10 @@
 
 import { describe, expect, it } from "vitest";
 
+import { emptySendTallies } from "./diagnose/fixtures.ts";
 import { TraceRecorder } from "./recorder.ts";
 import {
+  ClientMessageTypeIndex,
   CountedPhaseIndex,
   PointEvent,
   TickCounter,
@@ -57,6 +59,10 @@ function makeRecorder() {
       residentDetailChunks: 0,
       desiredCoarseChunks: 0,
       residentCoarseChunks: 0,
+      detailBytes: 0,
+      detailBudgetBytes: 0,
+      coarseBytes: 0,
+      coarseBudgetBytes: 0,
     }),
   });
   return { recorder, advance: (ms: number) => { clock += ms; } };
@@ -90,6 +96,27 @@ describe("per-tick aggregates", () => {
   });
 
   /**
+   * The loop says what woke it before each tick; every sample the tick
+   * publishes carries the answer, and the next tick's word replaces it.
+   */
+  it("marks the samples of a pass woken by an availability update alone", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    recorder.noteTickWake(true);
+    recorder.beginTick("ds-a");
+    recorder.commitTick();
+    recorder.beginTick("ds-b");
+    recorder.commitTick();
+    recorder.noteTickWake(false);
+    recorder.beginTick("ds-a");
+    recorder.commitTick();
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.ticks.map(tick => tick.availabilityWoken)).toEqual([true, true, false]);
+  });
+
+  /**
    * The reading tier rides the tick, not the planning pass — a run can fetch for
    * seconds without re-planning once, and a series that samples only when the
    * planner runs is a cluster of readings at run start and silence after.
@@ -117,7 +144,7 @@ describe("per-tick aggregates", () => {
 
   /**
    * Recording is continuous, so a reading taken between runs is retained in
-   * the unlabelled interval rather than discarded (#927).
+   * the unlabelled interval rather than discarded.
    */
   it("keeps a reading in the unlabelled interval while no run is open", () => {
     const { recorder } = makeRecorder();
@@ -190,6 +217,111 @@ describe("per-tick aggregates", () => {
   });
 });
 
+/**
+ * The send side rides the tick sample the way the counted phases do, and the
+ * interval keeps its own total besides, because a sample is published only
+ * by a planning pass and the sends worth explaining are the ones after the
+ * last one.
+ */
+describe("send accounting", () => {
+  it("carries the sends since the previous sample, by type, and resets them", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    recorder.countSend(ClientMessageTypeIndex.ChunkRequest, 98);
+    recorder.countSend(ClientMessageTypeIndex.ChunkRequest, 100);
+    recorder.countSend(ClientMessageTypeIndex.Cursor, 43);
+    recorder.beginTick("ds");
+    recorder.commitTick();
+
+    recorder.countSend(ClientMessageTypeIndex.Presence, 310);
+    recorder.beginTick("ds");
+    recorder.commitTick();
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.ticks[0].sent).toEqual({
+      ...emptySendTallies(),
+      chunkRequest: { messages: 2, bytes: 198 },
+      cursor: { messages: 1, bytes: 43 },
+    });
+    expect(run.ticks[1].sent).toEqual({
+      ...emptySendTallies(),
+      presence: { messages: 1, bytes: 310 },
+    });
+  });
+
+  it("totals every send of the interval, including those after the last sample", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    recorder.countSend(ClientMessageTypeIndex.ChunkRequest, 98);
+    recorder.beginTick("ds");
+    recorder.commitTick();
+    for (let i = 0; i < 40; i++) recorder.countSend(ClientMessageTypeIndex.Cursor, 43);
+    recorder.countSend(ClientMessageTypeIndex.ViewerInterest, 120);
+    recorder.closeRun("explicit");
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.ticks).toHaveLength(1);
+    expect(run.ticks[0].sent.cursor).toEqual({ messages: 0, bytes: 0 });
+    expect(run.sent).toEqual({
+      ...emptySendTallies(),
+      chunkRequest: { messages: 1, bytes: 98 },
+      cursor: { messages: 40, bytes: 1_720 },
+      viewerInterest: { messages: 1, bytes: 120 },
+    });
+  });
+
+  it("does not carry a sample's sends across a run boundary", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.countSend(ClientMessageTypeIndex.Command, 512);
+    recorder.closeRun("explicit");
+
+    recorder.openRun(OPEN_CAUSE);
+    recorder.beginTick("ds");
+    recorder.commitTick();
+
+    const runs = recorder.exportDocument().runs;
+    expect(runs[0].sent.command).toEqual({ messages: 1, bytes: 512 });
+    expect(runs[1].ticks[0].sent.command).toEqual({ messages: 0, bytes: 0 });
+    expect(runs[1].sent.command).toEqual({ messages: 0, bytes: 0 });
+  });
+
+  it("totals the sends of an unlabelled interval that recorded anything else", () => {
+    const { recorder } = makeRecorder();
+    recorder.noteReading(0, 0, 2_000, 1_000);
+    recorder.countSend(ClientMessageTypeIndex.Cursor, 43);
+    recorder.openRun(OPEN_CAUSE);
+
+    const [interval] = recorder.exportDocument().steadyState;
+    expect(interval.header.endReason).toBe("run-opened");
+    expect(interval.ticks).toHaveLength(0);
+    expect(interval.sent.cursor).toEqual({ messages: 1, bytes: 43 });
+  });
+
+  /**
+   * Retention is unchanged by the accounting: an interval that only sent is
+   * discarded with the other empty ones, so a pointer moving over an idle
+   * canvas does not retain an interval's worth of buffers.
+   */
+  it("discards an unlabelled interval that only sent, with its sends", () => {
+    const { recorder } = makeRecorder();
+    recorder.countSend(ClientMessageTypeIndex.Cursor, 43);
+    recorder.openRun(OPEN_CAUSE);
+    recorder.closeRun("explicit");
+
+    expect(recorder.exportDocument().steadyState).toHaveLength(0);
+  });
+
+  it("counts nothing before the page has said what conditions apply", () => {
+    const { recorder } = makeRecorder();
+    recorder.setEnvironment(null);
+    recorder.countSend(ClientMessageTypeIndex.Cursor, 43);
+    expect(recorder.exportDocument().steadyState).toHaveLength(0);
+  });
+});
+
 describe("point events", () => {
   it("records the four kinds under one shape, with borrowed reason codes", () => {
     const { recorder, advance } = makeRecorder();
@@ -218,5 +350,98 @@ describe("point events", () => {
     const { recorder } = makeRecorder();
     recorder.recordPointEvent(PointEvent.Failure, "permanent", CHUNK, 0);
     expect(recorder.exportDocument().runs).toHaveLength(0);
+  });
+});
+
+describe("level-change events", () => {
+  function tickWithTarget(
+    recorder: TraceRecorder,
+    datasetId: string,
+    min: number,
+    max: number,
+    pinned = false,
+  ): void {
+    const scratch = recorder.beginTick(datasetId);
+    scratch!.setTargetLevel(min, max, pinned);
+    recorder.commitTick();
+  }
+
+  it("records the old and new range when a dataset's target moves between samples", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    tickWithTarget(recorder, "ds", 1, 1);
+    advance(20);
+    tickWithTarget(recorder, "ds", 1, 1);
+    advance(20);
+    tickWithTarget(recorder, "ds", 2, 2);
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.events).toEqual([
+      {
+        atUs: 40_000,
+        kind: "level-change",
+        reason: "screen",
+        chunk: null,
+        levelChange: { datasetId: "ds", from: { min: 1, max: 1 }, to: { min: 2, max: 2 } },
+      },
+    ]);
+  });
+
+  it("names the pin as the reason when the new target is pinned", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    tickWithTarget(recorder, "ds", 2, 2);
+    tickWithTarget(recorder, "ds", 0, 0, true);
+    tickWithTarget(recorder, "ds", 0, 0, true);
+    tickWithTarget(recorder, "ds", 2, 2);
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.events.map(e => [e.reason, e.levelChange?.to.min])).toEqual([
+      ["pin", 0],
+      ["screen", 2],
+    ]);
+  });
+
+  it("tracks each dataset on its own", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    tickWithTarget(recorder, "ds-a", 1, 1);
+    tickWithTarget(recorder, "ds-b", 3, 3);
+    tickWithTarget(recorder, "ds-a", 1, 1);
+    tickWithTarget(recorder, "ds-b", 2, 2);
+
+    const [run] = recorder.exportDocument().runs;
+    expect(run.events.map(e => e.levelChange?.datasetId)).toEqual(["ds-b"]);
+  });
+
+  it("records nothing for the first target seen or for a sample with no target", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+
+    tickWithTarget(recorder, "ds", 1, 1);
+    recorder.beginTick("ds");
+    recorder.commitTick();
+    tickWithTarget(recorder, "ds", 1, 1);
+
+    expect(recorder.exportDocument().runs[0].events).toHaveLength(0);
+  });
+
+  it("compares across a run boundary and files the change in the run that saw it", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    tickWithTarget(recorder, "ds", 0, 0);
+    recorder.closeRun("explicit");
+
+    recorder.openRun(OPEN_CAUSE);
+    tickWithTarget(recorder, "ds", 1, 1);
+
+    const runs = recorder.exportDocument().runs;
+    expect(runs[0].events).toHaveLength(0);
+    expect(runs[1].events[0].levelChange).toEqual({
+      datasetId: "ds", from: { min: 0, max: 0 }, to: { min: 1, max: 1 },
+    });
   });
 });

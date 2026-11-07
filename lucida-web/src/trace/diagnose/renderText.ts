@@ -1,35 +1,47 @@
 /**
- * The one renderer. Text is a *reading* of the diagnostic document, never a
- * parallel design.
+ * The one renderer. Text is a reading of the diagnostic document, never a
+ * parallel design: every number printed here exists in the document at a
+ * stated path, recorded by {@link Provenance}. Text is the agent's default
+ * because the JSON is several times larger for the same content.
  *
- * Text is the agent's default because the JSON is several times larger for the
- * same content, and a diagnostic that does not fit in a context window is a
- * diagnostic nobody reads. Parity is one-directional and enforced: every
- * number printed here exists in the document at a stated path, recorded as it
- * is printed by {@link Provenance}. The converse does not hold — the document
- * is a superset and this renderer selects from it.
- *
- * The default rendering is bounded: **30 lines and 3 kB**. The bound is
- * enforced by construction rather than hoped for. Lines carry a priority, and
- * when the budget is exceeded the lowest-priority ones are dropped and the
- * drop is stated — a report that silently loses its last finding is worse than
- * one that says it did.
- *
- * Nothing per-row appears at any depth. A warm re-open is tens of thousands of
- * rows; Perfetto is the raw-row answer and the last line says so.
+ * The default rendering is bounded at 30 lines and 3 kB by construction: lines
+ * carry a priority, and over budget the lowest bands are dropped and the drop
+ * is stated. Nothing per-row appears except the `chunk` depth's capped lookup.
  */
 
-import type { DiagnosticDocument, Finding } from "./types.ts";
+import type { RunCause } from "../types.ts";
+import { SPATIAL_AXES } from "./spatialSummary.ts";
+import { describeState } from "./rowState.ts";
+import type { LiveTimeline } from "./timeline.ts";
+import type {
+  ChunkLookup,
+  DiagnosticDocument,
+  Finding,
+  SpatialSummary,
+  TimelineSection,
+} from "./types.ts";
 
 export const DEFAULT_MAX_LINES = 30;
 export const DEFAULT_MAX_BYTES = 3_072;
 
 /**
- * `phase` is one phase's reading, named by {@link RenderOptions.phase} — the
- * depth #893's "the shape behind X" follow-up prints. It renders here rather
+ * `phase` is one phase's reading, named by {@link RenderOptions.phase}: the
+ * depth the "the shape behind X" next step prints. It renders here rather
  * than in whoever asked, so a CLI never grows a second renderer.
+ *
+ * `chunk` and `spatial` are the two readings the overlay gives a person,
+ * rendered as text: the document's chunk lookup, and its spatial summary.
+ * Which chunk the lookup is about is a derivation option, not a rendering
+ * one; this renderer prints whichever chunk the document carries.
+ *
+ * `timeline` is the dock's charts as text: one line per chart of the closed
+ * set, naming each series' peak and newest value or the reason it is absent,
+ * so nothing is visible to a person and invisible to an agent.
  */
-export type RenderDepth = "summary" | "phases" | "phase";
+export type RenderDepth = "summary" | "phases" | "phase" | "chunk" | "spatial" | "timeline";
+
+const LEAD_CHUNK_ROWS = 3;
+const LEAD_SPATIAL_GROUPS = 8;
 
 export interface RenderOptions {
   depth?: RenderDepth;
@@ -73,27 +85,29 @@ interface Line {
   band: number;
 }
 
+type PushLine = (band: number, text: string) => void;
+type PrintNumber = (path: string, formatted: string | number) => string;
+
 export function renderDiagnostic(
   document: DiagnosticDocument,
   options: RenderOptions = {},
 ): RenderedDiagnostic {
   const depth = options.depth ?? "summary";
   const provenance: Provenance[] = [];
-  const p = (path: string, formatted: string | number): string => {
+  const p: PrintNumber = (path, formatted) => {
     provenance.push({ path, formatted: String(formatted) });
     return String(formatted);
   };
 
   const lines: Line[] = [];
-  const push = (band: number, text: string): void => {
+  const push: PushLine = (band, text) => {
     lines.push({ band, text });
   };
 
-  // --- verdict -------------------------------------------------------------
   push(REQUIRED, `lucida trace ${document.runId} — VERDICT: ${document.verdict.text}`);
   push(REQUIRED, `confidence: ${document.verdict.confidence} · degraded: ${document.attribution.degraded}`);
 
-  // --- truncation and coverage lead, they do not footnote --------------------
+  // Truncation and coverage lead; they do not footnote.
   const truncated = document.coverage.truncated;
   if (truncated) {
     push(
@@ -102,6 +116,21 @@ export function renderDiagnostic(
         `${p("coverage.truncated.rowsRecorded", truncated.rowsRecorded.toLocaleString())} of ` +
         `${p("coverage.truncated.rowsTotal", truncated.rowsTotal.toLocaleString())} rows, ` +
         `${p("coverage.truncated.recordedPct", truncated.recordedPct)}% of the run`,
+    );
+  }
+  // The window line goes before the coverage it qualifies: every number after
+  // it is of the window, not the run.
+  const window = document.window;
+  const clip = document.coverage.window;
+  if (window && clip) {
+    push(
+      REQUIRED,
+      `window    ${p("window.startMs", window.startMs)}..${p("window.endMs", window.endMs)} ms of the ` +
+        `${p("window.ofWallMs", window.ofWallMs)} ms run` +
+        (window.whole
+          ? " (the whole run)"
+          : ` · ${p("coverage.window.clippedRows", clip.clippedRows)} row(s) cross an edge and count for the part inside` +
+            ` · ${p("coverage.window.unplacedRows", clip.unplacedRows)} with no position left out`),
     );
   }
   push(
@@ -113,7 +142,6 @@ export function renderDiagnostic(
       (document.coverage.incomplete ? " · a gap could hide the bottleneck" : ""),
   );
 
-  // --- run identity --------------------------------------------------------
   push(
     IDENTITY,
     `run       ${document.run.datasetIds.join(", ")} · cause=${causeOf(document)} · ${document.run.warmth} · ` +
@@ -122,7 +150,27 @@ export function renderDiagnostic(
   push(
     IDENTITY,
     `client    DPR ${p("run.devicePixelRatio", document.run.devicePixelRatio)} · ${document.run.viewport} · ` +
-      `${document.run.gpu} · build ${document.run.build}`,
+      `${document.run.gpu} · ${document.run.adapterKind.label} · build ${document.run.build}`,
+  );
+  push(IDENTITY, `render    ${renderTimingOf(document, p)}`);
+
+  // The identity line names only the types that sent anything. The SENT table
+  // at DETAIL lists the whole closed set, zeros included.
+  const sentTypes = document.sent.byType
+    .map((entry, index) => ({ entry, index }))
+    .filter(({ entry }) => entry.messages > 0);
+  push(
+    IDENTITY,
+    sentTypes.length === 0
+      ? "sent      nothing on the session socket"
+      : `sent      ${p("sent.bytesPerS", document.sent.bytesPerS.toLocaleString())} B/s · ` +
+          sentTypes
+            .map(
+              ({ entry, index }) =>
+                `${entry.label} ${p(`sent.byType[${index}].bytesPerS`, entry.bytesPerS.toLocaleString())} B/s ` +
+                `n=${p(`sent.byType[${index}].messages`, entry.messages.toLocaleString())}`,
+            )
+            .join(" · "),
   );
 
   document.coverage.gaps.forEach((gap, index) => {
@@ -135,60 +183,14 @@ export function renderDiagnostic(
     );
   });
 
-  // --- the phase this reading is about --------------------------------------
+  // The chunk and spatial readings replace the findings block rather than
+  // sitting under it: the budget is thirty lines either way.
   const onlyPhase = depth === "phase" ? (options.phase ?? "") : null;
-  const phases =
-    onlyPhase === null ? document.phases : document.phases.filter((phase) => phase.id === onlyPhase);
-  if (onlyPhase !== null) {
-    push(
-      LEAD_FINDING,
-      phases.length === 0
-        ? `PHASE     ${onlyPhase} — not in this run; --phases lists the ones that are`
-        : `PHASE     ${onlyPhase}`,
-    );
-  }
+  if (depth === "chunk") renderChunk(document.chunk, document, push, p);
+  else if (depth === "spatial") renderSpatial(document.spatial, document, push, p);
+  else if (depth === "timeline") renderTimeline(document.timeline, LEAD_FINDING, push, p);
+  else renderFindings(document, depth, onlyPhase, push, p);
 
-  // --- findings ------------------------------------------------------------
-  const ranked =
-    onlyPhase === null
-      ? document.findings
-      : document.findings.filter((finding) => finding.subject === onlyPhase);
-  const shown = depth === "summary" ? ranked.slice(0, 3) : ranked;
-  if (shown.length === 0) {
-    push(
-      LEAD_FINDING,
-      onlyPhase === null
-        ? "FINDINGS  none — no threshold crossed."
-        : `FINDINGS  none against ${onlyPhase}.`,
-    );
-  } else {
-    push(LEAD_FINDING, `FINDINGS (${p("findings.length", ranked.length)})`);
-    shown.forEach((finding, index) => {
-      const band = index === 0 ? LEAD_FINDING : MORE_FINDINGS;
-      push(
-        band,
-        `  ${finding.id}  ${finding.severity.toUpperCase().padEnd(9)} ${finding.subject}   ` +
-          `${describeObservation(finding, p)}   [${finding.rule}]`,
-      );
-      if (index === 0 && finding.attribution) {
-        push(band, `       why: ${finding.attribution.why}`);
-      }
-      if (depth !== "summary") {
-        push(
-          DETAIL,
-          `       threshold: ${finding.threshold.value} (${finding.threshold.kind}) — ${finding.threshold.why}`,
-        );
-      }
-    });
-    if (depth === "summary" && ranked.length > shown.length) {
-      push(
-        MORE_FINDINGS,
-        `  ... ranked findings above; the run carries ${p("findings.length", document.findings.length)} in total (see --phases)`,
-      );
-    }
-  }
-
-  // --- the anti-signal, unconditional --------------------------------------
   push(
     REQUIRED,
     `NOT A HEALTH SIGNAL  ${document.coverage.notHealthSignals
@@ -196,12 +198,18 @@ export function renderDiagnostic(
       .join(" · ")} — these paths were not exercised; an absence of errors is not evidence of health.`,
   );
 
-  if (depth !== "summary") {
+  if (depth === "phases" || depth === "phase") {
+    const phases =
+      onlyPhase === null ? document.phases : document.phases.filter((phase) => phase.id === onlyPhase);
     push(DETAIL, "");
+    const from =
+      document.criticalPath.fromMs > 0
+        ? `from ${p("criticalPath.fromMs", document.criticalPath.fromMs)} ms `
+        : "";
     push(
       DETAIL,
       document.criticalPath.kind === "chain"
-        ? `CRITICAL PATH  to ${document.criticalPath.target} at ${document.criticalPath.targetAtMs} ms`
+        ? `CRITICAL PATH  ${from}to ${document.criticalPath.target} at ${p("criticalPath.targetAtMs", document.criticalPath.targetAtMs!)} ms`
         : `CRITICAL PATH  undefined — ${document.criticalPath.undefinedReason}`,
     );
     for (const segment of document.criticalPath.segments) {
@@ -237,6 +245,20 @@ export function renderDiagnostic(
       }
     }
     push(DETAIL, "");
+    push(
+      DETAIL,
+      "SENT  (messages the page transmitted on the session socket, by client message type, over the run's wall clock)",
+    );
+    document.sent.byType.forEach((entry, index) => {
+      push(
+        DETAIL,
+        `   ${entry.label.padEnd(18)} n=${p(`sent.byType[${index}].messages`, entry.messages).padStart(7)} ` +
+          `${p(`sent.byType[${index}].bytes`, entry.bytes).padStart(11)} B ` +
+          `${p(`sent.byType[${index}].bytesPerS`, entry.bytesPerS).padStart(9)} B/s`,
+      );
+    });
+    renderSteadyState(document, push, p);
+    push(DETAIL, "");
     push(DETAIL, `RULESET v${document.ruleset.version} — ${document.ruleset.note}`);
   }
 
@@ -245,10 +267,316 @@ export function renderDiagnostic(
   // why raw rows are never inlined, which is a rationale rather than a step.
   for (const step of document.next) push(NEXT, `   ${step.command.padEnd(52)} # ${step.why}`);
 
-  const maxLines = options.maxLines ?? (depth === "summary" ? DEFAULT_MAX_LINES : Infinity);
-  const maxBytes = options.maxBytes ?? (depth === "summary" ? DEFAULT_MAX_BYTES : Infinity);
+  // The phase depths and the timeline are where a reader goes when the budget
+  // was not enough, so they are unbudgeted.
+  const budgeted = depth === "summary" || depth === "chunk" || depth === "spatial";
+  const maxLines = options.maxLines ?? (budgeted ? DEFAULT_MAX_LINES : Infinity);
+  const maxBytes = options.maxBytes ?? (budgeted ? DEFAULT_MAX_BYTES : Infinity);
   const { kept, dropped } = fit(lines, maxLines, maxBytes);
   return { text: kept.join("\n"), provenance, droppedLines: dropped };
+}
+
+function renderFindings(
+  document: DiagnosticDocument,
+  depth: RenderDepth,
+  onlyPhase: string | null,
+  push: PushLine,
+  p: PrintNumber,
+): void {
+  if (onlyPhase !== null) {
+    const known = document.phases.some((phase) => phase.id === onlyPhase);
+    push(
+      LEAD_FINDING,
+      known
+        ? `PHASE     ${onlyPhase}`
+        : `PHASE     ${onlyPhase} — not in this run; --phases lists the ones that are`,
+    );
+  }
+
+  const ranked =
+    onlyPhase === null
+      ? document.findings
+      : document.findings.filter((finding) => finding.subject === onlyPhase);
+  const shown = depth === "summary" ? ranked.slice(0, 3) : ranked;
+  if (shown.length === 0) {
+    push(
+      LEAD_FINDING,
+      onlyPhase === null
+        ? "FINDINGS  none — no threshold crossed."
+        : `FINDINGS  none against ${onlyPhase}.`,
+    );
+    return;
+  }
+  push(LEAD_FINDING, `FINDINGS (${p("findings.length", ranked.length)})`);
+  shown.forEach((finding, index) => {
+    const band = index === 0 ? LEAD_FINDING : MORE_FINDINGS;
+    push(
+      band,
+      `  ${finding.id}  ${finding.severity.toUpperCase().padEnd(9)} ${finding.subject}   ` +
+        `${describeObservation(finding, p)}   [${finding.rule}]`,
+    );
+    if (index === 0 && finding.attribution) {
+      push(band, `       why: ${finding.attribution.why}`);
+    }
+    if (depth !== "summary") {
+      push(
+        DETAIL,
+        `       threshold: ${finding.threshold.value} (${finding.threshold.kind}) — ${finding.threshold.why}`,
+      );
+    }
+  });
+  if (depth === "summary" && ranked.length > shown.length) {
+    push(
+      MORE_FINDINGS,
+      `  ... ranked findings above; the run carries ${p("findings.length", document.findings.length)} in total (see --phases)`,
+    );
+  }
+}
+
+function renderChunk(
+  chunk: ChunkLookup,
+  document: DiagnosticDocument,
+  push: PushLine,
+  p: PrintNumber,
+): void {
+  push(LEAD_FINDING, `CHUNK     ${chunk.selector ?? "(none)"} — ${chunk.chosen}`);
+  push(LEAD_FINDING, `          ${chunk.statement}`);
+  if (chunk.rowCount === 0 && chunk.chunkKey !== null) {
+    // The queue at close is the number a missing row most often comes down to.
+    push(
+      LEAD_FINDING,
+      `          at run close ${p("run.outstanding.pending", document.run.outstanding.pending.toLocaleString())} ` +
+        `requests were still pending and ${p("run.outstanding.inFlight", document.run.outstanding.inFlight.toLocaleString())} in flight`,
+    );
+  }
+  chunk.rows.forEach((row, index) => {
+    const band =
+      index < LEAD_CHUNK_ROWS ? LEAD_FINDING : index < LEAD_CHUNK_ROWS * 3 ? MORE_FINDINGS : DETAIL;
+    const base = `chunk.rows[${index}]`;
+    push(
+      band,
+      `  ${p(`${base}.id`, row.id)}  ${row.entityId} · ${row.lane}/${row.residencyTier} · ` +
+        `rid ${p(`${base}.rid`, row.rid)} gen ${p(`${base}.connectionGeneration`, row.connectionGeneration)} · ` +
+        describeState(row.state) +
+        (row.ageMs === null ? "" : ` · age ${p(`${base}.ageMs`, row.ageMs)} ms`) +
+        (row.firstSeenMs === null ? "" : ` · first seen ${p(`${base}.firstSeenMs`, row.firstSeenMs)} ms`),
+    );
+    if (row.phases.length > 0) {
+      push(
+        band,
+        `     ${row.phases
+          .map((phase, i) => `${phase.phase} ${p(`${base}.phases[${i}].durationMs`, phase.durationMs)}`)
+          .join(" → ")} ms`,
+      );
+    }
+    if (row.queue) {
+      push(
+        band,
+        `     queue: ${p(`${base}.queue.aheadAtAdmission`, row.queue.aheadAtAdmission.toLocaleString())} ahead at admission · ` +
+          `${p(`${base}.queue.overtaken`, row.queue.overtaken.toLocaleString())} overtook it · ` +
+          `waited ${p(`${base}.queue.waitedMs`, row.queue.waitedMs)} ms · ` +
+          `${row.queue.dispatched ? "dispatched" : "not dispatched by run close"}`,
+      );
+    }
+  });
+  chunk.events.forEach((event, index) => {
+    push(
+      index < LEAD_CHUNK_ROWS ? LEAD_FINDING : MORE_FINDINGS,
+      `  EVENT  ${event.kind} (${event.reason}) at ${p(`chunk.events[${index}].atMs`, event.atMs.toLocaleString())} ms · ` +
+        `${event.entityId} ${event.residencyTier}`,
+    );
+  });
+  push(NEXT, `   cannot see: ${chunk.limits}`);
+}
+
+/**
+ * The text twin of the ribbon the dock draws between two runs: what the
+ * pipeline did after the view settled, and the tiers as the run left them.
+ * Every steady-state finding's numbers are here whether the rule fired or
+ * not, so a quiet interval reads as measured rather than as unexamined.
+ */
+function renderSteadyState(document: DiagnosticDocument, push: PushLine, p: PrintNumber): void {
+  const steady = document.steadyState;
+  push(DETAIL, "");
+  push(
+    DETAIL,
+    "STEADY STATE  (the unlabelled interval that opened when the run closed; the tiers are the run's settle block)",
+  );
+  push(DETAIL, `   ${steady.statement}`);
+  const interval = steady.interval;
+  if (interval) {
+    push(
+      DETAIL,
+      `   interval   ${interval.id} · ${p("steadyState.interval.windowMs", interval.windowMs)} ms · ` +
+        `${p("steadyState.interval.rows", interval.rows.toLocaleString())} row(s) · ` +
+        `${p("steadyState.interval.passes", interval.passes.toLocaleString())} pass(es) · ended ${interval.endReason}`,
+    );
+  }
+  const received = steady.received;
+  if (received) {
+    push(
+      DETAIL,
+      `   received   ${p("steadyState.received.bytes", received.bytes.toLocaleString())} B over ` +
+        `${p("steadyState.received.requests", received.requests.toLocaleString())} request(s) · ` +
+        `${p("steadyState.received.bytesPerS", received.bytesPerS.toLocaleString())} B/s · ` +
+        `${p("steadyState.received.busySeconds", received.busySeconds)} busy second(s) at ` +
+        `${p("steadyState.received.busyBytesPerS", received.busyBytesPerS.toLocaleString())} B/s`,
+    );
+    received.byLane.forEach((lane, index) => {
+      push(
+        DETAIL,
+        `      lane ${lane.lane.padEnd(9)} ${p(`steadyState.received.byLane[${index}].bytes`, lane.bytes.toLocaleString()).padStart(11)} B ` +
+          `${p(`steadyState.received.byLane[${index}].requests`, lane.requests.toLocaleString()).padStart(7)} request(s) ` +
+          `${p(`steadyState.received.byLane[${index}].bytesPerS`, lane.bytesPerS.toLocaleString()).padStart(9)} B/s`,
+      );
+    });
+  }
+  const refetch = steady.refetch;
+  if (refetch) {
+    push(
+      DETAIL,
+      `   refetch    ${p("steadyState.refetch.chunks", refetch.chunks.toLocaleString())} chunk(s) fetched again · ` +
+        `${p("steadyState.refetch.refetches", refetch.refetches.toLocaleString())} refetch(es) · ` +
+        `${p("steadyState.refetch.bytes", refetch.bytes.toLocaleString())} B · ` +
+        `window ${p("steadyState.refetch.windowMs", refetch.windowMs.toLocaleString())} ms`,
+    );
+  }
+  const replans = steady.replans;
+  if (replans) {
+    push(
+      DETAIL,
+      `   replans    ${p("steadyState.replans.availabilityWoken", replans.availabilityWoken.toLocaleString())} of ` +
+        `${p("steadyState.replans.passes", replans.passes.toLocaleString())} pass(es) woken by an availability update alone`,
+    );
+  }
+  const sent = steady.sent;
+  if (sent) {
+    push(
+      DETAIL,
+      `   sent       ${p("steadyState.sent.bytes", sent.bytes.toLocaleString())} B over ` +
+        `${p("steadyState.sent.messages", sent.messages.toLocaleString())} message(s) · ` +
+        `${p("steadyState.sent.bytesPerS", sent.bytesPerS.toLocaleString())} B/s`,
+    );
+  }
+  steady.tiers.forEach((tier, index) => {
+    const base = `steadyState.tiers[${index}]`;
+    push(
+      DETAIL,
+      `   tier ${tier.tier.padEnd(6)} wants ${p(`${base}.wanted`, tier.wanted.toLocaleString())} · ` +
+        `holds ${p(`${base}.resident`, tier.resident.toLocaleString())} · ` +
+        `${p(`${base}.bytes`, tier.bytes.toLocaleString())} of ${p(`${base}.budgetBytes`, tier.budgetBytes.toLocaleString())} B ` +
+        `(${p(`${base}.fillPct`, tier.fillPct)}%) · loss ${p(`${base}.coverageLossChunks`, tier.coverageLossChunks.toLocaleString())} ` +
+        `(${p(`${base}.coverageLossPct`, tier.coverageLossPct)}%) · ` +
+        (tier.budgetBound ? "budget-bound" : "not budget-bound"),
+    );
+  });
+}
+
+/**
+ * What the summary cannot show sits in the commands' band, so the budget
+ * drops groups before it drops the caveats on the groups it keeps.
+ */
+function renderSpatial(
+  spatial: SpatialSummary,
+  document: DiagnosticDocument,
+  push: PushLine,
+  p: PrintNumber,
+): void {
+  push(
+    LEAD_FINDING,
+    `SPATIAL   ${p("spatial.rowCount", spatial.rowCount.toLocaleString())} rows · ` +
+      `${p("spatial.groupCount", spatial.groupCount)} group(s) · ${p("spatial.levelCount", spatial.levelCount)} level(s)`,
+  );
+  push(LEAD_FINDING, `          ${spatial.coordinates}`);
+  const severalDatasets = document.run.datasetIds.length > 1;
+  spatial.groups.forEach((group, index) => {
+    const band =
+      index < LEAD_SPATIAL_GROUPS ? LEAD_FINDING : index < LEAD_SPATIAL_GROUPS * 2 ? MORE_FINDINGS : DETAIL;
+    const base = `spatial.groups[${index}]`;
+    const axes = SPATIAL_AXES.map(
+      (axis, i) =>
+        `${axis} ${p(`${base}.box.min[${i}]`, group.box.min[i])}..${p(`${base}.box.max[${i}]`, group.box.max[i])}`,
+    ).join(" ");
+    push(
+      band,
+      `  ${String(p(`${base}.id`, group.id)).padStart(2)}  ${group.state.padEnd(9)} ` +
+        `L${p(`${base}.level`, group.level)} ${group.residencyTier.padEnd(6)} ` +
+        (severalDatasets ? ` ${group.datasetId} ` : "") +
+        `n=${String(p(`${base}.n`, group.n.toLocaleString())).padStart(7)} ` +
+        `entities ${String(p(`${base}.entityCount`, group.entityCount.toLocaleString())).padStart(5)}  ` +
+        `${axes}  oldest ${p(`${base}.oldestMs`, group.oldestMs.toLocaleString())} ms`,
+    );
+  });
+  for (const line of spatial.cannotShow) push(NEXT, `   cannot show: ${line}`);
+}
+
+/**
+ * One line per chart, naming what the canvas draws for it: each recorded
+ * series' peak and newest value, each absent series' reason. A test holds
+ * the closed set of charts to these lines.
+ */
+function renderTimeline(timeline: TimelineSection, band: number, push: PushLine, p: PrintNumber): void {
+  const axis = timeline.axis;
+  push(
+    band,
+    `TIMELINE  ${p("timeline.axis.startMs", axis.startMs)}..${p("timeline.axis.endMs", axis.endMs)} ms in ` +
+      `${p("timeline.axis.buckets", axis.buckets)} buckets of ${p("timeline.axis.bucketMs", axis.bucketMs)} ms · ` +
+      `${timeline.rowsWalked ? "rows walked" : "rows not walked"} · ${timeline.statement}`,
+  );
+  timeline.intervals.forEach((interval, index) => {
+    const base = `timeline.intervals[${index}]`;
+    push(
+      band,
+      `   band  ${interval.kind.padEnd(12)} ${interval.runId.padEnd(24)} ` +
+        `${p(`${base}.startMs`, interval.startMs)}..${p(`${base}.endMs`, interval.endMs)} ms · ` +
+        `${interval.cause ? formatCause(interval.cause) : "steady state"} · ` +
+        `${interval.endReason ?? "open"}${interval.current ? " (this run)" : ""}`,
+    );
+  });
+  timeline.charts.forEach((chart, index) => {
+    const base = `timeline.charts[${index}]`;
+    const series = chart.series
+      .map((entry, i) =>
+        entry.recorded
+          ? `${entry.label} max ${p(`${base}.series[${i}].max`, entry.max)}` +
+            (entry.last === null ? "" : ` last ${p(`${base}.series[${i}].last`, entry.last)}`) +
+            (entry.unsampled === 0
+              ? ""
+              : ` (${p(`${base}.series[${i}].unsampled`, entry.unsampled)} unsampled)`)
+          : `${entry.label} absent (${entry.statement})`,
+      )
+      .join(" · ");
+    push(
+      band,
+      `   ${chart.id.padEnd(20)} ${chart.kind.padEnd(8)} ${chart.recorded ? "recorded" : "absent  "}  ` +
+        (chart.recorded ? `${series} [${chart.unit}]` : chart.statement),
+    );
+  });
+}
+
+/**
+ * The live timeline as text, for the seam and the dock's text twin. Every
+ * line is a selection from the object {@link deriveLiveTimeline} returned,
+ * and the first word after the run id is the label every live rendering
+ * carries.
+ */
+export function renderLiveTimeline(live: LiveTimeline): string {
+  const lines: string[] = [];
+  const push: PushLine = (_band, text) => {
+    lines.push(text);
+  };
+  const p: PrintNumber = (_path, formatted) => String(formatted);
+  lines.push(`lucida trace ${live.runId} — PROVISIONAL TIMELINE: ${live.statement}`);
+  lines.push(
+    "          not a verdict: this timeline changes while you read it, and the charts read from the rows are absent until the run closes",
+  );
+  const window = live.window;
+  lines.push(
+    `window    ${window.wholeRun ? "the run so far" : `the last ${window.spanMs} ms`}: ` +
+      `${window.startMs}..${window.endMs} ms of the run`,
+  );
+  renderTimeline(live.timeline, REQUIRED, push, p);
+  return lines.join("\n");
 }
 
 /**
@@ -302,13 +630,39 @@ function byteLength(text: string): number {
 }
 
 function causeOf(document: DiagnosticDocument): string {
-  const cause = document.run.cause;
-  return cause ? `${cause.epoch ?? "none"}/${cause.dirtyKind}/${cause.source}` : "steady state";
+  return formatCause(document.run.cause);
 }
 
-function describeObservation(finding: Finding, p: (path: string, value: string | number) => string): string {
+/**
+ * Why a run opened, in one line: the epoch kind, the dirty kind, and the
+ * source, which for an interaction run is the input. The monitor's run
+ * selector and live view spell it the same way through this function, so a
+ * run reads as one run wherever it appears.
+ */
+export function formatCause(cause: RunCause | null): string {
+  if (!cause) return "steady state";
+  return `${cause.epoch ?? "none"}/${cause.dirtyKind}/${cause.source}`;
+}
+
+function renderTimingOf(document: DiagnosticDocument, p: PrintNumber): string {
+  const { mainThread, gpuPass } = document.renderTiming;
+  const main = mainThread
+    ? `main-thread frame p50 ${p("renderTiming.mainThread.p50Ms", mainThread.p50Ms)} ms · ` +
+      `p95 ${p("renderTiming.mainThread.p95Ms", mainThread.p95Ms)} ms ` +
+      `(n=${p("renderTiming.mainThread.samples", mainThread.samples)})`
+    : "main-thread frame time not sampled";
+  const gpu = gpuPass.recorded
+    ? `GPU pass p50 ${p("renderTiming.gpuPass.p50Ms", gpuPass.p50Ms)} ms · ` +
+      `p95 ${p("renderTiming.gpuPass.p95Ms", gpuPass.p95Ms)} ms ` +
+      `(n=${p("renderTiming.gpuPass.samples", gpuPass.samples)})`
+    : `GPU pass not recorded: ${gpuPass.statement}`;
+  return `${main} · ${gpu}`;
+}
+
+function describeObservation(finding: Finding, p: PrintNumber): string {
   const observed = finding.observed;
   const base = `findings[${finding.id - 1}].observed`;
+  if (finding.severity === "steady-state") return describeSteadyState(finding, p);
   if (observed.backlogEtaS != null || observed.pending != null) {
     const parts = [
       `${p(`${base}.pending`, (observed.pending ?? 0).toLocaleString())} pending`,
@@ -336,5 +690,62 @@ function describeObservation(finding: Finding, p: (path: string, value: string |
   }
   if (observed.n != null) parts.push(`n=${p(`${base}.n`, observed.n)}`);
   if (observed.rows === 0 && observed.tier) parts.push(`no per-item rows (${observed.tier})`);
+  return parts.join(" · ");
+}
+
+/**
+ * A steady-state observation: what the interval after the run carried, and
+ * the window it carried it over. Every finding here states its window,
+ * because a count without a denominator is not a measurement — except the
+ * budget-bound one, which reads the run's settle block, an instant rather
+ * than an interval.
+ */
+function describeSteadyState(finding: Finding, p: PrintNumber): string {
+  const observed = finding.observed;
+  const base = `findings[${finding.id - 1}].observed`;
+  const parts: string[] = [];
+  if (observed.bytesPerS != null) {
+    parts.push(`${p(`${base}.bytesPerS`, observed.bytesPerS.toLocaleString())} B/s`);
+  }
+  if (observed.seconds != null) parts.push(`over ${p(`${base}.seconds`, observed.seconds)} s`);
+  if (observed.chunks != null) {
+    parts.push(`${p(`${base}.chunks`, observed.chunks.toLocaleString())} chunk(s)`);
+  }
+  if (observed.refetches != null) {
+    parts.push(`${p(`${base}.refetches`, observed.refetches.toLocaleString())} refetch(es)`);
+  }
+  if (observed.bytes != null) {
+    parts.push(`${p(`${base}.bytes`, observed.bytes.toLocaleString())} B`);
+  }
+  if (observed.wokenPasses != null) {
+    parts.push(
+      `${p(`${base}.wokenPasses`, observed.wokenPasses.toLocaleString())} of ` +
+        `${p(`${base}.passes`, (observed.passes ?? 0).toLocaleString())} pass(es)`,
+    );
+  }
+  if (observed.fillPct != null) {
+    parts.push(
+      `${p(`${base}.residentBytes`, (observed.residentBytes ?? 0).toLocaleString())} of ` +
+        `${p(`${base}.budgetBytes`, (observed.budgetBytes ?? 0).toLocaleString())} B ` +
+        `(${p(`${base}.fillPct`, observed.fillPct)}% full)`,
+    );
+  }
+  if (observed.lossChunks != null) {
+    parts.push(
+      `coverage loss ${p(`${base}.lossChunks`, observed.lossChunks.toLocaleString())} of ` +
+        `${p(`${base}.wanted`, (observed.wanted ?? 0).toLocaleString())} wanted chunk(s) ` +
+        `(${p(`${base}.lossPct`, observed.lossPct ?? 0)}%)`,
+    );
+  }
+  if (observed.breakdown) {
+    parts.push(
+      Object.entries(observed.breakdown)
+        .map(([name, bytes]) => `${name} ${p(`${base}.breakdown.${name}`, bytes.toLocaleString())} B`)
+        .join(" "),
+    );
+  }
+  if (observed.windowMs != null) {
+    parts.push(`window ${p(`${base}.windowMs`, observed.windowMs.toLocaleString())} ms`);
+  }
   return parts.join(" · ");
 }

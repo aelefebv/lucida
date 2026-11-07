@@ -90,6 +90,7 @@ function makeChunkDelivery(
     dataType: "uint16",
     epochs: EPOCHS,
     lane: "detail",
+    residencyTier: "detail",
     ...overrides,
   };
 }
@@ -138,9 +139,7 @@ function makeMockClient(): {
   };
 }
 
-// ---------------------------------------------------------------------------
 // dispatchChunk
-// ---------------------------------------------------------------------------
 
 describe("dispatchChunk", () => {
   it("slice mode calls sliceChunkData with derived level / chunk shape", () => {
@@ -235,9 +234,7 @@ describe("dispatchChunk", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // dispatchProxy
-// ---------------------------------------------------------------------------
 
 describe("dispatchProxy", () => {
   it("calls proxyAssetData with destructured delivery tiles", () => {

@@ -1,7 +1,6 @@
 /**
- * `UploadClient` — narrow facet of `RenderClient` consumed by the upload
- * phase. Render-side methods (`volumeRenderMultiPass`, `minimap*`, etc.)
- * are deliberately NOT part of this interface.
+ * Narrow facet of `RenderClient` consumed by the upload phase. Render-side
+ * methods (`volumeRenderMultiPass`, `minimap*`, etc.) are left out on purpose.
  */
 import type {
   ChunkFeedbackReason,
@@ -14,7 +13,7 @@ import type {
   MissingProxy,
 } from "../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../epochs.ts";
-import type { ResidencyTier } from "../fetch/types.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
 
 /**
  * Worker `chunksEvicted` callback. `memberId` is the worker-side member
@@ -92,11 +91,11 @@ export interface UploadClient {
     levelDepth: number,
     fullResZ: number,
     epochs: SceneEpochs,
-    tier?: ResidencyTier,
+    tier: ResidencyTier,
   ): void;
 
   /**
-   * Deliver PRE-SLICED uint32 label planes to the r32uint label pool
+   * Deliver pre-sliced uint32 label planes to the r32uint label pool
    * (categorical overlay path). Distinct from {@link sliceChunkData}: routed
    * by the label image id; each `chunk.data` is a single 2D Z-plane already
    * extracted for the current view (so only ~64 KB crosses, not the ~8 MB
@@ -144,11 +143,11 @@ export interface UploadClient {
     chunkY: number,
     chunkZ: number,
     epochs: SceneEpochs,
-    tier?: ResidencyTier,
+    tier: ResidencyTier,
   ): void;
 
   /**
-   * Deliver WHOLE uint32 label chunks to the r32uint label VOLUME pool
+   * Deliver whole uint32 label chunks to the r32uint label volume pool
    * (categorical first-hit overlay path). Distinct from {@link volumeChunkData}:
    * routed by the label image id and drawn as a colored surface, not
    * accumulated as intensity. Unlike {@link labelSliceChunkData}, the full 3D

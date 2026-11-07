@@ -17,47 +17,26 @@ use crate::transform::{TransformEdge, VoxelTransform};
 ///
 /// # Wire encoding
 ///
-/// The JSON form is hand-rolled (see the `Serialize`/`Deserialize` impls
-/// below) so that its size scales with a dataset's *structure*, not its tile
-/// count. A wide collection has tens of thousands of tiles that all share one
-/// multiscale description (the format requires it — the importer templates
-/// every tile from a representative one) and sit on deterministic 2D
-/// placements; repeating that shared metadata per tile is what used to push
-/// collection manifests past WebSocket frame limits.
+/// The JSON form is hand-rolled so its size scales with a dataset's
+/// structure, not its tile count, which keeps wide collections under
+/// WebSocket frame limits:
 ///
-/// - Any [`MultiscaleInfo`] value shared by two or more images is emitted
-///   once, in a top-level `multiscales` table; each sharing image carries a
-///   `multiscale_ref` index instead of an inline `multiscale`. Images with a
-///   unique multiscale (every single-image dataset, and any tile that has
-///   diverged, e.g. via generated levels) stay inline.
-/// - A transform edge that is exactly a pure 2D translation is emitted as
-///   `"translation": [tx, ty]` instead of a 16-element matrix.
-/// - Whenever either compact construct is present, the manifest leads with a
-///   `format_version` marker ([`COMPACT_MANIFEST_FORMAT_VERSION`]). A
-///   manifest that uses neither construct omits the marker and is
-///   byte-identical to the fully-inline form this encoding replaced. Note
-///   that an identity self-edge *is* a pure 2D translation, so byte-identity
-///   with the inline form holds only for manifests with no pure-translation
-///   edges at all (e.g. anisotropic placement matrices).
+/// - A [`MultiscaleInfo`] shared by two or more images is emitted once in a
+///   top-level `multiscales` table, and each sharing image carries a
+///   `multiscale_ref` index. A unique multiscale stays inline.
+/// - A pure 2D translation edge is emitted as `"translation": [tx, ty]`.
+/// - Either compact construct adds a `format_version` marker
+///   ([`COMPACT_MANIFEST_FORMAT_VERSION`]).
 ///
-/// Decoding accepts both the fully-inline form (inline `multiscale`, matrix
-/// `transform`) and the compact form, and resolves every reference back into
-/// the in-memory model here — consumers always see fully-populated
-/// [`ImageSpec`]s and [`TransformEdge`]s through [`DatasetManifest::images`]
-/// and [`DatasetManifest::transforms`], and never deal with table lookups.
-/// Persisted inline documents therefore keep loading — and re-persist in the
-/// compact form on their next write, because the encoder has no inline mode.
-/// The reverse is a one-way door: decoders that predate the compact form
-/// hard-reject any manifest that uses it.
+/// Decoding accepts the fully inline form as well as the compact one and
+/// resolves every reference, so consumers always see fully populated
+/// [`ImageSpec`]s and [`TransformEdge`]s. Inline documents re-persist in the
+/// compact form, since the encoder has no inline mode, and a decoder without
+/// compact support rejects a compact manifest.
 ///
-/// The serialization fixed point is the **canonical encoder output**:
-/// `encode(decode(x)) == x` byte-for-byte when `x` came out of this encoder.
-/// Valid non-canonical inputs decode fine but re-encode canonically rather
-/// than byte-identically: duplicate or unreferenced `multiscales` table
-/// entries collapse or disappear, inline duplicates move into the table, and
-/// because table entries dedup by IEEE equality, scale elements that differ
-/// only in zero sign (`-0.0` vs `0.0`) normalize to the first occurrence's
-/// representation.
+/// `encode(decode(x)) == x` byte for byte only when `x` came from this
+/// encoder. Other valid inputs re-encode canonically: table entries dedup by
+/// IEEE equality, so `-0.0` and `0.0` scales collapse to the first one seen.
 #[derive(Debug, Clone)]
 pub struct DatasetManifest {
     pub dataset_id: DatasetId,
@@ -144,10 +123,6 @@ impl DatasetManifest {
         self.labels.iter().map(LabelAttachment::from_spec).collect()
     }
 }
-
-// ---------------------------------------------------------------------------
-// Wire encoding (see the type-level docs on `DatasetManifest`)
-// ---------------------------------------------------------------------------
 
 /// Value of the `format_version` marker emitted whenever a manifest uses a
 /// compact construct (a shared `multiscales` table or a `translation` edge).
@@ -366,16 +341,11 @@ impl Serialize for DatasetManifest {
 }
 
 /// Decode-side bounds on shared-table expansion. Resolving a `multiscale_ref`
-/// clones the referenced table entry into its image, so a small compact
-/// document could otherwise direct the decoder to materialize a huge
-/// in-memory model (one bloated table entry referenced by thousands of
-/// images). The per-entry caps are far above anything the importer produces
-/// (cf. the metadata caps in `lucida-store/src/parse.rs`); the expansion cap
-/// keeps the materialized total at or below what the same manifest could
-/// have carried fully inline through the largest accepted socket message
-/// (256 MiB), so a reference can never amplify past what the inline form
-/// already expresses. Inline entries are exempt: they cost their own input
-/// bytes exactly once.
+/// clones the table entry into its image, so a small compact document could
+/// otherwise materialize a huge model. The per-entry caps sit far above what
+/// the importer produces, and the expansion cap keeps the total at or below
+/// what the inline form could carry in the largest accepted socket message
+/// (256 MiB). Inline entries are exempt: they cost their own input bytes.
 const MAX_TABLE_ENTRY_LEVELS: usize = 1024;
 const MAX_TABLE_ENTRY_CHANNEL_INFOS: usize = 4096;
 const MAX_REF_EXPANSION_BYTES: u64 = 256 * 1024 * 1024;
@@ -653,6 +623,7 @@ mod tests {
                     generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
+                    downsampling_method: None,
                     channel_infos: vec![],
                 },
             }],
@@ -725,6 +696,7 @@ mod tests {
                     generated_levels: vec![],
                     data_type: DataType::Uint32,
                     pinned_axes: vec![],
+                    downsampling_method: None,
                     channel_infos: vec![],
                 },
             },
@@ -819,6 +791,7 @@ mod tests {
             generated_levels: vec![],
             data_type: DataType::Uint16,
             pinned_axes: vec![],
+            downsampling_method: None,
             channel_infos: vec![
                 crate::image::ChannelInfo {
                     label: "Channel 0".to_string(),
@@ -1183,7 +1156,7 @@ mod tests {
     #[test]
     fn shared_table_dedups_ieee_equal_scale_representations() {
         // Two multiscales identical up to the sign of a zero scale element:
-        // IEEE-equal, so they dedup into ONE table entry and the second
+        // IEEE-equal, so they dedup into one table entry and the second
         // image re-encodes with the first occurrence's bits. Locks the
         // dedup-hash normalization — if -0.0 hashed differently from 0.0,
         // equal values would silently stop sharing.

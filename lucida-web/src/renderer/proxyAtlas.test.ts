@@ -30,9 +30,7 @@ import {
   type ProxyAtlasState,
 } from "./proxyAtlas.ts";
 
-// ---------------------------------------------------------------------------
 // Mock GPU device
-// ---------------------------------------------------------------------------
 
 interface MockTexture {
   destroyed: boolean;
@@ -62,10 +60,6 @@ function makeMockDevice(maxDim = 2048): GPUDevice {
     queue: { writeTexture: vi.fn() } as unknown as GPUQueue,
   } as unknown as GPUDevice;
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 describe("proxyAtlas", () => {
   let device: GPUDevice;

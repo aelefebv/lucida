@@ -1,15 +1,15 @@
 import type { PlanningConfig } from "../pipeline/planning/config.ts";
 import { renderRadiusEnabled } from "../pipeline/renderRadius.ts";
-import type { RenderRadiusPreviewTier } from "./logging.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 
 export interface RadiusSpec {
-  tier: RenderRadiusPreviewTier;
+  tier: ResidencyTier;
   radiusView: number;
 }
 
 export function radiusSpecsForOverlay(
   cfg: PlanningConfig,
-  previewTier: RenderRadiusPreviewTier | null,
+  previewTier: ResidencyTier | null,
 ): RadiusSpec[] {
   const allRadiusSpecs: RadiusSpec[] = [
     { tier: "coarse", radiusView: cfg.coarseRenderRadiusView },

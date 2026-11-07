@@ -1,4 +1,8 @@
 //! In-memory CLI authorization request store for tests.
+//!
+//! The `CliTokenAuthorizationStore` conformance suite in
+//! [`crate::storage`] runs against this store and the SQLite one, so the
+//! two answer alike.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -39,11 +43,15 @@ impl CliTokenAuthorizationStore for MemoryCliTokenAuthorizationStore {
         request: CliTokenAuthorization,
     ) -> Result<(), CliTokenAuthorizationStoreError> {
         let mut rows = self.rows.lock().expect("memory store mutex poisoned");
-        if rows.values().any(|row| {
-            row.poll_token_hash == request.poll_token_hash
-                || row.token_hash == request.token_hash
-                || row.user_code == request.user_code
-        }) {
+        // Every uniqueness rule the SQL schema carries: one request per
+        // id, and one per poll secret, credential hash, and user code.
+        if rows.contains_key(&request.id)
+            || rows.values().any(|row| {
+                row.poll_token_hash == request.poll_token_hash
+                    || row.token_hash == request.token_hash
+                    || row.user_code == request.user_code
+            })
+        {
             return Err(CliTokenAuthorizationStoreError::Backend(
                 "duplicate cli authorization request".to_string(),
             ));
@@ -81,63 +89,13 @@ impl CliTokenAuthorizationStore for MemoryCliTokenAuthorizationStore {
     ) -> Result<(), CliTokenAuthorizationStoreError> {
         let mut rows = self.rows.lock().expect("memory store mutex poisoned");
         if let Some(row) = rows.get_mut(id) {
-            row.approved_at = Some(now);
-            row.approved_token_id = Some(token_id.to_string());
-            row.approved_email = Some(email.to_string());
+            // First approval wins: a second must not re-point an approved
+            // request at another credential or another person.
+            row.approved_at.get_or_insert(now);
+            row.approved_token_id
+                .get_or_insert_with(|| token_id.to_string());
+            row.approved_email.get_or_insert_with(|| email.to_string());
         }
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn sample() -> CliTokenAuthorization {
-        let now = Utc::now();
-        CliTokenAuthorization {
-            id: "req-1".into(),
-            poll_token_hash: "poll-hash".into(),
-            token_hash: "token-hash".into(),
-            user_code: "ABCD-1234".into(),
-            name: "laptop".into(),
-            created_at: now,
-            expires_at: now + chrono::Duration::minutes(10),
-            token_expires_at: now + chrono::Duration::days(30),
-            approved_at: None,
-            approved_token_id: None,
-            approved_email: None,
-        }
-    }
-
-    #[tokio::test]
-    async fn poll_requires_poll_hash_and_approval_marks_row() {
-        let store = MemoryCliTokenAuthorizationStore::new();
-        store.create(sample()).await.unwrap();
-
-        assert!(
-            store
-                .get_for_poll("req-1", "wrong")
-                .await
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            store
-                .get_for_poll("req-1", "poll-hash")
-                .await
-                .unwrap()
-                .is_some()
-        );
-
-        let approved_at = Utc::now();
-        store
-            .mark_approved("req-1", "tok-1", "dev@local", approved_at)
-            .await
-            .unwrap();
-        let row = store.get("req-1").await.unwrap().unwrap();
-        assert_eq!(row.approved_at, Some(approved_at));
-        assert_eq!(row.approved_token_id.as_deref(), Some("tok-1"));
-        assert_eq!(row.approved_email.as_deref(), Some("dev@local"));
     }
 }

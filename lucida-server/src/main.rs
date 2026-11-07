@@ -16,9 +16,13 @@ use tower_http::cors::CorsLayer;
 use lucida_server::admin::{self, admin_clear_proxy_cache};
 use lucida_server::auth;
 use lucida_server::bookmarks;
+use lucida_server::deployment_theme::{self, DeploymentTheme};
 use lucida_server::health;
+use lucida_server::inbox;
 use lucida_server::session::Session;
 use lucida_server::static_serve;
+use lucida_server::status;
+use lucida_server::storage;
 use lucida_server::{
     AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler, workspace,
 };
@@ -162,8 +166,7 @@ async fn main() -> std::io::Result<()> {
             tracing_subscriber::fmt()
                 .with_env_filter(env_filter)
                 // Emit a span-close event with elapsed time for every
-                // #[tracing::instrument]-wrapped function. See
-                // wiki/decisions/0012-logging-conventions.
+                // #[tracing::instrument]-wrapped function.
                 .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
                 .init();
         }
@@ -217,7 +220,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         generated_disk_budget_bytes: args.generated_coarse_disk_budget_bytes,
     };
     // Operational logs go through the configured tracing subscriber
-    // so RUST_LOG filtering applies (ADR 0012).
+    // so RUST_LOG filtering applies.
     tracing::info!(
         cache_dir = %proxy_config.cache_dir.display(),
         concurrency = proxy_config.concurrency,
@@ -265,28 +268,55 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             return Err(std::io::Error::other(e.to_string()));
         }
     };
+    // Read before the database opens, so a bad value fails the boot with
+    // the other configuration errors rather than after a connection was
+    // made.
+    let status_config = match status::StatusRouteConfig::from_env(&auth_config.db_url) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "status.startup.config_error");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    };
+    let deployment_theme = match DeploymentTheme::from_env() {
+        Ok(theme) => theme,
+        Err(e) => {
+            tracing::error!(error = %e, "theme.startup.config_error");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    };
+    if let Some(theme) = deployment_theme.as_ref() {
+        tracing::info!(
+            file = %std::env::var(deployment_theme::FILE_VAR).unwrap_or_default().trim(),
+            dark_tokens = theme.tokens.dark.len(),
+            light_tokens = theme.tokens.light.len(),
+            "theme.configured",
+        );
+    }
     // Operator-facing startup line: mode + bind together so a glance
     // at the boot log answers "is this server reachable, and is it
     // protected?" Per ADR-0018 both signals should be visible together.
-    // Stable string mode tag (`"google"` / `"disabled"`) lands cleanly
-    // in audit pipelines that key off the exact string rather than the
-    // Debug-formatted variant.
+    // Stable string mode tag (`"google"` / `"iap"` / `"disabled"`)
+    // lands cleanly in audit pipelines that key off the exact string
+    // rather than the Debug-formatted variant.
     let mode_str = match auth_config.mode {
         auth::AuthMode::Google => "google",
+        auth::AuthMode::Iap => "iap",
         auth::AuthMode::Disabled => "disabled",
     };
     tracing::info!(
         mode = %mode_str,
         bind = %auth_config.bind_addr,
         cookie = %auth_config.cookie_name,
-        db = %auth_config.db_path.display(),
+        db = %auth_config.db_url.redacted(),
+        db_backend = %auth_config.db_url.scheme(),
         idle_timeout_s = auth_config.idle_timeout.as_secs(),
         hard_cap_s = auth_config.hard_cap.as_secs(),
         "auth.startup",
     );
     // Audit signal: explicit acknowledgment that we're running with
     // auth disabled on a non-loopback bind. This combination should
-    // raise eyebrows in code review (ADR-0018 §"Consequences"); the
+    // raise eyebrows in code review; the
     // banner is multi-line on purpose so it survives log truncation
     // and stands out in `journalctl` / k8s logs.
     if auth_config.insecure_acknowledged {
@@ -316,31 +346,44 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             "auth.google.configured",
         );
     }
-    let session_store = match auth::SqliteSessionStore::open(&auth_config.db_path).await {
-        Ok(s) => Arc::new(s),
+    if let Some(i) = auth_config.iap.as_ref() {
+        // The audience is logged unredacted. It is not a secret, and an
+        // operator chasing a wrong-audience rejection needs to read the
+        // value the server is comparing against.
+        tracing::info!(
+            audience = %i.audience,
+            issuer = %i.issuer,
+            jwks_uri = %i.jwks_uri,
+            "auth.iap.configured",
+        );
+    }
+    // The only place the server picks a database. Nothing downstream
+    // knows which one it got.
+    let storage = match storage::open(&auth_config.db_url).await {
+        Ok(s) => s,
         Err(e) => {
-            tracing::error!(error = %e, "auth.startup.session_store_open_failed");
+            tracing::error!(error = %e, "storage.startup.open_failed");
             return Err(std::io::Error::other(e.to_string()));
         }
     };
-    let session_store_dyn: Arc<dyn auth::LoginSessionStore> = session_store.clone();
-    let bearer_token_store: Arc<dyn auth::BearerTokenStore> = Arc::new(
-        auth::SqliteBearerTokenStore::new(session_store.pool().clone()),
-    );
-    let cli_authorization_store: Arc<dyn auth::CliTokenAuthorizationStore> = Arc::new(
-        auth::SqliteCliTokenAuthorizationStore::new(session_store.pool().clone()),
-    );
-    // Pending-auth store rides the same SQLite pool the session store
-    // opened (one DB, one migration system, one connection budget).
-    let pending_store: Arc<dyn auth::PendingAuthStore> = Arc::new(
-        auth::SqlitePendingAuthStore::new(session_store.pool().clone()),
-    );
+    let session_store_dyn = storage.login_sessions();
+    let bearer_token_store = storage.bearer_tokens();
+    let cli_authorization_store = storage.cli_token_authorizations();
+    let pending_store = storage.pending_auth();
 
-    let extractor = auth::middleware::build_extractor(
+    let auth_state = match auth::middleware::AuthMiddlewareState::build(
         Arc::clone(&auth_config),
         Arc::clone(&session_store_dyn),
         Arc::clone(&bearer_token_store),
-    );
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "auth.startup.iap_key_set_unavailable");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    };
 
     let logout_state = auth::handlers::LogoutState {
         config: Arc::clone(&auth_config),
@@ -354,7 +397,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
 
     // Two auth-route flavors so the OAuth flow doesn't bounce itself:
     //   * `authed_router` — `/auth/whoami` and `/auth/logout`. These
-    //     read the principal/cookie, so they MUST run through the auth
+    //     read the principal/cookie, so they must run through the auth
     //     middleware (whoami specifically returns 401 when missing).
     //   * `public_router` — `/auth/start` and `/auth/callback`. These
     //     mint sessions and must NOT be wrapped — otherwise an unauthed
@@ -374,18 +417,14 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             post(auth::handlers::revoke_current_bearer_token).with_state(cli_auth_state.clone()),
         )
         .route(
-            "/auth/logout",
+            auth::LOGOUT_PATH,
             post(auth::handlers::logout).with_state(logout_state),
         );
 
-    // Server-stored bookmarks share the same SQLite pool as the auth
-    // stores; the bookmarks router lands on the protected half so every
+    // The bookmarks router lands on the protected half, so every
     // handler sees an `AuthPrincipal` in extensions.
-    let bookmark_store = std::sync::Arc::new(bookmarks::SqliteBookmarkStore::new(
-        session_store.pool().clone(),
-    ));
     let bookmarks_state = bookmarks::handlers::BookmarksState {
-        store: bookmark_store as std::sync::Arc<dyn bookmarks::BookmarkStore>,
+        store: storage.bookmarks(),
         // Plumb the live session + unicast routes so handlers can
         // broadcast `BookmarkChanged` to clients with overlapping
         // loaded datasets after every successful CUD operation.
@@ -394,9 +433,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     };
     let bookmarks_router: Router<()> = bookmarks::routes::router(bookmarks_state);
 
-    let workspace_store = Arc::new(workspace::SqliteWorkspaceStore::new(
-        session_store.pool().clone(),
-    ));
+    let workspace_store = storage.workspaces();
     let workspace_runtime_config = workspace::WorkspaceRuntimeConfig {
         idle_ttl: Duration::from_secs(args.workspace_idle_ttl_secs),
         idle_sweep_interval: Duration::from_secs(args.workspace_idle_sweep_secs.max(1)),
@@ -406,12 +443,24 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         idle_sweep_secs = workspace_runtime_config.idle_sweep_interval.as_secs(),
         "workspace.runtime.config"
     );
-    let workspace_manager = Arc::new(workspace::WorkspaceManager::new_with_runtime_config(
-        workspace_store as Arc<dyn workspace::WorkspaceStore>,
-        proxy_config.clone(),
-        workspace_runtime_config,
-    ));
+    let inbox_store = storage.inbox();
+    let workspace_manager = Arc::new(
+        workspace::WorkspaceManager::new_with_runtime_config(
+            workspace_store,
+            proxy_config.clone(),
+            workspace_runtime_config,
+        )
+        // A **Send report** arrives on a workspace socket, so the
+        // manager behind that socket is what holds the inbox.
+        .with_inbox(Arc::clone(&inbox_store)),
+    );
     let _workspace_idle_eviction_handle = workspace_manager.spawn_idle_eviction_loop();
+    // The inbox's own read routes, on the protected half beside the
+    // workspace ones: the CLI lists and fetches what people sent.
+    let inbox_router: Router<()> = inbox::router(inbox::InboxState {
+        manager: Arc::clone(&workspace_manager),
+        store: inbox_store,
+    });
     let workspaces_router: Router<()> = workspace::router(workspace_manager);
 
     // /auth/error is available regardless of auth mode — if the user
@@ -420,12 +469,17 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // the public router so the auth middleware never wraps it (the
     // user is unauthenticated by definition when they're being told
     // to retry sign-in).
-    let dev_auth_state = auth::handlers::DevAuthState {
-        config: Arc::clone(&auth_config),
-        enabled: auth_config.mode == auth::AuthMode::Disabled,
-    };
+    //
+    // The dev identity routes mount unconditionally and gate on
+    // `DevAuthState::new`: elsewhere `/auth/dev/status` reports
+    // `enabled: false` and `/auth/dev/login` 404s.
+    let dev_auth_state = auth::handlers::DevAuthState::new(Arc::clone(&auth_config));
     let mut public_auth_router: Router<()> = Router::new()
         .route("/auth/error", get(auth::error_page::auth_error))
+        .route(
+            "/auth/mode",
+            get(auth::handlers::auth_mode).with_state(Arc::clone(&auth_config)),
+        )
         .route(
             "/auth/cli/start",
             post(auth::handlers::cli_auth_start).with_state(cli_auth_state.clone()),
@@ -437,13 +491,11 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .route(
             "/auth/dev/status",
             get(auth::handlers::dev_status).with_state(dev_auth_state.clone()),
-        );
-    if auth_config.mode == auth::AuthMode::Disabled {
-        public_auth_router = public_auth_router.route(
+        )
+        .route(
             "/auth/dev/login",
-            post(auth::handlers::dev_login).with_state(dev_auth_state.clone()),
+            post(auth::handlers::dev_login).with_state(dev_auth_state),
         );
-    }
     if let Some(g) = auth_config.google.clone() {
         let google_client = match auth::GoogleOAuthClient::new(Arc::new(g)).await {
             Ok(c) => Arc::new(c),
@@ -470,24 +522,32 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
                 get(auth::handlers::auth_callback).with_state(oauth_state),
             );
     }
-    // Liveness/readiness probes mounted on the public router half so
-    // the kubelet (which presents no session cookie) can hit them
-    // without being 401'd. Always-200 today; the split between
-    // `/healthz` and `/readyz` exists so future drain-on-shutdown can
-    // flip readiness to 503 while liveness stays 200, letting the LB
-    // stop routing without the kubelet restarting the pod mid-drain.
-    // See `lucida-server/src/health.rs`.
+    // Liveness and readiness probes go on the public router half, because
+    // the kubelet presents no session cookie. See `health.rs`.
     public_auth_router = public_auth_router.merge(health::router());
+    // Public half, for the same reason as the probes: an external
+    // monitor presents no session. The startup line is the one place the
+    // route is logged above debug level. See `lucida-server/src/status.rs`
+    // and ADR-0064.
+    if let Some(status) = status_config.as_ref() {
+        tracing::info!(
+            path = %status.path,
+            label = %status.label,
+            resource_name = %status.resource_name,
+            "status.route.configured",
+        );
+    }
+    public_auth_router =
+        public_auth_router.merge(status::router(status_config, Arc::clone(&storage)));
+    // Public because the sign-in screen is themed before anyone has a
+    // session. It answers whether or not a theme is configured.
+    public_auth_router =
+        public_auth_router.merge(deployment_theme::router(deployment_theme.as_ref()));
 
-    // ADR-0020: serve the SPA bundle from `LUCIDA_WEB_DIST` (default
-    // `./lucida-web/dist`) via `tower-http::ServeDir`. Lands on the
-    // public router half so HTML/JS/CSS aren't 401'd by the auth
-    // middleware — auth gates remain on `/auth/whoami` polling and
-    // `/api/*` calls. Merged LAST below so route-specific handlers
-    // (`/auth/*`, `/api/*`, `/admin/*`, `/ws`) take precedence and the
-    // SPA fallback only fires for truly unknown paths. The dist
-    // directory is re-stat'd on every request, so a dev who builds the
-    // SPA mid-session sees fresh content without restarting the server.
+    // Serve the SPA bundle from `LUCIDA_WEB_DIST` (default
+    // `./lucida-web/dist`) on the public router half (ADR-0020). Merged
+    // last so `/auth/*`, `/api/*`, `/admin/*`, and `/ws` take precedence
+    // and the SPA fallback only fires for unknown paths.
     let web_dist = PathBuf::from(
         std::env::var("LUCIDA_WEB_DIST").unwrap_or_else(|_| "./lucida-web/dist".to_string()),
     );
@@ -495,17 +555,11 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         web_dist = %web_dist.display(),
         "static_serve.config",
     );
-    let static_serve_router = static_serve::router(web_dist);
+    let static_serve_router = static_serve::router(web_dist, deployment_theme.as_ref());
 
     // App routes carry the auth middleware; public auth routes don't.
-    //
-    // ADR-0020: `/` no longer routes to the WebSocket handler — it now
-    // falls through to the SPA `static_serve` fallback below so a browser
-    // hitting `:9876` directly sees the app instead of a 401 / unauth
-    // landing. WebSocket clients use `/ws` (already the canonical path
-    // used by `lucida-web/src/bridge.ts`); `lucida-cli` callers that
-    // relied on the legacy `ws://localhost:9876` default URL must now
-    // pass `--server ws://localhost:9876/ws` explicitly.
+    // `/` falls through to the SPA so a browser hitting `:9876` sees the
+    // app. WebSocket clients use `/ws`.
     let app_state_router = Router::new()
         .route("/ws", get(ws_handler))
         .route("/api/browse", get(browse::browse_handler))
@@ -513,16 +567,17 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         .with_state(state)
         .merge(authed_auth_router)
         .merge(bookmarks_router)
+        .merge(inbox_router)
         .merge(workspaces_router)
         .layer(axum::middleware::from_fn_with_state(
-            extractor,
+            auth_state,
             auth::middleware::auth_middleware,
         ));
 
     let app = app_state_router
         .merge(public_auth_router)
-        // ADR-0020: SPA static-serve catch-all. Merged last so the
-        // fallback only fires for paths no other route claimed.
+        // SPA catch-all. Merged last so the fallback only fires for paths
+        // no other route claimed.
         .merge(static_serve_router)
         .layer(CorsLayer::permissive());
 
@@ -545,7 +600,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         "auth.cleanup.spawned",
     );
 
-    // ADR-0018: LUCIDA_BIND defaults to 127.0.0.1:9876 (loopback) so
+    // LUCIDA_BIND defaults to 127.0.0.1:9876 (loopback) so
     // `cargo run --bin lucida-server` is friction-free for local dev.
     // Set LUCIDA_BIND=0.0.0.0:9876 (or a deployment-specific interface)
     // to expose on all interfaces; production deployments must do so

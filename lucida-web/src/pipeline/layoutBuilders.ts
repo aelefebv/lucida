@@ -1,18 +1,8 @@
 /**
- * Layout builders — pure functions that derive `LayoutSpec` values from a
- * `DatasetManifest`. Used by the bridge to auto-register browser-authored
- * derived layouts when a dataset is opened.
- *
- * Today's two builders:
- *   - `buildCollectionGridLayout`  : a verbatim copy of the source default
- *     layout, registered under id `"derived:collection-grid"`.
- *   - `buildDenseSquareLayout`: source placements packed into a tight
- *     ceil(sqrt(N)) x ceil(N/cols) grid, registered under id
- *     `"derived:dense-square"`.
- *
- * Both return `null` when the dataset has no usable source default
- * (or fewer than 2 placements for the dense builder); `derivedBuildersFor`
- * filters those out so callers can iterate without null checks.
+ * Pure functions that derive `LayoutSpec` values from a `DatasetManifest`.
+ * The bridge auto-registers these browser-authored layouts when a dataset
+ * opens. A builder returns `null` when the dataset has no usable source
+ * default; `derivedBuildersFor` filters those out.
  */
 
 import { Axis } from "../axes.ts";
@@ -27,13 +17,13 @@ function sourceDefaultPlacements(manifest: DatasetManifest): LayoutSpec["placeme
 }
 
 /**
- * Hash indexes over a manifest's relational scans, built once per builder
- * call so per-placement footprint lookups are O(1). Without them a wide
+ * Hash indexes over a manifest's relational scans, built once per call so
+ * per-placement footprint lookups are O(1). Without them a wide
  * collection pays `placements × (images + entities + transforms)` array
  * scans — millions for hundreds of groups × tens of thousands of tiles.
- * Every map keeps the FIRST match, mirroring `Array.find` semantics.
+ * Every map keeps the first match, mirroring `Array.find` semantics.
  */
-interface ManifestIndex {
+export interface ManifestIndex {
   /** Owner entity id → first image it owns. */
   imageByOwner: Map<string, DatasetManifest["images"][number]>;
   /** Parent entity id → child entities, in manifest order. */
@@ -42,7 +32,7 @@ interface ManifestIndex {
   transformByEdge: Map<string, Map<string, DatasetManifest["transforms"][number]>>;
 }
 
-function buildManifestIndex(manifest: DatasetManifest): ManifestIndex {
+export function buildManifestIndex(manifest: DatasetManifest): ManifestIndex {
   const imageByOwner = new Map<string, DatasetManifest["images"][number]>();
   for (const img of manifest.images) {
     if (!imageByOwner.has(img.owner)) imageByOwner.set(img.owner, img);
@@ -69,8 +59,15 @@ function buildManifestIndex(manifest: DatasetManifest): ManifestIndex {
   return { imageByOwner, childrenByParent, transformByEdge };
 }
 
+/** An XY rectangle in level-0 voxel units, `min` and `max` as `[x, y]`. */
+export interface VoxelRect {
+  min: [number, number];
+  max: [number, number];
+}
+
 /**
- * Footprint `[height, width]` in voxel units for a placed entity.
+ * The XY rectangle a placed entity covers, relative to its placement, or null
+ * when nothing under it has a level 0.
  *
  *   - Image entity (owns an image directly) → that image's level-0 tile.
  *   - Group entity (no direct image; has child tiles) → bounding box of all
@@ -78,26 +75,22 @@ function buildManifestIndex(manifest: DatasetManifest): ManifestIndex {
  *     tile→group TransformEdge contributes the offset (matrix[12], [13]).
  *
  * This matches `lucida-core::scene::resolve_entity_position`, which composes
- * tile positions from `group_position + tile_offset_within_group`. For
- * dense packing we therefore need the GROUP's footprint (which scales with
- * tiles-per-group), not just one tile's footprint.
+ * tile positions from `group_position + tile_offset_within_group`, so the
+ * rectangle covers what the 2D view draws for the entity.
  */
-function entityFootprintYX(index: ManifestIndex, entityId: string): [number, number] {
+export function entityExtent(index: ManifestIndex, entityId: string): VoxelRect | null {
   const directImg = index.imageByOwner.get(entityId);
   if (directImg) {
     const lvl0 = directImg.multiscale.levels[0];
-    if (!lvl0) return [1, 1];
-    return [lvl0.shape[Axis.Y] ?? 1, lvl0.shape[Axis.X] ?? 1];
+    if (!lvl0) return null;
+    return { min: [0, 0], max: [lvl0.shape[Axis.X] ?? 1, lvl0.shape[Axis.Y] ?? 1] };
   }
-
-  const children = index.childrenByParent.get(entityId) ?? [];
-  if (children.length === 0) return [1, 1];
 
   let minX = Infinity;
   let minY = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
-  for (const child of children) {
+  for (const child of index.childrenByParent.get(entityId) ?? []) {
     const childImg = index.imageByOwner.get(child.id);
     if (!childImg) continue;
     const lvl0 = childImg.multiscale.levels[0];
@@ -113,8 +106,22 @@ function entityFootprintYX(index: ManifestIndex, entityId: string): [number, num
     if (ty + footprintY > maxY) maxY = ty + footprintY;
   }
 
-  if (!isFinite(minX)) return [1, 1];
-  return [Math.max(1, maxY - minY), Math.max(1, maxX - minX)];
+  if (!isFinite(minX)) return null;
+  return { min: [minX, minY], max: [maxX, maxY] };
+}
+
+/**
+ * Footprint `[height, width]` in voxel units for a placed entity. Dense
+ * packing needs the group's footprint, which scales with tiles-per-group, not
+ * just one tile's.
+ */
+function entityFootprintYX(index: ManifestIndex, entityId: string): [number, number] {
+  const extent = entityExtent(index, entityId);
+  if (!extent) return [1, 1];
+  return [
+    Math.max(1, extent.max[1] - extent.min[1]),
+    Math.max(1, extent.max[0] - extent.min[0]),
+  ];
 }
 
 /** Largest `[Y, X]` footprint across all source-default placements. Used as

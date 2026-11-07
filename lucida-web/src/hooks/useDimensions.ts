@@ -2,8 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis } from "../axes.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
-import { invalidateDisplaySettings } from "../invalidation.ts";
+import { invalidateSelection } from "../invalidation.ts";
 import type { RenderLoop } from "../renderLoop.ts";
+import { getViewportClass } from "../theme/viewport.ts";
 import type { DatasetState, ViewMode } from "../types.ts";
 import type { BridgeCallbacks } from "./useDatasetSettings.ts";
 
@@ -32,10 +33,8 @@ export function useDimensions({
   const [viewMode, setViewMode] = useState<ViewMode>("2d");
   const [multiChannel, setMultiChannel] = useState(false);
 
-  // Union dimension extents across ALL datasets for slider ranges.
-  // datasetsRef holds the live Map; datasetsVersion is the React-side
-  // bumper that triggers a re-render whenever the Map mutates, so reading
-  // .current here always sees the latest set.
+  // Slider ranges are the union across all datasets. `datasetsVersion`
+  // re-renders on every Map mutation, so reading the ref here is current.
   let dimZ = 1, dimC = 1, dimT = 1;
   void datasetsVersion;
   // eslint-disable-next-line react-hooks/refs
@@ -46,10 +45,8 @@ export function useDimensions({
     dimT = Math.max(dimT, shape[Axis.T]);
   }
 
-  // Per-dataset T/C/Z extents (counts) for saved-view clamping. The applier
-  // can read Z from the scene's volume shape but NOT T/C, so it asks for
-  // these. We answer from the loaded manifest (shape is [T, C, Z, Y, X]);
-  // an unknown/unloaded dataset returns `{}`, leaving that axis unclamped.
+  // Saved-view clamping needs T/C counts, which the scene can't supply. An
+  // unloaded dataset returns `{}`, leaving every axis unclamped.
   const dimensionExtentsFor = useCallback(
     (datasetId: string): { z?: number; t?: number; c?: number } => {
       const ds = datasetsRef.current.get(datasetId);
@@ -60,12 +57,10 @@ export function useDimensions({
     [datasetsRef],
   );
 
-  // Current label names (manifest `labels[]` order) for a dataset — the order
-  // the per-label settings index into. Saved-view capture stamps these onto the
-  // per-label display, and restore keys per-label settings by name+occurrence
-  // against them, so a view whose label list changed still lands each setting on
-  // the right current label. An unknown/unloaded dataset (or one with no labels)
-  // returns `undefined`, which leaves the per-label handling positional.
+  // Label names in manifest order, which per-label settings index into. Saved
+  // views key per-label settings by name and occurrence against these, so a
+  // changed label list still lands each setting on the right label.
+  // `undefined` leaves per-label handling positional.
   const labelNamesFor = useCallback(
     (datasetId: string): string[] | undefined => {
       const ds = datasetsRef.current.get(datasetId);
@@ -76,10 +71,8 @@ export function useDimensions({
     [datasetsRef],
   );
 
-  // Clamp slider values when union dimensions shrink, and sync to WASM scene.
-  // The clamp is a synchronization with external state (manifest dim union),
-  // not a derivation — z/c/t are user-controlled but must follow the open
-  // dataset's bounds. setState here IS the intended effect.
+  // Clamp z/c/t when the union shrinks. This syncs with external state, so
+  // setState in the effect is intended.
   useEffect(() => {
     const scene = wasmSceneRef.current;
     let clamped = false;
@@ -123,51 +116,105 @@ export function useDimensions({
           applyViewportCommand(wasmScene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
         }
       }
+      // Each mode starts from a fixed camera: 3D looks at the unit cube's
+      // middle from a set distance, and 2D shows one sample per device pixel.
+      // On a narrow or tall canvas at a phone's pixel ratio that is a corner
+      // of the volume or a small image, so below desktop widths the new mode
+      // frames the data instead.
+      const fitId = selectedDatasetId ?? datasetsRef.current.keys().next().value;
+      if (getViewportClass() !== "desktop" && fitId) {
+        try {
+          wasmScene.fit_camera_to_dataset_bounds(fitId);
+        } catch {
+          // A dataset with nothing loaded yet has no bounds; the fixed camera stays.
+        }
+      }
       bridgeCallbacksRef.current.emitPresence();
     }
   }, [viewMode, wasmScene, selectedDatasetId, datasetsRef, bridgeCallbacksRef]);
 
+  // The recorder hears the scrub here, at the control, not where the value
+  // reaches the render loop. A saved-view apply and a followed peer move the
+  // same selectors, and neither is an input.
   const handleZChange = useCallback((v: number) => {
     setZ(v);
     bridgeCallbacksRef.current.breakFollow();
+    loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
       applyViewportCommand(scene, { type: "set_z", z: v });
       bridgeCallbacksRef.current.emitPresence();
     }
-  }, [wasmSceneRef, bridgeCallbacksRef]);
+  }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
   const handleCChange = useCallback((v: number) => {
     setC(v);
     bridgeCallbacksRef.current.breakFollow();
+    loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
       applyViewportCommand(scene, { type: "set_c", c: v });
       bridgeCallbacksRef.current.emitPresence();
     }
-  }, [wasmSceneRef, bridgeCallbacksRef]);
+  }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
   const handleTChange = useCallback((v: number) => {
     setT(v);
     bridgeCallbacksRef.current.breakFollow();
+    loopRef.current?.markInput("scrub");
     const scene = wasmSceneRef.current;
     if (scene) {
       applyViewportCommand(scene, { type: "set_t", t: v });
       bridgeCallbacksRef.current.emitPresence();
     }
-  }, [wasmSceneRef, bridgeCallbacksRef]);
+  }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
-  const handleMultiChannelToggle = useCallback(() => {
-    const next = !multiChannel;
-    setMultiChannel(next);
+  // Solo is single-channel mode on the soloed channel; the composite is
+  // multi-channel mode. Both change which channels are shown, so a select.
+  const applyChannelMode = useCallback((multi: boolean, channel: number | null) => {
+    if (channel !== null) setC(channel);
+    setMultiChannel(multi);
     bridgeCallbacksRef.current.breakFollow();
     const scene = wasmSceneRef.current;
     if (scene) {
-      applyViewportCommand(scene, { type: "set_multi_channel", enabled: next });
-      invalidateDisplaySettings(loopRef.current, "multi_channel_toggle");
+      if (channel !== null) applyViewportCommand(scene, { type: "set_c", c: channel });
+      applyViewportCommand(scene, { type: "set_multi_channel", enabled: multi });
+      invalidateSelection(loopRef.current);
       bridgeCallbacksRef.current.emitPresence();
     }
-  }, [multiChannel, wasmSceneRef, bridgeCallbacksRef, loopRef]);
+  }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
+
+  const soloChannel = !multiChannel && dimC > 1 ? c : null;
+
+  /** Show one channel alone, or return to the composite when it already is. */
+  const handleSoloChannel = useCallback((channel: number) => {
+    if (soloChannel === channel) applyChannelMode(true, null);
+    else applyChannelMode(false, channel);
+  }, [soloChannel, applyChannelMode]);
+
+  const handleShowAllChannels = useCallback(() => {
+    applyChannelMode(true, null);
+  }, [applyChannelMode]);
+
+  // A multichannel image opens as a composite. Only the first one switches
+  // the mode, so opening another never undoes a solo, and this runs as the
+  // dataset registers, before a saved view or a followed peer applies its own
+  // mode on top. The scene's default stays single-channel, because a view
+  // recorded without the flag means single-channel.
+  const handleDatasetRegistered = useCallback((datasetId: string) => {
+    const datasets = datasetsRef.current;
+    const ds = datasets.get(datasetId);
+    if (!ds || channelCountOf(ds) <= 1) return;
+    for (const [id, other] of datasets) {
+      if (id !== datasetId && channelCountOf(other) > 1) return;
+    }
+    const scene = wasmSceneRef.current;
+    if (!scene || scene.multi_channel()) return;
+    applyViewportCommand(scene, { type: "set_multi_channel", enabled: true });
+    setMultiChannel(true);
+    invalidateSelection(loopRef.current);
+    bridgeCallbacksRef.current.emitPresence();
+  }, [datasetsRef, wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
   return {
     z, c, t, setZ, setC, setT,
@@ -176,7 +223,13 @@ export function useDimensions({
     dimZ, dimC, dimT,
     dimensionExtentsFor,
     labelNamesFor,
+    soloChannel,
     handleViewModeToggle,
-    handleZChange, handleCChange, handleTChange, handleMultiChannelToggle,
+    handleZChange, handleCChange, handleTChange,
+    handleSoloChannel, handleShowAllChannels, handleDatasetRegistered,
   };
+}
+
+function channelCountOf(ds: DatasetState): number {
+  return ds.manifest.images[0]?.multiscale.levels[0]?.shape[Axis.C] ?? 1;
 }

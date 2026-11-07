@@ -17,18 +17,14 @@ import {
   UPLOAD_LOG_SUSTAIN_MS,
 } from "../constants.ts";
 
-// ---------------------------------------------------------------------------
 // Test helpers
-// ---------------------------------------------------------------------------
 
 /** Build an empty tick-stats record with overrides applied. */
 function makeTickStats(over: Partial<UploadTickStats> = {}): UploadTickStats {
   return { ...emptyUploadTickStats(), ...over };
 }
 
-// ---------------------------------------------------------------------------
 // recordEvent + cumulative counters + size sketch
-// ---------------------------------------------------------------------------
 
 describe("UploadTelemetry — recordEvent + counters", () => {
   it("accumulates total bytes and total uploads across recordEvent calls", () => {
@@ -92,37 +88,32 @@ describe("UploadTelemetry — recordEvent + counters", () => {
     expect(rolling.totalUploads).toBe(ticks * perTick);
   });
 
-  it("publishes far faster than the shift()-pruned window it replaced", () => {
-    // Regression guard for #898. The old prune was `Array.shift()` in a
-    // loop; V8 left-trims cheaply until the backing store outgrows a regular
-    // heap object, after which every shift is a full memmove. 128 events per
-    // tick at ~120Hz puts the 1s window at ~15.5k entries — past that cliff,
-    // where the shift version measures ~1.15ms per publish against a 16.7ms
-    // frame budget.
+  it("publishes far faster than the shift()-pruned window it replaced", async ({ annotate }) => {
+    // `Array.shift()` in a loop becomes a full memmove per shift once V8's
+    // backing store outgrows a regular heap object. 128 events per tick on
+    // 8 ms ticks puts the 1s window at ~16k entries, past that cliff.
     //
-    // The assertion is a ratio against that old shape, measured in the same
-    // run, rather than an absolute millisecond bound: the cliff is
-    // structural in V8, so the ratio holds on a slow CI box where an
-    // absolute bound would just flake.
+    // The assertion is a ratio against a shift()-pruned window measured in
+    // the same run, not an absolute bound, so it holds on a slow CI box.
+    // A promoted store also pays the generational write barrier on every
+    // shift, and a session-lived store is promoted within seconds, so the
+    // test forces promotion rather than leaving it to GC timing.
+    //
+    // Both windows advance in lockstep, each tick timed separately, so they
+    // see the same heap phases. The assertion compares per-round minimums,
+    // because noise only ever adds time.
     const perTick = 128;
     const tickMs = 8;
-    const ticks = 300;
-
-    const timeTicks = (base: number, onTick: (now: number) => void): number => {
-      const start = performance.now();
-      for (let i = 0; i < ticks; i++) onTick(base + i * tickMs);
-      return performance.now() - start;
-    };
+    const warmTicks = 200;
+    const roundTicks = 25;
+    const roundCount = 4;
+    const ratioFloor = 4;
 
     const tel = new UploadTelemetry();
     const ringTick = (now: number): void => {
       for (let e = 0; e < perTick; e++) tel.recordEvent(now, 10);
       tel.publish(now, makeTickStats());
     };
-    // Warm to steady state so the measured ticks are the expensive ones
-    // (a full second of events resident, pruning on every tick).
-    timeTicks(100_000, ringTick);
-    const ringMs = timeTicks(200_000, ringTick) / ticks;
 
     // The pre-fix shape: a plain array pruned with `shift()`, then scanned.
     const events: Array<{ at: number; bytes: number }> = [];
@@ -134,14 +125,65 @@ describe("UploadTelemetry — recordEvent + counters", () => {
       for (const e of events) bytes += e.bytes;
       if (bytes < 0) throw new Error("unreachable");
     };
-    timeTicks(100_000, shiftTick);
-    const shiftMs = timeTicks(200_000, shiftTick) / ticks;
+
+    /** Milliseconds per tick for each side. */
+    interface SideMs {
+      ring: number;
+      shift: number;
+    }
+
+    let now = 100_000;
+    /** Advance both windows one tick and time each side. */
+    const step = (): SideMs => {
+      const t0 = performance.now();
+      ringTick(now);
+      const t1 = performance.now();
+      shiftTick(now);
+      const t2 = performance.now();
+      now += tickMs;
+      return { ring: t1 - t0, shift: t2 - t1 };
+    };
+
+    // Warm until the window is full, so every timed tick prunes.
+    for (let i = 0; i < warmTicks; i++) step();
+
+    // Promote both backing stores. About 128 MB of short-lived objects forces
+    // several scavenges even at V8's largest default semi-space, in about
+    // 35 ms.
+    const churn = new Array<object | undefined>(4096);
+    for (let i = 0; i < 4_000_000; i++) churn[i & 4095] = { i };
+
+    const rounds: SideMs[] = [];
+    for (let r = 0; r < roundCount; r++) {
+      const sum: SideMs = { ring: 0, shift: 0 };
+      for (let i = 0; i < roundTicks; i++) {
+        const t = step();
+        sum.ring += t.ring;
+        sum.shift += t.shift;
+      }
+      rounds.push({ ring: sum.ring / roundTicks, shift: sum.shift / roundTicks });
+    }
+    const ringMs = Math.min(...rounds.map((r) => r.ring));
+    const shiftMs = Math.min(...rounds.map((r) => r.shift));
 
     // Both windows hold the same events, so this is like for like.
     expect(events.length).toBeGreaterThan(15_000);
-    // Measured ~16x on a dev machine; 4x is the flake-proof floor.
-    expect(ringMs * 4).toBeLessThan(shiftMs);
-  });
+    const perRound = (side: keyof SideMs): string =>
+      rounds.map((r) => r[side].toFixed(3)).join("/");
+    const readout =
+      `ring ${perRound("ring")} ms, shift ${perRound("shift")} ms per tick; ` +
+      `ratio of minimums ${(shiftMs / ringMs).toFixed(1)}x`;
+    // The default reporter drops this. The GitHub Actions reporter shows it
+    // as a notice, so CI records the ratio on every run.
+    await annotate(readout);
+    // Ratio of minimums observed. GitHub's ubuntu-latest runners, Node 24:
+    // 11.0x to 17.6x over 6 runs. A 22-vCPU x86 VM, Node 24 and 26: 13.9x to
+    // 16.1x over 32 idle runs, 10.8x to 15.4x over 11 runs pinned to one
+    // hyperthread with its sibling busy, and 12.5x with the semi-space forced
+    // down to 1 MB. The ring swapped back to the shift() shape: 0.95x to
+    // 0.97x.
+    expect(shiftMs / ringMs, readout).toBeGreaterThan(ratioFloor);
+  }, 20_000);
 
   it("derives p50 / p95 upload size from the sample buffer", () => {
     const tel = new UploadTelemetry();
@@ -173,9 +215,7 @@ describe("UploadTelemetry — recordEvent + counters", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Tick window aggregation + filter ratio
-// ---------------------------------------------------------------------------
 
 describe("UploadTelemetry — tick aggregation", () => {
   it("aggregates skip causes from per-tick stats into the rolling window", () => {
@@ -212,14 +252,12 @@ describe("UploadTelemetry — tick aggregation", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Sustained-anomaly detectors
 //
 // debugLog only emits when its category is enabled (`localStorage.debug`
 // gates the call). We spy on `console.log`, enable the "orch" category
 // for the test, and assert that the right event names land. Each test
 // restores prior debug state in `afterEach` to avoid bleed.
-// ---------------------------------------------------------------------------
 
 describe("UploadTelemetry — sustained anomaly detectors", () => {
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
@@ -302,16 +340,12 @@ describe("UploadTelemetry — sustained anomaly detectors", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Telemetry shape regression — guards the counter migration parity
-// ---------------------------------------------------------------------------
-
 describe("UploadTelemetry — shape regression", () => {
   /**
    * Run a known sequence of recordEvent + publish calls and assert the
    * produced `UploadRollingStats` shape (every key, in order) matches
    * the expected snapshot. Safety net: if the module starts dropping or
-   * renaming a tile, this test catches it before the `orch` log
+   * renaming a field, this test catches it before the `orch` log
    * category — its remaining consumer — starts lying.
    */
   it("preserves the full UploadRollingStats key set", () => {

@@ -1,17 +1,36 @@
+import { mixColor, paint } from "../theme/tokenColors.ts";
+import type { ResolvedColor } from "../theme/tokens.ts";
+
 type Vec3 = [number, number, number];
+
+/** What the cube is drawn in: canvas tokens, so it reads on any canvas background. */
+export interface CubeColors {
+  background: ResolvedColor;
+  label: ResolvedColor;
+  axisX: ResolvedColor;
+  axisY: ResolvedColor;
+  axisZ: ResolvedColor;
+}
+
+type Axis = "axisX" | "axisY" | "axisZ";
+
+/** How far a receding face's color sinks toward the background. */
+const RECEDING_MIX = 0.35;
 
 const ORIENT_VERTS: Vec3[] = [
   [-1, -1, -1], [ 1, -1, -1], [ 1,  1, -1], [-1,  1, -1],
   [-1, -1,  1], [ 1, -1,  1], [ 1,  1,  1], [-1,  1,  1],
 ];
 
-const ORIENT_FACES: { indices: number[]; normal: Vec3; label: string; color: string }[] = [
-  { indices: [1, 2, 6, 5], normal: [ 1,  0,  0], label: "R", color: "rgba(255,68,68,"  },  // +X red
-  { indices: [0, 3, 7, 4], normal: [-1,  0,  0], label: "L", color: "rgba(170,40,40,"  },  // -X dim red
-  { indices: [2, 3, 7, 6], normal: [ 0,  1,  0], label: "B", color: "rgba(40,140,40,"  },  // +Y dim green
-  { indices: [0, 1, 5, 4], normal: [ 0, -1,  0], label: "T", color: "rgba(68,204,68,"  },  // -Y green
-  { indices: [4, 5, 6, 7], normal: [ 0,  0,  1], label: "F", color: "rgba(68,136,255," },  // +Z blue
-  { indices: [0, 1, 2, 3], normal: [ 0,  0, -1], label: "K", color: "rgba(40,80,170,"  },  // -Z dim blue
+// Each axis colors two opposite faces, one in its own color and one in a
+// receding shade of it.
+const ORIENT_FACES: { indices: number[]; normal: Vec3; label: string; axis: Axis; receding: boolean }[] = [
+  { indices: [1, 2, 6, 5], normal: [ 1,  0,  0], label: "R", axis: "axisX", receding: false },
+  { indices: [0, 3, 7, 4], normal: [-1,  0,  0], label: "L", axis: "axisX", receding: true },
+  { indices: [2, 3, 7, 6], normal: [ 0,  1,  0], label: "B", axis: "axisY", receding: true },
+  { indices: [0, 1, 5, 4], normal: [ 0, -1,  0], label: "T", axis: "axisY", receding: false },
+  { indices: [4, 5, 6, 7], normal: [ 0,  0,  1], label: "F", axis: "axisZ", receding: false },
+  { indices: [0, 1, 2, 3], normal: [ 0,  0, -1], label: "K", axis: "axisZ", receding: true },
 ];
 
 function buildViewRotation(theta: number, phi: number): number[] {
@@ -44,6 +63,7 @@ export function drawOrientationCube(
   ctx: CanvasRenderingContext2D,
   theta: number, phi: number,
   canvasW: number, canvasH: number,
+  colors: CubeColors,
 ) {
   const dpr = devicePixelRatio;
   const margin = 8 * dpr;
@@ -54,8 +74,8 @@ export function drawOrientationCube(
   const cx = canvasW - margin - halfSize;
   const cy = canvasH - margin - halfSize;
 
-  // Background circle
-  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  // A disc of the canvas background sets the cube off from the data behind it.
+  ctx.fillStyle = paint(colors.background, 0.35);
   ctx.beginPath();
   ctx.arc(cx, cy, halfSize + 4 * dpr, 0, Math.PI * 2);
   ctx.fill();
@@ -96,9 +116,11 @@ export function drawOrientationCube(
 
     const isFront = face.rnz < 0;
     const alpha = isFront ? 0.7 : 0.1;
+    const axisColor = colors[face.axis];
+    const color = face.receding ? mixColor(axisColor, colors.background, RECEDING_MIX) : axisColor;
 
     // Fill quad
-    ctx.fillStyle = face.color + alpha + ")";
+    ctx.fillStyle = paint(color, alpha);
     ctx.beginPath();
     ctx.moveTo(pts[0][0], pts[0][1]);
     for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
@@ -106,7 +128,7 @@ export function drawOrientationCube(
     ctx.fill();
 
     // Stroke edges
-    ctx.strokeStyle = face.color + "1)";
+    ctx.strokeStyle = paint(color);
     ctx.lineWidth = 1 * dpr;
     ctx.stroke();
 
@@ -116,10 +138,10 @@ export function drawOrientationCube(
       for (const p of pts) { lcx += p[0]; lcy += p[1]; }
       lcx /= pts.length; lcy /= pts.length;
 
-      ctx.strokeStyle = "rgba(0,0,0,0.7)";
+      ctx.strokeStyle = paint(colors.background, 0.7);
       ctx.lineWidth = 2.5 * dpr;
       ctx.strokeText(face.label, lcx, lcy);
-      ctx.fillStyle = "white";
+      ctx.fillStyle = paint(colors.label);
       ctx.fillText(face.label, lcx, lcy);
     }
   }

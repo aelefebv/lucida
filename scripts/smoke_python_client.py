@@ -14,19 +14,12 @@ from typing import Any
 from lucida import LucidaClient, LucidaError
 
 
-DEFAULT_DATASET = Path(
-    "/Users/austin/local_data/lucida_test_zarrs/collection_a.ome.zarr"
-)
-
-
 def resolve_dataset(value: str | None) -> str:
     if value:
         return value
     env_value = os.environ.get("LUCIDA_SMOKE_DATASET")
     if env_value:
         return env_value
-    if DEFAULT_DATASET.is_dir():
-        return str(DEFAULT_DATASET)
     raise SystemExit("Set --dataset or LUCIDA_SMOKE_DATASET to a server-visible OME-Zarr path or URL.")
 
 

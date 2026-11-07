@@ -2,12 +2,8 @@ import { describe, it, expect } from "vitest";
 import { annotationVertices, isClosedShape } from "./annotationGeometry.ts";
 import type { Annotation } from "./annotationDocument.ts";
 
-// Parity tests for the TS geometry mirror. These assert the SAME contract the
-// Rust unit tests (`vertices_point_is_single_anchor`,
-// `vertices_line_is_two_endpoints_in_order`, `vertices_box_is_four_corner_ring`,
-// `vertices_line_or_box_without_end_collapses_to_anchor`) lock for
-// `Annotation::vertices()` / `is_closed()` in lucida-core, so the two
-// implementations can't silently drift.
+// Parity with the Rust `vertices_*` unit tests for `Annotation::vertices()` and
+// `is_closed()`, so the two implementations can't drift.
 
 function pin(kind: string, position: [number, number], end?: [number, number] | null): Annotation {
   return { id: "a", position, end: end ?? null, author: "bio", kind };

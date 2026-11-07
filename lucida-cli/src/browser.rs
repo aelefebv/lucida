@@ -1,11 +1,6 @@
-//! The CLI's headless browser driver.
-//!
-//! One owner for the three things every browser-driving command needs: the
-//! headless launch, CDP evaluation against a loaded page, and waiting until the
-//! viewer has actually rendered. `viewer screenshot` and `dataset montage`
-//! (both its capture pass and its auto-contrast pre-pass) route through here
-//! rather than carrying a copy each, and the trace driver joins them as a
-//! caller rather than a fourth copy.
+//! The CLI's headless browser driver: the headless launch, CDP evaluation
+//! against a loaded page, and waiting until the viewer has rendered, owned
+//! once for every browser-driving command.
 //!
 //! Viewport and device pixel ratio are [`Viewport`] parameters, not constants
 //! baked into the launch: screenshot and montage want scale factor 1 because
@@ -34,10 +29,9 @@ const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 /// How large a single CDP reply may be.
 ///
 /// The default 16 MiB is a denial-of-service guard for a socket facing the
-/// internet; this one faces a browser we launched. It is not a theoretical
-/// limit either: a trace export of a warm open on a real dataset came back at
-/// 22 MB and was refused, and a screenshot of a large retina viewport is the
-/// same shape of problem.
+/// internet; this one faces a browser we launched. A trace export of a warm
+/// open on a real dataset can reach 22 MB, and a screenshot of a large
+/// retina viewport is the same shape of problem.
 const MAX_CDP_MESSAGE_BYTES: usize = 512 << 20;
 
 fn cdp_socket_config() -> WebSocketConfig {
@@ -73,17 +67,41 @@ impl Viewport {
 /// shape (headless mode, GPU flags, window size) is assertable without a
 /// browser on the machine.
 fn launch_args(viewport: Viewport, user_data_dir: &Path) -> Vec<String> {
-    vec![
+    let mut args = vec![
         "--headless=new".to_string(),
         "--enable-unsafe-webgpu".to_string(),
         "--ignore-gpu-blocklist".to_string(),
+    ];
+    args.extend(gpu_backend_args());
+    args.extend([
         "--no-first-run".to_string(),
         "--no-default-browser-check".to_string(),
         "--remote-debugging-port=0".to_string(),
         format!("--user-data-dir={}", user_data_dir.display()),
         format!("--window-size={},{}", viewport.width, viewport.height),
         "about:blank".to_string(),
-    ]
+    ]);
+    args
+}
+
+/// Flags that put headless Chrome's GPU process on the machine's GPU.
+///
+/// On Linux, Chrome with no display server picks SwiftShader unless Vulkan is
+/// switched on and told it has no window to present to. With these three, a
+/// host with a discrete GPU reports it as the active device and WebGPU as
+/// hardware accelerated; without them every run records a software fallback
+/// adapter, whatever the machine has. macOS reaches its GPU through Metal and
+/// must not be forced onto Vulkan, so it gets nothing here.
+fn gpu_backend_args() -> Vec<String> {
+    if cfg!(target_os = "linux") {
+        vec![
+            "--enable-features=Vulkan".to_string(),
+            "--use-angle=vulkan".to_string(),
+            "--disable-vulkan-surface".to_string(),
+        ]
+    } else {
+        Vec::new()
+    }
 }
 
 /// `Emulation.setDeviceMetricsOverride` parameters for `viewport`. The device
@@ -170,7 +188,7 @@ impl HeadlessBrowser {
         token: Option<&EffectiveToken>,
         wait: Duration,
     ) -> Result<Page, CliError> {
-        let mut page = self.navigate(url, token, wait).await?;
+        let mut page = self.navigate(url, token, None, wait).await?;
         page.wait_for_document(wait).await?;
         page.wait_for_capture_ready(wait).await?;
         Ok(page)
@@ -189,21 +207,40 @@ impl HeadlessBrowser {
         token: Option<&EffectiveToken>,
         wait: Duration,
     ) -> Result<Page, CliError> {
-        self.navigate(url, token, wait).await
+        self.navigate(url, token, None, wait).await
+    }
+
+    /// [`Self::open_page_unrendered`], with `script` run in the page before
+    /// any of the page's own scripts, on this navigation and any later one.
+    ///
+    /// The trace driver seeds the page's browser storage with the knobs it
+    /// was given this way, so the page hydrates its stores from them as it
+    /// starts. Evaluating after the load would be too late: the planner has
+    /// read its configuration and the first requests are in flight before
+    /// the driver can act.
+    pub async fn open_page_unrendered_with_script(
+        &self,
+        url: &str,
+        token: Option<&EffectiveToken>,
+        script: &str,
+        wait: Duration,
+    ) -> Result<Page, CliError> {
+        self.navigate(url, token, Some(script), wait).await
     }
 
     async fn navigate(
         &self,
         url: &str,
         token: Option<&EffectiveToken>,
+        script: Option<&str>,
         wait: Duration,
     ) -> Result<Page, CliError> {
         let mut page = Page::attach(&self.endpoint, wait).await?;
         // Only when there is a header to set. An enabled Network domain
-        // mirrors every WebSocket frame the page receives back over CDP —
-        // megabytes of chunk payload per second on a real dataset — which
-        // costs main-thread time in the page being measured and once
-        // overflowed the CDP message limit outright.
+        // mirrors every WebSocket frame the page receives back over CDP,
+        // megabytes of chunk payload per second on a real dataset, which
+        // costs main-thread time in the page being measured and can overflow
+        // the CDP message limit.
         if let Some(token) = token {
             page.call("Network.enable", json!({}), wait).await?;
             page.call(
@@ -220,6 +257,14 @@ impl HeadlessBrowser {
         )
         .await?;
         page.call("Page.enable", json!({}), wait).await?;
+        if let Some(source) = script {
+            page.call(
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({ "source": source }),
+                wait,
+            )
+            .await?;
+        }
         page.call("Page.navigate", json!({ "url": url }), wait)
             .await?;
         Ok(page)
@@ -390,26 +435,53 @@ impl Page {
     /// carried no value at all. The distinction matters to the readiness
     /// probes: an expression that evaluates to null is a page that has not
     /// answered yet and is worth re-polling, while a reply with no value is a
-    /// broken evaluation.
+    /// broken evaluation. An expression that threw is an error naming what
+    /// it threw, because a reply with no value would read as "not yet".
     async fn evaluate_value(
         &mut self,
         expression: &str,
         wait: Duration,
     ) -> Result<Option<Value>, CliError> {
+        // The bundle export evaluates to a promise. Plain values pass through unchanged.
         let evaluated = self
             .call(
                 "Runtime.evaluate",
-                json!({ "expression": expression, "returnByValue": true }),
+                json!({ "expression": expression, "returnByValue": true, "awaitPromise": true }),
                 wait,
             )
             .await?;
+        if let Some(details) = evaluated.get("exceptionDetails") {
+            return Err(CliError::new(
+                ErrorKind::Protocol,
+                format!("the page threw: {}", describe_exception(details)),
+            ));
+        }
         Ok(evaluated
             .get("result")
             .and_then(|value| value.get("value"))
             .cloned())
     }
 
-    /// Capture the page as a PNG.
+    /// Synthesize one mouse event through the browser's own input pipeline:
+    /// `params` is the DevTools protocol's `Input.dispatchMouseEvent`
+    /// request, with `x` and `y` in CSS pixels. The page sees the pointer or
+    /// wheel event a person's mouse would raise, at the emulated device
+    /// pixel ratio, so a scripted gesture measures the path a person's takes
+    /// (ADR 0051).
+    pub async fn dispatch_mouse_event(
+        &mut self,
+        params: Value,
+        wait: Duration,
+    ) -> Result<(), CliError> {
+        self.call("Input.dispatchMouseEvent", params, wait).await?;
+        Ok(())
+    }
+
+    /// Capture the page as a PNG, as the compositor shows it. That is not
+    /// always what the page drew: headless Chrome on Vulkan leaves a WebGPU
+    /// canvas out and returns solid black in its place, so a caller that
+    /// wants the canvas asks the page to capture it and keeps this as the
+    /// fallback.
     pub async fn screenshot_png(&mut self, wait: Duration) -> Result<Vec<u8>, CliError> {
         let captured = self
             .call(
@@ -696,9 +768,43 @@ fn ensure_png_signature(bytes: &[u8]) -> Result<(), CliError> {
     ))
 }
 
+/// The one line a CDP `exceptionDetails` object has to say: the thrown
+/// value's description when there is one, then the protocol's own text.
+fn describe_exception(details: &Value) -> String {
+    details
+        .get("exception")
+        .and_then(|exception| exception.get("description"))
+        .and_then(Value::as_str)
+        .or_else(|| details.get("text").and_then(Value::as_str))
+        .map(|text| text.lines().next().unwrap_or(text).to_string())
+        .unwrap_or_else(|| "an exception with no description".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_exception_is_described_by_its_first_line_or_the_protocols_text() {
+        let thrown = json!({
+            "text": "Uncaught",
+            "exception": {
+                "description": "RangeError: Array buffer allocation failed\n    at f (index.js:1:2)"
+            }
+        });
+        assert_eq!(
+            describe_exception(&thrown),
+            "RangeError: Array buffer allocation failed"
+        );
+        assert_eq!(
+            describe_exception(&json!({ "text": "Uncaught" })),
+            "Uncaught"
+        );
+        assert_eq!(
+            describe_exception(&json!({})),
+            "an exception with no description"
+        );
+    }
 
     #[test]
     fn launch_args_carry_the_viewport_and_profile_directory() {
@@ -708,6 +814,25 @@ mod tests {
         assert!(args.contains(&"--window-size=640,480".to_string()));
         assert!(args.contains(&"--user-data-dir=/tmp/profile".to_string()));
         assert_eq!(args.last().map(String::as_str), Some("about:blank"));
+    }
+
+    #[test]
+    fn launch_args_put_the_gpu_process_on_vulkan_only_on_linux() {
+        let args = launch_args(Viewport::new(640, 480, 1.0), Path::new("/tmp/profile"));
+        let vulkan = [
+            "--enable-features=Vulkan",
+            "--use-angle=vulkan",
+            "--disable-vulkan-surface",
+        ];
+
+        for flag in vulkan {
+            assert_eq!(
+                args.contains(&flag.to_string()),
+                cfg!(target_os = "linux"),
+                "{flag}"
+            );
+        }
+        assert!(args.contains(&"--enable-unsafe-webgpu".to_string()));
     }
 
     #[test]

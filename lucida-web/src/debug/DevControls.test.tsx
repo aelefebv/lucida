@@ -8,7 +8,6 @@ import { configStore } from "../pipeline/planning/configStore.ts";
 import { DEFAULT_PLANNING_CONFIG } from "../pipeline/planning/config.ts";
 import {
   DEBUG_OVERLAYS,
-  isOverlayEnabled,
   getRenderRadiusPreviewTier,
   setRenderRadiusPreviewTier,
   setOverlayEnabled,
@@ -48,10 +47,7 @@ function fakeCache(overrides: Partial<ReturnType<LiveCacheKnobs["getConfig"]>> =
 describe("DevControls — planning config rendering", () => {
   it("renders each tunable's label and current value", () => {
     render(<DevControls />);
-    // Mode thresholds.
-    expect(screen.getByText(/FAR threshold/)).toBeTruthy();
-    expect(screen.getByText(/DETAIL threshold/)).toBeTruthy();
-    expect(screen.getByText(/Hysteresis/)).toBeTruthy();
+    // Prefetch.
     expect(screen.getByText(/Prefetch depth/)).toBeTruthy();
 
     // Priority weights.
@@ -61,13 +57,11 @@ describe("DevControls — planning config rendering", () => {
     expect(screen.getByText(/Detail render radius/)).toBeTruthy();
     expect(screen.getByText(/Coarse render radius/)).toBeTruthy();
 
-    // The slider for FAR shows the default value.
-    const farSlider = screen.getByLabelText(/FAR threshold.*slider/i) as HTMLInputElement;
-    expect(Number(farSlider.value)).toBe(DEFAULT_PLANNING_CONFIG.farThresholdPx);
+    const weightSlider = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
+    expect(Number(weightSlider.value)).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
 
-    // The number input for FAR shows the default value.
-    const farNumber = screen.getByLabelText(/FAR threshold.*value/i) as HTMLInputElement;
-    expect(Number(farNumber.value)).toBe(DEFAULT_PLANNING_CONFIG.farThresholdPx);
+    const weightNumber = screen.getByLabelText(/Importance weight.*value/i) as HTMLInputElement;
+    expect(Number(weightNumber.value)).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
   });
 
   it("collapses lane-offsets section by default", () => {
@@ -85,22 +79,18 @@ describe("DevControls — planning config rendering", () => {
     render(<DevControls />);
     await user.click(screen.getByRole("button", { name: /show/i }));
     expect(screen.getByLabelText(/MINIMAP lane offset.*slider/i)).toBeTruthy();
-    expect(screen.getByLabelText(/OVERVIEW lane offset.*slider/i)).toBeTruthy();
+    expect(screen.getByLabelText(/COARSE lane offset.*slider/i)).toBeTruthy();
     // Warning banner mentions the canonical priority order.
     expect(screen.getByText(/canonical order/i)).toBeTruthy();
   });
 });
 
-// NOTE: the 3-D focal-depth control (issue #532) moved out of the planning
-// knobs into the main 3-D view UI. Its tests now live in
-// components/FocalDepthControl.test.tsx.
-
 describe("DevControls — slider + number input edits", () => {
-  it("dragging the FAR slider updates the configStore", () => {
+  it("dragging the importance weight slider updates the configStore", () => {
     render(<DevControls />);
-    const slider = screen.getByLabelText(/FAR threshold.*slider/i) as HTMLInputElement;
+    const slider = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
     fireEvent.change(slider, { target: { value: "120" } });
-    expect(configStore.get().farThresholdPx).toBe(120);
+    expect(configStore.get().importanceWeight).toBe(120);
   });
 
   it("dragging the detail radius slider updates the configStore", () => {
@@ -128,44 +118,44 @@ describe("DevControls — slider + number input edits", () => {
 
   it("does not preview radius visuals for unrelated sliders", () => {
     render(<DevControls />);
-    fireEvent.pointerDown(screen.getByLabelText(/FAR threshold.*slider/i));
+    fireEvent.pointerDown(screen.getByLabelText(/Importance weight.*slider/i));
     expect(getRenderRadiusPreviewTier()).toBeNull();
   });
 
   it("typing into the number input updates the configStore", () => {
     render(<DevControls />);
-    const number = screen.getByLabelText(/FAR threshold.*value/i) as HTMLInputElement;
+    const number = screen.getByLabelText(/Importance weight.*value/i) as HTMLInputElement;
     fireEvent.change(number, { target: { value: "55" } });
-    expect(configStore.get().farThresholdPx).toBe(55);
+    expect(configStore.get().importanceWeight).toBe(55);
   });
 
   it("clamps inputs above the slider max", () => {
     render(<DevControls />);
-    const number = screen.getByLabelText(/FAR threshold.*value/i) as HTMLInputElement;
+    const number = screen.getByLabelText(/Importance weight.*value/i) as HTMLInputElement;
     fireEvent.change(number, { target: { value: "999999" } });
-    // FAR slider max is 200 in the schema.
-    expect(configStore.get().farThresholdPx).toBe(200);
+    // Importance weight slider max is 2000 in the schema.
+    expect(configStore.get().importanceWeight).toBe(2000);
   });
 });
 
 describe("DevControls — reset arrow", () => {
   it("does not appear when value matches default", () => {
     render(<DevControls />);
-    expect(screen.queryByRole("button", { name: /Reset FAR threshold/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Reset Importance weight/i })).toBeNull();
   });
 
   it("appears when value differs from default and restores on click", async () => {
     const user = userEvent.setup();
     render(<DevControls />);
-    const slider = screen.getByLabelText(/FAR threshold.*slider/i) as HTMLInputElement;
+    const slider = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
 
     fireEvent.change(slider, { target: { value: "120" } });
 
-    const resetBtn = await screen.findByRole("button", { name: /Reset FAR threshold/i });
+    const resetBtn = await screen.findByRole("button", { name: /Reset Importance weight/i });
     await user.click(resetBtn);
 
-    expect(configStore.get().farThresholdPx).toBe(
-      DEFAULT_PLANNING_CONFIG.farThresholdPx,
+    expect(configStore.get().importanceWeight).toBe(
+      DEFAULT_PLANNING_CONFIG.importanceWeight,
     );
   });
 });
@@ -176,14 +166,14 @@ describe("DevControls — reset all", () => {
     render(<DevControls />);
 
     fireEvent.change(
-      screen.getByLabelText(/FAR threshold.*slider/i),
-      { target: { value: "120" } },
+      screen.getByLabelText(/Distance weight.*slider/i),
+      { target: { value: "50" } },
     );
     fireEvent.change(
       screen.getByLabelText(/Importance weight.*slider/i),
       { target: { value: "1500" } },
     );
-    expect(configStore.get().farThresholdPx).toBe(120);
+    expect(configStore.get().distanceWeight).toBe(50);
     expect(configStore.get().importanceWeight).toBe(1500);
 
     await user.click(screen.getByRole("button", { name: /reset all to defaults/i }));
@@ -198,19 +188,6 @@ describe("DevControls — reset all", () => {
 });
 
 describe("DevControls — cross-constraint warnings", () => {
-  it("shows the middle-band warning when DETAIL <= FAR + 2*hysteresis", () => {
-    render(<DevControls />);
-    // Push detail down to a value that collapses the middle band.
-    // Defaults: far=80, hysteresis=5, detail=150 -> band is 90..145.
-    // Force detail=85: dynamicMin clamps it to far+10=90 (still <= 80+10=90).
-    fireEvent.change(
-      screen.getByLabelText(/DETAIL threshold.*slider/i),
-      { target: { value: "30" } },
-    );
-    // The warning text should appear.
-    expect(screen.getAllByText(/middle band collapsed/i).length).toBeGreaterThan(0);
-  });
-
   it("shows lane-order inversion warning when offsets violate the canonical order", async () => {
     const user = userEvent.setup();
     render(<DevControls />);
@@ -229,19 +206,19 @@ describe("DevControls — cross-constraint warnings", () => {
 describe("DevControls — read-only mode (production builds)", () => {
   it("shows live values with disabled inputs, no per-field resets, and the note", () => {
     act(() => {
-      configStore.set("farThresholdPx", 120);
+      configStore.set("importanceWeight", 120);
     });
     render(<DevControls editable={false} />);
 
-    const slider = screen.getByLabelText(/FAR threshold.*slider/i) as HTMLInputElement;
+    const slider = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
     expect(slider.disabled).toBe(true);
     expect(Number(slider.value)).toBe(120);
 
-    const number = screen.getByLabelText(/FAR threshold.*value/i) as HTMLInputElement;
+    const number = screen.getByLabelText(/Importance weight.*value/i) as HTMLInputElement;
     expect(number.disabled).toBe(true);
 
     // Dirty value, but no per-field reset in read-only mode.
-    expect(screen.queryByRole("button", { name: /Reset FAR threshold/i })).toBeNull();
+    expect(screen.queryByRole("button", { name: /Reset Importance weight/i })).toBeNull();
 
     expect(screen.getByText(/read-only in this build/i)).toBeTruthy();
   });
@@ -251,7 +228,7 @@ describe("DevControls — read-only mode (production builds)", () => {
     // this build, so the user must be able to clear them from the UI.
     const user = userEvent.setup();
     act(() => {
-      configStore.set("farThresholdPx", 120);
+      configStore.set("distanceWeight", 50);
       configStore.set("importanceWeight", 1500);
     });
     render(<DevControls editable={false} />);
@@ -274,25 +251,15 @@ describe("DevControls — read-only mode (production builds)", () => {
   it("ignores change events on sliders and number inputs", () => {
     render(<DevControls editable={false} />);
     fireEvent.change(
-      screen.getByLabelText(/FAR threshold.*slider/i),
+      screen.getByLabelText(/Importance weight.*slider/i),
       { target: { value: "120" } },
     );
     fireEvent.change(
-      screen.getByLabelText(/FAR threshold.*value/i),
+      screen.getByLabelText(/Importance weight.*value/i),
       { target: { value: "55" } },
     );
-    expect(configStore.get().farThresholdPx).toBe(
-      DEFAULT_PLANNING_CONFIG.farThresholdPx,
-    );
-  });
-
-  it("renders the coarse/detail toggle disabled and inert", () => {
-    render(<DevControls editable={false} />);
-    const toggle = screen.getByLabelText(/Coarse\/detail path/i) as HTMLInputElement;
-    expect(toggle.disabled).toBe(true);
-    fireEvent.click(toggle);
-    expect(configStore.get().coarseDetailEnabled).toBe(
-      DEFAULT_PLANNING_CONFIG.coarseDetailEnabled,
+    expect(configStore.get().importanceWeight).toBe(
+      DEFAULT_PLANNING_CONFIG.importanceWeight,
     );
   });
 });
@@ -300,56 +267,26 @@ describe("DevControls — read-only mode (production builds)", () => {
 describe("DevControls — store subscription", () => {
   it("re-renders when configStore changes externally", async () => {
     render(<DevControls />);
-    const slider = screen.getByLabelText(/FAR threshold.*slider/i) as HTMLInputElement;
-    expect(Number(slider.value)).toBe(DEFAULT_PLANNING_CONFIG.farThresholdPx);
+    const slider = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
+    expect(Number(slider.value)).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
 
     // Change the store directly (bypassing the UI).
     await act(async () => {
-      configStore.set("farThresholdPx", 175);
+      configStore.set("importanceWeight", 175);
     });
-    const sliderAfter = screen.getByLabelText(/FAR threshold.*slider/i) as HTMLInputElement;
+    const sliderAfter = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
     expect(Number(sliderAfter.value)).toBe(175);
   });
 });
 
 describe("DevControls — overlay toggles", () => {
-  it("renders one checkbox per overlay, reflecting the persisted state", () => {
+  it("no longer shows them: the toggles live in the HUD legend", () => {
     setOverlayEnabled("chunkGrid", true);
     render(<DevControls />);
     for (const name of DEBUG_OVERLAYS) {
-      const box = screen.getByLabelText(name) as HTMLInputElement;
-      expect(box.checked).toBe(name === "chunkGrid");
+      expect(screen.queryByLabelText(name)).toBeNull();
     }
-  });
-
-  it("toggling a checkbox writes through to the overlay registry and re-renders", async () => {
-    const user = userEvent.setup();
-    render(<DevControls />);
-    const box = screen.getByLabelText("plannedRank") as HTMLInputElement;
-
-    await user.click(box);
-    expect(isOverlayEnabled("plannedRank")).toBe(true);
-    expect((screen.getByLabelText("plannedRank") as HTMLInputElement).checked).toBe(true);
-
-    await user.click(screen.getByLabelText("plannedRank"));
-    expect(isOverlayEnabled("plannedRank")).toBe(false);
-  });
-
-  it("reflects an overlay flipped from outside the surface", async () => {
-    render(<DevControls />);
-    expect((screen.getByLabelText("chunkGrid") as HTMLInputElement).checked).toBe(false);
-    await act(async () => {
-      setOverlayEnabled("chunkGrid", true);
-    });
-    expect((screen.getByLabelText("chunkGrid") as HTMLInputElement).checked).toBe(true);
-  });
-
-  it("disables the toggles in read-only builds", () => {
-    render(<DevControls editable={false} />);
-    const box = screen.getByLabelText("chunkGrid") as HTMLInputElement;
-    expect(box.disabled).toBe(true);
-    fireEvent.click(box);
-    expect(isOverlayEnabled("chunkGrid")).toBe(false);
+    expect(screen.queryByText("Overlays")).toBeNull();
   });
 });
 

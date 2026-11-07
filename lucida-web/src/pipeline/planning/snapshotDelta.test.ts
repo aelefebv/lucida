@@ -1,6 +1,5 @@
 import { describe, it, expect } from "vitest";
 import type { ImageSpec, LevelGeometry } from "../../manifestTypes.ts";
-import type { DatasetSettings } from "../../tickCommon.ts";
 import type { EntitySnapshot } from "./types.ts";
 import {
   applyViewQueryDelta,
@@ -41,20 +40,6 @@ function makeImageSpec(imageId: string): ImageSpec {
   } as ImageSpec;
 }
 
-function makeDsSettings(overrides?: Partial<DatasetSettings>): DatasetSettings {
-  return {
-    visible: true,
-    opacity: 1,
-    contrast_min: 0,
-    contrast_max: 1,
-    gamma: 1,
-    blend_mode: "alpha",
-    channel_settings: [],
-    channel_blend_mode: "additive",
-    ...overrides,
-  };
-}
-
 function row(overrides: Partial<ViewQueryEntityJson> = {}): ViewQueryEntityJson {
   return {
     entity_id: "e-0",
@@ -64,24 +49,21 @@ function row(overrides: Partial<ViewQueryEntityJson> = {}): ViewQueryEntityJson 
     projected_diagonal_px: 100,
     projected_area_px2: 10000,
     centroid_world: [0, 0, 0],
-    ideal_target_lod: 0,
+    target_level: 0,
+    level_pinned: false,
     importance: 1,
     ...overrides,
   };
 }
 
 /** Deps for a dataset whose images are all `Image` kind (no parent edges). */
-function makeDeps(
-  imageIds: string[],
-  dsSettings?: DatasetSettings,
-): SnapshotEntityDeps {
+function makeDeps(imageIds: string[]): SnapshotEntityDeps {
   const imageSpecById = new Map<string, ImageSpec>();
   for (const id of imageIds) imageSpecById.set(id, makeImageSpec(id));
   return {
     imageSpecById,
     parentByEntityId: new Map<string, string | null>(),
     positions: {},
-    dsSettings,
   };
 }
 
@@ -115,9 +97,8 @@ function projection(map: ReadonlyMap<string, EntitySnapshot>) {
     .map(([imageId, e]) => ({
       imageId,
       visible: e.visible,
-      idealTargetLod: e.idealTargetLod,
+      targetLevel: e.targetLevel,
       kind: e.kind,
-      detailLevel: e.detailLevel,
       coarseLevel: e.coarseLevel,
       parentId: e.kind === "Tile" ? e.parentId : null,
     }))
@@ -167,7 +148,7 @@ describe("applyViewQueryDelta — Delta", () => {
     const next = applyViewQueryDelta(
       prev,
       delta(
-        [row({ image_id: "img-2", ideal_target_lod: 3 })],
+        [row({ image_id: "img-2", target_level: 1 })],
         ["img-0"],
         [row({ image_id: "img-1", visible: false })],
       ),
@@ -175,7 +156,7 @@ describe("applyViewQueryDelta — Delta", () => {
     );
     expect([...next.keys()].sort()).toEqual(["img-1", "img-2"]);
     expect(next.get("img-1")?.visible).toBe(false);
-    expect(next.get("img-2")?.idealTargetLod).toBe(3);
+    expect(next.get("img-2")?.targetLevel).toBe(1);
     // prev is not mutated.
     expect([...prev.keys()].sort()).toEqual(["img-0", "img-1"]);
     expect(prev.get("img-1")?.visible).toBe(true);
@@ -193,20 +174,20 @@ describe("applyViewQueryDelta — keying", () => {
     const next = applyViewQueryDelta(
       null,
       full([
-        row({ entity_id: "shared", image_id: "img-a", ideal_target_lod: 1 }),
-        row({ entity_id: "shared", image_id: "img-b", ideal_target_lod: 4 }),
+        row({ entity_id: "shared", image_id: "img-a", target_level: 0 }),
+        row({ entity_id: "shared", image_id: "img-b", target_level: 1 }),
       ]),
       deps,
     );
     expect(next.size).toBe(2);
-    expect(next.get("img-a")?.idealTargetLod).toBe(1);
-    expect(next.get("img-b")?.idealTargetLod).toBe(4);
+    expect(next.get("img-a")?.targetLevel).toBe(0);
+    expect(next.get("img-b")?.targetLevel).toBe(1);
   });
 });
 
 describe("applyViewQueryDelta — equivalence over a sequence", () => {
   it("folding deltas reconstructs the same projection as a fresh full build", () => {
-    const deps = makeDeps(["img-0", "img-1", "img-2", "img-3"], makeDsSettings());
+    const deps = makeDeps(["img-0", "img-1", "img-2", "img-3"]);
 
     // Step 0 — Full with two images.
     let folded = applyViewQueryDelta(
@@ -223,11 +204,11 @@ describe("applyViewQueryDelta — equivalence over a sequence", () => {
       delta(
         [row({ image_id: "img-2" })],
         ["img-0"],
-        [row({ image_id: "img-1", ideal_target_lod: 2 })],
+        [row({ image_id: "img-1", target_level: 2 })],
       ),
       deps,
     );
-    oracleRows = [row({ image_id: "img-1", ideal_target_lod: 2 }), row({ image_id: "img-2" })];
+    oracleRows = [row({ image_id: "img-1", target_level: 2 }), row({ image_id: "img-2" })];
     expect(projection(folded)).toEqual(projection(freshBuild(oracleRows, deps)));
 
     // Step 2 — no quantized change (empty delta) — projection holds steady.
@@ -240,15 +221,66 @@ describe("applyViewQueryDelta — equivalence over a sequence", () => {
       delta(
         [row({ image_id: "img-3" })],
         ["img-2"],
-        [row({ image_id: "img-1", ideal_target_lod: 2, visible: false })],
+        [row({ image_id: "img-1", target_level: 2, visible: false })],
       ),
       deps,
     );
     oracleRows = [
-      row({ image_id: "img-1", ideal_target_lod: 2, visible: false }),
+      row({ image_id: "img-1", target_level: 2, visible: false }),
       row({ image_id: "img-3" }),
     ];
     expect(projection(folded)).toEqual(projection(freshBuild(oracleRows, deps)));
+  });
+});
+
+describe("makeEntitySnapshot — target level", () => {
+  it("reads the target level the core reports and chooses no level of its own", () => {
+    // No second clamp here. Level 7 is one the two-level manifest lacks.
+    const deps = makeDeps(["img-0"]);
+    for (const level of [0, 1, 7]) {
+      expect(makeEntitySnapshot(row({ target_level: level }), deps).targetLevel).toBe(level);
+    }
+  });
+
+  it("says whether the target is the pin or the screen's choice, as the core reports it", () => {
+    const deps = makeDeps(["img-0"]);
+    expect(makeEntitySnapshot(row(), deps).levelPinned).toBe(false);
+    expect(makeEntitySnapshot(row({ level_pinned: true }), deps).levelPinned).toBe(true);
+  });
+
+  it("lists the source levels, leaving generated coarse levels out", () => {
+    const generated: LevelGeometry = {
+      level_index: 2,
+      shape: [1, 1, 1, 256, 256],
+      chunk_shape: [1, 1, 1, 256, 256],
+      grid_shape: [1, 1, 1, 1, 1],
+      scale: [1, 1, 1, 4, 4],
+    };
+    const spec = {
+      image_id: "img-0",
+      owner: "img-0",
+      multiscale: {
+        axes: [],
+        data_type: "uint16",
+        levels: [...makeLevels(), generated],
+        generated_levels: [{ level_index: 2, role: "coarse" }],
+      },
+    } as unknown as ImageSpec;
+    const deps: SnapshotEntityDeps = {
+      imageSpecById: new Map([["img-0", spec]]),
+      parentByEntityId: new Map(),
+      positions: {},
+    };
+    expect(makeEntitySnapshot(row(), deps).sourceLevels).toEqual([0, 1]);
+    expect(makeEntitySnapshot(row(), makeDeps(["img-0"])).sourceLevels).toEqual([0, 1]);
+  });
+
+  it("a changed record's new target level lands on the folded snapshot", () => {
+    const deps = makeDeps(["img-0"]);
+    const prev = freshBuild([row({ target_level: 0 })], deps);
+    const next = applyViewQueryDelta(prev, delta([], [], [row({ target_level: 1 })]), deps);
+    expect(next.get("img-0")?.targetLevel).toBe(1);
+    expect(prev.get("img-0")?.targetLevel).toBe(0);
   });
 });
 
@@ -258,7 +290,6 @@ describe("makeEntitySnapshot — Tile parent edge", () => {
       imageSpecById: new Map([["img-0", makeImageSpec("img-0")]]),
       parentByEntityId: new Map(),
       positions: {},
-      dsSettings: undefined,
     };
     expect(() => makeEntitySnapshot(row({ kind: "Tile" }), deps)).toThrow(/parent edge/);
   });

@@ -1,17 +1,15 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Fragment, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ApplierState, SavedViewApplier } from "../savedView/applier.ts";
+import { Banner } from "../shell/Banner.tsx";
 
 interface Props {
   applier: SavedViewApplier;
 }
 
 /**
- * Subtle inline banner displayed during recipient apply. Subscribes to the
- * `SavedViewApplier` state and shows progress (`Loading shared view: 2 of
- * 4 datasets…`), with per-dataset failure indicators.
- *
- * Auto-hides shortly after `inProgress` flips to false (so the user can
- * see the final state, including any partial failures).
+ * Inline banner showing a recipient's saved-view apply progress, with
+ * per-dataset failure indicators. Auto-hides shortly after a clean finish;
+ * failures and warnings stay until dismissed.
  */
 export function LoadingViewBanner({ applier }: Props) {
   const state = useSyncExternalStore<ApplierState>(
@@ -19,14 +17,11 @@ export function LoadingViewBanner({ applier }: Props) {
     () => applier.getState(),
     () => applier.getState(),
   );
-  // Manual dismiss flag, set to true at the start of a fresh apply and
-  // toggled by the user's Dismiss button. Stays in sync with `inProgress`
-  // — see the effect below.
+  // Cleared when a new apply starts.
   const [dismissed, setDismissed] = useState(false);
   const inProgressPrevRef = useRef(state.inProgress);
 
   useEffect(() => {
-    // Reset dismissed flag whenever a new apply starts.
     if (state.inProgress && !inProgressPrevRef.current) {
       setDismissed(false);
     }
@@ -50,76 +45,32 @@ export function LoadingViewBanner({ applier }: Props) {
   const total = state.totalToOpen;
   const ok = state.okOpened;
   const showProgress = total > 0;
+  const failures = state.anyOpenFailed
+    ? state.openStatuses
+        .filter((s) => s.state === "error")
+        .map((s) => (
+          <Fragment key={s.url}>
+            <code className="lc-banner-code">{s.url}</code>
+            {s.error ? `: ${s.error}` : ""}
+          </Fragment>
+        ))
+    : [];
 
   return (
-    <div
-      role="status"
-      style={{
-        position: "absolute",
-        top: 12,
-        left: "50%",
-        transform: "translateX(-50%)",
-        background: state.anyOpenFailed || hasWarnings ? "#5a3a00" : "#1a3a5a",
-        color: "#fff",
-        padding: "0.5rem 0.875rem",
-        borderRadius: 6,
-        border: state.anyOpenFailed || hasWarnings ? "1px solid #b88500" : "1px solid #4080c0",
-        fontSize: "0.85rem",
-        zIndex: 50,
-        maxWidth: 480,
-        boxShadow: "0 2px 8px rgba(0,0,0,0.35)",
-      }}
+    <Banner
+      tone={state.anyOpenFailed || hasWarnings ? "warning" : "info"}
+      details={[...state.warnings, ...failures]}
+      onDismiss={state.inProgress ? undefined : () => setDismissed(true)}
     >
-      <div>
-        {state.inProgress
-          ? showProgress
-            ? `Loading shared view: ${ok} of ${total} datasets…`
-            : "Loading shared view…"
-          : state.anyOpenFailed
+      {state.inProgress
+        ? showProgress
+          ? `Loading shared view: ${ok} of ${total} datasets…`
+          : "Loading shared view…"
+        : state.anyOpenFailed
           ? `Loaded ${ok} of ${total} datasets — some failed.`
           : hasWarnings
-          ? "Loaded shared view with warnings."
-          : `Loaded shared view`}
-      </div>
-      {hasWarnings && (
-        <ul style={{ margin: "0.4rem 0 0 1rem", padding: 0, listStyle: "disc" }}>
-          {state.warnings.map((warning) => (
-            <li key={warning} style={{ fontSize: "0.8rem", opacity: 0.92 }}>
-              {warning}
-            </li>
-          ))}
-        </ul>
-      )}
-      {state.anyOpenFailed && (
-        <ul style={{ margin: "0.4rem 0 0 1rem", padding: 0, listStyle: "disc" }}>
-          {state.openStatuses
-            .filter((s) => s.state === "error")
-            .map((s) => (
-              <li key={s.url} style={{ fontSize: "0.8rem", opacity: 0.92 }}>
-                <code style={{ wordBreak: "break-all" }}>{s.url}</code>
-                {s.error ? `: ${s.error}` : ""}
-              </li>
-            ))}
-        </ul>
-      )}
-      {!state.inProgress && (
-        <button
-          type="button"
-          onClick={() => setDismissed(true)}
-          style={{
-            marginTop: 6,
-            padding: "0.2rem 0.5rem",
-            fontSize: "0.75rem",
-            background: "transparent",
-            color: "#fff",
-            border: "1px solid #888",
-            borderRadius: 4,
-            cursor: "pointer",
-          }}
-        >
-          Dismiss
-        </button>
-      )}
-    </div>
+            ? "Loaded shared view with warnings."
+            : "Loaded shared view"}
+    </Banner>
   );
 }

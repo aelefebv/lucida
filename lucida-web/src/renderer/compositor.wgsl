@@ -2,6 +2,8 @@
 // Blending is controlled by the pipeline blend state, not the shader.
 
 @group(0) @binding(0) var layerTex: texture_2d<f32>;
+// Read only by `fsBackground`, whose pipeline binds this alone.
+@group(0) @binding(1) var<uniform> background: vec4f;
 
 struct VSOut {
   @builtin(position) pos: vec4f,
@@ -20,4 +22,11 @@ fn vs(@builtin(vertex_index) vid: u32) -> VSOut {
 fn fs(input: VSOut) -> @location(0) vec4f {
   let coord = vec2i(input.pos.xy);
   return textureLoad(layerTex, coord, 0);
+}
+
+// The canvas background, premultiplied. Its pipeline blends it beneath what
+// is already on the canvas.
+@fragment
+fn fsBackground() -> @location(0) vec4f {
+  return background;
 }

@@ -1,0 +1,89 @@
+/* The panel meets the viewport's left and bottom edges, so it takes their
+   safe-area insets, outside the width a person sets. */
+.lc-left-panel {
+  position: relative;
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: calc(var(--left-panel-width) + var(--lc-safe-left));
+  min-height: 0;
+  padding: 0 0 var(--lc-safe-bottom) var(--lc-safe-left);
+  border-right: 1px solid var(--lc-border);
+  background: var(--lc-surface-1);
+}
+
+/* Over the canvas at a set width, leaving the rail and some canvas showing. */
+.lc-left-panel[data-mode="overlay"] {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: calc(var(--lc-z-panel) + 1);
+  width: min(calc(320px + var(--lc-safe-left)), calc(100% - 2 * var(--lc-space-8)));
+  box-shadow: var(--lc-shadow-2);
+  animation: lc-left-panel-in var(--lc-motion) var(--lc-ease);
+}
+
+@keyframes lc-left-panel-in {
+  from {
+    translate: -100% 0;
+  }
+}
+
+.lc-left-panel[hidden] {
+  display: none;
+}
+
+.lc-left-panel-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.lc-left-panel-body > * {
+  flex: 1;
+  min-height: 0;
+}
+
+/* A thin line over the border with a wider grab area, wider still under touch. */
+.lc-left-panel-resize {
+  --grab: max(8px, var(--lc-target-min));
+  position: absolute;
+  top: 0;
+  right: calc(var(--grab) / -2);
+  bottom: 0;
+  z-index: 1;
+  width: var(--grab);
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+
+.lc-left-panel-resize::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: calc(50% - 1px);
+  width: 2px;
+  background: transparent;
+  transition: background-color var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-left-panel-resize:hover::after,
+.lc-left-panel-resize[data-dragging]::after {
+  background: var(--lc-accent);
+}
+
+/* The line is the handle's focus ring. */
+.lc-left-panel-resize:focus-visible::after {
+  background: var(--lc-focus-ring);
+}
+
+body[data-lc-resizing="col"] {
+  cursor: col-resize;
+  user-select: none;
+}

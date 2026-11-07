@@ -5,13 +5,12 @@ import type { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerToMainMessage } from "./workerProtocol.ts";
 import type { ProxyAtlasState, ProxyHandle } from "./proxyAtlas.ts";
 import type { EntityDescriptorIndex } from "./descriptorBuffer.ts";
+import type { FrameTiming } from "./passTiming.ts";
 import type { RendererState } from "./worker/state.ts";
 
 /**
- * Proxy descriptor for one `(entity, t, c)` tuple — handles into the
- * GPU proxy atlases. Proxy pools are channel-scoped, so a single entity
- * can have several live descriptors at once during multi-channel and
- * time scrubbing.
+ * Handles into the GPU proxy atlases for one `(entity, t, c)`. Proxy pools
+ * are channel-scoped, so one entity can have several live descriptors.
  */
 export interface EntityProxyDescriptor {
   tileProxyHandle: ProxyHandle | null;
@@ -26,44 +25,36 @@ export interface WorkerCtx {
   device: GPUDevice;
   context: GPUCanvasContext;
   format: GPUTextureFormat;
-  /**
-   * Per-session worker state. Owned by the dispatcher; handlers mutate
-   * it directly. See {@link RendererState} for the shape.
-   */
+  /** Per-session worker state. Owned by the dispatcher; handlers mutate it directly. */
   state: RendererState;
+  /**
+   * The GPU pass timing for viewport frames, a no-op on a device without
+   * timestamp queries. The frame handlers bracket each frame with it and hand
+   * it to every viewport pass; the minimap and thumbnail paths never touch it.
+   */
+  passTimer: FrameTiming;
   getSliceRenderer(): SliceRenderer;
   getVolumeRenderer(): VolumeRenderer;
   getCompositor(): LayerCompositor;
   getCursorRenderer(): CursorRenderer;
   ensureOffscreenPool(count: number, w: number, h: number): GPUTexture[];
-  getDummyTexture(): GPUTexture;
-  getDummy3DTexture(): GPUTexture;
   getOrCreateLUT(name: string): GPUTexture;
-  /**
-   * Post a message to the main thread. `transfer` moves transferable objects
-   * (e.g. an `ImageBitmap` for a thumbnail reply) instead of structured-cloning
-   * them — omit it for plain messages.
-   */
+  /** Post a message to the main thread. `transfer` moves transferables instead of cloning them. */
   post(msg: WorkerToMainMessage, transfer?: Transferable[]): void;
-  /** Recompute and post wanted-set delta after eviction. */
-  postWantedSet(): void;
+  /**
+   * Recompute and post the wanted-set delta and level report for one
+   * dataset: the one named, else the dataset whose cold state arrived last.
+   * An upload names the dataset its member belongs to, so a workspace with
+   * several datasets keeps each one's report current.
+   */
+  postWantedSet(datasetId?: string): void;
   /**
    * Look up the proxy descriptor for an entity/time/channel. Returns
    * null if no proxy has been uploaded yet for that tuple.
    */
   lookupProxyDescriptor(entityId: string, t: number, c: number): EntityProxyDescriptor | null;
-  /**
-   * Resolve a proxy pool for the given dataset by its pool key
-   * (`proxyPoolKey()`). Returns null if no such pool. Handlers use this
-   * to fetch the GPU texture + slot dims for binding.
-   */
+  /** Resolve a dataset's proxy pool by its `proxyPoolKey()`, or null if there is none. */
   lookupProxyPool(datasetId: string, poolKey: string): ProxyAtlasState | null;
-  /**
-   * Look up the per-dataset entity descriptor buffer + index maps.
-   * Returns null until the first cold state for this dataset arrives.
-   * Render handlers bind `idx.buffer` plus a small uniform with the
-   * layer's `entityIndex`; the shader reads
-   * `entityDescriptors[currentEntity.x]` for matrix and per-LOD geometry.
-   */
+  /** The dataset's entity descriptor buffer and index maps, or null before its first cold state. */
   lookupEntityDescriptor(datasetId: string): EntityDescriptorIndex | null;
 }

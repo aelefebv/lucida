@@ -12,6 +12,7 @@ pub mod query;
 pub mod ray;
 pub mod saved_view;
 pub mod scene;
+pub mod target_level;
 pub mod transform;
 pub mod view;
 pub mod view_transform;

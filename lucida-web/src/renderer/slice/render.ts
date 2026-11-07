@@ -1,9 +1,10 @@
 /**
  * Slice render-multipass orchestration.
  *
- * Per layer: resolve member→pool→datasetId, look up descriptor + atlas,
- * compute hasDetail, update per-entity camera UV, resolve proxy
- * textures, bind, draw to offscreen. After the loop: composite + cursor.
+ * Per layer: resolve member→dataset, look up the descriptor and the
+ * pools its level sources and coarse source name, update per-entity
+ * camera UV, resolve proxy textures, bind, draw to offscreen. After the
+ * loop: composite + cursor.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -13,14 +14,14 @@ import type {
   SliceRenderMultiPassMessage,
 } from "../workerProtocol.ts";
 import type { CompositeLayer } from "../layerCompositor.ts";
-import type { LodIndirectionMeta } from "../volume/atlas.ts";
-import type { AggregateBatch } from "../sliceRenderer.ts";
-import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
+import type { AggregateBatch, SlicePoolBinding } from "../sliceRenderer.ts";
+import { resolveMemberPools, type EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import { type SliceAtlasState, type LabelSlicePool } from "./atlas.ts";
 import { setCameraUVForMember } from "./eviction.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
+import { captureRenderedFrame } from "../worker/captureFrame.ts";
 
 const IDENTITY_4X4 = new Float32Array([
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
@@ -33,9 +34,9 @@ const DEFAULT_LABEL_OPACITY = 0.5;
 const AGGREGATE_QUAD_STRIDE_BYTES = 32;
 
 /**
- * The persistent categorical descriptor for a label pool. Built once (and
- * refreshed only when the opacity changes) rather than allocated per frame,
- * so scrubbing stays smooth. Single-LOD (grid 1×1) covering the whole tile.
+ * The persistent categorical descriptor for a label pool: one level source
+ * (grid 1×1) covering the whole tile. Rebuilt only when the opacity changes,
+ * so scrubbing doesn't allocate per frame.
  */
 function ensureLabelDescriptor(
   ctx: WorkerCtx,
@@ -100,13 +101,9 @@ function ensureLabelPalette(
 /**
  * Draw one categorical label overlay from its r32uint slice pool.
  *
- * A label pool is a single-tile texture covering the label's 2D footprint,
- * so a single-LOD descriptor (grid 1×1) reads it directly. The quad is
- * sized to the SOURCE's voxel extent (`layer.dataW/dataH`, from
- * `labelFootprint`) and placed at the source member's `offsetX/offsetY`, so
- * a coarser label still covers the same region of the view. Declared OME colors
- * are honored via the palette buffer; the rest use the glasbey hash.
- * Returns the drawn view, or null when the pool has no resident slice yet.
+ * The quad is sized to the source's voxel extent (`layer.dataW/dataH`) and
+ * placed at the source member's offset, so a coarser label still covers the
+ * same region. Returns null when the pool has no resident slice yet.
  */
 function renderLabelLayer(
   ctx: WorkerCtx,
@@ -125,7 +122,10 @@ function renderLabelLayer(
   const ox = layer.offsetX ?? 0;
   const oy = layer.offsetY ?? 0;
   renderer.setProxyTextures(null, null);
-  renderer.setAtlas(pool.texture, pool.indirectionBuf, [1, 1]);
+  renderer.setTierAtlases(
+    [{ texture: pool.texture, indirectionBuf: pool.indirectionBuf, slotsX: 1, slotsY: 1 }],
+    null,
+  );
   // Categorical shading computes color from the id in-shader; the LUT is
   // bound (a valid gray ramp) but unread on this path.
   renderer.setColormapTexture(ctx.getOrCreateLUT("gray"));
@@ -134,9 +134,19 @@ function renderLabelLayer(
   renderer.setDescriptorBinding(descBuffer, 0, palette.count);
 
   const encoder = ctx.device.createCommandEncoder();
-  renderer.renderTo(target.createView(), encoder);
+  renderer.renderTo(target.createView(), encoder, ctx.passTimer);
   ctx.device.queue.submit([encoder.finish()]);
   return { view: target.createView(), blendMode: layer.blendMode };
+}
+
+/** An atlas as the renderer binds it. */
+function poolBinding(atlas: SliceAtlasState): SlicePoolBinding {
+  return {
+    texture: atlas.texture,
+    indirectionBuf: atlas.indirectionBuf,
+    slotsX: atlas.slotsX,
+    slotsY: atlas.slotsY,
+  };
 }
 
 /** Result of {@link buildAggregateBatches}. */
@@ -149,28 +159,13 @@ interface ResolvedAggregate {
 }
 
 /**
- * Resolve an aggregate layer's quads against CURRENT worker residency.
+ * Resolve an aggregate layer's quads against current worker residency.
  *
- * Per quad (via the record's entity index → memberId through the
- * descriptor index):
- *   - apply the SAME skip rule as the per-member path — a member with no
- *     detail metas, no coarse metas, and no resident proxy draws nothing
- *     (its quad is dropped), so an empty store renders empty instead of
- *     a grid of border frames;
- *   - update the member's camera-UV eviction recency exactly as the
- *     per-member path does for chunk-backed members, so batched members'
- *     resident chunks age fairly under eviction pressure;
- *   - group the survivors by their pool BINDING SET (detail pool, coarse
- *     pool, tile-proxy pool, group-proxy pool). One instanced draw per
- *     distinct binding set gives every member the same resources the
- *     per-member pass would have bound — members of heterogeneous chunk
- *     shapes/pyramid depths live in different pools and must never
- *     sample another pool's indirection ranges.
- *
- * Batch count is bounded by the number of distinct pool-binding sets in
- * the dataset (few — pools are keyed by (tier, channel, chunk dims)),
- * not by member count. Quads keep their incoming (roster) order within
- * each batch; batches are emitted in first-seen roster order.
+ * Each quad gets the per-member path's skip rule and camera-UV recency
+ * update, so batched members behave like per-member ones. Survivors are
+ * grouped by pool binding set, one instanced draw each, because members with
+ * different chunk shapes live in different pools and must never sample
+ * another pool's indirection. Quads keep roster order within a batch.
  */
 function buildAggregateBatches(
   ctx: WorkerCtx,
@@ -178,11 +173,6 @@ function buildAggregateBatches(
   layer: SliceLayerParams,
   agg: SliceAggregateParams,
   descIndex: EntityDescriptorIndex,
-  layerToPool: (memberId: string) => {
-    detailPoolKey: string | null;
-    coarsePoolKey: string | null;
-    datasetId: string | null;
-  } | null,
 ): ResolvedAggregate {
   const atlasMap = ctx.state.sliceAtlases;
   const srcF32 = new Float32Array(agg.quads);
@@ -196,10 +186,8 @@ function buildAggregateBatches(
   const aggOy = layer.offsetY ?? 0;
 
   interface PendingBatch {
-    detail: SliceAtlasState | null;
-    detailPoolKey: string | null;
+    levels: Array<SliceAtlasState | null>;
     coarse: SliceAtlasState | null;
-    coarsePoolKey: string | null;
     tileProxyTexture: GPUTexture | null;
     groupProxyTexture: GPUTexture | null;
     records: number[];
@@ -214,21 +202,10 @@ function buildAggregateBatches(
     // An index outside the current descriptor build has no defined
     // entry to sample — drop the quad rather than read a stale slot.
     if (memberId === undefined) continue;
-    const resolved = layerToPool(memberId);
-    if (!resolved) continue;
 
-    const detailAtlas = resolved.detailPoolKey
-      ? atlasMap.get(resolved.detailPoolKey) ?? null
-      : null;
-    const coarseAtlas = resolved.coarsePoolKey
-      ? atlasMap.get(resolved.coarsePoolKey) ?? null
-      : null;
-    const detailMetas: LodIndirectionMeta[] | null =
-      detailAtlas?.entityMetas.get(memberId) ?? null;
-    const coarseMetas: LodIndirectionMeta[] | null =
-      coarseAtlas?.entityMetas.get(memberId) ?? null;
-    const hasDetail = detailMetas != null && detailMetas.length > 0;
-    const hasCoarse = coarseMetas != null && coarseMetas.length > 0;
+    const pools = resolveMemberPools(atlasMap, descIndex, memberId);
+    const hasDetail = pools.levels.some((atlas) => atlas !== null);
+    const hasCoarse = pools.coarse !== null;
 
     const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
     let tileProxyTexture: GPUTexture | null = null;
@@ -269,23 +246,19 @@ function buildAggregateBatches(
       }
     }
 
-    const effDetail = hasDetail ? detailAtlas : null;
-    const effCoarse = hasCoarse ? coarseAtlas : null;
-    if (effDetail) atlases.add(effDetail);
-    if (effCoarse) atlases.add(effCoarse);
+    for (const atlas of pools.levels) if (atlas) atlases.add(atlas);
+    if (pools.coarse) atlases.add(pools.coarse);
     const key = [
-      effDetail ? resolved.detailPoolKey : "",
-      effCoarse ? resolved.coarsePoolKey : "",
+      pools.levels.map((atlas, i) => (atlas ? pools.levelPoolKeys[i] : "")).join(","),
+      pools.coarse ? pools.coarsePoolKey : "",
       tileProxyPoolKey ?? "",
       groupProxyPoolKey ?? "",
     ].join("|");
     let batch = batchesByKey.get(key);
     if (!batch) {
       batch = {
-        detail: effDetail,
-        detailPoolKey: effDetail ? resolved.detailPoolKey : null,
-        coarse: effCoarse,
-        coarsePoolKey: effCoarse ? resolved.coarsePoolKey : null,
+        levels: pools.levels,
+        coarse: pools.coarse,
         tileProxyTexture,
         groupProxyTexture,
         records: [],
@@ -296,8 +269,7 @@ function buildAggregateBatches(
     kept++;
   }
 
-  // Re-pack kept records contiguously in batch order (word-wise copy is
-  // bit-exact for the f32 rect fields).
+  // Word-wise copy is bit-exact for the f32 rect fields.
   const quadData = new ArrayBuffer(kept * AGGREGATE_QUAD_STRIDE_BYTES);
   const dstU32 = new Uint32Array(quadData);
   const batches: AggregateBatch[] = [];
@@ -308,18 +280,9 @@ function buildAggregateBatches(
       dstU32.set(srcU32.subarray(r * wordsPerRecord, (r + 1) * wordsPerRecord), write * wordsPerRecord);
       write++;
     }
-    const toBinding = (atlas: SliceAtlasState | null) =>
-      atlas
-        ? {
-            texture: atlas.texture,
-            indirectionBuf: atlas.indirectionBuf,
-            slotsX: atlas.slotsX,
-            slotsY: atlas.slotsY,
-          }
-        : null;
     batches.push({
-      detail: toBinding(b.detail),
-      coarse: toBinding(b.coarse),
+      levels: b.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
+      coarse: b.coarse ? poolBinding(b.coarse) : null,
       tileProxyTexture: b.tileProxyTexture,
       groupProxyTexture: b.groupProxyTexture,
       firstInstance,
@@ -329,27 +292,28 @@ function buildAggregateBatches(
   return { quadData, batches, atlases };
 }
 
-export function handleSliceRenderMultiPass(
+export async function handleSliceRenderMultiPass(
   ctx: WorkerCtx,
   msg: SliceRenderMultiPassMessage,
-  layerToPool: (memberId: string) => {
-    detailPoolKey: string | null;
-    coarsePoolKey: string | null;
-    datasetId: string | null;
-  } | null,
-): void {
+): Promise<void> {
+  const renderer = ctx.getSliceRenderer();
+  const comp = ctx.getCompositor();
+  const cr = ctx.getCursorRenderer();
+  // The wait holds every message behind this one (`worker/inOrder.ts`).
+  await Promise.all([renderer.compiled, comp.compiled, cr.compiled]);
+
   const canvas = ctx.context.canvas as OffscreenCanvas;
   canvas.width = msg.canvasW;
   canvas.height = msg.canvasH;
 
-  const renderer = ctx.getSliceRenderer();
-  const comp = ctx.getCompositor();
-  // Offscreen targets are canvas-sized; grow the pool per RENDERED
-  // layer, not per posted layer, so skipped layers never cost a target
-  // allocation. (Growing one at a time re-checks dims only — cheap.)
+  // Grow the offscreen pool per rendered layer, not per posted layer, so
+  // skipped layers never cost a target allocation.
   const targetFor = (idx: number): GPUTexture =>
     ctx.ensureOffscreenPool(idx + 1, msg.canvasW, msg.canvasH)[idx];
   const atlasMap = ctx.state.sliceAtlases;
+
+  const timing = ctx.passTimer;
+  timing.beginFrame();
 
   const renderedLayers: CompositeLayer[] = [];
 
@@ -364,23 +328,16 @@ export function handleSliceRenderMultiPass(
       continue;
     }
 
-    // Aggregate layer: every RESIDENT batched member, drawn in ONE
-    // render pass with one instanced draw per pool-binding sub-batch.
-    // The descriptor buffer + colormap resolve at DRAW time from the
-    // current worker state, so appearance changes (contrast, gamma,
-    // opacity, colormap) repaint the aggregate the same frame they
-    // repaint per-member layers; each quad samples its own descriptor
-    // entry in-shader.
+    // Aggregate layer: every resident batched member in one render pass.
+    // The descriptor buffer and colormap resolve at draw time, so appearance
+    // changes repaint the aggregate in the same frame as per-member layers.
     if (layer.aggregate) {
       const agg = layer.aggregate;
-      const resolved = layerToPool(agg.poolMemberId);
-      if (!resolved || !resolved.datasetId) continue;
-      const descIndex = ctx.lookupEntityDescriptor(resolved.datasetId);
+      const datasetId = ctx.state.memberToDataset.get(agg.poolMemberId);
+      const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId) : null;
       if (!descIndex) continue;
 
-      const built = buildAggregateBatches(ctx, msg, layer, agg, descIndex, layerToPool);
-      // Nothing resident for any batched member: skip the layer, the
-      // same way the per-member guard skips each member.
+      const built = buildAggregateBatches(ctx, msg, layer, agg, descIndex);
       if (built.batches.length === 0) continue;
 
       for (const atlas of built.atlases) {
@@ -408,39 +365,22 @@ export function handleSliceRenderMultiPass(
         canvasH: msg.canvasH,
         dataW: layer.dataW,
         dataH: layer.dataH,
-      });
+      }, timing);
       ctx.device.queue.submit([aggEncoder.finish()]);
       renderedLayers.push({ view: aggTarget.createView(), blendMode: layer.blendMode });
       continue;
     }
 
-    const resolved = layerToPool(memberId);
-    if (!resolved) continue;
-
-    // Per-dataset descriptor + entity index (orchestrator-computed;
-    // converges with the worker's descriptor build by canonical
-    // iteration order).
-    const descIndex = resolved.datasetId
-      ? ctx.lookupEntityDescriptor(resolved.datasetId)
-      : null;
+    // The orchestrator's entity index matches the worker's descriptor build
+    // because both use canonical iteration order.
+    const datasetId = ctx.state.memberToDataset.get(memberId);
+    const descIndex = datasetId ? ctx.lookupEntityDescriptor(datasetId) : null;
     if (!descIndex) continue;
     const entityIndex = layer.entityIndex;
 
-    // Detect "no detail" via descriptor-derived state: the canonical
-    // signal that this entity has no chunks in the pool. Drives the
-    // dummy chunk atlas binding + skip-render guard below.
-    const detailAtlas: SliceAtlasState | null = resolved.detailPoolKey
-      ? atlasMap.get(resolved.detailPoolKey) ?? null
-      : null;
-    const coarseAtlas: SliceAtlasState | null = resolved.coarsePoolKey
-      ? atlasMap.get(resolved.coarsePoolKey) ?? null
-      : null;
-    const detailMetas: LodIndirectionMeta[] | null =
-      detailAtlas?.entityMetas.get(memberId) ?? null;
-    const coarseMetas: LodIndirectionMeta[] | null =
-      coarseAtlas?.entityMetas.get(memberId) ?? null;
-    const hasDetail = detailMetas != null && detailMetas.length > 0;
-    const hasCoarse = coarseMetas != null && coarseMetas.length > 0;
+    const pools = resolveMemberPools(atlasMap, descIndex, memberId);
+    const hasDetail = pools.levels.some((atlas) => atlas !== null);
+    const hasCoarse = pools.coarse !== null;
 
     const ox = layer.offsetX ?? 0;
     const oy = layer.offsetY ?? 0;
@@ -453,15 +393,14 @@ export function handleSliceRenderMultiPass(
 
     const idx = renderedLayers.length;
 
-    for (const atlas of [detailAtlas, coarseAtlas]) {
+    for (const atlas of [...pools.levels, pools.coarse]) {
       if (atlas && atlas.indirectionDirty) {
         ctx.device.queue.writeBuffer(atlas.indirectionBuf, 0, atlas.indirectionData);
         atlas.indirectionDirty = false;
       }
     }
 
-    // Resolve proxy texture handles via the descriptor's dense pool
-    // array. Slot indices + dims come from the GPU descriptor.
+    // Slot indices and dims come from the GPU descriptor.
     const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
     let tileProxyTexture: GPUTexture | null = null;
     let tileProxySlotResident = false;
@@ -485,20 +424,15 @@ export function handleSliceRenderMultiPass(
       }
     }
 
-    // Skip when the layer has nothing renderable: no detail/coarse chunks
-    // AND no resident proxy. Entities with either chunk tier or a resident
-    // proxy continue rendering; the shader fallback chain handles the rest.
+    // Anything resident is enough to draw; the shader's sampling chain
+    // covers what this member lacks.
     if (!hasDetail && !hasCoarse && !tileProxySlotResident && !groupProxySlotResident) continue;
 
     renderer.setProxyTextures(tileProxyTexture, groupProxyTexture);
 
     renderer.setTierAtlases(
-      hasDetail && detailAtlas ? detailAtlas.texture : null,
-      hasDetail && detailAtlas ? detailAtlas.indirectionBuf : null,
-      hasDetail && detailAtlas ? [detailAtlas.slotsX, detailAtlas.slotsY] : [0, 0],
-      hasCoarse && coarseAtlas ? coarseAtlas.texture : null,
-      hasCoarse && coarseAtlas ? coarseAtlas.indirectionBuf : null,
-      hasCoarse && coarseAtlas ? [coarseAtlas.slotsX, coarseAtlas.slotsY] : [0, 0],
+      pools.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
+      pools.coarse ? poolBinding(pools.coarse) : null,
     );
 
     // Colormap from descriptor's CPU mirror; contrast/gamma/opacity are
@@ -512,20 +446,26 @@ export function handleSliceRenderMultiPass(
     renderer.setDescriptorBinding(descIndex.buffer, entityIndex);
     const layerTarget = targetFor(idx);
     const layerEncoder = ctx.device.createCommandEncoder();
-    renderer.renderTo(layerTarget.createView(), layerEncoder);
+    renderer.renderTo(layerTarget.createView(), layerEncoder, timing);
     ctx.device.queue.submit([layerEncoder.finish()]);
     renderedLayers.push({ view: layerTarget.createView(), blendMode: layer.blendMode });
   }
 
-  const canvasView = ctx.context.getCurrentTexture().createView();
+  const canvasTexture = ctx.context.getCurrentTexture();
+  const canvasView = canvasTexture.createView();
   const compEncoder = ctx.device.createCommandEncoder();
-  comp.composite(canvasView, renderedLayers, compEncoder);
+  comp.composite(canvasView, renderedLayers, compEncoder, true, timing);
+  comp.underlayBackground(canvasView, compEncoder, timing);
   ctx.device.queue.submit([compEncoder.finish()]);
 
-  const cr = ctx.getCursorRenderer();
   if (cr.hasData()) {
     const cursorEncoder = ctx.device.createCommandEncoder();
-    cr.renderSlice(canvasView, cursorEncoder, msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH);
+    cr.renderSlice(canvasView, cursorEncoder, msg.zoom, msg.cx, msg.cy, msg.canvasW, msg.canvasH, timing);
     ctx.device.queue.submit([cursorEncoder.finish()]);
   }
+
+  timing.endFrame();
+  // The frame can be read only here, after its last pass and before the
+  // texture expires with this handler.
+  captureRenderedFrame(ctx, canvasTexture);
 }

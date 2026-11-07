@@ -1,6 +1,6 @@
 //! Auth HTTP handlers.
 //!
-//! Hosts `/auth/whoami`, `/auth/logout`, the OAuth flow
+//! Hosts `/auth/whoami`, `/auth/logout`, `/auth/mode`, the OAuth flow
 //! (`/auth/start` + `/auth/callback`), and the `/auth/error` page.
 //! Disabled mode bypasses these handlers by yielding the dev principal
 //! directly from [`crate::auth::principal::StubPrincipalExtractor`].
@@ -23,7 +23,7 @@ use lucida_core::auth_principal::AuthPrincipal;
 
 use super::bearer_token::{BearerToken, BearerTokenStore, hash_bearer_token};
 use super::cli_authorization::{CliTokenAuthorization, CliTokenAuthorizationStore};
-use super::config::AuthConfig;
+use super::config::{AuthConfig, AuthMode};
 use super::cookie::{
     build_clearing_cookie, build_clearing_signed_out_marker, build_session_cookie,
     build_signed_out_marker, read_session_cookie, read_signed_out_marker, request_is_https,
@@ -56,6 +56,28 @@ pub async fn whoami(principal: Option<Extension<AuthPrincipal>>) -> Response {
         )
             .into_response(),
     }
+}
+
+/// What the configured auth mode offers the web client.
+///
+/// It reports what the mode does, not which mode it is, so the client
+/// never grows a branch per mode.
+#[derive(Debug, Serialize)]
+pub struct AuthModeInfo {
+    /// Where the sign-out control points, or `null` when this mode has
+    /// nothing to sign out of. See [`AuthMode::sign_out_url`].
+    pub sign_out_url: Option<&'static str>,
+}
+
+/// `GET /auth/mode` — the sign-out URL, if this mode has one.
+///
+/// Public, like `/auth/dev/status`. It carries no identity, and the
+/// client asks for it while whoami is still in flight.
+pub async fn auth_mode(State(config): State<Arc<AuthConfig>>) -> Response {
+    Json(AuthModeInfo {
+        sign_out_url: config.mode.sign_out_url(),
+    })
+    .into_response()
 }
 
 // -- CLI/Python bearer credential provisioning ---------------------------
@@ -549,10 +571,29 @@ fn html_escape(raw: &str) -> String {
 }
 
 /// State for disabled-auth developer identity routes.
+///
+/// Both fields are private, so [`DevAuthState::new`] is the only way to
+/// build one. A future route cannot mount the switcher without running
+/// the check that decides whether it is safe.
 #[derive(Clone)]
 pub struct DevAuthState {
-    pub config: Arc<AuthConfig>,
-    pub enabled: bool,
+    config: Arc<AuthConfig>,
+    enabled: bool,
+}
+
+impl DevAuthState {
+    /// Decide whether the dev identity switcher is available.
+    ///
+    /// It needs `LUCIDA_AUTH=disabled` and a loopback bind. Disabled
+    /// mode alone is not enough. `/auth/dev/login` mints whatever
+    /// identity the request body names, admin included, so on any other
+    /// address it lets every caller make themselves an admin.
+    /// `LUCIDA_INSECURE=1` acknowledges running without sign-in
+    /// (ADR-0018). It does not ask for a route that hands out privilege.
+    pub fn new(config: Arc<AuthConfig>) -> Self {
+        let enabled = config.mode == AuthMode::Disabled && config.bind_is_loopback();
+        Self { config, enabled }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -569,6 +610,9 @@ pub struct DevLoginRequest {
     pub is_admin: bool,
 }
 
+/// `GET /auth/dev/status` — tells the SPA whether to draw the identity
+/// switcher. Registered on every deployment, and `enabled` carries the
+/// verdict.
 pub async fn dev_status(State(state): State<DevAuthState>) -> Response {
     Json(DevAuthStatus {
         enabled: state.enabled,
@@ -577,6 +621,12 @@ pub async fn dev_status(State(state): State<DevAuthState>) -> Response {
     .into_response()
 }
 
+/// `POST /auth/dev/login` — take on a local dev identity of the
+/// caller's choosing.
+///
+/// Registered on every deployment, and 404s unless the switcher is
+/// enabled. Leaving the path unregistered would hand it to the SPA
+/// catch-all, which replies 200 with `index.html`.
 pub async fn dev_login(
     State(state): State<DevAuthState>,
     req: Request<axum::body::Body>,
@@ -642,16 +692,10 @@ pub struct LogoutState {
 
 /// `POST /auth/logout` — local-only sign-out.
 ///
-/// Idempotent: the response shape (302 + clearing cookie) is identical
-/// whether or not the request carried a valid session cookie, so the
-/// web client can call it without first checking auth state. We
-/// deliberately do **not** federate to Google's revoke endpoint — see
-/// `wiki/decisions/0016-backend-mediated-oauth-with-session-cookies.md`
-/// §"Logout" for the rationale (the ID token isn't held past login).
-///
-/// Returns 302 to `/`. fetch() in the web client follows redirects by
-/// default but the body of `/` is irrelevant — useAuthState refreshes
-/// via `/auth/whoami` after the call resolves, which then returns 401.
+/// Idempotent: 302 to `/` with a clearing cookie whether or not the
+/// request carried a valid session, so the client need not check auth
+/// state first. It does not federate to Google's revoke endpoint, since
+/// the ID token is not held past login (ADR-0016).
 pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Response {
     let (parts, _body) = req.into_parts();
     let session_id = read_session_cookie(&parts, &state.config.cookie_name);
@@ -691,17 +735,12 @@ pub async fn logout<B>(State(state): State<LogoutState>, req: Request<B>) -> Res
         "auth.logout"
     );
 
-    // Set-Cookie headers: clear `lucida_session`, set the
-    // `lucida_signed_out` marker, and clear any disabled-auth dev
-    // principal override. The marker survives the page refresh that
-    // would otherwise route through the auto-bouncing unauth landing →
-    // Google's still-active session → silent re-auth.
-    // Middleware consumes it (serves the static landing) and
-    // `/auth/start` clears it on user-initiated re-sign-in.
+    // Clear `lucida_session`, set the `lucida_signed_out` marker, and
+    // clear any dev principal override. The marker stops a refresh from
+    // silently signing back in through Google's still-active session.
     //
-    // `AppendHeaders` (not `[(name, val); N]`) — Set-Cookie is one of
-    // the few headers that legitimately needs multiple emissions; the
-    // array form would silently overwrite the second on the first.
+    // `AppendHeaders`, not an array: Set-Cookie needs one header per
+    // cookie, and the array form would keep only one of them.
     let is_https = request_is_https(&parts);
     let clearing = build_clearing_cookie(&state.config, is_https);
     let marker = build_signed_out_marker(&state.config, is_https);
@@ -743,30 +782,17 @@ pub struct StartRequest {
     pub hash: Option<String>,
 }
 
-/// `POST /auth/start` (also accepts `GET` for the noscript fallback
-/// from the unauth landing).
+/// `POST /auth/start` (also `GET` for the noscript fallback).
 ///
-/// Generates a 256-bit state token, stashes the intended path + hash
-/// in `pending_auth`, and 302s to Google's authorization URL with the
-/// token in the `state` parameter. Per ADR-0013 the hash is captured
-/// here so a `#view=…` link survives the redirect round-trip.
+/// Stores a 256-bit state token with the intended path and hash in
+/// `pending_auth`, then 302s to Google. The hash is captured here so a
+/// `#view=…` link survives the round trip (ADR-0013).
 ///
-/// When the inbound request carries the `lucida_signed_out` marker
-/// cookie (set by `/auth/logout`), this handler asks Google to show
-/// the account chooser (`prompt=select_account`) instead of silently
-/// passing through its still-active session.
-///
-/// **The marker is NOT cleared here.** It's cleared in `/auth/callback`
-/// on success. If the user bails out at Google's chooser (closes the
-/// tab, clicks back) and returns to lucida, the marker must still be
-/// in place so the next `/auth/start` also sends `prompt=select_account`
-/// — otherwise we'd silently re-auth them via Google's still-active
-/// session, defeating the logout. See ADR-0019 §"Why clear in callback,
-/// not start."
-///
-/// Cold-path callers (no marker) get the friction-free silent
-/// pass-through Google does when it has an active session — that's the
-/// design intent for first-visit and post-expiry re-auth (ADR-0016).
+/// With the `lucida_signed_out` marker present it asks Google for the
+/// account chooser (`prompt=select_account`). The marker is cleared in
+/// `/auth/callback`, not here: a user who backs out of the chooser must
+/// get the chooser again next time, or Google's live session would
+/// silently undo the logout (ADR-0019).
 pub async fn auth_start(
     State(state): State<OAuthState>,
     Query(query): Query<StartRequest>,
@@ -829,19 +855,11 @@ pub struct CallbackQuery {
 
 /// `GET /auth/callback?code=…&state=…`
 ///
-/// Validates the state token, exchanges the code with Google,
-/// validates the JWT, applies the hosted-domain + email_verified
-/// checks, mints a `LoginSession`, sets the cookie, and 302s to the
-/// originally-captured path + hash.
-///
-/// Every failure 302s to `/auth/error?code=…`. Two flavors:
-///
-/// * `code=hd_mismatch` / `code=unverified` — user-fixable rejections.
-///   Detail params (attempted_email, allowed_domains) included so the
-///   page can render the actionable message.
-/// * `code=auth_failed` — every other error path (state mismatch,
-///   code exchange failure, JWT invalid, store failure). Deliberately
-///   vague to the user; logs hold details server-side.
+/// Validates the state token and the JWT, applies the hosted-domain and
+/// `email_verified` checks, mints a `LoginSession`, sets the cookie, and
+/// 302s to the captured path and hash. Every failure 302s to
+/// `/auth/error`: `hd_mismatch` and `unverified` carry detail params for
+/// the page, and everything else is a deliberately vague `auth_failed`.
 pub async fn auth_callback(
     State(state): State<OAuthState>,
     Query(query): Query<CallbackQuery>,
@@ -1133,7 +1151,9 @@ mod tests {
             Arc::clone(&config),
             Arc::clone(&session_store) as Arc<dyn LoginSessionStore>,
             Arc::clone(&token_store) as Arc<dyn BearerTokenStore>,
-        );
+        )
+        .await
+        .expect("only IAP mode can fail to build an extractor");
         let authed = Router::new()
             .route("/auth/whoami", get(whoami))
             .route(
@@ -1215,13 +1235,80 @@ mod tests {
         assert_eq!(principal.email, "dev@local");
     }
 
+    // -- /auth/mode ------------------------------------------------------
+
+    async fn advertised_sign_out_url(mode: AuthMode) -> serde_json::Value {
+        let mut config = AuthConfig::for_tests();
+        config.mode = mode;
+        let app = Router::new()
+            .route("/auth/mode", get(auth_mode))
+            .with_state(Arc::new(config));
+
+        let req = Request::builder()
+            .uri("/auth/mode")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        let body = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        payload["sign_out_url"].clone()
+    }
+
+    #[tokio::test]
+    async fn auth_mode_advertises_the_url_the_configured_mode_declares() {
+        assert_eq!(
+            advertised_sign_out_url(AuthMode::Google).await,
+            json!("/auth/logout"),
+        );
+        assert_eq!(
+            advertised_sign_out_url(AuthMode::Disabled).await,
+            serde_json::Value::Null,
+            "disabled mode has no session to end, so it offers no sign-out",
+        );
+        assert_eq!(
+            advertised_sign_out_url(AuthMode::Iap).await,
+            json!("/?gcp-iap-mode=CLEAR_LOGIN_COOKIE"),
+            "IAP mode points sign-out at the perimeter that issued the identity",
+        );
+    }
+
     // -- /auth/dev/* -----------------------------------------------------
 
+    fn dev_auth_config(mode: AuthMode, bind: &str) -> Arc<AuthConfig> {
+        let mut config = AuthConfig::for_tests();
+        config.mode = mode;
+        config.bind_addr = bind.parse().expect("test bind parses");
+        Arc::new(config)
+    }
+
+    #[test]
+    fn dev_switcher_needs_disabled_mode_and_a_loopback_bind() {
+        assert!(
+            DevAuthState::new(dev_auth_config(AuthMode::Disabled, "127.0.0.1:9876")).enabled,
+            "the local-dev path keeps the switcher",
+        );
+        assert!(
+            !DevAuthState::new(dev_auth_config(AuthMode::Disabled, "0.0.0.0:9876")).enabled,
+            "an exposed bind must not hand out identities, acknowledged or not",
+        );
+        assert!(
+            !DevAuthState::new(dev_auth_config(AuthMode::Google, "127.0.0.1:9876")).enabled,
+            "real sign-in leaves no room for the switcher",
+        );
+    }
+
+    /// Mount both dev routes the way `main.rs` does. `enabled` picks the
+    /// bind that produces it, so the routes under test are reachable only
+    /// through the same gate production goes through.
     fn dev_auth_app(enabled: bool) -> Router {
-        let state = DevAuthState {
-            config: Arc::new(AuthConfig::for_tests()),
-            enabled,
+        let bind = if enabled {
+            "127.0.0.1:9876"
+        } else {
+            "0.0.0.0:9876"
         };
+        let state = DevAuthState::new(dev_auth_config(AuthMode::Disabled, bind));
+        assert_eq!(state.enabled, enabled, "helper picked the wrong bind");
         Router::new()
             .route(
                 "/auth/dev/status",

@@ -1,16 +1,7 @@
 /**
- * Pure-TS tests covering the bridge between `proxyAtlas.ts` and the
- * shaders' proxy sampling math. We can't run WGSL in vitest, but the
- * critical invariants we DO want to lock down are:
- *
- *   1. The shader's 3-D slot-origin math agrees with the TS-side
- *      `proxySlotOrigin()` (which is what gpu.worker.ts uses to decide
- *      where to write proxy uploads).
- *   2. The renderers' per-frame uniform layouts stay in sync with the
- *      shader's `Uniforms` struct. Step 9 unified the proxy/detail
- *      fallback chain and dropped `proxyParams.x = renderMode` from
- *      both volume and slice — these constants encode the post-step-9
- *      sizes so a future regression fails loudly.
+ * The shaders' 3D proxy slot-origin math must agree with `proxySlotOrigin()`,
+ * which decides where proxy uploads land. WGSL can't run in vitest, so the
+ * shader math is recomputed here.
  */
 
 import { describe, it, expect } from "vitest";
@@ -31,9 +22,7 @@ import {
   proxySlotOrigin,
 } from "./proxyAtlas.ts";
 
-// ---------------------------------------------------------------------------
 // Mock GPU device (mirrors proxyAtlas.test.ts)
-// ---------------------------------------------------------------------------
 
 interface MockTexture {
   destroyed: boolean;
@@ -59,10 +48,8 @@ function makeMockDevice(maxDim = 2048): GPUDevice {
   } as unknown as GPUDevice;
 }
 
-// ---------------------------------------------------------------------------
 // Shader-side slot-origin recomputation. Mirrors `sampleProxy()` in
 // volume.wgsl: dims = vec4u(Z, Y, X, _); grid = textureDims / slotDims.
-// ---------------------------------------------------------------------------
 function shaderOrigin(
   slotIdx: number,
   dims: [number, number, number],
@@ -110,37 +97,5 @@ describe("proxy slot origin math (shader ↔ proxyAtlas.ts)", () => {
       (atlas.texture as unknown as MockTexture).size,
     );
     expect(uploadOrigin).toEqual(shaderReadAtFracZero);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Uniform buffer packing offsets (volume + slice)
-// ---------------------------------------------------------------------------
-
-describe("renderer uniform layouts (post-step-9 unified fallback chain)", () => {
-  // Step 9 (DOMAINS §6.5): the unified semantic fallback chain is driven
-  // by descriptor sentinels — `proxyParams.x = renderMode` is gone from
-  // both volume (256→240B) and slice (128→112B) uniforms. The last vec4
-  // is now `lodParams`. These constants mirror volumeRenderer.ts and
-  // sliceRenderer.ts.
-  const VOLUME_UNIFORM_SIZE = 240;
-  const VOLUME_LOD_PARAMS_OFFSET_BYTES = 224;
-
-  const SLICE_UNIFORM_SIZE = 112;
-  const SLICE_LOD_PARAMS_OFFSET_BYTES = 96;
-
-  it("volume lodParams is 16-byte aligned and tail of UNIFORM_SIZE", () => {
-    expect(VOLUME_LOD_PARAMS_OFFSET_BYTES % 16).toBe(0);
-    expect(VOLUME_LOD_PARAMS_OFFSET_BYTES + 16).toBe(VOLUME_UNIFORM_SIZE);
-  });
-
-  it("slice lodParams is 16-byte aligned and tail of UNIFORM_SIZE", () => {
-    expect(SLICE_LOD_PARAMS_OFFSET_BYTES % 16).toBe(0);
-    expect(SLICE_LOD_PARAMS_OFFSET_BYTES + 16).toBe(SLICE_UNIFORM_SIZE);
-  });
-
-  it("u32-view indices match byte offsets / 4", () => {
-    expect(VOLUME_LOD_PARAMS_OFFSET_BYTES / 4).toBe(56);
-    expect(SLICE_LOD_PARAMS_OFFSET_BYTES / 4).toBe(24);
   });
 });

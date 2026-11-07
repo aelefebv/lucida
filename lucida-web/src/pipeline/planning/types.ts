@@ -1,23 +1,18 @@
 /**
  * Planning types and interfaces. Leaf module so siblings can import
- * without circular dependencies. See ADR 0029.
+ * without circular dependencies.
  */
 
 import type { LevelGeometry } from "../../manifestTypes.ts";
 import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
 import type { SceneEpochs } from "../epochs.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
 import type { VisibleRegion } from "../viewport.ts";
 
 /**
- * Shared shape across every {@link EntitySnapshot} variant. Holds the
- * tiles that don't depend on the entity's `kind`. The variants
- * specialise the discriminator and add `parentId` for {@link TileSnapshot}.
- *
- * Conservative form: `levels` lives on the base because all three
- * variants still carry it (even {@link GroupSnapshot}, despite
- * `group-as-proxy` never iterating group chunks). The aggressive form
- * stripping `levels` from {@link GroupSnapshot} is deferred indefinitely;
- * see ADR `0026-discriminated-active-set-and-entity-types.md`.
+ * Fields shared by every {@link EntitySnapshot} variant. `levels` stays
+ * on the base, {@link GroupSnapshot} included, even though a group never
+ * iterates its own chunks (ADR 0026).
  */
 export interface BaseEntitySnapshot {
   entityId: string;
@@ -26,77 +21,69 @@ export interface BaseEntitySnapshot {
   projectedDiagonalPx: number;
   projectedAreaPx2: number;
   centroidWorld: [number, number, number];
-  idealTargetLod: number;
   /**
-   * Source pyramid level selected for the detail tier. Defaults to level
-   * 0 unless the dataset settings carry an explicit lower-resolution
-   * override. Generated coarse levels are not valid detail choices.
+   * The level the detail tier requests: the dataset's level pin if set,
+   * otherwise the core's choice in `lucida-core/src/target_level.rs`, the
+   * coarsest level with at least one sample under every device pixel,
+   * held across a boundary by hysteresis. Always a source level, never a
+   * generated coarse level. The core resolves it and the browser copies
+   * it. It is in the quantized set the view-query delta tracks, so a move
+   * arrives as a `changed` record. Memory pressure is not an input.
    */
-  detailLevel: number;
+  targetLevel: number;
   /**
-   * Pyramid level selected for the coarse tier. Null means this image
-   * has no currently usable coarse level. The first bridge only emits
-   * source-backed coarse chunks; generated coarse levels become usable
-   * once readiness metadata marks them available.
+   * True when {@link targetLevel} is the dataset's level pin rather than
+   * the screen's choice. A pinned target never moves with the zoom, so
+   * the prefetch lane requests no neighboring level for the entity.
+   */
+  levelPinned: boolean;
+  /**
+   * The levels the image's source stores, ascending: every index of
+   * {@link levels} except the generated coarse levels. Target levels and
+   * the prefetch lane's level step stay inside this set.
+   */
+  sourceLevels: number[];
+  /**
+   * Level the coarse tier holds, or null when the image has no usable
+   * coarse level. A generated coarse level is usable only once readiness
+   * metadata marks it available.
    */
   coarseLevel: number | null;
   importance: number;
   /**
-   * Layout placement position, in voxel coordinates. Distinct from
-   * {@link centroidWorld}: `layoutPositionVox` is grid placement
-   * (voxel-space, set by the layout); `centroidWorld` is the entity's
-   * intrinsic spatial center (world-space). They're different things in
-   * different frames.
+   * Layout grid placement, in voxel coordinates. Not the same as
+   * {@link centroidWorld}, which is the entity's own center in world space.
    */
   layoutPositionVox: [number, number];
   levels: LevelGeometry[];
 }
 
 /**
- * A standalone image entity (non-collection datasets). Treated as its own
- * one-entry "group" by `groupMembers` so the rest of the planner is
- * uniform. No `parentId` tile — top-level entity by construction.
+ * A standalone image entity (non-collection datasets). `groupMembers`
+ * treats it as a one-entry group so the rest of the planner is uniform.
  */
 export interface ImageSnapshot extends BaseEntitySnapshot {
   kind: "Image";
 }
 
 /**
- * A group entity on a collection. Top-level — no `parentId`. `groupMembers`
- * pairs it with its constituent {@link TileSnapshot}s by id; promotion
- * may downgrade the group to `group-as-proxy` (rendered as one synthetic
- * cube) or leave it at tile-mode (each tile rendered separately).
+ * A group entity on a collection. `groupMembers` pairs it with its
+ * {@link TileSnapshot}s by id.
  */
 export interface GroupSnapshot extends BaseEntitySnapshot {
   kind: "Group";
 }
 
 /**
- * A tile entity belonging to a group on a collection. `parentId` is required
- * and non-null by contract: a tile without a parent is a producer
- * invariant violation worth surfacing rather than silently coercing.
- *
- * Consumers that read `parentId` narrow on `kind === "Tile"` first; the
- * post-narrow access has no `?? null` fallback.
+ * A tile entity in a collection group. `parentId` is required: a tile
+ * without a parent is a producer bug to surface, not to coerce.
  */
 export interface TileSnapshot extends BaseEntitySnapshot {
   kind: "Tile";
-  /**
-   * Parent group's entity id. Required and non-null for {@link TileSnapshot}
-   * — `groupMembers` keys tile grouping off this id. Only tiles carry
-   * a `parentId`; group/image variants don't.
-   */
+  /** Parent group's entity id. `groupMembers` groups tiles by it. */
   parentId: string;
 }
 
-/**
- * Discriminated union of the three entity kinds. The previous flat
- * `EntitySnapshot` interface (with `parentId: string | null`) is
- * replaced; consumers narrow on `kind` before reading variant-specific
- * tiles. Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
- * extended from "carry-forward state is explicit" to "per-variant
- * invariants are compile-time enforced."
- */
 export type EntitySnapshot = ImageSnapshot | GroupSnapshot | TileSnapshot;
 
 export interface SelectionState {
@@ -119,15 +106,9 @@ export interface CacheStateSnapshot {
 export type { AssetCatalogSnapshot, ProxyKind } from "../assetCatalog.ts";
 
 /**
- * Lightweight chunk coordinate carried inside {@link PlanningSnapshot.minimapPending}.
- *
- * Canonical home for this type: the orchestrator and `pipeline/planning/snapshot.ts`
- * both import this single definition.
- *
- * The orchestrator (and the minimap path that fills its
- * `pendingFetch` map) populates one of these per missing minimap
- * chunk; `emitMinimapLane` translates them into
- * {@link ChunkRequest}s at `MINIMAP_LANE_OFFSET`.
+ * One missing minimap chunk in {@link PlanningSnapshot.minimapPending}.
+ * `emitMinimapLane` turns each into a {@link ChunkRequest} at
+ * `MINIMAP_LANE_OFFSET`.
  */
 export interface MinimapChunkCoord {
   level: number;
@@ -142,10 +123,8 @@ export interface MinimapChunkCoord {
 
 export interface PlanningSnapshot {
   /**
-   * Dataset identifier this snapshot pertains to. Carried on the
-   * snapshot so the planner can stamp it onto every emitted
-   * {@link ChunkRequest} and {@link ProxyRequest} at emit time —
-   * the orchestrator does not back-fill it after `plan()`.
+   * The planner stamps it onto every emitted {@link ChunkRequest} and
+   * {@link ProxyRequest}; the orchestrator does not back-fill it.
    */
   datasetId: string;
   epochs: SceneEpochs;
@@ -153,100 +132,84 @@ export interface PlanningSnapshot {
   visibleRegion: VisibleRegion;
   selection: SelectionState;
   /**
-   * Asset catalog snapshot for promotion. The orchestrator passes
-   * `ctx.assetCatalog.snapshot()` (always non-null); Planning consults
-   * it to decide whether `group-as-proxy` /
-   * `tiles-with-proxy-fallback` are reachable for each group.
-   *
-   * `null` is still accepted for callers that want to opt out — e.g.
-   * tests and `createSyntheticSnapshot`. Treated as an empty catalog →
-   * no proxies available → all groups degrade to `tiles-with-detail`.
+   * Read only by the proxy residency planner, which goes away with the
+   * proxy-asset path (ADR 0043). `null` for callers that opt out, such
+   * as tests and `createSyntheticSnapshot`.
    */
   assetCatalog: AssetCatalogSnapshot | null;
   /**
-   * Per-image minimap chunks the renderer needs. Keyed by
-   * `EntitySnapshot.imageId`; each value is the list of pending
-   * coords the minimap path produced this tick (chunks not yet on
-   * the GPU's minimap atlas).
-   *
-   * `emitMinimapLane` reads this and emits requests at
-   * `MINIMAP_LANE_OFFSET`, the highest priority in the system.
-   * Empty map ⇒ no minimap work this tick (planning emits no
-   * minimap requests).
+   * Minimap chunks not yet on the GPU minimap atlas, keyed by
+   * `EntitySnapshot.imageId`. An empty map means no minimap requests
+   * this tick.
    */
   minimapPending: Map<string, MinimapChunkCoord[]>;
 }
 
 /**
- * Carry-forward state that survives across planning ticks. Distinct
- * from {@link PlanningSnapshot} (the world this tick) and
- * `PlanningConfig` (the tunables). The caller stores the opaque
- * pointer returned in {@link RequestPlan.nextState} and threads it into
- * the next call to `plan`.
- *
- * v1 contains a single tile — the previous tick's active set — used by
- * `buildPrevModeByGroup` to drive promotion-mode hysteresis. The
- * container exists so future state (per-group stickiness counters,
- * anticipation hints, planner state machines) can be added without
- * churning {@link PlanningSnapshot}'s contract.
- *
- * Cited [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]
- * and ADR `0027-planning-state-as-the-carry-forward-seam.md`.
+ * Carry-forward state between planning ticks (ADR 0027). The caller
+ * stores {@link RequestPlan.nextState} and passes it to the next `plan`
+ * call. It holds the previous active set, which the dev-mode validator
+ * checks and the cold-state delta diffs against, and the zoom memory the
+ * prefetch lane reads to pick the next level.
  */
 export interface PlanningState {
   previousActiveSet: ActiveSetEntry[];
+  /**
+   * `visibleRegion.effectiveZoom` as the previous plan saw it, or `null`
+   * before the first plan. The core reports device pixels per level-0
+   * sample here in both view modes, so a change in it is a change in
+   * the measure the target level is chosen from.
+   */
+  previousEffectiveZoom: number | null;
+  /**
+   * Direction of the last zoom change the planner observed, or `null`
+   * until it observes one. Kept across plans whose zoom is unchanged, so
+   * a pan or a scrub after a zoom still prefetches in the zoom's
+   * direction.
+   */
+  zoomDirection: ZoomDirection | null;
+}
+
+/** Which way the last zoom change moved: toward level 0 or away from it. */
+export type ZoomDirection = "in" | "out";
+
+/** The state before the first plan: nothing held, no zoom seen. */
+export function initialPlanningState(): PlanningState {
+  return { previousActiveSet: [], previousEffectiveZoom: null, zoomDirection: null };
 }
 
 export interface RequestPlan {
   /**
-   * All chunk requests across detail/prefetch/overview lanes, sorted
-   * ascending by `priority` (lower = more urgent). Fresh array per
-   * `plan()` call; safely mutable by the caller.
+   * Every lane's chunk requests, sorted ascending by `priority` (lower
+   * is more urgent). A fresh array, so the caller may mutate it.
    */
   requests: ChunkRequest[];
-  /**
-   * Promotion decisions: one entry per visible group (`group-as-proxy`)
-   * or per visible tile (tile modes), plus invisible-entity
-   * pass-throughs. Carries the resolved {@link EntityMode}, LOD range,
-   * and proxy availability flags consumed by orchestrator delivery.
-   */
+  /** One entry per visible tile, plus invisible-entity pass-throughs. */
   activeSet: ActiveSetEntry[];
   epochs: SceneEpochs;
   /**
-   * Proxy assets to fetch alongside chunks. Populated by promotion.
-   * Always defined — empty array when no entries use a proxy mode.
-   * Sorted ascending by `priority`. CpuCache routes these to
+   * Always defined, empty when no entry uses a proxy mode. Sorted
+   * ascending by `priority`. CpuCache routes these to
    * `ContentSource.fetchProxy`.
    */
   proxyRequests: ProxyRequest[];
   /**
-   * Counters accumulated during this plan run. Always present (zeroed
-   * if no work happened); cost is negligible. Consumers (the trace's
-   * per-tick counters in `traceTick.ts`, tests) read it post-hoc to
-   * surface decision rationale (catalog degradations) and culling
-   * effectiveness.
+   * Counters for this plan run, zeroed when no work happened. The
+   * trace's per-tick counters (`traceTick.ts`) and tests read them.
    */
   stats: PlanStats;
   /**
-   * Opaque carry-forward state for the next tick. The caller stores
-   * this pointer and passes it back as the `state` argument to the
-   * next `plan` call; it never inspects or constructs the
-   * contents itself. Today this is `{ previousActiveSet: activeSet }`;
-   * future planner-internal state (stickiness counters, anticipation
-   * hints) drops in here without touching the caller.
-   *
-   * Cited ADR `0027-planning-state-as-the-carry-forward-seam.md`.
+   * Opaque carry-forward state. The caller passes it back as `state` on
+   * the next `plan` call and never inspects or builds it.
    */
   nextState: PlanningState;
 }
 
 /**
  * Per-plan accumulator. Counters are summed across all `iterateChunks`
- * calls (detail + prefetch + overview lanes) and across all entities.
+ * calls (detail, prefetch, and coarse lanes) and across all entities.
  */
 export interface PlanStats {
-  /** How many times catalog-aware promotion downgraded a group's mode. */
-  catalogDegradations: number;
   /** Frustum / visible-region culling stages. */
   culling: PlanCullingStats;
 }
@@ -265,17 +228,12 @@ export interface PlanCullingStats {
 /** Construct a fresh, zeroed PlanStats accumulator. */
 export function emptyPlanStats(): PlanStats {
   return {
-    catalogDegradations: 0,
     culling: { considered: 0, afterXyBounds: 0, afterZRange: 0, afterFrustum: 0 },
   };
 }
 
 export interface ChunkRequest {
-  /**
-   * Dataset id this request belongs to. The planner stamps this at
-   * emit time from {@link PlanningSnapshot.datasetId}; the
-   * orchestrator does not back-fill it after `plan()`.
-   */
+  /** Stamped by the planner from {@link PlanningSnapshot.datasetId}. */
   datasetId: string;
   entityId: string;
   imageId: string;
@@ -285,34 +243,20 @@ export interface ChunkRequest {
   z: number;
   y: number;
   x: number;
-  /**
-   * Which planning lane produced this request. `"minimap"` is the
-   * highest priority — fetched first. The CPU cache and GPU upload
-   * paths route per-lane (see [[cpu-cache]] for the eviction-tier
-   * mapping).
-   */
+  /** The CPU cache and GPU upload paths route per lane. */
   lane: "minimap" | "detail" | "coarse" | "prefetch" | "overview";
-  /**
-   * Canonical residency tier this request fills. Kept optional for
-   * migration compatibility with older tests/helpers; the planner emits
-   * it on every request.
-   */
-  tier?: "detail" | "coarse";
+  /** Residency tier this request fills. */
+  tier: ResidencyTier;
   priority: number;
   /** Canonical key: "level/t/c/z/y/x" */
   chunkKey: string;
 }
 
 /**
- * A request to fetch a proxy asset for an entity. Mirrors
- * `lucida_protocol::AssetRequest` on the wire and is consumed by
- * [`CpuCache.submit`] which routes it to
- * [`ContentSource.fetchProxy`].
- *
- * Populated from the three-tier promotion: `GroupProxy3D` for groups in
- * `group-as-proxy` and as a parent fallback for
- * `tiles-with-proxy-fallback`; `TileProxy3D` for tiles in
- * `tiles-with-proxy-fallback` and `tiles-with-detail`.
+ * A request to fetch a proxy asset. Mirrors `lucida_protocol::AssetRequest`
+ * on the wire; `CpuCache.submit` routes it to `ContentSource.fetchProxy`.
+ * The planner emits none, since every tile entry has `proxyAvailable:
+ * false`. The type stays until the proxy-asset path is deleted.
  */
 export interface ProxyRequest {
   datasetId: string;
@@ -326,64 +270,26 @@ export interface ProxyRequest {
 }
 
 /**
- * Per-tile promotion mode for visible tile entries, selected by
- * `chooseEntityMode` from the group's projected diagonal (max of
- * constituent tiles, in pixels):
- *
- *   - `tiles-with-proxy-fallback` (mid range)  — request real tile detail
- *     chunks but also fetch `TileProxy3D` per visible tile and the
- *     parent's `GroupProxy3D` as a fast fallback while detail loads.
- *   - `tiles-with-detail`        (> `DETAIL_THRESHOLD_PX`)  — real
- *     tile detail chunks only; proxy is a stand-in fallback that the
- *     worker uses when chunks are missing.
- *
- * The third tier — group-as-proxy (< `FAR_THRESHOLD_PX`) — does not
- * live on this type. It's a separate {@link ActiveSetEntry} variant
- * ({@link GroupAsProxyEntry}) discriminated by `kind`, so per-variant
- * invariants (no LOD bookkeeping for group-as-proxy, no proxy
- * bookkeeping for invisible) are compile-time enforced rather than
- * JSDoc'd.
+ * Per-tile mode carried on {@link TileEntry}. The planner emits
+ * `tiles-with-detail` for every visible tile, because the tier model
+ * renders from chunks alone. `tiles-with-proxy-fallback` belongs to the
+ * proxy-asset path; cold-state and worker consumers accept it until that
+ * path is deleted.
  */
 export type EntityMode =
   | "tiles-with-proxy-fallback"
   | "tiles-with-detail";
 
 /**
- * The full per-group decision space — what `chooseEntityMode` and
- * `degradeForCatalog` return before the variant split. Includes
- * `group-as-proxy` because the per-group decision step still discriminates
- * on it before `assignModes` translates each result into the
- * matching {@link ActiveSetEntry} variant.
- *
- * Distinct from {@link EntityMode}, which is the narrower per-tile
- * mode that lives only on {@link TileEntry}.
- */
-export type ResolvedMode = EntityMode | "group-as-proxy";
-
-/**
- * Promotion decision for one visible group or visible tile, plus
- * pass-through entries for invisible entities. Discriminated by `kind`
- * so each variant can declare only the tiles that make sense for it
- * (per-variant invariants compile-time enforced — see
- * [[principles/planning#4-planning-is-pure-carry-forward-state-is-explicit]]).
- *
- * Three variants:
- *   - {@link GroupAsProxyEntry} (`kind: "group-as-proxy"`) — one per
- *     group-as-proxy group; carries no LOD or imageId data.
- *   - {@link TileEntry} (`kind: "tile"`) — one per visible tile in
- *     a tile-mode group; carries LOD range, proxy availability flags.
- *   - {@link InvisibleEntry} (`kind: "invisible"`) — one per invisible
- *     entity, carrying just the coarsest LOD for downstream eviction.
- *
- * Consumers narrow on `kind` before reading variant-specific tiles.
+ * One entry per visible tile, plus pass-through entries for invisible
+ * entities. The planner never produces {@link GroupAsProxyEntry};
+ * consumers accept it until the proxy-asset path is deleted.
  */
 export type ActiveSetEntry = GroupAsProxyEntry | TileEntry | InvisibleEntry;
 
 /**
- * Active-set entry for a group rendered as a single `GroupProxy3D`
- * asset — no tile chunks. Carries only the group's id; LOD bookkeeping
- * and proxy availability flags are implicit (the group-proxy IS the
- * one asset that gets fetched at `PROXY_LANE_OFFSET`).
+ * A group rendered as one `GroupProxy3D` asset fetched at
+ * `PROXY_LANE_OFFSET`, with no tile chunks.
  */
 export interface GroupAsProxyEntry {
   kind: "group-as-proxy";
@@ -391,44 +297,30 @@ export interface GroupAsProxyEntry {
   entityId: string;
 }
 
-/**
- * Active-set entry for a visible tile — one per visible tile of a
- * group in a tile-mode promotion. Carries the tile's owning image
- * id, the planning LOD range, and proxy availability flags that drive
- * the fallback request emission.
- */
+/** Active-set entry for one visible tile. */
 export interface TileEntry {
   kind: "tile";
   /** The tile's entity id. */
   entityId: string;
   /** The tile's owning image id (matches `EntitySnapshot.imageId`). */
   imageId: string;
-  /** Per-tile promotion mode. See {@link EntityMode}. */
   mode: EntityMode;
-  targetLod: number;
-  coarsestDetailLod: number;
-  /** [finest, coarsest] inclusive. */
-  detailOwnedLodRange: [number, number];
-  /** Explicit detail tier level for the chunk-only coarse/detail path. */
-  detailLevel?: number;
-  /** Explicit coarse tier level for the chunk-only coarse/detail path. */
-  coarseLevel?: number | null;
   /**
-   * When present, worker wanted-set should only ask for these LODs even
-   * if `detailOwnedLodRange` spans intermediate levels for shader
-   * fallback ordering.
+   * Levels the detail tier requests, target level first; today only the
+   * target. Cold state and the worker read the detail tier's levels from
+   * here. The worker keeps sections for `detailLevels[0]` and the coarser
+   * levels under it, and never samples a finer level.
    */
-  wantedLodLevels?: number[];
+  detailLevels: number[];
   /**
-   * Which proxy kind this entry would prefer, if any. Always
-   * `TileProxy3D` when set; `undefined` if the catalog has no tile
-   * proxy advertised for this entity.
+   * Level the coarse tier holds for this entity, or `null` when the
+   * image has no coarse level that is at least as coarse as the detail
+   * level.
    */
+  coarseLevel: number | null;
+  /** Set when the catalog advertises a tile proxy for this entity. */
   proxyKind?: "TileProxy3D";
-  /**
-   * True if the entry's preferred proxy is known to be in the catalog
-   * (the tile's `TileProxy3D`).
-   */
+  /** True if the tile's `TileProxy3D` is in the catalog. */
   proxyAvailable: boolean;
   /**
    * Whether the parent group's `GroupProxy3D` is advertised. Drives the
@@ -440,21 +332,16 @@ export interface TileEntry {
 }
 
 /**
- * Active-set entry for an invisible entity — pass-through so the CPU
- * cache eviction tier mapping can still see it.
- * Carries only enough to identify the entity and its coarsest level
- * (used for overview-lane bookkeeping); no LOD range or proxy tiles,
- * since invisibles don't request chunks or proxies.
- *
- * Distinct from a `tiles-with-detail` tile entry: keeping invisibles
- * as their own variant prevents `if (entry.mode === "tiles-with-detail")`
- * checks from accidentally including invisible entities.
+ * Pass-through for an invisible entity so CPU cache eviction still sees
+ * it. Carries only its coarsest level, the one its cold-state entry
+ * lists. A separate variant keeps `mode === "tiles-with-detail"` checks
+ * from catching invisible entities.
  */
 export interface InvisibleEntry {
   kind: "invisible";
   entityId: string;
   imageId: string;
-  /** The entity's coarsest LOD (= `levels.length - 1`, or 0 if empty). */
+  /** The entity's coarsest level (= `levels.length - 1`, or 0 if empty). */
   coarsestLod: number;
 }
 
@@ -468,6 +355,4 @@ export interface MemberGroup {
   groupEntity: EntitySnapshot | null;
   /** All visible tile entities whose `parentId === groupId`. */
   tiles: EntitySnapshot[];
-  /** Max projectedDiagonalPx across group + tiles. */
-  projectedDiagonalPx: number;
 }

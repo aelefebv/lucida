@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import "./FpsCounter.css";
 
 const UPDATE_INTERVAL_MS = 100;
 
@@ -29,21 +30,7 @@ export function FpsCounter() {
   }, []);
 
   return (
-    <div
-      style={{
-        position: "absolute",
-        top: 8,
-        right: 8,
-        zIndex: 10,
-        background: "rgba(0, 0, 0, 0.5)",
-        color: "white",
-        fontFamily: "monospace",
-        fontSize: 12,
-        padding: "2px 6px",
-        borderRadius: 4,
-        pointerEvents: "none",
-      }}
-    >
+    <div className="lc-fps">
       {fps} FPS
     </div>
   );

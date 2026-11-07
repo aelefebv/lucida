@@ -1,5 +1,5 @@
 /**
- * Trace model types — the vocabulary of ADR 0047 and ADR 0051, and the
+ * Trace model types: the vocabulary of ADR 0047 and ADR 0051, and the
  * shape of the document the trace seam returns.
  *
  * `CONTEXT.md` is the glossary: a *trace* is the artifact, a *phase* is a
@@ -9,23 +9,21 @@
  */
 
 import type { FetchErrorKind } from "../pipeline/fetch/retry.ts";
-import type { ChunkFeedbackReason } from "../renderer/workerProtocol.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
+import type { ChunkFeedbackReason, LevelRange } from "../renderer/workerProtocol.ts";
 
 /**
  * Bumped whenever the document shape changes incompatibly. One integer for
- * the whole file (ADR 0047): traces outlive the code that wrote them, and a
- * file from two releases ago should either load or fail clearly.
+ * the whole file: traces outlive the code that wrote them, and a file from
+ * two releases ago should either load or fail clearly.
  */
-export const TRACE_SCHEMA_VERSION = 1;
+export const TRACE_SCHEMA_VERSION = 3;
 
 /**
- * The closed browser phase enum. Fixed by the #921 spec rather than grown
- * ad hoc, because adding a phase widens every lifecycle row and spends from
- * a fixed budget.
- *
- * Every phase carries timings (#925). {@link TraceDocument.instrumentedPhases}
- * still states which ones were measured, so a reader never mistakes a
- * reserved slot for a measured zero.
+ * The closed browser phase enum. Closed rather than grown ad hoc, because
+ * adding a phase widens every lifecycle row and spends from a fixed budget.
+ * {@link TraceDocument.instrumentedPhases} states which phases were
+ * measured, so a reader never mistakes a reserved slot for a measured zero.
  *
  * The boundaries are all main-thread observations. No worker timestamps
  * itself and no clock is reconciled across contexts, so each phase is
@@ -33,11 +31,10 @@ export const TRACE_SCHEMA_VERSION = 1;
  *
  * - `plan`   the tick's wanted-set computation, including its synchronous
  *            wasm calls, up to the moment the request was admitted to the
- *            scheduler. Not a separate timing source — the same recorder
- *            clock as every other phase.
+ *            scheduler, on the same recorder clock as every other phase.
  * - `queue`  admitted to the scheduler → fetch dispatched.
  * - `wire`   request sent → bytes in hand. The bracket server rows nest in.
- * - `decode` the worker ROUND TRIP: postMessage out → onmessage in. Named
+ * - `decode` the worker round trip: postMessage out → onmessage in. Named
  *            for the round trip, not for CPU time, because it includes the
  *            wait for a free worker and that is usually the larger half.
  * - `upload` bytes decoded → the chunk is on the GPU. Covers the wait in
@@ -53,9 +50,9 @@ export type Phase = (typeof PHASES)[number];
 
 /**
  * Boundaries, not intervals: a row carries one timestamp slot per phase
- * boundary (ADR 0047), so N phases need N+1 slots and phase `i` runs from
- * slot `i` to slot `i + 1`. Adjacent phases share the slot between them —
- * `wire` ends where `decode` begins.
+ * boundary, so N phases need N+1 slots and phase `i` runs from slot `i` to
+ * slot `i + 1`. Adjacent phases share the slot between them: `wire` ends
+ * where `decode` begins.
  */
 export const BOUNDARY_COUNT = PHASES.length + 1;
 
@@ -83,7 +80,7 @@ const MAX_STAMP = UNSET_STAMP - 1;
  * Clamp a microsecond offset into the uint32 slot range.
  *
  * `Math.trunc`, not `| 0`: bitwise coercion is signed, so an offset past
- * 2^31 — a run over about 36 minutes — would come back negative. Harmless
+ * 2^31, a run over about 36 minutes, would come back negative. Harmless
  * inside a `Uint32Array`, but a run's duration is a plain number.
  */
 export function clampStamp(offsetUs: number): number {
@@ -93,30 +90,22 @@ export function clampStamp(offsetUs: number): number {
 
 /**
  * How a row's life ended. A stamp array alone cannot tell "never entered the
- * next phase" from "entered and never left" (#892), and drawing those alike
- * turns a healthy phase into a false slab — so the distinction is a column,
- * not an inference.
+ * next phase" from "entered and never left", and drawing those alike turns
+ * a healthy phase into a false slab, so the distinction is a column, not an
+ * inference.
  */
 export const RowOutcome = {
   /** Still open when the run closed. */
   InFlight: 0,
   /** Reached its last instrumented boundary. */
   Complete: 1,
-  /** Abandoned — aborted, superseded, or failed. */
+  /** Abandoned: aborted, superseded, or failed. */
   Retired: 2,
 } as const;
 export type RowOutcomeValue = (typeof RowOutcome)[keyof typeof RowOutcome];
 export type RowOutcomeName = "in-flight" | "complete" | "retired";
 
 export const ROW_OUTCOME_NAMES: readonly RowOutcomeName[] = ["in-flight", "complete", "retired"];
-
-/**
- * Row identity carries the residency tier because `chunkKey` alone is not
- * unique: the same key legitimately exists twice under the two tiers, which
- * have separate budgets and separate eviction (ADR 0039, ADR 0041).
- */
-export type ResidencyTierName = "detail" | "coarse";
-export const RESIDENCY_TIER_NAMES: readonly ResidencyTierName[] = ["detail", "coarse"];
 
 /**
  * Which lane a request travelled on. An attribute of the row, not a phase of
@@ -137,9 +126,8 @@ export const LANE_NAMES: readonly LaneName[] = [
 
 /**
  * Declared here rather than imported from the planner, so a lane added there
- * and not here fails to compile at the emit site. The alternative — a runtime
- * sentinel for an unrecognised lane — turns the drift into a column of nulls
- * nobody reads until they wonder where a lane went.
+ * and not here fails to compile at the emit site. A runtime sentinel for an
+ * unrecognised lane would turn the drift into a column of nulls nobody reads.
  */
 export function laneIndex(lane: LaneName): number {
   return LANE_NAMES.indexOf(lane);
@@ -164,9 +152,16 @@ export interface ChunkRowSource {
 }
 
 /**
- * Why a run opened. Drawn from the vocabulary the code already has (ADR
- * 0047) rather than a new one: `epoch` is a scene epoch-diff cause, and
+ * Why a run opened. Drawn from the vocabulary the code already has rather
+ * than a new one: `epoch` is a scene epoch-diff cause, and
  * `dirtyKind` / `source` are the render loop's typed dirty-set attribution.
+ *
+ * Two families share the shape. A dataset-open run carries a `content`
+ * epoch and the emit site's name as its source. An interaction run carries
+ * the epoch the input moves, `view` for the camera or `selection` for the
+ * selectors, and the input itself as its source, one of {@link INPUT_KINDS}.
+ * The epoch says what kind of change it was, and the source says which
+ * input made it.
  */
 export interface RunCause {
   epoch: "content" | "layout" | "view" | "selection" | "asset" | null;
@@ -175,7 +170,51 @@ export interface RunCause {
 }
 
 /**
- * Why a run closed. Required on every run — a run that never settled is still
+ * The inputs that open an interaction run. A closed set, so a run's label is
+ * comparable across runs and across machines. Two orbits are two orbits.
+ *
+ * Pan, zoom and orbit move the camera and so bump the `view` epoch. Scrub
+ * moves a selector along an axis, and select shows or hides a channel, a
+ * dataset, or a label; both bump the `selection` epoch.
+ */
+export const INPUT_KINDS = ["pan", "zoom", "orbit", "scrub", "select"] as const;
+export type InputKind = (typeof INPUT_KINDS)[number];
+
+export function interactionCause(input: InputKind): RunCause {
+  return {
+    epoch: input === "scrub" || input === "select" ? "selection" : "view",
+    dirtyKind: "interactive",
+    source: input,
+  };
+}
+
+/**
+ * Whether a cause is one {@link interactionCause} produced: an epoch an
+ * input moves, an interactive dirty, and one of the five inputs as its
+ * source. All three, so a synthetic view-epoch cause with a residency dirty
+ * kind is not judged as a gesture. The ruleset's frame-time ceiling reads
+ * this.
+ */
+export function isInteractionCause(cause: RunCause | null): boolean {
+  return (
+    cause !== null &&
+    (cause.epoch === "view" || cause.epoch === "selection") &&
+    cause.dirtyKind === "interactive" &&
+    (INPUT_KINDS as readonly string[]).includes(cause.source)
+  );
+}
+
+/**
+ * Whether a cause is a dataset open's: a content epoch, whichever emit site
+ * named it. The ruleset's first-paint rule reads this, as the frame-time
+ * ceiling reads {@link isInteractionCause}.
+ */
+export function isDatasetOpenCause(cause: RunCause | null): boolean {
+  return cause !== null && cause.epoch === "content";
+}
+
+/**
+ * Why a run closed. Required on every run: a run that never settled is still
  * a run.
  *
  * The last two belong to the unlabelled steady-state interval alone.
@@ -214,20 +253,39 @@ export interface BuildIdentity {
   dev: boolean;
 }
 
+/**
+ * The adapter the page renders on. Two runs from different machines are
+ * visibly not comparable only if the header names the hardware, and a slow
+ * orbit on a software adapter is a machine problem rather than a shader
+ * problem only if the header says which kind of adapter this was.
+ */
 export interface GpuIdentity {
   vendor: string;
   architecture: string;
   device: string;
   description: string;
+  /**
+   * True when the adapter is a software fallback rather than a hardware
+   * adapter, false when it is hardware, and null when the browser reported
+   * neither, so a browser that says nothing is recorded as saying nothing
+   * rather than as hardware.
+   */
+  fallback: boolean | null;
+  /**
+   * True when the adapter offers timestamp queries, which is what lets the
+   * render worker read a GPU pass time back per frame. When false, no
+   * reading carries {@link TraceReading.gpuPassUs} and every surface labels
+   * frame time as main-thread time.
+   */
+  timestampQueries: boolean;
 }
 
 /**
  * What the pipeline has left to do, from the CPU cache's point of view.
  * One shape with two readings: live, it is the cache's half of the
  * quiescence predicate; captured at run close, it is what was still
- * outstanding at settle. Reported rather than hidden — prefetch is excluded
- * from the predicate, so a run can close with speculative work in flight and
- * the reader has to be able to see that.
+ * outstanding at settle. Prefetch is excluded from the predicate, so a run
+ * can close with speculative work in flight, and the reader has to see it.
  */
 export interface Outstanding {
   /** Non-speculative work only; the speculative remainder is counted below. */
@@ -239,17 +297,28 @@ export interface Outstanding {
   residentDetailChunks: number;
   desiredCoarseChunks: number;
   residentCoarseChunks: number;
+  /**
+   * Each tier's resident bytes, and the budget eviction holds it under. The
+   * budget is the store's live figure, which the elastic split can raise
+   * above the configured one while the other tier has no demand. A tier
+   * near its budget that wants more chunks than it holds, with nothing
+   * pending or in flight, has stopped asking because the rest cannot fit,
+   * which is the budget-bound reading the steady-state ruleset names.
+   */
+  detailBytes: number;
+  detailBudgetBytes: number;
+  coarseBytes: number;
+  coarseBudgetBytes: number;
 }
 
 /**
- * The conditions a run happened under. Recorded so two runs are comparable
- * — or visibly not. A header that omits device pixel ratio does not stop
- * anyone comparing two runs at different DPR; it only stops them noticing.
+ * The conditions a run happened under, recorded so two runs are comparable
+ * or visibly not.
  *
  * Captured when the run closes, not when it opens: a run opens before the
  * canvas has been sized and before a collection's members have all arrived,
  * so an at-open reading describes a page that does not exist yet. Cache
- * warmth is the exception and is read at open — warmth means what was
+ * warmth is the exception and is read at open, because warmth means what was
  * already there.
  */
 export interface RunConditions {
@@ -262,11 +331,9 @@ export interface RunConditions {
 /**
  * What a run stopped recording, and how much it went on to miss.
  *
- * A boolean would be the cheap version and the useless one. A truncated run
- * stops storing rows but keeps counting them, which turns "truncated at
- * 18,000 rows" into "truncated at 18,000 of an eventual 63,412" — the
- * difference between a trace nobody can trust and a trace that states it
- * covered the first 28% of the run (ADR 0049).
+ * A truncated run stops storing rows but keeps counting them, so the trace
+ * can say "truncated at 18,000 of an eventual 63,412" rather than only
+ * "truncated".
  */
 export interface TruncationRecord {
   /** One rung, one reason. There is no sampling or coarsening rung to name. */
@@ -281,7 +348,7 @@ export interface TruncationRecord {
   rowsUnrecorded: number;
   ticksUnrecorded: number;
   eventsUnrecorded: number;
-  /** Server rows dropped after truncation — counted, so coverage is not overstated on one side only. */
+  /** Server rows dropped after truncation. Counted, so coverage is not overstated on one side only. */
   serverRowsUnrecorded: number;
 }
 
@@ -289,7 +356,7 @@ export interface TruncationRecord {
  * One socket the interval was recorded over.
  *
  * A run is a client-side interval that can outlive a socket, and the
- * correlation label restarts at zero on every new connection (ADR 0048) — so
+ * correlation label restarts at zero on every new connection (ADR 0048), so
  * one run can hold two `rid: 0` rows meaning different requests. The
  * generation is what disambiguates them, and this is where a reader learns
  * which generations a run spanned rather than inferring the set by scanning
@@ -313,7 +380,7 @@ export interface ConnectionRecord {
   /**
    * How long the browser had no socket at all before this connection opened,
    * or null when no outage preceded it. Measured from the actual disconnect,
-   * which may predate the interval — the outage is a fact about the page, not
+   * which may predate the interval: the outage is a fact about the page, not
    * about the interval that happens to be reading it.
    */
   gapUs: number | null;
@@ -328,7 +395,7 @@ export interface RunHeader extends RunConditions {
   runId: string;
   /**
    * Why the run opened, or null for the unlabelled steady-state interval
-   * between runs. Same object, differing only by label (ADR 0047).
+   * between runs. Same object, differing only by label.
    */
   cause: RunCause | null;
   endReason: EndReason;
@@ -352,10 +419,9 @@ export interface RunHeader extends RunConditions {
 }
 
 /**
- * Phases that sit below the platform's 100 µs clock floor — cache admission,
- * worker dispatch, coalesce attach. Timing them would show quantisation noise
- * wearing the costume of data, so they are counted per tick instead and never
- * appear on a lifecycle row.
+ * Phases that sit below the platform's 100 µs clock floor. Timing them would
+ * only record quantisation noise, so they are counted per tick instead and
+ * never appear on a lifecycle row.
  */
 export const COUNTED_PHASES = ["cache-admission", "worker-dispatch", "coalesce-attach"] as const;
 export type CountedPhase = (typeof COUNTED_PHASES)[number];
@@ -370,13 +436,8 @@ export type CountedPhaseIndexValue = (typeof CountedPhaseIndex)[keyof typeof Cou
 /**
  * The per-tick aggregate columns. A closed enum for the same reason the phase
  * inventory is closed: every name here widens a fixed-width tick sample.
- *
- * These are the shapes the debug panel used to carry — lane counts, the
- * culling funnel, active-set tallies — now recorded with a timestamp instead
- * of being polled off a flat sink, and recorded whether or not anybody is
- * looking. The panel they came from is gone (ADR 0052); this is where the
- * counts live. Per-level planned / cached / in-flight is variable-length and rides
- * in its own slots rather than here.
+ * Per-level planned / cached / in-flight is variable-length and rides in its
+ * own slots rather than here.
  */
 export const TICK_COUNTER_NAMES = [
   "laneMinimap",
@@ -427,20 +488,82 @@ export const TickCounter = {
 } as const;
 
 /**
+ * The closed set of client message types the send side is accounted under.
+ *
+ * Every message the page transmits over the session socket counts against
+ * exactly one of these, by messages and by bytes, so the outbound half of
+ * what an operating system's network monitor shows has a name in the trace.
+ * Closed for the same reason the phase inventory is: every type
+ * widens the fixed-width tick sample. The six named wire types are the ones
+ * a viewer sends continuously. `command` covers every document command.
+ * `other` is the remainder: snapshot requests, dataset opens, health and
+ * retry requests, follow and steer, which are once-per-interaction messages
+ * rather than a traffic pattern, and any message whose type this build does
+ * not name.
+ *
+ * One table carries the whole set: the name the document uses, the wire
+ * `type` the bridge classifies on, null for the remainder, and the label a
+ * reader sees. Index order is the column order of the tick sample and must
+ * not be reordered.
+ */
+export const CLIENT_MESSAGES = [
+  { type: "chunkRequest", wire: "chunk_request", label: "chunk request" },
+  { type: "assetRequest", wire: "asset_request", label: "asset request" },
+  { type: "viewerInterest", wire: "viewer_interest", label: "viewer interest" },
+  { type: "presence", wire: "presence", label: "presence" },
+  { type: "datasetPresence", wire: "dataset_presence", label: "dataset presence" },
+  { type: "cursor", wire: "cursor", label: "cursor" },
+  { type: "command", wire: "command", label: "command" },
+  { type: "other", wire: null, label: "other" },
+] as const;
+export type ClientMessageType = (typeof CLIENT_MESSAGES)[number]["type"];
+
+/** The names alone, in column order. */
+export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = CLIENT_MESSAGES.map(
+  (message) => message.type,
+);
+
+/** Indices derived from the names, as {@link TickCounter} derives its own. */
+export const ClientMessageTypeIndex = {
+  ChunkRequest: CLIENT_MESSAGE_TYPES.indexOf("chunkRequest"),
+  AssetRequest: CLIENT_MESSAGE_TYPES.indexOf("assetRequest"),
+  ViewerInterest: CLIENT_MESSAGE_TYPES.indexOf("viewerInterest"),
+  Presence: CLIENT_MESSAGE_TYPES.indexOf("presence"),
+  DatasetPresence: CLIENT_MESSAGE_TYPES.indexOf("datasetPresence"),
+  Cursor: CLIENT_MESSAGE_TYPES.indexOf("cursor"),
+  Command: CLIENT_MESSAGE_TYPES.indexOf("command"),
+  Other: CLIENT_MESSAGE_TYPES.indexOf("other"),
+} as const;
+export type ClientMessageTypeIndexValue =
+  (typeof ClientMessageTypeIndex)[keyof typeof ClientMessageTypeIndex];
+
+/** Two columns per client message type: messages, then bytes. */
+export const SEND_COLUMNS = 2;
+
+/** How much the client sent under one message type. */
+export interface SendTally {
+  messages: number;
+  /**
+   * The UTF-8 length of the messages' payloads: the per-message size a
+   * network monitor shows. This does not count the socket's own framing bytes.
+   */
+  bytes: number;
+}
+
+/** One tally per client message type, every type present, zeros included. */
+export type SendTallies = Record<ClientMessageType, SendTally>;
+
+/**
  * The process-wide readings, sampled once per tick.
  *
  * A counter is what happened over an interval; a reading is what was true at an
  * instant, which is why these are their own tier rather than more
- * {@link TICK_COUNTER_NAMES}. They are the four series a timeline reader asks
- * for first — how deep is the queue, how much is out, how long is a frame
- * taking, how much is resident.
+ * {@link TICK_COUNTER_NAMES}.
  *
- * **Tick cadence, not planning cadence.** A tick sample is published per
- * planning pass, and planning passes cluster at the start of a run: the
- * planner's epoch cache means a run can fetch for seconds without re-planning
- * once. Readings carried on those samples came out as one cluster in
- * the first few milliseconds — technically a series, useless as one. These
- * ride the tick instead, which is also the only moment they can change.
+ * Sampled per tick, not per planning pass. Planning passes cluster at the
+ * start of a run, because the planner's epoch cache lets a run fetch for
+ * seconds without re-planning, so readings on tick samples would bunch into
+ * the first few milliseconds. The tick is also the only moment they change.
  *
  * Held as doubles: resident bytes outgrow a uint32 and a frame time is
  * fractional.
@@ -448,10 +571,7 @@ export const TickCounter = {
 export const READING_NAMES = ["queueDepth", "inFlight", "frameTimeUs", "residentBytes"] as const;
 export type ReadingName = (typeof READING_NAMES)[number];
 
-/**
- * Column indices, derived from the names rather than written beside them —
- * two lists in the same order with nothing checking that they are.
- */
+/** Column indices, derived from the names as {@link TickCounter}'s are. */
 export const ReadingColumn = {
   QueueDepth: READING_NAMES.indexOf("queueDepth"),
   InFlight: READING_NAMES.indexOf("inFlight"),
@@ -459,10 +579,23 @@ export const ReadingColumn = {
   ResidentBytes: READING_NAMES.indexOf("residentBytes"),
 } as const;
 
-/** One reading. */
 export interface TraceReading extends Record<ReadingName, number> {
   /** Microseconds from run start. */
   atUs: number;
+  /**
+   * The GPU pass time of the most recent viewport frame whose timestamps
+   * were read back since the previous reading, in microseconds on the GPU's
+   * own clock: from the start of the frame's first render pass to the end of
+   * its last. Measured on the device through timestamp queries, so it is
+   * render cost rather than an inference from the main thread.
+   *
+   * Absent, never zero, when there is nothing to say: the adapter offers no
+   * timestamp queries ({@link GpuIdentity.timestampQueries}), the tick drew
+   * no frame, or the frame's read-back had not landed when the tick ended.
+   * It lags {@link READING_NAMES}'s `frameTimeUs` by a frame, because the
+   * read-back is asynchronous and the reading is taken at tick end.
+   */
+  gpuPassUs?: number;
 }
 
 /**
@@ -493,16 +626,16 @@ export interface PhaseTiming {
 export interface WireLabel {
   rid: number;
   /**
-   * Connections count from 1, so **generation 0 means no wire request** —
-   * the transport had no socket, the message was dropped before it was
-   * sent, and there is nothing on the server to join to. That is what makes
+   * Connections count from 1, so generation 0 means no wire request: the
+   * transport had no socket, the message was dropped before it was sent,
+   * and there is nothing on the server to join to. That is what makes
    * {@link UNLABELLED} distinguishable from a genuine `rid: 0`, which every
    * connection's first request legitimately has.
    */
   connectionGeneration: number;
 }
 
-/** No wire request was sent for this row — see {@link WireLabel.connectionGeneration}. */
+/** No wire request was sent for this row. See {@link WireLabel.connectionGeneration}. */
 export const UNLABELLED: WireLabel = { rid: 0, connectionGeneration: 0 };
 
 /**
@@ -527,7 +660,7 @@ export const SERVER_ROW_FAMILIES: readonly ServerRowFamily[] = [
  *
  * A `coalesced-wait` row waited on another reader's in-flight read and
  * performed no round trip of its own, so counting round trips means
- * counting `backend-read` rows — reading the whole family as trips would
+ * counting `backend-read` rows. Reading the whole family as trips would
  * report an open making thousands where it made hundreds.
  */
 export type MetadataReadPhase = "cache-hit" | "coalesced-wait" | "backend-read";
@@ -539,10 +672,9 @@ export const METADATA_READ_PHASES: readonly MetadataReadPhase[] = [
 
 /**
  * The server's phase enum, wider than the browser's because its clock is
- * finer: ADR 0047's 100 µs floor was a browser-platform measurement (#897)
- * and Rust's `Instant` has no such floor, so the rule is clock-relative.
- * Comparing a server phase against a browser phase by resolution is a
- * category error.
+ * finer: the 100 µs floor is a browser-platform limit and Rust's `Instant`
+ * has no such floor. Comparing a server phase against a browser phase by
+ * resolution is a category error.
  *
  * - `arrival`         frame off the socket → the request is recognised.
  * - `binding-lookup`  resolving the dataset binding, behind the shared
@@ -602,7 +734,7 @@ export const SERVER_PHASE_WIRE_KEY: Record<ServerPhase, string> = {
 /**
  * A phase the request never entered. Durations are microseconds in a
  * uint32 and zero is a legitimate duration, so the sentinel is the top of
- * the range — the same choice {@link UNSET_STAMP} makes for boundaries.
+ * the range, as {@link UNSET_STAMP} is for boundaries.
  */
 export const PHASE_UNSET = 0xffffffff;
 
@@ -633,7 +765,7 @@ export const SERVER_ROW_OUTCOMES: readonly ServerRowOutcome[] = [
  *
  * The server's own clock is never trusted. The browser stamped the send and
  * the receipt of this label, the server's work is strictly nested inside
- * that bracket, and the placement is derived from those two facts alone — so
+ * that bracket, and the placement is derived from those two facts alone, so
  * clock skew cannot produce a wrong picture.
  */
 export interface ServerPlacement {
@@ -642,8 +774,7 @@ export interface ServerPlacement {
   endUs: number;
   /**
    * The unattributed remainder of the bracket: network plus socket queue.
-   * Named rather than absorbed — a confidently-wrong merged timeline is a
-   * failure, not a win.
+   * Named rather than absorbed into the server span.
    *
    * The gap is measured; where inside the bracket it falls is not. The span
    * is centred, which splits the gap evenly between the outbound and inbound
@@ -655,21 +786,21 @@ export interface ServerPlacement {
    * How far the server's own numbers exceeded the browser's bracket, in
    * microseconds. Non-zero means the two clocks disagree; the span is
    * clamped to the bracket, because the bracket is the one measured on a
-   * single clock. Reported as a size rather than a flag — a disagreement
-   * of 3 µs and one of 3 s are not the same news.
+   * single clock. Reported as a size rather than a flag, because a
+   * disagreement of 3 µs and one of 3 s are not the same news.
    */
   overshootUs: number;
 }
 
 /** Why a server row could not be placed on the browser's timeline. */
 export type UnplacedReason =
-  /** No browser row carries this label — the request predates the run, or its row was dropped. */
+  /** No browser row carries this label: the request predates the run, or its row was dropped. */
   | "no-browser-row"
   /** The bracket never closed and never will: the server answered without bytes. */
   | "answered-without-delivery"
   /** The bracket is still open for another reason; the row is not evidence of a server stall. */
   | "bracket-open"
-  /** A metadata read whose open this run never saw sent — the open predates the run. */
+  /** A metadata read whose open this run never saw sent: the open predates the run. */
   | "no-open-bracket";
 
 /**
@@ -684,7 +815,7 @@ export interface DatasetOpenBracket {
   requestId: string;
   /** Microseconds from run start. */
   startUs: number;
-  /** Null while the open has not settled — a run can close over an open one. */
+  /** Null while the open has not settled: a run can close over an open one. */
   endUs: number | null;
 }
 
@@ -709,9 +840,19 @@ export interface TraceServerRow extends WireLabel {
    * a group-by over it.
    *
    * Labels are per connection, so a leader on another connection joins to
-   * nothing here — which is also why this carries no peer identity.
+   * nothing here, which is also why this carries no peer identity.
    */
   coalescedOnto: number | null;
+  /**
+   * The bytes this row's own backend round trips returned, and null when it
+   * performed none. It travels with `backend-read` and obeys its rule: a
+   * follower carries neither, so a sum over the column is the bytes the
+   * backend moved. An inner chunk read out of a shard reports the range it
+   * asked for, or every range a merged read carried, plus the shard's index
+   * when that read was this row's too, which is how a trace shows a shard
+   * read by the inner chunk and never downloaded whole.
+   */
+  backendBytes: number | null;
   /**
    * On a `metadata-read` row, the open's arrival → the start of that read,
    * which is what lets the reads be laid out across the open instead of
@@ -735,7 +876,12 @@ export interface TraceRow extends WireLabel {
   imageId: string;
   /** An attribute, not a phase. */
   lane: LaneName;
-  residencyTier: ResidencyTierName;
+  /**
+   * Part of the row's identity. The same chunk key legitimately exists
+   * under both tiers, which have separate budgets and separate eviction, so
+   * the key alone is not unique.
+   */
+  residencyTier: ResidencyTier;
   level: number;
   t: number;
   c: number;
@@ -744,18 +890,37 @@ export interface TraceRow extends WireLabel {
   x: number;
   /** Canonical `"level/t/c/z/y/x"`, rebuilt from the columns. */
   chunkKey: string;
+  /**
+   * The payload bytes the wire delivered for this row, recorded where `wire`
+   * closes, and zero until then. The "reading" half of what an operating
+   * system's network monitor shows, per chunk. Rows that coalesced onto one
+   * request each carry that request's bytes, so a sum over the wire counts
+   * a label once rather than a row once.
+   */
+  bytes: number;
   outcome: RowOutcomeName;
   phases: Partial<Record<Phase, PhaseTiming>>;
 }
 
 /**
- * The four rare things worth a point in time rather than a column: a chunk
+ * The five rare things worth a point in time rather than a column: a chunk
  * left the cache, the renderer refused one, a fetch was retried, a fetch gave
- * up. Nobody has caught the last three happening — #899 observed zero retries
- * and zero real failures across 3,781 remote reads — so they share one shape
- * and their diagnostic value is simply that they appear at all.
+ * up, a dataset's target level moved. The middle three are rare enough that
+ * they share one shape, and their diagnostic value is that they appear at
+ * all.
+ *
+ * `level-change` is the one that is not about a chunk. The target level
+ * follows the screen (ADR 0061), so a zoom moves the whole wanted set to
+ * another level at one instant, and a stall that begins there is explained by
+ * it. It names the dataset and the old and new level; see {@link LevelChange}.
  */
-export const POINT_EVENT_KINDS = ["eviction", "rejection", "retry", "failure"] as const;
+export const POINT_EVENT_KINDS = [
+  "eviction",
+  "rejection",
+  "retry",
+  "failure",
+  "level-change",
+] as const;
 export type PointEventKind = (typeof POINT_EVENT_KINDS)[number];
 
 export const PointEvent = {
@@ -763,13 +928,14 @@ export const PointEvent = {
   Rejection: 1,
   Retry: 2,
   Failure: 3,
+  LevelChange: 4,
 } as const;
 export type PointEventIndex = (typeof PointEvent)[keyof typeof PointEvent];
 
 /**
- * Reason codes are borrowed whole from the two taxonomies the pipeline
- * already has — the typed fetch error kinds and the renderer's chunk feedback
- * reasons — so a trace and a log line name the same failure the same way. The
+ * Reason codes are borrowed whole from the typed fetch error kinds and the
+ * renderer's chunk feedback reasons, so a trace and a log line name the same
+ * failure the same way. The
  * `satisfies` clauses below make this a checked borrowing rather than a copy
  * that drifts; the two assignments underneath fail to compile if either
  * taxonomy grows a member this list has not picked up.
@@ -792,9 +958,19 @@ const CHUNK_FEEDBACK_REASONS = [
   "atlas-policy",
 ] as const satisfies readonly ChunkFeedbackReason[];
 
+/**
+ * Why a target level moved: the screen chose another level, or the dataset's
+ * level pin did. The pin is the one input to the target that is not the
+ * camera, so this is the whole vocabulary. Memory pressure never
+ * changes the target and so never needs a code here.
+ */
+const LEVEL_CHANGE_REASONS = ["screen", "pin"] as const;
+export type LevelChangeReason = (typeof LEVEL_CHANGE_REASONS)[number];
+
 export const POINT_EVENT_REASONS = [
   ...FETCH_ERROR_REASONS,
   ...CHUNK_FEEDBACK_REASONS,
+  ...LEVEL_CHANGE_REASONS,
 ] as const;
 export type PointEventReason = (typeof POINT_EVENT_REASONS)[number];
 
@@ -804,7 +980,7 @@ void _coversFetchErrors;
 void _coversChunkFeedback;
 
 /**
- * The identity a point event copies off whatever it happened to — a planned
+ * The identity a point event copies off whatever it happened to: a planned
  * request or a resident cache entry. `datasetId` is optional because a cache
  * entry is keyed by entity and does not carry one; the remaining fields are a
  * structural subset of both, so an emit site passes the object it already
@@ -820,6 +996,26 @@ export interface ChunkEventSource {
   z: number;
   y: number;
   x: number;
+}
+
+/**
+ * What a `level-change` event names: the dataset whose target level moved,
+ * and from where to where.
+ *
+ * A range, not one level, because a dataset is the unit the per-tick
+ * aggregate samples and a collection's visible tiles can straddle a level
+ * boundary while a zoom is in progress. A single image reads `min === max`
+ * on both sides. The event is per dataset rather than per entity for the
+ * same reason the aggregate is: a 216-member collection crossing one
+ * boundary is one thing that happened, not 216. The flip side is that on a
+ * collection a pan that scrolls in a tile held at another level also moves
+ * the range and files an event; the plan's level set did change, and the
+ * requests that follow are at the new level, so the attribution still holds.
+ */
+export interface LevelChange {
+  datasetId: string;
+  from: LevelRange;
+  to: LevelRange;
 }
 
 /**
@@ -850,10 +1046,58 @@ export interface TraceTick {
    * across samples for a run total; do not read one sample as a dataset's own.
    */
   counted: Record<CountedPhase, number>;
+  /**
+   * What the client sent over the session socket since the previous sample,
+   * by message type. Process-wide like {@link counted}: the socket belongs to
+   * the page, not to whichever dataset's sample publishes the interval, so
+   * read no sample as a dataset's own.
+   *
+   * The sends ride this sample, on the planning cadence, rather than the
+   * reading tier on the tick cadence, because the monitor spec puts them on
+   * the per-tick aggregate table. The samples in order are the series, and a
+   * stretch that sends without re-planning lands on the next sample or on
+   * none. That is why {@link TraceRun.sent} carries the interval's total.
+   */
+  sent: SendTallies;
   /** Only levels with a non-zero column; a level absent here had nothing on it. */
   levels: TraceTickLevel[];
   /** Levels past {@link TICK_LEVEL_SLOTS} that this sample could not carry. */
   levelsDropped: number;
+  /**
+   * The target level across the dataset's visible image-bearing entities on
+   * this planning pass, which is the level the `planned` counts above were
+   * emitted at. When none is in view it spans every such entity instead,
+   * the layer panel's fallback, so the two surfaces stay on the same
+   * numbers. A range because a collection's tiles can disagree near a
+   * boundary; `min === max` for a single image. Null only for a dataset with
+   * no image-bearing entity, which is not the same as level 0.
+   */
+  targetLevel: LevelRange | null;
+  /**
+   * True when {@link targetLevel} is the dataset's level pin rather than the
+   * screen's choice. The one fact that explains a target sitting still while
+   * the zoom moves.
+   */
+  levelPinned: boolean;
+  /**
+   * The finest and coarsest level on screen across those entities, as the
+   * render worker last reported before this pass. Null while no visible
+   * position has any resident level.
+   *
+   * The worker knows this and the planner does not, so it necessarily lags
+   * the target by one report. It is sampled here, on the planning cadence,
+   * because that is the cadence the aggregate has: a fill that arrives with
+   * no re-plan is captured on the next pass, not as it lands.
+   */
+  displayedLevel: LevelRange | null;
+  /**
+   * True when the only thing that woke the loop for this pass was a
+   * generated-availability update from the server: no input, no continuation,
+   * no delivery. A pass that re-plans on nothing but availability is one turn
+   * of the server and the client answering each other, and the steady-state
+   * ruleset counts those turns.
+   */
+  availabilityWoken: boolean;
 }
 
 /** One point event. Every kind shares this shape. */
@@ -862,12 +1106,12 @@ export interface TracePointEvent {
   atUs: number;
   kind: PointEventKind;
   reason: PointEventReason;
-  /** Null when the event is not about one chunk — a proxy asset eviction, say. */
+  /** Null when the event is not about one chunk, a proxy asset eviction, say. */
   chunk: {
     datasetId: string;
     entityId: string;
     imageId: string;
-    residencyTier: ResidencyTierName;
+    residencyTier: ResidencyTier;
     level: number;
     t: number;
     c: number;
@@ -876,6 +1120,8 @@ export interface TracePointEvent {
     x: number;
     chunkKey: string;
   } | null;
+  /** Set on a `level-change` event and null on every other kind. */
+  levelChange: LevelChange | null;
 }
 
 /**
@@ -936,7 +1182,7 @@ export interface CoverageLimit {
 
 /**
  * What the run measured and what it did not. On every run, including clean
- * ones — "no stall found" is only worth anything next to how much of the run
+ * ones: "no stall found" is only worth anything next to how much of the run
  * was actually instrumented.
  */
 export interface TraceCoverage {
@@ -971,6 +1217,15 @@ export interface TraceRun {
   ticks: TraceTick[];
   /** Tick samples the ring dropped, so a wrapped ring is visible rather than inferred. */
   ticksDropped: number;
+  /**
+   * Everything the client sent during this interval, by message type,
+   * counted at the moment of each send. The tick samples carry the same
+   * counts as a series, but a sample is published only by a planning pass:
+   * sends after the last pass ride no sample, and a wrapped ring drops the
+   * oldest ones. These totals miss neither, so read a rate for the interval
+   * from here and never sum it off the ticks.
+   */
+  sent: SendTallies;
   /** Readings, oldest-first, one per tick. Also a drop-oldest ring. */
   readings: TraceReading[];
   /** Readings the ring dropped. */
@@ -988,8 +1243,8 @@ export interface TraceRun {
   /**
    * The dataset opens this run issued, as the browser bracketed them. The
    * metadata-read rows nest inside these, and an open still in flight at
-   * run close carries a null end rather than being dropped — an open that
-   * never settled is the most diagnostic one there is.
+   * run close carries a null end rather than being dropped, because an open
+   * that never settled is the most diagnostic one there is.
    */
   datasetOpens: DatasetOpenBracket[];
   /**
@@ -1007,7 +1262,7 @@ export interface TraceRun {
   /**
    * Server rows this side refused: they named a label this interval never
    * minted, or an open it never bracketed, so nothing here could ever place
-   * them. Counted rather than stored — an orphan row is not a diagnostic, and
+   * them. Counted rather than stored: an orphan row is not a diagnostic, and
    * keeping it would spend the budget truncation exists to protect.
    */
   serverRowsDiscarded: number;
@@ -1056,8 +1311,8 @@ export interface TraceDocument {
   /**
    * The unlabelled intervals between runs, chronological. Recording is
    * continuous, so steady state is retained under the same cap rather than
-   * thrown away — the pan that preceded a stall is often the thing that
-   * explains it. Same shape as a run; its header carries a null cause.
+   * thrown away: the pan that preceded a stall often explains it. Same shape
+   * as a run; its header carries a null cause.
    *
    * Kept in its own array rather than mixed into {@link runs} so that a
    * reader looking for a run cannot accidentally analyse an interval that has
@@ -1065,7 +1320,7 @@ export interface TraceDocument {
    */
   steadyState: TraceRun[];
   /**
-   * Rows the recorder saw with no interval to put them in — before the page
+   * Rows the recorder saw with no interval to put them in: before the page
    * registered an environment, or after it withdrew one. A run whose
    * conditions cannot be recorded is not a comparable artifact, so these are
    * counted rather than kept.
@@ -1078,3 +1333,45 @@ export interface TraceDocument {
    */
   serverRowsOutsideRun: number;
 }
+
+/**
+ * The columns that name one chunk: the dataset, the entity, the level and
+ * the five coordinates. A structural subset of {@link ChunkRowSource} and of
+ * the overlay's cell, so either is passed as it is.
+ */
+export type ChunkCoordinates = Pick<
+  ChunkRowSource,
+  "datasetId" | "entityId" | "level" | "t" | "c" | "z" | "y" | "x"
+>;
+
+/** The chunk key a set of coordinates spells, as a lifecycle row carries it. */
+export function chunkKeyOf(chunk: ChunkCoordinates): string {
+  return `${chunk.level}/${chunk.t}/${chunk.c}/${chunk.z}/${chunk.y}/${chunk.x}`;
+}
+
+/** One row that carries a looked-up chunk, with its index in the interval's table. */
+export interface MatchedRow {
+  row: TraceRow;
+  index: number;
+}
+
+/**
+ * When every row of an interval was admitted to the queue and when it left,
+ * by row index, for the chunk lookup's rank count. Two accessors rather than
+ * an array of records, so the row table answers them from its stamps without
+ * allocating a record per row, and a serialised run answers them from two
+ * precomputed columns.
+ */
+export interface AdmissionColumns {
+  readonly length: number;
+  /** Run-relative microseconds the row was admitted, or {@link NEVER_ADMITTED}. */
+  admittedUs(index: number): number;
+  /** Run-relative microseconds the row dispatched, or {@link NOT_DISPATCHED} while it has not. */
+  dispatchedUs(index: number): number;
+}
+
+/** The admission column's value for a row that never entered the queue. */
+export const NEVER_ADMITTED = -1;
+
+/** The dispatch column's value for a row still in the queue: later than any stamp. */
+export const NOT_DISPATCHED = Number.POSITIVE_INFINITY;

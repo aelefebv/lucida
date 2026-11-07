@@ -1,20 +1,16 @@
 /**
- * Debug logging registry. Single source of truth for enabled categories,
- * persisted in `localStorage.debug` as a comma-separated list (or `*` for
- * all). See `wiki/decisions/0012-logging-conventions.md`.
+ * Debug logging registry: the enabled categories, persisted in
+ * `localStorage.debug` as a comma-separated list or `*` (see
+ * docs/adr/0012-logging-conventions.md). There is no UI; set
+ * `localStorage.debug = 'bridge,cache'` and reload.
  *
- * There is no UI over the categories: `localStorage.debug = 'bridge,cache'`
- * plus a reload is the interface (ADR 0012, as amended by ADR 0052).
- *
- * The persisted set is read ONCE at module init and cached in
- * `enabledCategories`; the per-call gate (`isDebugEnabled`) sits on hot
- * paths — every `bridgeLog`, cache/upload telemetry event, and render-loop
- * dirty log routes through it — so it must never do a synchronous
- * `localStorage` read per call. The cache stays current through the
- * window `storage` event (writes from other tabs). A same-tab write
- * (DevTools console) doesn't fire `storage` in the writing tab; call
- * `refreshDebugCategories()` afterwards, or reload.
+ * The set is read once at module init. `isDebugEnabled` sits on hot paths, so
+ * it must never read localStorage per call. Other tabs' writes arrive through
+ * the `storage` event; after a same-tab write, call `refreshDebugCategories()`
+ * or reload.
  */
+
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 
 export const DEBUG_CATEGORIES = ["bridge", "wasm", "render", "cache", "orch"] as const;
 export type DebugCategory = (typeof DEBUG_CATEGORIES)[number];
@@ -34,10 +30,8 @@ export function isDebugEnabled(category: DebugCategory): boolean {
 }
 
 /**
- * Re-read `localStorage.debug` into the cached set and notify listeners
- * (the WASM logger holds its own copy and needs the push). Wired to the
- * cross-tab `storage` event below; also the explicit refresh path after
- * an out-of-band same-tab write.
+ * Re-read `localStorage.debug` and notify listeners; the WASM logger holds its
+ * own copy and needs the push. Call after a same-tab write.
  */
 export function refreshDebugCategories(): void {
   enabledCategories = readEnabled();
@@ -51,11 +45,7 @@ export function getEnabledCategories(): DebugCategory[] {
 type ChangeListener = (enabled: DebugCategory[]) => void;
 const listeners = new Set<ChangeListener>();
 
-/**
- * Subscribe to category-change events. Used by consumers (like the WASM
- * module) that hold their own copy of the enabled set and need to be
- * pushed to when JS toggles a category.
- */
+/** For consumers, like the WASM module, that hold their own copy of the set. */
 export function onDebugCategoriesChanged(fn: ChangeListener): () => void {
   listeners.add(fn);
   return () => {
@@ -83,7 +73,16 @@ export function debugLog(category: DebugCategory, event: string, data: Record<st
 // listener), different semantics (no console output, no WASM push-down,
 // no `*` shorthand).
 
-export const DEBUG_OVERLAYS = ["groupModes", "chunkGrid", "chunkTier", "renderRadius", "cachedTier", "plannedRank"] as const;
+export const DEBUG_OVERLAYS = [
+  "groupModes",
+  "chunkGrid",
+  "chunkTier",
+  "renderRadius",
+  "cachedTier",
+  "plannedRank",
+  "phaseColor",
+  "churnTint",
+] as const;
 export type DebugOverlay = (typeof DEBUG_OVERLAYS)[number];
 
 const OVERLAY_LS_KEY = "debug.overlays";
@@ -132,16 +131,14 @@ export function onOverlaysChanged(fn: () => void): () => void {
   };
 }
 
-export type RenderRadiusPreviewTier = "detail" | "coarse";
-
-let renderRadiusPreviewTier: RenderRadiusPreviewTier | null = null;
+let renderRadiusPreviewTier: ResidencyTier | null = null;
 const renderRadiusPreviewListeners = new Set<() => void>();
 
-export function getRenderRadiusPreviewTier(): RenderRadiusPreviewTier | null {
+export function getRenderRadiusPreviewTier(): ResidencyTier | null {
   return renderRadiusPreviewTier;
 }
 
-export function setRenderRadiusPreviewTier(tier: RenderRadiusPreviewTier | null): void {
+export function setRenderRadiusPreviewTier(tier: ResidencyTier | null): void {
   if (renderRadiusPreviewTier === tier) return;
   renderRadiusPreviewTier = tier;
   for (const fn of renderRadiusPreviewListeners) fn();
@@ -154,10 +151,9 @@ export function onRenderRadiusPreviewChanged(fn: () => void): () => void {
   };
 }
 
-// Cross-tab refresh: `storage` fires in every OTHER tab when one tab
-// writes localStorage, so a toggle flipped in tab A reaches tab B's
-// cached gates (and, via the listeners, the WASM logger's copy) without
-// reintroducing per-call reads. `key === null` is a full-storage clear.
+// `storage` fires in every other tab when one tab writes localStorage, so a
+// toggle reaches other tabs' cached gates, and the WASM logger's copy, without
+// per-call reads. `key === null` is a full-storage clear.
 if (typeof window !== "undefined") {
   window.addEventListener("storage", (e: StorageEvent) => {
     if (e.key === "debug" || e.key === null) refreshDebugCategories();

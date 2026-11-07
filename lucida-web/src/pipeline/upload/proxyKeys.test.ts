@@ -1,13 +1,6 @@
 /**
- * Tests for the three `proxyKeyFromX` helpers.
- *
- * Contract:
- *   `${datasetId}|${entityId}|${kindOrProxyKind}|${t}|${c}`
- *
- * The point of having three helpers (one per input shape) instead of
- * one polymorphic helper is to keep call sites type-honest. Each test
- * pins one helper against the same canonical key to prove all three
- * shapes resolve to the identical composite string.
+ * Tests for the three `proxyKeyFromX` helpers: every input shape must
+ * resolve to the same `${datasetId}|${entityId}|${kind}|${t}|${c}` key.
  */
 import { describe, it, expect } from "vitest";
 import {

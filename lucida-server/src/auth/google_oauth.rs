@@ -2,33 +2,10 @@
 //! exchange the authorization code for an ID token, fetch + cache the
 //! signing JWKS, and validate inbound JWTs.
 //!
-//! The module intentionally hides the protocol specifics from
-//! `handlers.rs`; the handler layer only sees `Client::authorize_url`,
-//! `Client::exchange_code`, and `Client::validate_id_token`.
-//!
-//! ## JWKS cache
-//!
-//! Google rotates signing keys roughly weekly. We cache the key set in
-//! memory and only refresh on two triggers:
-//!
-//! 1. **Time-based**: `JWKS_REFRESH_INTERVAL` (24h) — even if every
-//!    token validates, we refetch so the next rotation lands a fresh
-//!    cache without a request-time stall.
-//! 2. **On validation failure**: a JWT signed with an unknown `kid` is
-//!    the canonical "Google rotated, our cache is stale" signal. We
-//!    refetch eagerly and retry the validation once before giving up.
-//!
-//! The cache is wrapped in `Arc<RwLock<…>>` so concurrent validations
-//! share one cache; a refetch grabs the write lock briefly while the
-//! readers fall through to the new state.
-//!
-//! ## Test harness
-//!
-//! Production points at `accounts.google.com`. Integration tests
-//! override `auth_uri`, `token_uri`, `jwks_uri`, and the allowed
-//! issuer list via `AuthConfig::for_tests_google` so a tiny mock axum
-//! app can pretend to be Google. The `Client` doesn't know — every
-//! endpoint comes from config.
+//! The JWKS is cached and refetched every `JWKS_REFRESH_INTERVAL`, and
+//! eagerly when a token names an unknown `kid` (Google rotated). That
+//! refetch retries validation once before giving up. Every endpoint comes
+//! from config, so tests point the client at a mock axum app.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -84,7 +61,7 @@ pub enum OAuthError {
 }
 
 /// OpenID Connect `prompt` parameter values we use. Only `SelectAccount`
-/// is wired today (post-logout re-sign-in, so Google shows the chooser
+/// is wired (post-logout re-sign-in, so Google shows the chooser
 /// instead of silently passing through its still-active session). Listed
 /// as a typed enum rather than passing strings so call sites can't typo
 /// the on-the-wire value, and so adding `Login` / `Consent` later is
@@ -179,20 +156,13 @@ impl GoogleOAuthClient {
         Ok(Self { config, http, jwks })
     }
 
-    /// Build a Google authorization URL targeting the configured
-    /// `redirect_uri` with the supplied state token. Handler stashes the
-    /// state token in `pending_auth` first; this helper just emits the
-    /// URL the redirect goes to.
+    /// Build a Google authorization URL for the configured `redirect_uri`
+    /// and a state token the handler has already stored in `pending_auth`.
     ///
-    /// Scope = `openid email profile`, response_type = `code`. We omit
-    /// `access_type=offline` deliberately (no refresh tokens in v1 —
-    /// see ADR-0016 §"Why no refresh tokens in v1").
-    ///
-    /// `prompt` is `Some(Prompt::SelectAccount)` only on the post-logout
-    /// re-sign-in path (`/auth/start` set the `lucida_signed_out` marker
-    /// cookie). Cold and session-expiry paths pass `None` to keep the
-    /// friction-free silent pass-through Google does when its session
-    /// is still active.
+    /// We omit `access_type=offline` deliberately: no refresh tokens
+    /// (ADR-0016). `prompt` is `Some(Prompt::SelectAccount)` only after a
+    /// logout, so cold and expired-session paths keep Google's silent
+    /// pass-through.
     pub fn authorize_url(&self, state: &str, prompt: Option<Prompt>) -> String {
         // Manual URL build (rather than `reqwest::Url::parse_with_params`)
         // keeps the dependency surface narrow and the output bytewise
@@ -323,6 +293,11 @@ impl GoogleOAuthClient {
         let issuers: Vec<&str> = self.config.issuers.iter().map(String::as_str).collect();
         validation.set_issuer(&issuers);
         validation.set_audience(&[&self.config.client_id]);
+        // `set_issuer` and `set_audience` constrain a claim that is present
+        // and say nothing about one that is missing, and the default
+        // required set is `exp` alone. Without this, a token that omits
+        // `aud` skips the audience check instead of failing it.
+        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
 
         let data = decode::<GoogleClaims>(token, &key, &validation)
             .map_err(|e| OAuthError::JwtInvalid(e.to_string()))?;

@@ -1,397 +1,267 @@
-# Lucida Deployment Runbook
+# Lucida deployment runbook
 
-Step-by-step walkthrough for deploying lucida-server to a Kubernetes cluster
-behind a TLS-terminating ingress. The compose file in this directory is the
-single-host alternative; `k8s/` is the production target.
+How to deploy lucida-server to Kubernetes behind a TLS-terminating ingress.
+[`docker-compose.yml`](docker-compose.yml) is the single-host alternative and
+takes the same [environment variables](#environment-variables).
 
-This runbook is **opinionated about the procedure** and **unopinionated about
-which cloud, which cluster, which storage class, or which ingress controller**.
-Every adopter-specific value appears as `<UPPERCASE-WITH-DASHES>`. Find them
-all and replace them with values from your environment.
-
-Per [ADR-0021](../../wiki/decisions/0021-deployment-artifacts-as-reference-templates.md),
-the manifests in `k8s/` are reference templates, not packaged infrastructure.
-Copy them into your own infra repo, replace placeholders, and own the result
-from there. Do not `kubectl apply` directly from a checkout of the lucida
-upstream repo — your cluster details belong in your own version control, not
-upstream.
-
-## Table of contents
-
-1. [Prerequisites](#1-prerequisites)
-2. [Provision an OAuth client](#2-provision-an-oauth-client)
-3. [Create the Kubernetes Secret for the OAuth client secret](#3-create-the-kubernetes-secret-for-the-oauth-client-secret)
-4. [Edit the manifests: replace every placeholder](#4-edit-the-manifests-replace-every-placeholder)
-5. [Cloud-specific identity wiring](#5-cloud-specific-identity-wiring)
-6. [Apply the manifests](#6-apply-the-manifests)
-7. [Verify the deployment end-to-end](#7-verify-the-deployment-end-to-end)
-8. [First-time admin bootstrap](#8-first-time-admin-bootstrap)
-9. [Backup considerations](#9-backup-considerations)
-10. [Updating to a new release](#10-updating-to-a-new-release)
-11. [Branch protection and Actions setup (forks)](#11-branch-protection-and-actions-setup-forks)
-
----
+The manifests in [`k8s/`](k8s/) are reference templates. Copy them into your
+own infra repo, replace every `<UPPERCASE-WITH-DASHES>` placeholder, and own
+the result there. [`docs/adr/`](../../docs/adr/) has the reasoning.
 
 ## 1. Prerequisites
 
-You will need:
+- A cluster with an ingress controller, and `kubectl` pointed at it. The
+  shipped manifests need a StorageClass that offers `ReadWriteOnce`; the
+  network-database shape in step 4 does not.
+- A hostname, `<YOUR-EXTERNAL-HOSTNAME>`, with TLS terminated at the ingress.
+- For `LUCIDA_AUTH=google`, a Google Cloud project for the OAuth client. For
+  `LUCIDA_AUTH=iap`, an Identity-Aware Proxy already in front.
+- An image. Releases publish `ghcr.io/aelefebv/lucida:vX.Y.Z`, or run
+  `docker build` at the repo root.
 
-- **A Kubernetes cluster** with an installed ingress controller and a
-  StorageClass that supports `ReadWriteOnce` PersistentVolumeClaims. Any
-  cluster qualifies: GKE, EKS, AKS, on-prem (k3s, Talos, OpenShift, kubeadm,
-  Rancher), or a single-node `minikube` / `kind` for kicking the tires.
-- **`kubectl`** configured against the target cluster
-  (`kubectl cluster-info` should succeed).
-- **A Google Cloud project** if you intend to use `LUCIDA_AUTH=google` (the
-  v1 supported provider). You do not need any GCP-managed services for this
-  flow other than the OAuth client; the OAuth client itself is free.
-- **A DNS-resolvable hostname** that you control, pointing (eventually) at
-  your ingress controller's external IP. Examples: `lucida.example.com`,
-  `viewer.internal.example.com`. This runbook calls it
-  `<YOUR-EXTERNAL-HOSTNAME>`.
-- **A TLS certificate plan**. Two common patterns:
-    - cert-manager + Let's Encrypt (or your private CA): cert-manager issues
-      a `Certificate` resource and writes the chain into a Secret; the
-      Ingress references that Secret. Works with most ingress controllers.
-    - Controller-managed cert: AWS ACM ARN attached to an ALB Ingress, GKE
-      `ManagedCertificate`, AKS Application Gateway listener certs.
-- **A container image** for lucida. Either:
-    - Pull a published release image (recommended once releases are tagged):
-      `<YOUR-REGISTRY>/lucida:<YOUR-TAG>`. Adopters generally re-tag into
-      their own registry for promotion control.
-    - Build your own from a checkout: `docker build -t my-registry/lucida:v0 .`
-      then push. The Dockerfile is at the repo root.
+No cache server or static-asset host is needed. The proxy cache is a
+directory, and lucida-server serves the web UI itself.
 
-You do NOT need:
+### Choose a storage backend
 
-- A relational database (lucida uses SQLite on a PVC; see
-  [ADR-0015](../../wiki/decisions/0015-server-stored-bookmarks-and-auth-seam.md)).
-- A Redis or other cache (the proxy cache is on the same PVC).
-- A separate static-asset host (lucida-server serves the SPA itself; see
-  [ADR-0020](../../wiki/decisions/0020-single-image-with-servedir.md)).
+The scheme of `LUCIDA_DB_URL` picks the backend. Both hold the same seven
+stores: login sessions, pending authentications, bearer tokens, CLI token
+authorizations, bookmarks, workspaces, and inbox.
+
+SQLite is the default and suits one person or a small group. PostgreSQL is
+for a second replica, since one SQLite file has one writer, or for a managed
+database's backups and failover. It needs an empty database, a role that can
+create tables, and up to 10 connections per replica.
+
+| `LUCIDA_DB_URL` | What lucida opens |
+| --- | --- |
+| unset | `sqlite://lucida.db`, relative to the working directory |
+| `sqlite:///var/lib/lucida/lucida.db` | SQLite at an absolute path (three slashes) |
+| `postgres://<DB-USER>:<DB-PASSWORD>@<DB-HOST>:5432/<DB-NAME>` | PostgreSQL. `postgresql://` also works. |
+
+A bare path has no scheme and fails startup. Lucida migrates the database at
+startup and exits if it can't. Logs show the connection string with
+credentials replaced by `<redacted>`. Switching backends copies no data.
 
 ## 2. Provision an OAuth client
 
-Lucida's authenticated flow uses Google OAuth (`LUCIDA_AUTH=google`). The
-OAuth client identifies your deployment to Google; the secret authenticates
-the deployment to Google's token exchange.
+For `LUCIDA_AUTH=google`:
 
-1. Go to the Google Cloud Console -> APIs & Services -> Credentials.
-2. Click **Create Credentials** -> **OAuth client ID**.
-3. Application type: **Web application**.
-4. Name: anything that helps you find it later (e.g., `lucida-prod`).
-5. **Authorized JavaScript origins**: `https://<YOUR-EXTERNAL-HOSTNAME>`
-6. **Authorized redirect URIs**: `https://<YOUR-EXTERNAL-HOSTNAME>/auth/callback`
-   (must match `LUCIDA_OAUTH_REDIRECT_URI` exactly — Google compares the
-   string verbatim, including trailing slashes and case).
-7. Save. Copy the **Client ID** (this is the value for
-   `LUCIDA_GOOGLE_CLIENT_ID`; not a secret) and the **Client Secret**
-   (this is `LUCIDA_GOOGLE_CLIENT_SECRET`; treat as a real secret).
+1. In the Google Cloud Console, under APIs & Services, Credentials, create
+   an OAuth client ID of type Web application.
+2. Add the redirect URI `https://<YOUR-EXTERNAL-HOSTNAME>/auth/callback`. It
+   must equal `LUCIDA_OAUTH_REDIRECT_URI` exactly.
+3. The client ID goes in `LUCIDA_GOOGLE_CLIENT_ID`. The client secret goes
+   in `LUCIDA_GOOGLE_CLIENT_SECRET` and is the only secret.
 
-If you want to restrict sign-in to one or more Google Workspace domains,
-note the workspace domain(s) now (e.g., `example.com`). You will use them as
-`LUCIDA_ALLOWED_HOSTED_DOMAINS` (comma-separated). Empty / unset = anyone
-with a verified Google account can sign in (the OSS-permissive default).
+`LUCIDA_AUTH=iap` skips this step and needs only `LUCIDA_IAP_AUDIENCE`, the
+`aud` claim your IAP mints (`/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID`),
+copied from the load balancer's backend service. A wrong value answers every
+request with 401 and logs the first as `auth.iap.assertion.rejected.first`.
+IAP's IAM policy decides who gets in, so `LUCIDA_ALLOWED_HOSTED_DOMAINS` does
+nothing there.
 
-## 3. Create the Kubernetes Secret for the OAuth client secret
-
-The OAuth client **secret** must NOT live in the manifest YAML. Create a
-Secret in your target namespace:
+## 3. Create the Kubernetes Secrets
 
     kubectl create namespace <YOUR-NAMESPACE>
-
     kubectl -n <YOUR-NAMESPACE> create secret generic lucida-google-oauth \
         --from-literal=client_secret='<PASTE-CLIENT-SECRET-HERE>'
 
-The Deployment manifest references this Secret as `name: lucida-google-oauth,
-key: client_secret`. If you rename the Secret, update the Deployment's
-`secretKeyRef` to match.
+`deployment.yaml` reads `lucida-google-oauth`, key `client_secret`. If a
+secret manager syncs it instead, keep that name and key or edit the
+`secretKeyRef`. For PostgreSQL, the connection string carries the password,
+so it gets its own Secret. SQLite's URL is set inline.
 
-For production, prefer a real secret manager over a hand-created Secret:
+    kubectl -n <YOUR-NAMESPACE> create secret generic lucida-database \
+        --from-literal=url='postgres://<DB-USER>:<DB-PASSWORD>@<DB-HOST>:5432/<DB-NAME>'
 
-- **GCP**: Secret Manager + Secrets Store CSI driver (mount the secret as a
-  file, or sync it into a Kubernetes Secret with `External Secrets Operator`).
-- **AWS**: Secrets Manager / Parameter Store + External Secrets Operator.
-- **Azure**: Key Vault + Secrets Store CSI driver.
-- **On-prem**: HashiCorp Vault + External Secrets Operator, or
-  Bitnami Sealed Secrets, or SOPS-decrypted by your GitOps controller.
+## 4. Edit the manifests
 
-Whichever path: the resulting Kubernetes Secret should still be named
-`lucida-google-oauth` with key `client_secret`, OR you should update the
-Deployment's `secretKeyRef` block to point at whatever name you chose.
+| Placeholder | File |
+| --- | --- |
+| `<YOUR-NAMESPACE>` | every manifest |
+| `<YOUR-REGISTRY>/lucida:<YOUR-TAG>` | `deployment.yaml`. Pin a version, not `latest`. |
+| `<YOUR-OAUTH-CLIENT-ID>` | `deployment.yaml` |
+| `<YOUR-EXTERNAL-HOSTNAME>` | `deployment.yaml`, `ingress.yaml` |
+| `<YOUR-STORAGE-CLASS>` | `pvc.yaml` |
+| `<YOUR-INGRESS-CLASS>`, `<YOUR-TLS-SECRET>` | `ingress.yaml` |
 
-If you set `LUCIDA_ADMIN_TOKEN` for service-to-service admin access, create
-a similar Secret (the manifest has a commented-out block showing the shape).
+Optional variables sit in commented blocks in `deployment.yaml`. This finds
+placeholders left on active lines, as CI does:
 
-## 4. Edit the manifests: replace every placeholder
+    grep -RnE '<[A-Z][A-Z0-9-]+>' k8s/ | grep -vE ':[[:space:]]*#'
 
-Copy `extras/deploy/k8s/` into your own infra repo. Then find and replace
-every `<UPPERCASE-WITH-DASHES>` placeholder. Checklist:
+### Optional: the network-database shape
 
-- [ ] `<YOUR-NAMESPACE>` — the namespace from step 3. Appears in every
-      manifest's `metadata.namespace`.
-- [ ] `<YOUR-REGISTRY>/lucida:<YOUR-TAG>` — the image to deploy. Pin a
-      specific version tag (`v0.1.0`), not `latest`. In `deployment.yaml`.
-- [ ] `<YOUR-OAUTH-CLIENT-ID>` — the Client ID from step 2. In
-      `deployment.yaml`.
-- [ ] `<YOUR-EXTERNAL-HOSTNAME>` — your DNS hostname. Appears in
-      `deployment.yaml` (as part of `LUCIDA_OAUTH_REDIRECT_URI`) and in
-      `ingress.yaml` (`spec.rules[].host` and `spec.tls[].hosts[]`).
-- [ ] `<YOUR-STORAGE-CLASS>` — the StorageClass for the PVC. In `pvc.yaml`.
-      Examples: `standard-rwo` (GKE), `gp3` (EKS), `managed-csi` (AKS),
-      `longhorn` / `openebs-hostpath` / `local-path` (on-prem).
-- [ ] `<YOUR-INGRESS-CLASS>` — your ingress controller's class. In
-      `ingress.yaml`. Examples: `nginx`, `traefik`, `alb`, `gce`.
-- [ ] `<YOUR-TLS-SECRET>` — the Secret name holding your TLS cert + key.
-      In `ingress.yaml`. cert-manager-managed Secret name, or remove the
-      `tls:` block entirely if your ingress controller terminates TLS at
-      the controller level (ACM, ManagedCertificate, ...).
-- [ ] (Optional) `<YOUR-WORKSPACE-DOMAIN>`,
-      `<ADMIN-EMAIL-ONE>,<ADMIN-EMAIL-TWO>`, etc. — uncomment the matching
-      env blocks in `deployment.yaml` and fill in your values.
+The shipped shape runs one replica on one ReadWriteOnce PVC with a
+`Recreate` rollout, so two pods never open the same SQLite file. PostgreSQL
+removes that constraint. The variant is described here, not shipped as a
+second manifest, because `kubectl apply -f k8s/` would apply both.
 
-Sanity check before applying — searching for any leftover placeholders
-should return matches only inside the manifests you have not customized
-yet:
+1. Delete `pvc.yaml`.
+2. In `deployment.yaml`, make these changes:
 
-    grep -RE '<[A-Z][A-Z0-9-]*>' k8s/
+        spec:
+          strategy:
+            type: RollingUpdate       # was: Recreate
+            rollingUpdate: {maxSurge: 1, maxUnavailable: 0}
+          template:
+            spec:
+              containers:
+                - name: lucida
+                  env:
+                    - name: LUCIDA_DB_URL   # replaces the inline sqlite: value
+                      valueFrom:
+                        secretKeyRef: {name: lucida-database, key: url}
+              volumes:
+                - name: data
+                  emptyDir: {sizeLimit: 20Gi}   # was: persistentVolumeClaim
 
-If grep returns nothing, you have replaced everything. (The runbook itself
-contains placeholders; do not grep it.)
+3. Raise `replicas`. Concurrent startup migrations serialize on a PostgreSQL
+   advisory lock.
 
-## 5. Cloud-specific identity wiring
+Each pod now has its own cold cache. Size `sizeLimit` for one pod; without
+it the cache grows until the kubelet evicts the pod. Drop `LUCIDA_DATA_DIR`
+unless you mount datasets separately.
 
-`serviceaccount.yaml` upstream is bare. Lucida itself does not call the
-Kubernetes API and does not need RBAC. The reason a dedicated
-ServiceAccount exists is so adopters can bind a **cloud workload identity**
-to it (for accessing GCS / S3 / Azure Blob datasets, secret managers, KMS,
-etc.). Pick the snippet matching your cluster and apply it in your fork
-(NOT upstream — see ADR-0021):
+## 5. Cloud identity wiring
 
-### GKE Workload Identity
+Lucida never calls the Kubernetes API. The `lucida` ServiceAccount exists so
+you can bind a cloud identity to it for reading datasets from object storage.
 
-1. Create or pick a Google Service Account (GSA). Grant it the IAM roles
-   your deployment needs (e.g., `roles/storage.objectViewer` for GCS dataset
-   reads).
-2. Allow the KSA to impersonate the GSA:
+For `gs://` on GKE, grant a Google service account the roles it needs (such
+as `roles/storage.objectViewer`), let the KSA impersonate it, and annotate
+the KSA in `serviceaccount.yaml` with `iam.gke.io/gcp-service-account: <GSA-EMAIL>`:
 
-       gcloud iam service-accounts add-iam-policy-binding <GSA-EMAIL> \
-           --role roles/iam.workloadIdentityUser \
-           --member "serviceAccount:<PROJECT-ID>.svc.id.goog[<YOUR-NAMESPACE>/lucida]"
+    gcloud iam service-accounts add-iam-policy-binding <GSA-EMAIL> \
+        --role roles/iam.workloadIdentityUser \
+        --member "serviceAccount:<PROJECT-ID>.svc.id.goog[<YOUR-NAMESPACE>/lucida]"
 
-3. Annotate the KSA in your fork's `serviceaccount.yaml`:
+Elsewhere, mount a service-account key and set
+`GOOGLE_APPLICATION_CREDENTIALS`. The README's "Reading from `gs://`"
+section gives the discovery order. On EKS, annotate the KSA with
+`eks.amazonaws.com/role-arn`. On AKS, annotate it with
+`azure.workload.identity/client-id` and label the KSA and pod template
+`azure.workload.identity/use: "true"`.
 
-       metadata:
-         annotations:
-           iam.gke.io/gcp-service-account: <GSA-EMAIL>
-
-#### Non-GKE: service-account JSON key
-
-For deploys outside GKE (single-host docker, on-prem k8s without WI, EKS/AKS
-clusters reading from GCS), Workload Identity isn't an option. Mount a
-Google service-account JSON key as a secret/volume inside the pod (or bind
-it in via `docker run -v`) and set `GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json`
-in the deployment env. Lucida forwards that env var to the GCS client
-explicitly; see the README's "Google Cloud credentials" notes for the
-discovery order. WI on GKE remains the recommended path
-when available.
-
-### EKS IRSA (IAM Roles for Service Accounts)
-
-1. Create an IAM role with a trust policy that allows the EKS OIDC provider
-   to assume it for `system:serviceaccount:<YOUR-NAMESPACE>:lucida`.
-2. Attach the IAM policies your deployment needs.
-3. Annotate the KSA:
-
-       metadata:
-         annotations:
-           eks.amazonaws.com/role-arn: arn:aws:iam::<AWS-ACCOUNT-ID>:role/<ROLE-NAME>
-
-### AKS Workload Identity (Azure AD)
-
-1. Create an Azure AD app + federated credential whose subject is
-   `system:serviceaccount:<YOUR-NAMESPACE>:lucida`.
-2. Grant the app the Azure RBAC roles you need.
-3. Annotate AND label the KSA:
-
-       metadata:
-         annotations:
-           azure.workload.identity/client-id: <AZURE-AD-CLIENT-ID>
-         labels:
-           azure.workload.identity/use: "true"
-
-   And add the same `azure.workload.identity/use: "true"` label on the pod
-   template in `deployment.yaml`.
-
-### On-prem / non-cloud
-
-No identity binding required. Fetch any cloud credentials from your
-in-cluster secret manager (Vault, Sealed Secrets, SOPS-decrypted by your
-GitOps controller) and reference them from the Deployment env block. The
-upstream `serviceaccount.yaml` is sufficient as-is.
-
-## 6. Apply the manifests
-
-From your fork's directory containing the customized manifests:
+## 6. Apply and verify
 
     kubectl apply -f k8s/
-
-Order does not matter — `kubectl apply` reconciles whatever is referenced.
-The PVC may take a moment to bind depending on your CSI driver; the pod
-will stay `Pending` until the volume is bound.
-
-Watch progress:
-
     kubectl -n <YOUR-NAMESPACE> get pods,pvc,svc,ingress -w
-
-You are looking for:
-
-- `pvc/lucida-data` -> `Bound`
-- `pod/lucida-...` -> `Running` then `Ready 1/1`
-- `service/lucida` -> a ClusterIP assigned
-- `ingress/lucida` -> an external address (depends on your controller)
-
-## 7. Verify the deployment end-to-end
-
-**Pod ready.** From inside the cluster:
-
     kubectl -n <YOUR-NAMESPACE> port-forward svc/lucida 9876:9876
-    # then in another terminal:
-    curl -fsS http://127.0.0.1:9876/readyz   # expect 200 / "ok"
-    curl -fsS http://127.0.0.1:9876/healthz  # expect 200 / "ok"
+    curl -fsS http://127.0.0.1:9876/version
 
-If `/readyz` returns 503 or the pod CrashLoops, check
-`kubectl logs deploy/lucida` — the most common failures are surfaced as
-fail-fast startup errors:
+`/healthz` and `/readyz` answer 200 whenever the process serves, and don't
+check the database. A bad configuration shows up as a pod that exits at
+startup. `kubectl -n <YOUR-NAMESPACE> logs deploy/lucida` names the cause:
 
-- `AuthConfigError::InsecureRequiresOptIn` — `LUCIDA_AUTH=disabled` on a
-  non-loopback bind without `LUCIDA_INSECURE=1`. Either set the explicit
-  acknowledgment or switch to `LUCIDA_AUTH=google` with credentials.
-- `LUCIDA_GOOGLE_CLIENT_ID is required` — Secret not found / wrong key /
-  wrong Secret name. Verify with
-  `kubectl -n <YOUR-NAMESPACE> get secret lucida-google-oauth -o yaml`.
-- File-permission errors on `/var/lib/lucida/lucida.db` — your PodSecurity
-  profile + the runtime image's user are mismatched. The
-  `debian:bookworm-slim` runtime runs as root by default; if your cluster
-  enforces `restricted`, add `securityContext` with a non-root user to the
-  pod template (and ensure the volume's filesystem permissions match).
+- `LUCIDA_AUTH=disabled with non-loopback LUCIDA_BIND=... requires LUCIDA_INSECURE=1`.
+- `LUCIDA_AUTH=google requires LUCIDA_GOOGLE_CLIENT_ID`, or `_CLIENT_SECRET`,
+  or `LUCIDA_OAUTH_REDIRECT_URI`. A missing Secret fails earlier, as
+  `CreateContainerConfigError`.
+- `LUCIDA_AUTH=iap requires LUCIDA_IAP_AUDIENCE`.
+- `IAP key set fetch failed`. The pod can't reach
+  `https://www.gstatic.com/iap/verify/public_key-jwk`.
+- `cannot open the database at postgres://<redacted>@...`. Lucida gives up
+  after 3 seconds. Check host, port, password, and NetworkPolicy.
+- `cannot migrate the database at ...`. Usually a role that can't create
+  tables.
+- Permission errors on `/var/lib/lucida/lucida.db`. The image runs as root,
+  so a `restricted` PodSecurity profile needs a non-root `securityContext`
+  and matching volume permissions.
 
-**Sign-in flow.** Visit `https://<YOUR-EXTERNAL-HOSTNAME>` in a browser.
-Click sign-in. You should be redirected to Google, complete the consent
-screen, redirected back to `/auth/callback`, and land on the app with a
-session cookie set. If the cookie is missing, the most likely cause is the
-TLS-termination cookie gotcha — verify `LUCIDA_COOKIE_SECURE=always` is set
-in the manifest (it is, in the upstream template) and that the redirect
-URI registered with Google exactly matches what lucida posts.
+If sign-in loses its session cookie, check `LUCIDA_COOKIE_SECURE=always`
+(the template sets it) and the redirect URI.
 
-**Open a dataset.** The simplest smoke test is to open a known-good public
-URL (your team's standard dataset; or any OME-Zarr you have read access to).
-If `LUCIDA_DATA_DIR` is set, you can also browse that directory via the UI's
-file picker.
+## 7. First admin
 
-## 8. First-time admin bootstrap
+Admins come only from `LUCIDA_ADMIN_EMAILS`, which starts empty. It is read
+at startup, so each change needs a restart. Admin status is computed per
+request, so signed-in users don't need to sign in again.
 
-Lucida's admin allowlist starts empty. To make yourself an admin:
+## 8. Persistence and backups
 
-1. Edit the Deployment env to set `LUCIDA_ADMIN_EMAILS` to your email
-   (lowercase comparison, whitespace tolerated):
+On SQLite, the state is the `LUCIDA_DB_URL` file plus its `-wal` and `-shm`
+files, a few megabytes. Copying `lucida.db` alone during writes gives a torn
+copy. Scale to 0 and copy all three, or run
+`sqlite3 lucida.db ".backup '/path/backup.db'"` from a sidecar on the same
+volume, since the image has no `sqlite3`. On PostgreSQL, nothing on the
+pod's disk is authoritative.
 
-       - name: LUCIDA_ADMIN_EMAILS
-         value: "<YOUR-EMAIL>"
+The proxy cache can be rebuilt from its sources. Lucida only reads
+`LUCIDA_DATA_DIR`.
 
-   For multiple admins: comma-separated, e.g., `"a@x.com,b@x.com"`.
+## 9. Updating to a new release
 
-2. `kubectl apply -f k8s/deployment.yaml` (the change forces a Recreate
-   rollout; the pod restarts).
+Change the image tag and apply. The `Recreate` rollout stops the old pod
+first, so expect tens of seconds of downtime; the network-database shape has
+none. `kubectl -n <YOUR-NAMESPACE> rollout undo deployment/lucida` rolls
+back, but migrations are forward-only on both backends. Back up before a
+release whose notes mention a migration.
 
-3. Sign out and sign back in (or refresh — admin status is computed
-   per-request from the session principal, not stored on the session row).
+## Environment variables
 
-There is no in-app admin promotion today: the admin list is read from the
-environment at startup, so adding an admin requires a restart. Plan
-admin changes around restarts.
+`lucida-server --help` lists the tuning flags not shown here, with their
+variables.
 
-## 9. Backup considerations
+| Variable | Default | What it sets |
+| --- | --- | --- |
+| `LUCIDA_BIND` | `127.0.0.1:9876`; the image sets `0.0.0.0:9876` | Listen address |
+| `LUCIDA_DB_URL` | `sqlite://lucida.db` | Storage backend. See step 1. |
+| `LUCIDA_DATA_DIR` | unset: lists from `/` | Root the file picker is confined to |
+| `LUCIDA_PROXY_CACHE_DIR` | `<user cache dir>/lucida/proxies` | Proxy cache directory |
+| `LUCIDA_PROXY_CONCURRENCY` | half the CPUs | Per-generator concurrency cap |
+| `LUCIDA_LOG_FORMAT` | `text` | `json` for structured logs |
+| `LUCIDA_WEB_DIST` | `./lucida-web/dist`; set in the image | Web UI bundle |
+| `LUCIDA_THEME_FILE` | unset or blank: built-in theme | Default appearance and token overrides. See the README's [Theme a deployment](../../README.md#theme-a-deployment). |
+| `LUCIDA_AUTH` | `disabled` on a loopback bind, else `google` | `google`, `iap`, or `disabled` |
+| `LUCIDA_INSECURE` | unset | `1` allows `disabled` on a non-loopback bind |
+| `LUCIDA_GOOGLE_CLIENT_ID`, `LUCIDA_GOOGLE_CLIENT_SECRET`, `LUCIDA_OAUTH_REDIRECT_URI` | none | Required for `google` |
+| `LUCIDA_ALLOWED_HOSTED_DOMAINS` | unset: any Google account | Comma-separated Workspace domains, `google` only |
+| `LUCIDA_IAP_AUDIENCE` | none | Required for `iap` |
+| `LUCIDA_ADMIN_EMAILS` | unset: no admins | Comma-separated, case-insensitive, every mode |
+| `LUCIDA_COOKIE_SECURE` | `auto`, from the request scheme | `always` behind a TLS-terminating ingress, or `never` |
+| `LUCIDA_COOKIE_NAME` | `lucida_session` | Session cookie name |
+| `LUCIDA_SESSION_IDLE_TIMEOUT_HOURS` | `168` | Idle session lifetime |
+| `LUCIDA_SESSION_HARD_CAP_HOURS` | `720` | Maximum session lifetime |
 
-Two pieces of state live on the PVC:
+### Profile directory
 
-- **SQLite database** at `/var/lib/lucida/lucida.db` (plus `lucida.db-wal`
-  and `lucida.db-shm` from WAL journal mode). Sessions, bookmarks, and
-  any future server-stored state. Small (typically MB, not GB).
-- **Proxy on-disk cache** at `/var/lib/lucida/proxy-cache/`. Recomputable
-  from upstream sources; backing it up is convenience, not necessity.
+Behind a perimeter the server learns only an email. A JSON array of people,
+one object each, fills in names and pictures in every auth mode. It never
+changes the email, admin rights, or who can sign in.
 
-**SQLite-WAL gotcha.** The WAL file (`lucida.db-wal`) is part of the
-authoritative state — copying only `lucida.db` while writes are in flight
-gives you a torn snapshot. Two safe approaches:
+| Variable | Default | What it sets |
+| --- | --- | --- |
+| `LUCIDA_DIRECTORY_URL` | unset or blank: off | The listing, over `http` or `https` |
+| `LUCIDA_DIRECTORY_EMAIL_FIELD` | `email` | Key holding the address. Rows without one are skipped. |
+| `LUCIDA_DIRECTORY_NAME_FIELDS` | `name` | Space-separated keys, joined by a space for the display name |
+| `LUCIDA_DIRECTORY_PICTURE_FIELD` | `picture` | Key holding the picture URL |
+| `LUCIDA_DIRECTORY_HEADERS` | none | `Name: value` pairs separated by semicolons |
+| `LUCIDA_DIRECTORY_REFRESH_SECONDS` | `21600` (6 hours) | Refresh interval |
 
-- Use `sqlite3 lucida.db ".backup '/path/to/backup.db'"` from inside the
-  pod (or via `kubectl exec`). This produces a consistent single-file
-  backup regardless of WAL state.
-- Quiesce writes (scale to 0 replicas briefly) and snapshot the volume.
-  Safe but introduces downtime.
+A malformed value, or a field variable set but blank, stops the boot. The
+listing lives in memory and refreshes in the background with a 10-second
+timeout, so requests never wait on it. Down at startup, the server serves
+derived names and retries from 30 seconds, doubling to 10 minutes. A failed
+or empty refresh keeps the last good copy. Events log as `auth.directory.*`
+and never name a person.
 
-Pick the tool that fits your environment; this runbook is **explicitly
-not prescriptive**:
+### Status route
 
-- [Velero](https://velero.io/) — k8s-native, snapshots PVCs through your
-  CSI driver, schedules backups via CRDs.
-- [k8up](https://k8up.io/) — restic-based, writes to S3-compatible storage.
-- Cloud provider snapshots — GKE / EKS / AKS volume snapshot APIs work
-  directly; consistency is your job.
+For a monitor that polls dependency state. A `GET` on `LUCIDA_STATUS_PATH`
+runs one query with a 2-second timeout and answers 200 either way, with
+`connected: false` and `message: "Failure"` when the query fails:
 
-`/var/lib/lucida/data/` (if you set `LUCIDA_DATA_DIR`) is your dataset
-directory; back it up however your dataset workflow normally handles bulk
-data. Lucida treats it as read-only.
+    {"details": {"dependencies": {"database": [
+      {"resource_name": "lucida", "connected": true, "message": "Success"}
+    ]}}}
 
-## 10. Updating to a new release
+| Variable | Default | What it sets |
+| --- | --- | --- |
+| `LUCIDA_STATUS_PATH` | unset: off | Mount path. Starts with `/`, no whitespace or `?#{}`, not a probe path. |
+| `LUCIDA_STATUS_LABEL` | `database` | The key under `dependencies` |
+| `LUCIDA_STATUS_RESOURCE_NAME` | database name from `LUCIDA_DB_URL` | `resource_name`. Required if the URL names no database. |
 
-Pin the image tag, not `latest`. Promotion is a manifest edit:
-
-1. Identify the new release tag (e.g., `v0.2.0`) from the upstream
-   release-please flow.
-2. Re-tag into your registry (recommended) and update
-   `deployment.yaml` accordingly.
-3. `kubectl apply -f k8s/deployment.yaml`. The Deployment uses the
-   `Recreate` strategy (single replica + RWO PVC), so the old pod is
-   terminated before the new one starts. Brief downtime is expected during
-   image pull + readiness convergence (typically tens of seconds).
-4. Verify post-rollout: `/readyz` returns 200, sign-in still works.
-
-If a release ships breaking config changes, the release notes call them
-out. Read before applying.
-
-If you need to roll back: `kubectl rollout undo deployment/lucida -n
-<YOUR-NAMESPACE>` reverts to the previous ReplicaSet. SQLite migrations,
-when they exist, are forward-only — a rollback past a migration is not
-supported and may corrupt state.
-
-## 11. Branch protection and Actions setup (forks)
-
-If you forked the repo (or vendored the manifests into your own monorepo)
-and intend to track upstream:
-
-1. **Branch protection on `main`**. Require:
-    - Status checks `Rust workspace (test + clippy)`, `Web (wasm-pack +
-      pnpm)`, `Docker smoke build (no push)`, and `Manifest dry-run` to
-      pass.
-    - At least one PR review (or your org's standard).
-    - Linear history (squash-merge), unless you have a specific reason for
-      merge commits.
-2. **Actions enabled**. The CI workflow at `.github/workflows/ci.yml`
-   exercises the same builds upstream uses. The manifest dry-run job
-   substitutes placeholders to dummy values and runs `kubectl apply
-   --dry-run=client -f` against your fork's manifests; if you customize
-   the manifest set or add adopter-specific resources, that job will
-   continue to validate them.
-3. **Release workflow**. The upstream release process (release-please +
-   image publish) lives in `.github/workflows/`; see also
-   `wiki/decisions/0022-manual-merge-release-please-on-main.md`.
-   If you want to publish your own image tags from your fork, replicate
-   the relevant pieces of `.github/workflows/release.yml` against your
-   registry credentials.
-
-For internal-only forks that don't track upstream, you can drop the
-manifest dry-run job — but if you do, your manifest-edit workflow loses
-its safety net. Keeping the job enabled costs you a few seconds per PR
-and catches schema regressions early.
+The route needs no session, and the body carries no host or credential. An
+invalid path, or a label or resource name set but blank, stops the boot.

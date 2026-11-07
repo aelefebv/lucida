@@ -26,6 +26,7 @@ describe("EventRing", () => {
         kind: "failure",
         reason: "permanent",
         chunk: { ...CHUNK, residencyTier: "detail", chunkKey: "2/1/0/5/3/4" },
+        levelChange: null,
       },
     ]);
   });
@@ -35,6 +36,33 @@ describe("EventRing", () => {
     ring.append(10, PointEvent.Eviction, "evicted", null, 0);
 
     expect(ring.serialise()[0].chunk).toBeNull();
+  });
+
+  it("records a level change with the dataset and the old and new range, and no chunk", () => {
+    const ring = new EventRing(4);
+    ring.appendLevelChange(1_200, "screen", "ds-a", 1, 1, 2, 3);
+
+    expect(ring.serialise()).toEqual([
+      {
+        atUs: 1_200,
+        kind: "level-change",
+        reason: "screen",
+        chunk: null,
+        levelChange: { datasetId: "ds-a", from: { min: 1, max: 1 }, to: { min: 2, max: 3 } },
+      },
+    ]);
+  });
+
+  it("keeps a chunk event and a level change apart in the same ring", () => {
+    const ring = new EventRing(4);
+    ring.appendLevelChange(5, "pin", "ds-a", 2, 2, 0, 0);
+    ring.append(6, PointEvent.Eviction, "evicted", CHUNK, 1);
+
+    const [change, eviction] = ring.serialise();
+    expect(change.levelChange?.datasetId).toBe("ds-a");
+    expect(change.reason).toBe("pin");
+    expect(eviction.levelChange).toBeNull();
+    expect(eviction.chunk?.datasetId).toBe("ds");
   });
 
   it("defaults an absent dataset id to empty rather than guessing one", () => {
@@ -53,6 +81,18 @@ describe("EventRing", () => {
 
     expect(ring.dropped).toBe(3);
     expect(ring.serialise().map(e => e.atUs)).toEqual([3, 4]);
+  });
+
+  it("reads a trailing window newest-back and carries nothing from before it", () => {
+    const ring = new EventRing(8);
+    for (let i = 0; i < 6; i++) ring.append(i * 1_000, PointEvent.Eviction, "evicted", CHUNK, 0);
+
+    // An event is an instant, not a state in force, so the one before the
+    // window is not carried the way a reading or a tick sample is.
+    expect(ring.serialiseFrom(2_500).map(e => e.atUs)).toEqual([3_000, 4_000, 5_000]);
+    expect(ring.serialiseFrom(3_000).map(e => e.atUs)).toEqual([3_000, 4_000, 5_000]);
+    expect(ring.serialiseFrom(9_000)).toEqual([]);
+    expect(ring.serialiseFrom(2_500)[0].chunk?.chunkKey).toBe("2/1/0/5/3/4");
   });
 
   it("round-trips every reason code in the borrowed taxonomies", () => {

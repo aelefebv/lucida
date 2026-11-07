@@ -159,9 +159,8 @@ describe("SavedView encoder", () => {
     it("encoded payload of empty view is small", async () => {
       const v = emptySliceView();
       const s = await encode(v);
-      // The decoded JSON inside should NOT carry the view/display defaults.
-      // We can't easily inspect the gzipped body, but we can verify it's
-      // tiny (< 200 chars) — meaningful only if defaults were stripped.
+      // The gzipped body is hard to inspect; under 200 chars means the
+      // defaults were stripped.
       expect(s.length).toBeLessThan(200);
     });
 
@@ -183,6 +182,17 @@ describe("SavedView encoder", () => {
       };
       const back = await decode(await encode(v));
       expect(back.dataset_settings["ds-x"].detail_level_override).toBe(2);
+    });
+
+    it("a level pin to level 0 survives the round trip and is not mistaken for absent", async () => {
+      const v = emptySliceView();
+      v.datasets = ["gs://x"];
+      v.dataset_order = ["ds-x"];
+      v.dataset_settings = {
+        "ds-x": { ...defaultDatasetSettings(1), detail_level_override: 0 },
+      };
+      const back = await decode(await encode(v));
+      expect(back.dataset_settings["ds-x"].detail_level_override).toBe(0);
     });
 
     it("default null detail override strips as absent", async () => {
@@ -221,17 +231,14 @@ describe("SavedView encoder", () => {
       settings.channel_settings = [ch0, defaultChannel(1)];
       v.dataset_settings = { "ds-x": settings };
       const back = await decode(await encode(v));
-      // The override persists through the saved-view round-trip...
       expect(back.dataset_settings["ds-x"].channel_settings![0].name).toBe("Region A");
-      // ...and a channel with no override has no `name` key (back-compat with
-      // pre-slice payloads).
+      // A channel with no override has no `name` key.
       expect(back.dataset_settings["ds-x"].channel_settings![1].name).toBeUndefined();
     });
 
     it("a channel whose ONLY non-default is a name override survives", async () => {
-      // Guards that `name` alone flips the stripper's `any` flag, so a channel
-      // that is otherwise all-default but carries a rename isn't collapsed to
-      // an empty `{}` (which would drop the name on decode).
+      // `name` alone must flip the stripper's `any` flag, or the channel
+      // collapses to `{}` and the name is lost.
       const v = emptySliceView();
       v.datasets = ["gs://x"];
       v.dataset_order = ["ds-x"];
@@ -299,15 +306,9 @@ describe("SavedView encoder", () => {
 
   describe("size budget", () => {
     /**
-     * Synthesize a 384-group collection scenario:
-     *   - 1 dataset (384 groups, but they're members not separate datasets)
-     *   - active layout pointing at a 24x16 collection spec
-     *   - default channel settings, default contrast/gamma
-     *   - typical slice camera position
-     *
-     * The wire payload should fit comfortably under 1 KB after
-     * gzip+base64. The dataset side is one URL; the wire-cost driver
-     * is the per-channel display defaults — which the encoder strips.
+     * One dataset whose 384 groups are members, under a 24x16 collection
+     * layout with default display. The cost driver is the per-channel
+     * defaults, which the encoder strips.
      */
     it("384-group collection share link fits under 1 KB", async () => {
       const v = emptySliceView([1280, 720]);
@@ -331,10 +332,8 @@ describe("SavedView encoder", () => {
   });
 });
 
-// Helpers — we duplicate the gzip/base64url logic locally because the
-// encoder doesn't export its private helpers. This keeps the tests
-// honest: if the encoder switches algorithms, the version-handling tests
-// that hand-encode a payload will catch the divergence.
+// Local copies of the encoder's private gzip/base64url helpers. If the
+// encoder switches algorithms, the hand-encoded version tests catch it.
 
 async function gzipForTest(bytes: Uint8Array): Promise<Uint8Array> {
   const stream = new Response(new Blob([bytes as BlobPart])).body!
@@ -349,7 +348,6 @@ function base64UrlEncodeForTest(bytes: Uint8Array): string {
 }
 
 beforeEach(() => {
-  // No-op; placeholder for future common setup.
 });
 
 afterEach(() => {

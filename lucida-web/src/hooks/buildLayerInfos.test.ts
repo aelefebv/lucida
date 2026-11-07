@@ -5,6 +5,7 @@ import type { WasmScene } from "lucida-core";
 import { buildLayerInfos } from "./useDatasetSettings.ts";
 import type { DatasetState } from "../types.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "../manifestTypes.ts";
+import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
 
 // A single-level image with the given dtype + [Y, X] shape (chunked so a small
 // label's footprint fits the default caps).
@@ -61,12 +62,14 @@ function stubScene(
   order: string[],
   allSettings: Record<string, unknown>,
   c = 0,
+  pinnableLevels: number[] = [0],
 ): WasmScene {
   return {
     dataset_order: () => JSON.stringify(order),
     all_dataset_settings: () => JSON.stringify(allSettings),
     dataset_name: (id: string) => id,
     c: () => c,
+    pinnable_levels: () => Uint32Array.from(pinnableLevels),
   } as unknown as WasmScene;
 }
 
@@ -76,8 +79,8 @@ function datasetsWith(labels: LabelSpec[]): Map<string, DatasetState> {
 
 const emptyMaps = {
   autoContrast: new Map<string, boolean>(),
-  fullRange: new Map<string, boolean>(),
   dataRange: new Map<string, { min: number; max: number }>(),
+  levels: new Map<string, DatasetLevels>(),
 };
 
 // The full per-dataset settings shape the scene serializes, with the
@@ -103,7 +106,7 @@ function settingsWith(labelSettings: { visible: boolean; opacity: number }[]) {
 
 describe("buildLayerInfos label rows (scene → LayerInfo seam)", () => {
   it("surfaces label_settings from all_dataset_settings into labelRows", () => {
-    // THE regression this guards: the section renders live only if buildLayerInfos
+    // The section renders live only if buildLayerInfos
     // reads `label_settings` out of the scene JSON and maps it onto the LayerInfo.
     const scene = stubScene(
       ["ds-0"],
@@ -277,7 +280,7 @@ describe("buildLayerInfos view-mode-aware label rows", () => {
 
   it("disables an over-budget mask in 3D with a memory reason, distinct from the per-mask reason", () => {
     // Three ~192 MB masks; the 512 MB total budget fits the first two, so the
-    // third is disabled with a memory-budget reason (NOT the volume-ineligible
+    // third is disabled with a memory-budget reason (not the volume-ineligible
     // "too large to render in 3D" reason).
     const scene = stubScene(
       ["ds-0"],
@@ -339,5 +342,142 @@ describe("buildLayerInfos view-mode-aware label rows", () => {
     const rows = infos[0].labelRows!;
     expect(rows[2].visible).toBe(true);
     expect(rows[2].disabledReason).toBeUndefined();
+  });
+});
+
+describe("buildLayerInfos level readout", () => {
+  const scene = stubScene(["ds-0"], settingsWith([]));
+
+  it("carries the worker's target and displayed levels for the dataset", () => {
+    const infos = buildLayerInfos(scene, datasetsWith([]), {
+      ...emptyMaps,
+      levels: new Map([["ds-0", {
+        target: { min: 1, max: 1 },
+        displayed: { min: 1, max: 3 },
+        coarserThanTarget: true,
+      }]]),
+    });
+    expect(infos[0]).toMatchObject({
+      targetLevel: { min: 1, max: 1 },
+      displayedLevel: { min: 1, max: 3 },
+      displayedCoarserThanTarget: true,
+    });
+  });
+
+  it("leaves the levels null before the worker has reported the dataset", () => {
+    const infos = buildLayerInfos(scene, datasetsWith([]), { ...emptyMaps, levels: new Map() });
+    expect(infos[0]).toMatchObject({
+      targetLevel: null,
+      displayedLevel: null,
+      displayedCoarserThanTarget: false,
+    });
+  });
+
+  it("reads the downsampling method off the manifest, and null when it declares none", () => {
+    const withMethod = manifest([]);
+    withMethod.images[0].multiscale = { ...withMethod.images[0].multiscale, downsampling_method: "gaussian" };
+    const datasets = new Map([["ds-0", { manifest: withMethod } as unknown as DatasetState]]);
+    expect(buildLayerInfos(scene, datasets, emptyMaps)[0].downsamplingMethod).toBe("gaussian");
+
+    expect(buildLayerInfos(scene, datasetsWith([]), emptyMaps)[0].downsamplingMethod).toBeNull();
+  });
+});
+
+describe("buildLayerInfos level pin (scene → LayerInfo seam)", () => {
+  /** Four manifest levels, the last a generated coarse level, so the manifest
+   *  lists one level more than the scene reports pinnable. */
+  function pyramidDatasets(): Map<string, DatasetState> {
+    const base = manifest([]);
+    const levels = [4096, 2048, 1024, 512].map((side, level_index) => ({
+      level_index,
+      shape: [1, 1, 1, side, side / 2],
+      chunk_shape: [1, 1, 1, 128, 128],
+      grid_shape: [1, 1, 1, 1, 1],
+      scale: [1, 1, 1, 1, 1],
+    }));
+    const image: ImageSpec = {
+      ...base.images[0],
+      multiscale: {
+        ...base.images[0].multiscale,
+        levels,
+        generated_levels: [{ level_index: 3, role: "coarse" }],
+      },
+    };
+    return new Map([
+      ["ds-0", { manifest: { ...base, images: [image] } } as unknown as DatasetState],
+    ]);
+  }
+
+  it("lists the levels the scene reports pinnable, level 0 first, labeled by the manifest shape", () => {
+    const scene = stubScene(["ds-0"], settingsWith([]), 0, [0, 1, 2]);
+    const infos = buildLayerInfos(scene, pyramidDatasets(), emptyMaps);
+    expect(infos[0].levelPinOptions).toEqual([
+      { level: 0, label: "Level 0 (2048 x 4096)" },
+      { level: 1, label: "Level 1 (1024 x 2048)" },
+      { level: 2, label: "Level 2 (512 x 1024)" },
+    ]);
+    expect(infos[0].levelPin).toBeNull();
+  });
+
+  it("surfaces a pin to level 0 as 0, not as absent", () => {
+    const settings = settingsWith([]);
+    settings["ds-0"] = { ...settings["ds-0"], detail_level_override: 0 } as typeof settings["ds-0"];
+    const scene = stubScene(["ds-0"], settings, 0, [0, 1, 2]);
+    const infos = buildLayerInfos(scene, pyramidDatasets(), emptyMaps);
+    expect(infos[0].levelPin).toBe(0);
+  });
+
+  it("reports no options for a dataset the scene has no pinnable levels for", () => {
+    const scene = stubScene(["ds-0"], settingsWith([]), 0, []);
+    const infos = buildLayerInfos(scene, pyramidDatasets(), emptyMaps);
+    expect(infos[0].levelPinOptions).toEqual([]);
+  });
+});
+
+describe("buildLayerInfos channels (scene → LayerInfo seam)", () => {
+  /** A three-channel image whose metadata labels only the first channel. */
+  function threeChannelDatasets(): Map<string, DatasetState> {
+    const base = manifest([]);
+    const level = { ...base.images[0].multiscale.levels[0], shape: [1, 3, 1, 340, 348] };
+    const image: ImageSpec = {
+      ...base.images[0],
+      multiscale: { ...base.images[0].multiscale, levels: [level], channel_infos: [{ label: "Signal" }] },
+    };
+    return new Map([["ds-0", { manifest: { ...base, images: [image] } } as unknown as DatasetState]]);
+  }
+
+  function settingsWithChannels() {
+    const settings = settingsWith([]);
+    settings["ds-0"].channel_settings = [
+      { visible: true, colormap: "magenta", contrast_min: 10, contrast_max: 900, gamma: 1 },
+      { visible: false, colormap: "green", contrast_min: 0, contrast_max: 65535, gamma: 2, name: "Mine" } as never,
+      { visible: true, colormap: "cyan", contrast_min: 0, contrast_max: 65535, gamma: 1 },
+    ];
+    return settings;
+  }
+
+  it("lists every channel with its settings, name, and loaded range, whatever the scene's c", () => {
+    const scene = stubScene(["ds-0"], settingsWithChannels(), 2);
+    const maps = { ...emptyMaps, dataRange: new Map([["ds-0:ch1", { min: 5, max: 700 }]]) };
+    const [info] = buildLayerInfos(scene, threeChannelDatasets(), maps);
+
+    expect(info.channels.map((c) => c.name)).toEqual(["Signal", "Mine", "Channel 3"]);
+    expect(info.channels[1]).toMatchObject({
+      nameOverride: "Mine",
+      inheritedName: "Channel 2",
+      visible: false,
+      colormap: "green",
+      gamma: 2,
+      dataRange: { min: 5, max: 700 },
+    });
+    expect(info.channels[0]).toMatchObject({ contrastMin: 10, contrastMax: 900, dataRange: null });
+  });
+
+  it("gives a single-channel image one channel", () => {
+    const scene = stubScene(["ds-0"], settingsWith([]));
+    const [info] = buildLayerInfos(scene, datasetsWith([]), emptyMaps);
+    expect(info.channels).toHaveLength(1);
+    expect(info.channels[0].name).toBe("Channel 1");
+    expect(info.integerData).toBe(true);
   });
 });

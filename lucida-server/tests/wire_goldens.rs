@@ -1,33 +1,12 @@
 //! Golden-fixture lock tests for the JSON wire protocol.
 //!
-//! Every convention-governed JSON payload family that crosses the WebSocket
-//! between lucida-server and the web client is pinned by a committed fixture
-//! under `wire-fixtures/` at the repository root:
-//!
-//! - session envelopes (`lucida_core::protocol::{ServerMessage, ClientMessage}`),
-//!   including every web-live `DocumentCommand` and the open/health
-//!   diagnostics the envelopes carry;
-//! - the dataset-open payload (`lucida_protocol::DatasetOpened`) and the
-//!   `FetchSource` variants;
-//! - generated-availability payloads (snapshot/delta/chunk status updates);
-//! - the JSON request envelopes `ChunkMessage::ChunkRequest` and
-//!   `AssetMessage::AssetRequest`;
-//! - the enum vocabulary fixture (`vocab/enum_vocabulary.json`): one exemplar
-//!   per variant for every enum whose string form the web switches on.
-//!
-//! `ViewportCommand` is out of wire scope by design and needs no fixtures:
-//! viewport commands never cross the socket — `ClientMessage::Command`
-//! carries `DocumentCommand` only, and presence carries viewport *state*,
-//! not commands (see wiki/decisions/0001-document-vs-viewport-split.md).
-//!
-//! This test constructs the exact same values in code, serializes them with
-//! serde, and asserts byte-for-byte equality with the committed files. The
-//! companion vitest suite (`lucida-web/src/wireGoldens.test.ts`) parses the
-//! SAME files through the web client's real consumption paths, so a schema
-//! change on either side fails one of the two suites instead of shipping as
-//! silent `undefined`s in the browser.
-//!
-//! # Regenerating
+//! Every JSON payload family that crosses the WebSocket is pinned by a
+//! fixture under `wire-fixtures/`. This test serializes the same values and
+//! asserts byte equality, and `lucida-web/src/wireGoldens.test.ts` parses
+//! the same files, so a schema change on either side fails a suite. Deleting
+//! a `required` key must fail deserialization, and a new wire variant is a
+//! compile error until it has a fixture. A `HashMap` that crosses the wire
+//! may hold at most one entry here, because its order is not deterministic.
 //!
 //! After an intentional wire change, regenerate the fixtures with
 //!
@@ -35,60 +14,12 @@
 //! REGEN_WIRE_GOLDENS=1 cargo test -p lucida-server --test wire_goldens
 //! ```
 //!
-//! and then run `cd lucida-web && pnpm test` — the vitest suite failing on
-//! the regenerated fixtures is the lock doing its job: update the web's
-//! mirror types/expectations to match before shipping. Regeneration only
-//! writes files; a fixture removed from the tables below is reported as a
-//! stray by `fixture_directory_matches_declared_set` and must be deleted by
-//! hand.
-//!
-//! # What each layer of this test enforces
-//!
-//! - **Byte lock** (`check`): serde output equals the committed bytes, and
-//!   the committed bytes deserialize back into the type (both directions of
-//!   the wire). Runs in regen mode too.
-//! - **Required-key harness** (`check`, `required` lists): for every listed
-//!   JSON pointer, deleting that key from the fixture must make
-//!   deserialization FAIL. Making a required field optional (`Option` /
-//!   `#[serde(default)]`) therefore forces a visible edit to the pointer
-//!   list here — it cannot slip through as a silently-tolerated missing key.
-//!   Each required field of each wire type is covered at least once across
-//!   the fixture set (not at every occurrence).
-//! - **Variant exhaustiveness** (the `*_fixture_paths` matches and the
-//!   `vocab!` lists): adding a `ServerMessage`/`ClientMessage`/
-//!   `DocumentCommand`/`ChunkMessage`/`AssetMessage` variant, or a variant of
-//!   any vocabulary enum, is a COMPILE error until it is wired to a fixture
-//!   (or an explicit documented exclusion).
-//! - **Maximal fixtures**: every `Option`/`skip_serializing_if` field on the
-//!   covered wire types is populated (non-default) in at least one fixture,
-//!   so adding `skip_serializing_if` to an existing field changes a fixture
-//!   at regen and trips the web-side expectations.
-//!
-//! # Known limits (deliberate, documented)
-//!
-//! - A **newly added** serde-skipped field that no fixture populates never
-//!   appears in any fixture, so this lock cannot see it. The mitigation is
-//!   the maximal-fixture discipline above (populate every optional field in
-//!   at least one fixture when adding it) plus review.
-//! - The **binary** chunk/proxy frames (length-prefixed `client_id + key +
-//!   payload` framing and the 64-byte proxy header) are out of scope here;
-//!   the proxy header layout is locked separately by
-//!   `lucida-web/src/pipeline/fetch/wireProtocol.test.ts`.
-//! - `ChunkMessage::ChunkFetch` is currently unproduced wire vocabulary:
-//!   nothing in the repo sends it, and the server's handler accepts and
-//!   ignores it. It is excluded below because there is no producer or
-//!   consumer to lock.
-//!
-//! # Fixture-authoring constraint
-//!
-//! Any `std::collections::HashMap` that crosses the wire (e.g.
-//! `Snapshot::generated_availability`, `PresenceState::dataset_settings`)
-//! must hold at most ONE entry here, because `HashMap` iteration order is
-//! not deterministic and would break byte equality. `IndexMap`-backed fields
-//! (`DocumentState::manifests`, `SavedView::dataset_settings`, ...) preserve
-//! insertion order and may hold several.
+//! then update the web's mirror types until `pnpm test` passes in
+//! `lucida-web`. Populate every new optional field in at least one fixture,
+//! or the lock cannot see it. A fixture dropped from the tables below must
+//! be deleted by hand.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::PathBuf;
 
@@ -107,7 +38,8 @@ use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{
     BookmarkAction, ChunkMessage, ClientMessage, PeerIdentity, PresenceState, ServerMessage,
     ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint, ViewerInterestLane,
-    ViewerInterestMode, ViewerInterestViewport,
+    ViewerInterestMode, ViewerInterestViewport, WatchBoundaryEvent, WatchItem, WatchLevelRange,
+    WatchReading, WatchRunCause, WatchSendTally, WatchTick, WatchTickLevel,
 };
 use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
 use lucida_core::scene::{
@@ -261,18 +193,11 @@ fn assert_no_failures(failures: Vec<String>) {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Variant exhaustiveness devices
-//
-// Each function below maps every enum variant to the fixture path(s) that
-// lock it (or to an explicitly documented exclusion). NO wildcard arms:
-// adding a variant is a compile error until it is wired here, which is the
-// point — a new wire variant cannot land without either a fixture or a
-// written-down reason for not having one. The golden tables assert that the
-// path they check appears in the variant's declared list, and
-// `fixture_directory_matches_declared_set` asserts the declared set matches
+// Each function below maps every enum variant to the fixture paths that
+// lock it, or to a documented exclusion. No wildcard arms, so a new wire
+// variant is a compile error until it is wired here.
+// `fixture_directory_matches_declared_set` checks the declared set against
 // the files on disk.
-// ---------------------------------------------------------------------------
 
 fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] {
     match msg {
@@ -309,6 +234,9 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         ServerMessage::TimingBatch { .. } => &["session/server_timing_batch.json"],
         ServerMessage::BookmarkChanged { .. } => &["session/server_bookmark_changed.json"],
         ServerMessage::WorkspaceArchived { .. } => &["session/server_workspace_archived.json"],
+        ServerMessage::WatchUpdate { .. } => &["session/server_watch_update.json"],
+        ServerMessage::ReportSent { .. } => &["session/server_report_sent.json"],
+        ServerMessage::ReportFailed { .. } => &["session/server_report_failed.json"],
     }
 }
 
@@ -339,6 +267,17 @@ fn client_message_fixture_paths(msg: &ClientMessage) -> &'static [&'static str] 
         ClientMessage::DatasetRetry { .. } => &["session/client_dataset_retry.json"],
         ClientMessage::ViewerInterest { .. } => &["session/client_viewer_interest.json"],
         ClientMessage::RequestSnapshot => &["session/client_request_snapshot.json"],
+        ClientMessage::WatchSubscribe => &["session/client_watch_subscribe.json"],
+        // One envelope fixture per watch-item kind that the criteria lock:
+        // the aggregate and the boundary. The provisional item carries the
+        // diagnostic document's own object, which is versioned by the
+        // diagnostic's schema integer and locked by the derivation's tests
+        // rather than restated here.
+        ClientMessage::WatchPublish { .. } => &[
+            "session/client_watch_publish_aggregate.json",
+            "session/client_watch_publish_boundary.json",
+        ],
+        ClientMessage::SendReport { .. } => &["session/client_send_report.json"],
     }
 }
 
@@ -469,10 +408,6 @@ fn enum_vocabulary() -> EnumVocabulary {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared fixture values
-// ---------------------------------------------------------------------------
-
 const SINGLE_DATASET_ID: &str = "wds-0f3a";
 const SINGLE_IMAGE_ID: &str = "multiscale-0";
 const SINGLE_LABEL_IMAGE_ID: &str = "multiscale-0:label:region-a";
@@ -557,6 +492,7 @@ fn single_manifest() -> DatasetManifest {
                 color: None,
             },
         ],
+        downsampling_method: Some("mean".into()),
     };
 
     let label = LabelSpec {
@@ -591,6 +527,7 @@ fn single_manifest() -> DatasetManifest {
                 generated_levels: vec![],
                 data_type: DataType::Uint32,
                 pinned_axes: vec![],
+                downsampling_method: None,
                 channel_infos: vec![],
             },
         },
@@ -687,7 +624,7 @@ fn single_dataset_opened() -> DatasetOpened {
 }
 
 /// A collection manifest: group/tile entity hierarchy, explicit positioning,
-/// and TWO tile-owned images sharing one multiscale and one wire format —
+/// and two tile-owned images sharing one multiscale and one wire format —
 /// which locks the shared-once wire form (top-level `multiscales` /
 /// `wire_formats` tables, per-image `multiscale_ref` / `wire_format_ref`,
 /// and the compact `translation` transform edges).
@@ -700,9 +637,8 @@ fn collection_dataset_opened() -> DatasetOpened {
     ];
     let tile_positions = [[0.0, 0.0], [2048.0, 1024.0]];
 
-    // All tiles of a collection share one multiscale (the importer templates
-    // from a representative tile), which is exactly what the shared table
-    // deduplicates.
+    // All tiles of a collection share one declared multiscale, which is
+    // exactly what the shared table deduplicates.
     let shared_multiscale = MultiscaleInfo {
         axes: vec![
             Axis {
@@ -742,6 +678,7 @@ fn collection_dataset_opened() -> DatasetOpened {
         generated_levels: vec![],
         data_type: DataType::Uint8,
         pinned_axes: vec![],
+        downsampling_method: None,
         channel_infos: vec![],
     };
 
@@ -920,7 +857,7 @@ fn shared_display_state() -> DisplayState {
 
 /// The author-view capture embedded on a pin (`Annotation::view` /
 /// `AddAnnotation.view`) — the `SavedView` wire shape in
-/// workspace-dataset-id form. `datasets` stays EMPTY by invariant (a
+/// workspace-dataset-id form. `datasets` stays empty by invariant (a
 /// pin-embedded view must not carry dataset source URLs; membership is owned
 /// by the workspace document), while every other optional field is
 /// populated, including the `auto_contrast` map that is skipped when empty.
@@ -1204,10 +1141,6 @@ fn asset_catalog_delta() -> AssetCatalogDelta {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Required-key lists (JSON pointers), reused across embedding sites
-// ---------------------------------------------------------------------------
-
 /// Required fields of `DatasetManifest` and its component types, rooted at
 /// the manifest object. Written against `single_manifest()`'s shape.
 const MANIFEST_REQUIRED: &[&str] = &[
@@ -1384,10 +1317,6 @@ const SOURCE_HEALTH_REQUIRED: &[&str] = &[
     "/generated_coarse/recent_failures/0/key",
     "/generated_coarse/recent_failures/0/status",
 ];
-
-// ---------------------------------------------------------------------------
-// Golden tables
-// ---------------------------------------------------------------------------
 
 fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
     let mut generated_availability = HashMap::new();
@@ -1819,6 +1748,9 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     decompress_us: vec![4_512, PHASE_UNSET, PHASE_UNSET],
                     slice_encode_us: vec![903, PHASE_UNSET, PHASE_UNSET],
                     handoff_us: vec![61, 55, PHASE_UNSET],
+                    // Only the row that led a round trip says what it
+                    // moved: one whole 256x256 uint16 chunk object here.
+                    backend_bytes: vec![Some(131_072), None, None],
                     coalesced_onto: vec![LABEL_NONE, LABEL_NONE, LABEL_NONE],
                     metadata_phase: vec![None, None, Some(MetadataReadPhase::BackendRead)],
                     dispatch_offset_us: vec![0, 0, 1_204],
@@ -1848,6 +1780,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                     "/batch/decompress_us",
                     "/batch/slice_encode_us",
                     "/batch/handoff_us",
+                    "/batch/backend_bytes",
                     "/batch/coalesced_onto",
                 ],
             ),
@@ -1859,7 +1792,121 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             },
             req("", &["/type", "/workspace_id"]),
         ),
+        (
+            "session/server_watch_update.json",
+            ServerMessage::WatchUpdate {
+                client_id: 3,
+                seq: 42,
+                item: watch_aggregate(),
+            },
+            req("", &["/type", "/client_id", "/seq", "/item"]),
+        ),
+        (
+            "session/server_report_sent.json",
+            ServerMessage::ReportSent {
+                request_id: "web-report-9c1d".into(),
+                entry_id: "5d1f0c2e-7b3a-4e8f-9a6b-0c1d2e3f4a5b".into(),
+                expires_at: "2026-09-23T14:05:00Z".into(),
+            },
+            req("", &["/type", "/request_id", "/entry_id", "/expires_at"]),
+        ),
+        (
+            "session/server_report_failed.json",
+            ServerMessage::ReportFailed {
+                request_id: "web-report-9c1d".into(),
+                error: "the bundle carries no header".into(),
+            },
+            req("", &["/type", "/request_id", "/error"]),
+        ),
     ]
+}
+
+/// One watch-stream aggregate, in both directions: the page publishes this
+/// item and the server relays the same object inside a `watch_update`. Built
+/// once so the two fixtures cannot drift apart.
+fn watch_aggregate() -> WatchItem {
+    WatchItem::Aggregate {
+        at_epoch_ms: 1_767_225_600_250,
+        run_id: Some("run-3".into()),
+        reading: Some(WatchReading {
+            at_us: 4_200_000.0,
+            queue_depth: 20_480.0,
+            in_flight: 24.0,
+            frame_time_us: 8_300.0,
+            resident_bytes: 402_653_184.0,
+            gpu_pass_us: Some(2_100.0),
+            extra: BTreeMap::new(),
+        }),
+        counted: BTreeMap::from([("cache-admission".to_string(), 48)]),
+        sent: BTreeMap::from([(
+            "chunkRequest".to_string(),
+            WatchSendTally {
+                messages: 12,
+                bytes: 1_140,
+            },
+        )]),
+        ticks: vec![WatchTick {
+            at_us: 4_199_000,
+            dataset_id: SINGLE_DATASET_ID.into(),
+            counters: BTreeMap::from([("laneDetail".to_string(), 12)]),
+            levels: vec![WatchTickLevel {
+                level: 1,
+                planned: 48,
+                cached: 40,
+                in_flight: 8,
+            }],
+            levels_dropped: 0,
+            target_level: Some(WatchLevelRange { min: 1, max: 1 }),
+            level_pinned: false,
+            displayed_level: Some(WatchLevelRange { min: 1, max: 2 }),
+            availability_woken: false,
+            extra: BTreeMap::new(),
+        }],
+    }
+}
+
+/// The bundle a Send report carries, abbreviated, as the text the field
+/// holds. The server stores it as it arrived, so it appears escaped on one
+/// line. Only the header is spelled out, because it is the one part the
+/// server reads; the bundle's own shape is locked by
+/// `trace-fixtures/bundle-v1.json`.
+fn send_report_bundle() -> String {
+    serde_json::to_string(&serde_json::json!({
+        "format": "lucida-trace-bundle",
+        "bundleVersion": 1,
+        "schemaVersion": 2,
+        "header": {
+            "runId": "remote-cold",
+            "cause": {
+                "epoch": "content",
+                "dirtyKind": "interactive",
+                "source": "dataset_open_request"
+            },
+            "endReason": "quiescent",
+            "startedAtEpochMs": 1767225600000u64,
+            "durationUs": 4200000,
+            "savedAtEpochMs": 1767225700000u64,
+            "datasets": [{
+                "id": SINGLE_DATASET_ID,
+                "name": "sample volume",
+                "sourceUrl": "gs://lucida-fixtures/sample-volume.zarr"
+            }],
+            "viewUrl": "https://lucida.example/w/workspace-2ac8",
+            "mode": "volume",
+            "devicePixelRatio": 2,
+            "build": { "version": "0.2.0", "mode": "production", "dev": false },
+            "gpu": {
+                "vendor": "example",
+                "architecture": "gen-1",
+                "device": "adapter-01",
+                "description": "Example Adapter",
+                "fallback": false,
+                "timestampQueries": true
+            }
+        },
+        "trace": { "schemaVersion": 2, "runs": [] }
+    }))
+    .expect("the bundle fixture serializes")
 }
 
 /// The web-live `DocumentCommand`s, each as its client `Command` envelope
@@ -2070,6 +2117,69 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
             req("", &["/type"]),
         ),
         (
+            "session/client_watch_subscribe.json",
+            ClientMessage::WatchSubscribe,
+            req("", &["/type"]),
+        ),
+        (
+            "session/client_watch_publish_aggregate.json",
+            ClientMessage::WatchPublish {
+                item: watch_aggregate(),
+            },
+            req(
+                "",
+                &[
+                    "/type",
+                    "/item",
+                    "/item/kind",
+                    "/item/at_epoch_ms",
+                    "/item/reading/atUs",
+                    "/item/reading/queueDepth",
+                    "/item/reading/inFlight",
+                    "/item/reading/frameTimeUs",
+                    "/item/reading/residentBytes",
+                    "/item/counted",
+                    "/item/sent",
+                    "/item/ticks",
+                    "/item/ticks/0/atUs",
+                    "/item/ticks/0/datasetId",
+                    "/item/ticks/0/counters",
+                    "/item/ticks/0/levels",
+                    "/item/ticks/0/levelsDropped",
+                    "/item/ticks/0/levelPinned",
+                ],
+            ),
+        ),
+        (
+            "session/client_watch_publish_boundary.json",
+            ClientMessage::WatchPublish {
+                item: WatchItem::Boundary {
+                    at_epoch_ms: 1_767_225_604_700,
+                    event: WatchBoundaryEvent::RunClosed,
+                    run_id: Some("run-3".into()),
+                    cause: Some(WatchRunCause {
+                        epoch: Some("view".into()),
+                        dirty_kind: "interactive".into(),
+                        source: "orbit".into(),
+                    }),
+                    end_reason: Some("quiescent".into()),
+                    duration_us: Some(4_700_000),
+                },
+            },
+            req(
+                "",
+                &[
+                    "/type",
+                    "/item",
+                    "/item/kind",
+                    "/item/at_epoch_ms",
+                    "/item/event",
+                    "/item/cause/dirtyKind",
+                    "/item/cause/source",
+                ],
+            ),
+        ),
+        (
             "session/client_viewer_interest.json",
             ClientMessage::ViewerInterest {
                 interest: ViewerInterestHint {
@@ -2129,6 +2239,14 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
                 ],
             ),
         ),
+        (
+            "session/client_send_report.json",
+            ClientMessage::SendReport {
+                request_id: "web-report-9c1d".into(),
+                bundle: send_report_bundle(),
+            },
+            req("", &["/type", "/request_id", "/bundle"]),
+        ),
     ]);
     goldens
 }
@@ -2150,7 +2268,7 @@ const REQUEST_FILES: &[&str] = &["session/chunk_request.json", "session/asset_re
 
 const VOCAB_FILES: &[&str] = &["vocab/enum_vocabulary.json"];
 
-/// The two request goldens carry consecutive labels from ONE counter — `0`
+/// The two request goldens carry consecutive labels from one counter — `0`
 /// then `1` — because that is what a connection's first chunk request and
 /// first asset request actually get: the counter is shared across families
 /// and starts at zero. The vitest mirror reproduces both from a real
@@ -2175,10 +2293,6 @@ fn asset_request_golden() -> AssetMessage {
         c: 2,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Golden tests
-// ---------------------------------------------------------------------------
 
 #[test]
 fn server_messages_match_goldens() {

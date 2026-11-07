@@ -10,18 +10,24 @@ pub mod binding;
 pub mod binding_restore;
 pub mod bookmarks;
 pub mod browse;
+pub mod chunk_read;
 pub mod dataset_open;
 pub mod decode;
+pub mod deployment_theme;
 pub mod generated;
 pub mod handler;
 pub mod health;
+pub mod inbox;
 pub mod open_diagnostics;
 pub mod proxy;
 pub mod session;
 pub mod static_serve;
+pub mod status;
+pub mod storage;
 #[cfg(test)]
 pub(crate) mod test_fixtures;
 pub mod timing;
+pub mod watch;
 pub mod workspace;
 
 use std::collections::HashMap;

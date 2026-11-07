@@ -6,9 +6,7 @@ import type { CacheEntry, EvictionTier } from "./types.ts";
 import type { EvictionRecordTier } from "./telemetry.ts";
 import type { SceneEpochs } from "../epochs.ts";
 
-// ---------------------------------------------------------------------------
 // Helpers
-// ---------------------------------------------------------------------------
 
 const ZERO_EPOCHS: SceneEpochs = {
   content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
@@ -27,6 +25,7 @@ function makeEntry(overrides: Partial<CacheEntry> & {
     data: new ArrayBuffer(0),
     sizeBytes: 0,
     lane: "detail",
+    residencyTier: "detail",
     tier: "active-detail",
     entityId: "e-1",
     imageId: "img-1",
@@ -56,7 +55,7 @@ function makeMainStore(opts?: {
 }) {
   const evictionLog: EvictionRecordTier[] = [];
   const store = new ChunkStore({
-    policy: new TieredPolicy(() => "idle"),
+    policy: new TieredPolicy(() => "idle", () => undefined),
     budgetBytes: opts?.budgetBytes ?? Infinity,
     evictionTier: (entry) => entry.tier,
     recordEviction: (tier) => { evictionLog.push(tier); },
@@ -76,9 +75,7 @@ function makeOverviewStore(opts?: { budgetBytes?: number }) {
   return { store, evictionLog };
 }
 
-// ---------------------------------------------------------------------------
 // Basic API
-// ---------------------------------------------------------------------------
 
 describe("ChunkStore basics", () => {
   it("insert + get round-trip returns the live entry", () => {
@@ -150,9 +147,7 @@ describe("ChunkStore basics", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // cancelDataset
-// ---------------------------------------------------------------------------
 
 describe("ChunkStore.cancelDataset", () => {
   it("removes every entry for the given entityIds and zeros their bytes", () => {
@@ -190,9 +185,7 @@ describe("ChunkStore.cancelDataset", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // reset
-// ---------------------------------------------------------------------------
 
 describe("ChunkStore.reset", () => {
   it("clears all entries and zeros bytes", () => {
@@ -210,9 +203,7 @@ describe("ChunkStore.reset", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Eviction
-// ---------------------------------------------------------------------------
 
 describe("ChunkStore eviction via policy", () => {
   it("over-budget insert triggers policy and removes victims", () => {
@@ -319,9 +310,7 @@ describe("ChunkStore eviction via policy", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Telemetry shapes
-// ---------------------------------------------------------------------------
 
 describe("ChunkStore residency reporting", () => {
   it("tierResidency bins entries by entry.tier", () => {
@@ -346,9 +335,7 @@ describe("ChunkStore residency reporting", () => {
 
 });
 
-// ---------------------------------------------------------------------------
 // Demotion
-// ---------------------------------------------------------------------------
 
 describe("ChunkStore.demoteEntity", () => {
   it("moves every active-detail entry for an entity to demoted-detail", () => {
@@ -381,9 +368,7 @@ describe("ChunkStore.demoteEntity", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Snapshot integration helper
-// ---------------------------------------------------------------------------
 
 describe("ChunkStore.entityChunkKeys", () => {
   it("yields [entityId, chunkKeys] pairs for snapshot composition", () => {

@@ -1,33 +1,12 @@
-// URL ↔ scene synchronization. Deep module.
+// URL and scene synchronization.
 //
-// Two flows:
-//
-//   - **Outbound** (scene → URL): on every viewport-change tick, debounce
-//     250-500 ms, encode the current SavedView, write `#view=…` via
-//     `history.replaceState`. Suppressed while applier is in progress so
-//     we don't fight ourselves during a recipient apply.
-//
-//   - **Inbound** (URL → scene): on initial load, parse `window.location.hash`;
-//     on `popstate`, re-parse and re-apply. Both routed through the
-//     SavedViewApplier so the same step-ordered logic runs in both cases.
-//     Three recognized payload shapes:
-//       * `#view=<inline base64+gzip>` — inline payload
-//       * `#b=<saved-view-id>` — fetched via the configured resolver then
-//         handed to the applier; the URL is then collapsed to its live
-//         `#view=…` form so further pans don't drift the recipient
-//         back to a stale snapshot.
-//       * `#a=<annotation-id>` — a workspace-scoped annotation DEEP-LINK
-//         (annotation-views slice 3). UrlSync only RECOGNIZES it here so it
-//         never mistakes it for a bare workspace open (and so doesn't apply the
-//         default/last view over it). The actual resolve+restore+focus is the
-//         host's job (App.tsx) and is deliberately deferred until AFTER the
-//         workspace document — and thus its annotations — has loaded: an
-//         annotation exists only after the doc snapshot lands, so resolving at
-//         scene-bootstrap time would focus an unloaded pin (the #802 class).
-//         Like `#b=`, the host collapses the hash to the live `#view=…` form
-//         after applying via {@link UrlSync.collapseToLiveView}.
-//
-// The debounce timing is configurable via the constructor for tests.
+// Outbound: a debounced `history.replaceState` writes the current view as
+// `#view=…`, suppressed while the applier runs so we don't fight a recipient
+// apply. Inbound: initial load and `popstate` route `#view=` and `#b=` through
+// the applier, then collapse `#b=` to the live `#view=` form so later pans don't
+// snap back to a stale snapshot. `#a=` annotation links are only recognized
+// here; the host resolves them after the workspace document loads, because the
+// pin doesn't exist at scene bootstrap.
 
 import { encode, decode } from "./encoder.ts";
 import type { SavedView } from "./types.ts";
@@ -57,8 +36,8 @@ export interface UrlSyncOptions {
   fetchDefaultSavedView?: () => Promise<ResolvedSavedView | null>;
   /** Resolve `?viewer_profile=<name>` to a private viewer profile. */
   fetchViewerProfile?: (profile: string) => Promise<ResolvedSavedView | null>;
-  /** Resolve the caller's own remembered last view for a bare workspace URL
-   *  (#700). Returns null when there is none (or the user isn't a member). */
+  /** Resolve the caller's own remembered last view for a bare workspace URL.
+   *  Returns null when there is none (or the user isn't a member). */
   fetchLastView?: () => Promise<ResolvedSavedView | null>;
   /** Whether the per-user "restore my last view" toggle is on. Defaults to
    *  the localStorage-backed preference; injectable for tests. */
@@ -72,8 +51,6 @@ export type FetchDefaultSavedView = () => Promise<ResolvedSavedView | null>;
 export type FetchViewerProfile = (profile: string) => Promise<ResolvedSavedView | null>;
 export type FetchLastView = () => Promise<ResolvedSavedView | null>;
 
-/** Default `#b=<id>` resolver — the REST helper. Tests inject their
- *  own to avoid the production fetch path. */
 const defaultFetchSavedViewById: FetchSavedViewById = (id) => getBookmark(id);
 
 export class UrlSync {
@@ -82,7 +59,7 @@ export class UrlSync {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
   private popstateHandler: ((e: PopStateEvent) => void) | null = null;
-  /** Last URL we wrote — used to skip no-op writes and to suppress our
+  /** Last URL we wrote, to skip no-op writes and to suppress our
    * own popstate echoes. */
   private lastWritten: string | null = null;
 
@@ -113,16 +90,14 @@ export class UrlSync {
       options.restoreLastViewEnabled ?? getRestoreLastViewEnabled;
   }
 
-  /** Hook the popstate listener. Idempotent + re-armable after `destroy()`
-   *  so React 18 Strict-Mode's mount→unmount→mount effect cycle (which
-   *  double-invokes the cleanup before the second mount) doesn't leave the
-   *  sync permanently destroyed. */
+  /** Hook the popstate listener. Idempotent and re-armable after `destroy()`,
+   *  so Strict Mode's mount, unmount, mount cycle doesn't leave the sync
+   *  permanently destroyed. */
   start(): void {
     this.destroyed = false;
     if (this.popstateHandler !== null) return;
     this.popstateHandler = () => {
-      // popstate fires for back/forward navigation. Re-apply whatever's
-      // in the URL. If applier is busy, skip to avoid race.
+      // Back/forward: re-apply the URL, unless an apply is already running.
       if (this.applier.isInProgress()) return;
       this.bootstrap().catch((e) => {
         console.warn("[UrlSync] popstate apply failed:", e);
@@ -144,27 +119,16 @@ export class UrlSync {
   }
 
   /**
-   * Read `window.location.hash`, parse `#view=…` or `#b=<id>` if present,
-   * and apply. Resolves once the apply has run (or rejects on parse
-   * error). Safe to call multiple times — guarded by the applier's own
-   * "in progress" check so we never re-enter mid-apply.
-   *
-   * For `#b=<id>`: fetches the saved view via the configured resolver,
-   * applies its `view`, then `replaceState`s the URL to the inline `#view=…`
-   * form so further pans don't drift the recipient back to a stale
-   * snapshot every time the URL is re-applied.
+   * Apply whatever the URL names. Safe to call repeatedly: the applier's
+   * in-progress check keeps it from re-entering mid-apply.
    */
   async bootstrap(): Promise<void> {
     if (this.applier.isInProgress()) return;
 
     const hash = this.win.location.hash;
 
-    // `#a=<annotation-id>` is a workspace-scoped annotation deep-link
-    // (annotation-views slice 3). It is resolved by the HOST (App.tsx) AFTER
-    // the workspace document's annotations have loaded — not here — because the
-    // pin doesn't exist at scene-bootstrap time. We only RECOGNIZE it so the
-    // bootstrap doesn't fall through to `applyInitialViewForEmptyHash` and apply
-    // the default/last view over the link's target. No fetch, no apply here.
+    // The host resolves `#a=` once annotations load. Recognize it here only so
+    // we don't apply the default or last view over the link's target.
     if (parseAnnotationHash(hash) !== null) return;
 
     const bookmarkId = parseBookmarkHash(hash);
@@ -181,10 +145,8 @@ export class UrlSync {
         return;
       }
       await this.applier.apply(savedView.view);
-      // Collapse `#b=<id>` to the live `#view=…` form so the URL reflects
-      // the current scene, not the saved view's frozen snapshot. Skip if
-      // the apply was a no-op (no scene yet); the next bootstrap will
-      // rewrite when the scene is ready.
+      // Collapse to the live `#view=` form so the URL tracks the scene, not
+      // the saved snapshot.
       await this.flushAfterSavedViewApply();
       return;
     }
@@ -212,23 +174,16 @@ export class UrlSync {
   }
 
   /**
-   * Bare workspace open (no `#view=`/`#b=` hash, no `?viewer_profile=`):
-   * choose what to apply via the pure {@link resolveInitialViewSource}
-   * priority — the per-user remembered last view (#700) slots BETWEEN the
-   * URL-hash branch (handled above; a hash always wins) and the shared
-   * workspace default.
-   *
-   * We fetch the user's last view ONLY when the toggle is on and a fetcher is
-   * wired (so auth-off / non-member callers — which pass no `fetchLastView` —
-   * never issue the request); a fetch failure degrades silently to the
-   * default. We NEVER write the workspace default here.
+   * Bare workspace open: {@link resolveInitialViewSource} picks the user's
+   * last view or the workspace default. The last view is fetched only when the
+   * toggle is on and a fetcher is wired, so auth-off and non-member callers
+   * never send the request. This never writes the workspace default.
    */
   private async applyInitialViewForEmptyHash(): Promise<void> {
     const restoreEnabled = this.restoreLastViewEnabled();
 
-    // Resolve the remembered last view first (only when eligible), so the
-    // priority function has a truthful `hasLastView`. A fetch error is
-    // swallowed — the verdict simply falls through to the default.
+    // Fetch first so `hasLastView` is truthful. A fetch error falls through
+    // to the default.
     let lastView: ResolvedSavedView | null = null;
     if (restoreEnabled && this.fetchLastView) {
       try {
@@ -240,8 +195,7 @@ export class UrlSync {
     }
 
     const source = resolveInitialViewSource({
-      // A hash would have been handled by the branches above; at this point
-      // the workspace URL is bare.
+      // Any hash was handled above.
       hasUrlHash: false,
       restoreEnabled,
       hasLastView: lastView !== null,
@@ -285,15 +239,10 @@ export class UrlSync {
   }
 
   /**
-   * Collapse a resolved `#a=<annotation-id>` (or `#b=`) hash to the live
-   * `#view=…` form — the SAME tail `#b=` runs after its apply, exposed
-   * publicly so the host (App.tsx) can call it after the slice-2 LIGHT restore
-   * of an annotation deep-link. Keeping the URL on the annotation id would
-   * re-trigger the restore on every popstate / re-bootstrap and drift the
-   * recipient back to the author's frozen snapshot after they pan; collapsing
-   * to the live `#view=` makes the URL track the recipient's own scene from
-   * here on. A no-op when there's no capturable scene yet (the link's restore
-   * already positioned the live view; the next change tick will write it). */
+   * Collapse a resolved `#a=` hash to the live `#view=` form, as `#b=` does
+   * after its apply. Leaving the annotation id in the URL would re-run the
+   * restore on every popstate and snap the recipient back after they pan.
+   * A no-op when there's no capturable scene yet. */
   async collapseToLiveView(): Promise<void> {
     await this.flushAfterSavedViewApply();
   }
@@ -320,9 +269,8 @@ export class UrlSync {
   }
 
   /**
-   * Notify the sync that the scene has changed. Schedules a debounced
-   * URL update. If `applyInProgress` is true at fire time, the write
-   * is skipped (the URL already reflects the apply target).
+   * Schedule a debounced URL write. Skipped if an apply is running at fire
+   * time, since the URL already names the apply target.
    */
   notifyChange(): void {
     if (this.destroyed) return;
@@ -365,9 +313,7 @@ function isEmptyHash(hash: string): boolean {
   return !hash || hash === "#";
 }
 
-/** Parse a `#view=…` URL hash and return the encoded payload, or null
- * if the hash is empty or doesn't start with `#view=`. Exported for
- * test reuse. */
+/** The encoded `#view=` payload, or null if the hash has none. */
 export function parseViewHash(hash: string): string | null {
   if (!hash || hash === "#") return null;
   const stripped = hash.startsWith("#") ? hash.slice(1) : hash;
@@ -381,11 +327,9 @@ export function parseViewHash(hash: string): string | null {
   return null;
 }
 
-/** Parse a `#b=<id>` URL hash and return the bookmark id, or null when
- *  the hash isn't of that shape. Validates the id matches a conservative
- *  character class (`[A-Za-z0-9._-]+`) — UUID-v4s qualify, and rejecting
- *  anything else keeps the resolver from issuing wild GETs against the
- *  bookmarks API for `#b=<%-encoded-junk>`. */
+/** The `#b=<id>` bookmark id, or null. The conservative character class
+ *  (`[A-Za-z0-9._-]+`) admits UUIDs and keeps `#b=<%-encoded-junk>` from
+ *  sending wild GETs to the bookmarks API. */
 export function parseBookmarkHash(hash: string): string | null {
   if (!hash || hash === "#") return null;
   const stripped = hash.startsWith("#") ? hash.slice(1) : hash;
@@ -401,14 +345,9 @@ export function parseBookmarkHash(hash: string): string | null {
   return null;
 }
 
-/** Parse a `#a=<annotation-id>` URL hash and return the annotation id, or null
- *  when the hash isn't of that shape (annotation-views slice 3). Mirrors
- *  {@link parseBookmarkHash}'s conservative character class
- *  (`[A-Za-z0-9._-]+`) — annotation ids are client-minted UUID-v4s, which
- *  qualify — so a `#a=<%-encoded-junk>` link never drives a lookup against an
- *  attacker-chosen string. The link is the workspace URL + this hash; the
- *  workspace path itself still governs access (see the never-leak note in
- *  {@link buildAnnotationLink}). */
+/** The `#a=<annotation-id>` id, or null. Uses {@link parseBookmarkHash}'s
+ *  character class so a junk link never drives a lookup against an
+ *  attacker-chosen string. */
 export function parseAnnotationHash(hash: string): string | null {
   if (!hash || hash === "#") return null;
   const stripped = hash.startsWith("#") ? hash.slice(1) : hash;
@@ -421,7 +360,7 @@ export function parseAnnotationHash(hash: string): string | null {
     try {
       raw = decodeURIComponent(part.slice(eq + 1));
     } catch {
-      // Malformed percent-encoding — reject rather than throw.
+      // Malformed percent-encoding: reject rather than throw.
       return null;
     }
     if (!/^[A-Za-z0-9._-]+$/.test(raw)) return null;
@@ -431,21 +370,12 @@ export function parseAnnotationHash(hash: string): string | null {
 }
 
 /**
- * Build a shareable annotation deep-link: the CURRENT workspace URL (origin +
- * pathname + search) with the hash replaced by `#a=<annotationId>`
- * (annotation-views slice 3).
+ * The current workspace URL with the hash replaced by `#a=<annotationId>`.
  *
- * This is a deep-link, NOT an access grant: it carries no capability token and
- * widens nothing. The recipient still loads the workspace through the existing
- * gate (membership or the workspace's anyone-with-link), and annotation access
- * == workspace access because the annotation lives in the workspace document. A
- * recipient without access sees the SAME not-found UX as a missing annotation —
- * the link never confirms the annotation (or workspace) exists.
- *
- * `loc` defaults to `window.location`; injectable for tests. The annotation id
- * is `encodeURIComponent`-escaped for safety even though minted ids are already
- * URL-safe. The existing path+search are preserved so a workspace route like
- * `/w/ws-1` stays intact.
+ * A deep link, not an access grant: it carries no token. The recipient still
+ * passes the workspace gate, and a recipient without access sees the same
+ * not-found UX as a missing annotation, so the link never confirms the
+ * annotation exists. `loc` is injectable for tests.
  */
 export function buildAnnotationLink(
   annotationId: string,

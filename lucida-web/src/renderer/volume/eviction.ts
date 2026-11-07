@@ -1,10 +1,7 @@
 /**
- * Volume-mode eviction state + view hot-state application.
- *
- * Operates over `ctx.state.rayHitPerEntity` — the per-entity ray-pick
- * reference that `findFarthestSlot` consults to prefer keeping chunks
- * near the camera's hit point. Callers thread ctx (or a
- * `RendererState`) through rather than holding a module-local Map.
+ * Volume-mode eviction state and view hot-state application, over
+ * `ctx.state.rayHitPerEntity`: the per-entity ray-pick point that
+ * `findFarthestSlot` uses to keep chunks near the camera's hit point.
  */
 
 import type { ViewHotStateMessage } from "../workerProtocol.ts";
@@ -16,11 +13,7 @@ import {
 } from "../eviction.ts";
 import type { AtlasState, LodIndirectionMeta } from "./atlas.ts";
 
-/**
- * Apply a viewEpoch hot-state message. Updates
- * `ctx.state.rayHitPerEntity` so chunk eviction prioritization stays in
- * sync with the camera ray-pick. Latest message wins per entity.
- */
+/** Apply a view hot-state message to the per-entity ray hits. Latest message wins per entity. */
 export function applyViewHotState(ctx: WorkerCtx, msg: ViewHotStateMessage): void {
   const map = ctx.state.rayHitPerEntity;
   for (const [entityId, hit] of msg.rayHitsByEntity) {
@@ -54,12 +47,7 @@ export function clearAllRayHits(state: RendererState): void {
   state.rayHitPerEntity.clear();
 }
 
-/**
- * Squared distance from a chunk grid coordinate to a reference point
- * in [0,1] entity-local space. Volume-mode wrapper around the shared
- * 2D/3D-capable kernel (`eviction.chunkDistSq`); the explicit `cz`
- * argument keeps the volume call sites locally readable.
- */
+/** Squared distance from a chunk grid coordinate to a reference point in [0,1] entity-local space. */
 export function chunkDistSq(
   lodMeta: LodIndirectionMeta,
   cx: number, cy: number, cz: number,
@@ -69,10 +57,8 @@ export function chunkDistSq(
 }
 
 /**
- * Find the best eviction candidate: prefer stale (unmapped) chunks,
- * then farthest mapped chunk. Distance reference is per-entity
- * (`ctx.state.rayHitPerEntity`). Delegates to the shared kernel with
- * `is3D: true`.
+ * Find the best eviction candidate: finer than the member's target first,
+ * then stale (unmapped) chunks, then the farthest mapped chunk.
  */
 export function findFarthestSlot(
   state: RendererState,
@@ -83,6 +69,7 @@ export function findFarthestSlot(
     slotGridIdx: atlas.slotGridIdx,
     entityMetas: atlas.entityMetas,
     cameraFor: (memberId) => state.rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5],
+    targetLevelFor: (memberId) => state.targetLevelByMember.get(memberId),
     is3D: true,
   });
 }

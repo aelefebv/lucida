@@ -1,30 +1,20 @@
 /**
- * Debug overlay layer. Sits absolutely-positioned above the canvas with
- * pointer-events: none, so it never steals interaction from the viewer.
- * Reads from existing scene + orchestrator + cache state — no new
- * production-side state added for it to work.
+ * Debug overlay layer over the canvas, with pointer-events: none so it never
+ * steals interaction. It reads existing scene, orchestrator, and cache state;
+ * production code carries nothing for it. Colors and text come from the pure
+ * `overlayDrawList.ts`; this file projects and mounts. The brushed selection
+ * is read from `trace/linkedSelection.ts`, never from the dock (ADR 0052).
  *
- * Primary overlays, each gated by its own toggle in the Logging tab:
- *  - groupModes: per-group badge with detail/coarse worker-delivered coverage
- *  - chunkGrid: planned LOD chunk grid for every visible tile, colored
- *    by status or tier. Capped at MAX_CHUNK_RECTS per tick as a backstop for
- *    pathological cases.
- *  - renderRadius: actual detail/coarse render-radius boundary, projected
- *    through the same voxel→world→screen path as chunk overlays.
- *
- * Both modes (slice + volume) share the same projection pipeline:
- *
- *   voxel coords  →  world coords  →  WasmScene.project_to_screen
- *
- * The middle step differs by mode. Slice: world == voxel + tile
- * position offset (camera projects voxel space directly). Volume: world
- * == tile model matrix * (voxel / fullVoxel), which maps the tile's
- * unit cube into normalized world space and bakes in the Y-flip and
- * physical-extent normalization the renderer applies.
+ * Both modes project voxel to world to `WasmScene.project_to_screen`. Slice:
+ * world is voxel plus the tile position. Volume: world is the tile model
+ * matrix times voxel / fullVoxel, which bakes in the renderer's Y-flip and
+ * physical-extent normalization.
  */
-import { useEffect, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis } from "../axes.ts";
+import { currentChunkSelection, onChunkSelectionChanged } from "../trace/linkedSelection.ts";
+import { traceRecorder } from "../trace/recorder.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { CpuCache } from "../pipeline/fetch/index.ts";
@@ -35,6 +25,7 @@ import {
   visibleRegionCenterVox,
   type ChunkRadiusGeometry,
 } from "../pipeline/renderRadius.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 import type {
   CacheStateSnapshot,
@@ -48,9 +39,31 @@ import {
   onOverlaysChanged,
   onRenderRadiusPreviewChanged,
   type DebugOverlay,
-  type RenderRadiusPreviewTier,
 } from "./logging.ts";
+import {
+  buildChunkDrawList,
+  describeHoverInspector,
+  hitTestChunk,
+  overlayAbsence,
+  readOverlayColors,
+  selectionCaption,
+  type ChunkCell,
+  type ChunkDrawItem,
+  type ChunkDrawList,
+  type DisplayTier,
+  type InspectorView,
+} from "./overlayDrawList.ts";
 import { radiusSpecsForOverlay } from "./radiusPreview.ts";
+import {
+  buildVolumeDrawList,
+  hitTestBox,
+  isVolumeDrawList,
+  projectChunkBox,
+  type ProjectedBox,
+  type Projector,
+  type Vec3,
+} from "./volumeWireframe.ts";
+import "./DebugOverlays.css";
 
 interface Props {
   wasmSceneRef: RefObject<WasmScene | null>;
@@ -63,15 +76,6 @@ interface Props {
 
 const POLL_MS = 100;
 const MAX_CHUNK_RECTS = 600;
-
-const MODE_COLOR: Record<string, string> = {
-  "group-as-proxy": "#88f",
-  "tiles-with-proxy-fallback": "#fb4",
-  "tiles-with-detail": "#4f4",
-  "render-detail": "#4f4",
-  "render-coarse": "#6cf",
-  "render-waiting": "#fb4",
-};
 
 const MODE_LABEL: Record<string, string> = {
   "group-as-proxy": "WP",
@@ -87,9 +91,6 @@ interface GroupBadge {
   label: string;
   title: string;
 }
-
-type OverlayTier = "detail" | "coarse";
-type DisplayTier = OverlayTier | "missing";
 
 export interface TierCoverageCounts {
   /** Chunks requested by the current plan for this tier. */
@@ -111,101 +112,33 @@ export interface GroupTierCoverage {
   coarse: TierCoverageCounts;
 }
 
-interface ChunkRect {
-  key: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  status: "cached" | "in-flight" | "planned";
-  /** Current render tier visible to the shader, or missing fallback. */
-  sourceTier?: DisplayTier;
-  /**
-   * For `status === "planned"`: zero-based rank in the pending fetch
-   * queue (0 = next to fetch). `undefined` means "in plan but not in
-   * the pending queue we sampled" — the chunk was deduped, dropped, or
-   * sampled between dequeue and fetch start. Useful debug signal: a
-   * gray cell where you'd expect a hot-orange one says "planning
-   * thinks this should fetch, scheduler doesn't have it queued."
-   */
-  priorityRank?: number;
-  /**
-   * For `status === "cached"`: which eviction tier the chunk is in.
-   * Surfaces eviction churn — `active-detail` won't evict under
-   * normal pressure, `demoted-detail` is next-to-go, `prefetch` is
-   * cheapest. `null` for cached chunks where the lookup failed
-   * (rare; treat as fallback green).
-   */
-  tier?: import("../pipeline/fetch/index.ts").EvictionTier | null;
-}
-
 interface RadiusPath {
   key: string;
-  tier: OverlayTier;
+  tier: ResidencyTier;
   plane: "xy" | "xz" | "yz";
   d: string;
   title: string;
 }
 
-const SOLID_CACHED = "rgba(80, 220, 120, 0.30)";
-const SOLID_IN_FLIGHT = "rgba(240, 200, 70, 0.35)";
-const SOLID_PLANNED = "rgba(240, 90, 90, 0.30)";
-const TIER_DETAIL = "rgba(80, 220, 120, 0.36)";
-const TIER_COARSE = "rgba(245, 205, 70, 0.34)";
-const TIER_MISSING = "rgba(245, 70, 70, 0.38)";
-const RADIUS_DETAIL_STROKE = "rgba(80, 255, 130, 0.90)";
-const RADIUS_COARSE_STROKE = "rgba(255, 220, 70, 0.90)";
 const RADIUS_SAMPLE_COUNT = 96;
 
-function tierColor(tier: DisplayTier | undefined): string | null {
-  switch (tier) {
-    case "detail": return TIER_DETAIL;
-    case "coarse": return TIER_COARSE;
-    case "missing": return TIER_MISSING;
-    default: return null;
-  }
-}
-
-function tierDrawOrder(rect: ChunkRect): number {
-  if (rect.sourceTier === "missing") return 0;
-  if (rect.sourceTier === "coarse") return 0;
-  if (rect.sourceTier === "detail") return 1;
+function tierDrawOrder(cell: ChunkCell): number {
+  if (cell.sourceTier === "missing") return 0;
+  if (cell.sourceTier === "coarse") return 0;
+  if (cell.sourceTier === "detail") return 1;
   return 2;
 }
 
-/**
- * Color for a planned chunk based on its position in the pending fetch
- * queue. Rank 0 = next-to-fetch (bright orange); higher = colder.
- * Discrete bands (rather than smooth interpolation) keep the visual
- * easy to read at a glance: orange = imminent, red = soon, dim red =
- * way back.
- */
-function plannedColor(rank: number | undefined): string {
-  if (rank === undefined) return "rgba(140, 140, 140, 0.20)";
-  if (rank < 5) return "rgba(255, 180, 60, 0.50)";
-  if (rank < 20) return "rgba(245, 110, 70, 0.40)";
-  if (rank < 60) return "rgba(220, 70, 70, 0.32)";
-  return "rgba(160, 40, 40, 0.24)";
-}
+const EMPTY_DRAW_LIST: ChunkDrawList = { items: [], withRow: 0, churned: 0, selected: 0 };
 
-/**
- * Color for a cached chunk based on eviction tier. Stays in the green
- * family so "cached = green" reads at a glance, with hue shifts that
- * convey "how at-risk":
- *   active-detail  → bright green (safest)
- *   demoted-detail → pale sage    (will evict on memory pressure)
- *   prefetch       → teal         (cheapest to lose)
- */
-function cachedColor(
-  tier: import("../pipeline/fetch/index.ts").EvictionTier | null | undefined,
-): string {
-  switch (tier) {
-    case "active-detail":  return "rgba(80, 220, 120, 0.36)";
-    case "demoted-detail": return "rgba(150, 200, 140, 0.30)";
-    case "prefetch":       return "rgba(70, 200, 200, 0.32)";
-    default:               return SOLID_CACHED;
-  }
-}
+/** How faint a cell outside the brushed selection is drawn while one is on. */
+const UNSELECTED_OPACITY = 0.35;
+
+/** Where the inspector sits relative to the pointer, in CSS pixels. */
+const INSPECTOR_OFFSET = 14;
+
+/** The box the inspector describes gets a wide stroke under its own edges, so it stands out of the stack. */
+const HOVERED_BOX_EXTRA_WIDTH = 3;
 
 function emptyTierCoverageCounts(): TierCoverageCounts {
   return { wanted: 0, shown: 0, ready: 0, inFlight: 0 };
@@ -218,10 +151,10 @@ function emptyGroupTierCoverage(): GroupTierCoverage {
   };
 }
 
-function overlayTierForRequest(req: ChunkRequest): OverlayTier | null {
-  if (req.lane === "detail") return "detail";
-  if (req.lane === "coarse" || req.lane === "overview") return "coarse";
-  return null;
+/** The tier a request fills for the view. Speculative and minimap work is not coverage. */
+function overlayTierForRequest(req: ChunkRequest): ResidencyTier | null {
+  if (req.lane === "prefetch" || req.lane === "minimap") return null;
+  return req.tier;
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
@@ -445,37 +378,34 @@ function tileWorldCenter(frame: TileFrame): [number, number, number] {
   );
 }
 
-/**
- * Project a tile-local voxel-space AABB to a screen-space AABB by
- * projecting all 8 corners and reducing.
- */
-function projectVoxelAabb(
-  ws: WasmScene,
-  frame: TileFrame,
-  vMin: [number, number, number],
-  vMax: [number, number, number],
-  dpr: number,
-): { x: number; y: number; w: number; h: number } | null {
-  let sxMin = Infinity;
-  let syMin = Infinity;
-  let sxMax = -Infinity;
-  let syMax = -Infinity;
-  let any = false;
-  for (let i = 0; i < 8; i++) {
-    const vx = i & 1 ? vMax[0] : vMin[0];
-    const vy = (i >> 1) & 1 ? vMax[1] : vMin[1];
-    const vz = (i >> 2) & 1 ? vMax[2] : vMin[2];
+/** The scene's camera: world coordinates to CSS pixels, or null behind the camera. */
+function worldProjector(ws: WasmScene, dpr: number): Projector {
+  return (wx, wy, wz) => {
+    const arr = ws.project_to_screen(wx, wy, wz);
+    return arr.length === 0 ? null : [arr[0] / dpr, arr[1] / dpr];
+  };
+}
+
+function voxelProjector(ws: WasmScene, frame: TileFrame, dpr: number): Projector {
+  const project = worldProjector(ws, dpr);
+  return (vx, vy, vz) => {
     const [wx, wy, wz] = voxelToWorld(frame, vx, vy, vz);
-    const p = projectWorld(ws, wx, wy, wz, dpr);
-    if (!p) continue;
-    any = true;
-    if (p.x < sxMin) sxMin = p.x;
-    if (p.y < syMin) syMin = p.y;
-    if (p.x > sxMax) sxMax = p.x;
-    if (p.y > syMax) syMax = p.y;
+    return project(wx, wy, wz);
+  };
+}
+
+/** The camera's world position, for ordering boxes front to back in the hit test. */
+function eyeOf(ws: WasmScene): [number, number, number] | null {
+  try {
+    const eye = ws.eye_position();
+    return eye.length >= 3 ? [eye[0], eye[1], eye[2]] : null;
+  } catch {
+    return null;
   }
-  if (!any) return null;
-  return { x: sxMin, y: syMin, w: sxMax - sxMin, h: syMax - syMin };
+}
+
+function squaredDistance(a: Vec3, b: Vec3): number {
+  return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2;
 }
 
 function distanceToVoxelAabbSq(
@@ -559,27 +489,109 @@ export function DebugOverlays({
   useEffect(() => {
     return onOverlaysChanged(() => setEnabled(readEnabled()));
   }, []);
-  const [radiusPreviewTier, setRadiusPreviewTier] = useState<RenderRadiusPreviewTier | null>(
+  const [radiusPreviewTier, setRadiusPreviewTier] = useState<ResidencyTier | null>(
     getRenderRadiusPreviewTier,
   );
   useEffect(() => {
     return onRenderRadiusPreviewChanged(() => setRadiusPreviewTier(getRenderRadiusPreviewTier()));
   }, []);
+  const [selection, setSelection] = useState(currentChunkSelection);
+  useEffect(() => {
+    return onChunkSelectionChanged(() => setSelection(currentChunkSelection()));
+  }, []);
 
-  const anyEnabled = DEBUG_OVERLAYS.some(o => enabled[o]) || radiusPreviewTier !== null;
+  const anyEnabled =
+    DEBUG_OVERLAYS.some(o => enabled[o]) || radiusPreviewTier !== null || selection !== null;
+  // The trace-reading modes and a brushed selection all color the chunk
+  // grid, so any of them shows the grid without a second toggle.
+  const showGrid = enabled.chunkGrid || enabled.phaseColor || enabled.churnTint || selection !== null;
 
   const [badges, setBadges] = useState<GroupBadge[]>([]);
-  const [chunks, setChunks] = useState<ChunkRect[]>([]);
+  const [drawList, setDrawList] = useState<ChunkDrawList>(EMPTY_DRAW_LIST);
+  const [windowMs, setWindowMs] = useState<number | null>(null);
   const [radiusPaths, setRadiusPaths] = useState<RadiusPath[]>([]);
   const [size, setSize] = useState<{ w: number; h: number }>({ w: 0, h: 0 });
 
+  // The pointer and the latest draw list live in refs so a pointer move
+  // hit-tests without a render, and a tick refreshes the open inspector
+  // without a pointer move.
+  const drawListRef = useRef<ChunkDrawList>(EMPTY_DRAW_LIST);
+  const pointerRef = useRef<{ x: number; y: number } | null>(null);
+  const hoveredKeyRef = useRef<string | null>(null);
+  const [inspector, setInspector] = useState<{ key: string; left: number; top: number; view: InspectorView } | null>(
+    null,
+  );
+
+  const hitTest = useCallback(
+    (x: number, y: number): ChunkDrawItem | null =>
+      viewMode === "3d" ? hitTestBox(drawListRef.current.items, x, y) : hitTestChunk(drawListRef.current.items, x, y),
+    [viewMode],
+  );
+
+  // One live lookup per hovered cell per tick, never per pointer move: the
+  // rank is a pass over the interval's rows, a cost a hover can pay and a
+  // frame cannot.
+  const refreshInspector = useCallback(() => {
+    const pointer = pointerRef.current;
+    const item = pointer ? hitTest(pointer.x, pointer.y) : null;
+    if (!pointer || !item || item.cell.proxyAsset) {
+      hoveredKeyRef.current = null;
+      setInspector(null);
+      return;
+    }
+    const lookup = traceRecorder.lookupChunkLive(item.cell);
+    hoveredKeyRef.current = item.key;
+    setInspector({
+      key: item.key,
+      left: pointer.x + INSPECTOR_OFFSET,
+      top: pointer.y + INSPECTOR_OFFSET,
+      view: describeHoverInspector(item, lookup, traceRecorder.openIntervalMs),
+    });
+  }, [hitTest]);
+
+  const closeInspector = useCallback(() => {
+    pointerRef.current = null;
+    hoveredKeyRef.current = null;
+    setInspector(null);
+  }, []);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !showGrid) {
+      closeInspector();
+      return;
+    }
+    const onMove = (event: PointerEvent) => {
+      const bounds = canvas.getBoundingClientRect();
+      const x = event.clientX - bounds.left;
+      const y = event.clientY - bounds.top;
+      pointerRef.current = { x, y };
+      const item = hitTest(x, y);
+      if (item && item.key === hoveredKeyRef.current) {
+        // Same cell: move the box without another lookup.
+        setInspector((open) => (open ? { ...open, left: x + INSPECTOR_OFFSET, top: y + INSPECTOR_OFFSET } : open));
+        return;
+      }
+      refreshInspector();
+    };
+    canvas.addEventListener("pointermove", onMove);
+    canvas.addEventListener("pointerleave", closeInspector);
+    canvas.addEventListener("pointerdown", closeInspector);
+    return () => {
+      canvas.removeEventListener("pointermove", onMove);
+      canvas.removeEventListener("pointerleave", closeInspector);
+      canvas.removeEventListener("pointerdown", closeInspector);
+    };
+  }, [canvasRef, showGrid, hitTest, refreshInspector, closeInspector]);
+
   useEffect(() => {
     if (!anyEnabled) {
-      // Reset to empty when overlays are toggled off — no external state
-      // to subscribe to, the toggle IS the state change we react to.
+      // Reset when overlays are toggled off. There is no external state to
+      // subscribe to; the toggle is the state change we react to.
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setBadges([]);
-      setChunks([]);
+      drawListRef.current = EMPTY_DRAW_LIST;
+      setDrawList(EMPTY_DRAW_LIST);
       setRadiusPaths([]);
       return;
     }
@@ -596,6 +608,7 @@ export function DebugOverlays({
 
       const dpr = devicePixelRatio;
       const is3D = viewMode === "3d";
+      const eye = is3D ? eyeOf(ws) : null;
 
       const coord = renderLoopRef.current?.getTickCoordinator();
       const plans = coord?.getLastPlans();
@@ -605,6 +618,10 @@ export function DebugOverlays({
       const yMin = -32;
       const xMax = canvasWCss + 64;
       const yMax = canvasHCss + 32;
+      const offScreen = (box: ProjectedBox): boolean =>
+        box.left + box.width < xMin || box.top + box.height < yMin || box.left > xMax || box.top > yMax;
+      const volumeFields = (box: ProjectedBox, centerWorld: Vec3): Pick<ChunkCell, "corners" | "depth"> =>
+        is3D ? { corners: box.corners, depth: eye ? squaredDistance(eye, centerWorld) : undefined } : {};
 
       // Per-tick model-matrix cache; one WASM call per (dsId, imageId)
       // even when many overlays / groups reference the same tile.
@@ -731,7 +748,6 @@ export function DebugOverlays({
         setRadiusPaths([]);
       }
 
-      // Group badges
       if (enabled.groupModes && plans) {
         const out: GroupBadge[] = [];
         for (const [dsId, plan] of plans) {
@@ -797,17 +813,16 @@ export function DebugOverlays({
                 if (ent.parent === entry.entityId && ent.kind === "Tile") {
                   const img = ds.manifest.images.find(i => i.image_id === ent.id)
                     ?? ds.manifest.images[0];
-                  // group-as-proxy entries have no LOD bookkeeping —
-                  // surface `null` so the badge skips the LOD label.
+                  // group-as-proxy entries have no level bookkeeping, so the
+                  // badge shows no level.
                   if (img) addTile(entry.entityId, ent.id, img.image_id, "group-as-proxy", null);
                 }
               }
             } else if (entry.kind === "tile") {
               const groupId = parentByEntity.get(entry.entityId) ?? entry.entityId;
-              addTile(groupId, entry.entityId, entry.imageId, entry.mode, entry.targetLod);
+              addTile(groupId, entry.entityId, entry.imageId, entry.mode, entry.detailLevels[0] ?? null);
             }
-            // entry.kind === "invisible" — skipped (not rendered as a
-            // group badge; invisibles never had a promotion mode).
+            // Invisible entries get no badge.
           }
 
           for (const [groupId, agg] of groups) {
@@ -849,11 +864,9 @@ export function DebugOverlays({
         setBadges([]);
       }
 
-      // Chunk grid for every visible tile-mode entry.
-      // (group-as-proxy entries don't iterate chunks — they're served by
-      // a single proxy asset.)
-      if (enabled.chunkGrid && plans && cpuCache) {
-        const out: ChunkRect[] = [];
+      // Group-as-proxy entries have no chunks; one proxy asset serves them.
+      if (showGrid && plans && cpuCache) {
+        const out: ChunkCell[] = [];
         const t = ws.t();
         const c = ws.c();
         const planningConfig = configStore.get();
@@ -891,10 +904,7 @@ export function DebugOverlays({
           for (const entry of plan.activeSet) {
             if (out.length >= MAX_CHUNK_RECTS) break outer;
 
-            // Invisible entries don't contribute chunks or proxies —
-            // skip them entirely. They live in their own variant;
-            // reading mode/imageId/targetLod here would otherwise be
-            // a type error.
+            // Invisible entries contribute no chunks or proxy assets.
             if (entry.kind === "invisible") continue;
 
             // Group-as-proxy: there's no chunk grid because the group is
@@ -904,7 +914,7 @@ export function DebugOverlays({
             if (entry.kind === "group-as-proxy") {
               const cached = cpuCache.getCachedProxy(dsId, entry.entityId, "GroupProxy3D", t, c);
               const inFlight = cpuCache.isProxyInFlight(dsId, entry.entityId, "GroupProxy3D", t, c);
-              let status: ChunkRect["status"] = "planned";
+              let status: ChunkCell["status"] = "planned";
               let priorityRank: number | undefined;
               if (cached) {
                 status = "cached";
@@ -943,30 +953,27 @@ export function DebugOverlays({
                 }
               }
               if (!any) continue;
-              let sxMin = Infinity, syMin = Infinity, sxMax = -Infinity, syMax = -Infinity;
-              let projected = false;
-              for (let i = 0; i < 8; i++) {
-                const wx = i & 1 ? maxX : minX;
-                const wy = (i >> 1) & 1 ? maxY : minY;
-                const wz = (i >> 2) & 1 ? maxZ : minZ;
-                const p = projectWorld(ws, wx, wy, wz, dpr);
-                if (!p) continue;
-                projected = true;
-                if (p.x < sxMin) sxMin = p.x;
-                if (p.y < syMin) syMin = p.y;
-                if (p.x > sxMax) sxMax = p.x;
-                if (p.y > syMax) syMax = p.y;
-              }
-              if (!projected) continue;
-              if (sxMax < xMin || syMax < yMin || sxMin > xMax || syMin > yMax) continue;
+              const groupBox = projectChunkBox(worldProjector(ws, dpr), [minX, minY, minZ], [maxX, maxY, maxZ]);
+              if (!groupBox || offScreen(groupBox)) continue;
               out.push({
                 key: `${dsId}/${entry.entityId}/group-proxy`,
-                x: sxMin,
-                y: syMin,
-                w: sxMax - sxMin,
-                h: syMax - syMin,
+                datasetId: dsId,
+                entityId: entry.entityId,
+                chunkKey: "group-proxy",
+                level: -1,
+                t,
+                c,
+                z: 0,
+                y: 0,
+                x: 0,
+                left: groupBox.left,
+                top: groupBox.top,
+                width: groupBox.width,
+                height: groupBox.height,
                 status,
                 priorityRank,
+                proxyAsset: true,
+                ...volumeFields(groupBox, [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2]),
               });
               continue;
             }
@@ -978,6 +985,7 @@ export function DebugOverlays({
             if (!lvl0) continue;
             const frame = getFrame(dsId, entry.imageId, lvl0.shape);
             frame.pos = pos;
+            const projectVoxel = voxelProjector(ws, frame, dpr);
             const fullX = lvl0.shape[Axis.X];
             const fullY = lvl0.shape[Axis.Y];
 
@@ -986,7 +994,7 @@ export function DebugOverlays({
 
             const residency = (
               key: string,
-              tier: OverlayTier,
+              tier: ResidencyTier,
               geometry: ChunkRadiusGeometry,
               chunk: { x: number; y: number; z: number },
             ): boolean => {
@@ -1008,7 +1016,7 @@ export function DebugOverlays({
               return cpuCache.deliveryState.wasChunkSent(entry.imageId, c, key, tier);
             };
 
-            const statusFor = (key: string): Pick<ChunkRect, "status" | "priorityRank" | "tier"> => {
+            const statusFor = (key: string): Pick<ChunkCell, "status" | "priorityRank" | "tier"> => {
               if (cachedSet?.has(key)) {
                 return {
                   status: "cached",
@@ -1049,7 +1057,7 @@ export function DebugOverlays({
               };
             };
 
-            const appendSource = (level: number, sourceTier: OverlayTier): void => {
+            const appendSource = (level: number, sourceTier: ResidencyTier): void => {
               const lvl = img.multiscale.levels[level];
               if (!lvl) return;
               const geometry = geometryForLevels(lvl0, lvl);
@@ -1080,17 +1088,14 @@ export function DebugOverlays({
                   for (let col = colStart; col < colEnd; col++) {
                     if (out.length >= MAX_CHUNK_RECTS) return;
                     const key = chunkKeyFor(level, t, c, iz, row, col);
-                    const rect = projectVoxelAabb(
-                      ws,
-                      frame,
-                      [col * chunkWorldX, row * chunkWorldY, iz * chunkWorldZ],
-                      [(col + 1) * chunkWorldX, (row + 1) * chunkWorldY, (iz + 1) * chunkWorldZ],
-                      dpr,
-                    );
-                    if (!rect) continue;
-                    if (rect.x + rect.w < xMin || rect.y + rect.h < yMin || rect.x > xMax || rect.y > yMax) {
-                      continue;
-                    }
+                    const boxMin: [number, number, number] = [col * chunkWorldX, row * chunkWorldY, iz * chunkWorldZ];
+                    const boxMax: [number, number, number] = [
+                      (col + 1) * chunkWorldX,
+                      (row + 1) * chunkWorldY,
+                      (iz + 1) * chunkWorldZ,
+                    ];
+                    const box = projectChunkBox(projectVoxel, boxMin, boxMax);
+                    if (!box || offScreen(box)) continue;
 
                     let displayTier: DisplayTier = "missing";
                     let statusKey = key;
@@ -1116,14 +1121,35 @@ export function DebugOverlays({
                       displayTier = "coarse";
                     }
 
+                    // The trace is read for the cell's own chunk, even when
+                    // its pixels come from the coarse chunk behind it: "why
+                    // is this chunk not here" is a question about this chunk.
                     out.push({
                       key: `${dsId}/${entry.entityId}/${sourceTier}/${key}`,
-                      x: rect.x,
-                      y: rect.y,
-                      w: rect.w,
-                      h: rect.h,
+                      datasetId: dsId,
+                      entityId: entry.entityId,
+                      chunkKey: key,
+                      level,
+                      t,
+                      c,
+                      z: iz,
+                      y: row,
+                      x: col,
+                      left: box.left,
+                      top: box.top,
+                      width: box.width,
+                      height: box.height,
                       sourceTier: displayTier,
                       ...statusFor(statusKey),
+                      ...volumeFields(
+                        box,
+                        voxelToWorld(
+                          frame,
+                          (boxMin[0] + boxMax[0]) / 2,
+                          (boxMin[1] + boxMax[1]) / 2,
+                          (boxMin[2] + boxMax[2]) / 2,
+                        ),
+                      ),
                     });
                   }
                 }
@@ -1133,13 +1159,28 @@ export function DebugOverlays({
             if (coarseLevel !== null) {
               appendSource(coarseLevel, "coarse");
             }
-            appendSource(entry.detailLevel ?? entry.targetLod, "detail");
+            for (const level of entry.detailLevels) appendSource(level, "detail");
           }
         }
         out.sort((a, b) => tierDrawOrder(a) - tierDrawOrder(b));
-        setChunks(out);
-      } else if (chunks.length > 0) {
-        setChunks([]);
+        const window = traceRecorder.openIntervalMs;
+        const input = {
+          cells: out,
+          colors: readOverlayColors(),
+          modes: enabled,
+          readingOf: (cell: ChunkCell) => traceRecorder.readChunk(cell),
+          windowMs: window,
+          selection,
+        };
+        const list = is3D ? buildVolumeDrawList(input) : buildChunkDrawList(input);
+        drawListRef.current = list;
+        setDrawList(list);
+        setWindowMs(window);
+        refreshInspector();
+      } else if (drawListRef.current.items.length > 0) {
+        drawListRef.current = EMPTY_DRAW_LIST;
+        setDrawList(EMPTY_DRAW_LIST);
+        refreshInspector();
       }
     };
 
@@ -1147,77 +1188,119 @@ export function DebugOverlays({
     const id = setInterval(tick, POLL_MS);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, radiusPreviewTier, viewMode, datasets, cpuCache, wasmSceneRef, canvasRef, renderLoopRef]);
+  }, [enabled, showGrid, radiusPreviewTier, viewMode, datasets, cpuCache, wasmSceneRef, canvasRef, renderLoopRef, refreshInspector, selection]);
 
   if (!anyEnabled) return null;
 
+  const absence = overlayAbsence(enabled, drawList, windowMs);
+  const brushed = selectionCaption(selection, drawList);
+  const volumeList = viewMode === "3d" && isVolumeDrawList(drawList) ? drawList : null;
+  const hoveredBox = volumeList && inspector ? volumeList.items.find(item => item.key === inspector.key) ?? null : null;
+
   return (
-    <div
-      style={{
-        position: "absolute",
-        top: 0,
-        left: 0,
-        width: size.w,
-        height: size.h,
-        pointerEvents: "none",
-        overflow: "hidden",
-      }}
-    >
-      {enabled.chunkGrid && chunks.map(c => {
-        // Each color band gates on its own toggle so the simple
-        // 3-color view (cached/in-flight/planned) is recoverable by
-        // turning off both sub-toggles.
-        const tierBg = enabled.chunkTier ? tierColor(c.sourceTier) : null;
-        const bg =
-          tierBg ??
-          (c.status === "cached"
-            ? enabled.cachedTier ? cachedColor(c.tier) : SOLID_CACHED
-            : c.status === "in-flight"
-              ? SOLID_IN_FLIGHT
-              : enabled.plannedRank ? plannedColor(c.priorityRank) : SOLID_PLANNED);
-        const statusTooltip = c.status === "cached"
-          ? enabled.cachedTier && c.tier
-            ? `cached · tier ${c.tier}`
-            : "cached"
-          : c.status === "in-flight"
-            ? "in-flight"
-            : enabled.plannedRank && c.priorityRank !== undefined
-              ? `planned · queue rank ${c.priorityRank}`
-              : enabled.plannedRank
-                ? "planned · not in pending queue"
-                : "planned";
-        const tooltip = c.sourceTier ? `${c.sourceTier} · ${statusTooltip}` : statusTooltip;
-        return (
-          <div
-            key={c.key}
-            style={{
-              position: "absolute",
-              left: c.x,
-              top: c.y,
-              width: c.w,
-              height: c.h,
-              background: bg,
-              border: "1px solid rgba(255, 255, 255, 0.22)",
-              boxSizing: "border-box",
-            }}
-            title={tooltip}
-          />
-        );
-      })}
-      {(enabled.renderRadius || radiusPreviewTier !== null) && radiusPaths.length > 0 && (
+    <div className="debug-overlays" style={{ width: size.w, height: size.h }}>
+      {showGrid && viewMode !== "3d" && drawList.items.map(item => (
+        <div
+          key={item.key}
+          className="debug-overlays-cell"
+          data-selected={item.selected ? "true" : undefined}
+          style={{
+            left: item.left,
+            top: item.top,
+            width: item.width,
+            height: item.height,
+            background: item.fill,
+            border: item.border,
+            opacity: selection !== null && !item.selected ? UNSELECTED_OPACITY : undefined,
+          }}
+          title={item.tooltip}
+        />
+      ))}
+      {showGrid && volumeList && volumeList.batches.length > 0 && (
         <svg
+          data-testid="overlay-boxes"
+          className="debug-overlays-svg"
           width={size.w}
           height={size.h}
           viewBox={`0 0 ${size.w} ${size.h}`}
-          style={{
-            position: "absolute",
-            inset: 0,
-            pointerEvents: "none",
-            overflow: "hidden",
-          }}
+        >
+          {/* Halos first, so every edge draws over every halo. */}
+          {volumeList.batches.map((batch, i) =>
+            batch.style.halo ? (
+              <path
+                key={`halo-${i}`}
+                d={batch.d}
+                fill="none"
+                stroke={batch.style.halo.stroke}
+                strokeWidth={batch.style.halo.strokeWidth}
+                strokeLinecap="round"
+                opacity={selection !== null && !batch.selected ? UNSELECTED_OPACITY : undefined}
+              />
+            ) : null,
+          )}
+          {hoveredBox && (
+            <path
+              data-testid="overlay-box-hovered"
+              data-chunk={hoveredBox.cell.chunkKey}
+              className="debug-overlays-hovered-box"
+              d={hoveredBox.path}
+              fill="none"
+              strokeWidth={hoveredBox.style.strokeWidth + HOVERED_BOX_EXTRA_WIDTH}
+              strokeLinecap="round"
+            />
+          )}
+          {volumeList.batches.map((batch, i) => (
+            <path
+              key={`edges-${i}`}
+              data-testid="overlay-box-batch"
+              data-count={batch.count}
+              data-selected={batch.selected ? "true" : undefined}
+              d={batch.d}
+              fill="none"
+              stroke={batch.style.stroke}
+              strokeWidth={batch.style.strokeWidth}
+              strokeDasharray={batch.style.dash ?? undefined}
+              strokeLinecap="round"
+              opacity={selection !== null && !batch.selected ? UNSELECTED_OPACITY : undefined}
+            />
+          ))}
+        </svg>
+      )}
+      {showGrid && inspector && (
+        <div
+          data-testid="overlay-inspector"
+          role="tooltip"
+          className="debug-overlays-card debug-overlays-inspector"
+          style={{ left: inspector.left, top: inspector.top }}
+        >
+          <div className="debug-overlays-inspector-title">{inspector.view.title}</div>
+          {inspector.view.lines.map((line, i) => (
+            <div key={i}>{line}</div>
+          ))}
+        </div>
+      )}
+      {(absence || brushed) && (
+        <div className="debug-overlays-captions">
+          {brushed && (
+            <div data-testid="overlay-selection" className="debug-overlays-card debug-overlays-caption">
+              {brushed}
+            </div>
+          )}
+          {absence && (
+            <div data-testid="overlay-absence" className="debug-overlays-card debug-overlays-caption">
+              {absence}
+            </div>
+          )}
+        </div>
+      )}
+      {(enabled.renderRadius || radiusPreviewTier !== null) && radiusPaths.length > 0 && (
+        <svg
+          className="debug-overlays-svg"
+          width={size.w}
+          height={size.h}
+          viewBox={`0 0 ${size.w} ${size.h}`}
         >
           {radiusPaths.map(r => {
-            const stroke = r.tier === "detail" ? RADIUS_DETAIL_STROKE : RADIUS_COARSE_STROKE;
             const isPrimaryPlane = r.plane === "xy";
             const dash = r.tier === "coarse"
               ? isPrimaryPlane ? "8 5" : "4 6"
@@ -1225,9 +1308,10 @@ export function DebugOverlays({
             return (
               <path
                 key={r.key}
+                className="debug-overlays-radius"
+                data-tier={r.tier}
                 d={r.d}
                 fill="none"
-                stroke={stroke}
                 strokeWidth={isPrimaryPlane ? 2.25 : 1.5}
                 strokeDasharray={dash}
                 opacity={isPrimaryPlane ? 1 : 0.72}
@@ -1242,21 +1326,9 @@ export function DebugOverlays({
       {enabled.groupModes && badges.map(b => (
         <div
           key={b.key}
-          style={{
-            position: "absolute",
-            left: b.centerX,
-            top: b.centerY,
-            transform: "translate(-50%, -50%)",
-            padding: "1px 5px",
-            background: "rgba(0, 0, 0, 0.7)",
-            color: MODE_COLOR[b.mode] ?? "#fff",
-            border: `1px solid ${MODE_COLOR[b.mode] ?? "#fff"}`,
-            borderRadius: 3,
-            fontFamily: "monospace",
-            fontSize: 10,
-            lineHeight: 1.2,
-            whiteSpace: "nowrap",
-          }}
+          className="debug-overlays-badge"
+          data-mode={b.mode}
+          style={{ left: b.centerX, top: b.centerY }}
           title={b.title}
         >
           {b.label}

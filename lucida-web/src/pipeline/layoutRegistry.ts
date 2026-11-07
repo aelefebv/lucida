@@ -1,21 +1,9 @@
 /**
- * Layout Registry (web mirror) — tracks per-dataset available layouts and
- * the currently active layout id. Mirrors the WASM-side `registered_layouts`
- * + `active_layout_ids` so the UI (`<LayoutSwitcher>`, `CollectionSelector`) can
- * read without paying a JSON round-trip per render.
- *
- * Authority for layout state is Rust/WASM. This class:
- *
- *   1. Forwards every mutation as a document command via
- *      `wasmScene.apply_command(json)` AND `sendCommand(json)`, so it
- *      applies locally and broadcasts to peers (matching the
- *      `applyDocumentCommand` flow in `applyAndSend.ts`).
- *   2. Refreshes the available list from `wasmScene.available_layouts()`
- *      after every relevant mutation (and after inbound bridge events).
- *   3. Stores derived-layout `LayoutSpec` values locally so consumers like
- *      CollectionSelector can read placements without a WASM round-trip
- *      (`available_layouts` only returns id+name).
- *   4. Notifies subscribers on every change for `useSyncExternalStore`.
+ * Web mirror of the WASM-side registered and active layouts, so the UI can
+ * read them without a JSON round-trip per render. Rust/WASM is the
+ * authority: every mutation applies locally through `apply_command` and is
+ * also sent to peers. Derived-layout specs are stored here because
+ * `available_layouts` returns only id and name.
  */
 
 import type { LayoutSpec } from "../manifestTypes.ts";
@@ -39,7 +27,7 @@ export class LayoutRegistry {
   /** datasetId → active layout id (mirror; updated locally on register/setActive/setActiveLocal). */
   private readonly activeByDataset = new Map<string, string>();
   /** datasetId → layoutId → LayoutSpec for derived layouts we registered.
-   *  Source layouts are NOT mirrored here; consumers fall back to `manifest.source_layouts`. */
+   *  Source layouts are not mirrored here; consumers fall back to `manifest.source_layouts`. */
   private readonly specsByDataset = new Map<string, Map<string, LayoutSpec>>();
   private readonly listeners = new Set<() => void>();
   /** Monotonic counter bumped on every notify(); useful for `useSyncExternalStore`

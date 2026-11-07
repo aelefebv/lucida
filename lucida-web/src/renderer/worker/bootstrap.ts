@@ -1,24 +1,16 @@
 /**
- * Worker bootstrap: initialize the GPU device + canvas context, build
- * the per-session {@link RendererState}, and assemble the
- * {@link WorkerCtx} that the dispatcher and per-mode handlers consume.
+ * Worker bootstrap: initialize the GPU device and canvas context, build the
+ * per-session {@link RendererState}, and assemble the {@link WorkerCtx}.
  *
- * Renderer-class singletons (slice/volume/cursor/compositor renderers)
- * are held in closures owned by this function — they're per-canvas
- * instances that outlive any single session but stay tied to one
- * {@link WorkerCtx}, which is also recreated only on `init`.
- *
- * Cached worker-process GPU resources (LUT cache, offscreen pool, dummy
- * textures) live in `worker/resources.ts` as module-level state; this
- * module wires the ctx accessors to those resource helpers.
- *
- * The `post` callback is supplied by the caller (the entry-point worker
- * file) so this module doesn't reach into `self.postMessage`.
+ * Renderer singletons live in this function's closure: they are per-canvas,
+ * outlive any session, and are recreated only on `init`. The caller supplies
+ * `post` so this module never reaches into `self.postMessage`.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { WorkerToMainMessage } from "../workerProtocol.ts";
-import { initGPU } from "../gpuContext.ts";
+import { getDeviceLimits, initGPU } from "../gpuContext.ts";
+import { fitBudgets } from "../../deviceBudget.ts";
 import { SliceRenderer } from "../sliceRenderer.ts";
 import { VolumeRenderer } from "../volumeRenderer.ts";
 import { LayerCompositor } from "../layerCompositor.ts";
@@ -29,39 +21,39 @@ import {
   destroyDescriptorBuffer,
 } from "../descriptorBuffer.ts";
 import { createInitialState } from "./state.ts";
-import {
-  ensureOffscreenPool,
-  getDummy3DTexture,
-  getDummyTexture,
-  getOrCreateLUT,
-} from "./resources.ts";
+import { ensureOffscreenPool, getOrCreateLUT } from "./resources.ts";
+import { createFrameTiming } from "../passTiming.ts";
 import { proxyDescriptorKey } from "../workerContext.ts";
+import { sourceKey } from "../poolKeys.ts";
 
-/**
- * Bootstrap the worker: init the GPU, create a fresh {@link RendererState},
- * and assemble the {@link WorkerCtx} (with lazy renderer accessors +
- * lookup helpers + post wiring). Called once from `case "init"` in
- * `gpu.worker.ts`.
- */
+/** Init the GPU and assemble a fresh {@link WorkerCtx}. Called once from `case "init"` in `gpu.worker.ts`. */
 export async function bootstrapWorker(
   canvas: OffscreenCanvas,
   post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
+  deviceMemoryGiB: number | null = null,
 ): Promise<WorkerCtx> {
   const { device, context, format } = await initGPU(canvas);
-  const state = createInitialState();
+  const state = createInitialState(fitBudgets(deviceMemoryGiB, getDeviceLimits(device)));
+  const passTimer = createFrameTiming(device, (gpuPassUs) =>
+    post({ type: "gpuPassTime", gpuPassUs }),
+  );
 
-  // Renderer-class singletons (lazy-init on first use). Persisted across
-  // messages; not per-session state, so they stay in this closure rather
-  // than on RendererState.
-  let sliceRenderer: SliceRenderer | null = null;
+  // The slice path's three renderers are built here so their shader compile
+  // overlaps the dataset open instead of delaying the first present. The
+  // volume renderer is built on first need, because its compile is the
+  // longest of the four and a slice open never needs it.
+  const sliceRenderer = new SliceRenderer(device);
+  const compositor = new LayerCompositor(device, format);
+  const cursorRenderer = new CursorRenderer(device, format);
   let volumeRenderer: VolumeRenderer | null = null;
-  let compositor: LayerCompositor | null = null;
-  let cursorRenderer: CursorRenderer | null = null;
+  // The page holds the minimap overlay's content draws until this report
+  // (Minimap.tsx).
+  Promise.all([sliceRenderer.compiled, compositor.compiled, cursorRenderer.compiled]).then(
+    () => post({ type: "pipelinesCompiled" }),
+    (err: unknown) => post({ type: "error", message: err instanceof Error ? err.message : String(err) }),
+  );
 
-  /**
-   * Build a flat snapshot of all proxy pools for a dataset, in the shape
-   * `computeWantedSet()` expects. Cheap — pool maps are small.
-   */
+  /** A flat snapshot of a dataset's proxy pools, in the shape `computeWantedSet()` expects. */
   function buildProxyAtlasSnapshot(datasetId: string): Map<string, ProxyAtlasSnapshot> {
     const snap = new Map<string, ProxyAtlasSnapshot>();
     const pools = state.proxyPoolsByDataset.get(datasetId);
@@ -72,22 +64,32 @@ export async function bootstrapWorker(
     return snap;
   }
 
-  /** Compute and post wanted-set delta from current cold state + atlas state. */
-  function postWantedSet(): void {
-    if (!state.currentColdState || !state.currentEpochs) return;
-    const proxySnap = buildProxyAtlasSnapshot(state.currentColdState.datasetId);
+  /** See `WorkerCtx.postWantedSet`. */
+  function postWantedSet(datasetId?: string): void {
+    const cold = datasetId === undefined
+      ? state.currentColdState
+      : state.coldStateByDataset.get(datasetId) ?? null;
+    if (!cold) return;
+    const epochs = cold === state.currentColdState ? state.currentEpochs ?? cold.epochs : cold.epochs;
+    const proxySnap = buildProxyAtlasSnapshot(cold.datasetId);
     const result = computeWantedSet(
-      state.currentColdState,
+      cold,
       state.volumeAtlases,
       state.sliceAtlases,
-      state.memberTierToPool,
+      (memberId, tier, level) =>
+        state.memberSourcePools.get(memberId)?.get(sourceKey(tier, level)),
       proxySnap,
     );
     post({
       type: "wantedSetDelta",
-      datasetId: state.currentColdState.datasetId,
-      epochs: state.currentEpochs,
+      datasetId: cold.datasetId,
+      epochs,
       missing: result.missing,
+    });
+    post({
+      type: "entityLevels",
+      datasetId: cold.datasetId,
+      entities: result.levels,
     });
   }
 
@@ -96,8 +98,8 @@ export async function bootstrapWorker(
     context,
     format,
     state,
+    passTimer,
     getSliceRenderer() {
-      if (!sliceRenderer) sliceRenderer = new SliceRenderer(device);
       return sliceRenderer;
     },
     getVolumeRenderer() {
@@ -105,16 +107,12 @@ export async function bootstrapWorker(
       return volumeRenderer;
     },
     getCompositor() {
-      if (!compositor) compositor = new LayerCompositor(device, format);
       return compositor;
     },
     getCursorRenderer() {
-      if (!cursorRenderer) cursorRenderer = new CursorRenderer(device, format);
       return cursorRenderer;
     },
     ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(device, count, w, h),
-    getDummyTexture: () => getDummyTexture(device),
-    getDummy3DTexture: () => getDummy3DTexture(device),
     getOrCreateLUT: (name) => getOrCreateLUT(device, name),
     post,
     postWantedSet,
@@ -135,14 +133,9 @@ export async function bootstrapWorker(
 }
 
 /**
- * Rebuild the per-dataset entity descriptor buffer iff the upload's
- * dataset matches the current cold state. Proxy uploads for other
- * datasets stay resident in their pools, but their descriptor buffer
- * isn't refreshed until cold state lands for that dataset.
- *
- * Lives here (not in `dispatch.ts`) because it's a small helper that
- * binds together cold-state, proxy, and descriptor concerns — the same
- * mix that `bootstrap` already imports.
+ * Rebuild the entity descriptor buffer iff `datasetId` is the current cold
+ * state. Other datasets' proxy uploads stay resident, but their descriptor
+ * waits for their own cold state.
  */
 export function rebuildDescriptorIfMatching(ctx: WorkerCtx, datasetId: string): void {
   const state = ctx.state;
@@ -156,7 +149,7 @@ export function rebuildDescriptorIfMatching(ctx: WorkerCtx, datasetId: string): 
       state.currentColdState,
       state.proxyDescriptorsByEntity,
       state.proxyPoolsByDataset,
-      state.currentEntityMetasByDataset.get(datasetId) ?? new Map(),
+      state.currentSourcesByDataset.get(datasetId) ?? new Map(),
     ),
   );
 }

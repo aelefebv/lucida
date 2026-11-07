@@ -1,18 +1,26 @@
-/** 3D volume viewer — delegates WebGPU rendering to a worker via RenderClient. */
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+/** 3D volume viewer. WebGPU rendering runs in a worker via RenderClient. */
+import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { ORBIT_RADIANS_PER_PIXEL, VOLUME_ZOOM_PER_WHEEL_DELTA } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
 import { buildAnnotationView, liveViewWithLiveTC } from "../savedView/buildAnnotationView.ts";
-import { useKeyState } from "../hooks/useKeyState.ts";
-import { getBoundKeys, isActionPressed } from "../config/keyBindings.ts";
+import { useHeldKeys } from "../hooks/useHeldKeys.ts";
+import { CLIP_BINDINGS, FLY_BINDINGS, TOGGLE_FLY_KEYS } from "../config/keyBindings.ts";
 import { useFlyCameraInput } from "../hooks/useFlyCameraInput.ts";
+import { useFineInputAvailable } from "../input/fineInput.ts";
+import { useCommand } from "../ui/commands.ts";
+import { pushEscapeLayer } from "../ui/escape.ts";
+import { useShortcutScope } from "../ui/shortcuts.ts";
 import { FlyCameraHint } from "./FlyCameraHint.tsx";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
-import { eventToScreenPx } from "./cameraProjection.ts";
+import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
+import { eventToScreenPx, type ClientPoint } from "./cameraProjection.ts";
+import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
+import { frameClock } from "../frameClock.ts";
 
 interface Props {
   session: Session;
@@ -31,13 +39,11 @@ interface Props {
   onCameraModeChange?: (mode: string) => void;
   /** Dataset to attach a dropped pin to (annotations are scoped per dataset). */
   annotationDatasetId: string | null;
-  /** Shape a shift-drag draws: a point pin, a line, or a box. */
-  annotationKind: "point" | "line" | "box";
-  /** Stable, browser-persisted annotation-author identity (issue #777), recorded
-   * as a 3D-dropped pin's `author`. Sourced from `annotationAuthorId()`, not the
-   * per-connection `bridge.myId`, so pins this browser drops stay yours across
-   * leaving + rejoining a workspace. (Prop name kept as `myId`; its value/type is
-   * now the string identity.) */
+  /** The canvas tool: pan, or the annotation shape a press draws. */
+  tool: Tool;
+  /** Stable, browser-persisted annotation-author identity, recorded as a 3D pin's
+   * `author`. From `annotationAuthorId()`, not the per-connection `bridge.myId`,
+   * so pins stay yours across leaving and rejoining a workspace. */
   myId: string;
   /** Send a wire command (already wrapped by the bridge). */
   sendCommand: (json: string) => void;
@@ -47,6 +53,8 @@ interface Props {
    * relative to the canvas), rendered by {@link AnnotationDraftOverlay}; the
    * shift-drag writes it and clears it on release/cancel. */
   annotationDraftRef: RefObject<AnnotationDraft | null>;
+  /** A touch long press on the canvas, at its client point. */
+  onLongPress?: (at: ClientPoint) => void;
 }
 
 const CLIP_SPEED = 0.02; // world-space units per frame at 60 fps
@@ -54,27 +62,23 @@ const INTERACTION_RENDER_SCALE = 0.5;
 const FULL_RENDER_SCALE = 1.0;
 const SCALE_RESTORE_DELAY_MS = 50;
 
-export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, annotationKind, myId, sendCommand, onDocumentChanged, annotationDraftRef }: Props) {
+export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [cameraMode, setCameraMode] = useState<string>(() => scene.camera_mode());
   const [showHint, setShowHint] = useState(false);
 
-  // Mirror pin-drop props into refs so the pointer handlers (bound on `canvas`)
-  // read the latest values without re-binding on every doc change — the same
-  // pattern SliceViewer uses for its pin-drop path.
+  // Mirror pin-drop props into refs so the canvas-bound pointer handlers read the
+  // latest values without re-binding on every doc change.
   const annotationDatasetIdRef = useRef(annotationDatasetId);
   // eslint-disable-next-line react-hooks/refs
   annotationDatasetIdRef.current = annotationDatasetId;
-  const annotationKindRef = useRef(annotationKind);
+  const toolRef = useRef(tool);
   // eslint-disable-next-line react-hooks/refs
-  annotationKindRef.current = annotationKind;
+  toolRef.current = tool;
   const myIdRef = useRef(myId);
   // eslint-disable-next-line react-hooks/refs
   myIdRef.current = myId;
-  // Mirror the current timepoint/channel (issue #779) so a 3D pin drop records
-  // the view's T/C alongside its picked voxel depth (z) — the slice context it
-  // belongs to. Mirrored (not closed over) like the other pin-drop props so the
-  // canvas-bound pointer handlers see the latest values without re-binding.
+  // A 3D pin records the view's T/C alongside its picked depth.
   const tRef = useRef(t);
   // eslint-disable-next-line react-hooks/refs
   tRef.current = t;
@@ -87,38 +91,69 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const onDocumentChangedRef = useRef(onDocumentChanged);
   // eslint-disable-next-line react-hooks/refs
   onDocumentChangedRef.current = onDocumentChanged;
+  const onLongPressRef = useRef(onLongPress);
+  // eslint-disable-next-line react-hooks/refs
+  onLongPressRef.current = onLongPress;
 
   // Notify parent of camera mode (after render, to avoid setState-in-render)
   useEffect(() => {
     onCameraModeChange?.(cameraMode);
   }, [cameraMode, onCameraModeChange]);
 
-  // Mirror props into refs so the RAF tick + fly-camera input hook see
-  // the latest canvas/scene each frame. Mirror updates are render-phase
+  // Mirror the scene into a ref so the fly-camera input hook sees
+  // the latest each frame. Mirror updates are render-phase
   // and idempotent — the canonical workaround for the new react-hooks/refs
   // strictness.
-  const canvasRef = useRef<HTMLCanvasElement>(canvas);
-  // eslint-disable-next-line react-hooks/refs
-  canvasRef.current = canvas;
-  const boundKeys = useMemo(() => getBoundKeys(), []);
-  const pressedKeys = useKeyState(canvasRef, boundKeys);
-
-  // Stable refs for callbacks needed by useFlyCameraInput
   const sceneRef = useRef<WasmScene>(scene);
   // eslint-disable-next-line react-hooks/refs
   sceneRef.current = scene;
 
   const isFlyMode = cameraMode === "fly";
 
-  // Inline the markInteractiveDirty wrapper here (instead of reusing the
-  // shared `markInteractiveDirty` above) so the dirty_set log carries a
-  // fly-specific source. Fly-camera ticks every animation frame, so this
-  // is the one external caller where attribution is genuinely useful;
-  // the rate-limiter collapses 60+/sec into one log line per second.
+  // The fly keys bind whenever the volume shows, so the shortcut sheet lists
+  // them, and take precedence over global keys (L is also the line tool)
+  // only in fly mode. Clipping works in either camera.
+  const flyKeys = useHeldKeys(FLY_BINDINGS, { group: "Fly camera", scope: "fly", enabled: true });
+  const clipKeys = useHeldKeys(CLIP_BINDINGS, { group: "View", enabled: true });
+  useShortcutScope("fly", isFlyMode);
+  const flyKeysRef = useRef(flyKeys);
+
+  const toggleFly = () => {
+    const currentMode = scene.camera_mode();
+    if (currentMode === "fly") {
+      scene.set_mode_arcball();
+    } else if (currentMode === "arcball") {
+      scene.set_mode_fly();
+      const BASE_SPEED_FACTOR = 0.3;
+      const diagonal = scene.volume_diagonal();
+      scene.fly_set_base_speed(diagonal * BASE_SPEED_FACTOR);
+    }
+    const newMode = scene.camera_mode();
+    setCameraMode(newMode);
+    if (newMode === "fly") setShowHint(true);
+    breakFollow();
+    emitPresence();
+    loopRef.current?.markInteractiveDirty();
+  };
+  const canFly = useFineInputAvailable();
+  useCommand({
+    id: "camera.toggleFly",
+    label: isFlyMode ? "Leave fly mode" : "Fly through the volume",
+    group: "Fly camera",
+    keys: TOGGLE_FLY_KEYS,
+    keywords: ["camera", "orbit", "arcball"],
+    run: toggleFly,
+    // Steered by keys and a mouse, so offered only with one of them, or to
+    // get back out.
+    enabled: canFly || isFlyMode,
+  });
+
+  // A fly-specific dirty source: fly ticks every frame, so attribution is useful
+  // here, and the rate limiter collapses it to one log line per second.
   const fly = useFlyCameraInput(
     sceneRef,
     applyViewportCommand,
-    { current: pressedKeys },
+    flyKeysRef,
     isFlyMode,
     emitPresence,
     useCallback(() => loopRef.current?.markInteractiveDirty("fly_camera_input"), []),
@@ -163,57 +198,31 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     loopRef.current?.markInteractiveDirty();
   }, [t, c]);
 
-  // Clip distance adjustment + fly mode toggle via RAF loop
+  // Held clip keys, and the camera mode followed from the scene, since a
+  // control outside this viewer or a restored view can switch it too.
   useEffect(() => {
-    let rafId: number | null = null;
     let lastTime = 0;
-    let fWasPressed = false;
 
-    function tick(time: number) {
+    return frameClock.subscribe((time) => {
       const dt = lastTime > 0 ? Math.min((time - lastTime) / 1000, 0.1) : 0;
       lastTime = time;
 
-      // Clip distance
-      const inc = isActionPressed(pressedKeys, "clip.increase");
-      const dec = isActionPressed(pressedKeys, "clip.decrease");
-      if (inc || dec) {
-        const delta = (inc ? 1 : -1) * CLIP_SPEED * (dt * 60); // normalize to ~60fps
-        scene.adjust_clip_distance(delta);
-        emitPresence();
-        loopRef.current?.markInteractiveDirty();
+      setCameraMode(scene.camera_mode());
+      const farther = clipKeys.has("clipFarther");
+      const nearer = clipKeys.has("clipNearer");
+      if (farther === nearer) {
+        // The next press starts from rest, not from the last frame before it.
+        lastTime = 0;
+        return false;
       }
-
-      // Toggle fly mode on F key press (edge detect)
-      const fPressed = isActionPressed(pressedKeys, "camera.toggleFly");
-      if (fPressed && !fWasPressed) {
-        const currentMode = scene.camera_mode();
-        if (currentMode === "fly") {
-          scene.set_mode_arcball();
-        } else if (currentMode === "arcball") {
-          scene.set_mode_fly();
-          const BASE_SPEED_FACTOR = 0.3;
-          const diagonal = scene.volume_diagonal();
-          scene.fly_set_base_speed(diagonal * BASE_SPEED_FACTOR);
-        }
-        const newMode = scene.camera_mode();
-        setCameraMode(newMode);
-        onCameraModeChange?.(newMode);
-        if (newMode === "fly") setShowHint(true);
-        breakFollow();
-        emitPresence();
-        loopRef.current?.markInteractiveDirty();
-        canvas.focus();
-      }
-      fWasPressed = fPressed;
-
-      rafId = requestAnimationFrame(tick);
-    }
-
-    rafId = requestAnimationFrame(tick);
-    return () => {
-      if (rafId !== null) cancelAnimationFrame(rafId);
-    };
-  }, [scene, pressedKeys, emitPresence, breakFollow, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
+      const delta = (farther ? 1 : -1) * CLIP_SPEED * (dt * 60); // normalize to ~60fps
+      scene.adjust_clip_distance(delta);
+      emitPresence();
+      loopRef.current?.markInteractiveDirty();
+      // A held key moves the clip every frame without further input.
+      return true;
+    });
+  }, [scene, clipKeys, emitPresence]);
 
   // Resolution scaling during interaction
   const scaleTimerRef = useRef<number>(0);
@@ -236,16 +245,29 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const [dragging, setDragging] = useState(false);
   const shiftDragRef = useRef(false);
   const lastPos = useRef({ x: 0, y: 0 });
-  // Context for a shift press that may become a pin drop or a line/box draw:
-  // where it started, whether it has since moved past the click slop, and
-  // whether it is drawing a shape (kind line/box). For a point, crossing the
-  // slop turns it into a shift-pan exactly as before; for a shape, the drag
-  // draws (no pan) and the shape is emitted on release.
-  const pinPressRef = useRef<{ x: number; y: number; moved: boolean; shape: boolean } | null>(null);
+  // A press that may become a point or a line/box draw. For a point, crossing
+  // the click slop turns it into an orbit, or a pan with shift; for a shape,
+  // the drag draws (no camera move) and the shape is emitted on release.
+  // `endEscape` drops the press's Escape layer.
+  const pinPressRef = useRef<{
+    x: number;
+    y: number;
+    moved: boolean;
+    kind: AnnotationKind;
+    endEscape: () => void;
+  } | null>(null);
 
-  /** Ray-cast a client point into the volume, returning its in-plane-voxel +
-   * voxel-depth point `[x, y, z]`, or `null` if the ray missed. The same depth
-   * pick a pin drop uses, factored out so a line/box can pick both endpoints. */
+  // Escape mid-press abandons it: no annotation lands on release, and the
+  // rest of the drag leaves the camera alone.
+  const cancelPress = useCallback(() => {
+    pinPressRef.current?.endEscape();
+    pinPressRef.current = null;
+    annotationDraftRef.current = null;
+    setDragging(false);
+  }, [annotationDraftRef]);
+
+  /** Ray-cast a client point into the volume: `[x, y, z]` as in-plane voxel
+   * position plus voxel depth, or `null` if the ray missed. */
   const pickVoxel = useCallback(
     (clientX: number, clientY: number): [number, number, number] | null => {
       const datasetId = annotationDatasetIdRef.current;
@@ -259,13 +281,11 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     [canvas, scene],
   );
 
-  /** Draw an annotation from a shift gesture. A point is a single depth-picked
-   * drop (drop-where-clicked); a line/box depth-picks both endpoints and stores
-   * the second as `end`. No-op (declines) when no dataset is selected or a
-   * required ray misses the volume — an annotation should anchor to data, never
-   * float in empty space. The picks are stored as in-plane voxel position +
-   * voxel depth (z), the same frame a 2D draw uses, so the shape round-trips and
-   * renders in both views. The shared `z` is the anchor vertex's depth. */
+  /** Draw an annotation from a shift gesture. A line/box depth-picks both
+   * endpoints and stores the second as `end`. Declines when no dataset is
+   * selected or a ray misses, so an annotation always anchors to data. Picks use
+   * the same frame as a 2D draw, so the shape renders in both views. The shared
+   * `z` is the anchor vertex's depth. */
   const drawAnnotation = useCallback(
     (startX: number, startY: number, endX: number, endY: number, kind: "point" | "line" | "box") => {
       const datasetId = annotationDatasetIdRef.current;
@@ -273,12 +293,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const shape = kind === "line" || kind === "box";
       const anchor = pickVoxel(shape ? startX : endX, shape ? startY : endY);
       if (!anchor) return; // anchor ray missed → don't draw
-      // Clamp the picked depth to a valid slice index. The pick can return the
-      // ray's far-face depth (== full depth, e.g. 339.999 for a 340-deep volume),
-      // which rounds to 340 — OUT of the slice range [0, depth-1] — so the pin
-      // could never match any slider Z and read permanently off-context in 2D.
-      // Clamp so 2D navigation can reach its slice (issue: 3D annotations always
-      // off-context).
+      // The pick can return the far-face depth (339.999 for a 340-deep volume),
+      // which rounds outside [0, depth-1], so the pin would never match a 2D
+      // slice. Clamp so 2D navigation can reach it.
       const depth = scene.dataset_volume_shape(datasetId)[0];
       const z = depth > 0 ? Math.max(0, Math.min(anchor[2], depth - 1)) : anchor[2];
       let end: [number, number] | null = null;
@@ -290,17 +307,13 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const id = globalThis.crypto?.randomUUID
         ? globalThis.crypto.randomUUID()
         : `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-      // Snapshot the author's CURRENT view onto the pin (annotation-views slice
-      // 1) so a later slice can restore it on navigation. Workspace-dataset-id
-      // form (no source URLs). The 3D camera, z-slab, and display come from the
-      // scene's presence; T/C are overridden with the live refs so the embedded
-      // view's timepoint/channel match the pin's own t/c. `null` (capture
-      // failure) just omits the view — it is optional/additive.
+      // Snapshot the author's view onto the pin so navigation can restore it. T/C
+      // come from the live refs so the view matches the pin's own t/c. A null
+      // capture just omits the view.
       const capturedView = buildAnnotationView(scene, liveViewWithLiveTC(scene, tRef.current, cRef.current));
-      // Apply locally AND send (mirrors SliceViewer's draw and every other doc
-      // command): the sender is excluded from the server's rebroadcast, so the
-      // local apply is what shows the author their own shape. The client-supplied
-      // id makes the local apply and the peers' broadcast converge.
+      // Apply locally and send: the server's rebroadcast excludes the sender, so
+      // the local apply is what shows the author their shape. The client-supplied
+      // id makes the local and peer copies converge.
       applyDocumentCommand(
         scene,
         {
@@ -310,15 +323,11 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
           position: [anchor[0], anchor[1]],
           end,
           z,
-          // Stamp the view's current T/C so the pin belongs to this timepoint/
-          // channel (issue #779). In 3D `z` is the picked voxel depth (the
-          // geometric anchor), while T/C are the discrete view selectors.
+          // In 3D `z` is the picked depth, while T/C are the view's selectors.
           t: tRef.current,
           c: cRef.current,
           author: String(myIdRef.current),
           kind: shape ? kind : "point",
-          // The author's full view at creation (camera + display + slice).
-          // Omitted from the wire when capture failed (additive field).
           ...(capturedView ? { view: capturedView } : {}),
         },
         sendCommandRef.current,
@@ -329,26 +338,36 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     [scene, pickVoxel],
   );
 
-  const onArcballPointerDown = useCallback(
-    (e: PointerEvent) => {
+  // A press, from a mouse, a pen, or a finger drawing with a tool. Touch
+  // navigation goes through the gesture recognizer instead, so the arcball
+  // pointer handlers skip touch.
+  const beginArcballPress = useCallback(
+    (e: ClientPoint, shiftKey: boolean) => {
       setDragging(true);
-      shiftDragRef.current = e.shiftKey;
-      // A shift press starts a candidate annotation. With kind=point it becomes
-      // a shift-pan if it moves past the slop; with kind=line/box the drag
-      // draws the shape (and never pans).
-      const kind = annotationKindRef.current;
-      pinPressRef.current = e.shiftKey
-        ? { x: e.clientX, y: e.clientY, moved: false, shape: kind === "line" || kind === "box" }
+      shiftDragRef.current = shiftKey;
+      pinPressRef.current?.endEscape();
+      const kind = pressAnnotationKind(toolRef.current, shiftKey);
+      pinPressRef.current = kind
+        ? { x: e.clientX, y: e.clientY, moved: false, kind, endEscape: pushEscapeLayer(cancelPress) }
         : null;
       lastPos.current = { x: e.clientX, y: e.clientY };
+    },
+    [cancelPress],
+  );
+
+  const onArcballPointerDown = useCallback(
+    (e: PointerEvent) => {
+      // The right button opens the canvas menu instead.
+      if (e.pointerType === "touch" || e.button === 2) return;
+      beginArcballPress(e, e.shiftKey);
       canvas.setPointerCapture(e.pointerId);
       setLowRes();
     },
-    [canvas, setLowRes],
+    [canvas, setLowRes, beginArcballPress],
   );
 
-  const onArcballPointerMove = useCallback(
-    (e: PointerEvent) => {
+  const moveArcballPress = useCallback(
+    (e: ClientPoint) => {
       // Always broadcast cursor as normalized screen coordinates
       const rect = canvas.getBoundingClientRect();
       const nx = (e.clientX - rect.left) / canvas.clientWidth;
@@ -360,30 +379,26 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const press = pinPressRef.current;
       // A line/box draw owns the whole drag: track that it moved (so release
       // knows it's a real two-vertex shape) but never pan/rotate the camera.
-      if (press?.shape) {
+      if (press && isShapeKind(press.kind)) {
         if (exceedsClickSlop(press.x, press.y, e.clientX, e.clientY)) {
           press.moved = true;
         }
-        // Live draw preview: once past the slop, publish the in-progress shape
-        // (screen-space CSS px relative to the canvas) so AnnotationDraftOverlay
-        // grows it under the cursor — the camera is held still during a draw, so
-        // raw screen coords match where the committed shape lands on release.
-        const drawKind = annotationKindRef.current;
-        annotationDraftRef.current =
-          press.moved && (drawKind === "line" || drawKind === "box")
-            ? { kind: drawKind, x0: press.x - rect.left, y0: press.y - rect.top, x1: e.clientX - rect.left, y1: e.clientY - rect.top }
-            : null;
+        // Live draw preview in canvas-relative CSS px. The camera holds still
+        // during a draw, so raw screen coords match where the shape lands.
+        annotationDraftRef.current = press.moved
+          ? { kind: press.kind, x0: press.x - rect.left, y0: press.y - rect.top, x1: e.clientX - rect.left, y1: e.clientY - rect.top }
+          : null;
         return;
       }
 
-      // While a shift press is still within the click slop, hold off panning so
-      // a tiny jitter still resolves to a pin drop on release. Once it crosses
-      // the slop it's a deliberate shift-pan — mark it moved and pan as before.
+      // Within the click slop, hold off moving the camera so a tiny jitter
+      // still resolves to a point on release. Past it, the press navigates.
       if (press && !press.moved) {
         if (!exceedsClickSlop(press.x, press.y, e.clientX, e.clientY)) {
           return;
         }
         press.moved = true;
+        press.endEscape();
         lastPos.current = { x: e.clientX, y: e.clientY };
       }
 
@@ -395,34 +410,49 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       if (shiftDragRef.current) {
         applyViewportCommand(scene, { type: "arcball_pan", dx, dy });
       } else {
-        const dTheta = -dx * 0.005;
-        const dPhi = -dy * 0.005;
+        const dTheta = -dx * ORBIT_RADIANS_PER_PIXEL;
+        const dPhi = -dy * ORBIT_RADIANS_PER_PIXEL;
         applyViewportCommand(scene, { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi });
       }
       emitPresence();
-      loopRef.current?.markInteractiveDirty();
+      loopRef.current?.markInput(shiftDragRef.current ? "pan" : "orbit");
     },
     [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef],
   );
 
-  const onArcballPointerUp = useCallback(
+  const onArcballPointerMove = useCallback(
     (e: PointerEvent) => {
+      if (e.pointerType !== "touch") moveArcballPress(e);
+    },
+    [moveArcballPress],
+  );
+
+  const endArcballPress = useCallback(
+    (e: ClientPoint) => {
       setDragging(false);
       scheduleFullRes();
       const press = pinPressRef.current;
       pinPressRef.current = null;
+      press?.endEscape();
       annotationDraftRef.current = null; // draw ended; committed shape takes over
       if (!press) return;
-      if (press.shape && press.moved) {
+      if (isShapeKind(press.kind) && press.moved) {
         // A dragged line/box: draw from the press anchor to the release point.
-        drawAnnotation(press.x, press.y, e.clientX, e.clientY, annotationKindRef.current);
+        drawAnnotation(press.x, press.y, e.clientX, e.clientY, press.kind);
       } else if (!press.moved) {
         // A click (point kind, or a shape that never dragged) drops a point.
         drawAnnotation(e.clientX, e.clientY, e.clientX, e.clientY, "point");
       }
-      // A point-kind shift-pan (moved, not a shape) draws nothing — unchanged.
+      // A point press that navigated draws nothing.
     },
     [scheduleFullRes, drawAnnotation, annotationDraftRef],
+  );
+
+  const onArcballPointerUp = useCallback(
+    (e: PointerEvent) => {
+      if (e.pointerType !== "touch") endArcballPress(e);
+    },
+    [endArcballPress],
   );
 
   // Fly input handling
@@ -459,13 +489,86 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   }, [sendCursor]);
 
   // A cancelled gesture must never drop a pin (or leave a half-finished drag).
-  const onPointerCancel = useCallback(() => {
-    pinPressRef.current = null;
+  const onPointerCancel = useCallback((e: PointerEvent) => {
+    if (e.pointerType === "touch" && !isFlyMode) return;
+    cancelPress();
     setDragging(false);
-    annotationDraftRef.current = null;
     scheduleFullRes();
     if (isFlyMode) fly.onPointerUp();
-  }, [scheduleFullRes, isFlyMode, fly, annotationDraftRef]);
+  }, [cancelPress, scheduleFullRes, isFlyMode, fly]);
+
+  /** Move the camera from a touch gesture, at the interaction render scale the
+   * wheel uses. */
+  const navigate = (input: "orbit" | "pan" | "zoom", move: () => void) => {
+    breakFollow();
+    move();
+    emitPresence();
+    loopRef.current?.markInput(input);
+    setLowRes();
+    scheduleFullRes();
+  };
+
+  const sendTouchCursor = (g: { x: number; y: number }) => {
+    const rect = canvas.getBoundingClientRect();
+    sendCursor([(g.x - rect.left) / canvas.clientWidth, (g.y - rect.top) / canvas.clientHeight]);
+  };
+
+  // One finger orbits, or draws with a tool; two pinch to zoom and drag to
+  // pan. Fly mode keeps its own pointer handling, touch included.
+  useTouchGestures(canvas, !isFlyMode, {
+    claimsPress: () => toolRef.current !== "pan",
+    onGesture: (g) => {
+      switch (g.type) {
+        case "pressStart":
+          beginArcballPress(clientPoint(g), false);
+          setLowRes();
+          break;
+        case "pressMove":
+          moveArcballPress(clientPoint(g));
+          break;
+        case "pressEnd":
+          endArcballPress(clientPoint(g));
+          break;
+        case "pressCancel":
+          cancelPress();
+          scheduleFullRes();
+          break;
+        case "drag":
+          navigate("orbit", () =>
+            applyViewportCommand(scene, {
+              type: "arcball_rotate",
+              d_theta: -g.dx * ORBIT_RADIANS_PER_PIXEL,
+              d_phi: -g.dy * ORBIT_RADIANS_PER_PIXEL,
+            }),
+          );
+          sendTouchCursor(g);
+          break;
+        case "pinch":
+          navigate(g.scale === 1 ? "pan" : "zoom", () => {
+            // Spreading the fingers brings the camera closer by the same ratio.
+            if (g.scale !== 1) applyViewportCommand(scene, { type: "arcball_zoom", delta: 1 / g.scale - 1 });
+            if (g.dx !== 0 || g.dy !== 0) applyViewportCommand(scene, { type: "arcball_pan", dx: g.dx, dy: g.dy });
+          });
+          sendTouchCursor(g);
+          break;
+        case "doubleTap": {
+          const datasetId = annotationDatasetIdRef.current ?? datasets.keys().next().value;
+          if (!datasetId) break;
+          navigate("zoom", () => {
+            try {
+              scene.fit_camera_to_dataset_bounds(datasetId);
+            } catch {
+              // A dataset with nothing loaded yet has no bounds; the view stays.
+            }
+          });
+          break;
+        }
+        case "longPress":
+          onLongPressRef.current?.(clientPoint(g));
+          break;
+      }
+    },
+  });
 
   // Clear cursor on unmount (e.g. mode switch to 2D)
   useEffect(() => {
@@ -475,11 +578,11 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const onArcballWheel = useCallback(
     (e: WheelEvent) => {
       e.preventDefault();
-      const delta = e.deltaY * 0.001;
+      const delta = e.deltaY * VOLUME_ZOOM_PER_WHEEL_DELTA;
       breakFollow();
       applyViewportCommand(scene, { type: "arcball_zoom", delta });
       emitPresence();
-      loopRef.current?.markInteractiveDirty();
+      loopRef.current?.markInput("zoom");
       setLowRes();
       scheduleFullRes();
     },
@@ -513,7 +616,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     // for hover/drag feedback, vs a parent-driven CSS class that would
     // re-render the whole viewport on every transition.
     // eslint-disable-next-line react-hooks/immutability
-    canvas.style.cursor = isFlyMode ? "crosshair" : (dragging ? "grabbing" : "grab");
+    canvas.style.cursor = isFlyMode || tool !== "pan" ? "crosshair" : (dragging ? "grabbing" : "grab");
     return () => {
       canvas.removeEventListener("pointerdown", onPointerDown);
       canvas.removeEventListener("pointermove", onPointerMove);
@@ -522,7 +625,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       canvas.removeEventListener("pointerleave", onPointerLeave);
       canvas.removeEventListener("wheel", onWheel);
     };
-  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave, onWheel, dragging, isFlyMode]);
+  }, [canvas, onPointerDown, onPointerMove, onPointerUp, onPointerCancel, onPointerLeave, onWheel, dragging, isFlyMode, tool]);
 
   const dismissHint = useCallback(() => setShowHint(false), []);
 

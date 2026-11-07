@@ -1,10 +1,12 @@
 /**
- * Planning domain — public barrel. See ADR 0029.
+ * Planning domain — public barrel.
  * Core lives in sibling files; this module is re-exports only.
  */
 
 export {
   emptyPlanStats,
+  initialPlanningState,
+  type ZoomDirection,
   type ActiveSetEntry,
   type AssetCatalogSnapshot,
   type BaseEntitySnapshot,
@@ -24,35 +26,26 @@ export {
   type ProxyKind,
   type ProxyRequest,
   type RequestPlan,
-  type ResolvedMode,
   type SelectionState,
   type GroupAsProxyEntry,
   type MemberGroup,
   type GroupSnapshot,
 } from "./types.ts";
 
-export {
-  assignCoarseDetailModes,
-  assignModes,
-  buildPrevModeByGroup,
-  chooseEntityMode,
-  degradeForCatalog,
-  groupMembers,
-} from "./modes.ts";
+export { buildActiveSet, groupMembers } from "./activeSet.ts";
 
 export {
   chunkKey,
   chunkOutsideFrustum,
   chunkWorldDims,
   iterateChunks,
-  iterateChunksAtLodRange,
+  iterateChunksAtLevels,
 } from "./chunks.ts";
 
 export {
   emitCoarseLane,
   emitDetailLane,
   emitMinimapLane,
-  emitOverviewLane,
   emitPrefetchLane,
 } from "./emit.ts";
 
@@ -64,15 +57,11 @@ export {
   DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
   DEPTH_BIAS_VIEW,
   DETAIL_LANE_OFFSET,
-  DETAIL_THRESHOLD_PX,
   DISTANCE_WEIGHT,
-  FAR_THRESHOLD_PX,
-  HYSTERESIS_PX,
   IMPORTANCE_WEIGHT,
   MINIMAP_LANE_OFFSET,
   MINIMAP_SEED_BULK_LANE_OFFSET,
   MINIMAP_SEED_FAST_MAX_CHUNKS,
-  OVERVIEW_LANE_OFFSET,
   PREFETCH_DEPTH,
   PREFETCH_LANE_OFFSET,
   PROXY_LANE_OFFSET,
@@ -96,4 +85,5 @@ export {
   createSyntheticEntity,
   createSyntheticSnapshot,
   createSyntheticState,
+  type CreateSyntheticEntityOverrides,
 } from "./synthetic.ts";

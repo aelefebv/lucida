@@ -4,6 +4,8 @@ import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import type { SavedView } from "../savedView/types.ts";
+import { ToastRegion } from "../ui/Toast.tsx";
+import { toastQueue } from "../ui/toastQueue.ts";
 import type { WorkspaceSavedView } from "../workspaceApi.ts";
 
 // Mock the API surface so the sidebar's hook talks to spies, not the network.
@@ -77,6 +79,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  toastQueue.clear();
 });
 
 describe("WorkspaceSavedViewsSidebar — viewer propose flow", () => {
@@ -96,9 +99,9 @@ describe("WorkspaceSavedViewsSidebar — viewer propose flow", () => {
     await screen.findByText("My view");
     // Open the per-row actions menu.
     await userEvent.click(screen.getByLabelText("Saved view actions"));
-    const proposeBtn = await screen.findByTestId("saved-view-propose-sv-own");
+    const proposeBtn = await screen.findByRole("menuitem", { name: /propose to team/i });
     await userEvent.click(proposeBtn);
-    // Slice 3: proposing now asks for confirmation before it is sent.
+    // Proposing asks for confirmation before it is sent.
     await userEvent.click(await screen.findByRole("button", { name: /propose|confirm|share/i }));
 
     await waitFor(() =>
@@ -125,7 +128,7 @@ describe("WorkspaceSavedViewsSidebar — viewer propose flow", () => {
     );
     await screen.findByText("My view");
     await userEvent.click(screen.getByLabelText("Saved view actions"));
-    expect(screen.queryByTestId("saved-view-propose-sv-other")).toBeNull();
+    expect(screen.queryByRole("menuitem", { name: /propose to team/i })).toBeNull();
   });
 });
 
@@ -164,18 +167,20 @@ describe("WorkspaceSavedViewsSidebar — editor review queue", () => {
     cleanup();
     listMock.mockResolvedValue([proposal]);
     render(
-      <WorkspaceSavedViewsSidebar
-        {...baseProps()}
-        currentUserEmail="editor@example.com"
-        canEdit
-      />,
+      <>
+        <WorkspaceSavedViewsSidebar
+          {...baseProps()}
+          currentUserEmail="editor@example.com"
+          canEdit
+        />
+        <ToastRegion />
+      </>,
     );
     await screen.findByTestId("saved-view-reject-sv-prop");
     await userEvent.click(screen.getByTestId("saved-view-reject-sv-prop"));
-    // Slice 3: reject is a deferred, cancelable send — not fired immediately;
-    // an Undo cancels it entirely (no API call).
+    // Reject is deferred, and Undo cancels it with no API call.
     expect(rejectMock).not.toHaveBeenCalled();
-    await userEvent.click(await screen.findByText(/undo/i));
+    await userEvent.click(await screen.findByRole("button", { name: "Undo" }));
     expect(rejectMock).not.toHaveBeenCalled();
   });
 

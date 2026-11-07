@@ -1,43 +1,32 @@
 // Volume ray marching shader for OME-Zarr 3D rendering
 
+// Matches DESCRIPTOR_MAX_LEVEL_SOURCES in descriptor/layout.ts: one level pool binding per slot.
+const MAX_LEVEL_SOURCES: u32 = 4u;
+// The indirection sentinel, and the sample value for "nothing resident here".
+const MISS: u32 = 0xFFFFFFFFu;
+
 struct Uniforms {
-  invViewProj: mat4x4f,      // offset 0   (64 bytes)
-  cameraPos: vec4f,           // offset 64  (16 bytes)
-  volumeDims: vec4f,          // offset 80  (16 bytes)
+  invViewProj: mat4x4f,                // offset 0   (64 bytes)
+  cameraPos: vec4f,                    // offset 64  (16 bytes)
   // stepInfo.x=opacityScale (translucent compositing constant),
-  // stepInfo.y=stepSize, stepInfo.z=renderMode (0=translucent,1=MIP),
-  // stepInfo.w=reserved.
-  stepInfo: vec4f,            // offset 96  (16 bytes)
-  detailAtlasSlotDims: vec4u, // offset 112 (16 bytes) — xyz=slots per axis
-  coarseAtlasSlotDims: vec4u, // offset 128 (16 bytes) — xyz=slots per axis
-  viewProj: mat4x4f,          // offset 144 (64 bytes)
-  camForward: vec4f,          // offset 208 (16 bytes) — xyz=camera forward dir
-  clipParams: vec4f,          // offset 224 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
-  lodParams: vec4u,           // offset 240 (16 bytes) — x=targetLodIdx
-  // total = 256 bytes
+  // stepInfo.y=renderMode (0=translucent,1=MIP), zw=reserved.
+  stepInfo: vec4f,                     // offset 80  (16 bytes)
+  levelAtlasSlotDims: array<vec4u, 4>, // offset 96  (64 bytes) — xyz=slots per axis, one per level pool binding
+  coarseAtlasSlotDims: vec4u,          // offset 160 (16 bytes) — xyz=slots per axis
+  viewProj: mat4x4f,                   // offset 176 (64 bytes)
+  camForward: vec4f,                   // offset 240 (16 bytes) — xyz=camera forward dir
+  clipParams: vec4f,                   // offset 256 (16 bytes) — x=clipDist, y=clipMode (0=plane,1=sphere), zw=reserved
+  // total = 272 bytes
 };
 
 struct EntityRef { index: vec4u }; // x = entity index
 
-// Layout matches descriptorBuffer.ts.
-struct LodInfo {
-  level: u32,
-  indirectionOffset: u32,
-  _pad0: u32,
-  _pad1: u32,
-  gridDims: vec3<u32>,
-  _pad2: u32,
-  chunkDims: vec3<u32>,
-  _pad3: u32,
-  levelDims: vec3<u32>,
-  _pad4: u32,
-};
-
+// Layout matches descriptor/layout.ts.
 struct ChunkTierSource {
   valid: u32,
   level: u32,
   indirectionOffset: u32,
-  _pad0: u32,
+  poolIndex: u32,
   gridDims: vec3<u32>,
   _pad1: u32,
   chunkDims: vec3<u32>,
@@ -66,27 +55,35 @@ struct EntityDescriptor {
   gamma: f32,
   opacity: f32,
   colormapLutIndex: u32,
-  lodCount: u32,
+  levelSourceCount: u32,
   colormapMode: u32,
   labelOpacity: f32,
-  lods: array<LodInfo, 8>,
-  detailSource: ChunkTierSource,
+  levelSources: array<ChunkTierSource, 4>,
   coarseSource: ChunkTierSource,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var detailTex: texture_3d<u32>;
-@group(0) @binding(2) var<storage, read> detailIndirection: array<u32>;
-@group(0) @binding(3) var lutTex: texture_2d<f32>;
-@group(0) @binding(4) var lutSampler: sampler;
-@group(0) @binding(5) var coarseTex: texture_3d<u32>;
-@group(0) @binding(6) var<storage, read> coarseIndirection: array<u32>;
+@group(0) @binding(1) var lutTex: texture_2d<f32>;
+@group(0) @binding(2) var lutSampler: sampler;
+@group(0) @binding(3) var coarseTex: texture_3d<u32>;
+@group(0) @binding(4) var<storage, read> coarseIndirection: array<u32>;
 // Proxy textures. Same r16uint format as the chunk atlas. Slots occupy
 // a 3-D grid in the texture; the grid shape is derived from
 // textureDimensions(tex) / slot dims, matching `proxySlotOrigin()` in
 // proxyAtlas.ts.
-@group(0) @binding(7) var tileProxyTex: texture_3d<u32>;
-@group(0) @binding(8) var groupProxyTex: texture_3d<u32>;
+@group(0) @binding(5) var tileProxyTex: texture_3d<u32>;
+@group(0) @binding(6) var groupProxyTex: texture_3d<u32>;
+// One level pool per resident-level slot. A level source's `poolIndex`
+// says which of these it reads; levels of one entity may live in
+// different pools when their chunk shapes differ.
+@group(0) @binding(7) var levelTex0: texture_3d<u32>;
+@group(0) @binding(8) var levelTex1: texture_3d<u32>;
+@group(0) @binding(9) var levelTex2: texture_3d<u32>;
+@group(0) @binding(10) var levelTex3: texture_3d<u32>;
+@group(0) @binding(11) var<storage, read> levelIndirection0: array<u32>;
+@group(0) @binding(12) var<storage, read> levelIndirection1: array<u32>;
+@group(0) @binding(13) var<storage, read> levelIndirection2: array<u32>;
+@group(0) @binding(14) var<storage, read> levelIndirection3: array<u32>;
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
@@ -135,10 +132,10 @@ fn intersectAABB(ro: vec3f, rd: vec3f) -> vec2f {
 //   - Slot origin is derived from slot index over a 3-D atlas grid.
 //   - `frac` is in [0,1]³ over the slot's voxel cube; Y is flipped to
 //     match the chunk path's image-convention sampling.
-// Returns 0xFFFFFFFFu if the slot index is the sentinel.
+// Returns MISS if the slot index is the sentinel.
 fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f) -> u32 {
-  if (slotIdx == 0xFFFFFFFFu) {
-    return 0xFFFFFFFFu;
+  if (slotIdx == MISS) {
+    return MISS;
   }
   let slotZ = dims.x;
   let slotY = dims.y;
@@ -161,189 +158,157 @@ fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f)
   return textureLoad(tex, coord, 0).r;
 }
 
-fn sampleDetailVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
-  if (
-    source.valid == 0u ||
-    u.detailAtlasSlotDims.x == 0u ||
-    u.detailAtlasSlotDims.y == 0u ||
-    u.detailAtlasSlotDims.z == 0u
-  ) {
-    return 0xFFFFFFFFu;
-  }
+// The chunk-grid cell of one source under a local [0,1]^3 position, and
+// the texel inside that chunk. Y is flipped for image convention.
+struct Cell3D {
+  gridIdx: u32,
+  localTexel: vec3u,
+  chunkDims: vec3u,
+};
 
+fn locateCell3D(source: ChunkTierSource, pos: vec3f) -> Cell3D {
   let levelDims = vec3f(f32(source.levelDims.x), f32(source.levelDims.y), f32(source.levelDims.z));
   let chunkDims = source.chunkDims;
   let gridDims = source.gridDims;
-
-  let texCoord = vec3i(
-    clamp(i32(pos.x * levelDims.x), 0, i32(levelDims.x) - 1),
-    clamp(i32((1.0 - pos.y) * levelDims.y), 0, i32(levelDims.y) - 1),
-    clamp(i32(pos.z * levelDims.z), 0, i32(levelDims.z) - 1),
+  let texCoord = vec3u(
+    u32(clamp(i32(pos.x * levelDims.x), 0, i32(levelDims.x) - 1)),
+    u32(clamp(i32((1.0 - pos.y) * levelDims.y), 0, i32(levelDims.y) - 1)),
+    u32(clamp(i32(pos.z * levelDims.z), 0, i32(levelDims.z) - 1)),
   );
-  let chunkCoord = vec3u(
-    u32(texCoord.x) / chunkDims.x,
-    u32(texCoord.y) / chunkDims.y,
-    u32(texCoord.z) / chunkDims.z,
-  );
-  let gridIdx = source.indirectionOffset + chunkCoord.z * gridDims.y * gridDims.x
-              + chunkCoord.y * gridDims.x
-              + chunkCoord.x;
-  let slot = detailIndirection[gridIdx];
-  if (slot == 0xFFFFFFFFu) {
-    return 0xFFFFFFFFu;
-  }
+  let chunkCoord = texCoord / chunkDims;
+  var cell: Cell3D;
+  cell.gridIdx = source.indirectionOffset
+    + chunkCoord.z * gridDims.y * gridDims.x
+    + chunkCoord.y * gridDims.x
+    + chunkCoord.x;
+  cell.localTexel = texCoord % chunkDims;
+  cell.chunkDims = chunkDims;
+  return cell;
+}
 
+fn atlasCoord3D(slot: u32, slotDims: vec3u, cell: Cell3D) -> vec3i {
   let slotCoord = vec3u(
-    slot % u.detailAtlasSlotDims.x,
-    (slot / u.detailAtlasSlotDims.x) % u.detailAtlasSlotDims.y,
-    slot / (u.detailAtlasSlotDims.x * u.detailAtlasSlotDims.y),
+    slot % slotDims.x,
+    (slot / slotDims.x) % slotDims.y,
+    slot / (slotDims.x * slotDims.y),
   );
-  let localTexel = vec3u(
-    u32(texCoord.x) % chunkDims.x,
-    u32(texCoord.y) % chunkDims.y,
-    u32(texCoord.z) % chunkDims.z,
-  );
-  let atlasCoord = vec3i(
-    i32(slotCoord.x * chunkDims.x + localTexel.x),
-    i32(slotCoord.y * chunkDims.y + localTexel.y),
-    i32(slotCoord.z * chunkDims.z + localTexel.z),
-  );
-  return textureLoad(detailTex, atlasCoord, 0).r;
+  return vec3i(slotCoord * cell.chunkDims + cell.localTexel);
+}
+
+// Level pool bindings can't be indexed by a runtime value, so each
+// level source's `poolIndex` selects its indirection buffer and texture
+// here.
+fn levelSlotAt(poolIdx: u32, gridIdx: u32) -> u32 {
+  switch (poolIdx) {
+    case 0u: { return levelIndirection0[gridIdx]; }
+    case 1u: { return levelIndirection1[gridIdx]; }
+    case 2u: { return levelIndirection2[gridIdx]; }
+    default: { return levelIndirection3[gridIdx]; }
+  }
+}
+
+fn levelTexelAt(poolIdx: u32, coord: vec3i) -> u32 {
+  switch (poolIdx) {
+    case 0u: { return textureLoad(levelTex0, coord, 0).r; }
+    case 1u: { return textureLoad(levelTex1, coord, 0).r; }
+    case 2u: { return textureLoad(levelTex2, coord, 0).r; }
+    default: { return textureLoad(levelTex3, coord, 0).r; }
+  }
+}
+
+fn sampleLevelVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
+  let slotDims = u.levelAtlasSlotDims[source.poolIndex].xyz;
+  if (source.valid == 0u || slotDims.x == 0u || slotDims.y == 0u || slotDims.z == 0u) {
+    return MISS;
+  }
+  let cell = locateCell3D(source, pos);
+  let slot = levelSlotAt(source.poolIndex, cell.gridIdx);
+  if (slot == MISS) {
+    return MISS;
+  }
+  return levelTexelAt(source.poolIndex, atlasCoord3D(slot, slotDims, cell));
 }
 
 fn sampleCoarseVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
-  if (
-    source.valid == 0u ||
-    u.coarseAtlasSlotDims.x == 0u ||
-    u.coarseAtlasSlotDims.y == 0u ||
-    u.coarseAtlasSlotDims.z == 0u
-  ) {
-    return 0xFFFFFFFFu;
+  let slotDims = u.coarseAtlasSlotDims.xyz;
+  if (source.valid == 0u || slotDims.x == 0u || slotDims.y == 0u || slotDims.z == 0u) {
+    return MISS;
   }
-
-  let levelDims = vec3f(f32(source.levelDims.x), f32(source.levelDims.y), f32(source.levelDims.z));
-  let chunkDims = source.chunkDims;
-  let gridDims = source.gridDims;
-
-  let texCoord = vec3i(
-    clamp(i32(pos.x * levelDims.x), 0, i32(levelDims.x) - 1),
-    clamp(i32((1.0 - pos.y) * levelDims.y), 0, i32(levelDims.y) - 1),
-    clamp(i32(pos.z * levelDims.z), 0, i32(levelDims.z) - 1),
-  );
-  let chunkCoord = vec3u(
-    u32(texCoord.x) / chunkDims.x,
-    u32(texCoord.y) / chunkDims.y,
-    u32(texCoord.z) / chunkDims.z,
-  );
-  let gridIdx = source.indirectionOffset + chunkCoord.z * gridDims.y * gridDims.x
-              + chunkCoord.y * gridDims.x
-              + chunkCoord.x;
-  let slot = coarseIndirection[gridIdx];
-  if (slot == 0xFFFFFFFFu) {
-    return 0xFFFFFFFFu;
+  let cell = locateCell3D(source, pos);
+  let slot = coarseIndirection[cell.gridIdx];
+  if (slot == MISS) {
+    return MISS;
   }
-
-  let slotCoord = vec3u(
-    slot % u.coarseAtlasSlotDims.x,
-    (slot / u.coarseAtlasSlotDims.x) % u.coarseAtlasSlotDims.y,
-    slot / (u.coarseAtlasSlotDims.x * u.coarseAtlasSlotDims.y),
-  );
-  let localTexel = vec3u(
-    u32(texCoord.x) % chunkDims.x,
-    u32(texCoord.y) % chunkDims.y,
-    u32(texCoord.z) % chunkDims.z,
-  );
-  let atlasCoord = vec3i(
-    i32(slotCoord.x * chunkDims.x + localTexel.x),
-    i32(slotCoord.y * chunkDims.y + localTexel.y),
-    i32(slotCoord.z * chunkDims.z + localTexel.z),
-  );
-  return textureLoad(coarseTex, atlasCoord, 0).r;
+  return textureLoad(coarseTex, atlasCoord3D(slot, slotDims, cell), 0).r;
 }
 
-// Source-backed fallback chain:
-//   selected detail → configured coarse → empty
+// The march step for a level: two thirds of one sample spacing along
+// its densest axis, in local [0,1] units.
+fn stepForDims(dims: vec3<u32>) -> f32 {
+  let maxDim = max(max(dims.x, dims.y), dims.z);
+  return 1.0 / (f32(max(maxDim, 1u)) * 1.5);
+}
+
+// One ray sample: the value and the march step of the level that
+// answered. On a miss the step is the finest bound level's, so a
+// resident chunk of it is never stepped over.
+struct VolumeSample {
+  value: u32,
+  step: f32,
+};
+
+// Sampling order: the level sources finest first (the target level,
+// then the coarser resident levels), then the coarse tier, then empty.
+// Every sample comes from exactly one level; there is no blending.
 //
-// Legacy fallback chain when no tier sources are present:
-//   target detail LOD → coarser detail LODs → tile proxy → group proxy → empty
-//
-// Group-proxy sample uses the tile's local `pos` (no tile-to-group
-// transform yet). The group-proxy fallback in tile entries displays
-// proxy voxels at tile-local coordinates — spatially incorrect but
-// produces a non-blank result while detail chunks load. Group-as-proxy
-// entries don't need the transform — `lodCount == 0` makes the detail
-// loop a no-op, the tile proxy step is also a no-op (no tile handle),
-// and the group-proxy step samples the group's own proxy at group-local
+// Proxy assets are consulted only when the entity binds no chunk tier at
+// all (group-as-proxy entries). The group-proxy sample uses the tile's
+// local `pos` (no tile-to-group transform): spatially incorrect for tile
+// entries but non-blank while detail chunks load, and exact for
+// group-as-proxy entries, which sample their own proxy at group-local
 // coords.
-fn sampleWithFallback(pos: vec3f) -> u32 {
-  let hasTierSources = activeEntity.detailSource.valid != 0u || activeEntity.coarseSource.valid != 0u;
-  if (hasTierSources) {
-    let detail = sampleDetailVolume(activeEntity.detailSource, pos);
-    if (detail != 0xFFFFFFFFu) {
-      return detail;
+fn sampleWithFallback(pos: vec3f) -> VolumeSample {
+  var out: VolumeSample;
+  out.value = MISS;
+  out.step = 1.0;
+
+  let count = min(activeEntity.levelSourceCount, MAX_LEVEL_SOURCES);
+  if (count != 0u || activeEntity.coarseSource.valid != 0u) {
+    for (var i = 0u; i < count; i++) {
+      let v = sampleLevelVolume(activeEntity.levelSources[i], pos);
+      if (v != MISS) {
+        out.value = v;
+        out.step = stepForDims(activeEntity.levelSources[i].levelDims);
+        return out;
+      }
     }
-    return sampleCoarseVolume(activeEntity.coarseSource, pos);
-  }
-
-  let numLods = activeEntity.lodCount;
-  let targetIdx = u.lodParams.x;
-
-  for (var i = targetIdx; i < numLods; i++) {
-    let lod = activeEntity.lods[i];
-    let levelDims = vec3f(f32(lod.levelDims.x), f32(lod.levelDims.y), f32(lod.levelDims.z));
-    let chunkDims = lod.chunkDims;
-    let gridDims = lod.gridDims;
-    let offset = lod.indirectionOffset;
-
-    // Scale [0,1] position to this LOD's voxel space (Y-flipped for image convention)
-    let texCoord = vec3i(
-      clamp(i32(pos.x * levelDims.x), 0, i32(levelDims.x) - 1),
-      clamp(i32((1.0 - pos.y) * levelDims.y), 0, i32(levelDims.y) - 1),
-      clamp(i32(pos.z * levelDims.z), 0, i32(levelDims.z) - 1),
-    );
-
-    let chunkCoord = vec3u(
-      u32(texCoord.x) / chunkDims.x,
-      u32(texCoord.y) / chunkDims.y,
-      u32(texCoord.z) / chunkDims.z,
-    );
-    let gridIdx = offset + chunkCoord.z * gridDims.y * gridDims.x
-                + chunkCoord.y * gridDims.x
-                + chunkCoord.x;
-    let slot = detailIndirection[gridIdx];
-
-    if (slot != 0xFFFFFFFFu) {
-      let slotCoord = vec3u(
-        slot % u.detailAtlasSlotDims.x,
-        (slot / u.detailAtlasSlotDims.x) % u.detailAtlasSlotDims.y,
-        slot / (u.detailAtlasSlotDims.x * u.detailAtlasSlotDims.y),
-      );
-      let localTexel = vec3u(
-        u32(texCoord.x) % chunkDims.x,
-        u32(texCoord.y) % chunkDims.y,
-        u32(texCoord.z) % chunkDims.z,
-      );
-      let atlasCoord = vec3i(
-        i32(slotCoord.x * chunkDims.x + localTexel.x),
-        i32(slotCoord.y * chunkDims.y + localTexel.y),
-        i32(slotCoord.z * chunkDims.z + localTexel.z),
-      );
-      return textureLoad(detailTex, atlasCoord, 0).r;
+    let c = sampleCoarseVolume(activeEntity.coarseSource, pos);
+    if (c != MISS) {
+      out.value = c;
+      out.step = stepForDims(activeEntity.coarseSource.levelDims);
+      return out;
     }
+    if (count != 0u) {
+      out.step = stepForDims(activeEntity.levelSources[0].levelDims);
+    } else {
+      out.step = stepForDims(activeEntity.coarseSource.levelDims);
+    }
+    return out;
   }
 
   let tileSlot = activeEntity.tileProxySlotIndex;
-  if (tileSlot != 0xFFFFFFFFu) {
+  if (tileSlot != MISS) {
+    out.step = stepForDims(activeEntity.tileProxyDims);
     let v = sampleProxy(tileProxyTex, tileSlot, activeEntity.tileProxyDims, pos);
-    if (v != 0xFFFFFFFFu) { return v; }
+    if (v != MISS) { out.value = v; return out; }
   }
   let groupSlot = activeEntity.groupProxySlotIndex;
-  if (groupSlot != 0xFFFFFFFFu) {
+  if (groupSlot != MISS) {
+    out.step = stepForDims(activeEntity.groupProxyDims);
     let v = sampleProxy(groupProxyTex, groupSlot, activeEntity.groupProxyDims, pos);
-    if (v != 0xFFFFFFFFu) { return v; }
+    if (v != MISS) { out.value = v; return out; }
   }
-
-  return 0xFFFFFFFFu;
+  return out;
 }
 
 // Integer avalanche (MurmurHash3 finalizer). Native u32 wrap matches the
@@ -492,33 +457,35 @@ fn fs(input: VSOut) -> FsOut {
     return clipMiss;
   }
 
-  let dims = vec3i(u.volumeDims.xyz);
   let intensityMin = entity.contrastMin;
   let intensityMax = entity.contrastMax;
   let opacityScale = u.stepInfo.x;
-  let stepSize = u.stepInfo.y;
+  let renderMode = i32(u.stepInfo.y);
 
   let range = intensityMax - intensityMin;
-  let renderMode = i32(u.stepInfo.z);
 
   let rayLen = tEnd - tStart;
-  let adaptiveStep = max(stepSize, rayLen / 512.0);
+  // The march advances by the sampled level's own spacing, floored so the
+  // ray always reaches tEnd within the step budget.
+  let maxSteps = select(512, 256, renderMode == 1);
+  let minStep = rayLen / f32(maxSteps);
 
   // Categorical label overlay: a first-hit colored surface, NOT translucent
   // accumulation (which yields noisy haze). March until the first non-zero
   // label voxel, paint its categorical color opaque at the per-label opacity,
-  // record frag depth, and stop. `0xFFFFFFFFu` (not resident) and `0u`
-  // (background) are transparent so the intensity volume shows through.
-  // Declared OME colors win; the glasbey hash covers the rest. Nearest
-  // sampling (integer ids never interpolate).
+  // record frag depth, and stop. MISS (not resident) and `0u` (background)
+  // are transparent so the intensity volume shows through. Declared OME
+  // colors win; the glasbey hash covers the rest. Nearest sampling (integer
+  // ids never interpolate).
   if (entity.colormapMode == 1u) {
-    let labelSteps = min(i32(ceil(rayLen / adaptiveStep)), 512);
+    let labelMinStep = rayLen / 512.0;
     var lt = tStart;
-    for (var i = 0; i < labelSteps; i++) {
+    for (var i = 0; i < 512; i++) {
+      if (lt >= tEnd) { break; }
       let pos = ro + rd * lt;
-      let id = sampleWithFallback(pos);
-      if (id != 0xFFFFFFFFu && id != 0u) {
-        let labelRgba = labelColorFor(id, currentEntity.index.y);
+      let s = sampleWithFallback(pos);
+      if (s.value != MISS && s.value != 0u) {
+        let labelRgba = labelColorFor(s.value, currentEntity.index.y);
         let labelOp = entity.labelOpacity * labelRgba.a;
         // Record frag depth at the surface so the cursor occludes correctly.
         let worldHit = entity.modelMatrix * vec4f(pos, 1.0);
@@ -530,7 +497,7 @@ fn fs(input: VSOut) -> FsOut {
         hit.color = vec4f(labelRgba.rgb * labelOp, labelOp);
         return hit;
       }
-      lt += adaptiveStep;
+      lt += max(s.step, labelMinStep);
     }
     // No label voxel along this ray: contribute nothing AND leave the
     // intensity volume's depth intact. `discard` skips both the color and
@@ -551,22 +518,20 @@ fn fs(input: VSOut) -> FsOut {
   var hitDepth = 1.0;
   var depthRecorded = false;
 
-  let maxSteps = i32(ceil(rayLen / adaptiveStep));
-  let steps = select(min(maxSteps, 512), min(maxSteps, 256), renderMode == 1);
-
-  for (var i = 0; i < steps; i++) {
+  for (var i = 0; i < maxSteps; i++) {
+    if (t >= tEnd) { break; }
     if (renderMode == 0 && alpha >= 0.98) { break; } // early termination (translucent)
     if (renderMode == 1 && maxVal >= 0.98) { break; } // early termination (MIP)
 
     let pos = ro + rd * t;
 
-    var val = sampleWithFallback(pos);
-    if (val == 0xFFFFFFFFu) {
-      t += adaptiveStep;
+    let s = sampleWithFallback(pos);
+    let advance = max(s.step, minStep);
+    if (s.value == MISS || s.value == 0u) {
+      t += advance;
       continue;
     }
-    if (val == 0u) { t += adaptiveStep; continue; }
-    let rawVal = f32(val);
+    let rawVal = f32(s.value);
     let normalized = pow(clamp((rawVal - intensityMin) / range, 0.0, 1.0), entity.gamma);
 
     // Record depth at first significant sample
@@ -589,7 +554,7 @@ fn fs(input: VSOut) -> FsOut {
       alpha += (1.0 - alpha) * sampleAlpha;
     }
 
-    t += adaptiveStep;
+    t += advance;
   }
 
   let layerOpacity = entity.opacity;

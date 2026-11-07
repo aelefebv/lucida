@@ -16,11 +16,14 @@ import type {
   CriticalPath,
   DiagnosticDocument,
   Finding,
+  FindingSeverity,
   LimiterSummary,
   PhaseRollup,
   PhaseSide,
 } from "../trace/diagnose/types.ts";
-import type { RunCause } from "../trace/types.ts";
+import { formatCause } from "../trace/diagnose/renderText.ts";
+import { describeSteadyStateFinding } from "../trace/diagnose/steadyState.ts";
+import { labelMs } from "../trace/diagnose/window.ts";
 
 /** One figure, already formatted, with the word that names it. */
 export interface MonitorNumber {
@@ -49,7 +52,7 @@ export interface MonitorDrill {
 
 export interface MonitorCallout {
   id: string;
-  tone: "verdict" | "stall" | "saturated" | "note";
+  tone: "verdict" | "stall" | "saturated" | "steady-state" | "note";
   /** The phase, limiter or segment the callout is about. */
   subject: string;
   headline: string;
@@ -62,7 +65,25 @@ export interface MonitorCallout {
   drill: MonitorDrill | null;
 }
 
-export type MonitorBannerKind = "truncation" | "coverage" | "gap" | "not-health" | "limits";
+export type MonitorBannerKind = "truncation" | "window" | "coverage" | "gap" | "not-health" | "limits";
+
+/**
+ * The window a reading is scoped to, as the dock states it beside the
+ * brush: the document's own figures, the spelling the command line takes,
+ * and the show command that reads the same window. Brushing in the dock and
+ * the CLI's window flag are the same call, so the command reproduces the
+ * numbers on screen.
+ */
+export interface MonitorWindow {
+  startMs: number;
+  endMs: number;
+  spanMs: number;
+  ofWallMs: number;
+  whole: boolean;
+  /** `START..END`, as the window flag spells it. */
+  label: string;
+  command: string;
+}
 
 export interface MonitorBanner {
   kind: MonitorBannerKind;
@@ -106,7 +127,9 @@ export interface MonitorView {
   runId: string;
   wallMs: number;
   identity: MonitorNumber[];
-  /** Truncation and coverage, ahead of every number they qualify. */
+  /** The window this reading is of, or null for the whole run. */
+  window: MonitorWindow | null;
+  /** Truncation, the window, and coverage, ahead of every number they qualify. */
   banners: MonitorBanner[];
   /** The verdict, then the ranked findings. Index 0 is always the verdict. */
   callouts: MonitorCallout[];
@@ -168,6 +191,7 @@ export function buildMonitorView(diagnostic: DiagnosticDocument): MonitorView {
     runId: diagnostic.runId,
     wallMs: diagnostic.run.wallMs,
     identity: identityOf(diagnostic),
+    window: windowOf(diagnostic),
     banners: bannersOf(diagnostic),
     callouts: calloutsOf(diagnostic),
     trackGroups: trackGroupsOf(diagnostic),
@@ -186,14 +210,11 @@ export function buildMonitorView(diagnostic: DiagnosticDocument): MonitorView {
 }
 
 /**
- * Why a run opened, in one line. Shared with the live view, which shows the
- * same run before it closes — two spellings of one cause would read as two
- * different runs.
+ * Why a run opened, in one line. The text renderer's spelling, shared with
+ * the live view and the run selector. Two spellings of one cause would read
+ * as two different runs.
  */
-export function formatCause(cause: RunCause | null): string {
-  if (!cause) return "steady state";
-  return `${cause.epoch ?? "none"} / ${cause.dirtyKind} / ${cause.source}`;
-}
+export { formatCause };
 
 function identityOf(diagnostic: DiagnosticDocument): MonitorNumber[] {
   const run = diagnostic.run;
@@ -210,15 +231,51 @@ function identityOf(diagnostic: DiagnosticDocument): MonitorNumber[] {
     },
     { label: "device pixel ratio", value: String(run.devicePixelRatio) },
     { label: "viewport", value: run.viewport },
-    { label: "gpu", value: run.gpu },
+    { label: "gpu", value: `${run.gpu} · ${run.adapterKind.label}` },
+    { label: "render timing", value: renderTimingOf(diagnostic) },
     { label: "build", value: run.build },
   ];
+}
+
+function renderTimingOf(diagnostic: DiagnosticDocument): string {
+  const { mainThread, gpuPass } = diagnostic.renderTiming;
+  const main = mainThread
+    ? `main-thread frame p95 ${formatMs(mainThread.p95Ms)} (n=${formatCount(mainThread.samples)})`
+    : "main-thread frame time not sampled";
+  const gpu = gpuPass.recorded
+    ? `GPU pass p95 ${formatMs(gpuPass.p95Ms)} (n=${formatCount(gpuPass.samples)})`
+    : `GPU pass not recorded: ${gpuPass.statement}`;
+  return `${main} · ${gpu}`;
+}
+
+/**
+ * The window the document reads, with the command that reads the same one.
+ * The label is the document's own edges, which the derivation clamped to
+ * the run, so the command names what was read rather than what was asked.
+ */
+function windowOf(diagnostic: DiagnosticDocument): MonitorWindow | null {
+  const window = diagnostic.window;
+  if (!window) return null;
+  const label = labelMs(window.startMs, window.endMs);
+  return {
+    startMs: window.startMs,
+    endMs: window.endMs,
+    spanMs: window.spanMs,
+    ofWallMs: window.ofWallMs,
+    whole: window.whole,
+    label,
+    command: `lucida trace show ${diagnostic.runId} --window ${label}`,
+  };
 }
 
 /**
  * Truncation and coverage lead. They are not footnotes: a reader has to be told
  * what the run did not measure before being told what it did, and #893 shipped
  * `100% accounted` for a run that was 87% pre-instrument boot.
+ *
+ * A window sits between them, as it does in the text: after the truncation,
+ * which qualifies the window too, and before the coverage, whose denominator
+ * is the window's span rather than the run's.
  */
 function bannersOf(diagnostic: DiagnosticDocument): MonitorBanner[] {
   const coverage = diagnostic.coverage;
@@ -231,6 +288,19 @@ function bannersOf(diagnostic: DiagnosticDocument): MonitorBanner[] {
       headline: `Truncated at ${formatMs(truncated.atMs)} — ${formatCount(truncated.rowsRecorded)} of ${formatCount(truncated.rowsTotal)} rows recorded (${truncated.recordedPct}%)`,
       detail: `Recording stopped: ${truncated.reason}. Everything below is a partial trace, and the remainder is unbounded rather than merely unmeasured.`,
       severe: true,
+    });
+  }
+
+  const window = windowOf(diagnostic);
+  if (window && coverage.window) {
+    const clip = coverage.window;
+    banners.push({
+      kind: "window",
+      headline: `Window ${window.label} ms of the ${formatMs(window.ofWallMs)} run (${formatMs(window.spanMs)})`,
+      detail:
+        `Every number below is of this window, not the run. ${clip.statement} ` +
+        `${formatCount(clip.clippedRows)} row(s) cross an edge · ${formatCount(clip.unplacedRows)} with no position left out.`,
+      severe: false,
     });
   }
 
@@ -330,12 +400,23 @@ function phaseNumbers(phase: PhaseRollup): MonitorNumber[] {
   ];
 }
 
+/**
+ * One tone per severity, listed rather than derived, so a severity added to
+ * the derivation cannot quietly land in the stall colour.
+ */
+const CALLOUT_TONES: Record<FindingSeverity, MonitorCallout["tone"]> = {
+  stall: "stall",
+  saturated: "saturated",
+  "steady-state": "steady-state",
+  note: "note",
+};
+
 function calloutOf(finding: Finding, diagnostic: DiagnosticDocument): MonitorCallout {
   const phase = drillPhase(finding.subject, diagnostic.phases);
   const headline = headlineOf(finding);
   return {
     id: `finding-${finding.id}`,
-    tone: finding.severity === "saturated" ? "saturated" : finding.severity === "note" ? "note" : "stall",
+    tone: CALLOUT_TONES[finding.severity],
     subject: finding.subject,
     headline,
     confidence: finding.confidence,
@@ -358,6 +439,10 @@ function calloutOf(finding: Finding, diagnostic: DiagnosticDocument): MonitorCal
  */
 function headlineOf(finding: Finding): string {
   const observed = finding.observed;
+  // A steady-state finding is about the interval after the run, so it has
+  // neither a duration nor a share to lead with. Its sentence comes from the
+  // derivation, so the page and the agent text say the same thing.
+  if (finding.severity === "steady-state") return describeSteadyStateFinding(finding);
   if (observed.pending != null) {
     return `${finding.subject} held ${formatCount(observed.pending)} behind a cap of ${observed.inFlightCap ?? 0}`;
   }
@@ -400,6 +485,39 @@ function numbersOf(finding: Finding, phase: PhaseRollup | null): MonitorNumber[]
   }
   if (observed.rows === 0 && observed.tier) {
     numbers.push({ label: "per-item rows", value: `none (${observed.tier})` });
+  }
+  // The steady-state figures. Every one states its window where it has one,
+  // because a count without a denominator is not a measurement.
+  if (observed.bytesPerS != null) {
+    numbers.push({ label: "bytes per second", value: formatCount(observed.bytesPerS) });
+  }
+  if (observed.bytes != null) numbers.push({ label: "bytes", value: formatCount(observed.bytes) });
+  if (observed.chunks != null) {
+    numbers.push({ label: "chunks fetched again", value: formatCount(observed.chunks) });
+  }
+  if (observed.refetches != null) {
+    numbers.push({ label: "refetches", value: formatCount(observed.refetches) });
+  }
+  if (observed.wokenPasses != null) {
+    numbers.push({
+      label: "passes woken by availability",
+      value: `${formatCount(observed.wokenPasses)} of ${formatCount(observed.passes ?? 0)}`,
+    });
+  }
+  if (observed.fillPct != null) {
+    numbers.push({
+      label: "tier fill",
+      value: `${observed.fillPct}% of ${formatCount(observed.budgetBytes ?? 0)}`,
+    });
+  }
+  if (observed.lossChunks != null) {
+    numbers.push({
+      label: "coverage loss",
+      value: `${formatCount(observed.lossChunks)} of ${formatCount(observed.wanted ?? 0)} chunks (${observed.lossPct ?? 0}%)`,
+    });
+  }
+  if (observed.windowMs != null) {
+    numbers.push({ label: "window", value: formatMs(observed.windowMs) });
   }
   return numbers;
 }

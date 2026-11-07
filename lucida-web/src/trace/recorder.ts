@@ -3,18 +3,30 @@
  * when a lifecycle row belongs to a run.
  *
  * Recording is on in every build with no toggle at any scope (ADR 0049). An
- * idle viewer emits literally nothing — the render loop is dirty-driven — so
- * a continuous recording costs nothing at rest, and a switch that buys back
- * an unmeasurable quantity would only invite every unexplained stall to be
- * blamed on the monitor.
- *
- * A run is a labelled interval within that recording (ADR 0047), opened by a
- * cause and closed by quiescence, timeout, or explicitly. An interaction run
- * and a dataset-open run are the same object, differing only by cause.
+ * idle viewer emits nothing because the render loop is dirty-driven, so the
+ * recording costs nothing at rest, and a switch would only invite every
+ * unexplained stall to be blamed on the monitor.
  */
 
 import { buildIdentity } from "./buildInfo.ts";
 import { computeCoverage } from "./coverage.ts";
+import { readChunk } from "./diagnose/chunkLookup.ts";
+import type { ChunkReading } from "./diagnose/chunkStates.ts";
+import type { ChunkLookup } from "./diagnose/types.ts";
+import {
+  deriveProvisional,
+  resolveLiveWindow,
+  type ProvisionalOptions,
+  type ProvisionalReading,
+} from "./diagnose/provisional.ts";
+import {
+  DEFAULT_LIVE_TIMELINE_WINDOW_MS,
+  deriveLiveTimeline,
+  intervalFrom,
+  type LiveTimeline,
+  type LiveTimelineOptions,
+} from "./diagnose/timeline.ts";
+import type { TimelineInterval } from "./diagnose/types.ts";
 import { placeServerRows } from "./merge.ts";
 import { CAP_DERIVATION, CAP_UNIT, PER_RUN_CAP_BYTES, RESIDENT_CAP_BYTES } from "./retention.ts";
 import {
@@ -22,27 +34,40 @@ import {
   type ServerTimingBatch,
   type WireRowFamily,
 } from "./serverRowTable.ts";
-import type { LivePhaseOccupancy, LiveProgress } from "./liveProgress.ts";
+import type {
+  LivePhaseOccupancy,
+  LiveProgress,
+  RunBoundary,
+  WatchCursor,
+  WatchSample,
+} from "./liveProgress.ts";
 import type { QuiescenceState } from "./quiescence.ts";
+import { addSend, SEND_COLUMN_COUNT, sendTalliesFrom } from "./sendAccounting.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
 import { TickScratch } from "./tickRing.ts";
 import {
   Boundary,
+  chunkKeyOf,
   clampStamp,
   COUNTED_PHASES,
+  interactionCause,
   PHASES,
   READING_NAMES,
   ReadingColumn,
   RowOutcome,
+  SEND_COLUMNS,
   TRACE_SCHEMA_VERSION,
+  type ChunkCoordinates,
   type ChunkEventSource,
   type ChunkRowSource,
+  type ClientMessageTypeIndexValue,
   type ConnectionRecord,
   type CountedPhaseIndexValue,
   type DatasetOpenBracket,
   type EndReason,
   type CacheWarmth,
   type GpuIdentity,
+  type InputKind,
   type Outstanding,
   type Phase,
   type PointEventIndex,
@@ -51,6 +76,7 @@ import {
   type RunCause,
   type RunConditions,
   type RunHeader,
+  type SendTallies,
   type TraceDocument,
   type TraceRun,
   type TruncationRecord,
@@ -58,9 +84,9 @@ import {
 } from "./types.ts";
 
 /**
- * Phases whose boundaries are stamped today. The whole enum, as of #925.
- * Declared rather than inferred so a document says what it did not measure
- * even when every phase happens to be missing from a given row.
+ * Phases whose boundaries are stamped. Declared rather than inferred so a
+ * document says what it did not measure even when every phase happens to be
+ * missing from a given row.
  */
 export const INSTRUMENTED_PHASES: readonly Phase[] = [
   "plan",
@@ -86,7 +112,7 @@ const PLAN_SPAN_RING = 16;
 /**
  * How long `quiescent` must hold before a run closes on its own. Clears the
  * residency render interval and the minimap scan cadence with margin while
- * staying small against a healthy sub-second local open (ADR 0051). It goes
+ * staying small against a healthy sub-second local open. It goes
  * in the header because it is baked into every duration a run reports.
  */
 export const DEFAULT_QUIESCENCE_HOLD_MS = 500;
@@ -123,6 +149,33 @@ export interface TraceEnvironment {
   captureOutstanding(): Outstanding;
 }
 
+/** Observes one committed per-tick aggregate sample. See {@link TraceRecorder.onTick}. */
+export type TickListener = (sample: TickScratch) => void;
+
+/**
+ * The most recent reading, as the recorder keeps it: one object overwritten
+ * per reading rather than a copy per reading, so a surface that samples at
+ * its own cadence reads it for nothing and never walks the ring.
+ */
+export interface LatestReading {
+  /**
+   * Counts up once per reading, so a reader can tell a fresh reading from
+   * the one it already saw. Zero before the first.
+   */
+  seq: number;
+  /** The recorder's clock at the reading. */
+  atMs: number;
+  queueDepth: number;
+  inFlight: number;
+  frameTimeUs: number;
+  residentBytes: number;
+  /**
+   * Null when the reading carried none: no frame was read back since the
+   * previous reading, or the adapter offers no timestamp queries.
+   */
+  gpuPassUs: number | null;
+}
+
 export interface TraceRecorderOptions {
   sinkFactory?: TraceSinkFactory;
   /** Monotonic milliseconds. Injectable so a test can drive run durations. */
@@ -135,9 +188,9 @@ export interface TraceRecorderOptions {
 
 /**
  * One interval of the continuous recording. A labelled run and the unlabelled
- * steady state between runs are the same object, differing only by `cause`
- * (ADR 0047) — which is why steady state is retained rather than thrown away:
- * the pan before a stall is often the thing that explains it.
+ * steady state between runs are the same object, differing only by `cause`.
+ * Steady state is retained because the pan before a stall is often the thing
+ * that explains it.
  */
 interface OpenInterval {
   runId: string;
@@ -166,6 +219,12 @@ interface OpenInterval {
   connections: ConnectionRecord[];
   /** Server rows refused because nothing in this interval could place them. */
   serverRowsDiscarded: number;
+  /**
+   * Messages and bytes per client message type, counted at each send. A
+   * counter, not a record: it lives outside the sink and the caps, and it
+   * keeps counting past a truncation, as `rowsUnrecorded` does.
+   */
+  sent: Float64Array;
   generation: number;
   /**
    * Set once the interval crosses the per-run cap, and mutated from there on:
@@ -178,11 +237,18 @@ interface OpenInterval {
 
 interface ClosedInterval {
   header: RunHeader;
+  /**
+   * The recorder's own clock at the interval's start, so the live timeline
+   * can place a closed interval on the open run's clock without going
+   * through the header's epoch start.
+   */
+  startedAtMs: number;
   sink: TraceSink;
   serverRows: ServerRowTable;
   datasetOpens: DatasetOpenBracket[];
   datasetOpensDropped: number;
   serverRowsDiscarded: number;
+  sent: SendTallies;
   /** Frozen at close, so the resident total is a running sum rather than a walk. */
   byteLength: number;
 }
@@ -198,9 +264,10 @@ export class TraceRecorder {
   private readonly timeoutMs: number;
 
   private environment: TraceEnvironment | null = null;
-  private gpu: GpuIdentity | null = null;
+  private gpuIdentity: GpuIdentity | null = null;
 
   private open: OpenInterval | null = null;
+  private readonly runBoundaryListeners = new Set<(boundary: RunBoundary) => void>();
   private closed: ClosedInterval[] = [];
   /** Running sum over {@link closed}, so the resident cap is a comparison, not a walk. */
   private closedBytes = 0;
@@ -249,21 +316,52 @@ export class TraceRecorder {
    */
   private readonly tickScratch = new TickScratch();
   private readonly countedPhases = new Uint32Array(COUNTED_PHASES.length);
+  /**
+   * Sends since the previous tick sample: process-wide and reset per sample,
+   * like `countedPhases`.
+   */
+  private readonly sendSample = new Uint32Array(SEND_COLUMN_COUNT);
   /** One vector, refilled per tick, for the same reason as the scratch above. */
   private readonly readingColumns = new Float64Array(READING_NAMES.length);
+  /** The loop's word on what woke the tick in progress; see {@link noteTickWake}. */
+  private availabilityWoken = false;
   /**
    * The live view's phase-occupancy vector, refilled per poll rather than
-   * allocated per poll — the walk that fills it runs over every row the run
-   * has made, and that is not the place to hand the collector a buffer. The
-   * reading it produces is a fresh object by design: it is a snapshot handed
-   * to a surface, not something the recorder keeps.
+   * allocated per poll. The progress it produces is a fresh object by
+   * design: it is a copy handed to a surface, not something the recorder
+   * keeps.
    */
   private readonly occupancyScratch = new Uint32Array(PHASES.length);
   private tickInProgress = false;
 
+  /**
+   * The last target level range each dataset was sampled at, mutated in place
+   * so steady state allocates nothing. Page-scoped rather than interval-scoped
+   * on purpose: the zoom that moves the target is often the cause of the run
+   * that follows, and that run has to be able to say so.
+   */
+  private readonly lastTargetByDataset = new Map<string, { min: number; max: number }>();
+
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   private lastQuiescence: QuiescenceState | null = null;
+
+  private readonly tickListeners = new Set<TickListener>();
+  private readonly latest: LatestReading = {
+    seq: 0,
+    atMs: 0,
+    queueDepth: 0,
+    inFlight: 0,
+    frameTimeUs: 0,
+    residentBytes: 0,
+    gpuPassUs: null,
+  };
+  /**
+   * Never reset, unlike the per-interval send tallies, so a reader at any
+   * cadence takes a rate by differencing.
+   */
+  private sentBytesTotal = 0;
+  private receivedBytesTotal = 0;
 
   constructor(options: TraceRecorderOptions = {}) {
     this.sinkFactory = options.sinkFactory ?? tableSinkFactory;
@@ -287,7 +385,44 @@ export class TraceRecorder {
   }
 
   setGpu(gpu: GpuIdentity | null): void {
-    this.gpu = gpu;
+    this.gpuIdentity = gpu;
+  }
+
+  /** The adapter the page resolved, or null before it did or where there is no WebGPU. */
+  get gpu(): GpuIdentity | null {
+    return this.gpuIdentity;
+  }
+
+  /** Bytes the page has sent over the session socket since it loaded. */
+  get bytesSent(): number {
+    return this.sentBytesTotal;
+  }
+
+  /** Bytes the page has received over the session socket since it loaded. */
+  get bytesReceived(): number {
+    return this.receivedBytesTotal;
+  }
+
+  /** The most recent reading. `seq` is zero before the first. */
+  get latestReading(): Readonly<LatestReading> {
+    return this.latest;
+  }
+
+  /**
+   * Watch each per-tick aggregate sample as {@link commitTick} publishes it.
+   *
+   * The listener receives the recorder's reusable scratch, valid for the
+   * duration of the call: read it there and copy what you keep. It runs on
+   * the planning pass, so it must be a few field reads and no allocation.
+   * This is how a surface that draws at the tick cadence sees every
+   * dataset's sample without walking the ring: the ring stays the record,
+   * and this is a notification.
+   */
+  onTick(listener: TickListener): () => void {
+    this.tickListeners.add(listener);
+    return () => {
+      this.tickListeners.delete(listener);
+    };
   }
 
   /** Whether a *labelled* run is open. The unlabelled interval is not one. */
@@ -296,20 +431,14 @@ export class TraceRecorder {
   }
 
   /**
-   * The labelled runs that concluded **on their own** — by settling or by
-   * timing out — with the id of the most recent one.
+   * The labelled runs that concluded on their own, by settling or timing
+   * out, with the id of the most recent one. What a driver waits for, and
+   * readable without exporting because exporting closes the run asked about.
    *
-   * Readable without exporting, because exporting closes the run being asked
-   * about. This is what a driver waits for, and each part of it earns its
-   * place:
-   *
-   * - *Labelled*, because steady state has nothing to conclude.
-   * - *On their own*, because an `explicit` close came from somebody asking.
-   *   A page torn down and rebuilt hands back a run that lived under a
-   *   millisecond, and a driver waiting for "a run closed" would take it.
-   * - *By id*, because the export closes an interval of its own, so "the
-   *   newest run in the document" is the export's artifact rather than the
-   *   run that was waited for.
+   * An `explicit` close is excluded because somebody asked for it: a page
+   * torn down and rebuilt hands back a run that lived under a millisecond.
+   * The id matters because the export closes an interval of its own, so the
+   * newest run in the document is not the run that was waited for.
    */
   get concludedRuns(): { count: number; lastId: string | null } {
     let count = 0;
@@ -340,20 +469,206 @@ export class TraceRecorder {
 
   /**
    * What the run in progress can say about itself, or null when no labelled
-   * run is open (#937).
+   * run is open.
    *
-   * The one read that does not conclude the interval it describes. Everything
-   * else — the document, the Chrome projection, the diagnostic — closes the
-   * run, because a run without an end reason is not an artifact. This returns
-   * counts and occupancy rather than a verdict for the same reason: the
-   * attribution back-walk needs an end to walk back from.
-   *
-   * Costed on the reader, not the writer. It walks the rows the run has made
-   * so far, so a page nobody has opened pays nothing.
+   * Does not conclude the interval it describes. The document, the Chrome
+   * projection, and the diagnostic all close the run, because a run without
+   * an end reason is not an artifact. This returns counts and occupancy
+   * rather than a verdict for the same reason: the attribution back-walk
+   * needs an end to walk back from. Walks no row: the tally is kept as the
+   * rows are written.
    */
   get liveProgress(): LiveProgress | null {
     const run = this.open;
     if (!run?.cause) return null;
+    return this.progressAt(run, run.cause, this.now());
+  }
+
+  /**
+   * A provisional reading over a trailing window of the run in progress, or
+   * null when no labelled run is open.
+   *
+   * Labelled provisional in every rendering because it changes while it is
+   * read. It is never a verdict, the gate never reads it, and asking does not
+   * close the run. Walks no row: the tally comes from the row table's
+   * counters and the rest from the readings inside the window, so the cost is
+   * bounded by the window, never by the run.
+   */
+  provisionalReading(options: ProvisionalOptions = {}): ProvisionalReading | null {
+    const run = this.open;
+    if (!run?.cause) return null;
+    const nowMs = this.now();
+    const atUs = this.offsetUs(run, nowMs);
+    const window = resolveLiveWindow(atUs, options.windowMs);
+    return deriveProvisional(
+      {
+        progress: this.progressAt(run, run.cause, nowMs),
+        atUs,
+        readings: run.sink.serialiseReadingsFrom(window.startUs),
+        readingsDropped: run.sink.readingsDropped,
+      },
+      options,
+    );
+  }
+
+  /**
+   * The steady-state tiers since `since`, or null before the page has an
+   * interval to sample.
+   *
+   * Does not conclude the interval. Each ring is read from its newest slot
+   * back to the cursor, so the cost is the samples in that stretch.
+   *
+   * A cursor's offset means nothing once its interval has handed over. With
+   * no cursor the sample is empty and only fixes where the next one starts:
+   * a reader that just arrived is owed the present. Across a handover the new
+   * interval is read from its start, because that is the opening of the run
+   * somebody asked to watch.
+   */
+  watchSample(since: WatchCursor | null): WatchSample | null {
+    const interval = this.open;
+    if (!interval) return null;
+    const atUs = this.offsetUs(interval, this.now());
+    const fromUs =
+      since === null
+        ? atUs
+        : since.intervalId === interval.runId
+          ? since.atUs
+          : // Before the interval's first stamp, so a sample at offset zero
+            // is inside the stretch rather than on its edge.
+            -1;
+    // Strictly after the cursor: a sample the previous aggregate carried is
+    // not news.
+    const readings = interval.sink
+      .serialiseReadingsFrom(fromUs)
+      .filter((reading) => reading.atUs > fromUs);
+    return {
+      intervalId: interval.runId,
+      runId: interval.cause ? interval.runId : null,
+      atUs,
+      reading: readings.at(-1) ?? null,
+      ticks: interval.sink.serialiseTicksFrom(fromUs).filter((tick) => tick.atUs > fromUs),
+    };
+  }
+
+  /**
+   * Be told when a labelled run opens and when it ends.
+   *
+   * A pull cannot see an end reason: the run is gone by the time a poll
+   * notices, and `quiescent`, `timeout`, and `explicit` are the difference
+   * between a run that settled and one that never did. The unlabelled
+   * steady-state interval's edges go unannounced: it has no cause to name
+   * and its end is the next run's opening.
+   *
+   * A listener runs inside the close, so it must record or forward the
+   * boundary and not call back into the recorder.
+   */
+  onRunBoundary(listener: (boundary: RunBoundary) => void): () => void {
+    this.runBoundaryListeners.add(listener);
+    return () => this.runBoundaryListeners.delete(listener);
+  }
+
+  private announceRunBoundary(boundary: RunBoundary): void {
+    for (const listener of this.runBoundaryListeners) listener(boundary);
+  }
+
+  /**
+   * The timeline of the run in progress over a trailing window, or null
+   * when no labelled run is open: the dock's live charts, as fields.
+   *
+   * Does not conclude the interval. It draws only from tiers it can read
+   * from the newest slot back to the window's start, so the cost is bounded
+   * by the window, never by the run. Charts read from the rows are absent
+   * and say when they are read: at close, or when a verdict is asked for.
+   */
+  liveTimeline(options: LiveTimelineOptions = {}): LiveTimeline | null {
+    const run = this.open;
+    if (!run?.cause) return null;
+    const atUs = this.offsetUs(run, this.now());
+    const window = resolveLiveWindow(atUs, options.windowMs ?? DEFAULT_LIVE_TIMELINE_WINDOW_MS);
+    return deriveLiveTimeline(
+      {
+        runId: run.runId,
+        cause: run.cause,
+        atUs,
+        readings: run.sink.serialiseReadingsFrom(window.startUs),
+        readingsDropped: run.sink.readingsDropped,
+        ticks: run.sink.serialiseTicksFrom(window.startUs),
+        ticksDropped: run.sink.ticksDropped,
+        events: run.sink.serialiseEventsFrom(window.startUs),
+        eventsDropped: run.sink.eventsDropped,
+        connections: run.connections,
+        gpu: this.gpu,
+        intervals: this.closedIntervalsOn(run),
+        sentTotalBytes: sentBytes(run.sent),
+      },
+      options,
+    );
+  }
+
+  /**
+   * Read off the closed intervals' headers alone; no tier of theirs is
+   * copied for this. An empty steady-state interval was never retained, so
+   * a quiet stretch between two runs draws as a gap between their bands.
+   */
+  private closedIntervalsOn(run: OpenInterval): TimelineInterval[] {
+    return this.closed.map((interval) =>
+      intervalFrom(interval.header, interval.startedAtMs - run.startedAtMs, false),
+    );
+  }
+
+  /**
+   * How long the interval in progress has been recording, labelled or not,
+   * or null when none is open. The window the overlay's churn tint states:
+   * its fetch counts are over the open interval, which is what the
+   * steady-state refetch rule counts over once the interval closes.
+   */
+  get openIntervalMs(): number | null {
+    const run = this.open;
+    return run ? this.now() - run.startedAtMs : null;
+  }
+
+  /**
+   * One chunk's reading from the interval in progress: where its newest row
+   * stands, how many rows it has, how many fetched, and the newest row's age.
+   * What the overlay's phase color and churn tint paint, cell by cell.
+   *
+   * Leaves the recording alone and walks no row: the row table keeps an
+   * identity index, so the read costs the same at ten rows and at the per-run
+   * cap, which `chunkIndexCost.perf.test.ts` gates. Null when no interval is
+   * open or the open one holds no row for the chunk.
+   */
+  readChunk(chunk: ChunkCoordinates): ChunkReading | null {
+    const run = this.open;
+    if (!run) return null;
+    return run.sink.readChunk(chunk, this.offsetUs(run, this.now()));
+  }
+
+  /**
+   * The chunk lookup over the interval in progress, for the hover inspector:
+   * the same section the diagnostic document carries for a closed run, read
+   * through the same function, so what the pointer shows and what the text
+   * prints cannot disagree. The rows come from the identity index. The rank
+   * is one pass over the interval's admission columns, which is why this is
+   * a read for a hover and not for a tick. Null when no interval is open.
+   */
+  lookupChunkLive(chunk: ChunkCoordinates): ChunkLookup | null {
+    const run = this.open;
+    if (!run) return null;
+    const chunkKey = chunkKeyOf(chunk);
+    return readChunk({
+      selector: `${chunk.entityId}/${chunkKey}`,
+      chosen: "under the pointer",
+      chunkKey,
+      entityId: chunk.entityId,
+      matched: run.sink.chunkRows(chunk),
+      admissions: run.sink.admissionColumns(),
+      events: run.sink.serialiseEvents(),
+      closeUs: this.offsetUs(run, this.now()),
+    });
+  }
+
+  /** The run's progress at one clock reading, so a sample taken with it shares that instant. */
+  private progressAt(run: OpenInterval, cause: RunCause, nowMs: number): LiveProgress {
     const tally = run.sink.liveTally(this.occupancyScratch);
     const occupancy: LivePhaseOccupancy[] = [];
     for (let i = 0; i < PHASES.length; i++) {
@@ -361,8 +676,8 @@ export class TraceRecorder {
     }
     return {
       runId: run.runId,
-      cause: run.cause,
-      elapsedMs: this.now() - run.startedAtMs,
+      cause,
+      elapsedMs: nowMs - run.startedAtMs,
       planned: tally.complete + tally.retired + tally.inFlight,
       visible: tally.complete,
       inFlight: tally.inFlight,
@@ -389,6 +704,25 @@ export class TraceRecorder {
     // cause.
     this.finishInterval("run-opened");
     this.beginInterval(cause);
+  }
+
+  /**
+   * An input landed, one of the five that open an interaction run. One
+   * gesture is one run: with no run open the input opens one under a cause
+   * that names it, and while a run is open (a dataset-open run included,
+   * which keeps its cause) the input extends that run.
+   *
+   * The test is "no run open" rather than "quiescent", because after a
+   * timeout or explicit close the page may never go quiescent. Extending
+   * re-arms the hold, so the run closes on quiescence after the last input;
+   * otherwise a slow drag would shatter into a run per pause.
+   */
+  noteInput(input: InputKind): void {
+    if (this.isRunOpen) {
+      this.clearHoldTimer();
+      return;
+    }
+    this.openRun(interactionCause(input));
   }
 
   /**
@@ -434,31 +768,20 @@ export class TraceRecorder {
 
   /**
    * Start a lifecycle row. Returns a handle for {@link stamp} and
-   * {@link finishRow}, or -1 when there is no interval to record into —
-   * either no page has registered an environment, or the interval has
-   * truncated. Both cases are counted so the document does not overstate what
-   * it kept.
+   * {@link finishRow}, or -1 when there is no interval to record into: no
+   * page has registered an environment, or the interval has truncated. Both
+   * cases are counted so the document does not overstate what it kept.
    *
-   * **A chunk row is born at dispatch**, so this one call also stamps the two
-   * phases already behind it — `plan` and `queue` — and opens `wire`. That is
-   * not a convenience: it is the whole event budget (#949). Three calls per
-   * chunk was three times the per-chunk event count ADR 0049 derived its
-   * 250 µs tick ceiling from, and two of them spent a handle round-trip —
-   * {@link resolve}, a generation divide and a modulo — to reach a row this
-   * frame had just made. The recorder has no other way to make a chunk row,
-   * so there is no shape this collapse forecloses.
+   * A chunk row is born at dispatch, so this one call also stamps `plan` and
+   * `queue` and opens `wire`. Splitting it into three calls would triple the
+   * per-chunk event count the 250 µs tick ceiling is derived from.
    *
-   * `admittedAtMs` is the scheduler's own admission stamp when it has one
-   * (ADR 0044 keeps them for the admission window only). Behind the window the
-   * scheduler deliberately keeps no per-key bookkeeping — on a large remote
-   * collection the backlog is tens of thousands of entries replanned several
-   * times a second — so a row admitted straight off the backlog dates its
-   * queue from the plan pass that enqueued it. Queue time before the window is
-   * therefore a floor, not a total.
-   *
-   * `plan` is attributed to the last pass that ended at or before admission.
-   * With no such pass in the ring the plan slot stays unset, which reads as
-   * "not measured" rather than as a phase that took no time.
+   * `admittedAtMs` is the scheduler's admission stamp, kept for the admission
+   * window only. A row admitted straight off the backlog dates its queue from
+   * the plan pass that enqueued it, so queue time before the window is a
+   * floor, not a total. `plan` is attributed to the last pass that ended at
+   * or before admission; with none in the ring the plan slot stays unset,
+   * which reads as "not measured" rather than as zero.
    */
   beginChunkRow(src: ChunkRowSource, tier: 0 | 1, admittedAtMs?: number): number {
     const run = this.intervalForRecording();
@@ -471,8 +794,7 @@ export class TraceRecorder {
 
     // One clock read for both boundaries: the moment the request goes out is
     // the moment the queue ends, so reading the clock twice would open a gap
-    // between two halves of the same boundary (ADR 0047's shared-boundary row
-    // model).
+    // between two halves of the same boundary.
     const dispatchedAtMs = this.now();
     const admittedMs = admittedAtMs ?? this.latestPlanEndMs() ?? dispatchedAtMs;
     const planStartMs = this.planStartAtOrBefore(admittedMs);
@@ -649,7 +971,7 @@ export class TraceRecorder {
 
   /**
    * The page is on a socket. Called on every `onopen`, including the first:
-   * the generation restarts the correlation label counter (ADR 0048), so this
+   * the generation restarts the correlation label counter, so this
    * is the only thing that makes two `rid: 0` rows in one run tell apart.
    */
   noteConnected(generation: number): void {
@@ -764,6 +1086,20 @@ export class TraceRecorder {
     run.sink.stamp(handle % GENERATION_STRIDE, boundary, this.offsetUs(run, this.now()));
   }
 
+  /**
+   * Bytes in hand: closes `wire`, opens `decode`, and records what the wire
+   * delivered, in one resolve. The bytes land on the row at the boundary
+   * they arrive at rather than through a second call, because this runs
+   * once per completed fetch and each call spends a handle resolve.
+   */
+  noteBytesReceived(handle: number, bytes: number): void {
+    const run = this.resolve(handle);
+    if (!run) return;
+    const index = handle % GENERATION_STRIDE;
+    run.sink.stamp(index, Boundary.DecodeStart, this.offsetUs(run, this.now()));
+    run.sink.setBytes(index, bytes);
+  }
+
   finishRow(handle: number, outcome: RowOutcomeValue): void {
     const run = this.resolve(handle);
     if (!run) return;
@@ -783,8 +1119,21 @@ export class TraceRecorder {
   beginTick(datasetId: string): TickScratch | null {
     if (!this.open) return null;
     this.tickScratch.reset(datasetId);
+    this.tickScratch.availabilityWoken = this.availabilityWoken;
     this.tickInProgress = true;
     return this.tickScratch;
+  }
+
+  /**
+   * What woke the loop for the tick about to run: true when a
+   * generated-availability update was the only thing that dirtied it since
+   * the previous tick. The loop says so before each tick, every sample that
+   * tick publishes carries the answer, and the next tick's word replaces it.
+   * The loop owns the dirty sources, so the classification is its and the
+   * recorder keeps one boolean.
+   */
+  noteTickWake(availabilityOnly: boolean): void {
+    this.availabilityWoken = availabilityOnly;
   }
 
   /**
@@ -796,39 +1145,89 @@ export class TraceRecorder {
     if (!this.tickInProgress) return;
     this.tickInProgress = false;
     const run = this.intervalForRecording();
+    const atUs = run ? this.offsetUs(run, this.now()) : 0;
+    this.noteTargetLevel(run, atUs);
     if (run) {
-      run.sink.appendTick(this.offsetUs(run, this.now()), this.tickScratch, this.countedPhases);
+      run.sink.appendTick(atUs, this.tickScratch, this.countedPhases, this.sendSample);
     } else if (this.open?.truncation) {
       this.open.truncation.ticksUnrecorded++;
     }
+    // Listeners fire whether the ring recorded the sample or only counted it.
+    for (const listener of this.tickListeners) listener(this.tickScratch);
     // Either way the tallies belong to the interval just ended, not the next
     // one: carrying them forward would publish two intervals' counts as one.
     this.countedPhases.fill(0);
+    this.sendSample.fill(0);
+  }
+
+  /**
+   * Derived at commit rather than emitted by the planner, because this is the
+   * one place that sees a dataset's consecutive samples. A sample with no
+   * target leaves the memory alone, so a dataset that re-enters view at
+   * another level is reported then, against the level it was last seen at.
+   */
+  private noteTargetLevel(run: OpenInterval | null, atUs: number): void {
+    const scratch = this.tickScratch;
+    if (!scratch.hasTarget) return;
+    const min = scratch.targetMin;
+    const max = scratch.targetMax;
+    const last = this.lastTargetByDataset.get(scratch.datasetId);
+    if (!last) {
+      this.lastTargetByDataset.set(scratch.datasetId, { min, max });
+      return;
+    }
+    if (last.min === min && last.max === max) return;
+    if (run) {
+      run.sink.appendLevelChange(
+        atUs,
+        scratch.levelPinned ? "pin" : "screen",
+        scratch.datasetId,
+        last.min,
+        last.max,
+        min,
+        max,
+      );
+    } else if (this.open?.truncation) {
+      this.open.truncation.eventsUnrecorded++;
+    }
+    last.min = min;
+    last.max = max;
   }
 
   /**
    * Record the process-wide readings: queue depth, in-flight, the tick's own
-   * main-thread time, and resident bytes (#934).
+   * main-thread time, resident bytes, and the GPU pass time of the last frame
+   * the render worker read back.
    *
-   * Pushed by the render loop once per tick, next to the published
-   * quiescence, rather than pulled when a tick sample is committed. A tick
-   * sample is per planning pass, and the planner's epoch cache means a run
-   * can fetch for seconds without re-planning once — readings on that cadence
-   * are a cluster of readings at run start and silence after.
+   * Pushed by the render loop once per tick rather than pulled at tick-sample
+   * commit: the planner's epoch cache means a run can fetch for seconds
+   * without re-planning, so readings on that cadence would cluster at run
+   * start. `gpuPassUs` is null when nothing arrived since the previous
+   * reading, because a zero would read as a fast GPU.
    */
   noteReading(
     queueDepth: number,
     inFlight: number,
     frameTimeUs: number,
     residentBytes: number,
+    gpuPassUs: number | null = null,
   ): void {
+    // Ahead of the run check: the latest reading is read with no run open.
+    const latest = this.latest;
+    latest.seq++;
+    latest.atMs = this.now();
+    latest.queueDepth = queueDepth;
+    latest.inFlight = inFlight;
+    latest.frameTimeUs = frameTimeUs;
+    latest.residentBytes = residentBytes;
+    latest.gpuPassUs = gpuPassUs;
     const run = this.open;
     if (!run) return;
     this.readingColumns[ReadingColumn.QueueDepth] = queueDepth;
     this.readingColumns[ReadingColumn.InFlight] = inFlight;
     this.readingColumns[ReadingColumn.FrameTimeUs] = frameTimeUs;
     this.readingColumns[ReadingColumn.ResidentBytes] = residentBytes;
-    run.sink.appendReading(this.offsetUs(run, this.now()), this.readingColumns);
+    run.sink.appendReading(this.offsetUs(run, this.now()), this.readingColumns, gpuPassUs);
   }
 
   /**
@@ -839,6 +1238,38 @@ export class TraceRecorder {
   countPhase(phase: CountedPhaseIndexValue, times = 1): void {
     if (!this.open) return;
     this.countedPhases[phase] += times;
+  }
+
+  /**
+   * Count one message the bridge transmitted over the session socket, under
+   * exactly one client message type.
+   *
+   * Two tallies take it: the sample the next tick publishes, and the
+   * interval's running total. The total exists because a sample is published
+   * only by a planning pass, and the sends worth explaining go on after the
+   * last pass, when the view looks loaded and the socket does not go quiet.
+   *
+   * Silent with no interval open, like every tier, but not silenced by
+   * truncation: this is a counter, not a record, and spends nothing from the
+   * cap. An unlabelled interval that only sent is still discarded as empty,
+   * so a pointer moving over an idle canvas retains nothing.
+   */
+  countSend(type: ClientMessageTypeIndexValue, bytes: number): void {
+    this.sentBytesTotal += bytes;
+    const run = this.open;
+    if (!run) return;
+    addSend(this.sendSample, type, bytes);
+    addSend(run.sent, type, bytes);
+  }
+
+  /**
+   * Count bytes that arrived over the session socket. A page-scoped total
+   * and nothing else: on the receive side the trace's record is the
+   * per-chunk row, and what a surface needs from this is a rate, which it
+   * reads by differencing the total at its own cadence.
+   */
+  countReceive(bytes: number): void {
+    this.receivedBytesTotal += bytes;
   }
 
   /**
@@ -904,6 +1335,7 @@ export class TraceRecorder {
     this.lastQuiescence = null;
     this.planSpanCount = 0;
     this.openPlanStartMs = null;
+    this.lastTargetByDataset.clear();
     this.beginInterval(null);
   }
 
@@ -932,6 +1364,7 @@ export class TraceRecorder {
           ? [newConnection(this.connectionGeneration, null, null)]
           : [],
       serverRowsDiscarded: 0,
+      sent: new Float64Array(SEND_COLUMN_COUNT),
       generation: this.generation,
       truncation: null,
     };
@@ -942,7 +1375,15 @@ export class TraceRecorder {
     this.evictToResidentCap(intervalBytes(this.open));
     // Only a labelled run can fail to settle. Steady state is what a settled
     // page records, so there is nothing for a timeout to declare about it.
-    if (cause) this.timeoutTimer = setTimeout(() => this.closeRun("timeout"), this.timeoutMs);
+    if (cause) {
+      this.timeoutTimer = setTimeout(() => this.closeRun("timeout"), this.timeoutMs);
+      this.announceRunBoundary({
+        runId: this.open.runId,
+        cause,
+        endReason: null,
+        durationUs: null,
+      });
+    }
   }
 
   private finishInterval(endReason: EndReason): void {
@@ -955,12 +1396,27 @@ export class TraceRecorder {
     }
     this.open = null;
     // A tick half-filled when the interval closed belongs to no interval, and
-    // the counts behind it belong to no interval either.
+    // the counts behind it belong to no interval either. The sends behind it
+    // are already in the interval's total.
     this.tickInProgress = false;
     this.countedPhases.fill(0);
+    this.sendSample.fill(0);
 
     this.awaitingResident.length = 0;
     this.awaitingDrawn.length = 0;
+
+    const durationUs = clampStamp(Math.round((this.now() - run.startedAtMs) * 1000));
+    // Announced whether or not the interval is kept below: a run that was
+    // evicted still happened, and a watcher that heard it open has to hear
+    // it end.
+    if (run.cause) {
+      this.announceRunBoundary({
+        runId: run.runId,
+        cause: run.cause,
+        endReason,
+        durationUs,
+      });
+    }
 
     // An unlabelled interval that recorded nothing is not an artifact. A
     // labelled run that recorded nothing is — a run that saw no work is
@@ -969,6 +1425,7 @@ export class TraceRecorder {
 
     const byteLength = intervalBytes(run);
     this.closed.push({
+      startedAtMs: run.startedAtMs,
       sink: run.sink,
       serverRows: run.serverRows,
       // An open still in flight keeps its null end rather than being
@@ -976,6 +1433,7 @@ export class TraceRecorder {
       datasetOpens: [...run.datasetOpens.values()],
       datasetOpensDropped: run.datasetOpensDropped,
       serverRowsDiscarded: run.serverRowsDiscarded,
+      sent: sendTalliesFrom(run.sent),
       byteLength,
       header: {
         ...run.environment.captureConditions(),
@@ -986,9 +1444,9 @@ export class TraceRecorder {
         endReason,
         truncation: run.truncation,
         build: buildIdentity(),
-        gpu: this.gpu,
+        gpu: this.gpuIdentity,
         startedAtEpochMs: run.startedAtEpochMs,
-        durationUs: clampStamp(Math.round((this.now() - run.startedAtMs) * 1000)),
+        durationUs,
         quiescenceHoldMs: this.quiescenceHoldMs,
         timeoutMs: this.timeoutMs,
         outstandingAtSettle: run.environment.captureOutstanding(),
@@ -1000,19 +1458,16 @@ export class TraceRecorder {
   }
 
   /**
-   * The interval a new record belongs in, once the caps have had their say —
-   * or null when there is nowhere to put it.
+   * The interval a new record belongs in once the caps have had their say,
+   * or null when there is nowhere to put it. Checked before the write, so a
+   * rotation hands the caller a live interval rather than one that just
+   * closed.
    *
-   * Checked before the write rather than after it, so a rotation hands the
-   * caller a live interval instead of a handle into one that just closed.
-   *
-   * The two rungs, in the order they bite. The per-run cap acts on the
-   * interval in progress; the resident cap discards completed intervals
-   * oldest-first. There is deliberately no third rung: no sampling, no
-   * coarsening, no downsample to aggregates. Reaching the per-run cap means
-   * something pathological is happening, and a loud truncation diagnoses
-   * pathology better than a quietly coarsened trace that still looks
-   * complete (ADR 0049).
+   * The per-run cap acts on the interval in progress; the resident cap
+   * discards completed intervals oldest first. There is deliberately no
+   * sampling or coarsening: reaching the per-run cap means something
+   * pathological is happening, and a loud truncation diagnoses it better
+   * than a coarsened trace that still looks complete.
    */
   private intervalForRecording(): OpenInterval | null {
     const run = this.open;
@@ -1086,6 +1541,7 @@ export class TraceRecorder {
       rows,
       ticks,
       ticksDropped,
+      sent: interval.sent,
       readings: interval.sink.serialiseReadings(),
       readingsDropped: interval.sink.readingsDropped,
       events: interval.sink.serialiseEvents(),
@@ -1151,6 +1607,13 @@ function newConnection(
   return { generation, openedAtUs, closedAtUs: null, gapUs, firstRid: null, lastRid: null };
 }
 
+/** The bytes column of every type in a send-tally vector, summed. */
+function sentBytes(sent: Float64Array): number {
+  let total = 0;
+  for (let column = 1; column < sent.length; column += SEND_COLUMNS) total += sent[column];
+  return total;
+}
+
 /** Every tier an interval holds. Allocated bytes, because the cap is on memory. */
 function intervalBytes(interval: Pick<OpenInterval, "sink" | "serverRows">): number {
   return interval.sink.byteLength + interval.serverRows.byteLength;
@@ -1159,7 +1622,7 @@ function intervalBytes(interval: Pick<OpenInterval, "sink" | "serverRows">): num
 /**
  * The process-wide recorder. A module singleton because the emit points are
  * deep in the pipeline and threading an instance to each of them would make
- * the presence of recording a per-call-site decision — which is the toggle
- * ADR 0049 rejected, in another costume.
+ * the presence of recording a per-call-site decision, which is a recording
+ * toggle by another name.
  */
 export const traceRecorder = new TraceRecorder();

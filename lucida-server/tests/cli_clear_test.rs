@@ -1,20 +1,7 @@
-//! Integration tests for the `clear-proxy-cache` library helper.
-//!
-//! These cover the synchronous logic that backs both the
-//! `lucida-server clear-proxy-cache` subcommand and the
-//! `POST /admin/clear-proxy-cache` endpoint:
-//!
-//!   - Clearing a single dataset only removes its own subdirectory.
-//!   - Clearing without a dataset URL removes every dataset subdir but
-//!     leaves the cache root in place.
-//!   - A missing cache directory is treated as "0 cleared", not an error.
-//!   - File counts in the returned `ClearOutcome` match the synthetic
-//!     layout we pre-populate.
-//!
-//! We pre-populate a tempdir matching the on-disk layout owned by
-//! `proxy::ProxyCache` —
-//! `{cache_dir}/{url_hash hex}/{entity_id}/{kind}/T{t:05}_C{c:03}.bin` —
-//! so we exercise the helper against the real path scheme.
+//! Integration tests for the `clear-proxy-cache` helper behind both the
+//! subcommand and `POST /admin/clear-proxy-cache`. Each test pre-populates
+//! a tempdir in the real `proxy::ProxyCache` layout,
+//! `{cache_dir}/{url_hash hex}/{entity_id}/{kind}/T{t:05}_C{c:03}.bin`.
 
 use std::fs;
 use std::path::{Path, PathBuf};

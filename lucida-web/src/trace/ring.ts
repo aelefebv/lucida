@@ -37,4 +37,15 @@ export class RingSlots {
     const first = this.written > this.capacity ? this.written - this.capacity : 0;
     for (let n = first; n < this.written; n++) yield n % this.capacity;
   }
+
+  /**
+   * The live slots, newest first, for a reader that wants the recent end of
+   * the stream and stops when it has enough. A trailing window is read from
+   * the present backwards, and walking the whole ring to reach its tail would
+   * cost the ring's capacity on every read.
+   */
+  *newestFirst(): Generator<number> {
+    const first = this.written > this.capacity ? this.written - this.capacity : 0;
+    for (let n = this.written - 1; n >= first; n--) yield n % this.capacity;
+  }
 }

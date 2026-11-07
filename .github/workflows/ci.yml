@@ -17,6 +17,28 @@ jobs:
     name: Rust workspace (test + clippy)
     runs-on: ubuntu-latest
     timeout-minutes: 30
+
+    # The PostgreSQL conformance cases skip themselves when no server is
+    # reachable, which is what lets a developer without PostgreSQL run the
+    # suite. CI is the place that must not skip, so it runs one. Pin the
+    # major version to what a deployment runs; the schema targets 17.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: lucida
+          POSTGRES_PASSWORD: lucida
+          POSTGRES_DB: lucida_test
+        ports:
+          - 5432:5432
+        # Without this the job races the server's startup, and a connect
+        # failure fails the run rather than waiting for it.
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
       - uses: actions/checkout@v4
 
@@ -32,6 +54,11 @@ jobs:
       # instead of silently re-resolving deps on the runner. Keeps CI
       # testing the same dep graph the Docker image builds from.
       - name: cargo test
+        env:
+          LUCIDA_TEST_POSTGRES_URL: postgres://lucida:lucida@localhost:5432/lucida_test
+          # Turn a skip into a failure: a container that never came up, or
+          # a typo in the URL above, would otherwise report green.
+          LUCIDA_TEST_POSTGRES_REQUIRED: '1'
         run: cargo test --locked --workspace --all-features
 
       # Format check: enforces `cargo fmt --all` consistency across the
@@ -130,7 +157,7 @@ jobs:
       # Skip the build entirely on PRs that don't touch the Docker
       # build context. The rust + web jobs already prove the code
       # compiles; this job's unique value is "Dockerfile + .dockerignore
-      # + crate copy list still works." Wiki/doc/k8s-only PRs get a
+      # + crate copy list still works." Doc/k8s-only PRs get a
       # near-instant pass through. Push events (merges to main) and
       # release-please PRs always build (see gate step below).
       - name: Detect build-context changes
@@ -325,3 +352,21 @@ jobs:
           uv sync --python 3.12
           uv run maturin develop
           uv run pytest -q
+
+      # The generator declares its dependencies inline, so `uv run` on the
+      # test file gives it its own environment rather than lucida-py's. The
+      # suite also regenerates the committed fixtures and compares samples, so
+      # a generator change that would alter them fails here.
+      - name: Synthetic fixture generator tests
+        run: uv run extras/test_synthetic_ome_zarr.py
+
+      # The whole sharded twin check needs a server and a browser. This runs
+      # only the parts that read an object store and a run file.
+      - name: Sharded twin check tests
+        run: uv run extras/test_verify_sharded_twins.py
+
+      # Same split for the level chain check: the rule and the parts that
+      # read a frame or a run file run here; the four driven runs need a
+      # server.
+      - name: Level chain check tests
+        run: uv run extras/test_verify_level_chain.py

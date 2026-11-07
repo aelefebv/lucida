@@ -1,32 +1,12 @@
-//! Cross-platform dataset URL helpers.
+//! Cross-platform dataset URL helpers: the one place that turns a
+//! user-typed dataset path into its canonical string
+//! ([`normalize_dataset_url`]), classifies it as local or remote
+//! ([`is_local_dataset_url`]), and derives its id and cache hash
+//! ([`dataset_id_for_url`], [`dataset_url_hash16`]) from one BLAKE3 digest.
 //!
-//! The functions in this module are the **single source of truth** for
-//! how lucida turns a user-typed dataset path into:
-//!
-//!   1. A canonical string form ([`normalize_dataset_url`]) used uniformly
-//!      for `DatasetId` hashing, proxy-cache directory naming, wire
-//!      transmission, and display.
-//!   2. A boolean classification ([`is_local_dataset_url`]) of whether a
-//!      *normalized* URL refers to a filesystem path (Unix, drive-letter,
-//!      or UNC) versus a remote scheme (`gs://`, `s3://`, `http(s)://`).
-//!   3. A stable content-derived id ([`dataset_id_for_url`]) and a
-//!      16-byte URL hash ([`dataset_url_hash16`]) used by the proxy
-//!      cache to name per-dataset directories. Both derive from the same
-//!      BLAKE3 digest (see [`blake3_url`]) so they cannot drift.
-//!
-//! Normalization is **pure string-level**, not a filesystem
-//! `canonicalize` call. `..` is not resolved, symlinks are not followed,
-//! the path does not need to exist, and the function is **idempotent**
-//! (safe to call defensively at every boundary). See
-//! `wiki/decisions/0042-canonical-dataset-url-form.md` for the full
-//! rationale and what's intentionally not solved.
-//!
-//! Placement here (in `lucida-content`) honors the existing crate
-//! boundaries: every caller (`lucida-store`, `lucida-core`,
-//! `lucida-server`) already depends on `lucida-content`, the crate
-//! explicitly hosts pure (no-I/O, no-async) computation alongside the
-//! identity types (`DatasetId` lives in `lucida-content::id`), and
-//! `lucida-protocol` stays computation-free per its own systems article.
+//! Normalization is pure string work, not `canonicalize`: `..` is not
+//! resolved, symlinks are not followed, the path need not exist, and it is
+//! idempotent, so any boundary may call it (ADR 0042).
 
 /// Strip a leading `file://` or `file:///`+ prefix, lowercase the drive
 /// letter on Windows-style paths, forward-slashify backslashes, and
@@ -127,13 +107,10 @@ pub fn is_local_dataset_url(canonical: &str) -> bool {
 /// Stable, content-derived `DatasetId` for a dataset URL. Format:
 /// `ds-{first_8_bytes_of_blake3(url)_as_le_u64_hex}`.
 ///
-/// Two opens of the same URL within a session produce the same id —
-/// that's the dedup-on-reopen primitive lucida-server relies on. See
-/// `wiki/decisions/0014-local-file-datasets-personal-only-in-saved-views.md`
-/// for the BLAKE3-collision sharp edge on local-file paths.
-///
-/// Callers that want cross-machine equivalence on Windows / UNC should
-/// pass a [`normalize_dataset_url`]-canonicalized URL.
+/// Two opens of the same URL produce the same id, which is how the server
+/// dedupes a reopen. ADR 0014 covers the collision edge on local-file
+/// paths. Pass a [`normalize_dataset_url`]-canonicalized URL for
+/// equivalence across Windows and UNC spellings.
 pub fn dataset_id_for_url(canonical: &str) -> String {
     let digest = blake3_url(canonical);
     let prefix: [u8; 8] = digest[..8].try_into().expect("blake3 always >= 8 bytes");
@@ -154,14 +131,10 @@ pub fn dataset_url_hash16(canonical: &str) -> [u8; 16] {
 
 /// Internal: full 32-byte BLAKE3 digest of `url`. Held as a single
 /// helper so [`dataset_id_for_url`], [`dataset_url_hash16`], and any
-/// future longer derivation cannot drift apart. Mirrors the same
-/// shared-helper pattern the old `lucida-server::handler` used before
-/// this module collected the URL helpers.
+/// future longer derivation cannot drift apart.
 fn blake3_url(url: &str) -> [u8; 32] {
     *blake3::hash(url.as_bytes()).as_bytes()
 }
-
-// ---------- private helpers ----------
 
 /// Match `gs://`, `s3://`, `http://`, `https://` (and only those), in any
 /// letter case — schemes are case-insensitive per RFC 3986 §3.1. `file://`
@@ -305,8 +278,6 @@ fn swap_backslash(c: char) -> char {
 mod tests {
     use super::*;
 
-    // ---- normalize_dataset_url: table-driven ----
-
     /// Each row: (input, expected_canonical). The same table is reused
     /// by the idempotence and round-trip-id tests below.
     fn normalize_cases() -> Vec<(&'static str, &'static str)> {
@@ -379,8 +350,6 @@ mod tests {
         }
     }
 
-    // ---- is_local_dataset_url: classifier table ----
-
     #[test]
     fn is_local_dataset_url_table() {
         let cases: Vec<(&str, bool)> = vec![
@@ -411,15 +380,12 @@ mod tests {
         }
     }
 
-    // ---- Round-trip: equivalent spellings produce the same id ----
-
     #[test]
     fn dataset_id_for_url_is_stable_across_spelling_variants() {
         // Each group is a set of input spellings that should normalize
         // to the same canonical form, and therefore produce the same
         // `dataset_id_for_url`. Checks the property at the externally
-        // observable layer (same id) — see the PRD's "Testing
-        // Decisions" §.
+        // observable layer: the same id.
         let groups: Vec<Vec<&str>> = vec![
             vec![
                 "C:\\foo",
@@ -447,8 +413,6 @@ mod tests {
         }
     }
 
-    // ---- dataset_id_for_url: format ----
-
     #[test]
     fn dataset_id_for_url_format() {
         let id = dataset_id_for_url("gs://bucket/a.zarr");
@@ -463,8 +427,6 @@ mod tests {
         let b = dataset_id_for_url("gs://bucket/b.zarr");
         assert_ne!(a, b);
     }
-
-    // ---- dataset_url_hash16 ↔ dataset_id_for_url lockstep ----
 
     #[test]
     fn dataset_url_hash16_first_8_bytes_match_dataset_id() {

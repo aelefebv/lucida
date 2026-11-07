@@ -37,10 +37,10 @@ import type {
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { emptyPlanStats } from "../planning/index.ts";
+import { createQuiescenceState } from "../../trace/quiescence.ts";
+import { initialPlanningState, createSyntheticState } from "../planning/index.ts";
 
-// ---------------------------------------------------------------------------
 // Test Factories
-// ---------------------------------------------------------------------------
 
 interface MockContentSource extends ContentSource {
   pendingFetches: Map<string, { resolve: (r: FetchResult) => void; reject: (e: Error) => void }>;
@@ -184,6 +184,7 @@ function createSyncDecode(): DecodePool {
 }
 
 function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
+  const lane = overrides?.lane ?? "detail";
   return {
     datasetId: "entity-1",
     entityId: "entity-1",
@@ -194,7 +195,10 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
     z: 0,
     y: 0,
     x: 0,
-    lane: "detail",
+    lane,
+    // Each planner lane stamps its own tier. Mirror that so a lane-only
+    // override still matches a real request.
+    tier: lane === "coarse" || lane === "overview" || lane === "minimap" ? "coarse" : "detail",
     priority: 0,
     chunkKey: `${overrides?.level ?? 0}/${overrides?.t ?? 0}/${overrides?.c ?? 0}/${overrides?.z ?? 0}/${overrides?.y ?? 0}/${overrides?.x ?? 0}`,
     ...overrides,
@@ -211,9 +215,8 @@ function makePlan(
     entityId: "entity-1",
     imageId: "image-1",
     mode: "tiles-with-detail",
-    targetLod: 0,
-    coarsestDetailLod: 2,
-    detailOwnedLodRange: [0, 2],
+    detailLevels: [0],
+    coarseLevel: null,
     proxyKind: undefined,
     proxyAvailable: false,
     groupProxyAvailable: false,
@@ -232,7 +235,7 @@ function makePlan(
       ...epochs,
     },
     stats: emptyPlanStats(),
-    nextState: { previousActiveSet: resolvedActiveSet },
+    nextState: createSyntheticState({ previousActiveSet: resolvedActiveSet }),
   };
 }
 
@@ -242,9 +245,22 @@ function makeActiveEntry(entityId: string, imageId?: string): ActiveSetEntry {
     entityId,
     imageId: imageId ?? entityId.replace("entity", "image"),
     mode: "tiles-with-detail",
-    targetLod: 0,
-    coarsestDetailLod: 2,
-    detailOwnedLodRange: [0, 2],
+    detailLevels: [0],
+    coarseLevel: null,
+    proxyKind: undefined,
+    proxyAvailable: false,
+    groupProxyAvailable: false,
+  };
+}
+
+function tileAt(entityId: string, target: number): ActiveSetEntry {
+  return {
+    kind: "tile",
+    entityId,
+    imageId: entityId.replace("entity", "image"),
+    mode: "tiles-with-detail",
+    detailLevels: [target],
+    coarseLevel: null,
     proxyKind: undefined,
     proxyAvailable: false,
     groupProxyAvailable: false,
@@ -276,18 +292,14 @@ function consumeDeliverables(cache: CpuCache, budgetBytes = Infinity): ReadyDeli
   return deliveries;
 }
 
-// ---------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
 
 describe("CpuCache", () => {
   beforeEach(() => {
     vi.useRealTimers();
   });
 
-  // =========================================================================
   // Submit/deliverable lifecycle
-  // =========================================================================
 
   describe("submit/deliverable lifecycle", () => {
     it("submit plan → source resolves → getDeliverable returns delivery", async () => {
@@ -693,10 +705,9 @@ describe("CpuCache", () => {
       await flush();
 
       expect(Array.from(cache.getDeliverable())).toEqual([]);
-      // Tier is read off residency rather than a per-entry dump: the dump
-      // accessors went with the debug panel (ADR 0052). The counts carry no
-      // chunk key, so they pin the promotion only because this fixture holds
-      // exactly one chunk — the delivery assertion below binds the identity.
+      // Tier is read off residency counts. They carry no chunk key, so they
+      // pin the promotion only because this fixture holds exactly one chunk;
+      // the delivery assertion below binds the identity.
       expect(cache.telemetry().tierResidency).toMatchObject({
         prefetch: { count: 1 },
         activeDetail: { count: 0 },
@@ -720,9 +731,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // In-flight dedup
-  // =========================================================================
 
   describe("in-flight dedup", () => {
     it("does not duplicate fetches for same chunk in consecutive submits", async () => {
@@ -748,9 +757,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Fetch lifecycle preempted by plan omission
-  // =========================================================================
 
   describe("fetch lifecycle preempted by plan omission", () => {
     it("submit twice with overlapping requests cancels omitted in-flight work for active entities", async () => {
@@ -1006,7 +1013,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyReq],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
       expect(cache.telemetry().inFlightProxyCount).toBe(1);
 
@@ -1019,9 +1026,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // cancelDataset
-  // =========================================================================
 
   describe("cancelDataset", () => {
     function makeProxyRequest(overrides?: Partial<ProxyRequest>): ProxyRequest {
@@ -1050,7 +1055,7 @@ describe("CpuCache", () => {
           ...epochs,
         },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       };
     }
 
@@ -1115,7 +1120,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyReq],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
 
       // At least one request should be queued.
@@ -1247,7 +1252,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyA],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
       await flush();
 
@@ -1263,7 +1268,7 @@ describe("CpuCache", () => {
         proxyRequests: [proxyB],
         epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       });
       await flush();
 
@@ -1288,9 +1293,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Cache snapshot
-  // =========================================================================
 
   describe("cache snapshot", () => {
     it("returns cached and in-flight keys", async () => {
@@ -1312,9 +1315,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Multi-channel
-  // =========================================================================
 
   describe("multi-channel", () => {
     it("caches channels independently", async () => {
@@ -1333,9 +1334,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Demotion
-  // =========================================================================
 
   describe("demotion", () => {
     it("demotes entity entries when entity leaves active set", async () => {
@@ -1355,9 +1354,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Eviction tiers
-  // =========================================================================
 
   describe("eviction tiers", () => {
     it("evicts prefetch before active-detail under budget pressure", async () => {
@@ -1418,11 +1415,56 @@ describe("CpuCache", () => {
       expect(snap.cached.has("entity-1")).toBe(false); // demoted, evicted
       expect(snap.cached.get("entity-2")?.size).toBe(2); // active, kept
     });
+
+    it("evicts a chunk finer than its entity's target before a farther chunk at another entity's target", async () => {
+      const { cache, source } = createTestCache({ mainBudgetBytes: 256, overviewBudgetBytes: 0 });
+      source.autoResolveBytes = 100;
+
+      const e1Fine = makeRequest({ entityId: "entity-1", imageId: "image-1", priority: 0, chunkKey: "0/0/0/0/0/0" });
+      const e2Fine = makeRequest({ entityId: "entity-2", imageId: "image-2", priority: 100, chunkKey: "0/0/0/0/0/0" });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([e1Fine, e2Fine], [tileAt("entity-1", 0), tileAt("entity-2", 0)]));
+      await flush();
+      expect(cache.snapshot().cached.get("entity-1")?.has("0/0/0/0/0/0")).toBe(true);
+
+      // Entity 1's target moves to level 2, and the level-2 chunk it now
+      // wants pushes the store over budget.
+      const e1Target = makeRequest({ entityId: "entity-1", imageId: "image-1", level: 2, chunkKey: "2/0/0/0/0/0" });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([e1Target], [tileAt("entity-1", 2), tileAt("entity-2", 0)]));
+      await flush();
+
+      // The view-distance keys alone would take entity 2's distant chunk.
+      const snap = cache.snapshot();
+      expect(snap.cached.get("entity-1")).toEqual(new Set(["2/0/0/0/0/0"]));
+      expect(snap.cached.get("entity-2")).toEqual(new Set(["0/0/0/0/0/0"]));
+    });
+
+    it("leaves the coarse bucket's order alone: a coarse chunk finer than the target still goes by age", async () => {
+      const { cache, source } = createTestCache({ mainBudgetBytes: 0, overviewBudgetBytes: 256 });
+      source.autoResolveBytes = 100;
+      const coarse = (level: number, x: number) =>
+        makeRequest({ lane: "coarse", tier: "coarse", level, x, chunkKey: `${level}/0/0/0/0/${x}` });
+      const activeSet = [tileAt("entity-1", 2)];
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([coarse(3, 0)], activeSet));
+      await flush();
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([coarse(3, 0), coarse(0, 1)], activeSet));
+      await flush();
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([coarse(3, 0), coarse(0, 1), coarse(3, 2)], activeSet));
+      await flush();
+
+      const keys = cache.snapshot().cached.get("entity-1")!;
+      expect(keys.has("3/0/0/0/0/0")).toBe(false);
+      expect(keys.has("0/0/0/0/0/1")).toBe(true);
+      expect(keys.has("3/0/0/0/0/2")).toBe(true);
+    });
   });
 
-  // =========================================================================
-  // Minimap lane routing (ADR 0023)
-  // =========================================================================
+  // Minimap lane routing
 
   describe("minimap lane routing", () => {
     it("routes lane: \"minimap\" chunks to the overview cache", async () => {
@@ -1512,13 +1554,11 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Dual-lane demand: minimap seeding + the view's coarse lane
-  // =========================================================================
   //
   // The minimap and coarse lanes share a residency tier and a dedup
   // key, so one fetch (or one cached entry) can serve both. Whichever
-  // lane's request holds the queue slot, an arrival the VIEW demanded
+  // lane's request holds the queue slot, an arrival the view demanded
   // this tick must be deliverable immediately — idle fill must not wait
   // for the next interaction-triggered rebuild to relabel the entry.
   // Chunks only the minimap wanted stay off the view's delivery path.
@@ -1568,7 +1608,7 @@ describe("CpuCache", () => {
       cache.submit(makePlan([minimapReq()]));
 
       // Rebuild while the fetch is in flight: the view's coarse request
-      // rides the same fetch. The minimap request is deliberately LAST
+      // rides the same fetch. The minimap request is deliberately last
       // (its bulk-demoted sort position) so the freshest in-flight
       // metadata carries lane "minimap".
       cache.onPlanRebuildStart();
@@ -1625,9 +1665,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Error handling
-  // =========================================================================
 
   describe("error handling", () => {
     it("retries transient errors once", async () => {
@@ -1902,7 +1940,7 @@ describe("CpuCache", () => {
       expect(cache.failuresTracked()).toBe(MAX_TRACKED_FAILURES);
 
       // A retained permanent (the most-recent record survives the FIFO drop
-      // of the oldest permanents) stays excluded: re-planning it must NOT
+      // of the oldest permanents) stays excluded: re-planning it must not
       // issue a new fetch. Merely counting entries would miss a regression
       // where the gate re-enqueued an evicted-then-forgotten key.
       const retained = makeRequest({
@@ -1916,7 +1954,7 @@ describe("CpuCache", () => {
 
     it("retains a fresh transient's backoff even when the permanent store is full", async () => {
       // The compound exposure: a malformed collection floods the map with
-      // permanent 404s AND a throttling backend produces transient timeouts.
+      // permanent 404s and a throttling backend produces transient timeouts.
       // The transient store is independent, so the transient keeps its own
       // backoff slot instead of being crowded out — no no-backoff retry storm
       // against the throttling backend.
@@ -1930,7 +1968,7 @@ describe("CpuCache", () => {
           random: () => 0, // returns each backoff band's floor
         });
 
-        // Saturate the PERMANENT store to capacity with 404s.
+        // Saturate the permanent store to capacity with 404s.
         const permReqs = Array.from({ length: MAX_TRACKED_FAILURES }, (_, i) =>
           makeRequest({ x: i, chunkKey: `0/0/0/0/0/${i}` }),
         );
@@ -1941,7 +1979,7 @@ describe("CpuCache", () => {
         await vi.advanceTimersByTimeAsync(0);
         expect(cache.failuresTracked()).toBe(MAX_TRACKED_FAILURES);
 
-        // A brand-new TRANSIENT failure arrives while permanents are full.
+        // A brand-new transient failure arrives while permanents are full.
         const tIdx = MAX_TRACKED_FAILURES;
         const transientReq = makeRequest({ x: tIdx, chunkKey: `0/0/0/0/0/${tIdx}` });
         const transientComposite = `entity-1/image-1/0/0/0/0/0/${tIdx}`;
@@ -1951,13 +1989,12 @@ describe("CpuCache", () => {
         source.reject(transientComposite, new Error("Network error"));
         await vi.advanceTimersByTimeAsync(0);
 
-        // The transient got its OWN store slot — permanents did not evict it.
+        // The transient got its own store slot — permanents did not evict it.
         expect(cache.failuresTracked()).toBe(MAX_TRACKED_FAILURES + 1);
 
-        // The regression this fixes: the transient is RETAINED with its
-        // backoff. Re-planning it before its eligibility instant issues NO
-        // new fetch — with a single saturated map it would have been evicted
-        // and re-fetched with no backoff every tick.
+        // The transient keeps its backoff: re-planning it before its
+        // eligibility instant issues no new fetch. One shared saturated map
+        // would evict it and re-fetch it every tick.
         const backoffFloor =
           FAILURE_BACKOFF_BASE_MS * (1 - FAILURE_BACKOFF_JITTER_RATIO);
         clock = backoffFloor - 1;
@@ -2072,9 +2109,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Delivery failure streak surfacing
-  // =========================================================================
 
   describe("delivery failure streak surfacing", () => {
     it("notifies once when a failure streak reaches the threshold, throttled thereafter", async () => {
@@ -2236,7 +2271,7 @@ describe("CpuCache", () => {
       for (let i = 0; i < CHUNK_FAILURE_STREAK_THRESHOLD - 1; i++) {
         source.reject(`entity-1/image-1/0/0/0/0/0/${i}`, new Error("404 not found"));
       }
-      // …then the last fetch COMPLETES but its bytes cannot be decoded
+      // …then the last fetch completes but its bytes cannot be decoded
       // (e.g. a source answering 200 with the wrong wire format). That is
       // a delivery failure, not a recovery.
       failDecode = true;
@@ -2352,7 +2387,7 @@ describe("CpuCache", () => {
     it("a server-reported transient that also fails its retry feeds the streak once, not twice", async () => {
       // The recoverable-throttle case: every chunk comes back `unavailable`
       // (server-reported, transient), is retried once, and
-      // the retry ALSO comes back `unavailable`. Each such chunk produces two
+      // the retry also comes back `unavailable`. Each such chunk produces two
       // physical rejections but is a single failed delivery: it must feed the
       // streak exactly once. If the retry double-counted, half a threshold of
       // distinct throttled chunks would trip the aggregate "loading is failing"
@@ -2423,8 +2458,8 @@ describe("CpuCache", () => {
     });
 
     it("a chunk whose client transient is retried into a server-reported failure feeds the streak once", async () => {
-      // The undercount case: a chunk's FIRST attempt is a client-side
-      // transient (streak-exempt, retried) and its RETRY comes back
+      // The undercount case: a chunk's first attempt is a client-side
+      // transient (streak-exempt, retried) and its retry comes back
       // server-reported. The eligible failure lands on the retry, not the
       // first attempt, so it must still feed the streak exactly once — a
       // whole viewport of such chunks against a source that flaps then fails
@@ -2491,7 +2526,7 @@ describe("CpuCache", () => {
       expect(onChunkFailureStreak).toHaveBeenCalledTimes(1);
       expect(onChunkFailureRecovered).not.toHaveBeenCalled();
 
-      // A delivered (fetched AND decoded) chunk retires the signal…
+      // A delivered (fetched and decoded) chunk retires the signal…
       cache.submit(makePlan([makeRequest({ y: 1 })]));
       source.resolve("entity-1/image-1/0/0/0/0/1/0");
       await flush();
@@ -2503,14 +2538,14 @@ describe("CpuCache", () => {
       await flush();
       expect(onChunkFailureRecovered).toHaveBeenCalledTimes(1);
 
-      // A NEW streak after recovery is a new incident: it notifies
+      // A new streak after recovery is a new incident: it notifies
       // immediately instead of waiting out the previous throttle window.
       await rejectBatch(3, CHUNK_FAILURE_STREAK_THRESHOLD);
       expect(onChunkFailureStreak).toHaveBeenCalledTimes(2);
     });
 
     it("re-surfaces after a delivery reset when a re-planned source stays dead", async () => {
-      // The streak counts CONSECUTIVE failed deliveries: once a delivery
+      // The streak counts consecutive failed deliveries: once a delivery
       // resets it, a chunk that keeps failing across later re-plan cycles must
       // re-contribute — otherwise a partially-dead source surfaces once, one
       // unrelated chunk arrives, and the still-massively-failing chunks can
@@ -2690,9 +2725,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Budget enforcement
-  // =========================================================================
 
   describe("budget enforcement", () => {
     it("detail borrows unused coarse budget while coarse is idle, then evicts back to its protected budget", async () => {
@@ -2800,9 +2833,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // getCached
-  // =========================================================================
 
   describe("getCached", () => {
     it("returns cached detail entry", async () => {
@@ -2835,7 +2866,7 @@ describe("CpuCache", () => {
       cache.submit(makePlan([req]));
       await flush();
 
-      // Delivery consumption marks sent but does NOT remove from cache.
+      // Delivery consumption marks sent but does not remove from cache.
       consumeDeliverables(cache);
 
       const result = cache.getCachedChunk("entity-1", "0/0/0/0/0/0");
@@ -2875,9 +2906,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Reset
-  // =========================================================================
 
   describe("reset", () => {
     it("clears all state", async () => {
@@ -2900,9 +2929,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Proxy tier
-  // =========================================================================
 
   describe("proxy tier", () => {
     function makeProxyRequest(overrides?: Partial<ProxyRequest>): ProxyRequest {
@@ -2936,7 +2963,7 @@ describe("CpuCache", () => {
           ...epochs,
         },
         stats: emptyPlanStats(),
-        nextState: { previousActiveSet: [] },
+        nextState: initialPlanningState(),
       };
     }
 
@@ -3151,7 +3178,7 @@ describe("CpuCache", () => {
         expect(source.pendingProxyFetches.has(AWAY_KEY)).toBe(true);
 
         // entity-1 leaves the view; entity-2 is the current view now. The
-        // departure is only detected at the NEXT rebuild boundary.
+        // departure is only detected at the next rebuild boundary.
         cache.onPlanRebuildStart();
         cache.submit(makePlan([], [makeActiveEntry("entity-2", "image-2")]));
         expect(cache.telemetry().inFlightProxyCount).toBe(1);
@@ -3241,10 +3268,10 @@ describe("CpuCache", () => {
       it("keeps a still-wanted group proxy when its group leaves the active set on a zoom-in", async () => {
         // Group-to-tile zoom-in: the group first renders as a single
         // GroupProxy3D (the group is the active entity), then resolves into
-        // individual tiles that share that SAME group proxy as their fallback.
+        // individual tiles that share that same group proxy as their fallback.
         // The group id leaves the active set, but the group proxy — keyed by
         // the group id, not a per-tile entity — stays continuously requested.
-        // The per-entity departure cancel must NOT abort it (that would churn
+        // The per-entity departure cancel must not abort it (that would churn
         // a large shared fallback with an abort + refetch every zoom-in).
         const { cache, source } = createTestCache();
         source.autoResolveProxyBytes = null; // hold the proxy in-flight
@@ -3292,9 +3319,7 @@ describe("CpuCache", () => {
     });
   });
 
-  // =========================================================================
   // Subtle behaviours: race orderings, telemetry shape, eviction-burst log.
-  // =========================================================================
 
   describe("subtle behaviours", () => {
     beforeEach(() => {
@@ -3372,7 +3397,50 @@ describe("CpuCache", () => {
         coarseBytes: 64,
       });
       expect(demand.detailCoverageRatio).toBe(1);
-      expect(demand.sparseDetail).toBe(false);
+    });
+
+    it("counts desired and resident detail at the level the plan asked for, not at levels left resident from before", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      const at = (level: number, x: number) =>
+        makeRequest({ level, x, lane: "detail", tier: "detail", chunkKey: `${level}/0/0/0/0/${x}` });
+
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([at(2, 0), at(2, 1)]));
+      await flush();
+      let inputs = cache.quiescenceInputs(createQuiescenceState());
+      expect(inputs).toMatchObject({ desiredDetailChunks: 2, residentDetailChunks: 2 });
+
+      // The target moves to level 1. The coordinator opens every rebuild with
+      // `onPlanRebuildStart`, which is what retires the previous plan's demand.
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([at(1, 0)]));
+      inputs = cache.quiescenceInputs(createQuiescenceState());
+      expect(inputs).toMatchObject({ desiredDetailChunks: 1, residentDetailChunks: 0 });
+      // Still cached: the zero above is a level mismatch, not an eviction.
+      expect(cache.snapshot().cached.get("entity-1")?.has("2/0/0/0/0/0")).toBe(true);
+
+      await flush();
+      inputs = cache.quiescenceInputs(createQuiescenceState());
+      expect(inputs).toMatchObject({ desiredDetailChunks: 1, residentDetailChunks: 1 });
+    });
+
+    it("reports each tier's resident bytes against the budget eviction holds it under", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([
+        makeRequest({ level: 2, x: 0, lane: "detail", tier: "detail", chunkKey: "2/0/0/0/0/0" }),
+        makeRequest({ level: 2, x: 1, lane: "detail", tier: "detail", chunkKey: "2/0/0/0/0/1" }),
+      ]));
+      await flush();
+
+      const inputs = cache.quiescenceInputs(createQuiescenceState());
+      const budgets = cache.telemetry().tierBudgets;
+      expect(inputs.detailBytes).toBe(128);
+      expect(inputs.detailBudgetBytes).toBe(budgets.detailBytes);
+      expect(inputs.coarseBytes).toBe(0);
+      expect(inputs.coarseBudgetBytes).toBe(budgets.coarseBytes);
     });
 
     it("interleaves detail and coarse fetch starts when both tiers have demand", () => {
@@ -3393,32 +3461,6 @@ describe("CpuCache", () => {
       expect(queues.coarse.inFlight).toBe(1);
       expect(queues.detail.pending).toBe(1);
       expect(queues.coarse.pending).toBe(1);
-    });
-
-    it("logs sparse detail after sustained low coverage", () => {
-      vi.mocked(debugLog).mockClear();
-      const { cache } = createTestCache({ maxConcurrentFetches: 0 });
-      cache.submit(makePlan([
-        makeRequest({ x: 0, chunkKey: "0/0/0/0/0/0" }),
-        makeRequest({ x: 1, chunkKey: "0/0/0/0/0/1" }),
-        makeRequest({ x: 2, chunkKey: "0/0/0/0/0/2" }),
-        makeRequest({ x: 3, chunkKey: "0/0/0/0/0/3" }),
-      ]));
-
-      expect(cache.telemetry().tierDemand.sparseDetail).toBe(true);
-      cache.telemetry();
-      cache.telemetry();
-
-      expect(debugLog).toHaveBeenCalledWith(
-        "cache",
-        "cache.sparse_detail",
-        expect.objectContaining({
-          desiredDetailChunks: 4,
-          residentDetailChunks: 0,
-          pendingChunks: 4,
-          notice: expect.stringContaining("lower the detail LOD explicitly"),
-        }),
-      );
     });
 
     it("backpressure log fires at most once per second under sustained queue depth", () => {
@@ -3590,7 +3632,6 @@ describe("CpuCache", () => {
             coarseBytes: expect.any(Number),
           },
           detailCoverageRatio: expect.any(Number),
-          sparseDetail: expect.any(Boolean),
         },
         tierQueues: {
           detail: {

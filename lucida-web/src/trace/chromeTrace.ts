@@ -1,46 +1,15 @@
 /**
- * The borrowed path: a {@link TraceDocument} projected into Chrome Trace Event
- * JSON, so anyone can open a run in Perfetto and lucida never has to build a
- * span wall (#934).
+ * A {@link TraceDocument} projected into Chrome Trace Event JSON, so a run
+ * opens in Perfetto. The in-memory model stays a table (ADR 0047), and rows
+ * fan out into spans here, at serialisation, and nowhere else.
  *
- * **This is the only module that knows about spans.** ADR 0047 keeps the
- * in-memory model a table — thirteen columnar bytes a row against about 189
- * for a span object — and a lifecycle row fans out into its phases here, at
- * serialisation, and nowhere else. A future format change is therefore local
- * to this file.
- *
- * The emit shape is not the obvious one, and the difference was measured
- * against ui.perfetto.dev in #892 rather than assumed:
- *
- *   Async events (`ph: "b"/"e"`, one id per chunk) are the natural encoding
- *   for work that is not a call stack, and Perfetto *ingests* them correctly.
- *   But it renders them as one collapsed "Global Legacy Events" group per
- *   process, hundreds of rows deep with every phase interleaved. The phase is
- *   a slice name, so there is no track to read.
- *
- *   One thread id per phase plus `thread_name` metadata, with complete events
- *   (`ph: "X"`), renders as one named track per phase with the counter tracks
- *   below it — the whole raw-span surface, for free. It is also smaller: 2.7 MB
- *   against 3.9 MB, because a complete event is one object rather than two.
- *
- * "Thread" here is a *display track*, not a real thread — and not a request
- * lane either, which is what `lane` means everywhere else in lucida. That is a
- * lie the format requires and it is worth paying: the alternative is a viewer
- * nobody can read.
- *
- * What borrowing cannot do, and what the native surfaces are therefore for:
- * append (so this is never the live view), load quickly (about 25 s for
- * 2.7 MB), or emit a callout, ever.
- *
- * One known consequence of the track-per-phase shape, seen on every real
- * export: chunks are fetched concurrently, so their spans on one track overlap
- * and cannot nest. Perfetto reports these as
- * `slice_spill_overlapping_complete_event` import notices and moves them to
- * overflow tracks merged back in at display time. Nothing is lost — the track
- * renders as one track with the overlaps stacked — and the alternative
- * encodings that avoid it are the ones this shape was chosen over.
+ * Each phase gets its own thread id with complete events (`ph: "X"`). Async
+ * events are the natural encoding, but Perfetto renders them as one collapsed
+ * group with every phase interleaved. "Thread" is therefore a display track,
+ * not a real thread and not a request lane.
  */
 
+import type { LevelRange } from "../renderer/workerProtocol.ts";
 import { outageWindow } from "./coverage.ts";
 import {
   PHASES,
@@ -92,9 +61,23 @@ const SERVE_TID = 10;
 const COUNTER_SERIES = [
   { name: "queue depth", reading: "queueDepth" },
   { name: "in flight", reading: "inFlight" },
-  { name: "frame time (ms)", reading: "frameTimeUs", scale: 1 / 1000 },
+  { name: "main-thread frame time (ms)", reading: "frameTimeUs", scale: 1 / 1000 },
   { name: "resident bytes", reading: "residentBytes" },
 ] as const;
+
+/**
+ * Kept out of `COUNTER_SERIES` because a counter track has no null. This
+ * series has a point only where the reading carries a GPU pass time, so a run
+ * without timestamp queries gets no track rather than one pinned at zero.
+ */
+const GPU_PASS_SERIES = "gpu pass time (ms)";
+
+/**
+ * A counter track has no null, and holding the previous value would draw a
+ * level that was not on screen. Level 0 is a real level, so the absent marker
+ * sits below it.
+ */
+const NO_LEVEL_COUNTER = -1;
 
 /**
  * How a reader should discount what they are looking at: measured values that
@@ -107,17 +90,17 @@ export const DERIVED_VALUE_NOTES: readonly string[] = [
   "Phase spans are fanned out at export from the lifecycle row's boundary stamps.",
   "A retired row's open phase is not drawn at all — a span there would invent a stall the run did not have.",
   "Counter series are sampled once per tick, and a tick only happens when the page has work; a flat stretch is an idle page, not a frozen counter. `readingsDropped` in the header says how many readings the ring wrapped over, so a long run's counters cover its tail.",
+  "`main-thread frame time (ms)` is the tick's own main-thread time and never GPU time. `gpu pass time (ms)` is the GPU's pass time for a frame, read back through timestamp queries, and has a point only on the readings that received one. A run on an adapter without timestamp queries has no such track at all rather than a track at zero.",
+  "The `target level` and `displayed level` counters, one pair per dataset, are sampled per planning pass rather than per tick. The target is the level that pass planned at. The displayed level is what the render worker had last reported when the pass ran, so a fill that lands with no re-plan shows up on the next pass, not as it arrives. A value of -1 is an absence: nothing in view for the target, nothing resident yet for the displayed level.",
   "Concurrent chunks put overlapping spans on one phase track. Perfetto reports these as `slice_spill_overlapping_complete_event` and stacks them within the track; nothing is dropped.",
 ];
 
 /**
- * Positions and durations in this file that were **constructed at export
- * rather than measured**. Two of them, and a timeline cannot show a span
- * without committing to a position, so the honest move is to name them rather
- * than to claim the file contains no invented numbers.
- *
- * Every other value in the file is a measurement; the assembly the export does
- * on top of measured values is in {@link DERIVED_VALUE_NOTES}.
+ * Positions and durations in this file that were constructed at export
+ * rather than measured. A timeline cannot show a span without committing to
+ * a position, so the file names them rather than claiming it has no invented
+ * numbers. The assembly done on measured values is in
+ * {@link DERIVED_VALUE_NOTES}.
  */
 export const SYNTHETIC_VALUE_NOTES: readonly string[] = [
   "A server span's DURATION is the server's own measurement, but its POSITION is not measured: it is centred inside the browser's bracket for the same request, which splits the unattributed remainder evenly between the outbound and inbound legs because nothing measures them apart. Read `gapUs`, not the position.",
@@ -259,8 +242,8 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
 
   for (const serverRow of run.serverRows) {
     // An unplaced row has no position on the browser's clock, and inventing
-    // one is exactly the confidently-wrong merged timeline ADR 0050 refused.
-    // Its reason is counted in the header instead.
+    // one would draw a confidently wrong merged timeline. Its reason is
+    // counted in the header instead.
     if (!serverRow.placement) continue;
     const { placement } = serverRow;
     events.push({
@@ -277,6 +260,7 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
         outcome: serverRow.outcome,
         phases: serverRow.phases,
         coalescedOnto: serverRow.coalescedOnto,
+        backendBytes: serverRow.backendBytes,
         requestId: serverRow.requestId,
         metadataPhase: serverRow.metadataPhase,
         dispatchOffsetUs: serverRow.dispatchOffsetUs,
@@ -296,7 +280,15 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
       pid: PID_BROWSER,
       tid: POINT_TID,
       s: "t",
-      args: { kind: event.kind, reason: event.reason, key: event.chunk?.chunkKey ?? null },
+      args: {
+        kind: event.kind,
+        reason: event.reason,
+        dataset: event.chunk?.datasetId ?? event.levelChange?.datasetId ?? null,
+        key: event.chunk?.chunkKey ?? null,
+        level: event.chunk?.level ?? null,
+        from: event.levelChange?.from ?? null,
+        to: event.levelChange?.to ?? null,
+      },
     });
   }
 
@@ -313,7 +305,47 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
         args: { value: sample[series.reading] * scale },
       });
     }
+    if (sample.gpuPassUs != null) {
+      events.push({
+        name: GPU_PASS_SERIES,
+        cat: "counters",
+        ph: "C",
+        ts: baseUs + sample.atUs,
+        pid: PID_BROWSER,
+        tid: COUNTER_TID,
+        args: { value: sample.gpuPassUs / 1000 },
+      });
+    }
   }
+
+  // Off the ticks rather than the readings: the target is per dataset and per
+  // planning pass, and the readings are process-wide. DERIVED_VALUE_NOTES
+  // tells the reader what that cadence implies.
+  for (const sample of run.ticks) {
+    events.push(
+      levelCounter(`target level (${sample.datasetId})`, sample.targetLevel, baseUs + sample.atUs),
+      levelCounter(
+        `displayed level (${sample.datasetId})`,
+        sample.displayedLevel,
+        baseUs + sample.atUs,
+      ),
+    );
+  }
+}
+
+function levelCounter(name: string, range: LevelRange | null, tsUs: number): ChromeTraceEvent {
+  return {
+    name,
+    cat: "counters,level",
+    ph: "C",
+    ts: tsUs,
+    pid: PID_BROWSER,
+    tid: COUNTER_TID,
+    args: {
+      finest: range?.min ?? NO_LEVEL_COUNTER,
+      coarsest: range?.max ?? NO_LEVEL_COUNTER,
+    },
+  };
 }
 
 /**

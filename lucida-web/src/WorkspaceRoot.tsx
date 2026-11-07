@@ -1,6 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import App from "./App.tsx";
-import { MonitorPage } from "./monitor/MonitorPage.tsx";
+import "./auth/auth.css";
+import { WatchStreamBanner } from "./monitor/WatchToggle.tsx";
+import { Banner } from "./shell/Banner.tsx";
+import { Button } from "./ui/Button.tsx";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
 import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
 import {
@@ -14,28 +17,6 @@ function currentPath(): string {
   return window.location.pathname || "/";
 }
 
-/**
- * The monitor's route (#936).
- *
- * A separate page rather than an overlay, and a client-side route rather than
- * a second document: the trace lives in this page's memory, so a full load
- * would open the monitor on an empty recorder.
- *
- * The viewer it was opened from stays **mounted and offstage** (#937). #936
- * unmounted it, which was right while the monitor only read closed runs and
- * wrong the moment it grew a live view: navigating here would have torn down
- * the session, the socket and the render loop, and the run somebody came to
- * watch would have sat at whatever counts it held when they left. Offstage is
- * `visibility: hidden` rather than `display: none` deliberately — the canvas
- * keeps its layout size, so the run being watched is the run that would have
- * happened anyway. What #936's decision asked for still holds: nothing the
- * monitor draws shares a frame with the viewer.
- *
- * Not gated on the build. Recording is unconditional already and a diagnostic
- * that only exists in development cannot explain a field report (ADR 0051).
- */
-export const MONITOR_PATH = "/monitor";
-
 function parseWorkspaceId(path: string): string | null {
   const match = path.match(/^\/w\/([^/]+)\/?$/);
   if (!match) return null;
@@ -46,25 +27,32 @@ function parseWorkspaceId(path: string): string | null {
   }
 }
 
+// The open link: `/open?url=<dataset URL>` creates a workspace around the
+// named dataset(s) and opens them.
+function isOpenLinkPath(path: string): boolean {
+  return /^\/open\/?$/.test(path);
+}
+
+function openLinkUrls(search: string): string[] {
+  return new URLSearchParams(search)
+    .getAll("url")
+    .map((u) => u.trim())
+    .filter((u) => u.length > 0);
+}
+
 export function WorkspaceRoot() {
   const [path, setPath] = useState(currentPath);
-  // Pending seed dataset URLs for a freshly created "workspace from dataset(s)"
-  // (#697), keyed by workspace id. The dashboard / file browser create the
-  // workspace, then call `onOpenWorkspace(id, urls)`; we stash the urls here and
-  // hand them to `<App>` so it auto-opens them once connected. Keyed (not a bare
-  // value) so a stale seed can never bleed into a *different* workspace if the
-  // user navigates around. Consumed once: a later bare re-open of the same
-  // workspace passes no seed and opens nothing extra.
+  // Dataset URLs for `<App>` to auto-open in a just-created workspace. Keyed by
+  // workspace id so a stale seed can't bleed into a different workspace, and
+  // single-use so a later re-open opens nothing extra.
   const [pendingSeed, setPendingSeed] = useState<{
     workspaceId: string;
     datasetUrls: readonly string[];
   } | null>(null);
 
   useEffect(() => {
-    // Browser back/forward always means "leaving the create→open we made the
-    // seed for" (a fresh create navigates via pushState, never popstate), so
-    // drop any pending seed here. This keeps the seed strictly single-use
-    // without a setState-in-effect on the render path.
+    // Back/forward always leaves the create-then-open the seed was made for
+    // (a create navigates via pushState, never popstate), so drop the seed.
     const onPopState = () => {
       setPendingSeed(null);
       setPath(currentPath());
@@ -73,48 +61,36 @@ export function WorkspaceRoot() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
-  // Where Back leaves the monitor for. Captured on the way in rather than
-  // walked back through history: the monitor is one hop off the viewer, and
-  // history.back() from a directly-typed URL leaves lucida entirely.
-  //
-  // State rather than a ref because the render reads it (#937): it also names
-  // the viewer to keep running offstage while the monitor is on screen.
-  const [monitorReturnPath, setMonitorReturnPath] = useState("/");
-
-  const navigate = useCallback((nextPath: string) => {
-    if (nextPath === MONITOR_PATH) setMonitorReturnPath(currentPath());
-    // Clear a stale seed when navigating ANYWHERE other than straight into the
-    // workspace it was created for. `openWorkspaceById` sets the seed and then
-    // calls navigate to that same `/w/<id>` (matched here, so the seed
-    // survives); every other navigation — back to the dashboard, opening a
-    // different workspace — drops it so a later plain re-open never re-triggers
-    // the auto-open.
+  const navigate = useCallback((nextPath: string, replace = false) => {
+    // Keep the seed only when navigating straight into the workspace it was
+    // created for; any other navigation drops it.
     setPendingSeed((seed) =>
       seed && nextPath === `/w/${encodeURIComponent(seed.workspaceId)}`
         ? seed
         : null,
     );
-    window.history.pushState({}, "", nextPath);
+    if (replace) {
+      window.history.replaceState({}, "", nextPath);
+    } else {
+      window.history.pushState({}, "", nextPath);
+    }
     setPath(nextPath);
   }, []);
 
   const openWorkspaceById = useCallback(
-    (id: string, datasetUrls?: readonly string[]) => {
+    (id: string, datasetUrls?: readonly string[], replace = false) => {
       if (datasetUrls && datasetUrls.length > 0) {
-        // Set the seed BEFORE navigating; navigate keeps it because the
+        // Set the seed before navigating; navigate keeps it because the
         // destination matches this workspace's route.
         setPendingSeed({ workspaceId: id, datasetUrls });
       }
-      navigate(`/w/${encodeURIComponent(id)}`);
+      navigate(`/w/${encodeURIComponent(id)}`, replace);
     },
     [navigate],
   );
 
-  // In-viewer "create workspace from selection" (#697): create a fresh
-  // workspace around the chosen datasets, then navigate in with the seed so the
-  // viewer auto-opens them. Failures bubble up to the caller's catch (the file
-  // browser closed before this runs); the new workspace creation is the only
-  // step here, and on success the open happens in the destination viewer.
+  // In-viewer "create workspace from selection". Failures go to the caller's
+  // catch; the dataset open happens in the destination viewer.
   const createWorkspaceFrom = useCallback(
     async (paths: string[]) => {
       const cleaned = paths.map((p) => p.trim()).filter((p) => p.length > 0);
@@ -125,54 +101,108 @@ export function WorkspaceRoot() {
     [openWorkspaceById],
   );
 
-  const monitorOpen = path === MONITOR_PATH;
-  // While the monitor is open the viewer is the one it was opened from: it
-  // stays mounted so the run the monitor is watching keeps running.
-  const viewerPath = monitorOpen ? monitorReturnPath : path;
-  const workspaceId = useMemo(() => parseWorkspaceId(viewerPath), [viewerPath]);
+  const workspaceId = useMemo(() => parseWorkspaceId(path), [path]);
 
-  // Only forward the seed when it belongs to the workspace currently being
-  // opened (guards against a stale seed from an earlier create).
+  // Only forward the seed when it belongs to the workspace being opened.
   const seedForThisWorkspace =
     pendingSeed && workspaceId && pendingSeed.workspaceId === workspaceId
       ? pendingSeed.datasetUrls
       : undefined;
 
-  // One slot for whatever is behind the monitor, always in the same place in
-  // the tree: moving the viewer between two positions would unmount and
-  // remount it, which is the teardown this arrangement exists to avoid.
   return (
     <>
-      <div className={monitorOpen ? "route-offstage" : "route-onstage"}>
-        {workspaceId ? (
-          <WorkspaceViewerRoute
-            key={workspaceId}
-            workspaceId={workspaceId}
-            initialDatasetUrls={seedForThisWorkspace}
-            onBackToDashboard={() => navigate("/")}
-            onOpenMonitor={() => navigate(MONITOR_PATH)}
-            onCreateWorkspaceFromDatasets={createWorkspaceFrom}
-          />
-        ) : (
-          !monitorOpen && <WorkspaceDashboard onOpenWorkspace={openWorkspaceById} />
-        )}
-      </div>
-      {/* Back goes wherever the monitor was opened from, and to the dashboard
-          for someone who typed the URL: the monitor is reachable without a
-          workspace, because a run outlives the viewer that produced it. */}
-      {monitorOpen && <MonitorPage onClose={() => navigate(monitorReturnPath)} />}
+      {isOpenLinkPath(path) ? (
+        <OpenLinkRoute
+          datasetUrls={openLinkUrls(window.location.search)}
+          onWorkspaceCreated={(id, urls) => openWorkspaceById(id, urls, true)}
+          onBackToDashboard={() => navigate("/", true)}
+        />
+      ) : workspaceId ? (
+        <WorkspaceViewerRoute
+          key={workspaceId}
+          workspaceId={workspaceId}
+          initialDatasetUrls={seedForThisWorkspace}
+          onBackToDashboard={() => navigate("/")}
+          onCreateWorkspaceFromDatasets={createWorkspaceFrom}
+        />
+      ) : (
+        <WorkspaceDashboard onOpenWorkspace={openWorkspaceById} />
+      )}
+      {/* Above the routes, because the stream is per session and outlives the
+          dock the toggle lives in. */}
+      <WatchStreamBanner />
     </>
+  );
+}
+
+interface OpenLinkRouteProps {
+  datasetUrls: readonly string[];
+  onWorkspaceCreated: (id: string, datasetUrls: readonly string[]) => void;
+  onBackToDashboard: () => void;
+}
+
+// Every exit replaces the history entry, so Back can't rerun the link.
+function OpenLinkRoute({
+  datasetUrls,
+  onWorkspaceCreated,
+  onBackToDashboard,
+}: OpenLinkRouteProps) {
+  const [error, setError] = useState<string | null>(null);
+  // StrictMode runs this effect twice; the second run reuses the first create.
+  const createRef = useRef<Promise<WorkspaceRecord> | null>(null);
+  useEffect(() => {
+    if (datasetUrls.length === 0) {
+      onBackToDashboard();
+      return;
+    }
+    let cancelled = false;
+    createRef.current ??= createWorkspaceFromDatasets(datasetUrls);
+    createRef.current.then(
+      (workspace) => {
+        if (!cancelled) onWorkspaceCreated(workspace.id, datasetUrls);
+      },
+      (e: unknown) => {
+        if (cancelled) return;
+        console.warn("[WorkspaceRoot] open link: create workspace failed", e);
+        setError(e instanceof Error ? e.message : String(e));
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (error) {
+    return (
+      <div className="lc-auth-screen">
+        <div className="lc-auth-card">
+          <h1 className="lc-auth-title">Couldn&rsquo;t open the link</h1>
+          <p className="lc-auth-body" data-testid="open-link-error">
+            Couldn&rsquo;t create the workspace: {error}
+          </p>
+          <Button variant="primary" onPress={onBackToDashboard}>
+            All workspaces
+          </Button>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="lc-auth-screen">
+      <p className="lc-auth-status" role="status">
+        Opening…
+      </p>
+    </div>
   );
 }
 
 interface WorkspaceViewerRouteProps {
   workspaceId: string;
-  /** Seed dataset URLs to auto-open (#697), forwarded to <App>. */
+  /** Seed dataset URLs to auto-open, forwarded to <App>. */
   initialDatasetUrls?: readonly string[];
   onBackToDashboard: () => void;
-  /** Leave for the pipeline monitor (#936). */
-  onOpenMonitor: () => void;
-  /** Create a new workspace from datasets chosen in the viewer (#697). */
+  /** Create a new workspace from datasets chosen in the viewer. */
   onCreateWorkspaceFromDatasets: (paths: string[]) => Promise<void>;
 }
 
@@ -180,18 +210,13 @@ function WorkspaceViewerRoute({
   workspaceId,
   initialDatasetUrls,
   onBackToDashboard,
-  onOpenMonitor,
   onCreateWorkspaceFromDatasets,
 }: WorkspaceViewerRouteProps) {
   const [workspace, setWorkspace] = useState<WorkspaceRecord | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Error from the in-viewer "create workspace from selection" create-step
-  // (#697). Surfaced to the user (not just logged) so a failed create isn't
-  // silent — mirrors how the dashboard's create-from-dataset path shows its
-  // failure. Kept SEPARATE from `error` above: that one replaces the whole
-  // route with the access-denied page, but a create-from-selection failure must
-  // LEAVE the current workspace in place (the create is a side action), so this
-  // renders as a dismissible inline notice alongside the mounted <App>.
+  // Separate from `error`, which replaces the route with the access-denied
+  // page. A failed create-from-selection must leave the current workspace in
+  // place, so it renders as a dismissible notice beside <App>.
   const [createError, setCreateError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -201,14 +226,9 @@ function WorkspaceViewerRoute({
         if (!cancelled) setWorkspace(record);
       })
       .catch((e) => {
-        // NEVER-LEAK: this code runs in the *recipient's* browser, so the
-        // console is theirs, not an operator log. Logging the raw error (e.g.
-        // "403 Forbidden" vs "404 Not Found") would let a deep-link recipient
-        // distinguish a denied workspace from a missing one straight from
-        // devtools, defeating the unified message below. We therefore log a
-        // single non-distinguishing line (no status, no cause). The server now
-        // returns a uniform 404 for any non-member open, but we keep the client
-        // generic regardless so the never-leak invariant doesn't depend on it.
+        // Never leak: this console belongs to the deep-link recipient, and the
+        // raw error would tell a denied workspace from a missing one. Log one
+        // generic line even though the server already returns a uniform 404.
         console.warn("[WorkspaceRoot] could not open workspace");
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       });
@@ -228,44 +248,42 @@ function WorkspaceViewerRoute({
   }, [workspaceId]);
 
   if (error) {
-    // NEVER-LEAK (annotation-views slice 3): a denied workspace (403) and a
-    // missing one (404) — and a denied/missing annotation deep-link, which lands
-    // here too because annotation access == workspace access — must render the
-    // SAME friendly message, so the page never confirms whether a given
-    // workspace/annotation exists. The raw `error` (e.g. "403 Forbidden" vs
-    // "404 Not Found") would leak that distinction, so we deliberately don't
-    // show it. No "request access" backend flow — just a clear dead-end with a
-    // way back. (Genuine non-access errors degrade to the same message; we
-    // deliberately do not log the distinguishing detail — see the catch above.)
+    // Never leak: denied and missing workspaces (and annotation deep-links,
+    // whose access is workspace access) render the same message, so the page
+    // never confirms that one exists. The raw `error` is not shown.
     return (
-      <div className="workspace-route-message">
-        <button onClick={onBackToDashboard}>Workspaces</button>
-        <p data-testid="workspace-access-message">
-          You don&rsquo;t have access to this workspace, or it doesn&rsquo;t
-          exist — ask the person who shared it for an invite.
-        </p>
+      <div className="lc-auth-screen">
+        <div className="lc-auth-card">
+          <h1 className="lc-auth-title">Workspace unavailable</h1>
+          <p className="lc-auth-body" data-testid="workspace-access-message">
+            You don&rsquo;t have access to this workspace, or it doesn&rsquo;t
+            exist — ask the person who shared it for an invite.
+          </p>
+          <Button variant="primary" onPress={onBackToDashboard}>
+            All workspaces
+          </Button>
+        </div>
       </div>
     );
   }
 
   if (!workspace) {
-    return <div className="workspace-route-message">Loading workspace...</div>;
+    return (
+      <div className="lc-auth-screen">
+        <p className="lc-auth-status" role="status">
+          Loading workspace…
+        </p>
+      </div>
+    );
   }
 
   return (
     <>
       {createError && (
-        <div className="workspace-create-error" role="alert">
-          <span data-testid="workspace-create-error">
+        <div className="workspace-create-error">
+          <Banner tone="danger" role="alert" onDismiss={() => setCreateError(null)} data-testid="workspace-create-error">
             Couldn&rsquo;t create the workspace: {createError}
-          </span>
-          <button
-            type="button"
-            aria-label="Dismiss"
-            onClick={() => setCreateError(null)}
-          >
-            Dismiss
-          </button>
+          </Banner>
         </div>
       )}
       <App
@@ -276,17 +294,13 @@ function WorkspaceViewerRoute({
         canRenameWorkspace={workspace.role === "owner"}
         initialDatasetUrls={initialDatasetUrls}
         onBackToDashboard={onBackToDashboard}
-        onOpenMonitor={onOpenMonitor}
         onRenameWorkspace={handleRename}
         onSetDefaultSavedView={handleSetDefaultSavedView}
         onCreateWorkspaceFromDatasets={(paths) => {
           // Clear a stale notice when re-attempting.
           setCreateError(null);
           void onCreateWorkspaceFromDatasets(paths).catch((e) => {
-            // The new-workspace creation step failed (the only thing that can
-            // fail here — the dataset open happens in the destination viewer).
-            // Surface it to the user without unwinding the current workspace,
-            // consistent with the dashboard's create-from-dataset failure path.
+            // Only the create step can fail here; keep the current workspace.
             console.warn("[WorkspaceRoot] create workspace from datasets failed", e);
             setCreateError(e instanceof Error ? e.message : String(e));
           });

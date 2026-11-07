@@ -20,6 +20,7 @@ function browserRow(overrides: Partial<TraceRow> & { rid: number }): TraceRow {
     y: 0,
     x: 0,
     chunkKey: "0/0/0/0/0/0",
+    bytes: 0,
     outcome: "complete",
     phases: overrides.phases ?? { wire: { startUs: 1_000, endUs: 11_000, durationUs: 10_000 } },
   };
@@ -32,6 +33,7 @@ function serverRow(overrides: Partial<StoredServerRow> & { rid: number }): Store
     family: overrides.family ?? "chunk",
     outcome: overrides.outcome ?? "delivered",
     coalescedOnto: overrides.coalescedOnto ?? null,
+    backendBytes: overrides.backendBytes ?? null,
     // 6,000 µs of server time, spread over the phases a source chunk
     // passes through.
     phases: overrides.phases ?? {

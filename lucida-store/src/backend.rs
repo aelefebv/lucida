@@ -1,16 +1,11 @@
 //! Storage backend abstraction for reading from Zarr Stores.
 //!
-//! URL scheme routing (after [`lucida_content::url::normalize_dataset_url`]
-//! is applied at entry — see
-//! `wiki/decisions/0042-canonical-dataset-url-form.md`):
+//! Routing by URL scheme, after [`lucida_content::url::normalize_dataset_url`]
+//! (ADR 0042):
 //! - Unix `/path/...`, drive-letter `c:/path/...`, UNC `//server/share/...`
-//!   → local filesystem (classified via [`lucida_content::url::is_local_dataset_url`]).
-//! - `gs://bucket/...` → Google Cloud Storage. Credential discovery order:
-//!   `GOOGLE_*` env vars (incl. `GOOGLE_SERVICE_ACCOUNT*` and Google's standard
-//!   `GOOGLE_APPLICATION_CREDENTIALS`) read by `GoogleCloudStorageBuilder::from_env`,
-//!   then the well-known ADC file at
-//!   `$HOME/.config/gcloud/application_default_credentials.json`, then the GCE
-//!   metadata server (Workload Identity / GCE instance default).
+//!   → local filesystem.
+//! - `gs://bucket/...` → Google Cloud Storage, with credentials from the
+//!   `GOOGLE_*` env vars, then the ADC file, then the GCE metadata server.
 //! - `s3://bucket/...` → Amazon S3 (environment/instance credentials)
 //! - `http://...` / `https://...` → HTTP static file server
 
@@ -28,7 +23,7 @@ use object_store::{BackoffConfig, ClientOptions, ObjectStore, RetryConfig};
 
 /// The client's fetch timeout for a single remote read.
 ///
-/// This mirrors lucida-web `contentSource.ts` `DEFAULT_TIMEOUT_MS` and MUST be
+/// This mirrors lucida-web `contentSource.ts` `DEFAULT_TIMEOUT_MS` and must be
 /// kept in sync with it. The store's worst-case per-read budget
 /// ([`max_source_read_budget`]) must stay under this value so the *client*, not
 /// the server, wins the timeout race. If the server were allowed to hang past
@@ -39,16 +34,10 @@ pub const CLIENT_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Retry policy for remote source-path reads (GCS, S3, HTTP).
 ///
-/// object_store's default policy retries up to 10 times over 3 minutes. A
-/// single struggling object can therefore keep a request alive for minutes —
-/// far past the client's fetch timeout, which surfaces to the user as a hang
-/// rather than a prompt, retryable failure. This policy instead fails fast:
-/// a small number of retries bounded by a total budget comfortably under the
-/// client's timeout, so a bad object gives up quickly and the client can move
-/// on or retry itself.
-///
-/// The exponential backoff (100 ms → 1 s, base 2) leaves room for two retries
-/// within the `retry_timeout` budget while still absorbing transient blips.
+/// object_store's default retries for minutes, far past the client's fetch
+/// timeout, which the user sees as a hang. This fails fast instead: a few
+/// retries with backoff (100 ms → 1 s, base 2) inside a total budget
+/// comfortably under the client's timeout.
 pub fn source_retry_config() -> RetryConfig {
     RetryConfig {
         backoff: BackoffConfig {
@@ -78,7 +67,7 @@ fn source_client_options() -> ClientOptions {
     ClientOptions::new().with_timeout(SOURCE_REQUEST_TIMEOUT)
 }
 
-/// Worst-case wall-clock for ONE failing remote source read.
+/// Worst-case wall-clock for one failing remote source read.
 ///
 /// The retry loop is bounded by [`source_retry_config`]'s `retry_timeout`, but
 /// that budget only gates the time *between* attempts: a fresh attempt can be
@@ -115,6 +104,19 @@ impl fmt::Display for StoreError {
 }
 
 impl std::error::Error for StoreError {}
+
+impl StoreError {
+    /// This error with `context` in front of its metadata message, so a
+    /// failure names where it was found: the level, or the codec whose
+    /// configuration held it. An error that is not about metadata passes
+    /// through unchanged.
+    pub fn in_context(self, context: impl fmt::Display) -> Self {
+        match self {
+            StoreError::Metadata(message) => StoreError::Metadata(format!("{context}: {message}")),
+            other => other,
+        }
+    }
+}
 
 impl From<object_store::Error> for StoreError {
     fn from(e: object_store::Error) -> Self {
@@ -168,35 +170,18 @@ fn parse_s3_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
 
 /// Open a storage backend from a URL.
 ///
-/// The input URL is first normalized via
-/// [`lucida_content::url::normalize_dataset_url`] (idempotent, pure
-/// string-level). All subsequent dispatch — and the value embedded in
-/// any [`StoreError::UnsupportedScheme`] — uses the canonical form. See
-/// `wiki/decisions/0042-canonical-dataset-url-form.md` for the rationale.
+/// The URL is normalized first, and all dispatch, including the value in
+/// any [`StoreError::UnsupportedScheme`], uses the canonical form.
+/// Normalization lowercases a leading scheme, so `HTTP://…` dispatches like
+/// `http://…` while bucket and object paths keep their case.
 ///
-/// Dispatch on the canonical form. Normalization lowercases a leading URI
-/// scheme (schemes are case-insensitive per RFC 3986), so `HTTP://…` and
-/// `S3://…` spellings dispatch like their lowercase forms while bucket and
-/// object paths keep their case.
-///
-/// - Unix `/path/...`, drive-letter `c:/path/...`, UNC `//server/share/...`
-///   classified by [`lucida_content::url::is_local_dataset_url`] → local
-///   filesystem.
-/// - `gs://bucket/path` URLs use Google Cloud Storage. Credentials are
-///   discovered, in order: `GOOGLE_*` env vars (incl. `GOOGLE_SERVICE_ACCOUNT*`
-///   and Google's standard `GOOGLE_APPLICATION_CREDENTIALS`) via
-///   `GoogleCloudStorageBuilder::from_env`, then the well-known ADC file at
-///   `$HOME/.config/gcloud/application_default_credentials.json`, then the GCE
-///   metadata server (Workload Identity / GCE instance default).
-/// - `s3://bucket/path` URLs use Amazon S3 with environment/instance credentials.
-/// - `http://` and `https://` URLs use an HTTP static file server. Plain
-///   `http://` is explicitly enabled on the client (the default is
-///   https-only, which would reject every plain-http request).
-/// - Anything else → [`StoreError::UnsupportedScheme`].
+/// Schemes route as the module docs list. Plain `http://` is explicitly
+/// enabled on the client, whose default is https-only. Anything else is
+/// [`StoreError::UnsupportedScheme`].
 pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
     // Normalize once at entry: drive-letter case, slash direction, UNC
-    // backslashes, `file://` prefix — see ADR-0042. Idempotent, so it's
-    // safe even if the caller already normalized.
+    // backslashes, `file://` prefix. Idempotent, so it's safe even if the
+    // caller already normalized.
     let canonical = normalize_dataset_url(url);
 
     if is_local_dataset_url(&canonical) {
@@ -265,19 +250,11 @@ mod tests {
         assert!(matches!(err, StoreError::UnsupportedScheme(_)));
     }
 
-    // --- Cross-platform local-path construction (ADR-0042) ---
-    //
-    // These tests assert that each canonical-equivalent spelling of a
-    // local path *dispatches* to the local-filesystem branch (i.e. NOT
-    // `StoreError::UnsupportedScheme`). Whether the path actually exists
-    // is out of scope — `LocalFileSystem::new_with_prefix` calls
-    // `std::fs::canonicalize` which surfaces non-existing paths as
-    // `ObjectStore(UnableToCanonicalize)`. That's a real local-storage
-    // error, not a classification miss, and it's the cross-platform
-    // observable proxy for "this URL was treated as local."
-    //
-    // To exercise the canonicalize-succeeds path with an existing path,
-    // see [`open_local_path`] above (it uses `std::env::temp_dir()`).
+    // Each canonical-equivalent spelling of a local path must dispatch to
+    // the local-filesystem branch, not `StoreError::UnsupportedScheme`. A
+    // missing path surfaces as `ObjectStore(UnableToCanonicalize)`, a real
+    // local-storage error and so proof the URL was treated as local. See
+    // [`open_local_path`] for the existing-path case.
 
     /// Helper: assert that `open(url)` did NOT bail with `UnsupportedScheme`.
     /// Any other outcome (success, NotFound, UnableToCanonicalize) means
@@ -310,8 +287,6 @@ mod tests {
     fn open_unc_path_dispatches_local() {
         assert_dispatched_local("\\\\server\\share\\foo", open("\\\\server\\share\\foo"));
     }
-
-    // --- S3 tests ---
 
     #[test]
     fn parse_s3_bucket_only() {
@@ -346,8 +321,6 @@ mod tests {
         assert!(store.is_ok());
     }
 
-    // --- HTTP tests ---
-    //
     // Construction-path only: whether plain-http requests actually go through
     // is a property of the built client (https-only vs. allow-http) that only
     // surfaces on a real request, so these tests pin down that every http(s)
@@ -406,8 +379,6 @@ mod tests {
         assert!(store.is_ok(), "{:?}", store.err());
     }
 
-    // --- GCS tests ---
-
     #[test]
     fn parse_gs_bucket_only() {
         let (bucket, prefix) = parse_gs_url("gs://my-bucket").unwrap();
@@ -442,8 +413,6 @@ mod tests {
         let store = open("gs://test-bucket/some/prefix");
         assert!(store.is_ok());
     }
-
-    // --- Retry policy ---
 
     #[test]
     fn source_retry_config_is_capped_below_client_timeout() {

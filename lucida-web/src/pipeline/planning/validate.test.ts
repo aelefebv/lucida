@@ -1,10 +1,6 @@
 /**
- * Tests for {@link validatePlanningInputs} and its nine internal check
- * helpers. Each helper gets at least one passing case and one violating
- * case; the composing function gets a fully-valid passing case and a
- * smoke test that violations propagate.
- *
- * Per ADR 0031, per-check coverage is colocated with the validator.
+ * Each check helper gets a passing and a violating case; the composing
+ * function gets a valid case and a propagation smoke test.
  */
 
 import { describe, it, expect } from "vitest";
@@ -28,10 +24,6 @@ import {
   checkVisibleRegionBounds,
   validatePlanningInputs,
 } from "./validate.ts";
-
-// ---------------------------------------------------------------------------
-// Local helpers
-// ---------------------------------------------------------------------------
 
 /** Build a 5D LevelGeometry with the given shape + chunk_shape. */
 function makeLevel(
@@ -69,10 +61,6 @@ function makeValidSnapshot(): PlanningSnapshot {
   return createSyntheticSnapshot({ entities: [group, tile] });
 }
 
-// ===========================================================================
-// Check 1 — checkTileParentRefs
-// ===========================================================================
-
 describe("checkTileParentRefs", () => {
   it("passes when every tile's parentId resolves to a Group in entities", () => {
     expect(() => checkTileParentRefs(makeValidSnapshot())).not.toThrow();
@@ -103,10 +91,6 @@ describe("checkTileParentRefs", () => {
   });
 });
 
-// ===========================================================================
-// Check 2 — checkUniqueEntityIds
-// ===========================================================================
-
 describe("checkUniqueEntityIds", () => {
   it("passes when every entityId is unique", () => {
     expect(() => checkUniqueEntityIds(makeValidSnapshot())).not.toThrow();
@@ -126,10 +110,6 @@ describe("checkUniqueEntityIds", () => {
     );
   });
 });
-
-// ===========================================================================
-// Check 3 — checkUniqueImageIds
-// ===========================================================================
 
 describe("checkUniqueImageIds", () => {
   it("passes when every non-empty imageId is unique", () => {
@@ -166,10 +146,6 @@ describe("checkUniqueImageIds", () => {
   });
 });
 
-// ===========================================================================
-// Check 4 — checkLevelShapeArity
-// ===========================================================================
-
 describe("checkLevelShapeArity", () => {
   it("passes when every level has 5D shape and chunk_shape", () => {
     expect(() => checkLevelShapeArity(makeValidSnapshot())).not.toThrow();
@@ -203,10 +179,6 @@ describe("checkLevelShapeArity", () => {
     expect(() => checkLevelShapeArity(snap)).not.toThrow();
   });
 });
-
-// ===========================================================================
-// Check 5 — checkVisibleRegionBounds
-// ===========================================================================
 
 describe("checkVisibleRegionBounds", () => {
   it("passes when xyBoundsVox is a valid bbox and zRangeVox is ordered", () => {
@@ -244,68 +216,38 @@ describe("checkVisibleRegionBounds", () => {
   });
 });
 
-// ===========================================================================
-// Check 6 — withdrawn (assetCatalog refs)
-// ===========================================================================
-//
-// The original "every assetCatalog key must be a known entityId" check
-// was withdrawn. The catalog is flattened across all datasets the
-// catalog has ever seen; the snapshot is for one dataset's current
-// tick. They legitimately diverge. See validate.ts for the full
-// rationale.
-
-// ===========================================================================
-// Check 7 — withdrawn (minimapPending keys)
-// ===========================================================================
-//
-// The original "every minimapPending key must be a known imageId" check
-// was withdrawn during the post-ship audit. minimapPath populates
-// pendingFetch by iterating ALL dataset_images() (every image whose
-// minimap chunks haven't been fully uploaded), keyed by image_id.
-// snapshot.entities is view_query (only currently-visible entities).
-// The two routinely diverge — minimap pending coords for off-screen
-// images are legitimate. See validate.ts for the full rationale.
-
-// ===========================================================================
-// Check 8 — checkPrevActiveSetUnique
-// ===========================================================================
-
 describe("checkPrevActiveSetUnique", () => {
   it("passes when previousActiveSet is empty", () => {
     expect(() => checkPrevActiveSetUnique(createSyntheticState())).not.toThrow();
   });
 
   it("passes when every entry has a unique entityId", () => {
-    const state: PlanningState = {
+    const state: PlanningState = createSyntheticState({
       previousActiveSet: [
         { kind: "group-as-proxy", entityId: "group-A" },
         { kind: "group-as-proxy", entityId: "group-B" },
       ],
-    };
+    });
     expect(() => checkPrevActiveSetUnique(state)).not.toThrow();
   });
 
   it("throws on duplicate entityId in previousActiveSet", () => {
-    const state: PlanningState = {
+    const state: PlanningState = createSyntheticState({
       previousActiveSet: [
         { kind: "group-as-proxy", entityId: "group-A" },
         { kind: "group-as-proxy", entityId: "group-A" }, // duplicate
       ],
-    };
+    });
     expect(() => checkPrevActiveSetUnique(state)).toThrow(
       /duplicate entityId group-A in state\.previousActiveSet/,
     );
   });
 });
 
-// ===========================================================================
-// Check 9 — checkPrevActiveSetKindAgreement
-// ===========================================================================
-
 describe("checkPrevActiveSetKindAgreement", () => {
   it("passes when entry kinds agree with entity kinds", () => {
     const snap = makeValidSnapshot();
-    const state: PlanningState = {
+    const state: PlanningState = createSyntheticState({
       previousActiveSet: [
         { kind: "group-as-proxy", entityId: "group-A" },
         {
@@ -313,49 +255,48 @@ describe("checkPrevActiveSetKindAgreement", () => {
           entityId: "tile-A1",
           imageId: "img-tile-A1",
           mode: "tiles-with-detail",
-          targetLod: 0,
-          coarsestDetailLod: 0,
-          detailOwnedLodRange: [0, 0],
+          detailLevels: [0],
+          coarseLevel: null,
           proxyAvailable: false,
           groupProxyAvailable: false,
         },
       ],
-    };
+    });
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
   });
 
   it("passes when an invisible entry covers any entity kind (permissive)", () => {
     const snap = makeValidSnapshot();
-    const state: PlanningState = {
+    const state: PlanningState = createSyntheticState({
       previousActiveSet: [
         // Group that's now invisible — invisible permits any entity kind.
         { kind: "invisible", entityId: "group-A", imageId: "img-group-A", coarsestLod: 0 },
         // Tile that's now invisible — same story.
         { kind: "invisible", entityId: "tile-A1", imageId: "img-tile-A1", coarsestLod: 0 },
       ],
-    };
+    });
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
   });
 
   it("passes (no violation) when an entry's entityId disappears from snapshot", () => {
     const snap = makeValidSnapshot();
-    const state: PlanningState = {
+    const state: PlanningState = createSyntheticState({
       previousActiveSet: [
         // entityId not present in snapshot — disappeared, NOT a violation.
         { kind: "group-as-proxy", entityId: "group-gone-last-tick" },
       ],
-    };
+    });
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
   });
 
   it("throws when a group-as-proxy entry references a non-Group entity", () => {
     const snap = makeValidSnapshot();
-    const state: PlanningState = {
+    const state: PlanningState = createSyntheticState({
       previousActiveSet: [
         // tile-A1 is a Tile but the entry says it was a group-as-proxy.
         { kind: "group-as-proxy", entityId: "tile-A1" },
       ],
-    };
+    });
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).toThrow(
       /disagrees with entity kind Tile \(expected Group\)/,
     );
@@ -363,21 +304,20 @@ describe("checkPrevActiveSetKindAgreement", () => {
 
   it("throws when a tile entry references a Group entity (only Tile/Image allowed)", () => {
     const snap = makeValidSnapshot();
-    const state: PlanningState = {
+    const state: PlanningState = createSyntheticState({
       previousActiveSet: [
         {
           kind: "tile",
           entityId: "group-A", // Group, not Tile/Image
           imageId: "img-group-A",
           mode: "tiles-with-detail",
-          targetLod: 0,
-          coarsestDetailLod: 0,
-          detailOwnedLodRange: [0, 0],
+          detailLevels: [0],
+          coarseLevel: null,
           proxyAvailable: false,
           groupProxyAvailable: false,
         },
       ],
-    };
+    });
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).toThrow(
       /disagrees with entity kind Group \(expected Tile or Image\)/,
     );
@@ -386,7 +326,7 @@ describe("checkPrevActiveSetKindAgreement", () => {
   it("passes when a tile entry references an Image entity (singleton case)", () => {
     // Image entities are treated as singleton "groups with one tile" by
     // groupMembers — the active-set entry is a TileEntry even though the
-    // entity is an ImageSnapshot. See modes.ts::groupMembers.
+    // entity is an ImageSnapshot. See activeSet.ts::groupMembers.
     const snap = createSyntheticSnapshot({
       datasetId: "ds-singleton",
       entities: [
@@ -397,28 +337,23 @@ describe("checkPrevActiveSetKindAgreement", () => {
         }),
       ],
     });
-    const state: PlanningState = {
+    const state: PlanningState = createSyntheticState({
       previousActiveSet: [
         {
           kind: "tile",
           entityId: "img-only",
           imageId: "img-only-image",
           mode: "tiles-with-detail",
-          targetLod: 0,
-          coarsestDetailLod: 0,
-          detailOwnedLodRange: [0, 0],
+          detailLevels: [0],
+          coarseLevel: null,
           proxyAvailable: false,
           groupProxyAvailable: false,
         },
       ],
-    };
+    });
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
   });
 });
-
-// ===========================================================================
-// Composing validatePlanningInputs
-// ===========================================================================
 
 describe("validatePlanningInputs (composing)", () => {
   it("passes when the snapshot and state are fully valid", () => {
@@ -444,12 +379,12 @@ describe("validatePlanningInputs (composing)", () => {
   });
 
   it("propagates a state-side violation (smoke)", () => {
-    const state: PlanningState = {
+    const state: PlanningState = createSyntheticState({
       previousActiveSet: [
         { kind: "group-as-proxy", entityId: "group-X" },
         { kind: "group-as-proxy", entityId: "group-X" },
       ],
-    };
+    });
     expect(() => validatePlanningInputs(makeValidSnapshot(), state)).toThrow(
       /duplicate entityId group-X in state\.previousActiveSet/,
     );

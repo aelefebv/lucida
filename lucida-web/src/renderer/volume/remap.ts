@@ -1,9 +1,7 @@
 /**
- * Volume-mode indirection remap (thin wrapper).
- *
- * Delegates to the shared `remapSharedIndirection` kernel. Volume mode
- * passes `targetChunkZForMember: null` to (a) disable the Z filter and
- * (b) select volume index arithmetic (Z multiplier included).
+ * Volume-mode indirection remap over the shared `remapSharedIndirection`
+ * kernel. `targetChunkZFor: null` turns off the Z filter and selects 3D index
+ * arithmetic.
  */
 
 import { remapSharedIndirection, type RemapEntryInfo } from "../remap.ts";
@@ -11,10 +9,8 @@ import type { VisibleRegion } from "../../pipeline/viewport.ts";
 import type { AtlasState } from "./atlas.ts";
 
 /**
- * Remap the indirection buffer to show only chunks matching the current state.
- * Iterates composite slot keys, looks up each entity's lodMetas, and writes
- * chunks into the correct per-entity per-LOD section. Chunks for other T/C
- * or entities not in entityMetas remain in atlas.slots but are unmapped.
+ * Remap the indirection buffer to the chunks matching current T/C. Other
+ * chunks stay in `atlas.slots` but are unmapped.
  */
 export function remapIndirection(
   atlas: AtlasState,
@@ -36,7 +32,7 @@ export function remapIndirection(
     visibleRegion: options.visibleRegion,
     renderRadiusView: options.renderRadiusView,
     entryByMember: options.entryByMember,
-    targetChunkZForMember: null,
+    targetChunkZFor: null,
   });
   atlas.indirectionDirty = true;
 }

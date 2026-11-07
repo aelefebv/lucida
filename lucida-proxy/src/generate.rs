@@ -1,18 +1,10 @@
 //! Proxy generation algorithms.
 //!
-//! Two kinds:
-//!
-//! - [`ProxyKind::TileProxy3D`] — pick a coarse-but-not-too-coarse level
-//!   from the entity's image, read it through the source, and box-filter
-//!   down to `target_long_axis` along its longest axis (others scaled
-//!   proportionally, never upsampled).
-//!
-//! - [`ProxyKind::GroupProxy3D`] — find the group's child tiles, derive a
-//!   common bounding box from each tile's `voxel_to_image × tile_to_group`
-//!   transform, allocate an output volume sized so the longest axis hits
-//!   `target_long_axis`, and for each output voxel sample whichever tiles
-//!   contain that point. When multiple tiles cover a voxel we average
-//!   them; gaps stay zero.
+//! - [`ProxyKind::TileProxy3D`]: box-filter a coarse level of the entity's
+//!   image down to `target_long_axis` on its longest axis, never upsampling.
+//! - [`ProxyKind::GroupProxy3D`]: sample the group's child tiles into one
+//!   volume over their common bounding box, averaging where tiles overlap
+//!   and leaving gaps zero.
 
 use lucida_content::{
     DatasetManifest, Entity, EntityId, EntityKind, ImageSpec, LevelGeometry, VoxelTransform,

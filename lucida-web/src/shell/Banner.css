@@ -1,0 +1,60 @@
+.lc-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  box-sizing: border-box;
+  max-width: min(480px, 100%);
+  min-height: calc(var(--lc-control-h) + var(--lc-space-2));
+  padding: var(--lc-space-1) var(--lc-space-1) var(--lc-space-1) var(--lc-space-3);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius-lg);
+  background: var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-2);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+  line-height: 1.4;
+}
+
+.lc-banner-text {
+  flex: 1;
+  min-width: 0;
+  padding: var(--lc-space-1) var(--lc-space-2) var(--lc-space-1) 0;
+}
+
+/* With details below the message, the dismiss button stays by the first line. */
+.lc-banner:has(.lc-banner-details) {
+  align-items: flex-start;
+}
+
+.lc-banner-details {
+  max-height: 160px;
+  margin: var(--lc-space-1) 0 0;
+  padding-left: var(--lc-space-4);
+  overflow-y: auto;
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+  overflow-wrap: anywhere;
+}
+
+.lc-banner-code {
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+}
+
+.lc-banner[data-tone="info"] {
+  border-color: color-mix(in oklab, var(--lc-info) 45%, transparent);
+  box-shadow: inset 3px 0 0 var(--lc-info), var(--lc-shadow-2);
+}
+
+.lc-banner[data-tone="warning"] {
+  border-color: color-mix(in oklab, var(--lc-warning) 45%, transparent);
+  box-shadow: inset 3px 0 0 var(--lc-warning), var(--lc-shadow-2);
+}
+
+.lc-banner[data-tone="danger"] {
+  border-color: color-mix(in oklab, var(--lc-danger) 45%, transparent);
+  box-shadow: inset 3px 0 0 var(--lc-danger), var(--lc-shadow-2);
+}

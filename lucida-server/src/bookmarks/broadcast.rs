@@ -1,47 +1,12 @@
 //! Live `BookmarkChanged` broadcasts.
 //!
-//! After a successful `POST` / `PATCH` / `DELETE` on a bookmark, the
-//! handler hands off to [`broadcast_bookmark_change`] which:
-//!
-//!   1. Reads the current [`Session`]'s server bindings to learn which
-//!      dataset URLs are loaded.
-//!   2. If at least one of those URLs overlaps `dataset_urls`, dispatches
-//!      `ServerMessage::BookmarkChanged` to every connected client via
-//!      their per-client unicast channel.
-//!
-//! "Overlapping loaded datasets" maps cleanly onto the existing session
-//! state: each `ServerBinding` carries its source URL, and bookmarks
-//! list the URLs they reference. We compare URL-by-URL (string equality)
-//! rather than going through `DatasetId` / BLAKE3 — both ends of the
-//! comparison are the canonical source URL strings, and there's no
-//! benefit to round-tripping through the content-derived id here.
-//!
-//! ## Scope rule
-//!
-//! A single `Session` is shared across all clients of the server (see
-//! `AppState.session`); the per-session `server_bindings` are the
-//! authoritative "which datasets are open" set. A bookmark whose
-//! `dataset_urls` is empty (a "current view, no datasets" capture) is
-//! broadcast to every connected client — the slice-4 acceptance bullet
-//! "broadcast scope respects current session loaded datasets" doesn't
-//! apply when the bookmark itself isn't dataset-scoped.
-//!
-//! ## Best-effort
-//!
-//! Failures (closed unicast channel, JSON serialization error) are
-//! logged via `tracing::warn` and counted in the returned summary, but
-//! never propagated to the HTTP response. The PRD §"Broadcast is
-//! best-effort" calls this out explicitly: a sidebar that misses one
-//! update self-heals on the next refresh; a 500 on the POST surfaces
-//! a phantom failure to the user.
-//!
-//! ## Self-broadcast
-//!
-//! The originating client receives the broadcast too — slice-3
-//! optimistic state reconciles cleanly because the broadcast-driven
-//! refetch returns the same canonical state. Filtering self at the
-//! server would force the web client to wire alternate plumbing for
-//! the originator, doubling the surface area.
+//! After a successful bookmark write, [`broadcast_bookmark_change`] sends
+//! `ServerMessage::BookmarkChanged` to every connected client when a
+//! loaded dataset URL in the [`Session`] overlaps the bookmark's
+//! `dataset_urls`, compared as canonical URL strings. A bookmark with no
+//! datasets goes to everyone. Best-effort: a failure is logged and counted,
+//! never turned into an HTTP error, since a missed update heals on the next
+//! refresh. The originator gets the broadcast too, so its refetch reconciles.
 
 use std::sync::Arc;
 
@@ -217,6 +182,7 @@ mod tests {
                     generated_levels: vec![],
                     data_type: DataType::Uint16,
                     pinned_axes: vec![],
+                    downsampling_method: None,
                     channel_infos: vec![],
                 },
             }],

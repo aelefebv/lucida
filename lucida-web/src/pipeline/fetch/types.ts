@@ -1,18 +1,12 @@
 /**
- * Shared types for the fetch/decode subsystem.
- *
- * Lives separately from `cpuCache.ts` so the per-cache stores
- * (`chunkStore.ts`, `proxyStore.ts`), the eviction policies
- * (`eviction.ts`), and the telemetry counters (`telemetry.ts`) can
- * import the cache-shape types without back-pointing to the
- * coordinator. The barrel (`index.ts`) re-exports the public-surface
- * types from here as well.
- *
- * Pure type definitions: no runtime, no class. The `CpuCacheConfig`
- * defaults live in `cpuCache.ts` next to the constants they use.
+ * Shared types for the fetch/decode subsystem. Kept apart from `cpuCache.ts`
+ * so the stores, eviction policies, and telemetry can import cache shapes
+ * without importing the coordinator. `CpuCacheConfig` defaults live in
+ * `cpuCache.ts` next to the constants they use.
  */
 
 import type { SceneEpochs } from "../epochs.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
 import type { ProxyHeaderJs } from "./contentSource.ts";
 import type { InteractionMode } from "./interactionMode.ts";
 
@@ -28,17 +22,12 @@ export interface CpuCacheConfig {
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   /**
-   * Invoked when chunk deliveries keep failing with no delivered (fetched
-   * AND decoded) chunk in between — permanent fetch failures (e.g. access
-   * revoked after a successful open) and decode failures (e.g. a source
-   * answering with the wrong wire format) both count — so the owner can
-   * show a user-visible signal instead of a silently stalling canvas.
-   * Transient-kind fetch failures never count: they are the reconnect
-   * machinery's business (see also `CpuCache.resetChunkFailureStreak`).
-   * Aggregated and throttled by the cache: at most one call per notify
-   * interval, and only once the consecutive-failure streak reaches its
-   * threshold — healthy operation (including mixed success/failure) never
-   * triggers it.
+   * Invoked when chunk deliveries keep failing with no fetched and decoded
+   * chunk in between, so the owner can show a visible signal instead of a
+   * silently stalling canvas. Permanent fetch failures and decode failures
+   * count. Transient fetch failures never do: reconnect owns those. At most
+   * one call per notify interval, and only once the streak reaches its
+   * threshold, so mixed success and failure never triggers it.
    */
   onChunkFailureStreak?: (consecutiveFailures: number, lastError: string) => void;
   /**
@@ -61,13 +50,15 @@ export interface CpuCacheConfig {
 }
 
 /**
- * Logical lane each request travels on. `minimap` and `overview` share
- * the overview store (see ADR 0023); `detail` and `prefetch` live in
- * the main chunk store.
+ * Logical lane each request travels on. `minimap`, `coarse`, and
+ * `overview` share the overview store (ADR 0023). `detail` and
+ * `prefetch` live in the main chunk store. The planner does not emit
+ * `overview`; it stays for the trace's lane column and store routing.
  */
-export type ResidencyTier = "detail" | "coarse";
-
 export type Lane = "minimap" | "detail" | "coarse" | "prefetch" | "overview";
+
+/** Every lane, in the order a reader lists them: the view's own work first. */
+export const LANES = ["detail", "coarse", "minimap", "prefetch", "overview"] as const satisfies readonly Lane[];
 
 /**
  * Resident and in-flight chunk counts per pyramid level, indexed by level.
@@ -111,7 +102,7 @@ export interface ReadyChunkDelivery {
   dataType: string;
   epochs: SceneEpochs;
   lane: Lane;
-  residencyTier?: ResidencyTier;
+  residencyTier: ResidencyTier;
   /** Lower numbers are delivered first when present on CpuCache output. */
   priority?: number;
   /**
@@ -151,7 +142,7 @@ export interface CacheEntry {
   data: ArrayBuffer;
   sizeBytes: number;
   lane: Lane;
-  residencyTier?: ResidencyTier;
+  residencyTier: ResidencyTier;
   tier: EvictionTier;
   entityId: string;
   imageId: string;
@@ -206,7 +197,6 @@ export interface TierDemandTelemetry {
     coarseBytes: number;
   };
   detailCoverageRatio: number;
-  sparseDetail: boolean;
 }
 
 export interface TierQueueTelemetry {
@@ -228,7 +218,6 @@ export interface CacheTelemetry {
   mainBudget: number;
   overviewBytes: number;
   overviewBudget: number;
-  /** Proxy tier bytes / budget. */
   proxyBytes: number;
   proxyBudget: number;
   inFlightCount: number;
@@ -240,15 +229,9 @@ export interface CacheTelemetry {
   pendingProxyCount: number;
   /**
    * Age (ms) of the longest-waiting entry in the chunk scheduler's
-   * ADMISSION WINDOW — the bounded front of the pending queue the
-   * scheduler has committed to fetching soon (ADR 0044); 0 if empty.
-   *
-   * This is a drain-health signal, not a time-since-first-wanted one. On
-   * an oversubscribed collection the backlog behind the window can be
-   * tens of thousands deep, and the honest wait for a tile at the back of
-   * it is `pendingCount / fetch rate` — read those two together. Before
-   * the window existed this field pinned near the age of the whole
-   * session on such a collection and told you nothing.
+   * admission window; 0 if empty. A drain-health signal, not time since
+   * first wanted: the wait for a tile at the back of the backlog is
+   * `pendingCount / fetch rate`.
    */
   pendingOldestAgeMs: number;
   /** Cached, wanted, unsent deliverables currently visible to upload. */
@@ -287,4 +270,42 @@ export interface CacheTelemetry {
     detailBytes: number;
     coarseBytes: number;
   };
+}
+
+/** Resident bytes against budget for one CPU-side pool. */
+export interface PoolResidency {
+  bytes: number;
+  /**
+   * The budget in force: the elastic one for the main and overview pools,
+   * since a pool that stopped growing stopped at that and not at the
+   * configured split, and the configured one for the proxy pool.
+   */
+  budgetBytes: number;
+}
+
+/** The three CPU-side pools, as `CpuCache.poolResidency()` reports them. */
+export interface PoolResidencyReport {
+  main: PoolResidency;
+  overview: PoolResidency;
+  proxy: PoolResidency;
+}
+
+/**
+ * Outstanding work by lane: what is in flight and what is queued, counted
+ * per lane, plus the proxy asset scheduler, which has no lane. Filled in
+ * place by `CpuCache.laneOutstanding()`.
+ */
+export interface LaneOutstanding {
+  inFlight: Record<Lane, number>;
+  pending: Record<Lane, number>;
+  proxyInFlight: number;
+  proxyPending: number;
+  /** Every pending entry, classified or not, across both schedulers. */
+  pendingTotal: number;
+  /**
+   * True when the chunk queue was deeper than {@link pendingScanCap}, so the
+   * per-lane pending counts are zero and only the total is known.
+   */
+  pendingUnclassified: boolean;
+  pendingScanCap: number;
 }

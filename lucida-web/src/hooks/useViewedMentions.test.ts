@@ -1,10 +1,8 @@
 // @vitest-environment happy-dom
 //
-// Unit tests for the per-browser, per-dataset "viewed mentions" store (issue
-// #803). Drives the REAL hook against happy-dom's localStorage to lock the
-// contract <MentionsOfMe> + App depend on: viewed ids persist, are scoped by
-// dataset, marking is idempotent, and a broken/absent storage degrades to
-// "nothing viewed" rather than throwing.
+// Drives the real hook against happy-dom's localStorage: viewed ids persist,
+// are scoped by dataset, marking is idempotent, and broken or absent storage
+// degrades to "nothing viewed" rather than throwing.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";

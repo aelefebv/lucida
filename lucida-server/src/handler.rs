@@ -20,17 +20,18 @@ use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::ImportWarningKind;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
-use object_store::path::Path;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
+use crate::binding::{ChunkResolver, parse_level_from_chunk_key};
+use crate::chunk_read::{ChunkReadError, read_chunk};
 use crate::dataset_open::{self, DatasetOpenContext, DatasetOpenOutcome, WorkspaceScope};
-use crate::decode::decode_storage_bytes;
 use crate::generated::{
     DerivedCacheStorage, DerivedCacheTelemetry, DerivedChunkCache, DerivedChunkLookup,
     GeneratedCoarseService,
 };
+use crate::inbox::{self, InboxStore, Report as InboxReport};
 use crate::open_diagnostics::{
-    backend_kind_for_url, is_not_found, open_failure, open_progress, store_error_status,
+    backend_kind_for_url, open_failure, open_progress, store_error_status,
 };
 use crate::proxy::{PROXY_TARGET_LONG_AXIS, ProxyGenerator};
 use crate::session::Session;
@@ -115,17 +116,14 @@ async fn handle_client_inner(
     // peer dataset identities.
     let timings = Arc::new(TimingBuffer::new());
 
-    // Presentational identity for this peer's cursor (#540), authored from
-    // the connection's authenticated principal. The non-workspace `/ws`
-    // path has no principal, so anonymous peers join with `None` and render
-    // via the numeric-id fallback. Sourced server-side (never client-sent)
-    // so it can't be spoofed and is only shown to co-present peers.
+    // Presentational identity for this peer's cursor, authored server-side
+    // from the authenticated principal so it cannot be spoofed. The
+    // non-workspace `/ws` path has no principal, so those peers join with
+    // `None` and render by numeric id.
     //
-    // Privacy: the raw email is NOT broadcast — collaborator emails are
-    // owner-only. `from_principal_parts` computes a single-grapheme
-    // `initial` from the display name (or email local-part when blank)
-    // server-side, so only the non-identifying name/avatar/initial cross
-    // the wire to co-present (possibly non-owner) peers.
+    // The raw email is never broadcast, since collaborator emails are
+    // owner-only. Only the name, avatar, and a single-grapheme initial
+    // cross the wire.
     let identity = workspace.as_ref().map(|ctx| {
         PeerIdentity::from_principal_parts(
             ctx.principal.display_name.clone(),
@@ -230,24 +228,15 @@ async fn handle_client_inner(
                             }
                         }
                         Err(broadcast::error::RecvError::Lagged(n)) => {
-                            // This client's broadcast receiver overflowed and
-                            // dropped `n` messages — among them possibly
-                            // sequenced CommandBroadcasts, so its document has
-                            // silently diverged. Push a fresh snapshot to
-                            // repair it.
+                            // This receiver overflowed and dropped `n`
+                            // messages, possibly sequenced CommandBroadcasts,
+                            // so push a fresh snapshot to repair the document.
                             //
-                            // Ordering discipline (mirrors the join path's
-                            // subscribe-under-lock): `recv()` has ALREADY
-                            // repositioned this receiver past the loss, so
-                            // every message this client will never see was
-                            // stamped — and applied to the session — before
-                            // this point. Taking the session lock now yields a
-                            // snapshot whose `seq` is >= every lost message's
-                            // seq: no hole can open between the snapshot and
-                            // the resume position. Retained items forwarded
-                            // after the snapshot may carry seq <= the
-                            // snapshot's; the client's seq discipline drops
-                            // those instead of double-applying.
+                            // `recv()` has already moved past the loss, so
+                            // every lost message was applied before this
+                            // point and a snapshot taken under the session
+                            // lock has `seq` >= all of them. The client's seq
+                            // check drops retained items at or below it.
                             tracing::warn!(
                                 client_id = %id,
                                 skipped = n,
@@ -318,17 +307,11 @@ async fn handle_client_inner(
                                     );
                                     continue;
                                 }
-                                // Workspace command authorization lives in
-                                // WorkspaceManager, not here: a dataset rename
-                                // has its own authorize + validate +
-                                // exists-check + DB-sync path
-                                // (`rename_dataset`); every other document
-                                // command goes through
-                                // `apply_document_command` (editor gate +
-                                // apply + persist). This loop only translates
-                                // the manager's verdict to the wire —
-                                // broadcast the applied command so peers
-                                // apply it live, or drop it with a log line.
+                                // Authorization lives in WorkspaceManager:
+                                // `rename_dataset` for a dataset rename,
+                                // `apply_document_command` for everything
+                                // else. This loop only broadcasts the applied
+                                // command or drops it with a log line.
                                 if let DocumentCommand::RenameDataset { id: ds_id, name } = &command
                                 {
                                     match ctx
@@ -674,6 +657,77 @@ async fn handle_client_inner(
                                 json: serde_json::to_string(&update).unwrap(),
                             });
                         }
+                        ClientMessage::WatchSubscribe => {
+                            // The relay hands this connection the ring before
+                            // registering it, both under the session lock, so
+                            // the recent past arrives ahead of the live items
+                            // with no gap and no repeat (ADR 0051).
+                            let sender = unicast_routes.lock().await.get(&id).cloned();
+                            let Some(sender) = sender else { continue };
+                            let (replayed, subscribers) = {
+                                let mut sess = session.lock().await;
+                                let replayed = sess.watch.subscribe(id, sender);
+                                (replayed, sess.watch.subscribers())
+                            };
+                            tracing::info!(
+                                client_id = %id,
+                                replayed = replayed.len(),
+                                from_seq = replayed.first().copied().unwrap_or(0),
+                                subscribers,
+                                "watch.subscribed"
+                            );
+                        }
+                        ClientMessage::WatchPublish { item } => {
+                            // Nothing here reads the item: the server relays a
+                            // watch stream and computes nothing over it.
+                            let mut sess = session.lock().await;
+                            sess.watch.publish(id, item);
+                        }
+                        ClientMessage::SendReport { request_id, bundle } => {
+                            // Somebody pressed **Send report**. Nothing else
+                            // reaches this arm: no run closing, no schedule,
+                            // and no other message produces one.
+                            let Some(ctx) = workspace.as_ref() else {
+                                send_report_failed(
+                                    id,
+                                    request_id,
+                                    "this session is not in a workspace, so there is no inbox to send to"
+                                        .to_string(),
+                                    &unicast_routes,
+                                )
+                                .await;
+                                continue;
+                            };
+                            let Some(store) = ctx.manager.inbox() else {
+                                send_report_failed(
+                                    id,
+                                    request_id,
+                                    "this server keeps no inbox".to_string(),
+                                    &unicast_routes,
+                                )
+                                .await;
+                                continue;
+                            };
+                            // Off the inbound loop, as an open is: the
+                            // bundle is megabytes and the write is a real
+                            // one, and nothing else this client sends
+                            // should queue behind somebody's report.
+                            let workspace_id = ctx.live.workspace_id.clone();
+                            let principal = ctx.principal.clone();
+                            let unicast_routes_clone = Arc::clone(&unicast_routes);
+                            tokio::spawn(async move {
+                                store_report(
+                                    id,
+                                    request_id,
+                                    &bundle,
+                                    &workspace_id,
+                                    &principal,
+                                    store.as_ref(),
+                                    &unicast_routes_clone,
+                                )
+                                .await;
+                            });
+                        }
                     }
                     continue;
                 }
@@ -688,11 +742,6 @@ async fn handle_client_inner(
                             key,
                         } => {
                             // Look up the server binding for this dataset.
-                            // Parse the level prefix from the chunk key to
-                            // pick the right per-level compression + byte
-                            // layout. Malformed keys default to level 0 —
-                            // serve_chunk_from_store will fail-fast at
-                            // resolve time.
                             let level = parse_level_from_chunk_key(&key);
                             let mut probe = RequestProbe::arrived(
                                 rid,
@@ -704,7 +753,7 @@ async fn handle_client_inner(
                             // The lookup takes the shared session mutex, so
                             // every chunk request from every client in the
                             // workspace serialises here. It looks free and is
-                            // not, which is why it earns a slot (ADR 0050).
+                            // not, which is why it earns a slot.
                             let dispatch = {
                                 let sess = session.lock().await;
                                 sess.server_bindings.get(&dataset_id).map(|b| {
@@ -715,22 +764,16 @@ async fn handle_client_inner(
                                             generated_service: b.generated_service.clone(),
                                         }
                                     } else {
-                                        let level_info = b.resolver.level_info(&image_id, level);
                                         ChunkDispatch::Source {
-                                            resolved: b.resolver.resolve(&image_id, &key),
-                                            level_info,
-                                            cache: b.cache.clone(),
+                                            resolver: Arc::clone(&b.resolver),
+                                            cache: Arc::clone(&b.cache),
                                         }
                                     }
                                 })
                             };
                             probe.mark(ServerPhase::BindingLookup);
                             match dispatch {
-                                Some(ChunkDispatch::Source {
-                                    resolved,
-                                    level_info,
-                                    cache,
-                                }) => {
+                                Some(ChunkDispatch::Source { resolver, cache }) => {
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
                                     tokio::spawn(async move {
                                         serve_chunk_from_store(
@@ -738,8 +781,7 @@ async fn handle_client_inner(
                                             &dataset_id,
                                             &image_id,
                                             &key,
-                                            resolved.as_deref(),
-                                            level_info,
+                                            &resolver,
                                             &cache,
                                             &unicast_routes_clone,
                                             probe,
@@ -877,6 +919,10 @@ async fn handle_client_inner(
     // Remove client from session, get affected followers.
     let (affected_followers, peer_left_json) = {
         let mut sess = session.lock().await;
+        // A subscriber's connection is its subscription: a returning watcher
+        // subscribes again and reads the ring, and a publishing page's toggle
+        // is off after a reconnect.
+        sess.watch.unsubscribe(id);
         let affected = sess.remove_client(id);
         let peer_left = ServerMessage::PeerLeft { client_id: id };
         let json = serde_json::to_string(&peer_left).unwrap();
@@ -1196,9 +1242,7 @@ fn cache_used_percent(current_bytes: u64, max_bytes: Option<u64>) -> Option<u8> 
 /// The worse of two component statuses.
 ///
 /// Symmetric on purpose, so folding several components together cannot lose
-/// one: the earlier form only looked for `Degraded` in its right-hand
-/// argument, which meant a degraded source cache folded against a healthy
-/// generated-coarse reported the dataset healthy.
+/// a `Degraded` on either side.
 fn combine_health(a: DatasetHealthStatus, b: DatasetHealthStatus) -> DatasetHealthStatus {
     if a == DatasetHealthStatus::Unavailable || b == DatasetHealthStatus::Unavailable {
         DatasetHealthStatus::Unavailable
@@ -1362,8 +1406,7 @@ where
 
 enum ChunkDispatch {
     Source {
-        resolved: Option<String>,
-        level_info: Option<crate::binding::LevelInfo>,
+        resolver: Arc<ChunkResolver>,
         cache: Arc<CachedStore>,
     },
     Generated {
@@ -1373,43 +1416,10 @@ enum ChunkDispatch {
     },
 }
 
-/// Parse the level prefix from a canonical chunk key (`"{level}/t/c/z/y/x"`).
-/// Returns `0` if the key is malformed or missing a numeric prefix — the
-/// caller's resolve step will turn that into a clean per-key failure.
-fn parse_level_from_chunk_key(key: &str) -> u32 {
-    key.split('/')
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0)
-}
-
-/// Parse the wire `(t, c)` voxel coordinates from a canonical chunk key
-/// (`"{level}/t/c/z/y/x"`). Returns `(0, 0)` if the key is malformed —
-/// downstream slice math then yields the canonical prefix, which is the
-/// safe fallback for legacy paths.
-fn parse_t_c_from_chunk_key(key: &str) -> (u64, u64) {
-    let mut parts = key.split('/');
-    let _level = parts.next();
-    let t = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let c = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    (t, c)
-}
-
-/// Read a chunk from a CachedStore and send it to the requesting client.
-///
-/// `object_path` is the pre-resolved object store path from the ChunkResolver.
-/// If `None`, the image_id was unknown and the request is rejected.
-///
-/// `level_info` carries per-level compression, on-disk chunk_shape, and
-/// the canonical-byte slice layout. The wire `(t, c)` coords are parsed
-/// from `chunk_key` and reduced to intra-chunk indices via
-/// `wire_value % chunk_shape[axis]`; the resulting `(offset, size)` from
-/// [`ChunkByteLayout::slice_range`] picks the requested timepoint/channel
-/// out of the decompressed on-disk chunk.
-///
-/// A `None` `level_info` (unknown image or level — e.g. older snapshot)
-/// falls back to no-compression-no-slicing so legacy datasets keep
-/// working.
+/// Every exit files the probe's row. An absent chunk is delivered as fill
+/// like any other chunk, but an object store fault reaches the client as a
+/// status frame: from its side the alternative is a request timeout, which
+/// it has to treat as transient, so a dead source would never surface.
 // Internal helper threading per-request state from the dispatch site;
 // extracting a struct would just push the bundle one frame up.
 #[allow(clippy::too_many_arguments)]
@@ -1418,85 +1428,40 @@ async fn serve_chunk_from_store(
     dataset_id: &DatasetId,
     image_id: &ImageId,
     chunk_key: &str,
-    object_path: Option<&str>,
-    level_info: Option<crate::binding::LevelInfo>,
-    cache: &Arc<CachedStore>,
+    resolver: &ChunkResolver,
+    cache: &CachedStore,
     unicast_routes: &UnicastRoutes,
     mut probe: RequestProbe,
 ) {
-    let object_path = match object_path {
-        Some(p) => p,
-        None => {
+    // Charged to the requesting client, so one client's collection-sized
+    // backlog cannot delay another client's first chunk, and labelled
+    // with the request, so a wait behind the source-read cap is attributable
+    // to it rather than only to a client (ADR 0048).
+    let read = read_chunk(
+        resolver,
+        cache,
+        image_id,
+        chunk_key,
+        ReaderId(client_id),
+        RequestLabel(probe.rid()),
+        Some(&mut probe),
+    )
+    .await;
+    let bytes = match read {
+        Ok(read) => read.into_bytes(),
+        Err(ChunkReadError::UnknownImage(_)) => {
             eprintln!(
                 "server: unknown image_id {image_id} for dataset {dataset_id}, key {chunk_key}"
             );
             probe.finish(TimingRowOutcome::Failed);
             return;
         }
-    };
-
-    let level_info = level_info.unwrap_or(crate::binding::LevelInfo {
-        level_index: 0,
-        compression: crate::decode::StorageCompression::None,
-        chunk_shape: Vec::new(),
-        chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
-            canonical_byte_size: 0,
-            on_disk_byte_size: 0,
-            byte_stride_t: 0,
-            byte_stride_c: 0,
-            chunk_size_t: 1,
-            chunk_size_c: 1,
-        },
-    });
-
-    tracing::trace!(dataset = %dataset_id, image = %image_id, key = chunk_key, path = object_path, "serving chunk");
-    let obj_path = Path::from(object_path);
-    // Everything from the serve task starting to the read being issued.
-    probe.mark(ServerPhase::Dispatch);
-    // Charged to the requesting client, so one client's collection-sized
-    // backlog cannot delay another client's first chunk (#901).
-    // The label crosses into the store with the read, so a wait behind the
-    // source-read cap is attributable to a request rather than only to a
-    // client (ADR 0048).
-    let read = cache
-        .get_bytes(&obj_path, ReaderId(client_id), RequestLabel(probe.rid()))
-        .await;
-    // The store owns this stretch of the row: only it knows whether this
-    // request led the single flight or waited on someone else's read.
-    probe.record_read(read.timing);
-    let mut bytes: Vec<u8> = match read.result {
-        Ok(storage_bytes) => {
-            // Decode storage compression → raw bytes (WireFormat::Raw for phase 1).
-            // Shared with the proxy generator via [`crate::decode::decode_storage_bytes`].
-            match decode_storage_bytes(&storage_bytes, level_info.compression) {
-                Ok(raw) => {
-                    tracing::debug!(
-                        key = chunk_key,
-                        compressed = storage_bytes.len(),
-                        decompressed = raw.len(),
-                        compression = ?level_info.compression,
-                        "chunk decoded"
-                    );
-                    probe.mark(ServerPhase::Decompress);
-                    raw
-                }
-                Err(e) => {
-                    eprintln!("server: decode failed for {chunk_key}: {e}");
-                    probe.mark(ServerPhase::Decompress);
-                    probe.finish(TimingRowOutcome::Failed);
-                    return;
-                }
-            }
+        Err(ChunkReadError::Decode(e)) => {
+            eprintln!("server: decode failed for {chunk_key}: {e}");
+            probe.finish(TimingRowOutcome::Failed);
+            return;
         }
-        Err(e) if is_not_found(&e) => {
-            vec![0_u8; level_info.chunk_byte_layout.canonical_byte_size]
-        }
-        Err(e) => {
-            // A non-not-found store failure (revoked access, backend fault,
-            // unreachable service) must reach the requesting client as an
-            // explicit status frame: from its side the alternative is a
-            // request timeout, which it has to treat as transient, so a
-            // dead source would never surface.
+        Err(ChunkReadError::ObjectStore(e)) => {
             eprintln!("server: failed to read chunk {chunk_key} for {dataset_id}: {e}");
             send_source_chunk_status(
                 client_id,
@@ -1513,21 +1478,6 @@ async fn serve_chunk_from_store(
             return;
         }
     };
-
-    // Pick out the requested (t, c) slice from the decompressed on-disk
-    // chunk. For canonical 5D / chunk_size 1 datasets, slice_range returns
-    // (0, canonical_byte_size) and this is equivalent to the old prefix
-    // truncate. For chunk_size > 1 on t/c or pinned-axis bundling, the
-    // offset/size pick out exactly one timepoint/channel's bytes.
-    let (wire_t, wire_c) = parse_t_c_from_chunk_key(chunk_key);
-    let (offset, size) = level_info.chunk_byte_layout.slice_range(wire_t, wire_c);
-    if size > 0
-        && offset
-            .checked_add(size)
-            .is_some_and(|end| end <= bytes.len())
-    {
-        bytes = bytes[offset..offset + size].to_vec();
-    }
 
     let buf = encode_chunk_frame(client_id, dataset_id, image_id, chunk_key, &bytes);
     probe.mark(ServerPhase::SliceEncode);
@@ -1904,6 +1854,95 @@ async fn send_open_failed(
     }
 }
 
+/// Put one **Send report**'s bundle in the workspace inbox and tell the
+/// sender where it landed, or why nothing was kept.
+///
+/// The sender always hears back. A report that silently went nowhere is
+/// the one outcome this action must not have: whoever pressed it is
+/// about to tell somebody the report is there.
+async fn store_report(
+    client_id: ClientId,
+    request_id: String,
+    bundle: &str,
+    workspace_id: &str,
+    principal: &AuthPrincipal,
+    store: &dyn InboxStore,
+    unicast_routes: &UnicastRoutes,
+) {
+    let report = InboxReport {
+        workspace_id,
+        sender_email: &principal.email,
+        sender_name: &principal.display_name,
+        // The text as it arrived. The inbox stores these bytes, so what
+        // the CLI fetches is what the page produced.
+        bundle_json: bundle,
+        now: chrono::Utc::now(),
+    };
+    match inbox::receive(store, report).await {
+        Ok(entry) => {
+            tracing::info!(
+                client_id = %client_id,
+                request_id = %request_id,
+                workspace_id = %workspace_id,
+                entry_id = %entry.id,
+                size_bytes = entry.size_bytes,
+                "inbox.report_stored"
+            );
+            let expires_at = entry
+                .expires_at
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            send_to_client(
+                client_id,
+                ServerMessage::ReportSent {
+                    request_id,
+                    entry_id: entry.id,
+                    expires_at,
+                },
+                unicast_routes,
+            )
+            .await;
+        }
+        Err(error) => {
+            send_report_failed(client_id, request_id, error.to_string(), unicast_routes).await;
+        }
+    }
+}
+
+/// Tell the sender nothing was kept, and why, in the sentence the
+/// monitor shows under the action.
+async fn send_report_failed(
+    client_id: ClientId,
+    request_id: String,
+    error: String,
+    unicast_routes: &UnicastRoutes,
+) {
+    tracing::warn!(
+        client_id = %client_id,
+        request_id = %request_id,
+        error = %error,
+        "inbox.report_failed"
+    );
+    send_to_client(
+        client_id,
+        ServerMessage::ReportFailed { request_id, error },
+        unicast_routes,
+    )
+    .await;
+}
+
+/// Send one message to one client's own connection.
+async fn send_to_client(
+    client_id: ClientId,
+    message: ServerMessage,
+    unicast_routes: &UnicastRoutes,
+) {
+    let json = serde_json::to_string(&message).unwrap();
+    let senders = unicast_routes.lock().await;
+    if let Some(sender) = senders.get(&client_id) {
+        let _ = sender.send(Message::Text(json.into()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1960,6 +1999,7 @@ mod tests {
             family: TimingRowFamily::Chunk,
             outcome: TimingRowOutcome::Delivered,
             phases,
+            backend_bytes: None,
             coalesced_onto: lucida_protocol::LABEL_NONE,
             dispatch_offset_us: 0,
             duration_us: 0,
@@ -1989,6 +2029,7 @@ mod tests {
             family: TimingRowFamily::Chunk,
             outcome: TimingRowOutcome::Delivered,
             phases,
+            backend_bytes: None,
             coalesced_onto: lucida_protocol::LABEL_NONE,
             dispatch_offset_us: 0,
             duration_us: 0,
@@ -2026,9 +2067,7 @@ mod tests {
     }
 
     /// Health is a worst-of fold, and no component may be lost to argument
-    /// order. The earlier form only looked for `Degraded` on the right, so
-    /// `combine(Degraded, Healthy)` wrongly answered `Healthy` — which
-    /// silently swallowed a degraded source cache.
+    /// order: `combine(Degraded, Healthy)` must answer `Degraded`.
     #[test]
     fn combine_health_is_symmetric_worst_of() {
         use DatasetHealthStatus::{Degraded, Healthy, Unavailable};
@@ -2041,9 +2080,12 @@ mod tests {
         assert_eq!(combine_health(Degraded, Unavailable), Unavailable);
         assert_eq!(combine_health(Unavailable, Degraded), Unavailable);
     }
-    use crate::test_fixtures::single_image_manifest;
+    use crate::test_fixtures::{
+        FailingStore, StoreFailure, four_byte_level, image_seed, single_image_manifest,
+    };
     use lucida_content::EntityId;
     use lucida_proxy::{ProxyDtype, ProxyHeader};
+    use object_store::path::Path;
 
     #[test]
     fn dataset_health_reports_recorded_restore_failure() {
@@ -2102,7 +2144,7 @@ mod tests {
 
     #[test]
     fn dataset_retry_store_failure_maps_to_retryable_lookup() {
-        // A store failure — INCLUDING the editor gate's role lookup
+        // A store failure — including the editor gate's role lookup
         // erroring — is infrastructure trouble, not an authorization
         // verdict: it must surface as the retryable lookup diagnostic.
         let diag = dataset_retry_failure_diagnostic(WorkspaceError::Store(
@@ -2271,19 +2313,6 @@ mod tests {
         let store =
             Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
         let cache = Arc::new(CachedStore::new(store, 1024));
-        let level_info = crate::binding::LevelInfo {
-            level_index: 0,
-            compression: crate::decode::StorageCompression::None,
-            chunk_shape: vec![1, 1, 1, 1, 2],
-            chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
-                canonical_byte_size: 4,
-                on_disk_byte_size: 4,
-                byte_stride_t: 0,
-                byte_stride_c: 0,
-                chunk_size_t: 1,
-                chunk_size_c: 1,
-            },
-        };
 
         let timings = Arc::new(TimingBuffer::new());
         serve_chunk_from_store(
@@ -2291,8 +2320,7 @@ mod tests {
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
             "0/0/0/0/0/0",
-            Some("missing"),
-            Some(level_info),
+            &tiny_resolver(),
             &cache,
             &routes,
             test_probe(1, &timings),
@@ -2316,109 +2344,37 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    /// Which error class [`FailingStore`] fabricates for every read.
-    #[derive(Debug, Clone, Copy)]
-    enum StoreFailure {
-        PermissionDenied,
-        Backend,
+    #[tokio::test]
+    async fn unknown_image_fails_the_row_and_sends_nothing() {
+        let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        routes.lock().await.insert(5, tx);
+        let store =
+            Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let cache = Arc::new(CachedStore::new(store, 1024));
+
+        let timings = Arc::new(TimingBuffer::new());
+        serve_chunk_from_store(
+            5,
+            &DatasetId("ds1".into()),
+            &ImageId("not-bound".into()),
+            "0/0/0/0/0/0",
+            &tiny_resolver(),
+            &cache,
+            &routes,
+            test_probe(1, &timings),
+        )
+        .await;
+
+        assert_eq!(sole_outcome(&timings), TimingRowOutcome::Failed);
+        assert!(
+            rx.try_recv().is_err(),
+            "no frame for a key with no location"
+        );
     }
 
-    /// An `ObjectStore` whose reads always fail with the configured error
-    /// class, standing in for a source whose credentials were revoked or
-    /// whose backend is down after a successful open.
-    #[derive(Debug)]
-    struct FailingStore(StoreFailure);
-
-    impl FailingStore {
-        fn error(&self) -> object_store::Error {
-            match self.0 {
-                StoreFailure::PermissionDenied => object_store::Error::PermissionDenied {
-                    path: "chunk".into(),
-                    source: "403 Forbidden".to_string().into(),
-                },
-                StoreFailure::Backend => object_store::Error::Generic {
-                    store: "failing-store",
-                    source: "503 Service Unavailable".to_string().into(),
-                },
-            }
-        }
-    }
-
-    impl std::fmt::Display for FailingStore {
-        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            write!(f, "FailingStore({:?})", self.0)
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl object_store::ObjectStore for FailingStore {
-        async fn put_opts(
-            &self,
-            _location: &Path,
-            _payload: object_store::PutPayload,
-            _opts: object_store::PutOptions,
-        ) -> object_store::Result<object_store::PutResult> {
-            Err(self.error())
-        }
-
-        async fn put_multipart_opts(
-            &self,
-            _location: &Path,
-            _opts: object_store::PutMultipartOptions,
-        ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
-            Err(self.error())
-        }
-
-        async fn get_opts(
-            &self,
-            _location: &Path,
-            _options: object_store::GetOptions,
-        ) -> object_store::Result<object_store::GetResult> {
-            Err(self.error())
-        }
-
-        async fn delete(&self, _location: &Path) -> object_store::Result<()> {
-            Err(self.error())
-        }
-
-        fn list(
-            &self,
-            _prefix: Option<&Path>,
-        ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
-        {
-            futures_util::stream::empty().boxed()
-        }
-
-        async fn list_with_delimiter(
-            &self,
-            _prefix: Option<&Path>,
-        ) -> object_store::Result<object_store::ListResult> {
-            Err(self.error())
-        }
-
-        async fn copy(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
-            Err(self.error())
-        }
-
-        async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
-            Err(self.error())
-        }
-    }
-
-    fn tiny_level_info() -> crate::binding::LevelInfo {
-        crate::binding::LevelInfo {
-            level_index: 0,
-            compression: crate::decode::StorageCompression::None,
-            chunk_shape: vec![1, 1, 1, 1, 2],
-            chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
-                canonical_byte_size: 4,
-                on_disk_byte_size: 4,
-                byte_stride_t: 0,
-                byte_stride_c: 0,
-                chunk_size_t: 1,
-                chunk_size_c: 1,
-            },
-        }
+    fn tiny_resolver() -> ChunkResolver {
+        ChunkResolver::new(&image_seed("img1", vec![four_byte_level()]))
     }
 
     /// Drive `serve_chunk_from_store` against a [`FailingStore`] and return
@@ -2436,8 +2392,7 @@ mod tests {
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
             "0/0/0/0/0/0",
-            Some("some/object"),
-            Some(tiny_level_info()),
+            &tiny_resolver(),
             &cache,
             &routes,
             test_probe(1, &timings),
@@ -2460,9 +2415,13 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         routes.lock().await.insert(5, tx);
         let store = object_store::memory::InMemory::new();
+        let resolver = tiny_resolver();
+        let location = resolver
+            .resolve(&ImageId("img1".into()), "0/0/0/0/0/0")
+            .unwrap();
         object_store::ObjectStore::put(
             &store,
-            &Path::from("some/object"),
+            location.path(),
             object_store::PutPayload::from_static(&[1, 2, 3, 4]),
         )
         .await
@@ -2478,8 +2437,7 @@ mod tests {
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
             "0/0/0/0/0/0",
-            Some("some/object"),
-            Some(tiny_level_info()),
+            &resolver,
             &cache,
             &routes,
             test_probe(1, &timings),
@@ -2713,8 +2671,7 @@ mod tests {
         }
     }
 
-    /// #901's acceptance criterion, guarded at the seam that decides it: the
-    /// chunk handler must charge each read to its own client. A client opening
+    /// The chunk handler must charge each read to its own client. A client opening
     /// a large collection queues thousands of reads at once, and a second
     /// client arriving mid-open must not wait behind that whole backlog.
     ///
@@ -2746,7 +2703,9 @@ mod tests {
 
         // Client 1 opens something large: a backlog of distinct chunks, all
         // wanted at once.
+        let resolver = Arc::new(tiny_resolver());
         for index in 0..BACKLOG {
+            let resolver = Arc::clone(&resolver);
             let cache = cache.clone();
             let routes = routes.clone();
             tokio::spawn(async move {
@@ -2754,9 +2713,8 @@ mod tests {
                     1,
                     &DatasetId("ds1".into()),
                     &ImageId("img1".into()),
-                    "0/0/0/0/0/0",
-                    Some(&format!("busy-{index}")),
-                    Some(tiny_level_info()),
+                    &format!("0/0/0/0/0/{index}"),
+                    &resolver,
                     &cache,
                     &routes,
                     test_probe(1, &Arc::new(TimingBuffer::new())),
@@ -2770,8 +2728,10 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
-        // Client 2 arrives wanting one chunk.
+        // Client 2 arrives wanting a chunk none of the backlog asked for, so
+        // it cannot ride one of client 1's in-flight reads.
         let newcomer = tokio::spawn({
+            let resolver = Arc::clone(&resolver);
             let cache = cache.clone();
             let routes = routes.clone();
             async move {
@@ -2779,9 +2739,8 @@ mod tests {
                     2,
                     &DatasetId("ds1".into()),
                     &ImageId("img1".into()),
-                    "0/0/0/0/0/0",
-                    Some("newcomer"),
-                    Some(tiny_level_info()),
+                    "0/0/0/0/1/0",
+                    &resolver,
                     &cache,
                     &routes,
                     test_probe(2, &Arc::new(TimingBuffer::new())),

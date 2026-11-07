@@ -2,8 +2,6 @@ import type { VisibleRegion } from "./viewport.ts";
 
 export const RENDER_RADIUS_DISABLED = 2;
 
-export type RenderRadiusTier = "detail" | "coarse";
-
 export interface ChunkRadiusGeometry {
   /** Full-resolution dimensions in X/Y/Z order. */
   fullDims: [number, number, number];

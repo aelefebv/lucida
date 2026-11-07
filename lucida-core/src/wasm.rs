@@ -12,23 +12,27 @@ pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
     crate::chunk::chunk_key(level, t, c, z, y, x)
 }
 
-/// GPU camera matrices for an off-screen render of an *arbitrary* camera, in the
-/// exact 35-float layout the volume renderer wants:
-/// `invViewProj[16] + eye[3] + viewProj[16]` — identical to
-/// [`WasmScene::minimap_camera`]'s output, so the worker's thumbnail path can
-/// reuse the same offscreen render the minimap uses.
+/// The level the screen calls for, from [`crate::target_level::target_level`],
+/// the rule every record of [`WasmScene::view_query`] applies.
+/// `pixels_per_sample` is device pixels per level-0 sample, `shape_ratios[L]`
+/// is how many times coarser level `L` is than level 0, and `previous` is the
+/// level the caller last received for the same image, or `undefined` for the
+/// rule without hysteresis.
+#[wasm_bindgen]
+pub fn target_level(pixels_per_sample: f64, shape_ratios: &[f64], previous: Option<u32>) -> u32 {
+    crate::target_level::target_level(pixels_per_sample, shape_ratios, previous)
+}
+
+/// GPU camera matrices for an off-screen render of an arbitrary camera, in the
+/// 35-float layout the volume renderer wants (`invViewProj[16] + eye[3] +
+/// viewProj[16]`), the first 35 floats of [`WasmScene::minimap_camera`]'s
+/// output, so the worker's thumbnail path reuses the minimap's offscreen render.
 ///
-/// `camera_json` is a serialized [`crate::camera::Camera`] (the `camera` field of
-/// a `SavedView`); `w`/`h` size the off-screen target (its aspect overrides the
-/// camera's stored viewport, which was sized for the full canvas). This is the
-/// thumbnail counterpart to `minimap_camera`: that one synthesizes an orbit
-/// camera from `(theta, phi)`, this one takes a fully-specified child camera and
-/// just reads its matrices via [`Camera::gpu_view_matrices`] — no matrix math is
-/// reimplemented here.
-///
-/// On a malformed `camera_json` it returns an **empty** `Vec` (length 0) rather
-/// than panicking; the JS caller treats `result.length === 0` as "skip this
-/// thumbnail" and falls back to the label-only row.
+/// `camera_json` is a serialized [`crate::camera::Camera`]; `w`/`h` size the
+/// target and override the stored viewport's aspect. The matrices come from
+/// [`Camera::gpu_view_matrices`]. A malformed `camera_json` returns an empty
+/// `Vec` instead of panicking, which the JS caller treats as "skip this
+/// thumbnail".
 #[wasm_bindgen]
 pub fn camera_matrices(camera_json: &str, w: f64, h: f64) -> Vec<f32> {
     let camera: Camera = match serde_json::from_str(camera_json) {
@@ -44,6 +48,13 @@ pub fn camera_matrices(camera_json: &str, w: f64, h: f64) -> Vec<f32> {
     out
 }
 
+/// The peer cursor palette as CSS hex colors. A peer's color is the entry at
+/// its client id modulo the length, as on its GPU cursor.
+#[wasm_bindgen]
+pub fn peer_palette() -> Vec<String> {
+    crate::cursor::peer_palette_css()
+}
+
 /// Push the JS-side enabled-category set into the WASM logger. Pass a
 /// comma-separated list (matches `localStorage.debug` format). Empty
 /// string disables all WASM logging.
@@ -56,8 +67,7 @@ pub fn set_debug_categories(csv: &str) {
 // `dataset_id_for_url`, `normalize_dataset_url`, and
 // `is_local_dataset_url` are exported directly from `saved_view` via
 // `#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]`. They delegate to
-// `lucida_content::url` — the single source of truth shared with the
-// server and store. See `wiki/decisions/0042-canonical-dataset-url-form.md`.
+// `lucida_content::url`, shared with the server and store (ADR 0042).
 
 #[wasm_bindgen]
 pub struct WasmScene {
@@ -73,8 +83,6 @@ impl WasmScene {
         }
     }
 
-    // --- Command protocol ---
-    //
     // Every mutator below is a thin JSON adapter: parse, then delegate to
     // `Scene::apply` (a `ViewportCommand`/`Command`) or to a `Scene` method.
     // All mutation and epoch semantics are owned by the always-compiled
@@ -146,7 +154,17 @@ impl WasmScene {
         }
     }
 
-    // --- Mode switching ---
+    /// The dataset's bounds in the current camera's coordinate space as
+    /// `[min_x, min_y, min_z, max_x, max_y, max_z]`, the box
+    /// [`Self::fit_camera_to_dataset_bounds`] frames; empty when it has none.
+    /// Guided exploration passes it to [`crate::view_transform::explore_view`]
+    /// so its Home move frames what the viewer's own fit does.
+    pub fn dataset_fit_bounds(&self, dataset_id: &str) -> Vec<f64> {
+        match self.inner.dataset_fit_bounds(dataset_id) {
+            Some((min, max)) => vec![min[0], min[1], min[2], max[0], max[1], max[2]],
+            None => Vec::new(),
+        }
+    }
 
     pub fn set_mode_arcball(&mut self) {
         self.inner.apply(ViewportCommand::SetMode3D.into());
@@ -164,16 +182,12 @@ impl WasmScene {
         }
     }
 
-    // --- Shared viewport ---
-
     /// Assert the canvas size. Called every render tick, so it relies on
     /// `Scene::apply`'s no-change guard: a same-size re-assert bumps nothing.
     pub fn set_viewport(&mut self, width: u32, height: u32) {
         self.inner
             .apply(ViewportCommand::SetViewport { width, height }.into());
     }
-
-    // --- 2D camera queries ---
 
     pub fn center(&self) -> Vec<f64> {
         if let Camera::Slice(ref v) = self.inner.camera {
@@ -183,8 +197,6 @@ impl WasmScene {
         }
     }
 
-    // --- View state ---
-    //
     // `set_z`/`set_t`/`set_c` are also re-asserted every render tick, so they
     // too lean on the apply-side no-change guard.
 
@@ -200,13 +212,9 @@ impl WasmScene {
         self.inner.apply(ViewportCommand::SetC { c }.into());
     }
 
-    // --- Multi-channel ---
-
     pub fn multi_channel(&self) -> bool {
         self.inner.view.multi_channel
     }
-
-    // --- Display state ---
 
     pub fn contrast_min(&self) -> f64 {
         self.inner.display.contrast_min
@@ -220,8 +228,6 @@ impl WasmScene {
         self.inner.display.gamma
     }
 
-    // --- View state getters ---
-
     pub fn z(&self) -> u32 {
         self.inner.view.z_range.start
     }
@@ -233,8 +239,6 @@ impl WasmScene {
     pub fn c(&self) -> u32 {
         self.inner.view.c
     }
-
-    // --- Queries ---
 
     pub fn zoom(&self) -> f64 {
         self.inner.camera.effective_zoom()
@@ -287,16 +291,12 @@ impl WasmScene {
     /// Incremental counterpart to [`Self::view_query`]: reports only what
     /// changed since this scene last answered a delta query for the dataset.
     ///
-    /// The scene holds a per-dataset cursor of the last-reported quantized set;
-    /// the first call after the scene is (re)constructed — the cursor is
-    /// `#[serde(skip)]`, so a fresh scene starts empty — yields a `Full`
-    /// snapshot, and subsequent calls yield a `Delta`. Serialized as an
-    /// externally-tagged enum: `{"Full": {...}}` or `{"Delta": {...}}` (see
-    /// [`crate::query::ViewQueryDelta`]). Returns the JSON string `"null"` for
-    /// an unknown dataset, matching [`Self::view_query`]'s missing-dataset
-    /// convention.
-    ///
-    /// Takes `&mut self` because answering advances the cursor.
+    /// The per-dataset cursor is `#[serde(skip)]`, so the first call after the
+    /// scene is constructed yields a `Full` snapshot and later calls a `Delta`,
+    /// serialized as `{"Full": {...}}` or `{"Delta": {...}}` (see
+    /// [`crate::query::ViewQueryDelta`]). An unknown dataset returns `"null"`,
+    /// as [`Self::view_query`] does. Takes `&mut self` because answering
+    /// advances the cursor.
     pub fn view_query_delta(&mut self, dataset_id: &str) -> String {
         let id = DatasetId(dataset_id.into());
         match self.inner.view_query_delta(&id) {
@@ -353,6 +353,14 @@ impl WasmScene {
             map.insert(&member.entity_id.0, member.position);
         }
         serde_json::to_string(&map).unwrap()
+    }
+
+    /// The levels a level pin on `dataset_id` may hold, finest first: every
+    /// source level including 0, never a generated coarse level. Empty for
+    /// an unknown dataset. See [`Scene::pinnable_levels`].
+    pub fn pinnable_levels(&self, dataset_id: &str) -> Vec<u32> {
+        self.inner
+            .pinnable_levels(&DatasetId(dataset_id.to_string()))
     }
 
     /// Returns the full volume shape [Z, Y, X] for a dataset.
@@ -431,8 +439,6 @@ impl WasmScene {
         serde_json::to_string(&self.inner.member_render_ids(dataset_id)).unwrap()
     }
 
-    // --- Fly camera methods ---
-
     pub fn fly_tick(
         &mut self,
         dt: f64,
@@ -485,8 +491,6 @@ impl WasmScene {
     pub fn volume_diagonal(&self) -> f64 {
         self.inner.volume_diagonal()
     }
-
-    // --- Clip distance methods ---
 
     pub fn clip_distance(&self) -> f64 {
         match &self.inner.camera {
@@ -601,19 +605,15 @@ impl WasmScene {
         }
     }
 
-    /// Project a pin's stored world point `(x, y, z)` — in-plane voxel position
-    /// plus additive voxel depth — to screen-space pixels `[sx, sy]` (physical,
+    /// Project a pin's stored world point `(x, y, z)` (in-plane voxel position
+    /// plus additive voxel depth) to screen pixels `[sx, sy]` (physical,
     /// pre-DPR-divide) through the active camera.
     ///
-    /// This is the 3D analogue of `project_to_screen` for annotations: in slice
-    /// mode it is the same in-plane projection the 2D overlay uses (depth
-    /// ignored); in arcball/fly mode it lifts the point to world space via the
-    /// dataset's rendering transform first, so the marker tracks the volume as
-    /// the camera orbits. Returns an empty `Vec` (length 0) when the point is
-    /// behind the camera (3D) or the dataset has no anchorable member — the same
-    /// empty-vec-as-`Option` convention `project_to_screen` uses. The overlay
-    /// hides the marker on empty, which is what makes a pin disappear as it
-    /// swings behind the volume.
+    /// Slice mode uses the 2D overlay's in-plane projection. Arcball and fly
+    /// lift the point through the dataset's rendering transform first, so the
+    /// marker tracks the volume. Returns an empty `Vec` when the point is
+    /// behind the camera or the dataset has no anchorable member, which the
+    /// overlay uses to hide a pin that swings behind the volume.
     pub fn project_annotation(&self, dataset_id: &str, x: f64, y: f64, z: f64) -> Vec<f64> {
         let id = DatasetId(dataset_id.into());
         match self.inner.project_annotation(&id, x, y, z) {
@@ -641,8 +641,6 @@ impl WasmScene {
             None => Vec::new(),
         }
     }
-
-    // --- Layer display settings ---
 
     pub fn dataset_order(&self) -> String {
         serde_json::to_string(&self.inner.dataset_order).unwrap()
@@ -790,8 +788,6 @@ impl WasmScene {
             .unwrap_or_else(|| id.to_string())
     }
 
-    // --- Layout management ---
-    //
     // Layout mutations (`register_layout` / `set_active_layout`) arrive as
     // ordinary document commands through [`Self::apply_command`]; only the
     // read side lives here.
@@ -831,8 +827,6 @@ impl WasmScene {
 
         serde_json::to_string(&layouts).unwrap()
     }
-
-    // --- Minimap camera ---
 
     pub fn camera_theta(&self) -> f64 {
         if let Camera::Arcball(ref v) = self.inner.camera {
@@ -884,38 +878,48 @@ impl WasmScene {
         }
     }
 
-    /// Returns 35 floats: invViewProj[16] + eye[3] + viewProj[16]
+    /// Returns 36 floats: invViewProj[16] + eye[3] + viewProj[16] + topDown[1].
+    ///
+    /// `topDown` is `1` when every framed member has one Z plane and the camera
+    /// looks straight down Z, ignoring `theta`/`phi`, and `0` for the orbit.
+    /// See [`crate::minimap::minimap_framing`].
     pub fn minimap_camera(&self, theta: f64, phi: f64, w: f64, h: f64) -> Vec<f32> {
-        // Compute bounding box of all members to frame the camera
-        let (target, distance) = self.minimap_framing();
-        let cam = Arcball {
-            target,
-            theta,
-            phi,
-            distance,
-            fov: std::f64::consts::FRAC_PI_4,
-            viewport: [w as u32, h as u32],
-            near: 0.01,
-            far: (distance * 4.0_f64).max(100.0),
-            clip_distance: 0.0,
-            clip_mode: crate::camera::ClipMode::default(),
+        use crate::minimap::{MinimapFraming, minimap_framing, top_down_view};
+
+        let viewport = [w as u32, h as u32];
+        let (view_proj, eye, top_down) = match minimap_framing(&self.minimap_members()) {
+            MinimapFraming::Orbit { target, distance } => {
+                let cam = Arcball {
+                    target,
+                    theta,
+                    phi,
+                    distance,
+                    fov: std::f64::consts::FRAC_PI_4,
+                    viewport,
+                    near: 0.01,
+                    far: (distance * 4.0_f64).max(100.0),
+                    clip_distance: 0.0,
+                    clip_mode: crate::camera::ClipMode::default(),
+                };
+                (cam.view_proj_f64(), cam.eye_position(), false)
+            }
+            MinimapFraming::TopDown { bounds } => {
+                let (view_proj, eye) = top_down_view(bounds, viewport);
+                (view_proj, eye, true)
+            }
         };
-        let mut out = Vec::with_capacity(35);
-        out.extend_from_slice(&cam.inv_view_proj());
-        let eye = cam.eye_position();
-        out.push(eye[0] as f32);
-        out.push(eye[1] as f32);
-        out.push(eye[2] as f32);
-        out.extend_from_slice(&cam.view_proj());
+        let mut out = Vec::with_capacity(36);
+        out.extend_from_slice(&crate::mat4::invert4_f32(view_proj));
+        out.extend(eye.iter().map(|&v| v as f32));
+        out.extend(view_proj.iter().map(|&v| v as f32));
+        out.push(if top_down { 1.0 } else { 0.0 });
         out
     }
 
-    /// Compute minimap camera target and distance from the bounding box of the
-    /// member model matrices. Frames the **visible** members (falling back to all
-    /// when none are visible) so a single shown dataset isn't dwarfed by hidden
-    /// ones; the framing math lives in `crate::minimap` so it can be unit tested.
-    fn minimap_framing(&self) -> ([f64; 3], f64) {
-        let mut members: Vec<([f32; 16], bool)> = Vec::new();
+    /// Every member's world box, visibility, and plane count, for
+    /// [`crate::minimap::minimap_framing`].
+    fn minimap_members(&self) -> Vec<crate::minimap::MinimapMember> {
+        let mut members = Vec::new();
 
         for (ds_id, derived) in &self.inner.derived {
             let visible = self
@@ -925,14 +929,16 @@ impl WasmScene {
                 .map(|s| s.visible)
                 .unwrap_or(true);
             for member in &derived.members {
-                // Model matrix is scale+translate (diagonal); the framing helper
-                // reads mat[0]/[5]/[10] (scale) and mat[12]/[13]/[14] (translate).
-                // Shared with the renderer + auto-fit via `Scene::member_world_matrix`.
-                let mat = self.inner.member_world_matrix(member);
-                members.push((mat, visible));
+                members.push(crate::minimap::MinimapMember {
+                    // Shared with the renderer and auto-fit, so the minimap
+                    // frames the boxes that are drawn.
+                    model: self.inner.member_world_matrix(member),
+                    visible,
+                    z_planes: member.levels.first().map_or(0, |l| l.shape[2]),
+                });
             }
         }
 
-        crate::minimap::minimap_framing_boxes(&members)
+        members
     }
 }

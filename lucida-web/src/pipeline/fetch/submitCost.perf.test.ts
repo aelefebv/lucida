@@ -1,24 +1,13 @@
 /**
- * Regression guard on `CpuCache.submit` at remote-collection scale
- * (issue #900, ADR 0044).
+ * Regression guard on `CpuCache.submit` at remote-collection scale.
+ * `submit` receives the dataset's complete wanted set on every plan rebuild
+ * (~21k requests, ~5 rebuilds/s), so its per-call cost is main-thread time
+ * spent on pure bookkeeping.
  *
- * #899 measured `cache.request` running at 107,055/s on a 21,371-member
- * remote collection, and asked whether that churn is a real cost. It is:
- * `submit` re-receives the dataset's complete wanted set on every plan
- * rebuild (`plan.requests_per_submit` p50 = 21,400, ~5 rebuilds/s), and
- * at the time of that measurement one call took **20.5-22.2 ms p50** —
- * roughly 105 ms of main thread per second, on a path that is pure
- * bookkeeping and issues no network work of its own.
- *
- * After the single-derivation pass and the in-flight-only omitted-work
- * cancellation, the same call takes **9.1-9.5 ms p50** (~46 ms/s).
- *
- * The bound below is deliberately loose — 40 ms is ~4x the current
- * figure — because absolute timings vary widely across machines and CI
- * runners. It is not a benchmark; it is a tripwire for a return to
- * re-deriving per-request state several times per submit, or to walking
- * the outgoing pending queue on every rebuild. Read the logged p50 for
- * the actual number.
+ * The 40 ms bound is about 4x a typical p50, loose because timings vary
+ * across machines and CI runners. It is a tripwire for re-deriving
+ * per-request state several times per submit, or for walking the pending
+ * queue on every rebuild, not a benchmark. Read the logged p50.
  */
 import { describe, it, expect, vi } from "vitest";
 
@@ -32,6 +21,7 @@ import type { ContentSource, FetchRequest, FetchResult } from "./contentSource.t
 import type { DecodePool } from "./decodePool.ts";
 import type { ChunkRequest, RequestPlan, ActiveSetEntry } from "../planning/index.ts";
 import { emptyPlanStats } from "../planning/index.ts";
+import { createSyntheticState } from "../planning/index.ts";
 
 const MEMBERS = 21_400;
 
@@ -82,9 +72,8 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
     entityId: r.entityId,
     imageId: r.imageId,
     mode: "tiles-with-detail",
-    targetLod: 3,
-    coarsestDetailLod: 3,
-    detailOwnedLodRange: [3, 3],
+    detailLevels: [3],
+    coarseLevel: null,
     proxyKind: undefined,
     proxyAvailable: false,
     groupProxyAvailable: false,
@@ -95,7 +84,7 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
     proxyRequests: [],
     epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
     stats: emptyPlanStats(),
-    nextState: { previousActiveSet: activeSet },
+    nextState: createSyntheticState({ previousActiveSet: activeSet }),
   };
 }
 

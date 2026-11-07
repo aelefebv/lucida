@@ -1,18 +1,10 @@
-//! `/api/browse` — filesystem listing for the SPA's FileBrowser modal.
+//! `/api/browse`: filesystem listing for the SPA's FileBrowser modal.
 //!
-//! Cross-platform: on Unix the platform-default root is `/`. On Windows
-//! there is no shared filesystem root — `\` resolves per-drive — so the
-//! handler returns a *synthetic* drives-list entry list (`c:`, `d:`, …)
-//! when the client doesn't supply a path. The client never has to know
-//! which OS it's talking to; it just sends an empty `path` to ask for
-//! "whatever root makes sense here" and follows links from there.
-//!
-//! All non-empty paths flow through `tokio::fs::canonicalize`, then the
-//! response's `path` field is converted to the canonical display form
-//! (see [`canonical_display_form`]) so the SPA never sees Windows
-//! `\\?\C:\…` verbatim-UNC noise. The `data_dir` security check stays
-//! on the raw canonicalized `PathBuf`s — display conversion is for the
-//! wire only.
+//! An empty `path` asks for the platform root. Windows has no single root,
+//! so there it returns a synthetic list of drives. The response `path` goes
+//! through [`canonical_display_form`] so the SPA never sees `\\?\` verbatim
+//! paths, but the `data_dir` security check runs on the raw canonicalized
+//! `PathBuf`.
 
 use std::path::Path;
 use std::path::PathBuf;

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 //
-// The `?render=1` predicate (issue #923). Cheap, but it gates whether a
+// The `?render=1` predicate. Cheap, but it gates whether a
 // headless run writes into a user's workspace, so the exact match matters.
 
 import { describe, it, expect, afterEach } from "vitest";

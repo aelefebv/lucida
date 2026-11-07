@@ -1,0 +1,103 @@
+/* The bar meets the top and both sides of the viewport, so it takes their
+   safe-area insets. It stacks above the side panels that slide over the
+   canvas below desktop widths, so the account menu it drops is not drawn
+   under the right rail. */
+.lc-topbar {
+  position: relative;
+  z-index: calc(var(--lc-z-panel) + 2);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lc-space-4);
+  box-sizing: border-box;
+  height: calc(var(--lc-control-h) + var(--lc-space-4) + var(--lc-safe-top));
+  padding: var(--lc-safe-top) calc(var(--lc-space-2) + var(--lc-safe-right)) 0
+    calc(var(--lc-space-2) + var(--lc-safe-left));
+  border-bottom: 1px solid var(--lc-border);
+  background: var(--lc-surface-1);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-md);
+}
+
+.lc-topbar-start,
+.lc-topbar-end {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  min-width: 0;
+}
+
+.lc-topbar-start {
+  flex: 1 1 auto;
+  gap: var(--lc-space-1);
+}
+
+.lc-topbar-end {
+  flex: none;
+}
+
+.lc-topbar-mark {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: var(--lc-control-h);
+  height: var(--lc-control-h);
+  border-radius: var(--lc-radius);
+}
+
+.lc-topbar-mark:hover {
+  background: var(--lc-surface-3);
+}
+
+.lc-topbar-separator {
+  flex: none;
+  color: var(--lc-text-subtle);
+}
+
+/* Reads as a title; shows it is a field on hover and focus. */
+.lc-workspace-name {
+  box-sizing: border-box;
+  min-width: 0;
+  max-width: 360px;
+  height: var(--lc-control-h);
+  padding: 0 var(--lc-space-2);
+  overflow: hidden;
+  border: 1px solid transparent;
+  border-radius: var(--lc-radius);
+  background: transparent;
+  color: var(--lc-text);
+  font: inherit;
+  font-weight: 600;
+  line-height: calc(var(--lc-control-h) - 2px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+input.lc-workspace-name {
+  field-sizing: content;
+  min-width: 8ch;
+  outline: none;
+  transition:
+    border-color var(--lc-motion-fast) var(--lc-ease),
+    background-color var(--lc-motion-fast) var(--lc-ease);
+}
+
+input.lc-workspace-name:hover {
+  border-color: var(--lc-border);
+}
+
+input.lc-workspace-name:focus {
+  border-color: var(--lc-focus-ring);
+  background: var(--lc-field-bg);
+  box-shadow: 0 0 0 1px var(--lc-focus-ring);
+}
+
+.lc-topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding-right: var(--lc-space-2);
+  border-right: 1px solid var(--lc-border);
+}

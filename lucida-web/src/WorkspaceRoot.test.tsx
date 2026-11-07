@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 
+import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   act,
@@ -15,17 +16,16 @@ import { createWorkspaceFromDatasets } from "./workspaceFromDataset.ts";
 
 // App pulls in the WASM viewer; stub it so the route renders without a GPU/WASM
 // runtime. The stub records the props it was last rendered with so we can assert
-// the seed dataset URLs (#697) reach the viewer, and exposes a button to drive
+// the seed dataset URLs reach the viewer, and exposes a button to drive
 // the in-viewer "create workspace from datasets" callback.
 interface CapturedAppProps {
   workspaceId: string;
   initialDatasetUrls?: readonly string[];
   onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
-  onOpenMonitor?: () => void;
 }
 const lastAppProps: { current: CapturedAppProps | null } = { current: null };
-// Every `initialDatasetUrls` value the viewer was rendered with, in order — used
-// to assert the seed is delivered exactly once.
+// Every `initialDatasetUrls` value the viewer was rendered with, in order, to
+// assert the seed is delivered exactly once.
 const seedRenders: (readonly string[] | undefined)[] = [];
 vi.mock("./App.tsx", () => ({
   default: (props: CapturedAppProps) => {
@@ -40,9 +40,6 @@ vi.mock("./App.tsx", () => ({
           }
         >
           in-viewer-create-from-datasets
-        </button>
-        <button type="button" onClick={() => props.onOpenMonitor?.()}>
-          in-viewer-open-monitor
         </button>
       </div>
     );
@@ -102,7 +99,7 @@ async function renderRouteAndGetMessage(rejection: Error): Promise<string> {
 }
 
 // Everything WorkspaceRoot wrote to the console during this render, as one
-// string — used to assert the recipient's console never reveals the cause.
+// string, to assert the recipient's console never reveals the cause.
 function consoleOutput(): string {
   return warnSpy.mock.calls
     .map((args: unknown[]) => args.map(String).join(" "))
@@ -114,7 +111,7 @@ describe("WorkspaceRoot — denied/not-found deep-link UX (slice 3, never-leak)"
     const msg = await renderRouteAndGetMessage(new Error("403 Forbidden"));
     expect(msg).toContain("don’t have access");
     expect(msg).toContain("ask the person who shared it");
-    // The raw status is NOT rendered (it would leak existence).
+    // The raw status is not rendered; it would leak existence.
     expect(msg).not.toContain("403");
     expect(msg).not.toContain("Forbidden");
   });
@@ -131,17 +128,14 @@ describe("WorkspaceRoot — denied/not-found deep-link UX (slice 3, never-leak)"
 
   it("offers a way back to the workspaces list (no dead-end, no request-access flow)", async () => {
     await renderRouteAndGetMessage(new Error("403 Forbidden"));
-    expect(screen.getByRole("button", { name: "Workspaces" })).toBeTruthy();
-    // No "request access" affordance (we deliberately don't build that backend
-    // flow — see the never-leak note in WorkspaceRoot).
+    expect(screen.getByRole("button", { name: "All workspaces" })).toBeTruthy();
+    // No "request access" affordance; there is no backend flow for it.
     expect(screen.queryByText(/request access/i)).toBeNull();
   });
 
   it("NEVER-LEAK at the STATUS level: a non-member open is a uniform 404, indistinguishable from missing", async () => {
-    // After the server-side never-leak fix, any non-member open (exists-but-
-    // restricted, archived, or genuinely missing) is the SAME 404 the recipient
-    // receives. The route renders one message and the console reveals nothing —
-    // there is no exists-vs-missing signal anywhere the recipient can read.
+    // Any non-member open (restricted, archived, or missing) is the same 404.
+    // The route renders one message and the console reveals nothing.
     const restrictedExists = await renderRouteAndGetMessage(new Error("404 Not Found"));
     const restrictedConsole = consoleOutput();
     cleanup();
@@ -155,10 +149,8 @@ describe("WorkspaceRoot — denied/not-found deep-link UX (slice 3, never-leak)"
   });
 
   it("NEVER-LEAK in the CONSOLE: the recipient's console never echoes the distinguishing status", async () => {
-    // The slice originally logged the raw error to the recipient's devtools
-    // console (`console.warn("...", e)`), leaking 403-vs-404 even though the DOM
-    // was unified. Assert the console output carries no status/cause for either
-    // rejection — and that the two are byte-identical.
+    // Logging the raw error would leak 403-vs-404 through devtools even with a
+    // unified DOM. The console carries no status or cause, identically for both.
     await renderRouteAndGetMessage(new Error("403 Forbidden"));
     const deniedConsole = consoleOutput();
     cleanup();
@@ -177,25 +169,25 @@ describe("WorkspaceRoot — denied/not-found deep-link UX (slice 3, never-leak)"
   });
 });
 
+function record(overrides: Partial<WorkspaceRecord> = {}): WorkspaceRecord {
+  return {
+    id: "ws-created",
+    name: "sample.ome.zarr",
+    role: "owner",
+    created_by: "me@example.com",
+    created_at: "2026-06-23T00:00:00Z",
+    updated_at: "2026-06-23T00:00:00Z",
+    archived_at: null,
+    seq: 0,
+    default_saved_view_id: null,
+    last_opened_at: null,
+    pinned_at: null,
+    ...overrides,
+  };
+}
+
 describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
   const createFromDatasetsMock = vi.mocked(createWorkspaceFromDatasets);
-
-  function record(overrides: Partial<WorkspaceRecord> = {}): WorkspaceRecord {
-    return {
-      id: "ws-created",
-      name: "sample.ome.zarr",
-      role: "owner",
-      created_by: "me@example.com",
-      created_at: "2026-06-23T00:00:00Z",
-      updated_at: "2026-06-23T00:00:00Z",
-      archived_at: null,
-      seq: 0,
-      default_saved_view_id: null,
-      last_opened_at: null,
-      pinned_at: null,
-      ...overrides,
-    };
-  }
 
   beforeEach(() => {
     createFromDatasetsMock.mockReset();
@@ -216,7 +208,7 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
       await screen.findByRole("button", { name: "dashboard-open-with-seed" }),
     );
 
-    // The viewer mounts for the new workspace WITH the seed to auto-open.
+    // The viewer mounts for the new workspace with the seed to auto-open.
     await waitFor(() => {
       expect(screen.getByTestId("app-mounted")).toBeTruthy();
       expect(lastAppProps.current?.workspaceId).toBe("ws-created");
@@ -232,7 +224,7 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
 
     render(<WorkspaceRoot />);
 
-    // Create → navigate in with the seed.
+    // Create, then navigate in with the seed.
     fireEvent.click(
       await screen.findByRole("button", { name: "dashboard-open-with-seed" }),
     );
@@ -250,7 +242,7 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
     });
     await screen.findByTestId("dashboard-mounted");
 
-    // Re-open the SAME workspace via a plain (seed-less) navigation, simulating
+    // Re-open the same workspace via a plain (seed-less) navigation, simulating
     // clicking the existing row in the dashboard.
     await act(async () => {
       window.history.pushState({}, "", "/w/ws-created");
@@ -312,7 +304,7 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
     // the dashboard's create-from-dataset failure path...
     const errEl = await screen.findByTestId("workspace-create-error");
     expect(errEl.textContent).toContain("workspace quota exceeded");
-    // ...and the current workspace is NOT unwound — <App> stays mounted.
+    // ...and the current workspace is not unwound: <App> stays mounted.
     expect(screen.getByTestId("app-mounted")).toBeTruthy();
     // No navigation happened: still in ws-old.
     expect(lastAppProps.current?.workspaceId).toBe("ws-old");
@@ -335,52 +327,123 @@ describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
   });
 });
 
-describe("WorkspaceRoot — the monitor route (#936, #937)", () => {
-  it("renders the monitor at its own path, with no viewer to keep when none was left", () => {
-    window.history.replaceState({}, "", "/monitor");
+describe("WorkspaceRoot — open link (/open?url=…)", () => {
+  const createFromDatasetsMock = vi.mocked(createWorkspaceFromDatasets);
+  const linkedUrl = "gs://bucket/sample.ome.zarr";
+
+  function openLink(...urls: string[]): string {
+    const query = urls.map((u) => `url=${encodeURIComponent(u)}`).join("&");
+    return query ? `/open?${query}` : "/open";
+  }
+
+  beforeEach(() => {
+    createFromDatasetsMock.mockReset();
+    lastAppProps.current = null;
+    seedRenders.length = 0;
+  });
+
+  it("creates a workspace from the url and opens the viewer with it as the seed", async () => {
+    window.history.replaceState({}, "", openLink(linkedUrl));
+    createFromDatasetsMock.mockResolvedValue(record({ id: "ws-linked" }));
+    openWorkspaceMock.mockResolvedValue(record({ id: "ws-linked" }));
+
     render(<WorkspaceRoot />);
 
-    expect(screen.getByRole("heading", { name: "Pipeline monitor" })).toBeTruthy();
-    // Typed straight into the URL bar: there is no viewer to hold open, and a
-    // run outlives the viewer that produced it.
+    await waitFor(() => {
+      expect(lastAppProps.current?.workspaceId).toBe("ws-linked");
+      expect(lastAppProps.current?.initialDatasetUrls).toEqual([linkedUrl]);
+    });
+    expect(createFromDatasetsMock).toHaveBeenCalledTimes(1);
+    expect(createFromDatasetsMock).toHaveBeenCalledWith([linkedUrl]);
+  });
+
+  it("replaces the /open history entry, so Back can't land on it and create another workspace", async () => {
+    window.history.replaceState({}, "", openLink(linkedUrl));
+    const entriesBefore = window.history.length;
+    createFromDatasetsMock.mockResolvedValue(record({ id: "ws-linked" }));
+    openWorkspaceMock.mockResolvedValue(record({ id: "ws-linked" }));
+
+    render(<WorkspaceRoot />);
+
+    await waitFor(() => {
+      expect(lastAppProps.current?.workspaceId).toBe("ws-linked");
+    });
+    expect(window.location.pathname).toBe("/w/ws-linked");
+    expect(window.location.search).toBe("");
+    expect(window.history.length).toBe(entriesBefore);
+  });
+
+  it("opens every url parameter, in order, in one workspace, dropping blank ones", async () => {
+    window.history.replaceState(
+      {},
+      "",
+      openLink("gs://bucket/a.zarr", "  ", " /data/b.zarr "),
+    );
+    createFromDatasetsMock.mockResolvedValue(record({ id: "ws-linked" }));
+    openWorkspaceMock.mockResolvedValue(record({ id: "ws-linked" }));
+
+    render(<WorkspaceRoot />);
+
+    await waitFor(() => {
+      expect(lastAppProps.current?.initialDatasetUrls).toEqual([
+        "gs://bucket/a.zarr",
+        "/data/b.zarr",
+      ]);
+    });
+    expect(createFromDatasetsMock).toHaveBeenCalledTimes(1);
+    expect(createFromDatasetsMock).toHaveBeenCalledWith([
+      "gs://bucket/a.zarr",
+      "/data/b.zarr",
+    ]);
+  });
+
+  it("creates the workspace once under StrictMode's double-run effects", async () => {
+    window.history.replaceState({}, "", openLink(linkedUrl));
+    createFromDatasetsMock.mockResolvedValue(record({ id: "ws-linked" }));
+    openWorkspaceMock.mockResolvedValue(record({ id: "ws-linked" }));
+
+    render(
+      <StrictMode>
+        <WorkspaceRoot />
+      </StrictMode>,
+    );
+
+    await waitFor(() => {
+      expect(lastAppProps.current?.workspaceId).toBe("ws-linked");
+      expect(lastAppProps.current?.initialDatasetUrls).toEqual([linkedUrl]);
+    });
+    expect(createFromDatasetsMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows a failed create and offers the way back to the dashboard", async () => {
+    window.history.replaceState({}, "", openLink(linkedUrl));
+    const entriesBefore = window.history.length;
+    createFromDatasetsMock.mockRejectedValue(
+      new Error("workspace quota exceeded"),
+    );
+
+    render(<WorkspaceRoot />);
+
+    const errEl = await screen.findByTestId("open-link-error");
+    expect(errEl.textContent).toContain("workspace quota exceeded");
     expect(screen.queryByTestId("app-mounted")).toBeNull();
-    expect(screen.queryByTestId("dashboard-mounted")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "All workspaces" }));
+    await screen.findByTestId("dashboard-mounted");
+    expect(window.location.pathname).toBe("/");
+    expect(window.history.length).toBe(entriesBefore);
   });
 
-  it("keeps the viewer running offstage, so a run being watched is not torn down", async () => {
-    // #937: the monitor grew a live view, and unmounting the viewer to reach it
-    // would stop the very run somebody navigated here to watch. The viewer
-    // stays mounted and offstage instead — same instance, so the session, the
-    // socket and the render loop all survive the trip.
-    openWorkspaceMock.mockResolvedValue({
-      id: "ws-secret",
-      name: "Workspace",
-      role: "owner",
-      default_saved_view_id: null,
-    } as unknown as WorkspaceRecord);
-    render(<WorkspaceRoot />);
-    await screen.findByTestId("app-mounted");
-    const viewer = screen.getByTestId("app-mounted");
+  it("goes to the dashboard when the link names no dataset", async () => {
+    window.history.replaceState({}, "", openLink("   "));
+    const entriesBefore = window.history.length;
 
-    fireEvent.click(screen.getByText("in-viewer-open-monitor"));
-
-    expect(screen.getByRole("heading", { name: "Pipeline monitor" })).toBeTruthy();
-    expect(window.location.pathname).toBe("/monitor");
-    // The same node, not a remount — and hidden rather than unlaid-out, so the
-    // canvas keeps the size the run was planned for.
-    expect(screen.getByTestId("app-mounted")).toBe(viewer);
-    expect(viewer.closest(".route-offstage")).not.toBeNull();
-
-    fireEvent.click(screen.getByTestId("monitor-close"));
-    expect(screen.getByTestId("app-mounted")).toBe(viewer);
-    expect(viewer.closest(".route-offstage")).toBeNull();
-    expect(window.location.pathname).toBe("/w/ws-secret");
-  });
-
-  it("says there is nothing to read rather than failing when no run was recorded", () => {
-    window.history.replaceState({}, "", "/monitor");
     render(<WorkspaceRoot />);
 
-    expect(screen.getByTestId("monitor-empty")).toBeTruthy();
+    await screen.findByTestId("dashboard-mounted");
+    expect(createFromDatasetsMock).not.toHaveBeenCalled();
+    expect(window.location.pathname).toBe("/");
+    expect(window.location.search).toBe("");
+    expect(window.history.length).toBe(entriesBefore);
   });
 });

@@ -1,0 +1,58 @@
+.hud {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 11;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+  pointer-events: none;
+}
+
+.hud-strip {
+  display: block;
+  border-radius: var(--lc-radius);
+}
+
+/* A floating card over the canvas, like every control that sits on it. */
+.hud-legend {
+  pointer-events: auto;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  width: fit-content;
+  padding: 3px var(--lc-space-2);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-float);
+  -webkit-backdrop-filter: blur(16px) saturate(1.4);
+  backdrop-filter: blur(16px) saturate(1.4);
+  box-shadow: var(--lc-shadow-1);
+  color: var(--lc-text);
+  font-family: var(--lc-font-mono);
+  font-size: var(--lc-text-xs);
+  line-height: 1.6;
+}
+
+.hud-legend-title {
+  color: var(--lc-text-muted);
+}
+
+.hud-legend-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lc-space-1);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.hud-legend-toggle input {
+  margin: 0;
+  accent-color: var(--lc-accent);
+}
+
+/* The churn toggle's window label. */
+.hud-legend-window {
+  color: var(--lc-text-muted);
+}

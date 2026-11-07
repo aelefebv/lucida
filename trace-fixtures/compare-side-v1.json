@@ -1,0 +1,23 @@
+{
+  "label": "trace-fixtures/bundle-v1.json",
+  "runId": "local-healthy",
+  "planning": {
+    "prefetchDepth": 2,
+    "importanceWeight": 500,
+    "distanceWeight": 10,
+    "depthBiasView": 0,
+    "groupProxyPriorityBump": 100,
+    "proxyResidencyBudgetBytes": 134217728,
+    "detailRenderRadiusView": 2,
+    "coarseRenderRadiusView": 2,
+    "minimapLaneOffset": 0,
+    "minimapSeedFastMaxChunks": 128,
+    "minimapSeedBulkLaneOffset": 2600,
+    "detailLaneOffset": 500,
+    "proxyLaneOffset": 1000,
+    "prefetchLaneOffset": 1500,
+    "coarseLaneOffset": 2400
+  },
+  "cache": null,
+  "conditions": {}
+}

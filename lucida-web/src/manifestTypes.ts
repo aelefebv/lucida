@@ -1,4 +1,4 @@
-/** Dataset manifest and fetch source types — mirrors lucida-content/lucida-protocol serde output. */
+/** Dataset manifest and fetch source types. Mirrors lucida-content/lucida-protocol serde output. */
 
 export type DatasetKind =
   | "Single"
@@ -15,14 +15,10 @@ export interface TransformEdge {
   from: string;
   to: string;
   /**
-   * Affine transform from `from` to `to`, expressed in **voxel units** of
-   * the source entity's full-resolution image. Wire format is
-   * `{ matrix: [16 floats] }` in column-major order, so the 2D translation
-   * components live at `matrix[12]` (tx) and `matrix[13]` (ty).
-   *
-   * See `lucida-content/src/transform.rs` for the authoritative
-   * `VoxelTransform` definition and the unit contract producers must
-   * uphold.
+   * Affine transform from `from` to `to`, in voxel units of the source
+   * entity's full-resolution image. Column-major 16 floats, so the 2D
+   * translation is `matrix[12]` (tx) and `matrix[13]` (ty). The unit contract
+   * lives with `VoxelTransform` in `lucida-content/src/transform.rs`.
    */
   transform: { matrix: number[] };
 }
@@ -34,26 +30,29 @@ export interface MultiscaleInfo {
   generated_levels?: GeneratedLevelInfo[];
   data_type: string;
   /**
-   * Non-canonical axes (anything outside `{t,c,z,y,x}`) that were dropped
-   * from the canonical 5D shape and pinned to a fixed index when reading
-   * chunks. Optional/absent on payloads from older servers.
+   * Axes outside `{t,c,z,y,x}`, dropped from the 5D shape and pinned to a fixed
+   * index when reading chunks. Absent from older servers' payloads.
    */
   pinned_axes?: PinnedAxis[];
   /**
-   * Per-channel display metadata from the OME `omero.channels` block, in
-   * channel order. Optional/absent when the source has no omero block (the
-   * server omits the field for channel-less datasets), so consumers must fall
-   * back to a positional `Ch N` label. Best-effort and positional: may be
-   * shorter or longer than the actual channel count — index by channel and
-   * fall back per-index when an entry is missing.
+   * Per-channel metadata from OME `omero.channels`. Absent without an omero
+   * block, and may not match the channel count, so index by channel and fall
+   * back to a positional `Ch N` label per missing entry.
    */
   channel_infos?: ChannelInfo[];
+  /**
+   * How each coarser level was derived from the one above it, as the OME
+   * multiscale `type` declares it (for example `"gaussian"`). Absent when the
+   * source declares none; the layer panel then shows no method rather than
+   * guessing one.
+   */
+  downsampling_method?: string;
 }
 
 /**
- * Display metadata for a single channel (mirrors `lucida-content`'s
- * `ChannelInfo`). `label` is always a non-empty string when present; `color`
- * is the raw omero hex (no leading `#`) and is not consumed by this slice.
+ * Display metadata for one channel (mirrors `lucida-content`'s `ChannelInfo`).
+ * `label` is non-empty when present; `color` is the raw omero hex with no
+ * leading `#`.
  */
 export interface ChannelInfo {
   label: string;
@@ -100,9 +99,8 @@ export interface LayoutSpec {
 
 /**
  * One entry of an OME `image-label` color table (mirrors lucida-content's
- * `LabelColor`). `value` is the integer label id — carried as a number
- * because ids routinely exceed the 16-bit range; `rgba` is `[r, g, b, a]`
- * with each component `0..255`.
+ * `LabelColor`). `value` is the label id, a number because ids routinely
+ * exceed 16 bits; `rgba` components are `0..255`.
  */
 export interface LabelColor {
   value: number;
@@ -111,11 +109,9 @@ export interface LabelColor {
 
 /**
  * A segmentation-mask label attached to a source intensity image (mirrors
- * lucida-content's `LabelSpec`). A label carries its OWN multiscale image
- * — distinct axes, per-level geometry, scale, and integer dtype (e.g.
- * `Uint32`) from the source — so it can be streamed and drawn as an
- * overlay aligned by its own coordinate scale. `image.owner` is the entity
- * id owning the source image, used to place the overlay.
+ * lucida-content's `LabelSpec`). It carries its own multiscale image, with its
+ * own geometry, scale, and integer dtype, and is aligned by that scale.
+ * `image.owner` is the source image's owning entity, used for placement.
  */
 export interface LabelSpec {
   name: string;
@@ -136,34 +132,19 @@ export interface DatasetManifest {
   source_layouts: LayoutSpec[];
   default_layout_id: string | null;
   /**
-   * Segmentation labels attached to images in this dataset. Kept separate
-   * from `images` so a label never renders as an ordinary intensity image.
-   * Absent on the wire (and on manifests written before labels existed)
-   * when the dataset has none — consumers must tolerate `undefined`, like
-   * `channel_infos`.
+   * Kept apart from `images` so a label never renders as an intensity image.
+   * Absent when the dataset has none, so consumers must tolerate `undefined`.
    */
   labels?: LabelSpec[];
 }
 
-// ---------------------------------------------------------------------------
-// Wire forms and resolution
-//
-// Collection manifests would repeat one identical multiscale (and one
-// identical wire format) per tile — tens of thousands of times on a wide
-// collection — so the server encodes shared values ONCE: a top-level
-// `multiscales` table with per-image `multiscale_ref` indexes, a
-// `wire_formats` table with per-image `wire_format_ref` indexes, and pure-2D
-// placement edges as `translation: [tx, ty]` instead of a 16-element matrix.
-// Entries whose value is unique (every single-image dataset, and older
-// payloads/persisted documents predating the compact form) carry the inline
-// field instead.
-//
-// `resolveDatasetManifest` / `resolveFetchSource` are the ONLY places that
-// know this encoding: every ingest point (dataset_opened broadcast, snapshot
-// document manifests) resolves the wire form into the fully-populated
-// in-memory types above, so downstream consumers never do table lookups.
-// Table-resolved images intentionally share ONE multiscale object reference.
-// ---------------------------------------------------------------------------
+// Wire forms. A wide collection would repeat one multiscale and one wire format
+// per tile, so the server sends shared values once in `multiscales` and
+// `wire_formats` tables referenced by index, and pure-2D edges as
+// `translation: [tx, ty]`. Unique values, and older persisted documents, carry
+// the inline field. `resolveDatasetManifest` and `resolveFetchSource` are the
+// only code that knows this encoding; every ingest point resolves through them,
+// so downstream code never does table lookups.
 
 /** [`ImageSpec`] as serialized inside a manifest: inline `multiscale` or a
  *  `multiscale_ref` into the manifest's `multiscales` table. */
@@ -185,12 +166,8 @@ export interface TransformEdgeWire {
 
 export interface DatasetManifestWire {
   /**
-   * Compact-format marker: present (value 2) whenever the manifest uses a
-   * compact construct (`multiscales` table or `translation` edge), absent on
-   * fully-inline documents. Ignored by the resolver — decoding is driven by
-   * which fields each entry carries — and dropped from the resolved
-   * in-memory manifest; it exists so future readers can recognize a
-   * document's format generation without probing for compact fields.
+   * 2 when the manifest uses a compact construct, absent when fully inline.
+   * The resolver ignores it and decodes by which fields each entry carries.
    */
   format_version?: number;
   dataset_id: string;
@@ -230,18 +207,16 @@ export type FetchSourceWire =
   | { Local: LocalFetchDescriptor };
 
 /** The column-major 4x4 matrix `VoxelTransform::from_voxel_translation_2d`
- *  builds — the expansion of a wire `translation: [tx, ty]`. */
+ *  builds from a wire `translation: [tx, ty]`. */
 function translationMatrix(tx: number, ty: number): number[] {
   return [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, tx, ty, 0, 1];
 }
 
 /**
- * Resolve a wire manifest into the fully-populated in-memory shape: every
- * image ends up with an effective `multiscale` (table-resolved images share
- * one object reference — treat multiscales as immutable, copy-on-write) and
- * every transform edge with a full `matrix`. Throws on a reference outside
- * the shared table or an entry carrying neither form, mirroring the server's
- * own decoder.
+ * Resolve a wire manifest so every image has a `multiscale` and every edge a
+ * full `matrix`. Table-resolved images share one multiscale object, so treat
+ * multiscales as immutable. Throws on a bad reference or an entry with neither
+ * form, as the server's decoder does.
  */
 export function resolveDatasetManifest(wire: DatasetManifestWire): DatasetManifest {
   const table = wire.multiscales ?? [];

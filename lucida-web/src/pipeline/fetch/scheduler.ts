@@ -1,21 +1,14 @@
 /**
- * Pending queue + in-flight tracking + concurrency / bytes caps.
+ * Pending queue, in-flight tracking, and concurrency/bytes caps.
  *
  * Generic over the request shape so one class backs both the chunk and
- * proxy schedulers; the dedup ladder lives in `cpuCache.ts` and feeds
- * this with a pre-deduped list. The scheduler doesn't know about
- * decode, retry, or the cache — the `startFn` callback owns that work
- * and must call back via {@link correctInFlightBytes} +
- * {@link markInFlightDone} to close out the slot.
+ * proxy schedulers. The caller dedups, and its `startFn` owns decode, retry,
+ * and caching; it must close the slot via {@link correctInFlightBytes} and
+ * {@link markInFlightDone}.
  *
- * The pending queue is split in two (ADR 0044): a bounded, timestamped
- * ADMISSION WINDOW at the front, and an untimestamped BACKLOG behind it.
- * Both live in the same `pending` array — the window is simply its first
- * {@link SchedulerConfig.admissionWindow} entries — so ordering, drain,
- * and cancellation are unchanged. Only the per-key bookkeeping is
- * bounded. See the ADR for why: on an oversubscribed remote collection
- * the wanted set is ~21k requests re-submitted ~5x/s, and stamping all
- * of them cost ~9% of the main thread while saying nothing useful.
+ * Only the first {@link SchedulerConfig.admissionWindow} pending entries
+ * carry a timestamp (ADR 0044). The backlog behind them can be ~21k requests
+ * re-submitted ~5x/s, and stamping all of them costs real main-thread time.
  */
 
 import type { BurstLogger } from "./telemetry.ts";
@@ -101,8 +94,8 @@ export class Scheduler<Req extends SchedulableRequest> {
    * entered the front {@link admissionWindow} entries of `pending`, i.e.
    * when the scheduler committed to fetching it soon. Backlog entries
    * behind the window carry no stamp until promoted. The oldest stamp is
-   * the pending-starvation signal, and it is now bounded by the window
-   * rather than by how long ago a tile first became wanted.
+   * the pending-starvation signal, bounded by the window rather than by
+   * how long ago a tile first became wanted.
    */
   private enqueuedAt = new Map<string, number>();
 
@@ -168,7 +161,7 @@ export class Scheduler<Req extends SchedulableRequest> {
    * How many pending entries match `predicate`, without copying the queue.
    * Returns `null` when the queue is deeper than `cap`: the caller runs this
    * on the tick path, so the scan is bounded rather than proportional to a
-   * backlog that can be tens of thousands deep (issue #900).
+   * backlog that can be tens of thousands deep.
    */
   countPending(predicate: (req: Req) => boolean, cap: number): number | null {
     if (this.pending.length > cap) return null;
@@ -177,6 +170,18 @@ export class Scheduler<Req extends SchedulableRequest> {
       if (predicate(this.pending[i])) count++;
     }
     return count;
+  }
+
+  /**
+   * Visit every pending entry without copying the queue, unless it is deeper
+   * than `cap`, in which case visit none and return false. Bounded for the
+   * same reason as {@link countPending}: a caller on a periodic path must not
+   * pay for a backlog tens of thousands deep.
+   */
+  forEachPending(cap: number, visit: (req: Req) => void): boolean {
+    if (this.pending.length > cap) return false;
+    for (let i = 0; i < this.pending.length; i++) visit(this.pending[i]);
+    return true;
   }
 
   /** Age (ms) of the longest-waiting pending entry; 0 when empty. */
@@ -191,10 +196,8 @@ export class Scheduler<Req extends SchedulableRequest> {
 
   /**
    * The admission stamp for one key, or `undefined` for a backlog entry
-   * that has never been admitted (ADR 0044). No production caller since
-   * the debug panel's pending dump went with it (ADR 0052) — this is the
-   * seam the admission-window tests observe `enqueuedAt` through, which
-   * `oldestPendingAgeMs` and `admittedSize` only aggregate.
+   * that has never been admitted. Test seam: `oldestPendingAgeMs` and
+   * `admittedSize` only aggregate `enqueuedAt`.
    */
   enqueueTimeFor(key: string): number | undefined {
     return this.enqueuedAt.get(key);
@@ -210,11 +213,7 @@ export class Scheduler<Req extends SchedulableRequest> {
    * entries are stamped; a key already in the window keeps its original
    * stamp, so the starvation signal reflects first admission rather than
    * the most recent plan tick. Entries behind the window are retained in
-   * order and stamped when {@link drain} promotes them.
-   *
-   * Bounding the stamp map here is the whole point of the split: the
-   * caller hands us the complete wanted set on every rebuild, and on a
-   * large remote collection that is ~21k entries ~5x/s. Caller dedups;
+   * order and stamped when {@link drain} promotes them. Caller dedups;
    * the scheduler does no filtering.
    */
   enqueue(reqs: Req[], now: number = performance.now()): void {
@@ -365,7 +364,7 @@ export class Scheduler<Req extends SchedulableRequest> {
   }
 
   /**
-   * Abort IN-FLIGHT entries matching `predicate`, leaving the pending
+   * Abort in-flight entries matching `predicate`, leaving the pending
    * queue untouched. The predicate receives the scheduler key alongside
    * the entry so a caller matching on keys does not have to rebuild them.
    * Returns the keys removed.
@@ -373,7 +372,7 @@ export class Scheduler<Req extends SchedulableRequest> {
    * Use this instead of {@link cancelWhere} when the caller is about to
    * replace the pending queue anyway: `cancelWhere` walks every pending
    * entry, and on an oversubscribed collection that queue is tens of
-   * thousands deep (issue #900).
+   * thousands deep.
    */
   cancelInFlightWhere(
     predicate: (entry: InFlightEntry<Req>, key: string) => boolean,

@@ -3,18 +3,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { renderHook, act } from "@testing-library/react";
 
-// A mid-session snapshot (reconnect, or a snapshot resync after broadcast
-// loss) runs the SAME onSnapshot path as the join snapshot. These tests pin
-// the two properties that make that reuse safe:
-//
-//   1. Idempotence — a dataset already registered keeps its fetch pipeline
-//      and layer maps; nothing is double-created.
-//   2. Membership convergence — a dataset the snapshot's document no longer
-//      contains is removed locally (its remove_dataset broadcast may be
-//      exactly what the resync repaired).
-//
-// The Bridge and fetch-pipeline classes are instance-recording doubles (no
-// transport/workers); the Session and its catalogs are real.
+// A mid-session snapshot (reconnect, or resync after broadcast loss) runs the
+// same onSnapshot path as the join snapshot. That reuse is safe only if it is
+// idempotent (a registered dataset keeps its pipeline and layer maps) and
+// converges membership (a dataset the document no longer holds is removed,
+// since its remove_dataset broadcast may be what the resync repaired).
+// Bridge and fetch-pipeline classes are recording doubles; Session is real.
 vi.mock("../bridge.ts", () => {
   class MockBridge {
     static instances: MockBridge[] = [];
@@ -141,6 +135,7 @@ function makeParams(scene: ReturnType<typeof makeFakeScene>) {
         return scene as unknown as WasmScene;
       }),
       loopRef: { current: null },
+      canvasRef: { current: null },
       datasetsRef: { current: new Map<string, DatasetState>() },
       datasetCallbacksRef: { current: { removeDataset: vi.fn() } },
       bumpLayerSettingsVersion: vi.fn(),

@@ -1,13 +1,18 @@
 import { describe, it, expect, vi } from "vitest";
 
+import { diagnoseRun } from "./diagnose/diagnose.ts";
 import { TraceRecorder } from "./recorder.ts";
 import { noopSinkFactory } from "./sink.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./quiescence.ts";
 import {
   Boundary,
+  INPUT_KINDS,
+  interactionCause,
   LABEL_NONE,
   PHASE_UNSET,
+  PointEvent,
   RowOutcome,
+  TickCounter,
   TRACE_SCHEMA_VERSION,
 } from "./types.ts";
 
@@ -58,6 +63,10 @@ function makeRecorder(overrides: Partial<ConstructorParameters<typeof TraceRecor
       residentDetailChunks: 12,
       desiredCoarseChunks: 3,
       residentCoarseChunks: 3,
+      detailBytes: 0,
+      detailBudgetBytes: 0,
+      coarseBytes: 0,
+      coarseBudgetBytes: 0,
     }),
   });
   return { recorder, advance: (ms: number) => { clock += ms; } };
@@ -199,12 +208,127 @@ describe("TraceRecorder run lifecycle", () => {
   });
 });
 
+describe("TraceRecorder gesture rule", () => {
+  it("opens a run on each of the five inputs, under a cause that names the input", () => {
+    for (const input of INPUT_KINDS) {
+      const { recorder } = makeRecorder();
+      recorder.noteInput(input);
+      recorder.closeRun("explicit");
+
+      const [run] = recorder.exportDocument().runs;
+      expect(run.header.cause).toEqual(interactionCause(input));
+      expect(run.header.cause?.source).toBe(input);
+    }
+  });
+
+  it("names the epoch the input moves: the camera inputs a view, the selectors a selection", () => {
+    expect(interactionCause("pan").epoch).toBe("view");
+    expect(interactionCause("zoom").epoch).toBe("view");
+    expect(interactionCause("orbit").epoch).toBe("view");
+    expect(interactionCause("scrub").epoch).toBe("selection");
+    expect(interactionCause("select").epoch).toBe("selection");
+  });
+
+  it("makes one run of a continuous drag, and a second run of the next gesture", () => {
+    vi.useFakeTimers();
+    try {
+      const { recorder } = makeRecorder();
+      // A drag. The page goes quiescent between two pointer events, and the
+      // second arrives before the hold from that publication has elapsed.
+      recorder.noteInput("pan");
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      vi.advanceTimersByTime(400);
+      recorder.noteInput("pan");
+      // 800 ms after the first quiescent publication the run is still open.
+      // The hold counts from the last input, not the first.
+      vi.advanceTimersByTime(400);
+      expect(recorder.isRunOpen).toBe(true);
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_800));
+      vi.advanceTimersByTime(500);
+      expect(recorder.isRunOpen).toBe(false);
+
+      recorder.noteInput("zoom");
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 2_400));
+      vi.advanceTimersByTime(500);
+
+      const runs = recorder.exportDocument().runs;
+      expect(runs.map(run => run.header.cause?.source)).toEqual(["pan", "zoom"]);
+      expect(runs.map(run => run.header.endReason)).toEqual(["quiescent", "quiescent"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("extends an open dataset-open run rather than opening a second one", () => {
+    vi.useFakeTimers();
+    try {
+      const { recorder } = makeRecorder();
+      recorder.openRun(OPEN_CAUSE);
+      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      vi.advanceTimersByTime(400);
+      recorder.noteInput("pan");
+      vi.advanceTimersByTime(400);
+      expect(recorder.isRunOpen).toBe(true);
+      recorder.closeRun("explicit");
+
+      const runs = recorder.exportDocument().runs;
+      expect(runs).toHaveLength(1);
+      expect(runs[0].header.cause).toEqual(OPEN_CAUSE);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not open a second run on a content epoch during an interaction run", () => {
+    const { recorder } = makeRecorder();
+    recorder.noteInput("orbit");
+    recorder.noteOpenSent("open-1");
+    recorder.openRun(OPEN_CAUSE);
+    recorder.noteOpenSettled("open-1");
+    recorder.closeRun("explicit");
+
+    const runs = recorder.exportDocument().runs;
+    expect(runs).toHaveLength(1);
+    expect(runs[0].header.cause).toEqual(interactionCause("orbit"));
+    expect(runs[0].datasetOpens).toHaveLength(1);
+  });
+
+  it("leaves the dataset-open cause as it was", () => {
+    const { recorder } = makeRecorder();
+    recorder.noteOpenSent("open-1");
+    recorder.closeRun("explicit");
+
+    expect(recorder.exportDocument().runs[0].header.cause).toEqual({
+      epoch: "content",
+      dirtyKind: "interactive",
+      source: "dataset_open_request",
+    });
+  });
+
+  it("opens nothing on an input before the page can say what conditions apply", () => {
+    const { recorder } = makeRecorder();
+    recorder.setEnvironment(null);
+    recorder.noteInput("pan");
+
+    expect(recorder.isRunOpen).toBe(false);
+    expect(recorder.exportDocument().runs).toHaveLength(0);
+  });
+});
+
 describe("TraceRecorder run header", () => {
   it("carries the conditions that make two runs comparable", () => {
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
     advance(250);
-    recorder.setGpu({ vendor: "v", architecture: "a", device: "d", description: "desc" });
+    const gpu = {
+      vendor: "v",
+      architecture: "a",
+      device: "d",
+      description: "desc",
+      fallback: true,
+      timestampQueries: false,
+    };
+    recorder.setGpu(gpu);
     recorder.closeRun("explicit");
 
     const { header } = recorder.exportDocument().runs[0];
@@ -215,9 +339,28 @@ describe("TraceRecorder run header", () => {
     expect(header.viewport.deviceWidth).toBe(1600);
     expect(header.cacheWarmth.detailChunks).toBe(4);
     expect(header.build.version).toBeTypeOf("string");
-    expect(header.gpu).toEqual({ vendor: "v", architecture: "a", device: "d", description: "desc" });
+    expect(header.gpu).toEqual(gpu);
     expect(header.quiescenceHoldMs).toBe(500);
     expect(header.durationUs).toBe(250_000);
+  });
+
+  it("carries a GPU pass time on a reading only when one arrived", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    advance(10);
+    recorder.noteReading(3, 2, 4_000, 1_000, 1_200);
+    advance(10);
+    recorder.noteReading(3, 2, 4_000, 1_000);
+    advance(10);
+    recorder.noteReading(3, 2, 4_000, 1_000, null);
+    recorder.closeRun("explicit");
+
+    const { readings } = recorder.exportDocument().runs[0];
+    expect(readings).toHaveLength(3);
+    expect(readings[0].gpuPassUs).toBe(1_200);
+    expect(readings[0].frameTimeUs).toBe(4_000);
+    expect("gpuPassUs" in readings[1]).toBe(false);
+    expect("gpuPassUs" in readings[2]).toBe(false);
   });
 
   it("reports what was still outstanding at settle rather than hiding it", () => {
@@ -249,6 +392,19 @@ describe("TraceRecorder rows", () => {
     expect(serialised.chunkKey).toBe("1/0/0/0/2/3");
   });
 
+  it("closes the wire with the bytes it delivered, in one call", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    advance(40);
+    recorder.noteBytesReceived(row, 326_144);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.wire?.durationUs).toBe(40_000);
+    expect(serialised.bytes).toBe(326_144);
+  });
+
   it("ignores stamps for a row whose run has already closed", () => {
     const { recorder } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
@@ -275,10 +431,8 @@ describe("TraceRecorder rows", () => {
 describe("TraceRecorder plan and queue", () => {
   it("births a row at dispatch, dating plan and queue from the pass that enqueued it", () => {
     // A row is born at dispatch, so the one call that makes it also closes
-    // `plan`, brackets `queue` and opens `wire` (#949). Three recorder calls
-    // per chunk was three times the event count ADR 0049's tick ceiling was
-    // derived from, and two of them were handle round-trips — a `resolve`, a
-    // generation divide and a modulo — buying nothing.
+    // `plan`, brackets `queue` and opens `wire`. One call per chunk keeps the
+    // event count inside the tick ceiling ADR 0049 derived.
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
 
@@ -412,6 +566,7 @@ describe("TraceRecorder server rows", () => {
     decompress_us: [PHASE_UNSET],
     slice_encode_us: [PHASE_UNSET],
     handoff_us: [PHASE_UNSET],
+    backend_bytes: [65_536],
     coalesced_onto: [LABEL_NONE],
   };
 
@@ -691,6 +846,7 @@ describe("TraceRecorder dataset opens", () => {
       decompress_us: [PHASE_UNSET],
       slice_encode_us: [PHASE_UNSET],
       handoff_us: [PHASE_UNSET],
+      backend_bytes: [null],
       coalesced_onto: [LABEL_NONE],
     };
   }
@@ -880,9 +1036,9 @@ describe("what a run in progress can say about itself (#937)", () => {
     expect(rowsIn("upload")).toBe(1);
 
     // Every in-flight row the recorder made is in a phase: a chunk row is
-    // born at dispatch with `queue` stamped and `wire` open (#949), so the
-    // unstamped residual — which the table below the recorder can still hold
-    // — is empty for rows that came through this path.
+    // born at dispatch with `queue` stamped and `wire` open, so the unstamped
+    // residual, which the table below the recorder can still hold, is empty
+    // for rows that came through this path.
     expect(progress.unstamped).toBe(0);
     const inBar = progress.occupancy.reduce((total, slot) => total + slot.rows, 0);
     expect(inBar).toBe(progress.inFlight);
@@ -907,5 +1063,217 @@ describe("what a run in progress can say about itself (#937)", () => {
 
     expect(recorder.liveProgress!.quiescent).toBe(false);
     expect(recorder.liveProgress!.quiescenceReason).toBe("chunks_in_flight");
+  });
+});
+
+describe("the provisional reading over a trailing window (#1057)", () => {
+  it("says nothing while no labelled run is open", () => {
+    const { recorder } = makeRecorder();
+    expect(recorder.provisionalReading()).toBeNull();
+    recorder.beginChunkRow(CHUNK, 0);
+    recorder.noteReading(10, 4, 3_000, 1_000);
+    expect(recorder.provisionalReading()).toBeNull();
+  });
+
+  it("reads the window from the readings and the occupancy from the tally, and closes nothing", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    // A queue that will not drain: pinned at four in flight with a hundred pending.
+    for (let i = 0; i < 60; i++) {
+      recorder.noteReading(100, 4, 2_000, 1_000_000);
+      advance(100);
+    }
+    const onTheWire = recorder.beginChunkRow(CHUNK, 0);
+    const decoding = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stamp(decoding, Boundary.DecodeStart);
+    recorder.noteQuiescence(evaluateQuiescence(inputs({ inFlight: 2, pending: 100 }), 7_000));
+
+    const reading = recorder.provisionalReading()!;
+
+    expect(reading.provisional).toBe(true);
+    expect(reading.runId).toBe(recorder.liveProgress!.runId);
+    expect(reading.window).toMatchObject({ startMs: 1_000, endMs: 6_000, spanMs: 5_000, wholeRun: false });
+    expect(reading.readings.n).toBe(50);
+    expect(reading.readings.carried).toBe(true);
+    expect(reading.limiter).toMatchObject({ cap: 4, pinnedPct: 100, pending: 100, backlogEtaS: null });
+    expect(reading.topFinding?.severity).toBe("saturated");
+    expect(reading.quiescence).toEqual({ quiescent: false, reason: "chunks_in_flight" });
+    expect(reading.occupancy.inFlight).toBe(2);
+    expect(reading.occupancy.phases.find(slot => slot.phase === "wire")?.rows).toBe(1);
+    expect(reading.occupancy.phases.find(slot => slot.phase === "decode")?.rows).toBe(1);
+    expect(reading.rows.made).toBe(2);
+    expect(reading.rows.walked).toBe(0);
+
+    expect(recorder.isRunOpen).toBe(true);
+    expect(recorder.concludedRuns.count).toBe(0);
+    expect(recorder.provisionalReading()!.runId).toBe(reading.runId);
+    recorder.stamp(onTheWire, Boundary.DecodeStart);
+    expect(recorder.provisionalReading()!.occupancy.phases.find(slot => slot.phase === "decode")?.rows).toBe(2);
+  });
+
+  it("takes a caller's window and clamps it to the run so far", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    for (let i = 0; i < 8; i++) {
+      recorder.noteReading(0, 1, 1_000, 0);
+      advance(100);
+    }
+
+    expect(recorder.provisionalReading({ windowMs: 300 })!.window).toMatchObject({
+      startMs: 500,
+      endMs: 800,
+      wholeRun: false,
+    });
+    expect(recorder.provisionalReading()!.window).toMatchObject({ startMs: 0, endMs: 800, wholeRun: true });
+    expect(() => recorder.provisionalReading({ windowMs: -1 })).toThrow(/positive number/);
+  });
+
+  it("leaves nothing of itself in the run it read, so the verdict cannot be reading it", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    for (let i = 0; i < 20; i++) {
+      recorder.noteReading(500, 8, 1_000, 0);
+      advance(100);
+    }
+    const reading = recorder.provisionalReading()!;
+    expect(reading.topFinding?.severity).toBe("saturated");
+    expect("verdict" in reading).toBe(false);
+
+    recorder.closeRun("timeout");
+    const run = recorder.exportDocument().runs[0];
+    expect(JSON.stringify(run)).not.toContain("provisional");
+    expect(run.readings).toHaveLength(20);
+  });
+
+  /**
+   * The gate's half of the proof lives with the gate: it reads a closed
+   * run's verdict and nothing else. This is the other half: a window that
+   * read saturated while the run was open closes to a clear verdict once
+   * the backlog has drained, because the verdict is derived from the closed
+   * run and not from any reading taken along the way.
+   */
+  it("does not follow the run into its verdict: a saturated window can close clear", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    // Pinned at eight in flight with five hundred pending and nothing draining.
+    for (let i = 0; i < 20; i++) {
+      recorder.noteReading(500, 8, 1_000, 0);
+      advance(100);
+    }
+    expect(recorder.provisionalReading()!.topFinding?.severity).toBe("saturated");
+
+    // The backlog drains and the page goes quiescent.
+    for (let i = 1; i <= 10; i++) {
+      recorder.noteReading(Math.max(0, 500 - i * 50), i < 10 ? 8 : 0, 1_000, 0);
+      advance(100);
+    }
+    expect(recorder.provisionalReading()!.topFinding?.severity).not.toBe("saturated");
+    recorder.closeRun("quiescent");
+
+    const document = diagnoseRun(recorder.exportDocument().runs[0]);
+    expect(document.verdict.kind).toBe("clear");
+    expect(document.findings.find(finding => finding.severity === "saturated")).toBeUndefined();
+  });
+});
+
+describe("the live timeline over an open run", () => {
+  it("says nothing while no labelled run is open", () => {
+    const { recorder } = makeRecorder();
+    expect(recorder.liveTimeline()).toBeNull();
+    recorder.noteReading(10, 4, 3_000, 1_000);
+    expect(recorder.liveTimeline()).toBeNull();
+  });
+
+  it("draws the per-tick tiers of the window and walks no row, closing nothing", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    for (let i = 0; i < 40; i++) {
+      recorder.noteReading(100 - i, 4, 2_000 + (i % 5) * 1_000, 1_000_000 + i * 1_000);
+      if (i % 10 === 0) {
+        const scratch = recorder.beginTick("ds");
+        scratch!.counters[TickCounter.LaneDetail] = 3;
+        recorder.commitTick();
+      }
+      advance(100);
+    }
+    recorder.recordPointEvent(PointEvent.Eviction, "evicted", CHUNK, 0);
+    // Rows exist and are not walked: the row-derived charts say so.
+    recorder.beginChunkRow(CHUNK, 0);
+
+    const live = recorder.liveTimeline()!;
+
+    expect(live.provisional).toBe(true);
+    expect(live.runId).toBe(recorder.liveProgress!.runId);
+    expect(live.window).toMatchObject({ startMs: 0, endMs: 4_000, wholeRun: true });
+    expect(live.timeline.rowsWalked).toBe(false);
+    const charts = live.timeline.charts;
+    const inFlight = charts.find(chart => chart.id === "in-flight")!;
+    expect(inFlight.series[0]).toMatchObject({ id: "in-flight", recorded: true, max: 4, samples: 40 });
+    const planned = charts.find(chart => chart.id === "planned.lane")!;
+    expect(planned.series.find(series => series.id === "detail")).toMatchObject({ recorded: true, samples: 4 });
+    const events = charts.find(chart => chart.id === "events")!;
+    expect(events.series.find(series => series.id === "eviction")).toMatchObject({ recorded: true, samples: 1 });
+    expect(events.series.find(series => series.id === "plan")).toMatchObject({ recorded: true, samples: 4 });
+    for (const id of ["occupancy.browser", "occupancy.server", "occupancy.metadata", "in-flight.lane"]) {
+      const chart = charts.find(candidate => candidate.id === id)!;
+      expect(chart.recorded, id).toBe(false);
+      expect(chart.statement, id).toMatch(/closes/);
+    }
+    expect(live.timeline.intervals).toEqual([
+      expect.objectContaining({ runId: live.runId, current: true, endReason: null, startMs: 0, endMs: 4_000 }),
+    ]);
+
+    expect(recorder.isRunOpen).toBe(true);
+    expect(recorder.concludedRuns.count).toBe(0);
+  });
+
+  it("takes a caller's window, reads only its stretch of the rings, and places the closed intervals on the run's clock", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    advance(1_000);
+    recorder.closeRun("explicit");
+    advance(2_000);
+    recorder.openRun(OPEN_CAUSE);
+    for (let i = 0; i < 30; i++) {
+      recorder.noteReading(0, i < 20 ? 2 : 6, 1_000, 0);
+      advance(100);
+    }
+
+    const live = recorder.liveTimeline({ windowMs: 1_000 })!;
+
+    expect(live.window).toMatchObject({ startMs: 2_000, endMs: 3_000, wholeRun: false });
+    const inFlight = live.timeline.charts.find(chart => chart.id === "in-flight")!.series[0];
+    // Only the readings from the window's start on, led by the one before it.
+    expect(inFlight).toMatchObject({ recorded: true, samples: 11, min: 6, max: 6 });
+    // The first run closed 3 s before this one opened. The steady state
+    // between them recorded nothing, so it was never retained and the axis
+    // shows a gap there rather than a band.
+    expect(live.timeline.intervals.map(interval => [interval.kind, interval.startMs, interval.endMs])).toEqual([
+      ["run", -3_000, -2_000],
+      ["run", 0, 3_000],
+    ]);
+    expect(live.timeline.intervals[0]).toMatchObject({ current: false, endReason: "explicit" });
+    expect(live.timeline.intervals[1]).toMatchObject({ current: true, endReason: null });
+    expect(() => recorder.liveTimeline({ windowMs: 0 })).toThrow(/positive number/);
+  });
+
+  it("leaves nothing of itself in the run it read", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    for (let i = 0; i < 5; i++) {
+      recorder.noteReading(0, 1, 1_000, 0);
+      advance(100);
+    }
+    const live = recorder.liveTimeline()!;
+    expect("verdict" in live).toBe(false);
+
+    recorder.closeRun("quiescent");
+    const run = recorder.exportDocument().runs[0];
+    expect(JSON.stringify(run)).not.toContain("provisional");
+    expect(run.readings).toHaveLength(5);
+    // The closed run's timeline is the same closed set, with the rows walked.
+    const timeline = diagnoseRun(run).timeline;
+    expect(timeline.rowsWalked).toBe(true);
+    expect(timeline.charts.map(chart => chart.id)).toEqual(live.timeline.charts.map(chart => chart.id));
   });
 });

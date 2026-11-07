@@ -8,7 +8,7 @@
  * Pure collaborator: no I/O, no clocks, no worker-member-id knowledge.
  */
 
-import type { ResidencyTier } from "./types.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
 
 function channelKeyFor(imageId: string, c: number): string {
   return `${imageId}|${c}`;

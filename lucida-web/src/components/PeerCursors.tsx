@@ -1,29 +1,16 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
 import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
 import { projectToCanvas } from "./minimapMath.ts";
 import { makeWorldToScreen } from "./cameraProjection.ts";
-
-const PEER_COLORS = [
-  "#FF6B6B",
-  "#4ECDC4",
-  "#FFE66D",
-  "#A8E6CF",
-  "#FF8B94",
-  "#B5EAD7",
-  "#C7CEEA",
-  "#F8B500",
-];
-
-function peerColor(clientId: ClientId): string {
-  return PEER_COLORS[clientId % PEER_COLORS.length];
-}
+import { peerColor } from "../peerColor.ts";
+import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
+import "./PeerCursors.css";
 
 /**
- * Display label for a peer's cursor (#540). The server-authored
- * `identity.display_name` when present and non-blank; otherwise the numeric
- * client id (the historic fallback) so anonymous/legacy peers still get a
- * stable label.
+ * A peer's cursor label: the server-authored `identity.display_name` when
+ * non-blank, else the numeric client id, so anonymous peers still get a stable
+ * label.
  */
 function peerLabel(clientId: ClientId, identity?: PeerIdentity | null): string {
   const name = identity?.display_name?.trim();
@@ -31,11 +18,9 @@ function peerLabel(clientId: ClientId, identity?: PeerIdentity | null): string {
 }
 
 /**
- * Single-character chip glyph for the avatar fallback: the first letter of
- * the display name, then the server-precomputed `initial` (derived from
- * display-name-or-email server-side — the raw email never reaches the
- * client), else "?". Used when there is no avatar image (none supplied, or
- * it failed to load).
+ * The avatar fallback glyph: the display name's first letter, then the
+ * server-computed `initial`, else "?". The server computes `initial` so the raw
+ * email never reaches the client.
  */
 function peerInitial(identity?: PeerIdentity | null): string {
   const name = identity?.display_name?.trim();
@@ -73,7 +58,7 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: n
   const parts: string[] = [];
   let dim = false;
 
-  // Z is a spatial axis in 3D — skip Z badge/dimming when local viewer is in 3D
+  // Z is a spatial axis in 3D, so skip the Z badge and dimming there.
   if (!localIs3d) {
     const peerZ = view.z_range?.start;
     if (peerZ !== undefined && peerZ !== localZ) {
@@ -105,7 +90,7 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
   const chevronLabelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const dotRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const namePillRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
-  // Mirror props into refs so the RAF tick below reads the latest values
+  // Mirror props into refs so the frame tick below reads the latest values
   // each frame without stale closures and without re-running the effect on
   // every prop change. Mirror updates are render-phase, idempotent, and
   // never read during the same render they're written in — exactly the
@@ -123,9 +108,9 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
   // eslint-disable-next-line react-hooks/refs
   followTargetRef.current = followTarget;
 
+  // A peer's move arrives as a render; it needs a frame to be placed.
+  useWakeFramesOnRender();
   useEffect(() => {
-    let rafId: number;
-
     const tick = () => {
       const scene = wasmSceneRef.current;
       if (scene) {
@@ -224,42 +209,30 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
             if (chevronEl) { chevronEl.style.display = "none"; }
             if (chevronLabelEl) { chevronLabelEl.style.display = "none"; }
             if (dotEl) { dotEl.style.display = isDefaulted ? "" : "none"; }
-            // "flex" (not "") so the avatar + name pill keeps its flex row
-            // layout when the RAF re-shows it (#540 added the avatar/name flex
-            // container; clearing display to "" would fall back to block).
+            // "flex", not "": clearing display would drop the avatar and name
+            // pill's flex row back to block layout.
             if (namePillEl) { namePillEl.style.display = "flex"; }
           }
         }
       }
 
-      rafId = requestAnimationFrame(tick);
     };
 
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-    // myId, peers, etc. are read via the mirror refs above so the RAF tick
-    // sees the latest values without re-mounting the loop on every change.
+    return frameClock.subscribe(tick);
+    // myId, peers, etc. are read via the mirror refs above so the tick sees
+    // the latest values without re-subscribing on every change.
   }, [wasmSceneRef, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const peerEntries = Array.from(peers.entries()).filter(
     ([id]) => id !== myId,
   );
 
+  // The tick shows and hides each part by writing `style.display`, so every
+  // part starts hidden inline rather than in the stylesheet, where clearing
+  // the inline value would fall back to hidden.
   return (
-    <div
-      style={{
-        position: "absolute",
-        top: 0,
-        left: 0,
-        width: "100%",
-        height: "100%",
-        pointerEvents: "none",
-        overflow: "hidden",
-        zIndex: 11,
-      }}
-    >
+    <div className="lc-peer-cursors">
       {peerEntries.map(([clientId, peer]) => {
-        const color = peerColor(clientId);
         const { dim, badge } = dimBadge(peer, z, t, c, viewMode === "3d");
         return (
           <div
@@ -268,40 +241,19 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
               if (el) labelRefs.current.set(clientId, el);
               else labelRefs.current.delete(clientId);
             }}
-            style={{
-              position: "absolute",
-              top: 0,
-              left: 0,
-              display: "none",
-              willChange: "transform",
-              opacity: dim ? 0.5 : 1,
-            }}
+            className="lc-peer-cursor"
+            data-dim={dim || undefined}
+            style={{ "--peer-color": peerColor(clientId), display: "none" } as CSSProperties}
           >
             <div
               ref={(el) => {
                 if (el) namePillRefs.current.set(clientId, el);
                 else namePillRefs.current.delete(clientId);
               }}
-              style={{
-                position: "absolute",
-                left: 12,
-                top: -30,
-                display: "flex",
-                alignItems: "center",
-                gap: 4,
-                fontSize: 11,
-                fontFamily: "monospace",
-                color: "black",
-                backgroundColor: color,
-                padding: "1px 4px 1px 1px",
-                borderRadius: 999,
-                whiteSpace: "nowrap",
-                opacity: 0.9,
-                // Keep the pill legible over the bright WebGPU canvas.
-                boxShadow: "0 0 0 1px rgba(0,0,0,0.25)",
-              }}
+              className="lc-peer-pill"
+              style={{ display: "none" }}
             >
-              <PeerCursorAvatar identity={peer.identity} color={color} />
+              <PeerCursorAvatar identity={peer.identity} />
               <span data-testid="peer-cursor-name">
                 {peerLabel(clientId, peer.identity)}{badge ? ` ${badge}` : ""}
               </span>
@@ -311,53 +263,24 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
                 if (el) dotRefs.current.set(clientId, el);
                 else dotRefs.current.delete(clientId);
               }}
-              style={{
-                position: "absolute",
-                display: "none",
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                backgroundColor: color,
-                left: -4,
-                top: -4,
-                opacity: 0.9,
-              }}
+              className="lc-peer-dot"
+              style={{ display: "none" }}
             />
             <div
               ref={(el) => {
                 if (el) chevronRefs.current.set(clientId, el);
                 else chevronRefs.current.delete(clientId);
               }}
-              style={{
-                position: "absolute",
-                display: "none",
-                width: 0,
-                height: 0,
-                borderLeft: `10px solid ${color}`,
-                borderTop: "6px solid transparent",
-                borderBottom: "6px solid transparent",
-                transformOrigin: "center center",
-                left: -5,
-                top: -6,
-              }}
+              className="lc-peer-chevron"
+              style={{ display: "none" }}
             />
             <div
               ref={(el) => {
                 if (el) chevronLabelRefs.current.set(clientId, el);
                 else chevronLabelRefs.current.delete(clientId);
               }}
-              style={{
-                position: "absolute",
-                display: "none",
-                fontSize: 9,
-                fontFamily: "monospace",
-                color: "black",
-                backgroundColor: color,
-                padding: "0 2px",
-                borderRadius: 2,
-                lineHeight: "14px",
-                whiteSpace: "nowrap",
-              }}
+              className="lc-peer-chevron-label"
+              style={{ display: "none" }}
             >
               {clientId}
             </div>
@@ -371,69 +294,37 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
 const AVATAR_SIZE = 16;
 
 /**
- * Auth icon for a peer's cursor pill (#540). Renders the avatar image from
- * `identity.picture_url` when present; on a missing or broken image it falls
- * back to a colored chip showing the peer's initial. The chip is also the
- * direct render when no `picture_url` was supplied (dev sessions) or when the
- * peer has no `identity` at all (anonymous/legacy peers).
+ * Avatar for a peer's cursor pill from `identity.picture_url`, falling back to
+ * a chip with the peer's initial when the image is missing or broken, or the
+ * peer has no `identity`.
  *
- * Broken remote images are handled with local `errored` state flipped from
- * the <img>'s onError, so one failed avatar degrades to its chip without
- * affecting cursor positioning or other peers.
+ * The load failure is local state keyed by URL. Local state keeps one
+ * broken avatar from disturbing cursor positioning or other peers. Keying
+ * by URL lets a changed `picture_url` retry by itself. A boolean would need
+ * setState in an effect to reset it, which `react-hooks/set-state-in-effect`
+ * rejects.
  */
-function PeerCursorAvatar({
-  identity,
-  color,
-}: {
-  identity?: PeerIdentity | null;
-  color: string;
-}) {
-  const [errored, setErrored] = useState(false);
+function PeerCursorAvatar({ identity }: { identity?: PeerIdentity | null }) {
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const pictureUrl = identity?.picture_url;
   const initial = peerInitial(identity);
 
-  if (pictureUrl && !errored) {
+  if (pictureUrl && pictureUrl !== failedUrl) {
     return (
       <img
         src={pictureUrl}
         alt=""
         data-testid="peer-cursor-avatar"
+        className="lc-peer-avatar"
         width={AVATAR_SIZE}
         height={AVATAR_SIZE}
-        onError={() => setErrored(true)}
-        style={{
-          width: AVATAR_SIZE,
-          height: AVATAR_SIZE,
-          borderRadius: "50%",
-          objectFit: "cover",
-          // White ring keeps the avatar distinct from the colored pill.
-          boxShadow: "0 0 0 1px rgba(255,255,255,0.85)",
-        }}
+        onError={() => setFailedUrl(pictureUrl)}
       />
     );
   }
 
   return (
-    <span
-      aria-hidden="true"
-      data-testid="peer-cursor-initial"
-      style={{
-        display: "inline-flex",
-        alignItems: "center",
-        justifyContent: "center",
-        width: AVATAR_SIZE,
-        height: AVATAR_SIZE,
-        borderRadius: "50%",
-        // Solid dark chip with the same per-peer color ring so the initial
-        // stays legible regardless of the pill's background color.
-        background: "rgba(20,20,24,0.9)",
-        color: "#fff",
-        fontWeight: 700,
-        fontSize: 9,
-        lineHeight: `${AVATAR_SIZE}px`,
-        boxShadow: `0 0 0 1px ${color}`,
-      }}
-    >
+    <span aria-hidden="true" data-testid="peer-cursor-initial" className="lc-peer-avatar lc-peer-initial">
       {initial}
     </span>
   );

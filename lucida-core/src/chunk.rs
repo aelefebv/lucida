@@ -50,20 +50,6 @@ pub struct ChunkRequestPlan {
     pub prefetch: Vec<ChunkCoord>,
 }
 
-/// Pick the best multiscale level for a given zoom.
-///
-/// `num_levels` is the total number of resolution levels (level 0 = full res).
-/// Returns the level index where one chunk pixel ≈ one screen pixel.
-pub fn select_level(zoom: f64, num_levels: u32) -> u32 {
-    if num_levels == 0 {
-        return 0;
-    }
-    // Each level halves the resolution, so level L has scale 1/2^L.
-    // We want the coarsest level where the data resolution still exceeds screen resolution.
-    let level = (-zoom.log2()).floor().max(0.0) as u32;
-    level.min(num_levels - 1)
-}
-
 /// Compute which chunk grid cells intersect the visible region's bounds and z range.
 ///
 /// `level_geo` is the geometry at the target level (shape, chunk_shape, grid_shape).
@@ -313,26 +299,6 @@ mod tests {
             grid_shape,
             scale: [1.0; 5],
         }
-    }
-
-    #[test]
-    fn level_0_at_full_zoom() {
-        assert_eq!(select_level(1.0, 5), 0);
-    }
-
-    #[test]
-    fn zoomed_out_selects_coarser_level() {
-        assert_eq!(select_level(0.25, 5), 2);
-    }
-
-    #[test]
-    fn never_exceeds_max_level() {
-        assert_eq!(select_level(0.001, 3), 2);
-    }
-
-    #[test]
-    fn zoomed_in_past_native_stays_at_level_0() {
-        assert_eq!(select_level(4.0, 5), 0);
     }
 
     #[test]

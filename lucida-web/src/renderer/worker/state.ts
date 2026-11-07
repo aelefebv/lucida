@@ -1,37 +1,39 @@
 /**
- * Worker-side renderer state — every per-session Map / counter / pointer
- * the worker dispatcher owns. Threaded through {@link WorkerCtx.state};
- * handlers read/write `ctx.state.<field>` rather than reaching for
- * module globals.
- *
- * Renderer-class singletons (slice/volume/cursor/compositor renderers)
- * and persistent GPU resources (LUT cache, offscreen pool, dummy
- * textures) intentionally stay at module scope in `gpu.worker.ts`.
- *
- * Created in `case "init"` by {@link createInitialState}; torn down by
- * `case "destroy"`. GPU resources held by atlas / descriptor / proxy
- * pools are destroyed separately via the per-mode `destroyAll*Resources`
- * helpers.
+ * Per-session worker renderer state, threaded through
+ * {@link WorkerCtx.state} so handlers don't reach for module globals.
+ * Renderer singletons and persistent GPU resources (LUT cache, offscreen
+ * pool, dummy textures) stay at module scope in `gpu.worker.ts`. Created
+ * on `init`, dropped on `destroy`; pool GPU resources are freed
+ * separately by the per-mode `destroyAll*Resources` helpers.
  */
 
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import type { ColdStateMessage } from "../workerProtocol.ts";
-import type { AtlasState, LabelVolumePool, LodIndirectionMeta } from "../volume/atlas.ts";
+import type { AtlasState, LabelVolumePool } from "../volume/atlas.ts";
 import type { SliceAtlasState, LabelSlicePool } from "../slice/atlas.ts";
 import type { ProxyAtlasState } from "../proxyAtlas.ts";
 import type { EntityProxyDescriptor } from "../workerContext.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
+import type { EntitySource } from "../entitySources.ts";
+import type { PendingFrameCapture } from "./captureFrame.ts";
+import { CEILING_BUDGETS, type DeviceBudgets } from "../../deviceBudget.ts";
+
+/** The GPU atlas budgets a pool is sized under (ADR 0068). */
+export type AtlasBudgets = Pick<DeviceBudgets, "volumeAtlasBytes" | "sliceAtlasBytes">;
 
 export interface RendererState {
-  // ── Cold-state routing ────────────────────────────────────────────
   /** memberId → datasetId (canonical: imageId or imageId:chN; group-as-proxy resolves to entityId). */
   memberToDataset: Map<string, string>;
-  /** memberId → detail pool key. Legacy compatibility for callers that have not become tier-aware. */
-  memberToPool: Map<string, string>;
-  /** `${memberId}|${tier}` → pool key encoding (datasetId, channel, tier, chunkDims). */
-  memberTierToPool: Map<string, string>;
-  /** Per-dataset entityMetas snapshot captured during the most recent cold state. */
-  currentEntityMetasByDataset: Map<string, Map<string, LodIndirectionMeta[]>>;
+  /**
+   * memberId → (`sourceKey(tier, level)` → pool key): the pool each
+   * indirection section a member holds lives in. Chunk uploads and the
+   * wanted set route by (member, tier, level) through this map, since
+   * the detail tier holds several levels per member and levels with
+   * different chunk shapes live in different pools.
+   */
+  memberSourcePools: Map<string, Map<string, string>>;
+  /** Per-dataset sections snapshot captured during the most recent cold state. */
+  currentSourcesByDataset: Map<string, Map<string, EntitySource[]>>;
   /** groupId → set of child tileEntityIds (used for GroupProxy3D fan-out). */
   groupToTiles: Map<string, Set<string>>;
   /**
@@ -41,7 +43,6 @@ export interface RendererState {
    */
   groupsByDataset: Map<string, Set<string>>;
 
-  // ── Proxy + descriptor registries ────────────────────────────────
   /** dataset → poolKey → ProxyAtlasState (proxy GPU residency by `(datasetId, kind, slotDims, channel)`). */
   proxyPoolsByDataset: Map<string, Map<string, ProxyAtlasState>>;
   /** `${entityId}|${t}|${c}` → tile/group proxy handle pair (CPU mirror of GPU descriptor). */
@@ -49,7 +50,8 @@ export interface RendererState {
   /** dataset → entity descriptor buffer + index maps (rebuilt fresh on each cold state). */
   descriptorBuffersByDataset: Map<string, EntityDescriptorIndex>;
 
-  // ── Per-mode atlas registries ────────────────────────────────────
+  /** Per-pool byte budgets, fitted to the device at init. */
+  atlasBudgets: AtlasBudgets;
   /** poolKey → volume atlas pool state. */
   volumeAtlases: Map<string, AtlasState>;
   /** poolKey → slice atlas pool state. */
@@ -61,21 +63,23 @@ export interface RendererState {
    */
   labelSlicePools: Map<string, LabelSlicePool>;
   /**
-   * memberId → r32uint label overlay volume pool. The 3D counterpart to
-   * {@link labelSlicePools}: holds the full label mask volume for the
-   * first-hit categorical surface drawn over the translucent intensity
-   * volume. Separate from {@link volumeAtlases} (r16uint intensity) for the
-   * same reason — full 32-bit ids + the categorical shader path.
+   * memberId → r32uint label overlay volume pool, the 3D counterpart of
+   * {@link labelSlicePools}. Feeds the first-hit categorical surface drawn
+   * over the intensity volume.
    */
   labelVolumePools: Map<string, LabelVolumePool>;
 
-  // ── Per-entity eviction reference points ─────────────────────────
   /** memberId → last known ray-volume hit in entity-local [0,1]^3 (volume mode). */
   rayHitPerEntity: Map<string, [number, number, number]>;
   /** memberId → last known viewport center in entity-local [0,1]^2 (slice mode). */
   cameraUVPerEntity: Map<string, [number, number]>;
+  /**
+   * memberId → target level from the most recent cold state. Eviction
+   * takes a resident chunk finer than it first (ADR 0061). Absent for a
+   * member with no chunk levels.
+   */
+  targetLevelByMember: Map<string, number>;
 
-  // ── Cold-state / epoch tracking ──────────────────────────────────
   /** Current scene epochs (replaced on every cold state). */
   currentEpochs: SceneEpochs | null;
   /** Last cold-state message (replaced on every cold state). */
@@ -88,7 +92,13 @@ export interface RendererState {
    */
   coldStateByDataset: Map<string, ColdStateMessage>;
 
-  // ── Devtools counter (worker-side HITL) ──────────────────────────
+  /**
+   * Captures the trace bundle asked for that no frame has answered yet.
+   * The next frame handler takes them all, and a fallback timer takes
+   * one that no frame reaches.
+   */
+  frameCaptures: PendingFrameCapture[];
+
   /** Proxy upload/residency counters exposed via `self.__lucidaProxyStats`. */
   proxyStats: {
     uploaded: number;
@@ -103,12 +113,12 @@ export interface RendererState {
 }
 
 /** Build an empty {@link RendererState}. Called once in `case "init"`. */
-export function createInitialState(): RendererState {
+export function createInitialState(atlasBudgets: AtlasBudgets = CEILING_BUDGETS): RendererState {
   return {
+    atlasBudgets: { volumeAtlasBytes: atlasBudgets.volumeAtlasBytes, sliceAtlasBytes: atlasBudgets.sliceAtlasBytes },
     memberToDataset: new Map(),
-    memberToPool: new Map(),
-    memberTierToPool: new Map(),
-    currentEntityMetasByDataset: new Map(),
+    memberSourcePools: new Map(),
+    currentSourcesByDataset: new Map(),
     groupToTiles: new Map(),
     groupsByDataset: new Map(),
     proxyPoolsByDataset: new Map(),
@@ -120,9 +130,11 @@ export function createInitialState(): RendererState {
     labelVolumePools: new Map(),
     rayHitPerEntity: new Map(),
     cameraUVPerEntity: new Map(),
+    targetLevelByMember: new Map(),
     currentEpochs: null,
     currentColdState: null,
     coldStateByDataset: new Map(),
+    frameCaptures: [],
     proxyStats: {
       uploaded: 0,
       dropped: 0,

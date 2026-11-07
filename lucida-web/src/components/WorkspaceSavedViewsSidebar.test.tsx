@@ -8,6 +8,8 @@ import {
   type WorkspaceSavedViewsSidebarProps,
 } from "./WorkspaceSavedViewsSidebar.tsx";
 import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
+import { ToastRegion } from "../ui/Toast.tsx";
+import { toastQueue } from "../ui/toastQueue.ts";
 
 function emptyView(): SavedView {
   return {
@@ -87,6 +89,7 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = originalFetch;
   cleanup();
+  toastQueue.clear();
 });
 
 describe("WorkspaceSavedViewsSidebar — visibility on rows", () => {
@@ -143,7 +146,7 @@ describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
     await renderSidebar(true);
 
     const menu = await openRowMenu({ name: "My layout" });
-    const promote = within(menu).getByTestId("saved-view-promote-p1");
+    const promote = within(menu).getByRole("menuitem", { name: /share with team/i });
     expect(promote.textContent).toMatch(/share with team/i);
 
     await act(async () => {
@@ -168,7 +171,7 @@ describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
     await renderSidebar(true);
 
     const menu = await openRowMenu({ name: "Team layout" });
-    expect(within(menu).queryByTestId("saved-view-promote-s1")).toBeNull();
+    expect(within(menu).queryByRole("menuitem", { name: /share with team/i })).toBeNull();
   });
 
   it("does not offer 'Share with team' for someone else's personal view", async () => {
@@ -185,7 +188,7 @@ describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
     await renderSidebar(true);
 
     const menu = await openRowMenu({ name: "Bob layout" });
-    expect(within(menu).queryByTestId("saved-view-promote-p2")).toBeNull();
+    expect(within(menu).queryByRole("menuitem", { name: /share with team/i })).toBeNull();
   });
 
   it("does not offer 'Share with team' to a viewer (cannot edit) even on their own personal view", async () => {
@@ -194,15 +197,14 @@ describe("WorkspaceSavedViewsSidebar — promote to shared", () => {
     await renderSidebar(false);
 
     const menu = await openRowMenu({ name: "My layout" });
-    expect(within(menu).queryByTestId("saved-view-promote-p1")).toBeNull();
+    expect(within(menu).queryByRole("menuitem", { name: /share with team/i })).toBeNull();
   });
 });
 
 describe("WorkspaceSavedViewsSidebar — save modal (editor)", () => {
   it("defaults to personal, lets the editor pick shared, and POSTs visibility", async () => {
-    // Slice 2 (#699/#700 follow-up): the dialog now defaults to Personal for ALL
-    // roles so a hurried save can't broadcast to the team by accident; an editor
-    // can still deliberately pick Shared.
+    // Personal for all roles, so a hurried save can't broadcast to the team; an
+    // editor can still pick Shared.
     let postBody: Record<string, unknown> | null = null;
     responder = (_url, init) => {
       if (init?.method === "POST") {
@@ -267,14 +269,6 @@ describe("WorkspaceSavedViewsSidebar — save modal (viewer)", () => {
   });
 });
 
-// --- Coverage ported from the deleted BookmarkSidebar.test.tsx ---------------
-// These four behavior groups (rename, delete-with-confirm, copy link, filter)
-// were exercised only by the now-removed BookmarkSidebar test. They are still
-// live in WorkspaceSavedViewsSidebar, so they are re-asserted here against the
-// successor component's real API and DOM (menu via "Saved view actions" ->
-// role="menu"; rename via .bookmark-name-input; delete via a role="alertdialog"
-// ConfirmModal; PATCH/DELETE to /api/workspaces/<ws>/saved-views/<id>).
-
 describe("WorkspaceSavedViewsSidebar — inline rename", () => {
   it("Enter commits the new name via PATCH", async () => {
     let patchBody: Record<string, unknown> | null = null;
@@ -296,7 +290,7 @@ describe("WorkspaceSavedViewsSidebar — inline rename", () => {
 
     // The rename input renders in place of the name (class set by RenameInput);
     // pick it by class so the search box isn't grabbed instead.
-    const input = document.querySelector(".bookmark-name-input") as HTMLInputElement;
+    const input = screen.getByTestId("saved-view-rename-input") as HTMLInputElement;
     expect(input).toBeTruthy();
     await userEvent.clear(input);
     await act(async () => {
@@ -320,7 +314,7 @@ describe("WorkspaceSavedViewsSidebar — inline rename", () => {
     const menu = await openRowMenu({ name: "old" });
     await userEvent.click(within(menu).getByRole("menuitem", { name: /rename/i }));
 
-    const input = document.querySelector(".bookmark-name-input") as HTMLInputElement;
+    const input = screen.getByTestId("saved-view-rename-input") as HTMLInputElement;
     expect(input).toBeTruthy();
     await userEvent.clear(input);
     await act(async () => {
@@ -329,7 +323,7 @@ describe("WorkspaceSavedViewsSidebar — inline rename", () => {
 
     expect(calls.some((c) => c.method === "PATCH")).toBe(false);
     // The rename input closed; the original name is shown again.
-    expect(document.querySelector(".bookmark-name-input")).toBeNull();
+    expect(screen.queryByTestId("saved-view-rename-input")).toBeNull();
     expect(screen.getByText("old")).toBeTruthy();
   });
 });
@@ -352,7 +346,7 @@ describe("WorkspaceSavedViewsSidebar — delete confirmation", () => {
     await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
 
     // Confirmation dialog appears naming the view; no DELETE has fired yet.
-    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    const dialog = await screen.findByRole("dialog", { name: /delete saved view/i });
     expect(within(dialog).getByText(/Doomed/)).toBeTruthy();
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
 
@@ -374,11 +368,11 @@ describe("WorkspaceSavedViewsSidebar — delete confirmation", () => {
     const menu = await openRowMenu({ name: "Doomed" });
     await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
 
-    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    const dialog = await screen.findByRole("dialog", { name: /delete saved view/i });
     await userEvent.click(within(dialog).getByRole("button", { name: /cancel/i }));
 
     expect(calls.some((c) => c.method === "DELETE")).toBe(false);
-    expect(screen.queryByRole("alertdialog")).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });
 
@@ -419,7 +413,7 @@ describe("WorkspaceSavedViewsSidebar — filter and search", () => {
     expect(screen.getByText("alice 1")).toBeTruthy();
     expect(screen.getByText("bob 1")).toBeTruthy();
 
-    await userEvent.click(screen.getByRole("checkbox", { name: /mine only/i }));
+    await userEvent.click(screen.getByRole("switch", { name: /mine only/i }));
 
     expect(screen.getByText("alice 1")).toBeTruthy();
     expect(screen.queryByText("bob 1")).toBeNull();
@@ -441,13 +435,9 @@ describe("WorkspaceSavedViewsSidebar — filter and search", () => {
   });
 });
 
-// --- Fix A (#818 part 1): deferred reject keeps an independent, reachable Undo
-// per pending view ------------------------------------------------------------
-// Reject is a delayed, cancelable PATCH backed by a per-id timer; the toast used
-// to be a single slot, so rejecting B clobbered A's "Undo" toast while A's timer
-// kept running → A committed with no recourse. The fix is a toast STACK keyed by
-// saved-view id: each pending reject owns its own dismissible Undo for the whole
-// window. These tests use fake timers for the ~6s window and clean them up.
+// Each pending reject owns its own Undo toast for the whole window, so
+// rejecting B must not clobber A's Undo while A's timer runs. Fake timers cover
+// the ~6s window.
 
 function rejectButton(savedViewId: string): HTMLButtonElement {
   return screen.getByTestId(`saved-view-reject-${savedViewId}`) as HTMLButtonElement;
@@ -478,7 +468,12 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
       ]);
     };
     await act(async () => {
-      render(<WorkspaceSavedViewsSidebar {...baseProps(true)} />);
+      render(
+        <>
+          <WorkspaceSavedViewsSidebar {...baseProps(true)} />
+          <ToastRegion />
+        </>,
+      );
     });
     // Let the initial list fetch settle under fake timers.
     await act(async () => {
@@ -497,16 +492,16 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
       fireEvent.click(rejectButton("pb"));
     });
 
-    // Two distinct toasts, each naming its view and each carrying an Undo — A's
-    // toast was NOT evicted by B's (the bug). No reject has been sent yet.
-    const toasts = screen.getAllByTestId("saved-view-toast");
+    // Two toasts, each naming its view and carrying an Undo: B's did not evict
+    // A's. No reject has been sent yet.
+    const toasts = screen.getAllByRole("alertdialog");
     expect(toasts).toHaveLength(2);
     const aToast = toasts.find((t) => within(t).queryByText(/Proposal A/)) as HTMLElement;
     const bToast = toasts.find((t) => within(t).queryByText(/Proposal B/)) as HTMLElement;
     expect(aToast).toBeTruthy();
     expect(bToast).toBeTruthy();
-    expect(within(aToast).getByTestId("saved-view-toast-action").textContent).toMatch(/undo/i);
-    expect(within(bToast).getByTestId("saved-view-toast-action").textContent).toMatch(/undo/i);
+    expect(within(aToast).getByRole("button", { name: "Undo" })).toBeTruthy();
+    expect(within(bToast).getByRole("button", { name: "Undo" })).toBeTruthy();
     expect(rejectPosts()).toHaveLength(0);
   });
 
@@ -522,10 +517,10 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
 
     // Undo A specifically (via A's own toast's Undo button).
     const aToast = screen
-      .getAllByTestId("saved-view-toast")
+      .getAllByRole("alertdialog")
       .find((t) => within(t).queryByText(/Proposal A/)) as HTMLElement;
     await act(async () => {
-      fireEvent.click(within(aToast).getByTestId("saved-view-toast-action"));
+      fireEvent.click(within(aToast).getByRole("button", { name: "Undo" }));
     });
 
     // A is back in the queue (its row was only hidden, never sent); B is still
@@ -537,8 +532,10 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(6000);
     });
+    // B's Undo goes with its window, so nothing is left to undo.
+    expect(toastQueue.visibleToasts.some((t) => t.content.action)).toBe(false);
 
-    // The reject PATCH fired for B only — never for the undone A.
+    // The reject fired for B only, never for the undone A.
     const posts = rejectPosts();
     expect(posts).toHaveLength(1);
     expect(posts[0].url).toContain("/saved-views/pb/reject");
@@ -554,8 +551,9 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
     // Unmount while the reject is still pending.
     cleanup();
 
-    // Advancing past the window must NOT fire the reject (timer was cleared on
-    // unmount) — guards against a setState-after-unmount / stray PATCH.
+    // Advancing past the window must not fire the reject: unmount cleared the
+    // timer, and closed the Undo toast that would now undo nothing.
+    expect(toastQueue.visibleToasts).toHaveLength(0);
     await act(async () => {
       await vi.advanceTimersByTimeAsync(6000);
     });
@@ -563,13 +561,9 @@ describe("WorkspaceSavedViewsSidebar — deferred reject (multi-undo)", () => {
   });
 });
 
-// --- Fix B (#818 part 2): the open view going away clears the active highlight
-// ----------------------------------------------------------------------------
-// `currentOpenSavedViewId` highlights the open row. When the user deletes /
-// withdraws that view, or its deferred reject commits, the sidebar tells the
-// host via `onActiveSavedViewInvalidated` so the host can drop the now-dangling
-// highlight. (Viewport-change clearing lives host-side off the live-view signal
-// and is covered by the host wiring, not this component's surface.)
+// When the open view is deleted, withdrawn, or its deferred reject commits, the
+// sidebar calls `onActiveSavedViewInvalidated` so the host drops the highlight.
+// Viewport-change clearing is host-side and tested there.
 
 describe("WorkspaceSavedViewsSidebar — active-row invalidation", () => {
   it("renders the open row as active (data-active / aria-current)", async () => {
@@ -609,7 +603,7 @@ describe("WorkspaceSavedViewsSidebar — active-row invalidation", () => {
 
     const menu = await openRowMenu({ name: "Doomed" });
     await userEvent.click(within(menu).getByRole("menuitem", { name: /delete/i }));
-    const dialog = await screen.findByRole("alertdialog", { name: /confirm delete/i });
+    const dialog = await screen.findByRole("dialog", { name: /delete saved view/i });
     await act(async () => {
       await userEvent.click(within(dialog).getByRole("button", { name: /^delete$/i }));
     });
@@ -623,7 +617,7 @@ describe("WorkspaceSavedViewsSidebar — active-row invalidation", () => {
       if (init?.method === "PATCH") {
         return jsonResponse(200, savedViewRow({ id: "v1", name: "Mine", visibility: "personal" }));
       }
-      // A viewer's OWN proposed view exposes "Withdraw proposal".
+      // A viewer's own proposed view exposes "Withdraw proposal".
       return jsonResponse(200, [savedViewRow({ id: "v1", name: "Mine", visibility: "proposed", created_by: "alice@example.com" })]);
     };
     await act(async () => {
@@ -638,7 +632,7 @@ describe("WorkspaceSavedViewsSidebar — active-row invalidation", () => {
 
     const menu = await openRowMenu({ name: "Mine" });
     await act(async () => {
-      await userEvent.click(within(menu).getByTestId("saved-view-withdraw-v1"));
+      await userEvent.click(within(menu).getByRole("menuitem", { name: /withdraw proposal/i }));
     });
 
     expect(onInvalidated).toHaveBeenCalledWith("v1");

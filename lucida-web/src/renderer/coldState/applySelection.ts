@@ -1,28 +1,13 @@
 /**
- * Selection-scrub cold-state update.
+ * Selection-scrub cold-state update: re-point the dataset's retained cold
+ * state at the new T, Z, visible region, and proxy keys, and re-ingest it
+ * through {@link applyColdState}.
  *
- * Applies a {@link ColdStateSelectionMessage}: re-point the dataset's most
- * recent cold state at the new current T / Z / visible region (and the
- * budget-admitted proxy keys for that selection) and re-ingest it via the
- * same {@link applyColdState} path a full cold state uses.
- *
- * `currentT` / `currentZ` are top-level scalars on the cold state, never part
- * of a per-entity descriptor, so on a pure scrub the active set — geometry,
- * LOD, matrices, proxy flags, display state — is exactly what the last full
- * cold state built. Re-ingesting with the swapped selection repacks the atlas
- * indirection for the new plane/timepoint and yields a result byte-identical to
- * a full cold state at the new T / Z — without the sender rebuilding or
- * re-transmitting the O(active-set) descriptor array.
- *
- * Because the re-ingest goes through the same {@link applyColdState} path a full
- * cold state uses, the visible result matches the full path exactly: the new
- * T/Z's chunks are marked wanted and re-uploaded, and where the new selection
- * lands on a different atlas slot than the old one the render drops that quad
- * until the fresh chunk arrives (a brief blank) rather than sampling stale
- * old-T/old-Z data — this does NOT keep the prior plane on screen.
- *
- * No-op when no cold state has landed for the dataset yet: a full cold state
- * will follow and carry the selection itself.
+ * T and Z are top-level scalars, never per-entity, so the result is
+ * byte-identical to a full cold state at the new selection without resending
+ * the active set. A quad whose chunk moved to a new slot drops until the
+ * fresh chunk arrives; it does not keep the prior plane on screen.
+ * No-op when no cold state has landed for the dataset yet.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";

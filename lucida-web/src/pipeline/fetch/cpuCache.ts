@@ -1,10 +1,9 @@
 /**
- * CPU Cache — holds decompressed data between network and GPU.
+ * CPU cache: holds decoded data between the network and the GPU.
  *
- * Owns detail/overview caches with three-tier adaptive eviction,
- * a priority-ordered fetch scheduler, and the submit/getDeliverable/snapshot/telemetry API.
- *
- * See docs/cpu-cache-spec.md for the full specification.
+ * Owns the detail, overview, and proxy stores with their eviction policies,
+ * the priority-ordered fetch schedulers, and the submit/getDeliverable/
+ * snapshot/telemetry API.
  */
 
 import type {
@@ -36,7 +35,7 @@ import {
 } from "./proxyStore.ts";
 import { Scheduler, type SchedulableRequest } from "./scheduler.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
-import { Boundary, CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
+import { CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
 import { parseChunkKey } from "../../renderer/chunkKeys.ts";
 import type { ChunkFeedbackReason } from "../../renderer/workerProtocol.ts";
 import type { CacheQuiescenceInputs } from "../../trace/quiescence.ts";
@@ -49,18 +48,22 @@ import {
 import { RejectionTracker } from "./rejection.ts";
 import { DeliveryState } from "./deliveryState.ts";
 import { debugLog } from "../../debug/logging.ts";
-import type {
-  CacheEntry,
-  CacheTelemetry,
-  CpuCacheConfig,
-  EvictionTier,
-  Lane,
-  LevelResidency,
-  ReadyChunkDelivery,
-  ReadyDelivery,
-  ReadyProxyDelivery,
-  ResidencyTier,
+import {
+  LANES,
+  type CacheEntry,
+  type CacheTelemetry,
+  type CpuCacheConfig,
+  type EvictionTier,
+  type Lane,
+  type LaneOutstanding,
+  type LevelResidency,
+  type PoolResidencyReport,
+  type ReadyChunkDelivery,
+  type ReadyDelivery,
+  type ReadyProxyDelivery,
 } from "./types.ts";
+import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
 
 // Re-exported so existing `./cpuCache.ts` imports keep working.
 export type {
@@ -72,30 +75,28 @@ export type {
   ReadyChunkDelivery,
   ReadyDelivery,
   ReadyProxyDelivery,
-  ResidencyTier,
   TierCounters,
   TierResidencyEntry,
 } from "./types.ts";
 
-export const DEFAULT_MAIN_BUDGET = 512 * 1024 * 1024;
-export const DEFAULT_OVERVIEW_BUDGET = 64 * 1024 * 1024;
-export const DEFAULT_PROXY_BUDGET = 256 * 1024 * 1024;
-export const DEFAULT_MAX_BYTES_IN_FLIGHT = 32 * 1024 * 1024;
+// The page passes budgets fitted to the device (ADR 0068); these defaults
+// are the ceiling it fits them under.
+export const DEFAULT_MAIN_BUDGET = CEILING_BUDGETS.cpuMainBytes;
+export const DEFAULT_OVERVIEW_BUDGET = CEILING_BUDGETS.cpuOverviewBytes;
+export const DEFAULT_PROXY_BUDGET = CEILING_BUDGETS.cpuProxyBytes;
+export const DEFAULT_MAX_BYTES_IN_FLIGHT = CEILING_BUDGETS.cpuBytesInFlight;
 export const FETCH_CONCURRENCY_MULTIPLIER = 3;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
 export const MAX_TRANSIENT_RETRIES = 1;
-/** Consecutive chunk-delivery failures with no delivered chunk in between
- *  before the `onChunkFailureStreak` config callback fires. What counts:
- *  permanent-kind fetch rejections, every server-reported per-chunk
- *  `source_chunk_status` failure (store failures — revoked access, backend
- *  faults, throttling — whether classified permanent or transient), and
- *  decode failures. Client-side transient failures (timeouts, disconnect
- *  rejections) never count. High enough that a few isolated misses never
- *  trip it; a systemically dead source crosses it within one viewport's
- *  requests. */
+/** Consecutive chunk-delivery failures, with no delivered chunk between them,
+ *  before `onChunkFailureStreak` fires. Counted: permanent fetch rejections,
+ *  every server-reported `source_chunk_status` failure (permanent or
+ *  transient), and decode failures. Client-side transients (timeouts,
+ *  disconnects) never count. High enough that isolated misses never trip it,
+ *  low enough that a dead source crosses it within one viewport's requests. */
 export const CHUNK_FAILURE_STREAK_THRESHOLD = 10;
 /** Minimum spacing between `onChunkFailureStreak` calls while a streak
- *  persists — an aggregate signal, never per-chunk spam. */
+ *  persists, so the signal stays aggregate rather than per chunk. */
 export const CHUNK_FAILURE_NOTIFY_INTERVAL_MS = 15_000;
 export const INTERACTION_MODE_WINDOW = 10;
 /**
@@ -106,10 +107,6 @@ export const INTERACTION_MODE_WINDOW = 10;
  * declared rather than guessed.
  */
 const QUIESCENCE_PENDING_SCAN_CAP = 4096;
-const SPARSE_DETAIL_MIN_DESIRED_CHUNKS = 4;
-const SPARSE_DETAIL_COVERAGE_RATIO = 0.25;
-const SPARSE_DETAIL_STREAK_THRESHOLD = 3;
-const SPARSE_DETAIL_LOG_RATE_LIMIT_MS = 5000;
 
 /** Nominal (pre-jitter) first-attempt backoff before a transient failure
  *  is retried. */
@@ -129,13 +126,9 @@ export const FAILURE_BACKOFF_JITTER_RATIO = 0.5;
 export const MAX_TRACKED_FAILURES = 8192;
 
 /**
- * Capped exponential backoff with jitter for a transient failure's
- * `attempt`-th record (1-based). The growth term doubles each attempt and
- * is capped at {@link FAILURE_BACKOFF_MAX_MS}; jitter is then applied as a
- * band *below* that cap — `[base·(1 − ratio), base)` — so two entries that
- * both reach the cap still draw distinct, de-correlated delays instead of
- * collapsing onto one synchronized retry instant. The result is always
- * greater than zero and strictly below the cap.
+ * Capped exponential backoff for a transient failure's `attempt`-th record
+ * (1-based). Jitter spreads below the cap, so entries that both reach the cap
+ * still draw distinct delays instead of retrying in lockstep.
  */
 export function backoffWithJitter(attempt: number, random: () => number): number {
   const growth = FAILURE_BACKOFF_BASE_MS *
@@ -146,10 +139,10 @@ export function backoffWithJitter(attempt: number, random: () => number): number
 }
 
 /**
- * One per-key fetch-failure record. A key lives in exactly one of the two
- * independently-bounded stores that hold these — {@link CpuCache.permanentFailures}
- * (sticky) or {@link CpuCache.transientFailures} (self-healing) — so a flood of
- * one kind can never evict the other's slot.
+ * One per-key fetch-failure record. A key lives in exactly one of two
+ * independently bounded stores, {@link CpuCache.permanentFailures} or
+ * {@link CpuCache.transientFailures}, so a flood of one kind cannot evict the
+ * other's records.
  */
 interface FailureRecord {
   /** `permanent` is sticky (never time-eligible); `transient` self-heals
@@ -161,12 +154,8 @@ interface FailureRecord {
   /** How many times this key has failed transiently (>= 1); grows the
    *  backoff across successive records. Zero for a permanent record. */
   attempt: number;
-  /**
-   * Wall-clock (in `now()`'s frame) at or after which the key may be
-   * re-planned. The plan-time gate skips the key until `now()` reaches it;
-   * a permanent record sets this to `Infinity` so it is never freed by the
-   * passage of time.
-   */
+  /** `now()` at or after which the key may be re-planned. `Infinity` for a
+   *  permanent record, so time alone never frees it. */
   eligibleAt: number;
 }
 
@@ -204,7 +193,7 @@ export class CpuCache {
 
   private chunkStore!: ChunkStore;
 
-  /** Serves both lane="overview" and lane="minimap" (ADR 0023). */
+  /** Serves the overview, minimap, and coarse lanes (ADR 0023). */
   private overviewStore!: ChunkStore;
 
   private proxyStore!: ProxyStore;
@@ -218,34 +207,29 @@ export class CpuCache {
 
   private activeEntityIds = new Set<string>();
   private activeEntityIdsThisRebuild = new Set<string>();
+  /**
+   * Each tile entity's target level from its most recent plan. The detail
+   * store's eviction policy reads it so that a resident chunk finer than
+   * the target goes first (ADR 0061). The policy judges entries against
+   * this map at eviction time, so a target change costs no pass over the
+   * resident entries. An entity that left the view keeps its last target.
+   */
+  private targetLevelByEntity = new Map<string, number>();
 
   private interactionDetector = new InteractionModeDetector(INTERACTION_MODE_WINDOW);
 
   /**
-   * Keys with a PERMANENT fetch failure — one that
-   * {@link classifyFetchError} tagged `permanent` (e.g. an HTTP 404 /
-   * not-found, or a source that rejects the fetch outright, such as no
-   * wire format registered for the image). Permanent records are sticky:
-   * their `eligibleAt` is `Infinity`, so the plan-time gate never frees
-   * them by the passage of time; they clear only on a subsequent
-   * successful delivery, {@link CpuCache.reset}, or
-   * {@link CpuCache.cancelDataset}.
-   *
-   * Map iteration is insertion-order FIFO, so once it reaches
-   * {@link MAX_TRACKED_FAILURES} the oldest permanent key is dropped to hold
-   * the memory bound. Kept independent from {@link transientFailures} so a
-   * flood of permanents (e.g. a malformed collection emitting thousands of
-   * 404s) can never crowd out a transient's backoff slot — and vice versa.
+   * Keys with a permanent fetch failure (a 404, or a source that rejects the
+   * fetch outright). Sticky: they clear only on a successful delivery,
+   * {@link CpuCache.reset}, or {@link CpuCache.cancelDataset}. FIFO-capped at
+   * {@link MAX_TRACKED_FAILURES}, separately from {@link transientFailures},
+   * so a flood of 404s cannot crowd out a transient's backoff record.
    */
   private permanentFailures = new Map<string, FailureRecord>();
   /**
-   * Keys with an outstanding TRANSIENT fetch failure (a timeout, disconnect,
-   * failed decode, or other retryable rejection) awaiting their self-heal
-   * backoff. Each record carries when it failed, its attempt count (grows
-   * the backoff), and the instant it becomes re-eligible for planning.
-   * Bounded independently at {@link MAX_TRACKED_FAILURES} with FIFO eviction
-   * of the oldest entry, so backoff slots survive no matter how many
-   * permanent failures exist.
+   * Keys with a transient failure (timeout, disconnect, failed decode)
+   * waiting out their backoff. FIFO-capped at {@link MAX_TRACKED_FAILURES},
+   * independently of the permanent store.
    */
   private transientFailures = new Map<string, FailureRecord>();
 
@@ -273,13 +257,11 @@ export class CpuCache {
   private desiredDetailKeysThisTick = new Set<string>();
   private desiredCoarseKeysThisTick = new Set<string>();
   /**
-   * Keys demanded by the VIEW's own coarse lane this tick (a strict
+   * Keys demanded by the view's own coarse lane this tick (a strict
    * subset of `desiredCoarseKeysThisTick`, which also counts minimap
    * and overview demand). Feeds {@link resolveDemandLane}.
    */
   private viewCoarseKeysThisTick = new Set<string>();
-  private sparseDetailStreak = 0;
-  private lastSparseDetailLogAt = -Infinity;
 
   /**
    * Latest wanted metadata for in-flight fetches. The request object
@@ -292,7 +274,7 @@ export class CpuCache {
 
   /**
    * Worker-rejected (atlas full + too far) chunks. `submit()` skips
-   * enqueuing and does NOT refresh `lastSeenTick`, so the active-detail
+   * enqueuing and does not refresh `lastSeenTick`, so the active-detail
    * eviction can sweep cached-but-rejected copies before useful ones.
    */
   private rejectionTracker = new RejectionTracker();
@@ -324,7 +306,10 @@ export class CpuCache {
     this.now = config?.now ?? (() => performance.now());
     this.random = config?.random ?? Math.random;
 
-    const mainPolicy = new TieredPolicy(() => this.interactionDetector.current());
+    const mainPolicy = new TieredPolicy(
+      () => this.interactionDetector.current(),
+      (entityId) => this.targetLevelByEntity.get(entityId),
+    );
     this.chunkStore = new ChunkStore({
       policy: mainPolicy,
       budgetBytes: this.config.mainBudgetBytes,
@@ -377,9 +362,9 @@ export class CpuCache {
       (req, controller, _estimate, key, admittedAtMs) => {
         const startedEpochs = { ...this.currentEpochs };
         this.rememberInFlightChunk(key, req, startedEpochs);
-        // `fetchAndDecode` handles fetch/decode failures internally (retry,
-        // failure map, streak surfacing); anything escaping here is an
-        // unexpected pipeline error — keep it out of the void.
+        // `fetchAndDecode` handles fetch and decode failures itself (retry,
+        // failure records, streak); anything escaping here is an unexpected
+        // pipeline error, so log it.
         this.fetchAndDecode(req, controller, key, 0, startedEpochs, false, admittedAtMs).catch((err: unknown) => {
           console.warn("[CpuCache] unexpected chunk pipeline error:", err);
         });
@@ -406,44 +391,41 @@ export class CpuCache {
     );
   }
 
-  // Public API
-
   /**
-   * Submit the current request plan. Re-submitting an unchanged plan is
-   * still a no-op, but work for active entities that disappeared from
-   * the new plan is preempted so scrubbed-away T/Z/channel work does not
-   * block current requests behind the scheduler caps.
+   * Submit the current request plan. Re-submitting an unchanged plan is a
+   * no-op. In-flight work for active entities that left the new plan is
+   * preempted, so scrubbed-away T/Z/channel work does not hold scheduler
+   * slots ahead of current requests.
    */
   submit(plan: RequestPlan): void {
     this.currentEpochs = plan.epochs;
 
     this.interactionDetector.push(plan.epochs);
 
-    const newActiveIds = new Set(plan.activeSet.map(e => e.entityId));
-    for (const entityId of newActiveIds) this.activeEntityIdsThisRebuild.add(entityId);
+    const newActiveIds = new Set<string>();
+    for (const entry of plan.activeSet) {
+      newActiveIds.add(entry.entityId);
+      this.activeEntityIdsThisRebuild.add(entry.entityId);
+      if (entry.kind === "tile" && entry.detailLevels.length > 0) {
+        this.targetLevelByEntity.set(entry.entityId, entry.detailLevels[0]);
+      }
+    }
 
-    // One pass over the request list builds every derived key exactly
-    // once (issue #900). The planner hands `submit` the dataset's
-    // COMPLETE wanted set on every rebuild — ~21k entries at ~5/s on a
-    // large remote collection — so re-deriving `inFlightKey` separately
-    // for the planned-key set, the tier-demand pass, and the enqueue
-    // loop cost three string builds and ~six residency-tier calls per
-    // request per rebuild. `keys[i]` and `tiers[i]` are read back by the
-    // enqueue loop below. Order of effects is unchanged: tier demand is
-    // still recorded over the FULL list before the enqueue loop, so
-    // demand-lane resolution stays independent of request order.
+    // One pass derives every key and tier exactly once. `submit` receives the
+    // dataset's complete wanted set on every rebuild (~21k entries at ~5/s on
+    // a large remote collection), so the enqueue loop below reuses `keys[i]`
+    // and `tiers[i]`. Tier demand is recorded over the full list before that
+    // loop, so demand-lane resolution does not depend on request order.
     const requests = plan.requests;
     const keys = new Array<string>(requests.length);
     const tiers = new Array<ResidencyTier>(requests.length);
-    // Seeded with every in-flight key belonging to an entity in THIS
-    // submit's active set; the pass below strikes out each key the plan
-    // still wants, leaving the omitted work to abort. Bounded by the
-    // concurrency cap, so this replaces a ~21k-entry planned-key set with
-    // a set of at most a couple of dozen strings.
+    // Seeded with this submit's active-entity in-flight keys; the pass below
+    // strikes out each key the plan still wants, leaving the work to abort.
+    // Bounded by the concurrency cap, so it stays a few dozen strings.
     const unwantedInFlightKeys = this.activeInFlightChunkKeys(newActiveIds);
     for (let i = 0; i < requests.length; i++) {
       const req = requests[i];
-      const tier = this.requestResidencyTier(req);
+      const tier = req.tier;
       const key = chunkSchedulerKey(req, tier);
       keys[i] = key;
       tiers[i] = tier;
@@ -498,25 +480,23 @@ export class CpuCache {
 
       if (this.chunkScheduler.hasInFlight(key)) {
         // A second demand attaching to a fetch already on the wire. The
-        // attach itself is below the clock floor, so it is counted per tick
-        // (ADR 0047); the one fetch keeps the one row.
+        // attach itself is below the clock floor, so it is counted per tick;
+        // the one fetch keeps the one row.
         traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
         this.rememberInFlightChunk(key, req, { ...this.currentEpochs });
         continue;
       }
 
-      // Permanent failures stay excluded for the session (their `eligibleAt`
-      // is `Infinity`, until reset / cancelDataset). Transient failures
-      // self-heal: once a re-planned key has waited out its (jittered,
-      // capped-exponential) backoff, it is re-enqueued. Re-eligibility is
-      // evaluated lazily here at plan time — there is no timer re-arming
-      // failed tiles on its own.
+      // Permanent failures stay excluded until reset or cancelDataset.
+      // Transient failures self-heal: a key re-planned after its backoff is
+      // re-enqueued. Eligibility is checked lazily here at plan time; no
+      // timer re-arms failed tiles.
       if (this.isFailureExcluded(key)) continue;
 
       // The minimap and coarse lanes can demand the same chunk (shared
-      // residency tier + key); one fetch serves both, and the most
-      // urgent occurrence — plans arrive priority-sorted — keeps the
-      // queue slot.
+      // residency tier + key); one fetch serves both. The first occurrence
+      // keeps the queue slot, and plans arrive priority-sorted, so it is the
+      // most urgent.
       if (pendingKeys.has(key)) {
         traceRecorder.countPhase(CountedPhaseIndex.CoalesceAttach);
         continue;
@@ -565,36 +545,9 @@ export class CpuCache {
   }
 
   /**
-   * Abort a still-active entity's in-flight chunks that the entity's own
-   * newest plan no longer wants. `submit` runs once per dataset with that
-   * dataset's complete request set, so for an entity present in this
-   * submit's active set, `plannedChunkKeys` is authoritative: any of its
-   * in-flight chunks absent from it (scrubbed-away T/Z/channel work) is
-   * genuinely unwanted and must release its concurrency slot now rather
-   * than hold it until the transfer timeout. Entities NOT in this submit's
-   * active set are left untouched here — another still-visible dataset may
-   * simply be submitted in a separate call this rebuild; departure of an
-   * entity from the view entirely is handled at the rebuild boundary in
-   * {@link onPlanRebuildStart}.
-   *
-   * `unwantedInFlightKeys` is computed by {@link submit}'s derivation pass
-   * (issue #900): it starts as this submit's active-entity in-flight keys
-   * and has every key the plan still wants struck out of it, so what
-   * remains is exactly the set to abort — a handful of keys, rather than a
-   * membership test against a ~21k planned-key set.
-   *
-   * Only IN-FLIGHT work is cancelled. The pending queue is deliberately
-   * left alone: `submit` replaces it wholesale a few statements later with
-   * exactly this plan's request set, so filtering the outgoing queue is
-   * work with no observable effect — and on a large remote collection that
-   * filter walked ~21k entries, allocating a synthetic entry and rebuilding
-   * a key string for every one of them, on every rebuild.
-   */
-  /**
    * In-flight chunk keys whose entity is in `activeEntityIds`. Bounded by
-   * the concurrency cap, so building it is cheap regardless of how large
-   * the wanted set is. Empty when no entity is active — the caller then
-   * has nothing to cancel.
+   * the concurrency cap, so building it is cheap however large the wanted
+   * set is.
    */
   private activeInFlightChunkKeys(activeEntityIds: Set<string>): Set<string> {
     const keys = new Set<string>();
@@ -605,6 +558,18 @@ export class CpuCache {
     return keys;
   }
 
+  /**
+   * Abort a still-active entity's in-flight chunks that its newest plan no
+   * longer wants, so they release their concurrency slots now instead of at
+   * the transfer timeout. `submit` runs once per dataset with that dataset's
+   * complete request set, so for an entity in this submit's active set the
+   * plan is authoritative. Entities outside it may belong to a dataset
+   * submitted separately this rebuild; {@link onPlanRebuildStart} handles
+   * entities that left the view.
+   *
+   * Only in-flight work is cancelled. `submit` replaces the pending queue
+   * wholesale right after, so filtering it would change nothing.
+   */
   private cancelOmittedChunkWork(unwantedInFlightKeys: Set<string>): void {
     if (unwantedInFlightKeys.size === 0) return;
     const cancelled = this.chunkScheduler.cancelInFlightWhere(
@@ -616,15 +581,11 @@ export class CpuCache {
   }
 
   /**
-   * Abort every in-flight (and drop every pending) chunk fetch for
-   * `entityId` and clear its in-flight metadata. Used when an entity
-   * leaves the view entirely. The chunk and proxy schedulers share the
-   * concurrency/bytes caps (via `siblingInFlight`), so a departed
-   * entity's chunk and proxy fetches are both released — this handles
-   * the chunk side, {@link cancelProxyWorkForEntity} the proxy side —
-   * returning those shared slots to the current view immediately instead
-   * of holding them until the transfer timeout. A returning entity
-   * re-enqueues normally on its next submit.
+   * Abort every in-flight and pending chunk fetch for an entity that left
+   * the view. Chunk and proxy schedulers share the concurrency and bytes
+   * caps, so this and {@link cancelProxyWorkForEntity} hand those slots back
+   * to the current view instead of holding them until the transfer timeout.
+   * A returning entity re-enqueues on its next submit.
    */
   private cancelChunkWorkForEntity(entityId: string): void {
     const cancelled = this.chunkScheduler.cancelWhere(
@@ -636,26 +597,18 @@ export class CpuCache {
   }
 
   /**
-   * Abort every in-flight (and drop every pending) PER-ENTITY proxy fetch
-   * for `entityId` and clear its in-flight metadata. The proxy counterpart
-   * to {@link cancelChunkWorkForEntity}, called at the same rebuild boundary
-   * when an entity leaves the view entirely: because both schedulers share
-   * the concurrency/bytes caps, a departed entity's outstanding per-tile
-   * proxy would otherwise hold a shared slot until the proxy timeout,
-   * starving the current view. Proxies are {@link NeverRetry}; a returning
-   * entity re-fetches its proxy on the orchestrator's next submit.
+   * The proxy counterpart to {@link cancelChunkWorkForEntity}: abort the
+   * departed entity's per-tile proxy fetches so they do not hold a shared
+   * slot until the proxy timeout. A returning entity re-fetches its proxy on
+   * the next submit.
    */
   private cancelProxyWorkForEntity(entityId: string): void {
     const cancelled = this.proxyScheduler.cancelWhere(
       (entry) =>
         entry.request.entityId === entityId &&
-        // Exclude group proxies: a `GroupProxy3D` is keyed by its group id
-        // rather than a per-tile active entity, so one tile leaving the
-        // active set does not make it unwanted — the same shared fallback
-        // can stay continuously requested by the tiles that remain visible.
-        // A group proxy's wantedness is governed by plan membership (it is
-        // kept while the plan still requests it), handled separately, not by
-        // any single entity's departure.
+        // Group proxies are keyed by group id and stay wanted while other
+        // tiles in the group are visible; plan membership governs them, not
+        // one entity's departure.
         entry.request.kind !== "GroupProxy3D",
     );
     for (const key of cancelled) {
@@ -699,6 +652,7 @@ export class CpuCache {
       }
       this.activeEntityIds.delete(entityId);
       this.activeEntityIdsThisRebuild.delete(entityId);
+      this.targetLevelByEntity.delete(entityId);
       this.deliveryState.clearChunksForImage(entityId);
     }
     const proxyPrefix = `${datasetId}|`;
@@ -781,7 +735,6 @@ export class CpuCache {
     this.desiredDetailKeysThisTick.clear();
     this.desiredCoarseKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
-    this.sparseDetailStreak = 0;
     this.rejectionTracker.clear();
     this.deliveryState.onPlanRebuildStart();
   }
@@ -916,19 +869,15 @@ export class CpuCache {
 
   /**
    * Resident and in-flight chunk counts per pyramid level, for the trace's
-   * per-tick aggregates. Deliberately not {@link snapshot}: that one
-   * allocates a Set per entity and walks every resident chunk, which is
-   * affordable once per rebuild behind a debug toggle and not affordable on
-   * every tick with recording always on. Both stores keep their level counts
-   * incrementally, and the in-flight map holds only dispatched fetches — a
-   * few dozen — so this is a short walk over small numbers.
+   * per-tick aggregates. Not {@link snapshot}, which allocates a Set per
+   * entity and is too costly to run every tick. Both stores keep level
+   * counts incrementally, and the in-flight map holds a few dozen fetches.
    *
-   * Counts every resident chunk, not only the active set's: an aggregate that
-   * quietly excluded demoted or prefetched residency would understate what
-   * the cache is actually holding.
+   * Counts every resident chunk, not only the active set's, so the aggregate
+   * does not understate what the cache holds.
    *
-   * Returns the cache's own reused arrays, valid until the next call —
-   * recording is unconditional and per tick, so this may not allocate.
+   * Returns reused arrays, valid until the next call: recording runs every
+   * tick and must not allocate.
    */
   levelResidency(): LevelResidency {
     const { cached, inFlight } = this.levelResidencyScratch;
@@ -964,6 +913,50 @@ export class CpuCache {
     return this.chunkStore.bytes + this.overviewStore.bytes + this.proxyStore.bytes;
   }
 
+  /**
+   * Resident bytes against budget for each CPU-side pool. As cheap as
+   * {@link residentBytes}, and separate from {@link telemetry} for the same
+   * reason: the HUD reads this at its own cadence, and `telemetry()` builds
+   * a whole report to answer it.
+   */
+  poolResidency(): PoolResidencyReport {
+    return {
+      main: { bytes: this.chunkStore.bytes, budgetBytes: this.chunkStore.budgetBytes },
+      overview: { bytes: this.overviewStore.bytes, budgetBytes: this.overviewStore.budgetBytes },
+      proxy: { bytes: this.proxyStore.bytes, budgetBytes: this.proxyStore.budgetBytes },
+    };
+  }
+
+  /**
+   * What is in flight and what is queued, by lane, written into `out`.
+   *
+   * In flight is bounded by the concurrency cap, so it is always counted.
+   * Pending is scanned under the same cap as {@link quiescenceInputs}, and
+   * past it the per-lane counts stay at zero while `pendingUnclassified`
+   * says so, so a reader shows the total and states that the split is
+   * unknown rather than paying for a backlog tens of thousands deep.
+   */
+  laneOutstanding(out: LaneOutstanding): LaneOutstanding {
+    for (const lane of LANES) {
+      out.inFlight[lane] = 0;
+      out.pending[lane] = 0;
+    }
+    for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
+      out.inFlight[entry.request.lane]++;
+    }
+    out.proxyInFlight = this.proxyScheduler.inFlightSize;
+    out.proxyPending = this.proxyScheduler.pendingSize;
+    out.pendingTotal = this.chunkScheduler.pendingSize + this.proxyScheduler.pendingSize;
+    out.pendingScanCap = QUIESCENCE_PENDING_SCAN_CAP;
+    out.pendingUnclassified = !this.chunkScheduler.forEachPending(
+      QUIESCENCE_PENDING_SCAN_CAP,
+      (req) => {
+        out.pending[req.lane]++;
+      },
+    );
+    return out;
+  }
+
   telemetry(): CacheTelemetry {
     const now = performance.now();
     const counters = this.counters.snapshot(now);
@@ -983,7 +976,6 @@ export class CpuCache {
     const pendingOldestAgeMs = this.chunkScheduler.oldestPendingAgeMs(now);
     const tierDemand = this.computeTierDemandTelemetry();
     const tierQueues = this.computeTierQueueTelemetry();
-    this.maybeLogSparseDetail(now, tierDemand);
 
     return {
       mainBytes: this.chunkStore.bytes,
@@ -1026,31 +1018,19 @@ export class CpuCache {
   }
 
   /**
-   * The cache's half of the published quiescence predicate (ADR 0051):
-   * everything the view asked for is resident, with nothing pending or in
-   * flight.
+   * The cache's half of the quiescence predicate (ADR 0051): everything the
+   * view asked for is resident, with nothing pending or in flight. Writes
+   * into `out` so the per-tick call does not allocate.
    *
-   * Writes into `out` and returns it. The render loop calls this every tick
-   * and owns one instance, because ADR 0049 asks the monitor not to allocate
-   * in steady state — an allocating recorder produces GC pauses that show up
-   * as stalls in its own trace.
+   * Speculative prefetch is excluded from `pending` and `inFlight`, because
+   * the prefetch lane keeps requesting future timepoints and a plain "queues
+   * empty" test might never go true on a timeseries. It is reported beside
+   * them. Demand counts stay prefetch-inclusive: resident and desired must be
+   * counted the same way, and prefetch demand is finite per timepoint.
    *
-   * **Where prefetch is excluded, and where it is not.** ADR 0051 excludes
-   * speculative prefetch from the predicate because the prefetch lane keeps
-   * requesting future timepoints, so a naive "queues empty" test may never
-   * go true on a timeseries. That hazard lives in the *queues*, and that is
-   * where the exclusion is applied: `pending` and `inFlight` count
-   * non-speculative work only, and the speculative remainder is reported
-   * beside them rather than hidden. The demand counts stay on the same
-   * prefetch-inclusive basis the cache already publishes — resident and
-   * desired must be counted the same way or the ratio is nonsense, and
-   * prefetch demand is finite per timepoint and becomes resident like any
-   * other chunk, so including it cannot make quiescence unreachable.
-   *
-   * `pendingUnclassified` is set when the pending queue is deeper than
-   * {@link QUIESCENCE_PENDING_SCAN_CAP}. That bounds the scan to the tick it
-   * runs in, and reads as *not* quiescent, so a deep queue keeps a run open
-   * rather than closing one early on a guess.
+   * `pendingUnclassified` is set when the queue is deeper than
+   * {@link QUIESCENCE_PENDING_SCAN_CAP}. That reads as not quiescent, so a
+   * deep queue keeps a run open instead of closing it on a guess.
    */
   quiescenceInputs(out: CacheQuiescenceInputs): CacheQuiescenceInputs {
     const demand = this.computeTierDemandTelemetry();
@@ -1071,6 +1051,13 @@ export class CpuCache {
     out.residentDetailChunks = demand.resident.detailChunks;
     out.desiredCoarseChunks = demand.desired.coarseChunks;
     out.residentCoarseChunks = demand.resident.coarseChunks;
+    // The whole store against the budget eviction enforces, not the
+    // wanted-and-resident subset above: a tier is full when everything it
+    // holds fills it, whether or not the current plan asked for all of it.
+    out.detailBytes = this.chunkStore.bytes;
+    out.detailBudgetBytes = this.chunkStore.budgetBytes;
+    out.coarseBytes = this.overviewStore.bytes;
+    out.coarseBudgetBytes = this.overviewStore.budgetBytes;
     out.inFlight = inFlight;
     out.speculativeInFlight = speculativeInFlight;
     out.speculativePending = speculativePending ?? 0;
@@ -1162,6 +1149,7 @@ export class CpuCache {
 
     this.activeEntityIds.clear();
     this.activeEntityIdsThisRebuild.clear();
+    this.targetLevelByEntity.clear();
     this.viewCoarseKeysThisTick.clear();
     this.interactionDetector.reset();
     this.permanentFailures.clear();
@@ -1184,8 +1172,6 @@ export class CpuCache {
     this.counters.reset();
   }
 
-  // Fetch + Decode
-
   private async fetchAndDecode(
     req: ChunkRequest,
     controller: AbortController,
@@ -1196,19 +1182,13 @@ export class CpuCache {
     admittedAtMs?: number,
   ): Promise<void> {
     // One row per fetch attempt, so an in-fetch retry retires its row and the
-    // next attempt opens a fresh one rather than overwriting the first
-    // attempt's timings.
+    // next attempt opens a fresh one rather than overwriting its timings.
     //
-    // Three boundaries land in this one call, because the row is opened at
-    // dispatch and the two phases behind it are already over: `plan` (the
-    // tick's wanted-set computation) and `queue` (admitted to the scheduler →
-    // dispatched). `wire` — request sent → bytes in hand — starts now, and is
-    // the bracket the server's own rows nest inside once they arrive.
-    //
-    // One call rather than three: this loop runs up to 2,943 times in a single
-    // submit, so the extra calls were three times the event count ADR 0049's
-    // tick ceiling was derived from (#949).
-    const rowTier = this.requestResidencyTier(req) === "coarse" ? 1 : 0;
+    // The row opens at dispatch, when `plan` and `queue` are already over, so
+    // one call closes both and starts `wire`. This runs thousands of times in
+    // one submit, and three calls would triple the event count the tick
+    // budget allows (ADR 0049).
+    const rowTier = req.tier === "coarse" ? 1 : 0;
     const traceRow = traceRecorder.beginChunkRow(req, rowTier, admittedAtMs);
 
     let result: FetchResult;
@@ -1216,9 +1196,9 @@ export class CpuCache {
       result = await this.source.fetch(
         { datasetId: req.datasetId, imageId: req.imageId, chunkKey: req.chunkKey },
         controller.signal,
-        // The label the transport sent this chunk under — the first
-        // sender's when this fetch coalesced onto one already in flight, so
-        // every row that waited on a request points at that request.
+        // The transport's label for this chunk. When this fetch coalesced onto
+        // one already in flight it is the first sender's, so every row that
+        // waited on a request points at that request.
         label => traceRecorder.labelRow(traceRow, label),
       );
     } catch (err: unknown) {
@@ -1227,30 +1207,23 @@ export class CpuCache {
 
       if (fe.kind === "abort" || fe.kind === "pending") {
         // A silent teardown: the caller cancelled, or generated bytes are not
-        // ready yet. No failure entry, no streak — just release the slot and
-        // metadata this settle still owns (see {@link settleFetch}).
+        // ready yet. No failure record and no streak; release only what this
+        // settle still owns (see {@link settleFetch}).
         if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
           if (fe.kind === "pending") this.drainSchedulers();
         }
         return;
       }
 
-      // Whether THIS fetch lifecycle has already fed the delivery-failure
-      // streak. Carried across the lifecycle's own in-fetch retries by the
-      // recursion argument, so a single failed delivery counts once no matter
-      // how many times it is retried before giving up. The dedup is scoped to
-      // the lifecycle only: a chunk that keeps failing across re-plan
-      // re-fetches (each a fresh lifecycle, once its backoff expires) must
-      // re-contribute every time, so the streak keeps measuring consecutive
-      // failed deliveries and a persistently dead source stays surfaced.
+      // Whether this fetch lifecycle has already fed the failure streak. The
+      // recursion carries it across in-fetch retries, so one failed delivery
+      // counts once. A re-plan re-fetch is a fresh lifecycle and counts
+      // again, so a persistently dead source stays surfaced.
       let fed = fedStreak;
 
-      // A server-reported failure (a `source_chunk_status` frame: the source
-      // answered the request with a failure) is a real delivery failure and
-      // feeds the streak now, before the retry branch and regardless of its
-      // retry classification. A persistently-failing source thus surfaces
-      // even when each failure is individually transient (self-healing), and
-      // the count still resets the moment any chunk is delivered.
+      // A server-reported failure (a `source_chunk_status` frame) feeds the
+      // streak before the retry branch, whatever its retry classification, so
+      // a source whose failures are each transient still surfaces.
       if (fe.serverReported && !fed) {
         this.recordChunkFailureForStreak(fe.message);
         fed = true;
@@ -1287,9 +1260,10 @@ export class CpuCache {
     }
 
     // Closes `wire` and opens `decode` — adjacent phases share the slot
-    // between them. The pool closes `decode` on its own onmessage, and the
-    // row completes when a frame has drawn the chunk.
-    traceRecorder.stamp(traceRow, Boundary.DecodeStart);
+    // between them — and records what the wire delivered. The pool closes
+    // `decode` on its own onmessage, and the row completes when a frame has
+    // drawn the chunk.
+    traceRecorder.noteBytesReceived(traceRow, result.bytes.byteLength);
 
     this.counters.recordCompletedFetch(result.bytes.byteLength);
     // Correct the in-flight byte estimate only while this settle still owns
@@ -1337,7 +1311,7 @@ export class CpuCache {
       isEpochStale(metaEpochs, this.currentEpochs);
     const lastSeenTick = stale ? -1 : latestMeta.lastSeenTick;
 
-    // Only a DELIVERED chunk — fetched AND decoded — proves the source is
+    // Only a delivered chunk, fetched and decoded, proves the source is
     // serving usable data; a completed fetch alone can still be garbage. When
     // this settle still owns the key, the streak resets and the key's failure
     // record clears so its attempt/backoff bookkeeping starts clean; a
@@ -1371,7 +1345,7 @@ export class CpuCache {
       insertedAt: this.lruCounter++,
       epochs: { ...metaEpochs },
       dataType: result.dataType,
-      residencyTier: this.requestResidencyTier(effectiveReq),
+      residencyTier: effectiveReq.tier,
       priority: stale ? Number.MAX_SAFE_INTEGER : effectiveReq.priority,
       lastSeenTick,
       // Carries the chunk's lifecycle row the rest of the way, so `upload`
@@ -1379,7 +1353,7 @@ export class CpuCache {
       traceRow,
     };
 
-    // minimap/overview/coarse route to the overview/coarse bucket (ADR 0023 + coarse/detail bridge).
+    // Coarse-tier lanes share the overview store.
     if (lane === "overview" || lane === "minimap" || lane === "coarse") {
       if (stale && this.overviewStore.bytes + cacheEntry.sizeBytes > this.overviewStore.budgetBytes) {
         // Decoded and then dropped on the floor: the row ends here, and
@@ -1406,8 +1380,6 @@ export class CpuCache {
 
     this.drainSchedulers();
   }
-
-  // Proxy Fetch
 
   private async fetchProxy(
     req: ProxyRequest,
@@ -1543,17 +1515,12 @@ export class CpuCache {
   }
 
   /**
-   * Release the scheduler slot and drop the in-flight metadata for a
-   * completion, but only when the settling controller still owns the key.
-   * Every fetch-completion exit (chunk and proxy; failure, decode failure,
-   * success, abort/pending) routes through here so the identity guard holds
-   * by construction: a settle arriving after its key was cancelled and
-   * re-enqueued under a fresh controller (the same tile scrubbed away and
-   * straight back within a rebuild's detection lag) frees nothing, leaving
-   * the live successor's slot, metadata, and failure state intact — rather
-   * than under-counting concurrency and starting a duplicate fetch. Returns
-   * whether this settle owned the key, so callers gate their per-key
-   * bookkeeping (failure record, streak reset, recovery) on ownership.
+   * Release the scheduler slot and in-flight metadata for a completion, but
+   * only when the settling controller still owns the key. Every completion
+   * exit routes through here, so a settle that arrives after its key was
+   * cancelled and re-enqueued (a tile scrubbed away and straight back) frees
+   * nothing and cannot start a duplicate fetch. Returns whether this settle
+   * owned the key; callers gate per-key bookkeeping on it.
    */
   private settleFetch<Req extends SchedulableRequest, M>(
     scheduler: Scheduler<Req>,
@@ -1581,21 +1548,11 @@ export class CpuCache {
   }
 
   /**
-   * Record a fetch failure for `key`, routing it to the matching store.
-   *
-   * A key can flip kind between records (a timeout that later resolves to a
-   * 404, or a 404 that later times out), so both stores are cleared of the
-   * key first — it must live in exactly one. A permanent record is sticky
-   * (`eligibleAt` = `Infinity`). A transient record grows its attempt count
-   * from any prior transient record (so the backoff lengthens, capped) and
-   * records its re-eligibility instant.
-   *
-   * Each store is bounded independently at {@link MAX_TRACKED_FAILURES} with
-   * FIFO eviction of its oldest entry. Because the stores are separate, a
-   * flood of permanents cannot evict a transient's backoff slot: a transient
-   * always retains its own record and thus its backoff, even when the
-   * permanent store is saturated. Total tracked entries stay bounded at
-   * `2 · MAX_TRACKED_FAILURES`.
+   * Record a fetch failure for `key` in the matching store. A key can flip
+   * kind between records, so it is cleared from both first. A transient
+   * record grows its attempt count from the prior transient record, which
+   * lengthens the capped backoff. Each store is FIFO-capped independently,
+   * so a flood of permanents cannot evict a transient's backoff.
    */
   private recordFailure(key: string, isPermanent: boolean): void {
     if (isPermanent) {
@@ -1654,10 +1611,8 @@ export class CpuCache {
   }
 
   /**
-   * Short, capped exponential backoff with jitter for a transient
-   * failure's `attempt`-th record (1-based). Jitter is drawn from the
-   * injected `random()` so retries across many tiles de-correlate — and
-   * still de-correlate at the cap (see {@link backoffWithJitter}).
+   * Backoff for a transient failure's `attempt`-th record (1-based), with
+   * jitter from the injected `random()` (see {@link backoffWithJitter}).
    */
   private backoffMs(attempt: number): number {
     return backoffWithJitter(attempt, this.random);
@@ -1689,22 +1644,12 @@ export class CpuCache {
   }
 
   /**
-   * Count a streak-eligible delivery failure toward the consecutive-failure
-   * streak and notify the owner once it crosses the threshold — throttled
-   * while the streak persists. Eligible failures are a server-reported
-   * per-chunk failure (any retry classification), a post-retry permanent
-   * failure, or a decode failure; the caller feeds each failed delivery here
-   * exactly once per fetch lifecycle — a delivery's own attempt and its
-   * in-fetch retries count once, deduped by the recursion-carried flag in
-   * {@link CpuCache.fetchAndDecode}, while a chunk that keeps failing across
-   * re-plan re-fetches re-contributes each lifecycle so the count keeps
-   * tracking consecutive failed deliveries. This is the
-   * user-visible complement to the per-key failure records: individual misses
-   * stay quiet, but a source that fails everything (e.g. credentials lost
-   * after a successful open, or a backend that stays unavailable — both
-   * reported per chunk as `source_chunk_status`, whether the content source
-   * rejects them as permanent or as self-healing transient) must not present
-   * as a silently stalling canvas.
+   * Count a streak-eligible delivery failure and notify the owner once the
+   * streak crosses the threshold, throttled while it persists. The caller
+   * feeds each failed delivery once per fetch lifecycle (see
+   * {@link CpuCache.fetchAndDecode}). Individual misses stay quiet, but a
+   * source that fails everything, such as lost credentials or a backend that
+   * stays down, must not look like a silently stalled canvas.
    */
   private recordChunkFailureForStreak(message: string): void {
     this.chunkFailureStreak += 1;
@@ -1718,10 +1663,9 @@ export class CpuCache {
     notify(this.chunkFailureStreak, message);
   }
 
-  /** A chunk was delivered (fetched AND decoded): the streak breaks, and a
-   *  previously notified signal is retired via `onChunkFailureRecovered`.
-   *  The notify throttle re-arms so a NEW streak after recovery is a new
-   *  incident and may notify immediately. */
+  /** A chunk was delivered (fetched and decoded): the streak breaks and a
+   *  surfaced signal is retired via `onChunkFailureRecovered`. The notify
+   *  throttle re-arms, so a new streak after recovery may notify at once. */
   private recordChunkDelivered(): void {
     this.chunkFailureStreak = 0;
     if (!this.chunkFailureSurfaced) return;
@@ -1810,8 +1754,6 @@ export class CpuCache {
     return `${delivery.datasetId}|${delivery.entityId}|${delivery.proxyKind}|${delivery.t}|${delivery.c}`;
   }
 
-  // Cache Management
-
   private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
     // minimap/overview/coarse share the overview/coarse cache.
     const usesOverviewCache =
@@ -1821,16 +1763,12 @@ export class CpuCache {
   }
 
   /**
-   * Lane a chunk entry should carry given everything demanding it this
-   * tick. The minimap and coarse lanes share a residency tier and a
-   * dedup key, so one fetch (or one cached entry) serves both — but
-   * {@link getDeliverable} only hands lane `"coarse"` entries to the
-   * main view. When the view's own coarse lane demanded the chunk this
-   * tick, a minimap-lane fetch or refresh must not leave the entry
-   * undeliverable until an interaction-triggered rebuild relabels it:
-   * that stalls idle fill at zero regardless of fetch rate. Chunks only
-   * the minimap wanted keep their lane — nothing becomes deliverable
-   * that the view never asked for.
+   * Lane a chunk entry should carry given all of this tick's demand. Minimap
+   * and coarse share a tier and dedup key, so one fetch serves both, but
+   * {@link getDeliverable} only hands `"coarse"` entries to the view. If the
+   * view's coarse lane wanted the chunk this tick it is relabelled coarse;
+   * otherwise idle fill stalls until a rebuild relabels it. Chunks only the
+   * minimap wanted keep their lane.
    */
   private resolveDemandLane(lane: Lane, key: string): Lane {
     if (lane === "minimap" && this.viewCoarseKeysThisTick.has(key)) return "coarse";
@@ -1844,13 +1782,6 @@ export class CpuCache {
     return "active-detail";
   }
 
-  private requestResidencyTier(req: ChunkRequest): ResidencyTier {
-    if (req.tier) return req.tier;
-    return req.lane === "coarse" || req.lane === "overview" || req.lane === "minimap"
-      ? "coarse"
-      : "detail";
-  }
-
   private computeTierDemandTelemetry(): CacheTelemetry["tierDemand"] {
     let residentDetailChunks = 0;
     let residentDetailBytes = 0;
@@ -1859,14 +1790,14 @@ export class CpuCache {
 
     for (const entry of this.chunkStore.allEntries()) {
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (entry.residencyTier === "detail" || entry.lane === "detail") {
+      if (entry.residencyTier === "detail") {
         residentDetailChunks++;
         residentDetailBytes += entry.sizeBytes;
       }
     }
     for (const entry of this.overviewStore.allEntries()) {
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (entry.residencyTier === "coarse" || entry.lane === "coarse") {
+      if (entry.residencyTier === "coarse") {
         residentCoarseChunks++;
         residentCoarseBytes += entry.sizeBytes;
       }
@@ -1875,14 +1806,6 @@ export class CpuCache {
     const desiredDetail = this.desiredDetailKeysThisTick.size;
     const detailCoverageRatio =
       desiredDetail > 0 ? residentDetailChunks / desiredDetail : 1;
-    const sparseDetail =
-      desiredDetail >= SPARSE_DETAIL_MIN_DESIRED_CHUNKS &&
-      detailCoverageRatio < SPARSE_DETAIL_COVERAGE_RATIO &&
-      (
-        this.chunkScheduler.pendingSize > 0 ||
-        this.chunkScheduler.inFlightSize > 0 ||
-        this.chunkStore.bytes >= this.config.mainBudgetBytes * 0.95
-      );
 
     return {
       desired: {
@@ -1896,7 +1819,6 @@ export class CpuCache {
         coarseBytes: residentCoarseBytes,
       },
       detailCoverageRatio,
-      sparseDetail,
     };
   }
 
@@ -1907,43 +1829,18 @@ export class CpuCache {
     };
 
     for (const req of this.chunkScheduler.pendingSnapshot()) {
-      queues[this.requestResidencyTier(req)].pending++;
+      queues[req.tier].pending++;
     }
     for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
-      const tier = this.requestResidencyTier(entry.request);
+      const tier = entry.request.tier;
       queues[tier].inFlight++;
       queues[tier].inFlightBytes += entry.estimatedBytes;
     }
     return queues;
   }
 
-  private maybeLogSparseDetail(
-    now: number,
-    tierDemand: CacheTelemetry["tierDemand"],
-  ): void {
-    if (!tierDemand.sparseDetail) {
-      this.sparseDetailStreak = 0;
-      return;
-    }
-    this.sparseDetailStreak++;
-    if (this.sparseDetailStreak < SPARSE_DETAIL_STREAK_THRESHOLD) return;
-    if (now - this.lastSparseDetailLogAt < SPARSE_DETAIL_LOG_RATE_LIMIT_MS) return;
-
-    this.lastSparseDetailLogAt = now;
-    debugLog("cache", "cache.sparse_detail", {
-      desiredDetailChunks: tierDemand.desired.detailChunks,
-      residentDetailChunks: tierDemand.resident.detailChunks,
-      detailCoverageRatio: tierDemand.detailCoverageRatio,
-      pendingChunks: this.chunkScheduler.pendingSize,
-      inFlightChunks: this.chunkScheduler.inFlightSize,
-      mainBytes: this.chunkStore.bytes,
-      mainBudget: this.config.mainBudgetBytes,
-      notice: "Detail coverage is budget-limited; lower the detail LOD explicitly for broader coverage.",
-    });
-  }
-
   private inFlightKey(req: ChunkRequest): string {
-    return chunkSchedulerKey(req, this.requestResidencyTier(req));
+    return chunkSchedulerKey(req, req.tier);
   }
 }
 
@@ -1959,12 +1856,11 @@ function chunkSchedulerKey(req: ChunkRequest, tier: ResidencyTier): string {
 }
 
 /**
- * Interleave detail and coarse requests so neither tier can exhaust the
- * fetch slots before the other gets any — the two caches have separate
- * budgets, and a priority-sorted run of one tier would otherwise fill
- * the queue head. `tiers[i]` is the residency tier of `requests[i]`,
- * precomputed by {@link CpuCache.submit}'s single derivation pass so a
- * large wanted set is not re-classified here (issue #900).
+ * Interleave detail and coarse requests so neither tier exhausts the fetch
+ * slots before the other gets any. The two caches have separate budgets, and
+ * a priority-sorted run of one tier would otherwise fill the queue head.
+ * `tiers[i]` is the residency tier of `requests[i]`, precomputed by
+ * {@link CpuCache.submit}.
  */
 function orderChunkRequestsForTierAllocation(
   requests: ChunkRequest[],

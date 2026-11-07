@@ -28,6 +28,7 @@ import type {
   ColdStateMessage,
 } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
+import { UNTIMED } from "../passTiming.ts";
 
 function makeMockDevice(): GPUDevice {
   const createTexture = vi.fn((desc: GPUTextureDescriptor) => ({
@@ -49,13 +50,12 @@ function makeCtx(): WorkerCtx {
     context: {} as GPUCanvasContext,
     format: "bgra8unorm",
     state: createInitialState(),
+    passTimer: UNTIMED,
     getSliceRenderer: () => ({} as never),
     getVolumeRenderer: () => ({} as never),
     getCompositor: () => ({} as never),
     getCursorRenderer: () => ({} as never),
     ensureOffscreenPool: () => [],
-    getDummyTexture: () => ({} as GPUTexture),
-    getDummy3DTexture: () => ({} as GPUTexture),
     getOrCreateLUT: () => ({} as GPUTexture),
     post: () => {},
     postWantedSet: () => {},
@@ -71,17 +71,14 @@ function identityMatrix(): Float32Array {
   return m;
 }
 
-function tile(entityId: string, imageId: string, targetLod = 0): ColdStateActiveEntry {
+function tile(entityId: string, imageId: string, level = 0): ColdStateActiveEntry {
   return {
     kind: "tile",
     entityId,
     imageId,
     mode: "tiles-with-detail",
-    targetLod,
-    detailOwnedLodRange: [targetLod, targetLod],
-    detailLevel: targetLod,
+    detailLevels: [level],
     coarseLevel: null,
-    wantedLodLevels: [targetLod],
     levels: [
       { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
     ],
@@ -145,7 +142,7 @@ describe("applyColdStateDelta", () => {
     };
     applyColdStateDelta(ctxDelta, delta);
 
-    // A fresh worker fed the equivalent FULL cold state at the new view.
+    // A fresh worker fed the equivalent full cold state at the new view.
     const ctxFull = makeCtx();
     const coldFull: ColdStateMessage = {
       ...makeCold([tile("a", "img-a", 2), tile("c", "img-c", 1), tile("d", "img-d", 0)]),
@@ -172,8 +169,8 @@ describe("applyColdStateDelta", () => {
     // ghost tile. (Its pool routing is dropped and it never enters the rebuilt
     // descriptor buffer, exactly as a full rebuild on this worker would do.)
     expect(descDelta.indexByMember.has("img-b")).toBe(false);
-    expect(ctxDelta.state.memberToPool.has("img-b")).toBe(false);
-    expect(ctxDelta.state.currentEntityMetasByDataset.get("ds1")!.has("img-b")).toBe(false);
+    expect(ctxDelta.state.memberSourcePools.has("img-b")).toBe(false);
+    expect(ctxDelta.state.currentSourcesByDataset.get("ds1")!.has("img-b")).toBe(false);
     expect(descDelta.indexByMember.has("img-c")).toBe(true);
 
     // The delta re-pointed the retained cold state at the new view.

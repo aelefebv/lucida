@@ -1,5 +1,5 @@
 /**
- * The Chrome Trace Event projection (#934). These cases assert on the
+ * The Chrome Trace Event projection. These cases assert on the
  * *document* — track names, span placement, counter series, what the header
  * declares — because that is the external behaviour a reader opening the file
  * in Perfetto depends on. How the projection walks the table is not.
@@ -17,6 +17,7 @@ import {
   toChromeTraceJson,
   type ChromeTraceEvent,
 } from "./chromeTrace.ts";
+import { emptySendTallies } from "./diagnose/fixtures.ts";
 import {
   PHASES,
   type RunHeader,
@@ -56,6 +57,10 @@ const HEADER: RunHeader = {
     residentDetailChunks: 0,
     desiredCoarseChunks: 0,
     residentCoarseChunks: 0,
+    detailBytes: 0,
+    detailBudgetBytes: 0,
+    coarseBytes: 0,
+    coarseBudgetBytes: 0,
   },
 };
 
@@ -75,6 +80,7 @@ function row(overrides: Partial<TraceRow> = {}): TraceRow {
     y: 2,
     x: 3,
     chunkKey: "1/0/0/0/2/3",
+    bytes: 0,
     outcome: "complete",
     phases: {
       plan: { startUs: 0, endUs: 1_000, durationUs: 1_000 },
@@ -88,7 +94,7 @@ function reading(atUs: number, values: Partial<Omit<TraceReading, "atUs">> = {})
   return { atUs, queueDepth: 0, inFlight: 0, frameTimeUs: 0, residentBytes: 0, ...values };
 }
 
-function tick(atUs: number): TraceTick {
+function tick(atUs: number, overrides: Partial<TraceTick> = {}): TraceTick {
   return {
     atUs,
     datasetId: "ds",
@@ -100,8 +106,14 @@ function tick(atUs: number): TraceTick {
       activeSetTilesDetail: 0,
     },
     counted: { "cache-admission": 0, "worker-dispatch": 0, "coalesce-attach": 0 },
+    sent: emptySendTallies(),
     levels: [],
     levelsDropped: 0,
+    targetLevel: null,
+    levelPinned: false,
+    availabilityWoken: false,
+    displayedLevel: null,
+    ...overrides,
   };
 }
 
@@ -119,6 +131,7 @@ function run(overrides: Partial<TraceRun> = {}): TraceRun {
     rows: [],
     ticks: [],
     ticksDropped: 0,
+    sent: emptySendTallies(),
     readings: [],
     readingsDropped: 0,
     events: [],
@@ -267,11 +280,34 @@ describe("the Chrome Trace Event projection", () => {
     expect(counters.map(e => e.name)).toEqual([
       "queue depth",
       "in flight",
-      "frame time (ms)",
+      "main-thread frame time (ms)",
       "resident bytes",
     ]);
     expect(counters.every(e => e.ts === 1_000 && e.pid === PID_BROWSER)).toBe(true);
     expect(counters.map(e => e.args?.value)).toEqual([1_204, 12, 16.7, 6_000_000_000]);
+  });
+
+  /**
+   * A counter track has no null, so the GPU series has a point only where a
+   * reading carries one, and a run without timestamp queries has no track
+   * rather than one pinned at zero.
+   */
+  it("draws a GPU pass counter only on the readings that carry one", () => {
+    const events = toChromeTraceEvents(
+      doc(
+        run({
+          readings: [
+            reading(1_000, { frameTimeUs: 4_000 }),
+            reading(17_000, { frameTimeUs: 4_000, gpuPassUs: 1_250 }),
+          ],
+        }),
+      ),
+    );
+    const gpu = events.filter(e => e.ph === "C" && e.name === "gpu pass time (ms)");
+    expect(gpu.map(e => [e.ts, e.args?.value])).toEqual([[17_000, 1.25]]);
+
+    const untimed = toChromeTraceEvents(doc(run({ readings: [reading(1_000)] })));
+    expect(untimed.some(e => e.name === "gpu pass time (ms)")).toBe(false);
   });
 
   /**
@@ -311,6 +347,7 @@ describe("the Chrome Trace Event projection", () => {
               metadataPhase: null,
               dispatchOffsetUs: 0,
               durationUs: 0,
+              backendBytes: 131_072,
               placement: { startUs: 2_000, endUs: 2_900, gapUs: 2_100, overshootUs: 0 },
               unplacedReason: null,
             },
@@ -322,7 +359,7 @@ describe("the Chrome Trace Event projection", () => {
     const serve = events.filter(e => e.pid === PID_SERVER && e.ph === "X");
     expect(serve).toHaveLength(1);
     expect(serve[0]).toMatchObject({ ts: 2_000, dur: 900, tid: 10 });
-    expect(serve[0].args).toMatchObject({ rid: 3, gapUs: 2_100 });
+    expect(serve[0].args).toMatchObject({ rid: 3, gapUs: 2_100, backendBytes: 131_072 });
   });
 
   it("counts an unplaced server row in the header instead of inventing a position", () => {
@@ -336,6 +373,7 @@ describe("the Chrome Trace Event projection", () => {
             outcome: "not-ready",
             phases: { arrival: 10, handoff: 20 },
             coalescedOnto: null,
+            backendBytes: null,
             requestId: null,
             metadataPhase: null,
             dispatchOffsetUs: 0,
@@ -362,13 +400,94 @@ describe("the Chrome Trace Event projection", () => {
     const events = toChromeTraceEvents(
       doc(
         run({
-          events: [{ atUs: 2_500, kind: "eviction", reason: "evicted", chunk: null }],
+          events: [
+            { atUs: 2_500, kind: "eviction", reason: "evicted", chunk: null, levelChange: null },
+          ],
         }),
       ),
     );
 
     const instant = events.find(e => e.ph === "i");
     expect(instant).toMatchObject({ name: "eviction: evicted", ts: 2_500, tid: 2 });
+    expect(instant?.args).toEqual({
+      kind: "eviction", reason: "evicted", dataset: null, key: null, level: null, from: null, to: null,
+    });
+  });
+
+  it("names the chunk and its level on a point event about one chunk", () => {
+    const events = toChromeTraceEvents(
+      doc(
+        run({
+          events: [{
+            atUs: 10,
+            kind: "eviction",
+            reason: "evicted",
+            chunk: {
+              datasetId: "ds-1", entityId: "e-1", imageId: "img-1", residencyTier: "detail",
+              level: 3, t: 0, c: 0, z: 0, y: 1, x: 2, chunkKey: "3/0/0/0/1/2",
+            },
+            levelChange: null,
+          }],
+        }),
+      ),
+    );
+
+    const instant = events.find(e => e.ph === "i");
+    expect(instant?.args).toMatchObject({
+      kind: "eviction", reason: "evicted", dataset: "ds-1", key: "3/0/0/0/1/2", level: 3,
+    });
+  });
+
+  it("names the dataset and the old and new range on a level-change instant", () => {
+    const events = toChromeTraceEvents(
+      doc(
+        run({
+          events: [{
+            atUs: 3_000,
+            kind: "level-change",
+            reason: "screen",
+            chunk: null,
+            levelChange: { datasetId: "ds-1", from: { min: 1, max: 1 }, to: { min: 2, max: 2 } },
+          }],
+        }),
+      ),
+    );
+
+    const instant = events.find(e => e.ph === "i");
+    expect(instant).toMatchObject({ name: "level-change: screen", ts: 3_000, tid: 2 });
+    expect(instant?.args).toMatchObject({
+      dataset: "ds-1", from: { min: 1, max: 1 }, to: { min: 2, max: 2 }, key: null,
+    });
+  });
+
+  /** One pair per dataset, because a workspace's datasets can sit at different levels. */
+  it("draws the target and displayed level per dataset as counter tracks off the ticks", () => {
+    const events = toChromeTraceEvents(
+      doc(
+        run({
+          ticks: [
+            tick(1_000, { targetLevel: { min: 2, max: 2 }, displayedLevel: null }),
+            tick(9_000, {
+              targetLevel: { min: 1, max: 2 },
+              displayedLevel: { min: 2, max: 3 },
+            }),
+          ],
+        }),
+      ),
+    );
+
+    const target = events.filter(e => e.ph === "C" && e.name === "target level (ds)");
+    const displayed = events.filter(e => e.ph === "C" && e.name === "displayed level (ds)");
+    expect(target.map(e => [e.ts, e.args])).toEqual([
+      [1_000, { finest: 2, coarsest: 2 }],
+      [9_000, { finest: 1, coarsest: 2 }],
+    ]);
+    // -1: a counter has no null.
+    expect(displayed.map(e => [e.ts, e.args])).toEqual([
+      [1_000, { finest: -1, coarsest: -1 }],
+      [9_000, { finest: 2, coarsest: 3 }],
+    ]);
+    expect(target.every(e => e.pid === PID_BROWSER)).toBe(true);
   });
 
   /**

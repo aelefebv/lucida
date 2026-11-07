@@ -1,73 +1,9 @@
 use super::*;
 
-#[tokio::test]
-async fn dataset_membership_and_document_persist_together() {
-    let store = fresh_store().await;
-    let owner = principal("owner@example.com", false);
-    let workspace = store.create_workspace(&owner, Some("Demo")).await.unwrap();
-    let workspace_dataset_id = DatasetId("wds_runtime".into());
-    let mut doc = DocumentState::default();
-    doc.manifests.insert(
-        workspace_dataset_id.clone(),
-        lucida_content::DatasetManifest::new(
-            workspace_dataset_id.clone(),
-            "dataset".into(),
-            lucida_content::DatasetKind::Single,
-            vec![],
-            vec![],
-            vec![],
-            vec![],
-            None,
-        ),
-    );
-
-    store
-        .persist_dataset_opened(
-            &workspace.id,
-            &workspace_dataset_id,
-            "ds_source",
-            "file:///data/demo.zarr",
-            "demo.zarr",
-            &owner.email,
-            1,
-            &doc,
-        )
-        .await
-        .unwrap();
-
-    let sources = store.list_dataset_sources(&workspace.id).await.unwrap();
-    assert_eq!(sources.len(), 1);
-    assert_eq!(sources[0].workspace_dataset_id, workspace_dataset_id);
-    assert_eq!(sources[0].dataset_source_id, "ds_source");
-    assert_eq!(
-        store
-            .dataset_by_source(&workspace.id, "ds_source")
-            .await
-            .unwrap()
-            .unwrap()
-            .workspace_dataset_id,
-        DatasetId("wds_runtime".into())
-    );
-
-    let restored = store.get_workspace(&workspace.id).await.unwrap().unwrap();
-    assert_eq!(restored.seq, 1);
-    assert!(
-        restored
-            .document
-            .manifests
-            .contains_key(&DatasetId("wds_runtime".into()))
-    );
-}
-
-// --- Dataset rename (#701) -------------------------------------------
-
-// THE HEADLINE TEST: a rename must survive close + reopen. The prior
-// (rejected) attempt updated only the DB display_name and a web-local
-// override, so the persisted document still carried the old manifest name
-// and the rename was silently lost on reopen. This drives the rename
-// through the document-mutation path, evicts the live workspace, reopens
-// it (which loads the persisted document_json), and asserts the
-// client-visible manifest name is the NEW one.
+// A rename must survive close and reopen, so it has to reach the persisted
+// document, not only the DB display_name. Drives the rename through the
+// document path, evicts the live workspace, reopens it, and asserts the
+// client-visible manifest name is the new one.
 #[tokio::test]
 async fn rename_dataset_survives_evict_and_reopen() {
     let store = fresh_store().await;
@@ -102,7 +38,7 @@ async fn rename_dataset_survives_evict_and_reopen() {
     assert_eq!(evicted, 1);
     assert_eq!(manager.live_workspace_count().await, 0);
 
-    // Reopen: the client-visible document manifest name is the NEW one.
+    // Reopen: the client-visible document manifest name is the new one.
     let reopened = manager.live_workspace(&workspace_id, &owner).await.unwrap();
     assert!(!Arc::ptr_eq(&live, &reopened));
     let reopened_name = reopened.session.lock().await.document.manifests[&wds_id]
@@ -369,72 +305,6 @@ async fn rename_dataset_broadcasts_command_to_peers() {
 }
 
 #[tokio::test]
-async fn same_source_can_have_distinct_workspace_dataset_ids() {
-    let store = fresh_store().await;
-    let owner = principal("owner@example.com", false);
-    let a = store.create_workspace(&owner, Some("A")).await.unwrap();
-    let b = store.create_workspace(&owner, Some("B")).await.unwrap();
-    let source_id = "ds_shared_source";
-    let canonical_url = "file:///data/shared.zarr";
-
-    for (workspace, workspace_dataset_id) in [
-        (&a, DatasetId("wds_workspace_a".into())),
-        (&b, DatasetId("wds_workspace_b".into())),
-    ] {
-        let mut doc = DocumentState::default();
-        doc.manifests.insert(
-            workspace_dataset_id.clone(),
-            lucida_content::DatasetManifest::new(
-                workspace_dataset_id.clone(),
-                "shared.zarr".into(),
-                lucida_content::DatasetKind::Single,
-                vec![],
-                vec![],
-                vec![],
-                vec![],
-                None,
-            ),
-        );
-        store
-            .persist_dataset_opened(
-                &workspace.id,
-                &workspace_dataset_id,
-                source_id,
-                canonical_url,
-                "shared.zarr",
-                &owner.email,
-                1,
-                &doc,
-            )
-            .await
-            .unwrap();
-    }
-
-    let source_a = store
-        .dataset_by_source(&a.id, source_id)
-        .await
-        .unwrap()
-        .unwrap();
-    let source_b = store
-        .dataset_by_source(&b.id, source_id)
-        .await
-        .unwrap()
-        .unwrap();
-
-    assert_eq!(source_a.dataset_source_id, source_b.dataset_source_id);
-    assert_eq!(source_a.canonical_url, source_b.canonical_url);
-    assert_ne!(source_a.workspace_dataset_id, source_b.workspace_dataset_id);
-    assert_eq!(
-        source_a.workspace_dataset_id,
-        DatasetId("wds_workspace_a".into())
-    );
-    assert_eq!(
-        source_b.workspace_dataset_id,
-        DatasetId("wds_workspace_b".into())
-    );
-}
-
-#[tokio::test]
 async fn live_workspace_sessions_are_independent() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
@@ -484,12 +354,6 @@ async fn live_workspace_sessions_are_independent() {
             .contains_key(&DatasetId("ds-a".into()))
     );
 }
-// ===================================================================
-// RED TEAM (#817 issue-sweep): probe the new transition allow-list and
-// the surrounding never-leak / self-approve invariants.
-// ===================================================================
-
-// --- Manager-layer command authorization ---------------------------
 
 // Generic document commands are authorized (and persisted) by the
 // manager, mirroring `rename_dataset`: the WS handler holds no role
@@ -634,8 +498,8 @@ async fn dataset_source_for_retry_is_editor_gated() {
 }
 
 /// The editor gate's two failure modes must never be conflated: a role
-/// that DENIES is an authorization verdict, but a role lookup that
-/// ERRORS is transient store trouble — no verdict was reached. Closing
+/// that denies is an authorization verdict, but a role lookup that
+/// errors is transient store trouble, and no verdict was reached. Closing
 /// the sqlite pool makes every subsequent query fail, so both manager
 /// entry points can be driven against a genuinely failing store.
 #[tokio::test]

@@ -5,7 +5,7 @@ import {
   type AutoFitContext,
 } from "./autoFit.ts";
 
-// A context where auto-fit SHOULD fire: this client is the opener, and no
+// A context where auto-fit should fire: this client is the opener, and no
 // camera-owning state (restore / follow) is active.
 const FIT: AutoFitContext = {
   isOpener: true,
@@ -102,7 +102,7 @@ describe("isOpenerOf", () => {
 
   it("treats id 0 as a real id, not a sentinel (first-client opener fits)", () => {
     // The server allocates client ids from 0, so the single-user / first-client
-    // opener is often id 0 — it MUST match, not be excluded.
+    // opener is often id 0, so it must match.
     expect(isOpenerOf(0, 0)).toBe(true);
   });
 

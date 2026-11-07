@@ -10,6 +10,7 @@ import type { SceneEpochs } from "../../epochs.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
 import { Axis } from "../../../axes.ts";
 import { labelDepthZ } from "../../../renderer/labelLayout.ts";
+import { sliceLevelZ } from "../../../renderer/slicePlane.ts";
 
 export function workerMemberIdForChunk(
   delivery: ReadyChunkDelivery,
@@ -114,19 +115,13 @@ export function dispatchChunkDelivery(
 }
 
 /**
- * Deliver one uint32 label chunk to the r32uint label pool — but only the
- * SINGLE Z-plane the current view needs. A real label 3D chunk is ~8 MB
- * (e.g. 128³ u32) though the worker draws one ~64 KB plane; sending the
- * whole chunk would exhaust the per-frame upload budget on a single tile
- * (labels sort after intensity, so they'd starve). So the target plane is
- * extracted here from the label's own full-res Z (mapped from the current
- * source Z) and only that crosses to the worker.
+ * Deliver the one Z-plane of a uint32 label chunk that the slice view needs
+ * to the r32uint label pool. A 3D label chunk is ~8 MB though the worker
+ * draws one ~64 KB plane, and labels sort after intensity, so sending the
+ * whole chunk would starve them of upload budget.
  *
- * This is the 2D slice variant (the 3D volume view uses
- * {@link dispatchLabelVolumeChunkDelivery}, which forwards the whole chunk).
- * Returns the worker member id + the bytes actually sent (for budget
- * accounting), or `null` when geometry is unavailable or the chunk is for a
- * different Z-plane-chunk than the current view (a stale scrub).
+ * Returns the member id and bytes sent, or `null` when geometry is missing
+ * or the chunk covers a different Z-chunk than the current view.
  */
 export function dispatchLabelChunkDelivery(
   client: UploadClient,
@@ -145,10 +140,7 @@ export function dispatchLabelChunkDelivery(
 
   // Which Z-plane the current view wants, in this level's coords.
   const labelFullResZ = labelDepthZ(sliceZ, meta.labelSourceLevel0, meta.labelLevel0);
-  const levelZ = Math.min(
-    Math.floor((labelFullResZ / Math.max(label0Depth - 1, 1)) * Math.max(levelDepth - 1, 1)),
-    Math.max(levelDepth - 1, 0),
-  );
+  const levelZ = sliceLevelZ(labelFullResZ, label0Depth, levelDepth);
   const cz = Math.max(chunkZ, 1);
   const targetChunkZ = Math.floor(levelZ / cz);
   // This chunk covers a different Z-chunk than the current view — the right
@@ -188,17 +180,10 @@ export function dispatchLabelChunkDelivery(
 }
 
 /**
- * Deliver one uint32 label chunk to the r32uint label VOLUME pool — the
- * WHOLE 3D chunk, no plane extraction. The 3D first-hit surface needs the
- * full label volume (each ray stops at the first non-zero voxel anywhere
- * along its depth), so unlike {@link dispatchLabelChunkDelivery} (which
- * pre-slices to one ~64 KB Z-plane for the 2D view) the entire ~8 MB chunk
- * crosses to the worker. The uploader accounts the real byte size so the
- * per-frame budget throttles the volume across frames rather than fanning
- * every chunk out at once.
- *
- * Returns the worker member id + the bytes sent (for budget accounting), or
- * `null` when the level geometry is unavailable.
+ * Deliver a whole uint32 label chunk to the r32uint label volume pool. The
+ * first-hit surface needs the full depth, since each ray stops at the first
+ * non-zero voxel anywhere along it. Returns the member id and bytes sent,
+ * or `null` when the level geometry is unavailable.
  */
 export function dispatchLabelVolumeChunkDelivery(
   client: UploadClient,

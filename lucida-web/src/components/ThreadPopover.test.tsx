@@ -7,11 +7,12 @@ import type { WasmScene } from "lucida-core";
 import { ThreadPopover } from "./ThreadPopover.tsx";
 import type { Annotation } from "./annotationDocument.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "../savedView/types.ts";
+import { toastQueue } from "../ui/toastQueue.ts";
 
 const MY_ID = "7";
 
-/** A trivial scene stub — ThreadPopover only calls apply_command for mutations,
- * and the "Go to author's view" path never mutates the document. */
+/** ThreadPopover only calls apply_command for mutations, and "Go to author's
+ * view" never mutates. */
 function makeScene(): WasmScene {
   return {
     apply_command: () => {},
@@ -51,7 +52,10 @@ function renderThread(pin: Annotation, onGoToAuthorView?: (id: string) => void) 
 beforeEach(() => {
   Object.defineProperty(globalThis, "devicePixelRatio", { value: 1, configurable: true });
 });
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  toastQueue.clear();
+});
 
 describe("ThreadPopover — Go to author's view affordance (slice 2)", () => {
   it("renders the affordance ONLY when the pin carries a captured view", () => {
@@ -146,8 +150,7 @@ describe("ThreadPopover — Copy link share affordance (slice 3)", () => {
 
     expect(copied).toHaveLength(1);
     expect(copied[0]).toBe(`${window.location.origin}/w/ws-42#a=pin-share`);
-    // Transient "Copied!" feedback replaces the label.
-    expect(screen.getByTestId("pin-copy-link-pin-share").textContent).toBe("Copied!");
+    expect(toastQueue.visibleToasts.map((t) => t.content.title)).toEqual(["Link copied"]);
   });
 
   it("is available to ANY viewer (a pin authored by someone else still shows it)", () => {
@@ -162,7 +165,7 @@ describe("ThreadPopover — Copy link share affordance (slice 3)", () => {
     expect(screen.getByTestId("pin-copy-link-pin-other")).toBeTruthy();
   });
 
-  it("shows a non-throwing 'Copy failed' when the clipboard write rejects", async () => {
+  it("reports a rejected clipboard write in a toast, without throwing", async () => {
     Object.defineProperty(navigator, "clipboard", {
       value: {
         writeText: async () => {
@@ -185,6 +188,62 @@ describe("ThreadPopover — Copy link share affordance (slice 3)", () => {
     fireEvent.click(screen.getByTestId("pin-copy-link-pin-fail"));
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(screen.getByTestId("pin-copy-link-pin-fail").textContent).toBe("Copy failed");
+    expect(toastQueue.visibleToasts.map((t) => t.content)).toMatchObject([
+      { title: "Couldn't copy the link", description: "denied", tone: "danger" },
+    ]);
+  });
+});
+
+describe("ThreadPopover — Escape", () => {
+  function renderClosable(pin: Annotation) {
+    const closes: number[] = [];
+    const sceneRef = createRef<WasmScene | null>();
+    sceneRef.current = makeScene();
+    render(
+      <ThreadPopover
+        pin={pin}
+        datasetId="wds-1"
+        myId={MY_ID}
+        wasmSceneRef={sceneRef}
+        sendCommand={() => {}}
+        onDocumentChanged={() => {}}
+        onClose={() => closes.push(1)}
+      />,
+    );
+    return closes;
+  }
+
+  const ownPin: Annotation = {
+    id: "pin-esc",
+    position: [1, 2],
+    author: MY_ID,
+    kind: "point",
+    comments: [{ id: "c1", author: MY_ID, text: "mine" }],
+  };
+
+  it("closes the thread with focus outside it", () => {
+    const closes = renderClosable(ownPin);
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(closes).toHaveLength(1);
+  });
+
+  it("closes the thread from a control inside it", () => {
+    const closes = renderClosable(ownPin);
+    fireEvent.keyDown(screen.getByTestId("pin-copy-link-pin-esc"), { key: "Escape" });
+    expect(closes).toHaveLength(1);
+  });
+
+  it("closes the thread from the composer", () => {
+    const closes = renderClosable(ownPin);
+    fireEvent.keyDown(screen.getByTestId("comment-add-input-pin-esc"), { key: "Escape" });
+    expect(closes).toHaveLength(1);
+  });
+
+  it("cancels an edit before it closes anything", () => {
+    const closes = renderClosable(ownPin);
+    fireEvent.click(screen.getByTestId("comment-edit-c1"));
+    fireEvent.keyDown(screen.getByTestId("comment-edit-input-c1"), { key: "Escape" });
+    expect(screen.queryByTestId("comment-edit-input-c1")).toBeNull();
+    expect(closes).toHaveLength(0);
   });
 });

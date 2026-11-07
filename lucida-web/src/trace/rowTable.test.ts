@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 
 import { RowTable } from "./rowTable.ts";
+import { admissionColumnsOf } from "./diagnose/chunkLookup.ts";
+import { chunkIdentity, deriveChunkStates } from "./diagnose/chunkStates.ts";
+import { makeRun } from "./diagnose/fixtures.ts";
 import { Boundary, PHASES, RowOutcome, UNSET_STAMP, BOUNDARY_COUNT } from "./types.ts";
 
 function source(overrides: Partial<Parameters<RowTable["append"]>[0]> = {}) {
@@ -39,12 +42,22 @@ describe("RowTable", () => {
 
   it("pins the row width, because the memory caps are derived from it", () => {
     // 3 interned identity ids + 6 chunk coordinates + 7 boundary slots + the
-    // two-part wire label, all uint32, plus a residency-tier byte, a lane
-    // byte and an outcome byte. #927 derives its resident and per-run caps
-    // from this figure, so a change here is a change to how much of a run
-    // fits — the label costs 8 B a row, and buys the join to the server's
-    // table.
-    expect(RowTable.BYTES_PER_ROW).toBe(75);
+    // two-part wire label + the bytes column, all uint32, plus a
+    // residency-tier, lane, outcome and last-boundary byte, plus a 12 B
+    // identity index. The resident and per-run caps derive from this figure,
+    // so a change here changes how much of a run fits.
+    expect(RowTable.BYTES_PER_ROW).toBe(92);
+  });
+
+  it("carries the bytes the wire delivered, and zero until it did", () => {
+    const table = new RowTable(2);
+    const delivered = table.append(source(), 0);
+    table.append(source(), 0);
+    table.setBytes(delivered, 326_144);
+
+    const rows = table.serialise();
+    expect(rows[0].bytes).toBe(326_144);
+    expect(rows[1].bytes).toBe(0);
   });
 
   it("carries lane as a column, not as a phase", () => {
@@ -189,5 +202,222 @@ describe("the live tally (#937)", () => {
     table.liveTally(occupancy);
 
     expect(occupancy[PHASES.indexOf("wire")]).toBe(1);
+  });
+});
+
+describe("the live tally is kept on the write path", () => {
+  /**
+   * A full walk, the oracle for the write-path counters: a row is in the
+   * phase after the last boundary it stamped,
+   * a finished row is in no phase, and a row that stamped nothing is
+   * unstamped.
+   */
+  function walk(table: RowTable) {
+    const occupancy = new Uint32Array(PHASES.length);
+    let complete = 0;
+    let retired = 0;
+    let unstamped = 0;
+    for (let i = 0; i < table.length; i++) {
+      const outcome = table.outcomeAt(i);
+      if (outcome === RowOutcome.Complete) {
+        complete++;
+        continue;
+      }
+      if (outcome === RowOutcome.Retired) {
+        retired++;
+        continue;
+      }
+      let boundary = BOUNDARY_COUNT - 1;
+      while (boundary >= 0 && table.stampAt(i, boundary) === UNSET_STAMP) boundary--;
+      if (boundary < 0) unstamped++;
+      else if (boundary < PHASES.length) occupancy[boundary]++;
+    }
+    return {
+      occupancy,
+      tally: { complete, retired, inFlight: table.length - complete - retired, unstamped },
+    };
+  }
+
+  function expectCountersToMatchWalk(table: RowTable): void {
+    const occupancy = new Uint32Array(PHASES.length);
+    const tally = table.liveTally(occupancy);
+    const oracle = walk(table);
+    expect(tally).toEqual(oracle.tally);
+    expect([...occupancy]).toEqual([...oracle.occupancy]);
+  }
+
+  it("agrees with a walk over the rows after any sequence of stamps and outcomes", () => {
+    // A small table, so the sequence crosses several doublings, driven by a
+    // fixed linear congruential sequence so a failure replays.
+    const table = new RowTable(4);
+    let seed = 0x2545f491;
+    const next = (bound: number): number => {
+      seed = (Math.imul(seed, 1_103_515_245) + 12_345) >>> 0;
+      return seed % bound;
+    };
+    for (let step = 0; step < 4_000; step++) {
+      const roll = next(10);
+      if (roll < 3 || table.length === 0) {
+        table.append(source(), 0);
+        continue;
+      }
+      const row = next(table.length);
+      if (roll < 8) {
+        // Boundaries in any order: a lower boundary stamped late must not
+        // move a row backwards.
+        table.stamp(row, next(BOUNDARY_COUNT), step);
+      } else if (roll < 9) {
+        table.setOutcome(row, RowOutcome.Complete);
+      } else {
+        table.setOutcome(row, RowOutcome.Retired);
+      }
+      if (step % 97 === 0) expectCountersToMatchWalk(table);
+    }
+    expectCountersToMatchWalk(table);
+  });
+
+  it("moves a finished row out of its phase, and a late stamp on it moves nothing", () => {
+    const table = new RowTable(2);
+    const occupancy = new Uint32Array(PHASES.length);
+    const row = table.append(source(), 0);
+    table.stamp(row, Boundary.WireStart, 10);
+    expect(table.liveTally(occupancy).inFlight).toBe(1);
+    expect(occupancy[PHASES.indexOf("wire")]).toBe(1);
+
+    table.setOutcome(row, RowOutcome.Retired);
+    // A decode that lands after the view moved on: the row is still retired
+    // and still in no phase.
+    table.stamp(row, Boundary.DecodeStart, 20);
+
+    expect(table.liveTally(occupancy)).toEqual({
+      complete: 0,
+      retired: 1,
+      inFlight: 0,
+      unstamped: 0,
+    });
+    expect([...occupancy]).toEqual([0, 0, 0, 0, 0, 0]);
+    expectCountersToMatchWalk(table);
+  });
+
+  it("counts a row that stamped nothing as unstamped until its first boundary or its end", () => {
+    const table = new RowTable(2);
+    const occupancy = new Uint32Array(PHASES.length);
+    const abandoned = table.append(source(), 0);
+    const admitted = table.append(source(), 0);
+    expect(table.liveTally(occupancy).unstamped).toBe(2);
+
+    table.setOutcome(abandoned, RowOutcome.Retired);
+    table.stamp(admitted, Boundary.QueueStart, 5);
+
+    expect(table.liveTally(occupancy)).toEqual({
+      complete: 0,
+      retired: 1,
+      inFlight: 1,
+      unstamped: 0,
+    });
+    expect(occupancy[PHASES.indexOf("queue")]).toBe(1);
+    expectCountersToMatchWalk(table);
+  });
+
+  it("keeps the counters across a growth of the table", () => {
+    const table = new RowTable(1);
+    const occupancy = new Uint32Array(PHASES.length);
+    for (let i = 0; i < 9; i++) {
+      const row = table.append(source(), 0);
+      table.stamp(row, Boundary.WireStart, i);
+    }
+    expect(table.capacityRows).toBe(16);
+    expect(table.liveTally(occupancy).inFlight).toBe(9);
+    expect(occupancy[PHASES.indexOf("wire")]).toBe(9);
+    expectCountersToMatchWalk(table);
+  });
+});
+
+/** The chunk `source()` names, at one x, on one entity of one dataset. */
+function chunk(x: number, entityId = "member-1", datasetId = "ds") {
+  return { datasetId, entityId, level: 2, t: 3, c: 1, z: 4, y: 5, x };
+}
+
+describe("the identity index (#1062)", () => {
+  it("finds the newest row of a chunk in a table that holds several, and none for a chunk it never saw", () => {
+    const table = new RowTable(2);
+    const first = table.append(source({ x: 6 }), 0);
+    table.append(source({ x: 7 }), 0);
+    const again = table.append(source({ x: 6 }), 0);
+
+    expect(table.newestRowOf(chunk(6))).toBe(again);
+    expect(table.rowsOf(again)).toEqual([first, again]);
+    expect(table.newestRowOf(chunk(8))).toBe(-1);
+    expect(table.newestRowOf(chunk(6, "member-9"))).toBe(-1);
+    expect(table.newestRowOf(chunk(6, "member-1", "other"))).toBe(-1);
+  });
+
+  it("survives the table doubling, with every chain intact", () => {
+    const table = new RowTable(1);
+    const rows: number[] = [];
+    for (let i = 0; i < 50; i++) rows.push(table.append(source({ x: i % 7, entityId: `m-${i % 3}` }), 0));
+
+    for (let i = 0; i < 50; i++) {
+      const newest = table.newestRowOf(chunk(i % 7, `m-${i % 3}`));
+      const expected = rows.filter((_, j) => j % 3 === i % 3 && j % 7 === i % 7);
+      expect(table.rowsOf(newest)).toEqual(expected);
+    }
+  });
+
+  it("reads a chunk as the derivation reads its serialised rows, for every state a row can be in", () => {
+    const table = new RowTable(4);
+    // Complete, then fetched again and still on the wire.
+    const done = table.append(source({ x: 1 }), 0);
+    table.stamp(done, Boundary.PlanStart, 100);
+    table.stamp(done, Boundary.QueueStart, 200);
+    table.stamp(done, Boundary.WireStart, 300);
+    table.stamp(done, Boundary.DecodeStart, 900);
+    table.stamp(done, Boundary.UploadStart, 1_000);
+    table.stamp(done, Boundary.PresentStart, 1_100);
+    table.stamp(done, Boundary.PresentEnd, 1_300);
+    table.setOutcome(done, RowOutcome.Complete);
+    const onWire = table.append(source({ x: 1 }), 0);
+    table.stamp(onWire, Boundary.QueueStart, 2_000);
+    table.stamp(onWire, Boundary.WireStart, 2_100);
+    // Retired before its wire closed.
+    const retired = table.append(source({ x: 2 }), 0);
+    table.stamp(retired, Boundary.QueueStart, 2_500);
+    table.stamp(retired, Boundary.WireStart, 2_600);
+    table.setOutcome(retired, RowOutcome.Retired);
+    // Nothing stamped at all.
+    table.append(source({ x: 3 }), 0);
+    // Still in the queue.
+    const queued = table.append(source({ x: 4 }), 0);
+    table.stamp(queued, Boundary.PlanStart, 3_000);
+    table.stamp(queued, Boundary.QueueStart, 3_050);
+
+    const closeUs = 5_000;
+    const run = makeRun({ header: { durationUs: closeUs }, rows: table.serialise() });
+    const derived = deriveChunkStates(run);
+    for (const x of [1, 2, 3, 4]) {
+      const live = table.readChunk(chunk(x), closeUs);
+      expect(live).toEqual(derived.byIdentity.get(chunkIdentity("ds", "member-1", `2/3/1/4/5/${x}`)));
+    }
+    expect(table.readChunk(chunk(1), closeUs)).toEqual({
+      state: "wire",
+      rows: 2,
+      fetches: 1,
+      ageMs: 3,
+    });
+    expect(table.readChunk(chunk(3), closeUs)).toEqual({
+      state: "unstamped",
+      rows: 1,
+      fetches: 0,
+      ageMs: null,
+    });
+
+    // The admission columns agree with the serialised rule for every row.
+    const fromRows = admissionColumnsOf(run.rows);
+    const fromTable = table.admissionColumns();
+    expect(fromTable.length).toBe(fromRows.length);
+    for (let i = 0; i < fromRows.length; i++) {
+      expect(fromTable.admittedUs(i)).toBe(fromRows.admittedUs(i));
+      expect(fromTable.dispatchedUs(i)).toBe(fromRows.dispatchedUs(i));
+    }
   });
 });

@@ -1,20 +1,10 @@
 /**
- * Eviction policies for the CPU cache.
+ * Eviction policies for the CPU cache. {@link LRUPolicy} serves the
+ * overview and proxy caches, whose entries are sacrificial;
+ * {@link TieredPolicy} serves the main (detail) cache.
  *
- * Two policies share one {@link EvictionPolicy} interface:
- *  - {@link LRUPolicy} — pure insertion-order LRU. Used by the overview
- *    cache and the proxy cache (entries are sacrificial; oldest goes first).
- *  - {@link TieredPolicy} — tier-walked LRU with an active-detail
- *    tiebreaker. Used by the main (detail) cache. Walks tiers in
- *    {@link getTierOrder} for the current interaction mode; within
- *    active-detail it uses the `(lastSeenTick ↑, priority ↓, insertedAt ↑)`
- *    rule, so focal
- *    chunks aren't swept out by their own freshness.
- *
- * Pure: policies take synthetic entries and return victims. The cache
- * owns the actual removal (it tracks per-cache byte budgets and emits
- * the eviction-burst log from the call site, both of which need state
- * the policy doesn't see).
+ * Policies are pure: they take entries and return victims. The cache owns
+ * removal, byte budgets, and the eviction-burst log.
  */
 
 import type { CacheEntry, EvictionTier } from "./types.ts";
@@ -35,11 +25,8 @@ export interface EvictableEntry {
 /**
  * Picks victims from a flat list of evictable entries until enough
  * bytes are freed. Pure: must not mutate `entries` or hold state across
- * calls beyond the policy's own configuration.
- *
- * Generic in the entry shape so the same interface fits both the
- * detail/overview caches ({@link CacheEntry}) and the proxy cache
- * (a thin adapter — see `cpuCache.ts:evictProxyIfNeeded`).
+ * calls beyond the policy's own configuration. Generic in the entry shape
+ * so the proxy store's adapter fits too.
  */
 export interface EvictionPolicy<T extends EvictableEntry = CacheEntry> {
   selectVictims(entries: readonly T[], bytesNeeded: number): T[];
@@ -65,55 +52,77 @@ export class LRUPolicy<T extends EvictableEntry = CacheEntry> implements Evictio
 }
 
 /**
- * Tiered LRU for the detail cache. Walks {@link getTierOrder} for the
- * mode provided by `modeProvider`, accumulating victims tier-by-tier
- * until enough bytes are freed.
+ * The detail cache's policy. Two passes:
  *
- * Within each tier the order is pure LRU (`insertedAt` ascending),
- * EXCEPT for active-detail, which uses the
- * `(lastSeenTick ↑, priority ↓, insertedAt ↑)` tiebreaker so:
- *  - chunks absent from the most recent plan are picked first;
- *  - among present-this-tick entries, the highest priority *number*
- *    (= farthest from focal, lowest importance) goes first;
- *  - insertion order is the deterministic final tiebreaker.
+ *  1. Chunks finer than their entity's target level, whatever their tier
+ *     (ADR 0061). Planning requests only the target level, the renderer
+ *     never samples finer, and finer levels cost the most, so zooming out
+ *     releases these first. Finest level first.
+ *  2. Everything else, walking {@link getTierOrder} for the current mode.
+ *     Each tier is LRU, except active-detail, which sorts by
+ *     `(lastSeenTick ↑, priority ↓, insertedAt ↑)`: chunks absent from the
+ *     latest plan go first, then those farthest from focal.
  *
- * `modeProvider` is a thunk so the policy tracks the live detector
- * without having to be re-wired on each interaction-mode change.
+ * `modeProvider` and `targetLevelFor` are thunks so the policy reads live
+ * values without re-wiring. An entity with no known target has nothing finer.
  */
 export class TieredPolicy implements EvictionPolicy {
   private readonly modeProvider: () => InteractionMode;
+  private readonly targetLevelFor: (entityId: string) => number | undefined;
 
-  constructor(modeProvider: () => InteractionMode) {
+  constructor(
+    modeProvider: () => InteractionMode,
+    targetLevelFor: (entityId: string) => number | undefined,
+  ) {
     this.modeProvider = modeProvider;
+    this.targetLevelFor = targetLevelFor;
   }
 
   selectVictims(entries: readonly CacheEntry[], bytesNeeded: number): CacheEntry[] {
     if (bytesNeeded <= 0) return [];
-    const tierOrder = getTierOrder(this.modeProvider());
     const victims: CacheEntry[] = [];
     let freed = 0;
+    const take = (entry: CacheEntry): void => {
+      victims.push(entry);
+      freed += entry.sizeBytes;
+    };
 
-    for (const tier of tierOrder) {
+    const finer: CacheEntry[] = [];
+    const rest: CacheEntry[] = [];
+    for (const entry of entries) {
+      const target = this.targetLevelFor(entry.entityId);
+      (target !== undefined && entry.level < target ? finer : rest).push(entry);
+    }
+    finer.sort((a, b) => a.level - b.level || byDistanceFromView(a, b));
+    for (const entry of finer) {
+      if (freed >= bytesNeeded) return victims;
+      take(entry);
+    }
+
+    for (const tier of getTierOrder(this.modeProvider())) {
       if (freed >= bytesNeeded) break;
-      const tierEntries = entries.filter(e => e.tier === tier);
+      const tierEntries = rest.filter(e => e.tier === tier);
       if (tier === "active-detail") {
-        tierEntries.sort((a, b) =>
-          a.lastSeenTick - b.lastSeenTick      // oldest plan tick first
-          || b.priority - a.priority           // then highest priority number (= farthest from focal) first
-          || a.insertedAt - b.insertedAt,      // then oldest insertion as deterministic tiebreaker
-        );
+        tierEntries.sort(byDistanceFromView);
       } else {
         tierEntries.sort((a, b) => a.insertedAt - b.insertedAt);
       }
       for (const entry of tierEntries) {
         if (freed >= bytesNeeded) break;
-        victims.push(entry);
-        freed += entry.sizeBytes;
+        take(entry);
       }
     }
 
     return victims;
   }
+}
+
+function byDistanceFromView(a: CacheEntry, b: CacheEntry): number {
+  return (
+    a.lastSeenTick - b.lastSeenTick
+    || b.priority - a.priority
+    || a.insertedAt - b.insertedAt
+  );
 }
 
 /**

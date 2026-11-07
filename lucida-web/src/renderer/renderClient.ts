@@ -1,35 +1,80 @@
 /** Main-thread API wrapping the GPU render worker. */
 import type {
+  CanvasColors,
   Chunk,
+  InitMessage,
   VolumeLayerParams,
   SliceLayerParams,
   MinimapLayerParams,
   WorkerToMainMessage,
+  CaptureFailure,
+  FrameCaptureResult,
   ColdStateMessage,
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
   ViewHotStateMessage,
+  RgbaColor,
 } from "./workerProtocol.ts";
+import { summarizeDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type {
   UploadClient,
   ChunksEvictedHandler,
   WantedSetHandler,
 } from "../pipeline/upload/uploadClient.ts";
+import { tokenColor } from "../theme/tokenColors.ts";
+import type { ResolvedColor } from "../theme/tokens.ts";
+import { readDeviceMemoryGiB } from "../deviceBudget.ts";
+
+/**
+ * How much of the canvas stroke the tile frame takes. Members sit edge to
+ * edge, so the frame is a faint line that shows where one ends and does not
+ * compete with the data.
+ */
+const TILE_BORDER_ALPHA = 0.35;
+
+function rgba(color: ResolvedColor, alpha = 1): RgbaColor {
+  return [color.r, color.g, color.b, color.a * alpha];
+}
+
+/** The renderer's colors from the current theme tokens. */
+export function readCanvasColors(): CanvasColors {
+  return {
+    background: rgba(tokenColor("--lc-canvas-bg")),
+    tileBorder: rgba(tokenColor("--lc-canvas-stroke"), TILE_BORDER_ALPHA),
+  };
+}
 
 /** How long `destroy()` waits for the worker to process its `destroy`
- *  message (which ends in `self.close()`) before hard-terminating it.
- *  Calling `terminate()` immediately would discard the queued message and
- *  skip the worker-side GPU cleanup entirely; the fallback only matters for
- *  a wedged worker or one that never finished init (pre-init workers ignore
- *  `destroy`). `terminate()` on an already-closed worker is a no-op. */
+ *  message (which ends in `self.close()`) before terminating it. Terminating
+ *  at once would drop the queued message and skip worker-side GPU cleanup;
+ *  the fallback is for a wedged worker or one that never finished init. */
 const DESTROY_TERMINATE_FALLBACK_MS = 1000;
+
+function failureText(failure: CaptureFailure | null): string {
+  return failure ? `${failure.name}: ${failure.message}` : "no reason was given";
+}
+
+const DESTROYED_BEFORE_ANSWER = "the render client was destroyed before the worker answered";
+
+/** Frames in flight past which the oldest is taken as lost. */
+const MAX_FRAMES_AWAITING_DONE = 64;
+
+/** One viewport frame, timed from dispatch until its GPU work was done. */
+export interface FrameLatency {
+  frameSeq: number;
+  ms: number;
+}
 
 export class RenderClient implements UploadClient {
   private worker: Worker;
   private readyPromise: Promise<void>;
   private readyReject: (err: Error) => void = () => {};
+  /** The worker drops a message posted before `ready` if its init failed, so `captureFrame` waits for it. */
+  private workerReady = false;
+  private bootstrapCompiled = false;
   private destroyed = false;
 
   /** Pending `thumbnailRender` requests, keyed by the id sent to the worker.
@@ -37,13 +82,67 @@ export class RenderClient implements UploadClient {
   private thumbnailPending = new Map<number, (bitmap: ImageBitmap | null) => void>();
   private thumbnailSeq = 0;
 
+  /** Pending `captureFrame` requests, keyed by the id sent to the worker.
+   *  Resolved when the matching `frameCaptured` arrives. */
+  private framePending = new Map<number, (capture: FrameCaptureResult) => void>();
+  private frameSeq = 0;
+
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
   onChunksEvicted: ChunksEvictedHandler | null = null;
-  /**
-   * Missing entries are a discriminated union over chunks and proxies.
-   * Consumers should match on `kind === "chunk"` to handle chunk gaps.
-   */
+  /** Missing entries cover chunks and proxies; match on `kind`. */
   onWantedSetDelta: WantedSetHandler | null = null;
+  /**
+   * The worker's level readout for one dataset changed: its target level
+   * and the level on screen, summarised across its entities. Null when the
+   * dataset reports no image-bearing entity.
+   */
+  onEntityLevels: ((datasetId: string, levels: DatasetLevels | null) => void) | null = null;
+
+  private readonly pipelinesCompiledHandlers = new Set<() => void>();
+
+  /** Whether the worker has reported its bootstrap pipelines compiled. */
+  get pipelinesCompiled(): boolean {
+    return this.bootstrapCompiled;
+  }
+
+  /**
+   * Call `handler` once, when the worker reports that the pipelines it
+   * builds at bootstrap have compiled, or at once if it already has. Returns
+   * the function that withdraws the handler. The minimap holds its overlay's
+   * content draws on this report.
+   */
+  oncePipelinesCompiled(handler: () => void): () => void {
+    if (this.bootstrapCompiled) {
+      handler();
+      return () => {};
+    }
+    this.pipelinesCompiledHandlers.add(handler);
+    return () => {
+      this.pipelinesCompiledHandlers.delete(handler);
+    };
+  }
+
+  private notePipelinesCompiled(): void {
+    this.bootstrapCompiled = true;
+    const handlers = [...this.pipelinesCompiledHandlers];
+    this.pipelinesCompiledHandlers.clear();
+    for (const handler of handlers) handler();
+  }
+
+  /**
+   * Summarised once per worker report, so the layer panel and the trace's
+   * per-tick aggregate read the same numbers without each walking the
+   * entities.
+   */
+  private readonly levelsByDataset = new Map<string, DatasetLevels>();
+
+  private gpuPassUs: number | null = null;
+
+  /** The last viewport frame dispatched. */
+  private viewportFrameSeq = 0;
+  /** When each frame still awaiting its `frameDone` was dispatched. */
+  private readonly frameDispatchedAt = new Map<number, number>();
+  private frameLatency: FrameLatency | null = null;
 
   constructor(canvas: HTMLCanvasElement) {
     const offscreen = canvas.transferControlToOffscreen();
@@ -58,9 +157,14 @@ export class RenderClient implements UploadClient {
       this.readyReject = reject;
       const handler = (e: MessageEvent<WorkerToMainMessage>) => {
         if (e.data.type === "ready") {
+          this.workerReady = true;
           resolve();
           this.worker.removeEventListener("message", handler);
           this.worker.addEventListener("message", this.onMessage);
+        } else if (e.data.type === "pipelinesCompiled") {
+          // Follows `ready` in practice. Taken here too, so nothing depends
+          // on that order.
+          this.notePipelinesCompiled();
         } else if (e.data.type === "error") {
           reject(new Error(e.data.message));
           this.worker.removeEventListener("message", handler);
@@ -76,7 +180,8 @@ export class RenderClient implements UploadClient {
     // awaiting callers still observe the rejection themselves.
     this.readyPromise.catch(() => {});
 
-    this.worker.postMessage({ type: "init", canvas: offscreen }, [offscreen]);
+    const init: InitMessage = { type: "init", canvas: offscreen, deviceMemoryGiB: readDeviceMemoryGiB() };
+    this.worker.postMessage(init, [offscreen]);
   }
 
   /** Resolves when the worker finishes init; rejects if `destroy()` runs
@@ -84,6 +189,57 @@ export class RenderClient implements UploadClient {
    *  never escapes as an unhandled rejection (see constructor). */
   ready(): Promise<void> {
     return this.readyPromise;
+  }
+
+  /**
+   * The GPU pass time that arrived since the last call, in microseconds, or
+   * null when none did. Taking it clears it, so each frame's figure lands on
+   * one reading and a tick that drew nothing carries no GPU figure rather
+   * than repeating the last one.
+   */
+  takeGpuPassUs(): number | null {
+    const gpuPassUs = this.gpuPassUs;
+    this.gpuPassUs = null;
+    return gpuPassUs;
+  }
+
+  /**
+   * The newest frame finished since the last call, timed from dispatch to its
+   * GPU work done on this thread's clock, or null when none finished. Taking
+   * it clears it.
+   */
+  takeFrameLatency(): FrameLatency | null {
+    const latency = this.frameLatency;
+    this.frameLatency = null;
+    return latency;
+  }
+
+  /** The sequence number of the last viewport frame dispatched. */
+  lastFrameSeq(): number {
+    return this.viewportFrameSeq;
+  }
+
+  /** Number the next viewport frame and note when it left. */
+  private nextFrameSeq(): number {
+    this.viewportFrameSeq += 1;
+    this.frameDispatchedAt.set(this.viewportFrameSeq, performance.now());
+    // A frame whose report never comes (the worker dropped it) must not
+    // hold its entry forever.
+    if (this.frameDispatchedAt.size > MAX_FRAMES_AWAITING_DONE) {
+      const oldest = this.frameDispatchedAt.keys().next().value;
+      if (oldest !== undefined) this.frameDispatchedAt.delete(oldest);
+    }
+    return this.viewportFrameSeq;
+  }
+
+  private noteFrameDone(frameSeq: number): void {
+    const dispatchedAt = this.frameDispatchedAt.get(frameSeq);
+    for (const seq of this.frameDispatchedAt.keys()) {
+      if (seq > frameSeq) break;
+      this.frameDispatchedAt.delete(seq);
+    }
+    if (dispatchedAt === undefined) return;
+    this.frameLatency = { frameSeq, ms: performance.now() - dispatchedAt };
   }
 
   private onMessage = (e: MessageEvent<WorkerToMainMessage>) => {
@@ -100,15 +256,37 @@ export class RenderClient implements UploadClient {
       this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
+    } else if (msg.type === "entityLevels") {
+      const levels = summarizeDatasetLevels(msg.entities);
+      if (levels === null) this.levelsByDataset.delete(msg.datasetId);
+      else this.levelsByDataset.set(msg.datasetId, levels);
+      this.onEntityLevels?.(msg.datasetId, levels);
+    } else if (msg.type === "gpuPassTime") {
+      // Latest wins: when two frames land between ticks, the newer one is
+      // the frame on screen.
+      this.gpuPassUs = msg.gpuPassUs;
+    } else if (msg.type === "frameDone") {
+      this.noteFrameDone(msg.frameSeq);
+    } else if (msg.type === "pipelinesCompiled") {
+      this.notePipelinesCompiled();
     } else if (msg.type === "thumbnailResult") {
       const resolve = this.thumbnailPending.get(msg.id);
       if (resolve) {
         this.thumbnailPending.delete(msg.id);
         resolve(msg.bitmap);
       } else if (msg.bitmap) {
-        // No waiter (e.g. the request was already settled/abandoned) — release
-        // the GPU-backed bitmap rather than leak it.
+        // No waiter, so release the GPU-backed bitmap rather than leak it.
         msg.bitmap.close();
+      }
+    } else if (msg.type === "frameCaptured") {
+      const resolve = this.framePending.get(msg.id);
+      if (resolve) {
+        this.framePending.delete(msg.id);
+        resolve(
+          msg.png
+            ? { frame: { png: msg.png, width: msg.width, height: msg.height }, reason: null }
+            : { frame: null, reason: `the render worker could not read its canvas: ${failureText(msg.failure)}` },
+        );
       }
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
@@ -117,6 +295,11 @@ export class RenderClient implements UploadClient {
 
   resize(width: number, height: number) {
     this.worker.postMessage({ type: "resize", width, height });
+  }
+
+  /** Takes effect from the next frame drawn. */
+  setCanvasColors(colors: CanvasColors) {
+    this.worker.postMessage({ type: "canvasColors", colors });
   }
 
   volumeChunkData(
@@ -132,16 +315,12 @@ export class RenderClient implements UploadClient {
     chunkY: number,
     chunkZ: number,
     epochs: SceneEpochs,
-    tier?: "detail" | "coarse",
+    tier: ResidencyTier,
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
-      // Copy: the upstream `chunk.data` is owned by the CpuCache (see
-      // `CacheEntry.data` in pipeline/fetch/types.ts). The cache holds
-      // the buffer indefinitely for re-delivery after worker-side
-      // eviction (`getCachedChunk`); transferring it directly would
-      // detach the cache's copy and break later resends. Copy + transfer
-      // keeps both sides alive.
+      // Copy: the CpuCache keeps `chunk.data` for re-delivery after
+      // worker-side eviction, and transferring it would detach that copy.
       const buf = chunk.data.slice(0);
       transferList.push(buf);
       return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
@@ -178,8 +357,7 @@ export class RenderClient implements UploadClient {
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
-      // See note on `volumeChunkData` above — the cache reuses `chunk.data`
-      // across deliveries, so we copy before transfer.
+      // Copy before transfer, as in `volumeChunkData`.
       const buf = chunk.data.slice(0);
       transferList.push(buf);
       return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
@@ -215,12 +393,11 @@ export class RenderClient implements UploadClient {
     levelDepth: number,
     fullResZ: number,
     epochs: SceneEpochs,
-    tier?: "detail" | "coarse",
+    tier: ResidencyTier,
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
-      // See note on `volumeChunkData` above — the cache reuses
-      // `chunk.data` across deliveries, so we copy before transfer.
+      // Copy before transfer, as in `volumeChunkData`.
       const buf = chunk.data.slice(0);
       transferList.push(buf);
       return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
@@ -303,12 +480,8 @@ export class RenderClient implements UploadClient {
   }
 
   /**
-   * Forward a proxy asset to the worker. Copies the buffer before
-   * transferring — the upstream `data` is owned by the CpuCache
-   * (`ProxyCacheEntry.data` in pipeline/fetch/cpuCache.ts), which
-   * retains it for re-delivery (`getCachedProxy`) after worker-side
-   * eviction. Transferring directly would detach the cache's copy and
-   * break later resends.
+   * Forward a proxy asset to the worker. Copies before transferring because
+   * the CpuCache keeps `data` for re-delivery after worker-side eviction.
    */
   proxyAssetData(
     datasetId: string,
@@ -321,7 +494,6 @@ export class RenderClient implements UploadClient {
     data: ArrayBuffer,
     epochs: SceneEpochs,
   ) {
-    // Copy before transfer — see method docstring above.
     const buf = data.slice(0);
     this.worker.postMessage(
       {
@@ -361,6 +533,7 @@ export class RenderClient implements UploadClient {
       layers, invViewProj, eye,
       canvasW, canvasH, fullW, fullH, viewProj,
       camForward, clipDistance, clipMode,
+      frameSeq: this.nextFrameSeq(),
     });
   }
 
@@ -385,6 +558,7 @@ export class RenderClient implements UploadClient {
       epochs,
       layers, zoom, cx, cy,
       canvasW, canvasH,
+      frameSeq: this.nextFrameSeq(),
     }, transfer);
   }
 
@@ -398,12 +572,9 @@ export class RenderClient implements UploadClient {
   }
 
   /**
-   * Render one Explore-panel candidate thumbnail off-screen and resolve with the
-   * returned `ImageBitmap` (or `null` when no coarse overview is resident yet,
-   * so the caller can fall back to a label-only row). Reuses the minimap's
-   * overview textures + renderer; `layers` are the minimap per-member params and
-   * `invViewProj`/`eye` come from the child view's camera
-   * (`lucida-core::camera_matrices`). `size` is the square edge in device pixels.
+   * Render one Explore-panel thumbnail off-screen with the minimap's overview
+   * textures. Resolves `null` when no coarse overview is resident yet, so the
+   * caller can fall back to a label-only row. `size` is in device pixels.
    */
   thumbnailRender(
     layers: MinimapLayerParams[],
@@ -421,6 +592,42 @@ export class RenderClient implements UploadClient {
     return new Promise<ImageBitmap | null>((resolve) => {
       this.thumbnailPending.set(id, resolve);
       this.worker.postMessage({ type: "thumbnailRender", id, layers, invViewProj, eye, size });
+    });
+  }
+
+  /**
+   * The frame on the worker's canvas as a PNG, for the trace bundle. The
+   * worker takes it inside the next frame it renders. Resolves with a reason
+   * when no frame could be read, and at once after destroy, so a bundle never
+   * hangs on a dead client.
+   *
+   * A starting worker drops every message and a failed one answers none, so
+   * a capture asked for before `ready` waits for it and a failed start
+   * becomes the reason.
+   */
+  captureFrame(): Promise<FrameCaptureResult> {
+    if (this.destroyed) {
+      return Promise.resolve({ frame: null, reason: "the render client was destroyed, so there was no canvas to read" });
+    }
+    if (this.workerReady) return this.postCaptureFrame();
+    return this.readyPromise.then(
+      () => this.postCaptureFrame(),
+      // destroy() rejects the same promise, and that is not a failed start.
+      (error: unknown) => ({
+        frame: null,
+        reason: this.destroyed
+          ? DESTROYED_BEFORE_ANSWER
+          : `the render worker did not start: ${error instanceof Error ? error.message : String(error)}`,
+      }),
+    );
+  }
+
+  private postCaptureFrame(): Promise<FrameCaptureResult> {
+    if (this.destroyed) return Promise.resolve({ frame: null, reason: DESTROYED_BEFORE_ANSWER });
+    const id = this.frameSeq++;
+    return new Promise<FrameCaptureResult>((resolve) => {
+      this.framePending.set(id, resolve);
+      this.worker.postMessage({ type: "captureFrame", id });
     });
   }
 
@@ -471,10 +678,21 @@ export class RenderClient implements UploadClient {
   }
 
   removeLayerResources(datasetId: string) {
+    this.levelsByDataset.delete(datasetId);
     this.worker.postMessage({ type: "removeLayerResources", datasetId });
   }
 
-  /** Idempotent — a second call is a no-op. */
+  /**
+   * The worker's latest level readout for a dataset, or null before its first
+   * report. What the planning tick records as the displayed level, since the
+   * worker is the only side that knows which resident level each visible
+   * position samples from.
+   */
+  datasetLevels(datasetId: string): DatasetLevels | null {
+    return this.levelsByDataset.get(datasetId) ?? null;
+  }
+
+  /** Idempotent. */
   destroy() {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -482,6 +700,10 @@ export class RenderClient implements UploadClient {
     // after the worker is gone (the id-correlated path has no fire-and-forget).
     for (const resolve of this.thumbnailPending.values()) resolve(null);
     this.thumbnailPending.clear();
+    for (const resolve of this.framePending.values()) {
+      resolve({ frame: null, reason: DESTROYED_BEFORE_ANSWER });
+    }
+    this.framePending.clear();
     // Settle a still-pending init so `ready()` awaiters don't hang (no-op
     // once the worker has reported ready).
     this.readyReject(new Error("RenderClient destroyed"));

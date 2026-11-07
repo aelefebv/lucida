@@ -1,20 +1,10 @@
-// Encoder/decoder for `SavedView` ↔ URL-hash payload.
-// Pure functions; no DOM, no scene, no bridge — fully testable in isolation.
+// Encode a `SavedView` as a URL-hash payload (strip defaults, JSON, gzip,
+// base64url) and decode it back. Decoding rejects a missing `v` and applies a
+// newer `v` best-effort.
 //
-// Pipeline on encode:
-//   SavedView → strip defaults → JSON → gzip (CompressionStream) → base64url
-//
-// Pipeline on decode:
-//   base64url → gunzip (DecompressionStream) → JSON → restore defaults
-//     → reject if `v` missing/zero; warn if `v > SAVED_VIEW_VERSION` and
-//       best-effort apply known fields
-//
-// Both flows are async because `CompressionStream` is stream-based.
-//
-// Defaults stripping is what keeps a 384-group collection share link < 1 KB —
-// a default `DatasetDisplaySettings` carries a vec of identical channel
-// settings per dataset; emitting only the non-default deltas crushes the
-// payload before gzip even runs.
+// Default stripping keeps a 384-group collection link under 1 KB: a default
+// `DatasetDisplaySettings` repeats identical channel settings per dataset, so
+// only the non-default deltas go on the wire.
 
 import {
   SAVED_VIEW_VERSION,
@@ -24,8 +14,6 @@ import {
   type ViewState,
   type DisplayState,
 } from "./types.ts";
-
-// Public API
 
 export async function encode(view: SavedView): Promise<string> {
   const stripped = stripDefaults(view);
@@ -64,8 +52,6 @@ export class SavedViewDecodeError extends Error {
   }
 }
 
-// Validation + version handling
-
 function validateAndRestore(raw: unknown): SavedView {
   if (typeof raw !== "object" || raw === null) {
     throw new SavedViewDecodeError("payload must be an object");
@@ -76,9 +62,8 @@ function validateAndRestore(raw: unknown): SavedView {
     throw new SavedViewDecodeError(`missing or invalid version (got ${JSON.stringify(v)})`);
   }
   if (v > SAVED_VIEW_VERSION) {
-    // Best-effort: warn but try to consume known fields. Future versions
-    // are expected to be additive; if they aren't, downstream apply will
-    // surface a clean error per the failure-handling policy.
+    // Future versions are expected to be additive; if one isn't, apply
+    // surfaces the error.
     console.warn(
       `[SavedView] payload version ${v} exceeds known version ${SAVED_VIEW_VERSION}; applying best-effort.`,
     );
@@ -86,11 +71,9 @@ function validateAndRestore(raw: unknown): SavedView {
   return restoreDefaults(obj);
 }
 
-// Defaults stripping (encode-side).
-// Anything that matches the default in `lucida-core/src/scene/types.rs` and
-// `lucida-core/src/view.rs` gets dropped on the wire. The decoder re-fills.
-// This is purely a payload-size optimization — the round-trip identity is
-// preserved by the corresponding `restoreDefaults` step.
+// Values matching the defaults in `lucida-core/src/scene/types.rs` and
+// `lucida-core/src/view.rs` are dropped on the wire; `restoreDefaults`
+// refills them.
 
 function stripDefaults(view: SavedView): Record<string, unknown> {
   const out: Record<string, unknown> = {
@@ -109,17 +92,14 @@ function stripDefaults(view: SavedView): Record<string, unknown> {
 
   const settings_stripped: Record<string, unknown> = {};
   for (const [id, s] of Object.entries(view.dataset_settings)) {
-    // Preserve every key the sender tracked, even if all-default. The
-    // entry collapses to `{}` (or `{channel_settings: [{}, ...]}`) on the
-    // wire so roundtrip identity holds — the channel count is the only
-    // structural fact we have to preserve explicitly.
+    // Keep every tracked key, even all-default, as `{}` so the round trip
+    // holds. The channel count is the one structural fact to preserve.
     settings_stripped[id] = stripDatasetSettings(s);
   }
   if (Object.keys(settings_stripped).length > 0) {
     out.dataset_settings = settings_stripped;
   }
-  // auto_contrast: only emit non-default (`false`) entries — the recipient
-  // applies `true` for any dataset not present in the map.
+  // Only `false` entries; the recipient applies `true` to any dataset absent.
   if (view.auto_contrast) {
     const stripped: Record<string, boolean> = {};
     for (const [id, val] of Object.entries(view.auto_contrast)) {
@@ -175,9 +155,7 @@ function stripDatasetSettings(s: DatasetDisplaySettings): Record<string, unknown
   if (typeof s.detail_level_override === "number") {
     out.detail_level_override = s.detail_level_override;
   }
-  // `channel_settings` length is structural — preserve it exactly so
-  // roundtrip identity holds. Empty per-channel objects (`{}`) signal
-  // "all defaults at this index" and are restored via `defaultChannel`.
+  // The channel count is structural. `{}` means all defaults at that index.
   if (s.channel_settings && s.channel_settings.length > 0) {
     out.channel_settings = s.channel_settings.map((c, i) =>
       stripChannel(c, i) ?? {},
@@ -195,16 +173,13 @@ function stripChannel(c: ChannelSettings, index: number): Record<string, unknown
   if (c.contrast_min !== 0) { out.contrast_min = c.contrast_min; any = true; }
   if (c.contrast_max !== 65535) { out.contrast_max = c.contrast_max; any = true; }
   if (c.gamma !== 1.0) { out.gamma = c.gamma; any = true; }
-  // The default override is "none" (absent), so any present name is non-default
-  // and must ride the wire. Mirrors the Rust `skip_serializing_if` on `name`.
+  // Any present name is non-default, matching Rust's `skip_serializing_if`.
   if (c.name !== undefined) { out.name = c.name; any = true; }
   return any ? out : undefined;
 }
 
 // Mirrors `Colormap::default_for_channel` in `lucida-core/src/scene/types.rs`.
 const DEFAULT_COLORMAP_CYCLE = ["magenta", "green", "cyan"] as const;
-
-// Defaults restoration (decode-side)
 
 function restoreDefaults(obj: Record<string, unknown>): SavedView {
   const out: SavedView = {
@@ -280,13 +255,11 @@ function restoreChannel(p: Partial<ChannelSettings>, index: number): ChannelSett
     contrast_max: p.contrast_max ?? 65535,
     gamma: p.gamma ?? 1.0,
   };
-  // Restore the user override only when present, so a channel with no name
-  // stays `name: undefined` (round-trip identity with a pre-slice payload).
+  // Set `name` only when present so an unnamed channel round-trips without
+  // the key.
   if (p.name !== undefined) out.name = p.name;
   return out;
 }
-
-// gzip / gunzip via CompressionStream
 
 async function gzip(bytes: Uint8Array): Promise<Uint8Array> {
   // Wrap in a Blob so the BodyInit overload is unambiguous (a raw
@@ -304,9 +277,8 @@ async function gunzip(bytes: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(buf);
 }
 
-// base64url.
-// btoa expects a binary string. We chunk the bytes to avoid blowing the
-// argument-list size on long payloads (typical limit ~64K).
+// btoa takes a binary string. Chunk so `fromCharCode.apply` stays under the
+// argument-list limit (about 64K) on long payloads.
 
 function base64UrlEncode(bytes: Uint8Array): string {
   let s = "";

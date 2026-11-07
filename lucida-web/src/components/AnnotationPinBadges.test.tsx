@@ -43,11 +43,11 @@ describe("OffContextHelptext", () => {
   it("carries the pin-scoped testid and names the pin's own Z/T/C in contract form", () => {
     render(<OffContextHelptext pin={pin({ z: 12, t: 3, c: 1 })} />);
     const el = screen.getByTestId("annot-offcontext-pin-a");
-    expect(el.textContent).toBe("slice 12 · t=3 · ch=1");
+    expect(el.textContent).toBe("Z 13 · T 4 · Channel 2");
   });
 
   it("defaults absent z/t/c to 0 (an older pin still gets a full locator)", () => {
     render(<OffContextHelptext pin={pin()} />);
-    expect(screen.getByTestId("annot-offcontext-pin-a").textContent).toBe("slice 0 · t=0 · ch=0");
+    expect(screen.getByTestId("annot-offcontext-pin-a").textContent).toBe("Z 1 · T 1 · Channel 1");
   });
 });

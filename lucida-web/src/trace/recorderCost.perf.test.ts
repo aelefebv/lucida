@@ -16,7 +16,7 @@
  *   itself. It emitted three — row birth, admission, wire start — until #949,
  *   which put the tick over a ceiling derived from one third of its events.
  *   Keeping {@link BURST_CALLS_PER_CHUNK} at 1 is what keeps the two counting
- *   the same thing; `docs/perf/recorder-cost/README.md` carries the history.
+ *   the same thing.
  * - **Flat in events-per-tick, not merely small at one event.** This is the
  *   gate most worth having: `UploadTelemetry.publish` in this repo went from
  *   1.4 µs to 1.13 ms between 1 and 128 events per tick because it pruned with
@@ -54,8 +54,7 @@
  * The fourth gate ADR 0049 requires — an A/B frame-throughput comparison of
  * real sink against no-op sink over a warm re-open at devicePixelRatio 2 —
  * needs a GPU, a server and a real fixture, none of which a CI runner has. It
- * lives as a harness at `docs/perf/recorder-cost/`, alongside the net
- * non-regression ledger this file's gates feed.
+ * lives as a harness at `docs/perf/recorder-cost/`, with its last result.
  */
 
 import process from "node:process";
@@ -67,6 +66,7 @@ import { TraceRecorder } from "./recorder.ts";
 import { TableTraceSink } from "./sink.ts";
 import {
   Boundary,
+  ClientMessageTypeIndex,
   CountedPhaseIndex,
   PointEvent,
   TickCounter,
@@ -128,7 +128,11 @@ const WARMTH = {
 const OUTSTANDING = {
   pending: 0, inFlight: 0, speculativePending: 0, speculativeInFlight: 0,
   desiredDetailChunks: 0, residentDetailChunks: 0, desiredCoarseChunks: 0, residentCoarseChunks: 0,
+  detailBytes: 0, detailBudgetBytes: 0, coarseBytes: 0, coarseBudgetBytes: 0,
 };
+
+/** One object reused across ticks, as the emit site reuses the worker's report. */
+const DISPLAYED = { min: 2, max: 3 };
 
 /**
  * #888's peak per-second rates, and the tick rate it measured alongside them.
@@ -352,6 +356,11 @@ function makeRig(chunks: number, calls?: { count: number }) {
     if (scratch) {
       scratch.counters[TickCounter.PlannedChunks] = chunks;
       scratch.setResidency(2, chunks, 0);
+      // A steady target, so the level-change comparison runs every tick and
+      // files nothing: the shape a pan has, and the one the allocation gate
+      // must see.
+      scratch.setTargetLevel(2, 2, false);
+      scratch.setDisplayedLevel(DISPLAYED);
     }
     const enqueuedAtMs = performance.now();
     recorder.notePlanEnqueue(enqueuedAtMs);
@@ -384,7 +393,11 @@ function makeRig(chunks: number, calls?: { count: number }) {
   function burstTick(): void {
     recorder.markPlanStart();
     const scratch = recorder.beginTick("ds");
-    if (scratch) scratch.counters[TickCounter.PlannedChunks] = chunks;
+    if (scratch) {
+      scratch.counters[TickCounter.PlannedChunks] = chunks;
+      scratch.setTargetLevel(2, 2, false);
+      scratch.setDisplayedLevel(DISPLAYED);
+    }
     const enqueuedAtMs = performance.now();
     recorder.notePlanEnqueue(enqueuedAtMs);
     for (let i = 0; i < chunks; i++) {
@@ -780,9 +793,10 @@ describe("recorder cost contract", () => {
 
   it("allocates nothing in steady state after warmup", () => {
     // Steady state is the write path over buffers that already exist: row
-    // births into spare capacity, stamps into a live row, the two drop-oldest
-    // rings wrapping, the counted-phase vector, and the frame hand-off
-    // swapping its two lists.
+    // births into spare capacity, stamps into a live row, the three
+    // drop-oldest rings wrapping, the counted-phase and send-tally vectors,
+    // and the frame
+    // hand-off swapping its two lists.
     //
     // Row appends are inside the window on purpose, and the window is sized to
     // fit inside the capacity the warmup grew. Leaving them out would make the
@@ -820,8 +834,10 @@ describe("recorder cost contract", () => {
       if (i < appends) rig.recorder.beginChunkRow(source, 0);
       rig.recorder.stamp(handle, Boundary.WireStart);
       rig.recorder.countPhase(CountedPhaseIndex.CacheAdmission);
+      rig.recorder.countSend(ClientMessageTypeIndex.ChunkRequest, 98);
       rig.recorder.recordPointEvent(PointEvent.Rejection, "atlas-policy", null, 0);
       rig.recorder.noteFrameDispatched();
+      rig.recorder.noteReading(3, 2, 4_000, 1_000_000, i % 2 === 0 ? 900 : null);
       rig.recorder.beginTick("ds");
       rig.recorder.commitTick();
     }
@@ -829,7 +845,7 @@ describe("recorder cost contract", () => {
     gc?.();
     const heapAfter = process.memoryUsage().heapUsed;
     const grown = heapAfter - heapBefore;
-    const calls = ops * 6 + appends;
+    const calls = ops * 8 + appends;
     console.log(
       `[#928] steady state: ${calls} write calls (${appends} of them row births ` +
         `into spare capacity) grew the heap by ${(grown / 1024).toFixed(1)} kB ` +
@@ -856,13 +872,15 @@ describe("recorder cost contract", () => {
    * The live view's read (#937), which is the one place a *reader* spends the
    * pipeline's main thread rather than the writer.
    *
-   * It costs a walk over every row the run has made, twice a second, while
-   * the monitor is open — so the shape that matters is linearity. A walk that
-   * went quadratic in rows would turn watching a run into perturbing it, and
-   * the surface's "observation only" claim with it. Per-row cost is gated
-   * across a 10x population rather than in absolute microseconds, for the
-   * reason this file's doc gives: absolute timings on a CI runner measure the
-   * runner.
+   * It was a walk over every row the run has made, twice a second, while the
+   * monitor is open, and this gate held it to linear in rows: a walk that
+   * went quadratic would turn watching a run into perturbing it. Since #1057
+   * the tally is kept on the write path and the read is flat in rows, so it
+   * passes this gate by a wide margin. The gate stays to catch the read
+   * regressing to a walk, and `provisionalCost.perf.test.ts` asserts the
+   * flatness itself. Per-row cost is gated across a 10x population rather
+   * than in absolute microseconds, for the reason this file's doc gives:
+   * absolute timings on a CI runner measure the runner.
    */
   it("reads a run in progress in time linear in its rows", () => {
     // The upper figure is past the per-run cap on purpose: it lands the walk

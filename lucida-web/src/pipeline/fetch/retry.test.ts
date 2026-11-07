@@ -4,9 +4,8 @@
  * `classifyFetchError` is the boundary that maps arbitrary throws into
  * typed FetchErrors so the catch block in `CpuCache.fetchAndDecode`
  * can dispatch off `kind` instead of string-matching `message`.
- * Backwards compat: plain `Error` still falls back to the legacy
- * substring rules so untyped throws elsewhere in the stack don't
- * regress; a `debugLog` warning surfaces them for migration.
+ * Plain `Error` throws fall back to substring rules, with a `debugLog`
+ * warning so they can be migrated to typed throws.
  */
 
 import { describe, it, expect, vi } from "vitest";
@@ -24,9 +23,7 @@ import {
   NeverRetry,
 } from "./retry.ts";
 
-// ---------------------------------------------------------------------------
 // FetchError
-// ---------------------------------------------------------------------------
 
 describe("FetchError", () => {
   it("carries the kind, message, and name", () => {
@@ -56,9 +53,7 @@ describe("FetchError", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // classifyFetchError
-// ---------------------------------------------------------------------------
 
 describe("classifyFetchError", () => {
   it("returns a FetchError as-is", () => {
@@ -140,9 +135,7 @@ describe("classifyFetchError", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // OnceTransientRetry
-// ---------------------------------------------------------------------------
 
 describe("OnceTransientRetry", () => {
   it("shouldRetry returns true on transient + attempt < 1", () => {
@@ -177,9 +170,7 @@ describe("OnceTransientRetry", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // NeverRetry
-// ---------------------------------------------------------------------------
 
 describe("NeverRetry", () => {
   it("shouldRetry always returns false", () => {

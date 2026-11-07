@@ -1,9 +1,12 @@
 //! Disabled-auth developer identity switching.
 //!
-//! This module is intentionally only meaningful when `LUCIDA_AUTH=disabled`.
-//! The cookie is not a security boundary; it is a local-dev convenience so
-//! different browser profiles can exercise viewer/editor/owner behavior
-//! without configuring OAuth.
+//! This module is only meaningful when `LUCIDA_AUTH=disabled` and the
+//! server is bound to loopback. The cookie is not a security boundary.
+//! It is a local-dev convenience, so different browser profiles can
+//! exercise viewer, editor, and owner behavior without configuring
+//! OAuth. That is why the routes that write it are off wherever
+//! anything but this machine can reach the server. See
+//! [`crate::auth::handlers::DevAuthState::new`].
 
 use axum::http::header::COOKIE;
 use axum::http::request::Parts;
@@ -16,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::AuthConfig;
 use super::cookie::resolve_secure;
+use super::principal::{display_name_from_email, normalize_email};
 
 pub const DEV_PRINCIPAL_COOKIE_NAME: &str = "lucida_dev_principal";
 const DEV_PRINCIPAL_TTL_SECS: i64 = 60 * 60 * 24 * 30;
@@ -27,12 +31,18 @@ struct DevPrincipalCookie {
     is_admin: bool,
 }
 
+/// The identity disabled mode hands to a caller who presents nothing.
+///
+/// It carries no admin rights. Every request in disabled mode resolves
+/// to this principal by default, so anything it can do, anyone who
+/// reaches the server can do. Admin rights take a deliberate switch,
+/// which only a loopback bind offers.
 pub fn default_dev_principal() -> AuthPrincipal {
     AuthPrincipal {
         email: "dev@local".to_string(),
         display_name: "Local Dev".to_string(),
         picture_url: None,
-        is_admin: true,
+        is_admin: false,
     }
 }
 
@@ -41,16 +51,13 @@ pub fn normalize_dev_principal(
     display_name: Option<&str>,
     is_admin: bool,
 ) -> Result<AuthPrincipal, String> {
-    let email = email.trim().to_ascii_lowercase();
-    if email.is_empty() || !email.contains('@') {
-        return Err("dev user email is invalid".to_string());
-    }
+    let email = normalize_email(email).ok_or_else(|| "dev user email is invalid".to_string())?;
 
     let display_name = display_name
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.chars().take(120).collect::<String>())
-        .unwrap_or_else(|| fallback_display_name(&email));
+        .unwrap_or_else(|| display_name_from_email(&email));
 
     Ok(AuthPrincipal {
         email,
@@ -123,26 +130,6 @@ fn decode_dev_principal(value: &str) -> Option<AuthPrincipal> {
     .ok()
 }
 
-fn fallback_display_name(email: &str) -> String {
-    let local = email.split('@').next().unwrap_or(email).trim();
-    if local.is_empty() {
-        email.to_string()
-    } else {
-        local
-            .split(['.', '_', '-'])
-            .filter(|part| !part.is_empty())
-            .map(|part| {
-                let mut chars = part.chars();
-                match chars.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                    None => String::new(),
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +143,13 @@ mod tests {
             .unwrap();
         let (parts, _) = req.into_parts();
         parts
+    }
+
+    #[test]
+    fn default_dev_principal_holds_no_admin_rights() {
+        let principal = default_dev_principal();
+        assert_eq!(principal.email, "dev@local");
+        assert!(!principal.is_admin);
     }
 
     #[test]

@@ -7,7 +7,7 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
 import { SessionController } from "../sessionController.ts";
 export type { SavedViewBridgeHooks } from "../sessionController.ts";
-import type { SavedViewBridgeHooks } from "../sessionController.ts";
+import type { SavedViewBridgeHooks, ViewportSize } from "../sessionController.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
 
 interface Params {
@@ -17,11 +17,12 @@ interface Params {
   setWasmScene: React.Dispatch<React.SetStateAction<WasmScene | null>>;
   ensureScene: () => WasmScene;
   loopRef: React.RefObject<RenderLoop | null>;
+  /** The viewer canvas, measured for the auto-fit on open. */
+  canvasRef: React.RefObject<HTMLCanvasElement | null>;
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
-  /** Optional ref the SavedView applier populates after construction.
-   * Lets the applier resolve its pending opens without the session layer
-   * owning applier-specific types. */
+  /** Populated by the SavedView applier after construction, so it can resolve
+   * pending opens without the session layer owning applier types. */
   savedViewHooksRef?: React.RefObject<SavedViewBridgeHooks | null>;
   // From useDatasetSettings (called before)
   bumpLayerSettingsVersion: () => void;
@@ -40,27 +41,21 @@ interface Params {
 }
 
 /**
- * React adapter over [`SessionController`], which owns the whole connection
- * stack (DecodePool/ProxiedContentSource/CpuCache/Bridge/Session) and its
- * handler wiring. This hook only (a) constructs a controller per mount and
- * destroys it on cleanup, (b) mirrors controller events into React state,
- * and (c) exposes stable send/follow callbacks that delegate to the live
- * controller.
+ * React adapter over `SessionController`, which owns the connection stack. This
+ * hook builds one controller per mount, mirrors its events into React state, and
+ * exposes stable callbacks that delegate to the live controller.
  *
- * StrictMode safety comes from the fresh-instance-per-mount pattern
- * the bootstrap effect's
- * create/destroy pair is complete, so mount → cleanup → mount builds a
- * brand-new stack against a fresh WebSocket rather than restarting a dead
- * one, and an extra effect re-run costs a reconnect, never correctness.
+ * The effect's create/destroy pair is complete, so a StrictMode remount builds
+ * a fresh stack on a fresh WebSocket. An extra re-run costs a reconnect, never
+ * correctness.
  */
 export function useBridge(params: Params) {
   const { workspaceId, wasmReady } = params;
 
-  // Latest host values for the controller. The bootstrap effect depends only
-  // on session *identity* (wasm readiness + workspace), so the controller
-  // reaches everything else through this ref — kept current by the passive
-  // every-render effect below, which commits before the bootstrap effect on
-  // the same pass (hook-internal effect order).
+  // The bootstrap effect depends only on wasm readiness and workspace, so the
+  // controller reaches every other host value through this ref. The
+  // every-render effect below commits before the bootstrap effect on the same
+  // pass.
   const portsRef = useRef(params);
   useEffect(() => {
     portsRef.current = params;
@@ -68,38 +63,26 @@ export function useBridge(params: Params) {
 
   const controllerRef = useRef<SessionController | null>(null);
   const sessionRef = useRef<Session | null>(null);
-  /** Mirrors `controller.bridge` as React state so consumers (e.g.
-   *  `useBookmarks` for `bookmark_changed` subscriptions) re-run effects when
-   *  the bridge becomes available. Set immediately after construction. */
+  /** State, not a ref, so consumers such as `useBookmarks` re-run their
+   *  subscribe effects once the bridge exists. */
   const [bridge, setBridge] = useState<Bridge | null>(null);
-  // REAL transport-readiness signals, distinct from `Boolean(bridge)` (which
-  // flips synchronously when the Bridge is constructed, while its WebSocket is
-  // still CONNECTING — and `Bridge.send` silently drops frames sent before
-  // OPEN). `connected` flips on the WS `onopen`; `sessionReady` flips on the
-  // first snapshot (the session is fully established and the document loaded).
-  // Consumers that must not lose a one-shot send (e.g. the #697 seed open) gate
-  // on `sessionReady` so the open reliably reaches the server. Both reset on
+  // `Boolean(bridge)` is not readiness: the bridge exists while its WebSocket is
+  // still CONNECTING, and `Bridge.send` silently drops frames before OPEN.
+  // `connected` flips on `onopen`, `sessionReady` on the first snapshot. A
+  // one-shot send such as the seed open gates on `sessionReady`. Both reset on
   // disconnect so a reconnect re-arms them.
   const [connected, setConnected] = useState(false);
   const [sessionReady, setSessionReady] = useState(false);
   const [peers, setPeers] = useState<Map<ClientId, PresenceState>>(new Map());
   const [myId, setMyId] = useState<ClientId>(0);
   const [followTarget, setFollowTarget] = useState<ClientId | null>(null);
-  // Ref mirror of followTarget for consumers that read it outside render
-  // (RAF loops). Written from the controller event, never during render.
+  // For readers outside render, such as RAF loops. Written from the controller
+  // event, never during render.
   const followTargetRef = useRef<ClientId | null>(null);
   const [remoteDatasetLoading, setRemoteDatasetLoading] = useState(false);
   const [remoteDatasetError, setRemoteDatasetError] = useState<string | null>(null);
   const [remoteDatasetProgress, setRemoteDatasetProgress] = useState<string | null>(null);
-  // Durable non-fatal import warnings collected across dataset opens. Unlike
-  // `remoteDatasetProgress`, these survive open completion; they are cleared by
-  // an explicit dismiss, a failed open (only that open's own), or connection
-  // loss.
   const [remoteDatasetWarnings, setRemoteDatasetWarnings] = useState<readonly string[]>([]);
-  // How many further distinct warnings occurred beyond the ones retained in
-  // `remoteDatasetWarnings` (the display cap). Lets the banner render "+N more"
-  // so a bounded list never hides that a flood happened. Reset alongside the
-  // warnings themselves.
   const [remoteDatasetWarningsOverflow, setRemoteDatasetWarningsOverflow] = useState(0);
 
   useEffect(() => {
@@ -110,8 +93,9 @@ export function useBridge(params: Params) {
       ensureScene: () => portsRef.current.ensureScene(),
       getScene: () => portsRef.current.wasmSceneRef.current,
       getLoop: () => portsRef.current.loopRef.current,
-      // The map identity is stable for the life of the App instance; the
-      // controller owns its contents (and clears them on destroy).
+      getViewportSize: () => canvasDeviceSize(portsRef.current.canvasRef.current),
+      // The map identity is stable for the App's life; the controller owns
+      // its contents and clears them on destroy.
       datasets: portsRef.current.datasetsRef.current,
       removeDatasetLocal: (id) =>
         portsRef.current.datasetCallbacksRef.current.removeDataset(id),
@@ -150,14 +134,9 @@ export function useBridge(params: Params) {
     });
     controllerRef.current = controller;
     sessionRef.current = controller.session;
-    // Publish the bridge as React state so consumer hooks (useBookmarks
-    // subscribes to `bookmark_changed`) can take a dependency on it and run
-    // their subscribe effect once it's live.
     setBridge(controller.bridge);
 
     return () => {
-      // Tear down the whole stack this effect's controller built (WebSocket +
-      // timers, in-flight fetches, decode workers, dataset registry contents).
       controller.destroy();
       if (controllerRef.current === controller) {
         controllerRef.current = null;
@@ -165,9 +144,8 @@ export function useBridge(params: Params) {
       if (sessionRef.current === controller.session) {
         sessionRef.current = null;
       }
-      // Reset connection-scoped React state so nothing from the dead stack is
-      // consulted if this hook instance survives the teardown (dev StrictMode
-      // mount→cleanup→mount; all no-ops on real unmount).
+      // Reset connection-scoped state in case this hook instance survives the
+      // teardown (a StrictMode remount). No-ops on a real unmount.
       setBridge(null);
       setConnected(false);
       setSessionReady(false);
@@ -184,9 +162,8 @@ export function useBridge(params: Params) {
     };
   }, [wasmReady, workspaceId]);
 
-  // Stable delegating callbacks: each reads the live controller at call time,
-  // so identity never changes across renders or reconnect cycles. All no-op
-  // before wasm is ready (no controller yet) — same as an unopened socket.
+  // Each callback reads the live controller at call time, so identity survives
+  // renders and reconnects. All no-op before wasm is ready.
   const sendCommand = useCallback((json: string) => {
     controllerRef.current?.sendCommand(json);
   }, []);
@@ -224,17 +201,13 @@ export function useBridge(params: Params) {
 
   return {
     sessionRef,
-    /** Live bridge once the WS is constructed. `null` until the
-     *  wasm-ready effect has run. NOTE: this flips true while the WebSocket is
-     *  still CONNECTING — it is NOT a transport-readiness signal. Use
-     *  `connected` / `sessionReady` to know a send won't be dropped. */
+    /** Non-null while the WebSocket may still be CONNECTING, so it is not a
+     *  readiness signal. Use `connected` or `sessionReady` for that. */
     bridge,
-    /** True once the WebSocket is OPEN (`onopen`) — `bridge.send` no longer
-     *  silently drops. Resets on disconnect. */
+    /** True once the WebSocket is OPEN. Resets on disconnect. */
     connected,
-    /** True once the first snapshot has been applied: the session is fully
-     *  established and an open reliably reaches the server. The robust gate for
-     *  one-shot sends like the #697 seed open. Resets on disconnect. */
+    /** True once the first snapshot is applied, so an open reliably reaches
+     *  the server. Gate one-shot sends on this. Resets on disconnect. */
     sessionReady,
     peers,
     myId,
@@ -248,19 +221,29 @@ export function useBridge(params: Params) {
     remoteDatasetLoading,
     remoteDatasetError,
     remoteDatasetProgress,
-    /** Durable non-fatal import warnings collected across opens. Stays
-     *  populated after an open completes; cleared by
-     *  `dismissRemoteDatasetWarnings`, a failed open (its own only), or
-     *  connection loss. Capped for display; see `remoteDatasetWarningsOverflow`
-     *  for how many further distinct warnings the cap elided. */
+    /** Non-fatal import warnings that outlive the open. Cleared by dismiss, by
+     *  a failed open (its own warnings only), or by connection loss. Capped for
+     *  display. */
     remoteDatasetWarnings,
-    /** Count of further distinct warnings beyond the retained
-     *  `remoteDatasetWarnings` (the display cap). Zero unless a flood exceeded
-     *  the cap; drives the banner's "+N more" affordance. */
+    /** Distinct warnings dropped by the display cap, so the banner can say
+     *  "+N more" instead of hiding a flood. */
     remoteDatasetWarningsOverflow,
     dismissRemoteDatasetWarnings,
     breakFollow,
     handleFollow,
     followablePeers,
+  };
+}
+
+/**
+ * The canvas's size in device pixels, rounded as the render paths round it, or
+ * null while it has no layout box.
+ */
+function canvasDeviceSize(canvas: HTMLCanvasElement | null): ViewportSize | null {
+  if (!canvas || canvas.clientWidth === 0 || canvas.clientHeight === 0) return null;
+  const dpr = window.devicePixelRatio || 1;
+  return {
+    width: Math.round(canvas.clientWidth * dpr),
+    height: Math.round(canvas.clientHeight * dpr),
   };
 }

@@ -1,20 +1,6 @@
 use super::*;
 
 #[tokio::test]
-async fn create_lists_owner_workspace() {
-    let store = fresh_store().await;
-    let p = principal("Alice@Example.com", false);
-
-    let workspace = store.create_workspace(&p, None).await.unwrap();
-    assert_eq!(workspace.name, "Untitled workspace");
-
-    let rows = store.list_workspaces(&p).await.unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].id, workspace.id);
-    assert_eq!(rows[0].role, WorkspaceRole::Owner);
-}
-
-#[tokio::test]
 async fn duplicate_route_returns_201_for_member_and_404_for_non_member() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
@@ -441,21 +427,6 @@ async fn admin_can_recover_orphaned_workspace_owner() {
         .await
         .unwrap_err();
     assert!(matches!(err, WorkspaceError::BadRequest(_)));
-}
-
-#[tokio::test]
-async fn non_member_cannot_see_role_but_admin_can() {
-    let store = fresh_store().await;
-    let owner = principal("owner@example.com", false);
-    let other = principal("other@example.com", false);
-    let admin = principal("admin@example.com", true);
-    let workspace = store.create_workspace(&owner, Some("Demo")).await.unwrap();
-
-    assert_eq!(store.role_for(&workspace.id, &other).await.unwrap(), None,);
-    assert_eq!(
-        store.role_for(&workspace.id, &admin).await.unwrap(),
-        Some(WorkspaceRole::Owner),
-    );
 }
 
 #[tokio::test]
@@ -901,14 +872,10 @@ async fn archived_workspace_blocks_new_access_until_restored() {
 
 #[tokio::test]
 async fn workspace_open_never_leaks_existence_to_non_member() {
-    // NEVER-LEAK regression (annotation share-by-link, slice 3): the
-    // workspace-open response a deep-link recipient receives must be
-    // byte-identical whether the workspace exists-but-is-restricted, is
-    // archived, or never existed. Otherwise a recipient enumerates which
-    // workspaces/annotations exist via the Network tab. Folded from the
-    // red-team family `annotation_deeplink_neverleak_family.json` cases
-    // nl-http-restricted-exists-vs-missing, nl-http-deleted-vs-missing,
-    // and nl-http-control-member-ok.
+    // Never-leak: the workspace-open response a deep-link recipient gets
+    // must be byte-identical whether the workspace is restricted, archived,
+    // or missing. Otherwise a recipient could enumerate which workspaces
+    // exist from the Network tab.
     let store = fresh_store().await;
     let alice = principal("alice@example.com", false);
     let bob = principal("bob@example.com", false);
@@ -953,7 +920,7 @@ async fn workspace_open_never_leaks_existence_to_non_member() {
     let owner_open = open_status_body(&manager, &restricted.id, &alice).await;
     assert_eq!(owner_open.0, StatusCode::OK);
 
-    // Control: a member still learns their OWN archived workspace is archived
+    // Control: a member still learns their own archived workspace is archived
     // (410), the one party that already knows it exists.
     let owner_archived = open_status_body(&manager, &archived.id, &alice).await;
     assert_eq!(owner_archived.0, StatusCode::GONE);
@@ -1067,13 +1034,11 @@ async fn idle_eviction_drops_empty_live_workspace_and_reopen_restores_document()
 
 #[tokio::test]
 async fn presence_identity_is_never_persisted_into_document_json() {
-    // PRIVACY INVARIANT (#540 review): peer identity (display name, avatar,
-    // initial — and certainly any email) is EPHEMERAL session presence. It
-    // must NEVER cross into the persisted workspace document, or a stale
-    // identity / address would leak through `document_json` on every reload
-    // and to anyone the workspace is later shared with. Presence lives only
-    // on `Session::clients`; the document is built solely from sequenced
-    // commands. This guards that separation across a real persist+reload.
+    // Privacy invariant: peer identity (name, avatar, initial, and certainly
+    // any email) is ephemeral session presence. It must never reach the
+    // persisted document, or a stale identity would leak through
+    // `document_json` on every reload and to anyone the workspace is later
+    // shared with. Guards that across a real persist and reload.
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let workspace = store

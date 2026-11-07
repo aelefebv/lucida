@@ -1,15 +1,8 @@
 /**
- * Interaction-mode detector.
- *
- * Buffers a sliding window of `SceneEpochs` snapshots and derives the
- * current interaction mode from the deltas. The CPU cache reads the
- * mode to bias eviction tier order — panning protects active-detail,
- * scrubbing protects prefetch (the next-time-step chunks the user is
- * actively skimming through), idle uses the panning order as a default.
- *
- * Pure: no clock, no I/O. Push fresh epochs each `submit()` tick;
- * the mode is recomputed on each `current()` call from the buffered
- * history.
+ * Derives the interaction mode from a sliding window of `SceneEpochs`
+ * snapshots pushed each `submit()` tick. The CPU cache uses it to bias
+ * eviction tier order: scrubbing protects prefetch (the next time steps
+ * the user is skimming), while panning and idle protect active-detail.
  */
 import type { SceneEpochs } from "../epochs.ts";
 

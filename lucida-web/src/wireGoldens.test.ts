@@ -1,47 +1,16 @@
 /**
- * Golden-fixture lock tests for the JSON wire protocol (web side).
+ * Golden-fixture lock for the JSON wire protocol, web side.
  *
- * The committed fixtures under `wire-fixtures/` at the repository root are
- * generated and byte-locked by the Rust side
- * (`lucida-server/tests/wire_goldens.rs`), which builds each payload with
- * the real serde types. This suite parses THE SAME files and drives them
- * through the web's real consumption paths:
+ * `lucida-server/tests/wire_goldens.rs` generates and byte-locks the fixtures
+ * in `wire-fixtures/` from the real serde types. This suite drives the same
+ * files through the web's real consumers and compares each to a literal
+ * authored here, so a Rust field rename fails here instead of the web reading
+ * `undefined`. Binary frames are locked in `pipeline/fetch/wireProtocol.test.ts`;
+ * `ChunkMessage::ChunkFetch` has no producer and is excluded.
  *
- * - server envelopes through a real `Bridge` (its `onmessage` dispatch),
- *   asserting every handler argument;
- * - client envelopes through the real `Bridge` send methods and the real
- *   `ProxiedContentSource` request senders, asserting the transmitted
- *   frames equal the fixtures;
- * - every web-live `DocumentCommand` through `Bridge.sendCommand`, with the
- *   command bodies authored here mirroring the production producers
- *   (layoutRegistry.ts, useDatasetSettings.ts, AnnotationOverlay.tsx,
- *   ThreadPopover.tsx, savedView/buildAnnotationView.ts);
- * - `DatasetOpened` payloads against the `manifestTypes` mirrors and through
- *   `extractDataType` / `mergeGeneratedAvailabilityIntoManifest`;
- * - generated-availability payloads through `GeneratedAvailabilityCatalog`;
- * - asset-catalog deltas through the `AssetCatalog` web mirror;
- * - the enum vocabulary fixture against the production TS unions and
- *   `COLORMAP_NAMES`, so a Rust variant rename/addition cannot outrun the
- *   web's string dispatch vocabulary.
- *
- * Every fixture is additionally compared `toStrictEqual` against an
- * expected value AUTHORED HERE in TypeScript (typed with the production
- * mirror interfaces where they exist). That makes the check exhaustive: a
- * Rust-side field rename, after regenerating the fixtures, changes the
- * fixture but not these literals, so this suite fails instead of the web
- * silently reading `undefined`.
- *
- * Scope note: the binary chunk/proxy frames are locked separately
- * (`pipeline/fetch/wireProtocol.test.ts`); `ChunkMessage::ChunkFetch` is
- * currently unproduced wire vocabulary (nothing sends it; the server
- * ignores it if a client does) and is excluded from the lock. A newly
- * added serde-skipped field that no fixture populates is invisible to this
- * lock — see the Rust test header for that documented limit.
- *
- * On failure, first decide which side is wrong. If the Rust wire change is
- * intentional, regenerate fixtures with
+ * If the Rust change is intended, regenerate with
  * `REGEN_WIRE_GOLDENS=1 cargo test -p lucida-server --test wire_goldens`
- * and update the expectations (and any production mirror types) here.
+ * and update the expectations and mirror types here.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -71,6 +40,19 @@ import {
   type LayoutSpec,
 } from "./manifestTypes.ts";
 import { dtypeMax } from "./types.ts";
+import { makeTick } from "./trace/diagnose/fixtures.ts";
+import {
+  CLIENT_MESSAGE_TYPES,
+  COUNTED_PHASES,
+  TICK_COUNTER_NAMES,
+  type TraceReading,
+  type TraceTick,
+} from "./trace/types.ts";
+import {
+  aggregateItem,
+  runBoundaryItem,
+  type WatchAggregateItem,
+} from "./trace/watchStream.ts";
 import {
   GeneratedAvailabilityCatalog,
   mergeGeneratedAvailabilityIntoManifest,
@@ -103,9 +85,7 @@ import {
 import { viewModeForCamera } from "./savedView/restoreAnnotationView.ts";
 import type { Annotation } from "./components/annotationDocument.ts";
 
-// ---------------------------------------------------------------------------
 // Fixture loading
-// ---------------------------------------------------------------------------
 
 const FIXTURE_ROOT = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -142,9 +122,7 @@ function coveredFixture(rel: string): unknown {
   return fixture(rel);
 }
 
-// ---------------------------------------------------------------------------
 // Bridge harness (stand-in transport, real Bridge)
-// ---------------------------------------------------------------------------
 
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -206,11 +184,9 @@ function lastSent(ws: FakeWebSocket): unknown {
   return JSON.parse(ws.sent[ws.sent.length - 1]);
 }
 
-// ---------------------------------------------------------------------------
 // Expected wire values, authored in TS against the production mirror types.
 // These are the web's half of the contract: they must describe the exact
 // same values `lucida-server/tests/wire_goldens.rs` constructs in Rust.
-// ---------------------------------------------------------------------------
 
 const IDENTITY_TRANSLATION = (tx: number, ty: number): number[] => [
   1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, tx, ty, 0, 1,
@@ -293,6 +269,7 @@ const expectedManifestSingle: DatasetManifest = {
           { label: "Channel 0", color: "0000FF" },
           { label: "Channel 1" },
         ],
+        downsampling_method: "mean",
       },
     },
   ],
@@ -378,7 +355,7 @@ const expectedDatasetOpenedSingle: WireDatasetOpened = {
   opener_client_id: 7,
 };
 
-/** The collection's one shared multiscale, emitted ONCE in the manifest's
+/** The collection's one shared multiscale, emitted once in the manifest's
  *  `multiscales` table and referenced per tile via `multiscale_ref`. */
 const expectedCollectionSharedMultiscale = {
   axes: [
@@ -407,11 +384,9 @@ const expectedCollectionSharedMultiscale = {
   pinned_axes: [],
 };
 
-/** The collection manifest as it crosses the wire: shared-once multiscale
- *  table, per-image references, and compact `translation` placement edges —
- *  announced by the leading `format_version` marker (absent on fully-inline
- *  manifests, e.g. the single fixture). `resolveDatasetManifest` expands
- *  this into the in-memory shape below. */
+/** The collection manifest as it crosses the wire, in compact form with a
+ *  `format_version` marker. `resolveDatasetManifest` expands it into the
+ *  in-memory shape below. */
 const expectedManifestCollection: DatasetManifestWire = {
   format_version: 2,
   dataset_id: "wds-collection-77",
@@ -578,11 +553,8 @@ const expectedDisplay: WireDisplayState = {
   gamma: 0.85,
 };
 
-/** The pin-embedded author view (`Annotation.view` / `AddAnnotation.view`)
- *  in workspace-dataset-id form: `datasets` empty by invariant (no source
- *  URLs on the document wire), everything else populated. This is the shape
- *  `savedView/buildAnnotationView.ts` captures and
- *  `savedView/restoreAnnotationView.ts` consumes. */
+/** The pin-embedded author view in workspace-dataset-id form. `datasets` is
+ *  empty by invariant, since no source URLs ride the document wire. */
 const expectedPinView: SavedView = {
   v: 1,
   datasets: [],
@@ -629,8 +601,7 @@ const joiningMirror: PresenceState = expectedJoiningPresence;
 void joiningMirror;
 
 /** Wire shape of `lucida_core::scene::Annotation` (the snapshot pins).
- *  Exhaustive — includes `anchor`, which the web's `Annotation` mirror does
- *  not read yet. */
+ *  Exhaustive, so it includes `anchor`, which the web mirror doesn't read. */
 interface WireAnnotation {
   id: string;
   position: [number, number];
@@ -788,6 +759,20 @@ const expectedGeneratedDelta: WireGeneratedAvailabilityDelta = {
   ],
 };
 
+/**
+ * The bundle text a **Send report** carries, read out of the golden
+ * rather than restated here.
+ *
+ * A bundle rides as text: the server stores those bytes and the CLI
+ * fetches them back, so what the envelope has to lock is that the same
+ * characters go out, which a second spelling of the same object in this
+ * file could not check. The bundle's own shape is locked by
+ * `trace-fixtures/bundle-v1.json` on both sides.
+ */
+const expectedSendReportBundle = (
+  fixture("session/client_send_report.json") as { bundle: string }
+).bundle;
+
 const expectedSourceHealth: DatasetSourceHealth = {
   workspace_dataset_id: "wds-0f3a",
   name: "kidney-multiplex.zarr",
@@ -878,9 +863,7 @@ const expectedInterestHint = {
   ttl_ms: 2000,
 };
 
-// ---------------------------------------------------------------------------
 // Server → client envelopes, dispatched by the real Bridge
-// ---------------------------------------------------------------------------
 
 describe("wire goldens: server messages through Bridge dispatch", () => {
   beforeEach(() => {
@@ -1115,7 +1098,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
   it("open_dataset_succeeded: requester-only success envelope", () => {
     // The web treats the broadcast `command_broadcast(dataset_opened)` as
     // authoritative and has no dispatch arm for this envelope, but it still
-    // crosses the socket to the web session — lock its shape.
+    // crosses the socket to the web session, so lock its shape.
     const raw = fixtureRaw("session/server_open_dataset_succeeded.json");
     COVERED_FIXTURES.add("session/server_open_dataset_succeeded.json");
     expect(JSON.parse(raw)).toStrictEqual({
@@ -1184,6 +1167,49 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     // the bridge to resolve the right pending promise).
     deliver(ws, JSON.stringify({ ...envelope, request_id: sent.request_id }));
     await expect(pending).resolves.toStrictEqual([expectedSourceHealth]);
+  });
+
+  it("report_sent resolves a pending sendReport with the inbox entry and its expiry", async () => {
+    const raw = fixtureRaw("session/server_report_sent.json");
+    COVERED_FIXTURES.add("session/server_report_sent.json");
+    const envelope = JSON.parse(raw) as {
+      type: string;
+      request_id: string;
+      entry_id: string;
+      expires_at: string;
+    };
+    expect(envelope).toStrictEqual({
+      type: "report_sent",
+      request_id: "web-report-9c1d",
+      entry_id: "5d1f0c2e-7b3a-4e8f-9a6b-0c1d2e3f4a5b",
+      expires_at: "2026-09-23T14:05:00Z",
+    });
+
+    const { bridge, ws } = openBridge();
+    const pending = bridge.sendReport(expectedSendReportBundle);
+    const sent = lastSent(ws) as { request_id: string };
+    deliver(ws, JSON.stringify({ ...envelope, request_id: sent.request_id }));
+    await expect(pending).resolves.toStrictEqual({
+      entryId: "5d1f0c2e-7b3a-4e8f-9a6b-0c1d2e3f4a5b",
+      expiresAt: "2026-09-23T14:05:00Z",
+    });
+  });
+
+  it("report_failed rejects a pending sendReport with the server's reason", async () => {
+    const raw = fixtureRaw("session/server_report_failed.json");
+    COVERED_FIXTURES.add("session/server_report_failed.json");
+    const envelope = JSON.parse(raw) as { type: string; request_id: string; error: string };
+    expect(envelope).toStrictEqual({
+      type: "report_failed",
+      request_id: "web-report-9c1d",
+      error: "the bundle carries no header",
+    });
+
+    const { bridge, ws } = openBridge();
+    const pending = bridge.sendReport(expectedSendReportBundle);
+    const sent = lastSent(ws) as { request_id: string };
+    deliver(ws, JSON.stringify({ ...envelope, request_id: sent.request_id }));
+    await expect(pending).rejects.toThrow("the bundle carries no header");
   });
 
   it("asset_catalog_update: delta reaches the handler and the web AssetCatalog mirror", () => {
@@ -1332,6 +1358,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
         decompress_us: [4512, PHASE_UNSET, PHASE_UNSET],
         slice_encode_us: [903, PHASE_UNSET, PHASE_UNSET],
         handoff_us: [61, 55, PHASE_UNSET],
+        backend_bytes: [131072, null, null],
         coalesced_onto: [LABEL_NONE, LABEL_NONE, LABEL_NONE],
       },
     });
@@ -1360,13 +1387,14 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
           row.durationUs,
           row.requestId,
           row.metadataPhase,
+          row.backendBytes,
         ]),
     ).toEqual([
-      [2558, "chunk", 142 + 37 + 88 + 2 + 3100000 + 211400 + 4512 + 903 + 61, 0, null, null],
-      [2559, "asset", 96 + 41 + 74 + 3 + 55, 0, null, null],
+      [2558, "chunk", 142 + 37 + 88 + 2 + 3100000 + 211400 + 4512 + 903 + 61, 0, null, null, 131072],
+      [2559, "asset", 96 + 41 + 74 + 3 + 55, 0, null, null, null],
       // The metadata read keys on the open, not on a correlation label, and
       // its span is in its own column rather than in any phase.
-      [0, "metadata-read", 0, 63441, "web-open-4c1a", "backend-read"],
+      [0, "metadata-read", 0, 63441, "web-open-4c1a", "backend-read", null],
     ]);
   });
 
@@ -1415,9 +1443,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Client → server envelopes, produced by the real Bridge senders
-// ---------------------------------------------------------------------------
 
 /** Every web-live document command, authored as its production producer
  *  builds it (file references per entry), paired with its envelope fixture.
@@ -1445,8 +1471,8 @@ const commandCases: [string, string, Record<string, unknown>][] = [
   [
     "move_annotation (reshape)",
     "session/client_command_move_annotation.json",
-    // annotationInteraction.ts emitMoveAnnotation — the one construction site
-    // for every overlay move/reshape; a reshape carries both vertices.
+    // annotationInteraction.ts emitMoveAnnotation, the one construction site
+    // for every overlay move or reshape; a reshape carries both vertices.
     {
       type: "move_annotation",
       dataset_id: "wds-0f3a",
@@ -1641,6 +1667,21 @@ describe("wire goldens: client messages through Bridge senders", () => {
     expect(sent).toStrictEqual({ ...golden, request_id: sent.request_id });
   });
 
+  it("sendReport emits the send_report envelope with a fresh request id and the bundle as text", () => {
+    const { bridge, ws } = openBridge();
+    void bridge.sendReport(expectedSendReportBundle).catch(() => {});
+    const sent = lastSent(ws) as { request_id: string; bundle: string };
+    expect(sent.request_id).toMatch(/^web-report-/);
+    const golden = coveredFixture("session/client_send_report.json") as {
+      request_id: string;
+    };
+    expect(sent).toStrictEqual({ ...golden, request_id: sent.request_id });
+    // The payload is text on the wire and JSON to whoever opens it: the
+    // header the inbox reads out for its listing is in there, unaltered.
+    const bundle = JSON.parse(sent.bundle) as { header: { runId: string } };
+    expect(bundle.header.runId).toBe("remote-cold");
+  });
+
   it("a persistent seq gap in the broadcast stream emits the request_snapshot envelope", () => {
     // Producer-level lock through the real production trigger: the Bridge
     // itself sends `request_snapshot` when a `command_broadcast` arrives
@@ -1682,13 +1723,11 @@ describe("wire goldens: client messages through Bridge senders", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Request envelopes produced by the real ProxiedContentSource
-// ---------------------------------------------------------------------------
 
 describe("wire goldens: content-source request envelopes", () => {
   /**
-   * Both envelopes come off ONE source, in order, because the goldens carry
+   * Both envelopes come off one source, in order, because the goldens carry
    * consecutive correlation labels from one shared counter. Two sources
    * would each mint `rid: 0` and the shared-counter half of the contract
    * would go untested.
@@ -1733,9 +1772,7 @@ describe("wire goldens: content-source request envelopes", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Dataset-open payloads through the manifest mirrors
-// ---------------------------------------------------------------------------
 
 describe("wire goldens: dataset-open payloads", () => {
   it("single-image DatasetOpened matches the manifestTypes mirror", () => {
@@ -1768,8 +1805,8 @@ describe("wire goldens: dataset-open payloads", () => {
     for (const image of manifest.images) {
       expect(image.multiscale).toStrictEqual(expectedCollectionSharedMultiscale);
     }
-    // Table-resolved images share ONE multiscale object (copy-on-write
-    // downstream), so a 20k-tile manifest does not fan out 20k copies.
+    // Table-resolved images share one multiscale object, so a 20k-tile
+    // manifest does not fan out 20k copies.
     expect(manifest.images[0].multiscale).toBe(manifest.images[1].multiscale);
     expect(manifest.transforms).toStrictEqual([
       { from: "tile-A1-f0", to: "group-A1", transform: { matrix: IDENTITY_TRANSLATION(0, 0) } },
@@ -1848,9 +1885,7 @@ describe("wire goldens: dataset-open payloads", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Generated-availability payloads through the real catalog
-// ---------------------------------------------------------------------------
 
 describe("wire goldens: generated availability", () => {
   it("snapshot fixture drives the catalog's counters and per-chunk lookups", () => {
@@ -1862,7 +1897,7 @@ describe("wire goldens: generated availability", () => {
     const catalog = new GeneratedAvailabilityCatalog();
     catalog.applySnapshot("wds-0f3a", snapshot);
 
-    // One counter bucket per status variant — locks the status vocabulary.
+    // One counter bucket per status variant locks the status vocabulary.
     expect(catalog.statusCounts("wds-0f3a")).toStrictEqual({
       levels: 2,
       totalChunks: 5,
@@ -1931,9 +1966,7 @@ describe("wire goldens: generated availability", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
 // Enum vocabulary against the production TS unions
-// ---------------------------------------------------------------------------
 
 describe("wire goldens: enum vocabulary", () => {
   it("every wire enum's variants match the web's string vocabulary", () => {
@@ -2012,9 +2045,123 @@ describe("wire goldens: enum vocabulary", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
+// Watch stream: the items a toggled-on page publishes, and the relay envelope
+
+/**
+ * The aggregate and the boundary the fixtures lock, built by the page's own
+ * item builders (`trace/watchStream.ts`).
+ *
+ * The fixtures carry one entry in each of the aggregate's closed maps rather
+ * than the whole set: they are exemplars of a vocabulary the trace owns and
+ * the enum-vocabulary fixture already inventories.
+ */
+describe("wire goldens: watch stream", () => {
+  const watchReading: TraceReading = {
+    atUs: 4_200_000,
+    queueDepth: 20_480,
+    inFlight: 24,
+    frameTimeUs: 8_300,
+    residentBytes: 402_653_184,
+    gpuPassUs: 2_100,
+  };
+
+  const watchTick: TraceTick = {
+    ...makeTick(4_199_000, { "cache-admission": 48 }, { chunkRequest: { messages: 12, bytes: 1_140 } }),
+    datasetId: "wds-0f3a",
+    counters: { ...makeTick(0).counters, laneDetail: 12 },
+    levels: [{ level: 1, planned: 48, cached: 40, inFlight: 8 }],
+    targetLevel: { min: 1, max: 1 },
+    displayedLevel: { min: 1, max: 2 },
+  };
+
+  const publishedAggregate = () =>
+    JSON.parse(
+      JSON.stringify({
+        type: "watch_publish",
+        item: aggregateItem(1_767_225_600_250, "run-3", watchReading, [watchTick]),
+      }),
+    ) as { type: string; item: WatchAggregateItem };
+
+  it("watch_subscribe: the bare tag the CLI subscribes with", () => {
+    // No web sender: the page publishes and the CLI subscribes. The fixture
+    // locks the tag the Rust client sends and the tag the Rust server routes
+    // on to one spelling.
+    expect(coveredFixture("session/client_watch_subscribe.json")).toStrictEqual({
+      type: "watch_subscribe",
+    });
+  });
+
+  it("watch_publish(aggregate): the page's item, field for field", () => {
+    const golden = coveredFixture("session/client_watch_publish_aggregate.json") as {
+      type: string;
+      item: WatchAggregateItem;
+    };
+    const frame = publishedAggregate();
+
+    expect(Object.keys(frame).sort()).toStrictEqual(Object.keys(golden).sort());
+    expect(Object.keys(frame.item).sort()).toStrictEqual(Object.keys(golden.item).sort());
+    expect(frame.item.kind).toBe("aggregate");
+    expect(frame.item.at_epoch_ms).toBe(golden.item.at_epoch_ms);
+    expect(frame.item.run_id).toBe(golden.item.run_id);
+    expect(frame.item.reading).toStrictEqual(golden.item.reading);
+
+    const [tick] = frame.item.ticks;
+    const [goldenTick] = golden.item.ticks;
+    expect(Object.keys(tick).sort()).toStrictEqual(Object.keys(goldenTick).sort());
+    for (const field of [
+      "atUs",
+      "datasetId",
+      "levels",
+      "levelsDropped",
+      "targetLevel",
+      "levelPinned",
+      "displayedLevel",
+    ] as const) {
+      expect(tick[field]).toStrictEqual(goldenTick[field]);
+    }
+
+    const maps = [
+      [tick.counters, goldenTick.counters as Record<string, unknown>, TICK_COUNTER_NAMES],
+      [frame.item.counted, golden.item.counted as Record<string, unknown>, COUNTED_PHASES],
+      [frame.item.sent, golden.item.sent as Record<string, unknown>, CLIENT_MESSAGE_TYPES],
+    ] as const;
+    for (const [emitted, exemplar, names] of maps) {
+      expect(Object.keys(emitted)).toStrictEqual([...names]);
+      for (const [name, value] of Object.entries(exemplar)) {
+        expect((emitted as Record<string, unknown>)[name]).toStrictEqual(value);
+      }
+    }
+  });
+
+  it("watch_publish(boundary): a run's end, with the reason and the cause", () => {
+    const item = runBoundaryItem(1_767_225_604_700, {
+      runId: "run-3",
+      cause: { epoch: "view", dirtyKind: "interactive", source: "orbit" },
+      endReason: "quiescent",
+      durationUs: 4_700_000,
+    });
+    expect(JSON.parse(JSON.stringify({ type: "watch_publish", item }))).toStrictEqual(
+      coveredFixture("session/client_watch_publish_boundary.json"),
+    );
+  });
+
+  it("watch_update: the relay names the publishing page and its sequence", () => {
+    const golden = coveredFixture("session/server_watch_update.json") as {
+      type: string;
+      client_id: number;
+      seq: number;
+      item: WatchAggregateItem;
+    };
+    expect(Object.keys(golden).sort()).toStrictEqual(["client_id", "item", "seq", "type"]);
+    expect(golden.client_id).toBe(3);
+    expect(golden.seq).toBe(42);
+    expect(golden.item).toStrictEqual(
+      (fixture("session/client_watch_publish_aggregate.json") as { item: WatchAggregateItem }).item,
+    );
+  });
+});
+
 // Inventory: every committed fixture is asserted above
-// ---------------------------------------------------------------------------
 
 describe("wire goldens: fixture inventory", () => {
   it("every fixture file has web-side coverage", () => {

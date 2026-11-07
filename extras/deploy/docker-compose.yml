@@ -6,7 +6,7 @@
 # is the equivalent shape: one container, one named volume mounted at
 # /var/lib/lucida, env vars mirroring the k8s Deployment.
 #
-# Per ADR-0021 (wiki/decisions/0021-deployment-artifacts-as-reference-templates.md)
+# Per ADR-0021 (docs/adr/0021-deployment-artifacts-as-reference-templates.md)
 # this is a reference template — copy it, replace every <PLACEHOLDER>,
 # own the result. The placeholders are the same ones in k8s/*.yaml.
 #
@@ -45,9 +45,15 @@ services:
       LUCIDA_WEB_DIST: "/usr/share/lucida/web"
 
       # ---- Required: auth mode ----
-      # Use `disabled` + LUCIDA_INSECURE=1 for closed-network labs;
-      # `google` for everything else.
+      # Use `disabled` + LUCIDA_INSECURE=1 for closed-network labs,
+      # `iap` behind a Google Cloud Identity-Aware Proxy, and `google`
+      # for everything else.
       LUCIDA_AUTH: "google"
+
+      # ---- Required when LUCIDA_AUTH=iap ----
+      # The exact `aud` claim your IAP mints. Not a secret, and never
+      # assembled by hand.
+      # LUCIDA_IAP_AUDIENCE: "/projects/<YOUR-PROJECT-NUMBER>/global/backendServices/<YOUR-SERVICE-ID>"
 
       # ---- Required when LUCIDA_AUTH=google ----
       LUCIDA_GOOGLE_CLIENT_ID: "<YOUR-OAUTH-CLIENT-ID>"
@@ -56,9 +62,12 @@ services:
       # Do NOT inline the secret value here.
       LUCIDA_GOOGLE_CLIENT_SECRET: "${LUCIDA_GOOGLE_CLIENT_SECRET}"
 
-      # ---- Required: where SQLite + the proxy cache live ----
-      # Absolute paths under the bind-mounted volume below.
-      LUCIDA_DB_PATH: "/var/lib/lucida/lucida.db"
+      # ---- Required: where the database + the proxy cache live ----
+      # Absolute paths under the bind-mounted volume below. The scheme
+      # of LUCIDA_DB_URL picks the storage backend. PostgreSQL is the
+      # other one, spelled `postgres://` or `postgresql://`. Either
+      # backend is migrated at startup.
+      LUCIDA_DB_URL: "sqlite:///var/lib/lucida/lucida.db"
       LUCIDA_PROXY_CACHE_DIR: "/var/lib/lucida/proxy-cache"
       LUCIDA_DATA_DIR: "/var/lib/lucida/data"
 

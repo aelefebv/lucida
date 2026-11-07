@@ -1,6 +1,6 @@
 # Lucida
 
-Collaborative volumetric image viewer. Multiple peers open the same OME-Zarr dataset, follow each other's viewport, and share annotations in real time. Server in Rust (Axum + Tokio), client in TypeScript + WebGPU + WASM.
+A domain-neutral viewer for large n-dimensional array and image data, built for people and for agents. Point it at an OME-Zarr dataset, local or in object storage, and explore it in 2D or 3D without downloading it or waiting for it to open. People use the browser UI. Agents drive the same engine through the CLI and the Python client and capture what it renders. A Rust server (Axum, Tokio) serves a TypeScript, WebGPU, and WASM client.
 
 [![CI](https://github.com/aelefebv/lucida/actions/workflows/ci.yml/badge.svg)](https://github.com/aelefebv/lucida/actions/workflows/ci.yml)
 [![Release](https://github.com/aelefebv/lucida/actions/workflows/release.yml/badge.svg)](https://github.com/aelefebv/lucida/actions/workflows/release.yml)
@@ -8,7 +8,7 @@ Collaborative volumetric image viewer. Multiple peers open the same OME-Zarr dat
 
 ## Quick start
 
-### Run it locally (just you)
+### Run it locally
 
 ```bash
 docker run --rm -p 127.0.0.1:9876:9876 \
@@ -16,178 +16,59 @@ docker run --rm -p 127.0.0.1:9876:9876 \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-Visit <http://localhost:9876>. The `127.0.0.1:` prefix on `-p` keeps the host's port forward bound to loopback so only your machine can reach it; the container itself still binds `0.0.0.0` internally (the Dockerfile defaults it that way), and `LUCIDA_INSECURE=1` acknowledges that auth is off (see [ADR-0018](wiki/decisions/0018-auth-mode-auto-detect-by-bind-address.md)).
+Visit <http://localhost:9876>. The image binds `0.0.0.0` inside the container, so running with auth off needs `LUCIDA_INSECURE=1`. The `127.0.0.1:` prefix keeps the host side on loopback. You are `dev@local`, with no admin rights. The identity switcher that grants them appears only when the server itself binds loopback, which never happens in a container. Run from source (see [Develop](#develop)) if you need it.
 
 ### Share with your LAN
 
+Drop the prefix (`-p 9876:9876`) and anyone on your network can reach <http://your-machine:9876>. Everyone shares the one `dev@local` identity and edits the same state, and admin routes answer 403. For per-user sign-in, use one of the next two setups.
+
+### Sign in with Google
+
+Set `LUCIDA_AUTH=google`. [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) covers the OAuth client, the environment variables, the SQLite and PostgreSQL storage backends, and backups. It goes with the Kubernetes templates in [`extras/deploy/k8s/`](extras/deploy/k8s/) and the single-host [`docker-compose.yml`](extras/deploy/docker-compose.yml).
+
+### Run behind Identity-Aware Proxy
+
 ```bash
 docker run --rm -p 9876:9876 \
-  -e LUCIDA_AUTH=disabled -e LUCIDA_INSECURE=1 \
+  -e LUCIDA_AUTH=iap \
+  -e LUCIDA_IAP_AUDIENCE=/projects/PROJECT_NUMBER/global/backendServices/SERVICE_ID \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-Drops the `127.0.0.1:` prefix so the host port-forward listens on every interface — anyone on the same LAN can reach <http://your-machine:9876>. Be aware of the auth-off posture: browsers default to the admin `dev@local` identity, the profile menu can switch a browser to a different local dev identity for manual role testing, and admin endpoints (`/admin/clear-proxy-cache`) are unprotected. If you want real per-user authentication, use the auth-enabled scenario below.
+Lucida runs no sign-in of its own here. It verifies the assertion IAP attaches to each request and reads the email from it. `LUCIDA_IAP_AUDIENCE` is required and must match the `aud` claim byte for byte, so copy it from the load balancer's backend service. Bearer tokens still work, so the CLI reaches an IAP-fronted server unchanged.
 
-### Run with sign-in (Google OAuth)
-
-For any production-shape deployment — multi-user identity, proper admin gating, internet-reachable hostname — sign-in is required. The click-by-click Google Cloud Console setup (provision an OAuth client, configure the redirect URI, supply the credentials to the container) lives in [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) §2 alongside the Kubernetes manifests in [`extras/deploy/k8s/`](extras/deploy/k8s/) and the single-host docker-compose alternative in [`extras/deploy/docker-compose.yml`](extras/deploy/docker-compose.yml). The RUNBOOK also covers the conceptual model: env-var contract, persistence layout, OAuth provider extensibility, and per-cloud identity wiring.
-
-### Develop on it
-
-Prerequisites: rust + cargo, pnpm, wasm-pack, node — your package manager equivalent.
-
-One command brings everything up to date and runs both servers:
-
-```bash
-./scripts/dev.sh
-```
-
-It installs the web deps if they're missing, rebuilds the `lucida-core` wasm pkg **only when a `lucida-*` Rust source actually changed** (content-hashed, so an mtime bump from `git checkout` doesn't trigger a needless rebuild), builds `lucida-server`, then starts the relay server (binds `127.0.0.1:9876`, auth auto-disabled on loopback) and the Vite SPA dev server (which proxies `/auth /api /admin /ws` to `:9876`), streaming both logs. `Ctrl-C` stops both cleanly. Pass `--wasm` to force a wasm rebuild, or `--help` for details.
-
-Then visit <http://localhost:5173>.
-
-<details>
-<summary>Prefer to run the two-terminal loop by hand?</summary>
-
-One-time setup:
-
-```bash
-(cd lucida-web && pnpm install)
-```
-
-Terminal 1 — relay server (binds 127.0.0.1:9876, auth auto-disabled on loopback):
-
-```bash
-cargo run -p lucida-server
-```
-
-Terminal 2 — SPA dev server (Vite proxies /auth /api /admin /ws to :9876):
-
-```bash
-(pnpm install --force && cd lucida-web && pnpm run build:wasm && pnpm run dev -- --force)
-```
-
-`pnpm install --force` refreshes the local `file:../lucida-core/pkg` copy in `node_modules`, and `pnpm run dev -- --force` makes Vite discard any stale optimized dependency cache.
-
-Visit <http://localhost:5173>.
-
-</details>
-
-### Use the CLI and Python client
-
-The product CLI command is `lucida`. From a source checkout, run the same binary by replacing `lucida` with `cargo run -p lucida-cli --`, for example `cargo run -p lucida-cli -- --server http://127.0.0.1:9876 status`.
-
-To install the CLI from a checkout for repeated local use:
-
-```bash
-cargo install --locked --path lucida-cli
-lucida --server http://127.0.0.1:9876 status
-```
-
-For an auth-disabled local server:
-
-```bash
-lucida --server http://127.0.0.1:9876 status
-lucida --server http://127.0.0.1:9876 workspace list
-lucida --server http://127.0.0.1:9876 workspace create "local analysis"
-lucida --server http://127.0.0.1:9876 workspace use "local analysis"
-lucida --server http://127.0.0.1:9876 workspace open --no-browser
-lucida --server http://127.0.0.1:9876 workspace pin
-lucida --server http://127.0.0.1:9876 workspace share show
-```
-
-For protected deployments, authenticate first:
-
-```bash
-lucida --server https://lucida.example.org auth login
-lucida auth whoami
-```
-
-To open a dataset and verify it in the browser, keep a browser on the workspace URL printed by `workspace open`, then run:
-
-```bash
-lucida dataset browse /var/lib/lucida/data
-lucida dataset open /var/lib/lucida/data/sample.ome.zarr
-lucida dataset list
-lucida viewer state
-lucida viewer screenshot current-view.png
-```
-
-The already-open browser workspace should update when `dataset open`, layout, saved-view, or other shared workspace commands land. View, camera, layer, and channel commands update the selected durable headless viewer profile by default, and can also broadcast ephemeral presence while connected. `viewer screenshot`/`viewer overview` use the web renderer through Chrome/Chromium and wait for a nonblank canvas before writing the PNG.
-
-Live peer following is intentionally ephemeral. To inspect or capture what an
-already-open browser peer is looking at, run `lucida peer list` to find the
-client id, then use `lucida viewer state --from-peer <client-id>`,
-`lucida viewer screenshot --from-peer <client-id> peer-view.png`, or
-`lucida viewer adopt --from-peer <client-id>` to copy that peer's current view
-into the durable headless viewer profile.
-
-Python scripts use the same server/client model:
-
-```python
-from lucida import LucidaClient
-
-client = LucidaClient("http://127.0.0.1:9876")
-workspace = client.workspaces.use("local analysis")
-workspace.datasets.open("/var/lib/lucida/data/sample.ome.zarr")
-print(workspace.datasets.list())
-```
-
-`LucidaClient` reads explicit constructor tokens, `LUCIDA_TOKEN`, macOS Keychain credentials created by `lucida auth login`, and the CLI-compatible config file. Default workspaces and config-file token fallback are scoped to the normalized server URL.
-
-From a source checkout, run Python examples through the package environment:
-
-```bash
-uv run --project lucida-py python your_script.py
-```
-
-For a repeatable local smoke pass against a running server, set a server-visible dataset path and run:
-
-```bash
-export LUCIDA_SMOKE_SERVER=http://127.0.0.1:9876
-export LUCIDA_SMOKE_DATASET=/var/lib/lucida/data/sample.ome.zarr
-scripts/smoke_lucida_cli.sh
-uv run --project lucida-py python scripts/smoke_python_client.py
-```
-
-The CLI smoke script isolates `LUCIDA_CONFIG_PATH` in a temp directory, creates a throwaway workspace, opens the dataset, checks dataset health, verifies structured diagnostics for missing/malformed dataset opens, mutates view/layer/channel state, runs debug/plan diagnostics, and validates screenshot/overview PNGs. Set `LUCIDA_SMOKE_CAPTURE=0` to skip browser-rendered captures when Chrome/Chromium is unavailable.
-
-For a broader local fixture pass against Austin's test datasets, run a server
-whose `--data-dir` can see `/Users/austin/local_data/lucida_test_zarrs`, then:
-
-```bash
-uv run --project lucida-py python scripts/smoke_dataset_reliability.py \
-  --server "$LUCIDA_SMOKE_SERVER"
-```
+The RUNBOOK's [environment reference](extras/deploy/RUNBOOK.md#environment-variables) also covers two optional features: a JSON people directory that fills in names and pictures (`LUCIDA_DIRECTORY_URL`), and a storage health route for an external monitor (`LUCIDA_STATUS_PATH`).
 
 ### Useful options
 
-Add to any of the `docker run` recipes above.
-
-**Mount a local data directory** so `/api/browse` can list OME-Zarr files on your filesystem (otherwise browsing is restricted to `gs://` / `s3://` / `http(s)://` URLs):
+Add these to any `docker run` above:
 
 ```bash
--v /path/on/host:/var/lib/lucida/data \
-  -e LUCIDA_DATA_DIR=/var/lib/lucida/data
+# Mount datasets and confine the file picker to them. Unset, it lists from /.
+-v /path/on/host:/var/lib/lucida/data -e LUCIDA_DATA_DIR=/var/lib/lucida/data
+# Keep state across restarts. The default lucida.db lands in the working
+# directory, /var/lib/lucida. The proxy cache goes elsewhere unless moved.
+-v lucida-data:/var/lib/lucida -e LUCIDA_PROXY_CACHE_DIR=/var/lib/lucida/proxy-cache
 ```
 
-**Persist bookmarks/sessions across restarts** with a named volume covering the whole `/var/lib/lucida` tree (`lucida.db` + proxy cache). Without this, `docker rm` wipes everything; matters most for the LAN-shared case where multiple people accumulate state:
+### Theme a deployment
 
-```bash
--v lucida-data:/var/lib/lucida
+Point `LUCIDA_THEME_FILE` at a JSON file to set the appearance a first visit opens in and to restyle theme tokens. In Docker, mount it, for example `-v $PWD/theme.json:/etc/lucida/theme.json:ro -e LUCIDA_THEME_FILE=/etc/lucida/theme.json`.
+
+```json
+{
+  "defaults": { "theme": "light", "accent": "#0f8278", "density": "compact", "canvasBackground": "white" },
+  "tokens": { "dark": { "--lc-bg": "#101014" }, "light": { "--lc-radius": "4px" } }
+}
 ```
+
+Every key is optional. `theme` is `dark`, `light`, or `system`; `accent` is a six-digit hex color or `indigo`, `blue`, `teal`, `green`, `amber`, `rose`; `density` is `comfortable` or `compact`; `canvasBackground` is `black`, `dark-gray`, `white`, or `theme`. Users can still change each, and their choice wins. `tokens` overrides any `--lc-*` token in [`tokens.css`](lucida-web/src/theme/tokens.css) under that preset only, except the ones a setting above decides (accent, control heights, canvas colors, motion). The server refuses to start if the file is malformed or names an unknown token. `GET /api/theme` serves the file without a session.
 
 ### Reading from `gs://`
 
-Lucida discovers Google Cloud credentials, in order: object_store-native `GOOGLE_SERVICE_ACCOUNT*` env vars, then `GOOGLE_APPLICATION_CREDENTIALS` (forwarded explicitly), then the well-known ADC file at `$HOME/.config/gcloud/application_default_credentials.json`, then the GCE metadata server. Off-cluster, set one of the first three explicitly — otherwise the metadata-server probe adds a ~13s hang before falling through.
+Credentials are found in this order: `GOOGLE_*` environment variables (`GOOGLE_SERVICE_ACCOUNT*`, `GOOGLE_APPLICATION_CREDENTIALS`), the ADC file at `$HOME/.config/gcloud/application_default_credentials.json`, then the GCE metadata server. Off Google Cloud, provide one of the first two, or the metadata-server probe adds a hang of about 13 s before it gives up.
 
-**Bare binary on a dev laptop** with `gcloud auth application-default login` already done — zero env config; the well-known ADC file at `$HOME/.config/gcloud/application_default_credentials.json` is read automatically:
-
-```bash
-cargo run -p lucida-server
-```
-
-**`docker run`** with the host's ADC file (or any service-account JSON) bind-mounted in:
+After `gcloud auth application-default login`, `cargo run -p lucida-server` needs no configuration, and on GKE neither does Workload Identity (RUNBOOK §5). In Docker, mount the file:
 
 ```bash
 docker run --rm -p 127.0.0.1:9876:9876 \
@@ -197,29 +78,68 @@ docker run --rm -p 127.0.0.1:9876:9876 \
   ghcr.io/aelefebv/lucida:latest
 ```
 
-**GKE with Workload Identity** — annotate the KSA with the GSA email and lucida picks credentials up via the metadata server with no env config. Full walkthrough in [`extras/deploy/RUNBOOK.md`](extras/deploy/RUNBOOK.md) §5.
+## Writing data for lucida
 
-## Working with the codebase
+lucida reads OME-Zarr 0.5 stores lazily, one chunk at a time, so the chunk, shard, and pyramid layout a writer chooses decides how many reads a view costs. The [data layout guide](docs/data-layout.md) recommends a layout and says which viewer behavior each choice serves.
 
-- **Rust changes in any `lucida-*` crate** → the SPA needs a fresh WASM build; `./scripts/dev.sh` rebuilds it automatically on restart, or rerun `(cd lucida-web && pnpm run build:wasm)` by hand
-- **TypeScript changes in `lucida-web/`** → Vite hot-reloads automatically
-- **Python binding changes in `lucida-py/`** → `(cd lucida-py && maturin develop)`
+## CLI and Python client
 
-Tests:
+The `lucida` CLI and the `lucida` Python package drive a running server. `lucida --help` lists the commands, and each subcommand has its own `--help`. Dataset paths are paths the server can see, not the client.
 
 ```bash
-cargo test --workspace
-(cd lucida-web && pnpm test)
+cargo install --locked --path lucida-cli    # or: cargo run -p lucida-cli -- <args>
+lucida config set server https://lucida.example.org   # default: http://localhost:9876
+lucida auth login                           # protected deployments only
+lucida workspace create demo && lucida workspace use demo
+lucida dataset open /var/lib/lucida/data/sample.ome.zarr
+lucida viewer screenshot view.png           # renders through a local Chrome or Chromium
 ```
 
-Type-check the SPA: `(cd lucida-web && pnpm exec tsc --noEmit -p tsconfig.app.json)`. The `-p tsconfig.app.json` flag is load-bearing — a bare `tsc --noEmit` picks up a different config and silently checks the wrong file set.
+```python
+from lucida import LucidaClient
+
+client = LucidaClient("http://127.0.0.1:9876")
+workspace = client.workspaces.use("demo")
+workspace.datasets.open("/var/lib/lucida/data/sample.ome.zarr")
+```
+
+From a checkout, run scripts with `uv run --project lucida-py python your_script.py`. The client takes a token from its constructor, `LUCIDA_TOKEN`, the macOS Keychain entry `lucida auth login` writes, or the CLI config file.
+
+Smoke passes against a running server: `scripts/smoke_lucida_cli.sh` and `scripts/smoke_python_client.py` read `LUCIDA_SMOKE_SERVER` and `LUCIDA_SMOKE_DATASET` (set `LUCIDA_SMOKE_CAPTURE=0` without Chrome), and `scripts/smoke_dataset_reliability.py --fixtures-root <DIR>` opens the fixture list in the script from `<DIR>`.
+
+## Develop
+
+Prerequisites: Rust, Node, pnpm, and wasm-pack.
+
+```bash
+./scripts/dev.sh
+```
+
+Then visit <http://localhost:5173>. The script rebuilds the `lucida-core` wasm package when Rust source content changed (`--wasm` forces it), installs web dependencies, starts `lucida-server` on `127.0.0.1:9876` with auth off, and starts Vite, which proxies `/auth`, `/api`, `/admin`, and `/ws` to it. Ctrl-C stops both.
+
+By hand:
+
+```bash
+(cd lucida-web && pnpm run build:wasm && pnpm install)   # the wasm package must exist before install
+cargo run -p lucida-server                                # terminal 1
+(cd lucida-web && pnpm run dev)                           # terminal 2
+```
+
+`lucida-web` depends on `file:../lucida-core/pkg`, and pnpm installs a copy of it. After a Rust change, rerun `pnpm run build:wasm && pnpm install --force` in `lucida-web`, and start Vite with `pnpm run dev -- --force` so it drops its cached dependencies. Rebuild the Python bindings with `(cd lucida-py && maturin develop)`.
+
+```bash
+# tests and type check
+cargo test --workspace
+(cd lucida-web && pnpm test)
+(cd lucida-web && pnpm exec tsc --noEmit -p tsconfig.app.json)
+```
+
+Keep `-p tsconfig.app.json` on the type check. `lucida-web/tsconfig.json` is a solution file with `"files": []`, so a bare `tsc --noEmit` checks nothing and passes.
 
 ## Architecture
 
-The wiki under [`wiki/`](wiki/) is the primary reference — start at [`wiki/index.md`](wiki/index.md) (or [`wiki/CLAUDE.md`](wiki/CLAUDE.md) for navigation conventions).
-
-For *why* something is shaped the way it is, look in [`wiki/decisions/`](wiki/decisions/) (numbered ADRs) and [`wiki/principles/`](wiki/principles/). For *what the code does today*, read the code — the wiki deliberately doesn't track it.
+[`intention.md`](intention.md) says what lucida is for, [`CONTEXT.md`](CONTEXT.md) defines its terms, and [`docs/adr/`](docs/adr/) records why things are shaped the way they are.
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE).

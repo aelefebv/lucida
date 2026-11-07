@@ -1,23 +1,11 @@
-//! End-to-end startup tests for `AuthConfig::from_env`. We spawn the
-//! actual `lucida-server` binary with various `LUCIDA_*` env-var
-//! combinations and assert it either:
+//! End-to-end startup tests for `AuthConfig::from_env`: spawn the real
+//! `lucida-server` binary with `LUCIDA_*` combinations and assert it either
+//! binds or exits non-zero naming the variable. Only the binary covers the
+//! fail-fast in `main.rs`, the bind, and the startup banner; `from_env_map`
+//! has unit tests in `auth/config.rs`.
 //!
-//! - boots and starts listening (we close the listener as soon as we
-//!   see the bind succeed via a short port-poll), or
-//! - exits non-zero with the expected named-variable error in stderr.
-//!
-//! Running the binary (rather than calling `from_env` in-process) is
-//! the only way to cover the whole startup path: fail-fast in
-//! `main.rs`, the bind syscall, and the startup logging banner. The
-//! lower-level `from_env_map` path is exercised by the unit tests in
-//! `auth/config.rs`.
-//!
-//! Each test:
-//! - Picks a unique loopback port via `pick_loopback_port`.
-//! - Wipes the parent process env with `env_clear` so the test
-//!   environment can't smuggle in `LUCIDA_*` overrides.
-//! - Sets a tempdir-scoped `LUCIDA_DB_PATH` so the SQLite store
-//!   doesn't write `lucida.db` into the workspace root.
+//! Each test uses its own loopback port, clears the parent env so no
+//! `LUCIDA_*` override leaks in, and points `LUCIDA_DB_URL` at a tempdir.
 
 use std::io::Read;
 use std::net::TcpListener;
@@ -53,7 +41,10 @@ fn server_command(tmp_db: &std::path::Path, env: &[(&str, &str)]) -> Command {
         // some hosts; HOME for any default-cache-dir lookups.
         .env("PATH", std::env::var("PATH").unwrap_or_default())
         .env("HOME", std::env::var("HOME").unwrap_or_default())
-        .env("LUCIDA_DB_PATH", tmp_db.to_str().expect("utf-8"))
+        .env(
+            "LUCIDA_DB_URL",
+            format!("sqlite://{}", tmp_db.to_str().expect("utf-8")),
+        )
         // Force trace level off / quiet so stderr stays scannable.
         .env("RUST_LOG", "lucida_server=warn");
     for (k, v) in env {
@@ -196,8 +187,8 @@ fn explicit_disabled_non_loopback_with_insecure_starts() {
     // 0.0.0.0 is the wildcard bind: `Ipv4Addr::is_loopback()` returns
     // false for it (verified), so it correctly trips the "non-loopback"
     // branch of the auto-detect safety check. With LUCIDA_INSECURE=1
-    // set, the server should boot — and emit the multi-line audit
-    // banner per ADR-0018 §"Consequences" so it's impossible to miss
+    // set, the server should boot and emit the multi-line audit
+    // banner (ADR-0018) so it's impossible to miss
     // in a `journalctl`/k8s log scroll.
     let port = pick_loopback_port();
     let bind = format!("0.0.0.0:{port}");
@@ -248,6 +239,21 @@ fn explicit_google_without_credentials_fails() {
 }
 
 #[test]
+fn explicit_iap_without_an_audience_fails() {
+    let _guard = serial_test_lock();
+    let port = pick_loopback_port();
+    let bind = format!("127.0.0.1:{port}");
+    let stderr = assert_server_fails(
+        &[("LUCIDA_BIND", &bind), ("LUCIDA_AUTH", "iap")],
+        "LUCIDA_IAP_AUDIENCE",
+    );
+    assert!(
+        stderr.contains("backendServices"),
+        "the message should show the shape of the value; got=\n{stderr}",
+    );
+}
+
+#[test]
 fn unknown_auth_mode_fails() {
     let _guard = serial_test_lock();
     let port = pick_loopback_port();
@@ -262,4 +268,66 @@ fn unknown_auth_mode_fails() {
 fn invalid_bind_address_fails() {
     let _guard = serial_test_lock();
     assert_server_fails(&[("LUCIDA_BIND", "not-a-socket-addr")], "LUCIDA_BIND");
+}
+
+// -- LUCIDA_DIRECTORY_* ------------------------------------------------
+//
+// Malformed directory configuration fails the boot like any other
+// `LUCIDA_*` value. An unreachable directory does not: that is an
+// outage to survive, not a typo to catch.
+
+#[test]
+fn a_malformed_directory_variable_stops_the_boot_naming_it() {
+    let _guard = serial_test_lock();
+    let port = pick_loopback_port();
+    let bind = format!("127.0.0.1:{port}");
+    assert_server_fails(
+        &[
+            ("LUCIDA_BIND", &bind),
+            ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
+            ("LUCIDA_DIRECTORY_NAME_FIELDS", ""),
+        ],
+        "LUCIDA_DIRECTORY_NAME_FIELDS",
+    );
+    assert_server_fails(
+        &[
+            ("LUCIDA_BIND", &bind),
+            ("LUCIDA_DIRECTORY_URL", "people.example/people"),
+        ],
+        "LUCIDA_DIRECTORY_URL",
+    );
+    assert_server_fails(
+        &[
+            ("LUCIDA_BIND", &bind),
+            ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
+            ("LUCIDA_DIRECTORY_HEADERS", "X-Requested-By lucida"),
+        ],
+        "LUCIDA_DIRECTORY_HEADERS",
+    );
+    assert_server_fails(
+        &[
+            ("LUCIDA_BIND", &bind),
+            ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
+            ("LUCIDA_DIRECTORY_REFRESH_SECONDS", "soon"),
+        ],
+        "LUCIDA_DIRECTORY_REFRESH_SECONDS",
+    );
+}
+
+#[test]
+fn an_unreachable_directory_does_not_stop_the_boot() {
+    let _guard = serial_test_lock();
+    let port = pick_loopback_port();
+    let bind = format!("127.0.0.1:{port}");
+    // Port 1 refuses at once, so the load fails without waiting out its
+    // timeout. The failed load logs to stdout, which this harness does
+    // not capture, so only the bind is checked here. The middleware
+    // tests pin what `whoami` serves meanwhile.
+    assert_server_starts(
+        port,
+        &[
+            ("LUCIDA_BIND", &bind),
+            ("LUCIDA_DIRECTORY_URL", "http://127.0.0.1:1/people"),
+        ],
+    );
 }

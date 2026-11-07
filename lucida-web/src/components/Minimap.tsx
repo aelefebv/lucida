@@ -1,10 +1,21 @@
 import { useEffect, useRef } from "react";
 import type { RenderClient } from "../renderer/renderClient.ts";
 import type { RenderLoop, MinimapOverlayData } from "../renderLoop.ts";
-import { drawStaticMinimapOverlays, drawZPlaneOverlays, drawViewportOverlays, zPlaneLayerDirty } from "./minimapOverlay.ts";
+import { CanvasCard } from "./CanvasCard.tsx";
+import { minimapCardPreference, useCanvasCardState } from "./canvasCards.ts";
+import { drawStaticMinimapOverlays, drawZPlaneOverlays, drawViewportOverlays, readMinimapColors, zPlaneLayerDirty } from "./minimapOverlay.ts";
 import "./Minimap.css";
 
 const MINIMAP_SIZE = 200;
+
+// The page's first 2D-canvas draw creates the main thread's GPU context with a
+// synchronous request to the GPU process. Made during an open, it queues behind
+// the render worker's pipeline compile and first uploads, stalling the main
+// thread by 100 to 700 ms. `willReadFrequently` doesn't avoid it.
+//
+// So the overlay draws once at mount, before the worker draws a frame (the
+// sizing effect), and content draws wait for the worker's report that its
+// pipelines exist (the loop registration effect).
 
 interface Props {
   client: RenderClient;
@@ -12,19 +23,19 @@ interface Props {
 }
 
 export function Minimap({ client, activeLoop }: Props) {
+  // Folded or hidden, the loop stops rendering it. The canvases stay mounted,
+  // since the GPU context is bound to this canvas for the worker's life.
+  const [cardState] = useCanvasCardState(minimapCardPreference);
+  const drawing = cardState === "open";
   const gpuCanvasRef = useRef<HTMLCanvasElement>(null);
   const overlayCanvasRef = useRef<HTMLCanvasElement>(null);
   const initedRef = useRef(false);
-  // Offscreen cache of the Z-invariant (camera/geometry) overlay layer. Redrawn
-  // only when `staticDirty` (a camera move or geometry rebuild); on a pure
-  // Z-scrub it is blitted back verbatim so the O(N) member-border strokes don't
-  // rerun each Z step — only the cheap Z-dependent indicators are re-stroked.
+  // Offscreen cache of the Z-invariant layer, redrawn only when `staticDirty`,
+  // so the O(N) member-border strokes don't rerun on each Z step.
   const staticLayerRef = useRef<HTMLCanvasElement | null>(null);
   const staticReadyRef = useRef(false);
-  // Offscreen cache of the Z-plane sub-layer (per-member slice planes). These
-  // depend on the current Z but not on pan/zoom, so a 2D pan/zoom blits this
-  // back verbatim; it is re-stroked only on a Z-scrub or geometry change. Only
-  // the cheap viewport rectangles + orientation cube are redrawn every frame.
+  // Offscreen cache of the slice planes, which depend on Z but not pan/zoom.
+  // Only the viewport rectangles and orientation cube redraw every frame.
   const zLayerRef = useRef<HTMLCanvasElement | null>(null);
   const zReadyRef = useRef(false);
   const prevZRef = useRef<number | null>(null);
@@ -35,19 +46,26 @@ export function Minimap({ client, activeLoop }: Props) {
     if (!gpuCanvas || initedRef.current) return;
     initedRef.current = true;
     client.minimapInit(gpuCanvas);
-    // No cleanup — context lives for the worker's lifetime.
-    // Worker's "destroy" handler cleans up minimap state.
+    // No cleanup: the context lives as long as the worker, whose "destroy"
+    // handler cleans up minimap state.
   }, [client]);
 
   // Effect 2: Loop registration
   useEffect(() => {
-    if (!activeLoop) return;
+    if (!activeLoop || !drawing) return;
 
-    const overlayCallback = (data: MinimapOverlayData) => {
+    const drawOverlay = (data: MinimapOverlayData) => {
       const overlayCanvas = overlayCanvasRef.current;
       if (!overlayCanvas) return;
       const ctx = overlayCanvas.getContext("2d");
       if (!ctx) return;
+      const colors = readMinimapColors();
+      // A device-pixel-ratio change (a window moved to another screen) brings a
+      // new backing size; drawn into the old one, the overlay would be cropped.
+      if (overlayCanvas.width !== data.canvasW || overlayCanvas.height !== data.canvasH) {
+        overlayCanvas.width = data.canvasW;
+        overlayCanvas.height = data.canvasH;
+      }
 
       // Maintain the offscreen static-layer cache at the current backing size.
       let staticLayer = staticLayerRef.current;
@@ -77,65 +95,82 @@ export function Minimap({ client, activeLoop }: Props) {
         zReadyRef.current = false;
       }
 
-      // Rebuild the Z-invariant layer only when it changed (or the cache is
-      // empty); a pure Z-scrub reuses it. `getContext` on a canvas that has
-      // never had a 2D context is cheap and idempotent.
+      // A pure Z-scrub reuses the Z-invariant layer.
       if (data.staticDirty || !staticReadyRef.current) {
         const staticCtx = staticLayer.getContext("2d");
         if (staticCtx) {
-          drawStaticMinimapOverlays(staticCtx, data);
+          drawStaticMinimapOverlays(staticCtx, data, colors);
           staticReadyRef.current = true;
         }
       }
 
-      // Rebuild the Z-plane sub-layer only on a Z-scrub or geometry change (or
-      // when the cache is empty / was just resized); a pan/zoom reuses it.
-      // `drawZPlaneOverlays` does not clear, so clear the offscreen first.
+      // A pan/zoom reuses the Z-plane layer. `drawZPlaneOverlays` does not
+      // clear, so clear the offscreen first.
       if (zPlaneLayerDirty(data, prevZRef.current) || !zReadyRef.current) {
         const zCtx = zLayer.getContext("2d");
         if (zCtx) {
           zCtx.clearRect(0, 0, data.canvasW, data.canvasH);
-          drawZPlaneOverlays(zCtx, data);
+          drawZPlaneOverlays(zCtx, data, colors);
           zReadyRef.current = true;
           prevZRef.current = data.currentZ;
         }
       }
 
-      // Composite: cached static layer, then the cached Z-plane layer, then the
-      // fresh viewport rectangles + orientation cube on top — pixel-identical to
-      // a full redraw, in the same draw order (source-over is associative).
+      // Same draw order as a full redraw, so the composite is pixel-identical
+      // (source-over is associative).
       ctx.clearRect(0, 0, data.canvasW, data.canvasH);
       if (staticReadyRef.current) ctx.drawImage(staticLayer, 0, 0);
       if (zReadyRef.current) ctx.drawImage(zLayer, 0, 0);
-      drawViewportOverlays(ctx, data);
+      drawViewportOverlays(ctx, data, colors);
     };
+
+    // Content draws hold until the worker's pipelines exist, so the first one
+    // lands outside the open's first frame (see the note above `Props`).
+    let heldBack: MinimapOverlayData | null = null;
+    const overlayCallback = (data: MinimapOverlayData) => {
+      if (!client.pipelinesCompiled) {
+        heldBack = data;
+        return;
+      }
+      drawOverlay(data);
+    };
+    const withdraw = client.oncePipelinesCompiled(() => {
+      if (heldBack) drawOverlay(heldBack);
+      heldBack = null;
+    });
 
     activeLoop.setMinimap(true, MINIMAP_SIZE, overlayCallback);
     return () => {
+      withdraw();
       activeLoop.setMinimap(false);
     };
-  }, [activeLoop]);
+  }, [activeLoop, client, drawing]);
 
-  // Effect 3: Overlay canvas DPR sizing
+  // Effect 3: Overlay canvas DPR sizing. The clear is the overlay's first
+  // draw, which creates the main thread's GPU context before the worker
+  // draws a frame (see the note above `Props`).
   useEffect(() => {
     const overlayCanvas = overlayCanvasRef.current;
     if (!overlayCanvas) return;
     const backing = Math.round(MINIMAP_SIZE * devicePixelRatio);
     overlayCanvas.width = backing;
     overlayCanvas.height = backing;
+    overlayCanvas.getContext("2d")?.clearRect(0, 0, backing, backing);
   }, []);
 
   return (
-    <div className="minimap-panel" style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}>
-      <canvas
-        ref={gpuCanvasRef}
-        style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
-      />
-      <canvas
-        ref={overlayCanvasRef}
-        className="minimap-overlay"
-        style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
-      />
-    </div>
+    <CanvasCard title="Minimap" label="Minimap" preference={minimapCardPreference}>
+      <div className="minimap-panel" style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}>
+        <canvas
+          ref={gpuCanvasRef}
+          style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
+        />
+        <canvas
+          ref={overlayCanvasRef}
+          className="minimap-overlay"
+          style={{ width: MINIMAP_SIZE, height: MINIMAP_SIZE }}
+        />
+      </div>
+    </CanvasCard>
   );
 }

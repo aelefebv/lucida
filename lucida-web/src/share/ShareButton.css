@@ -1,0 +1,43 @@
+.lc-share-popover {
+  width: 344px;
+}
+
+.lc-share {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-3);
+}
+
+.lc-share-copy {
+  width: 100%;
+}
+
+.lc-share-divider {
+  height: 1px;
+  margin: 0 calc(-1 * var(--lc-space-3));
+  background: var(--lc-border);
+}
+
+.lc-share-access {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-2);
+  min-height: var(--lc-control-h-sm);
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+}
+
+.lc-share-access-icon {
+  flex: none;
+  color: var(--lc-text-subtle);
+}
+
+.lc-share-access-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.lc-share-access > .lc-button {
+  flex: none;
+  margin-right: calc(-1 * var(--lc-space-1));
+}

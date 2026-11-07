@@ -54,6 +54,10 @@ function makeRecorder() {
       residentDetailChunks: 0,
       desiredCoarseChunks: 0,
       residentCoarseChunks: 0,
+      detailBytes: 0,
+      detailBudgetBytes: 0,
+      coarseBytes: 0,
+      coarseBudgetBytes: 0,
     }),
   });
   return { recorder, advance: (ms: number) => { clock += ms; } };
@@ -177,6 +181,7 @@ describe("the per-run cap", () => {
         decompress_us: [PHASE_UNSET],
         slice_encode_us: [PHASE_UNSET],
         handoff_us: [PHASE_UNSET],
+        backend_bytes: [512],
         coalesced_onto: [LABEL_NONE],
       },
       1,

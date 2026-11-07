@@ -1,415 +1,58 @@
-.app {
-  position: relative; /* anchors absolute-positioned ProfileMenu */
+/* The viewer shell: the top bar over a row of the left panel, the canvas
+   column, and the right rail. The canvas takes whatever the panels leave. */
+
+/* body is a flex row; let the shell take its width. */
+#root:has(> .lc-shell) {
+  flex: 1;
+  min-width: 0;
+}
+
+.lc-shell {
   display: flex;
-  flex-direction: row;
-  align-items: stretch;
+  flex-direction: column;
+  width: 100%;
   height: 100vh;
-  width: 100%;
-}
-
-.main-content {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1rem;
-  padding: 1rem;
-  overflow: auto;
-}
-
-/* Chrome-free capture surface (`?render=1`), used by `dataset montage` and
-   `viewer render`: hide every piece of UI so a headless screenshot is pure data
-   on the WebGPU canvas, and let the canvas fill the whole viewport. The render
-   loop draws to the canvas independent of the overlay DOM, so hiding overlays
-   never stops rendering. `> :not(canvas)` also sweeps up any future overlay.
-   The surface also has a behavioural half — it writes no user state (#923);
-   the rule and its boundaries live in `captureSurface.ts`. */
-.app.render-mode {
+  height: 100dvh;
   overflow: hidden;
+  background: var(--lc-bg);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
 }
 
-.app.render-mode .layer-panel,
-.app.render-mode .sidebar-resize-handle,
-.app.render-mode .workspace-chrome,
-.app.render-mode .peer-list {
-  display: none !important;
-}
-
-.app.render-mode .main-content {
-  padding: 0;
-  gap: 0;
-  align-items: stretch;
-  overflow: hidden;
-}
-
-.app.render-mode .viewer-canvas-wrap > :not(canvas) {
-  display: none !important;
-}
-
-.app.render-mode canvas {
-  border-radius: 0 !important;
-}
-
-.workspace-chrome {
-  width: 100%;
-  display: grid;
-  grid-template-columns: auto minmax(14rem, 28rem) minmax(0, 1fr);
-  align-items: center;
-  gap: 0.75rem;
-}
-
-.workspace-back-button {
-  padding: 0.375rem 0.75rem;
-  font-size: 0.875rem;
-  white-space: nowrap;
-}
-
-.workspace-name-input,
-.workspace-name-label {
-  min-width: 0;
-  width: 100%;
-  box-sizing: border-box;
-  padding: 0.375rem 0.5rem;
-  border-radius: 6px;
-  border: 1px solid #444;
-  background: #1a1a1a;
-  color: inherit;
-  font: inherit;
-  font-weight: 650;
-}
-
-.workspace-name-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workspace-id-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #888;
-  font-size: 0.75rem;
-  text-align: right;
-}
-
-.workspace-chrome-actions {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.75rem;
-}
-
-.workspace-share-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 10000;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-  background: rgba(0, 0, 0, 0.55);
-}
-
-.workspace-share-dialog {
-  width: min(640px, calc(100vw - 2rem));
-  max-height: calc(100vh - 2rem);
-  overflow: auto;
-  padding: 1rem;
-  border: 1px solid #444;
-  border-radius: 8px;
-  background: #202020;
-  color: inherit;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45);
-}
-
-.workspace-share-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
-  margin-bottom: 1rem;
-}
-
-.workspace-share-header h2 {
-  margin: 0;
-  font-size: 1.1rem;
-}
-
-.workspace-share-error {
-  margin-bottom: 1rem;
-  padding: 0.625rem 0.75rem;
-  border: 1px solid #7a2b2b;
-  border-radius: 6px;
-  background: #341818;
-  color: #ffb4b4;
-}
-
-.workspace-share-muted {
-  color: #aaa;
-}
-
-.workspace-share-section {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.75rem;
-  margin-bottom: 1rem;
-}
-
-.workspace-share-section label {
-  display: flex;
-  flex-direction: column;
-  gap: 0.375rem;
-  color: #aaa;
-  font-size: 0.8125rem;
-}
-
-.workspace-share-section select,
-.workspace-share-section input,
-.workspace-share-add input,
-.workspace-share-add select,
-.workspace-share-member select {
-  min-width: 0;
-  padding: 0.45rem 0.5rem;
-  border: 1px solid #444;
-  border-radius: 6px;
-  background: #151515;
-  color: inherit;
-  font: inherit;
-}
-
-.workspace-share-add {
-  grid-column: 1 / -1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 8rem auto;
-  gap: 0.5rem;
-}
-
-.workspace-share-members {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
-
-.workspace-share-member {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 8rem auto;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.625rem 0;
-  border-top: 1px solid #333;
-}
-
-.workspace-share-person {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 0.125rem;
-}
-
-.workspace-share-person strong,
-.workspace-share-person span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workspace-share-person span {
-  color: #aaa;
-  font-size: 0.8125rem;
-}
-
-@media (max-width: 720px) {
-  .workspace-chrome-actions {
-    justify-content: flex-start;
-  }
-
-  .workspace-share-section,
-  .workspace-share-add,
-  .workspace-share-member {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-.secondary {
-  color: #888;
-  font-size: 0.875rem;
-}
-
-.dimension-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  width: 100%;
-}
-
-.dim-control {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.dim-label {
-  font-weight: 600;
-  width: 1.5rem;
-  text-align: center;
-}
-
-.dim-btn {
-  width: 2rem;
-  height: 2rem;
-  padding: 0;
-  font-size: 1rem;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.dim-btn:disabled {
-  opacity: 0.4;
-  cursor: default;
-}
-
-.dim-slider {
-  flex: 1;
-}
-
-.dim-value {
-  font-size: 0.875rem;
-  color: #888;
-  min-width: 3.5rem;
-  text-align: right;
-}
-
-/* Focal-depth control end-caps (near / far) — small muted labels that
-   flank the near↔far slider in the 3D dimension-controls row. */
-.dim-endcap {
-  font-size: 0.75rem;
-  color: #888;
-}
-
-/* Contrast controls */
-
-.contrast-controls {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-  width: 100%;
-  max-width: 800px;
-}
-
-.range-slider {
+/* Positioned, so a side panel can overlay the row (sidePanels.ts). */
+.lc-shell-body {
   position: relative;
+  display: flex;
   flex: 1;
-  height: 1.5rem;
+  min-height: 0;
 }
 
-.range-slider-track {
-  position: absolute;
-  top: 50%;
-  left: 0;
-  right: 0;
-  height: 4px;
-  transform: translateY(-50%);
-  background: #444;
-  border-radius: 2px;
+.lc-shell-center {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
 
-.range-slider-fill {
+/* Frames the monitor dock, which positions itself against the viewport,
+   so it spans the canvas column instead of the window: layout containment
+   makes this the containing block for its fixed position. */
+.lc-shell-dock {
   position: absolute;
-  top: 50%;
-  height: 4px;
-  transform: translateY(-50%);
-  background: #646cff;
-  border-radius: 2px;
+  inset: 0;
+  z-index: var(--lc-z-panel);
+  contain: layout;
   pointer-events: none;
 }
 
-.range-slider-input {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 100%;
-  height: 100%;
-  margin: 0;
-  padding: 0;
-  background: none;
-  pointer-events: none;
-  -webkit-appearance: none;
-  appearance: none;
+.lc-shell-dock > * {
+  pointer-events: auto;
 }
 
-.range-slider-input::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  border: 2px solid #646cff;
-  cursor: pointer;
-  pointer-events: all;
-}
-
-.range-slider-input::-moz-range-thumb {
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  border: 2px solid #646cff;
-  cursor: pointer;
-  pointer-events: all;
-}
-
-.range-slider-input::-webkit-slider-runnable-track {
-  background: transparent;
-}
-
-.range-slider-input::-moz-range-track {
-  background: transparent;
-}
-
-.auto-btn {
-  padding: 0.25rem 0.75rem;
-  font-size: 0.875rem;
-  cursor: pointer;
-  border: 2px solid transparent;
-  border-radius: 4px;
-  user-select: none;
-  touch-action: none;
-}
-
-.auto-btn-active {
-  background: #646cff;
-  color: #fff;
-  border-color: #646cff;
-}
-
-.sidebar-resize-handle {
-  width: 4px;
-  cursor: col-resize;
-  background: transparent;
-  flex-shrink: 0;
-  transition: background 0.15s;
-}
-.sidebar-resize-handle:hover,
-.sidebar-resize-handle:active {
-  background: #646cff;
-}
-
-.canvas-resize-handle {
-  position: absolute;
-  bottom: 0;
-  right: 0;
-  width: 16px;
-  height: 16px;
-  cursor: nwse-resize;
-  z-index: 5;
-  background: linear-gradient(135deg, transparent 50%, rgba(100, 108, 255, 0.5) 50%);
-  border-radius: 0 0 8px 0;
-}
-.canvas-resize-handle:hover {
-  background: linear-gradient(135deg, transparent 50%, rgba(100, 108, 255, 0.8) 50%);
+/* The capture surface (`?render=1`, see captureSurface.ts) is the canvas
+   alone, filling the viewport, so a headless screenshot is pure data. */
+.lc-shell[data-capture] {
+  background: var(--lc-canvas-bg);
 }

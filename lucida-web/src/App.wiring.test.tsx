@@ -1,35 +1,24 @@
 // @vitest-environment happy-dom
 //
-// Wiring tests for App.tsx's invalidation intents: mount the REAL App (real
-// hooks, real SessionController + Session, real LayerPanel/LayoutSwitcher)
-// over instance-recording doubles for the boundary classes (Bridge / fetch
-// pipeline / GPU RenderClient / WASM scene / workspace HTTP API), then drive
-// user-visible interactions and assert the planner-visible signal fires.
+// Wiring tests for App.tsx's invalidation intents: mount the real App over
+// recording doubles for the boundary classes (Bridge, fetch pipeline, GPU
+// RenderClient, WASM scene, workspace HTTP API), drive user interactions, and
+// assert the planner-visible signal fires.
 //
-// What is pinned, and why HERE rather than in a unit test:
-//   App.tsx is where a user action fans out to the invalidation mechanisms
-//   (settings-generation bump for the planner's cached snapshot, dirty marks
-//   for the render loop). A missed tap silently no-ops — the named bug
-//   classes (#780 layout-switch, the #802/#814 restore family) were all
-//   "everything compiled, nothing signaled". These tests mount the whole
-//   wiring so a regression in ANY hop (component prop → App handler →
-//   composed intent) fails, not just a change to the intent helpers
-//   themselves (those have their own unit suite in invalidation.test.ts).
-//
-// The composed intents (src/invalidation.ts) are module-spied (`spy: true`),
-// so assertions read "the handler invoked the right intent" while the real
-// implementation still runs — letting the same tests ALSO observe the
-// planner-visible effect through `getSceneSettings` cache identity.
+// App.tsx is where a user action fans out to invalidation. A missed tap
+// compiles and silently no-ops (a layout switch or a saved-view restore that
+// never replans), so these tests break on any broken hop from component prop
+// to App handler to intent. The intents are module-spied (`spy: true`) and
+// still run, so the planner-visible effect is observable too.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
-// ---------------------------------------------------------------------------
 // Boundary doubles. The WASM scene is a small stateful fake: it stores the
 // loaded document and records every applied command, and serves the JSON
 // reads the app performs (dataset order/settings/names, layouts, annotations,
 // presence, camera). Everything else in the session stack is real.
-// ---------------------------------------------------------------------------
 
 vi.mock("lucida-core", () => {
   class FakeWasmScene {
@@ -53,6 +42,9 @@ vi.mock("lucida-core", () => {
     }
     dataset_ids() {
       return this.dataset_order();
+    }
+    pinnable_levels() {
+      return Uint32Array.from([0]);
     }
     all_dataset_settings() {
       const out: Record<string, unknown> = {};
@@ -95,6 +87,7 @@ vi.mock("lucida-core", () => {
     zoom() { return 1; }
     center() { return new Float64Array([0, 0]); }
     dataset_volume_shape(_id: string) { return new Uint32Array([4, 8, 8]); }
+    dataset_fit_bounds(_id: string) { return new Float64Array([0, 0, 0, 8, 8, 0]); }
     export_presence() {
       return JSON.stringify({
         camera: { mode: "slice", center: [0, 0], zoom: 1 },
@@ -103,8 +96,8 @@ vi.mock("lucida-core", () => {
       });
     }
     // Shape-complete: `buildCapture` walks `dataset_settings`, so an empty
-    // object here makes every capture throw and silently no-op — which would
-    // make a "nothing was persisted" assertion pass for the wrong reason.
+    // object makes every capture throw and no-op, and a "nothing was
+    // persisted" assertion would pass for the wrong reason.
     export_dataset_presence() {
       return JSON.stringify({
         dataset_order: Object.keys(this.doc.manifests ?? {}),
@@ -131,15 +124,15 @@ vi.mock("lucida-core", () => {
     is_local_dataset_url: vi.fn(() => true),
     normalize_dataset_url: vi.fn((url: string) => url),
     dataset_id_for_url: vi.fn((url: string) => `wds:${url}`),
+    peer_palette: vi.fn(() => ["#ff6b6b", "#4ecdc4", "#ffe66d"]),
   };
 });
 
 vi.mock("./renderer/renderClient.ts", () => {
   class MockRenderClient {
     onIntensityRange: unknown = null;
-    // Never settles: the GPU worker never comes up in this environment, so
-    // the canvas-bound viewers stay unmounted and no RenderLoop exists —
-    // the intents run with a null loop (their contract covers that).
+    // Never settles: the GPU worker never comes up here, so no RenderLoop
+    // exists and the intents run with a null loop, which their contract covers.
     ready() { return new Promise(() => {}); }
     destroy() {}
     updateCursorData(_data: Float32Array, _count: number) {}
@@ -189,6 +182,13 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     reset = vi.fn();
     subscribe = vi.fn(() => () => {});
     cancelDataset = vi.fn();
+    // The HUD's two cache reads, so a shown HUD can tick over this double.
+    poolResidency = vi.fn(() => ({
+      main: { bytes: 0, budgetBytes: 1 },
+      overview: { bytes: 0, budgetBytes: 1 },
+      proxy: { bytes: 0, budgetBytes: 1 },
+    }));
+    laneOutstanding = vi.fn((out: unknown) => out);
     constructor(_source: unknown, _pool: unknown) {}
   }
   return {
@@ -232,9 +232,8 @@ vi.mock("./auth/whoami.ts", () => ({
   postDevLogin: vi.fn(async () => {}),
 }));
 
-// Spy the composed intents in place: calls are recorded AND the real
-// implementation runs, so both the intent invocation and its
-// planner-visible effect are assertable.
+// Spy the intents in place: calls are recorded and the real implementation
+// runs, so both the call and its planner-visible effect are assertable.
 vi.mock("./invalidation.ts", { spy: true });
 
 import App from "./App.tsx";
@@ -244,12 +243,25 @@ import { WasmScene } from "lucida-core";
 import { getSceneSettings } from "./tickCommon.ts";
 import { updateWorkspaceLastView } from "./workspaceApi.ts";
 import {
+  __resetPreferencesForTesting,
+  developerToolsPreference,
+  getPreference,
+  setPreference,
+} from "./theme/preferences.ts";
+import { leftPanelOpenPreference, rightPanelOpenPreference } from "./shell/layoutPreferences.ts";
+import { showKeyboardHelp } from "./ui/keyboardHelpState.ts";
+import {
   invalidateDisplaySettings,
   invalidateAfterViewRestore,
+  invalidateSelection,
 } from "./invalidation.ts";
 
 const MockedBridge = Bridge as unknown as {
-  instances: Array<{ handlers: BridgeHandlers; sendCommand: ReturnType<typeof vi.fn> }>;
+  instances: Array<{
+    handlers: BridgeHandlers;
+    sendCommand: ReturnType<typeof vi.fn>;
+    sendFollow: ReturnType<typeof vi.fn>;
+  }>;
 };
 const FakeScene = WasmScene as unknown as {
   instances: Array<{
@@ -258,7 +270,7 @@ const FakeScene = WasmScene as unknown as {
   }>;
 };
 
-function makeManifest(datasetId: string) {
+function makeManifest(datasetId: string, channels = 1) {
   return {
     dataset_id: datasetId,
     name: `${datasetId}.zarr`,
@@ -280,7 +292,7 @@ function makeManifest(datasetId: string) {
           levels: [
             {
               level_index: 0,
-              shape: [1, 1, 4, 8, 8],
+              shape: [1, channels, 4, 8, 8],
               chunk_shape: [1, 1, 4, 8, 8],
               grid_shape: [1, 1, 1, 1, 1],
               scale: [1, 1, 1, 1, 1],
@@ -323,9 +335,10 @@ function makePinWithView(pinId: string) {
 function documentJson(
   datasetIds: string[],
   annotations?: Record<string, unknown[]>,
+  channels = 1,
 ): string {
   const manifests: Record<string, unknown> = {};
-  for (const id of datasetIds) manifests[id] = makeManifest(id);
+  for (const id of datasetIds) manifests[id] = makeManifest(id, channels);
   return JSON.stringify({ manifests, annotations: annotations ?? {} });
 }
 
@@ -350,7 +363,6 @@ function renderApp() {
         defaultSavedViewId={null}
         canRenameWorkspace={false}
         onBackToDashboard={() => {}}
-        onOpenMonitor={() => {}}
         onRenameWorkspace={async () => {}}
         onSetDefaultSavedView={async () => {}}
       />
@@ -358,45 +370,78 @@ function renderApp() {
   );
 }
 
-/** Mount the app, let the (mocked) WASM init settle so the session controller
+/** Mount the app, let the mocked WASM init settle so the session controller
  *  connects, then deliver the join snapshot through the recorded bridge
- *  handlers — the same entry the real WebSocket uses. */
-async function mountWithSnapshot(docJson: string) {
+ *  handlers, the same entry the real WebSocket uses. */
+async function mountWithSnapshot(docJson: string, peers: unknown[] = []) {
   renderApp();
-  // Flush wasm init → wasmReady → controller construction.
+  // Flush wasm init, then wasmReady, then controller construction.
   await act(async () => {});
   const bridge = MockedBridge.instances[MockedBridge.instances.length - 1];
   await act(async () => {
-    bridge.handlers.onSnapshot(1, docJson, [], 1, {});
+    bridge.handlers.onSnapshot(1, docJson, peers as never, 1, {});
   });
   const scene = FakeScene.instances[FakeScene.instances.length - 1];
   return { bridge, scene };
 }
 
 beforeEach(() => {
+  localStorage.clear();
+  __resetPreferencesForTesting();
   vi.clearAllMocks();
   MockedBridge.instances.length = 0;
   FakeScene.instances.length = 0;
+  // The page draws through the mocked render client, as in a WebGPU browser.
+  Object.defineProperty(navigator, "gpu", { value: {}, configurable: true });
 });
 
 afterEach(() => {
   cleanup();
+  showKeyboardHelp(null);
   window.location.hash = "";
+  delete (navigator as { gpu?: unknown }).gpu;
+});
+
+describe("App wiring: channels", () => {
+  it("opens a multichannel dataset as a composite", async () => {
+    const { scene } = await mountWithSnapshot(documentJson(["wds-1"], undefined, 3));
+    expect(scene.commands).toContainEqual({ type: "set_multi_channel", enabled: true });
+  });
+
+  it("leaves a single-channel dataset in single-channel mode", async () => {
+    const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(scene.commands.some((cmd) => cmd.type === "set_multi_channel")).toBe(false);
+  });
+
+  it("opens Add data from the layer panel's header", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    // The dialog's file browser lists a folder as it opens.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ path: "/", entries: [] })));
+    const panel = screen.getByRole("complementary", { name: "Layers" });
+    await userEvent.click(within(panel).getByRole("button", { name: "Add data" }));
+    expect(await screen.findByRole("dialog", { name: "Add data" })).toBeTruthy();
+    fetchSpy.mockRestore();
+  });
 });
 
 describe("App wiring: layout switch (the #780 class)", () => {
   it("switching layouts fires the display-settings intent so the planner re-reads", async () => {
     const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
 
-    // The dataset auto-selected and auto-expanded; the layout switcher shows
-    // the first available layout.
-    const switcher = await screen.findByDisplayValue("Grid");
+    // The dataset auto-selected and auto-expanded; the layout switcher sits
+    // under Advanced and shows the first available layout.
+    await userEvent.click(await screen.findByRole("button", { name: "Advanced" }));
+    const switcher = screen.getByRole("button", { name: /Layout/ });
+    expect(switcher.textContent).toContain("Grid");
 
     // Prime the planner's settings cache so a served-from-cache read is
     // distinguishable from a re-read.
     const primed = getSceneSettings(scene as unknown as InstanceType<typeof WasmScene>);
 
-    fireEvent.change(switcher, { target: { value: "row" } });
+    await userEvent.click(switcher);
+    await userEvent.click(screen.getByRole("option", { name: "Row" }));
 
     // The switch applied the command to the scene...
     expect(scene.commands).toContainEqual({
@@ -404,8 +449,8 @@ describe("App wiring: layout switch (the #780 class)", () => {
       dataset_id: "wds-1",
       layout_id: "row",
     });
-    // ...and App signaled the replan through the composed intent — the
-    // planner-visible half is the settings cache invalidation.
+    // ...and App signaled the replan through the intent; the planner-visible
+    // half is the settings cache invalidation.
     expect(vi.mocked(invalidateDisplaySettings)).toHaveBeenCalledWith(
       null,
       "layout_switch",
@@ -436,7 +481,7 @@ describe("App wiring: annotation-view restore fan-out", () => {
 });
 
 describe("App wiring: the capture surface writes no user state (#923)", () => {
-  // The whole point of these two is that they mount the REAL App: the gate is
+  // These two must mount the real App: the gate is
   // a prop threaded from a URL read at the top of App.tsx down into
   // useSavedViewSync, and a hook-level test cannot fail if that thread breaks.
   afterEach(() => {
@@ -464,6 +509,35 @@ describe("App wiring: the capture surface writes no user state (#923)", () => {
   });
 });
 
+describe("App wiring: the top bar opens the monitor's dock", () => {
+  // The dock is code-split and reads the page's trace seam, which this
+  // harness never installs, so what it shows is its "no seam" reason. The
+  // wiring under test is the top bar toggle and the dock's own close.
+  it("toggles the dock from the monitor button, and the dock closes itself", async () => {
+    setPreference(developerToolsPreference, true);
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    const toggle = screen.getByRole("button", { name: "Pipeline monitor" });
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.queryByTestId("monitor-dock")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(toggle);
+    });
+
+    // The dock's chunk loads the UI primitives, and transforming them cold
+    // takes longer than findBy's default second.
+    const dock = await screen.findByTestId("monitor-dock", {}, { timeout: 10_000 });
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(within(dock).getByTestId("monitor-empty").textContent).toContain("trace seam");
+
+    await act(async () => {
+      fireEvent.click(within(dock).getByTestId("monitor-close"));
+    });
+    expect(screen.queryByTestId("monitor-dock")).toBeNull();
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+  });
+});
+
 describe("App wiring: dataset-settings mutation canary", () => {
   it("toggling a layer's visibility lands the planner-visible signal in the same task", async () => {
     const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
@@ -473,15 +547,223 @@ describe("App wiring: dataset-settings mutation canary", () => {
 
     fireEvent.click(screen.getByLabelText("Hide layer wds-1.zarr"));
 
-    // Assert synchronously after the event dispatch — no flushing — so a
-    // deferred (and hence missable) signal would fail here.
+    // Assert synchronously after the dispatch, with no flushing, so a deferred
+    // signal would fail here.
     expect(scene.commands).toContainEqual({
       type: "set_dataset_visible",
       dataset_id: "wds-1",
       visible: false,
     });
-    expect(vi.mocked(invalidateDisplaySettings)).toHaveBeenCalled();
+    // Hiding a dataset is a select, not a display-settings change.
+    expect(vi.mocked(invalidateSelection)).toHaveBeenCalled();
     const reread = getSceneSettings(scene as unknown as InstanceType<typeof WasmScene>);
     expect(reread).not.toBe(primed);
+  });
+});
+
+describe("App wiring: the pipeline HUD", () => {
+  it("shows on the top bar control and hides on its key, with developer tools on", async () => {
+    setPreference(developerToolsPreference, true);
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(screen.queryByTestId("hud")).toBeNull();
+    const toggle = screen.getByRole("button", { name: "Pipeline HUD" });
+
+    fireEvent.click(toggle);
+    // The HUD is code-split, so it mounts after the import resolves.
+    expect(await screen.findByTestId("hud")).toBeTruthy();
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByLabelText("chunkGrid")).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "h" });
+    });
+    expect(screen.queryByTestId("hud")).toBeNull();
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+  });
+});
+
+describe("App wiring: developer tools off (the default)", () => {
+  it("shows no developer surface, and H does nothing", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(getPreference(developerToolsPreference)).toBe(false);
+    for (const name of ["Pipeline monitor", "Pipeline HUD", "Dev controls"]) {
+      expect(screen.queryByRole("button", { name })).toBeNull();
+    }
+    expect(screen.queryByText(/FPS$/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Dev" })).toBeNull();
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "h" });
+    });
+    expect(screen.queryByTestId("hud")).toBeNull();
+  });
+
+  it("brings every surface back when the setting turns on", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    await act(async () => {
+      setPreference(developerToolsPreference, true);
+    });
+    for (const name of ["Pipeline monitor", "Pipeline HUD", "Dev controls"]) {
+      expect(screen.getByRole("button", { name })).toBeTruthy();
+    }
+    expect(screen.getByText(/FPS$/)).toBeTruthy();
+  });
+});
+
+describe("App wiring: the shell", () => {
+  it("names the page after the workspace", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(document.title).toBe("Wiring · lucida");
+  });
+
+  it("explains a browser without WebGPU in place of the viewer", async () => {
+    delete (navigator as { gpu?: unknown }).gpu;
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    const message = screen.getByRole("alert");
+    expect(message.textContent).toContain("This browser can’t show the viewer");
+    expect(message.textContent).toContain("Chrome, Edge, or Safari");
+    // Nothing over the canvas to drive, and no error banner for it.
+    expect(screen.queryByRole("button", { name: "Point tool" })).toBeNull();
+    expect(screen.queryByText(/WebGPU is not supported/)).toBeNull();
+    // The rest of the workspace still works.
+    expect(screen.getByRole("complementary", { name: "Layers" })).toBeTruthy();
+  });
+
+  it("collapses the left panel on Alt+[ and remembers it", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    const panel = screen.getByRole("complementary", { name: "Layers" });
+    expect(panel.hidden).toBe(false);
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "[", code: "BracketLeft", altKey: true });
+    });
+    expect(panel.hidden).toBe(true);
+    expect(getPreference(leftPanelOpenPreference)).toBe(false);
+    // Collapsed, the panel stays mounted, so its controls keep their state.
+    expect(screen.getByLabelText("Hide layer wds-1.zarr", { selector: "button" })).toBeTruthy();
+  });
+
+  it("opens one rail panel at a time, closed by default", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    const savedViews = () => screen.queryByRole("region", { name: "Saved views" });
+    expect(savedViews()).toBeNull();
+    expect(screen.queryByTestId("explore-panel")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Saved views" }));
+    expect(await screen.findByRole("region", { name: "Saved views" })).toBeTruthy();
+    expect(getPreference(rightPanelOpenPreference)).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Comments" }));
+    expect(screen.getByRole("region", { name: "Comments" })).toBeTruthy();
+    expect(savedViews()).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Info" }));
+    expect(screen.getByRole("region", { name: "Info" })).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Comments" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Explore" }));
+    expect(screen.getByTestId("explore-panel")).toBeTruthy();
+    expect(screen.queryByRole("region", { name: "Info" })).toBeNull();
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "]", code: "BracketRight", altKey: true });
+    });
+    expect(screen.queryByTestId("explore-panel")).toBeNull();
+    expect(getPreference(rightPanelOpenPreference)).toBe(false);
+  });
+
+  it("follows a peer from their presence avatar", async () => {
+    const peer = {
+      client_id: 7,
+      camera: { mode: "slice", center: [0, 0], zoom: 1 },
+      view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+      display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
+      following: null,
+      cursor: null,
+      dataset_order: [],
+      dataset_settings: {},
+      identity: { display_name: "Ada Lovelace" },
+    };
+    const { bridge } = await mountWithSnapshot(documentJson(["wds-1"]), [peer]);
+    expect(screen.queryByText(/Peers \(/)).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Follow Ada Lovelace" }));
+    });
+    expect(bridge.sendFollow).toHaveBeenCalledWith(7);
+    const avatar = screen.getByRole("button", { name: "Stop following Ada Lovelace" });
+    expect(avatar.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => {
+      fireEvent.click(avatar);
+    });
+    expect(bridge.sendFollow).toHaveBeenLastCalledWith(null);
+  });
+});
+
+describe("App wiring: tools and keyboard help", () => {
+  it("takes keys right after load, with nothing focused", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    expect(document.activeElement).toBe(document.body);
+    const point = screen.getByRole("button", { name: "Point tool" });
+    expect(point.getAttribute("aria-pressed")).toBe("false");
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "p", code: "KeyP" });
+    });
+    expect(point.getAttribute("aria-pressed")).toBe("true");
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Escape", code: "Escape" });
+    });
+    expect(point.getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByRole("button", { name: "Pan tool" }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("ignores keys typed into a field", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    // The dialog's file browser lists a folder as it opens.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(JSON.stringify({ path: "/", entries: [] })));
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "o", code: "KeyO", ctrlKey: true });
+    });
+    const dialog = await screen.findByRole("dialog", { name: "Add data" });
+    const field = within(dialog).getByRole("textbox", { name: "Dataset path or URL" });
+    await act(async () => {
+      fireEvent.keyDown(field, { key: "p", code: "KeyP" });
+    });
+    expect(screen.getByRole("button", { name: "Point tool" }).getAttribute("aria-pressed")).toBe("false");
+    fetchSpy.mockRestore();
+  });
+
+  it("runs a shell command from the palette", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "k", code: "KeyK", ctrlKey: true });
+    });
+    const search = within(await screen.findByRole("dialog", { name: "Command palette" })).getByRole("searchbox");
+    // A browser focuses the field on open; happy-dom leaves focus on the dialog.
+    act(() => search.focus());
+    await act(async () => {
+      fireEvent(search, new InputEvent("beforeinput", { inputType: "insertText", data: "layers", bubbles: true }));
+      fireEvent.change(search, { target: { value: "layers" } });
+    });
+    await act(async () => {
+      fireEvent.keyDown(search, { key: "Enter" });
+    });
+    expect(getPreference(leftPanelOpenPreference)).toBe(false);
+  });
+
+  it("lists the shell's keys in the shortcut sheet", async () => {
+    await mountWithSnapshot(documentJson(["wds-1"]));
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Keyboard shortcuts" }));
+    });
+    const sheet = await screen.findByRole("dialog", { name: "Keyboard shortcuts" });
+    for (const label of ["Command palette", "Show or hide the left panel", "Point tool", "Hide annotations"]) {
+      expect(within(sheet).getByText(label)).toBeTruthy();
+    }
   });
 });
