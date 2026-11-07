@@ -1304,7 +1304,7 @@ impl Scene {
     /// and settings imported from a peer or a saved view arrive as they are.
     /// The screen rule ranks every level the pyramid lists, so zoomed far out
     /// it names a generated coarse level, which belongs to the coarse tier and
-    /// is never a target (ADR 0040).
+    /// is never a target.
     ///
     /// A pinned level is also the history the screen rule resumes from once
     /// the pin is cleared. Clearing a pin one level away from the screen's

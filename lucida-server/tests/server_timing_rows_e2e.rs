@@ -6,8 +6,7 @@
 //! the live path. Every one of them is set somewhere other than where a unit
 //! test can see: `arrival` and `binding lookup` happen in the inbound loop,
 //! `dispatch` in a spawned task, and the store phases inside `CachedStore`.
-//! So this drives the whole stack and asserts on what came out the other end
-//! (ADR 0050).
+//! So this drives the whole stack and asserts on what came out the other end.
 
 use std::collections::HashMap;
 use std::fs;

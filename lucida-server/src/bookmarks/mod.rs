@@ -2,9 +2,9 @@
 //! across one or more datasets.
 //!
 //! The capture record is `lucida_core::SavedView`, the type URL-hash saved
-//! views use (ADR-0013), so a `#b=<id>` URL can be authored from any
-//! saved-view source. Every principal can read every bookmark (ADR-0015);
-//! PATCH and DELETE need the creator or an admin.
+//! views use, so a `#b=<id>` URL can be authored from any saved-view
+//! source. Every principal can read every bookmark; PATCH and DELETE need
+//! the creator or an admin.
 
 pub mod broadcast;
 pub mod handlers;

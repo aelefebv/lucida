@@ -1,8 +1,7 @@
 //! Gate-controlled WASM-side logger that mirrors the JS bridgeLog
-//! convention. JS calls `set_debug_categories(...)` to push the enabled
-//! set; the [`wasm_log!`] macro checks it before building any payload.
-//!
-//! See `docs/adr/0012-logging-conventions.md`.
+//! convention. WASM cannot read `localStorage`, so JS calls
+//! `set_debug_categories(...)` to push the enabled set; the [`wasm_log!`]
+//! macro checks it before building any payload.
 
 use std::cell::RefCell;
 use std::collections::HashSet;

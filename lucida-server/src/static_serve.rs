@@ -1,5 +1,5 @@
 //! SPA static-asset serving via `tower_http::services::ServeDir`, so one
-//! container image serves both the API and the UI (ADR-0020).
+//! container image serves both the API and the UI.
 //!
 //! Unknown paths fall back to `index.html` for client-side routing. When
 //! `dist_path` lacks an `index.html`, a landing page with build
@@ -9,7 +9,7 @@
 //!
 //! With a deployment theme configured, `index.html` goes out with the
 //! theme written in at [`INDEX_MARKER`], so the pre-paint script applies
-//! it on a first visit (ADR 0066).
+//! it on a first visit.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

@@ -1,6 +1,6 @@
 //! PostgreSQL storage backend, selected by a `postgres://` or
 //! `postgresql://` `LUCIDA_DB_URL`. Runs the bundled PostgreSQL migrations
-//! and serves all seven stores (ADR-0058).
+//! and serves all seven stores.
 //!
 //! This module is the only place in the server that names a PostgreSQL
 //! type. Everything above it works through [`StorageBackend`] and the

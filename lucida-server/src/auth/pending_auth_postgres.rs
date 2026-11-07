@@ -6,7 +6,7 @@
 //! The statements come from [`super::pending_auth_sql`], which the SQLite
 //! store runs too, so this module holds the binding and the row mapping
 //! and no SQL of its own. Read it beside `pending_auth_sqlite`: the two
-//! differ in the pool type and the type name, and nowhere else (ADR-0058).
+//! differ in the pool type and the type name, and nowhere else.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

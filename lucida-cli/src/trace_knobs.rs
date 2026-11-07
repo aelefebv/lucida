@@ -1,4 +1,4 @@
-//! The Dev controls knobs, set from the trace driver (ADR 0051 as amended).
+//! The Dev controls knobs, set from the trace driver.
 //!
 //! An experiment is a flag. Every knob the Dev controls panel shows is a flag
 //! here, named by the label the panel shows, kebab-cased: "Prefetch depth" is

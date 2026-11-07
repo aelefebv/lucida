@@ -31,7 +31,7 @@ pub enum AssetMessage {
     /// Viewer → server: request a proxy asset.
     AssetRequest {
         /// Correlation label, minted from the same per-connection counter as
-        /// `ChunkMessage::ChunkRequest` (ADR 0048). Uniqueness is across the
+        /// `ChunkMessage::ChunkRequest`. Uniqueness is across the
         /// connection, not within a family, so a label that is ambiguous
         /// until you also know the message type would not be a join key.
         rid: u32,

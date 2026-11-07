@@ -1,6 +1,6 @@
 //! `PrincipalExtractor` trait + its production implementations.
 //!
-//! The trait is the extension point for a new auth provider (ADR 0017).
+//! The trait is the extension point for a new auth provider.
 //! Everything downstream sees only the resulting `AuthPrincipal`.
 //!
 //! [`DualCredentialExtractor`] resolves `Authorization: Bearer` through

@@ -7,7 +7,6 @@
 //! SQLite store runs too, so this module holds the binding and the row
 //! mapping and no SQL of its own. Read it beside `session_store_sqlite`:
 //! the two differ in the pool type and the type name, and nowhere else.
-//! ADR-0058 records why the SQL is shared and the Rust is not.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

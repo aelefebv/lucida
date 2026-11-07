@@ -1,4 +1,4 @@
-//! The watch stream's relay (ADR 0051): who is subscribed, and a small ring
+//! The watch stream's relay: who is subscribed, and a small ring
 //! of what pages published, kept per workspace so a late subscriber reads
 //! the recent past before the live items.
 //!

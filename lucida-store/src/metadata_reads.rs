@@ -3,7 +3,7 @@
 //! at the front of every remote open.
 //!
 //! The observer is a task-local, not a [`CachedStore`] field or a threaded
-//! parameter. One cache serves every caller of a source (ADR 0046), so a
+//! parameter. One cache serves every caller of a source, so a
 //! field would file concurrent opens' reads against each other. The
 //! import's fan-out runs on the open's own task, so a task-local covers it,
 //! and a read outside any open files nowhere.

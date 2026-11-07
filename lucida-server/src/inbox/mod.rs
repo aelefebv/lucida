@@ -2,9 +2,9 @@
 //! an agent with `lucida trace inbox`. A page sends over its session socket
 //! ([`send`]); the CLI lists and fetches over HTTP ([`http`]).
 //!
-//! This is not a server-side trace store (ADR-0050). The server keeps the
-//! bytes a person chose to send, reads the header out for listings, and
-//! computes nothing. Nothing is uploaded on a run's close, on a schedule,
+//! This is not a server-side trace store; the browser owns the trace. The
+//! server keeps the bytes a person chose to send, reads the header out for
+//! listings, and computes nothing. Nothing is uploaded on a run's close, on a schedule,
 //! or on any other event.
 
 pub mod http;

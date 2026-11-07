@@ -4,8 +4,7 @@
 //! and hands out the seven stores the rest of the server programs against.
 //! A store holds one kind of record and knows nothing about the connection.
 //! [`open`] picks the backend from `LUCIDA_DB_URL`'s scheme once at
-//! startup, so adding a backend touches this module and no call site
-//! (ADR-0055).
+//! startup, so adding a backend touches this module and no call site.
 
 #[cfg(test)]
 mod conformance;

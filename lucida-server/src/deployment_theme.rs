@@ -1,6 +1,6 @@
 //! A deployment's theme: defaults for the appearance preferences and
 //! per-preset token overrides, from the JSON file `LUCIDA_THEME_FILE`
-//! names (ADR 0066).
+//! names.
 //!
 //! ```json
 //! {

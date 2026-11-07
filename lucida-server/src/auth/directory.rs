@@ -3,9 +3,9 @@
 //! auth middleware attaches.
 //!
 //! It fills in those two fields and nothing else: it never changes the
-//! email or the admin flag and never stands in for a credential
-//! (ADR-0063). [`ProfileDirectory::apply`] keys on the email the mode
-//! resolved, so nothing a request carries can choose whose row is shown.
+//! email or the admin flag and never stands in for a credential.
+//! [`ProfileDirectory::apply`] keys on the email the mode resolved, so
+//! nothing a request carries can choose whose row is shown.
 //! Only the background schedule fetches. A failed or empty refresh keeps
 //! the last good snapshot, and no request ever waits on a fetch.
 

@@ -4,8 +4,7 @@
 //! [`super::store_sql`] and binds the same values: the timestamps are
 //! `TIMESTAMPTZ` here and RFC 3339 text there, but both decode to
 //! `DateTime<Utc>`, and both payload columns are text on either engine
-//! because the inbox stores bytes rather than a parsed value. See
-//! ADR-0058 for why the Rust is duplicated rather than shared.
+//! because the inbox stores bytes rather than a parsed value.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

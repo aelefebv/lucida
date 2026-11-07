@@ -2,7 +2,7 @@
 //! [`WorkspaceStore`], including the row mappers.
 //!
 //! The statements come from [`super::sql`], shared with the PostgreSQL
-//! store (ADR-0058). What differs is the pool, the row type, and JSON
+//! store. What differs is the pool, the row type, and JSON
 //! columns: a `TEXT` column here takes the serialized string, where a
 //! `JSONB` column there refuses it.
 
@@ -312,8 +312,8 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             // `workspace_saved_view_payload` (which clears `datasets`), but a
             // row inserted by another path — or persisted before that strip
             // existed — may still carry source URLs. The copy must be clean
-            // regardless of the source row's state, so clear them here too
-            // (decision 0014). `remap_dataset_ids` intentionally leaves
+            // regardless of the source row's state, so clear them here too.
+            // `remap_dataset_ids` intentionally leaves
             // URL-keyed `datasets` alone; this is the explicit strip.
             view.clear_source_urls();
             let remapped_view_json =

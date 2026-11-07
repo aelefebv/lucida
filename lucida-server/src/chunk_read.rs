@@ -66,7 +66,7 @@ pub enum ChunkReadError {
 ///
 /// `reader` is the fairness class the backend read is charged to, and
 /// `label` attributes a wait behind the source-read cap to a request, not
-/// only a client (ADR 0048).
+/// only a client.
 ///
 /// `probe` is the timing row of the request this read serves, if any. The
 /// read marks its dispatch, read, and decompress phases itself, because

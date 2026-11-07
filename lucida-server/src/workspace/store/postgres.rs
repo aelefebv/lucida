@@ -1,9 +1,9 @@
 //! PostgreSQL-backed [`WorkspaceStore`], on the pool [`crate::storage`]
 //! opened.
 //!
-//! The statements come from [`super::sql`], shared with the SQLite store
-//! (ADR-0058). Four columns are `JSONB`, which refuses a bound `String`, so
-//! payloads go in as [`sqlx::types::Json`]. A `$n::jsonb` cast would keep
+//! The statements come from [`super::sql`], shared with the SQLite store.
+//! Four columns are `JSONB`, which refuses a bound `String`, so payloads go
+//! in as [`sqlx::types::Json`]. A `$n::jsonb` cast would keep
 //! the `String` bind, but SQLite rejects `::`. The clock is [`now`]; the
 //! note there says why it is not `Utc::now`.
 
@@ -348,8 +348,8 @@ impl WorkspaceStore for PostgresWorkspaceStore {
             // `workspace_saved_view_payload` (which clears `datasets`), but a
             // row inserted by another path — or persisted before that strip
             // existed — may still carry source URLs. The copy must be clean
-            // regardless of the source row's state, so clear them here too
-            // (decision 0014). `remap_dataset_ids` intentionally leaves
+            // regardless of the source row's state, so clear them here too.
+            // `remap_dataset_ids` intentionally leaves
             // URL-keyed `datasets` alone; this is the explicit strip.
             view.clear_source_urls();
             let remapped_view = view_payload(&view)?;

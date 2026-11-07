@@ -41,7 +41,7 @@ fn id_is_stable_across_repeat_invocations() {
 fn id_is_stable_across_windows_spelling_variants() {
     // A single Windows file has many legal spellings (`C:\foo`, `c:/foo`,
     // `file:///C:/foo`). The server normalizes every URL before deriving
-    // the `DatasetId` (ADR-0042), so all spellings dedup to one id and a
+    // the `DatasetId`, so all spellings dedup to one id and a
     // second open re-binds instead of re-importing. Each group below is a
     // set of equivalent spellings that must produce the same id.
     let groups: Vec<Vec<&str>> = vec![

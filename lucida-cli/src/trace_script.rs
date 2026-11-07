@@ -1,4 +1,4 @@
-//! The trace driver's script (ADR 0051, as amended): an ordered list of steps
+//! The trace driver's script: an ordered list of steps
 //! the driver performs on the page once the open has settled, so an agent
 //! can reproduce a pan, a zoom, an orbit, a scrub, or a select headlessly.
 //!
@@ -1167,7 +1167,7 @@ async fn wait_for_script_seam(page: &mut Page, wait: Duration) -> Result<(), Cli
 
 /// Why an opt-in gate should fail on the script, or `None`: a step whose
 /// run never settled, or whose run's verdict is a stall. Read from the same
-/// fields the page filled at export; nothing is derived here (ADR 0051).
+/// fields the page filled at export; nothing is derived here.
 pub fn script_gate_failure(script: &ScriptRecord) -> Option<String> {
     for (index, step) in script.steps.iter().enumerate() {
         let label = format!("step {} ({})", index + 1, step.step);

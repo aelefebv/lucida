@@ -2,7 +2,7 @@
 //! another: peers in a live session, and the owner row a new workspace
 //! records.
 //!
-//! The directory runs only in the auth middleware (ADR-0063), so every
+//! The directory runs only in the auth middleware, so every
 //! consumer should see the enriched principal. These tests check that
 //! through `AuthMiddlewareState::build` over a mock listing in front of
 //! the real workspace router, in `google` mode so a principal without a

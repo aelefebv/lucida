@@ -4,7 +4,7 @@
 //! cannot disagree: [`target_level`] picks the coarsest level that still
 //! places at least one sample under every device pixel. It reads the camera
 //! and the level geometry and nothing else, so memory pressure changes
-//! coverage, never resolution (ADR 0061). [`level_shape_ratios`] turns a
+//! coverage, never resolution. [`level_shape_ratios`] turns a
 //! pyramid's level geometries into the per-level ratios the rule consumes.
 
 use lucida_content::LevelGeometry;

@@ -32,7 +32,7 @@ use crate::workspace::{SqliteWorkspaceStore, WorkspaceStore};
 ///
 /// Each backend has its own directory under `migrations/`, because a
 /// schema cannot be written once for two engines that do not agree on
-/// what a timestamp is. See ADR-0058.
+/// what a timestamp is.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations/sqlite");
 
 /// Connections for a file-backed database. A single SQLite file

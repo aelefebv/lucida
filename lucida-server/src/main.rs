@@ -153,7 +153,7 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl
 async fn main() -> std::io::Result<()> {
     // LUCIDA_LOG_FORMAT={text,json} (default text). Both branches share
     // the same EnvFilter + FmtSpan::CLOSE config so `RUST_LOG` filtering
-    // and span-close timing per ADR-0012 work identically in either
+    // and span-close timing work identically in either
     // mode; only the line format differs.
     let log_format = std::env::var("LUCIDA_LOG_FORMAT")
         .ok()
@@ -295,7 +295,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     }
     // Operator-facing startup line: mode + bind together so a glance
     // at the boot log answers "is this server reachable, and is it
-    // protected?" Per ADR-0018 both signals should be visible together.
+    // protected?"
     // Stable string mode tag (`"google"` / `"iap"` / `"disabled"`)
     // lands cleanly in audit pipelines that key off the exact string
     // rather than the Debug-formatted variant.
@@ -527,8 +527,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     public_auth_router = public_auth_router.merge(health::router());
     // Public half, for the same reason as the probes: an external
     // monitor presents no session. The startup line is the one place the
-    // route is logged above debug level. See `lucida-server/src/status.rs`
-    // and ADR-0064.
+    // route is logged above debug level. See `status.rs`.
     if let Some(status) = status_config.as_ref() {
         tracing::info!(
             path = %status.path,
@@ -545,7 +544,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         public_auth_router.merge(deployment_theme::router(deployment_theme.as_ref()));
 
     // Serve the SPA bundle from `LUCIDA_WEB_DIST` (default
-    // `./lucida-web/dist`) on the public router half (ADR-0020). Merged
+    // `./lucida-web/dist`) on the public router half. Merged
     // last so `/auth/*`, `/api/*`, `/admin/*`, and `/ws` take precedence
     // and the SPA fallback only fires for unknown paths.
     let web_dist = PathBuf::from(

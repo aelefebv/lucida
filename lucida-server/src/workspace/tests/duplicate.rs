@@ -567,7 +567,7 @@ async fn duplicate_honors_explicit_name_override() {
 /// `DocumentState::apply(AddAnnotation { view })` enforces the
 /// `Annotation::view` invariant: the embedded view's `datasets` is emptied
 /// before the pin is stored, so a pin never leaks dataset source URLs,
-/// local `file:///` paths included (ADR 0014), into the persisted or
+/// local `file:///` paths included, into the persisted or
 /// broadcast document.
 #[tokio::test]
 async fn apply_add_annotation_strips_embedded_view_datasets() {

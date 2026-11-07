@@ -96,10 +96,9 @@ impl FromRef<SharedExtractor> for AuthMiddlewareState {
 /// `req.extensions().get::<AuthPrincipal>()`.
 ///
 /// The directory runs after extraction and before attachment, and
-/// nowhere else: this is the single seam ADR-0063 names. It is given
-/// the principal the mode resolved, so the email it keys on is one no
-/// request header chose, and it may write the display name and the
-/// picture and nothing more.
+/// nowhere else. It is given the principal the mode resolved, so the
+/// email it keys on is one no request header chose, and it may write the
+/// display name and the picture and nothing more.
 pub async fn auth_middleware(
     State(auth): State<AuthMiddlewareState>,
     req: Request,
@@ -191,10 +190,9 @@ pub fn accepts_html(headers: &HeaderMap) -> bool {
 /// behind the bearer path. `Iap` → [`IapAssertionExtractor`] behind the
 /// bearer path.
 ///
-/// Fallible because IAP mode reads its key set before serving a request
-/// (ADR-0060), and a server that cannot read it can never authenticate
-/// anybody. The match is exhaustive so a new `AuthMode` fails to compile
-/// here.
+/// Fallible because IAP mode reads its key set before serving a request,
+/// and a server that cannot read it can never authenticate anybody. The
+/// match is exhaustive so a new `AuthMode` fails to compile here.
 pub async fn build_extractor(
     config: Arc<AuthConfig>,
     store: Arc<dyn LoginSessionStore>,

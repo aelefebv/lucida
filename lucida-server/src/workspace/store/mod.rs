@@ -5,7 +5,7 @@
 //! manager holds `Arc<dyn WorkspaceStore>`, so authorization and live-session
 //! logic never see SQL. The production backend is [`SqliteWorkspaceStore`];
 //! [`PostgresWorkspaceStore`] is the same store on the other engine, and
-//! the two run the statements in [`sql`] between them. See ADR-0058.
+//! the two run the statements in [`sql`] between them.
 
 use async_trait::async_trait;
 use lucida_content::DatasetId;

@@ -6,7 +6,7 @@
 //!
 //! Normalization is pure string work, not `canonicalize`: `..` is not
 //! resolved, symlinks are not followed, the path need not exist, and it is
-//! idempotent, so any boundary may call it (ADR 0042).
+//! idempotent, so any boundary may call it.
 
 /// Strip a leading `file://` or `file:///`+ prefix, lowercase the drive
 /// letter on Windows-style paths, forward-slashify backslashes, and
@@ -104,13 +104,14 @@ pub fn is_local_dataset_url(canonical: &str) -> bool {
     canonical.starts_with('/')
 }
 
-/// Stable, content-derived `DatasetId` for a dataset URL. Format:
+/// Stable, URL-derived `DatasetId` for a dataset URL. Format:
 /// `ds-{first_8_bytes_of_blake3(url)_as_le_u64_hex}`.
 ///
 /// Two opens of the same URL produce the same id, which is how the server
-/// dedupes a reopen. ADR 0014 covers the collision edge on local-file
-/// paths. Pass a [`normalize_dataset_url`]-canonicalized URL for
-/// equivalence across Windows and UNC spellings.
+/// dedupes a reopen. The id hashes the URL, not the bytes, so one local
+/// path gets one id on every server, whatever file it names there. Pass a
+/// [`normalize_dataset_url`]-canonicalized URL for equivalence across
+/// Windows and UNC spellings.
 pub fn dataset_id_for_url(canonical: &str) -> String {
     let digest = blake3_url(canonical);
     let prefix: [u8; 8] = digest[..8].try_into().expect("blake3 always >= 8 bytes");

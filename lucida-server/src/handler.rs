@@ -112,7 +112,7 @@ async fn handle_client_inner(
 
     // This connection's server-side lifecycle rows. Scoped to the connection
     // rather than the process, so a client can only ever be handed rows its
-    // own requests produced (ADR 0050) — no queue depth, no peer rates, no
+    // own requests produced — no queue depth, no peer rates, no
     // peer dataset identities.
     let timings = Arc::new(TimingBuffer::new());
 
@@ -661,7 +661,7 @@ async fn handle_client_inner(
                             // The relay hands this connection the ring before
                             // registering it, both under the session lock, so
                             // the recent past arrives ahead of the live items
-                            // with no gap and no repeat (ADR 0051).
+                            // with no gap and no repeat.
                             let sender = unicast_routes.lock().await.get(&id).cloned();
                             let Some(sender) = sender else { continue };
                             let (replayed, subscribers) = {
@@ -1436,7 +1436,7 @@ async fn serve_chunk_from_store(
     // Charged to the requesting client, so one client's collection-sized
     // backlog cannot delay another client's first chunk, and labelled
     // with the request, so a wait behind the source-read cap is attributable
-    // to it rather than only to a client (ADR 0048).
+    // to it rather than only to a client.
     let read = read_chunk(
         resolver,
         cache,
@@ -1682,8 +1682,8 @@ async fn serve_asset_request(
         }
     };
     // Producing the asset and encoding its frame share one slot: this
-    // family has no generation phase of its own, and it is due for deletion
-    // under ADR 0043 rather than for a wider enum.
+    // family has no generation phase of its own, and no planner emits a proxy
+    // request, so it does not earn a wider enum.
     probe.mark(ServerPhase::SliceEncode);
 
     let senders = unicast_routes.lock().await;
