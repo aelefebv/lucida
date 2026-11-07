@@ -14,13 +14,14 @@ use chrono::{DateTime, Utc};
 use lucida_content::DatasetId;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::ServerMessage;
+use lucida_core::protocol::{ClientId, ServerMessage};
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
 use serde_json::json;
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast};
 
+use crate::connection::{CLOSE_ACCESS_REVOKED, ClientSender};
 use crate::inbox::InboxStore;
 use crate::session::Session;
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
@@ -46,6 +47,9 @@ pub struct LiveWorkspace {
     next_id: AtomicU64,
     empty_since: Mutex<Option<Instant>>,
     background_cancelled: AtomicBool,
+    /// Who each open socket acts as, so a membership change can find the
+    /// sockets it took access from.
+    connections: std::sync::Mutex<HashMap<ClientId, (AuthPrincipal, ClientSender)>>,
 }
 
 impl LiveWorkspace {
@@ -59,7 +63,25 @@ impl LiveWorkspace {
             next_id: AtomicU64::new(0),
             empty_since: Mutex::new(Some(Instant::now())),
             background_cancelled: AtomicBool::new(false),
+            connections: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Forget a socket that ended.
+    pub fn detach_connection(&self, id: ClientId) {
+        self.connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&id);
+    }
+
+    fn connections(&self) -> Vec<(ClientId, AuthPrincipal, ClientSender)> {
+        self.connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(id, (principal, sender))| (*id, principal.clone(), sender.clone()))
+            .collect()
     }
 
     pub fn next_client_id(&self) -> u64 {
@@ -473,11 +495,14 @@ impl WorkspaceManager {
         let email = normalize_request_email(email)?;
         let settings = self.current_sharing_settings(workspace_id).await?;
         ensure_owner_retained(&settings, &email, Some(role))?;
-        self.store
+        let member = self
+            .store
             .upsert_member(workspace_id, &email, display_name.unwrap_or(""), role)
             .await
             .map_err(WorkspaceError::Store)?
-            .ok_or(WorkspaceError::NotFound)
+            .ok_or(WorkspaceError::NotFound)?;
+        self.close_revoked_connections(workspace_id).await;
+        Ok(member)
     }
 
     pub async fn admin_upsert_owner(
@@ -505,11 +530,14 @@ impl WorkspaceManager {
         let email = normalize_request_email(email)?;
         let settings = self.current_sharing_settings(workspace_id).await?;
         ensure_owner_retained(&settings, &email, Some(role))?;
-        self.store
+        let member = self
+            .store
             .update_member_role(workspace_id, &email, role)
             .await
             .map_err(WorkspaceError::Store)?
-            .ok_or(WorkspaceError::NotFound)
+            .ok_or(WorkspaceError::NotFound)?;
+        self.close_revoked_connections(workspace_id).await;
+        Ok(member)
     }
 
     pub async fn remove_member(
@@ -527,11 +555,11 @@ impl WorkspaceManager {
             .remove_member(workspace_id, &email)
             .await
             .map_err(WorkspaceError::Store)?;
-        if removed {
-            Ok(())
-        } else {
-            Err(WorkspaceError::NotFound)
+        if !removed {
+            return Err(WorkspaceError::NotFound);
         }
+        self.close_revoked_connections(workspace_id).await;
+        Ok(())
     }
 
     pub async fn update_link_access(
@@ -547,11 +575,14 @@ impl WorkspaceManager {
                 "link role cannot be owner".to_string(),
             ));
         }
-        self.store
+        let settings = self
+            .store
             .update_link_access(workspace_id, link_access, link_role)
             .await
             .map_err(WorkspaceError::Store)?
-            .ok_or(WorkspaceError::NotFound)
+            .ok_or(WorkspaceError::NotFound)?;
+        self.close_revoked_connections(workspace_id).await;
+        Ok(settings)
     }
 
     pub async fn list_saved_views(
@@ -1103,6 +1134,71 @@ impl WorkspaceManager {
             .insert(workspace_id.to_string(), Arc::clone(&live));
         tracing::info!(workspace_id, "workspace.live_loaded");
         Ok(live)
+    }
+
+    /// Register an open socket under its principal, then check the role
+    /// once more: a membership change that landed between the upgrade's
+    /// check and this registration would otherwise never reach it.
+    pub async fn attach_connection(
+        &self,
+        live: &LiveWorkspace,
+        id: ClientId,
+        principal: &AuthPrincipal,
+        sender: ClientSender,
+    ) {
+        live.connections
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(id, (principal.clone(), sender.clone()));
+        if !self.still_has_access(&live.workspace_id, principal).await {
+            sender.close(CLOSE_ACCESS_REVOKED, "workspace access revoked");
+        }
+    }
+
+    /// Close every open socket whose principal no longer holds a role in
+    /// the workspace. Editor-only messages re-check the role as they
+    /// arrive, so a lowered role needs nothing here; losing access
+    /// altogether ends the socket, because everything else it receives
+    /// (chunks, broadcasts, presence) was authorized only at the upgrade.
+    pub async fn close_revoked_connections(&self, workspace_id: &str) {
+        let Some(live) = self.live.lock().await.get(workspace_id).cloned() else {
+            return;
+        };
+        let mut verdicts: HashMap<String, bool> = HashMap::new();
+        for (id, principal, sender) in live.connections() {
+            let allowed = match verdicts.get(&principal.email) {
+                Some(allowed) => *allowed,
+                None => {
+                    let allowed = self.still_has_access(workspace_id, &principal).await;
+                    verdicts.insert(principal.email.clone(), allowed);
+                    allowed
+                }
+            };
+            if !allowed {
+                tracing::info!(
+                    client_id = id,
+                    workspace_id,
+                    "workspace.connection.access_revoked"
+                );
+                sender.close(CLOSE_ACCESS_REVOKED, "workspace access revoked");
+            }
+        }
+    }
+
+    /// Whether `principal` still holds any role here. A lookup that fails
+    /// counts as no: the client reconnects, and the upgrade asks again.
+    async fn still_has_access(&self, workspace_id: &str, principal: &AuthPrincipal) -> bool {
+        match self.store.role_for(workspace_id, principal).await {
+            Ok(role) => role.is_some(),
+            Err(e) => {
+                tracing::error!(
+                    workspace_id,
+                    error = %e,
+                    "workspace.connection.access_check_failed"
+                );
+                false
+            }
+        }
     }
 
     pub async fn require_viewer(

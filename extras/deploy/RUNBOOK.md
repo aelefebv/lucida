@@ -220,7 +220,8 @@ variables.
 | `LUCIDA_ALLOWED_HOSTED_DOMAINS` | unset: any Google account | Comma-separated Workspace domains, `google` only |
 | `LUCIDA_IAP_AUDIENCE` | none | Required for `iap` |
 | `LUCIDA_ADMIN_EMAILS` | unset: no admins | Comma-separated, case-insensitive, every mode |
-| `LUCIDA_COOKIE_SECURE` | `auto`, from the request scheme | `always` behind a TLS-terminating ingress, or `never` |
+| `LUCIDA_COOKIE_SECURE` | `auto`: secure over https or on a non-loopback bind | `always`, or `never` for plain http on a non-loopback bind |
+| `LUCIDA_ALLOWED_ORIGINS` | unset: the server's own origin only | Comma-separated origins, such as `https://viewer.example.com`, that may open sockets and get CORS with credentials |
 | `LUCIDA_COOKIE_NAME` | `lucida_session` | Session cookie name |
 | `LUCIDA_SESSION_IDLE_TIMEOUT_HOURS` | `168` | Idle session lifetime |
 | `LUCIDA_SESSION_HARD_CAP_HOURS` | `720` | Maximum session lifetime |

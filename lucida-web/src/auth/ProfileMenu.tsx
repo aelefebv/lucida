@@ -95,7 +95,6 @@ export function ProfilePanel({ devAuthEnabled, onDone }: ProfilePanelProps) {
   const [pending, setPending] = useState(false);
   const [devEmail, setDevEmail] = useState(principal.email);
   const [devDisplayName, setDevDisplayName] = useState(principal.display_name);
-  const [devAdmin, setDevAdmin] = useState(false);
   const [devPending, setDevPending] = useState(false);
   const [devError, setDevError] = useState<string | null>(null);
   // Browser-local, default on; read as the panel opens so an edit made in
@@ -128,7 +127,6 @@ export function ProfilePanel({ devAuthEnabled, onDone }: ProfilePanelProps) {
       await postDevLogin({
         email: devEmail,
         display_name: devDisplayName,
-        is_admin: devAdmin,
       });
       await refresh();
       onDone();
@@ -137,7 +135,7 @@ export function ProfilePanel({ devAuthEnabled, onDone }: ProfilePanelProps) {
     } finally {
       setDevPending(false);
     }
-  }, [devAdmin, devDisplayName, devEmail, devPending, refresh, onDone]);
+  }, [devDisplayName, devEmail, devPending, refresh, onDone]);
 
   return (
     <>
@@ -186,15 +184,6 @@ export function ProfilePanel({ devAuthEnabled, onDone }: ProfilePanelProps) {
             placeholder="Display name"
             disabled={devPending}
           />
-          <label className="lc-profile-check">
-            <input
-              type="checkbox"
-              checked={devAdmin}
-              disabled={devPending}
-              onChange={(e) => setDevAdmin(e.target.checked)}
-            />
-            Admin override
-          </label>
           {devError && <div className="lc-profile-error">{devError}</div>}
           <button
             type="submit"
