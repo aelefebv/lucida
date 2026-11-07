@@ -1122,6 +1122,14 @@ export class CpuCache {
     return entry?.tier ?? null;
   }
 
+  /**
+   * Whether the store a request's lane fills holds its chunk. One key can be
+   * resident in either tier alone, so {@link getCachedChunk} cannot answer this.
+   */
+  holds(req: ChunkRequest): boolean {
+    return this.lookupCachedEntry(req) !== undefined;
+  }
+
   getPendingSnapshot(): readonly ChunkRequest[] {
     return this.chunkScheduler.pendingSnapshot();
   }
