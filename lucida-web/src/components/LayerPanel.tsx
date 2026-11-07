@@ -37,6 +37,7 @@ import { colormapTitle } from "./colormapSwatch.ts";
 import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
 import type { LevelRange } from "../renderer/workerProtocol.ts";
+import type { DatasetImportWarning } from "../bridge.ts";
 import { displayedLevelNotice, levelNumbers } from "./levelReadout.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import {
@@ -118,6 +119,9 @@ interface Props {
   expandedLayerId: string | null;
   /** The channel shown alone, or `null` for the composite. One for the whole scene. */
   soloChannel: number | null;
+  /** Each dataset's import warnings, by layer id. Those that say the data is
+   *  shown wrong mark the layer degraded and are spelled out under it. */
+  importWarnings?: ReadonlyMap<string, readonly DatasetImportWarning[]>;
   /** Editor-only affordances (rename) are shown only when true. */
   canEdit: boolean;
   onSelectLayer: (id: string) => void;
@@ -253,6 +257,8 @@ function LayerRow(props: LayerRowProps) {
   const multichannel = layer.channels.length > 1;
   // One `c` serves the scene, so a layer without the soloed channel draws nothing.
   const hiddenBySolo = soloChannel !== null && soloChannel >= layer.channels.length;
+  const problems = (props.importWarnings?.get(layer.id) ?? []).filter((warning) => warning.degrades);
+  const problemsId = useId();
 
   return (
     <section
@@ -301,6 +307,11 @@ function LayerRow(props: LayerRowProps) {
             <Badge>{`${layer.labelRows.length} label${layer.labelRows.length === 1 ? "" : "s"}`}</Badge>
           </span>
         )}
+        {problems.length > 0 && (
+          <span data-testid={`layer-degraded-${layer.id}`} aria-describedby={problemsId}>
+            <Badge tone="warning">Degraded</Badge>
+          </span>
+        )}
         <Menu
           label={`Layer ${layer.name} actions`}
           placement="bottom end"
@@ -338,6 +349,13 @@ function LayerRow(props: LayerRowProps) {
           onChange={(v) => props.onSetOpacity(layer.id, v)}
         />
       </div>
+      {problems.length > 0 && (
+        <ul className="lc-layer-problems" id={problemsId} aria-label={`${layer.name} data problems`}>
+          {problems.map((warning) => (
+            <li key={warning.message}>{warning.message}</li>
+          ))}
+        </ul>
+      )}
       {hiddenBySolo && (
         <p className="lc-layer-note">
           {`Not shown while channel ${(soloChannel ?? 0) + 1} is soloed.`}

@@ -22,6 +22,7 @@ vi.mock("./bridge.ts", () => {
     sendFollow = vi.fn();
     sendOpenRemoteDataset = vi.fn(() => `mock-open-req-${++openRequestCounter}`);
     subscribeBookmarkChanged = vi.fn(() => () => {});
+    requestDatasetHealth = vi.fn(() => Promise.resolve([]));
     constructor(handlers: unknown, _url?: string, workspaceId?: string) {
       this.handlers = handlers;
       this.workspaceId = workspaceId;
@@ -92,6 +93,7 @@ const MockedBridge = Bridge as unknown as {
     sendPresence: ReturnType<typeof vi.fn>;
     sendFollow: ReturnType<typeof vi.fn>;
     sendOpenRemoteDataset: ReturnType<typeof vi.fn>;
+    requestDatasetHealth: ReturnType<typeof vi.fn>;
   }>;
 };
 const MockedContentSource = ProxiedContentSource as unknown as {
@@ -222,6 +224,7 @@ function makeEvents(): SessionControllerEvents {
     onDatasetsChanged: vi.fn(),
     onRemoteDocumentChanged: vi.fn(),
     onWorkspaceArchived: vi.fn(),
+    onDatasetImportWarnings: vi.fn(),
   };
 }
 
@@ -1046,6 +1049,76 @@ describe("SessionController durable import warnings", () => {
 
     handlers.onCommand(2, JSON.stringify({ type: "remove_dataset", id: "wds-1" }));
     expect(lastActivity(events).warnings).toStrictEqual([sampledLabelNotice]);
+  });
+});
+
+describe("SessionController import warnings from dataset health", () => {
+  const shapeWarning = {
+    target: "wds-1",
+    message: "tiles differ in shape, and smaller tiles are padded with fill",
+    degrades: true,
+  };
+
+  function health(datasetId: string, importWarnings: (typeof shapeWarning)[]) {
+    return {
+      workspace_dataset_id: datasetId,
+      name: datasetId,
+      status: importWarnings.length > 0 ? "degraded" : "healthy",
+      source_url: `/data/${datasetId}.zarr`,
+      binding: { status: "healthy" },
+      generated_coarse: {
+        status: "healthy",
+        level_count: 0,
+        ready_chunks: 0,
+        pending_chunks: 0,
+        failed_chunks: 0,
+        unavailable_chunks: 0,
+      },
+      import_warnings: importWarnings,
+    };
+  }
+
+  function lastImportWarnings(events: SessionControllerEvents) {
+    const calls = (events.onDatasetImportWarnings as ReturnType<typeof vi.fn>).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    return calls[calls.length - 1][0] as ReadonlyMap<string, unknown>;
+  }
+
+  it("a restored dataset joins with its warnings shown, as a fresh open would show them", async () => {
+    const { handlers, bridge, events } = makeHarness();
+    bridge.requestDatasetHealth.mockResolvedValue([health("wds-1", [shapeWarning]), health("wds-2", [])]);
+
+    handlers.onSnapshot(1, snapshotJson(["wds-1", "wds-2"]), [], 4, {});
+    await vi.waitFor(() => expect(events.onDatasetImportWarnings).toHaveBeenCalled());
+
+    expect(bridge.requestDatasetHealth).toHaveBeenCalledTimes(1);
+    expect([...lastImportWarnings(events)]).toStrictEqual([["wds-1", [shapeWarning]]]);
+    expect(lastActivity(events).warnings).toStrictEqual([shapeWarning.message]);
+  });
+
+  it("a later refresh keeps the dataset marked but leaves a dismissed notice dismissed", async () => {
+    const { controller, handlers, bridge, events } = makeHarness();
+    bridge.requestDatasetHealth.mockResolvedValue([health("wds-1", [shapeWarning])]);
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    await vi.waitFor(() => expect(events.onDatasetImportWarnings).toHaveBeenCalledTimes(1));
+    controller.dismissOpenWarnings();
+
+    handlers.onCommand(2, datasetOpenedJson("wds-2", 9));
+    await vi.waitFor(() => expect(events.onDatasetImportWarnings).toHaveBeenCalledTimes(2));
+
+    expect(lastImportWarnings(events).has("wds-1")).toBe(true);
+    expect(lastActivity(events).warnings).toStrictEqual([]);
+  });
+
+  it("a removed dataset stops being marked", async () => {
+    const { handlers, bridge, events } = makeHarness();
+    bridge.requestDatasetHealth.mockResolvedValue([health("wds-1", [shapeWarning])]);
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 4, {});
+    await vi.waitFor(() => expect(events.onDatasetImportWarnings).toHaveBeenCalledTimes(1));
+
+    handlers.onCommand(2, JSON.stringify({ type: "remove_dataset", id: "wds-1" }));
+
+    expect(lastImportWarnings(events).size).toBe(0);
   });
 });
 

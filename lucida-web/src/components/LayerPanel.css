@@ -87,6 +87,22 @@
   font-size: var(--lc-text-sm);
 }
 
+/* Each problem in full: the tile names it carries are the point. */
+.lc-layer-problems {
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-1);
+  margin: 0 var(--lc-space-3) var(--lc-space-2) calc(var(--lc-control-h-sm) + var(--lc-space-2));
+  padding: var(--lc-space-2);
+  border-left: 2px solid var(--lc-warning);
+  border-radius: var(--lc-radius-sm);
+  background: var(--lc-warning-subtle);
+  color: var(--lc-text);
+  font-size: var(--lc-text-sm);
+  list-style: none;
+  overflow-wrap: anywhere;
+}
+
 .lc-layer-body {
   display: flex;
   flex-direction: column;

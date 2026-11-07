@@ -16,7 +16,8 @@ use crate::backend::StoreError;
 use crate::cache::CachedStore;
 use crate::coarse::{SourceCoarseConfig, select_source_coarse_level};
 use crate::codec::parse_codec_chain;
-use crate::collection_geometry::{DeclaredLevels, StoredLevels};
+use crate::collection_checks;
+use crate::collection_geometry::{DeclaredLevels, StoredLevels, StoredTile, describe_mismatches};
 use crate::import_types::*;
 use crate::layout::compute_chunk_byte_layout;
 use crate::parse;
@@ -273,17 +274,20 @@ fn sample_probe_indices(group_spans: &[std::ops::Range<usize>]) -> Vec<usize> {
 
 /// One group's parsed metadata: its collection path, grid coordinates, and the tiles
 /// it declares. Produced concurrently, then assembled in declared order.
-struct GroupParsed {
-    path: String,
-    row_index: u32,
-    column_index: u32,
-    tiles: Vec<TileParsed>,
+pub(crate) struct GroupParsed {
+    pub(crate) path: String,
+    pub(crate) row_index: u32,
+    pub(crate) column_index: u32,
+    pub(crate) tiles: Vec<TileParsed>,
+    /// Store prefixes the group lists again after their first entry. Each
+    /// is kept once, since a tile's identity is its store prefix.
+    pub(crate) repeated_tiles: Vec<String>,
 }
 
 /// One tile within a group: its store prefix and any explicit translation.
-struct TileParsed {
-    store_prefix: String,
-    translation: Option<Vec<f64>>,
+pub(crate) struct TileParsed {
+    pub(crate) store_prefix: String,
+    pub(crate) translation: Option<Vec<f64>>,
 }
 
 /// The collection path used to name a group in warnings and diagnostics. Prefers the
@@ -359,7 +363,7 @@ fn unreadable_tile_geometry_warning(
 
 /// One tile's multiscale metadata. The representative's axes, scales, and
 /// channel metadata apply to every tile of its collection; level shapes and
-/// chunk shapes are read per group, since tiles may differ in those.
+/// chunk shapes are read per tile, since tiles may differ in those.
 struct SharedTileGeometry {
     /// The representative tile the geometry was read from. Kept so later
     /// store-shape questions — such as whether a level was ever written — can
@@ -448,16 +452,16 @@ async fn select_shared_tile_geometry(
     (None, unreadable)
 }
 
-/// One aggregated [`ImportWarning`] for every group whose first tile's
-/// geometry could not be used, each entry naming the tile and why. Only the
-/// first [`UNREADABLE_GEOMETRY_WARNING_EXAMPLES`] entries are named.
+/// One aggregated [`ImportWarning`] for every tile whose geometry could not
+/// be used, each entry naming the tile and why. Only the first
+/// [`UNREADABLE_GEOMETRY_WARNING_EXAMPLES`] entries are named.
 fn unusable_tile_geometry_warning(
     dataset_id: &str,
     representative: &str,
     unusable: &[String],
 ) -> ImportWarning {
     let count = unusable.len();
-    let noun = if count == 1 { "group" } else { "groups" };
+    let noun = if count == 1 { "tile" } else { "tiles" };
     let examples = unusable
         .iter()
         .take(UNREADABLE_GEOMETRY_WARNING_EXAMPLES)
@@ -475,27 +479,27 @@ fn unusable_tile_geometry_warning(
     }
 }
 
-/// What each group's first tile stores, in group order, or why it cannot be
-/// used. The representative is not read again.
+/// What each tile stores, in declared order, or why it cannot be used. The
+/// representative is not read again.
 ///
-/// Reads fan out with bounded concurrency ([`METADATA_FETCH_CONCURRENCY`]),
-/// one tile per group, so a wide collection pays per group and never per
-/// tile. Each read owns its inputs so the future borrows nothing and stays
-/// `Send`.
-async fn read_stored_groups(
+/// Every tile is read, not one per group, because a tile the import does not
+/// read is bound as if stored like another and its differences go unnamed.
+/// Reads fan out with bounded concurrency ([`METADATA_FETCH_CONCURRENCY`]).
+/// Each read owns its inputs so the future borrows nothing and stays `Send`.
+async fn read_stored_tiles(
     store: &Arc<CachedStore>,
-    group_first_prefixes: &[&str],
+    tile_prefixes: &[String],
     representative_prefix: &str,
-    representative: &StoredLevels,
+    representative: &StoredTile,
     axes_names: &[String],
     data_type: DataType,
     pinned: &[PinnedAxis],
-) -> Vec<Result<StoredLevels, String>> {
-    let reads: Vec<_> = group_first_prefixes
+) -> Vec<Result<StoredTile, String>> {
+    let reads: Vec<_> = tile_prefixes
         .iter()
-        .map(|&prefix| {
+        .map(|prefix| {
             let store = store.clone();
-            let prefix = prefix.to_string();
+            let prefix = prefix.clone();
             let axes_names = axes_names.to_vec();
             let pinned = pinned.to_vec();
             let representative = (prefix == representative_prefix).then(|| representative.clone());
@@ -506,7 +510,7 @@ async fn read_stored_groups(
                 let geometry = read_tile_geometry(&store, &prefix)
                     .await
                     .map_err(|e| e.to_string())?;
-                stored_levels_of(&geometry, &axes_names, data_type, &pinned)
+                stored_tile_of(&geometry, &axes_names, data_type, &pinned)
             }
         })
         .collect();
@@ -516,14 +520,14 @@ async fn read_stored_groups(
         .await
 }
 
-/// A tile's stored levels, if it can be served at the representative's axes
-/// and data type.
-fn stored_levels_of(
+/// What a tile stores, if it can be served at the representative's axes and
+/// data type.
+fn stored_tile_of(
     geometry: &SharedTileGeometry,
     axes_names: &[String],
     data_type: DataType,
     pinned: &[PinnedAxis],
-) -> Result<StoredLevels, String> {
+) -> Result<StoredTile, String> {
     if geometry.axes_names != axes_names {
         return Err(format!(
             "axes {:?} differ from {axes_names:?}",
@@ -560,13 +564,16 @@ fn stored_levels_of(
     {
         return Err(format!("level {level} has a zero chunk dimension"));
     }
-    Ok(StoredLevels {
-        shapes: geometry
-            .level_metas
-            .iter()
-            .map(|meta| meta.shape.clone())
-            .collect(),
-        bindings,
+    Ok(StoredTile {
+        levels: StoredLevels {
+            shapes: geometry
+                .level_metas
+                .iter()
+                .map(|meta| meta.shape.clone())
+                .collect(),
+            bindings,
+        },
+        scale: geometry.level_entries[0].scale,
     })
 }
 
@@ -634,6 +641,8 @@ async fn parse_one_group(
     }
 
     let mut tiles: Vec<TileParsed> = Vec::new();
+    let mut repeated_tiles: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
     for image_entry in images {
         let tile_path = image_entry
             .get("path")
@@ -641,6 +650,10 @@ async fn parse_one_group(
             .unwrap_or("0")
             .to_string();
         let store_prefix = format!("{group_path}/{tile_path}");
+        if !seen.insert(store_prefix.clone()) {
+            repeated_tiles.push(store_prefix);
+            continue;
+        }
 
         let translation = image_entry
             .get("coordinateTransformations")
@@ -668,6 +681,7 @@ async fn parse_one_group(
         row_index,
         column_index,
         tiles,
+        repeated_tiles,
     })
 }
 
@@ -682,26 +696,16 @@ async fn import_collection(
         StoreError::Metadata(parse::describe_missing_ome_block(root_json, "plate"))
     })?;
 
-    // Parse rows and columns.
-    let rows: Vec<String> = collection_json
-        .get("rows")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|r| r.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let columns: Vec<String> = collection_json
-        .get("columns")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|c| c.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
+    // Every guess the layout below makes about malformed metadata, in the
+    // order met, for one aggregated warning.
+    let mut layout_problems: Vec<String> = Vec::new();
+    let rows =
+        collection_checks::axis_labels(collection_json.get("rows"), "row", &mut layout_problems);
+    let columns = collection_checks::axis_labels(
+        collection_json.get("columns"),
+        "column",
+        &mut layout_problems,
+    );
 
     let groups_json = collection_json
         .get("wells")
@@ -720,21 +724,36 @@ async fn import_collection(
             column_index: u32,
             target: String,
         }
+        // A group's identity is its path, so a path listed again is kept once.
+        let mut seen_paths = std::collections::HashSet::new();
         let requests: Vec<GroupRequest> = groups_json
             .iter()
-            .map(|group_entry| {
+            .filter_map(|group_entry| {
                 let path = group_entry
                     .get("path")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                let row_index = group_entry
-                    .get("rowIndex")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
-                let column_index = group_entry
-                    .get("columnIndex")
-                    .and_then(|v| v.as_u64())
-                    .unwrap_or(0) as u32;
+                if let Some(path) = &path
+                    && !seen_paths.insert(path.clone())
+                {
+                    layout_problems
+                        .push(format!("group {path:?} is listed twice and is shown once"));
+                    return None;
+                }
+                let row_index = collection_checks::group_index(
+                    group_entry,
+                    collection_checks::GroupAxis::Row,
+                    path.as_deref(),
+                    &rows,
+                    &mut layout_problems,
+                );
+                let column_index = collection_checks::group_index(
+                    group_entry,
+                    collection_checks::GroupAxis::Column,
+                    path.as_deref(),
+                    &columns,
+                    &mut layout_problems,
+                );
                 let target = group_collection_path(
                     path.as_deref(),
                     row_index,
@@ -742,12 +761,12 @@ async fn import_collection(
                     &rows,
                     &columns,
                 );
-                GroupRequest {
+                Some(GroupRequest {
                     path,
                     row_index,
                     column_index,
                     target,
-                }
+                })
             })
             .collect();
 
@@ -797,6 +816,23 @@ async fn import_collection(
         ));
     }
 
+    collection_checks::shared_cells(&parsed_groups, &rows, &columns, &mut layout_problems);
+    warnings.extend(collection_checks::aggregate(
+        ImportWarningKind::MalformedCollectionLayout,
+        id,
+        "the collection's layout metadata is malformed",
+        &layout_problems,
+    ));
+    warnings.extend(collection_checks::aggregate(
+        ImportWarningKind::DuplicateTile,
+        id,
+        "tiles duplicate each other",
+        &collection_checks::duplicate_tiles(
+            &parsed_groups,
+            collection_json.get("field_count").and_then(|v| v.as_u64()),
+        ),
+    ));
+
     // Whether any tile is explicitly positioned is a pure function of the
     // already-parsed group metadata (no tile I/O): a single tile carrying a
     // translation makes the whole collection explicitly positioned.
@@ -807,8 +843,7 @@ async fn import_collection(
 
     // The first readable representative (each group's first tile, in declared
     // order) defines axes, scales, and channels for all. An unreadable
-    // candidate is passed over
-    // and its group's interior tiles are never probed, so the search stays
+    // candidate is passed over for the next group's, so the search stays
     // O(groups) even when every read fails. If none is readable the import
     // fails rather than open a geometry-less collection.
     let representative_prefixes: Vec<String> = parsed_groups
@@ -882,22 +917,19 @@ async fn import_collection(
         group_spans.push(start..tile_prefixes.len());
     }
 
-    // Tiles in different groups may differ in level shape and chunk shape, so
-    // each group's first tile is read and the collection declares a geometry
-    // that covers them all. The rest of a group are taken to be stored like
-    // its first tile, which keeps metadata reads proportional to groups.
-    let representative = StoredLevels {
-        shapes: level_metas.iter().map(|meta| meta.shape.clone()).collect(),
-        bindings: level_bindings,
+    // Tiles may differ in level shape, level count, chunk shape, and scale,
+    // so every tile is read, the collection declares a geometry that covers
+    // them all, and whatever that hides is named.
+    let representative = StoredTile {
+        levels: StoredLevels {
+            shapes: level_metas.iter().map(|meta| meta.shape.clone()).collect(),
+            bindings: level_bindings,
+        },
+        scale: level_entries[0].scale,
     };
-    let group_first_prefixes: Vec<&str> = parsed_groups
-        .iter()
-        .filter_map(|group| group.tiles.first())
-        .map(|tile| tile.store_prefix.as_str())
-        .collect();
-    let stored_groups = read_stored_groups(
+    let stored_tiles = read_stored_tiles(
         store,
-        &group_first_prefixes,
+        &tile_prefixes,
         &geometry_tile_prefix,
         &representative,
         &axes_names,
@@ -905,9 +937,9 @@ async fn import_collection(
         &layout.pinned,
     )
     .await;
-    let unusable: Vec<String> = group_first_prefixes
+    let unusable: Vec<String> = tile_prefixes
         .iter()
-        .zip(&stored_groups)
+        .zip(&stored_tiles)
         .filter_map(|(prefix, stored)| stored.as_ref().err().map(|why| format!("{prefix}: {why}")))
         .collect();
     if !unusable.is_empty() {
@@ -917,12 +949,31 @@ async fn import_collection(
             &unusable,
         ));
     }
+    let usable: Vec<(&str, &StoredTile)> = tile_prefixes
+        .iter()
+        .zip(&stored_tiles)
+        .filter_map(|(prefix, stored)| Some((prefix.as_str(), stored.as_ref().ok()?)))
+        .collect();
     let declared = DeclaredLevels::covering(
-        stored_groups.iter().flatten(),
+        usable.iter().map(|(_, tile)| &tile.levels),
         &axes_names,
         data_type_size(data_type),
         &layout.pinned,
     )?;
+    warnings.extend(
+        describe_mismatches(
+            &usable,
+            &declared,
+            (&geometry_tile_prefix, &representative),
+            &axes_names,
+        )
+        .into_iter()
+        .map(|message| ImportWarning {
+            kind: ImportWarningKind::MismatchedTileGeometry,
+            target: id.to_string(),
+            message,
+        }),
+    );
     let levels: Vec<LevelGeometry> = representative_levels
         .into_iter()
         .zip(declared.shapes.iter().zip(&declared.chunk_shapes))
@@ -1118,12 +1169,10 @@ async fn import_collection(
         tile_labels.push(imported);
     }
     let mut tile_labels = tile_labels.into_iter();
+    let mut stored_tiles = stored_tiles.iter();
 
-    for (group, stored) in parsed_groups.iter().zip(&stored_groups) {
+    for group in &parsed_groups {
         let group_entity_id = EntityId(format!("{id}:group:{}", group.path));
-        // A group whose geometry is unusable is read as if stored like the
-        // representative, as the warning above says.
-        let tile_levels = declared.bind(stored.as_ref().unwrap_or(&representative));
 
         entities.push(Entity {
             id: group_entity_id.clone(),
@@ -1190,12 +1239,14 @@ async fn import_collection(
             let tile_entity_id = EntityId(format!("{id}:tile:{}", tile.store_prefix));
             let image_id = ImageId(format!("{id}:image:{}", tile.store_prefix));
 
+            // Named by its store prefix, which is how every warning names it
+            // and which tells a raw copy from a processed one.
             entities.push(Entity {
                 id: tile_entity_id.clone(),
                 kind: EntityKind::Tile,
                 parent: Some(group_entity_id.clone()),
                 labels: EntityLabels {
-                    name: Some(format!("Tile {}", fi)),
+                    name: Some(tile.store_prefix.clone()),
                     tile_index: Some(fi as u32),
                     ..Default::default()
                 },
@@ -1252,11 +1303,16 @@ async fn import_collection(
                 wire_format: WireFormat::Raw { data_type },
             });
 
+            // A tile whose geometry is unusable is read as if stored like the
+            // representative, as the warning above says.
+            let stored = stored_tiles
+                .next()
+                .expect("one stored geometry per tile, in declared order");
             binding_images.push(ImageBindingSeed {
                 image_id,
                 axes_names: axes_names.clone(),
                 store_prefix: Some(tile.store_prefix.clone()),
-                levels: tile_levels.clone(),
+                levels: declared.bind(&stored.as_ref().unwrap_or(&representative).levels),
             });
 
             // Append the tile's labels after its own image entries.
@@ -2240,12 +2296,27 @@ mod tests {
 
     /// The tiles are 14×12, 16×16, and 12×10, and level 1 is one chunk the
     /// size of each tile's level. The declared geometry covers the largest
-    /// tile, and only a tile stored at another chunk shape is regridded.
+    /// tile, only a tile stored at another chunk shape is regridded, and the
+    /// two smaller tiles are named as padded.
     #[tokio::test]
-    async fn committed_mixed_collection_declares_a_geometry_that_covers_every_tile() {
+    async fn committed_mixed_collection_covers_every_tile_and_names_the_smaller_ones() {
         let store = cached_store(&committed_fixture("collection-mixed.ome.zarr"));
         let result = import_dataset(&store, "mixed", "mixed").await.unwrap();
-        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let messages: Vec<_> = result
+            .warnings
+            .iter()
+            .map(|w| (w.kind, w.target.as_str(), w.message.as_str()))
+            .collect();
+        assert_eq!(
+            messages,
+            [(
+                ImportWarningKind::MismatchedTileGeometry,
+                "mixed",
+                "tiles differ in shape, and smaller tiles are padded with fill to 2×16×16 \
+                 (c×y×x), the largest on each axis. Smaller (2 of 3): \"A/1/0\" is 2×14×12, \
+                 \"B/1/0\" is 2×12×10",
+            )]
+        );
 
         for image in result.manifest.images() {
             let levels = &image.multiscale.levels;
@@ -2326,17 +2397,29 @@ mod tests {
         });
     }
 
-    /// Geometry is read once per group, so a group's other tiles are bound
-    /// exactly like its first tile.
+    /// Every tile is bound by its own geometry, so the smaller first tile of
+    /// a group does not drag its full-size sibling into its regrid, and the
+    /// import names the smaller tile.
     #[tokio::test]
-    async fn a_groups_tiles_are_bound_like_its_first_tile() {
-        let dir = temp_dir("groups_bound_like_first_tile");
+    async fn each_tile_is_bound_by_its_own_geometry_and_a_smaller_one_is_named() {
+        let dir = temp_dir("tiles_bound_by_own_geometry");
         two_group_fixture(&dir);
 
         let result = import_dataset(&cached_store(dir.to_str().unwrap()), "g", "g")
             .await
             .unwrap();
-        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        assert_eq!(
+            result.warnings[0].kind,
+            ImportWarningKind::MismatchedTileGeometry
+        );
+        assert!(
+            result.warnings[0]
+                .message
+                .contains("Smaller (1 of 4): \"B/1/0\" is 1×1×1×48×48"),
+            "{}",
+            result.warnings[0].message
+        );
 
         let levels_of = |prefix: &str| {
             result
@@ -2348,10 +2431,10 @@ mod tests {
                 .levels
                 .clone()
         };
-        let second_group = levels_of("B/1/0");
-        assert_eq!(levels_of("B/1/1"), second_group);
+        let smaller = levels_of("B/1/0");
+        assert_eq!(levels_of("B/1/1"), levels_of("A/1/0"));
         assert_eq!(
-            second_group[1]
+            smaller[1]
                 .regrid
                 .as_ref()
                 .map(|regrid| regrid.stored_shape.clone()),
@@ -2408,6 +2491,196 @@ mod tests {
         for image in &result.binding_seed.images[2..] {
             assert_eq!(&image.levels, representative, "{:?}", image.store_prefix);
         }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Rewrite one tile's multiscale metadata in a fixture written by
+    /// [`create_collection_fixture`].
+    fn rewrite_tile(dir: &std::path::Path, tile: &str, edit: impl Fn(&mut serde_json::Value)) {
+        let path = dir.join(tile).join("zarr.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        edit(&mut meta["attributes"]["ome"]["multiscales"][0]);
+        fs::write(&path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+    }
+
+    /// Rewrite the root collection metadata of a fixture written by
+    /// [`create_collection_fixture`].
+    fn rewrite_collection(dir: &std::path::Path, edit: impl Fn(&mut serde_json::Value)) {
+        let path = dir.join("zarr.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        edit(&mut meta["attributes"]["ome"]["plate"]);
+        fs::write(&path, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+    }
+
+    fn warnings_of(result: &ImportResult, kind: ImportWarningKind) -> Vec<&str> {
+        result
+            .warnings
+            .iter()
+            .filter(|w| w.kind == kind)
+            .map(|w| w.message.as_str())
+            .collect()
+    }
+
+    /// A tile with fewer levels and a tile at another pixel size are each
+    /// named, and the collection keeps only the levels every tile has.
+    #[tokio::test]
+    async fn tiles_with_fewer_levels_or_another_pixel_size_are_named() {
+        let dir = temp_dir("tiles_levels_and_pixel_size");
+        create_collection_fixture(
+            &dir,
+            "levels",
+            &["A", "B", "C"],
+            &["1"],
+            &[
+                ("A", "1", 0, 0, 1),
+                ("B", "1", 1, 0, 1),
+                ("C", "1", 2, 0, 1),
+            ],
+            [1, 1, 1, 64, 64],
+            [1, 1, 1, 32, 32],
+            2,
+        );
+        rewrite_tile(&dir, "B/1/0", |multiscale| {
+            multiscale["datasets"].as_array_mut().unwrap().truncate(1);
+        });
+        rewrite_tile(&dir, "C/1/0", |multiscale| {
+            for (level, dataset) in multiscale["datasets"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .enumerate()
+            {
+                let pixel = 2.0 * (1u64 << level) as f64;
+                dataset["coordinateTransformations"][0]["scale"] =
+                    serde_json::json!([1.0, 1.0, 1.0, pixel, pixel]);
+            }
+        });
+
+        let result = import_dataset(&cached_store(dir.to_str().unwrap()), "l", "l")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            warnings_of(&result, ImportWarningKind::MismatchedTileGeometry),
+            [
+                "tiles differ in level count, and every tile shows only the levels all of them \
+                 have (1). Fewer than 2 (1 of 3): \"B/1/0\" has 1",
+                "tiles differ in pixel size, and every tile is shown at \"A/1/0\"'s 1×1×1 \
+                 (z×y×x). Different (1 of 3): \"C/1/0\" is 1×2×2",
+            ]
+        );
+        assert_eq!(result.warnings.len(), 2, "{:?}", result.warnings);
+        assert_eq!(result.manifest.images()[0].multiscale.levels.len(), 1);
+        for image in &result.binding_seed.images {
+            assert_eq!(image.levels.len(), 1, "{:?}", image.store_prefix);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A tile listed twice is kept once, and a group holding more tiles than
+    /// the collection's `field_count` is named as holding copies. Tiles are
+    /// labelled by their store prefix, so the copies can be told apart.
+    #[tokio::test]
+    async fn copies_of_one_position_are_flagged_and_tiles_are_named_by_path() {
+        let dir = temp_dir("duplicate_tiles");
+        create_collection_fixture(
+            &dir,
+            "copies",
+            &["A"],
+            &["1", "2"],
+            &[("A", "1", 0, 0, 2), ("A", "2", 0, 1, 1)],
+            [1, 1, 1, 32, 32],
+            [1, 1, 1, 32, 32],
+            1,
+        );
+        rewrite_collection(&dir, |collection| {
+            collection["field_count"] = serde_json::json!(1);
+        });
+        let group_meta = dir.join("A").join("2").join("zarr.json");
+        let mut meta: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&group_meta).unwrap()).unwrap();
+        meta["attributes"]["ome"]["well"]["images"] =
+            serde_json::json!([{"path": "0"}, {"path": "0"}]);
+        fs::write(&group_meta, serde_json::to_string_pretty(&meta).unwrap()).unwrap();
+
+        let result = import_dataset(&cached_store(dir.to_str().unwrap()), "d", "d")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            warnings_of(&result, ImportWarningKind::DuplicateTile),
+            [
+                "tiles duplicate each other in 2 places: group \"A/1\" lists 2 tiles, more than \
+              the collection's field_count of 1; \"A/2/0\" is listed twice and is shown once"
+            ]
+        );
+        let tile_names: Vec<_> = result
+            .manifest
+            .entities()
+            .iter()
+            .filter(|e| e.kind == EntityKind::Tile)
+            .map(|e| e.labels.name.as_deref().unwrap())
+            .collect();
+        assert_eq!(tile_names, ["A/1/0", "A/1/1", "A/2/0"]);
+        assert_eq!(result.binding_seed.images.len(), 3);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A nameless row keeps its place instead of shifting later labels, a
+    /// missing index is recovered from the group's path, and two groups at
+    /// one position are named together.
+    #[tokio::test]
+    async fn malformed_layout_metadata_is_named_instead_of_shifting_labels() {
+        let dir = temp_dir("malformed_layout");
+        create_collection_fixture(
+            &dir,
+            "layout",
+            &["A", "B", "C"],
+            &["1", "2"],
+            &[
+                ("A", "1", 0, 0, 1),
+                ("A", "1b", 0, 0, 1),
+                ("C", "1", 2, 0, 1),
+                ("C", "2", 2, 1, 1),
+            ],
+            [1, 1, 1, 32, 32],
+            [1, 1, 1, 32, 32],
+            1,
+        );
+        rewrite_collection(&dir, |collection| {
+            collection["rows"][1] = serde_json::json!({});
+            collection["wells"][3]
+                .as_object_mut()
+                .unwrap()
+                .remove("columnIndex");
+        });
+
+        let result = import_dataset(&cached_store(dir.to_str().unwrap()), "m", "m")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            warnings_of(&result, ImportWarningKind::MalformedCollectionLayout),
+            [
+                "the collection's layout metadata is malformed in 3 places: row entry 1 has no \
+              name and is labelled \"1\"; group \"C/2\" has no columnIndex and is placed in \
+              column \"2\" by its path; groups \"A/1\" and \"A/1b\" are both at row \"A\", \
+              column \"1\" and overlap"
+            ]
+        );
+        let group_names: Vec<_> = result
+            .manifest
+            .entities()
+            .iter()
+            .filter(|e| e.kind == EntityKind::Group)
+            .map(|e| e.labels.name.as_deref().unwrap())
+            .collect();
+        assert_eq!(group_names, ["A/1", "A/1", "C/1", "C/2"]);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -2872,13 +3145,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// The geometry search never reads a corrupt leading group tile-by-tile.
-    /// With every tile of the leading group unreadable, the search tries that
-    /// group's single representative, then falls forward to the next group's
-    /// representative — so the corrupt group's interior tiles are never read
-    /// and total geometry reads track the group count, not the tile count.
+    /// The representative search falls forward past a corrupt leading group
+    /// one group at a time, and every tile of that group is then named as
+    /// unusable rather than silently bound like the representative.
     #[tokio::test]
-    async fn corrupt_leading_group_geometry_search_skips_interior_tiles() {
+    async fn corrupt_leading_group_falls_forward_and_names_every_unusable_tile() {
         let dir = temp_dir("corrupt_leading_group_geometry");
         create_collection_fixture(
             &dir,
@@ -2913,37 +3184,45 @@ mod tests {
         // of both groups still imports.
         assert_eq!(result.manifest.images().len(), 40, "one image per tile");
 
-        // Decisive: the leading group cost exactly one geometry read (its
-        // representative), never its 20 tiles, and the search fell forward to
-        // the next group's representative.
+        // The search tried the leading group's representative and fell
+        // forward to the next group's, without reading the leading group's
+        // other tiles first.
         let reads = reads.lock().unwrap();
+        let first_read = |path: &str| reads.iter().position(|p| p == path);
+        let chosen = first_read("B/1/0/zarr.json").expect("the search falls forward");
+        assert!(first_read("A/1/0/zarr.json").is_some_and(|tried| tried < chosen));
         assert!(
-            reads.iter().any(|p| p == "A/1/0/zarr.json"),
-            "the leading group's representative must be tried: {reads:?}",
+            first_read("A/1/1/zarr.json").is_some_and(|interior| interior > chosen),
+            "interior tiles are read only after the representative is chosen: {reads:?}",
         );
-        assert!(
-            reads.iter().any(|p| p == "B/1/0/zarr.json"),
-            "selection must fall forward to the next group's representative: {reads:?}",
-        );
-        for interior in ["A/1/1/zarr.json", "A/1/10/zarr.json", "A/1/19/zarr.json"] {
-            assert!(
-                !reads.iter().any(|p| p == interior),
-                "interior tiles of the corrupt leading group must never be read for \
-                 geometry, but {interior} was: {reads:?}",
-            );
-        }
         drop(reads);
 
-        // One aggregated geometry warning, naming the fell-forward
-        // representative as an example.
-        let geo: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.kind == ImportWarningKind::UnreadableTileGeometry)
-            .collect();
-        assert_eq!(geo.len(), 1, "warnings: {:?}", result.warnings);
-        assert_eq!(geo[0].target, "clg");
-        assert!(geo[0].message.contains("A/1/0"), "{}", geo[0].message);
+        // One aggregated warning names the fell-forward representative, and
+        // another counts every tile of the corrupt group as unusable.
+        let of_kind = |kind| {
+            result
+                .warnings
+                .iter()
+                .filter(|w| w.kind == kind)
+                .collect::<Vec<_>>()
+        };
+        let unreadable = of_kind(ImportWarningKind::UnreadableTileGeometry);
+        assert_eq!(unreadable.len(), 1, "warnings: {:?}", result.warnings);
+        assert_eq!(unreadable[0].target, "clg");
+        assert!(
+            unreadable[0].message.contains("A/1/0"),
+            "{}",
+            unreadable[0].message
+        );
+        let unusable = of_kind(ImportWarningKind::UnusableTileGeometry);
+        assert_eq!(unusable.len(), 1, "warnings: {:?}", result.warnings);
+        assert!(
+            unusable[0]
+                .message
+                .starts_with("20 tiles could not be read"),
+            "{}",
+            unusable[0].message
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -5319,14 +5598,13 @@ mod tests {
         );
     }
 
-    /// A label-free collection wide enough for sampled discovery imports
-    /// with metadata read traffic proportional to its groups, never one read
-    /// per tile: 6 groups x 60 tiles = 360 tiles must cost on the order of
-    /// dozens of reads (root + one per group + the representative tile's
-    /// template + two label samples per group). The bounded discovery is
-    /// surfaced as a warning naming the exhaustive override.
+    /// A label-free collection wide enough for sampled discovery reads each
+    /// tile's geometry exactly once, so every tile is compared, while label
+    /// discovery still costs two probes per group, never one per tile. The
+    /// bounded discovery is surfaced as a warning naming the exhaustive
+    /// override.
     #[tokio::test]
-    async fn label_free_wide_collection_reads_scale_with_groups() {
+    async fn label_free_wide_collection_reads_each_tile_once_and_samples_labels() {
         let dir = temp_dir("wide_label_free");
         create_collection_fixture(
             &dir,
@@ -5365,15 +5643,20 @@ mod tests {
             label_probes, 12,
             "expected 2 label probes per group (6 groups), got {label_probes}",
         );
-        // Total metadata reads track structure (root + 6 group metas + the
-        // representative tile and its level + 12 label samples ≈ 21), never
-        // the 360 tiles.
-        println!("metadata reads for 6x60 collection: {}", reads.len());
-        assert!(
-            reads.len() <= 40,
-            "expected dozens of metadata reads for a 360-tile collection, got {}",
-            reads.len(),
-        );
+        // Geometry: each tile's multiscale and its one level array, once.
+        let tile_reads = reads
+            .iter()
+            .filter(|p| p.ends_with("/zarr.json") && p.matches('/').count() == 3)
+            .count();
+        assert_eq!(tile_reads, 360);
+        let level_reads = reads
+            .iter()
+            .filter(|p| p.ends_with("/0/zarr.json") && p.matches('/').count() == 4)
+            .count();
+        assert_eq!(level_reads, 360);
+        // Root, 6 group metas, the tiles, the representative's unwritten-level
+        // probe, and the label samples: nothing else.
+        assert_eq!(reads.len(), 1 + 6 + 360 * 2 + 1 + 12, "{reads:?}");
         drop(reads);
 
         // Bounded discovery is announced, with the escape hatch named.
