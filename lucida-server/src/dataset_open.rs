@@ -1593,5 +1593,37 @@ mod tests {
         let health = health_after_open(13, &url, tmp.path()).await;
 
         assert_eq!(health.status, DatasetHealthStatus::Healthy);
+        assert!(health.import_warnings.is_empty());
+    }
+
+    /// A collection whose tiles differ in shape opens degraded, and health
+    /// carries the warning apart from the cache notes, flagged as the reason.
+    #[tokio::test]
+    async fn dataset_health_degrades_when_collection_tiles_differ_in_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../fixtures/ome-zarr/collection-mixed.ome.zarr")
+            .canonicalize()
+            .unwrap();
+        let url = fixture.to_str().unwrap().to_string();
+
+        let health = health_after_open(15, &url, tmp.path()).await;
+
+        assert_eq!(health.status, DatasetHealthStatus::Degraded);
+        assert_eq!(health.binding.status, DatasetHealthStatus::Healthy);
+        assert_eq!(
+            health.import_warnings.len(),
+            1,
+            "{:?}",
+            health.import_warnings
+        );
+        let warning = &health.import_warnings[0];
+        assert!(warning.degrades);
+        assert!(
+            warning.message.contains("\"A/1/0\" is 2×14×12"),
+            "{}",
+            warning.message
+        );
+        assert!(health.messages.contains(&warning.message));
     }
 }
