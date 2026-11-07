@@ -1,5 +1,5 @@
 /**
- * The page's side of the trace driver's scripted steps (ADR 0051).
+ * The page's side of the trace driver's scripted steps.
  *
  * Pan, zoom, and orbit arrive as synthesized pointer and wheel events and need
  * nothing here. Scrub and select have nothing to click on the capture surface,

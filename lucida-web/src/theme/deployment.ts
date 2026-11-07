@@ -8,7 +8,7 @@ import {
 import { setPreferenceDefaults } from "./preferences.ts";
 
 /**
- * A deployment's theme (ADR 0066): defaults for the appearance preferences
+ * A deployment's theme: defaults for the appearance preferences
  * and token overrides per preset, from the file the server's
  * `LUCIDA_THEME_FILE` names. It layers over the built-in defaults and under
  * the user's saved preferences.

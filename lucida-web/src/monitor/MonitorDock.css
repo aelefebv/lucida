@@ -8,9 +8,9 @@
  * store to the device pixel ratio for the same reason: #862 and #864 both
  * hid behind DPR-1-only verification.
  *
- * Colors are theme tokens only (ADR 0066). Chart colors come from
- * timelinePalette.ts, which names the same tokens, so a series is one color
- * in the DOM and on the canvas.
+ * Colors are theme tokens only. Chart colors come from timelinePalette.ts,
+ * which names the same tokens, so a series is one color in the DOM and on
+ * the canvas.
  */
 
 .monitor-dock {

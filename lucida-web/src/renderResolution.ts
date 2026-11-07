@@ -1,5 +1,5 @@
 /**
- * How much of the device's pixel density the viewport renders at (ADR 0068).
+ * How much of the device's pixel density the viewport renders at.
  *
  * Only the render target shrinks. The camera, planning, hit testing, and
  * every overlay keep working in device pixels at the full ratio, and the

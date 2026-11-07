@@ -10,7 +10,7 @@ export interface InitMessage {
   /**
    * The page's reading of the device's memory, in GiB, or null when unknown.
    * The page reads it because only it can tell a touch-only device that
-   * reports none; the worker fits its atlas budgets from it (ADR 0068).
+   * reports none; the worker fits its atlas budgets from it.
    */
   deviceMemoryGiB?: number | null;
 }
@@ -836,7 +836,7 @@ export interface GpuPassTimeMessage {
  * A viewport frame's GPU work has finished. Posted for every frame on every
  * device, unlike {@link GpuPassTimeMessage}, so the page can time a frame
  * from dispatch to done on its own clock and lower the render resolution
- * when frames run long (ADR 0068).
+ * when frames run long.
  */
 export interface FrameDoneMessage {
   type: "frameDone";

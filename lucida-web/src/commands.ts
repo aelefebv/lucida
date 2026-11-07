@@ -4,8 +4,8 @@
  * command the web produces as a literal; server-originated commands and camera
  * ops with typed wasm methods are absent because other locks cover them.
  *
- * The unions are tag-disjoint, as the Rust enums are (ADR 0001): document state
- * is sequenced and broadcast, viewport state stays local. `commands.test.ts`
+ * The unions are tag-disjoint, as the Rust enums are: document state is
+ * sequenced and broadcast, viewport state stays local. `commands.test.ts`
  * round-trips every variant through the real wasm so a Rust rename fails it.
  */
 

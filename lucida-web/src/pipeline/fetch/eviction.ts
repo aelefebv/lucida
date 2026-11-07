@@ -54,8 +54,8 @@ export class LRUPolicy<T extends EvictableEntry = CacheEntry> implements Evictio
 /**
  * The detail cache's policy. Two passes:
  *
- *  1. Chunks finer than their entity's target level, whatever their tier
- *     (ADR 0061). Planning requests only the target level, the renderer
+ *  1. Chunks finer than their entity's target level, whatever their tier.
+ *     Planning requests only the target level, the renderer
  *     never samples finer, and finer levels cost the most, so zooming out
  *     releases these first. Finest level first.
  *  2. Everything else, walking {@link getTierOrder} for the current mode.

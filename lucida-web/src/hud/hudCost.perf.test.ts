@@ -1,8 +1,6 @@
 /**
- * The HUD's cost contract, asserted (issue #1061, ADR 0049 as amended by
- * #1048). The amendment puts the surfaces that draw while a run is open
- * under the recorder's contract; the ADR carries the reasoning, and this file
- * carries the HUD's gates:
+ * The HUD's cost contract, asserted. A surface that draws while a run is
+ * open is under the recorder's contract, and these are the HUD's gates:
  *
  * - **Bounded per tick, nothing per frame.** The HUD ticks on its own timer
  *   every {@link HUD_TICK_MS} and never from the render loop, so its whole

@@ -1,8 +1,7 @@
 /**
  * Builds the active set. Every visible image or tile becomes one
  * {@link TileEntry} carrying the levels each residency tier holds for
- * it. Invisible entities pass through as {@link InvisibleEntry}. See ADR
- * 0061 for the two-tier residency model.
+ * it. Invisible entities pass through as {@link InvisibleEntry}.
  */
 
 import type {

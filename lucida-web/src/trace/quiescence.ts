@@ -1,5 +1,5 @@
 /**
- * The published quiescence predicate (ADR 0051).
+ * The published quiescence predicate.
  *
  * Quiescence is a boolean the page publishes, never something inferred from
  * outside. A driver can only watch the frame counter stop, and that is wrong

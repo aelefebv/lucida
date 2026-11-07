@@ -97,9 +97,9 @@ export interface MonitorBanner {
  * One phase drawn over the run's wall clock.
  *
  * `placed` is not decoration. A phase can be measured and unplaceable — a
- * server row the merge could not nest carries durations and no position at all
- * (ADR 0050) — and drawing one of those at the origin is the same class of lie
- * as drawing silence over a cold open's metadata reads.
+ * server row the merge could not nest carries durations and no position at
+ * all — and drawing one of those at the origin is the same class of lie as
+ * drawing silence over a cold open's metadata reads.
  */
 export interface MonitorTrack {
   phaseId: string;

@@ -94,7 +94,7 @@ export interface PhaseRollup {
  * A limiter and what it did to the run.
  *
  * `cap` is inferred from the trace rather than declared by it: a client sees
- * its own rows and no aggregate (ADR 0050), so the highest concurrency the
+ * its own rows and no aggregate, so the highest concurrency the
  * run ever reached is the only ceiling observable from inside. Stated as
  * `capSource` so nobody reads an inference as a configured value.
  */

@@ -1,6 +1,6 @@
 /// <reference types="node" />
 // Smoke test for the URL helpers the `lucida-core` wasm bundle re-exports from
-// `lucida_content::url` (see `docs/adr/0042-canonical-dataset-url-form.md`).
+// `lucida_content::url`.
 // It catches build-config drift: if wasm-pack stops re-exporting these, this
 // fails instead of the SPA failing when a user types a Windows path. Rust
 // tests cover the behavior; this checks one case per function. The

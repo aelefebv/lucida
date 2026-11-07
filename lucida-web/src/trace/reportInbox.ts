@@ -4,9 +4,9 @@
  * only path an agent has to a session it did not start.
  *
  * Nothing here runs on its own: no schedule, no send on a run's close, no
- * retry. The only caller is the action, so ADR 0049's rule that the recording
- * never leaves the process unless asked still holds. The viewer registers the
- * sender because the session socket lives there.
+ * retry. The only caller is the action, so the recording never leaves the
+ * page unless somebody asks. The viewer registers the sender because the
+ * session socket lives there.
  */
 
 import type { InboxReceipt } from "../bridge.ts";

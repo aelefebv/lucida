@@ -1,8 +1,7 @@
 // @vitest-environment happy-dom
 //
 // The share-warning classifier (`hasLocalFilePaths` / `localFilePathCount`),
-// which delegates to the wasm `is_local_dataset_url` (see
-// `docs/adr/0014-local-file-datasets-personal-only-in-saved-views.md`).
+// which delegates to the wasm `is_local_dataset_url`.
 // The shim is mocked with a small reference implementation;
 // `urlHelpers.test.ts` covers the real wasm wiring.
 

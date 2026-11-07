@@ -432,7 +432,7 @@ describe("TraceRecorder plan and queue", () => {
   it("births a row at dispatch, dating plan and queue from the pass that enqueued it", () => {
     // A row is born at dispatch, so the one call that makes it also closes
     // `plan`, brackets `queue` and opens `wire`. One call per chunk keeps the
-    // event count inside the tick ceiling ADR 0049 derived.
+    // event count inside the recorder's tick ceiling.
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
 
@@ -497,7 +497,7 @@ describe("TraceRecorder plan and queue", () => {
     recorder.notePlanEnqueue(1_010);
     advance(200);
 
-    // No admission stamp: ADR 0044 keeps them for the admission window only.
+    // No admission stamp: only the admission window carries one.
     recorder.beginChunkRow(CHUNK, 0, undefined);
     recorder.closeRun("explicit");
 

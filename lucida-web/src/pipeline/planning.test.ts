@@ -1231,7 +1231,7 @@ describe("plan() — detail and coarse tiers", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The detail lane follows the target level (ADR 0061)
+// The detail lane follows the target level
 // ---------------------------------------------------------------------------
 
 describe("plan() — the detail lane follows the target level", () => {
@@ -1330,9 +1330,10 @@ describe("plan() — the detail lane follows the target level", () => {
     const detail = planWithTarget(targetLevel).requests.filter((r) => r.lane === "detail");
     expect(new Set(detail.map((r) => r.level))).toEqual(new Set([targetLevel]));
 
-    // ADR 0061's bound: the viewport area over one target-level chunk's
-    // on-screen footprint, plus the partly covered chunks along each
-    // visible tile's border.
+    // At the target, the detail set is bounded by the screen, not the
+    // dataset: the viewport area over one target-level chunk's on-screen
+    // footprint, plus the partly covered chunks along each visible tile's
+    // border.
     const ratio = 2 ** targetLevel;
     const footprintPx = (chunkSide * pixelsPerSample * ratio) ** 2;
     const chunksPerTileSide = Math.ceil(tileSide / ratio / chunkSide);
@@ -2268,7 +2269,7 @@ describe("plan() honors config tunables", () => {
 });
 
 // ---------------------------------------------------------------------------
-// emitMinimapLane (ADR 0023)
+// emitMinimapLane
 // ---------------------------------------------------------------------------
 //
 // Minimap chunks ride their own dedicated highest-priority lane.
@@ -2409,12 +2410,11 @@ describe("plan() — minimap lane", () => {
   });
 
   // Bulk seeding. The top-priority lane is justified by the seed set
-  // being small (the "starvation risk is bounded" argument in ADR 0023).
-  // A wide collection's whole-collection seed set is not small: at tens
-  // of thousands of coarsest chunks, top-priority seeding would occupy
-  // every fetch slot for minutes while the visible band waits. Above
-  // the fast-seed cap the whole set emits behind every view-serving
-  // lane instead.
+  // being small. A wide collection's whole-collection seed set is not
+  // small: at tens of thousands of coarsest chunks, top-priority seeding
+  // would occupy every fetch slot for minutes while the visible band
+  // waits. Above the fast-seed cap the whole set emits behind every
+  // view-serving lane instead.
 
   function makeManyCoords(n: number): MinimapChunkCoord[] {
     const coords: MinimapChunkCoord[] = [];

@@ -3,7 +3,7 @@
  * steals interaction. It reads existing scene, orchestrator, and cache state;
  * production code carries nothing for it. Colors and text come from the pure
  * `overlayDrawList.ts`; this file projects and mounts. The brushed selection
- * is read from `trace/linkedSelection.ts`, never from the dock (ADR 0052).
+ * is read from `trace/linkedSelection.ts`, never from the dock.
  *
  * Both modes project voxel to world to `WasmScene.project_to_screen`. Slice:
  * world is voxel plus the tile position. Volume: world is the tile model

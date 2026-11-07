@@ -51,7 +51,7 @@ export interface CpuCacheConfig {
 
 /**
  * Logical lane each request travels on. `minimap`, `coarse`, and
- * `overview` share the overview store (ADR 0023). `detail` and
+ * `overview` share the overview store. `detail` and
  * `prefetch` live in the main chunk store. The planner does not emit
  * `overview`; it stays for the trace's lane column and store routing.
  */

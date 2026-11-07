@@ -1,5 +1,5 @@
 /**
- * The dock's live draw, under the cost contract (ADR 0049): a surface that
+ * The dock's live draw, under the cost contract: a surface that
  * draws while a run is open must not show up in the run it draws. Timed here:
  * deriving the live timeline from the open run's per-tick tiers, and laying
  * it out as a draw list. The canvas replay is bounded by the list's
