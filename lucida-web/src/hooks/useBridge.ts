@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
-import type { Bridge, ClientId, PresenceState } from "../bridge.ts";
+import type { Bridge, ClientId, DatasetImportWarning, PresenceState } from "../bridge.ts";
 export type { Bridge } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -84,6 +84,9 @@ export function useBridge(params: Params) {
   const [remoteDatasetProgress, setRemoteDatasetProgress] = useState<string | null>(null);
   const [remoteDatasetWarnings, setRemoteDatasetWarnings] = useState<readonly string[]>([]);
   const [remoteDatasetWarningsOverflow, setRemoteDatasetWarningsOverflow] = useState(0);
+  const [datasetImportWarnings, setDatasetImportWarnings] = useState<
+    ReadonlyMap<string, readonly DatasetImportWarning[]>
+  >(() => new Map());
 
   useEffect(() => {
     if (!wasmReady || controllerRef.current) return;
@@ -130,6 +133,7 @@ export function useBridge(params: Params) {
         onDatasetsChanged: () => portsRef.current.bumpDatasetsVersion(),
         onRemoteDocumentChanged: () => portsRef.current.bumpRemoteDocumentVersion(),
         onWorkspaceArchived: () => portsRef.current.onWorkspaceArchived?.(),
+        onDatasetImportWarnings: setDatasetImportWarnings,
       },
     });
     controllerRef.current = controller;
@@ -158,6 +162,7 @@ export function useBridge(params: Params) {
       setRemoteDatasetProgress(null);
       setRemoteDatasetWarnings([]);
       setRemoteDatasetWarningsOverflow(0);
+      setDatasetImportWarnings(new Map());
       portsRef.current.bumpDatasetsVersion();
     };
   }, [wasmReady, workspaceId]);
@@ -229,6 +234,9 @@ export function useBridge(params: Params) {
      *  "+N more" instead of hiding a flood. */
     remoteDatasetWarningsOverflow,
     dismissRemoteDatasetWarnings,
+    /** Each dataset's import warnings by dataset id, however the dataset
+     *  arrived. Unlike `remoteDatasetWarnings`, never dismissed. */
+    datasetImportWarnings,
     breakFollow,
     handleFollow,
     followablePeers,
