@@ -158,9 +158,10 @@ export function handleVolumeChunkData(
       if (!evictKey) continue;
       const cam = rayHitForMember(ctx.state, memberId);
       const incomingDist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam);
-      // Equal-distance replacement matters for T/C scrubbing: the new
-      // timepoint often maps to the same spatial cell as the old one.
-      if (incomingDist > farthestDist) continue;
+      // A tie keeps the resident, or mirror-image chunks displace each other
+      // on every re-send. A T or C scrub still replaces in place, because the
+      // remap unmaps the old selection's slots and they rank at infinite distance.
+      if (incomingDist >= farthestDist) continue;
       slotIndex = atlas.slots.get(evictKey)!;
       atlas.slots.delete(evictKey);
       evictedKeys.push(evictKey);
