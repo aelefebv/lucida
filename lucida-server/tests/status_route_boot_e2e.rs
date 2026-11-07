@@ -27,7 +27,7 @@ fn a_configured_route_answers_with_no_session() {
         .spawn()
         .expect("the server binary runs");
 
-    let up = wait_for_health(port);
+    let up = wait_for_health(port, &mut child);
     let answer = if up { get(port, "/status") } else { None };
     // Stop the server before reading its pipes: draining them runs to
     // end-of-file, and a running server never reaches one. Log lines go
