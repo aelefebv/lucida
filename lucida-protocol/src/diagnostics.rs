@@ -446,4 +446,19 @@ pub struct DatasetSourceHealth {
     pub generated_coarse: DatasetGeneratedCoarseHealth,
     #[serde(default)]
     pub messages: Vec<String>,
+    /// What the import found, in the order found. Each message is also in
+    /// `messages`; this keeps them apart from cache and binding notes so a
+    /// client can show them beside the dataset.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub import_warnings: Vec<DatasetImportWarning>,
+}
+
+/// One import warning, as dataset health reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DatasetImportWarning {
+    /// What the warning is about, such as a group's collection path.
+    pub target: String,
+    pub message: String,
+    /// The warning says the data is shown wrong, so it degrades `status`.
+    pub degrades: bool,
 }
