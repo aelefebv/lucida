@@ -379,6 +379,39 @@ describe("SessionController self id", () => {
   });
 });
 
+describe("SessionController follow", () => {
+  it("following a peer that has reported nothing keeps this client's camera and layers", () => {
+    const { controller, handlers, bridge, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 7, {});
+    handlers.onPeerJoined?.(2, { client_id: 2, following: null, cursor: null });
+
+    controller.follow(2);
+
+    expect(bridge.sendFollow).toHaveBeenCalledWith(2);
+    expect(scene.import_presence).not.toHaveBeenCalled();
+    expect(scene.import_dataset_presence).not.toHaveBeenCalled();
+  });
+
+  it("following a peer adopts its camera, order and settings", () => {
+    const { controller, handlers, scene } = makeHarness();
+    const peer: PresenceState = {
+      ...makePresence(2),
+      dataset_order: ["wds-1"],
+      dataset_settings: { "wds-1": { visible: false } },
+    };
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [peer], 7, {});
+
+    controller.follow(2);
+
+    expect(scene.import_presence).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({ camera: peer.camera, view: peer.view, display: peer.display }),
+    );
+    expect(scene.import_dataset_presence).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({ dataset_order: ["wds-1"], dataset_settings: { "wds-1": { visible: false } } }),
+    );
+  });
+});
+
 describe("SessionController remote-document-changed coalescing", () => {
   it("a snapshot with N pending replays emits onRemoteDocumentChanged exactly once, after the replays", async () => {
     const { handlers, events, scene } = makeHarness();

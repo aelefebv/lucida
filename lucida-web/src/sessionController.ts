@@ -397,8 +397,9 @@ export class SessionController {
   }
 
   /** Start (or stop, with `null`) following a peer's camera. On start,
-   *  immediately adopt the target's last known presence so the switch is
-   *  instant rather than waiting for their next update. */
+   *  immediately adopt what the target has reported so the switch is instant
+   *  rather than waiting for their next update. A part it hasn't reported
+   *  stays as it is here until its first update arrives. */
   follow(targetId: ClientId | null): void {
     if (targetId === this.myId) return;
     this.setFollowTarget(targetId);
@@ -409,12 +410,14 @@ export class SessionController {
     const scene = this.deps.getScene();
     if (!scene) return;
     try {
-      const presenceJson = JSON.stringify({
-        camera: peer.camera,
-        view: peer.view,
-        display: peer.display,
-      });
-      guardedSceneCall("import_presence", scene, () => scene.import_presence(presenceJson));
+      if (peer.camera && peer.view && peer.display) {
+        const presenceJson = JSON.stringify({
+          camera: peer.camera,
+          view: peer.view,
+          display: peer.display,
+        });
+        guardedSceneCall("import_presence", scene, () => scene.import_presence(presenceJson));
+      }
       if (peer.dataset_order && peer.dataset_settings) {
         try {
           const layerJson = JSON.stringify({

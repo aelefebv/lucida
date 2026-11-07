@@ -587,7 +587,8 @@ const expectedPeerPresence = {
 const presenceMirror: PresenceState = expectedPeerPresence;
 void presenceMirror;
 
-const expectedJoiningPresence = {
+/** A peer in fly mode that has reported an empty dataset presence. */
+const expectedFlyPeerPresence = {
   client_id: 11,
   camera: expectedFlyCamera,
   view: { z_range: { start: 0, end: 50 }, t: 0, c: 0, multi_channel: false },
@@ -597,8 +598,26 @@ const expectedJoiningPresence = {
   dataset_order: [] as string[],
   dataset_settings: {},
 };
-const joiningMirror: PresenceState = expectedJoiningPresence;
-void joiningMirror;
+const flyPeerMirror: PresenceState = expectedFlyPeerPresence;
+void flyPeerMirror;
+
+/** A peer that has just joined, as the server sends it: placeholder camera,
+ *  view and display for readers that predate `camera_reported`. */
+const expectedJoiningPresenceWire = {
+  client_id: 11,
+  camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 600] },
+  view: { z_range: { start: 0, end: 1 }, t: 0, c: 0, multi_channel: false },
+  display: { contrast_min: 0, contrast_max: 65535, gamma: 1 },
+  camera_reported: false,
+  following: null,
+  cursor: null,
+};
+/** The same peer as the bridge hands it on: nothing reported. */
+const expectedJoiningPresence: PresenceState = {
+  client_id: 11,
+  following: null,
+  cursor: null,
+};
 
 /** Wire shape of `lucida_core::scene::Annotation` (the snapshot pins).
  *  Exhaustive, so it includes `anchor`, which the web mirror doesn't read. */
@@ -882,7 +901,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       type: "snapshot",
       seq: 42,
       document: expectedDocument,
-      peers: [expectedPeerPresence],
+      peers: [expectedPeerPresence, expectedFlyPeerPresence],
       your_id: 7,
       generated_availability: { "wds-0f3a": expectedGeneratedSnapshot },
     });
@@ -897,7 +916,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(seq).toBe(42);
     const document: WireDocumentState = JSON.parse(documentJson);
     expect(document).toStrictEqual(expectedDocument);
-    expect(peers).toStrictEqual([expectedPeerPresence]);
+    expect(peers).toStrictEqual([expectedPeerPresence, expectedFlyPeerPresence]);
     expect(yourId).toBe(7);
     expect(generatedAvailability).toStrictEqual({
       "wds-0f3a": expectedGeneratedSnapshot,
@@ -945,13 +964,13 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(handlers.onAck).toHaveBeenCalledWith(44);
   });
 
-  it("peer_joined carries the full presence (fly camera, no identity)", () => {
+  it("peer_joined carries a presence with nothing reported", () => {
     const raw = fixtureRaw("session/server_peer_joined.json");
     COVERED_FIXTURES.add("session/server_peer_joined.json");
     expect(JSON.parse(raw)).toStrictEqual({
       type: "peer_joined",
       client_id: 11,
-      presence: expectedJoiningPresence,
+      presence: expectedJoiningPresenceWire,
     });
 
     const onPeerJoined = vi.fn();
