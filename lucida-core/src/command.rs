@@ -167,9 +167,13 @@ pub enum ViewportCommand {
     #[serde(rename = "set_mode_fly")]
     SetModeFly,
     // Viewport
+    /// The canvas in device pixels, and the device pixel ratio that sized it
+    /// when the client knows it.
     SetViewport {
         width: u32,
         height: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pixel_ratio: Option<f64>,
     },
     // 2D camera
     Pan {
@@ -758,8 +762,12 @@ impl Scene {
             ViewportCommand::SetModeFly => {
                 self.set_mode_fly();
             }
-            ViewportCommand::SetViewport { width, height } => {
-                self.inner_set_viewport(width, height);
+            ViewportCommand::SetViewport {
+                width,
+                height,
+                pixel_ratio,
+            } => {
+                self.inner_set_viewport(width, height, pixel_ratio);
             }
             ViewportCommand::Pan { dx, dy } => {
                 if let Camera::Slice(ref mut v) = self.camera {
@@ -2417,6 +2425,7 @@ mod tests {
             ViewportCommand::SetViewport {
                 width: 1024,
                 height: 768,
+                pixel_ratio: None,
             }
             .into(),
         );
@@ -2425,11 +2434,53 @@ mod tests {
             ViewportCommand::SetViewport {
                 width: 1024,
                 height: 768,
+                pixel_ratio: None,
             }
             .into(),
         );
         assert_eq!(scene.epochs.view, 1, "same-size re-assert must not bump");
         assert_eq!(scene.epochs.selection, 0);
+    }
+
+    #[test]
+    fn a_pixel_ratio_change_keeps_the_slice_region_and_a_resize_keeps_the_zoom() {
+        let size = |width, height, ratio| -> Command {
+            ViewportCommand::SetViewport {
+                width,
+                height,
+                pixel_ratio: Some(ratio),
+            }
+            .into()
+        };
+        let slice = |scene: &Scene| match &scene.camera {
+            Camera::Slice(s) => s.clone(),
+            other => panic!("expected a slice camera, got {other:?}"),
+        };
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(size(1280, 800, 1.0));
+        scene.apply(ViewportCommand::SetZoom { value: 0.5 }.into());
+        let at_1x = slice(&scene);
+
+        scene.apply(size(2560, 1600, 2.0));
+        let at_2x = slice(&scene);
+        assert_eq!(at_2x.zoom, 1.0);
+        assert_eq!(at_2x.world_bounds(), at_1x.world_bounds());
+
+        // Same ratio, wider canvas: more of the world, same zoom.
+        scene.apply(size(3000, 1600, 2.0));
+        assert_eq!(slice(&scene).zoom, 1.0);
+
+        // A size without a ratio leaves the ratio it last heard alone.
+        scene.apply(
+            ViewportCommand::SetViewport {
+                width: 1500,
+                height: 800,
+                pixel_ratio: None,
+            }
+            .into(),
+        );
+        scene.apply(size(3000, 1600, 2.0));
+        assert_eq!(slice(&scene).zoom, 1.0);
     }
 
     #[test]
@@ -2513,6 +2564,7 @@ mod tests {
             ViewportCommand::SetViewport {
                 width: 800,
                 height: 600,
+                pixel_ratio: None,
             }
             .into(),
         );
@@ -2520,6 +2572,7 @@ mod tests {
             ViewportCommand::SetViewport {
                 width: 800,
                 height: 600,
+                pixel_ratio: None,
             }
             .into(),
         );
@@ -2565,6 +2618,7 @@ mod tests {
             ViewportCommand::SetViewport {
                 width: 800,
                 height: 600,
+                pixel_ratio: None,
             }
             .into(),
         );
@@ -2703,6 +2757,7 @@ mod tests {
             ViewportCommand::SetViewport {
                 width: 800,
                 height: 600,
+                pixel_ratio: None,
             }
             .into(),
         );
@@ -2859,6 +2914,7 @@ mod tests {
                 ViewportCommand::SetViewport {
                     width: 800,
                     height: 600,
+                    pixel_ratio: None,
                 }
                 .into(),
             );
@@ -2987,6 +3043,7 @@ mod tests {
                 ViewportCommand::SetViewport {
                     width: 800,
                     height: 600,
+                    pixel_ratio: None,
                 }
                 .into(),
             );
@@ -3019,6 +3076,7 @@ mod tests {
             ViewportCommand::SetViewport {
                 width: 800,
                 height: 600,
+                pixel_ratio: None,
             }
             .into(),
         );

@@ -164,6 +164,10 @@ pub struct Scene {
     /// serialized state.
     #[serde(skip)]
     pub(crate) view_query_cursors: HashMap<DatasetId, ViewQueryCursor>,
+    /// The device pixel ratio the canvas was last sized at, once the client
+    /// has said. Client-local, like the canvas size.
+    #[serde(skip)]
+    pub(crate) pixel_ratio: Option<f64>,
 }
 
 /// The camera's geometry family. A change between families routes the entity
@@ -250,6 +254,7 @@ impl Scene {
             derived: HashMap::new(),
             epochs: SceneEpochs::default(),
             view_query_cursors: HashMap::new(),
+            pixel_ratio: None,
         }
     }
 
@@ -331,7 +336,21 @@ impl Scene {
     }
 
     /// Set viewport on camera (avoids name clash with ViewportCommand::SetViewport).
-    pub(crate) fn inner_set_viewport(&mut self, width: u32, height: u32) {
+    ///
+    /// A resize keeps the zoom. A new pixel ratio resizes the canvas in device
+    /// pixels but not on screen, so the slice zoom scales with it and the view
+    /// keeps its CSS size and region. A volume camera's view does not depend
+    /// on the ratio.
+    pub(crate) fn inner_set_viewport(&mut self, width: u32, height: u32, pixel_ratio: Option<f64>) {
+        let to = pixel_ratio.filter(|r| r.is_finite() && *r > 0.0);
+        if let (Some(from), Some(to), Camera::Slice(s)) = (self.pixel_ratio, to, &mut self.camera)
+            && from != to
+        {
+            s.set_zoom(s.zoom * to / from);
+        }
+        if to.is_some() {
+            self.pixel_ratio = to;
+        }
         self.camera.set_viewport(width, height);
     }
 
@@ -1139,22 +1158,27 @@ impl Scene {
         self.epochs.selection += 1;
     }
 
-    /// Adopt another client's camera + view + display (follow mode / saved-view
-    /// restore), preserving the local viewport size — the follower's canvas
-    /// dimensions are its own.
+    /// Adopt another client's camera + view + display: follow, and every
+    /// restore of a stored view. The camera keeps the region it showed on the
+    /// canvas it came from, fitted to this scene's viewport
+    /// ([`Camera::fit_region_to_viewport`]), so a view crosses pixel ratios and
+    /// canvas shapes without changing what it shows.
+    ///
+    /// The fit reads this scene's viewport, so a caller that has not ticked
+    /// since the canvas last resized asserts its size first.
     ///
     /// `epochs.view` bumps iff the camera changed, and `epochs.selection` iff
     /// view or display changed, so an unchanged presence heartbeat does not
     /// invalidate consumers' caches but a real remote camera move does.
     pub fn import_presence(&mut self, camera: Camera, view: ViewState, display: DisplayState) {
-        let viewport = self.camera.viewport();
         let mut camera = camera;
-        camera.set_viewport(viewport[0], viewport[1]);
         // A follow target must not hand this scene state its own mutators could
         // never produce, such as a `zoom: 0.0` that would NaN-poison the next
-        // pan. Sanitize is bit-preserving in range, so the equality check below
-        // still sees an unchanged re-import as unchanged.
+        // pan. Sanitize is bit-preserving in range and the fit is a pure
+        // function of the two viewports, so the equality check below still
+        // sees an unchanged re-import as unchanged.
         camera.sanitize();
+        camera.fit_region_to_viewport(self.camera.viewport());
         if self.camera != camera {
             self.camera = camera;
             self.epochs.view += 1;
@@ -4487,16 +4511,17 @@ mod tests {
     }
 
     #[test]
-    fn import_presence_preserves_viewport_and_bumps_iff_changed() {
+    fn import_presence_keeps_the_region_and_bumps_iff_changed() {
         let mut scene = Scene::new([800, 600]);
         let baseline = scene.epochs.clone();
 
         // A peer's presence: different camera center, T selector, and gamma,
-        // captured at a different canvas size.
-        let mut remote_camera = Camera::new_2d([1920, 1080]);
-        if let Camera::Slice(v) = &mut remote_camera {
-            v.center = [100.0, 200.0];
-        }
+        // captured on a wider canvas.
+        let remote_camera = Camera::Slice(crate::camera::Slice {
+            center: [100.0, 200.0],
+            zoom: 2.0,
+            viewport: [1920, 1080],
+        });
         let mut remote_view = ViewState::new();
         remote_view.t = 3;
         let remote_display = DisplayState {
@@ -4510,13 +4535,16 @@ mod tests {
             remote_display.clone(),
         );
 
-        // Local viewport size wins; everything else is the peer's.
-        assert_eq!(scene.camera.viewport(), [800, 600]);
-        if let Camera::Slice(v) = &scene.camera {
-            assert_eq!(v.center, [100.0, 200.0]);
-        } else {
+        // The peer's 960 x 540 region spans this canvas's width, centered
+        // where it was, with more of the world above and below.
+        let Camera::Slice(v) = &scene.camera else {
             panic!("expected Slice camera");
-        }
+        };
+        assert_eq!(v.viewport, [800, 600]);
+        let [x0, y0, x1, y1] = v.world_bounds();
+        assert!((x0 - (100.0 - 480.0)).abs() < 1e-9 && (x1 - (100.0 + 480.0)).abs() < 1e-9);
+        assert!(y0 < 200.0 - 270.0 && y1 > 200.0 + 270.0);
+        assert_eq!(v.center, [100.0, 200.0]);
         assert_eq!(scene.view.t, 3);
         assert_eq!(scene.display.gamma, 2.0);
         assert_eq!(scene.epochs.view, baseline.view + 1);
@@ -4545,7 +4573,11 @@ mod tests {
         scene.import_presence(zero_zoom.clone(), ViewState::new(), DisplayState::default());
         match &scene.camera {
             Camera::Slice(v) => {
-                assert_eq!(v.zoom, SLICE_ZOOM_MIN, "imported zoom must be clamped");
+                assert!(
+                    v.zoom >= SLICE_ZOOM_MIN && v.zoom.is_finite(),
+                    "imported zoom {} must be clamped",
+                    v.zoom
+                );
                 assert_eq!(v.viewport, [800, 600], "local viewport wins");
             }
             other => panic!("expected Slice camera, got {other:?}"),

@@ -315,12 +315,12 @@ describe("SessionController dataset registration", () => {
 
   it("fits a fresh open to the canvas's measured size, not the scene's default", () => {
     const { handlers, deps, scene } = makeHarness();
-    deps.getViewportSize.mockReturnValue({ width: 2544, height: 1832 });
+    deps.getViewportSize.mockReturnValue({ width: 2544, height: 1832, pixelRatio: 2 });
 
     handlers.onSnapshot(1, snapshotJson([]), [], 4, {});
     handlers.onCommand(2, datasetOpenedJson("wds-1", 4));
 
-    expect(scene.set_viewport).toHaveBeenCalledWith(2544, 1832);
+    expect(scene.set_viewport).toHaveBeenCalledWith(2544, 1832, 2);
     expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledWith("wds-1");
     // The size lands first, so the fit frames the canvas the user sees.
     expect(scene.set_viewport.mock.invocationCallOrder[0]).toBeLessThan(
@@ -379,6 +379,36 @@ describe("SessionController self id", () => {
     expect(events.onFollowTargetChanged).toHaveBeenCalledWith(2);
     expect(scene.import_presence).toHaveBeenCalledTimes(1);
     expect(MockedBridge.instances[0].sendPresence).toHaveBeenCalled();
+  });
+
+  // The scene fits a leader's region to the viewport it holds, so that has to
+  // be this canvas and not a size from before the last render tick.
+  it("sizes the scene to the canvas before adopting a leader's camera", () => {
+    const { handlers, deps, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson([]), [makePresence(2)], 7, {});
+    deps.getViewportSize.mockReturnValue({ width: 1170, height: 2532, pixelRatio: 3 });
+
+    handlers.onFollowChanged?.(7, 2);
+    handlers.onPresenceUpdate?.(2, makePresence(2).camera, makePresence(2).view, makePresence(2).display);
+
+    expect(scene.import_presence).toHaveBeenCalledTimes(2);
+    for (const order of scene.import_presence.mock.invocationCallOrder) {
+      const sized = scene.set_viewport.mock.invocationCallOrder.filter((o: number) => o < order);
+      expect(sized.length).toBeGreaterThan(0);
+    }
+    expect(scene.set_viewport).toHaveBeenLastCalledWith(1170, 2532, 3);
+  });
+
+  it("sizes a new scene to the canvas before a view can be applied to it", () => {
+    const { handlers, deps, scene } = makeHarness();
+    deps.getViewportSize.mockReturnValue({ width: 2560, height: 1600, pixelRatio: 2 });
+
+    handlers.onSnapshot(1, snapshotJson([]), [], 7, {});
+
+    expect(scene.set_viewport).toHaveBeenCalledWith(2560, 1600, 2);
+    expect(scene.set_viewport.mock.invocationCallOrder[0]).toBeLessThan(
+      scene.load_document.mock.invocationCallOrder[0],
+    );
   });
 });
 

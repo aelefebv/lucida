@@ -105,9 +105,10 @@ pub enum Camera {
 pub struct Slice {
     /// Center of the viewport in world coordinates.
     pub center: [f64; 2],
-    /// Zoom level. 1.0 = native resolution, 2.0 = 2x magnification.
+    /// Device pixels per world unit, so the same zoom shows half the CSS size
+    /// at twice the pixel ratio.
     pub zoom: f64,
-    /// Viewport size in screen pixels.
+    /// The canvas in device pixels.
     pub viewport: [u32; 2],
 }
 
@@ -196,12 +197,43 @@ impl Camera {
         }
     }
 
+    /// Resize the canvas and keep the zoom, as a window resize does: the
+    /// region in view grows or shrinks with the canvas.
     pub fn set_viewport(&mut self, w: u32, h: u32) {
         match self {
             Camera::Slice(v) => v.viewport = [w, h],
             Camera::Arcball(v) => v.viewport = [w, h],
             Camera::Fly(v) => v.viewport = [w, h],
         }
+    }
+
+    /// Move this camera onto a canvas of `viewport`, keeping the region it
+    /// showed on its own canvas in view and centered where it was. On a canvas
+    /// of the same shape the region fills it exactly, so it shows at the same
+    /// CSS size at any pixel ratio. On another shape it fits inside.
+    ///
+    /// A slice's region is `viewport / zoom`. An arcball's is the rectangle at
+    /// its target plane, whose height the vertical field of view fixes, so
+    /// only a narrower canvas moves the eye back. A fly camera has no target
+    /// plane and keeps its pose.
+    pub fn fit_region_to_viewport(&mut self, viewport: [u32; 2]) {
+        let from = self.viewport();
+        let sized = |v: [u32; 2]| v[0] > 0 && v[1] > 0;
+        if sized(from) && sized(viewport) {
+            let [fw, fh] = from.map(f64::from);
+            let [tw, th] = viewport.map(f64::from);
+            match self {
+                Camera::Slice(s) => s.set_zoom(s.zoom * (tw / fw).min(th / fh)),
+                Camera::Arcball(a) => {
+                    let narrowing = (fw / fh) / (tw / th);
+                    if narrowing > 1.0 {
+                        a.back_off(narrowing);
+                    }
+                }
+                Camera::Fly(_) => {}
+            }
+        }
+        self.set_viewport(viewport[0], viewport[1]);
     }
 
     /// Clamp an externally sourced camera (a peer's presence, a saved view)
@@ -787,6 +819,24 @@ impl Arcball {
         // instead of multiplying `distance` to Inf — `pan` scales by
         // `distance`, and `0 × Inf` would put NaN into `target`.
         self.distance = next.max(self.near).min(ARCBALL_DISTANCE_MAX);
+    }
+
+    /// Multiply the orbit distance by `factor` and carry the depth slab with
+    /// the eye. Every point's depth grows by the same amount, so the near and
+    /// far planes and a near clip cut the same world as before; left in place,
+    /// a far plane fitted around the data would end up in front of it.
+    fn back_off(&mut self, factor: f64) {
+        let distance = (self.distance * factor).min(ARCBALL_DISTANCE_MAX);
+        let step = distance - self.distance;
+        if !(step.is_finite() && step > 0.0) {
+            return;
+        }
+        self.distance = distance;
+        self.near += step;
+        self.far += step;
+        if self.clip_distance > 0.0 {
+            self.clip_distance = (self.clip_distance + step).min(CLIP_DISTANCE_MAX);
+        }
     }
 
     pub fn pan(&mut self, dx: f64, dy: f64) {
@@ -1968,6 +2018,117 @@ mod tests {
         let mut cam = Camera::new_3d([800, 600]);
         cam.set_viewport(1920, 1080);
         assert_eq!(cam.viewport(), [1920, 1080]);
+    }
+
+    fn slice(center: [f64; 2], zoom: f64, viewport: [u32; 2]) -> Slice {
+        Slice {
+            center,
+            zoom,
+            viewport,
+        }
+    }
+
+    #[test]
+    fn a_slice_region_fills_a_canvas_of_the_same_shape_at_any_pixel_ratio() {
+        let at_1x = slice([300.0, 200.0], 0.5, [1280, 800]);
+        let mut at_2x = Camera::Slice(at_1x.clone());
+        at_2x.fit_region_to_viewport([2560, 1600]);
+        let Camera::Slice(at_2x) = at_2x else {
+            unreachable!()
+        };
+        assert_eq!(at_2x.zoom, 1.0);
+        assert_eq!(at_2x.world_bounds(), at_1x.world_bounds());
+    }
+
+    #[test]
+    fn a_slice_region_fits_inside_a_canvas_of_another_shape() {
+        for (from, to) in [
+            ([1280, 800], [1170, 2532]),
+            ([390, 844], [1280, 800]),
+            ([1280, 800], [800, 1280]),
+        ] {
+            let saved = slice([50.0, -20.0], 3.0, from);
+            let mut shown = Camera::Slice(saved.clone());
+            shown.fit_region_to_viewport(to);
+            let Camera::Slice(shown) = shown else {
+                unreachable!()
+            };
+            let [a0, b0, a1, b1] = saved.world_bounds();
+            let [x0, y0, x1, y1] = shown.world_bounds();
+            let eps = 1e-9;
+            assert!(
+                x0 <= a0 + eps && y0 <= b0 + eps && x1 >= a1 - eps && y1 >= b1 - eps,
+                "{from:?} -> {to:?}: {:?} must contain {:?}",
+                shown.world_bounds(),
+                saved.world_bounds()
+            );
+            let tight = ((x0 - a0).abs() < eps && (x1 - a1).abs() < eps)
+                || ((y0 - b0).abs() < eps && (y1 - b1).abs() < eps);
+            assert!(tight, "{from:?} -> {to:?}: the region spans one axis");
+            assert_eq!(shown.center, saved.center);
+        }
+    }
+
+    #[test]
+    fn a_camera_keeps_its_zoom_on_the_canvas_it_came_from_or_a_zero_sized_one() {
+        let saved = Camera::Slice(slice([1.0, 2.0], 0.37, [1280, 800]));
+        let mut same = saved.clone();
+        same.fit_region_to_viewport([1280, 800]);
+        assert_eq!(same, saved);
+
+        let mut hidden = saved.clone();
+        hidden.fit_region_to_viewport([0, 0]);
+        assert_eq!(hidden.effective_zoom(), 0.37);
+
+        let mut from_unsized = Camera::Slice(slice([1.0, 2.0], 0.37, [0, 0]));
+        from_unsized.fit_region_to_viewport([1280, 800]);
+        assert_eq!(from_unsized.effective_zoom(), 0.37);
+        assert_eq!(from_unsized.viewport(), [1280, 800]);
+    }
+
+    #[test]
+    fn an_arcball_backs_off_on_a_narrower_canvas_and_carries_its_depth_slab() {
+        let saved = Arcball {
+            target: [0.5, 0.5, 0.5],
+            distance: 2.0,
+            near: 1.0,
+            far: 3.0,
+            clip_distance: 1.5,
+            ..Arcball::new([1280, 800])
+        };
+        let half_extent_at_target = |a: &Arcball| {
+            let half_h = a.distance * (a.fov / 2.0).tan();
+            let aspect = a.viewport[0] as f64 / a.viewport[1] as f64;
+            [half_h * aspect, half_h]
+        };
+
+        let mut portrait = Camera::Arcball(saved.clone());
+        portrait.fit_region_to_viewport([390, 844]);
+        let Camera::Arcball(portrait) = portrait else {
+            unreachable!()
+        };
+        let [sw, sh] = half_extent_at_target(&saved);
+        let [pw, ph] = half_extent_at_target(&portrait);
+        assert!((pw - sw).abs() < 1e-9, "the saved width spans the canvas");
+        assert!(ph > sh);
+        let step = portrait.distance - saved.distance;
+        assert!(step > 0.0);
+        assert!((portrait.near - (saved.near + step)).abs() < 1e-12);
+        assert!((portrait.far - (saved.far + step)).abs() < 1e-12);
+        assert!((portrait.clip_distance - (saved.clip_distance + step)).abs() < 1e-12);
+
+        // Wider, or the same shape at another pixel ratio, the height already
+        // fits and nothing moves.
+        for to in [[2560, 800], [2560, 1600]] {
+            let mut shown = Camera::Arcball(saved.clone());
+            shown.fit_region_to_viewport(to);
+            let Camera::Arcball(shown) = shown else {
+                unreachable!()
+            };
+            assert_eq!(shown.distance, saved.distance);
+            assert_eq!(shown.near, saved.near);
+            assert_eq!(shown.far, saved.far);
+        }
     }
 
     #[test]
