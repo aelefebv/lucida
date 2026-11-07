@@ -17,23 +17,21 @@
  * is popped out. Closing the window docks it back.
  *
  * It ships in production builds. A diagnostic that only exists in
- * development cannot explain a field report, and shipping the agent surface
- * to production while withholding the human one is exactly the asymmetry
- * surface parity forbids (ADR 0051, ADR 0052).
+ * development cannot explain a field report, and what an agent reaches in
+ * production a person reaches too.
  *
  * **Observation only.** Every control here reads, saves, sends, drills in, or
  * moves the dock. None of them changes what the pipeline does. *Send report*
  * is the one that leaves the page, and it copies the run to the workspace
  * inbox rather than touching the run: it happens when somebody presses it,
- * never on a run's close and never on a schedule (ADR 0049 as amended).
+ * never on a run's close and never on a schedule.
  *
  * **The brush.** A window brushed on the axis scopes the report beneath it
  * through the derivation's own window, the same call the CLI's window flag
  * makes, and publishes the chunk set that was in the window so the overlays
  * highlight it. The dock publishes and the overlay subscribes. Neither reads
- * the other (ADR 0052 as amended). Clearing the brush restores the whole-run
- * report and clears the set, and so does reading another run, showing a
- * file, or closing the dock.
+ * the other. Clearing the brush restores the whole-run report and clears the
+ * set, and so does reading another run, showing a file, or closing the dock.
  *
  * The dock is also a drop target (#1066). A saved run, the trace driver's
  * run file, or a bundle dropped anywhere on it is read with the checks the

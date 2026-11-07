@@ -213,8 +213,8 @@ export function rollupWindow(run: TraceRun, window: RunWindow): WindowRollup {
     }
   }
 
-  // The dataset open, as its own family. Not a recorded phase, because the
-  // row enum is closed (ADR 0047), but a bracket the run already carries.
+  // The dataset open, as its own family. Not a recorded phase, since every
+  // phase widens every row, but a bracket the run already carries.
   // Without it a warm re-open draws nothing over its own open: every read
   // inside quantises to zero against the 100 µs clock floor and drops out.
   // The reads nest inside it, so the two overlap by construction. A bracket

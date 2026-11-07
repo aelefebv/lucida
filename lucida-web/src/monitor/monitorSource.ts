@@ -3,7 +3,7 @@
  * sends one to the workspace inbox.
  *
  * Everything here goes through `window.lucidaTrace` — the page-level export
- * function ADR 0051 made public interface in every build. The monitor is a
+ * function, public interface in every build. The monitor is a
  * third caller of the same seam the CLI and an agent driving its own browser
  * use, so no surface gets a privately shaped copy of the document, a run
  * saved from this page is byte-identical to one saved by `lucida trace`, and

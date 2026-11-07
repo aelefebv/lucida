@@ -9,8 +9,8 @@ import { installAppearance } from './theme/appearance.ts'
 import { installDeploymentTheme } from './theme/deployment.ts'
 import { isCaptureSurface } from './captureSurface.ts'
 
-// The trace seam is public interface in every build (ADR 0051): a
-// diagnostic that only exists in development cannot explain a field report.
+// The trace seam is public interface in every build: a diagnostic that only
+// exists in development cannot explain a field report.
 installTraceSeam()
 void resolveGpuIdentity().then(gpu => traceRecorder.setGpu(gpu))
 

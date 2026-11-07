@@ -1,8 +1,7 @@
 /**
- * Dev controls: the one mutation surface for the pipeline (see
- * docs/adr/0052-debug-surface-dispositions.md). It holds the planning knobs
- * backed by {@link configStore}, persisted to localStorage, and four
- * `CpuCache` knobs that are session-scoped and die on reload. The
+ * Dev controls: the one mutation surface for the pipeline. It holds the
+ * planning knobs backed by {@link configStore}, persisted to localStorage,
+ * and four `CpuCache` knobs that are session-scoped and die on reload. The
  * session-scoped section says so on screen, because controls that silently
  * reset beside ones that don't are a trap.
  *

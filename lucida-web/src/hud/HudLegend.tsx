@@ -1,8 +1,8 @@
 /**
  * The HUD legend: the overlay toggles, in every build.
  *
- * The overlays are product surfaces (ADR 0052), so the toggles have no
- * editable gate. They keep the Dev controls panel's storage key, so existing
+ * The overlays are product surfaces, so the toggles have no editable
+ * gate. They keep the Dev controls panel's storage key, so existing
  * settings carry over.
  *
  * The churn toggle states its window beside its name, because a fetch count

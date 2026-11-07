@@ -1,7 +1,7 @@
 /**
  * The per-chunk lifecycle table: fixed-width rows in parallel typed arrays.
  *
- * A row, not a list of spans (ADR 0047). Six phase objects per chunk cost
+ * A row, not a list of spans. Six phase objects per chunk cost
  * ~1.1 kB; seven uint32 boundary slots cost 28 B, which is what makes
  * unconditional recording affordable. Spans exist only at {@link serialise}.
  *

@@ -142,7 +142,7 @@ export function buildCapture({
 }
 
 /** True if any URL is a local-file path. The share toolbar warns that such a
- * view is personal-only (ADR 0014). */
+ * view opens only on a server with the same files at the same paths. */
 export function hasLocalFilePaths(view: SavedView): boolean {
   return view.datasets.some(isLocalFilePath);
 }
@@ -153,7 +153,7 @@ export function localFilePathCount(view: SavedView): number {
 
 /**
  * Delegates to the wasm `is_local_dataset_url` so the share warning shares one
- * classifier with the Rust server. Callers pass canonical URLs (ADR 0042):
+ * classifier with the Rust server. Callers pass canonical URLs:
  * `useDatasets.handleUrlSubmit` and the server normalize them upstream.
  */
 function isLocalFilePath(url: string): boolean {

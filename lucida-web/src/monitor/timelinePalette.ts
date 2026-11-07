@@ -2,7 +2,7 @@
  * The timeline's palette: one colour per phase, lane, client message type,
  * event mark, and interval kind.
  *
- * Every entry is a theme token (ADR 0066) written as `var(--lc-...)`, so DOM
+ * Every entry is a theme token written as `var(--lc-...)`, so DOM
  * styles take it as it is and follow the theme on their own, and a canvas
  * reads it through {@link resolveColor}. A chart's own series take the
  * categorical slots in the chart's series order, because the slots are ordered

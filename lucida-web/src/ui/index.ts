@@ -1,6 +1,6 @@
-// The UI primitives (ADR 0067). Import from here; style only with --lc-*
-// tokens (ADR 0066). Icons come straight from @phosphor-icons/react and are
-// passed as components, e.g. `icon={PlusIcon}`.
+// The UI primitives. Import from here; style only with --lc-* tokens. Icons
+// come straight from @phosphor-icons/react and are passed as components, e.g.
+// `icon={PlusIcon}`.
 export { Avatar, type AvatarProps } from "./Avatar.tsx";
 export { Badge, type BadgeProps, type BadgeTone } from "./Badge.tsx";
 export {

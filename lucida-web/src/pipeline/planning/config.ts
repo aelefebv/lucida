@@ -10,7 +10,7 @@
 
 /**
  * Minimap lane offset. The top lane, so whole-sample context appears
- * within about 1 s of dataset open (ADR 0023). Applies only while the
+ * within about 1 s of dataset open. Applies only while the
  * pending seed set is small ({@link MINIMAP_SEED_FAST_MAX_CHUNKS});
  * larger sets emit at {@link MINIMAP_SEED_BULK_LANE_OFFSET}.
  */

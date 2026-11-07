@@ -1,6 +1,6 @@
 // Short, distinguishable labels for where datasets live, for lists that show
-// many of them at once. Pure string work on canonical URLs (ADR 0042), so it
-// needs no wasm and runs in any render.
+// many of them at once. Pure string work on canonical URLs, so it needs no
+// wasm and runs in any render.
 
 const SCHEME = /^[a-z][a-z0-9+.-]*:\/\//i;
 

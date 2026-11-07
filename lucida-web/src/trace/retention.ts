@@ -1,6 +1,5 @@
 /**
- * The retention policy: two caps, two rungs of degradation, and no third
- * (ADR 0049).
+ * The retention policy: two caps, two rungs of degradation, and no third.
  *
  * Bytes are the unit because the recording rate varies by three orders of
  * magnitude between idle and peak. Whole intervals are discarded, never part

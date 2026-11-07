@@ -3,8 +3,9 @@
  * document. The dock computes nothing of its own, so the picture a person
  * reads and the text an agent reads cannot disagree.
  *
- * A closed run walks its rows once. An open run reads the per-tick tiers alone
- * and marks the row-derived charts absent until it closes (ADR 0049). Absent
+ * A closed run walks its rows once. An open run reads the per-tick tiers
+ * alone, since a live surface walks no rows, and marks the row-derived charts
+ * absent until it closes. Absent
  * is a value here, never a zero, so a quiet chart is qualified by what was
  * recorded rather than read as a quiet pipeline.
  */

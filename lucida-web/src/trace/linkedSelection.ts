@@ -3,7 +3,7 @@
  * publishes, and the one place the overlay reads it from.
  *
  * The dock (temporal) and the overlay (spatial) link through a selection and
- * do not merge (ADR 0052). Each imports this file and nothing of the other,
+ * do not merge. Each imports this file and nothing of the other,
  * which is why it lives beside the trace rather than under either surface.
  * `diagnose/chunkSelection.ts` derives the set from the rows the phase table
  * reads over the same window.

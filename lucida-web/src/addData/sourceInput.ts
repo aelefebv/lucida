@@ -3,7 +3,7 @@ import { is_local_dataset_url, normalize_dataset_url } from "lucida-core";
 /** What the add-data field makes of what was typed. */
 export type SourceCheck =
   | { readonly kind: "empty" }
-  /** `url` is the canonical form (ADR 0042), ready to open. */
+  /** `url` is the canonical form, ready to open. */
   | { readonly kind: "ok"; readonly url: string }
   | { readonly kind: "rejected"; readonly message: string };
 

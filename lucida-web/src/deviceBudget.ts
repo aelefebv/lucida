@@ -1,6 +1,6 @@
 /**
- * Memory budgets fitted to the device (ADR 0068). The page reads the
- * device's memory once; the render worker adds its GPU's limits.
+ * Memory budgets fitted to the device. The page reads the device's memory
+ * once; the render worker adds its GPU's limits.
  */
 
 const MIB = 1024 * 1024;
