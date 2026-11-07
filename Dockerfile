@@ -1,11 +1,10 @@
 # syntax=docker/dockerfile:1.7
 #
 # Lucida canonical deploy image.
-# Per ADR-0020 (docs/adr/0020-single-image-with-servedir.md), one
-# container bundles the API binary, the SPA dist, and the WASM pkg. The
-# same image runs in production via Kubernetes, in a developer's
-# `docker run` for local use, and in a `cargo run --release`-based
-# prod-like rehearsal.
+# One container bundles the API binary, the SPA dist, and the WASM pkg,
+# so the SPA and the API share an origin and a version. The same image
+# runs in production via Kubernetes, in a developer's `docker run` for
+# local use, and in a `cargo run --release`-based prod-like rehearsal.
 #
 # Three stages:
 #   1. rust + wasm-pack    -> lucida-server release binary, lucida-core wasm pkg
@@ -160,11 +159,11 @@ COPY --from=web-builder  /web/lucida-web/dist                    /usr/share/luci
 WORKDIR /var/lib/lucida
 
 # The dist path is image-internal (not adopter-tunable) so we bake it
-# in. Everything else flows from runtime (`docker run -e ...` or k8s
-# `env:`) per ADR-0017's OSS env-var contract.
+# in. Everything else comes from `LUCIDA_*` variables at runtime
+# (`docker run -e ...` or k8s `env:`).
 ENV LUCIDA_WEB_DIST=/usr/share/lucida/web
 
-# Bind 0.0.0.0 by default. ADR-0018's loopback default is for the
+# Bind 0.0.0.0 by default. The server's own loopback default is for the
 # binary running outside a container; the deploy unit's intent is "I'm
 # exposed via a port forward," so the wildcard bind is the useful
 # default here. Adopters who want a different bind override at runtime.

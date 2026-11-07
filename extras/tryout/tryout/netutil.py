@@ -17,7 +17,7 @@ from dataclasses import dataclass
 
 
 # Loopback only. The harness is hermetic by construction: we never want the
-# throwaway server reachable off the host, and ADR-0018 keeps auth auto-disabled
+# throwaway server reachable off the host, and the server keeps auth auto-disabled
 # on loopback so LUCIDA_AUTH=disabled needs no LUCIDA_INSECURE opt-in.
 LOOPBACK = "127.0.0.1"
 

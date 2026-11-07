@@ -1,5 +1,5 @@
 'use strict';
-// Recorder A/B frame-throughput driver (issue #928, ADR 0049).
+// Recorder A/B frame-throughput driver (issue #928).
 //
 // Loads an already-opened viewer URL twice in one browser context and counts
 // rendered frames over a fixed ten-second window on the SECOND load — the warm
@@ -51,7 +51,7 @@ function readyProbe() {
   return { ready, reason: ready ? 'rendered' : String(s.reason || 'not_ready'), frame_count: fc };
 }
 const frames = () => Number((window.__lucidaCaptureReady || {}).frameCount || 0);
-// Present in both arms: the seam is unconditional (ADR 0051). Its absence in
+// Present in both arms: the seam is unconditional. Its absence in
 // the no-op arm would mean the edit removed more than the sink.
 const seam = () => (window.lucidaTrace ? window.lucidaTrace.schemaVersion : null);
 

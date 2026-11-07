@@ -251,7 +251,7 @@ class ServerProcess:
         # at a non-loopback bind (which would then demand LUCIDA_INSECURE) or at
         # a different DB. We own these for the throwaway server.
         env.pop("LUCIDA_INSECURE", None)
-        # Web surface: point the server at the SPA bundle to serve (ADR-0020) so a
+        # Web surface: point the server at the SPA bundle to serve so a
         # real browser can render the viewer. Absolute, because the server's cwd
         # is our throwaway temp dir, not the repo. When unset, we leave the
         # server's own default (./lucida-web/dist) untouched so non-web bring-ups

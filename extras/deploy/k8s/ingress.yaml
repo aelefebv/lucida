@@ -1,7 +1,6 @@
 # Ingress for the lucida Service.
 #
-# Per ADR-0021 (docs/adr/0021-deployment-artifacts-as-reference-templates.md)
-# this stays generic: no provider-specific resources, no annotations
+# This stays generic: no provider-specific resources, no annotations
 # pinned to one ingress class, no `BackendConfig` / `FrontendConfig` /
 # `ManagedCertificate` / `IngressClassParams`. Adopters add what their
 # controller needs in their own infra repo.
@@ -12,7 +11,7 @@
 #   3. spec.rules[].host + spec.tls[].hosts -> your external hostname
 #
 # WebSocket support: lucida-server uses long-lived WebSockets for the
-# follow-mode + presence channel (ADR 0002).
+# follow-mode + presence channel.
 # Most modern ingress controllers handle the HTTP/1.1 `Upgrade: websocket`
 # handshake transparently when the backend's protocol is HTTP, BUT the
 # default idle/read timeouts on each controller are usually short enough
@@ -57,7 +56,7 @@
 # GKE Ingress (kubernetes.io/ingress.gce / GKE classic L7 ILB+ELB)
 # ----------------------------------------------------------------------
 # GKE Ingress requires its own custom resources to tune timeouts +
-# managed certs. Per ADR-0021 we do NOT ship those upstream. In your
+# managed certs. We do NOT ship those upstream. In your
 # fork, attach a `BackendConfig` (with `timeoutSec: 3600`) via the
 # `cloud.google.com/backend-config` annotation on the Service, and a
 # `ManagedCertificate` via the `networking.gke.io/managed-certificates`
@@ -99,7 +98,7 @@ spec:
           # Single backend, prefix `/`. lucida-server serves the SPA
           # (ServeDir at `/`), the API under `/api`, the auth flow under
           # `/auth`, the admin endpoints under `/admin`, and the
-          # WebSocket under `/ws` (see ADR-0020). One Ingress path
+          # WebSocket under `/ws`. One Ingress path
           # covers all of them.
           - path: /
             pathType: Prefix

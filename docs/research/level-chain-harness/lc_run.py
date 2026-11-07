@@ -5,18 +5,18 @@
 # ///
 """Measure a collection's wanted set and fill time with and without the level rule.
 
-The measurement section of ADR 0061 compares the level-0 default the ADR
-replaced with the screen-chosen target level, on a wide collection zoomed
-out to show every tile. This harness takes that measurement at device
-pixel ratio 2, one server process per run so every run reads a cold source
-cache, and one browser per run, which is what ``lucida trace`` gives.
+This harness compares the former level-0 default with the screen-chosen
+target level, on a wide collection zoomed out to show every tile. It
+measures at device pixel ratio 2, one server process per run so every run
+reads a cold source cache, and one browser per run, which is what
+``lucida trace`` gives.
 
 Each round drives two runs of the same dataset, in alternating order so
 that a link that changes speed between rounds cannot favour one side:
 
 ``pinned``
     ``lucida trace --level-pin 0``. The target is held at level 0, which is
-    the behaviour before ADR 0061.
+    the former default.
 ``screen``
     ``lucida trace`` with the target following the screen.
 
@@ -81,8 +81,8 @@ sys.path.insert(0, str(REPO / "extras" / "tryout"))
 from tryout.server import ServerProcess  # noqa: E402
 from verify_level_chain import DEVICE_PIXEL_RATIO, Lucida, fmt_range, read_levels, run_in_document  # noqa: E402
 
-# Level 0 pinned is the behavior before ADR 0061; following the screen is
-# the behavior after.
+# Level 0 pinned is the former default; following the screen is the
+# current one.
 MODES = {"pinned": ["--level-pin", "0"], "screen": []}
 
 

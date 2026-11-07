@@ -6,7 +6,7 @@ takes the same [environment variables](#environment-variables).
 
 The manifests in [`k8s/`](k8s/) are reference templates. Copy them into your
 own infra repo, replace every `<UPPERCASE-WITH-DASHES>` placeholder, and own
-the result there. [`docs/adr/`](../../docs/adr/) has the reasoning.
+the result there.
 
 ## 1. Prerequisites
 

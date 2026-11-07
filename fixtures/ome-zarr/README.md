@@ -58,5 +58,5 @@ uv run extras/verify_trace_script.py
 uv run extras/verify_sharded_twins.py --generated-cache-dir /tmp/lucida-coarse
 ```
 
-The measurement behind ADR 0061's numbers is
-`docs/research/level-chain-harness/`.
+`docs/research/level-chain-harness/` measures the target level against level 0
+pinned.

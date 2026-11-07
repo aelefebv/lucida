@@ -22,13 +22,6 @@ with `pnpm build:wasm` from `lucida-web/`.
 Comments say why: the invariant, the constraint, the choice a reader would otherwise undo.
 History and issue numbers belong in commit messages.
 
-## ADRs
-
-Decisions live in `docs/adr/NNNN-slug.md`, numbered in sequence. Code cites the numbers, so
-never renumber. An ADR holds the context, the decision, and the rejected alternatives in under
-100 lines, and names a module only where a reader needs it. When a decision changes, update
-the ADR, or delete it and fold what survives into its successor. Git keeps the history.
-
 ## Issues
 
 GitHub Issues on `aelefebv/lucida`, through `gh`. See `docs/agents/issue-tracker.md`.
