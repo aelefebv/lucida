@@ -3,7 +3,8 @@
 //! The client sees one multiscale per collection, but OME-Zarr lets each tile
 //! store its own level shapes and chunk shapes. The declared geometry covers
 //! every tile, and each tile is bound to it: as stored where its chunk shape
-//! is the declared one, and through a [`Regrid`] where it is not.
+//! is the declared one, and through a [`Regrid`] where it is not. What the
+//! declared geometry hides about a tile is named by [`describe_mismatches`].
 
 use lucida_content::PinnedAxis;
 
@@ -16,6 +17,14 @@ use crate::layout::{ChunkByteLayout, compute_chunk_byte_layout};
 pub(crate) struct StoredLevels {
     pub(crate) shapes: Vec<Vec<u64>>,
     pub(crate) bindings: Vec<LevelBindingInfo>,
+}
+
+/// One tile's stored levels and the scale its metadata declares for them.
+#[derive(Clone)]
+pub(crate) struct StoredTile {
+    pub(crate) levels: StoredLevels,
+    /// Level 0's scale, as `[t, c, z, y, x]`.
+    pub(crate) scale: [f64; 5],
 }
 
 /// The geometry a collection declares for all of its tiles, in raw axes
@@ -110,6 +119,134 @@ fn widen(declared: &mut [u64], stored: &[u64]) {
     }
 }
 
+/// Tiles named in one mismatch sentence before the rest are counted.
+const MISMATCH_EXAMPLES: usize = 5;
+
+/// Relative difference under which two scales are the same. Writers derive
+/// scale in floating point, so equal pixel sizes rarely compare bit-equal.
+const SCALE_TOLERANCE: f64 = 1e-6;
+
+/// What the declared geometry hides about `tiles`, one sentence per kind of
+/// difference (shape, level count, pixel size), each naming the tiles.
+/// Empty when every tile matches.
+///
+/// Pixel size is level 0's scale on the spatial axes, compared against the
+/// representative's because every tile is shown at it. Shape is level 0's,
+/// since coarser levels differ wherever level 0 does.
+pub(crate) fn describe_mismatches(
+    tiles: &[(&str, &StoredTile)],
+    declared: &DeclaredLevels,
+    representative: (&str, &StoredTile),
+    axes_names: &[String],
+) -> Vec<String> {
+    let total = tiles.len();
+    let mut sentences = Vec::new();
+
+    if let Some(declared_shape) = declared.shapes.first() {
+        let smaller: Vec<String> = tiles
+            .iter()
+            .filter_map(|(prefix, tile)| {
+                let shape = tile.levels.shapes.first()?;
+                (shape != declared_shape).then(|| format!("{prefix:?} is {}", dims(shape)))
+            })
+            .collect();
+        if !smaller.is_empty() {
+            sentences.push(format!(
+                "tiles differ in shape, and smaller tiles are padded with fill to {} ({}), \
+                 the largest on each axis. Smaller ({} of {total}): {}",
+                dims(declared_shape),
+                axes_names.join("×"),
+                smaller.len(),
+                examples(&smaller),
+            ));
+        }
+    }
+
+    let counts = tiles.iter().map(|(_, tile)| tile.levels.shapes.len());
+    if let (Some(fewest), Some(most)) = (counts.clone().min(), counts.max())
+        && fewest != most
+    {
+        let short: Vec<String> = tiles
+            .iter()
+            .filter(|(_, tile)| tile.levels.shapes.len() < most)
+            .map(|(prefix, tile)| format!("{prefix:?} has {}", tile.levels.shapes.len()))
+            .collect();
+        sentences.push(format!(
+            "tiles differ in level count, and every tile shows only the levels all of them \
+             have ({fewest}). Fewer than {most} ({} of {total}): {}",
+            short.len(),
+            examples(&short),
+        ));
+    }
+
+    let spatial: Vec<(usize, &str)> = [(2, "z"), (3, "y"), (4, "x")]
+        .into_iter()
+        .filter(|(_, name)| {
+            axes_names
+                .iter()
+                .any(|axis| axis.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    let pixel_size = |scale: &[f64; 5]| {
+        spatial
+            .iter()
+            .map(|(index, _)| scale[*index].to_string())
+            .collect::<Vec<_>>()
+            .join("×")
+    };
+    let (representative_prefix, representative_tile) = representative;
+    let resized: Vec<String> = tiles
+        .iter()
+        .filter(|(_, tile)| {
+            spatial.iter().any(|(index, _)| {
+                !same_scale(tile.scale[*index], representative_tile.scale[*index])
+            })
+        })
+        .map(|(prefix, tile)| format!("{prefix:?} is {}", pixel_size(&tile.scale)))
+        .collect();
+    if !resized.is_empty() {
+        sentences.push(format!(
+            "tiles differ in pixel size, and every tile is shown at {representative_prefix:?}'s \
+             {} ({}). Different ({} of {total}): {}",
+            pixel_size(&representative_tile.scale),
+            spatial
+                .iter()
+                .map(|(_, name)| *name)
+                .collect::<Vec<_>>()
+                .join("×"),
+            resized.len(),
+            examples(&resized),
+        ));
+    }
+
+    sentences
+}
+
+fn dims(shape: &[u64]) -> String {
+    shape
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join("×")
+}
+
+fn examples(named: &[String]) -> String {
+    let shown = named
+        .iter()
+        .take(MISMATCH_EXAMPLES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    match named.len().saturating_sub(MISMATCH_EXAMPLES) {
+        0 => shown,
+        more => format!("{shown}, and {more} more"),
+    }
+}
+
+fn same_scale(a: f64, b: f64) -> bool {
+    (a - b).abs() <= SCALE_TOLERANCE * a.abs().max(b.abs())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,5 +336,78 @@ mod tests {
             })
         );
         assert_eq!(declared.bind(&large), large.bindings);
+    }
+
+    fn stored(levels: StoredLevels, pixel: f64) -> StoredTile {
+        StoredTile {
+            levels,
+            scale: [1.0, 1.0, 1.0, pixel, pixel],
+        }
+    }
+
+    fn mismatches(tiles: &[(&str, &StoredTile)]) -> Vec<String> {
+        let declared = declare(&tiles.iter().map(|(_, t)| &t.levels).collect::<Vec<_>>());
+        describe_mismatches(tiles, &declared, tiles[0], &axes())
+    }
+
+    #[test]
+    fn matching_tiles_have_nothing_to_name() {
+        let a = stored(tile(&[([1, 16, 16], [1, 8, 8])]), 0.5);
+        let b = stored(tile(&[([1, 16, 16], [1, 8, 8])]), 0.5 * (1.0 + 1e-9));
+
+        assert!(mismatches(&[("A/1/0", &a), ("A/2/0", &b)]).is_empty());
+    }
+
+    #[test]
+    fn each_kind_of_difference_names_the_tiles_it_hides() {
+        let full = || tile(&[([1, 16, 16], [1, 8, 8]), ([1, 8, 8], [1, 8, 8])]);
+        let rest = stored(full(), 0.5);
+        let smaller = stored(
+            tile(&[([1, 12, 10], [1, 8, 8]), ([1, 6, 5], [1, 6, 5])]),
+            0.5,
+        );
+        let shallow = stored(tile(&[([1, 16, 16], [1, 8, 8])]), 0.5);
+        let coarser = stored(full(), 1.0);
+
+        let sentences = mismatches(&[
+            ("A/1/0", &rest),
+            ("A/2/0", &smaller),
+            ("B/1/0", &shallow),
+            ("B/2/0", &coarser),
+        ]);
+
+        assert_eq!(
+            sentences,
+            [
+                "tiles differ in shape, and smaller tiles are padded with fill to 1×16×16 \
+                 (c×y×x), the largest on each axis. Smaller (1 of 4): \"A/2/0\" is 1×12×10",
+                "tiles differ in level count, and every tile shows only the levels all of \
+                 them have (1). Fewer than 2 (1 of 4): \"B/1/0\" has 1",
+                "tiles differ in pixel size, and every tile is shown at \"A/1/0\"'s 0.5×0.5 \
+                 (y×x). Different (1 of 4): \"B/2/0\" is 1×1",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_long_list_of_tiles_is_counted_past_the_examples() {
+        let large = stored(tile(&[([1, 16, 16], [1, 8, 8])]), 0.5);
+        let small = stored(tile(&[([1, 8, 8], [1, 8, 8])]), 0.5);
+        let names: Vec<String> = (0..7).map(|i| format!("B/{i}/0")).collect();
+        let mut tiles = vec![("A/1/0", &large)];
+        tiles.extend(names.iter().map(|name| (name.as_str(), &small)));
+
+        let sentences = mismatches(&tiles);
+
+        assert!(
+            sentences[0].ends_with("\"B/4/0\" is 1×8×8, and 2 more"),
+            "{}",
+            sentences[0]
+        );
+        assert!(
+            sentences[0].contains("Smaller (7 of 8)"),
+            "{}",
+            sentences[0]
+        );
     }
 }
