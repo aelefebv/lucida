@@ -12,7 +12,7 @@
  */
 
 import type { Lane, LaneOutstanding, PoolResidencyReport } from "../pipeline/fetch/types.ts";
-import type { LevelRange } from "../renderer/workerProtocol.ts";
+import type { GpuAtlasReport, LevelRange } from "../renderer/workerProtocol.ts";
 import { adapterKindOf, adapterName } from "../trace/diagnose/renderTiming.ts";
 import type { GpuIdentity } from "../trace/types.ts";
 
@@ -61,6 +61,8 @@ export interface HudSample {
   /** Null with no session to ask. */
   lanes: LaneOutstanding | null;
   pools: PoolResidencyReport | null;
+  /** Null with no render worker to ask. */
+  gpuAtlases: GpuAtlasReport | null;
   levels: readonly HudLevelSample[];
   gpu: GpuIdentity | null;
   runOpen: boolean;
@@ -332,10 +334,19 @@ function poolsOf(last: HudSample | null): HudPoolView[] {
     if (fill >= 0.9) return { label, text, fill, state: "near budget", tone: "busy" };
     return { label, text, fill, state: "under budget", tone: "ok" };
   });
-  // The render worker reports no resident bytes, so the GPU pool is drawn as
-  // absent rather than as a confident zero.
-  out.push({ label: "GPU", text: "not reported", fill: null, state: "not reported", tone: "absent" });
+  out.push(gpuPoolOf(last?.gpuAtlases ?? null));
   return out;
+}
+
+/**
+ * The render worker's atlases, as bytes and a count. Nothing adds the GPU
+ * pools up to one budget yet, so there is no fill to draw.
+ */
+function gpuPoolOf(report: GpuAtlasReport | null): HudPoolView {
+  // With no worker to ask, absent rather than a confident zero.
+  if (!report) return { label: "GPU", text: "not reported", fill: null, state: "not reported", tone: "absent" };
+  const atlases = `${formatCount(report.atlases)} ${report.atlases === 1 ? "atlas" : "atlases"}`;
+  return { label: "GPU", text: `${formatMiB(report.bytes)} MiB`, fill: null, state: atlases, tone: "info" };
 }
 
 function levelOf(level: HudLevelSample): HudLevelView {

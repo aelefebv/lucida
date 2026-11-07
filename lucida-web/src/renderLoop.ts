@@ -43,6 +43,22 @@ declare global {
   }
 }
 
+/**
+ * The ids the CPU cache holds a dataset's entries under. It keys chunks by
+ * entity id, its delivery ledger by image id, and a label's chunks by the
+ * label's image id. Only a single-image dataset shares one id between entity
+ * and image, and worker member ids add a channel suffix, so no one list
+ * reaches every entry. An entry left behind outlives the dataset, and a
+ * reopened dataset, which keeps its ids, finds it marked as delivered.
+ */
+export function cacheIdsOf(manifest: DatasetManifest | undefined, memberIds: readonly string[]): string[] {
+  const ids = new Set(memberIds);
+  for (const entity of manifest?.entities ?? []) ids.add(entity.id);
+  for (const image of manifest?.images ?? []) ids.add(image.image_id);
+  for (const label of manifest?.labels ?? []) ids.add(label.image.image_id);
+  return [...ids];
+}
+
 export class RenderLoop implements TraceEnvironment {
   private session: Session;
   private datasets: Map<string, { manifest: DatasetManifest }>;
@@ -253,7 +269,7 @@ export class RenderLoop implements TraceEnvironment {
     // member IDs may differ (e.g. "collectionId:A/1/0").
     const memberIds = this.collectMemberIds(id);
 
-    this.session.cpuCache.cancelDataset(id, memberIds);
+    this.session.cpuCache.cancelDataset(id, cacheIdsOf(manifest, memberIds));
     this.session.contentSource.unregisterDataset(imageIds);
 
     clearVolumeForDataset(this.volumeState, id);
