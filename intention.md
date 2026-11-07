@@ -1,8 +1,7 @@
 # lucida intention
 
 The north star for what lucida is and who it's for. Keep it short and durable.
-Decisions and their reasons live in `docs/adr/`. If a change makes lucida worse
-against this document, it's the wrong change.
+If a change makes lucida worse against this document, it's the wrong change.
 
 ## In one line
 
@@ -62,5 +61,5 @@ compared on identical inputs. It does no view math of its own. What is visible,
 and at what apparent size, is computed once in `lucida-core` for every client.
 If planning needs a number the snapshot lacks, grow the snapshot.
 
-When a change can't satisfy all of these, don't soften one to fit. Write an ADR
-that names the one being relaxed and why the trade is worth it.
+When a change can't satisfy all of these, don't soften one to fit. Say in the PR
+which one is being relaxed and why the trade is worth it.

@@ -12,7 +12,7 @@
 #   5. Run       — start the server + Vite, stream both logs, reap both on Ctrl-C.
 #
 # Then open http://localhost:5173 (you land as dev@local, not an admin; auth is
-# auto-disabled on loopback per ADR-0018). The backend is on :9876 and Vite
+# auto-disabled on loopback). The backend is on :9876 and Vite
 # proxies /auth /api /admin /ws to it.
 #
 # Usage:  ./scripts/dev.sh [--wasm] [-h|--help]

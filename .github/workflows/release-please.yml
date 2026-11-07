@@ -42,7 +42,7 @@ jobs:
           # GITHUB_TOKEN can't trigger workflow-from-workflow chains, so
           # release.yml would never fire and no image would be built.
           token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
-          # Auto-merge is OFF per ADR-0022. The action opens or updates
+          # Auto-merge is OFF. The action opens or updates
           # the "chore(release): X.Y.Z" PR; the maintainer manually
           # merges it when a release is desired. This lets a solo / small-
           # team maintainer batch related changes (e.g. a fix: immediately

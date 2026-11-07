@@ -138,7 +138,7 @@ Keep `-p tsconfig.app.json` on the type check. `lucida-web/tsconfig.json` is a s
 
 ## Architecture
 
-[`intention.md`](intention.md) says what lucida is for, [`CONTEXT.md`](CONTEXT.md) defines its terms, and [`docs/adr/`](docs/adr/) records why things are shaped the way they are.
+[`intention.md`](intention.md) says what lucida is for, and [`CONTEXT.md`](CONTEXT.md) defines its terms.
 
 ## License
 

@@ -14,7 +14,7 @@ sample, which is the one measure the target level is chosen from. Then it
 reads what came back and requires four independent answers to name the
 same level:
 
-1. **The rule.** This script applies ADR 0061's rule to the level shapes
+1. **The rule.** This script applies the target-level rule to the level shapes
    on disk and the zoom it asked for: the coarsest level whose samples
    are still no more than one device pixel apart. It never reads the
    core's answer to get it.
@@ -30,7 +30,7 @@ same level:
    evenly spaced, never black, and never the background.
 
 Each run must also reach quiescence, and the detail chunks it requested
-per planning pass must fit the bound ADR 0061 states: the entity's
+per planning pass must fit the visible-detail bound: the entity's
 on-screen area over the footprint of one target-level chunk, plus a chunk
 of border per axis, and in volume mode the depth of the frustum's cut in
 chunks again. The zoomed-in slice run places the image well past the
@@ -185,7 +185,7 @@ def level_ratios(shapes: Sequence[tuple[int, ...]], axes: Sequence[int]) -> list
 
 
 def expected_target(zoom: float, ratios: Sequence[float]) -> int:
-    """ADR 0061's rule: the largest level L with zoom × ratio[L] at most 1, else 0."""
+    """The target-level rule: the largest level L with zoom × ratio[L] at most 1, else 0."""
     qualifying = [level for level, ratio in enumerate(ratios) if zoom * ratio <= 1.0]
     return qualifying[-1] if qualifying else 0
 
@@ -221,7 +221,7 @@ def overflow_zoom(image_samples: tuple[int, int], viewport: tuple[int, int]) -> 
 
     Below it the whole image fits on screen and the wanted set is the
     level's own chunk grid; above it the set is cut by the screen, which is
-    the regime ADR 0061's bound is about.
+    the regime the visible-detail bound is about.
     """
     return 2.0 * max(extent / samples for samples, extent in zip(image_samples, viewport))
 
@@ -234,7 +234,7 @@ def wanted_set_bound(
     chunk: int,
     depth_chunks: int,
 ) -> int:
-    """The visible detail wanted set ADR 0061 bounds one entity to.
+    """The bound on one entity's visible detail wanted set.
 
     The entity covers ``image_samples × zoom`` device pixels, or the
     viewport where that is smaller, and one target-level chunk covers
@@ -621,7 +621,7 @@ def check_run(
     report.check(
         0 < seen.detail_per_rebuild <= bound,
         f"{run.name}: a planning pass requested {seen.detail_per_rebuild} detail chunks at level "
-        f"{predicted}, outside the 1 to {bound} the ADR bounds it to; see {run.run_file}",
+        f"{predicted}, outside the bound of 1 to {bound}; see {run.run_file}",
     )
 
 
