@@ -4,8 +4,8 @@ A domain-neutral viewer for large n-dimensional array and image data, built for
 humans and LLM agents as coequal users.
 
 This file is a glossary: what words mean, and which synonyms to avoid.
-Behaviour lives in the code, and decisions live in `docs/adr/`. Keep every term
-domain-neutral, here and everywhere else in the repo.
+Behaviour lives in the code. Keep every term domain-neutral, here and
+everywhere else in the repo.
 
 ## Content model
 

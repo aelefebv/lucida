@@ -17,9 +17,9 @@ chunk. Nothing reads a whole array.
 
 Over a remote object store, a view is bounded by how many reads per second the
 link completes. One measured link plateaued at a concurrency of 16, near 57
-reads per second, with bytes per second flattening at the same point
-([ADR 0053](adr/0053-fair-share-source-read-admission.md)). So a layout should
-need few reads per view, and no read should carry bytes the screen never shows.
+reads per second, with bytes per second flattening at the same point. So a
+layout should need few reads per view, and no read should carry bytes the
+screen never shows.
 
 ## The recommended layout
 
@@ -69,8 +69,7 @@ keep them from costing objects in proportion to the image.
 
 The viewer reads a shard's index once, caches it while the dataset is open, and
 reads each inner chunk as one range read. Range reads that wait for a permit
-together and lie end to end in the shard go out as one request
-([ADR 0062](adr/0062-merged-range-reads-at-the-permit-queue.md)). zarr-python
+together and lie end to end in the shard go out as one request. zarr-python
 writes inner chunks in position order, which puts a run along the last axis end
 to end. A writer that orders them another way keeps a working store and loses
 the merge.
