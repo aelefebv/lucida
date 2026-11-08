@@ -97,9 +97,9 @@ spec:
         paths:
           # Single backend, prefix `/`. lucida-server serves the SPA
           # (ServeDir at `/`), the API under `/api`, the auth flow under
-          # `/auth`, the admin endpoints under `/admin`, and the
-          # WebSocket under `/ws`. One Ingress path
-          # covers all of them.
+          # `/auth`, the admin endpoints under `/admin`, and workspace
+          # WebSockets under `/ws/workspaces`. One Ingress path covers all
+          # of them.
           - path: /
             pathType: Prefix
             backend:
