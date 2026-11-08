@@ -15,7 +15,7 @@ use std::sync::Arc;
 use common::workspace_rig::WorkspaceRig;
 use lucida_content::{ChunkKey, DatasetManifest, ImageId};
 use lucida_protocol::DatasetOpenFailureKind;
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::binding::ChunkResolver;
 use lucida_server::chunk_read::{ChunkRead, read_chunk};
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
@@ -172,19 +172,18 @@ async fn open(
         "{}-caches",
         dir.file_name().unwrap().to_string_lossy()
     ));
-    let proxy_config = ProxyConfig {
-        cache_dir: root.join("proxies"),
+    let generated_config = GeneratedConfig {
         generated_enabled: false,
         generated_cache_dir: root.join("generated"),
-        ..ProxyConfig::defaults()
+        ..GeneratedConfig::defaults()
     };
-    let rig = WorkspaceRig::start(proxy_config.clone()).await;
+    let rig = WorkspaceRig::start(generated_config.clone()).await;
     let (progress, _progress_rx) = mpsc::unbounded_channel();
     open_dataset(
         1,
         &dir.to_str().unwrap().parse().unwrap(),
         &DatasetOpenContext {
-            proxy_config,
+            generated_config,
             source_policy: Arc::default(),
             workspace: rig.scope(),
         },
