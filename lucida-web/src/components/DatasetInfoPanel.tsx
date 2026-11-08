@@ -1,13 +1,16 @@
 /**
- * The Info rail panel: what the active dataset is and where it came from, and
- * the workspace's id, each copyable where someone would paste it elsewhere.
+ * The Info rail panel: what the active dataset is, where it came from, and
+ * whether it is shown as stored, and the workspace's id, each copyable where
+ * someone would paste it elsewhere.
  */
 import { CopyIcon } from "@phosphor-icons/react";
 import { useEffect, useState, type ReactNode } from "react";
 import { positionLabel } from "../axes.ts";
+import type { DatasetHealthStatus, DatasetSourceHealth } from "../bridge.ts";
 import type { DatasetManifest, MultiscaleInfo } from "../manifestTypes.ts";
 import { channelDisplayName } from "./channels.ts";
 import { drawnAtFloat32Precision } from "../renderer/dataTypeUtil.ts";
+import { Badge, type BadgeTone } from "../ui/Badge.tsx";
 import { IconButton } from "../ui/Button.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
 import { toast } from "../ui/toastQueue.ts";
@@ -26,49 +29,60 @@ export interface DatasetInfoPanelProps {
   workspaceId: string;
   /** The selected dataset, else the first; null with none open. */
   dataset: InfoDataset | null;
-  /** The dataset's source path or URL; null when the server has none. */
-  getSource?: (datasetId: string) => Promise<string | null>;
+  /** The server's health for the dataset, which also names its source; null when it has none. */
+  getHealth?: (datasetId: string) => Promise<DatasetSourceHealth | null>;
 }
 
 /** Level-0 shape order, as every manifest stores it. */
 const AXES = ["T", "C", "Z", "Y", "X"] as const;
 
-type SourceState =
-  | { datasetId: string; status: "ready"; value: string | null }
+type HealthState =
+  | { datasetId: string; status: "ready"; value: DatasetSourceHealth | null }
   | { datasetId: string; status: "failed" };
 
-export function DatasetInfoPanel({ visible, workspaceId, dataset, getSource }: DatasetInfoPanelProps) {
-  const datasetId = dataset?.id ?? null;
-  const [source, setSource] = useState<SourceState | null>(null);
+const STATUS: Record<DatasetHealthStatus, { label: string; tone: BadgeTone }> = {
+  healthy: { label: "Healthy", tone: "success" },
+  degraded: { label: "Degraded", tone: "warning" },
+  unavailable: { label: "Unavailable", tone: "danger" },
+};
 
-  // Asked once per dataset, and only once someone looks.
-  const needsSource = visible && datasetId !== null && !!getSource && source?.datasetId !== datasetId;
+export function DatasetInfoPanel(props: DatasetInfoPanelProps) {
+  // Mounted only while shown, so each look asks again: health can change
+  // while a dataset is open, and nothing is asked while nobody looks.
+  return props.visible ? <InfoBody {...props} /> : null;
+}
+
+function InfoBody({ workspaceId, dataset, getHealth }: DatasetInfoPanelProps) {
+  const datasetId = dataset?.id ?? null;
+  const [health, setHealth] = useState<HealthState | null>(null);
+
   useEffect(() => {
-    if (!needsSource || !datasetId || !getSource) return;
+    if (!datasetId || !getHealth) return;
     let cancelled = false;
-    getSource(datasetId).then(
+    getHealth(datasetId).then(
       (value) => {
-        if (!cancelled) setSource({ datasetId, status: "ready", value });
+        if (!cancelled) setHealth({ datasetId, status: "ready", value });
       },
       () => {
-        if (!cancelled) setSource({ datasetId, status: "failed" });
+        if (!cancelled) setHealth({ datasetId, status: "failed" });
       },
     );
     return () => {
       cancelled = true;
     };
-  }, [needsSource, datasetId, getSource]);
+  }, [datasetId, getHealth]);
 
-  if (!visible) return null;
-
-  const current = source?.datasetId === datasetId ? source : null;
+  const current = health?.datasetId === datasetId ? health : null;
 
   return (
     <section className="lc-rail-panel" aria-label="Info" data-testid="info-panel">
       <PanelHeader className="lc-rail-panel-header" title="Info" />
       <div className="lc-rail-panel-body lc-info">
         {dataset ? (
-          <DatasetFacts dataset={dataset} source={current} />
+          <>
+            <DatasetFacts dataset={dataset} health={current} />
+            <HealthFacts health={current} />
+          </>
         ) : (
           <p className="lc-rail-panel-empty">Open a dataset to see its details.</p>
         )}
@@ -85,7 +99,7 @@ export function DatasetInfoPanel({ visible, workspaceId, dataset, getSource }: D
   );
 }
 
-function DatasetFacts({ dataset, source }: { dataset: InfoDataset; source: SourceState | null }) {
+function DatasetFacts({ dataset, health }: { dataset: InfoDataset; health: HealthState | null }) {
   const { manifest } = dataset;
   const images = manifest.images;
   const multiscale: MultiscaleInfo | undefined = images[0]?.multiscale;
@@ -99,15 +113,16 @@ function DatasetFacts({ dataset, source }: { dataset: InfoDataset; source: Sourc
   });
   const labels = manifest.labels ?? [];
 
+  const source = health?.status === "ready" ? health.value?.source_url : null;
   let sourceText: ReactNode;
   let sourceCopy: string | undefined;
-  if (!source) {
+  if (!health) {
     sourceText = <span className="lc-info-muted">Looking up…</span>;
-  } else if (source.status === "failed" || !source.value) {
+  } else if (!source) {
     sourceText = <span className="lc-info-muted">Not available</span>;
   } else {
-    sourceText = source.value;
-    sourceCopy = source.value;
+    sourceText = source;
+    sourceCopy = source;
   }
 
   return (
@@ -181,6 +196,58 @@ function DatasetFacts({ dataset, source }: { dataset: InfoDataset; source: Sourc
       </dl>
     </section>
   );
+}
+
+/**
+ * Whether the dataset is shown as stored, and each reason it may not be: what
+ * the import found, and the server's own trouble serving it.
+ */
+function HealthFacts({ health }: { health: HealthState | null }) {
+  const value = health?.status === "ready" ? health.value : null;
+  let status: ReactNode;
+  if (!health) status = <span className="lc-info-muted">Looking up…</span>;
+  else if (!value) status = <span className="lc-info-muted">Not available</span>;
+  else status = <Badge tone={STATUS[value.status].tone}>{STATUS[value.status].label}</Badge>;
+  const reasons = value ? healthReasons(value) : [];
+
+  return (
+    <section className="lc-info-section">
+      <h3 className="lc-rail-panel-section-title">Health</h3>
+      <dl className="lc-info-list">
+        <Fact label="Status">{status}</Fact>
+      </dl>
+      {reasons.length > 0 && (
+        <ul className="lc-info-health" aria-label="Health details">
+          {reasons.map((reason) => (
+            <li key={reason.text} data-degrades={reason.degrades || undefined}>
+              {reason.text}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** What health reports, each marked when it makes the data show wrong or not at all. */
+function healthReasons(health: DatasetSourceHealth): Array<{ text: string; degrades: boolean }> {
+  const reasons: Array<{ text: string; degrades: boolean }> = [];
+  if (health.binding.status !== "healthy" && health.binding.message) {
+    reasons.push({ text: health.binding.message, degrades: true });
+  }
+  const failedReads = health.source_cache?.backend_errors ?? 0;
+  if (failedReads > 0) {
+    const reads = failedReads === 1 ? "read" : "reads";
+    reasons.push({ text: `${failedReads.toLocaleString()} ${reads} from the source failed`, degrades: true });
+  }
+  const coarse = health.generated_coarse;
+  if (coarse.status !== "healthy" && coarse.message) {
+    reasons.push({ text: coarse.message, degrades: true });
+  }
+  for (const warning of health.import_warnings ?? []) {
+    reasons.push({ text: warning.message, degrades: warning.degrades });
+  }
+  return reasons;
 }
 
 /** A level's spatial extent, Z × Y × X, dropping a single plane. */
