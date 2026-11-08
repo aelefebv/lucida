@@ -149,9 +149,9 @@ def test_layer_changes_persist_with_the_core_defaults(tmp_path):
     assert layers[0]["level_pin"] == "follows the screen"
 
 
-def test_layer_contrast_sets_the_selected_channel_and_stops_auto_contrast(tmp_path):
+def test_layer_contrast_sets_the_soloed_channel_and_stops_auto_contrast(tmp_path):
     ws, server = workspace(tmp_path)
-    ws.view.slice("c", 1)
+    ws.channel.solo(DATASET, 1)
 
     ws.layer.contrast(DATASET, 10.0, 500.0)
 
@@ -172,15 +172,27 @@ def test_channel_changes_persist_and_unknown_channels_are_missing(tmp_path):
     ws, server = workspace(tmp_path)
 
     ws.channel.colormap(DATASET, 1, "viridis")
-    ws.channel.mode("multi")
+    ws.channel.solo(DATASET, 1)
 
     view = stored_view(server)
     assert view["dataset_settings"][DATASET]["channel_settings"][1]["colormap"] == "viridis"
-    assert view["view"]["multi_channel"] is True
+    assert view["dataset_settings"][DATASET]["solo"] == 1
+    assert "c" not in view["view"]
+
+    ws.channel.solo(DATASET)
+    assert "solo" not in stored_view(server)["dataset_settings"][DATASET]
 
     with pytest.raises(LucidaError) as error:
         ws.channel.visible(DATASET, 2, False)
     assert error.value.kind == "missing_resource"
+
+    with pytest.raises(LucidaError) as error:
+        ws.channel.solo(DATASET, 2)
+    assert error.value.kind == "missing_resource"
+
+    with pytest.raises(LucidaError) as error:
+        ws.view.slice("c", 1)
+    assert error.value.kind == "config"
 
     with pytest.raises(LucidaError) as error:
         ws.channel.colormap(DATASET, 0, "not-a-colormap")

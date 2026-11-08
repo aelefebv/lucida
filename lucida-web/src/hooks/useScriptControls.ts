@@ -10,34 +10,46 @@
  */
 
 import { useEffect, type RefObject } from "react";
+import { Axis } from "../axes.ts";
+import type { ResolvedLayers } from "../resolvedLayers.ts";
 import type { SavedView } from "../savedView/types.ts";
-import { scrubIndex, selectDataset, setScriptControls, type SelectorState } from "../trace/steps.ts";
+import {
+  scrubIndex,
+  scrubSolo,
+  selectDataset,
+  setScriptControls,
+  type SelectorState,
+} from "../trace/steps.ts";
 import type { DatasetState } from "../types.ts";
 
 export interface ScriptControlInputs {
   /** The selectors as the dimension controls see them. */
   selectors: SelectorState;
-  /** The handlers the Z, T, and C controls call. */
+  /** What each layer shows, for a `c` scrub's starting solo. */
+  resolvedLayers: ResolvedLayers;
+  /** The handlers the Z and T controls call. */
   setZ(index: number): void;
   setT(index: number): void;
-  setC(index: number): void;
+  /** The handler the layer panel's solo calls. */
+  setSolo(datasetId: string, channel: number | null): void;
   /** The handlers the layer panel's channel and layer checkboxes call. */
   setChannelVisible(datasetId: string, channel: number, visible: boolean): void;
   setLayerVisible(datasetId: string, visible: boolean): void;
   /** The view as the page would save it, or null before a scene exists. */
   captureView(): SavedView | null;
-  /** The dataset a channel select is about when several are open. */
+  /** The dataset a channel step is about when several are open. */
   selectedDatasetId: string | null;
-  /** The open datasets, read when a select lands rather than when it is registered. */
+  /** The open datasets, read when a step lands rather than when it is registered. */
   datasetsRef: RefObject<Map<string, DatasetState>>;
 }
 
 export function useScriptControls(inputs: ScriptControlInputs): void {
-  const { z, t, c, dimZ, dimT, dimC, viewMode } = inputs.selectors;
+  const { z, t, dimZ, dimT, viewMode } = inputs.selectors;
   const {
+    resolvedLayers,
     setZ,
     setT,
-    setC,
+    setSolo,
     setChannelVisible,
     setLayerVisible,
     captureView,
@@ -45,13 +57,27 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
     datasetsRef,
   } = inputs;
   useEffect(() => {
-    const selectors: SelectorState = { z, t, c, dimZ, dimT, dimC, viewMode };
+    const selectors: SelectorState = { z, t, dimZ, dimT, viewMode };
+    const channelCountOf = (datasetId: string): number =>
+      datasetsRef.current?.get(datasetId)?.manifest?.images[0]?.multiscale.levels[0]?.shape[Axis.C] ?? 1;
     setScriptControls({
       view: captureView,
       scrub: (axis, count) => {
+        if (axis === "c") {
+          const open = Array.from(datasetsRef.current?.keys() ?? []);
+          const datasetId = selectDataset(selectedDatasetId, open);
+          if (datasetId === null) {
+            return { applied: false, reason: "no dataset is in hand for a channel scrub" };
+          }
+          const solo = resolvedLayers.get(datasetId)?.solo ?? null;
+          const landing = scrubSolo(solo, channelCountOf(datasetId), count);
+          if ("refused" in landing) return { applied: false, reason: landing.refused };
+          setSolo(datasetId, landing.solo);
+          return { applied: true, reason: null };
+        }
         const landing = scrubIndex(selectors, axis, count);
         if ("refused" in landing) return { applied: false, reason: landing.refused };
-        ({ z: setZ, t: setT, c: setC })[axis](landing.index);
+        ({ z: setZ, t: setT })[axis](landing.index);
         return { applied: true, reason: null };
       },
       select: (target, visible) => {
@@ -67,10 +93,11 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
         if (datasetId === null) {
           return { applied: false, reason: "no dataset is in hand for a channel select" };
         }
-        if (target.channel >= dimC) {
+        const channels = channelCountOf(datasetId);
+        if (target.channel >= channels) {
           return {
             applied: false,
-            reason: `${datasetId} has ${dimC} channel(s), so there is no channel ${target.channel}`,
+            reason: `${datasetId} has ${channels} channel(s), so there is no channel ${target.channel}`,
           };
         }
         setChannelVisible(datasetId, target.channel, visible);
@@ -79,8 +106,8 @@ export function useScriptControls(inputs: ScriptControlInputs): void {
     });
     return () => setScriptControls(null);
   }, [
-    z, t, c, dimZ, dimT, dimC, viewMode,
-    setZ, setT, setC, setChannelVisible, setLayerVisible,
+    z, t, dimZ, dimT, viewMode, resolvedLayers,
+    setZ, setT, setSolo, setChannelVisible, setLayerVisible,
     captureView, selectedDatasetId, datasetsRef,
   ]);
 }

@@ -1,7 +1,9 @@
 // The Explore panel's `requestThumbnail`: render a candidate child `SavedView`
 // off-screen through the minimap's coarse-overview path, with no re-streaming.
-// Layer content and placement come from the current scene, as the minimap draws
-// them; only the camera varies per candidate.
+// Placement comes from the current scene, as the minimap draws it. What each
+// layer shows comes from the scene resolving the candidate, so a candidate that
+// solos a channel previews that channel and every other one previews the
+// composite the canvas shows.
 
 import { camera_matrices, type WasmScene } from "lucida-core";
 import type { RenderClient } from "./renderer/renderClient.ts";
@@ -10,51 +12,41 @@ import type { DatasetState } from "./types.ts";
 import type { SavedView } from "./savedView/types.ts";
 import {
   identityModelMatrix,
+  overviewKeyFor,
+  overviewLayerParams,
   readMemberRenderMatrices,
-  resolveMinimapLayerColormap,
-  resolveMinimapLayerContrast,
-  type MinimapDatasetSettings,
+  type MinimapRenderLayerGeometry,
 } from "./minimapPath.ts";
-
-/** The display-settings shape `all_dataset_settings()` serializes per dataset. */
-type ThumbDatasetSettings = {
-  visible: boolean;
-} & MinimapDatasetSettings;
+import { parseResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 
 /**
- * Minimap-style layer params for `datasetId` from the live scene, one per
- * member; empty when the dataset is hidden or unknown. Camera-independent, so
- * all of a dataset's thumbnails share them.
+ * Minimap-style layer params for `datasetId` under `resolved`, one per member
+ * and shown channel; empty when the dataset is hidden or unknown.
  */
-function buildThumbnailLayers(
+export function buildThumbnailLayers(
   scene: WasmScene,
   ds: DatasetState,
   datasetId: string,
+  resolved: ResolvedLayers,
 ): MinimapLayerParams[] {
-  let allSettings: Record<string, ThumbDatasetSettings>;
-  try {
-    allSettings = JSON.parse(scene.all_dataset_settings());
-  } catch {
-    return [];
-  }
-  const settings = allSettings[datasetId];
-  if (!settings || !settings.visible) return [];
-
-  const activeC = scene.c();
-  const { contrastMin, contrastMax, gamma } = resolveMinimapLayerContrast(settings, activeC);
-  const colormap = resolveMinimapLayerColormap(settings, activeC);
+  const layer = resolved.get(datasetId);
+  if (!layer || !layer.visible) return [];
 
   const memberMatrices = readMemberRenderMatrices(scene, datasetId);
-  const layers: MinimapLayerParams[] = [];
+  const geometry: MinimapRenderLayerGeometry[] = [];
   for (const img of ds.manifest.images) {
-    const memberId = img.image_id;
-    // Worker overview textures are keyed by member id.
-    const mats = memberMatrices.get(memberId);
-    const modelMatrix = mats?.model ?? identityModelMatrix();
-    const invModelMatrix = mats?.invModel ?? identityModelMatrix();
-    layers.push({ datasetId: memberId, modelMatrix, invModelMatrix, contrastMin, contrastMax, gamma, colormap });
+    const mats = memberMatrices.get(img.image_id);
+    for (const ch of layer.channels) {
+      geometry.push({
+        memberId: overviewKeyFor(img.image_id, ch.channel),
+        ownerDatasetId: datasetId,
+        channel: ch.channel,
+        modelMatrix: mats?.model ?? identityModelMatrix(),
+        invModelMatrix: mats?.invModel ?? identityModelMatrix(),
+      });
+    }
   }
-  return layers;
+  return overviewLayerParams(geometry, resolved);
 }
 
 /**
@@ -62,10 +54,10 @@ function buildThumbnailLayers(
  * candidate. Returns `null`, so the panel falls back to a label, whenever a
  * render can't be produced.
  *
- * The layer list is cached across the batch and rebuilt only when the epochs,
- * active channel, or display settings change; camera moves don't invalidate
- * it. `client.thumbnailRender` structured-clones the layers per call, so reuse
- * never hands the worker a detached buffer.
+ * Layers are cached per what the candidate shows, so the camera-only
+ * candidates of one batch share them. `client.thumbnailRender`
+ * structured-clones the layers per call, so reuse never hands the worker a
+ * detached buffer.
  */
 export function makeThumbnailRequester(opts: {
   getScene: () => WasmScene | null;
@@ -83,12 +75,12 @@ export function makeThumbnailRequester(opts: {
     const ds = getDatasets().get(datasetId);
     if (!ds) return null;
 
+    const resolvedJson = scene.resolved_view_layers(JSON.stringify(view));
     let layersKey: string | null = null;
     try {
       const epochs: { content: number; layout: number } = JSON.parse(scene.epochs());
       layersKey =
-        `${datasetId}|${epochs.content}|${epochs.layout}|${scene.c()}` +
-        `|${ds.manifest.images.length}|${scene.all_dataset_settings()}`;
+        `${datasetId}|${epochs.content}|${epochs.layout}|${ds.manifest.images.length}|${resolvedJson}`;
     } catch {
       // Unreadable epochs leave a null key: rebuild, don't cache.
     }
@@ -96,7 +88,7 @@ export function makeThumbnailRequester(opts: {
     const layers =
       layersKey !== null && layersKey === cachedLayersKey && cachedLayers !== null
         ? cachedLayers
-        : buildThumbnailLayers(scene, ds, datasetId);
+        : buildThumbnailLayers(scene, ds, datasetId, parseResolvedLayers(resolvedJson));
     cachedLayers = layersKey !== null ? layers : null;
     cachedLayersKey = layersKey;
     if (layers.length === 0) return null;

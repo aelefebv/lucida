@@ -5,7 +5,8 @@ import { act, cleanup, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { Hud } from "./Hud.tsx";
-import { DEBUG_OVERLAYS, isOverlayEnabled, setOverlayEnabled } from "../debug/logging.ts";
+import { DEBUG_OVERLAYS, debugOverlaysPreference, isOverlayEnabled, setOverlayEnabled } from "../debug/logging.ts";
+import { getPreference } from "../theme/preferences.ts";
 
 beforeEach(() => {
   localStorage.clear();
@@ -36,15 +37,15 @@ describe("the HUD legend", () => {
     }
   });
 
-  it("writes a toggle through the registry into the same storage key the overlays read", async () => {
+  it("writes a toggle through the registry into the same preference the overlays read", async () => {
     const user = userEvent.setup();
     renderHud();
     await user.click(screen.getByLabelText("plannedRank"));
     expect(isOverlayEnabled("plannedRank")).toBe(true);
-    expect(localStorage.getItem("debug.overlays")).toBe("plannedRank");
+    expect(getPreference(debugOverlaysPreference)).toEqual(["plannedRank"]);
     await user.click(screen.getByLabelText("plannedRank"));
     expect(isOverlayEnabled("plannedRank")).toBe(false);
-    expect(localStorage.getItem("debug.overlays")).toBeNull();
+    expect(getPreference(debugOverlaysPreference)).toEqual([]);
   });
 
   it("reflects a toggle flipped from outside", async () => {

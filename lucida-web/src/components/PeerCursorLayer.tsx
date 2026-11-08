@@ -20,7 +20,6 @@ interface Props {
   viewMode: ViewMode;
   z: number;
   t: number;
-  c: number;
   wasmSceneRef: RefObject<WasmScene | null>;
   /** The client and scene become readable when these turn true. */
   clientReady: boolean;
@@ -36,7 +35,6 @@ function PeerCursorLayerBody({
   viewMode,
   z,
   t,
-  c,
   wasmSceneRef,
   clientReady,
   wasmReady,
@@ -108,7 +106,6 @@ function PeerCursorLayerBody({
       viewMode={viewMode}
       z={z}
       t={t}
-      c={c}
       cursorLabels={cursorLabels}
     />
   );

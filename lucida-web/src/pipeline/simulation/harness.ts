@@ -71,7 +71,7 @@ const REPORT_KEY_LIMIT = 12;
 const RESENT_THRESHOLD = 3;
 
 export type ScenarioStep =
-  | { scrub: { z?: number; t?: number; c?: number } }
+  | { scrub: { z?: number; t?: number } }
   /** A drag, in device pixels; an arcball pan in a volume. */
   | { pan: [dx: number, dy: number] }
   /** A zoom by a factor about the view center; an arcball zoom in a volume. */
@@ -460,7 +460,6 @@ class Simulation {
     loop.markInput("scrub");
     if (scrub.z !== undefined) applyViewportCommand(scene, { type: "set_z", z: scrub.z });
     if (scrub.t !== undefined) applyViewportCommand(scene, { type: "set_t", t: scrub.t });
-    if (scrub.c !== undefined) applyViewportCommand(scene, { type: "set_c", c: scrub.c });
     return `scrub ${Object.entries(scrub).map(([axis, v]) => `${axis}=${v}`).join(" ")}`;
   }
 

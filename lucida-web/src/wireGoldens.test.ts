@@ -486,6 +486,7 @@ const expectedDisplaySettings: WireDatasetDisplaySettings = {
   channel_blend_mode: "additive",
   detail_level_override: 1,
   label_names: ["region-a"],
+  solo: 0,
 };
 
 const expectedSliceCamera: SliceCamera = {
@@ -526,8 +527,6 @@ const expectedFlyCamera: FlyCamera = {
 const expectedView: WireViewState = {
   z_range: { start: 10, end: 14 },
   t: 2,
-  c: 1,
-  multi_channel: true,
 };
 const expectedDisplay: WireDisplayState = {
   contrast_min: 120,
@@ -538,7 +537,7 @@ const expectedDisplay: WireDisplayState = {
 /** The pin-embedded author view in workspace-dataset-id form. `datasets` is
  *  empty by invariant, since no source URLs ride the document wire. */
 const expectedPinView: SavedView = {
-  v: 1,
+  v: 2,
   datasets: [],
   active_layouts: { "wds-0f3a": "layout-grid" },
   camera: expectedArcballCamera,
@@ -573,7 +572,7 @@ void presenceMirror;
 const expectedFlyPeerPresence = {
   client_id: 11,
   camera: expectedFlyCamera,
-  view: { z_range: { start: 0, end: 50 }, t: 0, c: 0, multi_channel: false },
+  view: { z_range: { start: 0, end: 50 }, t: 0 },
   display: { contrast_min: 0, contrast_max: 65535, gamma: 1 },
   following: null,
   cursor: null,
@@ -588,7 +587,7 @@ void flyPeerMirror;
 const expectedJoiningPresenceWire = {
   client_id: 11,
   camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 600] },
-  view: { z_range: { start: 0, end: 1 }, t: 0, c: 0, multi_channel: false },
+  view: { z_range: { start: 0, end: 1 }, t: 0 },
   display: { contrast_min: 0, contrast_max: 65535, gamma: 1 },
   camera_reported: false,
   following: null,

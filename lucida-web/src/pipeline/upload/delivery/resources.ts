@@ -2,8 +2,8 @@
  * Tracks worker member ids that have received upload resources.
  *
  * This is wire-resource lifecycle state, not delivery state: it exists
- * so dataset removal and multi-channel transitions can ask the worker
- * to drop stale layer resources without peeking into CpuCache internals.
+ * so dataset removal can ask the worker to drop stale layer resources
+ * without peeking into CpuCache internals.
  */
 
 export class WorkerResourceTracker {

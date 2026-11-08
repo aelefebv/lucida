@@ -3,14 +3,14 @@
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 
 /**
- * Chunk-pool key for the worker's shared atlas pools. `chunkDims` is
- * `[X, Y]` for slice or `[X, Y, Z]` for volume; any other arity throws.
+ * Chunk-pool key for the worker's shared atlas pools, one per channel.
+ * `chunkDims` is `[X, Y]` for slice or `[X, Y, Z]` for volume; any other
+ * arity throws.
  */
 export function chunkPoolKey(
   datasetId: string,
   channel: number,
   chunkDims: number[],
-  isMultiCh: boolean,
 ): string {
   let chunkDimsKey: string;
   if (chunkDims.length === 3) {
@@ -22,9 +22,7 @@ export function chunkPoolKey(
       `chunkPoolKey: unsupported chunkDims arity ${chunkDims.length}; expected 2 (slice) or 3 (volume)`,
     );
   }
-  return isMultiCh
-    ? `${datasetId}:ch${channel}:${chunkDimsKey}`
-    : `${datasetId}:${chunkDimsKey}`;
+  return `${datasetId}:ch${channel}:${chunkDimsKey}`;
 }
 
 export function chunkTierPoolKey(
@@ -32,9 +30,8 @@ export function chunkTierPoolKey(
   tier: ResidencyTier,
   channel: number,
   chunkDims: number[],
-  isMultiCh: boolean,
 ): string {
-  const base = chunkPoolKey(datasetId, channel, chunkDims, isMultiCh);
+  const base = chunkPoolKey(datasetId, channel, chunkDims);
   return `${base}:${tier}`;
 }
 

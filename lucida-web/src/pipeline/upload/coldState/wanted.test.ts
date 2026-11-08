@@ -30,7 +30,7 @@ describe("wantedChunksFromPlan", () => {
       req({ chunkKey: "2/0/1/0/0/0", c: 1, level: 2, lane: "coarse", tier: "coarse" }),
       req({ chunkKey: "0/1/1/0/0/0", c: 1, t: 1, lane: "prefetch" }),
       req({ chunkKey: "3/0/1/0/0/0", c: 1, level: 3, lane: "minimap", tier: "coarse" }),
-    ], true);
+    ]);
 
     expect([...wanted.values()]).toEqual([
       { memberId: "img:ch1", tier: "detail", chunkKeys: ["0/0/1/0/0/0", "0/0/1/0/0/1"] },
@@ -38,9 +38,9 @@ describe("wantedChunksFromPlan", () => {
     ]);
   });
 
-  it("uses the bare image id outside multi-channel mode", () => {
-    const wanted = wantedChunksFromPlan([req({})], false);
-    expect([...wanted.values()].map((e) => e.memberId)).toEqual(["img"]);
+  it("names the channel when one is shown alone too", () => {
+    const wanted = wantedChunksFromPlan([req({})]);
+    expect([...wanted.values()].map((e) => e.memberId)).toEqual(["img:ch0"]);
   });
 });
 
@@ -51,19 +51,19 @@ describe("diffWantedChunks", () => {
       req({ imageId: "a", chunkKey: "k2" }),
       req({ imageId: "b", chunkKey: "k1" }),
       req({ imageId: "c", chunkKey: "k1" }),
-    ], false);
+    ]);
     const next = wantedChunksFromPlan([
       // Same chunks in another order: unchanged.
       req({ imageId: "a", chunkKey: "k2" }),
       req({ imageId: "a", chunkKey: "k1" }),
       req({ imageId: "b", chunkKey: "k3" }),
       req({ imageId: "d", chunkKey: "k1" }),
-    ], false);
+    ]);
 
     expect(diffWantedChunks(prev, next)).toEqual([
-      { memberId: "b", tier: "detail", chunkKeys: ["k3"] },
-      { memberId: "d", tier: "detail", chunkKeys: ["k1"] },
-      { memberId: "c", tier: "detail", chunkKeys: [] },
+      { memberId: "b:ch0", tier: "detail", chunkKeys: ["k3"] },
+      { memberId: "d:ch0", tier: "detail", chunkKeys: ["k1"] },
+      { memberId: "c:ch0", tier: "detail", chunkKeys: [] },
     ]);
   });
 });

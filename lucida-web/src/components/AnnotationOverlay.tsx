@@ -779,7 +779,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
     return scene ? buildAnnotationView(scene) : null;
   };
   const addPoint = (at: AnnotationPlacement, openThread: boolean) => {
-    editing.addPoint(at, { t: viewContext.t, c: viewContext.c, view: viewForNewPoint(), openThread });
+    editing.addPoint(at, { t: viewContext.t, c: viewContext.channels[0] ?? 0, view: viewForNewPoint(), openThread });
     onViewportChanged?.();
   };
 

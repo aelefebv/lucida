@@ -121,12 +121,11 @@ function stripViewState(v: ViewState): ViewState | undefined {
     out.t = v.t;
     any = true;
   }
-  if (v.c !== 0) {
-    out.c = v.c;
-    any = true;
-  }
-  if (v.multi_channel === true) {
-    out.multi_channel = true;
+  // A view decoded from an older payload keeps its scene-wide channel mode
+  // whole, defaults included, so it re-encodes to what it decoded from.
+  if (v.c !== undefined || v.multi_channel !== undefined) {
+    out.c = v.c ?? 0;
+    out.multi_channel = v.multi_channel ?? false;
     any = true;
   }
   return any ? (out as ViewState) : undefined;
@@ -155,6 +154,7 @@ function stripDatasetSettings(s: DatasetDisplaySettings): Record<string, unknown
   if (typeof s.detail_level_override === "number") {
     out.detail_level_override = s.detail_level_override;
   }
+  if (typeof s.solo === "number") out.solo = s.solo;
   // The channel count is structural. `{}` means all defaults at that index.
   if (s.channel_settings && s.channel_settings.length > 0) {
     out.channel_settings = s.channel_settings.map((c, i) =>
@@ -187,7 +187,7 @@ function restoreDefaults(obj: Record<string, unknown>): SavedView {
     datasets: (obj.datasets as string[] | undefined) ?? [],
     active_layouts: (obj.active_layouts as Record<string, string> | undefined) ?? {},
     camera: obj.camera as SavedView["camera"],
-    view: restoreView(obj.view),
+    view: restoreView(obj.view, obj.v as number),
     display: restoreDisplay(obj.display),
     dataset_order: (obj.dataset_order as string[] | undefined) ?? [],
     dataset_settings: restoreDatasetSettingsMap(obj.dataset_settings),
@@ -196,14 +196,23 @@ function restoreDefaults(obj: Record<string, unknown>): SavedView {
   return out;
 }
 
-function restoreView(v: unknown): ViewState {
+/**
+ * A version 1 payload chose its channels scene-wide, and stripping dropped
+ * `c: 0` and `multi_channel: false`, so absent means "channel 0 alone". It
+ * restores whole, and the scene decodes it into each layer's solo when the
+ * view is imported. Version 2 keeps solo per layer and has neither key.
+ */
+function restoreView(v: unknown, version: number): ViewState {
   const partial = (v as Partial<ViewState> | undefined) ?? {};
-  return {
+  const view: ViewState = {
     z_range: partial.z_range ?? { start: 0, end: 1 },
     t: partial.t ?? 0,
-    c: partial.c ?? 0,
-    multi_channel: partial.multi_channel ?? false,
   };
+  if (version < 2) {
+    view.c = partial.c ?? 0;
+    view.multi_channel = partial.multi_channel ?? false;
+  }
+  return view;
 }
 
 function restoreDisplay(d: unknown): DisplayState {
@@ -243,6 +252,7 @@ function restoreDatasetSettings(p: unknown): DatasetDisplaySettings {
   if (typeof partial.detail_level_override === "number") {
     out.detail_level_override = partial.detail_level_override;
   }
+  if (typeof partial.solo === "number") out.solo = partial.solo;
   return out;
 }
 

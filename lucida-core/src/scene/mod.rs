@@ -1,5 +1,8 @@
+mod layers;
 mod types;
 
+pub(crate) use layers::LayerExtent;
+pub use layers::{ResolvedLayer, ShownChannel, in_channel_context};
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
@@ -809,6 +812,8 @@ impl Scene {
         let last_query = self.last_query_entries(dataset_id);
         let pin = self.level_pin(dataset_id);
         let multiscale_by_image = multiscale_by_image(manifest);
+        let layer = self.resolved_layer(dataset_id)?;
+        let channels = layer.channel_indices();
 
         let mut plans = Vec::new();
         for member in &derived.members {
@@ -827,7 +832,7 @@ impl Scene {
                 level0.shape[4] as u32,
             ];
             let region = self.camera.visible_region(
-                &self.view.z_range,
+                &layer.z_range,
                 Some(&member.volume_transform),
                 Some(&vol_shape),
             );
@@ -877,17 +882,29 @@ impl Scene {
             );
             let level_geo = &member.levels[level as usize];
 
-            let t = self.view.t;
-            let c = self.view.c;
-
-            let (needed, prefetch) = if !is_2d {
-                (
-                    chunk::visible_chunks(&local_region, level_geo, t, c, level0),
-                    vec![],
-                )
-            } else {
-                chunk::visible_and_prefetch_chunks(&local_region, level_geo, t, c, level0)
-            };
+            let mut needed = Vec::new();
+            let mut prefetch = Vec::new();
+            for &c in &channels {
+                if is_2d {
+                    let (n, p) = chunk::visible_and_prefetch_chunks(
+                        &local_region,
+                        level_geo,
+                        layer.t,
+                        c,
+                        level0,
+                    );
+                    needed.extend(n);
+                    prefetch.extend(p);
+                } else {
+                    needed.extend(chunk::visible_chunks(
+                        &local_region,
+                        level_geo,
+                        layer.t,
+                        c,
+                        level0,
+                    ));
+                }
+            }
 
             plans.push(MemberChunkPlan {
                 image_id: member.image_id.clone(),
@@ -1326,10 +1343,19 @@ impl Scene {
     /// The fit reads this scene's viewport, so a caller that has not ticked
     /// since the canvas last resized asserts its size first.
     ///
+    /// A view recorded before solo was per layer carries a scene-wide channel
+    /// mode, which lands here as each layer's solo.
+    ///
     /// `epochs.view` bumps iff the camera changed, and `epochs.selection` iff
-    /// view or display changed, so an unchanged presence heartbeat does not
-    /// invalidate consumers' caches but a real remote camera move does.
+    /// view, display or a solo changed, so an unchanged presence heartbeat does
+    /// not invalidate consumers' caches but a real remote camera move does.
     pub fn import_presence(&mut self, camera: Camera, view: ViewState, display: DisplayState) {
+        let mut view = view;
+        if let Some(legacy) = view.take_legacy_channels()
+            && self.adopt_legacy_channels(legacy)
+        {
+            self.epochs.selection += 1;
+        }
         let mut camera = camera;
         // A follow target must not hand this scene state its own mutators could
         // never produce, such as a `zoom: 0.0` that would NaN-poison the next
@@ -3047,7 +3073,6 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         scene.view.set_z(5);
         scene.view.t = 2;
-        scene.view.c = 1;
 
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -3059,7 +3084,6 @@ mod tests {
 
         assert_eq!(parsed.view.z_range, 5..6);
         assert_eq!(parsed.view.t, 2);
-        assert_eq!(parsed.view.c, 1);
         assert_eq!(parsed.document.manifests.len(), 1);
         assert!(
             parsed

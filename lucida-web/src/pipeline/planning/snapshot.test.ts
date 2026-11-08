@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import type { WasmScene } from "lucida-core";
 import type { DatasetManifest, ImageSpec, LevelGeometry } from "../../manifestTypes.ts";
-import type { DatasetSettings } from "../../tickCommon.ts";
-
+import { resolvedLayer } from "../../resolvedLayerFixtures.ts";
+import type { ResolvedLayer } from "../../resolvedLayers.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import {
@@ -42,7 +42,6 @@ interface StubSceneConfig {
   visibleEntities: VisibleEntityRow[];
   positions: Record<string, [number, number]>;
   visibleRegion: VisibleRegionJson | null;
-  c: number;
   t: number;
   z: number;
 }
@@ -71,7 +70,6 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
       sort_center: null,
       frustum_planes: null,
     },
-    c: 0,
     t: 0,
     z: 0,
     ...overrides,
@@ -83,7 +81,6 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
     member_positions: (_dsId: string) => JSON.stringify(config.positions),
     visible_region: (_dsId: string) =>
       config.visibleRegion === null ? "null" : JSON.stringify(config.visibleRegion),
-    c: () => config.c,
     t: () => config.t,
     z: () => config.z,
     epochs: () =>
@@ -143,19 +140,6 @@ function makeDataset(
   return { manifest };
 }
 
-function makeDsSettings(overrides?: Partial<DatasetSettings>): DatasetSettings {
-  return {
-    visible: true,
-    opacity: 1,
-    contrast_min: 0,
-    contrast_max: 1,
-    gamma: 1,
-    blend_mode: "alpha",
-    channel_settings: [],
-    channel_blend_mode: "additive",
-    ...overrides,
-  };
-}
 
 function makeEpochs(): SceneEpochs {
   return { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
@@ -164,8 +148,7 @@ function makeEpochs(): SceneEpochs {
 interface MakeArgsOverrides {
   scene?: WasmScene;
   dataset?: SnapshotDatasetEntry;
-  dsSettings?: DatasetSettings | undefined;
-  multiChannel?: boolean;
+  layer?: ResolvedLayer | undefined;
   mode?: "slice" | "volume";
 }
 
@@ -174,11 +157,9 @@ function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
     scene: overrides?.scene ?? makeStubScene(),
     datasetId: "ds1",
     dataset: overrides?.dataset ?? makeDataset(),
-    dsSettings: overrides?.dsSettings ?? makeDsSettings(),
-
+    layer: overrides && "layer" in overrides ? overrides.layer : resolvedLayer("ds1"),
     minimapPending: new Map(),
     mode: overrides?.mode ?? "slice",
-    multiChannel: overrides?.multiChannel ?? false,
     currentEpochs: makeEpochs(),
     requestEpoch: 0,
     config: DEFAULT_PLANNING_CONFIG,
@@ -365,36 +346,33 @@ describe("buildPlanningSnapshot — visible region fallback", () => {
 });
 
 describe("buildPlanningSnapshot — selection state", () => {
-  it("multi-channel selection lists every visible channel from settings", () => {
-    const scene = makeStubScene({ c: 1 });
-    const dsSettings = makeDsSettings({
-      channel_settings: [
-        { visible: true, color: [1, 0, 0], opacity: 1, contrast_min: 0, contrast_max: 1, gamma: 1 } as unknown as DatasetSettings["channel_settings"][number],
-        { visible: false, color: [0, 1, 0], opacity: 1, contrast_min: 0, contrast_max: 1, gamma: 1 } as unknown as DatasetSettings["channel_settings"][number],
-        { visible: true, color: [0, 0, 1], opacity: 1, contrast_min: 0, contrast_max: 1, gamma: 1 } as unknown as DatasetSettings["channel_settings"][number],
-      ],
-    });
+  it("plans the channels the resolved layer shows", () => {
     const built = buildPlanningSnapshot(
-      makeArgs({ scene, multiChannel: true, dsSettings }),
+      makeArgs({ layer: resolvedLayer("ds1", [0, 2]) }),
     );
     expect(built!.selection.visibleChannels).toEqual([0, 2]);
-    expect(built!.selection.c).toBe(1);
   });
 
-  it("single-channel selection emits only the active channel", () => {
-    const scene = makeStubScene({ c: 3 });
+  it("plans a solo's one channel", () => {
     const built = buildPlanningSnapshot(
-      makeArgs({ scene, multiChannel: false }),
+      makeArgs({ layer: resolvedLayer("ds1", [3], { solo: 3, channel_count: 4 }) }),
     );
     expect(built!.selection.visibleChannels).toEqual([3]);
   });
 
-  it("multi-channel falls back to scene.c when channel_settings is empty", () => {
-    const scene = makeStubScene({ c: 5 });
-    const built = buildPlanningSnapshot(
-      makeArgs({ scene, multiChannel: true, dsSettings: makeDsSettings() }),
-    );
-    expect(built!.selection.visibleChannels).toEqual([5]);
+  it("plans the layer's clamped t and z, not the scene's", () => {
+    const scene = makeStubScene();
+    const layer = resolvedLayer("ds1", [0], {
+      t: 1, z_range: { start: 4, end: 5 }, t_clamped: true, z_clamped: true,
+    });
+    const built = buildPlanningSnapshot(makeArgs({ scene, layer }));
+    expect(built!.selection.t).toBe(1);
+    expect(built!.selection.z).toBe(4);
+  });
+
+  it("falls back to channel 0 at the scene's selectors for a layer the scene lacks", () => {
+    const built = buildPlanningSnapshot(makeArgs({ layer: undefined }));
+    expect(built!.selection.visibleChannels).toEqual([0]);
   });
 
   it("threads renderMode from the args mode tile", () => {
@@ -452,11 +430,6 @@ describe("buildPlanningSnapshot — target level", () => {
           .targetLevel,
       ).toBe(level);
     }
-    const pinned = makeDsSettings({ detail_level_override: 0 });
-    expect(
-      buildPlanningSnapshot(makeArgs({ scene: sceneAtScreenLevel(1), dsSettings: pinned }))!
-        .entities[0].targetLevel,
-    ).toBe(1);
   });
 
   it("uses an explicit valid coarse pointer", () => {

@@ -186,7 +186,7 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
     if (!overview) continue;
 
     const idx = renderedLayers.length;
-    // Bind the active channel's LUT for the minimap's own draw; otherwise it
+    // Bind this channel's LUT for the minimap's own draw; otherwise it
     // keeps whatever the volume renderer last had, which stays gray in 2D mode.
     // Set it before setVolume, which rebuilds the bind group from the current LUT.
     renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
@@ -204,7 +204,7 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
     const layerEncoder = ctx.device.createCommandEncoder();
     renderer.renderTo(minimapOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, msg.canvasW, msg.canvasH);
     ctx.device.queue.submit([layerEncoder.finish()]);
-    renderedLayers.push({ view: minimapOffscreenPool[idx].createView(), blendMode: "alpha" });
+    renderedLayers.push({ view: minimapOffscreenPool[idx].createView(), blendMode: layer.blendMode });
   }
 
   // Drawn even with no overview resident, so the minimap shows the canvas
@@ -253,7 +253,7 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
     if (!overview) continue;
 
     const idx = renderedLayers.length;
-    // Same single-LOD overview draw as the minimap: bind the active channel's
+    // Same single-LOD overview draw as the minimap: bind this channel's
     // LUT before setVolume (setVolume rebuilds the bind group from the
     // current LUT), then a transient descriptor so the shader reads this
     // layer's model matrix + contrast/gamma over the full overview.
@@ -268,7 +268,7 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
     const layerEncoder = ctx.device.createCommandEncoder();
     renderer.renderTo(thumbnailOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, size, size);
     ctx.device.queue.submit([layerEncoder.finish()]);
-    renderedLayers.push({ view: thumbnailOffscreenPool[idx].createView(), blendMode: "alpha" });
+    renderedLayers.push({ view: thumbnailOffscreenPool[idx].createView(), blendMode: layer.blendMode });
   }
 
   if (renderedLayers.length === 0 || !thumbnailContext || !thumbnailCanvas) {

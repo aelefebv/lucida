@@ -79,7 +79,7 @@ describe("AnnotationOverlay (2D) — visible prop (issue #792)", () => {
         wasmSceneRef={sceneRef}
         canvas={canvas}
         version={0}
-        viewContext={{ z: 3, t: 0, c: 0 }}
+        viewContext={{ z: 3, t: 0, channels: [0] }}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -93,7 +93,7 @@ describe("AnnotationOverlay (2D) — visible prop (issue #792)", () => {
           wasmSceneRef={sceneRef}
           canvas={canvas}
           version={0}
-          viewContext={{ z: 3, t: 0, c: 0 }}
+          viewContext={{ z: 3, t: 0, channels: [0] }}
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}
@@ -186,7 +186,7 @@ describe("AnnotationOverlay3D — visible prop (issue #792)", () => {
         wasmSceneRef={sceneRef}
         canvas={canvas}
         version={0}
-        viewContext={{ z: 3, t: 0, c: 0 }}
+        viewContext={{ z: 3, t: 0, channels: [0] }}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -200,7 +200,7 @@ describe("AnnotationOverlay3D — visible prop (issue #792)", () => {
           wasmSceneRef={sceneRef}
           canvas={canvas}
           version={0}
-          viewContext={{ z: 3, t: 0, c: 0 }}
+          viewContext={{ z: 3, t: 0, channels: [0] }}
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}
@@ -260,7 +260,7 @@ describe("toolbar toggle wiring (issue #792) — button flips overlay visibility
           wasmSceneRef={sceneRef}
           canvas={canvas}
           version={0}
-          viewContext={{ z: 3, t: 0, c: 0 }}
+          viewContext={{ z: 3, t: 0, channels: [0] }}
           myId={MY_ID}
           sendCommand={() => {}}
           onDocumentChanged={() => {}}

@@ -3,7 +3,6 @@ import {
   parseChunkKey,
   makeCompositeKey,
   parseCompositeKey,
-  derivePoolKey,
 } from "./chunkKeys.ts";
 
 describe("parseChunkKey", () => {
@@ -69,16 +68,5 @@ describe("parseCompositeKey", () => {
       memberId: "mem",
       chunkKey: "a|b|c",
     });
-  });
-});
-
-describe("derivePoolKey", () => {
-  it("returns datasetId for a single-channel memberId", () => {
-    expect(derivePoolKey("imageA", "ds1")).toBe("ds1");
-  });
-
-  it("appends the :chN suffix for a multi-channel memberId", () => {
-    expect(derivePoolKey("imageA:ch0", "ds1")).toBe("ds1:ch0");
-    expect(derivePoolKey("imageA:ch5", "ds1")).toBe("ds1:ch5");
   });
 });

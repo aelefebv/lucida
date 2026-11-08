@@ -37,22 +37,22 @@ describe("gpuSlotsFor", () => {
       reservedBytes: 40 * MIB,
       pools: [{ poolKey: "ds:ch1:128x128:detail", datasetId: "ds", tier: "detail", slotBytes: 32_768, slots: 64, maxSlots: 4096 }],
     };
-    const slotOf = gpuSlotsFor(manifest, "slice", true, report, 1536 * MIB);
+    const slotOf = gpuSlotsFor(manifest, "slice", report, 1536 * MIB);
     expect(slotOf(request())).toEqual({ pool: "ds:ch1:128x128:detail", slots: 4096, slotBytes: 32_768 });
   });
 
   it("sizes a pool the worker has not made yet as the worker would, in either mode", () => {
-    const slice = gpuSlotsFor(manifest, "slice", false, null, 256 * MIB)(request({ level: 1 }));
+    const slice = gpuSlotsFor(manifest, "slice", null, 256 * MIB)(request({ level: 1 }));
     // 256 MiB of 8 KiB slots would be 32,768, but 128 a side is all the texture limit allows.
-    expect(slice).toEqual({ pool: "ds:64x64:detail", slots: 128 * 128, slotBytes: 64 * 64 * 2 });
-    const volume = gpuSlotsFor(manifest, "volume", false, null, 256 * MIB)(request({ tier: "coarse", lane: "coarse" }));
-    expect(volume?.pool).toBe("ds:128x128x32:coarse");
+    expect(slice).toEqual({ pool: "ds:ch1:64x64:detail", slots: 128 * 128, slotBytes: 64 * 64 * 2 });
+    const volume = gpuSlotsFor(manifest, "volume", null, 256 * MIB)(request({ tier: "coarse", lane: "coarse" }));
+    expect(volume?.pool).toBe("ds:ch1:128x128x32:coarse");
     expect(volume?.slotBytes).toBe(128 * 128 * 32 * 2);
     expect(volume?.slots).toBe(256);
   });
 
   it("puts no prefetch or minimap chunk in a pool", () => {
-    const slotOf = gpuSlotsFor(manifest, "slice", false, null, 256 * MIB);
+    const slotOf = gpuSlotsFor(manifest, "slice", null, 256 * MIB);
     expect(slotOf(request({ lane: "prefetch" }))).toBeNull();
     expect(slotOf(request({ lane: "minimap" }))).toBeNull();
   });
