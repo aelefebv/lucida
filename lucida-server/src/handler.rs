@@ -174,14 +174,17 @@ async fn handle_client_inner(
         loop {
             // A requested close goes out next, ahead of anything still
             // queued: the connection is ending, and the backlog may be why.
-            if let Some(frame) = outbound_close.current() {
+            if let Some(close) = outbound_close.current() {
                 tracing::warn!(
                     client_id = %id,
-                    code = frame.code,
-                    reason = %frame.reason,
+                    code = close.frame.code,
+                    reason = %close.frame.reason,
                     "ws.connection.closed_by_server"
                 );
-                let _ = ws_tx.send(Message::Close(Some(frame))).await;
+                if let Some(notice) = close.notice {
+                    let _ = ws_tx.send(Message::Text(notice.into())).await;
+                }
+                let _ = ws_tx.send(Message::Close(Some(close.frame))).await;
                 break;
             }
             tokio::select! {
@@ -230,7 +233,6 @@ async fn handle_client_inner(
                                     json
                                 }
                                 BroadcastItem::GeneratedAvailabilityUpdate { json } => json,
-                                BroadcastItem::WorkspaceArchived { json } => json,
                             };
                             if ws_tx
                                 .send(Message::Text(json.clone().into()))
@@ -339,7 +341,9 @@ async fn handle_client_inner(
                                             error = %e,
                                             "workspace.command.rename_dataset_rejected"
                                         );
-                                        reject_command(&tx, id, rename_rejection(&e));
+                                        if !unicast_tx.close_requested() {
+                                            reject_command(&tx, id, rename_rejection(&e));
+                                        }
                                     }
                                 }
                                 continue;
@@ -382,7 +386,12 @@ async fn handle_client_inner(
                                         error = %e,
                                         "workspace.command.persist_failed"
                                     );
-                                    reject_command(&tx, id, CommandRejection::Unavailable);
+                                    // A stale write closes this socket with the
+                                    // refusal as its notice; once more would
+                                    // only race the close.
+                                    if !unicast_tx.close_requested() {
+                                        reject_command(&tx, id, CommandRejection::Unavailable);
+                                    }
                                 }
                             }
                         }

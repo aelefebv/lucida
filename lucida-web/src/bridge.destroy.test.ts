@@ -16,7 +16,7 @@ class FakeWebSocket {
   readyState = FakeWebSocket.CONNECTING;
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: unknown }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((e: { code: number; reason: string }) => void) | null = null;
   onerror: (() => void) | null = null;
   sent: string[] = [];
   closed = false;
@@ -66,7 +66,7 @@ describe("Bridge.destroy", () => {
     new Bridge(makeHandlers(), "ws://test/ws/workspaces/w1");
     expect(FakeWebSocket.instances).toHaveLength(1);
 
-    FakeWebSocket.instances[0].onclose?.();
+    FakeWebSocket.instances[0].onclose?.({ code: 1006, reason: "" });
     vi.advanceTimersByTime(2500);
 
     expect(FakeWebSocket.instances).toHaveLength(2);
@@ -81,7 +81,7 @@ describe("Bridge.destroy", () => {
 
     // The browser fires `onclose` asynchronously after `close()`; the
     // destroyed bridge must not schedule a reconnect off it.
-    ws.onclose?.();
+    ws.onclose?.({ code: 1006, reason: "" });
     vi.advanceTimersByTime(10_000);
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
@@ -89,7 +89,7 @@ describe("Bridge.destroy", () => {
   it("cancels an already-scheduled reconnect", () => {
     const bridge = new Bridge(makeHandlers(), "ws://test/ws/workspaces/w1");
 
-    FakeWebSocket.instances[0].onclose?.(); // arms the ~2s reconnect timer
+    FakeWebSocket.instances[0].onclose?.({ code: 1006, reason: "" }); // arms the ~2s reconnect timer
     bridge.destroy();
     vi.advanceTimersByTime(10_000);
 
@@ -152,7 +152,7 @@ describe("Bridge.destroy", () => {
     onmessage({
       data: JSON.stringify({ type: "snapshot", seq: 1, document: {}, peers: [], your_id: 7 }),
     });
-    onclose();
+    onclose({ code: 1006, reason: "" });
     onopen();
     vi.advanceTimersByTime(10_000);
 
@@ -189,5 +189,45 @@ describe("Bridge.destroy", () => {
     bridge.sendFollow(null);
 
     expect(ws.sent).toHaveLength(1);
+  });
+});
+
+describe("Bridge close codes", () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("stops for good when the server says access was removed", () => {
+    const handlers = makeHandlers({ onAccessRevoked: vi.fn(), onDisconnect: vi.fn() });
+    new Bridge(handlers, "ws://test/ws/workspaces/w1");
+    const ws = FakeWebSocket.instances[0];
+    ws.open();
+
+    ws.onclose?.({ code: 1008, reason: "workspace access revoked" });
+    vi.advanceTimersByTime(60_000);
+
+    expect(handlers.onAccessRevoked).toHaveBeenCalledTimes(1);
+    expect(handlers.onDisconnect).not.toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  it("reconnects after a close that asks it to, such as a reloaded workspace", () => {
+    const handlers = makeHandlers({ onAccessRevoked: vi.fn(), onDisconnect: vi.fn() });
+    new Bridge(handlers, "ws://test/ws/workspaces/w1");
+    FakeWebSocket.instances[0].open();
+
+    FakeWebSocket.instances[0].onclose?.({ code: 1012, reason: "workspace changed elsewhere" });
+    vi.advanceTimersByTime(2500);
+
+    expect(handlers.onAccessRevoked).not.toHaveBeenCalled();
+    expect(handlers.onDisconnect).toHaveBeenCalledTimes(1);
+    expect(FakeWebSocket.instances).toHaveLength(2);
   });
 });

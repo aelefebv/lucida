@@ -28,7 +28,7 @@ class FakeWebSocket {
   readyState = FakeWebSocket.CONNECTING;
   onopen: (() => void) | null = null;
   onmessage: ((e: { data: unknown }) => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((e: { code: number; reason: string }) => void) | null = null;
   onerror: (() => void) | null = null;
   sent: string[] = [];
 
@@ -444,7 +444,7 @@ describe("Bridge sequenced-stream gap detection and snapshot resync", () => {
     vi.advanceTimersByTime(PAST_GRACE_MS);
     expect(resyncRequests(ws)).toBe(1);
 
-    ws.onclose?.();
+    ws.onclose?.({ code: 1006, reason: "" });
     vi.advanceTimersByTime(2500);
     const ws2 = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
     expect(ws2).not.toBe(ws);
@@ -575,7 +575,7 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     deliver(ws, snapshotMsg(10, { "wds-1": {} }));
     bridge.sendCommand(RENAME_JSON);
 
-    ws.onclose?.();
+    ws.onclose?.({ code: 1006, reason: "" });
     vi.advanceTimersByTime(2500);
     const ws2 = FakeWebSocket.instances[FakeWebSocket.instances.length - 1];
     ws2.open();
