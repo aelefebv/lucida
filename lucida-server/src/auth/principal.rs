@@ -17,7 +17,7 @@ use tracing::{debug, error};
 
 use lucida_core::auth_principal::AuthPrincipal;
 
-use super::anonymous::is_anonymous_session_id;
+use super::anonymous::{anonymous_sessions_enabled, is_anonymous_session_id};
 use super::bearer_token::{BearerTokenStore, hash_bearer_token};
 use super::config::AuthConfig;
 use super::cookie::read_session_cookie;
@@ -585,27 +585,30 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
     }
 }
 
-/// Disabled-mode extractor: the dev switcher's choice, then the browser's
-/// anonymous session, then `dev@local`.
+/// Disabled-mode extractor: the dev switcher's choice on a loopback bind,
+/// the browser's anonymous session on any other, and `dev@local` when
+/// neither names anyone.
 ///
 /// Disabled mode bypasses sign-in entirely, and this is what delivers
 /// that. Without it the cookie extractor would 401 every request and the
-/// SPA would loop into an unregistered `/auth/start`, so a caller with no
-/// live anonymous session, such as the command-line client, is
-/// `dev@local` rather than refused.
+/// SPA would loop into an unregistered `/auth/start`, so a caller nothing
+/// names, such as the command-line client, is `dev@local` rather than
+/// refused.
 ///
 /// The dev cookie is honored only where the switcher that writes it is
-/// offered, a loopback bind, and it wins there because it is a choice the
-/// developer made. Admin rights come from `LUCIDA_ADMIN_EMAILS` alone, as
-/// in every other mode, so no cookie can grant them.
+/// offered, and an anonymous session only where one is minted
+/// ([`anonymous_sessions_enabled`]). The two never hold on the same bind.
+/// Admin rights come from `LUCIDA_ADMIN_EMAILS` alone, as in every other
+/// mode, so no cookie can grant them.
 pub struct StubPrincipalExtractor {
     config: Arc<AuthConfig>,
-    sessions: SessionCookieExtractor,
+    sessions: Option<SessionCookieExtractor>,
 }
 
 impl StubPrincipalExtractor {
     pub fn new(config: Arc<AuthConfig>, store: Arc<dyn LoginSessionStore>) -> Self {
-        let sessions = SessionCookieExtractor::anonymous(Arc::clone(&config), store);
+        let sessions = anonymous_sessions_enabled(&config)
+            .then(|| SessionCookieExtractor::anonymous(Arc::clone(&config), store));
         Self { config, sessions }
     }
 }
@@ -613,17 +616,17 @@ impl StubPrincipalExtractor {
 #[async_trait]
 impl PrincipalExtractor for StubPrincipalExtractor {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
-        let switched = dev_switcher_enabled(&self.config)
-            .then(|| read_dev_principal_cookie(req))
-            .flatten();
-        let mut principal = match switched {
-            Some(principal) => principal,
-            None => match self.sessions.extract(req).await {
+        if let Some(sessions) = &self.sessions {
+            match sessions.extract(req).await {
                 Ok(anonymous) => return Ok(anonymous),
-                Err(AuthError::Unauthenticated) => default_dev_principal(),
+                Err(AuthError::Unauthenticated) => {}
                 Err(error) => return Err(error),
-            },
-        };
+            }
+        }
+        let mut principal = dev_switcher_enabled(&self.config)
+            .then(|| read_dev_principal_cookie(req))
+            .flatten()
+            .unwrap_or_else(default_dev_principal);
         principal.is_admin = self.config.admin_emails.contains(&principal.email);
         Ok(principal)
     }

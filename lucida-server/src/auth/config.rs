@@ -155,8 +155,9 @@ impl SecureCookieMode {
 /// over the auto-detect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
-    /// No sign-in. Each browser that loads the app gets an anonymous
-    /// session; every other caller is the local dev principal.
+    /// No sign-in. Every caller is the local dev principal, except that on
+    /// a non-loopback bind each browser that loads the app gets an
+    /// anonymous session.
     Disabled,
     /// Production OAuth: /auth/start + /auth/callback wired up against
     /// Google. Requires `LUCIDA_GOOGLE_CLIENT_ID`,

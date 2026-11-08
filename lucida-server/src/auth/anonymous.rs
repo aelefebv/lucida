@@ -1,13 +1,18 @@
-//! Per-browser anonymous sessions for disabled auth.
+//! Per-browser anonymous sessions for disabled auth on a shared server.
 //!
-//! Disabled mode has no sign-in, so without these every browser would be
-//! the one shared `dev@local`. A browser that loads the app with no live
-//! session gets one minted here: a row in the session store behind the
-//! ordinary opaque session cookie, naming a fresh `anon-…@local` principal
-//! with a generated name and avatar color. A browser can present only a
-//! session the server minted, so it never picks who it is. Clearing
-//! cookies makes a new person: this tells people apart and secures
-//! nothing.
+//! Disabled mode has no sign-in, so without these every browser on a
+//! server other machines can reach would be the one shared `dev@local`. A
+//! browser that loads the app with no live session gets one minted here: a
+//! row in the session store behind the ordinary opaque session cookie,
+//! naming a fresh `anon-…@local` principal with a generated name and
+//! avatar color. A browser can present only a session the server minted,
+//! so it never picks who it is. Clearing cookies makes a new person: this
+//! tells people apart and secures nothing.
+//!
+//! A loopback bind has one person at it, who drives the CLI and the
+//! browser alike. There every caller stays `dev@local`, so a workspace the
+//! CLI made opens in the browser, and the dev switcher is how a developer
+//! becomes someone else.
 //!
 //! Only a page load mints. The command-line and Python clients never load
 //! the page and stay `dev@local`, and so does the capture surface the CLI
@@ -42,14 +47,22 @@ pub fn is_anonymous_session_id(id: &str) -> bool {
     id.starts_with(ANONYMOUS_SESSION_PREFIX)
 }
 
-/// `router` with anonymous sessions minted on page loads, in disabled
-/// mode. Any other mode gets `router` back unchanged.
+/// Whether browsers get anonymous sessions: disabled auth on a bind other
+/// machines can reach. Never where [`super::dev::dev_switcher_enabled`]
+/// holds.
+pub fn anonymous_sessions_enabled(config: &AuthConfig) -> bool {
+    config.mode == AuthMode::Disabled && !config.bind_is_loopback()
+}
+
+/// `router` with anonymous sessions minted on page loads, where
+/// [`anonymous_sessions_enabled`] holds. Elsewhere `router` comes back
+/// unchanged.
 pub fn with_anonymous_sessions(
     router: Router,
     config: Arc<AuthConfig>,
     store: Arc<dyn LoginSessionStore>,
 ) -> Router {
-    if config.mode != AuthMode::Disabled {
+    if !anonymous_sessions_enabled(&config) {
         return router;
     }
     let sessions = AnonymousSessions {
@@ -214,10 +227,18 @@ mod tests {
 
     const PAGE_ACCEPT: &str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
 
-    fn disabled_config(bind: &str) -> AuthConfig {
+    /// Disabled auth on a bind other machines reach, as the
+    /// `LUCIDA_INSECURE=1` deployment runs it.
+    fn shared() -> AuthConfig {
         let mut config = AuthConfig::for_tests();
-        config.bind_addr = bind.parse().unwrap();
+        config.bind_addr = "0.0.0.0:9876".parse().unwrap();
+        config.insecure_acknowledged = true;
         config
+    }
+
+    /// Disabled auth on loopback, the zero-config local run.
+    fn loopback() -> AuthConfig {
+        AuthConfig::for_tests()
     }
 
     /// The app as `main` composes it in disabled mode: `/auth/whoami`
@@ -290,7 +311,7 @@ mod tests {
 
     #[tokio::test]
     async fn two_browsers_loading_the_app_are_two_people() {
-        let app = app(AuthConfig::for_tests(), Arc::new(MemorySessionStore::new())).await;
+        let app = app(shared(), Arc::new(MemorySessionStore::new())).await;
 
         let first = load(&app, "/", None).await.expect("a first visit mints");
         let second = load(&app, "/open?url=/data/a.zarr", None)
@@ -319,7 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_browser_keeps_its_session_across_page_loads() {
-        let app = app(AuthConfig::for_tests(), Arc::new(MemorySessionStore::new())).await;
+        let app = app(shared(), Arc::new(MemorySessionStore::new())).await;
         let cookie = load(&app, "/", None).await.unwrap();
         let before = whoami_with(&app, Some(&cookie)).await;
 
@@ -328,29 +349,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_session_cookie_is_http_only_and_lasts_the_hard_cap() {
-        let app = app(AuthConfig::for_tests(), Arc::new(MemorySessionStore::new())).await;
+    async fn the_session_cookie_is_http_only_secure_and_lasts_the_hard_cap() {
+        let app = app(shared(), Arc::new(MemorySessionStore::new())).await;
         let response = app.oneshot(page_load("/", None)).await.unwrap();
         let cookie = session_cookies(&response).pop().unwrap();
         assert!(cookie.contains("HttpOnly"), "{cookie}");
         assert!(cookie.contains("SameSite=Lax"), "{cookie}");
         assert!(cookie.contains("Path=/"), "{cookie}");
         assert!(cookie.contains("Max-Age=2592000"), "{cookie}");
-        assert!(
-            !cookie.contains("Secure"),
-            "plain http on loopback: {cookie}"
-        );
-    }
+        assert!(cookie.contains("Secure"), "off loopback: {cookie}");
 
-    #[tokio::test]
-    async fn the_session_cookie_is_secure_off_loopback_as_every_cookie_is() {
-        let mut config = disabled_config("0.0.0.0:9876");
-        config.insecure_acknowledged = true;
-        let app = app(config.clone(), Arc::new(MemorySessionStore::new())).await;
-        let response = app.oneshot(page_load("/", None)).await.unwrap();
-        let cookie = session_cookies(&response).pop().unwrap();
-        assert!(cookie.contains("Secure"), "{cookie}");
-
+        let mut config = shared();
         config.secure_mode = SecureCookieMode::Never;
         let app = self::app(config, Arc::new(MemorySessionStore::new())).await;
         let response = app.oneshot(page_load("/", None)).await.unwrap();
@@ -361,7 +370,7 @@ mod tests {
     #[tokio::test]
     async fn only_a_page_load_mints() {
         let store = Arc::new(MemorySessionStore::new());
-        let app = app(AuthConfig::for_tests(), Arc::clone(&store)).await;
+        let app = app(shared(), Arc::clone(&store)).await;
 
         let fetch = Request::builder()
             .uri("/assets/index.js")
@@ -401,7 +410,7 @@ mod tests {
     /// with no access to that workspace.
     #[tokio::test]
     async fn the_capture_surface_stays_the_cli_that_opened_it() {
-        let app = app(AuthConfig::for_tests(), Arc::new(MemorySessionStore::new())).await;
+        let app = app(shared(), Arc::new(MemorySessionStore::new())).await;
         assert_eq!(load(&app, "/w/ws-1?render=1", None).await, None);
         assert_eq!(load(&app, "/w/ws-1?x=1&render=1", None).await, None);
         assert!(load(&app, "/w/ws-1?render=0", None).await.is_some());
@@ -409,7 +418,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_forged_session_cookie_names_nobody_and_a_page_load_replaces_it() {
-        let app = app(AuthConfig::for_tests(), Arc::new(MemorySessionStore::new())).await;
+        let app = app(shared(), Arc::new(MemorySessionStore::new())).await;
         let forged = "lucida_session=anon_never-minted-by-this-server";
 
         assert_eq!(whoami_with(&app, Some(forged)).await.email, "dev@local");
@@ -440,7 +449,7 @@ mod tests {
             })
             .await
             .unwrap();
-        let app = app(AuthConfig::for_tests(), store).await;
+        let app = app(shared(), store).await;
         let cookie = "lucida_session=3f2a8c1e-0000-4000-8000-000000000000";
         assert_eq!(whoami_with(&app, Some(cookie)).await.email, "dev@local");
     }
@@ -448,7 +457,7 @@ mod tests {
     #[tokio::test]
     async fn an_anonymous_session_is_not_honored_by_sign_in() {
         let store = Arc::new(MemorySessionStore::new());
-        let config = AuthConfig::for_tests();
+        let config = shared();
         let session = new_session(&config, [1, 2, 3, 4, 5, 6], Utc::now());
         store.create(session.clone()).await.unwrap();
 
@@ -474,13 +483,13 @@ mod tests {
     async fn an_anonymous_session_never_carries_admin_rights() {
         let store = Arc::new(MemorySessionStore::new());
         let first = {
-            let app = app(AuthConfig::for_tests(), Arc::clone(&store)).await;
+            let app = app(shared(), Arc::clone(&store)).await;
             let cookie = load(&app, "/", None).await.unwrap();
             (cookie.clone(), whoami_with(&app, Some(&cookie)).await)
         };
 
         // Even an allowlist that names the minted address grants nothing.
-        let mut config = AuthConfig::for_tests();
+        let mut config = shared();
         config.admin_emails = [first.1.email.clone()].into_iter().collect();
         let app = app(config, store).await;
         let p = whoami_with(&app, Some(&first.0)).await;
@@ -491,7 +500,7 @@ mod tests {
     #[tokio::test]
     async fn an_expired_session_names_nobody() {
         let store = Arc::new(MemorySessionStore::new());
-        let config = AuthConfig::for_tests();
+        let config = shared();
         let now = Utc::now();
 
         let mut idle = new_session(&config, [1; 6], now - ChronoDuration::days(8));
@@ -515,28 +524,35 @@ mod tests {
         set_cookie.split(';').next().unwrap().to_string()
     }
 
+    /// One person sits at a loopback bind and drives the CLI and the
+    /// browser alike, so the browser is `dev@local` too and opens the
+    /// workspaces the CLI made.
     #[tokio::test]
-    async fn the_loopback_dev_switcher_still_wins_over_the_anonymous_session() {
-        let config = AuthConfig::for_tests();
-        let app = app(config.clone(), Arc::new(MemorySessionStore::new())).await;
-        let session = load(&app, "/", None).await.unwrap();
-        let both = format!("{session}; {}", dev_cookie(&config, "viewer@example.com"));
+    async fn on_loopback_a_browser_is_the_cli_and_the_switcher_still_works() {
+        let store = Arc::new(MemorySessionStore::new());
+        let config = loopback();
+        let app = app(config.clone(), Arc::clone(&store)).await;
 
+        assert_eq!(load(&app, "/", None).await, None, "nothing is minted");
+        assert_eq!(whoami_with(&app, None).await.email, "dev@local");
+
+        let switched = dev_cookie(&config, "viewer@example.com");
         assert_eq!(
-            whoami_with(&app, Some(&both)).await.email,
+            whoami_with(&app, Some(&switched)).await.email,
             "viewer@example.com"
         );
-        assert_eq!(
-            load(&app, "/", Some(&both)).await,
-            None,
-            "the session stays put under the switch"
-        );
+
+        // A session minted while the same database served a shared bind
+        // names nobody here.
+        let session = new_session(&config, [3; 6], Utc::now());
+        store.create(session.clone()).await.unwrap();
+        let cookie = format!("lucida_session={}", session.id);
+        assert_eq!(whoami_with(&app, Some(&cookie)).await.email, "dev@local");
     }
 
     #[tokio::test]
     async fn off_loopback_the_dev_cookie_is_ignored_and_the_session_answers() {
-        let mut config = disabled_config("0.0.0.0:9876");
-        config.insecure_acknowledged = true;
+        let config = shared();
         let app = app(config.clone(), Arc::new(MemorySessionStore::new())).await;
         let session = load(&app, "/", None).await.unwrap();
         let anonymous = whoami_with(&app, Some(&session)).await;
@@ -547,21 +563,23 @@ mod tests {
 
     #[tokio::test]
     async fn other_modes_mint_nothing() {
-        let mut config = AuthConfig::for_tests();
-        config.mode = AuthMode::Iap;
-        let pages = Router::new().fallback(|| async { "<html>lucida</html>" });
-        let app = with_anonymous_sessions(
-            pages,
-            Arc::new(config),
-            Arc::new(MemorySessionStore::new()) as Arc<dyn LoginSessionStore>,
-        );
-        assert_eq!(load(&app, "/", None).await, None);
+        for mode in [AuthMode::Google, AuthMode::Iap] {
+            let mut config = shared();
+            config.mode = mode;
+            let pages = Router::new().fallback(|| async { "<html>lucida</html>" });
+            let app = with_anonymous_sessions(
+                pages,
+                Arc::new(config),
+                Arc::new(MemorySessionStore::new()) as Arc<dyn LoginSessionStore>,
+            );
+            assert_eq!(load(&app, "/", None).await, None, "{mode:?}");
+        }
     }
 
     #[tokio::test]
     async fn the_stub_extractor_resolves_a_minted_session_to_its_row() {
         let store = Arc::new(MemorySessionStore::new());
-        let config = Arc::new(AuthConfig::for_tests());
+        let config = Arc::new(shared());
         let session = new_session(&config, [9, 8, 7, 6, 5, 4], Utc::now());
         store.create(session.clone()).await.unwrap();
 
@@ -605,7 +623,7 @@ mod tests {
 
     #[test]
     fn every_session_gets_an_id_of_its_own() {
-        let config = AuthConfig::for_tests();
+        let config = shared();
         let session = new_session(&config, [0xaa; 6], Utc::now());
         assert!(is_anonymous_session_id(&session.id));
         assert_ne!(session.id, new_session(&config, [0xaa; 6], Utc::now()).id);

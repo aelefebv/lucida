@@ -382,22 +382,27 @@ fn name_value(set_cookie: &str) -> &str {
     set_cookie.split(';').next().unwrap()
 }
 
-// Each browser that loads the app becomes its own person, through the
-// session store the server already keeps. Anything that never loads the
-// page, such as the command-line client, is still `dev@local`.
+// On a server other machines reach, each browser that loads the app
+// becomes its own person, through the session store the server already
+// keeps. Anything that never loads the page, such as the command-line
+// client, is still `dev@local`.
 #[tokio::test]
-async fn each_browser_that_loads_the_app_gets_its_own_anonymous_identity() {
+async fn on_a_shared_bind_each_browser_gets_its_own_anonymous_identity() {
     let dist = web_dist();
     let server = spawn_server(
-        "127.0.0.1",
-        &[("LUCIDA_WEB_DIST", dist.path().to_str().unwrap())],
+        "0.0.0.0",
+        &[
+            ("LUCIDA_AUTH", "disabled"),
+            ("LUCIDA_INSECURE", "1"),
+            ("LUCIDA_WEB_DIST", dist.path().to_str().unwrap()),
+        ],
     );
 
     let first = load_page(&server, "/", None)
         .await
         .expect("a first visit mints");
     assert!(first.contains("HttpOnly"), "{first}");
-    assert!(!first.contains("Secure"), "plain http on loopback: {first}");
+    assert!(first.contains("Secure"), "an exposed bind: {first}");
     let second = load_page(&server, "/open?url=/data/a.zarr", None)
         .await
         .expect("another browser's first visit mints too");
@@ -428,22 +433,41 @@ async fn each_browser_that_loads_the_app_gets_its_own_anonymous_identity() {
     assert_eq!(forged["email"], "dev@local", "got {forged}");
 }
 
+// On loopback the one person at the machine drives the CLI and the
+// browser alike, so a workspace the CLI made opens in the browser with
+// no share step.
 #[tokio::test]
-async fn the_anonymous_session_cookie_is_secure_on_an_exposed_bind() {
+async fn on_loopback_the_browser_opens_a_workspace_the_cli_made() {
     let dist = web_dist();
     let server = spawn_server(
-        "0.0.0.0",
-        &[
-            ("LUCIDA_AUTH", "disabled"),
-            ("LUCIDA_INSECURE", "1"),
-            ("LUCIDA_WEB_DIST", dist.path().to_str().unwrap()),
-        ],
+        "127.0.0.1",
+        &[("LUCIDA_WEB_DIST", dist.path().to_str().unwrap())],
     );
-    let cookie = load_page(&server, "/", None).await.expect("minted");
-    assert!(cookie.contains("Secure"), "{cookie}");
-    let person = whoami(&server, Some(name_value(&cookie))).await;
-    assert!(
-        person["email"].as_str().unwrap().starts_with("anon-"),
-        "{person}"
+    let client = http_client();
+
+    let created: Value = client
+        .post(format!("{}/api/workspaces", server.base_url))
+        .json(&serde_json::json!({ "name": "made by the cli" }))
+        .send()
+        .await
+        .expect("POST /api/workspaces")
+        .json()
+        .await
+        .expect("json body");
+    let id = created["id"].as_str().expect("a workspace id");
+
+    assert_eq!(
+        load_page(&server, &format!("/w/{id}"), None).await,
+        None,
+        "the browser is given no identity of its own",
     );
+    let opened = client
+        .get(format!("{}/api/workspaces/{id}", server.base_url))
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .expect("GET /api/workspaces/{id}");
+    assert_eq!(opened.status(), reqwest::StatusCode::OK);
+    let opened: Value = opened.json().await.expect("json body");
+    assert_eq!(opened["role"], "owner", "got {opened}");
 }

@@ -553,9 +553,9 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         web_dist = %web_dist.display(),
         "static_serve.config",
     );
-    // A page load is a browser's first visit, so disabled mode gives each
-    // browser its own anonymous session here, before the app's first
-    // request asks who it is.
+    // A page load is a browser's first visit, so a disabled-mode server on
+    // a shared bind gives each browser its own anonymous session here,
+    // before the app's first request asks who it is.
     let static_serve_router = auth::anonymous::with_anonymous_sessions(
         static_serve::router(web_dist, deployment_theme.as_ref()),
         Arc::clone(&auth_config),
