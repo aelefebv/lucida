@@ -106,34 +106,18 @@ export function findEvictionSlot(params: FindEvictionParams): EvictionCandidate 
   let wantedDist = -1;
 
   for (const [compositeKey, slotIdx] of params.slots) {
-    const parsed = parseCompositeKey(compositeKey);
-    if (!parsed) continue;
-    const chunk = parseChunkKey(parsed.chunkKey);
-    if (!chunk) continue;
-
-    const target = params.targetLevelFor(parsed.memberId);
-    const lodMeta = params.slotGridIdx[slotIdx] < 0
-      ? undefined
-      : params.entityMetas.get(parsed.memberId)?.find(m => m.level === chunk.level);
-    if ((target !== undefined && chunk.level < target) || !lodMeta) {
-      if (compositeKey > unsampledKey) unsampledKey = compositeKey;
-      continue;
-    }
     // Once the scan holds an unsampled slot, no other class can outrank it.
-    if (unsampledKey) continue;
-
-    const cam = params.cameraFor(parsed.memberId);
-    const dist = params.is3D
-      ? chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam)
-      : chunkDistSq(lodMeta, chunk.x, chunk.y, null, cam);
-
-    if (params.isWanted(parsed.memberId, parsed.chunkKey)) {
-      if (dist > wantedDist || (dist === wantedDist && compositeKey > wantedKey)) {
-        wantedDist = dist;
+    const slot = classifySlot(params, compositeKey, slotIdx, unsampledKey === "");
+    if (!slot) continue;
+    if (slot.class === "unsampled") {
+      if (compositeKey > unsampledKey) unsampledKey = compositeKey;
+    } else if (slot.class === "wanted") {
+      if (slot.dist > wantedDist || (slot.dist === wantedDist && compositeKey > wantedKey)) {
+        wantedDist = slot.dist;
         wantedKey = compositeKey;
       }
-    } else if (dist > unwantedDist || (dist === unwantedDist && compositeKey > unwantedKey)) {
-      unwantedDist = dist;
+    } else if (slot.dist > unwantedDist || (slot.dist === unwantedDist && compositeKey > unwantedKey)) {
+      unwantedDist = slot.dist;
       unwantedKey = compositeKey;
     }
   }
@@ -142,6 +126,56 @@ export function findEvictionSlot(params: FindEvictionParams): EvictionCandidate 
   if (unwantedKey) return { key: unwantedKey, class: "unwanted", dist: unwantedDist };
   if (wantedKey) return { key: wantedKey, class: "wanted", dist: wantedDist };
   return null;
+}
+
+const CLASS_RANK: Record<EvictionClass, number> = { wanted: 0, unwanted: 1, unsampled: 2 };
+
+/**
+ * Every slot, in the order a pool that must shrink keeps them: the reverse of
+ * {@link findEvictionSlot}'s order, so wanted slots nearest first, then
+ * unwanted ones nearest first, then unsampled ones.
+ */
+export function rankSlotsToKeep(params: FindEvictionParams): EvictionCandidate[] {
+  const ranked: EvictionCandidate[] = [];
+  for (const [compositeKey, slotIdx] of params.slots) {
+    const slot = classifySlot(params, compositeKey, slotIdx, true);
+    ranked.push(slot ?? { key: compositeKey, class: "unsampled", dist: Infinity });
+  }
+  return ranked.sort((a, b) =>
+    CLASS_RANK[a.class] - CLASS_RANK[b.class] ||
+    a.dist - b.dist ||
+    (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+/**
+ * One slot's class, and its distance unless `withDistance` is false or the
+ * slot is unsampled. Null for a key that doesn't parse.
+ */
+function classifySlot(
+  params: FindEvictionParams,
+  compositeKey: string,
+  slotIdx: number,
+  withDistance: boolean,
+): EvictionCandidate | null {
+  const parsed = parseCompositeKey(compositeKey);
+  if (!parsed) return null;
+  const chunk = parseChunkKey(parsed.chunkKey);
+  if (!chunk) return null;
+
+  const target = params.targetLevelFor(parsed.memberId);
+  const lodMeta = params.slotGridIdx[slotIdx] < 0
+    ? undefined
+    : params.entityMetas.get(parsed.memberId)?.find(m => m.level === chunk.level);
+  if ((target !== undefined && chunk.level < target) || !lodMeta) {
+    return { key: compositeKey, class: "unsampled", dist: Infinity };
+  }
+  const wanted = params.isWanted(parsed.memberId, parsed.chunkKey);
+  if (!withDistance) return { key: compositeKey, class: wanted ? "wanted" : "unwanted", dist: 0 };
+  const cam = params.cameraFor(parsed.memberId);
+  const dist = params.is3D
+    ? chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam)
+    : chunkDistSq(lodMeta, chunk.x, chunk.y, null, cam);
+  return { key: compositeKey, class: wanted ? "wanted" : "unwanted", dist };
 }
 
 /** Whether a wanted incoming chunk at `incomingDist` may take `victim`'s slot. */

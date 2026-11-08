@@ -75,7 +75,7 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     freeSlots: [],
     totalSlots,
     chunkX: 32, chunkY: 32,
-    slotsX: 4, slotsY: 4,
+    slotsX: 4, slotsY: 4, maxSlotsY: 4,
     entityMetas,
     entityZInfo,
     z: 0, t: 0, c: 0,

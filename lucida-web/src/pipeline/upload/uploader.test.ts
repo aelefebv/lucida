@@ -250,6 +250,7 @@ function makeCtx(args: {
     ]),
     client: {
       coldState: vi.fn(),
+      gpuCapacity: () => null,
       viewHotState: vi.fn(),
       proxyAssetData: vi.fn(),
       sliceChunkData: vi.fn(),

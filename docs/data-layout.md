@@ -1,10 +1,11 @@
 # Data layout guide
 
-lucida reads OME-Zarr 0.5 stores one chunk at a time, and only the chunks the
-screen needs, so the layout decides how many reads a view costs and how many
-bytes each read moves. This guide recommends one layout and says which viewer
-behavior each choice serves. A store with other numbers still opens. Measure
-before you settle, as the last section describes.
+lucida reads OME-Zarr stores, 0.5 on Zarr v3 or 0.4 on Zarr v2, one chunk at a
+time, and only the chunks the screen needs, so the layout decides how many
+reads a view costs and how many bytes each read moves. This guide recommends
+one layout and says which viewer behavior each choice serves. A store with
+other numbers still opens. Measure before you settle, as the last section
+describes.
 
 ## How the viewer reads a store
 
@@ -129,10 +130,14 @@ the server generate one from the source data on first open.
 
 ### The codec chain
 
-Import accepts `bytes` in little-endian order, alone or followed by one of
-`zstd`, `lz4`, or `blosc` with `zstd` inside. Under sharding, the sharding codec
-is the only outer codec, this chain goes inside it, and the index uses `bytes`
-optionally followed by `crc32c`. Sample types are `uint8`, `uint16`, `uint32`,
+Import reads any chain of the codecs the server decodes: `transpose`, then
+`bytes` in either byte order, then any of `gzip`, `zlib`, `zstd`, `lz4`,
+`blosc` (with `blosclz`, `lz4`, `lz4hc`, `zlib`, or `zstd` inside), and
+`crc32c`. A Zarr v2 array's filters and compressor are read as the same codecs,
+and its Fortran order as a transpose. Any other codec fails the open with an
+error that names it. Under sharding, the sharding codec is the only outer
+codec, this chain goes inside it, and the index uses `bytes` optionally
+followed by `crc32c`. Sample types are `uint8`, `uint16`, `uint32`,
 `float32`, and `float64`.
 
 ## Write it with zarr-python

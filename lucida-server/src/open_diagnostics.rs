@@ -242,12 +242,12 @@ mod tests {
                 serde_json::json!([{"name": "sharding_indexed", "configuration": {}}]),
                 "end",
             ),
-            sharded_chain(serde_json::json!([bytes, {"name": "gzip"}]), "end"),
+            sharded_chain(serde_json::json!([bytes, {"name": "bz2"}]), "end"),
             sharded_chain(serde_json::json!([bytes, {"name": "zstd"}]), "middle"),
         ];
         for chain in refused {
-            let error =
-                lucida_store::shard::ShardLayout::from_codec_chain(&chain, &[16, 16]).unwrap_err();
+            let error = lucida_store::shard::ShardLayout::from_codec_chain(&chain, &[16, 16], 2)
+                .unwrap_err();
             let diagnostic = import_failure(&error);
             assert_eq!(
                 diagnostic.kind,

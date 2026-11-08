@@ -81,7 +81,7 @@ docker run --rm -p 127.0.0.1:9876:9876 \
 
 ## Writing data for lucida
 
-lucida reads OME-Zarr 0.5 stores lazily, one chunk at a time, so the chunk, shard, and pyramid layout a writer chooses decides how many reads a view costs. The [data layout guide](docs/data-layout.md) recommends a layout and says which viewer behavior each choice serves.
+lucida reads OME-Zarr stores (0.5 on Zarr v3, or 0.4 on Zarr v2) lazily, one chunk at a time, so the chunk, shard, and pyramid layout a writer chooses decides how many reads a view costs. The [data layout guide](docs/data-layout.md) recommends a layout and says which viewer behavior each choice serves.
 
 ## CLI and Python client
 
