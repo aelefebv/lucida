@@ -100,6 +100,7 @@ export function fixtureContext(overrides: Partial<BundleContext> = {}): BundleCo
     planning: { ...DEFAULT_PLANNING_CONFIG },
     origin: "https://lucida.example",
     devicePixelRatio: 2,
+    deviceMemoryGib: 4,
     // Rejects by default, so a test that reaches the fallback path without
     // saying what the screenshot decodes to gets the frame carried unchecked
     // rather than a verdict on a guessed picture.
