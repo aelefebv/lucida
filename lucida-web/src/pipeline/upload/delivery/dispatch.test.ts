@@ -172,7 +172,7 @@ describe("dispatchChunkDelivery", () => {
     // Level 1 is 2 planes deep: z 3 lands on its plane 1, chunk 1.
     const sent = dispatchChunkDelivery(client, delivery, meta, "slice", 3, EPOCHS);
 
-    expect(sent?.bytes).toBe(PLANE * 2);
+    expect(sent).toEqual({ memberId: "img-0:ch0", bytes: PLANE * 2 });
     expect(sliceChunkData.mock.calls[0][12]).toBe(2); // levelDepth
   });
 
@@ -181,7 +181,7 @@ describe("dispatchChunkDelivery", () => {
     const { client, sliceChunkData } = makeMockClient();
 
     // z 1 is in chunk 0; the delivery is chunk 1.
-    expect(dispatchChunkDelivery(client, makeChunkDelivery(), meta, "slice", 1, EPOCHS)).toBeNull();
+    expect(dispatchChunkDelivery(client, makeChunkDelivery(), meta, "slice", 1, EPOCHS)).toBe("other-plane");
     expect(sliceChunkData).not.toHaveBeenCalled();
   });
 
@@ -190,7 +190,7 @@ describe("dispatchChunkDelivery", () => {
     const delivery = makeChunkDelivery({ data: new ArrayBuffer(PLANE * 2) });
     const { client, sliceChunkData } = makeMockClient();
 
-    expect(dispatchChunkDelivery(client, delivery, meta, "slice", 3, EPOCHS)).toBeNull();
+    expect(dispatchChunkDelivery(client, delivery, meta, "slice", 3, EPOCHS)).toBe("no-meta");
     expect(sliceChunkData).not.toHaveBeenCalled();
   });
 
@@ -227,7 +227,7 @@ describe("dispatchChunkDelivery", () => {
     const delivery = makeChunkDelivery({ level: 99 });
     const { client, sliceChunkData, volumeChunkData } = makeMockClient();
 
-    expect(dispatchChunkDelivery(client, delivery, meta, "slice", 0, EPOCHS)).toBeNull();
+    expect(dispatchChunkDelivery(client, delivery, meta, "slice", 0, EPOCHS)).toBe("no-meta");
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(volumeChunkData).not.toHaveBeenCalled();

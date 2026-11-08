@@ -1,12 +1,12 @@
 //! Replaying a bundle in the trace driver.
 //!
 //! A field report becomes a reproducible run. A bundle's header carries what
-//! the driver needs to replay the view: the dataset, the view URL,
-//! the viewport and device pixel ratio, the planning configuration, and the
-//! pins. [`ReplayPlan`] reads them and says, input by input, which the
-//! driver restores and which it cannot — the build is whatever the server
-//! serves, the adapter is this machine's, and a fresh browser profile is
-//! cold whatever the run's browser held. The plan guesses nothing. An input
+//! the driver needs to replay the view: the dataset, the view URL, the
+//! viewport, device pixel ratio and device memory, the planning
+//! configuration, and the pins. [`ReplayPlan`] reads them and says, input by
+//! input, which the driver restores and which it cannot — the build is
+//! whatever the server serves, the adapter is this machine's, and a fresh
+//! browser profile is cold whatever the run's browser held. The plan guesses nothing. An input
 //! the header lacks runs at the driver's default, and the record in the new
 //! run's header lists it as unrestored, with the reason.
 //!
@@ -101,6 +101,9 @@ pub struct ReplayPlan {
     pub width: u32,
     pub height: u32,
     pub device_pixel_ratio: f64,
+    /// The memory the page is told the device has, in GiB, as the run's page
+    /// read it. None leaves the page reading this machine's.
+    pub device_memory_gib: Option<f64>,
     /// The planning configuration, as the knobs the driver writes before
     /// the page loads. Empty when the header carries none.
     pub knobs: KnobSettings,
@@ -214,6 +217,19 @@ impl ReplayPlan {
         };
         let device_pixel_ratio = ratio.clone().unwrap_or(DEFAULT_DEVICE_PIXEL_RATIO);
 
+        let memory = match header.device_memory_gib {
+            Some(gib) if gib.is_finite() && gib > 0.0 => Ok(gib),
+            Some(gib) => Err(format!(
+                "the header's device memory is {gib} GiB; the page reads this machine's"
+            )),
+            None => Err(
+                "the header carries no device memory, because the run's page read none \
+                 or the bundle predates it; the page reads this machine's"
+                    .to_string(),
+            ),
+        };
+        let device_memory_gib = memory.clone().ok();
+
         // The whole configuration, not the fields that differ from this
         // build's defaults: the run's defaults may not be this build's, and
         // the run file records exactly what was written.
@@ -253,6 +269,7 @@ impl ReplayPlan {
             ("viewUrl", view.map(|_| ())),
             ("viewport", viewport.map(|_| ())),
             ("devicePixelRatio", ratio.map(|_| ())),
+            ("deviceMemoryGib", memory.map(|_| ())),
             ("mode", mode),
             ("planning", planning.map(|_| ())),
             ("pins", pins),
@@ -277,6 +294,7 @@ impl ReplayPlan {
             width,
             height,
             device_pixel_ratio,
+            device_memory_gib,
             knobs,
             script,
             record: ReplayRecord {
@@ -547,6 +565,7 @@ mod tests {
         assert!(fragment.starts_with("view="));
         assert_eq!((plan.width, plan.height), (1440, 900));
         assert_eq!(plan.device_pixel_ratio, 2.0);
+        assert_eq!(plan.device_memory_gib, Some(4.0));
 
         let planning: Value = plan.knobs.planning.clone().into_iter().collect();
         assert_eq!(planning, bundle.header.planning);
@@ -563,6 +582,7 @@ mod tests {
                 "view URL",
                 "viewport",
                 "device pixel ratio",
+                "device memory",
                 "slice or volume mode",
                 "planning configuration",
                 "level, render mode, contrast, and colormap pins",
@@ -713,6 +733,7 @@ mod tests {
         bundle.header.view_url = None;
         bundle.header.viewport = None;
         bundle.header.device_pixel_ratio = None;
+        bundle.header.device_memory_gib = None;
         bundle.header.planning = Value::Null;
         bundle.header.build = None;
         bundle.header.gpu = None;
@@ -725,6 +746,7 @@ mod tests {
         assert_eq!(plan.record.view, None);
         assert_eq!((plan.width, plan.height), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
         assert_eq!(plan.device_pixel_ratio, DEFAULT_DEVICE_PIXEL_RATIO);
+        assert_eq!(plan.device_memory_gib, None);
         assert!(plan.knobs.is_empty());
         assert_eq!(plan.record.restored, vec!["dataset"]);
         assert_eq!(
@@ -733,6 +755,7 @@ mod tests {
                 "view URL",
                 "viewport",
                 "device pixel ratio",
+                "device memory",
                 "slice or volume mode",
                 "planning configuration",
                 "level, render mode, contrast, and colormap pins",
@@ -745,6 +768,7 @@ mod tests {
         assert!(reason(unrestored, "view URL").contains("no view URL"));
         assert!(reason(unrestored, "viewport").contains("1440x900"));
         assert!(reason(unrestored, "device pixel ratio").contains("2"));
+        assert!(reason(unrestored, "device memory").contains("this machine's"));
         assert!(reason(unrestored, "slice or volume mode").contains("the view"));
         assert!(reason(unrestored, "planning configuration").contains("page's defaults"));
         assert!(reason(unrestored, "build").contains("does not say"));
@@ -858,8 +882,9 @@ mod tests {
         );
         assert!(
             text.contains(
-                "restored  dataset, view URL, viewport, device pixel ratio, slice or volume mode, \
-                 planning configuration, level, render mode, contrast, and colormap pins, cache warmth\n"
+                "restored  dataset, view URL, viewport, device pixel ratio, device memory, slice or \
+                 volume mode, planning configuration, level, render mode, contrast, and colormap \
+                 pins, cache warmth\n"
             ),
             "{text}"
         );

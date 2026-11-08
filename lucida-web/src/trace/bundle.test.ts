@@ -141,6 +141,12 @@ describe("the header", () => {
     expect(header.planning.prefetchDepth).toBe(7);
   });
 
+  it("carries the device memory the page fitted its budgets to, and null when it read none", async () => {
+    expect((await exportBundle(context())).header.deviceMemoryGib).toBe(4);
+    const { header } = await exportBundle(context({ deviceMemoryGib: null }));
+    expect(header.deviceMemoryGib).toBeNull();
+  });
+
   it("says nothing is pinned when the URL carries no view, rather than inventing defaults", async () => {
     const run = healthyLocalOpen();
     run.header.composedView = { url: "/w/ws-1", mode: "slice" };
