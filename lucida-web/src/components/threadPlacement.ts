@@ -1,4 +1,5 @@
 import { useLayoutEffect, type RefObject } from "react";
+import { frameClock } from "../frameClock.ts";
 import { readSafeAreaInsets } from "../theme/viewport.ts";
 
 export interface Box {
@@ -48,9 +49,10 @@ function intersect(a: Box, b: Box, inset: number): Box {
 
 /**
  * Keeps an open thread on screen: inside the box that clips it and clear of
- * the safe-area insets. Its pin moves every frame as the view pans, so the
- * placement follows each frame, and it writes only when the answer changes.
- * The thread caps its size at the room, so a short stage still holds it.
+ * the safe-area insets. Its pin moves as the view pans, so placement runs on
+ * the frame clock, which wakes for everything that moves the pin and idles
+ * on a still view. It writes only when the answer changes. The thread caps
+ * its size at the room, so a short stage still holds it.
  */
 export function useThreadPlacement(ref: RefObject<HTMLElement | null>): void {
   useLayoutEffect(() => {
@@ -88,10 +90,13 @@ export function useThreadPlacement(ref: RefObject<HTMLElement | null>): void {
       thread.style.setProperty("--thread-room-height", `${roomHeight}px`);
     };
     place();
-    let frame = requestAnimationFrame(function follow() {
-      place();
-      frame = requestAnimationFrame(follow);
-    });
-    return () => cancelAnimationFrame(frame);
+    // Nothing else wakes the clock when the thread's own content changes its size.
+    const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(frameClock.wake);
+    resized?.observe(thread);
+    const unsubscribe = frameClock.subscribe(place);
+    return () => {
+      unsubscribe();
+      resized?.disconnect();
+    };
   }, [ref]);
 }
