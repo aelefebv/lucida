@@ -50,14 +50,15 @@ use lucida_core::view::ViewState;
 use lucida_protocol::{
     ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
     DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
-    DatasetImportWarning, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
-    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
-    DatasetSourceCacheStats, DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec,
-    FetchSource, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelHistogram,
-    GeneratedLevelSummary, HistogramBin, LABEL_NONE, LevelAddress, LocalFetchDescriptor,
-    MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor, ProxiedImageSpec, ServerTimingBatch,
-    SourceChunkStatus, TimingRowFamily, TimingRowOutcome, WireFormat,
+    DatasetImportWarning, DatasetImportWarningKind, DatasetOpenFailureDiagnostic,
+    DatasetOpenFailureKind, DatasetOpenProgressDiagnostic, DatasetOpenStage,
+    DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats, DatasetSourceHealth,
+    DirectFetchDescriptor, DirectImageSpec, FetchSource, GeneratedAvailabilityDelta,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedChunkStatusUpdate,
+    GeneratedLevelAvailability, GeneratedLevelHistogram, GeneratedLevelSummary, HistogramBin,
+    LABEL_NONE, LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET,
+    ProxiedFetchDescriptor, ProxiedImageSpec, ServerTimingBatch, SourceChunkStatus,
+    TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -1178,6 +1179,7 @@ fn source_health() -> DatasetSourceHealth {
             "tiles differ in shape, and smaller tiles are padded with fill".into(),
         ],
         import_warnings: vec![DatasetImportWarning {
+            kind: DatasetImportWarningKind::MismatchedTileGeometry,
             target: SINGLE_DATASET_ID.into(),
             message: "tiles differ in shape, and smaller tiles are padded with fill".into(),
             degrades: true,
