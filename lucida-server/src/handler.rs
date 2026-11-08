@@ -1792,6 +1792,7 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "send_report",
     "chunk_request",
     "chunk_fetch",
+    "chunk_cancel",
     "asset_request",
 ];
 
