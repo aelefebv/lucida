@@ -11,7 +11,7 @@ import { renderHook } from "@testing-library/react";
 vi.mock("../bridge.ts", () => {
   class MockBridge {
     static instances: MockBridge[] = [];
-    workspaceId: string | undefined;
+    url: string;
     destroy = vi.fn();
     send = vi.fn();
     sendCommand = vi.fn();
@@ -20,13 +20,16 @@ vi.mock("../bridge.ts", () => {
     sendCursor = vi.fn();
     sendFollow = vi.fn();
     sendOpenRemoteDataset = vi.fn();
-    subscribeBookmarkChanged = vi.fn(() => () => {});
-    constructor(_handlers: unknown, _url?: string, workspaceId?: string) {
-      this.workspaceId = workspaceId;
+    constructor(_handlers: unknown, url: string) {
+      this.url = url;
       MockBridge.instances.push(this);
     }
   }
-  return { Bridge: MockBridge, bridgeLog: vi.fn() };
+  return {
+    Bridge: MockBridge,
+    bridgeLog: vi.fn(),
+    workspaceSocketUrl: (id: string) => `ws://test/ws/workspaces/${id}`,
+  };
 });
 
 vi.mock("../pipeline/fetch/index.ts", () => {
@@ -109,7 +112,7 @@ describe("useBridge teardown ownership", () => {
     const { result } = renderHook(() => useBridge(params));
 
     expect(MockedBridge.instances).toHaveLength(1);
-    expect(MockedBridge.instances[0].workspaceId).toBe("ws-1");
+    expect(MockedBridge.instances[0].url).toBe("ws://test/ws/workspaces/ws-1");
     expect(MockedDecodePool.instances).toHaveLength(1);
     expect(MockedContentSource.instances).toHaveLength(1);
     expect(MockedCpuCache.instances).toHaveLength(1);
