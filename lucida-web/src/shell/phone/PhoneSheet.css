@@ -15,9 +15,10 @@
   box-sizing: border-box;
   padding: 0 var(--lc-safe-right) var(--lc-safe-bottom) var(--lc-safe-left);
   /* Clip, not hidden: a hidden box still scrolls to bring a focused field
-     into view, which would slide the handle up out of its place. */
-  overflow: hidden;
-  overflow: clip;
+     into view, which would slide the handle up out of its place. Only the
+     sides clip here, so the handle's hit area can reach above the sheet;
+     the body clips its own overflow. */
+  overflow-x: clip;
   border-top: 1px solid var(--lc-border);
   border-radius: var(--lc-radius-lg) var(--lc-radius-lg) 0 0;
   background: var(--lc-surface-1);
@@ -50,6 +51,7 @@
 
 /* The whole strip takes the drag, and a tap on it steps the height. */
 .lc-phone-sheet-handle {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -61,6 +63,19 @@
   -webkit-user-select: none;
   -webkit-touch-callout: none;
   -webkit-tap-highlight-color: transparent;
+}
+
+/* Under touch the target reaches up over the canvas edge rather than down,
+   so the head, which the canvas gives up its height to, stays as tall. */
+.lc-phone-sheet-handle::before {
+  content: "";
+  position: absolute;
+  inset: min(0px, calc(var(--lc-space-6) - var(--lc-target-min))) 0 0;
+}
+
+/* At full the sheet meets the top bar, whose buttons keep their own taps. */
+.lc-phone-sheet[data-snap="full"] .lc-phone-sheet-handle::before {
+  top: 0;
 }
 
 .lc-phone-sheet[data-dragging] .lc-phone-sheet-handle {
@@ -122,6 +137,7 @@
   flex: 1;
   flex-direction: column;
   min-height: 0;
+  overflow: clip;
   border-top: 1px solid var(--lc-border);
 }
 
