@@ -311,6 +311,7 @@ const expectedManifestSingle: DatasetManifest = {
         { value: 1, rgba: [255, 64, 0, 255] },
         { value: 92801, rgba: [0, 128, 255, 128] },
       ],
+      names: [{ value: 92801, name: "region 92801" }],
       source_declared: true,
     },
   ],

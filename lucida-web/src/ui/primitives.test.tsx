@@ -211,6 +211,38 @@ describe("Slider", () => {
     await user.type(low, "500{Enter}");
     expect(onChange).toHaveBeenLastCalledWith([200, 200]);
   });
+
+  it("shows a value off its step as given, in a field or as text", () => {
+    const { unmount } = render(
+      <Slider label="Radius" value={0.137} onChange={() => {}} minValue={0} maxValue={2} step={0.05} valueDisplay="field" />,
+    );
+    expect((screen.getByRole("textbox", { name: "Radius" }) as HTMLInputElement).value).toBe("0.137");
+    unmount();
+    render(<Slider label="Weight" value={125} onChange={() => {}} minValue={10} maxValue={2000} step={10} />);
+    expect(screen.getByText("125")).toBeTruthy();
+  });
+
+  it("takes a typed value between steps as typed", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(<Slider label="Radius" value={0.5} onChange={onChange} minValue={0} maxValue={2} step={0.05} valueDisplay="field" />);
+    const input = screen.getByRole("textbox", { name: "Radius" });
+    await user.clear(input);
+    await user.type(input, "0.42{Enter}");
+    expect(onChange).toHaveBeenLastCalledWith(0.42);
+    expect(input.getAttribute("aria-invalid")).toBeNull();
+  });
+
+  it("sizes a field to the whole value it holds", () => {
+    render(
+      <Slider label="Contrast" value={[-6000000000, 1234567890] as const} onChange={() => {}} minValue={-(2 ** 63)} maxValue={2 ** 63}
+        formatOptions={{ maximumFractionDigits: 0, useGrouping: false }} valueDisplay="field" />,
+    );
+    const low = screen.getByRole("textbox", { name: "Contrast minimum" }) as HTMLInputElement;
+    const high = screen.getByRole("textbox", { name: "Contrast maximum" }) as HTMLInputElement;
+    expect([low.value, high.value]).toEqual(["-6000000000", "1234567890"]);
+    expect([low.style.getPropertyValue("--lc-field-chars"), high.style.getPropertyValue("--lc-field-chars")]).toEqual(["11", "10"]);
+  });
 });
 
 describe("UnstyledButton", () => {

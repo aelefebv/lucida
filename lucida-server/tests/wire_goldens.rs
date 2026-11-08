@@ -29,8 +29,8 @@ use serde::de::DeserializeOwned;
 use lucida_content::{
     Axis, AxisKind, ChannelInfo, DataType, DatasetId, DatasetKind, DatasetManifest, Entity,
     EntityId, EntityKind, EntityLabels, EntityPlacement, GeneratedLevelInfo,
-    GeneratedLevelProvenance, GeneratedLevelRole, ImageId, ImageSpec, LabelColor, LabelSpec,
-    LayoutId, LayoutSpec, LevelGeometry, MultiscaleInfo, PinnedAxis, PositioningMode,
+    GeneratedLevelProvenance, GeneratedLevelRole, ImageId, ImageSpec, LabelColor, LabelName,
+    LabelSpec, LayoutId, LayoutSpec, LevelGeometry, MultiscaleInfo, PinnedAxis, PositioningMode,
     TransformEdge, VoxelTransform,
 };
 use lucida_core::camera::{Arcball, Camera, ClipMode, Fly, Slice};
@@ -551,6 +551,10 @@ fn single_manifest() -> DatasetManifest {
                 rgba: [0, 128, 255, 128],
             },
         ],
+        names: vec![LabelName {
+            value: 92801,
+            name: "region 92801".into(),
+        }],
         source_declared: true,
     };
 
