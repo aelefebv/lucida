@@ -704,6 +704,7 @@ mod tests {
                 value: 92801,
                 rgba: [1, 2, 3, 255],
             }],
+            names: vec![],
             source_declared: true,
         }
     }

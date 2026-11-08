@@ -13,8 +13,10 @@
   opacity: 0.45;
 }
 
+/* Fields too wide to sit beside the label drop below it. */
 .lc-slider-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--lc-space-2);
@@ -34,18 +36,28 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* A range too wide for one line puts its maximum on the next. */
 .lc-slider-fields {
   display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: center;
   gap: 2px;
+  max-width: 100%;
   margin-left: auto;
   color: var(--lc-text-subtle);
   font-size: var(--lc-text-sm);
 }
 
+.lc-slider-field-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .lc-slider-field-input {
   box-sizing: border-box;
-  width: 6ch;
+  width: max(6ch, calc((var(--lc-field-chars, 0) + 0.5) * 1ch + 2 * var(--lc-space-1) + 2px));
   height: max(20px, var(--lc-target-min));
   margin: 0;
   padding: 0 var(--lc-space-1);
