@@ -53,4 +53,9 @@ export default defineConfig([
       ],
     },
   },
+  {
+    // The entry point is never hot-reloaded, so the fast-refresh export rule does not apply to it.
+    files: ['src/main.tsx'],
+    rules: { 'react-refresh/only-export-components': 'off' },
+  },
 ])
