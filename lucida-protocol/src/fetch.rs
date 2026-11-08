@@ -290,6 +290,59 @@ pub enum SourceChunkStatus {
     Unavailable,
 }
 
+/// Why the server sent no bytes for a source chunk request. The status a
+/// client retries by follows from it ([`ChunkFailureKind::status`]); the
+/// kind says why, in words a person or an agent can act on.
+///
+/// `permission` and `storage_backend` name the same failures as the
+/// dataset-open kinds of those names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChunkFailureKind {
+    /// The key is not `level/t/c/z/y/x` in canonical decimal integers.
+    MalformedKey,
+    /// The session holds no binding for the dataset, as while a workspace
+    /// is still restoring its datasets after a server restart.
+    UnknownDataset,
+    /// The dataset has no image of that id.
+    UnknownImage,
+    /// The image has no level of that index.
+    UnknownLevel,
+    /// The stored bytes would not decode: a corrupt or truncated chunk.
+    CorruptChunk,
+    /// The stored bytes decoded, but not to the size the level's chunk
+    /// shape holds.
+    WrongSize,
+    /// The chunk's own header names a compressor or configuration lucida
+    /// does not decode, though the array's metadata named one it does.
+    UnsupportedCodec,
+    /// The object store refused the read for want of permission or valid
+    /// credentials.
+    Permission,
+    /// The object store could not serve the read just now.
+    StorageBackend,
+}
+
+impl ChunkFailureKind {
+    /// Whether a retry can succeed. A dataset the session does not hold yet
+    /// may be bound a moment later; every other kind but a store fault says
+    /// something about the request or the stored bytes that a retry repeats.
+    pub fn status(self) -> SourceChunkStatus {
+        match self {
+            ChunkFailureKind::UnknownDataset | ChunkFailureKind::StorageBackend => {
+                SourceChunkStatus::Unavailable
+            }
+            ChunkFailureKind::MalformedKey
+            | ChunkFailureKind::UnknownImage
+            | ChunkFailureKind::UnknownLevel
+            | ChunkFailureKind::CorruptChunk
+            | ChunkFailureKind::WrongSize
+            | ChunkFailureKind::UnsupportedCodec
+            | ChunkFailureKind::Permission => SourceChunkStatus::FailedPermanent,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

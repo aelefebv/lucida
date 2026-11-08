@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
+import { settleSignal } from "../pipeline/settle.ts";
 import type { FrameCaptureResult } from "../renderer/workerProtocol.ts";
-import { traceRecorder } from "../trace/recorder.ts";
 import { useCommand } from "../ui/commands.ts";
 import { toast } from "../ui/toastQueue.ts";
 import { fetchPreviewUpdatedAt, uploadPreview } from "./api.ts";
@@ -27,12 +27,12 @@ export function previewWanted(updatedAt: Date | null, now: number): boolean {
 }
 
 /**
- * Whether the page is settled now: no run open, and the last published
- * quiescence holds. For a check made between boundaries, such as data
- * appearing after the run that brought it had already closed.
+ * Whether the view is settled now, covering everything it wants or as much
+ * as its budgets hold. A stalled view is not: it would show what had arrived
+ * before something stopped.
  */
 function settledNow(): boolean {
-  return !traceRecorder.isRunOpen && traceRecorder.quiescence?.quiescent === true;
+  return settleSignal.outcome === "settled";
 }
 
 /** Run `work` when the page is idle, so the capture never competes with a frame. */
@@ -45,9 +45,13 @@ function whenIdle(work: () => void): () => void {
   return () => clearTimeout(handle);
 }
 
-/** Resolve once the run in progress ends, at once when none is open, or after `timeoutMs`. */
+/**
+ * Resolve once the view settles or stalls, at once when it already has, or
+ * after `timeoutMs`. Somebody asked for this view, so a stalled one is taken
+ * as it is.
+ */
 function untilSettled(timeoutMs: number): Promise<void> {
-  if (!traceRecorder.isRunOpen) return Promise.resolve();
+  if (settleSignal.outcome !== "settling") return Promise.resolve();
   return new Promise((resolve) => {
     const finish = () => {
       clearTimeout(timer);
@@ -55,9 +59,8 @@ function untilSettled(timeoutMs: number): Promise<void> {
       resolve();
     };
     const timer = setTimeout(finish, timeoutMs);
-    // A boundary listener runs inside the recorder's close, so leave it before acting.
-    const unsubscribe = traceRecorder.onRunBoundary((boundary) => {
-      if (boundary.endReason !== null) queueMicrotask(finish);
+    const unsubscribe = settleSignal.subscribe((outcome) => {
+      if (outcome !== "settling") finish();
     });
   });
 }
@@ -76,11 +79,10 @@ async function capturePreview(captureFrame: WorkspacePreviewOptions["captureFram
  *
  * Once per open, after the view first settles with data in it, an owner or
  * editor uploads a capture if the workspace has no preview or its preview
- * is over an hour old. "Settled" is the trace's quiescence: a run closing
- * because everything the view asked for is resident, so the capture shows
- * full detail rather than whatever had arrived. A run that times out counts
- * too, so a view that never goes quiet still gets a preview. Failures stay
- * silent.
+ * is over an hour old. "Settled" is the pipeline's settle signal: everything
+ * the view asked for is resident, or as much as its budgets hold, so the
+ * capture shows what the view will show rather than whatever had arrived.
+ * A stalled view waits for the next open. Failures stay silent.
  *
  * Also registers "Use this view as the preview", and returns it for the
  * workspace menu, or undefined while it is not available.
@@ -111,8 +113,8 @@ export function useWorkspacePreview(options: WorkspacePreviewOptions): (() => vo
       cancelIdle = whenIdle(() => {
         cancelIdle = null;
         if (disposed || chosenByHand.current) return;
-        // Somebody moved since the view settled; wait for this run to close too.
-        if (traceRecorder.isRunOpen) {
+        // Somebody moved since the view settled; wait for it to settle again.
+        if (!settledNow()) {
           viewSettled = false;
           return;
         }
@@ -128,9 +130,8 @@ export function useWorkspacePreview(options: WorkspacePreviewOptions): (() => vo
       });
     };
 
-    const unsubscribe = traceRecorder.onRunBoundary((boundary) => {
-      const ended = boundary.endReason === "quiescent" || boundary.endReason === "timeout";
-      if (!ended || !latest.current.hasData) return;
+    const unsubscribe = settleSignal.subscribe((outcome) => {
+      if (outcome !== "settled" || !latest.current.hasData) return;
       viewSettled = true;
       attempt();
     });

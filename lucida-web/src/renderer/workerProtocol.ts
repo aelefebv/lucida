@@ -649,13 +649,6 @@ export interface ErrorMessage {
   message: string;
 }
 
-export interface IntensityRangeMessage {
-  type: "intensityRange";
-  datasetId: string;
-  min: number;
-  max: number;
-}
-
 /**
  * Reply to a {@link ThumbnailRenderMessage}, correlated by `id`. `bitmap` is the
  * rendered tile as a transferable `ImageBitmap`, or `null` when nothing could be
@@ -893,7 +886,6 @@ export type WorkerToMainMessage =
   | ReadyMessage
   | PipelinesCompiledMessage
   | ErrorMessage
-  | IntensityRangeMessage
   | ThumbnailResultMessage
   | ChunkResidencyMessage
   | WantedSetDeltaMessage

@@ -34,7 +34,7 @@ import type {
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { emptyPlanStats } from "../planning/index.ts";
-import { createQuiescenceState } from "../../trace/quiescence.ts";
+import { createSettleState, evaluateSettle, stallReasonOf } from "../settle.ts";
 import { initialPlanningState, createSyntheticState } from "../planning/index.ts";
 
 // Test Factories
@@ -2847,20 +2847,20 @@ describe("CpuCache", () => {
       cache.onPlanRebuildStart();
       cache.submit(makePlan([at(2, 0), at(2, 1)]));
       await flush();
-      let inputs = cache.quiescenceInputs(createQuiescenceState());
+      let inputs = cache.settleInputs(createSettleState());
       expect(inputs).toMatchObject({ desiredDetailChunks: 2, residentDetailChunks: 2 });
 
       // The target moves to level 1. The coordinator opens every rebuild with
       // `onPlanRebuildStart`, which is what retires the previous plan's demand.
       cache.onPlanRebuildStart();
       cache.submit(makePlan([at(1, 0)]));
-      inputs = cache.quiescenceInputs(createQuiescenceState());
+      inputs = cache.settleInputs(createSettleState());
       expect(inputs).toMatchObject({ desiredDetailChunks: 1, residentDetailChunks: 0 });
       // Still cached: the zero above is a level mismatch, not an eviction.
       expect(cache.snapshot().cached.get("entity-1")?.has("2/0/0/0/0/0")).toBe(true);
 
       await flush();
-      inputs = cache.quiescenceInputs(createQuiescenceState());
+      inputs = cache.settleInputs(createSettleState());
       expect(inputs).toMatchObject({ desiredDetailChunks: 1, residentDetailChunks: 1 });
     });
 
@@ -2874,12 +2874,62 @@ describe("CpuCache", () => {
       ]));
       await flush();
 
-      const inputs = cache.quiescenceInputs(createQuiescenceState());
+      const inputs = cache.settleInputs(createSettleState());
       const budgets = cache.telemetry().tierBudgets;
       expect(inputs.detailBytes).toBe(128);
       expect(inputs.detailBudgetBytes).toBe(budgets.detailBytes);
       expect(inputs.coarseBytes).toBe(0);
       expect(inputs.coarseBudgetBytes).toBe(budgets.coarseBytes);
+    });
+
+    it("counts a wanted chunk its full tier has no room for as short, and settles on it", async () => {
+      const { cache, source } = createTestCache({ overviewBudgetBytes: 3 * 64 });
+      source.autoResolveBytes = 64;
+      const coarse = (x: number) =>
+        makeRequest({ level: 2, x, lane: "coarse", tier: "coarse", chunkKey: `2/0/0/0/0/${x}` });
+      cache.onPlanRebuildStart();
+      // A detail chunk too, or the coarse tier borrows the idle detail budget.
+      const detail = makeRequest({ lane: "detail", tier: "detail", chunkKey: "0/0/0/0/0/0" });
+      cache.submit(makePlan([detail, ...[0, 1, 2, 3, 4].map(coarse)]));
+      await flush();
+
+      const inputs = cache.settleInputs(createSettleState());
+      expect(inputs).toMatchObject({ desiredCoarseChunks: 5, residentCoarseChunks: 3, shortCoarseChunks: 2 });
+      expect(evaluateSettle(Object.assign(createSettleState(), inputs), 0).reason).toBe("coverage_limited");
+    });
+
+    it("never evicts a wanted chunk more urgent than the one arriving, and counts the refused one short", async () => {
+      const { cache, source } = createTestCache({ mainBudgetBytes: 2 * 64, overviewBudgetBytes: 64 });
+      source.autoResolveBytes = 64;
+      const detail = (x: number) =>
+        makeRequest({ x, priority: x, lane: "detail", tier: "detail", chunkKey: `0/0/0/0/0/${x}` });
+      const coarse = makeRequest({ level: 2, lane: "coarse", tier: "coarse", chunkKey: "2/0/0/0/0/0" });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([detail(0), detail(1), detail(5), coarse]));
+      await flush();
+
+      const cached = cache.snapshot().cached.get("entity-1")!;
+      expect(cached.has("0/0/0/0/0/0")).toBe(true);
+      expect(cached.has("0/0/0/0/0/1")).toBe(true);
+      expect(cached.has("0/0/0/0/0/5")).toBe(false);
+      expect(cache.settleInputs(createSettleState())).toMatchObject({ shortDetailChunks: 1 });
+
+      // Short for this plan: nothing fetches it again.
+      const requestsBefore = source.fetchCount;
+      await flush();
+      expect(source.fetchCount).toBe(requestsBefore);
+    });
+
+    it("counts a wanted chunk the server has not made yet as waiting on it, not as short", async () => {
+      const { cache, source } = createTestCache();
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([makeRequest({ level: 2, lane: "coarse", tier: "coarse" })]));
+      source.reject("entity-1/image-1/2/0/0/0/0/0", new FetchError("generated pending", { kind: "pending" }));
+      await flush();
+
+      const inputs = cache.settleInputs(createSettleState());
+      expect(inputs).toMatchObject({ serverPendingChunks: 1, shortCoarseChunks: 0 });
+      expect(stallReasonOf(evaluateSettle(Object.assign(createSettleState(), inputs), 0))).toBe("server_pending");
     });
 
     it("interleaves detail and coarse fetch starts when both tiers have demand", () => {

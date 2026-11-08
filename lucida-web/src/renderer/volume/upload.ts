@@ -1,7 +1,7 @@
 /**
  * Volume chunk upload: staleness check, admission against the planner's
- * wanted keys, eviction, GPU write, intensity sampling, and the residency
- * report for every chunk.
+ * wanted keys, eviction, GPU write, and the residency report for every
+ * chunk.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -11,10 +11,9 @@ import type {
   VolumeChunkDataMessage,
 } from "../workerProtocol.ts";
 import { writeVolumeChunk } from "../gpuContext.ts";
-import { sampleIntensityRange } from "../../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { asUint32, atlasTexels, atlasTextureFormat, texelValues } from "../dataTypeUtil.ts";
+import { asUint32, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.ts";
 import { makeCompositeKey } from "../chunkKeys.ts";
 import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
 import { mayEvict } from "../eviction.ts";
@@ -29,9 +28,9 @@ import {
 
 /**
  * Write whole 3D uint32 label chunks into the member's bricked r32uint
- * volume atlas. Ids keep their full 32-bit width and get no intensity
- * sampling, because they are categorical. Brick placement and edge clamping
- * mirror `handleVolumeChunkData`.
+ * volume atlas. Ids keep their full 32-bit width, because they are
+ * categorical. Brick placement and edge clamping mirror
+ * `handleVolumeChunkData`.
  */
 export function handleLabelVolumeChunkData(
   ctx: WorkerCtx,
@@ -135,8 +134,6 @@ export function handleVolumeChunkData(
   }
 
   const wanted = wantedChunksFor(ctx.state, memberId, tier);
-  let intensityChanged = false;
-  const totalChunks = msg.chunks.length;
   const batch = new ResidencyBatch();
   let failure: unknown = null;
 
@@ -206,11 +203,6 @@ export function handleVolumeChunkData(
       atlas.indirectionDirty = true;
       batch.held.push(chunk.key);
       landed = true;
-
-      const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
-      const { min, max } = sampleIntensityRange(texelValues(data, atlas.format), perChunkSamples);
-      if (min < atlas.intensityMin) { atlas.intensityMin = min; intensityChanged = true; }
-      if (max > atlas.intensityMax) { atlas.intensityMax = max; intensityChanged = true; }
     } catch (err) {
       // A chunk that throws goes back to the page to be sent again, and the
       // rest of the batch still lands.
@@ -224,9 +216,6 @@ export function handleVolumeChunkData(
   batch.post(ctx, memberId, tier);
   if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
 
-  if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
-  }
   if (failure !== null) throw failure;
 }
 

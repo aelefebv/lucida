@@ -41,7 +41,7 @@ import type {
   WatchCursor,
   WatchSample,
 } from "./liveProgress.ts";
-import type { QuiescenceState } from "./quiescence.ts";
+import { SETTLE_HOLD_MS, type SettleState } from "../pipeline/settle.ts";
 import { addSend, SEND_COLUMN_COUNT, sendTalliesFrom } from "./sendAccounting.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
 import { TickScratch } from "./tickRing.ts";
@@ -110,18 +110,18 @@ const PLAN_SPAN_RING = 16;
 
 
 /**
- * How long `quiescent` must hold before a run closes on its own. Clears the
- * residency render interval and the minimap scan cadence with margin while
- * staying small against a healthy sub-second local open. It goes
- * in the header because it is baked into every duration a run reports.
+ * How long `quiescent` must hold before a run closes on its own: the hold
+ * the page's settle signal uses. It goes in the header because it is baked
+ * into every duration a run reports.
  */
-export const DEFAULT_QUIESCENCE_HOLD_MS = 500;
+export const DEFAULT_QUIESCENCE_HOLD_MS = SETTLE_HOLD_MS;
 
 /**
- * How long a run may stay open before closing as `timeout`. Three paths can
- * keep a page live indefinitely, and a monitor that emits nothing on the
- * interesting case is the wrong tool — the most diagnostic run is the one
- * that never finished.
+ * How long a run may stay open before closing as `timeout`, unless a trace
+ * driver sets its own through the seam. A view that settles or stalls ends
+ * its run sooner; a run still making progress when this runs out is the
+ * one it exists for, because a monitor that emits nothing on the
+ * interesting case is the wrong tool.
  */
 export const DEFAULT_RUN_TIMEOUT_MS = 60_000;
 
@@ -261,7 +261,7 @@ export class TraceRecorder {
   private readonly now: () => number;
   private readonly epochNow: () => number;
   private readonly quiescenceHoldMs: number;
-  private readonly timeoutMs: number;
+  private timeoutMs: number;
 
   private environment: TraceEnvironment | null = null;
   private gpuIdentity: GpuIdentity | null = null;
@@ -344,7 +344,7 @@ export class TraceRecorder {
 
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastQuiescence: QuiescenceState | null = null;
+  private lastQuiescence: SettleState | null = null;
 
   private readonly tickListeners = new Set<TickListener>();
   private readonly latest: LatestReading = {
@@ -431,9 +431,10 @@ export class TraceRecorder {
   }
 
   /**
-   * The labelled runs that concluded on their own, by settling or timing
-   * out, with the id of the most recent one. What a driver waits for, and
-   * readable without exporting because exporting closes the run asked about.
+   * The labelled runs that concluded on their own, by settling, stalling or
+   * timing out, with the id of the most recent one. What a driver waits for,
+   * and readable without exporting because exporting closes the run asked
+   * about.
    *
    * An `explicit` close is excluded because somebody asked for it: a page
    * torn down and rebuilt hands back a run that lived under a millisecond.
@@ -445,7 +446,7 @@ export class TraceRecorder {
     let lastId: string | null = null;
     for (const interval of this.closed) {
       const { cause, endReason, runId } = interval.header;
-      if (!cause || (endReason !== "quiescent" && endReason !== "timeout")) continue;
+      if (!cause || !concludedOnItsOwn(endReason)) continue;
       count += 1;
       lastId = runId;
     }
@@ -463,7 +464,7 @@ export class TraceRecorder {
   }
 
   /** The last state the page published, or null before the first publication. */
-  get quiescence(): QuiescenceState | null {
+  get quiescence(): SettleState | null {
     return this.lastQuiescence;
   }
 
@@ -731,10 +732,32 @@ export class TraceRecorder {
    * merely counting what it saw, only one in which no page has told it what
    * conditions it would be recording under.
    */
-  closeRun(endReason: EndReason): void {
+  closeRun(endReason: EndReason, stallReason: string | null = null): void {
     if (!this.open) return;
-    this.finishInterval(endReason);
+    // A stall concludes a labelled run; steady state has nothing to stall.
+    if (endReason === "stalled" && !this.open.cause) return;
+    this.finishInterval(endReason, endReason === "stalled" ? stallReason : null);
     this.beginInterval(null);
+  }
+
+  /** How long a run may stay open before closing as `timeout`. */
+  get runTimeoutMs(): number {
+    return this.timeoutMs;
+  }
+
+  /**
+   * Set how long a run may stay open. A run already open is held to the new
+   * length from when it opened, so a driver that sets it as the page comes
+   * up governs the open it is waiting for.
+   */
+  setRunTimeout(ms: number): void {
+    if (!Number.isFinite(ms) || ms <= 0 || ms === this.timeoutMs) return;
+    this.timeoutMs = ms;
+    const run = this.open;
+    if (!run?.cause || this.timeoutTimer === null) return;
+    clearTimeout(this.timeoutTimer);
+    const remaining = Math.max(0, run.startedAtMs + ms - this.now());
+    this.timeoutTimer = setTimeout(() => this.closeRun("timeout"), remaining);
   }
 
   /**
@@ -742,7 +765,7 @@ export class TraceRecorder {
    * has held for the hold window, so a momentary lull between two bursts of
    * arrivals does not end the run early.
    */
-  noteQuiescence(state: QuiescenceState): void {
+  noteQuiescence(state: SettleState): void {
     this.lastQuiescence = state;
     // Settling ends a labelled run. The unlabelled interval has nothing to
     // settle into — it is what a settled page records.
@@ -1382,7 +1405,7 @@ export class TraceRecorder {
     }
   }
 
-  private finishInterval(endReason: EndReason): void {
+  private finishInterval(endReason: EndReason, stallReason: string | null = null): void {
     const run = this.open;
     if (!run) return;
     this.clearHoldTimer();
@@ -1438,6 +1461,7 @@ export class TraceRecorder {
         runId: run.runId,
         cause: run.cause,
         endReason,
+        stallReason,
         truncation: run.truncation,
         build: buildIdentity(),
         gpu: this.gpuIdentity,
@@ -1601,6 +1625,11 @@ function newConnection(
   gapUs: number | null,
 ): ConnectionRecord {
   return { generation, openedAtUs, closedAtUs: null, gapUs, firstRid: null, lastRid: null };
+}
+
+/** Whether a run with this end reason closed without anybody asking it to. */
+function concludedOnItsOwn(endReason: EndReason): boolean {
+  return endReason === "quiescent" || endReason === "stalled" || endReason === "timeout";
 }
 
 /** The bytes column of every type in a send-tally vector, summed. */

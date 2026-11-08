@@ -1323,6 +1323,7 @@ describe("SessionController source-chunk status routing", () => {
       "0/0/0/0/0/0",
       "failed_permanent",
       "access denied",
+      "permission",
     );
 
     expect(
@@ -1333,6 +1334,7 @@ describe("SessionController source-chunk status routing", () => {
       "0/0/0/0/0/0",
       "failed_permanent",
       "access denied",
+      "permission",
     );
   });
 });

@@ -6,6 +6,7 @@ import userEvent from "@testing-library/user-event";
 import { LayerPanel, type LayerChannel, type LayerInfo } from "./LayerPanel.tsx";
 import { __resetShortcutsForTesting, listShortcuts } from "../ui/shortcuts.ts";
 import { __resetCommandsForTesting, listCommands } from "../ui/commands.ts";
+import { createSettleState, evaluateSettle, settleSignal, type SettleState } from "../pipeline/settle.ts";
 
 function channel(overrides: Partial<LayerChannel> = {}): LayerChannel {
   return {
@@ -127,6 +128,42 @@ describe("LayerPanel header", () => {
     expect(screen.getByText("No layers yet.")).toBeTruthy();
     await userEvent.click(screen.getAllByRole("button", { name: "Add data" })[1]);
     expect(props.onAddData).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("LayerPanel coverage notice", () => {
+  afterEach(() => {
+    settleSignal.reset();
+    vi.useRealTimers();
+  });
+
+  function settle(overrides: Partial<SettleState>): void {
+    const state = Object.assign(createSettleState(), overrides);
+    act(() => {
+      settleSignal.publish(evaluateSettle(state, 0));
+      vi.advanceTimersByTime(settleSignal.holdMs);
+    });
+  }
+
+  it("says quietly how much of the view a full memory budget holds", () => {
+    vi.useFakeTimers();
+    render(<LayerPanel {...baseProps()} />);
+    expect(screen.queryByText(/Memory is full/)).toBeNull();
+
+    settle({ desiredCoarseChunks: 40, residentCoarseChunks: 25, shortCoarseChunks: 15 });
+    expect(screen.getByText(/Memory is full/).textContent).toBe(
+      "Memory is full: this view holds 62% of the data it asks for.",
+    );
+
+    act(() => settleSignal.disturb());
+    expect(screen.queryByText(/Memory is full/)).toBeNull();
+  });
+
+  it("says nothing about a view that holds everything it asks for", () => {
+    vi.useFakeTimers();
+    render(<LayerPanel {...baseProps()} />);
+    settle({ desiredCoarseChunks: 40, residentCoarseChunks: 40 });
+    expect(screen.queryByText(/Memory is full/)).toBeNull();
   });
 });
 

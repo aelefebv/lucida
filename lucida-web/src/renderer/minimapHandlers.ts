@@ -7,8 +7,7 @@ import type {
 } from "./workerProtocol.ts";
 import { createEmptyVolumeTexture, createOffscreenTarget, writeVolumeChunk } from "./gpuContext.ts";
 import type { CompositeLayer } from "./layerCompositor.ts";
-import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
-import { atlasTexels, atlasTextureFormat, texelValues, type SampleFormat } from "./dataTypeUtil.ts";
+import { atlasTexels, atlasTextureFormat, type SampleFormat } from "./dataTypeUtil.ts";
 
 interface MinimapOverviewEntry {
   texture: GPUTexture;
@@ -19,8 +18,6 @@ interface MinimapOverviewEntry {
   width: number;
   height: number;
   depth: number;
-  intensityMin: number;
-  intensityMax: number;
 }
 
 const minimapOverviewPerDataset = new Map<string, MinimapOverviewEntry>();
@@ -256,13 +253,10 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
       texture, format: sampleFormat, uploaded: new Set(),
       t, c,
       width: levelWidth, height: levelHeight, depth: levelDepth,
-      intensityMin: Infinity, intensityMax: -Infinity,
     };
     minimapOverviewPerDataset.set(datasetId, entry);
   }
 
-  let intensityChanged = false;
-  const totalChunks = msg.chunks.length;
   for (const chunk of msg.chunks) {
     if (entry.uploaded.has(chunk.key)) continue;
     const data = atlasTexels(chunk.data, chunk.dataType, entry.format);
@@ -278,15 +272,6 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
       atlasTextureFormat(entry.format),
     );
     entry.uploaded.add(chunk.key);
-
-    const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
-    const { min, max } = sampleIntensityRange(texelValues(data, entry.format), perChunkSamples);
-    if (min < entry.intensityMin) { entry.intensityMin = min; intensityChanged = true; }
-    if (max > entry.intensityMax) { entry.intensityMax = max; intensityChanged = true; }
-  }
-
-  if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId, min: entry.intensityMin, max: entry.intensityMax });
   }
 }
 

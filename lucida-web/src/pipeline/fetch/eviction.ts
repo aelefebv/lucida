@@ -49,6 +49,40 @@ export class LRUPolicy<T extends EvictableEntry = CacheEntry> implements Evictio
 }
 
 /**
+ * The coarse store's policy. What the latest plan did not ask for goes
+ * first, oldest first; then what it did, least urgent first, so the view's
+ * most important coarse chunks are the last to go. Insertion order alone
+ * evicts a priority-ordered fill from its most urgent end.
+ */
+export class WantedLastPolicy implements EvictionPolicy {
+  private readonly currentTick: () => number;
+
+  constructor(currentTick: () => number) {
+    this.currentTick = currentTick;
+  }
+
+  selectVictims(entries: readonly CacheEntry[], bytesNeeded: number): CacheEntry[] {
+    if (bytesNeeded <= 0) return [];
+    const tick = this.currentTick();
+    const wanted = (entry: CacheEntry): number => (entry.lastSeenTick === tick ? 1 : 0);
+    const sorted = [...entries].sort(
+      (a, b) =>
+        wanted(a) - wanted(b) ||
+        (wanted(a) === 1 ? b.priority - a.priority : 0) ||
+        a.insertedAt - b.insertedAt,
+    );
+    const victims: CacheEntry[] = [];
+    let freed = 0;
+    for (const entry of sorted) {
+      if (freed >= bytesNeeded) break;
+      victims.push(entry);
+      freed += entry.sizeBytes;
+    }
+    return victims;
+  }
+}
+
+/**
  * The detail cache's policy. Two passes:
  *
  *  1. Chunks finer than their entity's target level, whatever their tier.

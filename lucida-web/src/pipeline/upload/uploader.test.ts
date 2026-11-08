@@ -157,6 +157,7 @@ function makeCpuCache(deliveries: ReadyChunkDelivery[] = []): CpuCache {
   return {
     submit: vi.fn(),
     onPlanRebuildStart: vi.fn(),
+    tierCapacity: vi.fn(() => ({ detail: Infinity, coarse: Infinity })),
     getDeliverable: vi.fn(function* () {
       yield* deliveries;
     }),

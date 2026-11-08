@@ -17,7 +17,9 @@ use crate::cache::CachedStore;
 use crate::coarse::{SourceCoarseConfig, select_source_coarse_level};
 use crate::codec::parse_codec_chain;
 use crate::collection_checks;
-use crate::collection_geometry::{DeclaredLevels, StoredLevels, StoredTile, describe_mismatches};
+use crate::collection_geometry::{
+    DeclaredLevels, StoredLevels, StoredTile, clamp_to_extent, describe_mismatches,
+};
 use crate::import_types::*;
 use crate::layout::compute_chunk_byte_layout;
 use crate::parse;
@@ -82,17 +84,28 @@ async fn import_single_image(
 
     let data_type = parse_data_type(&level_metas[0].data_type)?;
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
-    warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
-    let level_bindings = build_level_binding_infos(
-        &axes_names,
+    let level_bindings = clamp_chunks_to_levels(
+        build_level_binding_infos(
+            &axes_names,
+            &level_metas,
+            data_type_size(data_type),
+            &layout.pinned,
+        )?,
         &level_metas,
+        &axes_names,
         data_type_size(data_type),
         &layout.pinned,
     )?;
     let levels =
         build_level_geometries(&level_entries, &level_metas, &level_bindings, &axes_names)?;
-    let probe_targets = build_probe_targets(&level_entries, &level_metas, &level_bindings, &levels);
+    let probe_targets = build_probe_targets(
+        &level_entries,
+        &level_metas,
+        &level_bindings,
+        &levels,
+        &axes_names,
+    );
     let coarse_level_index =
         select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
 
@@ -130,6 +143,7 @@ async fn import_single_image(
     // exists (or errors) without yielding names is surfaced as a warning so
     // possibly-incomplete discovery never passes silently.
     let mut warnings: Vec<ImportWarning> = Vec::new();
+    warnings.extend(pinned_axes_warning(id, &layout.pinned));
     warnings.extend(unwritten::warn_unwritten_levels(store, "", id, &probe_targets).await);
 
     let mut label_budget = LabelBudget::new();
@@ -693,7 +707,7 @@ async fn import_collection(
     force_exhaustive_label_discovery: bool,
 ) -> Result<ImportResult, StoreError> {
     let collection_json = parse::resolve_ome_block(root_json, "plate").ok_or_else(|| {
-        StoreError::Metadata(parse::describe_missing_ome_block(root_json, "plate"))
+        StoreError::missing_metadata(parse::describe_missing_ome_block(root_json, "plate"))
     })?;
 
     // Every guess the layout below makes about malformed metadata, in the
@@ -710,7 +724,7 @@ async fn import_collection(
     let groups_json = collection_json
         .get("wells")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| StoreError::Metadata("collection has no groups array".into()))?;
+        .ok_or_else(|| StoreError::malformed_metadata("collection has no groups array"))?;
 
     // Fetch every group's `zarr.json` with bounded concurrency, keyed by its
     // declared position, then re-order the results so downstream assembly runs
@@ -811,8 +825,8 @@ async fn import_collection(
     }
 
     if parsed_groups.is_empty() {
-        return Err(StoreError::Metadata(
-            "collection has no readable groups".into(),
+        return Err(StoreError::malformed_metadata(
+            "collection has no readable groups",
         ));
     }
 
@@ -861,7 +875,7 @@ async fn import_collection(
         downsampling_method,
         level_metas,
     } = shared_geometry.ok_or_else(|| {
-        StoreError::Metadata("collection has no tile with readable geometry".into())
+        StoreError::malformed_metadata("collection has no tile with readable geometry")
     })?;
 
     // The collection opened. If selection had to fall forward past unreadable
@@ -881,7 +895,7 @@ async fn import_collection(
 
     let data_type = parse_data_type(&level_metas[0].data_type)?;
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
-    warn_pinned_axes(id, &layout.pinned);
+    warnings.extend(pinned_axes_warning(id, &layout.pinned));
     let axes = build_axes(&layout.canonical_names);
     let level_bindings = build_level_binding_infos(
         &axes_names,
@@ -904,6 +918,7 @@ async fn import_collection(
                 &level_metas,
                 &level_bindings,
                 &representative_levels,
+                &axes_names,
             ),
         )
         .await,
@@ -1008,11 +1023,15 @@ async fn import_collection(
         let sx = if valid(raw_x) { raw_x } else { 1.0 };
         let sy = if valid(raw_y) { raw_y } else { 1.0 };
         if has_explicit_positions && (!valid(raw_x) || !valid(raw_y)) {
-            eprintln!(
-                "[lucida-store] dataset {id:?} has missing or invalid voxel \
-                 scale (scale_x={raw_x}, scale_y={raw_y}); explicit translations \
-                 are passed through unchanged",
-            );
+            warnings.push(ImportWarning {
+                kind: ImportWarningKind::InvalidScale,
+                target: id.to_string(),
+                message: format!(
+                    "level 0 has a missing or invalid sample scale (x {raw_x}, y {raw_y}), \
+                     so tile positions are read as samples rather than converted from \
+                     physical units"
+                ),
+            });
         }
         (sx, sy)
     };
@@ -1342,7 +1361,7 @@ async fn import_collection(
             &tile_entities,
             full_shape_5d,
         )
-        .map_err(|e| StoreError::Metadata(e.to_string()))?;
+        .map_err(|e| StoreError::malformed_metadata(e.to_string()))?;
 
         transforms = grid_transforms;
     }
@@ -1452,14 +1471,63 @@ fn build_level_binding_infos(
         .collect()
 }
 
-fn warn_pinned_axes(dataset_id: &str, pinned: &[PinnedAxis]) {
-    for axis in pinned {
-        eprintln!(
-            "[lucida-store] dataset {dataset_id:?}: axis '{}' (size {}) is non-canonical \
-             and was pinned to index {}; only that slice will be visible",
-            axis.name, axis.size, axis.pinned_index,
-        );
+/// Serve each level at a chunk no larger than the level, through a regrid
+/// where the stored chunk overhangs it. See [`clamp_to_extent`].
+fn clamp_chunks_to_levels(
+    bindings: Vec<LevelBindingInfo>,
+    level_metas: &[parse::ArrayMeta],
+    axes_names: &[String],
+    dtype_size: u8,
+    pinned: &[PinnedAxis],
+) -> Result<Vec<LevelBindingInfo>, StoreError> {
+    bindings
+        .into_iter()
+        .zip(level_metas)
+        .enumerate()
+        .map(|(i, (binding, meta))| {
+            let mut chunk_shape = binding.chunk_shape.clone();
+            clamp_to_extent(&mut chunk_shape, &meta.shape);
+            if chunk_shape == binding.chunk_shape {
+                return Ok(binding);
+            }
+            let chunk_byte_layout =
+                compute_chunk_byte_layout(axes_names, &chunk_shape, dtype_size, pinned)
+                    .map_err(|e| e.in_context(format!("level {i}")))?;
+            Ok(LevelBindingInfo {
+                regrid: Some(Regrid {
+                    chunk_shape,
+                    chunk_byte_layout,
+                    stored_shape: meta.shape.clone(),
+                }),
+                ..binding
+            })
+        })
+        .collect()
+}
+
+/// One warning naming every axis that was pinned, or `None` when none was.
+fn pinned_axes_warning(target: &str, pinned: &[PinnedAxis]) -> Option<ImportWarning> {
+    if pinned.is_empty() {
+        return None;
     }
+    let axes = pinned
+        .iter()
+        .map(|axis| {
+            format!(
+                "'{}' (size {}) at index {}",
+                axis.name, axis.size, axis.pinned_index
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(ImportWarning {
+        kind: ImportWarningKind::PinnedAxis,
+        target: target.to_string(),
+        message: format!(
+            "axes lucida does not show were pinned to one index each, so only that \
+             slice is visible: {axes}"
+        ),
+    })
 }
 
 fn build_axes(axes_names: &[String]) -> Vec<Axis> {
@@ -1493,22 +1561,24 @@ fn build_probe_targets(
     level_metas: &[parse::ArrayMeta],
     level_bindings: &[LevelBindingInfo],
     levels: &[LevelGeometry],
+    axes_names: &[String],
 ) -> Vec<unwritten::ProbeTarget> {
     level_entries
         .iter()
         .zip(level_metas.iter())
         .zip(level_bindings.iter())
         .zip(levels.iter())
-        .map(
-            |(((entry, meta), binding), geometry)| unwritten::ProbeTarget {
+        .map(|(((entry, meta), binding), geometry)| {
+            // The probe reads the stored origin chunk, whatever chunk the
+            // level is served at.
+            let stored = normalize_to_5d(&binding.chunk_shape, axes_names, 1);
+            unwritten::ProbeTarget {
                 path: entry.path.clone(),
                 axis_count: meta.shape.len(),
-                origin_footprint: std::array::from_fn(|d| {
-                    geometry.chunk_shape[d] as f64 * geometry.scale[d]
-                }),
+                origin_footprint: std::array::from_fn(|d| stored[d] as f64 * geometry.scale[d]),
                 shard: binding.shard.clone(),
-            },
-        )
+            }
+        })
         .collect()
 }
 
@@ -1532,9 +1602,14 @@ fn build_level_geometries(
         .enumerate()
         .map(|(i, ((entry, meta), binding))| {
             let shape = normalize_to_5d(&meta.shape, axes_names, 1);
-            let chunk_shape = normalize_to_5d(&binding.chunk_shape, axes_names, 1);
+            // A key addresses the chunk the level is served at.
+            let served = binding
+                .regrid
+                .as_ref()
+                .map_or(&binding.chunk_shape, |regrid| &regrid.chunk_shape);
+            let chunk_shape = normalize_to_5d(served, axes_names, 1);
             if chunk_shape.contains(&0) {
-                return Err(StoreError::Metadata(format!(
+                return Err(StoreError::malformed_metadata(format!(
                     "level {i}: chunk_shape {chunk_shape:?} has a zero dimension"
                 )));
             }
@@ -1754,9 +1829,10 @@ async fn build_labels_within_budget(
     let mut imported = ImportedLabels::default();
     for name in names {
         if budget.labels_remaining == 0 {
-            eprintln!(
-                "[lucida-store] dataset {dataset_id:?}: dataset label budget reached; \
-                 skipping remaining labels under {labels_prefix:?}",
+            tracing::warn!(
+                dataset = %dataset_id,
+                labels = %labels_prefix,
+                "import.label.budget_reached"
             );
             break;
         }
@@ -1774,9 +1850,12 @@ async fn build_labels_within_budget(
                 imported.bindings.push(label.binding);
             }
             Err(e) => {
-                eprintln!(
-                    "[lucida-store] dataset {dataset_id:?}: skipping malformed label \
-                     {name:?} under {labels_prefix:?}: {e}",
+                tracing::warn!(
+                    dataset = %dataset_id,
+                    labels = %labels_prefix,
+                    label = %name,
+                    error = %e,
+                    "import.label.skipped"
                 );
             }
         }
@@ -1818,7 +1897,15 @@ async fn build_label(
     // whose ids exceed 65535 must never be narrowed.
     let data_type = parse_data_type(&level_metas[0].data_type)?;
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
-    warn_pinned_axes(&group_prefix, &layout.pinned);
+    for axis in &layout.pinned {
+        tracing::warn!(
+            label = %group_prefix,
+            axis = %axis.name,
+            size = axis.size,
+            pinned_index = axis.pinned_index,
+            "import.label.axis_pinned"
+        );
+    }
     let axes = build_axes(&layout.canonical_names);
     let level_bindings = build_level_binding_infos(
         &axes_names,
@@ -2232,7 +2319,10 @@ mod tests {
             let error = import_with_sharded_codecs(name, sharded_codecs_with(edit))
                 .await
                 .unwrap_err();
-            assert!(matches!(error, StoreError::Metadata(_)), "{name}: {error}");
+            assert!(
+                matches!(error, StoreError::Metadata { .. }),
+                "{name}: {error}"
+            );
             let message = error.to_string();
             assert!(message.contains("level 0"), "{name}: {message}");
             assert!(message.contains("sharding_indexed"), "{name}: {message}");
@@ -2256,7 +2346,13 @@ mod tests {
             let scale = (1u64 << index) as f64;
             assert_eq!(level.level_index, index as u32);
             assert_eq!(level.shape, [1, 1, 32 >> index, 64 >> index, 64 >> index]);
-            assert_eq!(level.chunk_shape, [1, 1, 16, 16, 16]);
+            // One 16-cubed chunk is stored on every level; each is served at
+            // no more than its level holds.
+            let extent = [32u64 >> index, 64 >> index, 64 >> index].map(|e| e.min(16));
+            assert_eq!(level.chunk_shape, [1, 1, extent[0], extent[1], extent[2]]);
+            // The grid is the stored one: an overhung axis has one chunk either way.
+            let grid = [32u64 >> index, 64 >> index, 64 >> index].map(|e| e.div_ceil(16));
+            assert_eq!(level.grid_shape, [1, 1, grid[0], grid[1], grid[2]]);
             assert_eq!(level.scale, [1.0, 1.0, scale, scale, scale]);
         }
     }
@@ -2976,7 +3072,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, StoreError::Metadata(_)),
+            matches!(err, StoreError::Metadata { .. }),
             "expected a metadata error, got {err:?}",
         );
 
@@ -3138,7 +3234,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            matches!(err, StoreError::Metadata(_)),
+            matches!(err, StoreError::Metadata { .. }),
             "expected a metadata error, got {err:?}",
         );
 
@@ -3242,7 +3338,7 @@ mod tests {
         let err = import_dataset_with_label_discovery(&store, "swg", "Store Wide Geometry", false)
             .await
             .expect_err("no tile has readable geometry, so the import must fail loudly");
-        assert!(matches!(err, StoreError::Metadata(_)), "got {err:?}");
+        assert!(matches!(err, StoreError::Metadata { .. }), "got {err:?}");
 
         // Decisive: one geometry read per group (12), never one per tile (240).
         let tile_geometry_reads = count_tile_geometry_reads(&reads);
@@ -3706,6 +3802,30 @@ mod tests {
             "tile 1 ty should be 400 voxels, got {}",
             t1.transform.matrix()[13],
         );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A zero scale cannot convert translations, so they are read as samples,
+    /// and the user is told the tile positions may be wrong.
+    #[tokio::test]
+    async fn an_unusable_scale_under_translations_is_a_warning() {
+        let dir = temp_dir("explicit_translations_zero_scale");
+        let translations = vec![
+            Some([0.0, 0.0, 0.0, 0.0, 0.0]),
+            Some([0.0, 0.0, 0.0, 200.0, 100.0]),
+        ];
+        create_explicit_collection_fixture(&dir, &translations, Some([1.0, 1.0, 1.0, 0.0, 0.0]));
+
+        let store = cached_store(dir.to_str().unwrap());
+        let result = import_dataset(&store, "zero-scale", "Zero scale")
+            .await
+            .unwrap();
+
+        let warnings = warnings_of(&result, ImportWarningKind::InvalidScale);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("x 0, y 0"), "{}", warnings[0]);
+        assert!(ImportWarningKind::InvalidScale.degrades_health());
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -4246,6 +4366,15 @@ mod tests {
         // binding ever reaches the chunk-fetch path.
         assert_eq!(level0.compression, crate::codec::StorageCompression::Lz4);
 
+        // The pinned axis reaches the user as a warning, not only a log line.
+        let pinned = warnings_of(&result, ImportWarningKind::PinnedAxis);
+        assert_eq!(pinned.len(), 1, "{pinned:?}");
+        assert!(
+            pinned[0].contains("'m' (size 4) at index 0"),
+            "{}",
+            pinned[0]
+        );
+
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -4407,7 +4536,7 @@ mod tests {
         let err = import_dataset(&store, "gzip-bad", "gzip bad")
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Metadata { .. }));
         let msg = err.to_string();
         assert!(msg.contains("gzip"), "error should name 'gzip': {msg}");
         assert!(
@@ -4434,7 +4563,7 @@ mod tests {
         let err = import_dataset(&store, "big-endian-bad", "big endian bad")
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Metadata { .. }));
         let msg = err.to_string();
         assert!(msg.contains("big"), "error should mention 'big': {msg}");
 
@@ -4464,7 +4593,7 @@ mod tests {
         let err = import_dataset(&store, "mid-pyramid-bad", "mid-pyramid bad")
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Metadata { .. }));
         let msg = err.to_string();
         assert!(
             msg.contains("level 1"),
@@ -4499,7 +4628,7 @@ mod tests {
         let err = import_dataset(&store, "blosc-blosclz", "blosc blosclz")
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Metadata { .. }));
         let msg = err.to_string();
         assert!(
             msg.contains("blosclz"),
@@ -5138,7 +5267,7 @@ mod tests {
         let err = import_dataset(&store, "szc", "Src Zero Chunk")
             .await
             .expect_err("a zero-chunk source array must fail the import");
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Metadata { .. }));
         assert!(
             err.to_string().contains("zero"),
             "error should name the zero dimension: {err}",
@@ -5167,7 +5296,7 @@ mod tests {
         let err = import_dataset(&store, "pzc", "Collection Zero Chunk")
             .await
             .expect_err("a zero-chunk collection tile array must fail the import");
-        assert!(matches!(err, StoreError::Metadata(_)));
+        assert!(matches!(err, StoreError::Metadata { .. }));
         assert!(
             err.to_string().contains("zero"),
             "error should name the zero dimension: {err}",

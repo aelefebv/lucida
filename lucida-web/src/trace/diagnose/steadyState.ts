@@ -29,9 +29,13 @@ import type {
 
 const US_PER_SECOND = 1_000_000;
 
-/** A steady-state finding before ranking, which is what assigns an id. */
+/**
+ * A steady-state finding before ranking, which is what assigns an id. A
+ * budget-bound tier is a note: covering less is how a view settles under
+ * memory pressure.
+ */
 export type SteadyStateFinding = Omit<Finding, "id" | "confidence" | "attribution"> & {
-  severity: "steady-state";
+  severity: "steady-state" | "note";
 };
 
 /**
@@ -323,7 +327,7 @@ function budgetBoundFindings(tiers: TierAtSettle[]): SteadyStateFinding[] {
   return tiers
     .filter((tier) => tier.budgetBound)
     .map((tier) => ({
-      severity: "steady-state" as const,
+      severity: "note" as const,
       rule: rule.id,
       subject: tierSubject(tier.tier),
       observed: {
@@ -414,7 +418,7 @@ export function describeSteadyStateFinding(finding: SteadyStateFinding | Finding
         `the ${finding.subject} is budget-bound at ${count(observed.residentBytes)} B of ` +
         `${count(observed.budgetBytes)} B (${count(observed.fillPct)}% full) with nothing pending and ` +
         `nothing in flight, so ${count(observed.lossChunks)} of ${count(observed.wanted)} wanted chunk(s) ` +
-        `cannot fit — a coverage loss of ${count(observed.lossPct)}%, not a timeout`
+        `cannot fit — the view settles covering less, a coverage loss of ${count(observed.lossPct)}%`
       );
     case rules.replans.id:
       return (

@@ -190,6 +190,14 @@ export interface RequestPlan {
    * the next `plan` call and never inspects or builds it.
    */
   nextState: PlanningState;
+  /**
+   * Requests capacity-aware admission left out because the budgets could
+   * not hold them, per tier. Absent when nothing was admitted against a
+   * capacity.
+   */
+  shortfall?: Record<ResidencyTier, number>;
+  /** Detail budget the coarse tier took to hold what admission admitted. */
+  coarseLoanBytes?: number;
 }
 
 /**

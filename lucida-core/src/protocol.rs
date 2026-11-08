@@ -4,9 +4,10 @@ use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, ImageId};
 use lucida_protocol::{
-    AssetCatalogDelta, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
-    DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
-    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerTimingBatch, SourceChunkStatus,
+    AssetCatalogDelta, ChunkFailureKind, DatasetOpenFailureDiagnostic,
+    DatasetOpenProgressDiagnostic, DatasetOpenSuccessDiagnostic, DatasetSourceHealth,
+    GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
+    ServerTimingBatch, SourceChunkStatus,
 };
 
 use crate::camera::Camera;
@@ -645,13 +646,18 @@ pub enum ServerMessage {
     /// A workspace was archived while this client was connected.
     /// Workspace clients should stop reconnecting and leave the workspace route.
     WorkspaceArchived { workspace_id: String },
-    /// Sent to the requester when a source chunk's store read fails with a
-    /// non-not-found error (revoked access, backend failure, unreachable
-    /// store). Not-found is legitimate sparse data and keeps the canonical
-    /// zero-filled binary frame; successful reads keep the binary chunk
-    /// frame. Without this frame the client only observes its own request
-    /// timeout, which it must treat as transient — a dead source would
+    /// Sent to the requester for every source chunk request the server
+    /// answers without bytes: a key that does not parse, a dataset, image or
+    /// level it does not hold, bytes that would not decode, or a store read
+    /// that failed. Not-found is legitimate sparse data and keeps the
+    /// canonical zero-filled binary frame; successful reads keep the binary
+    /// chunk frame. Without this frame the client only observes its own
+    /// request timeout, which it must treat as transient, so a failure would
     /// stay invisible behind a stalling canvas.
+    ///
+    /// `key` is the key as the request spelled it, parsed or not, so the
+    /// reply reaches the request that asked. `kind` is absent only from a
+    /// server that predates it.
     ///
     /// Variant added at the end so the serde tag positions of older
     /// variants don't shift.
@@ -660,6 +666,8 @@ pub enum ServerMessage {
         image_id: ImageId,
         key: String,
         status: SourceChunkStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kind: Option<ChunkFailureKind>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
@@ -737,6 +745,28 @@ pub enum ServerMessage {
     /// Variant added at the end so the serde tag positions of older
     /// variants don't shift.
     CommandRejected { reason: CommandRejection },
+    /// Sent to a client whose message the server did not act on and that
+    /// has no answer of its own: one it could not parse, a type it does not
+    /// read, or a request it turned away. A client never waits on silence.
+    /// A command is answered by `Ack` or `CommandRejected` instead, so its
+    /// answers keep their order, and a chunk request by its chunk or a
+    /// `SourceChunkStatus`.
+    ///
+    /// `request_id` and `rid` echo the message's own when it carried one
+    /// the server could read, and `message_type` is its `type` tag as sent.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift.
+    MessageRejected {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rid: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        message_type: Option<String>,
+        reason: MessageRejection,
+        message: String,
+    },
 }
 
 /// Why the server refused a document command.
@@ -751,6 +781,22 @@ pub enum CommandRejection {
     /// The server could not check the sender's role or store the change.
     /// Sending it again may work.
     Unavailable,
+}
+
+/// Why the server did not act on a client message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MessageRejection {
+    /// Not JSON, or JSON that is no message the server reads.
+    Malformed,
+    /// A `type` the server does not read from a client.
+    UnknownType,
+    /// A binary frame. Clients send only text.
+    BinaryFrame,
+    /// Too soon after the last message of its type.
+    Throttled,
+    /// The message names a dataset the session holds no binding for.
+    UnknownDataset,
 }
 
 /// The kind of mutation a `BookmarkChanged` describes. Wire encoding is
@@ -1959,11 +2005,13 @@ mod tests {
             image_id: ImageId("img1".into()),
             key: "0/0/0/0/0/0".into(),
             status: SourceChunkStatus::FailedPermanent,
+            kind: Some(ChunkFailureKind::Permission),
             message: Some("access denied".into()),
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert!(json.contains("\"type\":\"source_chunk_status\""));
         assert!(json.contains("\"status\":\"failed_permanent\""));
+        assert!(json.contains("\"kind\":\"permission\""));
         let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
         match parsed {
             ServerMessage::SourceChunkStatus {
