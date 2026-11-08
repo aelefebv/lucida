@@ -13,6 +13,12 @@ export interface MinimapState {
   overviewUploaded: Map<string, Set<string>>;
   overviewSeeded: Set<string>;
   pendingFetch: Map<string, MinimapChunkCoord[]>;
+  /**
+   * The entity that owns each member's image. The minimap keys its work by
+   * image, but the CPU cache keys chunks by entity, and in a collection the
+   * two ids differ.
+   */
+  memberOwner: Map<string, string>;
   enabled: boolean;
   /**
    * Keeps the coarse overview textures uploading for Explore-panel thumbnails
@@ -120,6 +126,7 @@ export function createMinimapState(): MinimapState {
     overviewUploaded: new Map(),
     overviewSeeded: new Set(),
     pendingFetch: new Map(),
+    memberOwner: new Map(),
     enabled: false,
     overviewActive: false,
     size: 200,
@@ -303,8 +310,10 @@ export function markMinimapOverviewSeeded(
 /** Whether any chunk a member awaits is now in the cache, with the scan's own test for usable data. */
 function awaitedChunkArrived(ctx: TickContext, state: MinimapState): boolean {
   for (const [memberId, coords] of state.pendingFetch) {
+    const owner = state.memberOwner.get(memberId);
+    if (owner === undefined) continue;
     for (const coord of coords) {
-      const cached = ctx.cpuCache.getCachedChunk(memberId, coord.key);
+      const cached = ctx.cpuCache.getCachedChunk(owner, coord.key);
       if (cached && cached.data.byteLength > 0) return true;
     }
   }
@@ -365,6 +374,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
 
       if (state.overviewSeeded.has(memberId)) continue;
 
+      state.memberOwner.set(memberId, img.owner);
       const uploaded = state.overviewUploaded.get(memberId)!;
       const missing: { level: number; x: number; y: number; z: number; t: number; c: number; key: string }[] = [];
       const available: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[] = [];
@@ -375,7 +385,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
             const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
             if (uploaded.has(chunkKey)) continue;
 
-            const cached = ctx.cpuCache.getCachedChunk(memberId, chunkKey);
+            const cached = ctx.cpuCache.getCachedChunk(img.owner, chunkKey);
             if (cached && cached.data.byteLength > 0) {
               available.push({
                 data: cached.data,
@@ -844,6 +854,7 @@ export function clearMinimapForDataset(state: MinimapState, dsId: string): void 
   state.overviewUploaded.delete(dsId);
   state.overviewSeeded.delete(dsId);
   state.pendingFetch.delete(dsId);
+  state.memberOwner.delete(dsId);
   // Clear any member-keyed entries (collection case, e.g. "dsId:A/1/0").
   const prefix = dsId + ":";
   for (const key of [...state.overviewKey.keys()]) {
@@ -852,6 +863,7 @@ export function clearMinimapForDataset(state: MinimapState, dsId: string): void 
       state.overviewUploaded.delete(key);
       state.overviewSeeded.delete(key);
       state.pendingFetch.delete(key);
+      state.memberOwner.delete(key);
     }
   }
 }
