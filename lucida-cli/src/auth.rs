@@ -7,7 +7,7 @@ use std::process::Command;
 use std::time::Duration;
 
 use base64::Engine;
-use rand::TryRngCore;
+use rand::TryRng;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
@@ -174,7 +174,7 @@ pub struct LoginResult {
 
 pub fn generate_raw_token() -> String {
     let mut bytes = [0_u8; 32];
-    rand::rngs::OsRng
+    rand::rngs::SysRng
         .try_fill_bytes(&mut bytes)
         .expect("OS random number generator unavailable");
     format!(
