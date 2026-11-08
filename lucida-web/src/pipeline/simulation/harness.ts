@@ -158,6 +158,8 @@ export interface PhaseOutcome {
   missingGpu: string[];
   /** Chunks the page sent the worker again and again in this phase, most often first. */
   resent: string[];
+  /** Chunk requests the source has answered since the open. */
+  sourceRequests: number;
 }
 
 export interface SimulationRun {
@@ -505,6 +507,7 @@ class Simulation {
       missingCpu,
       missingGpu,
       resent: resent.map((r) => r.text),
+      sourceRequests: this.source.requestCount,
     };
   }
 

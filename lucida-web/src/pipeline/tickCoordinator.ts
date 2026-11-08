@@ -35,6 +35,7 @@ import {
 import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
+import { admitRequests, chunkBytesFor } from "./planning/admission.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -795,9 +796,23 @@ export class TickCoordinator {
       desiredProxyKeysByDataset.set(datasetId, set);
     }
 
+    // Admit each dataset's plan against what the CPU budgets have left, in
+    // layer order, so the wanted set the cache drives toward fits it.
+    let capacity = ctx.cpuCache.tierCapacity();
     for (const planned of plannedDatasets) {
       const { dsId, dsSettings, entities, visibleRegion, selection } = planned;
-      const result = planned.result;
+      const admission = admitRequests(
+        planned.result.requests,
+        capacity,
+        chunkBytesFor(ctx.datasets.get(dsId)!.manifest),
+      );
+      capacity = admission.remaining;
+      const result: RequestPlan = {
+        ...planned.result,
+        requests: admission.admitted,
+        shortfall: admission.shortfall,
+        coarseLoanBytes: admission.borrowed,
+      };
       const budgetedProxyRequests = proxyRequestsByDataset.get(dsId) ?? [];
       const budgetedResult: RequestPlan = {
         ...result,
@@ -933,6 +948,8 @@ export class TickCoordinator {
         // `nextState` is required on RequestPlan but unused by submit();
         // forward the planner's pointer so the shape stays honest.
         nextState: result.nextState,
+        shortfall: result.shortfall,
+        coarseLoanBytes: result.coarseLoanBytes,
       });
 
 
@@ -1332,7 +1349,15 @@ export class TickCoordinator {
     // which is needed because the worker repacks its atlas indirection for
     // the new T/Z. The active set is unchanged, so `planningState` stays.
     ctx.cpuCache.onPlanRebuildStart();
-    for (const p of planned) {
+    let capacity = ctx.cpuCache.tierCapacity();
+    for (const scrubbed of planned) {
+      const admission = admitRequests(
+        scrubbed.requests,
+        capacity,
+        chunkBytesFor(ctx.datasets.get(scrubbed.dsId)!.manifest),
+      );
+      capacity = admission.remaining;
+      const p = { ...scrubbed, requests: admission.admitted };
       this.requestEpoch = scrubRequestEpoch;
       this._lastVisibleRegion.set(p.dsId, p.visibleRegion);
 
@@ -1371,6 +1396,8 @@ export class TickCoordinator {
         epochs: scrubEpochs,
         stats: p.stats,
         nextState: p.planningState,
+        shortfall: admission.shortfall,
+        coarseLoanBytes: admission.borrowed,
       });
 
       this.uploader.sendColdStateSelection({
