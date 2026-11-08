@@ -63,6 +63,33 @@ export function webGpuUnavailableReason(message: string): WebGpuUnavailableReaso
 }
 
 export async function initGPU(canvas: HTMLCanvasElement | OffscreenCanvas): Promise<GPUContext> {
+  const device = await requestGpuDevice();
+  const context = canvas.getContext("webgpu");
+  if (!context) {
+    throw new Error("Failed to get WebGPU canvas context");
+  }
+  const format = navigator.gpu.getPreferredCanvasFormat();
+  configureCanvas(context, device, format);
+  return { device, context, format };
+}
+
+/**
+ * Point a canvas context at a device. A context outlives the device it was
+ * configured with, so a replacement device draws to the same canvas.
+ */
+export function configureCanvas(context: GPUCanvasContext, device: GPUDevice, format: GPUTextureFormat): void {
+  // `COPY_SRC` lets the frame capture copy the canvas texture out from
+  // inside a frame, for the trace bundle. See `worker/captureFrame.ts`.
+  context.configure({
+    device,
+    format,
+    alphaMode: "opaque",
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+  });
+}
+
+/** A fresh adapter and device. A lost device's adapter can't make another, so recovery comes here too. */
+export async function requestGpuDevice(): Promise<GPUDevice> {
   if (!navigator.gpu) {
     throw new Error(WEBGPU_MISSING);
   }
@@ -94,22 +121,7 @@ export async function initGPU(canvas: HTMLCanvasElement | OffscreenCanvas): Prom
       requiredFeatures: retry.features.has("timestamp-query") ? ["timestamp-query"] : [],
     });
   }
-  const context = canvas.getContext("webgpu");
-  if (!context) {
-    throw new Error("Failed to get WebGPU canvas context");
-  }
-
-  const format = navigator.gpu.getPreferredCanvasFormat();
-  // `COPY_SRC` lets the frame capture copy the canvas texture out from
-  // inside a frame, for the trace bundle. See `worker/captureFrame.ts`.
-  context.configure({
-    device,
-    format,
-    alphaMode: "opaque",
-    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
-  });
-
-  return { device, context, format };
+  return device;
 }
 
 export function createEmptyVolumeTexture(

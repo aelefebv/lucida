@@ -36,6 +36,8 @@ function makeDevice(): GPUDevice {
   return {
     createBuffer: vi.fn(() => ({ destroy: vi.fn() })),
     createTexture: vi.fn(() => texture),
+    pushErrorScope: vi.fn(),
+    popErrorScope: vi.fn(() => Promise.resolve(null)),
     createCommandEncoder: vi.fn(() => encoder),
     queue: {
       writeBuffer: vi.fn(),
