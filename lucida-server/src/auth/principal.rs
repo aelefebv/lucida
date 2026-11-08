@@ -786,7 +786,7 @@ mod tests {
             .await
             .unwrap();
 
-        let ext = make_extractor_with_admins(Arc::clone(&store), &["someone@else.com"]);
+        let ext = make_extractor_with_admins(Arc::clone(&store), &["someone@example.org"]);
         let parts = parts_with_cookie(Some("nonadmin-cookie"));
         let p = ext.extract(&parts).await.unwrap();
         assert!(!p.is_admin);
@@ -799,12 +799,12 @@ mod tests {
         // env-var-derived set still matches.
         let store = Arc::new(MemorySessionStore::new());
         let mut row = fresh_session("admin-mixed");
-        row.email = "AuStin@CalicoLabs.com".to_string();
+        row.email = "AdMin@Example.com".to_string();
         store.create(row).await.unwrap();
 
         // The parser would have lowercased the env var; tests bypass the
         // parser, so seed the lowercased form directly.
-        let ext = make_extractor_with_admins(Arc::clone(&store), &["austin@calicolabs.com"]);
+        let ext = make_extractor_with_admins(Arc::clone(&store), &["admin@example.com"]);
         let parts = parts_with_cookie(Some("admin-mixed"));
         let p = ext.extract(&parts).await.unwrap();
         assert!(p.is_admin);
@@ -1058,23 +1058,23 @@ mod tests {
 
     #[test]
     fn rejection_unverified_takes_precedence_over_hd_check() {
-        let mut claims = verified("alice@calicolabs.com", Some("calicolabs.com"));
+        let mut claims = verified("alice@example.com", Some("example.com"));
         claims.email_verified = false;
         // Even though hd would pass, unverified must reject first.
-        let allowed = allowed_set(&["calicolabs.com"]);
+        let allowed = allowed_set(&["example.com"]);
         let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap_err();
         assert_eq!(
             err,
             RejectionReason::Unverified {
-                attempted_email: "alice@calicolabs.com".into(),
+                attempted_email: "alice@example.com".into(),
             },
         );
     }
 
     #[test]
     fn rejection_hd_missing_when_allowlist_nonempty() {
-        let claims = verified("alice@gmail.com", None); // personal Gmail
-        let allowed = allowed_set(&["calicolabs.com"]);
+        let claims = verified("alice@example.net", None); // personal account
+        let allowed = allowed_set(&["example.com"]);
         let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap_err();
         match err {
             RejectionReason::HdMismatch {
@@ -1082,9 +1082,9 @@ mod tests {
                 attempted_hd,
                 allowed_domains,
             } => {
-                assert_eq!(attempted_email, "alice@gmail.com");
+                assert_eq!(attempted_email, "alice@example.net");
                 assert_eq!(attempted_hd, None, "personal account = no hd");
-                assert_eq!(allowed_domains, vec!["calicolabs.com".to_string()]);
+                assert_eq!(allowed_domains, vec!["example.com".to_string()]);
             }
             _ => panic!("expected HdMismatch, got {err:?}"),
         }
@@ -1092,34 +1092,34 @@ mod tests {
 
     #[test]
     fn rejection_hd_not_in_allowlist() {
-        let claims = verified("alice@othercorp.com", Some("othercorp.com"));
-        let allowed = allowed_set(&["calicolabs.com"]);
+        let claims = verified("alice@example.org", Some("example.org"));
+        let allowed = allowed_set(&["example.com"]);
         let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap_err();
         match err {
             RejectionReason::HdMismatch {
                 attempted_hd: Some(h),
                 ..
-            } => assert_eq!(h, "othercorp.com"),
+            } => assert_eq!(h, "example.org"),
             _ => panic!("expected HdMismatch, got {err:?}"),
         }
     }
 
     #[test]
     fn accept_when_hd_matches_allowlist() {
-        let claims = verified("alice@calicolabs.com", Some("calicolabs.com"));
-        let allowed = allowed_set(&["calicolabs.com"]);
+        let claims = verified("alice@example.com", Some("example.com"));
+        let allowed = allowed_set(&["example.com"]);
         let p = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap();
-        assert_eq!(p.email, "alice@calicolabs.com");
+        assert_eq!(p.email, "alice@example.com");
     }
 
     #[test]
     fn accept_hd_match_is_case_insensitive() {
         // Allowlist already lowercased by the parser; the claim is
         // whatever Google sent. Match must still succeed.
-        let claims = verified("alice@calicolabs.com", Some("CalicoLabs.COM"));
-        let allowed = allowed_set(&["calicolabs.com"]);
+        let claims = verified("alice@example.com", Some("Example.COM"));
+        let allowed = allowed_set(&["example.com"]);
         let p = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap();
-        assert_eq!(p.email, "alice@calicolabs.com");
+        assert_eq!(p.email, "alice@example.com");
     }
 
     #[test]
@@ -1127,18 +1127,18 @@ mod tests {
         // OSS-permissive default: no domain restriction means any
         // verified Google email gets through, hd present or not.
         let allowed: HashSet<String> = HashSet::new();
-        let with_hd = verified("alice@calicolabs.com", Some("calicolabs.com"));
+        let with_hd = verified("alice@example.com", Some("example.com"));
         assert!(principal_or_rejection_from_claims(&with_hd, &allowed, &no_admins()).is_ok());
-        let without_hd = verified("personal@gmail.com", None);
+        let without_hd = verified("personal@example.net", None);
         assert!(principal_or_rejection_from_claims(&without_hd, &allowed, &no_admins()).is_ok());
     }
 
     #[test]
     fn rejection_hd_mismatch_with_multiple_allowed_domains_is_sorted() {
-        let claims = verified("alice@evil.com", Some("evil.com"));
+        let claims = verified("alice@example.org", Some("example.org"));
         // Insert in reverse-sort order; the rejection must still come
         // back sorted so the user-facing message is deterministic.
-        let allowed = allowed_set(&["zlast.com", "acorp.com", "mid.org"]);
+        let allowed = allowed_set(&["zlast.example.com", "acorp.example.com", "mid.example.com"]);
         let err = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap_err();
         match err {
             RejectionReason::HdMismatch {
@@ -1147,9 +1147,9 @@ mod tests {
                 assert_eq!(
                     allowed_domains,
                     vec![
-                        "acorp.com".to_string(),
-                        "mid.org".to_string(),
-                        "zlast.com".to_string()
+                        "acorp.example.com".to_string(),
+                        "mid.example.com".to_string(),
+                        "zlast.example.com".to_string()
                     ],
                 );
             }
@@ -1161,26 +1161,26 @@ mod tests {
 
     #[test]
     fn principal_is_admin_when_email_in_admin_set() {
-        let claims = verified("austin@calicolabs.com", Some("calicolabs.com"));
-        let allowed = allowed_set(&["calicolabs.com"]);
-        let admins = allowed_set(&["austin@calicolabs.com"]);
+        let claims = verified("admin@example.com", Some("example.com"));
+        let allowed = allowed_set(&["example.com"]);
+        let admins = allowed_set(&["admin@example.com"]);
         let p = principal_or_rejection_from_claims(&claims, &allowed, &admins).unwrap();
         assert!(p.is_admin, "matched email must yield is_admin: true");
     }
 
     #[test]
     fn principal_is_not_admin_when_email_missing_from_admin_set() {
-        let claims = verified("alice@calicolabs.com", Some("calicolabs.com"));
-        let allowed = allowed_set(&["calicolabs.com"]);
-        let admins = allowed_set(&["bob@calicolabs.com"]);
+        let claims = verified("alice@example.com", Some("example.com"));
+        let allowed = allowed_set(&["example.com"]);
+        let admins = allowed_set(&["bob@example.com"]);
         let p = principal_or_rejection_from_claims(&claims, &allowed, &admins).unwrap();
         assert!(!p.is_admin);
     }
 
     #[test]
     fn principal_is_not_admin_when_admin_set_empty() {
-        let claims = verified("anyone@calicolabs.com", Some("calicolabs.com"));
-        let allowed = allowed_set(&["calicolabs.com"]);
+        let claims = verified("anyone@example.com", Some("example.com"));
+        let allowed = allowed_set(&["example.com"]);
         let p = principal_or_rejection_from_claims(&claims, &allowed, &no_admins()).unwrap();
         assert!(!p.is_admin, "no admins configured = nobody is admin");
     }
@@ -1190,8 +1190,8 @@ mod tests {
         // Operator might author the env var with capitalized casing
         // (parser lowercases) and Google might emit a casing-shifted
         // email; lookup must still match.
-        let claims = verified("AuStin@CalicoLabs.com", None);
-        let admins = allowed_set(&["austin@calicolabs.com"]); // already lowercased by parser
+        let claims = verified("AdMin@Example.com", None);
+        let admins = allowed_set(&["admin@example.com"]); // already lowercased by parser
         let p = principal_or_rejection_from_claims(&claims, &no_admins(), &admins).unwrap();
         assert!(
             p.is_admin,

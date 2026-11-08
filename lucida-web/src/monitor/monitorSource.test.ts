@@ -60,7 +60,7 @@ afterEach(() => {
 });
 
 describe("reading the run in progress", () => {
-  it("takes the provisional reading through the seam without closing the run (#1057)", () => {
+  it("takes the provisional reading through the seam without closing the run", () => {
     registerEnvironment();
     installTraceSeam();
     expect(readProvisional()).toBeNull();
@@ -237,7 +237,7 @@ describe("saving a run", () => {
   });
 
   /**
-   * The bundle goes through the seam's one bundle function (#1055), named
+   * The bundle goes through the seam's one bundle function, named
    * for the run on screen and without the Perfetto projection, which has its
    * own control.
    */
@@ -267,7 +267,7 @@ describe("saving a run", () => {
   });
 });
 
-describe("reading a dropped file (#1066)", () => {
+describe("reading a dropped file", () => {
   it("reads the golden bundle about the run its header names, at every depth the page reads a live run", () => {
     const loaded = readArtifactFile(readFileSync(GOLDEN_BUNDLE, "utf-8"), "lucida-local-healthy.bundle.json");
 
@@ -310,7 +310,7 @@ describe("reading a dropped file (#1066)", () => {
   });
 });
 
-describe("comparing two loaded runs (#1066)", () => {
+describe("comparing two loaded runs", () => {
   it("is the seam's own compare function: the dock's text is the text lucida trace diff prints", () => {
     const seam = installTraceSeam();
     const baseline = readArtifactFile(readFileSync(GOLDEN_BUNDLE, "utf-8"), "baseline.bundle.json");

@@ -110,7 +110,7 @@ function consoleOutput(): string {
     .join("\n");
 }
 
-describe("WorkspaceRoot — denied/not-found deep-link UX (slice 3, never-leak)", () => {
+describe("WorkspaceRoot — denied/not-found deep-link UX (never-leak)", () => {
   it("renders a friendly access message (not the raw error) on failure", async () => {
     const msg = await renderRouteAndGetMessage(new Error("403 Forbidden"));
     expect(msg).toContain("don’t have access");
@@ -208,7 +208,7 @@ describe("WorkspaceRoot — access removed while the viewer is open", () => {
   });
 });
 
-describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
+describe("WorkspaceRoot — create workspace from dataset(s)", () => {
   const createFromDatasetsMock = vi.mocked(createWorkspaceFromDatasets);
 
   beforeEach(() => {

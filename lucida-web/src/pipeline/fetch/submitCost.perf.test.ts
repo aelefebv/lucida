@@ -95,7 +95,7 @@ describe("submit cost at remote-fixture scale", () => {
       before: () => cache.onPlanRebuildStart(),
     });
     console.log(
-      `[#900] submit(${MEMBERS} reqs): ${describeTiming(submit, SUBMIT_BUDGET_US)} ` +
+      `[submit cost] submit(${MEMBERS} reqs): ${describeTiming(submit, SUBMIT_BUDGET_US)} ` +
         `| at 5 rebuilds/s => ${((submit.p50Us * 5) / 1_000).toFixed(1)}ms/s of main thread`,
     );
 

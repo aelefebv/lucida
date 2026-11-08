@@ -173,7 +173,7 @@ describe("the dock's live draw cost contract", () => {
 
     for (const r of readings) {
       console.log(
-        `[#1064] live timeline derivation: rows=${String(r.rows).padStart(6)} | ` +
+        `[timeline cost] live timeline derivation: rows=${String(r.rows).padStart(6)} | ` +
           `${describeTiming(r.timed, r.budgetUs)} | ` +
           `${(r.timed.nominalUs / DERIVE_CEILING_US).toFixed(2)}x the ${DERIVE_CEILING_US}µs ceiling`,
       );
@@ -198,7 +198,7 @@ describe("the dock's live draw cost contract", () => {
     recorder.reset();
 
     console.log(
-      `[#1064] live timeline draw list: ${LAYOUT.width}px at DPR ${LAYOUT.devicePixelRatio} | ` +
+      `[timeline cost] live timeline draw list: ${LAYOUT.width}px at DPR ${LAYOUT.devicePixelRatio} | ` +
         `${primitives.toFixed(0)} primitives over ${seriesCount} series | ` +
         `${describeTiming(timed, DRAW_LIST_BUDGET_US)} | ` +
         `${(timed.nominalUs / DRAW_LIST_CEILING_US).toFixed(2)}x the ${DRAW_LIST_CEILING_US}µs ceiling`,

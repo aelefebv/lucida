@@ -295,7 +295,7 @@ describe("DevControls — store subscription", () => {
 });
 
 describe("DevControls — overlay toggles", () => {
-  it("no longer shows them: the toggles live in the HUD legend", () => {
+  it("does not show them: the toggles live in the HUD legend", () => {
     setOverlayEnabled("chunkGrid", true);
     render(<DevControls />);
     for (const name of DEBUG_OVERLAYS) {

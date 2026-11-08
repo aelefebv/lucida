@@ -165,8 +165,8 @@ function formatRows(value: number): string {
  *
  * Metadata first and unconditional when the run has any: on a cold open the
  * first seconds are dataset-open metadata reads, and no chunk track can draw
- * them because the first chunk does not exist yet (#893 measured those reads
- * at 91% of a cold headline run).
+ * them because the first chunk does not exist yet (those reads have measured
+ * 91% of a cold headline run).
  */
 const TRACK_BANDS: { side: PhaseSide; title: string; why: string }[] = [
   {
@@ -270,8 +270,8 @@ function windowOf(diagnostic: DiagnosticDocument): MonitorWindow | null {
 
 /**
  * Truncation and coverage lead. They are not footnotes: a reader has to be told
- * what the run did not measure before being told what it did, and #893 shipped
- * `100% accounted` for a run that was 87% pre-instrument boot.
+ * what the run did not measure before being told what it did, or a run that is
+ * 87% pre-instrument boot reads as `100% accounted`.
  *
  * A window sits between them, as it does in the text: after the truncation,
  * which qualifies the window too, and before the coverage, whose denominator

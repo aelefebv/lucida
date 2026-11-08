@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.22.0](https://github.com/aelefebv/lucida/compare/v0.21.0...v0.22.0) (2026-11-08)
+
+
+### Features
+
+* hover pixel readout, 64-bit and half data types, percent-decoded file URLs, v3 consolidated metadata ([#1325](https://github.com/aelefebv/lucida/issues/1325)) ([b51be99](https://github.com/aelefebv/lucida/commit/b51be999808f0a3bab36adbaa545df333b77e5fe))
+* open single-channel images gray, through one saved-view codec in core ([#1324](https://github.com/aelefebv/lucida/issues/1324)) ([4104433](https://github.com/aelefebv/lucida/commit/41044334cbb3f4358d505b9324fec27377cd14eb))
+* per-layer channel model in core ([#1295](https://github.com/aelefebv/lucida/issues/1295)) ([b45151d](https://github.com/aelefebv/lucida/commit/b45151d052ce280230d93bf81b83d1f9229be8e3))
+
+
+### Bug Fixes
+
+* **cli:** run on an 8 MiB stack so debug builds don't overflow on Windows ([#1318](https://github.com/aelefebv/lucida/issues/1318)) ([f8e22d2](https://github.com/aelefebv/lucida/commit/f8e22d24b00eb2c96be86b22a06a17e3168481e8))
+* fit generated coarse levels' auto-contrast from a server histogram, and pool their fill value ([#1321](https://github.com/aelefebv/lucida/issues/1321)) ([49fb887](https://github.com/aelefebv/lucida/commit/49fb887df83f4728a15a0844d68d8f523a36d3c9)), closes [#1287](https://github.com/aelefebv/lucida/issues/1287)
+* give the dev-controls knobs one lifetime as preferences ([#1302](https://github.com/aelefebv/lucida/issues/1302)) ([120addf](https://github.com/aelefebv/lucida/commit/120addf1af528f6fe45cfe4dc2d1f3e4b1c373b3))
+* **web:** draw collection members in the minimap ([#1319](https://github.com/aelefebv/lucida/issues/1319)) ([10ef317](https://github.com/aelefebv/lucida/commit/10ef317c7b99f28b0e9e37e963a2bf8e7b412bd3))
+* **web:** draw failed label and minimap chunks hatched ([#1322](https://github.com/aelefebv/lucida/issues/1322)) ([dbcd26b](https://github.com/aelefebv/lucida/commit/dbcd26b3dbb89596f5d32f238097767f55751be8))
+* **web:** restores report presence, a steer adopts dataset presence, and peer messages skip App ([#1323](https://github.com/aelefebv/lucida/issues/1323)) ([bc5a248](https://github.com/aelefebv/lucida/commit/bc5a248cbab65d6a40e231bb44b1922b3a4c8602))
+* **web:** send the slice view one plane per chunk and stop needless resends ([#1329](https://github.com/aelefebv/lucida/issues/1329)) ([6be373e](https://github.com/aelefebv/lucida/commit/6be373e9eacc4e067dc2e0824a9a6293c8d3bab9))
+
+
+### Refactors
+
+* **planning:** enumerate chunks in the core and keep each lane in its own priority band ([#1326](https://github.com/aelefebv/lucida/issues/1326)) ([bf2bd8e](https://github.com/aelefebv/lucida/commit/bf2bd8ea7860355163e2b034ef39af7e6f45607c))
+* **web:** move the remaining raw controls onto the ui primitives ([#1328](https://github.com/aelefebv/lucida/issues/1328)) ([c00e3dc](https://github.com/aelefebv/lucida/commit/c00e3dc369639e2e9ed011edb4ccf7acf7954428))
+
 ## [0.21.0](https://github.com/aelefebv/lucida/compare/v0.20.1...v0.21.0) (2026-11-08)
 
 

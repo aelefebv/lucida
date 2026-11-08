@@ -156,7 +156,7 @@ describe("the per-chunk read's cost contract", () => {
     const ratio = largeTick.nominalUs / Math.max(1, smallTick.nominalUs);
 
     console.log(
-      `[#1062] overlay tick: ${CELLS_PER_TICK} cells read over 2,000 rows nominal p50=${smallTick.nominalUs.toFixed(1)}µs | ` +
+      `[chunk index cost] overlay tick: ${CELLS_PER_TICK} cells read over 2,000 rows nominal p50=${smallTick.nominalUs.toFixed(1)}µs | ` +
         `over 40,000 rows ${describeTiming(largeTick, TICK_BUDGET_US)} | ratio ${ratio.toFixed(2)}x (gate ${ROW_INDEPENDENCE_GATE}x) | ` +
         `ceiling ${TICK_CEILING_US}µs`,
     );
