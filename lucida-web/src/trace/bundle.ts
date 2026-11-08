@@ -325,7 +325,7 @@ export async function exportBundle(
   ]);
   const trace = context.exportTrace();
   const run = selectRun(trace, options.runId);
-  const view = run ? await decodeView(run.header.composedView.url) : null;
+  const view = run ? decodeView(run.header.composedView.url) : null;
   const health = healthResult.value;
   const datasetIds = run?.header.datasetIds ?? [];
 
@@ -474,11 +474,11 @@ async function fetchHealth(
  * read. A URL that fails to decode is not an error here. The bundle still
  * carries the URL verbatim, and the pins say they are unknown.
  */
-async function decodeView(url: string): Promise<SavedView | null> {
+function decodeView(url: string): SavedView | null {
   const payload = viewPayload(url);
   if (!payload) return null;
   try {
-    return await decode(payload);
+    return decode(payload);
   } catch {
     return null;
   }

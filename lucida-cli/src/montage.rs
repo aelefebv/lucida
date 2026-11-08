@@ -187,9 +187,10 @@ pub fn build_cell_view(
             // Per-channel settings carry the colormap (an explicit dataset
             // setting otherwise resets it to gray) and the same window, for
             // every channel of the composite.
-            let channel_settings = (0..channel_count.max(1) as usize)
+            let channel_count = channel_count.max(1) as usize;
+            let channel_settings = (0..channel_count)
                 .map(|i| ChannelSettings {
-                    colormap: Colormap::default_for_channel(i),
+                    colormap: Colormap::default_for_channel(i, channel_count),
                     contrast_min: lo,
                     contrast_max: hi,
                     ..ChannelSettings::default()
@@ -404,10 +405,15 @@ mod tests {
         assert_eq!(settings.channel_settings.len(), 2);
         assert_eq!(
             settings.channel_settings[1].colormap,
-            Colormap::default_for_channel(1)
+            Colormap::default_for_channel(1, 2)
         );
         assert_eq!(settings.channel_settings[1].contrast_min, 60.0);
         assert_eq!(settings.channel_settings[1].contrast_max, 196.0);
+
+        // A one-channel image keeps the gray it opens with.
+        let view = build_cell_view("wds-x", &cell, [256, 256], Some([60.0, 196.0]), 1);
+        let settings = view.dataset_settings.get(&id).expect("settings");
+        assert_eq!(settings.channel_settings[0].colormap, Colormap::Gray);
     }
 
     #[test]

@@ -558,24 +558,29 @@ class DatasetsResource:
         ``breadcrumb`` are stamped on the returned current node so a stateless
         caller can keep an honest trail across calls.
 
-        URLs are deferred: each cell carries a full ``view`` object, which you
-        pass back as ``view=`` to descend.
+        Each cell carries a full ``view`` object, which you pass back as
+        ``view=`` to descend, and a ``url`` that opens that view in the viewer.
         """
-        _explore = native_extension().explore
+        extension = native_extension()
 
         document = self._workspace.snapshot(timeout=timeout).get("document", {})
         summary = dataset_info_from_document(document, dataset)
         ds_id = summary["workspace_dataset_id"]
         view_json = json.dumps(view) if view is not None else None
-        result = _explore(
-            json.dumps(document),
-            ds_id,
-            viewport,
-            view_json,
-            depth,
-            breadcrumb or [],
+        result = json.loads(
+            extension.explore(
+                json.dumps(document),
+                ds_id,
+                viewport,
+                view_json,
+                depth,
+                breadcrumb or [],
+            )
         )
-        return json.loads(result)
+        for cell in result.get("cells") or []:
+            payload = extension.encode_view_payload(json.dumps(cell["view"]))
+            cell["url"] = f"{self._workspace.web_url}#view={payload}"
+        return result
 
     def open(self, source: str, *, timeout: float = 300.0) -> dict[str, Any]:
         return run_sync(self.async_open(source, timeout=timeout))

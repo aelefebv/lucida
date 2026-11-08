@@ -25,6 +25,10 @@ use crate::camera::Camera;
 use crate::scene::{DatasetDisplaySettings, DisplayState};
 use crate::view::ViewState;
 
+mod payload;
+
+pub use payload::{PayloadError, decode_payload, encode_payload};
+
 /// Schema version of the [`SavedView`] wire format. Encoders emit and
 /// accept only this version. Recipients that see a higher version should
 /// best-effort apply known fields and surface a warning; recipients that

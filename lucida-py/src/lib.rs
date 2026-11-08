@@ -9,7 +9,7 @@ use lucida_content::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::command::{Command, ViewportCommand};
 use lucida_core::protocol::ClientMessage;
-use lucida_core::saved_view::SavedView;
+use lucida_core::saved_view::{self, SavedView};
 use lucida_core::scene::{DisplayState, DocumentState, Scene};
 use lucida_core::view::ViewState;
 use lucida_core::view_transform;
@@ -342,11 +342,30 @@ fn explore(
     serde_json::to_string(&sidecar).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Encode a `SavedView` JSON string as the `#view=` payload of a viewer URL,
+/// the same payload the viewer and the CLI write for the same view.
+#[pyfunction]
+fn encode_view_payload(view_json: &str) -> PyResult<String> {
+    let view: serde_json::Value =
+        serde_json::from_str(view_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    saved_view::encode_payload(&view).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Decode a viewer URL's `#view=` payload into a `SavedView` JSON string.
+#[pyfunction]
+fn decode_view_payload(payload: &str) -> PyResult<String> {
+    saved_view::decode_payload(payload)
+        .map(|view| view.to_string())
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn lucida(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyScene>()?;
     m.add_class::<PyStore>()?;
     m.add_class::<PyProfileScene>()?;
     m.add_function(wrap_pyfunction!(explore, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_view_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_view_payload, m)?)?;
     Ok(())
 }

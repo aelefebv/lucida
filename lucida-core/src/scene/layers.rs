@@ -286,6 +286,31 @@ mod tests {
     }
 
     #[test]
+    fn a_one_channel_layer_opens_gray() {
+        let mut scene = scene_with(&[("a", 1)]);
+        let layer = scene.resolved_layer(&DatasetId("a".into())).unwrap();
+        assert_eq!(layer.channels[0].colormap, Colormap::Gray);
+
+        // A channel entry made by a command, not by the open, is gray too.
+        scene
+            .dataset_settings
+            .get_mut(&DatasetId("a".into()))
+            .unwrap()
+            .channel_settings
+            .clear();
+        scene.apply(
+            ViewportCommand::SetChannelGamma {
+                dataset_id: "a".into(),
+                channel: 0,
+                gamma: 0.5,
+            }
+            .into(),
+        );
+        let layer = scene.resolved_layer(&DatasetId("a".into())).unwrap();
+        assert_eq!(layer.channels[0].colormap, Colormap::Gray);
+    }
+
+    #[test]
     fn solo_on_one_layer_leaves_the_others_as_they_were() {
         let mut scene = scene_with(&[("a", 3), ("b", 2), ("c", 1)]);
         solo(&mut scene, "a", Some(2));

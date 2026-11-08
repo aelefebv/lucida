@@ -9,13 +9,17 @@
  * `REGEN_TRACE_FIXTURES=1 pnpm exec vitest run src/trace/bundle.golden.test.ts`
  * regenerates it, and `cargo test -p lucida-cli` shows what the CLI needs.
  */
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { exportBundle } from "./bundle.ts";
 import { fixtureContext } from "./bundleFixtures.ts";
+import { loadWasm } from "../viewProperties.ts";
+
+// The view URL decodes through the core codec.
+beforeAll(() => loadWasm());
 
 const FIXTURE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "trace-fixtures");
 const FIXTURE = join(FIXTURE_ROOT, "bundle-v1.json");
