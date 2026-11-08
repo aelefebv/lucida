@@ -163,10 +163,12 @@ async fn generated_coarse_over_the_sharded_twin_produces_the_unsharded_twins_chu
         let manifest = Arc::new(twin.result.manifest.clone());
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &twin.resolver,
             GeneratedCoarseConfig {
                 target_long_axis: 20,
                 chunk_long_axis: 10,
                 max_chunk_bytes: 1 << 20,
+                min_chunk_axis: 1,
             },
         )
         .pop()

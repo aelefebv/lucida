@@ -52,12 +52,20 @@ export interface GeneratedCoarseSpec {
    * manifest with no scene epoch behind it.
    */
   publishedAtMs?: number;
+  /**
+   * When the histograms arrive, if not with the chunks: later, as when the
+   * server finishes the rest of a timepoint and channel after the chunks
+   * the view asked for, or `null` for never.
+   */
+  histogramsAtMs?: number | null;
 }
 
 export interface GeneratedCoarseLevel {
   levelIndex: number;
   readyAtMs: number;
   publishedAtMs: number;
+  /** `readyAtMs` unless the spec says otherwise. */
+  histogramsAtMs: number | null;
   /** The level's geometry, one entry per image. */
   levels: WireGeneratedLevelAvailability[];
   /** The availability snapshot the server sends with the open. */
@@ -174,6 +182,7 @@ function fixture(
       levelIndex,
       readyAtMs: generated.readyAtMs,
       publishedAtMs,
+      histogramsAtMs: generated.histogramsAtMs === undefined ? generated.readyAtMs : generated.histogramsAtMs,
       levels,
       snapshot: { levels: publishedAtMs > 0 ? [] : levels, chunks: [] },
       chunkKeys: new Map(resolved.images.map((image) => [image.image_id, levelChunkKeys(level)])),

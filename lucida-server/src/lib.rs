@@ -109,6 +109,16 @@ impl GeneratedConfig {
             .join("generated-coarse")
     }
 
+    /// The shape every dataset's generated coarse levels are planned to.
+    pub fn coarse_config(&self) -> generated::GeneratedCoarseConfig {
+        generated::GeneratedCoarseConfig {
+            target_long_axis: self.generated_target_long_axis,
+            chunk_long_axis: self.generated_chunk_long_axis,
+            max_chunk_bytes: self.generated_max_chunk_bytes,
+            ..Default::default()
+        }
+    }
+
     pub fn defaults() -> Self {
         Self {
             generated_enabled: true,
