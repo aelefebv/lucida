@@ -165,7 +165,12 @@ async fn six_d_with_m_blosc_decodes_to_canonical_m0_slice() {
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
     let image_id = ImageId("blosc-e2e".to_string());
     let canonical_key = "0/0/0/0/0/0";
-    let location = resolver.resolve(&image_id, canonical_key).unwrap();
+    let location = resolver
+        .resolve(
+            &image_id,
+            &canonical_key.parse::<lucida_content::ChunkKey>().unwrap(),
+        )
+        .unwrap();
     assert_eq!(
         location.path().clone(),
         Path::from("0/c/0/0/0/0/0/0"),
@@ -180,7 +185,7 @@ async fn six_d_with_m_blosc_decodes_to_canonical_m0_slice() {
         &resolver,
         &store,
         &image_id,
-        canonical_key,
+        &canonical_key.parse::<lucida_content::ChunkKey>().unwrap(),
         ReaderId::UNATTRIBUTED,
         RequestLabel::UNATTRIBUTED,
         None,
