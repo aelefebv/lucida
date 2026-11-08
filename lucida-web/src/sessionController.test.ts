@@ -225,6 +225,7 @@ function makeEvents(): SessionControllerEvents {
     onRemoteDocumentChanged: vi.fn(),
     onWorkspaceArchived: vi.fn(),
     onDatasetImportWarnings: vi.fn(),
+    onCommandRejected: vi.fn(),
   };
 }
 

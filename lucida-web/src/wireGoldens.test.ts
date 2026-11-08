@@ -978,6 +978,18 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(handlers.onAck).toHaveBeenCalledWith(44);
   });
 
+  it("command_rejected names the reason and asks for a snapshot", () => {
+    const raw = fixtureRaw("session/server_command_rejected.json");
+    COVERED_FIXTURES.add("session/server_command_rejected.json");
+    expect(JSON.parse(raw)).toStrictEqual({ type: "command_rejected", reason: "unavailable" });
+
+    const onCommandRejected = vi.fn();
+    const { ws } = openBridge({ onCommandRejected });
+    deliver(ws, raw);
+    expect(onCommandRejected).toHaveBeenCalledWith("unavailable");
+    expect(lastSent(ws)).toStrictEqual({ type: "request_snapshot" });
+  });
+
   it("peer_joined carries a presence with nothing reported", () => {
     const raw = fixtureRaw("session/server_peer_joined.json");
     COVERED_FIXTURES.add("session/server_peer_joined.json");

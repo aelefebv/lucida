@@ -22,7 +22,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
-use lucida_core::protocol::{MessageRejection, ServerMessage};
+use lucida_core::protocol::{CommandRejection, MessageRejection, ServerMessage};
 use lucida_protocol::{ChunkFailureKind, SourceChunkStatus};
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
 use lucida_server::session::Session;
@@ -374,5 +374,23 @@ async fn every_message_the_server_does_not_act_on_gets_a_rejection() {
     };
     assert_eq!(request_id.as_deref(), Some("r-3"));
     assert_eq!(rid, Some(12));
+
+    // A command whose body does not parse is a refused command, answered
+    // where the sender's acks are, so its pending commands stay in order.
+    send_text(
+        &mut rig.ws,
+        r#"{"type":"command","command":{"type":"no_such_command"}}"#.to_string(),
+    )
+    .await;
+    let reply = next_reply(&mut rig.ws).await;
+    assert!(
+        matches!(
+            reply,
+            ServerMessage::CommandRejected {
+                reason: CommandRejection::Invalid
+            }
+        ),
+        "expected the command to be refused as invalid, got {reply:?}"
+    );
     let _ = fs::remove_dir_all(&rig.root);
 }

@@ -36,10 +36,11 @@ use lucida_content::{
 use lucida_core::camera::{Arcball, Camera, ClipMode, Fly, Slice};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{
-    BookmarkAction, ChunkMessage, ClientMessage, MessageRejection, PeerIdentity, PresenceState,
-    ServerMessage, ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint,
-    ViewerInterestLane, ViewerInterestMode, ViewerInterestViewport, WatchBoundaryEvent, WatchItem,
-    WatchLevelRange, WatchReading, WatchRunCause, WatchSendTally, WatchTick, WatchTickLevel,
+    BookmarkAction, ChunkMessage, ClientMessage, CommandRejection, MessageRejection, PeerIdentity,
+    PresenceState, ServerMessage, ViewerInteractionMode, ViewerInterestChunkKey,
+    ViewerInterestHint, ViewerInterestLane, ViewerInterestMode, ViewerInterestViewport,
+    WatchBoundaryEvent, WatchItem, WatchLevelRange, WatchReading, WatchRunCause, WatchSendTally,
+    WatchTick, WatchTickLevel,
 };
 use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
 use lucida_core::scene::{
@@ -242,6 +243,7 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         ServerMessage::WatchHistoryEnd { .. } => &["session/server_watch_history_end.json"],
         ServerMessage::ReportSent { .. } => &["session/server_report_sent.json"],
         ServerMessage::ReportFailed { .. } => &["session/server_report_failed.json"],
+        ServerMessage::CommandRejected { .. } => &["session/server_command_rejected.json"],
         ServerMessage::MessageRejected { .. } => &["session/server_message_rejected.json"],
     }
 }
@@ -1907,6 +1909,13 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 error: "the bundle carries no header".into(),
             },
             req("", &["/type", "/request_id", "/error"]),
+        ),
+        (
+            "session/server_command_rejected.json",
+            ServerMessage::CommandRejected {
+                reason: CommandRejection::Unavailable,
+            },
+            req("", &["/type", "/reason"]),
         ),
     ]
 }
