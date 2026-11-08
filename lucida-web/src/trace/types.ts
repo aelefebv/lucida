@@ -370,6 +370,12 @@ export interface TruncationRecord {
  * and the rows it had buffered for the dead socket are discarded rather than
  * replayed.
  */
+/** A socket's close event as the browser reported it. */
+export interface SocketClose {
+  code: number;
+  reason: string;
+}
+
 export interface ConnectionRecord {
   /** The browser's per-connection counter. Zero never appears here. */
   generation: number;
@@ -380,6 +386,11 @@ export interface ConnectionRecord {
   openedAtUs: number | null;
   /** Where the socket dropped, or null when it was still up at interval close. */
   closedAtUs: number | null;
+  /**
+   * The close code and reason the socket dropped with. Absent while it is up,
+   * and on a document written before the field existed.
+   */
+  close?: SocketClose;
   /**
    * How long the browser had no socket at all before this connection opened,
    * or null when no outage preceded it. Measured from the actual disconnect,

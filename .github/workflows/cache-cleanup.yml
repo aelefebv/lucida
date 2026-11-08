@@ -1,0 +1,31 @@
+name: Cache cleanup
+
+# A pull request's cache entries serve only that pull request, yet they count
+# against the repository's 10 GB until they age out a week later, and past
+# the limit the entries main's runs start from are evicted first. Deleting
+# them when the pull request closes keeps main's.
+on:
+  pull_request:
+    types: [closed]
+
+permissions:
+  actions: write
+
+jobs:
+  cleanup:
+    name: Delete the pull request's caches
+    # A fork's pull request gets a read-only token, which cannot delete.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Delete caches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          REF: refs/pull/${{ github.event.pull_request.number }}/merge
+        run: |
+          set -euo pipefail
+          for id in $(gh cache list --ref "$REF" --limit 1000 --json id --jq '.[].id'); do
+            gh cache delete "$id"
+          done
