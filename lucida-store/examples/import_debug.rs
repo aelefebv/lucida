@@ -29,21 +29,28 @@ async fn main() {
         .unwrap_or(&path)
         .to_string();
 
-    // backend::open needs absolute paths for local files
-    let path = if !path.starts_with('/') && !path.contains("://") {
-        let abs = std::path::Path::new(&path)
-            .canonicalize()
-            .unwrap_or_else(|e| {
+    let location = match lucida_content::url::DatasetLocation::parse(&path) {
+        Ok(location) => location,
+        Err(lucida_content::url::LocationError::RelativePath { .. }) => {
+            let absolute = std::path::absolute(&path).unwrap_or_else(|e| {
                 eprintln!("Cannot resolve path: {e}");
                 std::process::exit(1);
             });
-        abs.to_string_lossy().to_string()
-    } else {
-        path
+            lucida_content::url::DatasetLocation::parse(&absolute.to_string_lossy()).unwrap_or_else(
+                |e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                },
+            )
+        }
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
     };
 
-    eprintln!("Opening: {path}");
-    let store = match lucida_store::backend::open(&path) {
+    eprintln!("Opening: {location}");
+    let store = match lucida_store::backend::open(&location) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Failed to open store: {e}");

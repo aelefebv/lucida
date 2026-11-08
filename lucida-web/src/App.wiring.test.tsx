@@ -143,6 +143,7 @@ vi.mock("lucida-core", () => {
     camera_matrices: vi.fn(() => new Float32Array(32)),
     is_local_dataset_url: vi.fn(() => true),
     normalize_dataset_url: vi.fn((url: string) => url),
+    dataset_location_error: vi.fn(() => undefined),
     dataset_id_for_url: vi.fn((url: string) => `wds:${url}`),
     peer_palette: vi.fn(() => ["#ff6b6b", "#4ecdc4", "#ffe66d"]),
   };

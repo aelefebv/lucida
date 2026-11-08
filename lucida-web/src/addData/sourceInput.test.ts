@@ -19,6 +19,8 @@ describe("checkSource", () => {
     ["  /data/sample.zarr  ", "/data/sample.zarr"],
     ["C:\\data\\sample.zarr", "c:/data/sample.zarr"],
     ["file:///C:/data/sample.zarr", "c:/data/sample.zarr"],
+    ["file:///data/sample.zarr", "/data/sample.zarr"],
+    ["file://server/share/sample.zarr", "//server/share/sample.zarr"],
     ["\\\\server\\share\\sample.zarr", "//server/share/sample.zarr"],
     ["gs://bucket/sample.zarr", "gs://bucket/sample.zarr"],
     ["S3://bucket/Sample.zarr", "s3://bucket/Sample.zarr"],
@@ -55,6 +57,8 @@ describe("checkSource", () => {
     expect(bucket.kind === "rejected" && bucket.message).toBe("Add a bucket name after gs://.");
     const host = checkSource("https://");
     expect(host.kind === "rejected" && host.message).toBe("Add a host name after https://.");
+    const upper = checkSource("S3:///key");
+    expect(upper.kind === "rejected" && upper.message).toBe("Add a bucket name after s3://.");
   });
 
   it("points out a URL missing the slashes after its scheme", () => {

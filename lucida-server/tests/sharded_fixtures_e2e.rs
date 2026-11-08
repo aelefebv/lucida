@@ -62,7 +62,7 @@ struct Twin {
 
 async fn import_twin(name: &str) -> Twin {
     let store = Arc::new(CachedStore::new(
-        lucida_store::backend::open(fixture_dir(name).to_str().unwrap()).unwrap(),
+        lucida_store::backend::open(&fixture_dir(name).to_str().unwrap().parse().unwrap()).unwrap(),
         DEFAULT_SOURCE_CACHE_BYTES,
     ));
     let result = import_dataset(&store, "twin", "twin").await.unwrap();
@@ -294,15 +294,21 @@ async fn the_server_frames_the_same_bytes_for_the_sharded_and_the_unsharded_twin
         session: Arc::clone(&session),
         tx: tx.clone(),
         proxy_config: proxy_config(&root),
+        source_policy: Arc::default(),
         workspace: None,
     };
 
     let mut opened_twins = Vec::new();
     for name in ["twin-sharded.ome.zarr", "twin-unsharded.ome.zarr"] {
         let (progress, _progress_rx) = mpsc::unbounded_channel();
-        let outcome = open_dataset(1, fixture_dir(name).to_str().unwrap(), &context, &progress)
-            .await
-            .unwrap_or_else(|e| panic!("{name} opens: {e:?}"));
+        let outcome = open_dataset(
+            1,
+            &fixture_dir(name).to_str().unwrap().parse().unwrap(),
+            &context,
+            &progress,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{name} opens: {e:?}"));
         let DatasetOpenOutcome::Opened { opened, .. } = outcome else {
             panic!("{name}: the open must complete");
         };
@@ -325,7 +331,7 @@ async fn the_server_frames_the_same_bytes_for_the_sharded_and_the_unsharded_twin
         tx,
         next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes,
-        data_dir: None,
+        source_policy: Arc::default(),
         proxy_config: proxy_config(&root),
     };
     let app = Router::new().route("/ws", get(ws_route)).with_state(state);

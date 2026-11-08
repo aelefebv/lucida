@@ -910,7 +910,7 @@ export class SessionController {
     snapshot: WireGeneratedAvailabilitySnapshot,
   ): void {
     this.session.generatedAvailability.applySnapshot(datasetId, snapshot);
-    this.refreshRuntimeGeneratedManifest(datasetId);
+    this.refreshRuntimeGeneratedManifest(datasetId, snapshot);
   }
 
   private applyGeneratedAvailabilityDelta(
@@ -918,16 +918,25 @@ export class SessionController {
     delta: WireGeneratedAvailabilityDelta,
   ): void {
     this.session.generatedAvailability.applyDelta(datasetId, delta);
-    this.refreshRuntimeGeneratedManifest(datasetId);
+    this.refreshRuntimeGeneratedManifest(datasetId, delta);
   }
 
-  private refreshRuntimeGeneratedManifest(datasetId: string): void {
+  private refreshRuntimeGeneratedManifest(
+    datasetId: string,
+    change: WireGeneratedAvailabilityDelta,
+  ): void {
     const entry = this.deps.datasets.get(datasetId);
     if (!entry) return;
-    const merged = this.session.generatedAvailability.mergeManifest(datasetId, entry.manifest);
-    this.deps.datasets.set(datasetId, { ...entry, manifest: merged });
     const loop = this.deps.getLoop();
-    loop?.updateDatasetManifest(datasetId, merged);
+    // Only level geometry reaches the manifest, and a replaced manifest
+    // replans, so a change that carries chunk statuses alone keeps the one
+    // the page has.
+    if (change.levels?.length) {
+      const merged = this.session.generatedAvailability.mergeManifest(datasetId, entry.manifest);
+      this.deps.datasets.set(datasetId, { ...entry, manifest: merged });
+      loop?.updateDatasetManifest(datasetId, merged);
+    }
+    this.session.cpuCache.noteGeneratedAvailability(datasetId, change.chunks ?? []);
     this.deps.events.onDatasetsChanged();
     loop?.markResidencyDirty(AVAILABILITY_UPDATE_SOURCE);
   }

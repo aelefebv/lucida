@@ -208,7 +208,7 @@ variables.
 | --- | --- | --- |
 | `LUCIDA_BIND` | `127.0.0.1:9876`; the image sets `0.0.0.0:9876` | Listen address |
 | `LUCIDA_DB_URL` | `sqlite://lucida.db` | Storage backend. See step 1. |
-| `LUCIDA_DATA_DIR` | unset: lists from `/` | Root the file picker is confined to |
+| `LUCIDA_DATA_DIR` | unset: lists from `/` | Directories the file picker is confined to, separated by `:` (`;` on Windows). See [Dataset sources](#dataset-sources). |
 | `LUCIDA_PROXY_CACHE_DIR` | `<user cache dir>/lucida/proxies` | Proxy cache directory |
 | `LUCIDA_PROXY_CONCURRENCY` | half the CPUs | Per-generator concurrency cap |
 | `LUCIDA_LOG_FORMAT` | `text` | `json` for structured logs |
@@ -225,6 +225,25 @@ variables.
 | `LUCIDA_COOKIE_NAME` | `lucida_session` | Session cookie name |
 | `LUCIDA_SESSION_IDLE_TIMEOUT_HOURS` | `168` | Idle session lifetime |
 | `LUCIDA_SESSION_HARD_CAP_HOURS` | `720` | Maximum session lifetime |
+
+### Dataset sources
+
+With `google` or `iap` auth, datasets open only from:
+
+- local paths under a `LUCIDA_DATA_DIR` directory. With none set, no local
+  path opens.
+- `http` and `https` hosts on public addresses, checked when a dataset opens
+  and again on every connection and redirect. These reads ignore proxy
+  variables.
+- any `gs://` or `s3://` bucket, or only the listed ones.
+
+With auth `disabled`, every location opens. A refused open fails with the
+`source_not_allowed` kind.
+
+| Variable | Default | What it sets |
+| --- | --- | --- |
+| `LUCIDA_SOURCE_ALLOW_HOSTS` | unset | Comma-separated hosts, IP addresses, or CIDR ranges that `http(s)` datasets may reach though they are not public |
+| `LUCIDA_SOURCE_ALLOW_BUCKETS` | unset: any bucket | Comma-separated `gs://bucket` or `s3://bucket` entries, the only buckets datasets open from |
 
 ### Profile directory
 

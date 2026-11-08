@@ -1,0 +1,5 @@
+{
+  "type": "watch_history_end",
+  "through_seq": 42,
+  "replayed": 40
+}
