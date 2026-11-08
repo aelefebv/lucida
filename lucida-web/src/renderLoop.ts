@@ -13,7 +13,7 @@ import { configStore } from "./pipeline/planning/configStore.ts";
 import type { CpuCache } from "./pipeline/fetch/index.ts";
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
-import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview, forgetMinimapOverviewUploads } from "./minimapPath.ts";
+import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview, forgetMinimapOverviewUploads, forgetMinimapOverviewsOf } from "./minimapPath.ts";
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createSettleState, evaluateSettle, settleSignal, type SettleOutcome, type SettleState } from "./pipeline/settle.ts";
 import { PointEvent, type CacheWarmth, type InputKind, type Outstanding, type RunConditions } from "./trace/types.ts";
@@ -206,6 +206,11 @@ export class RenderLoop implements TraceEnvironment {
       }
     };
 
+    this.client.onMinimapOverviewsLost = (memberIds) => {
+      forgetMinimapOverviewsOf(this.minimapState, memberIds);
+      this.setDirty("residency", "minimap_overviews_lost");
+    };
+
     this.gpuStatusUnsub = this.client.onGpuStatus((status) => {
       if (status.type === "gpuError") {
         // Recovering a lost device sends everything again, so the recovery
@@ -237,6 +242,7 @@ export class RenderLoop implements TraceEnvironment {
     }
     this.client.onChunkResidency = null;
     this.client.onWantedSetDelta = null;
+    this.client.onMinimapOverviewsLost = null;
     this.gpuStatusUnsub();
     this.cpuCacheUnsub();
     this.configStoreUnsub();
@@ -368,13 +374,15 @@ export class RenderLoop implements TraceEnvironment {
     // include speculative prefetch: the queue is as deep as it is, whatever
     // the settle predicate chooses to ignore. The GPU pass time is whatever
     // the render worker read back since the last tick, usually the previous
-    // tick's frame.
+    // tick's frame. GPU memory is the worker's latest report.
+    const gpu = this.client.gpuMemory();
     traceRecorder.noteReading(
       state.pending + state.speculativePending,
       state.inFlight + state.speculativeInFlight,
       this.lastFrameTimeUs,
       this.session.cpuCache.residentBytes(),
       this.client.takeGpuPassUs(),
+      gpu && { bytes: gpu.bytes, budgetBytes: gpu.budgetBytes, slotsHeld: gpu.slotsHeld, slots: gpu.slots },
     );
   }
 
