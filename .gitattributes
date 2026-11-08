@@ -10,3 +10,6 @@ wire-fixtures/**/*.json text eol=lf
 
 # The view-property fixtures are compared byte for byte by lucida-core.
 fixtures/view-properties/*.json text eol=lf
+
+# Codec test vectors are compared byte for byte.
+*.blosc binary

@@ -97,6 +97,9 @@ export function pushMemberLayers(
     members, indexByMember, channel, blendMode,
     fullResWidth, fullResHeight, zoom,
   } = input;
+  // Every layer this call emits shares one target. The index of the first is
+  // unique in the frame and needs no counter threaded through the callers.
+  const passGroup = layers.length;
 
   // A non-positive or non-finite extent covers no pixels and would break
   // the aggregate's union-extent normalization, so cull it here.
@@ -191,6 +194,7 @@ export function pushMemberLayers(
           count: batched.length,
           quads,
         },
+        passGroup,
       });
     } else {
       // Unreachable while zero-extent members are culled above. Falls back to
@@ -210,6 +214,7 @@ export function pushMemberLayers(
       offsetY: c.member.position[1],
       entityId: c.member.entityId,
       entityIndex: c.entityIndex,
+      passGroup,
     });
   }
 }

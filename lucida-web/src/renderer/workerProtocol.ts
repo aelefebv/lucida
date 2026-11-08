@@ -289,6 +289,13 @@ export interface SliceLayerParams {
    * Absent for ordinary per-member layers.
    */
   aggregate?: SliceAggregateParams;
+  /**
+   * Consecutive layers with the same group draw into one offscreen target in
+   * one render pass and composite once: one group per (dataset, channel),
+   * whose members never overlap and share a blend mode. A layer without one
+   * draws alone.
+   */
+  passGroup?: number;
 }
 
 /**
@@ -665,11 +672,13 @@ export interface ThumbnailResultMessage {
  * Why the worker refused a chunk or stopped holding one. A refusal is
  * `stale`, `unwanted`, `wrong-slice`, a `missing-*` routing gap,
  * `atlas-policy`, or `upload-failed`; a loss is `evicted`, `freed`,
- * `out-of-memory`, or `wrong-slice`.
+ * `out-of-memory`, `wrong-slice`, or `replaced` (a label cell rewritten in
+ * place with another chunk, such as the next timepoint's).
  */
 export type ChunkFeedbackReason =
   | "evicted"
   | "freed"
+  | "replaced"
   | "stale"
   | "unwanted"
   | "wrong-slice"
@@ -819,18 +828,74 @@ export interface GpuPassTimeMessage {
 }
 
 /**
- * What the worker's chunk and label atlases hold on the GPU: how
- * many there are, and the bytes of their textures and indirection buffers.
- * Render targets, colormaps, and minimap textures are not counted.
+ * What the render worker holds on the GPU against its one budget. `bytes` is
+ * the sum of the four holder lines; colormaps and descriptor buffers, a few
+ * KiB, are left out.
  */
-export interface GpuAtlasReport {
-  atlases: number;
+export interface GpuMemoryReport {
+  /** The device-fitted total, halved when the device runs out of memory under it. */
+  budgetBytes: number;
   bytes: number;
+  /** Chunk pools: textures and indirection buffers. */
+  chunkBytes: number;
+  labelBytes: number;
+  /** Viewport render targets and the depth texture. */
+  targetBytes: number;
+  /** Minimap overview textures and the minimap's and thumbnails' render targets. */
+  minimapBytes: number;
+  /** Chunk and label atlases. */
+  atlases: number;
+  /** Chunk pool slots holding a chunk. */
+  slotsHeld: number;
+  /** Chunk pool slots allocated. */
+  slots: number;
+  /** Minimap overviews not drawn because the budget had no room for them. */
+  overviewsRefused: number;
 }
 
-/** A changed {@link GpuAtlasReport}. Posted only when a number moves. */
-export interface GpuAtlasesMessage extends GpuAtlasReport {
-  type: "gpuAtlases";
+/** A changed {@link GpuMemoryReport}. Posted only when a number moves. */
+export interface GpuMemoryMessage extends GpuMemoryReport {
+  type: "gpuMemory";
+}
+
+/** One chunk pool's capacity, as admission counts it. */
+export interface GpuPoolCapacity {
+  /** `chunkTierPoolKey(datasetId, tier, channel, chunkDims, multiChannel)`. */
+  poolKey: string;
+  datasetId: string;
+  tier: ResidencyTier;
+  /** Bytes one slot holds. */
+  slotBytes: number;
+  /** Slots the pool has now. */
+  slots: number;
+  /** Slots the pool may grow to while the GPU total has room. */
+  maxSlots: number;
+}
+
+/**
+ * What the GPU total leaves the chunk pools, and each pool's slots, so the
+ * page admits no more than they can hold together. Chunk pools hold at most
+ * `budgetBytes - reservedBytes` between them.
+ */
+export interface GpuCapacityReport {
+  budgetBytes: number;
+  /** What the other holders take of the total now: label pools, render targets, minimap textures. */
+  reservedBytes: number;
+  pools: GpuPoolCapacity[];
+}
+
+/** A changed {@link GpuCapacityReport}: a pool created, grown, shrunk, or freed, or the total or reserve moved. */
+export interface GpuCapacityMessage extends GpuCapacityReport {
+  type: "gpuCapacity";
+}
+
+/**
+ * Minimap overview textures the device could not allocate. The page uploads
+ * these members' overviews again, under the budget the failure halved.
+ */
+export interface MinimapOverviewsLostMessage {
+  type: "minimapOverviewsLost";
+  memberIds: string[];
 }
 
 /**
@@ -891,7 +956,9 @@ export type WorkerToMainMessage =
   | WantedSetDeltaMessage
   | EntityLevelsMessage
   | GpuPassTimeMessage
-  | GpuAtlasesMessage
+  | GpuMemoryMessage
+  | GpuCapacityMessage
+  | MinimapOverviewsLostMessage
   | FrameDoneMessage
   | FrameCapturedMessage
   | GpuErrorMessage

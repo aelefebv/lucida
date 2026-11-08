@@ -34,7 +34,7 @@ import {
   handleThumbnailRender,
 } from "../minimapHandlers.ts";
 import { removeDatasetResources } from "./lifecycle.ts";
-import { postGpuAtlasesIfChanged } from "./atlasReport.ts";
+import { postGpuMemoryIfChanged } from "./gpuBudget.ts";
 import { handleCaptureFrame } from "./captureFrame.ts";
 import { postChunkResidency } from "../chunkUploadFeedback.ts";
 import { sourceKey } from "../poolKeys.ts";
@@ -80,7 +80,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "sliceRenderMultiPass":
       await handleSliceRenderMultiPass(ctx, msg);
       postFrameDone(ctx, msg.frameSeq);
-      postGpuAtlasesIfChanged(ctx);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "volumeChunkData": {
@@ -103,7 +103,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "volumeRenderMultiPass":
       await handleVolumeRenderMultiPass(ctx, msg);
       postFrameDone(ctx, msg.frameSeq);
-      postGpuAtlasesIfChanged(ctx);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "minimapInit":
@@ -114,6 +114,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "minimapUploadOverviewChunksForLayer":
       handleMinimapUploadOverviewChunks(ctx, msg);
+      postGpuMemoryIfChanged(ctx);
       return;
     case "thumbnailRender":
       handleThumbnailRender(ctx, msg);
@@ -146,7 +147,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       ctx.state.coldStateByDataset.set(msg.datasetId, msg);
       applyColdState(ctx, msg);
       ctx.postWantedSet(msg.datasetId);
-      postGpuAtlasesIfChanged(ctx);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "coldStateDisplay":
@@ -158,7 +159,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // A T/Z scrub changes the wanted chunks, so the wanted-set is posted.
       applyColdStateSelection(ctx, msg);
       ctx.postWantedSet(msg.datasetId);
-      postGpuAtlasesIfChanged(ctx);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "coldStateDelta":
@@ -166,12 +167,12 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // selection paths.
       applyColdStateDelta(ctx, msg);
       ctx.postWantedSet(msg.datasetId);
-      postGpuAtlasesIfChanged(ctx);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "removeLayerResources":
       removeDatasetResources(ctx, msg.datasetId);
-      postGpuAtlasesIfChanged(ctx);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "destroy":

@@ -1,5 +1,7 @@
 [build-system]
-requires = ["maturin>=1.0,<2.0"]
+# 1.9.4 is the first to set PYO3_BUILD_EXTENSION_MODULE, which lucida-py relies
+# on in place of pyo3's `extension-module` feature.
+requires = ["maturin>=1.9.4,<2.0"]
 build-backend = "maturin"
 
 [project]
@@ -11,16 +13,16 @@ dependencies = [
     "numpy",
     "lz4",
     "zstandard",
-    "maturin>=1.12.6",
 ]
 
 [tool.maturin]
-features = ["pyo3/extension-module"]
+module-name = "lucida.lucida"
 python-source = "python"
 
 [dependency-groups]
 dev = [
     "ipykernel>=6.31.0",
+    "maturin>=1.12.6,<2.0",
     "pytest>=8.4.2",
     "scipy>=1.13.1",
 ]

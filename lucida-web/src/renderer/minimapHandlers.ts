@@ -7,7 +7,11 @@ import type {
 } from "./workerProtocol.ts";
 import { createEmptyVolumeTexture, createOffscreenTarget, writeVolumeChunk } from "./gpuContext.ts";
 import type { CompositeLayer } from "./layerCompositor.ts";
-import { atlasTexels, atlasTextureFormat, type SampleFormat } from "./dataTypeUtil.ts";
+import { atlasTexels, atlasTextureFormat, bytesPerTexel, type SampleFormat } from "./dataTypeUtil.ts";
+import { allocateWatched } from "./worker/gpuErrors.ts";
+import { handleGpuOutOfMemory, reserveGpuBytes } from "./worker/gpuBudget.ts";
+import { setGpuLedgerLine } from "./worker/gpuLedger.ts";
+import { OFFSCREEN_BYTES_PER_TEXEL } from "./worker/resources.ts";
 
 interface MinimapOverviewEntry {
   texture: GPUTexture;
@@ -18,14 +22,63 @@ interface MinimapOverviewEntry {
   width: number;
   height: number;
   depth: number;
+  /** What the texture holds, counted against the GPU total. */
+  bytes: number;
 }
 
+/**
+ * The share of the GPU total the minimap's overview textures may hold
+ * together. One texture per member, so a collection of thousands of members
+ * would otherwise take the bytes the view's own chunks need.
+ */
+export const MINIMAP_OVERVIEW_SHARE = 1 / 16;
+
 const minimapOverviewPerDataset = new Map<string, MinimapOverviewEntry>();
+let overviewBytes = 0;
 
 let minimapContext: GPUCanvasContext | null = null;
 let minimapOffscreenPool: GPUTexture[] = [];
 let minimapPoolWidth = 0;
 let minimapPoolHeight = 0;
+
+function noteOverviewBytes(): void {
+  setGpuLedgerLine("minimapTextures", overviewBytes);
+}
+
+function noteMinimapTargetBytes(): void {
+  setGpuLedgerLine(
+    "minimapTargets",
+    (minimapOffscreenPool.length * minimapPoolWidth * minimapPoolHeight +
+      thumbnailOffscreenPool.length * thumbnailPoolSize * thumbnailPoolSize) * OFFSCREEN_BYTES_PER_TEXEL,
+  );
+}
+
+/** Make an offscreen target that leaves `pool` when the device can't allocate it. */
+function watchedTarget(ctx: WorkerCtx, w: number, h: number, pool: () => GPUTexture[]): GPUTexture {
+  return allocateWatched(
+    ctx,
+    () => createOffscreenTarget(ctx.device, w, h),
+    (lost) => {
+      const targets = pool();
+      const at = targets.indexOf(lost);
+      if (at >= 0) {
+        targets.splice(at, 1);
+        lost.destroy();
+        noteMinimapTargetBytes();
+      }
+      handleGpuOutOfMemory(ctx);
+    },
+  );
+}
+
+function dropOverview(datasetId: string): void {
+  const entry = minimapOverviewPerDataset.get(datasetId);
+  if (!entry) return;
+  entry.texture.destroy();
+  overviewBytes -= entry.bytes;
+  minimapOverviewPerDataset.delete(datasetId);
+  noteOverviewBytes();
+}
 
 // Thumbnail render state. Thumbnails reuse the minimap's overview textures and
 // renderers but draw to their own square pool and `OffscreenCanvas`, then
@@ -52,11 +105,12 @@ function ensureThumbnailTargets(ctx: WorkerCtx, size: number, count: number) {
     thumbnailCanvas.height = size;
   }
   while (thumbnailOffscreenPool.length < count) {
-    thumbnailOffscreenPool.push(createOffscreenTarget(ctx.device, size, size));
+    thumbnailOffscreenPool.push(watchedTarget(ctx, size, size, () => thumbnailOffscreenPool));
   }
+  noteMinimapTargetBytes();
 }
 
-function ensureMinimapOffscreenPool(device: GPUDevice, count: number, w: number, h: number) {
+function ensureMinimapOffscreenPool(ctx: WorkerCtx, count: number, w: number, h: number) {
   if (w !== minimapPoolWidth || h !== minimapPoolHeight) {
     for (const tex of minimapOffscreenPool) tex.destroy();
     minimapOffscreenPool = [];
@@ -64,8 +118,9 @@ function ensureMinimapOffscreenPool(device: GPUDevice, count: number, w: number,
     minimapPoolHeight = h;
   }
   while (minimapOffscreenPool.length < count) {
-    minimapOffscreenPool.push(createOffscreenTarget(device, w, h));
+    minimapOffscreenPool.push(watchedTarget(ctx, w, h, () => minimapOffscreenPool));
   }
+  noteMinimapTargetBytes();
 }
 
 export function handleMinimapInit(ctx: WorkerCtx, msg: MinimapInitMessage): void {
@@ -122,7 +177,7 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
 
   const renderer = ctx.getVolumeRenderer();
   const comp = ctx.getCompositor();
-  ensureMinimapOffscreenPool(ctx.device, msg.layers.length, msg.canvasW, msg.canvasH);
+  ensureMinimapOffscreenPool(ctx, msg.layers.length, msg.canvasW, msg.canvasH);
 
   const renderedLayers: CompositeLayer[] = [];
 
@@ -240,21 +295,47 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
   let entry = minimapOverviewPerDataset.get(datasetId);
 
   if (entry && (entry.t !== t || entry.c !== c || entry.format !== sampleFormat)) {
-    entry.texture.destroy();
+    dropOverview(datasetId);
     entry = undefined;
-    minimapOverviewPerDataset.delete(datasetId);
   }
 
   if (!entry) {
-    const texture = createEmptyVolumeTexture(
-      ctx.device, levelWidth, levelHeight, levelDepth, atlasTextureFormat(sampleFormat),
+    // A refused overview stays refused for its selection: taking it later
+    // would draw only the chunks that arrived after, which the page counts as
+    // sent.
+    const selection = `${t}/${c}/${sampleFormat}`;
+    const refused = ctx.state.overviewsRefused;
+    if (refused.get(datasetId) === selection) return;
+    refused.delete(datasetId);
+    const bytes = levelWidth * levelHeight * levelDepth * bytesPerTexel(sampleFormat);
+    if (
+      overviewBytes + bytes > ctx.state.gpuTotalBytes * MINIMAP_OVERVIEW_SHARE ||
+      !reserveGpuBytes(ctx, bytes)
+    ) {
+      refused.set(datasetId, selection);
+      return;
+    }
+    const texture = allocateWatched(
+      ctx,
+      () => createEmptyVolumeTexture(ctx.device, levelWidth, levelHeight, levelDepth, atlasTextureFormat(sampleFormat)),
+      (lost) => {
+        if (minimapOverviewPerDataset.get(datasetId)?.texture !== lost) return;
+        dropOverview(datasetId);
+        // Under a halved total the page sends it again; at the floor it
+        // would only fail again, so it is refused.
+        if (handleGpuOutOfMemory(ctx)) ctx.post({ type: "minimapOverviewsLost", memberIds: [datasetId] });
+        else refused.set(datasetId, selection);
+      },
     );
     entry = {
       texture, format: sampleFormat, uploaded: new Set(),
       t, c,
       width: levelWidth, height: levelHeight, depth: levelDepth,
+      bytes,
     };
     minimapOverviewPerDataset.set(datasetId, entry);
+    overviewBytes += bytes;
+    noteOverviewBytes();
   }
 
   for (const chunk of msg.chunks) {
@@ -295,6 +376,7 @@ export function handleMinimapDestroy(): void {
     thumbnailContext = null;
   }
   thumbnailCanvas = null;
+  noteMinimapTargetBytes();
 }
 
 /**
@@ -305,6 +387,8 @@ export function releaseMinimapDeviceResources(): void {
   deferredMinimapRender = null;
   for (const entry of minimapOverviewPerDataset.values()) entry.texture.destroy();
   minimapOverviewPerDataset.clear();
+  overviewBytes = 0;
+  noteOverviewBytes();
   for (const tex of minimapOffscreenPool) tex.destroy();
   minimapOffscreenPool = [];
   minimapPoolWidth = 0;
@@ -314,6 +398,7 @@ export function releaseMinimapDeviceResources(): void {
   thumbnailPoolSize = 0;
   thumbnailContext = null;
   thumbnailCanvas = null;
+  noteMinimapTargetBytes();
 }
 
 /** Point the minimap canvas, if there is one, at the worker's current device. */
@@ -321,16 +406,15 @@ export function rebindMinimapCanvas(ctx: WorkerCtx): void {
   minimapContext?.configure({ device: ctx.device, format: ctx.format, alphaMode: "opaque" });
 }
 
-export function removeMinimapResources(datasetId: string): void {
-  const mmEntry = minimapOverviewPerDataset.get(datasetId);
-  if (mmEntry) {
-    mmEntry.texture.destroy();
-    minimapOverviewPerDataset.delete(datasetId);
-  }
+export function removeMinimapResources(ctx: WorkerCtx, datasetId: string): void {
+  dropOverview(datasetId);
+  ctx.state.overviewsRefused.delete(datasetId);
 }
 
 export function destroyAllMinimapResources(): void {
   for (const mmE of minimapOverviewPerDataset.values()) mmE.texture.destroy();
   minimapOverviewPerDataset.clear();
+  overviewBytes = 0;
+  noteOverviewBytes();
   handleMinimapDestroy();
 }
