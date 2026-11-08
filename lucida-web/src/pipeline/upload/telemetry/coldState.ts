@@ -16,13 +16,19 @@ import {
 } from "../constants.ts";
 import { SustainedCondition } from "./sustained.ts";
 
-/** Per-epoch cause keys we attribute rebuilds to. */
+/**
+ * What a rebuild is attributed to: a scene epoch that moved, a dataset
+ * manifest replaced with no epoch behind it, or minimap chunks no plan has
+ * asked for.
+ */
 export type ColdStateCauseKey =
   | "content"
   | "layout"
   | "view"
   | "selection"
-  | "asset";
+  | "asset"
+  | "manifest"
+  | "minimap";
 
 interface ColdStateEvent {
   at: number;
