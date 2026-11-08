@@ -21,6 +21,15 @@ export interface MinimapState {
    * two ids differ.
    */
   memberOwner: Map<string, string>;
+  /**
+   * The overviews, by `overviewKey` value, the worker was told to open before
+   * any chunk arrived, because a chunk of theirs failed for good. The worker
+   * draws those hatched, and it can't without an overview to draw.
+   */
+  overviewOpened: Set<string>;
+  /** Every chunk the source failed for good, as `failedChunkId`, at {@link failedVersion}. */
+  failedKeys: Set<string>;
+  failedVersion: number;
   enabled: boolean;
   /**
    * Keeps the coarse overview textures uploading for Explore-panel thumbnails
@@ -131,6 +140,9 @@ export function createMinimapState(): MinimapState {
     overviewSeeded: new Set(),
     pendingFetch: new Map(),
     memberOwner: new Map(),
+    overviewOpened: new Set(),
+    failedKeys: new Set(),
+    failedVersion: -1,
     enabled: false,
     overviewActive: false,
     size: 200,
@@ -276,6 +288,22 @@ export function intersectSliceViewWithMember(
 }
 
 
+/** One failed chunk's id in {@link MinimapState.failedKeys}. */
+function failedChunkId(imageId: string, chunkKey: string): string {
+  return `${imageId}\n${chunkKey}`;
+}
+
+/** Re-read the chunks the source failed for good, when the cache says they changed. */
+function refreshFailedKeys(ctx: TickContext, state: MinimapState): void {
+  const version = ctx.cpuCache.failedChunksVersion();
+  if (version === state.failedVersion) return;
+  state.failedVersion = version;
+  state.failedKeys.clear();
+  for (const { imageId, chunkKey } of ctx.cpuCache.failedChunks()) {
+    state.failedKeys.add(failedChunkId(imageId, chunkKey));
+  }
+}
+
 /** Whether any chunk a member awaits is now in the cache, with the scan's own test for usable data. */
 function awaitedChunkArrived(ctx: TickContext, state: MinimapState): boolean {
   for (const [memberId, coords] of state.pendingFetch) {
@@ -312,6 +340,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
 
   const { scene, client, datasets } = ctx;
   const layers = readResolvedLayers(scene);
+  refreshFailedKeys(ctx, state);
 
   let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
 
@@ -352,6 +381,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
 
         const uploaded = state.overviewUploaded.get(key)!;
         const available: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[] = [];
+        let anyFailed = false;
 
         for (let iz = 0; iz < nz; iz++) {
           for (let iy = 0; iy < ny; iy++) {
@@ -371,6 +401,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
                 if (budgetRemaining <= 0) break;
               } else {
                 missing.push({ level: coarsestIdx, x: ix, y: iy, z: iz, t, c, key: chunkKey });
+                anyFailed ||= state.failedKeys.has(failedChunkId(memberId, chunkKey));
               }
             }
             if (budgetRemaining <= 0) break;
@@ -378,13 +409,17 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
           if (budgetRemaining <= 0) break;
         }
 
-        if (available.length > 0) {
+        // An overview whose chunks all failed still opens, so it draws them hatched.
+        const open = available.length === 0 && uploaded.size === 0 && anyFailed
+          && !state.overviewOpened.has(overviewKey);
+        if (available.length > 0 || open) {
           client.minimapUploadOverviewChunksForLayer(
-            key, available, t, c,
+            key, available, memberId, coarsestIdx, t, c,
             levelWidth, levelHeight, levelDepth,
             chunkX, chunkY, chunkZ,
             datasetSampleFormat(ds.manifest),
           );
+          state.overviewOpened.add(overviewKey);
           state.uploadGeneration++;
         }
 
@@ -802,6 +837,7 @@ export function forgetMinimapOverviewUploads(state: MinimapState): void {
   state.overviewKey.clear();
   state.overviewUploaded.clear();
   state.overviewSeeded.clear();
+  state.overviewOpened.clear();
   state.lastOverviewScanMs = Number.NEGATIVE_INFINITY;
   invalidateMinimapOverview(state);
 }
@@ -809,6 +845,8 @@ export function forgetMinimapOverviewUploads(state: MinimapState): void {
 /** The worker lost these members' overview textures: upload them again, starting next tick. */
 export function forgetMinimapOverviewsOf(state: MinimapState, memberIds: readonly string[]): void {
   for (const memberId of memberIds) {
+    const opened = state.overviewKey.get(memberId);
+    if (opened !== undefined) state.overviewOpened.delete(opened);
     state.overviewKey.delete(memberId);
     state.overviewUploaded.delete(memberId);
     state.overviewSeeded.delete(memberId);
@@ -824,6 +862,9 @@ export function clearMinimapForDataset(state: MinimapState, dsId: string): void 
   state.overviewSeeded.delete(dsId);
   state.pendingFetch.delete(dsId);
   state.memberOwner.delete(dsId);
+  for (const opened of [...state.overviewOpened]) {
+    if (opened.startsWith(dsId)) state.overviewOpened.delete(opened);
+  }
   // Clear any member-keyed entries (collection case, e.g. "dsId:A/1/0").
   const prefix = dsId + ":";
   for (const key of [...state.overviewKey.keys()]) {

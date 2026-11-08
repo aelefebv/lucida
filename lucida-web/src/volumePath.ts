@@ -5,7 +5,7 @@ import type { TickContext } from "./renderLoopTypes.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { computeScissorRect } from "./pipeline/upload/scissor.ts";
-import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
+import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
 import { labelModelMatrices } from "./renderer/labelLayout.ts";
 import { compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
@@ -24,6 +24,12 @@ export interface LabelVolumeScene {
   inv_member_model_matrix(datasetId: string, memberId: string): Float32Array;
 }
 
+/** The level and chunk-T of a label that volume mode draws at source `t`, every Z of it. */
+function labelVolumeChunkAt(resolved: ResolvedLabel, t: number): { level: number; t: number } {
+  const chunk = labelChunkAt(resolved, t);
+  return { level: chunk.level, t: chunk.t };
+}
+
 /**
  * Append a first-hit overlay layer for each visible label, over the intensity
  * volume. The drawn set must match what {@link computeLabelChunkRequests}
@@ -40,6 +46,7 @@ export function pushLabelVolumeLayers(
   canvasW: number,
   canvasH: number,
   labelSettings?: LabelViewSetting[],
+  t?: number,
 ): void {
   // `mode: "volume"` matches the volume fetch, so a label too large for a 3D
   // texture is skipped by both.
@@ -68,6 +75,7 @@ export function pushLabelVolumeLayers(
       isLabel: true,
       opacity,
       labelColors: label.colors,
+      labelChunk: t === undefined ? undefined : labelVolumeChunkAt(resolved, t),
       modelMatrix: model,
       invModelMatrix: inv,
     });
@@ -165,6 +173,7 @@ function uploadAndRenderVolume(
       canvasW,
       canvasH,
       dsSettings.label_settings,
+      resolved.t,
     );
   }
 

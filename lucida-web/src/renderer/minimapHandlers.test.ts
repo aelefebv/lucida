@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
   STORAGE_BINDING: 0x08,
   RENDER_ATTACHMENT: 0x10,
 };
+(globalThis as Record<string, unknown>).GPUBufferUsage = { STORAGE: 0x80, COPY_DST: 0x08 };
 
 import type { WorkerCtx } from "./workerContext.ts";
 import type { MinimapRenderMessage, ThumbnailRenderMessage, WorkerToMainMessage } from "./workerProtocol.ts";
@@ -34,7 +35,8 @@ function makeVolumeRenderer() {
     isCompiled: false,
     compiled,
     setColormapTexture: vi.fn(),
-    setVolume: vi.fn(),
+    setTierAtlases: vi.fn(),
+    setPixelRatio: vi.fn(),
     setMatrices: vi.fn(),
     setTransientDescriptor: vi.fn(),
     renderTo: vi.fn(),
@@ -58,10 +60,11 @@ function makeCtx(renderer: ReturnType<typeof makeVolumeRenderer>["renderer"]) {
   const ctx = {
     device: {
       createTexture: vi.fn(() => texture),
+      createBuffer: vi.fn(() => ({ destroy: vi.fn() })),
       createCommandEncoder: () => ({ finish: () => ({}) }),
       pushErrorScope: vi.fn(),
       popErrorScope: () => Promise.resolve(null),
-      queue: { submit: vi.fn(), writeTexture: vi.fn() },
+      queue: { submit: vi.fn(), writeTexture: vi.fn(), writeBuffer: vi.fn() },
     },
     state: createInitialState(),
     format: "bgra8unorm",
@@ -91,6 +94,8 @@ function uploadOverview(ctx: WorkerCtx): void {
   handleMinimapUploadOverviewChunks(ctx, {
     type: "minimapUploadOverviewChunksForLayer",
     datasetId: "ds",
+    imageId: "ds",
+    level: 3,
     t: 0,
     c: 0,
     levelWidth: 2,
@@ -121,6 +126,7 @@ function renderMsg(canvasW: number): MinimapRenderMessage {
     eye: new Float32Array(3),
     canvasW,
     canvasH: canvasW,
+    pixelRatio: 1,
   };
 }
 
@@ -202,6 +208,45 @@ describe("the minimap's overview render", () => {
       { type: "error", message: "volume shader refused" },
     ]);
   });
+
+  it("draws each chunk at its place, a missing one as nothing and a failed one as failed", () => {
+    const { renderer, compile } = makeVolumeRenderer();
+    compile();
+    const { ctx } = makeCtx(renderer);
+    const writeBuffer = (ctx.device.queue as unknown as { writeBuffer: ReturnType<typeof vi.fn> }).writeBuffer;
+    handleMinimapInit(ctx, { type: "minimapInit", canvas: minimapCanvas().canvas });
+    // A 2x2 grid of 2x2 chunks, of which the first arrived.
+    handleMinimapUploadOverviewChunks(ctx, {
+      type: "minimapUploadOverviewChunksForLayer",
+      datasetId: "ds:ch0",
+      imageId: "ds",
+      level: 3,
+      t: 0,
+      c: 0,
+      levelWidth: 4,
+      levelHeight: 4,
+      levelDepth: 1,
+      chunkX: 2,
+      chunkY: 2,
+      chunkZ: 1,
+      chunks: [{ key: "3/0/0/0/0/0", x: 0, y: 0, z: 0, dataType: "uint16", data: new Uint16Array(4).buffer }],
+      sampleFormat: "u16",
+    });
+    // The last chunk failed for good, and a failed chunk of another level marks nothing.
+    ctx.state.failedByDataset.set("ds", new Map([["ds", new Set(["3/0/0/0/1/1", "2/0/0/0/1/0"])]]));
+
+    const msg = renderMsg(100);
+    msg.layers[0].datasetId = "ds:ch0";
+    handleMinimapRender(ctx, msg);
+
+    const written = writeBuffer.mock.calls.at(-1)![2] as Uint32Array;
+    expect([...written]).toEqual([0, 0xffffffff, 0xffffffff, 0xfffffffe]);
+    expect(renderer.setTierAtlases.mock.calls.at(-1)![0][0]).toMatchObject({ slotsX: 2, slotsY: 2, slotsZ: 1 });
+    expect(renderer.setTransientDescriptor.mock.calls.at(-1)![8]).toEqual({
+      gridDims: [2, 2, 1],
+      chunkDims: [2, 2, 1],
+    });
+  });
 });
 
 describe("a thumbnail render", () => {
@@ -230,6 +275,7 @@ describe("a thumbnail render", () => {
       invViewProj: IDENTITY,
       eye: new Float32Array(3),
       size: 64,
+      pixelRatio: 1,
     };
   }
 
