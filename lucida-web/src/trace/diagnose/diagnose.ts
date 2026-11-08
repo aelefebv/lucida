@@ -26,6 +26,7 @@ import { emptyChunkLookup, lookupChunk, worstRowSelector, type WorstRow } from "
 import { buildCriticalPath, UNRECORDED_PREFIX } from "./criticalPath.ts";
 import { deriveLag } from "./lag.ts";
 import { backlogExceeded, isPinned, summariseLimiters } from "./limiters.ts";
+import { deriveLoad } from "./load.ts";
 import { RULESET, type AbsoluteRule, type ColdOpenAllowanceRule } from "./ruleset.ts";
 import {
   aggregateCandidates,
@@ -240,6 +241,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     gpuMemory: deriveGpuMemory(run.readings),
     lag,
     sent: summariseSent(run.sent, run.header.durationUs),
+    load: deriveLoad(run),
     steadyState: steady.reading,
     counts: {
       rows: run.rows.length,

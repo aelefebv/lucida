@@ -1323,6 +1323,25 @@ mod tests {
         ScriptArgs::from_arg_matches(&matches)
     }
 
+    /// `scripts/perf.py` hands each scenario file to `--script` as it is, so
+    /// every one has to read as a script.
+    #[test]
+    fn every_perf_scenario_reads_as_a_script() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../scripts/perf/scenarios");
+        let mut read = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                if let Err(reason) = Script::from_json(&text) {
+                    panic!("{}: {reason}", path.display());
+                }
+                read += 1;
+            }
+        }
+        assert!(read > 0, "no scenarios in {}", dir.display());
+    }
+
     #[test]
     fn a_script_file_reads_every_kind_and_keeps_its_order() {
         let script = Script::from_json(

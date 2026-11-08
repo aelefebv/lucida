@@ -1,0 +1,10 @@
+{
+  "description": "zoom in, then pan right twice and down once, as far as a drag across the view goes",
+  "camera": "slice",
+  "steps": [
+    { "kind": "zoom", "factor": 4 },
+    { "kind": "pan", "dx": -600, "dy": 0 },
+    { "kind": "pan", "dx": -600, "dy": 0 },
+    { "kind": "pan", "dx": 0, "dy": -400 }
+  ]
+}
