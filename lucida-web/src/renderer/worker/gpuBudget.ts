@@ -7,8 +7,8 @@
  * so slots the planner no longer wants stay resident as fallback for as long
  * as nothing else needs the bytes. When the total is reached:
  *
- *   1. a full pool takes the slot of a chunk the planner doesn't want, its own
- *      first (`findEvictionSlot`);
+ *   1. a full pool takes the slot of one of its own chunks the planner
+ *      doesn't want (`findEvictionSlot`);
  *   2. a pool holding only wanted chunks may grow by taking bytes back from
  *      other pools, which shrink to the layers their wanted chunks need;
  *   3. otherwise it evicts its farthest wanted chunk for a nearer one, and
@@ -17,6 +17,10 @@
  *
  * A device that runs out of memory under the total halves it, down to the
  * floor, and the pools give back what it no longer covers.
+ *
+ * The page admits each plan against the capacities posted here
+ * (`pipeline/planning/gpuCapacity.ts`), so the wanted set fits the pools and
+ * step 3 is the exception rather than the steady state.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";

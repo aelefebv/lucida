@@ -9,6 +9,7 @@
 import { describe, it, expect } from "vitest";
 import { computeAtlasGeometry, poolCapBytes } from "./atlasSizing.ts";
 import type { DeviceLimits } from "./gpuContext.ts";
+import { GPU_TOTAL_FLOOR_BYTES } from "../deviceBudget.ts";
 
 // Default WebGPU spec-minimum limits.
 const SPEC_LIMITS: DeviceLimits = {
@@ -78,6 +79,15 @@ describe("computeAtlasGeometry — 2D", () => {
   it("does not round a few large chunks down to a square: 1024² in 16 MiB is 8 slots, not 4", () => {
     const geom = computeAtlasGeometry(SPEC_LIMITS, [1024, 1024], 16 * MB, "2d");
     expect(geom.totalSlots).toBe(8);
+  });
+
+  it("holds a phone viewport's 1024² chunks at the target level under the floor GPU total", () => {
+    // 390×844 CSS px at DPR 3 is 1170×2532 device px. At one sample a pixel,
+    // an unaligned view touches 3 × 4 chunks of 1024².
+    const viewportChunks = (Math.ceil(1170 / 1024) + 1) * (Math.ceil(2532 / 1024) + 1);
+    const cap = poolCapBytes(SPEC_LIMITS, GPU_TOTAL_FLOOR_BYTES);
+    const geom = computeAtlasGeometry(SPEC_LIMITS, [1024, 1024], cap, "2d");
+    expect(geom.totalSlots).toBeGreaterThanOrEqual(viewportChunks);
   });
 
   it("chunk larger than half the 2D limit → totalSlots small but nonzero", () => {
