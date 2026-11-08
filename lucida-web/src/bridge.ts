@@ -85,11 +85,27 @@ export interface DatasetSourceHealth {
 }
 
 export interface DatasetImportWarning {
+  kind: DatasetImportWarningKind;
   target: string;
+  /** The importer's account, for developers and agents. People see the warning worded from `kind`. */
   message: string;
   /** The warning says the data is shown wrong, so it degrades `status`. */
   degrades: boolean;
 }
+
+/** Mirror of `lucida_protocol::DatasetImportWarningKind`. */
+export type DatasetImportWarningKind =
+  | "skipped_group"
+  | "unreadable_tile_geometry"
+  | "unusable_tile_geometry"
+  | "sampled_label_discovery"
+  | "unusable_label_index"
+  | "unwritten_level"
+  | "mismatched_tile_geometry"
+  | "duplicate_tile"
+  | "malformed_collection_layout"
+  | "pinned_axis"
+  | "invalid_scale";
 
 export type DatasetOpenStage =
   | "request_received"
@@ -403,6 +419,9 @@ export interface BridgeHandlers {
    * there is no server-side trace store to poll.
    */
   onTimingBatch?: (batch: ServerTimingBatch, generation: number) => void;
+  /** The connection dropped, or closed because the page went into the
+   *  back-forward cache or froze. A reconnect follows, once the page is back
+   *  if it went away. */
   onDisconnect?: (close: SocketClose) => void;
 }
 
@@ -425,6 +444,10 @@ export class Bridge {
   private handlers: BridgeHandlers;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private destroyed = false;
+  /** True while the page sits in the back-forward cache or is frozen. Its
+   *  socket stays closed until the page is back. */
+  private suspended = false;
+  private readonly stopListeningToPage: () => void;
   /** Sockets this bridge has opened. The other half of the trace's join key. */
   private connectionGeneration = 0;
   private presenceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -475,11 +498,65 @@ export class Bridge {
   constructor(handlers: BridgeHandlers, url: string) {
     this.url = url;
     this.handlers = handlers;
+    this.stopListeningToPage = this.listenToPageLifecycle();
+    this.connect();
+  }
+
+  /**
+   * Leave the session while the page is in the back-forward cache or frozen,
+   * and rejoin when it is back. Such a page can't move, report or follow, yet
+   * its open socket keeps it in the session, and beside the same page opened
+   * again it shows as a second peer.
+   */
+  private listenToPageLifecycle(): () => void {
+    if (typeof window === "undefined" || typeof document === "undefined") return () => {};
+    const onPageHide = (event: PageTransitionEvent) => {
+      if (event.persisted) this.suspend();
+    };
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (event.persisted) this.resume();
+    };
+    const onFreeze = () => this.suspend();
+    const onResume = () => this.resume();
+    window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
+    document.addEventListener("freeze", onFreeze);
+    document.addEventListener("resume", onResume);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
+      document.removeEventListener("freeze", onFreeze);
+      document.removeEventListener("resume", onResume);
+    };
+  }
+
+  /** Close the socket as a drop would, but schedule no reconnect. */
+  private suspend() {
+    if (this.destroyed || this.suspended) return;
+    this.suspended = true;
+    if (this.reconnectTimer !== null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const ws = this.ws;
+    // No socket means a drop already reported the disconnect.
+    if (!ws) return;
+    ws.onopen = null;
+    ws.onmessage = null;
+    ws.onclose = null;
+    ws.onerror = null;
+    ws.close();
+    this.connectionLost({ code: 1000, reason: "page suspended" });
+  }
+
+  private resume() {
+    if (this.destroyed || !this.suspended) return;
+    this.suspended = false;
     this.connect();
   }
 
   private connect() {
-    if (this.destroyed) return;
+    if (this.destroyed || this.suspended) return;
 
     const ws = new WebSocket(this.url);
     ws.binaryType = "arraybuffer";
@@ -717,19 +794,7 @@ export class Bridge {
         this.destroy();
         return;
       }
-      this.ws = null;
-      // Seq tracking is per-connection; the reconnect's snapshot re-seeds
-      // it. Pending local commands drop too: one may never have reached the
-      // server, and the reconnect snapshot is the truth.
-      this.lastAppliedSeq = null;
-      this.resyncInFlight = false;
-      this.pendingSequenced = [];
-      this.pendingLocalCommands = [];
-      this.revertOwed = false;
-      this.documentDatasetIds = null;
-      this.clearGraceTimer();
-      this.clearRetryTimer();
-      this.handlers.onDisconnect?.({ code: event.code, reason: event.reason });
+      this.connectionLost({ code: event.code, reason: event.reason });
       this.scheduleReconnect();
     };
 
@@ -739,6 +804,22 @@ export class Bridge {
     };
 
     this.ws = ws;
+  }
+
+  private connectionLost(close: SocketClose) {
+    this.ws = null;
+    // Seq tracking is per-connection; the reconnect's snapshot re-seeds
+    // it. Pending local commands drop too: one may never have reached the
+    // server, and the reconnect snapshot is the truth.
+    this.lastAppliedSeq = null;
+    this.resyncInFlight = false;
+    this.pendingSequenced = [];
+    this.pendingLocalCommands = [];
+    this.revertOwed = false;
+    this.documentDatasetIds = null;
+    this.clearGraceTimer();
+    this.clearRetryTimer();
+    this.handlers.onDisconnect?.(close);
   }
 
   private handleBinary(buffer: ArrayBuffer) {
@@ -1296,6 +1377,7 @@ export class Bridge {
    */
   destroy() {
     this.destroyed = true;
+    this.stopListeningToPage();
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
     }

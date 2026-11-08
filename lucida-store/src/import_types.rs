@@ -1,5 +1,5 @@
 use lucida_content::{DatasetManifest, ImageId};
-use lucida_protocol::FetchSource;
+use lucida_protocol::{DatasetImportWarningKind, FetchSource};
 use serde::{Deserialize, Serialize};
 
 use crate::ChunkKeyEncoding;
@@ -125,6 +125,24 @@ impl ImportWarningKind {
             | Self::SampledLabelDiscovery
             | Self::UnusableLabelIndex
             | Self::PinnedAxis => false,
+        }
+    }
+}
+
+impl From<ImportWarningKind> for DatasetImportWarningKind {
+    fn from(kind: ImportWarningKind) -> Self {
+        match kind {
+            ImportWarningKind::SkippedGroup => Self::SkippedGroup,
+            ImportWarningKind::UnreadableTileGeometry => Self::UnreadableTileGeometry,
+            ImportWarningKind::UnusableTileGeometry => Self::UnusableTileGeometry,
+            ImportWarningKind::SampledLabelDiscovery => Self::SampledLabelDiscovery,
+            ImportWarningKind::UnusableLabelIndex => Self::UnusableLabelIndex,
+            ImportWarningKind::UnwrittenLevel => Self::UnwrittenLevel,
+            ImportWarningKind::MismatchedTileGeometry => Self::MismatchedTileGeometry,
+            ImportWarningKind::DuplicateTile => Self::DuplicateTile,
+            ImportWarningKind::MalformedCollectionLayout => Self::MalformedCollectionLayout,
+            ImportWarningKind::PinnedAxis => Self::PinnedAxis,
+            ImportWarningKind::InvalidScale => Self::InvalidScale,
         }
     }
 }

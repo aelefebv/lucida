@@ -54,8 +54,8 @@ describe("DatasetInfoPanel", () => {
       health({
         status: "degraded",
         import_warnings: [
-          { target: "wds-1", message: "tiles differ in size", degrades: true },
-          { target: "B/2", message: "skipped group \"B/2\"", degrades: false },
+          { kind: "mismatched_tile_geometry", target: "wds-1", message: "tiles differ in size", degrades: true },
+          { kind: "skipped_group", target: "B/2", message: "skipped group \"B/2\": invalid JSON", degrades: false },
         ],
       }),
     );
@@ -66,25 +66,30 @@ describe("DatasetInfoPanel", () => {
     const details = within(section).getByRole("list", { name: "Health details" });
     const items = within(details).getAllByRole("listitem");
     expect(items.map((li) => [li.textContent, li.hasAttribute("data-degrades")])).toEqual([
-      ["tiles differ in size", true],
-      ["skipped group \"B/2\"", false],
+      ["Tiles differ in size", true],
+      ["Cell B/2 was left out because it couldn't be read.", false],
     ]);
     expect(screen.getByText("/data/tiles.zarr")).toBeTruthy();
     expect(getHealth).toHaveBeenCalledWith("wds-1");
   });
 
-  it("names the server's own trouble serving the dataset", async () => {
+  it("words the server's own trouble serving the dataset for people", async () => {
     const getHealth = vi.fn(async () =>
       health({
         status: "unavailable",
         binding: { status: "unavailable", message: "server binding is missing; chunks cannot be served" },
+        messages: ["dataset exists in the workspace document but has no runtime binding; retry dataset restore"],
       }),
     );
     render(<DatasetInfoPanel visible workspaceId="ws" dataset={dataset} getHealth={getHealth} />);
 
     const section = healthSection();
     expect(await within(section).findByText("Unavailable")).toBeTruthy();
-    expect(within(section).getByText("server binding is missing; chunks cannot be served")).toBeTruthy();
+    const details = within(section).getByRole("list", { name: "Health details" });
+    expect(within(details).getAllByRole("listitem").map((li) => li.textContent)).toEqual([
+      "The server can't read this dataset right now, so none of it can be shown.",
+    ]);
+    expect(section.textContent).not.toMatch(/binding/);
   });
 
   it("lists nothing for a healthy dataset", async () => {

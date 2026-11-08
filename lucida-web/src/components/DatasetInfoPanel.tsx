@@ -9,6 +9,7 @@ import { positionLabel } from "../axes.ts";
 import type { DatasetHealthStatus, DatasetSourceHealth } from "../bridge.ts";
 import type { DatasetManifest, MultiscaleInfo } from "../manifestTypes.ts";
 import { channelDisplayName } from "./channels.ts";
+import { healthReasons } from "./healthText.ts";
 import { drawnAtFloat32Precision } from "../renderer/dataTypeUtil.ts";
 import { Badge, type BadgeTone } from "../ui/Badge.tsx";
 import { IconButton } from "../ui/Button.tsx";
@@ -227,27 +228,6 @@ function HealthFacts({ health }: { health: HealthState | null }) {
       )}
     </section>
   );
-}
-
-/** What health reports, each marked when it makes the data show wrong or not at all. */
-function healthReasons(health: DatasetSourceHealth): Array<{ text: string; degrades: boolean }> {
-  const reasons: Array<{ text: string; degrades: boolean }> = [];
-  if (health.binding.status !== "healthy" && health.binding.message) {
-    reasons.push({ text: health.binding.message, degrades: true });
-  }
-  const failedReads = health.source_cache?.backend_errors ?? 0;
-  if (failedReads > 0) {
-    const reads = failedReads === 1 ? "read" : "reads";
-    reasons.push({ text: `${failedReads.toLocaleString()} ${reads} from the source failed`, degrades: true });
-  }
-  const coarse = health.generated_coarse;
-  if (coarse.status !== "healthy" && coarse.message) {
-    reasons.push({ text: coarse.message, degrades: true });
-  }
-  for (const warning of health.import_warnings ?? []) {
-    reasons.push({ text: warning.message, degrades: warning.degrades });
-  }
-  return reasons;
 }
 
 /** A level's spatial extent, Z × Y × X, dropping a single plane. */
