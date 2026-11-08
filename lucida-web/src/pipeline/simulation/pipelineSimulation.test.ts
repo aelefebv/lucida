@@ -555,6 +555,36 @@ describe("auto-contrast limits", () => {
   }
 
   for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`keeps a generated coarse level's limits through pans and zooms at device pixel ratio ${dpr}`, async () => {
+      // The zoom and the pans at it bring in chunks the view did not read
+      // before; the generated level arrives after the first of them.
+      const run = await runScenario(
+        describeScenario({
+          name: "pans and zooms over a generated coarse level",
+          dataset: singleImage({
+            id: "roam",
+            pyramid: { shape: [1, 1, 1, 2048, 2048], chunk: [1, 64, 64], levels: 3 },
+            generatedCoarse: { readyAtMs: 300 },
+          }),
+          source: { latencyMs: scatteredLatency(false) },
+          steps: [{ zoom: 3 }, { pan: [400, 200] }, { pan: [-700, -350] }, { zoom: 0.25 }],
+        }),
+        { dpr },
+      );
+      expectSettled(run);
+      const fitted = lastFits(run.phases[0]);
+      expect(fitted.size).toBe(1);
+      for (const fit of fitted.values()) expect(fit.provisional).toBe(false);
+      for (const phase of run.phases.slice(1, 4)) {
+        expect(phase.distinctChunksSent, `${phase.label} brings in chunks`).toBeGreaterThan(0);
+      }
+      for (const phase of run.phases.slice(1)) {
+        expect(phase.fits, `${phase.label} keeps the limits`).toEqual([]);
+      }
+    });
+  }
+
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
     it(`leaves a generated level out of the settled limits at device pixel ratio ${dpr}`, async () => {
       const dataset = singleImage({
         id: "lifted",

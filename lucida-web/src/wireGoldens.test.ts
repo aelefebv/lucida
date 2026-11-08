@@ -59,6 +59,7 @@ import {
   type WireGeneratedAvailabilityDelta,
   type WireGeneratedAvailabilitySnapshot,
   type WireGeneratedLevelAvailability,
+  type WireGeneratedLevelHistogram,
 } from "./pipeline/generatedAvailability.ts";
 
 import {
@@ -710,6 +711,18 @@ const expectedGeneratedLevel: WireGeneratedLevelAvailability = {
   summary: { total_chunks: 12, ready_chunks: 7, pending_chunks: 3, failed_chunks: 2 },
 };
 
+const expectedGeneratedHistogram: WireGeneratedLevelHistogram = {
+  image_id: "multiscale-0",
+  level_index: 2,
+  t: 0,
+  c: 1,
+  bins: [
+    [-3, -3, 2],
+    [12, 12, 4096],
+    [1024, 1039, 37],
+  ],
+};
+
 const expectedGeneratedSnapshot: WireGeneratedAvailabilitySnapshot = {
   levels: [
     expectedGeneratedLevel,
@@ -748,6 +761,7 @@ const expectedGeneratedSnapshot: WireGeneratedAvailabilitySnapshot = {
       message: "chunk exceeds generation budget",
     },
   ],
+  histograms: [expectedGeneratedHistogram],
 };
 
 const expectedGeneratedDelta: WireGeneratedAvailabilityDelta = {
@@ -755,6 +769,7 @@ const expectedGeneratedDelta: WireGeneratedAvailabilityDelta = {
   chunks: [
     { image_id: "multiscale-0", level_index: 2, key: "2/0/0/1/0/0", status: "ready" },
   ],
+  histograms: [expectedGeneratedHistogram],
 };
 
 /**
@@ -1888,6 +1903,8 @@ describe("wire goldens: generated availability", () => {
       status: "failed_transient",
       message: "source read timed out",
     });
+    expect(catalog.histogram("wds-0f3a", "multiscale-0", 2, 0, 1)).toStrictEqual(expectedGeneratedHistogram);
+    expect(catalog.histogram("wds-0f3a", "multiscale-0", 2, 0, 0)).toBeUndefined();
   });
 
   it("delta fixture upserts through the catalog", () => {

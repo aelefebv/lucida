@@ -2448,6 +2448,7 @@ mod tests {
                     message: Some("queued".to_string()),
                 },
             ],
+            histograms: vec![],
         }
     }
 
