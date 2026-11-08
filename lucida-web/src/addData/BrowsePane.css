@@ -118,13 +118,16 @@ button.lc-browse-entry:hover {
   text-align: left;
 }
 
+/* Under touch the rows and the edges open up as far as each remove button's
+   hit area reaches past its 22px chip, so no two hit areas overlap and none
+   reaches the list above. */
 .lc-browse-selection {
   display: flex;
   flex: none;
   flex-wrap: wrap;
-  gap: var(--lc-space-1);
+  gap: max(var(--lc-space-1), calc(var(--lc-target-min) - 22px)) var(--lc-space-1);
   margin: 0;
-  padding: var(--lc-space-2);
+  padding: max(var(--lc-space-2), calc((var(--lc-target-min) - 22px) / 2));
   border-top: 1px solid var(--lc-border);
   list-style: none;
 }
@@ -149,6 +152,7 @@ button.lc-browse-entry:hover {
 }
 
 .lc-browse-chip-remove {
+  position: relative;
   display: inline-flex;
   flex: none;
   align-items: center;
@@ -161,6 +165,12 @@ button.lc-browse-entry:hover {
   background: transparent;
   color: inherit;
   cursor: default;
+}
+
+.lc-browse-chip-remove::before {
+  content: "";
+  position: absolute;
+  inset: min(0px, calc((18px - var(--lc-target-min)) / 2));
 }
 
 .lc-browse-chip-remove:hover {
