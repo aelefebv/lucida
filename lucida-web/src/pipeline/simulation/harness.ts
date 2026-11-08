@@ -156,6 +156,11 @@ export interface PhaseOutcome {
   missingGpu: string[];
   /** Chunks the page sent the worker again and again in this phase, most often first. */
   resent: string[];
+  /**
+   * Wanted chunks the source failed for good, each with the reason it gave.
+   * A view settles without them, and this is how the run names them.
+   */
+  failed: string[];
 }
 
 export interface SimulationRun {
@@ -497,6 +502,10 @@ class Simulation {
       missingCpu,
       missingGpu,
       resent: resent.map((r) => r.text),
+      failed: this.cpuCache
+        .failedWantedChunks()
+        .map(({ chunk, failure }) => `${chunk}: ${failure ?? "failed with no reason given"}`)
+        .sort(),
     };
   }
 
@@ -577,6 +586,7 @@ function formatReport(name: string, dpr: number, phases: PhaseOutcome[]): string
       ...formatKeys("wanted by the plan, not in the CPU cache", p.missingCpu),
       ...formatKeys("wanted by the worker, not on the GPU", p.missingGpu),
       ...formatKeys(`sent to the worker ${RESENT_THRESHOLD} or more times`, p.resent),
+      ...formatKeys("failed for good, so the view settles without them", p.failed),
     );
   }
   return lines.join("\n");

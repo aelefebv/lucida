@@ -21,6 +21,13 @@ export interface CacheQuiescenceInputs extends Outstanding {
    * rather than closing one early on a guess.
    */
   pendingUnclassified: boolean;
+  /**
+   * Wanted chunks of each tier that the source failed for good. Nothing asks
+   * for them again until the dataset is reopened, so waiting on them would
+   * never end: the view settles without them, and the failure says why.
+   */
+  failedDetailChunks: number;
+  failedCoarseChunks: number;
 }
 
 /** The cache's half plus the render loop's own three flags. */
@@ -61,6 +68,8 @@ export function createQuiescenceState(): QuiescenceState {
     speculativePending: 0,
     speculativeInFlight: 0,
     pendingUnclassified: false,
+    failedDetailChunks: 0,
+    failedCoarseChunks: 0,
     quiescent: false,
     reason: "unpublished",
     at: 0,
@@ -86,7 +95,11 @@ function quiescenceReason(i: QuiescenceInputs): string {
   if (i.pendingUnclassified) return "pending_unclassified";
   if (i.inFlight > 0) return "chunks_in_flight";
   if (i.pending > 0) return "chunks_pending";
-  if (i.residentDetailChunks < i.desiredDetailChunks) return "detail_not_resident";
-  if (i.residentCoarseChunks < i.desiredCoarseChunks) return "coarse_not_resident";
+  if (i.residentDetailChunks + i.failedDetailChunks < i.desiredDetailChunks) {
+    return "detail_not_resident";
+  }
+  if (i.residentCoarseChunks + i.failedCoarseChunks < i.desiredCoarseChunks) {
+    return "coarse_not_resident";
+  }
   return "quiescent";
 }
