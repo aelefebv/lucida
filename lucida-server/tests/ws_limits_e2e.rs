@@ -30,7 +30,7 @@ use lucida_server::connection::{
     CLOSE_TOO_FAR_BEHIND, MAX_INBOUND_MESSAGE_BYTES, OUTBOUND_BUDGET_BYTES, limit_inbound,
 };
 use lucida_server::session::Session;
-use lucida_server::{AppState, ProxyConfig, handler};
+use lucida_server::{AppState, ProxyConfig, UnicastRoutes, handler};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -39,6 +39,7 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 struct Rig {
     addr: SocketAddr,
     session: Arc<Mutex<Session>>,
+    unicast_routes: UnicastRoutes,
     _tmp: tempfile::TempDir,
 }
 
@@ -64,11 +65,12 @@ async fn start_server() -> Rig {
     let mut proxy_config = ProxyConfig::defaults();
     proxy_config.cache_dir = tmp.path().join("proxies");
     proxy_config.generated_cache_dir = tmp.path().join("generated-coarse");
+    let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));
     let state = AppState {
         session: Arc::clone(&session),
         tx,
         next_id: Arc::new(AtomicU64::new(0)),
-        unicast_routes: Arc::new(Mutex::new(HashMap::new())),
+        unicast_routes: Arc::clone(&unicast_routes),
         source_policy: Arc::default(),
         proxy_config,
     };
@@ -83,6 +85,7 @@ async fn start_server() -> Rig {
     Rig {
         addr,
         session,
+        unicast_routes,
         _tmp: tmp,
     }
 }
@@ -223,7 +226,16 @@ async fn a_message_over_the_cap_ends_the_connection_and_one_under_it_does_not() 
 async fn a_client_that_stops_reading_is_closed_with_a_reason() {
     let rig = start_server().await;
     let mut client = connect(rig.addr).await;
-    next_message(&mut client).await;
+    let ServerMessage::Snapshot { your_id, .. } = next_message(&mut client).await else {
+        panic!("the first message is the snapshot");
+    };
+    let queue = rig
+        .unicast_routes
+        .lock()
+        .await
+        .get(&your_id)
+        .cloned()
+        .expect("the connection's queue");
     send(
         &mut client,
         &ClientMessage::WatchSubscribe { history: false },
@@ -234,7 +246,7 @@ async fn a_client_that_stops_reading_is_closed_with_a_reason() {
     // client's own queue. Twice the budget is far past what the socket
     // buffers can absorb.
     const ITEM_BYTES: usize = 1024 * 1024;
-    let items = 2 * OUTBOUND_BUDGET_BYTES / ITEM_BYTES;
+    let most_items = 2 * OUTBOUND_BUDGET_BYTES / ITEM_BYTES;
     let item = WatchItem::Aggregate {
         at_epoch_ms: 0,
         run_id: Some("r".repeat(ITEM_BYTES)),
@@ -246,7 +258,13 @@ async fn a_client_that_stops_reading_is_closed_with_a_reason() {
     let publish = serde_json::to_string(&ClientMessage::WatchPublish { item }).unwrap();
     let (mut sink, mut stream) = client.split();
     let publisher = tokio::spawn(async move {
-        for _ in 0..items {
+        // Stop once the server gives up. It waits a bounded time for the
+        // close to get through, and on a loaded host a client still pushing
+        // the rest of a fixed backlog starts reading after that window.
+        for _ in 0..most_items {
+            if queue.close_requested() {
+                break;
+            }
             if sink
                 .send(WsMessage::Text(publish.clone().into()))
                 .await
@@ -255,9 +273,13 @@ async fn a_client_that_stops_reading_is_closed_with_a_reason() {
                 break;
             }
         }
+        assert!(
+            queue.close_requested(),
+            "the server kept twice its budget queued for a client that never read"
+        );
         sink
     });
-    // Read only once everything is sent, so the backlog builds first.
+    // Read only once the server has given up, so the backlog builds first.
     let _sink = publisher.await.expect("publisher");
 
     let close = loop {

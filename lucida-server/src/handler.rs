@@ -1039,16 +1039,15 @@ async fn handle_client_inner(
     // outbound task behind whatever the socket already holds, so give it a
     // bounded moment to get through. Inbound frames are read and dropped
     // meanwhile: a client blocked writing to us cannot read the close.
+    //
+    // Wait for the client's side to end as well, with its close reply or
+    // its EOF. Dropping the socket while its frames are still unread makes
+    // the OS reset the connection, and the reset can discard the close
+    // frame before the client reads it.
     if unicast_tx.close_requested() {
-        let drain = async {
-            while let Some(Ok(_)) = ws_rx.next().await {}
-            std::future::pending::<()>().await
-        };
+        let drain = async { while let Some(Ok(_)) = ws_rx.next().await {} };
         let _ = tokio::time::timeout(CLOSE_FLUSH_TIMEOUT, async {
-            tokio::select! {
-                _ = &mut outbound => {}
-                _ = drain => {}
-            }
+            let _ = tokio::join!(&mut outbound, drain);
         })
         .await;
     }
