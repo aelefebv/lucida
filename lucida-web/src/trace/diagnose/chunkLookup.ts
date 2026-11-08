@@ -20,6 +20,7 @@ import {
   type TraceRow,
   type TraceRun,
 } from "../types.ts";
+import { formatCount } from "../../formatCount.ts";
 import { nullableUsToMs, usToMs } from "./phaseRollup.ts";
 import { describeState, firstBoundaryUs, rowAgeUs, rowState } from "./rowState.ts";
 import type {
@@ -378,5 +379,5 @@ function statementFor(input: {
 }
 
 function plural(n: number, one: string, many = `${one}s`): string {
-  return `${n.toLocaleString()} ${n === 1 ? one : many}`;
+  return `${formatCount(n)} ${n === 1 ? one : many}`;
 }

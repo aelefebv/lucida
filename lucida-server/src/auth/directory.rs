@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use axum::http::header::HeaderMap;
 use lucida_core::auth_principal::AuthPrincipal;
 use serde_json::Value;
+use tokio::task::JoinHandle;
 use tracing::{error, info, warn};
 
 use super::config::DirectoryConfig;
@@ -290,6 +291,13 @@ async fn run_schedule(directory: Weak<ProfileDirectory>) {
 /// built at all, which is a property of the process rather than of the
 /// listing.
 pub async fn load_at_boot(config: DirectoryConfig) -> Option<Arc<ProfileDirectory>> {
+    start(config).await.map(|(directory, _schedule)| directory)
+}
+
+/// [`load_at_boot`], also handing back the schedule's task. Dropping
+/// the handle detaches the task rather than stopping it; the task ends
+/// when the directory does.
+async fn start(config: DirectoryConfig) -> Option<(Arc<ProfileDirectory>, JoinHandle<()>)> {
     info!(
         url = %redacted(&config.url),
         email_field = %config.email_field,
@@ -307,8 +315,8 @@ pub async fn load_at_boot(config: DirectoryConfig) -> Option<Arc<ProfileDirector
         }
     };
     directory.attempt().await;
-    tokio::spawn(run_schedule(Arc::downgrade(&directory)));
-    Some(directory)
+    let schedule = tokio::spawn(run_schedule(Arc::downgrade(&directory)));
+    Some((directory, schedule))
 }
 
 /// The listing URL as it may be logged: a listing that wants an API
@@ -967,21 +975,17 @@ mod tests {
     #[tokio::test]
     async fn dropping_the_directory_ends_the_schedule() {
         let (url, mock) = spawn_failing_listing(StatusCode::SERVICE_UNAVAILABLE).await;
-        let directory = load_at_boot(config_retrying_fast(&url))
+        let (directory, schedule) = start(config_retrying_fast(&url))
             .await
             .expect("a client builds");
         mock.wait_for_fetches(3).await;
 
         drop(directory);
-        // A wake that upgraded its handle before the drop still runs its
-        // attempt, so the baseline waits out the backoff cap first.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        let after_drop = mock.fetch_count().await;
-        tokio::time::sleep(Duration::from_millis(250)).await;
-        assert_eq!(
-            mock.fetch_count().await,
-            after_drop,
-            "no fetch after the drop"
-        );
+        // The task ends at its next wake, or after the attempt in flight
+        // when the drop landed; either way within one backoff and one fetch.
+        tokio::time::timeout(POLL_LIMIT, schedule)
+            .await
+            .expect("the schedule ends once the directory is dropped")
+            .expect("the schedule ends without panicking");
     }
 }

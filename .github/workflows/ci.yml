@@ -259,18 +259,19 @@ jobs:
       # download URL second: the download URL can return 504s for long
       # stretches while the API route still serves. EmbarkStudios/cargo-deny-
       # action fetches only from the download URL, so it is not used. The
-      # version and checksum are pinned by hand; Dependabot does not see them.
+      # version and checksum are pinned by hand; Dependabot does not see them,
+      # and the Tool pins workflow reports a newer release.
       - name: Install cargo-deny
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: 0.20.2
+          CARGO_DENY_VERSION: 0.20.2
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          asset="cargo-deny-$VERSION-x86_64-unknown-linux-musl.tar.gz"
-          gh release download "$VERSION" -R EmbarkStudios/cargo-deny -p "$asset" --clobber \
+          asset="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          gh release download "$CARGO_DENY_VERSION" -R EmbarkStudios/cargo-deny -p "$asset" --clobber \
             || curl -fsSL --retry 5 --retry-all-errors -o "$asset" \
-                 "https://github.com/EmbarkStudios/cargo-deny/releases/download/$VERSION/$asset"
+                 "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$asset"
           echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  $asset" | sha256sum -c -
           tar -xzf "$asset" --strip-components=1 -C /usr/local/bin "${asset%.tar.gz}/cargo-deny"
 
@@ -458,12 +459,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ASSET: kubeconform-linux-amd64.tar.gz
+          KUBECONFORM_VERSION: 0.6.7
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          gh release download v0.6.7 -R yannh/kubeconform -p "$ASSET" --clobber \
+          gh release download "v$KUBECONFORM_VERSION" -R yannh/kubeconform -p "$ASSET" --clobber \
             || curl -fsSL --retry 5 --retry-all-errors -o "$ASSET" \
-                 "https://github.com/yannh/kubeconform/releases/download/v0.6.7/$ASSET"
+                 "https://github.com/yannh/kubeconform/releases/download/v$KUBECONFORM_VERSION/$ASSET"
           echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  $ASSET" | sha256sum -c -
           tar -xzf "$ASSET" -C /usr/local/bin kubeconform
 
@@ -487,7 +489,9 @@ jobs:
       # GitHub release: release downloads can return 504s for long stretches.
       # The runner image puts pipx's bin directory on PATH.
       - name: Install uv
-        run: pipx install uv==0.13.7
+        env:
+          UV_VERSION: 0.13.7
+        run: pipx install "uv==$UV_VERSION"
 
       # The client's integration tests drive a real server.
       - name: Build lucida-server

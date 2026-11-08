@@ -25,7 +25,7 @@ const READ_CEILING_US = 1_000;
 /** Budgets in nominal microseconds, about twice each typical figure. */
 const FULL_READ_BUDGET_US = 400;
 const WRAPPED_READ_BUDGET_US = 370;
-const SLID_READ_BUDGET_US = 120;
+const SLID_READ_BUDGET_US = 14;
 
 /**
  * How much more a read may cost at the largest row population than at the

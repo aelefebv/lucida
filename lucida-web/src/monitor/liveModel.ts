@@ -13,6 +13,7 @@
  * back from, and a headline that changes as you read it is not one.
  */
 
+import { formatCount } from "../formatCount.ts";
 import {
   describeProvisionalObservation,
   type ProvisionalReading,
@@ -87,39 +88,35 @@ export function buildLiveView(progress: LiveProgress): LiveView {
     counters: [
       {
         label: "planned",
-        value: count(progress.planned),
+        value: formatCount(progress.planned),
         meaning: "chunks this run has asked for",
       },
       {
         label: "visible",
-        value: count(progress.visible),
+        value: formatCount(progress.visible),
         meaning: "drawn in a frame",
       },
       {
         label: "in flight",
-        value: count(progress.inFlight),
+        value: formatCount(progress.inFlight),
         meaning: "still going",
       },
       {
         label: "retired",
-        value: count(progress.retired),
+        value: formatCount(progress.retired),
         meaning: "abandoned — the view moved on, or the fetch failed",
       },
     ],
     bar: segments,
     unrecorded:
       progress.unrecorded > 0
-        ? `${count(progress.unrecorded)} rows past the per-run cap are not in these counts`
+        ? `${formatCount(progress.unrecorded)} rows past the per-run cap are not in these counts`
         : null,
   };
 }
 
 function segment(id: string, rows: number, inFlight: number): LiveBarSegment {
   return { id, rows, pct: inFlight > 0 ? (rows / inFlight) * 100 : 0 };
-}
-
-function count(value: number): string {
-  return value.toLocaleString();
 }
 
 /** The top finding of a provisional reading, as the live view prints it. */

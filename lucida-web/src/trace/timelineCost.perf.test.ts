@@ -37,11 +37,16 @@ const DRAW_LIST_CEILING_US = 2_000;
 /** How much more a derivation may cost at the largest row population than at the smallest. */
 const FLATNESS_GROWTH_GATE = 4;
 
-/** A small run, and one past the per-run cap, which is the largest row population a run can hold. */
-const POPULATIONS = [2_000, 40_000] as const;
+/**
+ * A small run, and the most rows a run takes with its ticks and events still
+ * recording. Past that the per-run cap refuses every tier but the readings,
+ * and a derivation over a run with no ticks or events does less work, which
+ * would flatter the large run in the comparison.
+ */
+const POPULATIONS = [2_000, 16_384] as const;
 
-/** Budgets in nominal microseconds, about twice each typical figure; the derivation's by population. */
-const DERIVE_BUDGET_US = [2_300, 800] as const;
+/** Budgets in nominal microseconds, about twice each typical figure. */
+const DERIVE_BUDGET_US = 2_300;
 const DRAW_LIST_BUDGET_US = 84;
 
 /** A busy pan's tick rate over the live timeline's default window: more readings than the ring holds. */
@@ -126,6 +131,13 @@ function makeRun(rows: number): TraceRecorder {
   return recorder;
 }
 
+/** How many records each series was read from, so two runs can be shown to differ only in their rows. */
+function seriesSamples(recorder: TraceRecorder): string[] {
+  return recorder.liveTimeline()!.timeline.charts.flatMap((chart) =>
+    chart.series.map((series) => `${chart.id}/${series.id}: ${series.recorded ? series.samples : "absent"}`),
+  );
+}
+
 /** The charts are asserted on so nothing here is dead code an optimiser is free to skip. */
 function timeDerivation(recorder: TraceRecorder): { timed: StepTiming; readings: number; rowsWalked: boolean } {
   let readings = 0;
@@ -159,34 +171,39 @@ describe("the dock's live draw cost contract", () => {
     timeDerivation(warm);
     warm.reset();
 
-    const readings = POPULATIONS.map((asked, index) => {
+    const readings = POPULATIONS.map((asked) => {
       const recorder = makeRun(asked);
-      const rows = recorder.liveProgress!.planned;
+      const progress = recorder.liveProgress!;
+      const samples = seriesSamples(recorder);
       const derivation = timeDerivation(recorder);
       recorder.reset();
+      expect(progress.unrecorded).toBe(0);
       // The window held the whole reading ring and nothing older.
       expect(derivation.readings).toBeGreaterThan(1_000);
       expect(derivation.readings).toBeLessThanOrEqual(1_025);
       expect(derivation.rowsWalked).toBe(false);
-      return { rows, timed: derivation.timed, budgetUs: DERIVE_BUDGET_US[index] };
+      return { rows: progress.planned, samples, timed: derivation.timed };
     });
 
     for (const r of readings) {
       console.log(
         `[#1064] live timeline derivation: rows=${String(r.rows).padStart(6)} | ` +
-          `${describeTiming(r.timed, r.budgetUs)} | ` +
+          `${describeTiming(r.timed, DERIVE_BUDGET_US)} | ` +
           `${(r.timed.nominalUs / DERIVE_CEILING_US).toFixed(2)}x the ${DERIVE_CEILING_US}µs ceiling`,
       );
     }
 
     const [small, large] = readings;
     expect(large.rows).toBeGreaterThan(small.rows * 4);
+    // Every chart read the same ticks, events and readings in both runs, so
+    // the rows are the only difference the comparison sees.
+    expect(large.samples).toEqual(small.samples);
     expect(
       large.timed.nominalUs,
       `${large.timed.nominalUs.toFixed(1)}µs at ${large.rows} rows against ${small.timed.nominalUs.toFixed(1)}µs at ${small.rows}`,
     ).toBeLessThan(Math.max(small.timed.nominalUs, 1) * FLATNESS_GROWTH_GATE);
     for (const r of readings) {
-      expectWithinBudget(`live timeline derivation at ${r.rows} rows`, r.timed, r.budgetUs);
+      expectWithinBudget(`live timeline derivation at ${r.rows} rows`, r.timed, DERIVE_BUDGET_US);
     }
   });
 

@@ -59,7 +59,7 @@ const MODEL_CEILING_US = 200;
 const DRAW_CEILING_US = 500;
 
 /** Budgets in nominal microseconds, about twice each typical figure. */
-const MODEL_BUDGET_US = 48;
+const MODEL_BUDGET_US = 12;
 const DRAW_BUDGET_US = 25;
 const SAMPLE_BUDGET_US = 2.4;
 const LANE_SCAN_BUDGET_US = 110;

@@ -1,6 +1,7 @@
 # Minor and patch updates arrive as one pull request per ecosystem each week.
 # A major update gets a pull request of its own, since it usually needs code
-# changes.
+# changes. Tools that workflow steps install at a pinned version are outside
+# every ecosystem here; the Tool pins workflow reports those.
 version: 2
 updates:
   - package-ecosystem: cargo
