@@ -23,8 +23,9 @@ use crate::workspace::types::{
 };
 
 use super::{
-    StoreError, WorkspaceStore, default_member_display_name, default_workspace_name, map_json_in,
-    map_json_out, map_saved_view_json_in, map_saved_view_json_out, map_sql, normalize_email, sql,
+    StoreError, WorkspaceStore, default_member_display_name, default_workspace_name,
+    document_written, map_json_in, map_json_out, map_saved_view_json_in, map_saved_view_json_out,
+    map_sql, normalize_email, sql,
 };
 
 use async_trait::async_trait;
@@ -628,15 +629,16 @@ impl WorkspaceStore for SqliteWorkspaceStore {
     ) -> Result<(), StoreError> {
         let document_json = serde_json::to_string(document).map_err(map_json_out)?;
         let now = Utc::now();
-        sqlx::query(sql::PERSIST_DOCUMENT)
+        let result = sqlx::query(sql::PERSIST_DOCUMENT)
             .bind(seq as i64)
             .bind(document_json)
             .bind(now)
             .bind(workspace_id)
+            .bind(seq as i64)
             .execute(&self.pool)
             .await
             .map_err(map_sql)?;
-        Ok(())
+        document_written(result.rows_affected(), seq)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -676,14 +678,16 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             .await
             .map_err(map_sql)?;
 
-        sqlx::query(sql::PERSIST_DOCUMENT)
+        let result = sqlx::query(sql::PERSIST_DOCUMENT)
             .bind(seq as i64)
             .bind(document_json)
             .bind(now)
             .bind(workspace_id)
+            .bind(seq as i64)
             .execute(&mut *tx)
             .await
             .map_err(map_sql)?;
+        document_written(result.rows_affected(), seq)?;
 
         tx.commit().await.map_err(map_sql)?;
         Ok(())
@@ -705,14 +709,16 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             .execute(&mut *tx)
             .await
             .map_err(map_sql)?;
-        sqlx::query(sql::PERSIST_DOCUMENT)
+        let result = sqlx::query(sql::PERSIST_DOCUMENT)
             .bind(seq as i64)
             .bind(document_json)
             .bind(now)
             .bind(workspace_id)
+            .bind(seq as i64)
             .execute(&mut *tx)
             .await
             .map_err(map_sql)?;
+        document_written(result.rows_affected(), seq)?;
         tx.commit().await.map_err(map_sql)?;
         Ok(())
     }
@@ -735,14 +741,16 @@ impl WorkspaceStore for SqliteWorkspaceStore {
             .execute(&mut *tx)
             .await
             .map_err(map_sql)?;
-        sqlx::query(sql::PERSIST_DOCUMENT)
+        let result = sqlx::query(sql::PERSIST_DOCUMENT)
             .bind(seq as i64)
             .bind(document_json)
             .bind(now)
             .bind(workspace_id)
+            .bind(seq as i64)
             .execute(&mut *tx)
             .await
             .map_err(map_sql)?;
+        document_written(result.rows_affected(), seq)?;
         tx.commit().await.map_err(map_sql)?;
         Ok(())
     }

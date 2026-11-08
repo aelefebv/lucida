@@ -183,17 +183,15 @@ interface PendingLocalCommand {
  *  throttle (~1s). A gap storm costs at most one request per interval. */
 const RESYNC_RETRY_MS = 5000;
 
-/** Maximum age of a pending local command. A healthy ack takes well under a
- *  second; an entry this old was rejected server-side (rejections never ack),
- *  shed by the cap, or sits on a dying connection. Without expiry, a stale
- *  pending `remove_dataset` replayed by a later snapshot would delete a
+/** Maximum age of a pending local command. A healthy answer takes well
+ *  under a second; an entry this old lost its ack or rejection to broadcast
+ *  lag, was shed by the cap, or sits on a dying connection. Without expiry, a
+ *  stale pending `remove_dataset` replayed by a later snapshot would delete a
  *  re-opened dataset and poison the membership mirror. */
 const PENDING_LOCAL_COMMAND_TTL_MS = 10_000;
 
-/** How long a seq hole may stand before it counts as loss. The server sends
- *  broadcasts after releasing the session lock, so concurrent editors
- *  routinely deliver seq out of order with nothing lost. A late arrival that
- *  fills the hole in this window drains the buffer with no snapshot. */
+/** How long a seq hole may stand before it counts as loss. A late arrival
+ *  that fills the hole in this window drains the buffer with no snapshot. */
 const RESYNC_GRACE_MS = 200;
 
 /** Upper bound on messages buffered while a resync is in flight. Overflow
@@ -201,10 +199,9 @@ const RESYNC_GRACE_MS = 200;
  *  snapshot being produced; a residual gap triggers another resync. */
 const MAX_PENDING_SEQUENCED = 4096;
 
-/** Upper bound on tracked unacked local commands. A command the server
- *  rejects never acks and its optimistic apply is never rolled back, so the
- *  list is capped (oldest shed) and cleared on disconnect rather than
- *  trusted to drain. */
+/** Upper bound on tracked unacked local commands. Broadcast lag can drop
+ *  the answer to a command, so the list is capped (oldest shed) and cleared
+ *  on disconnect rather than trusted to drain. */
 const MAX_PENDING_LOCAL_COMMANDS = 64;
 
 /** Throttle for presence and cursor updates, which fire per mouse move.
@@ -369,6 +366,12 @@ export interface BridgeHandlers {
   ) => void;
   onWorkspaceArchived?: (workspaceId: string) => void;
   /**
+   * The server refused one of this client's document commands and applied
+   * nothing. The bridge has already asked for the snapshot that undoes the
+   * optimistic apply; this is for telling the person.
+   */
+  onCommandRejected?: (reason: CommandRejection) => void;
+  /**
    * The WebSocket reached OPEN; before this, [`Bridge.send`] silently drops.
    * Distinct from `onSnapshot`, the session-established signal: a frame sent
    * between the two still reaches the server. Fires on every (re)connect.
@@ -389,6 +392,9 @@ export interface BridgeHandlers {
 
 /** Mirror of `lucida_core::protocol::BookmarkAction` (lowercase wire form). */
 export type BookmarkAction = "created" | "updated" | "deleted";
+
+/** Mirror of `lucida_core::protocol::CommandRejection`. */
+export type CommandRejection = "forbidden" | "invalid" | "unavailable";
 
 /** Listener for cross-peer `bookmark_changed` broadcasts, via
  *  [`Bridge.subscribeBookmarkChanged`]. Fan-out lives on the bridge so
@@ -447,6 +453,10 @@ export class Bridge {
    *  mid-session full-replace can't erase the author's own optimistic
    *  applies; retired FIFO on ack; cleared on disconnect. */
   private pendingLocalCommands: PendingLocalCommand[] = [];
+  /** Set when the server refuses a command we applied optimistically, and
+   *  cleared by the next adopted snapshot, which no longer holds it. Keeps
+   *  the retry timer asking until that snapshot lands. */
+  private revertOwed = false;
 
   constructor(handlers: BridgeHandlers, urlOverride?: string, workspaceId?: string) {
     // Same-origin WebSocket so the lucida_session cookie is sent on
@@ -520,6 +530,9 @@ export class Bridge {
               // hole appears next (drain re-arms with full windows).
               this.clearGraceTimer();
               this.clearRetryTimer();
+              // Too old to adopt, so it cannot undo a refused command
+              // either; ask again once the server's throttle has passed.
+              if (this.revertOwed) this.armRetryTimer();
               this.drainPendingSequenced();
               break;
             }
@@ -528,6 +541,7 @@ export class Bridge {
             // any outstanding resync before handing it to the app.
             this.lastAppliedSeq = snapshotSeq;
             this.resyncInFlight = false;
+            this.revertOwed = false;
             // A hole this snapshot repaired must not leave its timers
             // running: a new hole inside a leftover grace window would get
             // short grace and fire a premature request into the server's
@@ -596,6 +610,18 @@ export class Bridge {
             this.pendingLocalCommands.shift();
             this.handleSequenced(msg.seq, null);
             this.handlers.onAck(msg.seq);
+            break;
+          case "command_rejected":
+            // The server answers one client's commands in send order, with
+            // an ack or a rejection each, so this one is the oldest pending
+            // command. Its optimistic apply stays until a snapshot replaces
+            // the document; the pending commands after it replay on top.
+            this.prunePendingLocalCommands();
+            this.pendingLocalCommands.shift();
+            this.revertOwed = true;
+            bridgeLog("command.rejected", { reason: msg.reason ?? null }, ws.readyState);
+            this.requestResync(null);
+            this.handlers.onCommandRejected?.(msg.reason);
             break;
           case "peer_joined":
             this.handlers.onPeerJoined?.(msg.client_id, readPresence(msg.presence));
@@ -710,6 +736,7 @@ export class Bridge {
       this.resyncInFlight = false;
       this.pendingSequenced = [];
       this.pendingLocalCommands = [];
+      this.revertOwed = false;
       this.documentDatasetIds = null;
       this.clearGraceTimer();
       this.clearRetryTimer();
@@ -982,10 +1009,11 @@ export class Bridge {
   }
 
   /** Ask the server for a fresh snapshot, at most one outstanding request at
-   *  a time. Every request arms the retry timer, so a hole that outlives
-   *  [`RESYNC_RETRY_MS`] is re-requested even in an idle workspace or after
-   *  the server's throttle ate this request. */
-  private requestResync(gapSeq: number) {
+   *  a time, to repair a seq hole (`gapSeq`) or undo a refused command
+   *  (`null`). Every request arms the retry timer, so a hole or a refused
+   *  command that outlives [`RESYNC_RETRY_MS`] is re-requested even in an
+   *  idle workspace or after the server's throttle ate this request. */
+  private requestResync(gapSeq: number | null) {
     const now = Date.now();
     if (this.resyncInFlight && now - this.lastResyncRequestAt < RESYNC_RETRY_MS) {
       return;
@@ -1001,15 +1029,15 @@ export class Bridge {
     this.armRetryTimer();
   }
 
-  /** (Re)arm the traffic-independent retry. A standing hole keeps retrying
-   *  once per interval until a snapshot resolves it. */
+  /** (Re)arm the traffic-independent retry. A standing hole or an owed
+   *  revert keeps retrying once per interval until a snapshot resolves it. */
   private armRetryTimer() {
     this.clearRetryTimer();
     this.resyncRetryTimer = setTimeout(() => {
       this.resyncRetryTimer = null;
       if (this.destroyed) return;
-      if (this.pendingSequenced.length === 0) return;
-      this.requestResync(this.pendingSequenced[0].seq);
+      if (this.pendingSequenced.length === 0 && !this.revertOwed) return;
+      this.requestResync(this.pendingSequenced[0]?.seq ?? null);
     }, RESYNC_RETRY_MS);
   }
 
@@ -1066,7 +1094,7 @@ export class Bridge {
         sentAt: Date.now(),
       });
       if (this.pendingLocalCommands.length > MAX_PENDING_LOCAL_COMMANDS) {
-        // Shed the oldest. Most are rejection orphans, but a shed entry may
+        // Shed the oldest. Most lost their answer, but a shed entry may
         // be a sent command whose ack will come and retire a newer entry.
         // The TTL prune bounds that misalignment.
         this.pendingLocalCommands.splice(

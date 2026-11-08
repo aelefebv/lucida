@@ -79,18 +79,39 @@ impl Session {
 
     /// Apply a document command. Returns the new seq number.
     pub fn apply(&mut self, cmd: DocumentCommand) -> u64 {
+        self.document.apply(cmd.clone());
+        let seq = self.seq + 1;
+        self.record(seq, cmd);
+        seq
+    }
+
+    /// The seq and document `cmd` would produce, leaving the session as it
+    /// is, so the result can be persisted before anything changes here.
+    pub fn next(&self, cmd: &DocumentCommand) -> (u64, DocumentState) {
+        let mut document = self.document.clone();
+        document.apply(cmd.clone());
+        (self.seq + 1, document)
+    }
+
+    /// Adopt the `(seq, document)` that [`Self::next`] produced for `cmd`.
+    /// The caller holds the workspace's document turn from `next` through
+    /// here, so no other command can have moved the seq in between.
+    pub fn commit(&mut self, seq: u64, cmd: DocumentCommand, document: DocumentState) {
+        debug_assert_eq!(seq, self.seq + 1, "a commit follows its own next()");
+        self.document = document;
+        self.record(seq, cmd);
+    }
+
+    fn record(&mut self, seq: u64, cmd: DocumentCommand) {
         if let DocumentCommand::RemoveDataset { id } = &cmd {
             self.generated_availability.remove(id);
             self.binding_runtime.remove(id);
         }
-        self.document.apply(cmd.clone());
-
-        self.seq += 1;
+        self.seq = seq;
         if self.history.len() == HISTORY_CAPACITY {
             self.history.pop_front();
         }
-        self.history.push_back((self.seq, cmd));
-        self.seq
+        self.history.push_back((seq, cmd));
     }
 
     pub fn apply_generated_availability_delta(

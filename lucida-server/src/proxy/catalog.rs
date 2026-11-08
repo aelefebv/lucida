@@ -7,6 +7,8 @@ use lucida_content::{DatasetManifest, EntityId, EntityKind};
 use lucida_protocol::{ProxyAvailability, ProxyFootprint};
 use lucida_proxy::{ProxyKind, ProxySpec, estimate_proxy_dims};
 
+use super::server_source::proxy_holds_data_type;
+
 /// Soft cap on the longest output dimension of a proxy. Mirrors the value
 /// used by `serve_asset_request` so the cache key (which is derived from
 /// `(entity, kind, t, c)` only, not the target) stays in lockstep with the
@@ -18,6 +20,16 @@ pub(crate) fn proxy_catalog_entries_for_manifest(
     legacy_proxy_enabled: bool,
 ) -> Vec<ProxyAvailability> {
     if !legacy_proxy_enabled {
+        return vec![];
+    }
+    // A proxy holds u16 samples. Advertising one for other data would ask
+    // the generator for a proxy it refuses, so the viewer streams chunks
+    // instead.
+    if manifest
+        .images()
+        .iter()
+        .any(|image| !proxy_holds_data_type(image.multiscale.data_type))
+    {
         return vec![];
     }
 
@@ -83,6 +95,14 @@ mod tests {
     fn proxy_catalog_is_empty_on_default_path() {
         let manifest = single_image_manifest();
         let entries = proxy_catalog_entries_for_manifest(&manifest, false);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn proxy_catalog_skips_data_a_proxy_cannot_hold() {
+        let mut manifest = single_image_manifest();
+        manifest.images_mut()[0].multiscale.data_type = lucida_content::DataType::Float32;
+        let entries = proxy_catalog_entries_for_manifest(&manifest, true);
         assert!(entries.is_empty());
     }
 

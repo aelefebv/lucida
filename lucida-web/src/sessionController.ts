@@ -4,6 +4,7 @@ import {
   bridgeLog,
   type BridgeHandlers,
   type ClientId,
+  type CommandRejection,
   type DatasetImportWarning,
   type DatasetOpenProgressDiagnostic,
   type PresenceState,
@@ -141,6 +142,9 @@ export interface SessionControllerEvents {
    *  the author's own edits. */
   onRemoteDocumentChanged: () => void;
   onWorkspaceArchived: () => void;
+  /** The server refused one of this client's document commands; the bridge
+   *  is already fetching the snapshot that undoes it. */
+  onCommandRejected: (reason: CommandRejection) => void;
   /** Each dataset's import warnings, by dataset id, from the server's dataset
    *  health. A fresh map each time; datasets without warnings are absent. */
   onDatasetImportWarnings: (warnings: ReadonlyMap<string, readonly DatasetImportWarning[]>) => void;
@@ -1069,6 +1073,7 @@ export class SessionController {
         }
       },
       onAck: () => {},
+      onCommandRejected: (reason) => this.deps.events.onCommandRejected(reason),
       onBinary: (key, data) => {
         this.contentSource.handleBinary(key, data);
       },
