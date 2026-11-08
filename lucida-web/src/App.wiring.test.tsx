@@ -172,7 +172,7 @@ vi.mock("./renderer/renderClient.ts", () => {
     destroy() {}
     updateCursorData(_data: Float32Array, _count: number) {}
     removeLayerResources(_id: string) {}
-    gpuAtlases() { return { atlases: 0, bytes: 0 }; }
+    gpuMemory() { return null; }
     onGpuStatus() { return () => {}; }
   }
   return { RenderClient: MockRenderClient };

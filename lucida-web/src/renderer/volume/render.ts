@@ -21,6 +21,7 @@ import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
 import { packLabelPalette } from "../labelColors.ts";
 import { captureRenderedFrame } from "../worker/captureFrame.ts";
+import { trimOffscreenPool } from "../worker/resources.ts";
 
 /** Defensive fallback model transform. A real label layer always carries its source member's matrices. */
 const IDENTITY_4X4 = new Float32Array([
@@ -183,6 +184,8 @@ export async function handleVolumeRenderMultiPass(
 
   // One offscreen texture: each layer is rendered and composited in turn.
   const pool = ctx.ensureOffscreenPool(1, msg.canvasW, msg.canvasH);
+  // A slice frame before this one may have left more.
+  trimOffscreenPool(1);
 
   const canvasTexture = ctx.context.getCurrentTexture();
   const canvasView = canvasTexture.createView();

@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use bytes::Bytes;
 use object_store::path::Path;
 use serde::Deserialize;
 
@@ -58,27 +59,34 @@ pub struct ChunkGridConfig {
 
 /// Which Zarr version a dataset is stored in. One hierarchy is one version,
 /// so the dataset's root decides it for every group and array beneath.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// A Zarr v2 hierarchy may also have copied every metadata document into
+/// its root `.zmetadata`. A document found there is read from there, as
+/// zarr-python reads a consolidated hierarchy, which saves a round trip per
+/// group and per level.
+#[derive(Debug, Clone)]
 pub(crate) enum ZarrFormat {
-    V2,
+    V2 {
+        consolidated: Option<Arc<serde_json::Map<String, serde_json::Value>>>,
+    },
     V3,
 }
 
 impl ZarrFormat {
     /// The object holding the metadata of the group at `prefix`, or of the
     /// dataset root when `prefix` is empty.
-    pub(crate) fn group_key(self, prefix: &str) -> String {
+    pub(crate) fn group_key(&self, prefix: &str) -> String {
         let name = match self {
-            ZarrFormat::V2 => ".zattrs",
+            ZarrFormat::V2 { .. } => ".zattrs",
             ZarrFormat::V3 => "zarr.json",
         };
         join(prefix, name)
     }
 
     /// The object holding the metadata of the array at `prefix`.
-    fn array_key(self, prefix: &str) -> String {
+    fn array_key(&self, prefix: &str) -> String {
         let name = match self {
-            ZarrFormat::V2 => ".zarray",
+            ZarrFormat::V2 { .. } => ".zarray",
             ZarrFormat::V3 => "zarr.json",
         };
         join(prefix, name)
@@ -86,16 +94,84 @@ impl ZarrFormat {
 
     /// A group's metadata, as its v3 `zarr.json` would say it.
     pub(crate) fn group_json(
-        self,
+        &self,
         key: &str,
         bytes: &[u8],
     ) -> Result<serde_json::Value, StoreError> {
         let value = serde_json::from_slice(bytes)
             .map_err(|e| StoreError::malformed_metadata(format!("invalid JSON in {key}: {e}")))?;
         Ok(match self {
-            ZarrFormat::V2 => zarr_v2::group(value),
+            ZarrFormat::V2 { .. } => zarr_v2::group(value),
             ZarrFormat::V3 => value,
         })
+    }
+
+    /// The consolidated copy of the document at `key`, if there is one.
+    fn consolidated(&self, key: &str) -> Option<Bytes> {
+        let ZarrFormat::V2 {
+            consolidated: Some(documents),
+        } = self
+        else {
+            return None;
+        };
+        let document = documents.get(key)?;
+        Some(Bytes::from(serde_json::to_vec(document).ok()?))
+    }
+
+    /// The metadata document at `key`: its consolidated copy, or the object.
+    pub(crate) async fn document(
+        &self,
+        store: &CachedStore,
+        key: &str,
+    ) -> Result<Bytes, object_store::Error> {
+        match self.consolidated(key) {
+            Some(bytes) => Ok(bytes),
+            None => store.get_metadata_bytes(&Path::from(key)).await,
+        }
+    }
+
+    /// [`Self::document`] for one that may not exist. Consolidated metadata
+    /// covers the whole hierarchy, so a document it lacks is absent, as
+    /// zarr-python reads it, and costs no read.
+    async fn optional_document(
+        &self,
+        store: &CachedStore,
+        key: &str,
+    ) -> Result<Option<Bytes>, object_store::Error> {
+        match self {
+            ZarrFormat::V2 {
+                consolidated: Some(_),
+            } => Ok(self.consolidated(key)),
+            _ => store.get_optional_metadata_bytes(&Path::from(key)).await,
+        }
+    }
+}
+
+/// The documents of a `.zmetadata`, keyed by object path, or `None` when it
+/// is not Zarr v2 consolidated metadata. Consolidation only saves reads, so
+/// one that cannot be used is passed over, never fatal.
+fn consolidated_documents(bytes: &[u8]) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let value: serde_json::Value = match serde_json::from_slice(bytes) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(error = %e, "import.consolidated_metadata.malformed");
+            return None;
+        }
+    };
+    if value
+        .get("zarr_consolidated_format")
+        .and_then(|v| v.as_u64())
+        != Some(1)
+    {
+        tracing::warn!("import.consolidated_metadata.unknown_format");
+        return None;
+    }
+    match value.get("metadata") {
+        Some(serde_json::Value::Object(documents)) => Some(documents.clone()),
+        _ => {
+            tracing::warn!("import.consolidated_metadata.no_documents");
+            None
+        }
     }
 }
 
@@ -108,33 +184,57 @@ fn join(prefix: &str, name: &str) -> String {
 }
 
 /// Read the dataset root's group metadata and tell which Zarr version holds
-/// it. A v3 root costs the one read it always has; only a dataset with no
-/// `zarr.json` is asked for a v2 `.zattrs`.
+/// it. A v3 root costs the one read it always has. Only a dataset with no
+/// `zarr.json` is asked for a v2 `.zattrs`, and for its `.zmetadata` in the
+/// same round trip, so a hierarchy that consolidated nothing pays no extra
+/// wait for the chance.
 pub(crate) async fn read_root(
     store: &Arc<CachedStore>,
 ) -> Result<(ZarrFormat, serde_json::Value), StoreError> {
-    for format in [ZarrFormat::V3, ZarrFormat::V2] {
-        let key = format.group_key("");
-        if let Some(bytes) = store
-            .get_optional_metadata_bytes(&Path::from(key.as_str()))
-            .await?
-        {
-            return Ok((format, format.group_json(&key, &bytes)?));
-        }
+    if let Some(bytes) = store
+        .get_optional_metadata_bytes(&Path::from("zarr.json"))
+        .await?
+    {
+        return Ok((
+            ZarrFormat::V3,
+            ZarrFormat::V3.group_json("zarr.json", &bytes)?,
+        ));
     }
-    Err(StoreError::missing_metadata(
-        "no zarr.json (Zarr v3) or .zattrs (Zarr v2) at the dataset root",
-    ))
+    let (zattrs_key, zmetadata_key) = (Path::from(".zattrs"), Path::from(".zmetadata"));
+    let (zattrs, zmetadata) = tokio::join!(
+        store.get_optional_metadata_bytes(&zattrs_key),
+        store.get_optional_metadata_bytes(&zmetadata_key),
+    );
+    let consolidated = zmetadata?.and_then(|bytes| consolidated_documents(&bytes));
+    let found = consolidated.is_some();
+    let format = ZarrFormat::V2 {
+        consolidated: consolidated.map(Arc::new),
+    };
+    let attributes = match zattrs? {
+        Some(bytes) => bytes,
+        None => match format.consolidated(".zattrs") {
+            Some(bytes) => bytes,
+            // A consolidated group with no attributes is still a group.
+            None if found => Bytes::from_static(b"{}"),
+            None => {
+                return Err(StoreError::missing_metadata(
+                    "no zarr.json (Zarr v3) or .zattrs (Zarr v2) at the dataset root",
+                ));
+            }
+        },
+    };
+    let root = format.group_json(".zattrs", &attributes)?;
+    Ok((format, root))
 }
 
 /// Read and parse the metadata of the group at `prefix`.
 pub(crate) async fn read_group(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     prefix: &str,
 ) -> Result<serde_json::Value, StoreError> {
     let key = format.group_key(prefix);
-    let bytes = store.get_metadata_bytes(&Path::from(key.as_str())).await?;
+    let bytes = format.document(store, &key).await?;
     format.group_json(&key, &bytes)
 }
 
@@ -459,14 +559,11 @@ pub(crate) enum OptionalZarrJson {
 /// tell a definitive miss from an anomaly.
 pub(crate) async fn read_optional_group(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     prefix: &str,
 ) -> OptionalZarrJson {
     let path = format.group_key(prefix);
-    match store
-        .get_optional_metadata_bytes(&Path::from(path.as_str()))
-        .await
-    {
+    match format.optional_document(store, &path).await {
         Ok(Some(bytes)) => match format.group_json(&path, &bytes) {
             Ok(value) => OptionalZarrJson::Parsed(value),
             Err(e) => {
@@ -600,18 +697,16 @@ fn parse_label_color(entry: &serde_json::Value) -> Option<LabelColor> {
 /// wall time rather than one per level.
 pub(crate) async fn read_level_metas(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     base_prefix: &str,
     level_entries: &[LevelEntry],
 ) -> Result<Vec<ArrayMeta>, StoreError> {
     let reads = level_entries.iter().map(|entry| {
         let level = join(base_prefix, &entry.path);
         async move {
-            let level_bytes = store
-                .get_metadata_bytes(&Path::from(format.array_key(&level)))
-                .await?;
+            let level_bytes = format.document(store, &format.array_key(&level)).await?;
             match format {
-                ZarrFormat::V2 => zarr_v2::array_meta(&level_bytes),
+                ZarrFormat::V2 { .. } => zarr_v2::array_meta(&level_bytes),
                 ZarrFormat::V3 => {
                     serde_json::from_slice::<ArrayMeta>(&level_bytes).map_err(|e| e.to_string())
                 }
@@ -625,6 +720,46 @@ pub(crate) async fn read_level_metas(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consolidated_metadata_is_used_only_when_it_is_what_it_says() {
+        let documents = consolidated_documents(
+            br#"{"zarr_consolidated_format": 1, "metadata": {"0/.zarray": {"shape": [1]}}}"#,
+        )
+        .unwrap();
+        assert_eq!(documents["0/.zarray"]["shape"], serde_json::json!([1]));
+        for unusable in [
+            &b"not json"[..],
+            br#"{"zarr_consolidated_format": 2, "metadata": {}}"#,
+            br#"{"zarr_consolidated_format": 1}"#,
+        ] {
+            assert!(consolidated_documents(unusable).is_none());
+        }
+    }
+
+    /// A document the consolidated copy holds is read from it; one it lacks
+    /// is absent without a read, as zarr-python reads a consolidated
+    /// hierarchy.
+    #[tokio::test]
+    async fn a_consolidated_hierarchy_answers_from_its_copy() {
+        let store = Arc::new(CachedStore::new(
+            Arc::new(object_store::memory::InMemory::new()),
+            1 << 20,
+        ));
+        let documents = consolidated_documents(
+            br#"{"zarr_consolidated_format": 1, "metadata": {"A/.zattrs": {"well": {}}}}"#,
+        );
+        let format = ZarrFormat::V2 {
+            consolidated: documents.map(Arc::new),
+        };
+        let group = read_group(&store, &format, "A").await.unwrap();
+        assert!(group["attributes"]["well"].is_object());
+        assert!(matches!(
+            read_optional_group(&store, &format, "A/labels").await,
+            OptionalZarrJson::Absent
+        ));
+        assert_eq!(store.stats().source_reads, 0);
+    }
 
     /// A scale on the multiscale itself multiplies each level's own.
     #[test]
