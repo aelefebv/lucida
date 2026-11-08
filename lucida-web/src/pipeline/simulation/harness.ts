@@ -175,6 +175,11 @@ export interface PhaseOutcome {
    * phase does not count as settled.
    */
   held: string[];
+  /**
+   * Wanted chunks the source failed for good, each with the reason it gave.
+   * A view settles without them, and this is how the run names them.
+   */
+  failed: string[];
 }
 
 export interface SimulationRun {
@@ -563,6 +568,10 @@ class Simulation {
       resent: resent.map((r) => r.text),
       sourceRequests: this.source.requestCount,
       held: this.held.slice(heldBefore),
+      failed: this.cpuCache
+        .failedWantedChunks()
+        .map(({ chunk, failure }) => `${chunk}: ${failure ?? "failed with no reason given"}`)
+        .sort(),
     };
   }
 
@@ -647,6 +656,7 @@ function formatReport(name: string, dpr: number, phases: PhaseOutcome[]): string
       ...formatKeys("wanted by the worker, not on the GPU", p.missingGpu),
       ...formatKeys(`sent to the worker ${RESENT_THRESHOLD} or more times`, p.resent),
       ...formatKeys("held by the uploader to cut a feedback loop", p.held),
+      ...formatKeys("failed for good, so the view settles without them", p.failed),
     );
   }
   return lines.join("\n");

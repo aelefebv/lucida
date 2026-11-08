@@ -7,6 +7,7 @@
  */
 
 import type {
+  ChunkFailureKind,
   ContentSource,
   FetchResult,
   FetchProxyResult,
@@ -170,6 +171,8 @@ interface FailureRecord {
    *  not made yet: not a failure, but it waits like a transient one, unless an
    *  availability update names the chunk first. */
   kind: "permanent" | "transient" | "pending";
+  /** Why the server answered without bytes, when it said. */
+  failure: ChunkFailureKind | null;
   /** The chunk's composite key, which is how an availability update names it. */
   chunk: string;
   /** `now()` at the moment the failure was recorded (the transient backoff
@@ -1315,13 +1318,18 @@ export class CpuCache {
     out.pendingUnclassified = speculativePending === null;
     out.pending =
       this.chunkScheduler.pendingSize - (speculativePending ?? 0) + this.proxyScheduler.pendingSize;
+    out.failedDetailChunks = 0;
+    out.failedCoarseChunks = 0;
+    this.forEachFailedWantedKey((key) => {
+      if (this.desiredDetailKeysThisTick.has(key)) out.failedDetailChunks++;
+      else out.failedCoarseChunks++;
+    });
 
     out.uploadsUnanswered = this.deliveryState.chunksUnanswered;
     out.shortDetailChunks = shortfall.detail;
     out.shortCoarseChunks = shortfall.coarse;
     out.serverPendingChunks = 0;
     out.retryingChunks = 0;
-    out.failedChunks = 0;
     out.unrequestedChunks = 0;
     const unmet =
       demand.resident.detailChunks < demand.desired.detailChunks ||
@@ -1364,11 +1372,45 @@ export class CpuCache {
         }
         if (entry || this.chunkScheduler.hasInFlight(key)) continue;
         const record = this.getFailureRecord(key);
-        if (record?.kind === "permanent") out.failedChunks++;
-        else if (record?.kind === "pending") out.serverPendingChunks++;
+        // A permanent failure is counted with the failed chunks above.
+        if (record?.kind === "permanent") continue;
+        if (record?.kind === "pending") out.serverPendingChunks++;
         else if (record) out.retryingChunks++;
         else if (full[req.tier]) short(req.tier);
         else out.unrequestedChunks++;
+      }
+    }
+  }
+
+  /**
+   * The wanted chunks the source failed for good, with the reason it gave
+   * when it gave one. They are not asked for again until the dataset is
+   * reopened, so the view settles without them.
+   */
+  failedWantedChunks(): Array<{ chunk: string; failure: ChunkFailureKind | null }> {
+    const out: Array<{ chunk: string; failure: ChunkFailureKind | null }> = [];
+    this.forEachFailedWantedKey((_key, record) => {
+      out.push({ chunk: record.chunk, failure: record.failure });
+    });
+    return out;
+  }
+
+  /**
+   * Visit each wanted key with a permanent failure record, walking whichever
+   * of the two sets is smaller: both are bounded, but this runs every tick.
+   */
+  private forEachFailedWantedKey(visit: (key: string, record: FailureRecord) => void): void {
+    const wanted = this.desiredDetailKeysThisTick.size + this.desiredCoarseKeysThisTick.size;
+    if (this.permanentFailures.size <= wanted) {
+      for (const [key, record] of this.permanentFailures) {
+        if (this.isWanted(key)) visit(key, record);
+      }
+      return;
+    }
+    for (const keys of [this.desiredDetailKeysThisTick, this.desiredCoarseKeysThisTick]) {
+      for (const key of keys) {
+        const record = this.permanentFailures.get(key);
+        if (record) visit(key, record);
       }
     }
   }
@@ -1563,7 +1605,7 @@ export class CpuCache {
       }
 
       if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
-        traceRecorder.recordPointEvent(PointEvent.Retry, fe.kind, req, rowTier);
+        traceRecorder.recordPointEvent(PointEvent.Retry, fe.failure ?? fe.kind, req, rowTier);
         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
         return this.fetchAndDecode(
@@ -1584,10 +1626,10 @@ export class CpuCache {
         fed = true;
       }
       if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
-        this.recordFailure(key, isPermanent ? "permanent" : "transient", req);
+        this.recordFailure(key, isPermanent ? "permanent" : "transient", req, fe.failure);
         this.counters.recordFetchFailure(isPermanent, fe.message);
         this.recordFailureForBurstDetection(isPermanent, fe.message);
-        traceRecorder.recordPointEvent(PointEvent.Failure, fe.kind, req, rowTier);
+        traceRecorder.recordPointEvent(PointEvent.Failure, fe.failure ?? fe.kind, req, rowTier);
       }
       return;
     }
@@ -1939,7 +1981,12 @@ export class CpuCache {
    * Each store is FIFO-capped independently, so a flood of permanents cannot
    * evict a transient's backoff.
    */
-  private recordFailure(key: string, kind: FailureRecord["kind"], req: ChunkRequest): void {
+  private recordFailure(
+    key: string,
+    kind: FailureRecord["kind"],
+    req: ChunkRequest,
+    failure: ChunkFailureKind | null = null,
+  ): void {
     const chunk = `${req.datasetId}/${req.imageId}/${req.chunkKey}`;
     if (kind === "permanent") {
       this.transientFailures.delete(key);
@@ -1948,6 +1995,7 @@ export class CpuCache {
       this.permanentFailures.delete(key);
       this.permanentFailures.set(key, {
         kind,
+        failure,
         chunk,
         failedAt: this.now(),
         attempt: 0,
@@ -1969,6 +2017,7 @@ export class CpuCache {
     this.transientFailures.delete(key);
     this.transientFailures.set(key, {
       kind,
+      failure,
       chunk,
       failedAt,
       attempt,

@@ -2924,7 +2924,10 @@ mod tests {
 
     fn source_path(resolver: &ChunkResolver, key: &str) -> object_store::path::Path {
         resolver
-            .resolve(&ImageId("img-1".into()), key)
+            .resolve(
+                &ImageId("img-1".into()),
+                &lucida_content::ChunkKey::parse(key).unwrap(),
+            )
             .unwrap()
             .path()
             .clone()
@@ -2941,26 +2944,29 @@ mod tests {
                 store_prefix: None,
                 levels: levels
                     .iter()
-                    .map(|level| LevelBindingInfo {
-                        level_index: level.level_index,
-                        compression: StorageCompression::None,
-                        chunk_shape: level.chunk_shape.to_vec(),
-                        chunk_byte_layout: ChunkByteLayout {
-                            canonical_byte_size: checked_product(&[
-                                level.chunk_shape[2],
-                                level.chunk_shape[3],
-                                level.chunk_shape[4],
-                                data_type_size(data_type),
-                            ])
-                            .unwrap() as usize,
-                            on_disk_byte_size: 0,
-                            byte_stride_t: 0,
-                            byte_stride_c: 0,
-                            chunk_size_t: 1,
-                            chunk_size_c: 1,
-                        },
-                        shard: None,
-                        regrid: None,
+                    .map(|level| {
+                        let chunk_bytes = checked_product(&[
+                            level.chunk_shape[2],
+                            level.chunk_shape[3],
+                            level.chunk_shape[4],
+                            data_type_size(data_type),
+                        ])
+                        .unwrap() as usize;
+                        LevelBindingInfo {
+                            level_index: level.level_index,
+                            compression: StorageCompression::None,
+                            chunk_shape: level.chunk_shape.to_vec(),
+                            chunk_byte_layout: ChunkByteLayout {
+                                canonical_byte_size: chunk_bytes,
+                                on_disk_byte_size: chunk_bytes,
+                                byte_stride_t: 0,
+                                byte_stride_c: 0,
+                                chunk_size_t: 1,
+                                chunk_size_c: 1,
+                            },
+                            shard: None,
+                            regrid: None,
+                        }
                     })
                     .collect(),
             }],

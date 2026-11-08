@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import copy
 import json
 import os
 import platform
@@ -18,6 +17,8 @@ from urllib.request import Request, urlopen
 
 
 DEFAULT_SERVER = "http://localhost:9876"
+# The CLI's default too, so both clients change one viewer unless told otherwise.
+DEFAULT_VIEWER_PROFILE = "default"
 KEYCHAIN_SERVICE = "lucida-cli"
 
 
@@ -456,11 +457,23 @@ class WorkspacesResource:
 
 
 class WorkspaceResource:
-    def __init__(self, client: LucidaClient, record: dict[str, Any]):
+    """One workspace. ``view``, ``camera``, ``layer`` and ``channel`` change
+    the viewer profile ``viewer_profile`` names; see :class:`ViewerResource`."""
+
+    def __init__(
+        self,
+        client: LucidaClient,
+        record: dict[str, Any],
+        *,
+        viewer_profile: str = DEFAULT_VIEWER_PROFILE,
+    ):
         self._client = client
         self.record = record
+        self.viewer_profile = viewer_profile
         self.datasets = DatasetsResource(self)
+        self.viewer = ViewerResource(self)
         self.view = ViewResource(self)
+        self.camera = CameraResource(self)
         self.layer = LayerResource(self)
         self.channel = ChannelResource(self)
         self.saved_views = SavedViewsResource(self)
@@ -548,14 +561,7 @@ class DatasetsResource:
         URLs are deferred: each cell carries a full ``view`` object, which you
         pass back as ``view=`` to descend.
         """
-        try:
-            from lucida.lucida import explore as _explore  # noqa: PLC0415
-        except ImportError as error:
-            raise LucidaError(
-                "config",
-                "the compiled lucida extension is unavailable; build it with "
-                "`uv run maturin develop` in lucida-py",
-            ) from error
+        _explore = native_extension().explore
 
         summary = self.info(dataset, timeout=timeout)
         dims = summary.get("dimensions")
@@ -734,110 +740,225 @@ class DatasetsResource:
                 )
 
 
+class ViewerResource:
+    """The workspace's durable viewer profile.
+
+    The view, camera, layer and channel resources change this view rather than
+    a connection's presence, which the server drops when the connection
+    closes. The server keeps one profile per user and name, the same one the
+    CLI's ``--viewer-profile`` names, and a page opened at :attr:`web_url`
+    shows it. Every change goes through the compiled extension, which applies
+    it with the viewer's own commands, clamps and defaults.
+    """
+
+    def __init__(self, workspace: WorkspaceResource):
+        self._workspace = workspace
+
+    @property
+    def profile(self) -> str:
+        return self._workspace.viewer_profile
+
+    @property
+    def web_url(self) -> str:
+        """The page that opens this profile's view."""
+        return build_url(
+            self._workspace._client.server.url,
+            ["w", self._workspace.id],
+            {"viewer_profile": self.profile},
+        )
+
+    def state(self, *, timeout: float = 30.0) -> dict[str, Any]:
+        return run_sync(self.async_state(timeout=timeout))
+
+    async def async_state(self, *, timeout: float = 30.0) -> dict[str, Any]:
+        snapshot = await self._workspace.async_snapshot(timeout=timeout)
+        return self._state(snapshot)
+
+    def apply(self, command: Any, *, timeout: float = 30.0) -> dict[str, Any]:
+        return run_sync(self.async_apply(command, timeout=timeout))
+
+    async def async_apply(self, command: Any, *, timeout: float = 30.0) -> dict[str, Any]:
+        """Apply one viewport command to the profile and store the result.
+
+        ``command`` is a command in the core's tagged form, such as
+        ``{"type": "pan", "dx": 10.0, "dy": 0.0}``, or a function of the
+        workspace snapshot and the stored view that returns one.
+        """
+        snapshot = await self._workspace.async_snapshot(timeout=timeout)
+        return self._apply(snapshot, command)
+
+    def _state(self, snapshot: dict[str, Any]) -> dict[str, Any]:
+        record, view, seed_source = self._current()
+        scene = open_profile_scene(snapshot, view)
+        if seed_source is not None:
+            record = self._store(scene, seed_source)
+        return self._result(snapshot, record, scene, None)
+
+    def _apply(self, snapshot: dict[str, Any], command: Any) -> dict[str, Any]:
+        _, view, seed_source = self._current()
+        scene = open_profile_scene(snapshot, view)
+        if callable(command):
+            command = command(snapshot, json.loads(scene.saved_view_json()))
+        try:
+            scene.apply(json.dumps(command))
+        except LookupError as error:
+            raise LucidaError("missing_resource", str(error)) from error
+        except ValueError as error:
+            raise LucidaError("config", str(error)) from error
+        record = self._store(scene, seed_source)
+        return self._result(snapshot, record, scene, command)
+
+    def _current(self) -> tuple[dict[str, Any] | None, dict[str, Any] | None, str | None]:
+        """The stored record and its view, or, for a profile not stored yet,
+        the view it starts from and where that came from. A ``None`` view
+        starts with the visible datasets framed."""
+        record = self._workspace._client._request_json("GET", self._segments())
+        if record is not None:
+            return record, record["view"], None
+        default_id = self._workspace.record.get("default_saved_view_id")
+        if default_id:
+            saved = self._workspace.saved_views.get(default_id)
+            return None, saved["view"], f"default_saved_view:{default_id}"
+        return None, None, "workspace_snapshot"
+
+    def _store(self, scene: Any, seed_source: str | None) -> dict[str, Any]:
+        body: dict[str, Any] = {"view": json.loads(scene.saved_view_json())}
+        if seed_source is not None:
+            body["seed_source"] = seed_source
+        return self._workspace._client._request_json("PUT", self._segments(), body=body)
+
+    def _segments(self) -> list[str]:
+        return ["api", "workspaces", self._workspace.id, "viewer-profiles", self.profile]
+
+    def _result(
+        self,
+        snapshot: dict[str, Any],
+        record: dict[str, Any],
+        scene: Any,
+        command: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        view = json.loads(scene.saved_view_json())
+        return {
+            "workspace_id": self._workspace.id,
+            "profile": record["profile"],
+            "user_email": record["user_email"],
+            "updated_at": record["updated_at"],
+            "seed_source": record.get("seed_source"),
+            "snapshot_seq": snapshot.get("seq", 0),
+            "web_url": self.web_url,
+            "command": command,
+            "camera": view["camera"],
+            "view": view["view"],
+            "display": view["display"],
+            "dataset_order": view["dataset_order"],
+            "dataset_settings": view["dataset_settings"],
+            "saved_view": view,
+        }
+
+
 class ViewResource:
+    """The viewer profile's 2D slice camera and its selected Z, T and C."""
+
     def __init__(self, workspace: WorkspaceResource):
         self._workspace = workspace
 
     def pan(self, dx: float, dy: float, *, timeout: float = 30.0) -> dict[str, Any]:
-        def mutate(presence: dict[str, Any]) -> None:
-            camera = ensure_slice_camera(presence["camera"])
-            zoom = float(camera.get("zoom") or 1.0)
-            camera["center"][0] += dx / zoom
-            camera["center"][1] += dy / zoom
-
-        return self._apply(mutate, timeout=timeout)
+        """Pan the slice camera by ``dx``, ``dy`` screen pixels."""
+        return self._apply({"type": "pan", "dx": dx, "dy": dy}, timeout)
 
     def zoom(self, factor: float, *, timeout: float = 30.0) -> dict[str, Any]:
-        if factor <= 0:
-            raise LucidaError("config", "view.zoom factor must be positive")
-
-        def mutate(presence: dict[str, Any]) -> None:
-            camera = ensure_slice_camera(presence["camera"])
-            camera["zoom"] = float(camera.get("zoom") or 1.0) * factor
-
-        return self._apply(mutate, timeout=timeout)
+        return self._apply({"type": "zoom_by", "factor": factor}, timeout)
 
     def set_zoom(self, value: float, *, timeout: float = 30.0) -> dict[str, Any]:
-        if value <= 0:
-            raise LucidaError("config", "view.set_zoom value must be positive")
-
-        def mutate(presence: dict[str, Any]) -> None:
-            ensure_slice_camera(presence["camera"])["zoom"] = value
-
-        return self._apply(mutate, timeout=timeout)
+        return self._apply({"type": "set_zoom", "value": value}, timeout)
 
     def center(self, x: float, y: float, *, timeout: float = 30.0) -> dict[str, Any]:
-        def mutate(presence: dict[str, Any]) -> None:
-            ensure_slice_camera(presence["camera"])["center"] = [x, y]
-
-        return self._apply(mutate, timeout=timeout)
+        return self._apply({"type": "set_center", "x": x, "y": y}, timeout)
 
     def slice(self, axis: str, index: int, *, timeout: float = 30.0) -> dict[str, Any]:
         axis = axis.lower()
         if axis not in {"z", "t", "c"}:
             raise LucidaError("config", f"unknown slice axis: {axis}")
-
-        def mutate(presence: dict[str, Any]) -> None:
-            view = presence["view"]
-            if axis == "z":
-                set_z_range(view, index, index + 1)
-            else:
-                view[axis] = index
-
-        return self._apply(mutate, timeout=timeout)
+        return self._apply({"type": f"set_{axis}", axis: index}, timeout)
 
     def z_range(self, start: int, end: int, *, timeout: float = 30.0) -> dict[str, Any]:
-        if end <= start:
-            raise LucidaError("config", "view.z_range end must be greater than start")
-
-        def mutate(presence: dict[str, Any]) -> None:
-            set_z_range(presence["view"], start, end)
-
-        return self._apply(mutate, timeout=timeout)
+        return self._apply({"type": "set_z_range", "start": start, "end": end}, timeout)
 
     def viewport_size(self, width: int, height: int, *, timeout: float = 30.0) -> dict[str, Any]:
-        if width <= 0 or height <= 0:
-            raise LucidaError("config", "viewport dimensions must be positive")
+        return self._apply({"type": "set_viewport", "width": width, "height": height}, timeout)
 
-        def mutate(presence: dict[str, Any]) -> None:
-            presence["camera"]["viewport"] = [width, height]
+    def _apply(self, command: dict[str, Any], timeout: float) -> dict[str, Any]:
+        return self._workspace.viewer.apply(command, timeout=timeout)
 
-        return self._apply(mutate, timeout=timeout)
 
-    def _apply(self, mutator: Any, *, timeout: float) -> dict[str, Any]:
-        return run_sync(self.async_apply(mutator, timeout=timeout))
+class CameraResource:
+    """The viewer profile's camera mode and its 3D cameras.
 
-    async def async_apply(self, mutator: Any, *, timeout: float = 30.0) -> dict[str, Any]:
-        async with self._workspace._connect_ws() as ws:
-            snapshot = await recv_snapshot(ws, timeout)
-            presence = copy.deepcopy(own_presence(snapshot))
-            messages = break_follow_messages(presence)
-            mutator(presence)
-            messages.append(
-                {
-                    "type": "presence",
-                    "camera": presence["camera"],
-                    "view": presence["view"],
-                    "display": presence["display"],
-                }
-            )
-            for message in messages:
-                await send_json(ws, message)
-            return {
-                "snapshot_seq": snapshot.get("seq", 0),
-                "own_client_id": snapshot.get("your_id"),
-                "camera": presence["camera"],
-                "view": presence["view"],
-                "display": presence["display"],
-            }
+    A rotate, pan or zoom here switches the camera to arcball, and a fly tick
+    to fly, as the viewer's 3D controls do. The 2D slice camera moves through
+    :class:`ViewResource`, which refuses to move a 3D camera.
+    """
+
+    _MODES = {"slice": "set_mode_slice", "arcball": "set_mode_arcball", "fly": "set_mode_fly"}
+
+    def __init__(self, workspace: WorkspaceResource):
+        self._workspace = workspace
+
+    def mode(self, mode: str, *, timeout: float = 30.0) -> dict[str, Any]:
+        command = self._MODES.get(mode.lower())
+        if command is None:
+            raise LucidaError("config", "camera.mode must be 'slice', 'arcball' or 'fly'")
+        return self._apply({"type": command}, timeout)
+
+    def rotate(self, d_theta: float, d_phi: float, *, timeout: float = 30.0) -> dict[str, Any]:
+        """Orbit the arcball camera by ``d_theta`` and ``d_phi`` radians."""
+        return self._apply({"type": "arcball_rotate", "d_theta": d_theta, "d_phi": d_phi}, timeout)
+
+    def pan(self, dx: float, dy: float, *, timeout: float = 30.0) -> dict[str, Any]:
+        return self._apply({"type": "arcball_pan", "dx": dx, "dy": dy}, timeout)
+
+    def zoom(self, delta: float, *, timeout: float = 30.0) -> dict[str, Any]:
+        """Scale the arcball distance by ``1 + delta``, so a negative delta moves in."""
+        return self._apply({"type": "arcball_zoom", "delta": delta}, timeout)
+
+    def fly_tick(
+        self,
+        *,
+        dt: float = 1.0 / 60.0,
+        forward: float = 0.0,
+        right: float = 0.0,
+        up: float = 0.0,
+        yaw: float = 0.0,
+        pitch: float = 0.0,
+        roll: float = 0.0,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        return self._apply(
+            {
+                "type": "fly_tick",
+                "dt": dt,
+                "forward": forward,
+                "right": right,
+                "up": up,
+                "yaw": yaw,
+                "pitch": pitch,
+                "roll": roll,
+            },
+            timeout,
+        )
+
+    def _apply(self, command: dict[str, Any], timeout: float) -> dict[str, Any]:
+        return self._workspace.viewer.apply(command, timeout=timeout)
 
 
 class LayerResource:
+    """Per-dataset display settings in the viewer profile."""
+
     def __init__(self, workspace: WorkspaceResource):
         self._workspace = workspace
 
     def list(self, *, timeout: float = 30.0) -> list[dict[str, Any]]:
-        """Each dataset with its display settings, in this client's presence.
+        """Each dataset with its display settings, in layer order.
 
         ``settings["detail_level_override"]`` is the dataset's level pin:
         ``None`` means the target level follows the screen, and a number pins
@@ -845,47 +966,36 @@ class LayerResource:
         same thing in words.
         """
         snapshot = self._workspace.snapshot(timeout=timeout)
-        presence = own_presence(snapshot)
-        summaries = dataset_summaries_from_document(snapshot.get("document", {}))
-        settings = presence.get("dataset_settings") or {}
-        order = presence.get("dataset_order") or [item["workspace_dataset_id"] for item in summaries]
-        layers = []
-        for summary in summaries:
-            dataset_id = summary["workspace_dataset_id"]
-            layer_settings = settings.get(dataset_id, default_dataset_settings())
-            layers.append(
-                {
-                    **summary,
-                    "settings": layer_settings,
-                    "level_pin": level_pin_label(layer_settings),
-                    "order_index": order.index(dataset_id) if dataset_id in order else None,
-                }
-            )
-        return layers
+        state = self._workspace.viewer._state(snapshot)
+        summaries = {
+            summary["workspace_dataset_id"]: summary
+            for summary in dataset_summaries_from_document(snapshot.get("document", {}))
+        }
+        return [
+            {
+                **summaries[dataset_id],
+                "settings": state["dataset_settings"][dataset_id],
+                "level_pin": level_pin_label(state["dataset_settings"][dataset_id]),
+                "order_index": index,
+            }
+            for index, dataset_id in enumerate(state["dataset_order"])
+        ]
 
     def order(self, datasets: list[str], *, timeout: float = 30.0) -> dict[str, Any]:
-        def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            summaries = dataset_summaries_from_document(snapshot.get("document", {}))
-            presence["dataset_order"] = [resolve_dataset_id(item, summaries) for item in datasets]
-
-        return self._apply(mutate, timeout=timeout)
+        """Put ``datasets`` first, keeping the rest in their current order."""
+        return self._workspace.viewer.apply(
+            lambda snapshot, _view: {
+                "type": "set_dataset_order",
+                "order": [snapshot_dataset_id(snapshot, item) for item in datasets],
+            },
+            timeout=timeout,
+        )
 
     def visible(self, dataset: str, visible: bool, *, timeout: float = 30.0) -> dict[str, Any]:
-        def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            settings = ensure_dataset_settings(snapshot, presence, dataset)
-            settings["visible"] = visible
-
-        return self._apply(mutate, timeout=timeout)
+        return self._apply("set_dataset_visible", dataset, {"visible": visible}, timeout)
 
     def opacity(self, dataset: str, opacity: float, *, timeout: float = 30.0) -> dict[str, Any]:
-        if opacity < 0 or opacity > 1:
-            raise LucidaError("config", "layer.opacity must be between 0 and 1")
-
-        def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            settings = ensure_dataset_settings(snapshot, presence, dataset)
-            settings["opacity"] = opacity
-
-        return self._apply(mutate, timeout=timeout)
+        return self._apply("set_dataset_opacity", dataset, {"opacity": opacity}, timeout)
 
     def contrast(
         self,
@@ -893,50 +1003,51 @@ class LayerResource:
         min: float,
         max: float,
         *,
+        channel: int | None = None,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        if max <= min:
-            raise LucidaError("config", "layer.contrast max must be greater than min")
+        """Set the contrast window of ``channel``, or of the selected channel,
+        as the layer panel does. It also stops auto-contrast for the layer."""
+        return self._apply(
+            "set_channel_contrast", dataset, {"min": min, "max": max}, timeout, channel=channel
+        )
 
-        def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            settings = ensure_dataset_settings(snapshot, presence, dataset)
-            settings["contrast_min"] = min
-            settings["contrast_max"] = max
+    def gamma(
+        self,
+        dataset: str,
+        gamma: float,
+        *,
+        channel: int | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Set the gamma of ``channel``, or of the selected channel."""
+        return self._apply("set_channel_gamma", dataset, {"gamma": gamma}, timeout, channel=channel)
 
-        return self._apply(mutate, timeout=timeout)
-
-    def gamma(self, dataset: str, gamma: float, *, timeout: float = 30.0) -> dict[str, Any]:
-        if gamma <= 0:
-            raise LucidaError("config", "layer.gamma must be positive")
-
-        def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            ensure_dataset_settings(snapshot, presence, dataset)["gamma"] = gamma
-
-        return self._apply(mutate, timeout=timeout)
-
-    def _apply(self, mutator: Any, *, timeout: float) -> dict[str, Any]:
-        return run_sync(self.async_apply(mutator, timeout=timeout))
-
-    async def async_apply(self, mutator: Any, *, timeout: float = 30.0) -> dict[str, Any]:
-        async with self._workspace._connect_ws() as ws:
-            snapshot = await recv_snapshot(ws, timeout)
-            presence = copy.deepcopy(own_presence(snapshot))
-            mutator(snapshot, presence)
-            message = {
-                "type": "dataset_presence",
-                "dataset_order": presence.get("dataset_order") or [],
-                "dataset_settings": presence.get("dataset_settings") or {},
+    def _apply(
+        self,
+        command_type: str,
+        dataset: str,
+        fields: dict[str, Any],
+        timeout: float,
+        *,
+        channel: int | None = None,
+    ) -> dict[str, Any]:
+        def command(snapshot: dict[str, Any], view: dict[str, Any]) -> dict[str, Any]:
+            built = {
+                "type": command_type,
+                "dataset_id": snapshot_dataset_id(snapshot, dataset),
+                **fields,
             }
-            await send_json(ws, message)
-            return {
-                "snapshot_seq": snapshot.get("seq", 0),
-                "own_client_id": snapshot.get("your_id"),
-                "dataset_order": message["dataset_order"],
-                "dataset_settings": message["dataset_settings"],
-            }
+            if command_type.startswith("set_channel_"):
+                built["channel"] = view["view"]["c"] if channel is None else channel
+            return built
+
+        return self._workspace.viewer.apply(command, timeout=timeout)
 
 
 class ChannelResource:
+    """Per-channel display settings in the viewer profile."""
+
     def __init__(self, workspace: WorkspaceResource):
         self._workspace = workspace
 
@@ -944,37 +1055,21 @@ class ChannelResource:
         mode = mode.lower()
         if mode not in {"single", "multi"}:
             raise LucidaError("config", "channel.mode must be 'single' or 'multi'")
-
-        def mutate(presence: dict[str, Any]) -> None:
-            presence["view"]["multi_channel"] = mode == "multi"
-
-        return self._workspace.view._apply(mutate, timeout=timeout)
+        return self._workspace.viewer.apply(
+            {"type": "set_multi_channel", "enabled": mode == "multi"}, timeout=timeout
+        )
 
     def visible(
-        self,
-        dataset: str,
-        channel: int,
-        visible: bool,
-        *,
-        timeout: float = 30.0,
+        self, dataset: str, channel: int, visible: bool, *, timeout: float = 30.0
     ) -> dict[str, Any]:
-        def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            ensure_channel_settings(snapshot, presence, dataset, channel)["visible"] = visible
-
-        return self._workspace.layer._apply(mutate, timeout=timeout)
+        return self._apply("set_channel_visible", dataset, channel, {"visible": visible}, timeout)
 
     def colormap(
-        self,
-        dataset: str,
-        channel: int,
-        colormap: str,
-        *,
-        timeout: float = 30.0,
+        self, dataset: str, channel: int, colormap: str, *, timeout: float = 30.0
     ) -> dict[str, Any]:
-        def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            ensure_channel_settings(snapshot, presence, dataset, channel)["colormap"] = colormap
-
-        return self._workspace.layer._apply(mutate, timeout=timeout)
+        return self._apply(
+            "set_channel_colormap", dataset, channel, {"colormap": colormap}, timeout
+        )
 
     def contrast(
         self,
@@ -985,31 +1080,26 @@ class ChannelResource:
         *,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        if max <= min:
-            raise LucidaError("config", "channel.contrast max must be greater than min")
-
-        def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            settings = ensure_channel_settings(snapshot, presence, dataset, channel)
-            settings["contrast_min"] = min
-            settings["contrast_max"] = max
-
-        return self._workspace.layer._apply(mutate, timeout=timeout)
+        """Set the channel's contrast window. It also stops auto-contrast for
+        the layer, as setting it by hand in the viewer does."""
+        return self._apply(
+            "set_channel_contrast", dataset, channel, {"min": min, "max": max}, timeout
+        )
 
     def gamma(
+        self, dataset: str, channel: int, gamma: float, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return self._apply("set_channel_gamma", dataset, channel, {"gamma": gamma}, timeout)
+
+    def _apply(
         self,
+        command_type: str,
         dataset: str,
         channel: int,
-        gamma: float,
-        *,
-        timeout: float = 30.0,
+        fields: dict[str, Any],
+        timeout: float,
     ) -> dict[str, Any]:
-        if gamma <= 0:
-            raise LucidaError("config", "channel.gamma must be positive")
-
-        def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
-            ensure_channel_settings(snapshot, presence, dataset, channel)["gamma"] = gamma
-
-        return self._workspace.layer._apply(mutate, timeout=timeout)
+        return self._workspace.layer._apply(command_type, dataset, fields, timeout, channel=channel)
 
 
 class DebugResource:
@@ -1373,38 +1463,6 @@ def dataset_open_error_kind(diagnostic: Any) -> str:
     return "dataset_open_failure"
 
 
-def own_presence(snapshot: dict[str, Any]) -> dict[str, Any]:
-    own_id = snapshot.get("your_id")
-    for peer in snapshot.get("peers") or []:
-        if peer.get("client_id") == own_id:
-            return peer
-    raise LucidaError("protocol", "workspace snapshot did not include this client presence")
-
-
-def break_follow_messages(presence: dict[str, Any]) -> list[dict[str, Any]]:
-    if presence.get("following") is None:
-        return []
-    presence["following"] = None
-    return [{"type": "follow", "target": None}]
-
-
-def ensure_slice_camera(camera: dict[str, Any]) -> dict[str, Any]:
-    if camera.get("mode") != "slice":
-        raise LucidaError("config", "operation requires slice camera mode")
-    camera.setdefault("center", [0.0, 0.0])
-    camera.setdefault("zoom", 1.0)
-    camera.setdefault("viewport", [800, 600])
-    return camera
-
-
-def set_z_range(view: dict[str, Any], start: int, end: int) -> None:
-    existing = view.get("z_range")
-    if isinstance(existing, list):
-        view["z_range"] = [start, end]
-    else:
-        view["z_range"] = {"start": start, "end": end}
-
-
 def level_pin_label(settings: dict[str, Any]) -> str:
     """How a dataset's level pin reads. An absent pin follows the screen."""
     level = settings.get("detail_level_override")
@@ -1413,66 +1471,33 @@ def level_pin_label(settings: dict[str, Any]) -> str:
     return f"pinned to level {level}"
 
 
-def default_dataset_settings(channel_count: int = 0) -> dict[str, Any]:
-    return {
-        "visible": True,
-        "opacity": 1.0,
-        "contrast_min": 0.0,
-        "contrast_max": 65535.0,
-        "gamma": 1.0,
-        "blend_mode": "alpha",
-        "render_mode": "translucent",
-        "channel_settings": [
-            default_channel_settings(index)
-            for index in range(channel_count)
-        ],
-        "channel_blend_mode": "additive",
-        "detail_level_override": None,
-    }
-
-
-def default_channel_settings(index: int = 0) -> dict[str, Any]:
-    colormaps = ["magenta", "green", "cyan"]
-    return {
-        "visible": True,
-        "colormap": colormaps[index % len(colormaps)],
-        "contrast_min": 0.0,
-        "contrast_max": 65535.0,
-        "gamma": 1.0,
-    }
-
-
-def ensure_dataset_settings(
-    snapshot: dict[str, Any],
-    presence: dict[str, Any],
-    dataset: str,
-) -> dict[str, Any]:
+def snapshot_dataset_id(snapshot: dict[str, Any], selector: str) -> str:
     summaries = dataset_summaries_from_document(snapshot.get("document", {}))
-    summary = resolve_dataset_id_or_name(dataset, summaries)
-    dataset_id = summary["workspace_dataset_id"]
-    settings_by_dataset = presence.setdefault("dataset_settings", {})
-    if dataset_id not in settings_by_dataset:
-        settings_by_dataset[dataset_id] = default_dataset_settings(
-            int(summary.get("channel_count") or 0)
+    return resolve_dataset_id(selector, summaries)
+
+
+def native_extension() -> Any:
+    try:
+        from lucida import lucida as extension  # noqa: PLC0415
+    except ImportError as error:
+        raise LucidaError(
+            "config",
+            "the compiled lucida extension is unavailable; build it with "
+            "`uv run maturin develop` in lucida-py",
+        ) from error
+    return extension
+
+
+def open_profile_scene(snapshot: dict[str, Any], view: dict[str, Any] | None) -> Any:
+    """``view`` opened over the snapshot's document, or, when it is ``None``,
+    the view a new viewer profile starts from."""
+    document = json.dumps(snapshot.get("document") or {})
+    try:
+        return native_extension().ProfileScene(
+            document, None if view is None else json.dumps(view)
         )
-    if not presence.get("dataset_order"):
-        presence["dataset_order"] = [item["workspace_dataset_id"] for item in summaries]
-    return settings_by_dataset[dataset_id]
-
-
-def ensure_channel_settings(
-    snapshot: dict[str, Any],
-    presence: dict[str, Any],
-    dataset: str,
-    channel: int,
-) -> dict[str, Any]:
-    if channel < 0:
-        raise LucidaError("config", "channel index must be non-negative")
-    dataset_settings = ensure_dataset_settings(snapshot, presence, dataset)
-    channels = dataset_settings.setdefault("channel_settings", [])
-    while len(channels) <= channel:
-        channels.append(default_channel_settings(len(channels)))
-    return channels[channel]
+    except ValueError as error:
+        raise LucidaError("protocol", str(error)) from error
 
 
 async def recv_snapshot(ws: Any, timeout: float) -> dict[str, Any]:
@@ -1530,6 +1555,8 @@ def run_sync(coro: Any) -> Any:
 
 __all__ = [
     "AuthResource",
+    "CameraResource",
+    "ChannelResource",
     "ConfigStore",
     "DatasetsResource",
     "DebugResource",
@@ -1543,6 +1570,7 @@ __all__ = [
     "ServerResource",
     "UrllibTransport",
     "ViewResource",
+    "ViewerResource",
     "WorkspaceResource",
     "WorkspacesResource",
     "normalize_server_base_url",

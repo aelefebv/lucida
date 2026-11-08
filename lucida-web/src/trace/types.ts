@@ -7,6 +7,7 @@
  * and *end reason* is why a run closed.
  */
 
+import type { ChunkFailureKind } from "../pipeline/fetch/contentSource.ts";
 import type { FetchErrorKind } from "../pipeline/fetch/retry.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { ChunkFeedbackReason, GpuErrorKind, LevelRange } from "../renderer/workerProtocol.ts";
@@ -998,21 +999,40 @@ export type LevelChangeReason = (typeof LEVEL_CHANGE_REASONS)[number];
  */
 export type HeldReason = ChunkFeedbackReason | "not-resident";
 
+/**
+ * Why the server answered a chunk request without bytes, so a failure or a
+ * retry names the cause the server gave and not only whether it retries.
+ */
+const CHUNK_FAILURE_REASONS = [
+  "malformed_key",
+  "unknown_dataset",
+  "unknown_image",
+  "unknown_level",
+  "corrupt_chunk",
+  "wrong_size",
+  "unsupported_codec",
+  "permission",
+  "storage_backend",
+] as const satisfies readonly ChunkFailureKind[];
+
 export const POINT_EVENT_REASONS = [
   ...FETCH_ERROR_REASONS,
   ...CHUNK_FEEDBACK_REASONS,
   ...LEVEL_CHANGE_REASONS,
   "not-resident",
   ...GPU_ERROR_REASONS,
+  ...CHUNK_FAILURE_REASONS,
 ] as const;
 export type PointEventReason = (typeof POINT_EVENT_REASONS)[number];
 
 const _coversFetchErrors: FetchErrorKind extends PointEventReason ? true : never = true;
 const _coversChunkFeedback: ChunkFeedbackReason extends PointEventReason ? true : never = true;
 const _coversGpuErrors: GpuErrorKind extends PointEventReason ? true : never = true;
+const _coversChunkFailures: ChunkFailureKind extends PointEventReason ? true : never = true;
 void _coversFetchErrors;
 void _coversChunkFeedback;
 void _coversGpuErrors;
+void _coversChunkFailures;
 
 /**
  * The identity a point event copies off whatever it happened to: a planned

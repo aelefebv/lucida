@@ -298,6 +298,37 @@ describe("a transient source failure", () => {
   );
 });
 
+describe("a permanent source failure", () => {
+  // The coarse chunk is wanted at both ratios, and the source answers it with
+  // bytes that will not decode. Nothing asks for it again, so the view
+  // settles without it and says why, instead of waiting for it forever.
+  const scenario = describeScenario({
+    name: "permanent source failure",
+    dataset: singleImage({ id: "broken", pyramid: IMAGE_1024 }),
+    source: {
+      answer: (req) =>
+        req.chunkKey === "3/0/0/0/0/0"
+          ? { status: "failed_permanent", failure: "corrupt_chunk" }
+          : "ready",
+    },
+    // The worker still wants the chunk that failed.
+    gpuComplete: false,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles at device pixel ratio ${dpr} with the failure named`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.failed).toEqual(["broken/broken-image/3/0/0/0/0/0: corrupt_chunk"]);
+      // The failed chunk is the only one the view goes without, and it was
+      // asked for once: a permanent failure is not retried.
+      expect(open.missingGpu).toHaveLength(1);
+      expect(open.missingGpu[0]).toContain("3/0/0/0/0/0");
+      expect(open.missingGpu[0]).toContain("source answered corrupt_chunk (1 request)");
+    });
+  }
+});
+
 describe("a source failure that outlasts its first backoff", () => {
   // The detail chunk in the view's corner fails its first four requests:
   // two fetches, each with its in-fetch retry. The view waits out one

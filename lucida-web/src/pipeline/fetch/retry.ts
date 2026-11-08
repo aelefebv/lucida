@@ -3,6 +3,7 @@
 // block boundary that promotes/wraps non-FetchError throws.
 
 import { debugLog } from "../../debug/logging.ts";
+import type { ChunkFailureKind } from "./contentSource.ts";
 
 /**
  * - `permanent`: same failure on retry — record + surface, no retry.
@@ -24,14 +25,22 @@ export class FetchError extends Error {
    * cannot masquerade as a dead source. Independent of retry classification.
    */
   readonly serverReported: boolean;
+  /** Why the server answered without bytes, when it said. */
+  readonly failure: ChunkFailureKind | null;
 
   constructor(
     message: string,
-    opts: { kind: FetchErrorKind; serverReported?: boolean; cause?: unknown },
+    opts: {
+      kind: FetchErrorKind;
+      serverReported?: boolean;
+      failure?: ChunkFailureKind | null;
+      cause?: unknown;
+    },
   ) {
     super(message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
     this.kind = opts.kind;
     this.serverReported = opts.serverReported ?? false;
+    this.failure = opts.failure ?? null;
     this.name = "FetchError";
   }
 }
