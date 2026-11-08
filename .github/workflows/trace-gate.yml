@@ -80,7 +80,7 @@ jobs:
             runs: volume-render collection single-level
             saves-cache: false
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -182,7 +182,7 @@ jobs:
       # header, which is what `lucida trace show` and `trace replay` read.
       - name: Upload runs and bundles
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trace-gate-runs-${{ strategy.job-index }}
           path: ${{ runner.temp }}/gate-out

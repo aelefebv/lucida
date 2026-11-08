@@ -45,7 +45,7 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -99,7 +99,7 @@ jobs:
       # directory. Line tables still put a file and line in a backtrace.
       CARGO_PROFILE_DEV_DEBUG: line-tables-only
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -120,7 +120,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust + wasm32 target
         uses: dtolnay/rust-toolchain@stable
@@ -137,7 +137,7 @@ jobs:
       # release: release downloads can return 504s for long stretches.
       - name: Cache wasm-pack
         id: wasm-pack-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/wasm-pack*
           key: wasm-pack-${{ env.WASM_PACK_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -201,7 +201,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust + wasm32 target
         uses: dtolnay/rust-toolchain@stable
@@ -217,7 +217,7 @@ jobs:
       # As in the web job.
       - name: Cache wasm-pack
         id: wasm-pack-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/wasm-pack*
           key: wasm-pack-${{ env.WASM_PACK_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -257,7 +257,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The release asset comes through the REST API first and the github.com
       # download URL second: the download URL can return 504s for long
@@ -291,7 +291,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Skip the build entirely on PRs that don't touch the Docker
       # build context. The rust + web jobs already prove the code
@@ -418,7 +418,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The reference manifests in extras/deploy/k8s/ ship with
       # <UPPERCASE-WITH-DASHES> placeholders. Substitute
@@ -484,7 +484,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable

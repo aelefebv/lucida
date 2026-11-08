@@ -23,7 +23,7 @@ lucida-protocol = { path = "../lucida-protocol" }
 lucida-store = { path = "../lucida-store" }
 # No `extension-module` feature: pyo3 deprecates it, and maturin sets
 # PYO3_BUILD_EXTENSION_MODULE for its own builds instead.
-pyo3 = "0.29"
+pyo3 = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread"] }
