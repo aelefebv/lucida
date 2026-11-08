@@ -93,10 +93,10 @@ const PER_EVENT_BUDGET_NS: Readonly<Record<number, number>> = {
 };
 
 /** A row birth's budget in nominal nanoseconds, about twice the typical figure, at any burst size. */
-const ROW_BIRTH_BUDGET_NS = 370;
+const ROW_BIRTH_BUDGET_NS = 300;
 
 /** Tick budgets in nominal microseconds, about twice each typical figure. */
-const WORST_TICK_BUDGET_US = 1_100;
+const WORST_TICK_BUDGET_US = 900;
 const MATCHED_TICK_BUDGET_US = 14;
 const LIVE_READ_BUDGET_US = 2.1;
 
