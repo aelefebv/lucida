@@ -402,11 +402,10 @@ fn cold_as_the_run_was(cache_warmth: &Value) -> Result<(), String> {
     }
     let count = |key: &str| fields.get(key).and_then(Value::as_f64).unwrap_or(0.0);
     Err(format!(
-        "the run's browser held {} detail chunks, {} coarse chunks, and {} proxy asset bytes; a \
-         fresh browser profile starts cold",
+        "the run's browser held {} detail chunks and {} coarse chunks; a fresh browser profile \
+         starts cold",
         count("detailChunks"),
-        count("coarseChunks"),
-        count("proxyBytes")
+        count("coarseChunks")
     ))
 }
 
@@ -759,7 +758,7 @@ mod tests {
         bundle.header.build = None;
         bundle.header.gpu = None;
         bundle.header.cache_warmth = json!({
-            "detailChunks": 12, "detailBytes": 4096, "coarseChunks": 3, "coarseBytes": 512, "proxyBytes": 0
+            "detailChunks": 12, "detailBytes": 4096, "coarseChunks": 3, "coarseBytes": 512
         });
 
         let plan = ReplayPlan::from_bundle(&bundle, Path::new("b.json")).unwrap();

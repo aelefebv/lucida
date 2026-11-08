@@ -771,7 +771,6 @@ describe("the send side", () => {
     expect(byType.presence).toMatchObject({ messages: 40, bytes: 12_000, bytesPerS: 1_200 });
     expect(byType.viewerInterest).toMatchObject({ messages: 10, bytes: 1_200, bytesPerS: 120 });
     expect(byType.chunkRequest).toMatchObject({ messages: 12, bytes: 1_176, bytesPerS: 118 });
-    expect(byType.assetRequest).toMatchObject({ messages: 0, bytes: 0, bytesPerS: 0 });
   });
 
   it("reads the run's totals rather than summing the tick samples", () => {

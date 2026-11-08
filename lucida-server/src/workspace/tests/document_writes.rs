@@ -55,7 +55,7 @@ async fn a_refused_write_leaves_memory_and_the_database_at_one_seq() {
     let (store, pool) = fresh_store_with_pool().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
     let mut peer = live.tx.subscribe();
 
@@ -103,7 +103,7 @@ async fn a_refused_rename_leaves_the_name_in_memory_and_the_database() {
     let (store, pool) = fresh_store_with_pool().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     refuse_document_writes(&pool).await;
@@ -145,7 +145,7 @@ async fn commands_from_two_clients_leave_the_database_at_the_highest_seq() {
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
     manager
         .upsert_member(
@@ -209,7 +209,7 @@ async fn a_refused_command_tells_its_sender_why() {
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
     let (url, server) = serve_workspace_socket(manager, owner.clone(), &workspace_id).await;
     let mut socket = connect_socket(&url).await;
@@ -241,8 +241,8 @@ async fn two_writers_on_one_workspace(
     owner: &AuthPrincipal,
 ) -> (WorkspaceManager, WorkspaceManager, String, DatasetId) {
     let (workspace_id, wds_id) = seed_workspace_with_dataset(store, owner, "layer.zarr").await;
-    let here = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
-    let elsewhere = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let here = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
+    let elsewhere = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     (here, elsewhere, workspace_id, wds_id)
 }
 
@@ -345,7 +345,7 @@ async fn retiring_a_replaced_live_workspace_leaves_its_replacement_serving() {
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
         idle_eviction_config(),
     );
     let replaced = manager.live_workspace(&workspace_id, &owner).await.unwrap();

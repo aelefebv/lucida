@@ -1,19 +1,16 @@
 /**
- * Tests for `dispatchChunk` + `dispatchProxy`.
+ * Tests for `dispatchChunk`.
  *
- * Both helpers thinly wrap RenderClient methods; the test surface is
+ * The helper thinly wraps RenderClient methods; the test surface is
  * "given a delivery + meta, the right client method is called with the
  * right positional arguments." No counter accounting / tracker writes
  * happen here — those live at the caller (the run*Pass helpers).
  */
 import { describe, it, expect, vi } from "vitest";
-import type {
-  ReadyChunkDelivery,
-  ReadyProxyDelivery,
-} from "../../fetch/index.ts";
+import type { ReadyChunkDelivery } from "../../fetch/index.ts";
 import type { RenderClient } from "../../../renderer/renderClient.ts";
 import type { SceneEpochs } from "../../epochs.ts";
-import { dispatchChunk, dispatchProxy } from "./dispatch.ts";
+import { dispatchChunk } from "./dispatch.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
 import type { ImageSpec } from "../../../manifestTypes.ts";
 
@@ -22,7 +19,6 @@ const EPOCHS: SceneEpochs = {
   layout: 1,
   view: 1,
   selection: 1,
-  asset: 0,
   request: 1,
 };
 
@@ -76,7 +72,6 @@ function makeChunkDelivery(
   overrides: Partial<ReadyChunkDelivery> = {},
 ): ReadyChunkDelivery {
   return {
-    kind: "chunk",
     entityId: "tile-0",
     imageId: "img-0",
     level: 1,
@@ -95,47 +90,20 @@ function makeChunkDelivery(
   };
 }
 
-function makeProxyDelivery(
-  overrides: Partial<ReadyProxyDelivery> = {},
-): ReadyProxyDelivery {
-  return {
-    kind: "proxy",
-    datasetId: "ds1",
-    entityId: "tile-0",
-    imageId: "img-0",
-    proxyKind: "TileProxy3D",
-    t: 0,
-    c: 0,
-    header: {
-      algorithmVersion: 1,
-      sourceContentHash: new Uint8Array(32),
-      dims: [4, 4, 4],
-      dtype: "u16",
-    },
-    data: new ArrayBuffer(256),
-    epochs: EPOCHS,
-    ...overrides,
-  };
-}
-
 function makeMockClient(): {
   client: RenderClient;
   sliceChunkData: ReturnType<typeof vi.fn>;
   volumeChunkData: ReturnType<typeof vi.fn>;
-  proxyAssetData: ReturnType<typeof vi.fn>;
 } {
   const sliceChunkData = vi.fn();
   const volumeChunkData = vi.fn();
-  const proxyAssetData = vi.fn();
   return {
     client: {
       sliceChunkData,
       volumeChunkData,
-      proxyAssetData,
     } as unknown as RenderClient,
     sliceChunkData,
     volumeChunkData,
-    proxyAssetData,
   };
 }
 
@@ -234,36 +202,3 @@ describe("dispatchChunk", () => {
   });
 });
 
-// dispatchProxy
-
-describe("dispatchProxy", () => {
-  it("calls proxyAssetData with destructured delivery tiles", () => {
-    const delivery = makeProxyDelivery();
-    const { client, proxyAssetData } = makeMockClient();
-
-    dispatchProxy(client, delivery, EPOCHS);
-
-    expect(proxyAssetData).toHaveBeenCalledTimes(1);
-    expect(proxyAssetData).toHaveBeenCalledWith(
-      "ds1",
-      "tile-0",
-      "img-0",
-      "TileProxy3D",
-      0,
-      0,
-      [4, 4, 4],
-      delivery.data,
-      EPOCHS,
-    );
-  });
-
-  it("forwards GroupProxy3D kind as-is", () => {
-    const delivery = makeProxyDelivery({ proxyKind: "GroupProxy3D", entityId: "group-1" });
-    const { client, proxyAssetData } = makeMockClient();
-
-    dispatchProxy(client, delivery, EPOCHS);
-
-    expect(proxyAssetData.mock.calls[0][1]).toBe("group-1");
-    expect(proxyAssetData.mock.calls[0][3]).toBe("GroupProxy3D");
-  });
-});

@@ -296,16 +296,13 @@ function lanesOf(last: HudSample | null): HudView["lanes"] {
     inFlight: lanes.inFlight[lane],
     pending: lanes.pending[lane],
   }));
-  // The historical lane and the laneless proxy scheduler appear only when
-  // they carry work, so a permanent zero is not read as a measurement.
+  // The historical lane appears only when it carries work, so a permanent
+  // zero is not read as a measurement.
   if (lanes.inFlight.overview > 0 || lanes.pending.overview > 0) {
     rows.push({ label: "overview", inFlight: lanes.inFlight.overview, pending: lanes.pending.overview });
   }
-  if (lanes.proxyInFlight > 0 || lanes.proxyPending > 0) {
-    rows.push({ label: "proxy assets", inFlight: lanes.proxyInFlight, pending: lanes.proxyPending });
-  }
 
-  let inFlightTotal = lanes.proxyInFlight + lanes.inFlight.overview;
+  let inFlightTotal = lanes.inFlight.overview;
   for (const lane of LANE_ROWS) inFlightTotal += lanes.inFlight[lane];
 
   return {
@@ -318,7 +315,7 @@ function lanesOf(last: HudSample | null): HudView["lanes"] {
   };
 }
 
-const POOL_KEYS = ["main", "overview", "proxy"] as const;
+const POOL_KEYS = ["main", "overview"] as const;
 
 function poolsOf(last: HudSample | null): HudPoolView[] {
   const pools = last?.pools ?? null;

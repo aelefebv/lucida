@@ -10,14 +10,10 @@
 
 import {
   DESCRIPTOR_ENTRY_SIZE,
-  DESCRIPTOR_SENTINEL_INDEX,
   DESCRIPTOR_TIER_SOURCE_SIZE,
   OFFSET_COARSE_SOURCE,
   OFFSET_CONTRAST_MAX,
   OFFSET_CONTRAST_MIN,
-  OFFSET_TILE_PROXY_DIMS,
-  OFFSET_TILE_PROXY_POOL_INDEX,
-  OFFSET_TILE_PROXY_SLOT_INDEX,
   OFFSET_COLORMAP_MODE,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
@@ -25,9 +21,6 @@ import {
   OFFSET_LEVEL_SOURCE_COUNT,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
-  OFFSET_GROUP_PROXY_DIMS,
-  OFFSET_GROUP_PROXY_POOL_INDEX,
-  OFFSET_GROUP_PROXY_SLOT_INDEX,
   OFFSET_SAMPLE_FORMAT,
   SOURCE_OFFSET_CHUNK_DIMS,
   SOURCE_OFFSET_GRID_DIMS,
@@ -71,8 +64,8 @@ export interface TransientDescriptorParams {
 
 /**
  * Serialize a transient single-entity descriptor at byte 0 of `target`,
- * which must hold at least {@link DESCRIPTOR_ENTRY_SIZE} bytes. Proxy handles
- * are sentinel and only level source 0 (pool binding 0) is valid.
+ * which must hold at least {@link DESCRIPTOR_ENTRY_SIZE} bytes. Only level
+ * source 0 (pool binding 0) is valid.
  */
 export function serializeTransientDescriptor(
   target: ArrayBuffer,
@@ -83,22 +76,6 @@ export function serializeTransientDescriptor(
 
   if (params.modelMatrix.length === 16) f32.set(params.modelMatrix, OFFSET_MODEL_MATRIX / 4);
   if (params.invModelMatrix.length === 16) f32.set(params.invModelMatrix, OFFSET_INV_MODEL_MATRIX / 4);
-
-  // The shader's proxy steps short-circuit on a sentinel slot index.
-  u32[OFFSET_TILE_PROXY_POOL_INDEX / 4] = DESCRIPTOR_SENTINEL_INDEX;
-  u32[OFFSET_TILE_PROXY_SLOT_INDEX / 4] = DESCRIPTOR_SENTINEL_INDEX;
-  u32[OFFSET_GROUP_PROXY_POOL_INDEX / 4]  = DESCRIPTOR_SENTINEL_INDEX;
-  u32[OFFSET_GROUP_PROXY_SLOT_INDEX / 4]  = DESCRIPTOR_SENTINEL_INDEX;
-
-  // Defensive: the proxy slot is sentinel, so these dims are never read.
-  const tileDimsBase = OFFSET_TILE_PROXY_DIMS / 4;
-  u32[tileDimsBase + 0] = 1;
-  u32[tileDimsBase + 1] = 1;
-  u32[tileDimsBase + 2] = 1;
-  const groupDimsBase = OFFSET_GROUP_PROXY_DIMS / 4;
-  u32[groupDimsBase + 0] = 1;
-  u32[groupDimsBase + 1] = 1;
-  u32[groupDimsBase + 2] = 1;
 
   f32[OFFSET_CONTRAST_MIN / 4] = params.contrastMin;
   f32[OFFSET_CONTRAST_MAX / 4] = params.contrastMax;

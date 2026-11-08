@@ -51,26 +51,16 @@ export function recordPlanningTick(
   }
 
   tick.counters[TickCounter.PlannedChunks] = plan.requests.length;
-  tick.counters[TickCounter.ProxyRequests] = plan.proxyRequests.length;
   tick.counters[TickCounter.CullingConsidered] = plan.stats.culling.considered;
   tick.counters[TickCounter.CullingAfterXyBounds] = plan.stats.culling.afterXyBounds;
   tick.counters[TickCounter.CullingAfterZRange] = plan.stats.culling.afterZRange;
   tick.counters[TickCounter.CullingAfterFrustum] = plan.stats.culling.afterFrustum;
 
   // Tallied over the whole active set, not the row-capped slice the panel
-  // renders. Invisible entries carry no mode and are counted in
-  // none of the three, so they sum to at most the total.
+  // renders. Invisible entries are counted in the total only.
   tick.counters[TickCounter.ActiveSetTotal] = plan.activeSet.length;
   for (const entry of plan.activeSet) {
-    if (entry.kind === "group-as-proxy") {
-      tick.counters[TickCounter.ActiveSetGroupAsProxy]++;
-    } else if (entry.kind === "invisible") {
-      continue;
-    } else if (entry.mode === "tiles-with-proxy-fallback") {
-      tick.counters[TickCounter.ActiveSetTilesProxyFallback]++;
-    } else if (entry.mode === "tiles-with-detail") {
-      tick.counters[TickCounter.ActiveSetTilesDetail]++;
-    }
+    if (entry.kind === "tile") tick.counters[TickCounter.ActiveSetTilesDetail]++;
   }
 
   const levels = Math.max(residency.cached.length, residency.inFlight.length);

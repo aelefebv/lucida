@@ -53,7 +53,6 @@ describe("drawHud", () => {
       "within a frame",
       "main",
       "overview",
-      "proxy",
       "GPU",
       "not reported",
       "detail",

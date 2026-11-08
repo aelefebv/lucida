@@ -8,8 +8,8 @@ publish = false
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 # Used by `url::dataset_id_for_url` and `url::dataset_url_hash16` — the
-# single source of truth for the BLAKE3-derived dataset id and proxy-cache
-# directory name.
+# single source of truth for the BLAKE3-derived dataset id and the
+# generated-level cache's directory name.
 blake3 = "1"
 
 [dev-dependencies]

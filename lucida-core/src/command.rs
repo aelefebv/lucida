@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use lucida_content::{
     DatasetId, DatasetKind, DatasetManifest, EntityId, EntityKind, LayoutId, LayoutSpec,
 };
-use lucida_protocol::{AssetCatalogDelta, DatasetOpened};
+use lucida_protocol::DatasetOpened;
 
 use crate::camera::{Camera, Framing};
 use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
@@ -37,12 +37,6 @@ pub enum DocumentCommand {
     SetActiveLayout {
         dataset_id: DatasetId,
         layout_id: LayoutId,
-    },
-    /// Merge an asset catalog delta into the document. Bumps `epochs.asset`.
-    /// Idempotent on identical re-apply.
-    ApplyAssetCatalogDelta {
-        dataset_id: DatasetId,
-        delta: AssetCatalogDelta,
     },
     /// Drop a collaborative annotation onto `dataset_id` at in-plane world
     /// `position` and depth `z`. The `id` is client-supplied (a uuid string) so
@@ -695,9 +689,6 @@ impl Scene {
                     }
                     DocumentCommand::SetActiveLayout { .. } => {
                         unreachable!("handled above");
-                    }
-                    DocumentCommand::ApplyAssetCatalogDelta { .. } => {
-                        self.epochs.asset += 1;
                     }
                     DocumentCommand::AddAnnotation { .. }
                     | DocumentCommand::RemoveAnnotation { .. }
@@ -3314,163 +3305,6 @@ mod tests {
     }
 
     #[test]
-    fn apply_asset_catalog_delta_bumps_only_asset_epoch() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-        let mut scene = Scene::new([800, 600]);
-        // Register a dataset first so the catalog is initialized.
-        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
-        scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let baseline = scene.epochs.clone();
-        assert_eq!(baseline.asset, 0);
-
-        let cmd = DocumentCommand::ApplyAssetCatalogDelta {
-            dataset_id: DatasetId("ds1".into()),
-            delta: AssetCatalogDelta {
-                added: vec![ProxyAvailability {
-                    entity_id: lucida_content::EntityId("ds1-entity".into()),
-                    kinds: vec![ProxyKind::TileProxy3D],
-                    footprints: vec![],
-                }],
-            },
-        };
-        scene.apply(cmd.into());
-
-        assert_eq!(scene.epochs.asset, 1);
-        // No other epoch should change.
-        assert_eq!(scene.epochs.content, baseline.content);
-        assert_eq!(scene.epochs.layout, baseline.layout);
-        assert_eq!(scene.epochs.view, baseline.view);
-        assert_eq!(scene.epochs.selection, baseline.selection);
-    }
-
-    #[test]
-    fn apply_asset_catalog_delta_idempotent_on_repeat() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-        let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
-        scene.apply(DocumentCommand::DatasetOpened(reg).into());
-
-        let delta = AssetCatalogDelta {
-            added: vec![ProxyAvailability {
-                entity_id: lucida_content::EntityId("ds1-entity".into()),
-                kinds: vec![ProxyKind::TileProxy3D],
-                footprints: vec![],
-            }],
-        };
-        let cmd1 = DocumentCommand::ApplyAssetCatalogDelta {
-            dataset_id: DatasetId("ds1".into()),
-            delta: delta.clone(),
-        };
-        let cmd2 = DocumentCommand::ApplyAssetCatalogDelta {
-            dataset_id: DatasetId("ds1".into()),
-            delta,
-        };
-
-        scene.apply(cmd1.into());
-        let after_first = scene.document.asset_catalogs[&DatasetId("ds1".into())].clone();
-        // Asset epoch bumps each call (it's the message-arrival counter; whether
-        // catalog *contents* changed is checked separately below).
-        assert_eq!(scene.epochs.asset, 1);
-
-        scene.apply(cmd2.into());
-        let after_second = scene.document.asset_catalogs[&DatasetId("ds1".into())].clone();
-
-        // Catalog contents must be identical — the merge must dedupe.
-        assert_eq!(after_first, after_second);
-        assert_eq!(after_second.entries.len(), 1);
-        assert_eq!(after_second.entries[0].kinds, vec![ProxyKind::TileProxy3D]);
-    }
-
-    #[test]
-    fn apply_asset_catalog_delta_merges_kinds_for_same_entity() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-        let mut scene = Scene::new([800, 600]);
-        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
-        scene.apply(DocumentCommand::DatasetOpened(reg).into());
-
-        scene.apply(
-            DocumentCommand::ApplyAssetCatalogDelta {
-                dataset_id: DatasetId("ds1".into()),
-                delta: AssetCatalogDelta {
-                    added: vec![ProxyAvailability {
-                        entity_id: lucida_content::EntityId("e1".into()),
-                        kinds: vec![ProxyKind::TileProxy3D],
-                        footprints: vec![],
-                    }],
-                },
-            }
-            .into(),
-        );
-
-        scene.apply(
-            DocumentCommand::ApplyAssetCatalogDelta {
-                dataset_id: DatasetId("ds1".into()),
-                delta: AssetCatalogDelta {
-                    added: vec![ProxyAvailability {
-                        entity_id: lucida_content::EntityId("e1".into()),
-                        kinds: vec![ProxyKind::GroupProxy3D],
-                        footprints: vec![],
-                    }],
-                },
-            }
-            .into(),
-        );
-
-        let cat = &scene.document.asset_catalogs[&DatasetId("ds1".into())];
-        assert_eq!(cat.entries.len(), 1);
-        assert!(cat.entries[0].kinds.contains(&ProxyKind::TileProxy3D));
-        assert!(cat.entries[0].kinds.contains(&ProxyKind::GroupProxy3D));
-    }
-
-    #[test]
-    fn dataset_opened_seeds_catalog_from_event() {
-        use lucida_protocol::{AssetCatalog, ProxyAvailability, ProxyKind};
-        let mut scene = Scene::new([800, 600]);
-        let mut reg = test_helpers::make_dataset_opened("ds1", "test", 1);
-        reg.catalog = AssetCatalog {
-            entries: vec![ProxyAvailability {
-                entity_id: lucida_content::EntityId("seed".into()),
-                kinds: vec![ProxyKind::GroupProxy3D],
-                footprints: vec![],
-            }],
-        };
-        scene.apply(DocumentCommand::DatasetOpened(reg).into());
-
-        let cat = &scene.document.asset_catalogs[&DatasetId("ds1".into())];
-        assert_eq!(cat.entries.len(), 1);
-        assert_eq!(
-            cat.entries[0].entity_id,
-            lucida_content::EntityId("seed".into())
-        );
-    }
-
-    #[test]
-    fn apply_asset_catalog_delta_command_round_trips() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-        let cmd = DocumentCommand::ApplyAssetCatalogDelta {
-            dataset_id: DatasetId("ds1".into()),
-            delta: AssetCatalogDelta {
-                added: vec![ProxyAvailability {
-                    entity_id: lucida_content::EntityId("e1".into()),
-                    kinds: vec![ProxyKind::TileProxy3D],
-                    footprints: vec![],
-                }],
-            },
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"type\":\"apply_asset_catalog_delta\""));
-        let parsed: DocumentCommand = serde_json::from_str(&json).unwrap();
-        match parsed {
-            DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
-                assert_eq!(dataset_id, DatasetId("ds1".into()));
-                assert_eq!(delta.added.len(), 1);
-                assert_eq!(delta.added[0].kinds, vec![ProxyKind::TileProxy3D]);
-            }
-            _ => panic!("expected ApplyAssetCatalogDelta"),
-        }
-    }
-
-    #[test]
     fn scene_epochs_serde_round_trip() {
         use crate::epoch::SceneEpochs;
         let epochs = SceneEpochs {
@@ -3478,7 +3312,6 @@ mod tests {
             layout: 2,
             view: 3,
             selection: 4,
-            asset: 5,
             annotation: 6,
         };
         let json = serde_json::to_string(&epochs).unwrap();
@@ -4772,12 +4605,11 @@ mod tests {
 
         scene.apply(add_annotation_cmd("ds1", "p1", [1.0, 2.0], "alice").into());
         assert_eq!(scene.epochs.annotation, 1);
-        // Adding a pin is not a content/layout/view/selection/asset change.
+        // Adding a pin is not a content/layout/view/selection change.
         assert_eq!(scene.epochs.content, baseline.content);
         assert_eq!(scene.epochs.layout, baseline.layout);
         assert_eq!(scene.epochs.view, baseline.view);
         assert_eq!(scene.epochs.selection, baseline.selection);
-        assert_eq!(scene.epochs.asset, baseline.asset);
 
         scene.apply(
             DocumentCommand::RemoveAnnotation {
@@ -5563,7 +5395,6 @@ mod tests {
         assert_eq!(scene.epochs.layout, baseline.layout);
         assert_eq!(scene.epochs.view, baseline.view);
         assert_eq!(scene.epochs.selection, baseline.selection);
-        assert_eq!(scene.epochs.asset, baseline.asset);
     }
 
     #[test]
@@ -5993,7 +5824,6 @@ mod tests {
         assert_eq!(scene.epochs.layout, baseline.layout);
         assert_eq!(scene.epochs.view, baseline.view);
         assert_eq!(scene.epochs.selection, baseline.selection);
-        assert_eq!(scene.epochs.asset, baseline.asset);
 
         scene.apply(remove_comment_cmd("ds1", "pin-1", "c1").into());
         assert_eq!(scene.epochs.annotation, baseline.annotation + 2);
@@ -6001,8 +5831,8 @@ mod tests {
 
     #[test]
     fn add_comment_to_missing_pin_still_bumps_epoch_but_creates_nothing() {
-        // The epoch is the message-arrival counter (mirrors asset-delta
-        // semantics): it bumps per applied command even when the state-level
+        // The epoch is the message-arrival counter: it bumps per applied
+        // command even when the state-level
         // effect is a no-op. The no-op must not create a phantom pin.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
@@ -6269,7 +6099,6 @@ mod tests {
         assert_eq!(scene.epochs.layout, baseline.layout);
         assert_eq!(scene.epochs.view, baseline.view);
         assert_eq!(scene.epochs.selection, baseline.selection);
-        assert_eq!(scene.epochs.asset, baseline.asset);
     }
 
     #[test]

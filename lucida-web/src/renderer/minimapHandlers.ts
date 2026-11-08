@@ -186,10 +186,6 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
     if (!overview) continue;
 
     const idx = renderedLayers.length;
-    // The transient descriptor sets proxy slot indices to the sentinel, so
-    // the draw falls through to the chunk path. Clear any proxy textures a
-    // main-view draw left bound.
-    renderer.setProxyTextures(null, null);
     // Bind the active channel's LUT for the minimap's own draw; otherwise it
     // keeps whatever the volume renderer last had, which stays gray in 2D mode.
     // Set it before setVolume, which rebuilds the bind group from the current LUT.
@@ -257,11 +253,10 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
     if (!overview) continue;
 
     const idx = renderedLayers.length;
-    // Same single-LOD overview draw as the minimap: reset proxy textures, bind
-    // the active channel's LUT before setVolume (setVolume rebuilds the bind
-    // group from the current LUT), then a transient descriptor so the shader
-    // reads this layer's model matrix + contrast/gamma over the full overview.
-    renderer.setProxyTextures(null, null);
+    // Same single-LOD overview draw as the minimap: bind the active channel's
+    // LUT before setVolume (setVolume rebuilds the bind group from the
+    // current LUT), then a transient descriptor so the shader reads this
+    // layer's model matrix + contrast/gamma over the full overview.
     renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
     renderer.setVolume(overview.texture);
     renderer.setMatrices(msg.invViewProj, msg.eye);

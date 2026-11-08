@@ -138,7 +138,6 @@ def snapshot():
             "manifests": {"wds-test": manifest()},
             "registered_layouts": {},
             "active_layout_ids": {},
-            "asset_catalogs": {},
         },
         "peers": [
             {

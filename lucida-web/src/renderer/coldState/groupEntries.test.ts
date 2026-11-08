@@ -3,9 +3,9 @@
  *
  * Locks the partition matrix the worker's previous inline code
  * implemented: shared chunk dims → one group; mismatched chunk dims →
- * multiple groups; multi-channel → channel suffix on the pool key;
- * `group-as-proxy` (no detail levels) → skipped from groups; one entry per
- * (member, level) section for the target and the coarser levels under it.
+ * multiple groups; multi-channel → channel suffix on the pool key; an entry
+ * with no levels → skipped from groups; one entry per (member, level)
+ * section for the target and the coarser levels under it.
  */
 
 import { describe, it, expect } from "vitest";
@@ -13,7 +13,6 @@ import { groupEntriesByPool } from "./groupEntries.ts";
 import type {
   ColdStateMessage,
   ColdStateActiveEntry,
-  ColdStateTileEntry,
 } from "../workerProtocol.ts";
 
 function identityMatrix(): Float32Array {
@@ -34,40 +33,22 @@ function defaultDisplay(): ColdStateActiveEntry["displayStateByChannel"][number]
 }
 
 function makeEntry(
-  opts: Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & {
-    entityId: string;
-    imageId: string;
-    mode: ColdStateActiveEntry["mode"];
-  },
+  opts: Partial<ColdStateActiveEntry> & { entityId: string; imageId: string },
 ): ColdStateActiveEntry {
   const base = {
     entityId: opts.entityId,
     levels: opts.levels ?? [
       { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
-    proxyKind: opts.proxyKind,
-    proxyAvailable: opts.proxyAvailable ?? false,
-    groupProxyAvailable: opts.groupProxyAvailable ?? false,
     modelMatrix: opts.modelMatrix ?? identityMatrix(),
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplay() },
   };
-  if (opts.mode === "group-as-proxy") {
-    return {
-      ...base,
-      kind: "group-as-proxy",
-      mode: "group-as-proxy",
-      parentGroupId: null,
-    };
-  }
   return {
     ...base,
-    kind: "tile",
     imageId: opts.imageId,
-    mode: opts.mode,
     detailLevels: opts.detailLevels ?? [0],
     coarseLevel: opts.coarseLevel ?? null,
-    parentGroupId: opts.parentGroupId ?? null,
   };
 }
 
@@ -79,7 +60,7 @@ function makeCold(
 ): ColdStateMessage {
   return {
     type: "coldState",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 0 },
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
@@ -103,11 +84,11 @@ describe("groupEntriesByPool — volume", () => {
   it("two entries with same chunk dims → one pool group", () => {
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+        entityId: "imgA", imageId: "imgA",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
       makeEntry({
-        entityId: "imgB", imageId: "imgB", mode: "tiles-with-detail",
+        entityId: "imgB", imageId: "imgB",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
     ]);
@@ -124,11 +105,11 @@ describe("groupEntriesByPool — volume", () => {
   it("two entries with different chunk dims → two pool groups", () => {
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+        entityId: "imgA", imageId: "imgA",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
       makeEntry({
-        entityId: "imgB", imageId: "imgB", mode: "tiles-with-detail",
+        entityId: "imgB", imageId: "imgB",
         levels: [{ level: 0, chunkShape: [16, 32, 32], gridShape: [4, 8, 8], levelDims: [64, 256, 256] }],
       }),
     ]);
@@ -141,7 +122,7 @@ describe("groupEntriesByPool — volume", () => {
     const cold = makeCold(
       [
         makeEntry({
-          entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+          entityId: "imgA", imageId: "imgA",
           levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
         }),
       ],
@@ -157,7 +138,7 @@ describe("groupEntriesByPool — volume", () => {
     const cold = makeCold(
       [
         makeEntry({
-          entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+          entityId: "imgA", imageId: "imgA",
           levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
         }),
       ],
@@ -172,14 +153,14 @@ describe("groupEntriesByPool — volume", () => {
     expect(groups.get("ds1:ch2:64x64x32:detail")?.entries[0].memberId).toBe("imgA:ch2");
   });
 
-  it("group-as-proxy entry (empty levels) is skipped", () => {
+  it("an entry with empty levels is skipped", () => {
     const cold = makeCold([
       makeEntry({
-        entityId: "groupA", imageId: "", mode: "group-as-proxy",
+        entityId: "imgA", imageId: "imgA",
         levels: [],
       }),
       makeEntry({
-        entityId: "imgB", imageId: "imgB", mode: "tiles-with-detail",
+        entityId: "imgB", imageId: "imgB",
         levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
       }),
     ]);
@@ -191,7 +172,7 @@ describe("groupEntriesByPool — volume", () => {
   it("detail and coarse sources use separate tiered pool groups even with mismatched chunk dims", () => {
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+        entityId: "imgA", imageId: "imgA",
         detailLevels: [0],
         coarseLevel: 2,
         levels: [
@@ -225,7 +206,7 @@ describe("groupEntriesByPool — volume", () => {
   it("one pool holds one section per (member, level) for the target and the coarser levels under it", () => {
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+        entityId: "imgA", imageId: "imgA",
         detailLevels: [1],
         levels: [0, 1, 2, 3, 4, 5].map((level) => ({
           level,
@@ -245,7 +226,7 @@ describe("groupEntriesByPool — volume", () => {
   it("detail and coarse sources stay separate when they share the same level", () => {
     const cold = makeCold([
       makeEntry({
-        entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+        entityId: "imgA", imageId: "imgA",
         detailLevels: [1],
         coarseLevel: 1,
         levels: [
@@ -276,7 +257,7 @@ describe("groupEntriesByPool — slice", () => {
     const cold = makeCold(
       [
         makeEntry({
-          entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+          entityId: "imgA", imageId: "imgA",
           levels: [{ level: 0, chunkShape: [16, 128, 128], gridShape: [4, 2, 2], levelDims: [64, 256, 256] }],
         }),
       ],
@@ -294,7 +275,7 @@ describe("groupEntriesByPool — slice", () => {
     const cold = makeCold(
       [
         makeEntry({
-          entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+          entityId: "imgA", imageId: "imgA",
           levels: [{ level: 0, chunkShape: [16, 128, 128], gridShape: [4, 2, 2], levelDims: [64, 256, 256] }],
         }),
       ],

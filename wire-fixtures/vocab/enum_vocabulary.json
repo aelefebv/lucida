@@ -58,10 +58,6 @@
     "Explicit",
     "Derived"
   ],
-  "proxy_kinds": [
-    "GroupProxy3D",
-    "TileProxy3D"
-  ],
   "dataset_open_stages": [
     "request_received",
     "authorization",

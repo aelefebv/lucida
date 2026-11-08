@@ -120,11 +120,8 @@ function plan(requests: ChunkRequest[]): RequestPlan {
         kind: "tile",
         entityId: "ent",
         imageId: "img",
-        mode: "tiles-with-detail",
         detailLevels: [0],
         coarseLevel: 1,
-        proxyAvailable: false,
-        groupProxyAvailable: false,
       },
     ],
   } as unknown as RequestPlan;

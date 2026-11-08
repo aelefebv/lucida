@@ -98,7 +98,7 @@ export const LANE_COLORS: Record<LaneName, string> = {
 };
 
 export const MESSAGE_COLORS: Record<ClientMessageType, string> = {
-  ...slots(["chunkRequest", "assetRequest", "viewerInterest", "presence", "datasetPresence", "cursor", "command"] as const),
+  ...slots(["chunkRequest", "viewerInterest", "presence", "datasetPresence", "cursor", "command"] as const),
   other: NEUTRAL,
 };
 

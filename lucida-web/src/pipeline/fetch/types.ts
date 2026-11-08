@@ -7,18 +7,11 @@
 
 import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
-import type { ProxyHeaderJs } from "./contentSource.ts";
 import type { InteractionMode } from "./interactionMode.ts";
 
 export interface CpuCacheConfig {
   mainBudgetBytes: number;
   overviewBudgetBytes: number;
-  /**
-   * Budget for the proxy tier in bytes. Proxies are a small middle layer
-   * (between detail and overview). Eviction tier order: detail > proxy
-   * > overview.
-   */
-  proxyBudgetBytes: number;
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   /**
@@ -78,17 +71,8 @@ export interface LevelResidency {
  */
 export type EvictionTier = "prefetch" | "demoted-detail" | "active-detail";
 
-/**
- * A delivery from the CPU cache that the orchestrator routes to the GPU
- * worker. The discriminated union covers both regular chunks
- * (`kind: "chunk"`) and proxy deliveries (`kind: "proxy"`); both
- * variants stamp the discriminator explicitly so consumers narrow
- * unambiguously.
- */
-export type ReadyDelivery = ReadyChunkDelivery | ReadyProxyDelivery;
-
+/** A decoded chunk the CPU cache hands the orchestrator for the GPU worker. */
 export interface ReadyChunkDelivery {
-  kind: "chunk";
   entityId: string;
   imageId: string;
   level: number;
@@ -111,26 +95,6 @@ export interface ReadyChunkDelivery {
    * `wire` and `decode`. -1 when no run was open at fetch time.
    */
   traceRow?: number;
-}
-
-/**
- * A delivered proxy asset. Carries the parsed header + raw u16 voxel
- * bytes. The orchestrator forwards this to the worker via
- * `client.proxyAssetData(...)`.
- */
-export interface ReadyProxyDelivery {
-  kind: "proxy";
-  datasetId: string;
-  entityId: string;
-  imageId: string;
-  proxyKind: "GroupProxy3D" | "TileProxy3D";
-  t: number;
-  c: number;
-  header: ProxyHeaderJs;
-  data: ArrayBuffer;
-  epochs: SceneEpochs;
-  /** Lower numbers are delivered first when present on CpuCache output. */
-  priority?: number;
 }
 
 /**
@@ -210,7 +174,6 @@ export interface TierCounters {
   demotedDetail: number;
   prefetch: number;
   overview: number;
-  proxy: number;
 }
 
 export interface CacheTelemetry {
@@ -218,15 +181,9 @@ export interface CacheTelemetry {
   mainBudget: number;
   overviewBytes: number;
   overviewBudget: number;
-  proxyBytes: number;
-  proxyBudget: number;
   inFlightCount: number;
   inFlightBytes: number;
-  /** In-flight proxy fetches (count, estimated bytes). */
-  inFlightProxyCount: number;
-  inFlightProxyBytes: number;
   pendingCount: number;
-  pendingProxyCount: number;
   /**
    * Age (ms) of the longest-waiting entry in the chunk scheduler's
    * admission window; 0 if empty. A drain-health signal, not time since
@@ -256,7 +213,6 @@ export interface CacheTelemetry {
     demotedDetail: TierResidencyEntry;
     prefetch: TierResidencyEntry;
     overview: TierResidencyEntry;
-    proxy: TierResidencyEntry;
   };
   /** Current-plan wanted vs CPU-resident chunk coverage by coarse/detail tier. */
   tierDemand: TierDemandTelemetry;
@@ -276,31 +232,26 @@ export interface CacheTelemetry {
 export interface PoolResidency {
   bytes: number;
   /**
-   * The budget in force: the elastic one for the main and overview pools,
-   * since a pool that stopped growing stopped at that and not at the
-   * configured split, and the configured one for the proxy pool.
+   * The elastic budget in force, since a pool that stopped growing stopped
+   * at that and not at the configured split.
    */
   budgetBytes: number;
 }
 
-/** The three CPU-side pools, as `CpuCache.poolResidency()` reports them. */
+/** The two CPU-side pools, as `CpuCache.poolResidency()` reports them. */
 export interface PoolResidencyReport {
   main: PoolResidency;
   overview: PoolResidency;
-  proxy: PoolResidency;
 }
 
 /**
  * Outstanding work by lane: what is in flight and what is queued, counted
- * per lane, plus the proxy asset scheduler, which has no lane. Filled in
- * place by `CpuCache.laneOutstanding()`.
+ * per lane. Filled in place by `CpuCache.laneOutstanding()`.
  */
 export interface LaneOutstanding {
   inFlight: Record<Lane, number>;
   pending: Record<Lane, number>;
-  proxyInFlight: number;
-  proxyPending: number;
-  /** Every pending entry, classified or not, across both schedulers. */
+  /** Every pending entry, classified or not. */
   pendingTotal: number;
   /**
    * True when the chunk queue was deeper than {@link pendingScanCap}, so the

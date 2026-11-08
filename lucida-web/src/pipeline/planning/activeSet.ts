@@ -68,10 +68,10 @@ export function groupMembers(entities: EntitySnapshot[]): MemberGroup[] {
  * Every visible image or tile becomes a tile entry. Its detail tier holds
  * one level, the entity's target level, which the core already resolved
  * and clamped. Nothing here chooses a level or reads residency. Its coarse
- * tier holds the coarse source level when that level is no finer. Proxy
- * assets and projected size play no part, because the tier model renders
- * from chunks alone. A visible group entity gets no entry of its own; its
- * tiles carry its geometry.
+ * tier holds the coarse source level when that level is no finer.
+ * Projected size plays no part, because the tier model renders from chunks
+ * alone. A visible group entity gets no entry of its own; its tiles carry
+ * its geometry.
  *
  * Invisible entities still appear so downstream consumers (the CPU
  * cache's eviction tier mapping, the trace's per-tick tallies) can see
@@ -100,12 +100,8 @@ function makeTileEntry(entity: EntitySnapshot): TileEntry {
     kind: "tile",
     entityId: entity.entityId,
     imageId: entity.imageId,
-    mode: "tiles-with-detail",
     detailLevels: [entity.targetLevel],
     coarseLevel: compatibleCoarseLevel(entity, entity.targetLevel),
-    proxyKind: undefined,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
   };
 }
 
