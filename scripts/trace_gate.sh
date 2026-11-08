@@ -44,16 +44,17 @@ datasets=(
   "collection|--tiles 12 --size 512,512 --channels 2 --levels 3 --chunk 128"
   "single-level|--size 4096,4096 --levels 1 --chunk 512"
 )
-# name|dataset|framing. Each run frames its dataset whole. Ray-marching is the
-# costliest pass on a software rasterizer, so the volume renders in a ninth of
-# the default viewport: at the full one, SwiftShader did not settle it within
-# the timeout.
+# name|dataset|timeout|framing. Each run frames its dataset whole, and an
+# empty timeout is LUCIDA_GATE_TIMEOUT. Ray-marching is the costliest pass on
+# a software rasterizer: in a ninth of the default viewport, SwiftShader
+# settles the volume at ratio 1 in about 15 s and at ratio 2, where the view
+# asks for level 0, in about 95 s.
 runs=(
-  "image|image|--camera slice"
-  "volume|volume|--camera slice"
-  "volume-render|volume|--camera arcball --width 480 --height 300"
-  "collection|collection|--camera slice"
-  "single-level|single-level|--camera slice"
+  "image|image||--camera slice"
+  "volume|volume||--camera slice"
+  "volume-render|volume|300|--camera arcball --width 480 --height 300"
+  "collection|collection||--camera slice"
+  "single-level|single-level||--camera slice"
 )
 ratios=(1 2)
 
@@ -62,7 +63,7 @@ wanted() {
 }
 
 for entry in "${runs[@]}"; do
-  IFS='|' read -r name dataset framing <<< "${entry}"
+  IFS='|' read -r name dataset _ <<< "${entry}"
   wanted "${name}" || continue
   path="${data_dir}/${dataset}.ome.zarr"
   [[ -e "${path}/zarr.json" ]] && continue
@@ -79,7 +80,7 @@ failures=0
 stamp="$(date +%Y%m%d-%H%M%S)"
 
 for entry in "${runs[@]}"; do
-  IFS='|' read -r name dataset framing <<< "${entry}"
+  IFS='|' read -r name dataset run_timeout framing <<< "${entry}"
   wanted "${name}" || continue
   read -r -a framing_args <<< "${framing}"
   for ratio in "${ratios[@]}"; do
@@ -95,7 +96,7 @@ for entry in "${runs[@]}"; do
       trace "${data_dir}/${dataset}.ome.zarr" \
       "${framing_args[@]}" \
       --device-pixel-ratio "${ratio}" \
-      --timeout-seconds "${timeout}" \
+      --timeout-seconds "${run_timeout:-${timeout}}" \
       --gate \
       --output "${output_dir}/${run}.json" \
       --bundle "${output_dir}/${run}.bundle.json" \
