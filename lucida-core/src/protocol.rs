@@ -259,18 +259,28 @@ pub enum ClientMessage {
     /// variants don't shift.
     SendReport { request_id: String, bundle: String },
     /// Subscribe this connection to the workspace's watch stream. The server
-    /// answers with the ring it keeps for late joiners and then relays every
-    /// item published from that point on, each as a
+    /// relays every item published from that point on, each as a
     /// [`ServerMessage::WatchUpdate`].
     ///
-    /// Carries no fields: a subscriber receives every publishing page's items
-    /// and filters by `client_id` itself, so the server holds no per-subscriber
-    /// state beyond the registration. Repeating it on a subscribed connection
-    /// replays the ring again and changes nothing else.
+    /// Live only unless `history` is set. The ring outlives the pages that
+    /// filled it, reloads and earlier runs included, and a replayed item is
+    /// byte-identical to a live one, so history has to be asked for. With
+    /// `history`, the server first replays what the ring holds and then sends
+    /// one [`ServerMessage::WatchHistoryEnd`], so a reader can tell where
+    /// the replay stops. `history` is left off the wire when false, so a live
+    /// subscribe is the bare tag.
+    ///
+    /// A subscriber receives every publishing page's items and filters by
+    /// `client_id` itself, so the server holds no per-subscriber state beyond
+    /// the registration. Repeating it on a subscribed connection changes
+    /// nothing but the replay it asks for.
     ///
     /// Variant added at the end so the serde tag positions of older
     /// variants don't shift.
-    WatchSubscribe,
+    WatchSubscribe {
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        history: bool,
+    },
     /// One item of this page's watch stream, sent while its watch toggle is
     /// on. The server appends it to the ring and relays it to subscribers; it
     /// computes nothing over it and never writes an item of its own.
@@ -688,10 +698,9 @@ pub enum ServerMessage {
     ///
     /// `client_id` is the publishing page, so a subscriber can follow one
     /// session in a workspace where several pages publish. `seq` is the
-    /// workspace's running count of relayed items, from 1: the ring a late
-    /// joiner receives and the live items that follow it share one sequence,
-    /// so a subscriber can see a gap where the ring wrapped and never sees an
-    /// item twice.
+    /// workspace's running count of relayed items, from 1: a replayed ring
+    /// and the live items that follow it share one sequence, so a subscriber
+    /// can see a gap where the ring wrapped and never sees an item twice.
     ///
     /// The server computes nothing here. The item is the page's, as sent, and
     /// no row rides it.
@@ -703,6 +712,22 @@ pub enum ServerMessage {
         seq: u64,
         item: WatchItem,
     },
+    /// Where a replay stops: sent once, right after the replayed ring, to a
+    /// connection that subscribed with `history`. Every
+    /// [`ServerMessage::WatchUpdate`] before it is history and every one
+    /// after it is live.
+    ///
+    /// `through_seq` is the last `seq` the replay covers, so the first live
+    /// item's `seq` is greater; 0 means nothing was ever published.
+    /// `replayed` counts the items the ring handed over, so a ring that
+    /// dropped older items shows as `replayed < through_seq`.
+    ///
+    /// Not a [`WatchItem`]: the server never writes an item of its own, and
+    /// this frame describes the subscription, not a page.
+    ///
+    /// Variant added at the end so the serde tag positions of older
+    /// variants don't shift.
+    WatchHistoryEnd { through_seq: u64, replayed: u64 },
 }
 
 /// The kind of mutation a `BookmarkChanged` describes. Wire encoding is
@@ -2145,13 +2170,24 @@ mod tests {
         }
     }
 
+    /// A live subscribe is the bare tag both ways, so a client that predates
+    /// `history` subscribes live, and only a request for history adds a key.
     #[test]
-    fn watch_subscribe_is_a_bare_tag() {
-        let json = serde_json::to_string(&ClientMessage::WatchSubscribe).unwrap();
+    fn a_live_watch_subscribe_is_a_bare_tag() {
+        let live = ClientMessage::WatchSubscribe { history: false };
+        let json = serde_json::to_string(&live).unwrap();
         assert_eq!(json, r#"{"type":"watch_subscribe"}"#);
         assert!(matches!(
             serde_json::from_str::<ClientMessage>(&json).unwrap(),
-            ClientMessage::WatchSubscribe
+            ClientMessage::WatchSubscribe { history: false }
+        ));
+
+        let with_history = ClientMessage::WatchSubscribe { history: true };
+        let json = serde_json::to_string(&with_history).unwrap();
+        assert_eq!(json, r#"{"type":"watch_subscribe","history":true}"#);
+        assert!(matches!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            ClientMessage::WatchSubscribe { history: true }
         ));
     }
 
