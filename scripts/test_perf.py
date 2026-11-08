@@ -319,7 +319,7 @@ def test_a_field_the_diagnostic_lacks_is_a_dash_not_a_number(tmp_path: Path) -> 
     path = run_file(tmp_path, {"verdict": {"kind": "unsettled"}})
     case = perf.Case(CATALOG["image"], SCENARIOS["cold-open"], 2.0, 1)
     row = perf.Row(case, path, tmp_path / "run.txt", exit_code=0, fields=perf.read_run(path))
-    cells = dict(zip(perf.COLUMNS, perf.table_cells(row, tmp_path)))
+    cells = dict(zip(perf.COLUMNS, perf.table_cells(perf.group_cells([row])[0], tmp_path)))
     assert cells["first frame"] == cells["settle"] == cells["fetched"] == cells["top limiter"] == "-"
     assert cells["verdict"] == "unsettled"
     assert cells["run"] == "run.json"
@@ -369,6 +369,186 @@ def test_the_server_keeps_the_callers_source_throttle(monkeypatch) -> None:
     env = perf._scrubbed_env()
     assert env["LUCIDA_SOURCE_THROTTLE"] == "remote"
     assert "LUCIDA_DB_URL" not in env
+
+
+# -- repeats, baselines and comparison ---------------------------------------
+
+ADAPTER = "nvidia ampere (hardware adapter)"
+ADAPTER_DIR = "nvidia-ampere-hardware-adapter"
+
+
+def measured(tmp_path: Path, name: str, ratio: float = 1.0, repeat: int = 1, error=None, **fields) -> perf.Row:
+    """A run of `name` ("dataset.scenario") whose diagnostic read as `fields`
+    over a settled default."""
+    dataset, scenario = name.split(".")
+    case = perf.Case(CATALOG[dataset], SCENARIOS[scenario], ratio, repeat)
+    row = perf.Row(case, tmp_path / f"{case.id}.json", tmp_path / f"{case.id}.txt", 0 if error is None else 1, error)
+    if error is None:
+        row.fields = {
+            "adapter": "nvidia ampere",
+            "adapterKind": "hardware adapter",
+            "verdict": "clear",
+            "firstFrameMs": 200.0,
+            "settleMs": 1000.0,
+            "bytesFetched": 5_000_000,
+            "chunksFetched": 80,
+            "chunksEvicted": 0,
+            **fields,
+        }
+    return row
+
+
+def saved(tmp_path: Path, rows: list[perf.Row], commit: str = "abc1234", knobs=()) -> Path:
+    root = tmp_path / "baselines"
+    perf.save_baseline(perf.group_cells(rows), root, {"commit": commit, "startedAt": "2026-11-08T10:00:00"}, knobs)
+    return root
+
+
+def compared(rows: list[perf.Row], root: Path, knobs=()) -> tuple[list[perf.Cell], perf.Comparison]:
+    cells = perf.group_cells(rows)
+    return cells, perf.compare(cells, root, knobs)
+
+
+def test_repeats_make_one_row_of_medians_with_their_spread(tmp_path: Path) -> None:
+    rows = [measured(tmp_path, "image.cold-open", repeat=n, settleMs=s) for n, s in enumerate([1000, 1400, 1100], 1)]
+    [cell] = perf.group_cells(rows)
+    assert cell.stats("settleMs") == perf.Stats(3, 1100, 1000, 1400)
+    # An even count's median is a mean, and still prints as a whole count.
+    [pair] = perf.group_cells([measured(tmp_path, "image.cold-open", repeat=n, bytesFetched=0) for n in (1, 2)])
+    assert perf.table_cells(pair, tmp_path)[perf.COLUMNS.index("fetched")] == "0 B"
+    cells = dict(zip(perf.COLUMNS, perf.table_cells(cell, tmp_path)))
+    assert cells["scenario"] == "cold-open ×3"
+    assert cells["settle"] == "1,100 ms ±200 ms"
+    assert cells["chunks"] == "80"
+    assert cells["evicted"] == "0"
+    assert cells["verdict"] == "clear"
+    assert cells["run"] == "image.cold-open.dpr1.txt +2"
+
+
+def test_a_failed_repeat_shows_in_the_verdict_and_not_in_the_numbers(tmp_path: Path) -> None:
+    rows = [measured(tmp_path, "image.cold-open"), measured(tmp_path, "image.cold-open", repeat=2, error="timed out")]
+    cells = dict(zip(perf.COLUMNS, perf.table_cells(perf.group_cells(rows)[0], tmp_path)))
+    assert cells["settle"] == "1,000 ms"
+    assert cells["verdict"] == "clear ×1, error: timed out ×1"
+
+
+def test_a_run_within_noise_of_its_baseline_flags_nothing(tmp_path: Path) -> None:
+    root = saved(tmp_path, [measured(tmp_path, "volume.orbit")])
+    allowed = {m.field: m.allowance(base) * 0.9 for m, base in zip(perf.METRICS, (200, 1000, 5e6, 80, 0))}
+    later = measured(
+        tmp_path,
+        "volume.orbit",
+        firstFrameMs=200 + allowed["firstFrameMs"],
+        settleMs=1000 - allowed["settleMs"],
+        chunksFetched=80 + round(allowed["chunksFetched"] - 0.5),
+    )
+    [cell], comparison = compared([later], root)
+    assert comparison.found(cell) == []
+    assert comparison.describe(cell) == "within noise"
+    assert not comparison.regressed(cell)
+
+
+def test_a_slowdown_beyond_noise_is_flagged_and_listed_first(tmp_path: Path) -> None:
+    root = saved(tmp_path, [measured(tmp_path, "volume.cold-open"), measured(tmp_path, "volume.orbit")])
+    later = [measured(tmp_path, "volume.cold-open"), measured(tmp_path, "volume.orbit", settleMs=3000.0)]
+    later.append(measured(tmp_path, "volume.cold-open", 2.0))
+    cells, comparison = compared(later, root)
+    assert comparison.regressed(cells[1]) and not comparison.regressed(cells[0])
+    assert comparison.describe(cells[1]) == "worse: settle 1,000 ms -> 3,000 ms (+200%)"
+    assert comparison.describe(cells[2]) == "no baseline"
+    table = [line for line in perf.render_markdown(later, tmp_path, comparison).splitlines() if line.startswith("|")]
+    assert table[0].endswith(f"| {perf.BASELINE_COLUMN} |")
+    assert table[2].startswith("| volume | orbit |")
+    assert table[2].endswith("| worse: settle 1,000 ms -> 3,000 ms (+200%) |")
+    assert table[3].endswith("| within noise |")
+    summary = perf.summary_json(later, tmp_path, {}, comparison)
+    assert summary["cells"][1]["vsBaseline"][0]["worse"] is True
+
+
+def test_a_measure_that_drops_is_named_but_not_called_better(tmp_path: Path) -> None:
+    root = saved(tmp_path, [measured(tmp_path, "volume.cold-open")])
+    later = measured(tmp_path, "volume.cold-open", chunksEvicted=64, chunksFetched=30, bytesFetched=2_000_000)
+    [cell], comparison = compared([later], root)
+    assert comparison.regressed(cell)
+    assert comparison.describe(cell) == (
+        "worse: evicted 0 -> 64; changed: fetched 5.0 MB -> 2.0 MB (-60%), chunks 80 -> 30 (-62%)"
+    )
+
+
+def test_a_view_that_stops_settling_is_flagged(tmp_path: Path) -> None:
+    root = saved(tmp_path, [measured(tmp_path, "image.cold-open"), measured(tmp_path, "image.pan-sweep")])
+    later = [measured(tmp_path, "image.cold-open", verdict="unsettled"), measured(tmp_path, "image.pan-sweep")]
+    later.append(measured(tmp_path, "image.pan-sweep", repeat=2, error="timed out"))
+    cells, comparison = compared(later, root)
+    assert comparison.describe(cells[0]) == "worse: verdict clear -> unsettled"
+    assert comparison.describe(cells[1]) == "worse: verdict clear -> clear ×1, error ×1"
+    # A stall comes and goes on an unchanged build, so it is no regression.
+    clear, stall = (perf.group_cells([measured(tmp_path, "image.cold-open", verdict=v)])[0] for v in ("clear", "stall"))
+    assert perf.compare_records(clear.record(), stall.record()) == []
+
+
+def test_a_baseline_is_kept_per_adapter_and_ratio_outside_target(tmp_path: Path) -> None:
+    root = saved(tmp_path, [measured(tmp_path, "image.cold-open"), measured(tmp_path, "image.cold-open", 2.0)])
+    assert sorted(p.relative_to(root).as_posix() for p in root.rglob("*.json")) == [
+        f"{ADAPTER_DIR}/dpr1.json",
+        f"{ADAPTER_DIR}/dpr2.json",
+    ]
+    baseline = json.loads((root / ADAPTER_DIR / "dpr2.json").read_text(encoding="utf-8"))
+    assert baseline["adapter"] == ADAPTER
+    assert baseline["ratio"] == 2.0
+    assert perf.REPO / "target" not in perf.default_baseline_dir().parents
+
+
+def test_saving_replaces_the_cells_it_measured_and_keeps_the_rest(tmp_path: Path) -> None:
+    root = saved(tmp_path, [measured(tmp_path, "image.cold-open"), measured(tmp_path, "volume.orbit")])
+    later = [measured(tmp_path, "volume.orbit", settleMs=2000.0), measured(tmp_path, "image.pan-sweep", error="x")]
+    notes = perf.save_baseline(perf.group_cells(later), root, {"commit": "def5678"}, ("max-fetches=1",))
+    assert notes[-1] == "not saved, because a run failed: image.pan-sweep dpr 1"
+    cells = json.loads((root / ADAPTER_DIR / "dpr1.json").read_text(encoding="utf-8"))["cells"]
+    assert sorted(cells) == ["image.cold-open", "volume.orbit"]
+    assert cells["image.cold-open"]["commit"] == "abc1234"
+    assert cells["volume.orbit"]["commit"] == "def5678"
+    assert cells["volume.orbit"]["metrics"]["settleMs"] == {"n": 1, "median": 2000.0, "low": 2000.0, "high": 2000.0}
+    assert cells["volume.orbit"]["knobs"] == ["max-fetches=1"]
+
+
+def test_a_baseline_recorded_on_another_adapter_is_refused(tmp_path: Path) -> None:
+    root = saved(tmp_path, [measured(tmp_path, "image.cold-open")])
+    path = root / ADAPTER_DIR / "dpr1.json"
+    write(path, {**json.loads(path.read_text(encoding="utf-8")), "adapter": "apple m2 (hardware adapter)"})
+    later = [measured(tmp_path, "image.cold-open", settleMs=9000.0)]
+    [cell], comparison = compared(later, root)
+    assert comparison.refused and not comparison.compared
+    assert comparison.found(cell) is None
+    assert comparison.notes == [
+        f"dpr 1: not compared: {path} was recorded on apple m2 (hardware adapter), these runs on {ADAPTER}"
+    ]
+    assert perf.BASELINE_COLUMN not in perf.render_markdown(later, tmp_path, comparison)
+
+
+def test_no_baseline_ever_saved_adds_nothing_to_the_table(tmp_path: Path) -> None:
+    rows = [measured(tmp_path, "image.cold-open"), measured(tmp_path, "image.cold-open", 2.0)]
+    cells, comparison = compared(rows, tmp_path / "absent")
+    assert comparison.notes == [] and not comparison.compared and not comparison.refused
+    assert not any(comparison.regressed(cell) for cell in cells)
+    assert perf.render_markdown(rows, tmp_path, comparison) == perf.render_markdown(rows, tmp_path)
+
+
+def test_an_adapter_without_a_baseline_hears_which_adapters_have_one(tmp_path: Path) -> None:
+    root = saved(tmp_path, [measured(tmp_path, "image.cold-open")])
+    _, comparison = compared([measured(tmp_path, "image.cold-open", adapter="intel xe")], root)
+    assert not comparison.compared and not comparison.refused
+    assert comparison.notes == [f"dpr 1: no baseline for this adapter; {root} has one for {ADAPTER_DIR}"]
+
+
+def test_knobs_reach_the_trace_and_a_baseline_under_other_knobs_says_so(tmp_path: Path) -> None:
+    assert perf.knob_args(("max-fetches=1", "main-budget-mb=64")) == ["--max-fetches", "1", "--main-budget-mb", "64"]
+    for text in ("--max-fetches 1", "max-fetches", "max-fetches=1=2"):
+        with pytest.raises(perf.PerfError, match="a knob is NAME=VALUE"):
+            perf.parse_knob(text)
+    root = saved(tmp_path, [measured(tmp_path, "image.cold-open")])
+    _, comparison = compared([measured(tmp_path, "image.cold-open")], root, ("max-fetches=1",))
+    assert "dpr 1: knobs differ: these runs --max-fetches 1, the baseline none" in comparison.notes
 
 
 if __name__ == "__main__":
