@@ -184,6 +184,11 @@ export interface VolumeLayerParams {
    */
   labelColors?: { value: number; rgba: [number, number, number, number] }[];
   /**
+   * The level and chunk-T a label layer draws, so the worker marks the
+   * chunks of it that failed for good. Label layers only.
+   */
+  labelChunk?: { level: number; t: number };
+  /**
    * Column-major model matrix (source member's `[0,1]^3` cube → world) and
    * its inverse, for a label layer only. A label overlays its source image's
    * physical extent, so it renders in the source's world placement; the
@@ -281,6 +286,8 @@ export interface SliceLayerParams {
   opacity?: number;
   /** See {@link VolumeLayerParams.labelColors}. */
   labelColors?: { value: number; rgba: [number, number, number, number] }[];
+  /** The plane a label layer draws: its level, chunk-T and chunk-Z. See {@link VolumeLayerParams.labelChunk}. */
+  labelChunk?: { level: number; t: number; z: number };
   /**
    * Batched member quads for an aggregate layer. When present the
    * worker renders the whole batch in one pass (one instanced draw)
@@ -350,6 +357,8 @@ export interface MinimapRenderMessage {
   eye: Float32Array;
   canvasW: number;
   canvasH: number;
+  /** Device pixels per CSS pixel, so the failed hatch is one size at any ratio. */
+  pixelRatio: number;
 }
 
 export interface MinimapDestroyMessage {
@@ -360,6 +369,9 @@ export interface MinimapUploadOverviewChunksForLayerMessage {
   type: "minimapUploadOverviewChunksForLayer";
   datasetId: string;
   chunks: Chunk[];
+  /** The member image the overview draws, and the level its chunk keys name. */
+  imageId: string;
+  level: number;
   t: number;
   c: number;
   levelWidth: number;
@@ -389,6 +401,8 @@ export interface ThumbnailRenderMessage {
   eye: Float32Array;
   /** Square edge length of the off-screen target in device pixels. */
   size: number;
+  /** See {@link MinimapRenderMessage.pixelRatio}. */
+  pixelRatio: number;
 }
 
 export interface RemoveLayerResourcesMessage {
