@@ -121,9 +121,11 @@ jobs:
             type=gha,scope=trace-gate-server
           cache-to: ${{ github.event_name != 'pull_request' && matrix.saves-cache && 'type=gha,mode=min,scope=trace-gate-server' || '' }}
 
-      # From PyPI, as in the CI workflow's lucida-py job.
+      # From PyPI, as in the CI workflow's lucida-py job, at the same version.
       - name: Install uv
-        run: pipx install uv==0.13.7
+        env:
+          UV_VERSION: 0.13.7
+        run: pipx install "uv==$UV_VERSION"
 
       # The server opens each dataset by the path the CLI names, so the data
       # directory is mounted at the same path inside the container. Auth is

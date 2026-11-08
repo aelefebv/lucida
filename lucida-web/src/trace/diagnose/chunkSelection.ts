@@ -10,6 +10,7 @@
  * row that crosses the window's edge counts for the part inside.
  */
 
+import { formatCount } from "../../formatCount.ts";
 import { labelKey } from "../merge.ts";
 import { PHASES, SERVER_PHASES, type Phase, type ServerPhase, type TraceRow, type TraceRun } from "../types.ts";
 import { chunkIdentity } from "./chunkStates.ts";
@@ -177,9 +178,9 @@ export function selectChunks(
 
 function countPhrase(chunks: number): string {
   if (chunks === 0) return "no chunk";
-  return chunks === 1 ? "1 chunk" : `${chunks.toLocaleString()} chunks`;
+  return chunks === 1 ? "1 chunk" : `${formatCount(chunks)} chunks`;
 }
 
 function fromRows(rows: number, chunks: number): string {
-  return rows > chunks ? `, from ${rows.toLocaleString()} rows` : "";
+  return rows > chunks ? `, from ${formatCount(rows)} rows` : "";
 }

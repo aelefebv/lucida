@@ -186,13 +186,22 @@ describe("WorkspaceSharingDialog", () => {
     return dialog;
   }
 
+  // The address goes in as one input event. Typed a key at a time, every
+  // keystroke re-renders the dialog, and under parallel load the typing alone
+  // outran the test timeout.
+  async function submitEmail(user: ReturnType<typeof userEvent.setup>, field: HTMLElement, email: string) {
+    await user.click(field);
+    await user.paste(email);
+    await user.keyboard("{Enter}");
+  }
+
   it("adds a person, and reports a failed add in a toast", async () => {
     const user = setupUser();
     renderShare(true);
     const dialog = await openManage(user);
     const emailField = within(dialog).getByRole("textbox", { name: "Email" });
 
-    await user.type(emailField, "new@example.com{Enter}");
+    await submitEmail(user, emailField, "new@example.com");
     expect(await within(dialog).findByText("new@example.com")).toBeTruthy();
     expect(requests).toContainEqual({
       method: "POST",
@@ -201,7 +210,7 @@ describe("WorkspaceSharingDialog", () => {
     });
     expect((emailField as HTMLInputElement).value).toBe("");
 
-    await user.type(emailField, "nobody@example.com{Enter}");
+    await submitEmail(user, emailField, "nobody@example.com");
     expect(await screen.findByText("Couldn't add nobody@example.com")).toBeTruthy();
     expect(screen.getByText("No such person")).toBeTruthy();
     expect((emailField as HTMLInputElement).value).toBe("nobody@example.com");

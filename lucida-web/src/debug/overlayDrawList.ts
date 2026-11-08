@@ -14,6 +14,7 @@
 
 import type { EvictionTier } from "../pipeline/fetch/index.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
+import { formatCount } from "../formatCount.ts";
 import { formatMs } from "../monitor/monitorModel.ts";
 import { CANVAS_ROW_STATE_COLORS, withAlpha } from "../monitor/timelinePalette.ts";
 import type { ChunkSelection } from "../trace/diagnose/chunkSelection.ts";
@@ -447,8 +448,8 @@ export function describeHoverInspector(
   const rankOf = capped ? "queue rank of the newest listed row" : "queue rank";
   lines.push(
     listed.queue
-      ? `${rankOf}: ${listed.queue.aheadAtAdmission.toLocaleString()} ahead at admission · ` +
-          `${listed.queue.overtaken.toLocaleString()} overtook it · waited ${formatMs(listed.queue.waitedMs)}` +
+      ? `${rankOf}: ${formatCount(listed.queue.aheadAtAdmission)} ahead at admission · ` +
+          `${formatCount(listed.queue.overtaken)} overtook it · waited ${formatMs(listed.queue.waitedMs)}` +
           (listed.queue.dispatched ? "" : " · not dispatched yet")
       : `${rankOf}: never entered the queue`,
   );
@@ -507,10 +508,10 @@ export function selectionCaption(selection: ChunkSelection | null, list: ChunkDr
   if (selection.chunks === 0) {
     return `${scope}: no chunk had a row ${where} in the window, so nothing is highlighted`;
   }
-  const set = `${selection.chunks.toLocaleString()} chunks with a row ${where} in the window`;
+  const set = `${formatCount(selection.chunks)} chunks with a row ${where} in the window`;
   if (list.selected === 0) return `${scope}: none of the ${set} is on screen at this view`;
   return (
-    `${scope}: ${list.selected.toLocaleString()} of ${set} are on screen; ` +
+    `${scope}: ${formatCount(list.selected)} of ${set} are on screen; ` +
     "the rest are off screen or at a level this view does not show"
   );
 }
