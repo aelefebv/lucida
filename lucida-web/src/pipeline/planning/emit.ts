@@ -1,23 +1,23 @@
 /**
- * Lane emission helpers + priority computation. Translates active-set
- * entries and minimap-pending coords into {@link ChunkRequest} streams,
- * one per lane.
+ * Lane emission and priority. Turns the active set and minimap-pending
+ * coords into one {@link ChunkRequest} stream per lane, from the chunks the
+ * core enumerated for the plan.
+ *
+ * A request's priority is its lane's band plus an in-lane term under one.
+ * Lane offsets and prefetch steps are whole numbers, so every reader of the
+ * priority (admission, the fetch queue, the CPU store's protection and
+ * eviction, delivery order) sees one lane wholly before the next.
+ * Importance and distance from the view's focus order requests only within
+ * their band.
  */
 
 import { Axis } from "../../axes.ts";
-import type { VisibleRegion } from "../viewport.ts";
-import { chunkWithinRenderRadius } from "../renderRadius.ts";
-import {
-  chunkWorldDims,
-  compareChunkRequests,
-  iterateChunks,
-  iterateChunksAtLevels,
-} from "./chunks.ts";
 import {
   MINIMAP_SEED_BULK_LANE_OFFSET,
   MINIMAP_SEED_FAST_MAX_CHUNKS,
   type PlanningConfig,
 } from "./config.ts";
+import { enumerateChunks, type ChunkEnumeration, type LevelQuery } from "./enumerate.ts";
 import type {
   ActiveSetEntry,
   ChunkRequest,
@@ -25,45 +25,233 @@ import type {
   MinimapChunkCoord,
   PlanningSnapshot,
   PlanStats,
-  SelectionState,
   TileEntry,
   ZoomDirection,
 } from "./types.ts";
 
+/** Priority gap between consecutive prefetch steps. */
+const PREFETCH_STEP = 100;
+
 /**
- * Numeric priority for a chunk request. Lower = more urgent. Lane
- * offset separates lanes (minimap < detail < prefetch < coarse);
- * importance and distance order within a lane.
+ * The share of its band a lane's in-lane terms spread over. Under one, so a
+ * lane never reaches the next whole-number band.
  */
-function computePriority(
-  laneOffset: number,
-  importance: number,
-  distanceFromCenter: number,
-  config: PlanningConfig,
-): number {
+const IN_LANE_SPAN = 0.5;
+
+/** Canonical chunk key: "level/t/c/z/y/x". */
+export function chunkKey(
+  level: number,
+  t: number,
+  c: number,
+  z: number,
+  y: number,
+  x: number,
+): string {
+  return `${level}/${t}/${c}/${z}/${y}/${x}`;
+}
+
+/**
+ * The planner's request order: ascending priority (lower is more urgent),
+ * then a spatial-first, channel-second tiebreak so equal-priority
+ * multi-channel chunks interleave by cell instead of by channel.
+ */
+export function compareChunkRequests(a: ChunkRequest, b: ChunkRequest): number {
+  const priority = a.priority - b.priority;
+  if (priority !== 0) return priority;
+
+  const image = a.imageId.localeCompare(b.imageId);
+  if (image !== 0) return image;
+
   return (
-    laneOffset +
-    (1.0 - importance) * config.importanceWeight +
-    distanceFromCenter * config.distanceWeight
+    a.level - b.level ||
+    a.t - b.t ||
+    a.z - b.z ||
+    a.y - b.y ||
+    a.x - b.x ||
+    a.c - b.c ||
+    a.chunkKey.localeCompare(b.chunkKey)
   );
 }
 
-function stampRequest(
-  req: ChunkRequest,
+/**
+ * Requests as the lanes emit them. `priority` holds the lane's band until
+ * {@link LaneRequests.finish} adds each request's in-lane term, which needs
+ * every key in the band.
+ */
+export class LaneRequests {
+  private readonly requests: ChunkRequest[] = [];
+  /** Each request's in-lane key, lower first. */
+  private readonly keys: number[] = [];
+  private highestBand = -Infinity;
+
+  push(req: ChunkRequest, key: number): void {
+    this.requests.push(req);
+    this.keys.push(key);
+    if (req.priority > this.highestBand) this.highestBand = req.priority;
+  }
+
+  /** The highest band emitted so far, or -Infinity. */
+  get topBand(): number {
+    return this.highestBand;
+  }
+
+  /**
+   * Place each request within its band by where its key falls between the
+   * band's least and greatest, then sort into the planner's request order.
+   * Equal keys get equal priorities, so the identity tiebreak still applies.
+   */
+  finish(): ChunkRequest[] {
+    const range = new Map<number, [number, number]>();
+    for (let i = 0; i < this.requests.length; i++) {
+      const band = this.requests[i].priority;
+      const key = this.keys[i];
+      const seen = range.get(band);
+      if (seen === undefined) range.set(band, [key, key]);
+      else if (key < seen[0]) seen[0] = key;
+      else if (key > seen[1]) seen[1] = key;
+    }
+    for (let i = 0; i < this.requests.length; i++) {
+      const req = this.requests[i];
+      const [least, greatest] = range.get(req.priority)!;
+      if (greatest > least) req.priority += (IN_LANE_SPAN * (this.keys[i] - least)) / (greatest - least);
+    }
+    return this.requests.sort(compareChunkRequests);
+  }
+}
+
+/**
+ * A request's place within its lane: more important entities first, then
+ * chunks nearer the view's focus.
+ */
+function inLaneKey(entity: EntitySnapshot, distance: number, config: PlanningConfig): number {
+  return (1.0 - entity.importance) * config.importanceWeight + distance * config.distanceWeight;
+}
+
+/** One visible tile and the queries its lanes read from the plan's enumeration. */
+export interface TileQueries {
+  entry: TileEntry;
+  entity: EntitySnapshot;
+  /** One query per detail-tier level, in `entry.detailLevels` order. */
+  detail: number[];
+  coarse: number | null;
+  /** Future timepoints the prefetch lane steps through, nearest first. */
+  timepointSteps: number;
+  /** The prefetch lane's level step, when the lane has steps left for it. */
+  levelStep: LevelStep | null;
+}
+
+interface LevelStep {
+  level: number;
+  query: number;
+  /** Prefetch steps it takes, each the size of the visible target-level set. */
+  steps: number;
+}
+
+/** What one plan's lanes draw on: the enumeration and how its queries map to tiles. */
+export interface PlanChunks {
+  tiles: TileQueries[];
+  found: ChunkEnumeration;
+}
+
+/**
+ * Enumerate, in one call into the core, every chunk the plan's lanes can
+ * ask for: each visible tile's detail levels, its coarse level, and the
+ * prefetch lane's level step. Timepoint prefetch reuses the detail chunks,
+ * since only `t` differs.
+ */
+export function enumeratePlanChunks(
+  activeSet: readonly ActiveSetEntry[],
+  snapshot: PlanningSnapshot,
+  entityById: ReadonlyMap<string, EntitySnapshot>,
+  config: PlanningConfig,
+  zoomDirection: ZoomDirection | null,
+): PlanChunks {
+  const queries: LevelQuery[] = [];
+  const ask = (entity: EntitySnapshot, level: number, radiusView: number): number =>
+    queries.push({ entity, level, radiusView }) - 1;
+  const tiles: TileQueries[] = [];
+  for (const entry of activeSet) {
+    if (entry.kind !== "tile") continue;
+    const entity = entityById.get(entry.entityId);
+    if (entity === undefined) continue;
+
+    const detail = entry.detailLevels.map((level) => ask(entity, level, config.detailRenderRadiusView));
+    const coarse = entry.coarseLevel === null
+      ? null
+      : ask(entity, entry.coarseLevel, config.coarseRenderRadiusView);
+
+    // The prefetch lane's budget is `prefetchDepth` steps. A level in the
+    // zoom direction takes the last step, and any step the timepoints
+    // cannot fill.
+    let timepointSteps = 0;
+    let levelStep: LevelStep | null = null;
+    const level0 = entity.levels[0];
+    if (level0 !== undefined) {
+      const level = levelInZoomDirection(entity, zoomDirection);
+      const allowed = level === null ? config.prefetchDepth : config.prefetchDepth - 1;
+      const timepoints = level0.grid_shape[Axis.T] ?? 0;
+      timepointSteps = Math.max(0, Math.min(allowed, timepoints - 1 - snapshot.selection.t));
+      const steps = config.prefetchDepth - timepointSteps;
+      if (level !== null && steps > 0) {
+        levelStep = { level, query: ask(entity, level, config.detailRenderRadiusView), steps };
+      }
+    }
+    tiles.push({ entry, entity, detail, coarse, timepointSteps, levelStep });
+  }
+  const found = enumerateChunks(snapshot.visibleRegion, config.depthBiasView, queries);
+  return { tiles, found };
+}
+
+/** A lane's sink for requests and their in-lane keys. */
+type Push = (req: ChunkRequest, key: number) => void;
+
+/**
+ * Push one request per channel for each chunk `query` found at `level`, at
+ * timepoint `t`, in `lane`'s `band`. Channels are innermost so
+ * equal-priority multi-channel chunks interleave by cell.
+ */
+function emitQuery(
+  chunks: PlanChunks,
   entity: EntitySnapshot,
+  query: number,
+  level: number,
   snapshot: PlanningSnapshot,
   config: PlanningConfig,
+  t: number,
   lane: ChunkRequest["lane"],
   tier: ChunkRequest["tier"],
-  laneOffset: number,
-  radiusView: number,
-): boolean {
-  if (!requestWithinRenderRadius(req, snapshot.visibleRegion, entity, radiusView)) return false;
-  const dist = chunkDistanceFromCenter(req, snapshot.visibleRegion, entity, config.depthBiasView);
-  req.lane = lane;
-  req.tier = tier;
-  req.priority = computePriority(laneOffset, entity.importance, dist, config);
-  return true;
+  band: number,
+  push: Push,
+): void {
+  const channels = snapshot.selection.visibleChannels;
+  chunks.found.forEach(query, (x, y, z, distance) => {
+    const key = inLaneKey(entity, distance, config);
+    for (const c of channels) {
+      push(
+        {
+          datasetId: snapshot.datasetId,
+          entityId: entity.entityId,
+          imageId: entity.imageId,
+          level,
+          t,
+          c,
+          z,
+          y,
+          x,
+          lane,
+          tier,
+          priority: band,
+          chunkKey: chunkKey(level, t, c, z, y, x),
+        },
+        key,
+      );
+    }
+  });
+}
+
+/** Add a query's culling counts once per channel. */
+function count(chunks: PlanChunks, query: number, snapshot: PlanningSnapshot, stats: PlanStats): void {
+  chunks.found.addCounts(query, stats.culling, snapshot.selection.visibleChannels.length);
 }
 
 /**
@@ -74,18 +262,17 @@ function stampRequest(
  * is small. On a wide collection it is tens of thousands of chunks and would
  * hold every fetch slot for minutes while the view waits. Past
  * `minimapSeedFastMaxChunks` of total demand, everything here rides the bulk
- * lane at `max(bulk offset, bulkPriorityFloor)`. `bulkPriorityFloor` is above
- * every request already in the plan, which a constant offset cannot promise
- * because other lanes' distance terms are unbounded, so this must run after
- * the view lanes. Mutates `out`.
+ * lane at `max(bulk offset, bulkBandFloor)`. The floor is above every band
+ * already in the plan, which the bulk offset alone cannot promise because
+ * the lane offsets are knobs, so this must run after the view lanes.
  */
 export function emitMinimapLane(
   minimapPending: Map<string, MinimapChunkCoord[]>,
   entities: EntitySnapshot[],
   datasetId: string,
   config: PlanningConfig,
-  bulkPriorityFloor: number,
-  out: ChunkRequest[],
+  bulkBandFloor: number,
+  out: LaneRequests,
 ): void {
   if (minimapPending.size === 0) return;
   // The fast/bulk decision reads the whole pending map, not this call's
@@ -99,67 +286,53 @@ export function emitMinimapLane(
   // rides the fast lane because a knob is absent.
   const fastMax = config.minimapSeedFastMaxChunks ?? MINIMAP_SEED_FAST_MAX_CHUNKS;
   const bulkBase = config.minimapSeedBulkLaneOffset ?? MINIMAP_SEED_BULK_LANE_OFFSET;
-  const priority =
+  const band =
     pendingTotal > fastMax
-      ? Math.max(bulkBase, bulkPriorityFloor)
+      ? Math.max(bulkBase, bulkBandFloor)
       : config.minimapLaneOffset;
   for (const entity of entities) {
     const pending = minimapPending.get(entity.imageId);
     if (!pending) continue;
     for (const coord of pending) {
-      out.push({
-        datasetId,
-        entityId: entity.entityId,
-        imageId: entity.imageId,
-        level: coord.level,
-        t: coord.t,
-        c: coord.c,
-        z: coord.z,
-        y: coord.y,
-        x: coord.x,
-        lane: "minimap",
-        tier: "coarse",
-        priority,
-        chunkKey: coord.key,
-      });
+      out.push(
+        {
+          datasetId,
+          entityId: entity.entityId,
+          imageId: entity.imageId,
+          level: coord.level,
+          t: coord.t,
+          c: coord.c,
+          z: coord.z,
+          y: coord.y,
+          x: coord.x,
+          lane: "minimap",
+          tier: "coarse",
+          priority: band,
+          chunkKey: coord.key,
+        },
+        0,
+      );
     }
   }
 }
 
-/**
- * Detail lane — for each visible tile entry, push its detail chunks.
- * Mutates `allRequests`.
- */
+/** Detail lane: each visible tile's chunks at its detail-tier levels. */
 export function emitDetailLane(
-  activeSet: ActiveSetEntry[],
+  chunks: PlanChunks,
   snapshot: PlanningSnapshot,
-  entityById: Map<string, EntitySnapshot>,
   stats: PlanStats,
-  allRequests: ChunkRequest[],
+  out: LaneRequests,
   config: PlanningConfig,
 ): void {
-  const datasetId = snapshot.datasetId;
-  for (const entry of activeSet) {
-    if (entry.kind === "invisible") continue;
-
-    const entity = entityById.get(entry.entityId);
-    if (entity === undefined) continue;
-
-    const chunks = iterateChunks(
-      entity,
-      entry,
-      snapshot.visibleRegion,
-      snapshot.selection,
-      stats,
-      datasetId,
-    );
-    for (const req of chunks) {
-      const kept = stampRequest(
-        req, entity, snapshot, config,
-        "detail", "detail", config.detailLaneOffset, config.detailRenderRadiusView,
+  const push: Push = (req, key) => out.push(req, key);
+  for (const { entity, entry, detail } of chunks.tiles) {
+    detail.forEach((query, i) => {
+      count(chunks, query, snapshot, stats);
+      emitQuery(
+        chunks, entity, query, entry.detailLevels[i], snapshot, config, snapshot.selection.t,
+        "detail", "detail", config.detailLaneOffset, push,
       );
-      if (kept) allRequests.push(req);
-    }
+    });
   }
 }
 
@@ -179,128 +352,69 @@ function levelInZoomDirection(
 }
 
 /**
- * Prefetch lane — for each tile-mode active entry, chunks at future
+ * Prefetch lane: for each visible tile, the detail chunks at future
  * timepoints, and chunks at the next level in the direction of the last
- * zoom change so that level is partly resident when the target crosses
- * to it.
+ * zoom change so that level is partly resident when the target crosses to
+ * it.
  *
  * The lane's budget per entity is `prefetchDepth` steps, each the visible
  * target-level set. With no level to prefetch, every step is a future
- * timepoint. With one, the level step takes the lane's last
- * step and the timepoint steps keep the ones before it. The level step
- * also takes any step the timepoints cannot fill, nearest the view center
- * first. The lane never exceeds the budget either way.
- *
- * Mutates `allRequests`.
+ * timepoint. With one, the level step takes the lane's last step and the
+ * timepoint steps keep the ones before it. The level step also takes any
+ * step the timepoints cannot fill, nearest the view's focus first. Each
+ * step is its own band, nearest first, so a later step never outranks an
+ * earlier one.
  */
 export function emitPrefetchLane(
-  activeSet: ActiveSetEntry[],
+  chunks: PlanChunks,
   snapshot: PlanningSnapshot,
-  entityById: Map<string, EntitySnapshot>,
   stats: PlanStats,
-  allRequests: ChunkRequest[],
+  out: LaneRequests,
   config: PlanningConfig,
-  zoomDirection: ZoomDirection | null,
 ): void {
-  const datasetId = snapshot.datasetId;
-  for (const entry of activeSet) {
-    if (entry.kind !== "tile") continue;
-    const entity = entityById.get(entry.entityId);
-    if (entity === undefined) continue;
-    if (entity.levels.length === 0) continue;
-
-    const level = levelInZoomDirection(entity, zoomDirection);
-    const timepointStepsAllowed = level === null ? config.prefetchDepth : config.prefetchDepth - 1;
-    let timepointSteps = 0;
-    const maxT = entity.levels[0]?.grid_shape[Axis.T] ?? 0;
-    for (let dt = 1; dt <= timepointStepsAllowed; dt++) {
-      const nextT = snapshot.selection.t + dt;
-      if (nextT >= maxT) break;
-      const prefetchSelection: SelectionState = {
-        ...snapshot.selection,
-        t: nextT,
-      };
-
-      const chunks = iterateChunks(
-        entity,
-        entry,
-        snapshot.visibleRegion,
-        prefetchSelection,
-        stats,
-        datasetId,
-      );
-      for (const req of chunks) {
-        const kept = stampRequest(
-          req, entity, snapshot, config,
-          "prefetch", "detail", config.prefetchLaneOffset + dt * 100, config.detailRenderRadiusView,
+  const push: Push = (req, key) => out.push(req, key);
+  for (const { entity, entry, detail, timepointSteps, levelStep } of chunks.tiles) {
+    for (let dt = 1; dt <= timepointSteps; dt++) {
+      detail.forEach((query, i) => {
+        count(chunks, query, snapshot, stats);
+        emitQuery(
+          chunks, entity, query, entry.detailLevels[i], snapshot, config, snapshot.selection.t + dt,
+          "prefetch", "detail", config.prefetchLaneOffset + dt * PREFETCH_STEP, push,
         );
-        if (kept) allRequests.push(req);
-      }
-      timepointSteps++;
+      });
     }
-
-    if (level === null) continue;
-    const stepsLeft = config.prefetchDepth - timepointSteps;
-    if (stepsLeft <= 0) continue;
-    const stepSize = countTargetLevelRequests(entity, entry, snapshot, config);
-    emitLevelPrefetch(entity, level, snapshot, stats, allRequests, config, stepsLeft * stepSize);
+    if (levelStep === null) continue;
+    let stepSize = 0;
+    for (const query of detail) stepSize += chunks.found.size(query);
+    stepSize *= snapshot.selection.visibleChannels.length;
+    emitLevelStep(chunks, entity, levelStep, snapshot, stats, config, levelStep.steps * stepSize, out);
   }
-}
-
-/** The size of one prefetch step: what the detail lane emits for the entry. */
-function countTargetLevelRequests(
-  entity: EntitySnapshot,
-  entry: TileEntry,
-  snapshot: PlanningSnapshot,
-  config: PlanningConfig,
-): number {
-  let count = 0;
-  for (const req of iterateChunks(entity, entry, snapshot.visibleRegion, snapshot.selection)) {
-    if (requestWithinRenderRadius(req, snapshot.visibleRegion, entity, config.detailRenderRadiusView)) {
-      count++;
-    }
-  }
-  return count;
 }
 
 /**
- * The prefetch lane's level step: the `allowance` chunks at `level` nearest
- * the view center. Within one entity and offset, priority order is distance
- * order, so the sort picks them. The offset is the lane's last step slot, so
- * the step ranks behind every timepoint step.
- *
- * Mutates `allRequests`.
+ * The prefetch lane's level step: the `allowance` requests at the level
+ * nearest the view's focus, in the lane's last step band.
  */
-function emitLevelPrefetch(
+function emitLevelStep(
+  chunks: PlanChunks,
   entity: EntitySnapshot,
-  level: number,
+  step: LevelStep,
   snapshot: PlanningSnapshot,
   stats: PlanStats,
-  allRequests: ChunkRequest[],
   config: PlanningConfig,
   allowance: number,
+  out: LaneRequests,
 ): void {
   if (allowance <= 0) return;
-  const candidates: ChunkRequest[] = [];
-  const chunks = iterateChunksAtLevels(
-    entity,
-    [level],
-    snapshot.visibleRegion,
-    snapshot.selection,
-    stats,
-    snapshot.datasetId,
+  count(chunks, step.query, snapshot, stats);
+  const band = config.prefetchLaneOffset + config.prefetchDepth * PREFETCH_STEP;
+  const candidates: { req: ChunkRequest; key: number }[] = [];
+  emitQuery(
+    chunks, entity, step.query, step.level, snapshot, config, snapshot.selection.t,
+    "prefetch", "detail", band, (req, key) => candidates.push({ req, key }),
   );
-  for (const req of chunks) {
-    const kept = stampRequest(
-      req, entity, snapshot, config,
-      "prefetch", "detail",
-      config.prefetchLaneOffset + config.prefetchDepth * 100,
-      config.detailRenderRadiusView,
-    );
-    if (kept) candidates.push(req);
-  }
-  candidates.sort(compareChunkRequests);
-  for (const req of candidates.slice(0, allowance)) allRequests.push(req);
+  candidates.sort((a, b) => a.key - b.key || compareChunkRequests(a.req, b.req));
+  for (const { req, key } of candidates.slice(0, allowance)) out.push(req, key);
 }
 
 /**
@@ -309,140 +423,19 @@ function emitLevelPrefetch(
  * detail lane, and skips the levels between.
  */
 export function emitCoarseLane(
-  activeSet: ActiveSetEntry[],
+  chunks: PlanChunks,
   snapshot: PlanningSnapshot,
-  entityById: Map<string, EntitySnapshot>,
   stats: PlanStats,
-  allRequests: ChunkRequest[],
+  out: LaneRequests,
   config: PlanningConfig,
 ): void {
-  const datasetId = snapshot.datasetId;
-  for (const entry of activeSet) {
-    if (entry.kind !== "tile") continue;
-    if (entry.coarseLevel === null) continue;
-
-    const entity = entityById.get(entry.entityId);
-    if (entity === undefined) continue;
-
-    const chunks = iterateChunksAtLevels(
-      entity,
-      [entry.coarseLevel],
-      snapshot.visibleRegion,
-      snapshot.selection,
-      stats,
-      datasetId,
+  const push: Push = (req, key) => out.push(req, key);
+  for (const { entity, entry, coarse } of chunks.tiles) {
+    if (coarse === null || entry.coarseLevel === null) continue;
+    count(chunks, coarse, snapshot, stats);
+    emitQuery(
+      chunks, entity, coarse, entry.coarseLevel, snapshot, config, snapshot.selection.t,
+      "coarse", "coarse", config.coarseLaneOffset, push,
     );
-    for (const req of chunks) {
-      const kept = stampRequest(
-        req, entity, snapshot, config,
-        "coarse", "coarse", config.coarseLaneOffset, config.coarseRenderRadiusView,
-      );
-      if (kept) allRequests.push(req);
-    }
   }
-}
-
-/**
- * Compute distance from a chunk's world-space center to the view center.
- *
- * Uses the visible region's sortCenter if available, otherwise its
- * midpoint, offset by entity position. Grid indices become world-voxel
- * positions via per-level chunk world sizes so distance compares across
- * levels. `depthBiasView` shifts the focal Z; see {@link applyDepthBias}.
- */
-function chunkDistanceFromCenter(
-  req: ChunkRequest,
-  region: VisibleRegion,
-  entity: EntitySnapshot,
-  depthBiasView = 0,
-): number {
-  // View center in local (entity-relative) voxel coords.
-  let centerX: number;
-  let centerY: number;
-  let centerZ: number;
-
-  if (region.sortCenterVox !== null) {
-    centerX = region.sortCenterVox[0] - entity.layoutPositionVox[0];
-    centerY = region.sortCenterVox[1] - entity.layoutPositionVox[1];
-    centerZ = region.sortCenterVox[2];
-  } else {
-    centerX =
-      (region.xyBoundsVox[0] + region.xyBoundsVox[2]) / 2 -
-      entity.layoutPositionVox[0];
-    centerY =
-      (region.xyBoundsVox[1] + region.xyBoundsVox[3]) / 2 -
-      entity.layoutPositionVox[1];
-    centerZ = (region.zRangeVox[0] + region.zRangeVox[1]) / 2;
-  }
-
-  centerZ = applyDepthBias(centerZ, region, depthBiasView);
-
-  const level0 = entity.levels[0];
-  const geo = entity.levels[req.level];
-  let cwX = 1;
-  let cwY = 1;
-  let cwZ = 1;
-  if (geo !== undefined && level0 !== undefined) {
-    [cwX, cwY, cwZ] = chunkWorldDims(geo, level0);
-  }
-
-  const dx = (req.x + 0.5) * cwX - centerX;
-  const dy = (req.y + 0.5) * cwY - centerY;
-  const dz = (req.z + 0.5) * cwZ - centerZ;
-  return Math.sqrt(dx * dx + dy * dy + dz * dz);
-}
-
-/**
- * Shift the focal Z (the center-out spawn origin along the near↔far axis)
- * by `depthBiasView`, a fraction of the visible half-depth. The bias is
- * clamped to `[-1, 1]`: `-1` is the near plane, `+1` the far plane. At `0`
- * this returns `centerZ` with no arithmetic or clamp, so the default
- * priority is byte-identical to no bias.
- */
-function applyDepthBias(
-  centerZ: number,
-  region: VisibleRegion,
-  depthBiasView: number,
-): number {
-  if (depthBiasView === 0) return centerZ;
-  const bias = Math.min(1, Math.max(-1, depthBiasView));
-  const zMin = region.zRangeVox[0];
-  const zMax = region.zRangeVox[1];
-  const halfDepth = (zMax - zMin) / 2;
-  const shifted = centerZ + bias * halfDepth;
-  return Math.min(zMax, Math.max(zMin, shifted));
-}
-
-function requestWithinRenderRadius(
-  req: ChunkRequest,
-  region: VisibleRegion,
-  entity: EntitySnapshot,
-  radiusView: number,
-): boolean {
-  const level0 = entity.levels[0];
-  const level = entity.levels[req.level];
-  if (!level0 || !level) return true;
-  return chunkWithinRenderRadius({
-    region,
-    radiusView,
-    layoutPositionVox: entity.layoutPositionVox,
-    geometry: {
-      fullDims: [
-        level0.shape[Axis.X],
-        level0.shape[Axis.Y],
-        level0.shape[Axis.Z],
-      ],
-      levelDims: [
-        level.shape[Axis.X],
-        level.shape[Axis.Y],
-        level.shape[Axis.Z],
-      ],
-      chunkDims: [
-        level.chunk_shape[Axis.X],
-        level.chunk_shape[Axis.Y],
-        level.chunk_shape[Axis.Z],
-      ],
-    },
-    chunk: { x: req.x, y: req.y, z: req.z },
-  });
 }

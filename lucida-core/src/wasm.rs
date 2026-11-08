@@ -14,6 +14,25 @@ pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
     crate::chunk::chunk_key(level, t, c, z, y, x)
 }
 
+/// The chunks each query's level samples under one view, with each chunk's
+/// distance from the view's focus, from [`crate::chunk::enumerate_batch`].
+///
+/// `region_json` is a visible region shaped as [`WasmScene::visible_region`]
+/// writes it; `depth_bias` moves the focus along Z. `queries` holds
+/// [`crate::chunk::QUERY_STRIDE`] numbers per query. The planner makes one
+/// call per plan, so the boundary is crossed once however many entities it
+/// covers.
+#[wasm_bindgen]
+pub fn enumerate_chunks(
+    region_json: &str,
+    depth_bias: f64,
+    queries: &[f64],
+) -> Result<Vec<f64>, JsError> {
+    let view = crate::chunk::ChunkView::from_json(region_json, depth_bias)
+        .map_err(|e| JsError::new(&format!("invalid visible region: {e}")))?;
+    Ok(crate::chunk::enumerate_batch(&view, queries))
+}
+
 /// The level the screen calls for, from [`crate::target_level::target_level`],
 /// the rule every record of [`WasmScene::view_query`] applies.
 /// `pixels_per_sample` is device pixels per level-0 sample, `shape_ratios[L]`

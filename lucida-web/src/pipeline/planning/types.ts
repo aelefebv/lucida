@@ -200,8 +200,9 @@ export interface RequestPlan {
 }
 
 /**
- * Per-plan accumulator. Counters are summed across all `iterateChunks`
- * calls (detail, prefetch, and coarse lanes) and across all entities.
+ * Per-plan accumulator. Counters are summed across the chunks each lane
+ * reads (detail, every prefetch step, and coarse), across all entities and
+ * channels.
  */
 export interface PlanStats {
   /** Frustum / visible-region culling stages. */

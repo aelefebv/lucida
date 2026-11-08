@@ -83,18 +83,18 @@ export class WantedLastPolicy implements EvictionPolicy {
 }
 
 /**
- * The detail cache's policy. Two passes:
+ * The detail cache's policy. Three passes:
  *
  *  1. Chunks finer than their entity's target level, whatever their tier.
  *     Planning requests only the target level, the renderer
  *     never samples finer, and finer levels cost the most, so zooming out
  *     releases these first. Finest level first.
- *  2. Everything else, walking {@link getTierOrder} for the current mode,
- *     first over what the latest plan does not want, then over its
- *     prefetch, then over what its view wants. Each tier is LRU, except
- *     active-detail, which sorts by `(lastSeenTick ↑, priority ↓,
- *     insertedAt ↑)`: chunks absent from the latest plan go first, then
- *     those farthest from focal.
+ *  2. What the latest plan does not want, walking {@link getTierOrder} for
+ *     the current mode. Each tier is LRU, except active-detail, which sorts
+ *     by `(lastSeenTick ↑, priority ↓, insertedAt ↑)`: the oldest plans'
+ *     chunks first, then those farthest from focal.
+ *  3. What it wants, least urgent first. The priority puts every lane
+ *     wholly ahead of the next, so its prefetch goes before any of its view.
  *
  * Admission fits the view's chunks within the budget, so the view's chunks
  * going last means the view never loses one while anything else is held.
@@ -131,14 +131,12 @@ export class TieredPolicy implements EvictionPolicy {
     const tick = this.currentTick();
     const finer: CacheEntry[] = [];
     const unwanted: CacheEntry[] = [];
-    const prefetch: CacheEntry[] = [];
-    const view: CacheEntry[] = [];
+    const wanted: CacheEntry[] = [];
     for (const entry of entries) {
       const target = this.targetLevelFor(entry.entityId);
       if (target !== undefined && entry.level < target) finer.push(entry);
       else if (entry.lastSeenTick !== tick) unwanted.push(entry);
-      else if (entry.lane === "prefetch") prefetch.push(entry);
-      else view.push(entry);
+      else wanted.push(entry);
     }
     finer.sort((a, b) => a.level - b.level || byDistanceFromView(a, b));
     for (const entry of finer) {
@@ -146,21 +144,24 @@ export class TieredPolicy implements EvictionPolicy {
       take(entry);
     }
 
-    const order = getTierOrder(this.modeProvider());
-    for (const group of [unwanted, prefetch, view]) {
-      for (const tier of order) {
-        if (freed >= bytesNeeded) return victims;
-        const tierEntries = group.filter(e => e.tier === tier);
-        if (tier === "active-detail") {
-          tierEntries.sort(byDistanceFromView);
-        } else {
-          tierEntries.sort((a, b) => a.insertedAt - b.insertedAt);
-        }
-        for (const entry of tierEntries) {
-          if (freed >= bytesNeeded) break;
-          take(entry);
-        }
+    for (const tier of getTierOrder(this.modeProvider())) {
+      if (freed >= bytesNeeded) return victims;
+      const tierEntries = unwanted.filter(e => e.tier === tier);
+      if (tier === "active-detail") {
+        tierEntries.sort(byDistanceFromView);
+      } else {
+        tierEntries.sort((a, b) => a.insertedAt - b.insertedAt);
       }
+      for (const entry of tierEntries) {
+        if (freed >= bytesNeeded) break;
+        take(entry);
+      }
+    }
+
+    wanted.sort((a, b) => b.priority - a.priority || a.insertedAt - b.insertedAt);
+    for (const entry of wanted) {
+      if (freed >= bytesNeeded) break;
+      take(entry);
     }
 
     return victims;
@@ -176,11 +177,11 @@ function byDistanceFromView(a: CacheEntry, b: CacheEntry): number {
 }
 
 /**
- * Tier-walk order for {@link TieredPolicy}. Highest-eviction-priority
- * tier first. Panning and idle both walk prefetch → demoted → active
- * (cheapest losses first). Scrubbing protects prefetch (those are the
- * next-time-step chunks the user is actively skimming) by walking
- * demoted → active → prefetch.
+ * Tier-walk order for what {@link TieredPolicy} evicts among the chunks the
+ * latest plan does not want. Highest-eviction-priority tier first. Panning
+ * and idle both walk prefetch → demoted → active (cheapest losses first).
+ * Scrubbing protects prefetch (those are the next-time-step chunks the user
+ * is actively skimming) by walking demoted → active → prefetch.
  *
  * Pure; exported for the cache's telemetry surface
  * (`CacheTelemetry.evictionTierOrder`).

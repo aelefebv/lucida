@@ -29,20 +29,9 @@ export {
 
 export { buildActiveSet, groupMembers } from "./activeSet.ts";
 
-export {
-  chunkKey,
-  chunkOutsideFrustum,
-  chunkWorldDims,
-  iterateChunks,
-  iterateChunksAtLevels,
-} from "./chunks.ts";
+export { chunkKey, compareChunkRequests } from "./emit.ts";
 
-export {
-  emitCoarseLane,
-  emitDetailLane,
-  emitMinimapLane,
-  emitPrefetchLane,
-} from "./emit.ts";
+export { enumerateChunks, type ChunkEnumeration, type LevelQuery } from "./enumerate.ts";
 
 export { plan, emitPlanRequests } from "./plan.ts";
 
