@@ -280,6 +280,19 @@ describe("DevControls — read-only mode (production builds)", () => {
   });
 });
 
+describe("DevControls — off-step values", () => {
+  it("shows a knob stored between its slider's steps as stored", () => {
+    act(() => {
+      configStore.set("importanceWeight", 125);
+      configStore.set("detailRenderRadiusView", 0.137);
+    });
+    render(<DevControls />);
+    expect(valueField("Importance weight").value).toBe("125");
+    expect(valueField("Detail render radius (view)").value).toBe("0.137");
+    expect(configStore.get().importanceWeight).toBe(125);
+  });
+});
+
 describe("DevControls — store subscription", () => {
   it("re-renders when configStore changes externally", async () => {
     render(<DevControls />);

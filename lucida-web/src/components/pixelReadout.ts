@@ -15,16 +15,34 @@ export interface ReadoutContext {
   /** Level-0 depth, so a flat image's position leaves Z out. */
   depth(datasetId: string): number;
   channel(datasetId: string, channel: number): { name: string; colormap: string };
+  /** A label overlay by its label image id, or null when the manifest has none by that id. */
+  label(datasetId: string, labelImageId: string): ReadoutLabel | null;
+}
+
+/** What the readout shows of a label overlay. */
+export interface ReadoutLabel {
+  name: string;
+  /** The name the label's property table gives an id, or null. */
+  idName(id: number): string | null;
+  /** The CSS color the overlay draws an id in. */
+  color(id: number): string;
 }
 
 export interface ReadoutRow {
   key: string;
   name: string;
-  colormap: string;
+  /** The channel's colormap; absent on a label row, which shows `color`. */
+  colormap?: string;
+  /** The color a label row's id draws in. */
+  color?: string;
   value: string;
+  /** The name a label table gives the row's id. */
+  detail: string | null;
   /** Set only when the block's rows come from different levels. */
   level: string | null;
-  /** Nothing resident or the chunk failed: no value to read. */
+  /** Set only when the block's rows lie at different positions. */
+  position: string | null;
+  /** Nothing resident, the chunk failed, or a 3D ray drew nothing: no value to read. */
   absent: boolean;
 }
 
@@ -32,8 +50,13 @@ export interface ReadoutBlock {
   key: string;
   /** Shown when the readout spans entities, or the entity is a collection tile. */
   title: string | null;
-  /** `x`, `y` as 0-based sample indices; `Z` as people count it, from 1. */
+  /**
+   * The position every row lies at, when they share one: `x`, `y` as 0-based
+   * sample indices, `Z` as people count it, from 1.
+   */
   position: { label: string; value: string }[];
+  /** How a 3D march chose the rows' samples, where it did. */
+  note: string | null;
   /** The level every row came from, when they share one. */
   level: string | null;
   rows: ReadoutRow[];
@@ -50,42 +73,98 @@ export function readoutBlocks(samples: readonly ProbeSample[], context: ReadoutC
   }
   const blocks: ReadoutBlock[] = [];
   for (const [key, group] of byEntity) {
-    const { datasetId, entityId, position } = group[0];
-    const ordered = [...group].sort((a, b) => a.channel - b.channel);
-    const levels = new Set(ordered.flatMap((s) => (s.level === undefined ? [] : [s.level])));
-    const shared = levels.size === 1 ? [...levels][0] : null;
+    const { datasetId, entityId } = group[0];
+    // Channels in channel order, then label overlays in the order they draw.
+    const channels = group.filter((s) => s.channel !== undefined).sort((a, b) => a.channel! - b.channel!);
+    const labels = group.filter((s) => s.channel === undefined);
+    const ordered = [...channels, ...labels];
+    const levels = new Set(channels.flatMap((s) => (s.level === undefined ? [] : [s.level])));
+    const sharedLevel = levels.size === 1 ? [...levels][0] : null;
+    const depth = context.depth(datasetId);
+    const placed = ordered.flatMap((s) => (s.position ? [positionAxes(s.position, depth)] : []));
+    const sharedPosition = placed.length > 0 && placed.every((p) => sameAxes(p, placed[0])) ? placed[0] : null;
     const tile = context.entityName(datasetId, entityId);
     const name = context.datasetName(datasetId);
-    const [x, y, z] = position;
-    const axes = [
-      { label: "x", value: String(x) },
-      { label: "y", value: String(y) },
-    ];
-    if (context.depth(datasetId) > 1) axes.push({ label: "Z", value: String(z + 1) });
-    blocks.push({
-      key,
-      title: tile ? `${name} · ${tile}` : byEntity.size > 1 ? name : null,
-      position: axes,
-      level: shared === null ? null : `level ${shared}`,
-      rows: ordered.map((sample) => {
+    const rows: ReadoutRow[] = [];
+    for (const sample of ordered) {
+      const position = sample.position && !sharedPosition
+        ? positionAxes(sample.position, depth).map((a) => `${a.label} ${a.value}`).join(" ")
+        : null;
+      const rowKey = `${key}\u0000${sample.labelImageId ?? sample.channel}`;
+      if (sample.channel !== undefined) {
         const channel = context.channel(datasetId, sample.channel);
-        return {
-          key: `${key}\u0000${sample.channel}`,
+        rows.push({
+          key: rowKey,
           name: channel.name,
           colormap: channel.colormap,
           value: sampleText(sample, context.dataType(datasetId)),
-          level: shared === null && sample.level !== undefined ? `level ${sample.level}` : null,
+          detail: null,
+          level: sharedLevel === null && sample.level !== undefined ? `level ${sample.level}` : null,
+          position,
           absent: sample.state !== "value",
-        };
-      }),
+        });
+        continue;
+      }
+      const label = sample.labelImageId ? context.label(datasetId, sample.labelImageId) : null;
+      if (!label) continue;
+      const id = sample.state === "value" ? sample.value : undefined;
+      rows.push({
+        key: rowKey,
+        name: label.name,
+        color: id === undefined ? undefined : label.color(id),
+        // Label ids are held as exact 32-bit integers, never as floats.
+        value: id === undefined ? sampleText(sample, "uint32") : String(id),
+        detail: id === undefined ? null : label.idName(id),
+        level: null,
+        position,
+        absent: id === undefined,
+      });
+    }
+    if (rows.length === 0) continue;
+    blocks.push({
+      key,
+      title: tile ? `${name} · ${tile}` : byEntity.size > 1 ? name : null,
+      position: sharedPosition ?? [],
+      note: marchNote(channels, labels),
+      level: sharedLevel === null ? null : `level ${sharedLevel}`,
+      rows,
     });
   }
   return blocks;
 }
 
+function positionAxes([x, y, z]: readonly number[], depth: number): { label: string; value: string }[] {
+  const axes = [
+    { label: "x", value: String(x) },
+    { label: "y", value: String(y) },
+  ];
+  if (depth > 1) axes.push({ label: "Z", value: String(z + 1) });
+  return axes;
+}
+
+function sameAxes(a: readonly { value: string }[], b: readonly { value: string }[]): boolean {
+  return a.length === b.length && a.every((axis, i) => axis.value === b[i].value);
+}
+
+/**
+ * What a block's 3D march read, in words. A label overlay is always marched to
+ * its first id, while a channel is marched only without a clip plane cutting
+ * the entity, and to its brightest sample in MIP.
+ */
+function marchNote(channels: readonly ProbeSample[], labels: readonly ProbeSample[]): string | null {
+  const channelPick = channels.find((s) => s.along)?.along;
+  const labelMarched = labels.some((s) => s.along);
+  if (channelPick === "brightest") {
+    return labelMarched ? "Brightest sample along the ray, first label" : "Brightest sample along the ray";
+  }
+  if (channelPick === "first") return "First sample drawn along the ray";
+  return labelMarched ? "First label along the ray" : null;
+}
+
 function sampleText(sample: ProbeSample, dataType: string): string {
   if (sample.state === "missing") return "not loaded";
   if (sample.state === "failed") return "unavailable";
+  if (sample.state === "none") return "nothing drawn";
   return formatSampleValue(sample.value ?? Number.NaN, dataType);
 }
 
@@ -113,7 +192,7 @@ function integerText(value: number): string {
 }
 
 /** The fewest significant digits that read back as the same float32. */
-function shortestFloat32Text(value: number): string {
+export function shortestFloat32Text(value: number): string {
   const single = Math.fround(value);
   for (let digits = 1; digits <= 9; digits++) {
     const shortest = Number(single.toPrecision(digits));
