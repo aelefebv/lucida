@@ -679,6 +679,36 @@ describe("auto-contrast limits", () => {
   }
 
   for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`fits every channel of a slice view from its histogram once the server completes it at device pixel ratio ${dpr}`, async () => {
+      // A slice view wants one slab of the generated level per channel, so
+      // the server finishes each shown timepoint and channel after the view
+      // has its own chunks, and the histograms come after the view settled.
+      const slab = (histogramsAtMs?: number | null): ScenarioSpec => ({
+        name: "three-channel slice view over a generated coarse level",
+        dataset: singleImage({
+          id: "slab",
+          pyramid: { shape: [1, 3, 32, 512, 512], chunk: [8, 64, 64], levels: 2 },
+          generatedCoarse: { readyAtMs: 0, histogramsAtMs },
+        }),
+      });
+      const onTime = await runScenario(describeScenario(slab()), { dpr });
+      const late = await runScenario(describeScenario(slab(2_000)), { dpr });
+      const never = await runScenario(describeScenario(slab(null)), { dpr });
+      for (const run of [onTime, late, never]) expectSettled(run);
+
+      const fitted = lastFits(late.phases[0]);
+      expect(fitted.size).toBe(3);
+      expect(late.phases[0].fits.some(({ fit }) => fit.provisional), "the view idled before they came").toBe(true);
+      expect(fitted).toEqual(lastFits(onTime.phases[0]));
+      for (const fit of fitted.values()) expect(fit.provisional).toBe(false);
+      // What the view's own chunks give in the meantime, and all it would
+      // ever get if the server left the rest of the slab's level to a
+      // background fill that stopped.
+      expect([...lastFits(never.phases[0]).values()].map((fit) => fit.provisional)).toEqual([true, true, true]);
+    });
+  }
+
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
     it(`leaves a generated level out of the settled limits at device pixel ratio ${dpr}`, async () => {
       const dataset = singleImage({
         id: "lifted",

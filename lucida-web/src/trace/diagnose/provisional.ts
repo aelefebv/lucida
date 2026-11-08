@@ -12,6 +12,7 @@
 
 import type { LivePhaseOccupancy, LiveProgress } from "../liveProgress.ts";
 import type { RunCause, TraceReading } from "../types.ts";
+import { formatCount } from "../../formatCount.ts";
 import { usToMs } from "./phaseRollup.ts";
 import { summariseTiming } from "./renderTiming.ts";
 import { RULESET, RULESET_VERSION } from "./ruleset.ts";
@@ -317,7 +318,7 @@ function describeReadings(
   } else if (inside.length === 0 && carried) {
     statement =
       `no tick landed in the window; the reading in force is ${latestAgeMs} ms old, ` +
-      `with ${carried.queueDepth.toLocaleString()} pending and ${carried.inFlight.toLocaleString()} in flight — ` +
+      `with ${formatCount(carried.queueDepth)} pending and ${formatCount(carried.inFlight)} in flight — ` +
       "a page waiting on the work it has out, not a quiescent one";
   } else if (startUnread) {
     statement =
@@ -342,7 +343,7 @@ function describeRows(progress: LiveProgress): ProvisionalRows {
   const made = progress.planned;
   const refused =
     progress.unrecorded > 0
-      ? `, and ${progress.unrecorded.toLocaleString()} more were refused by the per-run cap`
+      ? `, and ${formatCount(progress.unrecorded)} more were refused by the per-run cap`
       : "";
   return {
     made,
@@ -352,9 +353,9 @@ function describeRows(progress: LiveProgress): ProvisionalRows {
     unrecorded: progress.unrecorded,
     walked: 0,
     statement:
-      `walked none of the ${made.toLocaleString()} rows this run has made ` +
-      `(${progress.visible.toLocaleString()} complete, ${progress.retired.toLocaleString()} retired, ` +
-      `${progress.inFlight.toLocaleString()} in flight)${refused}; ` +
+      `walked none of the ${formatCount(made)} rows this run has made ` +
+      `(${formatCount(progress.visible)} complete, ${formatCount(progress.retired)} retired, ` +
+      `${formatCount(progress.inFlight)} in flight)${refused}; ` +
       "per-row durations, the critical path and the worst row wait for the verdict",
   };
 }
@@ -547,7 +548,7 @@ function buildStatement(
         ? "the backlog is not shrinking"
         : `at the net ${observed.drainPerS}/s the backlog needs about ${observed.backlogEtaS} s`;
     return (
-      `provisional — ${span}, ${lead.subject} held ${(observed.pending ?? 0).toLocaleString()} requests ` +
+      `provisional — ${span}, ${lead.subject} held ${formatCount(observed.pending ?? 0)} requests ` +
       `behind a cap of ${observed.inFlightCap} and ${eta}; ${page}`
     );
   }
@@ -599,11 +600,11 @@ export function renderProvisional(reading: ProvisionalReading): string {
   );
   const occupied = reading.occupancy.phases.filter((slot) => slot.rows > 0);
   const parts = [
-    ...(reading.occupancy.unstamped > 0 ? [`planned ${reading.occupancy.unstamped.toLocaleString()}`] : []),
-    ...occupied.map((slot) => `${slot.phase} ${slot.rows.toLocaleString()}`),
+    ...(reading.occupancy.unstamped > 0 ? [`planned ${formatCount(reading.occupancy.unstamped)}`] : []),
+    ...occupied.map((slot) => `${slot.phase} ${formatCount(slot.rows)}`),
   ];
   lines.push(
-    `in flight ${reading.occupancy.inFlight.toLocaleString()} row(s) this instant` +
+    `in flight ${formatCount(reading.occupancy.inFlight)} row(s) this instant` +
       (parts.length > 0 ? `: ${parts.join(" · ")}` : ""),
   );
   lines.push(`rows      ${reading.rows.statement}`);
@@ -611,7 +612,7 @@ export function renderProvisional(reading: ProvisionalReading): string {
   if (limiter) {
     lines.push(
       `limiter   ${limiter.id} cap ${limiter.cap} (${limiter.capSource}) · pinned ${limiter.pinnedPct}% · ` +
-        `pending ${limiter.pending.toLocaleString()} (from ${limiter.pendingAtStart.toLocaleString()}) · ` +
+        `pending ${formatCount(limiter.pending)} (from ${formatCount(limiter.pendingAtStart)}) · ` +
         `net drain ${limiter.netDrainPerS}/s · ` +
         `ETA ${limiter.backlogEtaS == null ? "not shrinking" : `~${limiter.backlogEtaS} s`}`,
     );
@@ -651,7 +652,7 @@ export function renderProvisional(reading: ProvisionalReading): string {
 export function describeProvisionalObservation(observed: FindingObservation): string {
   if (observed.backlogEtaS != null || observed.pending != null) {
     const parts = [
-      `${(observed.pending ?? 0).toLocaleString()} pending`,
+      `${formatCount(observed.pending ?? 0)} pending`,
       `cap ${observed.inFlightCap ?? 0}`,
       `pinned ${observed.pinnedPct ?? 0}%`,
       `net drain ${observed.drainPerS ?? 0}/s`,

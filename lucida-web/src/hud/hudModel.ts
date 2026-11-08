@@ -436,6 +436,9 @@ export function formatMs(ms: number): string {
   return `${ms >= 100 ? Math.round(ms) : ms.toFixed(1)} ms`;
 }
 
+// Kept rather than built per call, for the reason `formatCount.ts` gives.
+const COUNTS = new Intl.NumberFormat("en-US");
+
 function formatCount(n: number): string {
-  return n.toLocaleString("en-US");
+  return COUNTS.format(n);
 }

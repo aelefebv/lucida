@@ -13,6 +13,7 @@ import type { ChunkFailureKind, SourceChunkStatus } from "./pipeline/fetch/conte
 import { traceRecorder } from "./trace/recorder.ts";
 import { classifyClientMessage, utf8ByteLength } from "./trace/sendAccounting.ts";
 import type { ServerTimingBatch } from "./trace/serverRowTable.ts";
+import type { SocketClose } from "./trace/types.ts";
 import type {
   GeneratedChunkStatus,
   WireGeneratedAvailabilityByDataset,
@@ -421,7 +422,7 @@ export interface BridgeHandlers {
   /** The connection dropped, or closed because the page went into the
    *  back-forward cache or froze. A reconnect follows, once the page is back
    *  if it went away. */
-  onDisconnect?: () => void;
+  onDisconnect?: (close: SocketClose) => void;
 }
 
 /** Mirror of `lucida_core::protocol::CommandRejection`. */
@@ -545,7 +546,7 @@ export class Bridge {
     ws.onclose = null;
     ws.onerror = null;
     ws.close();
-    this.connectionLost();
+    this.connectionLost({ code: 1000, reason: "page suspended" });
   }
 
   private resume() {
@@ -793,7 +794,7 @@ export class Bridge {
         this.destroy();
         return;
       }
-      this.connectionLost();
+      this.connectionLost({ code: event.code, reason: event.reason });
       this.scheduleReconnect();
     };
 
@@ -805,7 +806,7 @@ export class Bridge {
     this.ws = ws;
   }
 
-  private connectionLost() {
+  private connectionLost(close: SocketClose) {
     this.ws = null;
     // Seq tracking is per-connection; the reconnect's snapshot re-seeds
     // it. Pending local commands drop too: one may never have reached the
@@ -818,7 +819,7 @@ export class Bridge {
     this.documentDatasetIds = null;
     this.clearGraceTimer();
     this.clearRetryTimer();
-    this.handlers.onDisconnect?.();
+    this.handlers.onDisconnect?.(close);
   }
 
   private handleBinary(buffer: ArrayBuffer) {

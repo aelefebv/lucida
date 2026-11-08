@@ -5,6 +5,8 @@ name: Trace gate
 # a failing verdict fails the job. No GPU is needed, so a hosted runner can
 # catch what the unit tests cannot see.
 on:
+  pull_request:
+    types: [opened, synchronize, reopened]
   schedule:
     - cron: '23 7 * * *'
   workflow_dispatch:
@@ -17,22 +19,84 @@ permissions:
   contents: read
 
 jobs:
-  gate:
-    name: lucida trace --gate (SwiftShader)
+  # A pull request that touches nothing the gate builds or drives skips it.
+  # The filter is a job rather than trigger paths so that the `Trace gate`
+  # job below always reports, which a required check needs.
+  changes:
+    name: Decide whether to run the gate
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      gate: ${{ github.event_name != 'pull_request' || steps.filter.outputs.gate == 'true' }}
+    steps:
+      - name: Detect changes the gate can see
+        id: filter
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@v4
+        with:
+          filters: |
+            gate:
+              - 'Dockerfile'
+              - '.dockerignore'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '**/Cargo.toml'
+              - 'lucida-cli/src/**'
+              - 'lucida-content/src/**'
+              - 'lucida-core/src/**'
+              - 'lucida-protocol/src/**'
+              - 'lucida-server/src/**'
+              - 'lucida-store/src/**'
+              - 'lucida-web/src/**'
+              - 'lucida-web/public/**'
+              - 'lucida-web/index.html'
+              - 'lucida-web/package.json'
+              - 'lucida-web/pnpm-lock.yaml'
+              - 'lucida-web/tsconfig*.json'
+              - 'lucida-web/vite.config.ts'
+              - 'extras/synthetic_ome_zarr.py'
+              - 'scripts/trace_gate.sh'
+              - '.github/workflows/trace-gate.yml'
+
+  # Two halves of the runs on two runners, so the wall clock is one half's.
+  # The runs are split by their measured seconds, not by count.
+  gate:
+    name: lucida trace --gate (SwiftShader, ${{ matrix.part }})
+    needs: changes
+    if: needs.changes.outputs.gate == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: image and volume
+            runs: image volume
+            saves-cache: true
+          - part: ray-march, collection and generated coarse
+            runs: volume-render collection single-level
+            saves-cache: false
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      # Both builds read the cache the CI workflow's Docker job writes, so a
-      # stage it has built is not built again. Each also keeps its own final
-      # layers, which is all an unchanged build needs. Exporting every stage
-      # instead would copy the Docker job's largest layers into the
-      # repository's cache a second time, and writing its scope would replace
-      # that job's entries.
+      # Both builds read the cache the CI workflow's Docker job writes on
+      # main, so a stage it has built is not built again. Each also keeps its
+      # own final layers, which is all an unchanged build needs. Exporting
+      # every stage instead would copy the Docker job's largest layers into
+      # the repository's cache a second time, and writing its scope would
+      # replace that job's entries.
+      #
+      # A pull request reads these caches and writes none: an entry saved
+      # from a pull request serves only that pull request, and every one
+      # counts against the repository's 10 GB, past which the entries main's
+      # runs depend on are evicted. One half saves, since both build the
+      # same thing.
       - name: Build the lucida CLI
         uses: docker/build-push-action@v7
         with:
@@ -43,7 +107,7 @@ jobs:
           cache-from: |
             type=gha
             type=gha,scope=trace-gate-cli
-          cache-to: type=gha,mode=min,scope=trace-gate-cli
+          cache-to: ${{ github.event_name != 'pull_request' && matrix.saves-cache && 'type=gha,mode=min,scope=trace-gate-cli' || '' }}
 
       - name: Build the server image
         uses: docker/build-push-action@v7
@@ -55,11 +119,13 @@ jobs:
           cache-from: |
             type=gha
             type=gha,scope=trace-gate-server
-          cache-to: type=gha,mode=min,scope=trace-gate-server
+          cache-to: ${{ github.event_name != 'pull_request' && matrix.saves-cache && 'type=gha,mode=min,scope=trace-gate-server' || '' }}
 
-      # From PyPI, as in the CI workflow's lucida-py job.
+      # From PyPI, as in the CI workflow's lucida-py job, at the same version.
       - name: Install uv
-        run: pipx install uv==0.13.7
+        env:
+          UV_VERSION: 0.13.7
+        run: pipx install "uv==$UV_VERSION"
 
       # The server opens each dataset by the path the CLI names, so the data
       # directory is mounted at the same path inside the container. Auth is
@@ -105,6 +171,7 @@ jobs:
           LUCIDA_GATE_CLI: ${{ runner.temp }}/cli/lucida
           LUCIDA_GATE_DATA: ${{ runner.temp }}/gate-data
           LUCIDA_GATE_OUTPUT: ${{ runner.temp }}/gate-out
+          LUCIDA_GATE_ONLY: ${{ matrix.runs }}
         run: scripts/trace_gate.sh
 
       - name: Server logs
@@ -117,7 +184,24 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: trace-gate-runs
+          name: trace-gate-runs-${{ strategy.job-index }}
           path: ${{ runner.temp }}/gate-out
           if-no-files-found: ignore
           retention-days: 14
+
+  # One check whatever the matrix holds, and a pass when the filter skipped
+  # the gate.
+  result:
+    name: Trace gate
+    needs: [changes, gate]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail unless every part passed or the gate was skipped
+        env:
+          CHANGES: ${{ needs.changes.result }}
+          GATE: ${{ needs.gate.result }}
+        run: |
+          echo "changes: $CHANGES, gate: $GATE"
+          [[ "$CHANGES" == "success" ]] && [[ "$GATE" == "success" || "$GATE" == "skipped" ]]

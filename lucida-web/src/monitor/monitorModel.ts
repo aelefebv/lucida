@@ -21,7 +21,7 @@ import type {
   PhaseRollup,
   PhaseSide,
 } from "../trace/diagnose/types.ts";
-import { formatCause } from "../trace/diagnose/renderText.ts";
+import { describeNotHealthSignals, formatCause } from "../trace/diagnose/renderText.ts";
 import { describeSteadyStateFinding } from "../trace/diagnose/steadyState.ts";
 import { labelMs } from "../trace/diagnose/window.ts";
 
@@ -324,13 +324,13 @@ function bannersOf(diagnostic: DiagnosticDocument): MonitorBanner[] {
     });
   }
 
+  const notHealth = describeNotHealthSignals(coverage.notHealthSignals);
   banners.push({
     kind: "not-health",
     headline: `Not a health signal — ${coverage.notHealthSignals
       .map((signal) => `${signal.metric} ${formatCount(signal.value)}`)
       .join(" · ")}`,
-    detail:
-      "These paths were not exercised. A pipeline running twenty thousand requests behind has recorded exactly these zeroes; an absence of errors is not evidence of health.",
+    detail: notHealth.charAt(0).toUpperCase() + notHealth.slice(1),
     severe: false,
   });
 

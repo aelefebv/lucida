@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 
+use futures_util::{StreamExt, stream};
 use lucida_content::{ChunkKey, ImageId, ImageSpec};
 use lucida_store::cache::CachedStore;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
@@ -10,6 +11,9 @@ use lucida_store::source_limiter::{ReaderId, RequestLabel};
 use crate::binding::ChunkResolver;
 use crate::chunk_read::{ChunkRead, ChunkReadError, read_chunk};
 use crate::decode::DecodeError;
+
+/// Source chunks one region read keeps in flight.
+const REGION_READ_CONCURRENCY: usize = 8;
 
 /// A half-open box `[z0, z1) x [y0, y1) x [x0, x1)` in one level's voxels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,119 +114,125 @@ pub(crate) async fn fetch_volume_region(
             .ok_or(RegionReadError::TooLarge)?,
     );
 
-    for gz in grid_z0..=grid_z1 {
-        for gy in grid_y0..=grid_y1 {
-            for gx in grid_x0..=grid_x1 {
-                let key = ChunkKey {
-                    level: level as u32,
-                    t: u64::from(t),
-                    c: u64::from(c),
-                    z: gz,
-                    y: gy,
-                    x: gx,
-                };
-                // Charged to the background class, not to a client: a
-                // generated chunk is built once for every client waiting on
-                // it, so there is no one client whose share it should come
-                // out of. It competes for one fair share against the
-                // interactive readers, which is what it is — one background
-                // population, however many clients are waiting on it. No
-                // probe: generation has no browser bracket to nest inside, so
-                // its read timing is dropped.
-                let read = read_chunk(
-                    resolver,
-                    store,
-                    &image.image_id,
-                    &key,
-                    ReaderId::UNATTRIBUTED,
-                    RequestLabel::UNATTRIBUTED,
-                    None,
-                )
-                .await;
-                let raw = match read {
-                    Ok(ChunkRead::Present(raw)) => raw,
-                    // `out` is already fill, so an absent chunk has nothing
-                    // to copy.
-                    Ok(ChunkRead::Absent { .. }) => continue,
-                    Err(ChunkReadError::UnknownImage(image)) => {
-                        return Err(RegionReadError::UnknownImage(image));
-                    }
-                    Err(ChunkReadError::UnknownLevel { image, level }) => {
-                        return Err(RegionReadError::BadLevel {
-                            image,
-                            level: level as usize,
-                        });
-                    }
-                    Err(ChunkReadError::ObjectStore(e)) => {
-                        return Err(RegionReadError::Fetch {
-                            image: image.image_id.clone(),
-                            key: key.to_string(),
-                            message: e.to_string(),
-                        });
-                    }
-                    Err(ChunkReadError::Decode(source)) => {
-                        return Err(RegionReadError::Decode {
-                            image: image.image_id.clone(),
-                            key: key.to_string(),
-                            source,
-                        });
-                    }
-                };
+    let keys = (grid_z0..=grid_z1).flat_map(|gz| {
+        (grid_y0..=grid_y1)
+            .flat_map(move |gy| (grid_x0..=grid_x1).map(move |gx| (gz, gy, gx)))
+            .map(move |(z, y, x)| ChunkKey {
+                level: level as u32,
+                t: u64::from(t),
+                c: u64::from(c),
+                z,
+                y,
+                x,
+            })
+    });
+    // A region spans many source chunks once a generated chunk spans many,
+    // and against an object store one read after another would add up their
+    // round trips. The source limiter still caps reads server-wide.
+    let mut reads = stream::iter(keys)
+        .map(|key| async move {
+            // Charged to the background class, not to a client: a generated
+            // chunk is built once for every client waiting on it, so there
+            // is no one client whose share it should come out of. It
+            // competes for one fair share against the interactive readers,
+            // which is what it is — one background population, however many
+            // clients are waiting on it. No probe: generation has no browser
+            // bracket to nest inside, so its read timing is dropped.
+            let read = read_chunk(
+                resolver,
+                store,
+                &image.image_id,
+                &key,
+                ReaderId::UNATTRIBUTED,
+                RequestLabel::UNATTRIBUTED,
+                None,
+            )
+            .await;
+            (key, read)
+        })
+        .buffer_unordered(REGION_READ_CONCURRENCY);
 
-                // Edge truncation: the last grid cell on each axis may be
-                // partial. Compute the in-bounds extent for this chunk.
-                let z0 = gz * chunk_z;
-                let y0 = gy * chunk_y;
-                let x0 = gx * chunk_x;
-                let z_end = (z0 + chunk_z).min(level_z);
-                let y_end = (y0 + chunk_y).min(level_y);
-                let x_end = (x0 + chunk_x).min(level_x);
+    while let Some((key, read)) = reads.next().await {
+        let raw = match read {
+            Ok(ChunkRead::Present(raw)) => raw,
+            // `out` is already fill, so an absent chunk has nothing to copy.
+            Ok(ChunkRead::Absent { .. }) => continue,
+            Err(ChunkReadError::UnknownImage(image)) => {
+                return Err(RegionReadError::UnknownImage(image));
+            }
+            Err(ChunkReadError::UnknownLevel { image, level }) => {
+                return Err(RegionReadError::BadLevel {
+                    image,
+                    level: level as usize,
+                });
+            }
+            Err(ChunkReadError::ObjectStore(e)) => {
+                return Err(RegionReadError::Fetch {
+                    image: image.image_id.clone(),
+                    key: key.to_string(),
+                    message: e.to_string(),
+                });
+            }
+            Err(ChunkReadError::Decode(source)) => {
+                return Err(RegionReadError::Decode {
+                    image: image.image_id.clone(),
+                    key: key.to_string(),
+                    source,
+                });
+            }
+        };
 
-                let copy_z0 = z0.max(region.z0);
-                let copy_y0 = y0.max(region.y0);
-                let copy_x0 = x0.max(region.x0);
-                let copy_z1 = z_end.min(region.z1);
-                let copy_y1 = y_end.min(region.y1);
-                let copy_x1 = x_end.min(region.x1);
+        // Edge truncation: the last grid cell on each axis may be partial.
+        // Compute the in-bounds extent for this chunk.
+        let z0 = key.z * chunk_z;
+        let y0 = key.y * chunk_y;
+        let x0 = key.x * chunk_x;
+        let z_end = (z0 + chunk_z).min(level_z);
+        let y_end = (y0 + chunk_y).min(level_y);
+        let x_end = (x0 + chunk_x).min(level_x);
 
-                // Each chunk is stored densely as `[chunk_z, chunk_y, chunk_x]`
-                // in row-major order (X varies fastest), as little-endian
-                // dtype bytes, the same layout `out` holds.
-                let stride_z = (chunk_y * chunk_x) as usize;
-                let stride_y = chunk_x as usize;
+        let copy_z0 = z0.max(region.z0);
+        let copy_y0 = y0.max(region.y0);
+        let copy_x0 = x0.max(region.x0);
+        let copy_z1 = z_end.min(region.z1);
+        let copy_y1 = y_end.min(region.y1);
+        let copy_x1 = x_end.min(region.x1);
 
-                let out_stride_y = region_x as usize;
-                let out_stride_z = (region_y as usize) * out_stride_y;
+        // Each chunk is stored densely as `[chunk_z, chunk_y, chunk_x]` in
+        // row-major order (X varies fastest), as little-endian dtype bytes,
+        // the same layout `out` holds.
+        let stride_z = (chunk_y * chunk_x) as usize;
+        let stride_y = chunk_x as usize;
 
-                let expected_chunk_voxels =
-                    (chunk_z as usize) * (chunk_y as usize) * (chunk_x as usize);
-                if raw.len() < expected_chunk_voxels * bytes_per_voxel {
-                    return Err(RegionReadError::ShortChunk {
-                        image: image.image_id.clone(),
-                        key: key.to_string(),
-                        got: raw.len() / bytes_per_voxel,
-                        expected: expected_chunk_voxels,
-                    });
-                }
+        let out_stride_y = region_x as usize;
+        let out_stride_z = (region_y as usize) * out_stride_y;
 
-                for z in copy_z0..copy_z1 {
-                    for y in copy_y0..copy_y1 {
-                        let local_z = z - z0;
-                        let local_y = y - y0;
-                        let local_x = copy_x0 - x0;
-                        let in_off = (local_z as usize) * stride_z
-                            + (local_y as usize) * stride_y
-                            + local_x as usize;
-                        let out_off = ((z - region.z0) as usize) * out_stride_z
-                            + ((y - region.y0) as usize) * out_stride_y
-                            + (copy_x0 - region.x0) as usize;
-                        let row_len = (copy_x1 - copy_x0) as usize * bytes_per_voxel;
-                        let in_byte_off = in_off * bytes_per_voxel;
-                        let out_byte_off = out_off * bytes_per_voxel;
-                        out[out_byte_off..out_byte_off + row_len]
-                            .copy_from_slice(&raw[in_byte_off..in_byte_off + row_len]);
-                    }
-                }
+        let expected_chunk_voxels = (chunk_z as usize) * (chunk_y as usize) * (chunk_x as usize);
+        if raw.len() < expected_chunk_voxels * bytes_per_voxel {
+            return Err(RegionReadError::ShortChunk {
+                image: image.image_id.clone(),
+                key: key.to_string(),
+                got: raw.len() / bytes_per_voxel,
+                expected: expected_chunk_voxels,
+            });
+        }
+
+        for z in copy_z0..copy_z1 {
+            for y in copy_y0..copy_y1 {
+                let local_z = z - z0;
+                let local_y = y - y0;
+                let local_x = copy_x0 - x0;
+                let in_off = (local_z as usize) * stride_z
+                    + (local_y as usize) * stride_y
+                    + local_x as usize;
+                let out_off = ((z - region.z0) as usize) * out_stride_z
+                    + ((y - region.y0) as usize) * out_stride_y
+                    + (copy_x0 - region.x0) as usize;
+                let row_len = (copy_x1 - copy_x0) as usize * bytes_per_voxel;
+                let in_byte_off = in_off * bytes_per_voxel;
+                let out_byte_off = out_off * bytes_per_voxel;
+                out[out_byte_off..out_byte_off + row_len]
+                    .copy_from_slice(&raw[in_byte_off..in_byte_off + row_len]);
             }
         }
     }

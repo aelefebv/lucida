@@ -819,6 +819,21 @@ describe("TraceRecorder connections", () => {
     expect(gap?.endUs).toBe(2_200_000);
   });
 
+  it("keeps the close code the socket died with, on the record for that socket", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.noteConnected(1);
+    recorder.openRun(OPEN_CAUSE);
+    advance(100);
+    recorder.noteDisconnected({ code: 1013, reason: "client fell too far behind" });
+    advance(2_000);
+    recorder.noteConnected(2);
+    recorder.closeRun("explicit");
+
+    const [dead, live] = recorder.exportDocument().runs[0].header.connections;
+    expect(dead.close).toEqual({ code: 1013, reason: "client fell too far behind" });
+    expect(live.close).toBeUndefined();
+  });
+
   it("declares an outage that outlives the interval it started in", () => {
     const { recorder, advance } = makeRecorder();
     recorder.noteConnected(1);

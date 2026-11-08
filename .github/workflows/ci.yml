@@ -52,8 +52,14 @@ jobs:
         with:
           components: clippy
 
+      # Saved from main only. A pull request restores main's entry, and an
+      # entry saved per pull request serves only that pull request while
+      # counting against the repository's 10 GB cache, past which the
+      # entries main's runs depend on are evicted.
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # --locked: fail if Cargo.lock is out of sync with the manifests
       # instead of silently re-resolving deps on the runner. Keeps CI
@@ -98,9 +104,7 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Saved from main only. A pull request restores main's cache, and
-      # one entry per branch would push the Linux caches out of the
-      # repository's quota.
+      # Saved from main only, as in the rust job.
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -123,8 +127,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Cache cargo build (shared with rust job)
+      # Saved from main only, as in the rust job.
+      - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Built from crates.io and cached, not downloaded from the GitHub
       # release: release downloads can return 504s for long stretches.
@@ -149,7 +156,7 @@ jobs:
           package_json_file: lucida-web/package.json
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 'lts/*'
           cache: pnpm
@@ -225,7 +232,7 @@ jobs:
           package_json_file: lucida-web/package.json
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 'lts/*'
           cache: pnpm
@@ -256,18 +263,19 @@ jobs:
       # download URL second: the download URL can return 504s for long
       # stretches while the API route still serves. EmbarkStudios/cargo-deny-
       # action fetches only from the download URL, so it is not used. The
-      # version and checksum are pinned by hand; Dependabot does not see them.
+      # version and checksum are pinned by hand; Dependabot does not see them,
+      # and the Tool pins workflow reports a newer release.
       - name: Install cargo-deny
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: 0.20.2
+          CARGO_DENY_VERSION: 0.20.2
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          asset="cargo-deny-$VERSION-x86_64-unknown-linux-musl.tar.gz"
-          gh release download "$VERSION" -R EmbarkStudios/cargo-deny -p "$asset" --clobber \
+          asset="cargo-deny-$CARGO_DENY_VERSION-x86_64-unknown-linux-musl.tar.gz"
+          gh release download "$CARGO_DENY_VERSION" -R EmbarkStudios/cargo-deny -p "$asset" --clobber \
             || curl -fsSL --retry 5 --retry-all-errors -o "$asset" \
-                 "https://github.com/EmbarkStudios/cargo-deny/releases/download/$VERSION/$asset"
+                 "https://github.com/EmbarkStudios/cargo-deny/releases/download/$CARGO_DENY_VERSION/$asset"
           echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  $asset" | sha256sum -c -
           tar -xzf "$asset" --strip-components=1 -C /usr/local/bin "${asset%.tar.gz}/cargo-deny"
 
@@ -342,10 +350,13 @@ jobs:
       # image available for the run-and-probe step on release-please
       # PRs (and for any later local inspection).
       #
-      # GHA buildx cache (mode=max) exports every intermediate stage so
-      # subsequent CI runs reuse the cargo + pnpm build layers when the
-      # COPY inputs haven't changed. First-build-on-branch is still
-      # cold; pushed fixup commits and rebases see warm caches.
+      # The GHA buildx cache (mode=max) exports every intermediate stage, so
+      # a later build reuses the cargo and pnpm layers when their COPY
+      # inputs have not changed. Only a push to main writes it, for the
+      # reason the rust job's cargo cache is saved from main only: a pull
+      # request's entries run to a gigabyte or more, serve only that pull
+      # request, and push main's layers out of the repository's 10 GB.
+      # The trace gate builds on main's layers.
       - name: Build image (single-arch, no push)
         if: steps.gate.outputs.build == 'true'
         uses: docker/build-push-action@v7
@@ -356,7 +367,7 @@ jobs:
           load: true
           tags: lucida:ci-smoke
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
 
       # True smoke (release-please PRs only): start the image and prove
       # the binary actually serves /healthz, /readyz, /version. This is
@@ -455,12 +466,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           ASSET: kubeconform-linux-amd64.tar.gz
+          KUBECONFORM_VERSION: 0.6.7
         run: |
           set -euo pipefail
           cd "$RUNNER_TEMP"
-          gh release download v0.6.7 -R yannh/kubeconform -p "$ASSET" --clobber \
+          gh release download "v$KUBECONFORM_VERSION" -R yannh/kubeconform -p "$ASSET" --clobber \
             || curl -fsSL --retry 5 --retry-all-errors -o "$ASSET" \
-                 "https://github.com/yannh/kubeconform/releases/download/v0.6.7/$ASSET"
+                 "https://github.com/yannh/kubeconform/releases/download/v$KUBECONFORM_VERSION/$ASSET"
           echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  $ASSET" | sha256sum -c -
           tar -xzf "$ASSET" -C /usr/local/bin kubeconform
 
@@ -477,14 +489,19 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo build (shared with rust job)
+      # Saved from main only, as in the rust job.
+      - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # From PyPI rather than astral-sh/setup-uv, which fetches uv from its
       # GitHub release: release downloads can return 504s for long stretches.
       # The runner image puts pipx's bin directory on PATH.
       - name: Install uv
-        run: pipx install uv==0.13.7
+        env:
+          UV_VERSION: 0.13.7
+        run: pipx install "uv==$UV_VERSION"
 
       # The client's integration tests drive a real server.
       - name: Build lucida-server

@@ -10,6 +10,7 @@
  * recorded rather than read as a quiet pipeline.
  */
 
+import { formatCount } from "../../formatCount.ts";
 import {
   CLIENT_MESSAGES,
   LANE_NAMES,
@@ -563,7 +564,7 @@ function bytesSent(spec: TimelineChartSpec, input: DeriveInput, axis: Axis): Tim
     spec,
     series,
     `bytes sent per second by client message type, each sample's bytes spread over the interval since the previous sample, ` +
-      `from ${ticks.length} tick sample(s); the run's total is ${input.sentTotalBytes.toLocaleString()} bytes, ` +
+      `from ${ticks.length} tick sample(s); the run's total is ${formatCount(input.sentTotalBytes)} bytes, ` +
       "which the samples may not reach, since a send after the last planning pass rides no sample" +
       dropped(input.ticksDropped, "sample"),
   );
@@ -616,7 +617,7 @@ function events(spec: TimelineChartSpec, input: DeriveInput, axis: Axis): Timeli
 
 function dropped(count: number, unit: string): string {
   return count > 0
-    ? `; the ring dropped ${count.toLocaleString()} older ${unit}(s), so the buckets before the oldest retained one are unread`
+    ? `; the ring dropped ${formatCount(count)} older ${unit}(s), so the buckets before the oldest retained one are unread`
     : "";
 }
 

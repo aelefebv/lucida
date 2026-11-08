@@ -32,6 +32,7 @@ import { diagnoseRun } from "./diagnose.ts";
 import {
   DEFAULT_MAX_BYTES,
   DEFAULT_MAX_LINES,
+  describeNotHealthSignals,
   renderDiagnostic,
   type RenderedDiagnostic,
 } from "./renderText.ts";
@@ -160,6 +161,35 @@ describe("the default rendering", () => {
       expect(text, name).toContain("VERDICT:");
       expect(text, name).toContain("degraded:");
     }
+  });
+
+  it("calls only the counters at zero not exercised", () => {
+    const document = diagnoseRun(healthyLocalOpen());
+    const signals = (values: number[]) =>
+      document.coverage.notHealthSignals.map((signal, index) => ({ ...signal, value: values[index] }));
+
+    expect(renderDiagnostic(document).text).toContain(
+      "rejections=0 — none of these paths was exercised; an absence of errors is not evidence of health.",
+    );
+
+    // A run that reconnected and retried what it lost says the retry path ran.
+    const retried = {
+      ...document,
+      coverage: { ...document.coverage, notHealthSignals: signals([93, 0, 0, 0]) },
+    };
+    const { text } = renderDiagnostic(retried);
+    expect(text).toContain("retries=93");
+    expect(text).toContain(
+      "the paths at zero (failures, evictions, rejections) were not exercised; an absence of errors is not evidence of health.",
+    );
+    expect(text).not.toContain("none of these paths");
+
+    expect(describeNotHealthSignals(signals([93, 2, 5, 0]))).toBe(
+      "the path at zero (rejections) was not exercised; an absence of errors is not evidence of health.",
+    );
+    expect(describeNotHealthSignals(signals([93, 2, 5, 1]))).toBe(
+      "every one of these paths was exercised; a count says how often, not that the run was healthy.",
+    );
   });
 
   it("leads with truncation rather than footnoting it", () => {

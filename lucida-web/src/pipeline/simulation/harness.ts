@@ -435,7 +435,13 @@ class Simulation {
       );
       // The server sends a histogram with the last chunk of its timepoint and channel.
       const histograms = generatedHistograms(generated, this.scenario.source.samples ?? rampSamples);
-      setTimeout(() => this.applyAvailability({ chunks, histograms }), generated.readyAtMs);
+      if (generated.histogramsAtMs === generated.readyAtMs) {
+        setTimeout(() => this.applyAvailability({ chunks, histograms }), generated.readyAtMs);
+      } else {
+        setTimeout(() => this.applyAvailability({ chunks }), generated.readyAtMs);
+        const at = generated.histogramsAtMs;
+        if (at !== null) setTimeout(() => this.applyAvailability({ histograms }), at);
+      }
     }
   }
 

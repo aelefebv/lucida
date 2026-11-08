@@ -165,16 +165,32 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      # Fetched as the CI workflow's cargo-deny is: the release asset through
+      # the REST API first and the github.com download URL second, because
+      # the download URL can return 504s for long stretches while the API
+      # route still serves. aquasecurity/trivy-action installs from the
+      # download URL, so it is not used. The version and checksum are pinned
+      # by hand.
+      - name: Install Trivy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TRIVY_VERSION: 0.76.2
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          asset="trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz"
+          gh release download "v$TRIVY_VERSION" -R aquasecurity/trivy -p "$asset" --clobber \
+            || curl -fsSL --retry 5 --retry-all-errors -o "$asset" \
+                 "https://github.com/aquasecurity/trivy/releases/download/v$TRIVY_VERSION/$asset"
+          echo "bc0fc726e017b8927a62b2d3531d7a84ee01769daf5c99ed866dced54089fdbf  $asset" | sha256sum -c -
+          tar -xzf "$asset" -C /usr/local/bin trivy
+
       # Initially permissive: only fail on CRITICAL severity, ignore
       # unfixed CVEs. Adopters / maintainers can tighten over time
       # (HIGH, MEDIUM) once the upstream image's CVE baseline is known.
-      # ignore-unfixed avoids blocking on CVEs whose only "fix" is
+      # --ignore-unfixed avoids blocking on CVEs whose only "fix" is
       # waiting for an upstream package update we don't control.
       - name: Trivy scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-          format: table
-          exit-code: '1'
-          severity: CRITICAL
-          ignore-unfixed: true
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+        run: trivy image --format table --exit-code 1 --severity CRITICAL --ignore-unfixed "$IMAGE"
