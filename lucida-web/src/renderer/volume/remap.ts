@@ -20,6 +20,7 @@ export function remapIndirection(
     visibleRegion?: VisibleRegion;
     renderRadiusView?: number;
     entryByMember?: Map<string, RemapEntryInfo>;
+    failed?: ReadonlyMap<string, ReadonlySet<string>>;
   } = {},
 ): void {
   remapSharedIndirection({
@@ -32,6 +33,7 @@ export function remapIndirection(
     visibleRegion: options.visibleRegion,
     renderRadiusView: options.renderRadiusView,
     entryByMember: options.entryByMember,
+    failed: options.failed,
     targetChunkZFor: null,
   });
   atlas.indirectionDirty = true;

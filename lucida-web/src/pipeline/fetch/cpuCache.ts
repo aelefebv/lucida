@@ -175,6 +175,10 @@ interface FailureRecord {
   failure: ChunkFailureKind | null;
   /** The chunk's composite key, which is how an availability update names it. */
   chunk: string;
+  /** The parts of {@link chunk}, which ids containing `/` keep from being split back out. */
+  datasetId: string;
+  imageId: string;
+  chunkKey: string;
   /** `now()` at the moment the failure was recorded (the transient backoff
    *  anchor). */
   failedAt: number;
@@ -184,6 +188,38 @@ interface FailureRecord {
   /** `now()` at or after which the key may be re-planned. `Infinity` for a
    *  permanent record, so time alone never frees it. */
   eligibleAt: number;
+}
+
+/**
+ * A map that counts its changes, so a reader polling it every tick can tell
+ * whether anything moved without walking it.
+ */
+class CountingMap<K, V> extends Map<K, V> {
+  changes = 0;
+
+  override set(key: K, value: V): this {
+    this.changes++;
+    return super.set(key, value);
+  }
+
+  override delete(key: K): boolean {
+    const had = super.delete(key);
+    if (had) this.changes++;
+    return had;
+  }
+
+  override clear(): void {
+    if (this.size > 0) this.changes++;
+    super.clear();
+  }
+}
+
+/** A chunk the source failed for good, and the reason it gave when it gave one. */
+export interface FailedChunk {
+  datasetId: string;
+  imageId: string;
+  chunkKey: string;
+  failure: ChunkFailureKind | null;
 }
 
 interface InFlightChunkMeta {
@@ -255,7 +291,7 @@ export class CpuCache {
    * {@link MAX_TRACKED_FAILURES}, separately from {@link transientFailures},
    * so a flood of 404s cannot crowd out a transient's backoff record.
    */
-  private permanentFailures = new Map<string, FailureRecord>();
+  private permanentFailures = new CountingMap<string, FailureRecord>();
   /**
    * Keys with a transient failure (timeout, disconnect, failed decode), or a
    * generated chunk answered pending, waiting out their backoff. FIFO-capped
@@ -1396,6 +1432,31 @@ export class CpuCache {
   }
 
   /**
+   * Every chunk the source failed for good, wanted or not, once each. A
+   * chunk wanted in both tiers fails under both scheduler keys.
+   */
+  failedChunks(): FailedChunk[] {
+    const seen = new Set<string>();
+    const out: FailedChunk[] = [];
+    for (const record of this.permanentFailures.values()) {
+      if (seen.has(record.chunk)) continue;
+      seen.add(record.chunk);
+      out.push({
+        datasetId: record.datasetId,
+        imageId: record.imageId,
+        chunkKey: record.chunkKey,
+        failure: record.failure,
+      });
+    }
+    return out;
+  }
+
+  /** Changes whenever {@link failedChunks} may have, so a per-tick reader can skip the walk. */
+  failedChunksVersion(): number {
+    return this.permanentFailures.changes;
+  }
+
+  /**
    * Visit each wanted key with a permanent failure record, walking whichever
    * of the two sets is smaller: both are bounded, but this runs every tick.
    */
@@ -1997,6 +2058,7 @@ export class CpuCache {
     failure: ChunkFailureKind | null = null,
   ): void {
     const chunk = `${req.datasetId}/${req.imageId}/${req.chunkKey}`;
+    const address = { chunk, datasetId: req.datasetId, imageId: req.imageId, chunkKey: req.chunkKey };
     if (kind === "permanent") {
       this.transientFailures.delete(key);
       // Delete-then-set refreshes FIFO recency, so a re-reported permanent
@@ -2005,7 +2067,7 @@ export class CpuCache {
       this.permanentFailures.set(key, {
         kind,
         failure,
-        chunk,
+        ...address,
         failedAt: this.now(),
         attempt: 0,
         eligibleAt: Infinity,
@@ -2027,7 +2089,7 @@ export class CpuCache {
     this.transientFailures.set(key, {
       kind,
       failure,
-      chunk,
+      ...address,
       failedAt,
       attempt,
       eligibleAt,

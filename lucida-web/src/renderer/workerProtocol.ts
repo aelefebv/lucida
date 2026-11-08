@@ -242,6 +242,8 @@ export interface VolumeRenderMultiPassMessage {
   camForward?: Float32Array;
   clipDistance?: number;
   clipMode?: number;
+  /** See {@link SliceRenderMultiPassMessage.pixelRatio}. */
+  pixelRatio?: number;
   /** Echoed in the frame's {@link FrameDoneMessage}. */
   frameSeq?: number;
 }
@@ -335,6 +337,11 @@ export interface SliceRenderMultiPassMessage {
   cy: number;
   canvasW: number;
   canvasH: number;
+  /**
+   * Render-target pixels per CSS pixel. Screen-space patterns use it to keep
+   * one size on screen at any device pixel ratio or render scale. Defaults to 1.
+   */
+  pixelRatio?: number;
   /** Echoed in the frame's {@link FrameDoneMessage}. */
   frameSeq?: number;
 }
@@ -693,6 +700,18 @@ export interface ColdStateDeltaMessage {
   activeSetOrder: string[];
 }
 
+/**
+ * Every chunk of one dataset the source failed for good, replacing the last
+ * list. Failures arrive between cold states, so they travel apart from them.
+ * The worker marks the ones its wanted set holds, so the shader draws them
+ * hatched instead of falling through to a coarser level or to nothing.
+ */
+export interface FailedChunksMessage {
+  type: "failedChunks";
+  datasetId: string;
+  images: Array<{ imageId: string; chunkKeys: string[] }>;
+}
+
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
@@ -716,6 +735,7 @@ export type MainToWorkerMessage =
   | ColdStateDisplayMessage
   | ColdStateSelectionMessage
   | ColdStateDeltaMessage
+  | FailedChunksMessage
   | ViewHotStateMessage
   | CaptureFrameMessage
   | LoseDeviceMessage;
