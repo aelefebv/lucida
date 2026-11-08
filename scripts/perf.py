@@ -1,0 +1,1115 @@
+#!/usr/bin/env -S uv run
+# /// script
+# requires-python = ">=3.10"
+# dependencies = []
+# ///
+"""Run `lucida trace` over a matrix of datasets, scenarios and device pixel
+ratios, and print one table of what each run's diagnostic says.
+
+    uv run scripts/perf.py                          # the quick suite
+    uv run scripts/perf.py --suite full
+    uv run scripts/perf.py --dataset volume --scenario orbit,z-scrub --ratio 2
+    uv run scripts/perf.py --list
+
+It builds whatever is stale (server and CLI, wasm, web bundle), generates the
+datasets the selection needs, starts its own server, gives every run a
+workspace of its own, and stops the server and every browser on the way out,
+Ctrl-C included. The catalog, scenarios and suites live in `scripts/perf/`;
+`docs/perf.md` describes them.
+
+Every number in the table is a field of a run's diagnostic. This script
+selects and formats; it derives nothing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import signal
+import socket
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+REPO = Path(__file__).resolve().parent.parent
+PERF_DIR = REPO / "scripts" / "perf"
+LOCAL_CATALOG = PERF_DIR / "datasets.local.json"
+GENERATOR = REPO / "extras" / "synthetic_ome_zarr.py"
+EXE = ".exe" if os.name == "nt" else ""
+
+# What a scenario can require of a dataset.
+TRAITS = ("volume", "time", "channels", "collection")
+CAMERAS = ("slice", "arcball")
+SCENARIO_KEYS = {"description", "requires", "camera", "width", "height", "steps"}
+DEFAULT_SUITE = "quick"
+
+
+class PerfError(Exception):
+    """A problem the person running the script has to fix: printed, exit 2."""
+
+
+# ---------------------------------------------------------------------------
+# Catalog, scenarios, suites
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Dataset:
+    name: str
+    description: str
+    traits: frozenset[str]
+    # Generator options for a generated dataset; None for a local one.
+    generate: tuple[str, ...] | None = None
+    # Where a local dataset lives: an absolute path or a URL.
+    url: str | None = None
+
+
+@dataclass(frozen=True)
+class Scenario:
+    name: str
+    description: str
+    requires: frozenset[str]
+    camera: str
+    steps: tuple[dict[str, Any], ...]
+    path: Path
+    width: int | None = None
+    height: int | None = None
+
+    def applies_to(self, dataset: Dataset) -> bool:
+        return self.requires <= dataset.traits
+
+
+@dataclass(frozen=True)
+class Suite:
+    name: str
+    description: str
+    datasets: tuple[str, ...]
+    scenarios: tuple[str, ...]
+    ratios: tuple[float, ...]
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise PerfError(f"{path} is not JSON: {error}") from error
+
+
+def traits_from_options(options: tuple[str, ...]) -> frozenset[str]:
+    """What a generated dataset has, read off the generator options that make it."""
+    traits: set[str] = set()
+    for flag, value in zip(options, options[1:]):
+        if flag == "--size" and len(value.split(",")) == 3:
+            traits.add("volume")
+        elif flag == "--channels" and int(value) > 1:
+            traits.add("channels")
+        elif flag == "--timepoints" and int(value) > 1:
+            traits.add("time")
+        elif flag == "--tiles":
+            traits.add("collection")
+    return frozenset(traits)
+
+
+def _check_traits(where: str, traits: Any) -> frozenset[str]:
+    if not isinstance(traits, list) or not all(isinstance(t, str) for t in traits):
+        raise PerfError(f"{where}: traits are a list of names")
+    unknown = sorted(set(traits) - set(TRAITS))
+    if unknown:
+        raise PerfError(f"{where}: unknown trait {', '.join(unknown)}; the traits are {', '.join(TRAITS)}")
+    return frozenset(traits)
+
+
+def load_catalog(catalog_path: Path, local_path: Path | None) -> dict[str, Dataset]:
+    """The generated datasets, with the local file's real ones merged in."""
+    catalog: dict[str, Dataset] = {}
+    for name, entry in _read_json(catalog_path).get("datasets", {}).items():
+        where = f"{catalog_path.name}: {name}"
+        if set(entry) - {"description", "generate"} or "generate" not in entry:
+            raise PerfError(f"{where}: a generated dataset has a description and generate options only")
+        options = tuple(shlex.split(entry["generate"]))
+        catalog[name] = Dataset(name, entry.get("description", ""), traits_from_options(options), generate=options)
+    if local_path is None or not local_path.exists():
+        return catalog
+    for name, entry in _read_json(local_path).get("datasets", {}).items():
+        where = f"{local_path.name}: {name}"
+        if name in catalog:
+            raise PerfError(f"{where}: the catalog already has a dataset called {name}")
+        if set(entry) - {"description", "url", "traits"} or "url" not in entry or "traits" not in entry:
+            raise PerfError(f"{where}: a local dataset has a url, its traits, and a description")
+        catalog[name] = Dataset(
+            name, entry.get("description", ""), _check_traits(where, entry["traits"]), url=entry["url"]
+        )
+    return catalog
+
+
+def load_scenario(path: Path) -> Scenario:
+    where = f"scenario {path.stem}"
+    entry = _read_json(path)
+    if not isinstance(entry, dict):
+        raise PerfError(f"{where}: a scenario is a JSON object")
+    unknown = sorted(set(entry) - SCENARIO_KEYS)
+    if unknown:
+        raise PerfError(f"{where}: unknown key {', '.join(unknown)}; the keys are {', '.join(sorted(SCENARIO_KEYS))}")
+    camera = entry.get("camera", "slice")
+    if camera not in CAMERAS:
+        raise PerfError(f"{where}: camera {camera!r} is not one of {', '.join(CAMERAS)}")
+    steps = entry.get("steps", [])
+    # Step kinds and their fields are the CLI's to judge; a test runs every
+    # scenario through its script parser.
+    if not isinstance(steps, list) or not all(isinstance(s, dict) and isinstance(s.get("kind"), str) for s in steps):
+        raise PerfError(f"{where}: steps are a list of objects, each with a kind")
+    for key in ("width", "height"):
+        if key in entry and not (isinstance(entry[key], int) and entry[key] > 0):
+            raise PerfError(f"{where}: {key} is a positive whole number of CSS pixels")
+    return Scenario(
+        name=path.stem,
+        description=entry.get("description", ""),
+        requires=_check_traits(where, entry.get("requires", [])),
+        camera=camera,
+        steps=tuple(steps),
+        path=path,
+        width=entry.get("width"),
+        height=entry.get("height"),
+    )
+
+
+def load_scenarios(directory: Path) -> dict[str, Scenario]:
+    return {path.stem: load_scenario(path) for path in sorted(directory.glob("*.json"))}
+
+
+def _names(where: str, wanted: Any, known: dict[str, Any], kind: str) -> tuple[str, ...]:
+    if wanted == "all":
+        return tuple(known)
+    if not isinstance(wanted, list):
+        raise PerfError(f"{where}: {kind}s are \"all\" or a list of names")
+    unknown_names(kind, wanted, known)
+    return tuple(wanted)
+
+
+def unknown_names(kind: str, wanted: list[str], known: dict[str, Any]) -> None:
+    missing = [name for name in wanted if name not in known]
+    if missing:
+        raise PerfError(f"no {kind} called {', '.join(missing)}; the {kind}s are {', '.join(known)}")
+
+
+def load_suites(path: Path, catalog: dict[str, Dataset], scenarios: dict[str, Scenario]) -> dict[str, Suite]:
+    suites = {}
+    for name, entry in _read_json(path).get("suites", {}).items():
+        where = f"suite {name}"
+        suites[name] = Suite(
+            name=name,
+            description=entry.get("description", ""),
+            datasets=_names(where, entry.get("datasets"), catalog, "dataset"),
+            scenarios=_names(where, entry.get("scenarios"), scenarios, "scenario"),
+            ratios=tuple(parse_ratio(str(r)) for r in entry.get("ratios", [1, 2])),
+        )
+    return suites
+
+
+def parse_ratio(text: str) -> float:
+    try:
+        ratio = float(text)
+    except ValueError:
+        raise PerfError(f"a device pixel ratio is a number, not {text!r}") from None
+    if not ratio > 0:
+        raise PerfError(f"a device pixel ratio is positive, not {text}")
+    return ratio
+
+
+# ---------------------------------------------------------------------------
+# The matrix
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Case:
+    dataset: Dataset
+    scenario: Scenario
+    ratio: float
+    repeat: int
+
+    @property
+    def id(self) -> str:
+        suffix = f".{self.repeat}" if self.repeat > 1 else ""
+        return f"{self.dataset.name}.{self.scenario.name}.dpr{format_ratio(self.ratio)}{suffix}"
+
+
+@dataclass
+class Selection:
+    suite: str | None = None
+    datasets: list[str] = field(default_factory=list)
+    scenarios: list[str] = field(default_factory=list)
+    ratios: list[float] = field(default_factory=list)
+    repeat: int = 1
+
+
+def plan(
+    selection: Selection,
+    catalog: dict[str, Dataset],
+    scenarios: dict[str, Scenario],
+    suites: dict[str, Suite],
+) -> tuple[list[Case], list[tuple[str, str]]]:
+    """The runs to make, and the dataset and scenario pairs left out because
+    the scenario does not apply.
+
+    A suite supplies each dimension the flags leave open. With no suite and no
+    flags it is the quick suite; flags alone leave the rest at every scenario
+    and ratios 1 and 2.
+    """
+    explicit = selection.datasets or selection.scenarios or selection.ratios
+    suite_name = selection.suite or (None if explicit else DEFAULT_SUITE)
+    if suite_name is not None and suite_name not in suites:
+        raise PerfError(f"no suite called {suite_name}; the suites are {', '.join(suites)}")
+    suite = suites.get(suite_name) if suite_name else None
+    unknown_names("dataset", selection.datasets, catalog)
+    unknown_names("scenario", selection.scenarios, scenarios)
+    if selection.repeat < 1:
+        raise PerfError("--repeat is at least 1")
+
+    dataset_names = selection.datasets or (list(suite.datasets) if suite else list(catalog))
+    scenario_names = selection.scenarios or (list(suite.scenarios) if suite else list(scenarios))
+    ratios = selection.ratios or (list(suite.ratios) if suite else [1.0, 2.0])
+
+    cases: list[Case] = []
+    skipped: list[tuple[str, str]] = []
+    for dataset_name in dict.fromkeys(dataset_names):
+        dataset = catalog[dataset_name]
+        for scenario_name in dict.fromkeys(scenario_names):
+            scenario = scenarios[scenario_name]
+            if not scenario.applies_to(dataset):
+                skipped.append((dataset_name, scenario_name))
+                continue
+            for ratio in dict.fromkeys(ratios):
+                for repeat in range(1, selection.repeat + 1):
+                    cases.append(Case(dataset, scenario, ratio, repeat))
+    if not cases:
+        raise PerfError("the selection holds no run: " + describe_skipped(skipped, scenarios))
+    return cases, skipped
+
+
+def describe_skipped(skipped: list[tuple[str, str]], scenarios: dict[str, Scenario]) -> str:
+    by_scenario: dict[str, list[str]] = {}
+    for dataset_name, scenario_name in skipped:
+        by_scenario.setdefault(scenario_name, []).append(dataset_name)
+    return "; ".join(
+        f"{name} needs {', '.join(sorted(scenarios[name].requires))}, so it skips {', '.join(datasets)}"
+        for name, datasets in by_scenario.items()
+    )
+
+
+def format_ratio(ratio: float) -> str:
+    return f"{ratio:g}"
+
+
+# ---------------------------------------------------------------------------
+# Building
+# ---------------------------------------------------------------------------
+
+
+def _tool(name: str, why: str) -> str:
+    path = shutil.which(name)
+    if path is None:
+        raise PerfError(f"{name} is not on PATH; it is needed to {why}")
+    return path
+
+
+def _git_files(paths: list[Path]) -> list[Path]:
+    """Every file git would see under `paths`: tracked, plus untracked and not ignored."""
+    relative = [str(p.relative_to(REPO)) for p in paths]
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard", "--", *relative],
+            cwd=REPO,
+            capture_output=True,
+            check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise PerfError(f"could not list the checkout's files with git: {error}") from error
+    return sorted({REPO / name for name in listed.decode("utf-8").split("\0") if name})
+
+
+def _hash_files(files: list[Path], root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8") + b"\0")
+        # A tracked file deleted from the working tree is part of the state too.
+        digest.update(path.read_bytes() if path.is_file() else b"<absent>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _hash_tree(root: Path) -> str | None:
+    if not root.is_dir():
+        return None
+    return _hash_files(sorted(p for p in root.rglob("*") if p.is_file()), root)
+
+
+def _local_crates(root_crate: str) -> list[Path]:
+    """The directories of a crate and every workspace crate it reaches by path."""
+    try:
+        metadata = json.loads(
+            subprocess.run(
+                ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+                cwd=REPO,
+                capture_output=True,
+                check=True,
+            ).stdout
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise PerfError(f"cargo metadata failed: {error}") from error
+    packages = {p["name"]: p for p in metadata["packages"]}
+    seen: list[str] = []
+    pending = [root_crate]
+    while pending:
+        name = pending.pop()
+        if name in seen or name not in packages:
+            continue
+        seen.append(name)
+        pending.extend(d["name"] for d in packages[name]["dependencies"] if d.get("path"))
+    return [Path(packages[name]["manifest_path"]).parent for name in seen]
+
+
+@dataclass(frozen=True)
+class Component:
+    """A build output that cargo does not track for us, and what it is built from."""
+
+    name: str
+    inputs: list[Path]
+    output: Path
+    # Folded into the input fingerprint: a component built on another's output.
+    upstream: str = ""
+
+
+def _stamp_path(name: str) -> Path:
+    return REPO / "target" / "perf" / "stamps" / f"{name}.json"
+
+
+def component_fingerprint(component: Component) -> str:
+    digest = hashlib.sha256(_hash_files(_git_files(component.inputs), REPO).encode())
+    digest.update(component.upstream.encode())
+    return digest.hexdigest()
+
+
+def is_fresh(component: Component, fingerprint: str) -> bool:
+    """Built by this script from these inputs, and untouched since.
+
+    The output's own hash is part of the stamp, so a bundle rebuilt by hand
+    from another checkout reads as stale even when this checkout's inputs
+    match the stamp.
+    """
+    stamp = _stamp_path(component.name)
+    if not stamp.exists():
+        return False
+    recorded = json.loads(stamp.read_text(encoding="utf-8"))
+    return recorded.get("inputs") == fingerprint and recorded.get("output") == _hash_tree(component.output)
+
+
+def _record(component: Component, fingerprint: str) -> None:
+    stamp = _stamp_path(component.name)
+    stamp.parent.mkdir(parents=True, exist_ok=True)
+    stamp.write_text(json.dumps({"inputs": fingerprint, "output": _hash_tree(component.output)}), encoding="utf-8")
+
+
+def _run_build(argv: list[str], cwd: Path, what: str, env: dict[str, str] | None = None) -> None:
+    print(f"  {what}: {' '.join(Path(argv[0]).name if i == 0 else a for i, a in enumerate(argv))}", flush=True)
+    completed = subprocess.run(argv, cwd=cwd, env=env)
+    if completed.returncode != 0:
+        raise PerfError(f"building {what} failed (exit {completed.returncode}); nothing was measured")
+
+
+@dataclass(frozen=True)
+class Build:
+    server: Path
+    cli: Path
+    web_dist: Path
+
+
+def build() -> Build:
+    """Bring the server, CLI, wasm and web bundle up to the checkout.
+
+    Cargo judges the binaries itself. The wasm package and the web bundle
+    are rebuilt when the files git sees under their inputs, or the outputs
+    themselves, differ from what this script last built.
+    """
+    print("build", flush=True)
+    cargo = _tool("cargo", "build the server and the CLI")
+    env = dict(os.environ)
+    # aws-lc-sys assembles with NASM on Windows unless it may use the
+    # objects it ships; a machine without NASM fails the build otherwise.
+    if os.name == "nt" and "AWS_LC_SYS_PREBUILT_NASM" not in env and shutil.which("nasm") is None:
+        env["AWS_LC_SYS_PREBUILT_NASM"] = "1"
+    _run_build(
+        [cargo, "build", "--release", "--locked", "-p", "lucida-server", "-p", "lucida-cli"],
+        REPO,
+        "server and CLI",
+        env,
+    )
+
+    web_dir = REPO / "lucida-web"
+    root_files = [REPO / "Cargo.toml", REPO / "Cargo.lock"]
+    wasm = Component("wasm", [*_local_crates("lucida-core"), *root_files], REPO / "lucida-core" / "pkg")
+    wasm_fingerprint = component_fingerprint(wasm)
+    if is_fresh(wasm, wasm_fingerprint):
+        print("  wasm: fresh", flush=True)
+    else:
+        pnpm = _tool("pnpm", "build the wasm package and the web bundle")
+        _tool("wasm-pack", "build the wasm package")
+        _run_build([pnpm, "run", "build:wasm"], web_dir, "wasm")
+        _record(wasm, wasm_fingerprint)
+
+    web = Component("web", [web_dir], web_dir / "dist", upstream=wasm_fingerprint)
+    web_fingerprint = component_fingerprint(web)
+    if is_fresh(web, web_fingerprint):
+        print("  web bundle: fresh", flush=True)
+    else:
+        pnpm = _tool("pnpm", "build the web bundle")
+        # The install links the wasm package, so it comes after build:wasm.
+        _run_build([pnpm, "install", "--frozen-lockfile"], web_dir, "web dependencies")
+        _run_build([pnpm, "run", "build"], web_dir, "web bundle")
+        _record(web, web_fingerprint)
+
+    release = REPO / "target" / "release"
+    return Build(release / f"lucida-server{EXE}", release / f"lucida{EXE}", web_dir / "dist")
+
+
+# ---------------------------------------------------------------------------
+# Datasets
+# ---------------------------------------------------------------------------
+
+
+def dataset_location(dataset: Dataset, data_dir: Path) -> str:
+    """The URL a run opens: a local entry's own, or the generated copy's path."""
+    if dataset.url is not None:
+        return dataset.url
+    assert dataset.generate is not None
+    # The generator's own bytes are in the key: the same options from a
+    # changed generator are a different dataset.
+    key = hashlib.sha256(" ".join(dataset.generate).encode() + b"\0" + GENERATOR.read_bytes()).hexdigest()[:12]
+    return (data_dir / f"{dataset.name}-{key}.ome.zarr").as_posix()
+
+
+def prune_earlier(name: str, data_dir: Path) -> None:
+    """Remove a dataset's copies under other keys, and any partial one: dead
+    weight once a new copy is on its way."""
+    earlier = re.compile(re.escape(name) + r"-[0-9a-f]{12}\.ome\.zarr(\.partial)?")
+    for path in data_dir.iterdir():
+        if earlier.fullmatch(path.name):
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def ensure_datasets(datasets: list[Dataset], data_dir: Path) -> dict[str, str]:
+    locations: dict[str, str] = {}
+    pending = [d for d in datasets if d.generate is not None and not Path(dataset_location(d, data_dir)).exists()]
+    if pending:
+        print("datasets", flush=True)
+        uv = _tool("uv", "generate the datasets")
+    for dataset in datasets:
+        location = dataset_location(dataset, data_dir)
+        locations[dataset.name] = location
+        if dataset not in pending:
+            continue
+        final = Path(location)
+        final.parent.mkdir(parents=True, exist_ok=True)
+        prune_earlier(dataset.name, final.parent)
+        # Generated aside and moved into place, so an interrupted generation
+        # never leaves a half dataset under the name the cache trusts.
+        partial = final.with_name(final.name + ".partial")
+        print(f"  {dataset.name}: {' '.join(dataset.generate)}", flush=True)
+        argv = [uv, "run", "--quiet", str(GENERATOR), str(partial), "--overwrite", *dataset.generate]
+        if subprocess.run(argv, cwd=REPO).returncode != 0:
+            raise PerfError(f"generating {dataset.name} failed; nothing was measured")
+        os.replace(partial, final)
+    return locations
+
+
+# ---------------------------------------------------------------------------
+# Processes
+# ---------------------------------------------------------------------------
+
+
+class _WindowsJob:
+    """A job object that kills every process in it when it is closed.
+
+    A child joins its parent's job, so the browser a CLI launches is in the
+    CLI's job. Closing the handle, which also happens when this process dies
+    for any reason, takes the whole tree down.
+    """
+
+    def __init__(self) -> None:
+        import ctypes
+        from ctypes import wintypes
+
+        class IoCounters(ctypes.Structure):
+            _fields_ = [
+                (name, ctypes.c_ulonglong)
+                for name in ("Read", "Write", "Other", "ReadBytes", "WriteBytes", "OtherBytes")
+            ]
+
+        class BasicLimits(ctypes.Structure):
+            _fields_ = [
+                ("PerProcessUserTimeLimit", ctypes.c_int64),
+                ("PerJobUserTimeLimit", ctypes.c_int64),
+                ("LimitFlags", wintypes.DWORD),
+                ("MinimumWorkingSetSize", ctypes.c_size_t),
+                ("MaximumWorkingSetSize", ctypes.c_size_t),
+                ("ActiveProcessLimit", wintypes.DWORD),
+                ("Affinity", ctypes.c_size_t),
+                ("PriorityClass", wintypes.DWORD),
+                ("SchedulingClass", wintypes.DWORD),
+            ]
+
+        class ExtendedLimits(ctypes.Structure):
+            _fields_ = [
+                ("BasicLimitInformation", BasicLimits),
+                ("IoInfo", IoCounters),
+                ("ProcessMemoryLimit", ctypes.c_size_t),
+                ("JobMemoryLimit", ctypes.c_size_t),
+                ("PeakProcessMemoryUsed", ctypes.c_size_t),
+                ("PeakJobMemoryUsed", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+        kernel32.CreateJobObjectW.argtypes = (wintypes.LPVOID, wintypes.LPCWSTR)
+        kernel32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+        kernel32.TerminateJobObject.argtypes = (wintypes.HANDLE, wintypes.UINT)
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        self._kernel32 = kernel32
+        self._ctypes = ctypes
+
+        self.handle = kernel32.CreateJobObjectW(None, None)
+        if not self.handle:
+            raise OSError(ctypes.get_last_error(), "CreateJobObject failed")
+        limits = ExtendedLimits()
+        limits.BasicLimitInformation.LimitFlags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+        if not kernel32.SetInformationJobObject(self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)):
+            raise OSError(ctypes.get_last_error(), "SetInformationJobObject failed")
+
+    def add(self, pid: int) -> None:
+        process = self._kernel32.OpenProcess(0x0101, False, pid)  # PROCESS_SET_QUOTA | PROCESS_TERMINATE
+        if not process:
+            raise OSError(self._ctypes.get_last_error(), "OpenProcess failed")
+        try:
+            if not self._kernel32.AssignProcessToJobObject(self.handle, process):
+                raise OSError(self._ctypes.get_last_error(), "AssignProcessToJobObject failed")
+        finally:
+            self._kernel32.CloseHandle(process)
+
+    def kill(self) -> None:
+        if self.handle:
+            self._kernel32.TerminateJobObject(self.handle, 1)
+            self._kernel32.CloseHandle(self.handle)
+            self.handle = None
+
+
+LIVE: list[ProcessTree] = []
+
+
+class ProcessTree:
+    """One process this script started and everything it starts in turn.
+
+    The children are kept out of the terminal's Ctrl-C, in a process group
+    of their own or a job object, so this script decides when they stop and
+    stops the browser with them.
+    """
+
+    def __init__(self, argv: list[str], log: Path, cwd: Path, env: dict[str, str]) -> None:
+        self.log = log
+        self.job: _WindowsJob | None = None
+        options: dict[str, Any] = {}
+        if os.name == "nt":
+            options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            try:
+                self.job = _WindowsJob()
+            except OSError as error:
+                print(f"warning: no job object ({error}); a browser a run starts may outlive it")
+        else:
+            options["start_new_session"] = True
+        with open(log, "wb") as out:
+            self.process = subprocess.Popen(
+                argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **options
+            )
+        LIVE.append(self)
+        if self.job is not None:
+            try:
+                self.job.add(self.process.pid)
+            except OSError as error:
+                print(f"warning: {Path(argv[0]).name} is in no job object ({error}); a browser it starts may outlive it")
+
+    def wait(self, timeout: float | None = None) -> int | None:
+        """The exit code, or None at the timeout. Polled, because a blocking
+        wait on Windows does not let Ctrl-C through."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            code = self.process.poll()
+            if code is not None:
+                return code
+            if deadline is not None and time.monotonic() >= deadline:
+                return None
+            time.sleep(0.1)
+
+    def stop(self, grace: float = 5.0) -> None:
+        """Stop the process and whatever it left running. Safe to repeat."""
+        if os.name == "nt":
+            if self.process.poll() is None:
+                self.process.terminate()
+            if self.job is not None:
+                self.job.kill()
+                self.job = None
+        else:
+            try:
+                os.killpg(self.process.pid, signal.SIGTERM)
+                self.wait(grace)
+                # Whether or not the leader went, a browser left in its group
+                # goes now.
+                os.killpg(self.process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+        try:
+            self.process.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            self.process.kill()
+            self.process.wait()
+        if self in LIVE:
+            LIVE.remove(self)
+
+
+def stop_everything() -> None:
+    for tree in list(reversed(LIVE)):
+        tree.stop()
+
+
+def _scrubbed_env(**overrides: str) -> dict[str, str]:
+    """The caller's environment without its lucida settings, so a run never
+    reaches the caller's own server, config, token or database. The browser
+    choice is kept: it says which Chrome this machine has."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LUCIDA_") or k == "LUCIDA_BROWSER"}
+    env.update(overrides)
+    return env
+
+
+def free_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def start_server(built: Build, out_dir: Path, port: int) -> tuple[ProcessTree, str]:
+    # The server keeps its database in its working directory.
+    server_dir = out_dir / "server"
+    server_dir.mkdir(parents=True, exist_ok=True)
+    env = _scrubbed_env(
+        LUCIDA_BIND=f"127.0.0.1:{port}",
+        LUCIDA_AUTH="disabled",
+        LUCIDA_WEB_DIST=str(built.web_dist),
+        # A generated coarse tier cached by an earlier invocation would make
+        # a single-level dataset's first open look warm.
+        LUCIDA_GENERATED_COARSE_CACHE_DIR=str(server_dir / "generated-coarse"),
+    )
+    tree = ProcessTree([str(built.server)], server_dir / "server.log", server_dir, env)
+    url = f"http://127.0.0.1:{port}"
+    deadline = time.monotonic() + 30
+    while time.monotonic() < deadline:
+        if tree.wait(0.25) is not None:
+            raise PerfError(f"the server exited at startup; see {tree.log}")
+        try:
+            with urllib.request.urlopen(f"{url}/healthz", timeout=1):
+                return tree, url
+        except (urllib.error.URLError, OSError):
+            continue
+    raise PerfError(f"the server did not answer {url}/healthz within 30 s; see {tree.log}")
+
+
+# ---------------------------------------------------------------------------
+# Runs
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Row:
+    case: Case
+    run_file: Path
+    log: Path
+    exit_code: int | None = None
+    error: str | None = None
+    fields: dict[str, Any] = field(default_factory=dict)
+
+
+def _first_error_line(log: Path) -> str:
+    lines = [line.strip() for line in log.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
+    for line in lines:
+        if line.lower().startswith("error"):
+            return line[len("error") :].lstrip(":").strip()
+    return lines[-1] if lines else "no output"
+
+
+def run_case(case: Case, built: Build, server_url: str, location: str, out_dir: Path, timeout: int, stamp: str) -> Row:
+    runs_dir = out_dir / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    row = Row(case, runs_dir / f"{case.id}.json", runs_dir / f"{case.id}.txt")
+    # An output directory used before may hold this case's file from then.
+    row.run_file.unlink(missing_ok=True)
+    # The browser's throwaway profile lands here rather than the system
+    # temp directory, so one killed mid-run is cleaned up with the rest.
+    tmp = out_dir / "tmp"
+    tmp.mkdir(exist_ok=True)
+    env = _scrubbed_env(
+        LUCIDA_CONFIG_PATH=str(out_dir / "config.json"),
+        LUCIDA_TRACE_DIR=str(runs_dir),
+        TMP=str(tmp),
+        TEMP=str(tmp),
+        TMPDIR=str(tmp),
+    )
+    cli = [str(built.cli), "--server", server_url]
+    # The page loads the whole workspace, so each run gets one of its own.
+    workspace = f"perf-{case.id}-{stamp}"
+    create = ProcessTree([*cli, "workspace", "create", workspace], runs_dir / f"{case.id}.workspace.txt", REPO, env)
+    code = create.wait()
+    create.stop()
+    if code != 0:
+        row.exit_code, row.log = code, create.log
+        row.error = _first_error_line(create.log)
+        return row
+
+    scenario = case.scenario
+    argv = [
+        *cli,
+        "--workspace",
+        workspace,
+        "trace",
+        location,
+        "--camera",
+        scenario.camera,
+        "--device-pixel-ratio",
+        format_ratio(case.ratio),
+        "--timeout-seconds",
+        str(timeout),
+        "--output",
+        str(row.run_file),
+    ]
+    if scenario.width is not None:
+        argv += ["--width", str(scenario.width)]
+    if scenario.height is not None:
+        argv += ["--height", str(scenario.height)]
+    if scenario.steps:
+        # A scenario file is a script file: the CLI reads its steps and
+        # ignores the keys around them.
+        argv += ["--script", str(scenario.path)]
+    trace = ProcessTree(argv, row.log, REPO, env)
+    try:
+        # The CLI has its own deadline per wait; this one only catches a hang.
+        row.exit_code = trace.wait(timeout * (len(scenario.steps) + 2) + 60)
+    finally:
+        trace.stop()
+    if row.exit_code != 0 or not row.run_file.exists():
+        row.error = "timed out" if row.exit_code is None else _first_error_line(row.log)
+        return row
+    row.fields = read_run(row.run_file)
+    return row
+
+
+def _metric(signals: list[dict[str, Any]] | None, name: str) -> Any:
+    for signal_entry in signals or []:
+        if signal_entry.get("metric") == name:
+            return signal_entry.get("value")
+    return None
+
+
+def read_run(path: Path) -> dict[str, Any]:
+    """The table's fields, as the run file's diagnostic states them."""
+    run_file = _read_json(path)
+    diagnostic = run_file.get("diagnostic") or {}
+    header = run_file.get("header") or {}
+    load = diagnostic.get("load") or {}
+    received = load.get("received") or {}
+    attribution = diagnostic.get("attribution") or {}
+    run = diagnostic.get("run") or {}
+    verdict = diagnostic.get("verdict") or {}
+    steps = (header.get("script") or {}).get("steps") or []
+    return {
+        "runId": diagnostic.get("runId"),
+        "verdict": verdict.get("kind"),
+        "verdictText": verdict.get("text"),
+        "firstFrameMs": load.get("firstFrameMs"),
+        "settleMs": load.get("settleMs"),
+        "bytesFetched": received.get("bytes"),
+        "chunksFetched": received.get("requests"),
+        "chunksEvicted": _metric((diagnostic.get("coverage") or {}).get("notHealthSignals"), "evictions"),
+        "topLimiter": attribution.get("cause"),
+        "confidence": attribution.get("confidence"),
+        "adapter": run.get("gpu"),
+        "adapterKind": (run.get("adapterKind") or {}).get("label"),
+        "steps": [
+            {
+                "kind": step.get("kind"),
+                "runId": step.get("runId"),
+                "verdict": (step.get("verdict") or {}).get("kind"),
+            }
+            for step in steps
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# The table
+# ---------------------------------------------------------------------------
+
+DASH = "-"
+COLUMNS = [
+    "dataset",
+    "scenario",
+    "dpr",
+    "first frame",
+    "settle",
+    "fetched",
+    "chunks",
+    "evicted",
+    "top limiter",
+    "verdict",
+    "steps",
+    "run",
+]
+
+
+def _ms(value: Any) -> str:
+    return DASH if value is None else f"{value:,.0f} ms"
+
+
+def _bytes(value: Any) -> str:
+    if value is None:
+        return DASH
+    for unit, size in (("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
+        if value >= size:
+            return f"{value / size:.1f} {unit}"
+    return f"{value} B"
+
+
+def _count(value: Any) -> str:
+    return DASH if value is None else f"{value:,}"
+
+
+def _limiter(fields: dict[str, Any]) -> str:
+    cause = fields.get("topLimiter")
+    if not cause:
+        return DASH
+    text = " / ".join(cause) if isinstance(cause, list) else str(cause)
+    return f"{text} ({fields['confidence']})" if fields.get("confidence") else text
+
+
+def _steps(fields: dict[str, Any]) -> str:
+    steps = fields.get("steps") or []
+    if not steps:
+        return DASH
+    return " ".join(f"{step['kind']}:{step['verdict'] or 'no run'}" for step in steps)
+
+
+def table_cells(row: Row, out_dir: Path) -> list[str]:
+    case = row.case
+    scenario = case.scenario.name + (f" #{case.repeat}" if case.repeat > 1 else "")
+    run = row.run_file.relative_to(out_dir).as_posix() if row.run_file.exists() else row.log.relative_to(out_dir).as_posix()
+    if row.error is not None:
+        return [case.dataset.name, scenario, format_ratio(case.ratio), *[DASH] * 6, f"error: {row.error}", DASH, run]
+    f = row.fields
+    return [
+        case.dataset.name,
+        scenario,
+        format_ratio(case.ratio),
+        _ms(f.get("firstFrameMs")),
+        _ms(f.get("settleMs")),
+        _bytes(f.get("bytesFetched")),
+        _count(f.get("chunksFetched")),
+        _count(f.get("chunksEvicted")),
+        _limiter(f),
+        f.get("verdict") or DASH,
+        _steps(f),
+        run,
+    ]
+
+
+def render_markdown(rows: list[Row], out_dir: Path) -> str:
+    def cell(text: str) -> str:
+        return text.replace("|", "\\|")
+
+    adapters = sorted({f"{r.fields['adapter']} ({r.fields['adapterKind']})" for r in rows if r.fields.get("adapter")})
+    lines = [f"adapter: {', '.join(adapters) or 'not recorded'}", ""]
+    lines.append("| " + " | ".join(COLUMNS) + " |")
+    lines.append("|" + "|".join(" --- " for _ in COLUMNS) + "|")
+    for row in rows:
+        lines.append("| " + " | ".join(cell(c) for c in table_cells(row, out_dir)) + " |")
+    return "\n".join(lines) + "\n"
+
+
+def summary_json(rows: list[Row], out_dir: Path, meta: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **meta,
+        "rows": [
+            {
+                "dataset": row.case.dataset.name,
+                "scenario": row.case.scenario.name,
+                "ratio": row.case.ratio,
+                "repeat": row.case.repeat,
+                "runFile": row.run_file.relative_to(out_dir).as_posix() if row.run_file.exists() else None,
+                "log": row.log.relative_to(out_dir).as_posix(),
+                "exitCode": row.exit_code,
+                "error": row.error,
+                **row.fields,
+            }
+            for row in rows
+        ],
+    }
+
+
+def _git(*args: str) -> str:
+    try:
+        return subprocess.run(["git", *args], cwd=REPO, capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+
+
+def write_summary(rows: list[Row], out_dir: Path, meta: dict[str, Any]) -> str:
+    markdown = render_markdown(rows, out_dir)
+    (out_dir / "summary.md").write_text(markdown, encoding="utf-8")
+    (out_dir / "summary.json").write_text(json.dumps(summary_json(rows, out_dir, meta), indent=2), encoding="utf-8")
+    return markdown
+
+
+# ---------------------------------------------------------------------------
+# Command line
+# ---------------------------------------------------------------------------
+
+
+def _split(values: list[str] | None) -> list[str]:
+    return [part for value in values or [] for part in value.split(",") if part]
+
+
+def parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        prog="perf.py", description="Run lucida trace over datasets x scenarios x device pixel ratios."
+    )
+    parser.add_argument("--suite", help=f"a named suite from scripts/perf/suites.json (default {DEFAULT_SUITE})")
+    parser.add_argument("--dataset", action="append", help="dataset names, comma-separated or repeated")
+    parser.add_argument("--scenario", action="append", help="scenario names, comma-separated or repeated")
+    parser.add_argument("--ratio", action="append", help="device pixel ratios, comma-separated or repeated")
+    parser.add_argument("--repeat", type=int, default=1, help="runs per dataset, scenario and ratio (default 1)")
+    parser.add_argument("--timeout-seconds", type=int, default=120, help="per wait inside a run (default 120)")
+    parser.add_argument("--output", type=Path, help="where runs and the summary go (default target/perf/runs/<time>)")
+    parser.add_argument("--data", type=Path, help="where generated datasets are cached (default target/perf/datasets)")
+    parser.add_argument("--local-catalog", type=Path, default=LOCAL_CATALOG, help="real datasets, merged in")
+    parser.add_argument("--port", type=int, help="the server's port (default a free one)")
+    parser.add_argument("--list", action="store_true", help="list datasets, scenarios and suites, then exit")
+    parser.add_argument("--dry-run", action="store_true", help="print the runs the selection makes, then exit")
+    return parser.parse_args(argv)
+
+
+def _interrupt(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt
+
+
+def print_listing(catalog: dict[str, Dataset], scenarios: dict[str, Scenario], suites: dict[str, Suite]) -> None:
+    print("datasets")
+    for d in catalog.values():
+        source = "local" if d.url else "generated"
+        print(f"  {d.name:<16} {', '.join(sorted(d.traits)) or '2D':<28} {source}: {d.description}")
+    print("scenarios")
+    for s in scenarios.values():
+        print(f"  {s.name:<16} needs {', '.join(sorted(s.requires)) or 'nothing':<22} {s.description}")
+    print("suites")
+    for suite in suites.values():
+        print(f"  {suite.name:<16} {suite.description}")
+
+
+def main(argv: list[str]) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(errors="replace")  # type: ignore[attr-defined]
+    args = parse_args(argv)
+    catalog = load_catalog(PERF_DIR / "datasets.json", args.local_catalog)
+    scenarios = load_scenarios(PERF_DIR / "scenarios")
+    suites = load_suites(PERF_DIR / "suites.json", catalog, scenarios)
+    if args.list:
+        print_listing(catalog, scenarios, suites)
+        return 0
+    selection = Selection(
+        suite=args.suite,
+        datasets=_split(args.dataset),
+        scenarios=_split(args.scenario),
+        ratios=[parse_ratio(r) for r in _split(args.ratio)],
+        repeat=args.repeat,
+    )
+    cases, skipped = plan(selection, catalog, scenarios, suites)
+    if skipped:
+        print(f"not applicable, left out: {describe_skipped(skipped, scenarios)}")
+    if args.dry_run:
+        for case in cases:
+            print(case.id)
+        return 0
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    out_dir = (args.output or REPO / "target" / "perf" / "runs" / stamp).resolve()
+    data_dir = (args.data or REPO / "target" / "perf" / "datasets").resolve()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    signal.signal(signal.SIGTERM, _interrupt)
+    if hasattr(signal, "SIGBREAK"):
+        signal.signal(signal.SIGBREAK, _interrupt)
+
+    meta = {
+        "commit": _git("rev-parse", "HEAD"),
+        "dirty": bool(_git("status", "--porcelain")),
+        "startedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "selection": {
+            "suite": selection.suite,
+            "datasets": selection.datasets,
+            "scenarios": selection.scenarios,
+            "ratios": selection.ratios,
+            "repeat": selection.repeat,
+        },
+    }
+    rows: list[Row] = []
+    interrupted = False
+    try:
+        built = build()
+        unique = list({case.dataset.name: case.dataset for case in cases}.values())
+        locations = ensure_datasets(unique, data_dir)
+        _, server_url = start_server(built, out_dir, args.port or free_port())
+        meta["server"] = server_url
+        print(f"server {server_url}, runs in {out_dir}", flush=True)
+        for index, case in enumerate(cases, start=1):
+            print(f"[{index}/{len(cases)}] {case.id} ...", end=" ", flush=True)
+            row = run_case(case, built, server_url, locations[case.dataset.name], out_dir, args.timeout_seconds, stamp)
+            rows.append(row)
+            print(f"error: {row.error}" if row.error else (row.fields.get("verdict") or "no verdict"), flush=True)
+    except KeyboardInterrupt:
+        interrupted = True
+        print("\ninterrupted; stopping the server and browsers", flush=True)
+    finally:
+        stop_everything()
+        shutil.rmtree(out_dir / "tmp", ignore_errors=True)
+    if rows:
+        print()
+        print(write_summary(rows, out_dir, meta))
+        print(f"summary: {out_dir / 'summary.md'}")
+    if interrupted:
+        return 130
+    return 1 if any(row.error for row in rows) else 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv[1:]))
+    except PerfError as error:
+        stop_everything()
+        print(f"perf: {error}", file=sys.stderr)
+        sys.exit(2)

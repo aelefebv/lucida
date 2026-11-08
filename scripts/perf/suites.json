@@ -1,0 +1,16 @@
+{
+  "suites": {
+    "quick": {
+      "description": "a large 2D image and a 3D volume through the common moves, in a few minutes",
+      "datasets": ["large-image", "volume"],
+      "scenarios": ["cold-open", "pan-sweep", "z-scrub", "orbit"],
+      "ratios": [1, 2]
+    },
+    "full": {
+      "description": "every dataset through every scenario that applies to it",
+      "datasets": "all",
+      "scenarios": "all",
+      "ratios": [1, 2]
+    }
+  }
+}

@@ -538,3 +538,8 @@ jobs:
       # server.
       - name: Level chain check tests
         run: uv run extras/test_verify_level_chain.py
+
+      # The perf runner's catalog, scenarios, matrix and table. The runs
+      # themselves need a GPU to mean anything, so they stay local.
+      - name: Perf runner tests
+        run: uv run scripts/test_perf.py

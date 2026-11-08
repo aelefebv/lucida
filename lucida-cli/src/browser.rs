@@ -555,6 +555,22 @@ impl Page {
     }
 }
 
+/// Where Chrome and Edge install on Windows, which puts neither on `PATH`.
+fn windows_install_candidates(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Vec<PathBuf> {
+    const CHROME: &str = r"Google\Chrome\Application\chrome.exe";
+    const EDGE: &str = r"Microsoft\Edge\Application\msedge.exe";
+    [
+        ("ProgramFiles", CHROME),
+        ("ProgramFiles(x86)", CHROME),
+        ("LOCALAPPDATA", CHROME),
+        ("ProgramFiles(x86)", EDGE),
+        ("ProgramFiles", EDGE),
+    ]
+    .into_iter()
+    .filter_map(|(root, executable)| var(root).map(|root| PathBuf::from(root).join(executable)))
+    .collect()
+}
+
 fn find_browser_binary() -> Result<String, CliError> {
     if let Some(path) = std::env::var_os("LUCIDA_BROWSER") {
         let path = path.to_string_lossy().to_string();
@@ -575,6 +591,13 @@ fn find_browser_binary() -> Result<String, CliError> {
     for candidate in absolute_candidates {
         if Path::new(candidate).exists() {
             return Ok(candidate.to_string());
+        }
+    }
+    if cfg!(windows) {
+        for candidate in windows_install_candidates(|name| std::env::var_os(name)) {
+            if candidate.is_file() {
+                return Ok(candidate.to_string_lossy().to_string());
+            }
         }
     }
 
@@ -808,6 +831,24 @@ mod tests {
         assert_eq!(
             describe_exception(&json!({})),
             "an exception with no description"
+        );
+    }
+
+    #[test]
+    fn windows_candidates_look_where_chrome_and_edge_install() {
+        let candidates = windows_install_candidates(|name| match name {
+            "ProgramFiles" => Some(r"C:\Program Files".into()),
+            "LOCALAPPDATA" => Some(r"C:\Users\someone\AppData\Local".into()),
+            _ => None,
+        });
+        let chrome = r"Google\Chrome\Application\chrome.exe";
+        assert_eq!(
+            candidates,
+            vec![
+                PathBuf::from(r"C:\Program Files").join(chrome),
+                PathBuf::from(r"C:\Users\someone\AppData\Local").join(chrome),
+                PathBuf::from(r"C:\Program Files").join(r"Microsoft\Edge\Application\msedge.exe"),
+            ]
         );
     }
 
