@@ -43,7 +43,7 @@ struct EntityDescriptor {
   tileProxySlotIndex: u32,
   groupProxyPoolIndex: u32,
   groupProxySlotIndex: u32,
-  _pad_proxy0: u32,
+  sampleFormat: u32,
   _pad_proxy1: u32,
   _pad_proxy2: u32,
   tileProxyDims: vec3<u32>,
@@ -311,6 +311,25 @@ fn sampleWithFallback(pos: vec3f) -> VolumeSample {
   return out;
 }
 
+// `EntityDescriptor.sampleFormat`: the texel is the sample's float32 bits,
+// not the integer itself. Matches `sampleFormatCode` in dataTypeUtil.ts.
+const SAMPLE_F32: u32 = 1u;
+
+// A float texel holding NaN: no value, so it draws nothing. Decoding rewrites
+// every NaN to one pattern, so none is the MISS sentinel.
+fn texelIsNaN(texel: u32, format: u32) -> bool {
+  return format == SAMPLE_F32 && (texel & 0x7FFFFFFFu) > 0x7F800000u;
+}
+
+// The value a resident texel holds, in the data's own units, which is what
+// the contrast window is in.
+fn texelValue(texel: u32, format: u32) -> f32 {
+  if (format == SAMPLE_F32) {
+    return bitcast<f32>(texel);
+  }
+  return f32(texel);
+}
+
 // Integer avalanche (MurmurHash3 finalizer). Native u32 wrap matches the
 // `Math.imul`/`>>> 0` port in labelColors.ts.
 fn labelFmix32(value: u32) -> u32 {
@@ -527,11 +546,15 @@ fn fs(input: VSOut) -> FsOut {
 
     let s = sampleWithFallback(pos);
     let advance = max(s.step, minStep);
-    if (s.value == MISS || s.value == 0u) {
+    // A u16 zero sits at or below any window over unsigned data, so it adds
+    // nothing; a float zero can sit inside a window that reaches below it.
+    if (s.value == MISS
+        || (entity.sampleFormat != SAMPLE_F32 && s.value == 0u)
+        || texelIsNaN(s.value, entity.sampleFormat)) {
       t += advance;
       continue;
     }
-    let rawVal = f32(s.value);
+    let rawVal = texelValue(s.value, entity.sampleFormat);
     let normalized = pow(clamp((rawVal - intensityMin) / range, 0.0, 1.0), entity.gamma);
 
     // Record depth at first significant sample
