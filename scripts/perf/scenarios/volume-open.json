@@ -1,0 +1,6 @@
+{
+  "description": "open the volume framed whole in a volume view and wait for it to settle",
+  "requires": ["volume"],
+  "camera": "arcball",
+  "steps": []
+}

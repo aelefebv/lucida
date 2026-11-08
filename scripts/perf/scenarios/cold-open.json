@@ -1,0 +1,5 @@
+{
+  "description": "open the dataset framed whole in a slice view and wait for it to settle",
+  "camera": "slice",
+  "steps": []
+}
