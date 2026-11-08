@@ -64,6 +64,7 @@ import {
 } from "./types.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
+import type { WireGeneratedChunkStatusUpdate } from "../generatedAvailability.ts";
 
 // Re-exported so existing `./cpuCache.ts` imports keep working.
 export type {
@@ -124,14 +125,32 @@ export const FAILURE_BACKOFF_JITTER_RATIO = 0.5;
  *  FIFO-dropping its oldest entry past the cap, so total tracked entries
  *  never exceed `2 · MAX_TRACKED_FAILURES`. */
 export const MAX_TRACKED_FAILURES = 8192;
+/**
+ * Least spacing between reconciles that availability updates call for. The
+ * server publishes one update per generated chunk, and a reconcile walks the
+ * whole wanted set, so a burst of updates folds into one walk per interval.
+ */
+export const AVAILABILITY_RECONCILE_INTERVAL_MS = 100;
+
+/**
+ * Nominal first backoff for a generated chunk answered pending. The
+ * availability update that names the chunk is what asks for it again; this
+ * only covers an update that never comes, such as work the server lost, so it
+ * starts long rather than re-asking for a whole level every second.
+ */
+export const PENDING_BACKOFF_BASE_MS = 8_000;
 
 /**
  * Capped exponential backoff for a transient failure's `attempt`-th record
  * (1-based). Jitter spreads below the cap, so entries that both reach the cap
  * still draw distinct delays instead of retrying in lockstep.
  */
-export function backoffWithJitter(attempt: number, random: () => number): number {
-  const growth = FAILURE_BACKOFF_BASE_MS *
+export function backoffWithJitter(
+  attempt: number,
+  random: () => number,
+  baseMs: number = FAILURE_BACKOFF_BASE_MS,
+): number {
+  const growth = baseMs *
     Math.pow(FAILURE_BACKOFF_FACTOR, Math.max(0, attempt - 1));
   const base = Math.min(FAILURE_BACKOFF_MAX_MS, growth);
   const floor = base * (1 - FAILURE_BACKOFF_JITTER_RATIO);
@@ -146,8 +165,12 @@ export function backoffWithJitter(attempt: number, random: () => number): number
  */
 interface FailureRecord {
   /** `permanent` is sticky (never time-eligible); `transient` self-heals
-   *  after its backoff window. */
-  kind: "permanent" | "transient";
+   *  after its backoff window. `pending` is a generated chunk the server has
+   *  not made yet: not a failure, but it waits like a transient one, unless an
+   *  availability update names the chunk first. */
+  kind: "permanent" | "transient" | "pending";
+  /** The chunk's composite key, which is how an availability update names it. */
+  chunk: string;
   /** `now()` at the moment the failure was recorded (the transient backoff
    *  anchor). */
   failedAt: number;
@@ -230,11 +253,27 @@ export class CpuCache {
    */
   private permanentFailures = new Map<string, FailureRecord>();
   /**
-   * Keys with a transient failure (timeout, disconnect, failed decode)
-   * waiting out their backoff. FIFO-capped at {@link MAX_TRACKED_FAILURES},
-   * independently of the permanent store.
+   * Keys with a transient failure (timeout, disconnect, failed decode), or a
+   * generated chunk answered pending, waiting out their backoff. FIFO-capped
+   * at {@link MAX_TRACKED_FAILURES}, independently of the permanent store.
    */
   private transientFailures = new Map<string, FailureRecord>();
+
+  /**
+   * The request arrays submitted since the last plan rebuild, one per
+   * dataset: the wanted set {@link reconcile} drives toward resident.
+   */
+  private wantedRequests: ChunkRequest[][] = [];
+  /**
+   * The one timer that wakes {@link reconcile}, and the `now()` it is due
+   * at. Armed only while a wanted chunk waits out a backoff or an
+   * availability update has freed one, so an idle cache holds no timer.
+   */
+  private reconcileTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconcileAt = Infinity;
+  private lastReconcileAt = -Infinity;
+  /** In-flight chunk keys an availability update settled before they answered. */
+  private settledWhileInFlight = new Set<string>();
 
   private lruCounter = 0;
 
@@ -443,11 +482,13 @@ export class CpuCache {
 
     this.applyElasticTierBudgets();
     this.cancelOmittedChunkWork(unwantedInFlightKeys);
+    this.wantedRequests.push(requests);
 
     const pendingChunks: ChunkRequest[] = [];
     const pendingTiers: ResidencyTier[] = [];
     const pendingKeys = new Set<string>();
     const enqueueNow = performance.now();
+    let nextRetryAt = Infinity;
     for (let i = 0; i < requests.length; i++) {
       const req = requests[i];
       const key = keys[i];
@@ -491,10 +532,13 @@ export class CpuCache {
       }
 
       // Permanent failures stay excluded until reset or cancelDataset.
-      // Transient failures self-heal: a key re-planned after its backoff is
-      // re-enqueued. Eligibility is checked lazily here at plan time; no
-      // timer re-arms failed tiles.
-      if (this.isFailureExcluded(key)) continue;
+      // Transient and pending records self-heal, and the reconcile timer is
+      // armed for the earliest one so the view need not plan again.
+      const failure = this.excludingFailure(key);
+      if (failure) {
+        nextRetryAt = Math.min(nextRetryAt, failure.eligibleAt);
+        continue;
+      }
 
       // The minimap and coarse lanes can demand the same chunk (shared
       // residency tier + key); one fetch serves both. The first occurrence
@@ -545,6 +589,115 @@ export class CpuCache {
     this.proxyScheduler.enqueue(pendingProxies, enqueueNow);
 
     this.drainSchedulers();
+    this.armReconcile(nextRetryAt);
+  }
+
+  /**
+   * Drive the wanted set toward resident without a new plan. Every wanted
+   * chunk that is not resident, in flight, rejected, or waiting out a backoff
+   * is queued again, and the timer is re-armed for the earliest backoff still
+   * running. A static view plans once, so this is what asks again for a chunk
+   * that was answered pending or failed.
+   *
+   * It runs only from the timer, which is armed only while there is such a
+   * chunk to wait for, so a settled cache never wakes itself.
+   */
+  private reconcile(): void {
+    // Its own plan pass: a row it queues would otherwise date its plan phase
+    // from the last tick's pass and charge the whole wait to planning.
+    traceRecorder.markPlanStart();
+    const now = this.now();
+    this.lastReconcileAt = now;
+    let nextRetryAt = Infinity;
+    const pending: ChunkRequest[] = [];
+    const tiers: ResidencyTier[] = [];
+    const seen = new Set<string>();
+    for (const requests of this.wantedRequests) {
+      for (const req of requests) {
+        const key = chunkSchedulerKey(req, req.tier);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        if (this.rejectionTracker.has(req.entityId, req.chunkKey)) continue;
+        if (this.lookupCachedEntry(req) || this.chunkScheduler.hasInFlight(key)) continue;
+        const failure = this.excludingFailure(key, now);
+        if (failure) {
+          nextRetryAt = Math.min(nextRetryAt, failure.eligibleAt);
+          continue;
+        }
+        pending.push(req);
+        tiers.push(req.tier);
+      }
+    }
+    if (pending.length > 0) {
+      const enqueueNow = performance.now();
+      traceRecorder.notePlanEnqueue(enqueueNow);
+      // Replacing the queue drops nothing: whatever it held is wanted, absent
+      // and not in flight, so it is in `pending` too, in the same order.
+      this.chunkScheduler.enqueue(orderChunkRequestsForTierAllocation(pending, tiers), enqueueNow);
+      this.drainSchedulers();
+      this.notifyListeners();
+    }
+    this.armReconcile(nextRetryAt);
+  }
+
+  /** Wake {@link reconcile} at `at` on the `now()` clock, unless it already wakes sooner. */
+  private armReconcile(at: number): void {
+    if (!(at < this.reconcileAt)) return;
+    this.disarmReconcile();
+    this.reconcileAt = at;
+    this.reconcileTimer = setTimeout(() => {
+      this.reconcileTimer = null;
+      this.reconcileAt = Infinity;
+      this.reconcile();
+    }, Math.max(0, Math.ceil(at - this.now())));
+  }
+
+  private disarmReconcile(): void {
+    if (this.reconcileTimer !== null) clearTimeout(this.reconcileTimer);
+    this.reconcileTimer = null;
+    this.reconcileAt = Infinity;
+  }
+
+  /**
+   * Generated chunks whose status the server published. A record for one
+   * that settled, pending or failed, no longer says what a request would get,
+   * so it clears and the chunk is asked for again without waiting out its
+   * backoff. The server's answer to a request and its update for the same
+   * chunk travel separately, so an update can overtake a pending answer still
+   * on its way; the fetch it overtook is marked so that answer is not believed.
+   */
+  noteGeneratedAvailability(
+    datasetId: string,
+    chunks: readonly WireGeneratedChunkStatusUpdate[],
+  ): void {
+    const settled = new Set<string>();
+    for (const chunk of chunks) {
+      if (chunk.status !== "pending") settled.add(`${datasetId}/${chunk.image_id}/${chunk.key}`);
+    }
+    if (settled.size === 0) return;
+    for (const [key, { request }] of this.chunkScheduler.inFlightEntries()) {
+      if (settled.has(`${request.datasetId}/${request.imageId}/${request.chunkKey}`)) {
+        this.settledWhileInFlight.add(key);
+      }
+    }
+    if (this.permanentFailures.size + this.transientFailures.size === 0) return;
+    let freedWanted = false;
+    for (const store of [this.permanentFailures, this.transientFailures]) {
+      for (const [key, record] of store) {
+        if (!settled.has(record.chunk)) continue;
+        store.delete(key);
+        freedWanted ||= this.isWanted(key);
+      }
+    }
+    if (freedWanted) this.armReconcileForAvailability();
+  }
+
+  private armReconcileForAvailability(): void {
+    this.armReconcile(Math.max(this.now(), this.lastReconcileAt + AVAILABILITY_RECONCILE_INTERVAL_MS));
+  }
+
+  private isWanted(key: string): boolean {
+    return this.desiredDetailKeysThisTick.has(key) || this.desiredCoarseKeysThisTick.has(key);
   }
 
   /**
@@ -579,7 +732,7 @@ export class CpuCache {
       (_entry, key) => unwantedInFlightKeys.has(key),
     );
     for (const key of cancelled) {
-      this.inFlightChunkMeta.delete(key);
+      this.forgetCancelledChunk(key);
     }
   }
 
@@ -595,7 +748,7 @@ export class CpuCache {
       (entry) => entry.request.entityId === entityId,
     );
     for (const key of cancelled) {
-      this.inFlightChunkMeta.delete(key);
+      this.forgetCancelledChunk(key);
     }
   }
 
@@ -651,7 +804,7 @@ export class CpuCache {
         if (key.startsWith(prefix)) this.clearFailure(key);
       }
       for (const key of this.inFlightChunkMeta.keys()) {
-        if (key.startsWith(prefix)) this.inFlightChunkMeta.delete(key);
+        if (key.startsWith(prefix)) this.forgetCancelledChunk(key);
       }
       this.activeEntityIds.delete(entityId);
       this.activeEntityIdsThisRebuild.delete(entityId);
@@ -662,6 +815,11 @@ export class CpuCache {
     for (const key of this.inFlightProxyMeta.keys()) {
       if (key.startsWith(proxyPrefix)) this.inFlightProxyMeta.delete(key);
     }
+    // A reconcile due before the next plan must not fetch for a dataset
+    // that is gone.
+    this.wantedRequests = this.wantedRequests.map(
+      (requests) => requests.filter((req) => req.datasetId !== datasetId),
+    );
   }
 
   /**
@@ -709,7 +867,7 @@ export class CpuCache {
       entry.request.chunkKey === chunkKey
     ));
     for (const key of cancelled) {
-      this.inFlightChunkMeta.delete(key);
+      this.forgetCancelledChunk(key);
     }
   }
 
@@ -739,6 +897,9 @@ export class CpuCache {
     this.desiredCoarseKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
     this.rejectionTracker.clear();
+    // The submits that follow carry the new wanted set and re-arm for it.
+    this.wantedRequests = [];
+    this.disarmReconcile();
   }
 
   *getDeliverable(): Iterable<ReadyDelivery> {
@@ -845,6 +1006,15 @@ export class CpuCache {
 
   markProxyMissing(key: string): void {
     this.deliveryState.clearProxySent(key);
+  }
+
+  /**
+   * The renderer replaced its GPU device and holds nothing, so every chunk
+   * and proxy is eligible to send again, the ones it refused included.
+   */
+  forgetDelivered(): void {
+    this.deliveryState.reset();
+    this.rejectionTracker.clear();
   }
 
   snapshot(): CacheStateSnapshot {
@@ -1171,6 +1341,10 @@ export class CpuCache {
     this.deliveryState.reset();
     this.inFlightChunkMeta.clear();
     this.inFlightProxyMeta.clear();
+    this.wantedRequests = [];
+    this.disarmReconcile();
+    this.lastReconcileAt = -Infinity;
+    this.settledWhileInFlight.clear();
     this.lruCounter = 0;
     this.currentSubmitTick = 0;
     this.chunkStore.setBudgetBytes(this.config.mainBudgetBytes);
@@ -1215,12 +1389,27 @@ export class CpuCache {
       traceRecorder.finishRow(traceRow, RowOutcome.Retired);
       const fe = classifyFetchError(err);
 
-      if (fe.kind === "abort" || fe.kind === "pending") {
-        // A silent teardown: the caller cancelled, or generated bytes are not
-        // ready yet. No failure record and no streak; release only what this
+      if (fe.kind === "abort") {
+        // A silent teardown: the caller cancelled. Release only what this
         // settle still owns (see {@link settleFetch}).
+        this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller);
+        return;
+      }
+      if (fe.kind === "pending") {
+        // Generated bytes not made yet. Not a failure, so no streak and no
+        // failure counters, but a record all the same: the chunk waits for an
+        // availability update naming it, or its backoff, rather than being
+        // asked for on every plan or never again. An update that already
+        // overtook this answer has nothing left to wait for.
+        const overtaken = this.settledWhileInFlight.has(key);
         if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
-          if (fe.kind === "pending") this.drainSchedulers();
+          if (!overtaken) {
+            this.recordFailure(key, "pending", req);
+          } else {
+            if (this.isWanted(key)) this.armReconcileForAvailability();
+            this.notifyListeners();
+          }
+          this.drainSchedulers();
         }
         return;
       }
@@ -1261,7 +1450,7 @@ export class CpuCache {
         fed = true;
       }
       if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
-        this.recordFailure(key, isPermanent);
+        this.recordFailure(key, isPermanent ? "permanent" : "transient", req);
         this.counters.recordFetchFailure(isPermanent, fe.message);
         this.recordFailureForBurstDetection(isPermanent, fe.message);
         traceRecorder.recordPointEvent(PointEvent.Failure, fe.kind, req, rowTier);
@@ -1301,7 +1490,7 @@ export class CpuCache {
         if (!fedStreak) {
           this.recordChunkFailureForStreak(streakMessage);
         }
-        this.recordFailure(key, false);
+        this.recordFailure(key, "transient", req);
         this.counters.recordFetchFailure(false, streakMessage);
         this.recordFailureForBurstDetection(false, streakMessage);
         // Bytes that arrived and could not be decoded fail the delivery just
@@ -1508,6 +1697,12 @@ export class CpuCache {
     });
   }
 
+  /** Drop what the cache keeps beside a chunk fetch it cancelled. */
+  private forgetCancelledChunk(key: string): void {
+    this.inFlightChunkMeta.delete(key);
+    this.settledWhileInFlight.delete(key);
+  }
+
   private rememberInFlightProxy(
     key: string,
     req: ProxyRequest,
@@ -1540,6 +1735,7 @@ export class CpuCache {
   ): boolean {
     if (!scheduler.markInFlightDoneIfCurrent(key, controller)) return false;
     meta.delete(key);
+    this.settledWhileInFlight.delete(key);
     return true;
   }
 
@@ -1549,53 +1745,62 @@ export class CpuCache {
     return this.permanentFailures.get(key) ?? this.transientFailures.get(key);
   }
 
-  /** Whether `key` is currently excluded from planning by a failure record:
-   *  a permanent record (never time-eligible) or a transient record still
-   *  inside its backoff window. */
-  private isFailureExcluded(key: string): boolean {
+  /** The record excluding `key` from fetching, if any: a permanent record
+   *  (never time-eligible), or a transient or pending one still inside its
+   *  backoff window. */
+  private excludingFailure(key: string, now?: number): FailureRecord | undefined {
     const record = this.getFailureRecord(key);
-    return record !== undefined && this.now() < record.eligibleAt;
+    if (record === undefined) return undefined;
+    return (now ?? this.now()) < record.eligibleAt ? record : undefined;
   }
 
   /**
-   * Record a fetch failure for `key` in the matching store. A key can flip
-   * kind between records, so it is cleared from both first. A transient
-   * record grows its attempt count from the prior transient record, which
-   * lengthens the capped backoff. Each store is FIFO-capped independently,
-   * so a flood of permanents cannot evict a transient's backoff.
+   * Record an unsuccessful settle for `key` in the matching store, and wake
+   * the page so it publishes the settle. A key can flip kind between
+   * records, so it is cleared from both first. A transient or pending record
+   * grows its attempt count from the prior one, which lengthens the capped
+   * backoff, and arms the reconcile timer while the chunk is still wanted.
+   * Each store is FIFO-capped independently, so a flood of permanents cannot
+   * evict a transient's backoff.
    */
-  private recordFailure(key: string, isPermanent: boolean): void {
-    if (isPermanent) {
+  private recordFailure(key: string, kind: FailureRecord["kind"], req: ChunkRequest): void {
+    const chunk = `${req.datasetId}/${req.imageId}/${req.chunkKey}`;
+    if (kind === "permanent") {
       this.transientFailures.delete(key);
       // Delete-then-set refreshes FIFO recency, so a re-reported permanent
       // is not the first to be dropped under cap pressure.
       this.permanentFailures.delete(key);
       this.permanentFailures.set(key, {
-        kind: "permanent",
+        kind,
+        chunk,
         failedAt: this.now(),
         attempt: 0,
         eligibleAt: Infinity,
       });
       this.evictOldestWhileOverCap(this.permanentFailures);
+      this.notifyListeners();
       return;
     }
 
     const prev = this.transientFailures.get(key);
     const failedAt = this.now();
     const attempt = (prev?.attempt ?? 0) + 1;
-    const eligibleAt = failedAt + this.backoffMs(attempt);
+    const eligibleAt = failedAt + this.backoffMs(attempt, kind);
 
     this.permanentFailures.delete(key);
     // Delete-then-set keeps Map iteration order == insertion recency, so
     // FIFO eviction drops the genuinely oldest transient.
     this.transientFailures.delete(key);
     this.transientFailures.set(key, {
-      kind: "transient",
+      kind,
+      chunk,
       failedAt,
       attempt,
       eligibleAt,
     });
     this.evictOldestWhileOverCap(this.transientFailures);
+    if (this.isWanted(key)) this.armReconcile(eligibleAt);
+    this.notifyListeners();
   }
 
   /**
@@ -1621,11 +1826,13 @@ export class CpuCache {
   }
 
   /**
-   * Backoff for a transient failure's `attempt`-th record (1-based), with
-   * jitter from the injected `random()` (see {@link backoffWithJitter}).
+   * Backoff for a transient or pending record's `attempt`-th record
+   * (1-based), with jitter from the injected `random()` (see
+   * {@link backoffWithJitter}).
    */
-  private backoffMs(attempt: number): number {
-    return backoffWithJitter(attempt, this.random);
+  private backoffMs(attempt: number, kind: "transient" | "pending"): number {
+    const base = kind === "pending" ? PENDING_BACKOFF_BASE_MS : FAILURE_BACKOFF_BASE_MS;
+    return backoffWithJitter(attempt, this.random, base);
   }
 
   /** Total tracked failure entries (permanent + transient), across both

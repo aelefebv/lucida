@@ -1,10 +1,15 @@
-//! `lucida trace watch`: follow a live session's watch stream (#1068).
+//! `lucida trace watch`: follow a live session's watch stream.
 //!
 //! The pull path needs a run that ends. This is the case where there is
 //! none — a session that keeps fetching after the view looks loaded, on
 //! somebody else's machine, in a tab this command did not open. A person
 //! turns the watch toggle on in their monitor, and this subscribes to the
 //! workspace socket and prints what their page publishes.
+//!
+//! **Live unless asked.** The stream starts at the subscribe. `--history`
+//! prints what the server's ring still holds first, then the server's
+//! `watch_history_end` line, so a reader knows which lines came before it
+//! started watching.
 //!
 //! **Line-delimited JSON, and only that.** One object per line, flushed as it
 //! arrives, so a long-running job can block on the stream and wake on a
@@ -41,6 +46,8 @@ pub struct WatchOptions {
     /// Stop after this long. Runs until the socket closes or the reader quits
     /// when absent, which is the point of the command.
     pub duration: Option<Duration>,
+    /// Print the server's ring and its end marker before the live items.
+    pub history: bool,
 }
 
 /// What one frame off the socket means to a watch.
@@ -62,6 +69,9 @@ pub enum WatchFrame<'a> {
 /// watcher must not do: the stream carries the trace's own objects, and their
 /// vocabulary is versioned by the trace rather than by the CLI.
 ///
+/// The history marker prints whichever page the watch follows, because it
+/// describes the stream rather than any one page's items.
+///
 /// A frame that does not parse is skipped rather than fatal. A newer server
 /// may notify with message types this binary does not know, and none of them
 /// can be the stream.
@@ -73,6 +83,7 @@ pub fn read_frame(filter: Option<ClientId>, text: &str) -> WatchFrame<'_> {
         {
             WatchFrame::Line(text)
         }
+        Ok(ServerMessage::WatchHistoryEnd { .. }) => WatchFrame::Line(text),
         _ => WatchFrame::Skip,
     }
 }
@@ -93,7 +104,13 @@ pub async fn watch_workspace(
     let mut messages = Box::pin(incoming_messages(read));
 
     crate::session::wait_for_workspace_snapshot(&mut messages, SNAPSHOT_TIMEOUT).await?;
-    send_client_message(&mut write, &ClientMessage::WatchSubscribe).await?;
+    send_client_message(
+        &mut write,
+        &ClientMessage::WatchSubscribe {
+            history: options.history,
+        },
+    )
+    .await?;
 
     // A duration that runs out ends the watch rather than failing it: what
     // was printed is what there was.
@@ -245,6 +262,22 @@ mod tests {
     fn a_line_is_the_frame_the_server_sent() {
         let frame = r#"{"type":"watch_update","client_id":3,"seq":7,"item":{"kind":"aggregate","at_epoch_ms":1,"run_id":null,"reading":null,"counted":{},"sent":{},"ticks":[],"somethingNewer":42}}"#;
         assert_eq!(read_frame(None, frame), WatchFrame::Line(frame));
+    }
+
+    /// The marker says where history ends for the whole stream, so a watch
+    /// that follows one page prints it too.
+    #[test]
+    fn the_history_marker_prints_whichever_page_the_watch_follows() {
+        let marker = serde_json::to_string(&ServerMessage::WatchHistoryEnd {
+            through_seq: 7,
+            replayed: 7,
+        })
+        .unwrap();
+        for filter in [None, Some(3)] {
+            let line = line_of(read_frame(filter, &marker));
+            assert_eq!(line["type"], "watch_history_end");
+            assert_eq!(line["through_seq"], 7);
+        }
     }
 
     #[test]
