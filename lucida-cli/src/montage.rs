@@ -48,6 +48,14 @@ pub struct MontagePlan {
     pub rows: u32,
 }
 
+/// A position as a person reads it, counted from 1, as the web's
+/// `positionLabel` writes it, so a label burned into a cell names the same
+/// slice the viewer does. The sidecar's `z`/`t`/`c`/`tile` fields and the CLI
+/// flags stay 0-based.
+fn position_label(axis: &str, index: impl Into<u64>) -> String {
+    format!("{axis} {}", index.into() + 1)
+}
+
 /// Evenly-spaced sample indices across `[0, extent)`, inclusive of both ends.
 /// `n` samples (clamped to `extent`); `extent` 0/1 yields `[0]`.
 fn even_samples(extent: u64, n: usize) -> Vec<u32> {
@@ -98,7 +106,7 @@ pub fn plan_montage(
                 t: 0,
                 c: 0,
                 tile: f,
-                label: format!("tile {f}"),
+                label: position_label("tile", f as u64),
             })
             .collect();
         (MontageAxis::Tile, cells)
@@ -110,7 +118,7 @@ pub fn plan_montage(
                 t: 0,
                 c: 0,
                 tile: 0,
-                label: format!("z={z}"),
+                label: position_label("Z", z),
             })
             .collect();
         (MontageAxis::Z, cells)
@@ -122,7 +130,7 @@ pub fn plan_montage(
                 t,
                 c: 0,
                 tile: 0,
-                label: format!("t={t}"),
+                label: position_label("T", t),
             })
             .collect();
         (MontageAxis::T, cells)
@@ -134,7 +142,7 @@ pub fn plan_montage(
                 t: 0,
                 c: 0,
                 tile: 0,
-                label: "z=0".into(),
+                label: position_label("Z", 0u32),
             }],
         )
     };
@@ -376,7 +384,7 @@ mod tests {
             t: 3,
             c: 1,
             tile: 0,
-            label: "z=42".into(),
+            label: "Z 43".into(),
         };
         let view = build_cell_view("wds-abc", &cell, 400, 200, [256, 256], None);
         match view.camera {
@@ -406,7 +414,7 @@ mod tests {
             t: 0,
             c: 1,
             tile: 0,
-            label: "z=10".into(),
+            label: "Z 11".into(),
         };
         let view = build_cell_view("wds-x", &cell, 256, 256, [256, 256], Some([60.0, 196.0]));
         let id = DatasetId("wds-x".into());
@@ -433,7 +441,7 @@ mod tests {
             solid_png(64, 64, [0, 255, 0, 255]),
             solid_png(64, 64, [0, 0, 255, 255]),
         ];
-        let labels = vec!["z=0".to_string(), "z=1".to_string(), "z=2".to_string()];
+        let labels = vec!["Z 1".to_string(), "Z 2".to_string(), "Z 3".to_string()];
         let png = stitch_grid(&thumbs, &labels, 2).unwrap();
         let img = image::load_from_memory(&png).unwrap();
         // 3 cells, 2 cols → 2x2 grid of 64px cells = 128x128.
@@ -497,6 +505,22 @@ mod tests {
         assert_eq!(plan.cells.len(), 1);
         assert_eq!(plan.cols, 1);
         assert_eq!(plan.rows, 1);
+    }
+
+    #[test]
+    fn labels_count_from_one_while_fields_stay_zero_based() {
+        let z = plan_montage([1, 1, 340, 512, 512], 1, 16, 4);
+        assert_eq!((z.cells[0].z, z.cells[0].label.as_str()), (0, "Z 1"));
+        assert_eq!((z.cells[15].z, z.cells[15].label.as_str()), (339, "Z 340"));
+        let t = plan_montage([30, 2, 1, 256, 256], 1, 16, 4);
+        assert_eq!((t.cells[0].t, t.cells[0].label.as_str()), (0, "T 1"));
+        let tiles = plan_montage([1, 4, 9, 256, 256], 64, 16, 4);
+        assert_eq!(
+            (tiles.cells[0].tile, tiles.cells[0].label.as_str()),
+            (0, "tile 1")
+        );
+        let single = plan_montage([1, 1, 1, 1024, 1024], 1, 16, 4);
+        assert_eq!(single.cells[0].label, "Z 1");
     }
 
     #[test]

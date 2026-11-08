@@ -480,7 +480,7 @@ async fn handle_client_inner(
                         ClientMessage::OpenRemoteDataset { request_id, url } => {
                             // Adding a dataset takes the editor role, which
                             // nobody holds on the legacy `/ws` session.
-                            if workspace.is_none() {
+                            let Some(scope) = workspace.clone() else {
                                 send_open_failed(
                                     id,
                                     &request_id,
@@ -496,7 +496,7 @@ async fn handle_client_inner(
                                 )
                                 .await;
                                 continue;
-                            }
+                            };
                             tracing::info!(
                                 client_id = %id,
                                 request_id = %request_id,
@@ -507,7 +507,6 @@ async fn handle_client_inner(
                             let tx_clone = tx.clone();
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let proxy_config_clone = proxy_config.clone();
-                            let workspace_clone = workspace.clone();
                             let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest { request_id, url };
                             tokio::spawn(async move {
@@ -518,7 +517,7 @@ async fn handle_client_inner(
                                     tx_clone,
                                     unicast_routes_clone,
                                     proxy_config_clone,
-                                    workspace_clone,
+                                    scope,
                                     timings_clone,
                                 )
                                 .await;
@@ -619,7 +618,7 @@ async fn handle_client_inner(
                             let tx_clone = tx.clone();
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let proxy_config_clone = proxy_config.clone();
-                            let workspace_clone = workspace.clone();
+                            let workspace_clone = ctx.clone();
                             let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest {
                                 request_id,
@@ -699,20 +698,22 @@ async fn handle_client_inner(
                                 json: serde_json::to_string(&update).unwrap(),
                             });
                         }
-                        ClientMessage::WatchSubscribe => {
-                            // The relay hands this connection the ring before
-                            // registering it, both under the session lock, so
+                        ClientMessage::WatchSubscribe { history } => {
+                            // Asked for history, the relay hands this
+                            // connection the ring and its end marker before
+                            // registering it, all under the session lock, so
                             // the recent past arrives ahead of the live items
                             // with no gap and no repeat.
                             let sender = unicast_routes.lock().await.get(&id).cloned();
                             let Some(sender) = sender else { continue };
                             let (replayed, subscribers) = {
                                 let mut sess = session.lock().await;
-                                let replayed = sess.watch.subscribe(id, sender);
+                                let replayed = sess.watch.subscribe(id, sender, history);
                                 (replayed, sess.watch.subscribers())
                             };
                             tracing::info!(
                                 client_id = %id,
+                                history,
                                 replayed = replayed.len(),
                                 from_seq = replayed.first().copied().unwrap_or(0),
                                 subscribers,
@@ -839,7 +840,7 @@ async fn handle_client_inner(
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
                                     tokio::spawn(async move {
                                         generated_service
-                                            .enqueue_chunk_request(&image_id, level, &key)
+                                            .enqueue_chunk_request(id, &image_id, level, &key)
                                             .await;
                                         serve_generated_chunk_request(
                                             id,
@@ -973,8 +974,8 @@ async fn handle_client_inner(
     let (affected_followers, peer_left_json) = {
         let mut sess = session.lock().await;
         // A subscriber's connection is its subscription: a returning watcher
-        // subscribes again and reads the ring, and a publishing page's toggle
-        // is off after a reconnect.
+        // subscribes again, and a publishing page's toggle is off after a
+        // reconnect.
         sess.watch.unsubscribe(id);
         let affected = sess.remove_client(id);
         let peer_left = ServerMessage::PeerLeft { client_id: id };
@@ -1385,7 +1386,7 @@ async fn handle_open_remote_dataset(
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
-    workspace: Option<WorkspaceScope>,
+    workspace: WorkspaceScope,
     timings: Arc<TimingBuffer>,
 ) {
     let OpenRemoteDatasetRequest { request_id, url } = request;
@@ -1434,7 +1435,8 @@ async fn handle_open_remote_dataset(
         session,
         tx,
         proxy_config,
-        workspace,
+        source_policy: workspace.manager.source_policy(),
+        workspace: Some(workspace),
     };
     // Every metadata object this open reads files a row against the open's
     // own `request_id`, on the requesting connection's buffer. Scoped

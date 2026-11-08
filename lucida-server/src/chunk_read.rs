@@ -147,6 +147,11 @@ async fn read_location(
     }
 }
 
+/// The decode limit for a level that declares no chunk size, which only a
+/// key naming a level the binding lacks reaches. Still a bound, so no
+/// stream decodes without one.
+const UNDECLARED_CHUNK_LIMIT: usize = 1 << 30;
+
 /// Decode one stored chunk and cut out the key's timepoint and channel.
 ///
 /// A chunk that decodes to another size than its stored chunk shape holds is
@@ -157,7 +162,13 @@ fn decode_wire_chunk(
     level_info: &LevelInfo,
     chunk_key: &str,
 ) -> Result<Vec<u8>, ChunkReadError> {
-    let raw = decode_storage_bytes(storage_bytes, level_info.compression)
+    let expected = level_info.chunk_byte_layout.on_disk_byte_size;
+    let max_len = if expected > 0 {
+        expected
+    } else {
+        UNDECLARED_CHUNK_LIMIT
+    };
+    let raw = decode_storage_bytes(storage_bytes, level_info.compression, max_len)
         .map_err(ChunkReadError::Decode)?;
     tracing::debug!(
         key = chunk_key,
@@ -166,7 +177,6 @@ fn decode_wire_chunk(
         compression = ?level_info.compression,
         "chunk decoded"
     );
-    let expected = level_info.chunk_byte_layout.on_disk_byte_size;
     if expected > 0 && raw.len() != expected {
         return Err(ChunkReadError::Decode(DecodeError::WrongSize {
             expected,
@@ -969,22 +979,36 @@ mod tests {
     #[tokio::test]
     async fn a_chunk_that_decodes_to_another_size_than_its_shape_holds_is_an_error() {
         let resolver = resolver_with(vec![four_byte_level()]);
-        for bytes in [&[1, 2][..], &[1, 2, 3, 4, 5, 6][..]] {
-            let store = object_store::memory::InMemory::new();
-            put_chunk(&store, &resolver, "0/0/0/0/0/0", bytes).await;
+        let read_error = |bytes: &'static [u8]| {
+            let resolver = &resolver;
+            async move {
+                let store = object_store::memory::InMemory::new();
+                put_chunk(&store, resolver, "0/0/0/0/0/0", bytes).await;
+                read(resolver, &cached(store), "0/0/0/0/0/0")
+                    .await
+                    .unwrap_err()
+            }
+        };
 
-            let error = read(&resolver, &cached(store), "0/0/0/0/0/0")
-                .await
-                .unwrap_err();
-
-            assert!(
-                matches!(
-                    error,
-                    ChunkReadError::Decode(DecodeError::WrongSize { expected: 4, actual })
-                        if actual == bytes.len()
-                ),
-                "{bytes:?}: {error:?}"
-            );
-        }
+        let short = read_error(&[1, 2]).await;
+        assert!(
+            matches!(
+                short,
+                ChunkReadError::Decode(DecodeError::WrongSize {
+                    expected: 4,
+                    actual: 2
+                })
+            ),
+            "{short:?}"
+        );
+        // A longer stream is refused at the limit instead of decoded whole.
+        let long = read_error(&[1, 2, 3, 4, 5, 6]).await;
+        assert!(
+            matches!(
+                long,
+                ChunkReadError::Decode(DecodeError::TooLarge { limit: 4 })
+            ),
+            "{long:?}"
+        );
     }
 }

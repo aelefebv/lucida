@@ -236,6 +236,7 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         ServerMessage::BookmarkChanged { .. } => &["session/server_bookmark_changed.json"],
         ServerMessage::WorkspaceArchived { .. } => &["session/server_workspace_archived.json"],
         ServerMessage::WatchUpdate { .. } => &["session/server_watch_update.json"],
+        ServerMessage::WatchHistoryEnd { .. } => &["session/server_watch_history_end.json"],
         ServerMessage::ReportSent { .. } => &["session/server_report_sent.json"],
         ServerMessage::ReportFailed { .. } => &["session/server_report_failed.json"],
     }
@@ -268,7 +269,12 @@ fn client_message_fixture_paths(msg: &ClientMessage) -> &'static [&'static str] 
         ClientMessage::DatasetRetry { .. } => &["session/client_dataset_retry.json"],
         ClientMessage::ViewerInterest { .. } => &["session/client_viewer_interest.json"],
         ClientMessage::RequestSnapshot => &["session/client_request_snapshot.json"],
-        ClientMessage::WatchSubscribe => &["session/client_watch_subscribe.json"],
+        // The bare tag is a live subscribe; `history` is the only key, and
+        // it is on the wire only when true.
+        ClientMessage::WatchSubscribe { .. } => &[
+            "session/client_watch_subscribe.json",
+            "session/client_watch_subscribe_history.json",
+        ],
         // One envelope fixture per watch-item kind that the criteria lock:
         // the aggregate and the boundary. The provisional item carries the
         // diagnostic document's own object, which is versioned by the
@@ -391,6 +397,7 @@ fn enum_vocabulary() -> EnumVocabulary {
         }),
         dataset_open_failure_kinds: vocab!(DatasetOpenFailureKind::{
             Authorization, SessionClosed, WorkspaceLookup, UnsupportedScheme, InvalidLocation,
+            SourceNotAllowed,
             LocalPath,
             MissingObject, Permission, CloudConfiguration, Http, StorageBackend,
             UnsupportedCodec, UnsupportedLayout, MalformedMetadata, MissingMetadata, Import,
@@ -1833,6 +1840,14 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             req("", &["/type", "/client_id", "/seq", "/item"]),
         ),
         (
+            "session/server_watch_history_end.json",
+            ServerMessage::WatchHistoryEnd {
+                through_seq: 42,
+                replayed: 40,
+            },
+            req("", &["/type", "/through_seq", "/replayed"]),
+        ),
+        (
             "session/server_report_sent.json",
             ServerMessage::ReportSent {
                 request_id: "web-report-9c1d".into(),
@@ -2149,7 +2164,12 @@ fn client_goldens() -> Vec<(&'static str, ClientMessage, Vec<String>)> {
         ),
         (
             "session/client_watch_subscribe.json",
-            ClientMessage::WatchSubscribe,
+            ClientMessage::WatchSubscribe { history: false },
+            req("", &["/type"]),
+        ),
+        (
+            "session/client_watch_subscribe_history.json",
+            ClientMessage::WatchSubscribe { history: true },
             req("", &["/type"]),
         ),
         (
