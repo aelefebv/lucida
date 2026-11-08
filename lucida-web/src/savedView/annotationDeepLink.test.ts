@@ -25,7 +25,7 @@ function pin(id: string): Annotation {
   };
 }
 
-describe("resolveAnnotationDeepLink (slice 3)", () => {
+describe("resolveAnnotationDeepLink", () => {
   it("finds a pin and reports its OWNING dataset id (the clamp target)", () => {
     const scene = makeScene({
       "wds-1": [pin("p-a"), pin("p-b")],

@@ -36,9 +36,9 @@ describe("activeMentionQuery — the live @query token rule", () => {
   });
 
   it("a mid-word @ (email local part) does NOT open a query", () => {
-    // `a@b.com` — the `@` has a word char immediately before it, so it is not a
+    // `a@example.com` — the `@` has a word char immediately before it, so it is not a
     // mention. The whole address is plain text, picker stays closed.
-    expect(activeMentionQuery("a@b.com")).toBeNull();
+    expect(activeMentionQuery("a@example.com")).toBeNull();
     expect(activeMentionQuery("mail me at alice@example.com")).toBeNull();
   });
 
@@ -142,9 +142,9 @@ describe("splitMentionTokens — chip segmentation is lossless", () => {
   });
 
   it("an email is NOT chipped (no boundary before the @)", () => {
-    const segs = splitMentionTokens("write a@b.com now");
+    const segs = splitMentionTokens("write a@example.com now");
     expect(segs.some((s) => s.kind === "mention")).toBe(false);
-    expect(rejoin("write a@b.com now")).toBe("write a@b.com now");
+    expect(rejoin("write a@example.com now")).toBe("write a@example.com now");
   });
 
   it("a lone @ with no word chars stays plain text", () => {
@@ -170,7 +170,7 @@ describe("splitMentionTokens — chip segmentation is lossless", () => {
       "@only",
       "@a @b @c",
       "leading @x trailing",
-      "punct, @y! and email z@w.com",
+      "punct, @y! and email z@example.org",
       "  spaced  @z  ",
     ]) {
       expect(rejoin(text)).toBe(text);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run one arm of the recorder A/B (issue #928).
+"""Run one arm of the recorder A/B.
 
 Boots lucida-server from this tree against a pre-built web bundle, opens a
 local fixture, and drives the viewer at devicePixelRatio 2 over a warm re-open,
@@ -15,13 +15,13 @@ separate build with `noopSinkFactory` in the recorder singleton. See README.md.
 Environment:
     AB_SERVER_BIN   lucida-server binary            (default: target/release/lucida-server)
     AB_WEB_DIST     built SPA for this arm          (default: lucida-web/dist)
-    AB_WINDOW_MS    measurement window              (default: 10000, #888's shape)
+    AB_WINDOW_MS    measurement window              (default: 10000, the debug-panel A/B's shape)
     AB_SETTLE_MS    post-first-render settle        (default: 8000)
     AB_MODE         'frames' or 'heap'              (default: frames)
 
 `AB_MODE=heap` adds a post-GC live-heap reading at the end of the same drive,
-for the net non-regression ledger's measurement 2 (the debug-surface teardown,
-[#919]).
+for the net non-regression ledger's measurement 2 (the debug-surface
+teardown).
 """
 from __future__ import annotations
 

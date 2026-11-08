@@ -108,7 +108,7 @@ mod tests {
 
     #[tokio::test]
     async fn admin_required_succeeds_for_admin() {
-        let app = with_principal(principal("austin@calicolabs.com", true));
+        let app = with_principal(principal("admin@example.com", true));
         let req = Request::builder()
             .uri("/admin/ping")
             .body(Body::empty())
@@ -116,12 +116,12 @@ mod tests {
         let res = app.oneshot(req).await.unwrap();
         assert_eq!(res.status(), StatusCode::OK);
         let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
-        assert_eq!(&bytes[..], b"austin@calicolabs.com");
+        assert_eq!(&bytes[..], b"admin@example.com");
     }
 
     #[tokio::test]
     async fn admin_required_forbids_non_admin() {
-        let app = with_principal(principal("alice@calicolabs.com", false));
+        let app = with_principal(principal("alice@example.com", false));
         let req = Request::builder()
             .uri("/admin/ping")
             .body(Body::empty())

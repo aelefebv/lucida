@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Read both arms of a recorder A/B run and state the verdict (issue #928).
+"""Read both arms of a recorder A/B run and state the verdict.
 
     python3 docs/perf/recorder-cost/ab_compare.py OUT_DIR
 
-The number to beat comes from #888, which ran this exact shape — same warm
-re-open, same ten-second window, at devicePixelRatio 2 — against the debug
-panel and measured **1,148 rendered frames either way**. The claim under test
+The number to beat comes from the debug-panel A/B, which ran this exact
+shape — same warm re-open, same ten-second window, at devicePixelRatio 2 —
+with the panel open and closed, and measured **1,148 rendered frames either
+way**. The claim under test
 is that the recorder's cost is unrepresentable at a 100 microsecond clock, so
 the two arms should be indistinguishable; a real difference is the claim
 failing, not the harness being imprecise.
@@ -16,7 +17,7 @@ import json
 import sys
 from pathlib import Path
 
-# #888's precedent: the same shape measured against the debug panel.
+# The precedent: the same shape measured against the debug panel.
 PRECEDENT_FRAMES = 1148
 
 # What counts as indistinguishable. Frame counts over a ten-second drive swing
@@ -51,7 +52,7 @@ real = (arms["real"].get("driver") or {})["frames"]
 noop = (arms["noop"].get("driver") or {})["frames"]
 delta = (real - noop) / noop if noop else float("nan")
 print()
-print(f"precedent (#888, debug panel, same shape): {PRECEDENT_FRAMES} frames either way")
+print(f"precedent (debug panel, same shape): {PRECEDENT_FRAMES} frames either way")
 print(f"real vs no-op sink: {real} vs {noop} frames  ({delta:+.1%})")
 
 if abs(delta) <= TOLERANCE:

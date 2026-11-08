@@ -149,7 +149,7 @@ describe("RowTable", () => {
   });
 });
 
-describe("the live tally (#937)", () => {
+describe("the live tally", () => {
   it("counts outcomes and parks each unfinished row in the phase it is sitting in", () => {
     const table = new RowTable(4);
     const occupancy = new Uint32Array(PHASES.length);
@@ -338,7 +338,7 @@ function chunk(x: number, entityId = "member-1", datasetId = "ds") {
   return { datasetId, entityId, level: 2, t: 3, c: 1, z: 4, y: 5, x };
 }
 
-describe("the identity index (#1062)", () => {
+describe("the identity index", () => {
   it("finds the newest row of a chunk in a table that holds several, and none for a chunk it never saw", () => {
     const table = new RowTable(2);
     const first = table.append(source({ x: 6 }), 0);

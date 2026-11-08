@@ -45,13 +45,12 @@ use crate::source_limiter::{ReaderId, RequestLabel, SourceReadLimiter};
 /// above the plateau still costs: body-transfer p50 runs ~117 ms at 16, ~198 ms
 /// at 24 and ~280 ms at 32 for the same bytes, and by 48 throughput is falling.
 /// Extra permits past the knee do not deliver chunks sooner, they relocate the
-/// wait from our queue into the transfer — the outcome #901 warned about. 16 is
-/// the smallest cap that reaches the plateau, so it takes the throughput
-/// without the tail.
+/// wait from our queue into the transfer. 16 is the smallest cap that reaches
+/// the plateau, so it takes the throughput without the tail.
 ///
-/// The old value of 12 sat just below the plateau, worth ~12 % of throughput.
-/// It was not, as #900 supposed, the reason the fetch rate stalls: raising it
-/// past 16 makes things worse, because the ceiling is the link.
+/// The cap is not why the fetch rate stalls: 12 sits just below the plateau,
+/// worth ~12 % of throughput, and raising it past 16 makes things worse,
+/// because the ceiling is the link.
 ///
 /// This is a bound on lucida's demand, not a property of the store, and the
 /// knee moves with the link. An operator on a fatter one can raise it with
@@ -2751,7 +2750,7 @@ mod tests {
 
     // --- Range reads ---
     //
-    // These pin the contract the shard resolver (#990) builds on.
+    // These pin the contract the shard resolver builds on.
 
     #[tokio::test]
     async fn a_range_read_returns_exactly_the_requested_bytes() {
