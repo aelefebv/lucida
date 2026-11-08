@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use lucida_content::*;
 
-use crate::camera::Camera;
+use crate::camera::{Camera, Framing};
 use crate::chunk::{self, ChunkRequestPlan};
+use crate::framing::{FitBounds, VoxBox, WorldBox};
 use crate::epoch::SceneEpochs;
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
 use crate::target_level::{self, IN_PLANE_AXES, VOLUME_AXES, level_shape_ratios};
@@ -138,10 +139,24 @@ impl PlacementCorrection {
     }
 }
 
+/// What [`Scene::frame`] fits.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameTarget {
+    /// Every visible dataset.
+    Visible,
+    /// One dataset, shown or not.
+    Dataset(DatasetId),
+}
+
 /// The complete viewer state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Scene {
     pub camera: Camera,
+    /// The last camera of the family not in use: the slice camera while a
+    /// volume camera is active, and the other way round. Switching back
+    /// brings it back, so each mode keeps the view it had. Client-local.
+    #[serde(skip)]
+    pub(crate) parked_camera: Option<Camera>,
     pub view: ViewState,
     /// Shared document state (dataset manifests).
     #[serde(flatten)]
@@ -246,6 +261,7 @@ impl Scene {
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
             camera: Camera::new_2d(viewport),
+            parked_camera: None,
             view: ViewState::new(),
             document: DocumentState::default(),
             display: DisplayState::default(),
@@ -296,62 +312,192 @@ impl Scene {
         (sx * sx + sy * sy + sz * sz).sqrt()
     }
 
-    /// Switch to 2D mode, preserving the current viewport.
+    /// Switch to the slice camera: the one this scene last had, or a new one
+    /// fitted to the data.
     pub fn set_mode_2d(&mut self) {
-        if !matches!(self.camera, Camera::Slice(_)) {
-            let vp = self.camera.viewport();
-            self.camera = Camera::new_2d(vp);
+        if self.camera.is_volume() {
+            let slice = match self.parked_camera.take() {
+                Some(parked @ Camera::Slice(_)) => parked,
+                _ => Camera::new_2d(self.camera.viewport()),
+            };
+            self.parked_camera = Some(std::mem::replace(&mut self.camera, slice));
+            self.reframe();
         }
     }
 
-    /// Switch to 3D arcball mode, preserving the current viewport.
-    /// If currently in fly mode, converts to arcball preserving eye position and view direction.
+    /// Switch to the arcball. From fly mode it converts, keeping the eye and
+    /// the view direction. From 2D it brings back the volume camera this
+    /// scene last had, or a new arcball fitted to the data.
     pub fn set_mode_3d(&mut self) {
-        if !matches!(self.camera, Camera::Arcball(_)) {
-            match &self.camera {
-                Camera::Fly(v) => {
-                    self.camera = Camera::Arcball(v.to_arcball());
-                }
-                _ => {
-                    let vp = self.camera.viewport();
-                    self.camera = Camera::new_3d(vp);
-                }
-            }
-        }
+        let arcball = match &self.camera {
+            Camera::Arcball(_) => return,
+            Camera::Fly(fly) => fly.to_arcball(),
+            Camera::Slice(_) => match self.parked_camera.take() {
+                Some(Camera::Arcball(parked)) => parked,
+                Some(Camera::Fly(parked)) => parked.to_arcball(),
+                _ => crate::camera::Arcball::new(self.camera.viewport()),
+            },
+        };
+        self.enter_volume(Camera::Arcball(arcball));
     }
 
-    /// Switch to fly mode, converting from arcball if possible.
+    /// Switch to the fly camera. From the arcball it converts, keeping the
+    /// eye and the view direction. From 2D it brings back the volume camera
+    /// this scene last had, or a new fly camera fitted to the data.
     pub fn set_mode_fly(&mut self) {
-        if !matches!(self.camera, Camera::Fly(_)) {
-            match &self.camera {
-                Camera::Arcball(v) => {
-                    self.camera = Camera::Fly(v.to_fly());
-                }
-                _ => {
-                    let vp = self.camera.viewport();
-                    self.camera = Camera::Fly(crate::camera::Fly::new(vp));
-                }
-            }
+        let fly = match &self.camera {
+            Camera::Fly(_) => return,
+            Camera::Arcball(arcball) => arcball.to_fly(),
+            Camera::Slice(_) => match self.parked_camera.take() {
+                Some(Camera::Fly(parked)) => parked,
+                Some(Camera::Arcball(parked)) => parked.to_fly(),
+                _ => crate::camera::Fly::new(self.camera.viewport()),
+            },
+        };
+        self.enter_volume(Camera::Fly(fly));
+    }
+
+    /// Make `camera`, a volume camera, the active one, parking the slice
+    /// camera if that is what it replaces.
+    fn enter_volume(&mut self, camera: Camera) {
+        let previous = std::mem::replace(&mut self.camera, camera);
+        if !previous.is_volume() {
+            self.parked_camera = Some(previous);
         }
+        self.reframe();
     }
 
     /// Set viewport on camera (avoids name clash with ViewportCommand::SetViewport).
     ///
-    /// A resize keeps the zoom. A new pixel ratio resizes the canvas in device
-    /// pixels but not on screen, so the slice zoom scales with it and the view
-    /// keeps its CSS size and region. A volume camera's view does not depend
-    /// on the ratio.
+    /// A resize keeps a placed camera's zoom, and fits a framed or unframed
+    /// one again on the new canvas. A new pixel ratio resizes the canvas in
+    /// device pixels but not on screen, so the slice zoom scales with it and
+    /// the view keeps its CSS size and region. A volume camera's view does not
+    /// depend on the ratio.
     pub(crate) fn inner_set_viewport(&mut self, width: u32, height: u32, pixel_ratio: Option<f64>) {
+        let before = self.camera.clone();
+        self.resize(width, height, pixel_ratio);
+        if self.camera != before {
+            self.reframe();
+        }
+    }
+
+    /// Resize both cameras' canvases, the parked one too so it comes back
+    /// sized for the canvas it returns to.
+    fn resize(&mut self, width: u32, height: u32, pixel_ratio: Option<f64>) {
         let to = pixel_ratio.filter(|r| r.is_finite() && *r > 0.0);
-        if let (Some(from), Some(to), Camera::Slice(s)) = (self.pixel_ratio, to, &mut self.camera)
-            && from != to
-        {
-            s.set_zoom(s.zoom * to / from);
+        let from = self.pixel_ratio;
+        for camera in std::iter::once(&mut self.camera).chain(self.parked_camera.as_mut()) {
+            if let (Some(from), Some(to), Camera::Slice(s)) = (from, to, &mut *camera)
+                && from != to
+            {
+                s.set_zoom(s.zoom * to / from);
+            }
+            camera.set_viewport(width, height);
         }
         if to.is_some() {
             self.pixel_ratio = to;
         }
-        self.camera.set_viewport(width, height);
+    }
+
+    /// Fit the camera to `target` on a canvas of `viewport` device pixels,
+    /// which this resizes it to. The canvas is an argument because a fit
+    /// against a size the scene has not caught up with frames the wrong
+    /// canvas.
+    ///
+    /// A fit of everything visible leaves the camera framed, so a new canvas
+    /// or new content fits it again. A fit of one dataset among others is a
+    /// choice like a zoom, and leaves it placed.
+    ///
+    /// Returns `false`, changing nothing, when the canvas has no area or the
+    /// target no bounds. Bumps `epochs.view` when the camera changed.
+    pub fn frame(&mut self, target: &FrameTarget, viewport: [u32; 2]) -> bool {
+        if viewport[0] == 0 || viewport[1] == 0 {
+            return false;
+        }
+        let bounds = match target {
+            FrameTarget::Visible => self.visible_bounds(),
+            FrameTarget::Dataset(id) => self.dataset_bounds(&id.0),
+        };
+        let Some(bounds) = bounds else {
+            return false;
+        };
+        let framing = match target {
+            FrameTarget::Visible => Framing::Framed,
+            FrameTarget::Dataset(id) => {
+                let mut visible = self.visible_dataset_ids();
+                if visible.next() == Some(id) && visible.next().is_none() {
+                    Framing::Framed
+                } else {
+                    Framing::Placed
+                }
+            }
+        };
+        let before = self.camera.clone();
+        self.resize(viewport[0], viewport[1], None);
+        self.camera.fit(&bounds);
+        self.camera.set_framing(framing);
+        if self.camera != before {
+            self.epochs.view += 1;
+        }
+        true
+    }
+
+    /// Fit the slice camera to `region`, a voxel box, on its canvas: a part of
+    /// the data, so the camera is left placed. A volume camera ignores it.
+    /// Bumps `epochs.view` and returns `true` when the camera changed.
+    pub fn frame_voxel_region(&mut self, region: VoxBox) -> bool {
+        let Camera::Slice(slice) = &mut self.camera else {
+            return false;
+        };
+        let before = slice.clone();
+        slice.fit_to_bounds(region, crate::framing::FIT_MARGIN_2D);
+        slice.framing = Framing::Placed;
+        let changed = *slice != before;
+        if changed {
+            self.epochs.view += 1;
+        }
+        changed
+    }
+
+    /// Fit the camera to everything visible again when its pose is the fit or
+    /// a stand-in, after something that fit depends on changed: the canvas,
+    /// the content, what is visible, or the mode. A placed camera stays where
+    /// it was put. Leaves the epochs to the caller and says whether the camera
+    /// changed.
+    pub(crate) fn reframe(&mut self) -> bool {
+        if self.camera.framing() == Framing::Placed {
+            return false;
+        }
+        let [width, height] = self.camera.viewport();
+        if width == 0 || height == 0 {
+            return false;
+        }
+        let Some(bounds) = self.visible_bounds() else {
+            return false;
+        };
+        let before = self.camera.clone();
+        self.camera.fit(&bounds);
+        self.camera.set_framing(Framing::Framed);
+        self.camera != before
+    }
+
+    /// Follow a change to the document's datasets. A scene with none left has
+    /// nothing its cameras frame, so the active one becomes a stand-in and
+    /// the parked one is dropped; otherwise the camera reframes. Bumps
+    /// `epochs.view` when the camera changed.
+    pub(crate) fn content_changed(&mut self) {
+        let changed = if self.document.manifests.is_empty() {
+            self.parked_camera = None;
+            let stand_in = self.camera.framing() != Framing::Unframed;
+            self.camera.set_framing(Framing::Unframed);
+            stand_in
+        } else {
+            self.reframe()
+        };
+        if changed {
+            self.epochs.view += 1;
+        }
     }
 
     pub fn remove_dataset(&mut self, id: &DatasetId) {
@@ -360,6 +506,7 @@ impl Scene {
         self.dataset_settings.remove(id);
         self.derived.remove(id);
         self.view_query_cursors.remove(id);
+        self.content_changed();
     }
 
     /// Returns the maximum `max_physical_extent` across all datasets.
@@ -444,15 +591,13 @@ impl Scene {
             .collect()
     }
 
-    /// World-space bounds (`(min, max)`) of a single dataset's members, never
-    /// the union across datasets, so the caller can frame the newly opened
-    /// dataset alone.
+    /// World-space bounds of a single dataset's members, never the union
+    /// across datasets.
     ///
     /// Each member's unit-cube corners go through
-    /// [`Self::rendering_transform`] into a [`framing::Aabb`]. Returns `None`
-    /// when no member has levels, the "nothing to frame" signal
-    /// [`Self::fit_camera_to_dataset`] checks.
-    pub fn dataset_world_bounds(&self, dataset_id: &str) -> Option<([f64; 3], [f64; 3])> {
+    /// [`Self::rendering_transform`] into a [`crate::framing::Aabb`]. Returns
+    /// `None` when no member has levels.
+    pub fn dataset_world_bounds(&self, dataset_id: &str) -> Option<WorldBox> {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = self.derived.get(&ds_id)?;
 
@@ -469,77 +614,86 @@ impl Scene {
         if aabb.is_empty() {
             None
         } else {
-            Some((aabb.min, aabb.max))
+            Some(WorldBox::new(aabb.min, aabb.max))
         }
     }
 
-    /// Bounds (`(min, max)`) of a single dataset's members in the 2D voxel
-    /// space the [`Camera::Slice`] camera works in, the 2D twin of
+    /// Bounds of a single dataset's members in voxel space, the space the
+    /// [`Camera::Slice`] camera works in: the voxel twin of
     /// [`Self::dataset_world_bounds`].
     ///
     /// Each member with a level 0 contributes
-    /// `[position[0], position[1]] .. [position[0] + X, position[1] + Y]`, with
-    /// `X = level0.shape[4]` and `Y = level0.shape[3]`, the voxel convention
-    /// the slice-mode ray pick and chunk culling use. Returns `None` when no
-    /// member has levels.
-    pub fn dataset_voxel_bounds_2d(&self, dataset_id: &str) -> Option<([f64; 2], [f64; 2])> {
+    /// `[position[0], position[1], 0] .. [position[0] + X, position[1] + Y, Z]`
+    /// from its level-0 shape, the voxel convention the slice-mode ray pick
+    /// and chunk culling use. Returns `None` when no member has levels.
+    pub fn dataset_voxel_bounds(&self, dataset_id: &str) -> Option<VoxBox> {
         let ds_id = DatasetId(dataset_id.to_string());
         let derived = self.derived.get(&ds_id)?;
-
-        let mut min = [f64::MAX; 2];
-        let mut max = [f64::MIN; 2];
-        let mut any = false;
-        for member in &derived.members {
-            let Some(level0) = member.levels.first() else {
-                continue;
-            };
-            let x0 = member.position[0];
-            let y0 = member.position[1];
-            let x1 = x0 + level0.shape[4] as f64; // X extent
-            let y1 = y0 + level0.shape[3] as f64; // Y extent
-            min[0] = min[0].min(x0);
-            min[1] = min[1].min(y0);
-            max[0] = max[0].max(x1);
-            max[1] = max[1].max(y1);
-            any = true;
-        }
-
-        if any { Some((min, max)) } else { None }
+        derived
+            .members
+            .iter()
+            .filter_map(|member| {
+                let level0 = member.levels.first()?;
+                let [x0, y0] = member.position;
+                Some(VoxBox::new(
+                    [x0, y0, 0.0],
+                    [
+                        x0 + level0.shape[4] as f64,
+                        y0 + level0.shape[3] as f64,
+                        level0.shape[2] as f64,
+                    ],
+                ))
+            })
+            .reduce(VoxBox::union)
     }
 
-    /// The named dataset's bounds in the coordinate space the current camera
-    /// works in, the box [`Camera::fit_to_bounds`] frames:
-    ///
-    /// - The 2D [`Camera::Slice`] camera works in voxel space, so this is
-    ///   [`Self::dataset_voxel_bounds_2d`] with a zero Z extent. Normalized
-    ///   unit-cube bounds would zoom onto a sub-pixel speck at the origin.
-    /// - The 3D [`Camera::Arcball`]/[`Camera::Fly`] cameras work in normalized
-    ///   world space, so this is [`Self::dataset_world_bounds`]. Voxel bounds
-    ///   would aim the camera at empty space far from the data.
-    ///
-    /// `None` when the dataset has no bounds in that space.
+    /// A dataset's bounds in both spaces, or `None` when it has none.
+    pub fn dataset_bounds(&self, dataset_id: &str) -> Option<FitBounds> {
+        Some(FitBounds {
+            vox: self.dataset_voxel_bounds(dataset_id)?,
+            world: self.dataset_world_bounds(dataset_id)?,
+        })
+    }
+
+    /// The datasets a fit of everything visible covers: each one the document
+    /// holds whose layer is shown.
+    pub fn visible_dataset_ids(&self) -> impl Iterator<Item = &DatasetId> {
+        self.document.manifests.keys().filter(|id| {
+            self.dataset_settings
+                .get(*id)
+                .is_none_or(|settings| settings.visible)
+        })
+    }
+
+    /// The union of every visible dataset's bounds, what a framed camera
+    /// fits. `None` when nothing visible has bounds.
+    pub fn visible_bounds(&self) -> Option<FitBounds> {
+        self.visible_dataset_ids()
+            .filter_map(|id| self.dataset_bounds(&id.0))
+            .reduce(FitBounds::union)
+    }
+
+    /// The named dataset's box in the space the current camera works in, as
+    /// `(min, max)`: voxel space with a zero Z extent for the slice camera,
+    /// world space for a volume camera. `None` when it has no bounds.
     pub fn dataset_fit_bounds(&self, dataset_id: &str) -> Option<([f64; 3], [f64; 3])> {
         if let Camera::Slice(_) = self.camera {
-            let (min, max) = self.dataset_voxel_bounds_2d(dataset_id)?;
-            Some(([min[0], min[1], 0.0], [max[0], max[1], 0.0]))
+            let b = self.dataset_voxel_bounds(dataset_id)?;
+            Some(([b.min[0], b.min[1], 0.0], [b.max[0], b.max[1], 0.0]))
         } else {
-            self.dataset_world_bounds(dataset_id)
+            let b = self.dataset_world_bounds(dataset_id)?;
+            Some((b.min, b.max))
         }
     }
 
-    /// Frame the named dataset's full extent in the current camera, using
-    /// [`Self::dataset_fit_bounds`] for the camera's coordinate space.
-    ///
-    /// Returns `false`, leaving the camera and epochs untouched, if the dataset
-    /// has no bounds in the active space. On success it bumps `epochs.view`, as
-    /// pan, zoom, and rotate do.
+    /// Fit the named dataset's full extent on the current canvas. See
+    /// [`Self::frame`].
     pub fn fit_camera_to_dataset(&mut self, dataset_id: &str) -> bool {
-        let Some((min, max)) = self.dataset_fit_bounds(dataset_id) else {
-            return false;
-        };
-        self.camera.fit_to_bounds(min, max);
-        self.epochs.view += 1;
-        true
+        let viewport = self.camera.viewport();
+        self.frame(
+            &FrameTarget::Dataset(DatasetId(dataset_id.to_string())),
+            viewport,
+        )
     }
 
     /// Return aggregate bounds for all visible image members in scene XY space.
@@ -1099,8 +1253,10 @@ impl Scene {
     ///   entries are kept; entries for removed datasets are pruned.
     ///
     /// It bumps every document-scoped epoch (`content`, `layout`, `asset`,
-    /// `annotation`) plus `selection`. `view` is not bumped because the local
-    /// camera is untouched.
+    /// `annotation`) plus `selection`. `view` bumps only when the camera
+    /// reframed: a placed camera is untouched, and a framed or unframed one
+    /// fits the loaded content, so a page that joins an open dataset shows it
+    /// fitted.
     pub fn load_document(&mut self, doc: DocumentState) {
         self.document = doc;
         self.rebuild_derived();
@@ -1156,13 +1312,19 @@ impl Scene {
         self.epochs.asset += 1;
         self.epochs.annotation += 1;
         self.epochs.selection += 1;
+        self.content_changed();
     }
 
     /// Adopt another client's camera + view + display: follow, and every
-    /// restore of a stored view. The camera keeps the region it showed on the
-    /// canvas it came from, fitted to this scene's viewport
+    /// restore of a stored view. A placed camera keeps the region it showed on
+    /// the canvas it came from, fitted to this scene's viewport
     /// ([`Camera::fit_region_to_viewport`]), so a view crosses pixel ratios and
-    /// canvas shapes without changing what it shows.
+    /// canvas shapes without changing what it shows. A framed or unframed one
+    /// fits this scene's visible datasets on this canvas instead, so a fit
+    /// made on a wide canvas fills a tall one.
+    ///
+    /// A camera of the other family parks the one it replaces, as a mode
+    /// switch does.
     ///
     /// The fit reads this scene's viewport, so a caller that has not ticked
     /// since the canvas last resized asserts its size first.
@@ -1174,13 +1336,18 @@ impl Scene {
         let mut camera = camera;
         // A follow target must not hand this scene state its own mutators could
         // never produce, such as a `zoom: 0.0` that would NaN-poison the next
-        // pan. Sanitize is bit-preserving in range and the fit is a pure
-        // function of the two viewports, so the equality check below still
-        // sees an unchanged re-import as unchanged.
+        // pan. Sanitize is bit-preserving in range and both fits are pure
+        // functions of their inputs, so the equality check below still sees
+        // an unchanged re-import as unchanged.
         camera.sanitize();
         camera.fit_region_to_viewport(self.camera.viewport());
-        if self.camera != camera {
-            self.camera = camera;
+        let before = self.camera.clone();
+        let previous = std::mem::replace(&mut self.camera, camera);
+        if previous.is_volume() != self.camera.is_volume() {
+            self.parked_camera = Some(previous);
+        }
+        self.reframe();
+        if self.camera != before {
             self.epochs.view += 1;
         }
         if self.view != view || self.display != display {
@@ -1245,9 +1412,24 @@ impl Scene {
         }
 
         if self.dataset_order != order || self.dataset_settings != settings {
+            let visible_before = self.visible_set();
             self.dataset_order = order;
             self.dataset_settings = settings;
             self.epochs.selection += 1;
+            self.visibility_changed(visible_before);
+        }
+    }
+
+    /// The visible datasets, to compare across a settings change.
+    pub(crate) fn visible_set(&self) -> Vec<DatasetId> {
+        self.visible_dataset_ids().cloned().collect()
+    }
+
+    /// Reframe when the visible datasets differ from `before`, since a framed
+    /// camera fits exactly those. Bumps `epochs.view` when the camera changed.
+    pub(crate) fn visibility_changed(&mut self, before: Vec<DatasetId>) {
+        if self.visible_set() != before && self.reframe() {
+            self.epochs.view += 1;
         }
     }
 
@@ -1946,6 +2128,14 @@ pub(crate) fn resolve_entity_position(
 pub(crate) mod test_helpers {
     use lucida_content::*;
     use lucida_protocol::*;
+
+    /// A scene whose slice camera is placed at the origin at one sample per
+    /// device pixel, so opening a dataset leaves it there.
+    pub fn placed_scene(viewport: [u32; 2]) -> super::Scene {
+        let mut scene = super::Scene::new(viewport);
+        scene.camera.set_framing(crate::camera::Framing::Placed);
+        scene
+    }
 
     /// Create a DatasetOpened with a simple single-image manifest.
     pub fn make_dataset_opened(id: &str, name: &str, channels: u64) -> DatasetOpened {
@@ -2701,7 +2891,7 @@ mod tests {
 
     #[test]
     fn changing_slice_updates_chunk_coords() {
-        let mut scene = Scene::new([512, 512]);
+        let mut scene = test_helpers::placed_scene([512, 512]);
         let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1",
             "test",
@@ -2722,7 +2912,7 @@ mod tests {
 
     #[test]
     fn z_slab_produces_chunks_across_z() {
-        let mut scene = Scene::new([512, 512]);
+        let mut scene = test_helpers::placed_scene([512, 512]);
         let reg = test_helpers::make_dataset_opened_with_shape(
             "ds1",
             "test",
@@ -3374,7 +3564,7 @@ mod tests {
     fn multi_member_aabb_culling() {
         // Two members side-by-side, each 256x256 in XY. Camera at origin
         // should see member at [0,0] but not the one at [10000, 0].
-        let mut scene = Scene::new([512, 512]);
+        let mut scene = test_helpers::placed_scene([512, 512]);
         let reg = test_helpers::make_collection_dataset_opened(
             "collection",
             "collection",
@@ -3672,7 +3862,7 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let (min, max) = scene
+        let WorldBox { min, max } = scene
             .dataset_world_bounds("ds1")
             .expect("known dataset has bounds");
         for v in min.iter().chain(max.iter()) {
@@ -3714,8 +3904,8 @@ mod tests {
             .into(),
         );
 
-        let (a_min, a_max) = scene.dataset_world_bounds("a").expect("a has bounds");
-        let (b_min, b_max) = scene.dataset_world_bounds("b").expect("b has bounds");
+        let WorldBox { min: a_min, max: a_max } = scene.dataset_world_bounds("a").expect("a has bounds");
+        let WorldBox { min: b_min, max: b_max } = scene.dataset_world_bounds("b").expect("b has bounds");
 
         // Each frames its own dataset → different boxes.
         assert!(
@@ -3771,7 +3961,7 @@ mod tests {
             }
         }
 
-        let (min, max) = scene.dataset_world_bounds("p").expect("p has bounds");
+        let WorldBox { min, max } = scene.dataset_world_bounds("p").expect("p has bounds");
         assert_eq!(min, expected.min);
         assert_eq!(max, expected.max);
     }
@@ -4165,7 +4355,7 @@ mod tests {
             }
         }
 
-        let (min, max) = scene.dataset_world_bounds("p").expect("p has bounds");
+        let WorldBox { min, max } = scene.dataset_world_bounds("p").expect("p has bounds");
         // Folded from the same source → identical, and finite/non-degenerate.
         assert_eq!(min, expected.min);
         assert_eq!(max, expected.max);
@@ -4188,8 +4378,8 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1); // 256x256 XY
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let (min2, max2) = scene
-            .dataset_voxel_bounds_2d("ds1")
+        let VoxBox { min: min2, max: max2 } = scene
+            .dataset_voxel_bounds("ds1")
             .expect("known dataset has voxel bounds");
         let mid_x = (min2[0] + max2[0]) / 2.0;
         let mid_y = (min2[1] + max2[1]) / 2.0;
@@ -4220,7 +4410,7 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let (min, max) = scene.dataset_world_bounds("ds1").unwrap();
+        let WorldBox { min, max } = scene.dataset_world_bounds("ds1").unwrap();
         let mid = [
             (min[0] + max[0]) / 2.0,
             (min[1] + max[1]) / 2.0,
@@ -4267,9 +4457,10 @@ mod tests {
     }
 
     #[test]
-    fn dataset_voxel_bounds_2d_is_origin_to_voxel_extent() {
-        // A single image of shape [1,1,Z,H,W] at the origin yields [0,0]..[W,H],
-        // the AABB the slice-mode ray pick and chunk culling test against.
+    fn dataset_voxel_bounds_is_origin_to_voxel_extent() {
+        // A single image of shape [1,1,Z,H,W] at the origin yields
+        // [0,0,0]..[W,H,Z], whose XY rect is the AABB the slice-mode ray pick
+        // and chunk culling test against.
         let mut scene = Scene::new([800, 600]);
         let (w, h) = (2048u64, 2048u64);
         let reg = test_helpers::make_dataset_opened_with_shape(
@@ -4282,8 +4473,8 @@ mod tests {
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let (min, max) = scene
-            .dataset_voxel_bounds_2d("ds1")
+        let VoxBox { min, max } = scene
+            .dataset_voxel_bounds("ds1")
             .expect("known dataset has voxel bounds");
         for v in min.iter().chain(max.iter()) {
             assert!(v.is_finite(), "non-finite voxel bound leaked: {v}");
@@ -4292,11 +4483,11 @@ mod tests {
             min[0] <= max[0] && min[1] <= max[1],
             "bounds must be ordered"
         );
-        assert_eq!(min, [0.0, 0.0], "min should be the origin placement");
+        assert_eq!(min, [0.0, 0.0, 0.0], "min should be the origin placement");
         assert_eq!(
             max,
-            [w as f64, h as f64],
-            "max should be the level-0 X/Y voxel extent"
+            [w as f64, h as f64, 16.0],
+            "max should be the level-0 X/Y/Z voxel extent"
         );
     }
 
@@ -4321,17 +4512,17 @@ mod tests {
         scene.camera = Camera::new_3d([800, 600]);
         assert_eq!(
             scene.dataset_fit_bounds("ds1"),
-            scene.dataset_world_bounds("ds1"),
+            scene.dataset_world_bounds("ds1").map(|b| (b.min, b.max)),
         );
         assert!(scene.dataset_fit_bounds("nope").is_none());
     }
 
     #[test]
-    fn dataset_voxel_bounds_2d_none_for_unknown_id() {
+    fn dataset_voxel_bounds_none_for_unknown_id() {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        assert!(scene.dataset_voxel_bounds_2d("nope").is_none());
+        assert!(scene.dataset_voxel_bounds("nope").is_none());
     }
 
     #[test]
@@ -4392,7 +4583,7 @@ mod tests {
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let (min3, max3) = scene
+        let WorldBox { min: min3, max: max3 } = scene
             .dataset_world_bounds("ds1")
             .expect("known dataset has normalized bounds");
         let mid = [
@@ -4428,11 +4619,183 @@ mod tests {
         }
     }
 
+    fn opened_volume(viewport: [u32; 2]) -> Scene {
+        let mut scene = Scene::new(viewport);
+        let reg = test_helpers::make_dataset_opened_with_shape(
+            "vol",
+            "vol",
+            1,
+            [1, 1, 128, 512, 512],
+            [1, 1, 64, 128, 128],
+            3,
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene
+    }
+
+    fn apply_vp(scene: &mut Scene, cmd: crate::command::ViewportCommand) {
+        scene.apply(cmd.into());
+    }
+
+    #[test]
+    fn opening_a_dataset_frames_a_new_scene() {
+        let scene = opened_volume([800, 600]);
+        assert_eq!(scene.camera.framing(), Framing::Framed);
+        let mut fitted = Scene::new([800, 600]);
+        fitted.document = scene.document.clone();
+        fitted.rebuild_derived();
+        fitted.camera.fit(&fitted.visible_bounds().unwrap());
+        fitted.camera.set_framing(Framing::Framed);
+        assert_eq!(scene.camera, fitted.camera);
+    }
+
+    #[test]
+    fn each_mode_keeps_its_own_view_across_a_switch() {
+        use crate::command::ViewportCommand::*;
+        let mut scene = opened_volume([800, 600]);
+        apply_vp(&mut scene, Pan { dx: 30.0, dy: -10.0 });
+        let slice = scene.camera.clone();
+        assert_eq!(slice.framing(), Framing::Placed);
+
+        // The first visit to 3D fits the data.
+        apply_vp(&mut scene, SetMode3D);
+        assert_eq!(scene.camera.framing(), Framing::Framed);
+        apply_vp(&mut scene, Rotate3D { d_theta: 0.4, d_phi: 0.1 });
+        let arcball = scene.camera.clone();
+
+        apply_vp(&mut scene, SetMode2D);
+        assert_eq!(scene.camera, slice, "2D comes back as the person left it");
+        apply_vp(&mut scene, SetMode3D);
+        assert_eq!(scene.camera, arcball, "3D comes back as the person left it");
+    }
+
+    #[test]
+    fn a_parked_camera_follows_the_canvas() {
+        use crate::command::ViewportCommand::*;
+        let mut scene = opened_volume([800, 600]);
+        apply_vp(&mut scene, Pan { dx: 30.0, dy: 0.0 });
+        let zoom = scene.camera.effective_zoom();
+        apply_vp(&mut scene, SetMode3D);
+        apply_vp(
+            &mut scene,
+            SetViewport {
+                width: 1000,
+                height: 700,
+                pixel_ratio: None,
+            },
+        );
+        apply_vp(&mut scene, SetMode2D);
+        assert_eq!(scene.camera.viewport(), [1000, 700]);
+        assert_eq!(scene.camera.effective_zoom(), zoom, "a resize keeps a placed zoom");
+    }
+
+    #[test]
+    fn a_framed_camera_fits_a_resized_canvas_and_a_placed_one_keeps_its_zoom() {
+        use crate::command::ViewportCommand::*;
+        let mut framed = opened_volume([800, 600]);
+        let zoom = framed.camera.effective_zoom();
+        let resize = SetViewport {
+            width: 400,
+            height: 600,
+            pixel_ratio: None,
+        };
+        apply_vp(&mut framed, resize.clone());
+        assert_eq!(framed.camera.framing(), Framing::Framed);
+        assert!(framed.camera.effective_zoom() < zoom, "a narrower canvas fits smaller");
+
+        let mut placed = opened_volume([800, 600]);
+        apply_vp(&mut placed, Pan { dx: 1.0, dy: 0.0 });
+        let zoom = placed.camera.effective_zoom();
+        apply_vp(&mut placed, resize);
+        assert_eq!(placed.camera.effective_zoom(), zoom);
+    }
+
+    #[test]
+    fn steering_a_stand_in_keeps_it_unframed_until_there_is_data() {
+        use crate::command::ViewportCommand::*;
+        let mut scene = Scene::new([800, 600]);
+        apply_vp(&mut scene, Pan { dx: 50.0, dy: 50.0 });
+        assert_eq!(scene.camera.framing(), Framing::Unframed);
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(scene.camera.framing(), Framing::Framed);
+    }
+
+    #[test]
+    fn removing_the_last_dataset_makes_the_next_open_fit() {
+        use crate::command::ViewportCommand::*;
+        let mut scene = opened_volume([800, 600]);
+        apply_vp(&mut scene, Pan { dx: 30.0, dy: 0.0 });
+        apply_vp(&mut scene, SetMode3D);
+        scene.apply(
+            DocumentCommand::RemoveDataset {
+                id: DatasetId("vol".into()),
+            }
+            .into(),
+        );
+        assert_eq!(scene.camera.framing(), Framing::Unframed);
+        assert!(scene.parked_camera.is_none());
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(scene.camera.framing(), Framing::Framed);
+    }
+
+    #[test]
+    fn hiding_a_dataset_refits_a_framed_camera_to_what_is_left() {
+        use crate::command::ViewportCommand::*;
+        let mut scene = Scene::new([800, 600]);
+        for (id, size) in [("small", 64), ("big", 4096)] {
+            let reg = test_helpers::make_dataset_opened_with_shape(
+                id,
+                id,
+                1,
+                [1, 1, 1, size, size],
+                [1, 1, 1, 64, 64],
+                1,
+            );
+            scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        }
+        let both = scene.camera.effective_zoom();
+        apply_vp(
+            &mut scene,
+            SetDatasetVisible {
+                dataset_id: "big".into(),
+                visible: false,
+            },
+        );
+        assert!(scene.camera.effective_zoom() > both * 10.0);
+        assert_eq!(scene.camera.framing(), Framing::Framed);
+    }
+
+    #[test]
+    fn a_framed_import_fits_this_canvas() {
+        let source = opened_volume([1280, 800]);
+        let mut page = opened_volume([390, 844]);
+        page.apply(crate::command::ViewportCommand::Pan { dx: 9.0, dy: 0.0 }.into());
+        page.import_presence(source.camera.clone(), source.view.clone(), source.display.clone());
+        assert_eq!(page.camera, opened_volume([390, 844]).camera);
+    }
+
+    #[test]
+    fn a_volume_import_parks_the_slice_camera() {
+        use crate::command::ViewportCommand::*;
+        let mut leader = opened_volume([800, 600]);
+        apply_vp(&mut leader, SetMode3D);
+        let mut page = opened_volume([800, 600]);
+        apply_vp(&mut page, Pan { dx: 9.0, dy: 0.0 });
+        let own = page.camera.clone();
+        page.import_presence(leader.camera.clone(), leader.view.clone(), leader.display.clone());
+        assert!(page.camera.is_volume());
+        apply_vp(&mut page, SetMode2D);
+        assert_eq!(page.camera, own);
+    }
+
     #[test]
     fn fit_camera_to_dataset_bumps_view_epoch_on_success_only() {
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        scene.apply(crate::command::ViewportCommand::Pan { dx: 40.0, dy: 0.0 }.into());
         let baseline = scene.epochs.clone();
 
         assert!(!scene.fit_camera_to_dataset("ghost"));
@@ -4455,7 +4818,7 @@ mod tests {
         let doc = donor.document.clone();
 
         // Restore into a fresh scene with a distinctive local camera.
-        let mut scene = Scene::new([640, 480]);
+        let mut scene = test_helpers::placed_scene([640, 480]);
         scene.apply(crate::command::ViewportCommand::SetCenter { x: 42.0, y: 7.0 }.into());
         let baseline = scene.epochs.clone();
         let camera_before = scene.camera.clone();
@@ -4486,7 +4849,7 @@ mod tests {
         assert!(scene.epochs.asset > baseline.asset);
         assert!(scene.epochs.annotation > baseline.annotation);
         assert!(scene.epochs.selection > baseline.selection);
-        // ...but the local camera is untouched, so view does not.
+        // ...but the local camera is placed and untouched, so view does not.
         assert_eq!(scene.epochs.view, baseline.view);
         assert_eq!(scene.camera, camera_before);
     }
@@ -4538,6 +4901,7 @@ mod tests {
             center: [100.0, 200.0],
             zoom: 2.0,
             viewport: [1920, 1080],
+            framing: Framing::Placed,
         });
         let mut remote_view = ViewState::new();
         remote_view.t = 3;
@@ -4586,6 +4950,7 @@ mod tests {
             center: [10.0, 20.0],
             zoom: 0.0,
             viewport: [64, 64],
+            framing: Framing::Placed,
         });
         scene.import_presence(zero_zoom.clone(), ViewState::new(), DisplayState::default());
         match &scene.camera {
