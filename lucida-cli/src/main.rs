@@ -5475,7 +5475,7 @@ mod tests {
             archived: false,
             server_url: "http://127.0.0.1:9876".to_string(),
             web_url: "http://127.0.0.1:9876/w/ws-1".to_string(),
-            ws_url: "ws://127.0.0.1:9876/ws/ws-1".to_string(),
+            ws_url: "ws://127.0.0.1:9876/ws/workspaces/ws-1".to_string(),
         };
         for cell in sidecar.cells.iter_mut() {
             cell.url = Some(viewer_inline_view_web_url(&target, &cell.view).unwrap());

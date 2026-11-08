@@ -1,6 +1,7 @@
-//! Shared helpers for proxy-related integration tests.
+//! Shared helpers for integration tests.
 //!
 //! Provides:
+//! - [`workspace_rig`]: a real workspace socket on an ephemeral port.
 //! - [`InstrumentedStore`]: an `ObjectStore` wrapper that counts `get`
 //!   calls and can introduce per-call delays to make timing-sensitive
 //!   tests deterministic.
@@ -9,6 +10,8 @@
 //!   TileProxy3D-shaped image with a configurable level grid.
 
 #![allow(dead_code)]
+
+pub mod workspace_rig;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};

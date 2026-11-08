@@ -2,10 +2,9 @@
 //! implementations share: the statements they run, and how a driver
 //! error becomes a store error.
 //!
-//! Same rules as `bookmarks/store_sql.rs`: numbered `$N` placeholders
-//! only, never mixed with `?`. Both payload columns are `TEXT` on both
-//! engines, because the inbox hands back the bytes it was sent and a JSON
-//! column would store a parsed value.
+//! Numbered `$N` placeholders only, never mixed with `?`. Both payload
+//! columns are `TEXT` on both engines, because the inbox hands back the
+//! bytes it was sent and a JSON column would store a parsed value.
 
 use super::store::StoreError;
 

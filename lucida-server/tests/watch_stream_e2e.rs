@@ -7,49 +7,28 @@
 //! for history, and that history arrives ahead of a marker and the live items,
 //! with nothing twice.
 
-use std::collections::{BTreeMap, HashMap};
-use std::net::SocketAddr;
+mod common;
+
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, broadcast};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use common::workspace_rig::WorkspaceRig;
 use lucida_core::protocol::{
     ClientId, ClientMessage, ServerMessage, WatchBoundaryEvent, WatchItem,
 };
-use lucida_server::session::Session;
+use lucida_server::ProxyConfig;
 use lucida_server::watch::WATCH_RING_CAPACITY;
-use lucida_server::{AppState, ProxyConfig, handler};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
-
-async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    ws.on_upgrade(move |socket| async move {
-        handler::handle_client(
-            id,
-            socket,
-            state.session,
-            state.tx,
-            state.unicast_routes,
-            state.proxy_config,
-        )
-        .await;
-    })
-}
 
 fn proxy_config(root: &Path) -> ProxyConfig {
     ProxyConfig {
@@ -67,30 +46,15 @@ fn proxy_config(root: &Path) -> ProxyConfig {
     }
 }
 
-/// Serve the session socket on an ephemeral port and answer with its address.
-async fn serve() -> SocketAddr {
+/// Serve a workspace socket on an ephemeral port.
+async fn serve() -> WorkspaceRig {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("watch-stream-e2e");
-    let (tx, _) = broadcast::channel(64);
-    let state = AppState {
-        session: Arc::new(Mutex::new(Session::new())),
-        tx,
-        next_id: Arc::new(AtomicU64::new(0)),
-        unicast_routes: Arc::new(Mutex::new(HashMap::new())),
-        source_policy: Arc::default(),
-        proxy_config: proxy_config(&root),
-    };
-    let app = Router::new().route("/ws", get(ws_route)).with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    addr
+    WorkspaceRig::start(proxy_config(&root)).await
 }
 
 /// Connect and consume the snapshot handshake the server always sends first.
-async fn join(addr: SocketAddr) -> WsClient {
-    let (mut ws, _) = connect_async(format!("ws://{addr}/ws"))
-        .await
-        .expect("ws connect");
+async fn join(rig: &WorkspaceRig) -> WsClient {
+    let (mut ws, _) = connect_async(rig.ws_url()).await.expect("ws connect");
     let first = next_server_message(&mut ws).await;
     assert!(
         matches!(first, ServerMessage::Snapshot { .. }),
@@ -200,10 +164,10 @@ fn epoch_of(item: &WatchItem) -> u64 {
 
 #[tokio::test]
 async fn a_subscriber_reads_what_a_publishing_page_sends() {
-    let addr = serve().await;
-    let mut subscriber = join(addr).await;
+    let rig = serve().await;
+    let mut subscriber = join(&rig).await;
     subscribe_live(&mut subscriber).await;
-    let mut page = join(addr).await;
+    let mut page = join(&rig).await;
 
     send(&mut page, &aggregate(1)).await;
     send(
@@ -240,11 +204,11 @@ async fn a_subscriber_reads_what_a_publishing_page_sends() {
 
 #[tokio::test]
 async fn a_late_subscriber_reads_only_what_is_published_after_it_joined() {
-    let addr = serve().await;
-    let mut page = join(addr).await;
+    let rig = serve().await;
+    let mut page = join(&rig).await;
     publish_and_settle(&mut page, 1..=3).await;
 
-    let mut late = join(addr).await;
+    let mut late = join(&rig).await;
     send(&mut late, &ClientMessage::WatchSubscribe { history: false }).await;
     // Published from the subscribing socket, so it lands after the subscribe.
     // A replay would arrive ahead of it.
@@ -256,11 +220,11 @@ async fn a_late_subscriber_reads_only_what_is_published_after_it_joined() {
 
 #[tokio::test]
 async fn history_is_the_ring_then_a_marker_then_the_live_items() {
-    let addr = serve().await;
-    let mut page = join(addr).await;
+    let rig = serve().await;
+    let mut page = join(&rig).await;
     publish_and_settle(&mut page, 1..=3).await;
 
-    let mut late = join(addr).await;
+    let mut late = join(&rig).await;
     send(&mut late, &ClientMessage::WatchSubscribe { history: true }).await;
     send(&mut late, &aggregate(100)).await;
 
@@ -283,12 +247,12 @@ async fn history_is_the_ring_then_a_marker_then_the_live_items() {
 
 #[tokio::test]
 async fn a_wrapped_ring_replays_its_tail_and_the_marker_shows_the_gap() {
-    let addr = serve().await;
-    let mut page = join(addr).await;
+    let rig = serve().await;
+    let mut page = join(&rig).await;
     let published = WATCH_RING_CAPACITY as u64 + 3;
     publish_and_settle(&mut page, 1..=published).await;
 
-    let mut late = join(addr).await;
+    let mut late = join(&rig).await;
     send(&mut late, &ClientMessage::WatchSubscribe { history: true }).await;
     let (_, seq, item) = next_watch_update(&mut late).await;
     assert_eq!(seq, published - WATCH_RING_CAPACITY as u64 + 1);
@@ -309,11 +273,11 @@ async fn a_wrapped_ring_replays_its_tail_and_the_marker_shows_the_gap() {
 /// The stream is opt-in on the reading side as well as on the publishing one.
 #[tokio::test]
 async fn a_connection_that_never_subscribed_receives_nothing() {
-    let addr = serve().await;
-    let mut bystander = join(addr).await;
-    let mut subscriber = join(addr).await;
+    let rig = serve().await;
+    let mut bystander = join(&rig).await;
+    let mut subscriber = join(&rig).await;
     subscribe_live(&mut subscriber).await;
-    let mut page = join(addr).await;
+    let mut page = join(&rig).await;
 
     send(&mut page, &aggregate(1)).await;
     assert_eq!(epoch_of(&next_watch_update(&mut subscriber).await.2), 1);
