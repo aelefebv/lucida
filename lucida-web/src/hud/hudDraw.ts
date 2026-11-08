@@ -44,8 +44,8 @@ export interface HudBox {
 /**
  * What the strip paints with, as CSS colors. The strip is a floating card,
  * so it follows the UI theme, not the canvas background, and its series
- * take the theme's chart slots, not the overlay's canvas variants: they are
- * drawn on the card.
+ * take the card's chart slots, not the overlay's canvas variants: they are
+ * drawn on the card, and the data shows through it.
  */
 export interface HudColors {
   background: string;
@@ -80,14 +80,14 @@ export function readHudColors(): HudColors {
       absent: paint(tones.absent),
       info: paint(tones.info),
     },
-    // The developer surfaces' chart slots, in order, so a series reads the
-    // same here as in the monitor's charts and the status tones keep their
-    // meaning.
+    // The chart slots in order, in their shades for the card, so a series
+    // keeps the hue it has in the monitor's charts and the status tones keep
+    // their meaning.
     series: {
-      received: paint(tokenColor("--lc-chart-1")),
-      sent: paint(tokenColor("--lc-chart-2")),
-      frame: paint(tokenColor("--lc-chart-3")),
-      gpu: paint(tokenColor("--lc-chart-4")),
+      received: paint(tokenColor("--lc-float-chart-1")),
+      sent: paint(tokenColor("--lc-float-chart-2")),
+      frame: paint(tokenColor("--lc-float-chart-3")),
+      gpu: paint(tokenColor("--lc-float-chart-4")),
     },
   };
 }

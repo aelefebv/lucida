@@ -633,6 +633,10 @@ pub struct BundleHeader {
     pub view_url: Option<String>,
     pub viewport: Option<BundleViewport>,
     pub device_pixel_ratio: Option<f64>,
+    /// The memory the page fitted its budgets to, in GiB: what the browser
+    /// reported, or the driver's override of it. None when the page read
+    /// none, or the bundle is older than the field.
+    pub device_memory_gib: Option<f64>,
     /// `slice` or `volume`.
     pub mode: Option<String>,
     /// The planning configuration, by the names the Dev controls panel shows.
@@ -812,6 +816,10 @@ pub const REPLAY_INPUTS: &[ReplayInput] = &[
     ReplayInput {
         input: "device pixel ratio",
         field: "devicePixelRatio",
+    },
+    ReplayInput {
+        input: "device memory",
+        field: "deviceMemoryGib",
     },
     ReplayInput {
         input: "slice or volume mode",
@@ -1673,12 +1681,16 @@ pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> Str
             .device_pixel_ratio
             .map(|dpr| format!(" DPR {dpr}"))
             .unwrap_or_default();
+        let memory = header
+            .device_memory_gib
+            .map(|gib| format!(" · device memory {gib} GiB"))
+            .unwrap_or_default();
         let mode = header
             .mode
             .as_deref()
             .map(|mode| format!(" · {mode}"))
             .unwrap_or_default();
-        lines.push(format!("view      {url}{viewport}{dpr}{mode}"));
+        lines.push(format!("view      {url}{viewport}{dpr}{memory}{mode}"));
     }
     for pins in &header.pins {
         lines.push(format!("pins      {}", format_pins(pins)));
@@ -3769,7 +3781,10 @@ mod tests {
         assert!(human.contains("misses 12"), "{human}");
         assert!(human.contains("generated coarse ready 8"), "{human}");
         assert!(human.contains("gs://bucket/sample.zarr"), "{human}");
-        assert!(human.contains("@ 1440x900 DPR 2 · slice"), "{human}");
+        assert!(
+            human.contains("@ 1440x900 DPR 2 · device memory 4 GiB · slice"),
+            "{human}"
+        );
         assert!(human.contains("level 2 · max_intensity"), "{human}");
         assert!(human.contains("contrast 100..2000, 50..900"), "{human}");
         assert!(human.contains("hardware adapter"), "{human}");
