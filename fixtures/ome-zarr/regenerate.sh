@@ -44,3 +44,9 @@ uv run "$gen" "$dest/v3-codec-chain.ome.zarr" "${twin[@]}" \
 uv run "$gen" "$dest/v2-collection.ome.zarr" \
   --tiles 3 --size 24,24 --levels 2 --factor 3,2 --chunk 8 --seed 1 --overwrite \
   --zarr-version 2 --order F --endian big --dimension-separator .
+
+# Level arrays named s0, s1, ... rather than by their index.
+uv run "$gen" "$dest/v3-level-paths.ome.zarr" "${twin[@]}" --shard 16 --level-prefix s
+uv run "$gen" "$dest/v2-consolidated.ome.zarr" \
+  --tiles 3 --size 24,24 --levels 2 --factor 3,2 --chunk 8 --seed 1 --overwrite \
+  --zarr-version 2 --level-prefix s --consolidated

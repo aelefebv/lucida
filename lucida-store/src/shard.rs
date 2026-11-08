@@ -174,11 +174,13 @@ impl ShardLayout {
     /// exactly as an unsharded key is read in its chunk grid, bundled `t` and
     /// `c` included. Each grid coordinate then splits into a shard coordinate
     /// and a position within the shard, and `encoding` names the shard's
-    /// object from its shard coordinates. `None` when the axes do not match
-    /// the layout's, or the position does not fit in memory.
+    /// object from its shard coordinates under `level_path`, the level's
+    /// array path. `None` when the axes do not match the layout's, or the
+    /// position does not fit in memory.
     pub fn locate_inner_chunk(
         &self,
         key: &ChunkKey,
+        level_path: &str,
         axes: &[String],
         encoding: ChunkKeyEncoding,
     ) -> Option<ShardLocation> {
@@ -193,7 +195,7 @@ impl ShardLayout {
             position = position * per_shard + coord % per_shard;
         }
         Some(ShardLocation {
-            path: Path::from(encoding.store_path(key.level, &shard)),
+            path: Path::from(encoding.store_path(level_path, &shard)),
             position: usize::try_from(position).ok()?,
         })
     }
@@ -639,14 +641,14 @@ mod tests {
         let cyx = axes(&["c", "y", "x"]);
         // (c=1, y=2, x=3) in 1x2x2 shards: shard (1, 1, 1), position (0, 0, 1).
         assert_eq!(
-            layout.locate_inner_chunk(&key("0/0/1/0/2/3"), &cyx, ChunkKeyEncoding::default()),
+            layout.locate_inner_chunk(&key("0/0/1/0/2/3"), "0", &cyx, ChunkKeyEncoding::default()),
             Some(ShardLocation {
                 path: Path::from("0/c/1/1/1"),
                 position: 1,
             })
         );
         assert_eq!(
-            layout.locate_inner_chunk(&key("1/0/0/0/1/0"), &cyx, ChunkKeyEncoding::default()),
+            layout.locate_inner_chunk(&key("1/0/0/0/1/0"), "1", &cyx, ChunkKeyEncoding::default()),
             Some(ShardLocation {
                 path: Path::from("1/c/0/0/0"),
                 position: 2,
@@ -670,6 +672,7 @@ mod tests {
         assert_eq!(
             layout.locate_inner_chunk(
                 &key("0/0/7/0/3/2"),
+                "0",
                 &axes(&["t", "c", "z", "y", "x"]),
                 ChunkKeyEncoding::default()
             ),
@@ -727,6 +730,7 @@ mod tests {
         let location = layout
             .locate_inner_chunk(
                 &self::key(key),
+                &self::key(key).level.to_string(),
                 &axes(&["c", "y", "x"]),
                 ChunkKeyEncoding::default(),
             )
@@ -759,6 +763,7 @@ mod tests {
                     .unwrap();
                 let object = crate::chunk_key_to_store_path(
                     &self::key(&key),
+                    &level.to_string(),
                     &cyx,
                     &layout.inner_chunk_shape,
                     ChunkKeyEncoding::default(),
@@ -803,7 +808,7 @@ mod tests {
             ("0/0/0/0/1/1", true),
         ] {
             let location = layout
-                .locate_inner_chunk(&self::key(key), &yx, ChunkKeyEncoding::default())
+                .locate_inner_chunk(&self::key(key), "0", &yx, ChunkKeyEncoding::default())
                 .unwrap();
             let read = shards
                 .read_inner_chunk(&store, &layout, &location, READER, LABEL)
@@ -827,7 +832,7 @@ mod tests {
         let yx = axes(&["y", "x"]);
         for key in ["2/0/0/0/0/0", "2/0/0/0/0/1"] {
             let location = layout
-                .locate_inner_chunk(&self::key(key), &yx, ChunkKeyEncoding::default())
+                .locate_inner_chunk(&self::key(key), "2", &yx, ChunkKeyEncoding::default())
                 .unwrap();
             let read = shards
                 .read_inner_chunk(&store, &layout, &location, READER, LABEL)
