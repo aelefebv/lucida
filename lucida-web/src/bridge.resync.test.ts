@@ -13,7 +13,9 @@ import { Bridge, type BridgeHandlers } from "./bridge.ts";
  * - stale `dataset_opened` rebroadcasts pass only for datasets the document
  *   still contains;
  * - unacked local commands replay after a snapshot and retire on their acks,
- *   including the accepted case where the replay overwrites a newer peer value.
+ *   including the accepted case where the replay overwrites a newer peer value;
+ * - a refused command retires like an ack and is undone by the snapshot the
+ *   bridge asks for, which keeps being asked for until one is adopted.
  */
 class FakeWebSocket {
   static instances: FakeWebSocket[] = [];
@@ -93,6 +95,10 @@ function datasetOpenedCmd(datasetId: string): Record<string, unknown> {
 
 function ackMsg(seq: number): string {
   return JSON.stringify({ type: "ack", seq });
+}
+
+function rejectedMsg(reason: string): string {
+  return JSON.stringify({ type: "command_rejected", reason });
 }
 
 /** Count `request_snapshot` envelopes transmitted on this socket. */
@@ -609,8 +615,9 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     const { bridge, ws, handlers } = openBridge();
     deliver(ws, snapshotMsg(10, { "wds-1": {} }));
 
-    // Server-side rejections are log-only, so this command never acks, and
-    // blind FIFO would misalign every retirement after it.
+    // This command's answer was lost (broadcast lag drops acks and
+    // rejections alike), and blind FIFO would misalign every retirement
+    // after it.
     bridge.sendCommand(JSON.stringify({ type: "remove_dataset", id: "wds-1" }));
     vi.advanceTimersByTime(11_000); // well past the pending TTL
 
@@ -645,5 +652,68 @@ describe("Bridge pending local commands across snapshot full-replace", () => {
     expect(appliedCommands(handlers)).toEqual([
       JSON.stringify({ type: "remove_dataset", id: "wds-1" }),
     ]);
+  });
+});
+
+describe("Bridge refused commands", () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = [];
+    vi.stubGlobal("WebSocket", FakeWebSocket);
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  const REFUSED = JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "refused" });
+  const LATER = JSON.stringify({ type: "rename_dataset", id: "wds-1", name: "later" });
+
+  it("a rejection retires the refused command and asks for the snapshot that undoes it", () => {
+    const onCommandRejected = vi.fn();
+    const { bridge, ws, handlers } = openBridge({ onCommandRejected });
+    deliver(ws, snapshotMsg(10, { "wds-1": {} }));
+    bridge.sendCommand(REFUSED);
+    bridge.sendCommand(LATER);
+
+    deliver(ws, rejectedMsg("unavailable"));
+    expect(onCommandRejected).toHaveBeenCalledWith("unavailable");
+    expect(resyncRequests(ws)).toBe(1);
+
+    // The snapshot replaces the document, and only the command still
+    // awaiting its answer replays on top.
+    deliver(ws, snapshotMsg(10, { "wds-1": {} }));
+    expect(appliedCommands(handlers)).toEqual([LATER]);
+  });
+
+  it("an ack after a rejection retires the next command, not the refused one", () => {
+    const { bridge, ws, handlers } = openBridge();
+    deliver(ws, snapshotMsg(10, { "wds-1": {} }));
+    bridge.sendCommand(REFUSED);
+    bridge.sendCommand(LATER);
+
+    deliver(ws, rejectedMsg("forbidden"));
+    deliver(ws, ackMsg(11));
+    deliver(ws, snapshotMsg(11, { "wds-1": {} }));
+    expect(appliedCommands(handlers)).toEqual([]);
+  });
+
+  it("keeps asking until a snapshot is adopted, since a stale one cannot undo the command", () => {
+    const { bridge, ws } = openBridge();
+    deliver(ws, snapshotMsg(10, { "wds-1": {} }));
+    bridge.sendCommand(REFUSED);
+    deliver(ws, broadcastMsg(11));
+    deliver(ws, broadcastMsg(12));
+
+    deliver(ws, rejectedMsg("unavailable"));
+    expect(resyncRequests(ws)).toBe(1);
+    deliver(ws, snapshotMsg(11, { "wds-1": {} })); // overtaken by seq 12
+    vi.advanceTimersByTime(5000);
+    expect(resyncRequests(ws)).toBe(2);
+
+    deliver(ws, snapshotMsg(12, { "wds-1": {} }));
+    vi.advanceTimersByTime(20_000);
+    expect(resyncRequests(ws)).toBe(2);
   });
 });

@@ -4,7 +4,7 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { LayerInfo } from "../components/LayerPanel.tsx";
 import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetState, ViewMode } from "../types.ts";
-import { dtypeMax } from "../types.ts";
+import { dtypeRange } from "../types.ts";
 import { applyDocumentCommand } from "../applyAndSend.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import type { ViewportCommand } from "../commands.ts";
@@ -220,7 +220,7 @@ export function buildLayerInfos(
       blendMode: settings?.blend_mode ?? "alpha",
       renderMode: settings?.render_mode ?? "translucent",
       autoContrast: maps.autoContrast.get(id) ?? true,
-      fullRangeMax: dtypeMax(dataType),
+      valueRange: dtypeRange(dataType),
       integerData: !dataType.toLowerCase().startsWith("float"),
       labelRows: labelRows.length > 0 ? labelRows : undefined,
       channelBlendMode: settings?.channel_blend_mode ?? "additive",

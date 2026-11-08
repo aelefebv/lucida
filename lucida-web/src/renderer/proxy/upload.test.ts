@@ -137,6 +137,7 @@ function makeColdState(
     desiredProxyKeys: opts?.desiredProxyKeys,
     activeSet: opts?.activeSet ?? [],
     viewMode: opts?.viewMode ?? "volume",
+    sampleFormat: "u16",
   };
 }
 

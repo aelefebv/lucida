@@ -18,6 +18,7 @@ import {
   type EntityProxyDescriptor,
 } from "./workerContext.ts";
 import type { ProxyAtlasState } from "./proxyAtlas.ts";
+import { sampleFormatCode, type SampleFormat } from "./dataTypeUtil.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import {
   selectEntitySources,
@@ -44,7 +45,7 @@ import {
   OFFSET_COLORMAP_MODE,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
-  OFFSET_PAD_PROXY0,
+  OFFSET_SAMPLE_FORMAT,
   OFFSET_PAD_PROXY1,
   OFFSET_PAD_PROXY2,
   OFFSET_GROUP_PROXY_DIMS,
@@ -231,6 +232,7 @@ export function buildDescriptorBuffer(
       proxyPoolsByIndex,
       colormapLutIndices,
       proxyDescriptorKey(entry.entityId, cold.currentT, channel),
+      cold.sampleFormat,
     );
   }
 
@@ -339,6 +341,7 @@ export function serializeEntityDescriptor(
   proxyPoolsByIndex: ProxyAtlasState[],
   colormapLutIndices: Map<string, number>,
   proxyKey: string | null = null,
+  sampleFormat: SampleFormat = "u16",
 ): void {
   const f32 = new Float32Array(target, offset, DESCRIPTOR_ENTRY_SIZE / 4);
   const u32 = new Uint32Array(target, offset, DESCRIPTOR_ENTRY_SIZE / 4);
@@ -379,7 +382,7 @@ export function serializeEntityDescriptor(
   u32[OFFSET_TILE_PROXY_SLOT_INDEX / 4] = tileSlotIdx;
   u32[OFFSET_GROUP_PROXY_POOL_INDEX / 4]  = groupPoolIdx;
   u32[OFFSET_GROUP_PROXY_SLOT_INDEX / 4]  = groupSlotIdx;
-  u32[OFFSET_PAD_PROXY0 / 4] = 0;
+  u32[OFFSET_SAMPLE_FORMAT / 4] = sampleFormatCode(sampleFormat);
   u32[OFFSET_PAD_PROXY1 / 4] = 0;
   u32[OFFSET_PAD_PROXY2 / 4] = 0;
   const tileDimsBase = OFFSET_TILE_PROXY_DIMS / 4;

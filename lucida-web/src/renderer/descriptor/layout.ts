@@ -14,7 +14,7 @@
  *   136: tileProxySlotIndex  u32             (4)
  *   140: groupProxyPoolIndex u32             (4)
  *   144: groupProxySlotIndex u32             (4)
- *   148: _pad_proxy0         u32             (4)
+ *   148: sampleFormat        u32             (4) — 0 = u16 integer texels, 1 = float32 bits
  *   152: _pad_proxy1         u32             (4)
  *   156: _pad_proxy2         u32             (4)
  *   160: tileProxyDims       vec3<u32>+pad   (16) — xyz=(Z,Y,X)
@@ -72,7 +72,8 @@ export const OFFSET_TILE_PROXY_POOL_INDEX = 132; // u32
 export const OFFSET_TILE_PROXY_SLOT_INDEX = 136; // u32
 export const OFFSET_GROUP_PROXY_POOL_INDEX = 140;  // u32
 export const OFFSET_GROUP_PROXY_SLOT_INDEX = 144;  // u32
-export const OFFSET_PAD_PROXY0 = 148;            // u32 (pad)
+/** How the entity's texels hold samples (`sampleFormatCode` in `dataTypeUtil.ts`). */
+export const OFFSET_SAMPLE_FORMAT = 148;         // u32
 export const OFFSET_PAD_PROXY1 = 152;            // u32 (pad)
 export const OFFSET_PAD_PROXY2 = 156;            // u32 (pad)
 export const OFFSET_TILE_PROXY_DIMS = 160;      // vec3<u32>+pad (16) — xyz=(Z,Y,X)

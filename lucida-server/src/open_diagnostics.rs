@@ -97,6 +97,13 @@ pub(crate) fn backend_open_failure(
             denied.to_string(),
             None,
         ),
+        lucida_store::backend::StoreError::UnsupportedDataType(_) => open_failure(
+            DatasetOpenStage::BackendOpen,
+            DatasetOpenFailureKind::UnsupportedDataType,
+            false,
+            error.to_string(),
+            None,
+        ),
         lucida_store::backend::StoreError::Metadata(message) => {
             let lower = message.to_ascii_lowercase();
             let kind = if lower.contains("bucket") || lower.contains("credential") {
@@ -153,7 +160,10 @@ pub(crate) fn backend_open_failure(
 pub(crate) fn import_failure(error: &dyn std::fmt::Display) -> DatasetOpenFailureDiagnostic {
     let message = error.to_string();
     let lower = message.to_ascii_lowercase();
-    let kind = if lower.contains("codec")
+    // Before the other rules: a data type's name can contain any of their words.
+    let kind = if lower.contains("unsupported data type") {
+        DatasetOpenFailureKind::UnsupportedDataType
+    } else if lower.contains("codec")
         || lower.contains("blosc")
         || lower.contains("cname")
         || lower.contains("compressor")
@@ -305,6 +315,23 @@ mod tests {
                 "{error}"
             );
             assert_eq!(diagnostic.stage, DatasetOpenStage::MetadataImport);
+            assert!(!diagnostic.retryable);
+        }
+    }
+
+    /// A refused data type is named and triaged as such, even when its name
+    /// holds a word another rule matches on.
+    #[test]
+    fn a_refused_data_type_is_an_unsupported_data_type() {
+        for name in ["complex64", "int64", "r16-chunked"] {
+            let error = lucida_store::backend::StoreError::UnsupportedDataType(name.to_string());
+            let diagnostic = import_failure(&error);
+            assert_eq!(
+                diagnostic.kind,
+                DatasetOpenFailureKind::UnsupportedDataType,
+                "{error}"
+            );
+            assert!(diagnostic.message.contains(name), "{}", diagnostic.message);
             assert!(!diagnostic.retryable);
         }
     }
