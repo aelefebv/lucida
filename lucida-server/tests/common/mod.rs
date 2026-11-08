@@ -231,6 +231,7 @@ pub async fn build_single_tile_dataset(
             // bytes put into the store below.
             levels: vec![lucida_store::import_types::LevelBindingInfo {
                 level_index: 0,
+                path: "0".to_string(),
                 compression: lucida_store::codec::StorageCompression::None,
                 chunk_shape: chunk_shape.to_vec(),
                 chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
