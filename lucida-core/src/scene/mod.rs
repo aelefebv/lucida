@@ -221,7 +221,6 @@ pub(crate) struct ViewQueryCursor {
     /// membership base was rebuilt, so the query resyncs to a full snapshot.
     content: u64,
     layout: u64,
-    asset: u64,
     /// Camera geometry family at snapshot time. A change resyncs.
     mode: CameraModeKind,
     /// Quantized state per present record, keyed by the unique per-record
@@ -235,10 +234,7 @@ impl ViewQueryCursor {
     /// meaning the same membership base and the same camera family. A
     /// difference against any other snapshot means nothing.
     fn matches(&self, epochs: &SceneEpochs, mode: CameraModeKind) -> bool {
-        self.content == epochs.content
-            && self.layout == epochs.layout
-            && self.asset == epochs.asset
-            && self.mode == mode
+        self.content == epochs.content && self.layout == epochs.layout && self.mode == mode
     }
 }
 
@@ -1098,7 +1094,7 @@ impl Scene {
     ///   no channel or label entries for the layer panel to render. Existing
     ///   entries are kept; entries for removed datasets are pruned.
     ///
-    /// It bumps every document-scoped epoch (`content`, `layout`, `asset`,
+    /// It bumps every document-scoped epoch (`content`, `layout`,
     /// `annotation`) plus `selection`. `view` is not bumped because the local
     /// camera is untouched.
     pub fn load_document(&mut self, doc: DocumentState) {
@@ -1153,7 +1149,6 @@ impl Scene {
 
         self.epochs.content += 1;
         self.epochs.layout += 1;
-        self.epochs.asset += 1;
         self.epochs.annotation += 1;
         self.epochs.selection += 1;
     }
@@ -1549,7 +1544,7 @@ impl Scene {
     /// Incremental counterpart to [`Scene::view_query`].
     ///
     /// The first query for a dataset, a query after the membership base was
-    /// rebuilt (a move in the content, layout, or asset epoch), and a query
+    /// rebuilt (a move in the content or layout epoch), and a query
     /// after the camera changed geometry family all return
     /// [`ViewQueryDelta::Full`] — a complete snapshot that also (re)seeds this
     /// dataset's cursor. Any other query returns [`ViewQueryDelta::Delta`]
@@ -1580,7 +1575,6 @@ impl Scene {
 
         let content = self.epochs.content;
         let layout = self.epochs.layout;
-        let asset = self.epochs.asset;
         let mode = CameraModeKind::of(&self.camera);
 
         // A cursor whose structural epochs and camera family match the current
@@ -1606,7 +1600,6 @@ impl Scene {
                 ViewQueryCursor {
                     content,
                     layout,
-                    asset,
                     mode,
                     entries: new_entries,
                 },
@@ -1627,7 +1620,6 @@ impl Scene {
             ViewQueryCursor {
                 content,
                 layout,
-                asset,
                 mode,
                 entries: new_entries,
             },
@@ -2023,7 +2015,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2169,7 +2160,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2401,7 +2391,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2530,7 +2519,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2665,7 +2653,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -4483,7 +4470,6 @@ mod tests {
         // Every document-scoped epoch advances so consumers re-read...
         assert!(scene.epochs.content > baseline.content);
         assert!(scene.epochs.layout > baseline.layout);
-        assert!(scene.epochs.asset > baseline.asset);
         assert!(scene.epochs.annotation > baseline.annotation);
         assert!(scene.epochs.selection > baseline.selection);
         // ...but the local camera is untouched, so view does not.

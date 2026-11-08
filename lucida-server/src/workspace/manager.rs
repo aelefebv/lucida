@@ -25,7 +25,7 @@ use tokio::sync::{Mutex, MutexGuard, broadcast};
 use crate::connection::{CLOSE_ACCESS_REVOKED, ClientSender};
 use crate::inbox::InboxStore;
 use crate::session::Session;
-use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
+use crate::{BroadcastItem, GeneratedConfig, UnicastRoutes};
 
 use super::preview::{MIN_PREVIEW_INTERVAL, PreviewError, retry_after_secs, validate_preview};
 use super::store::{StoreError, WorkspaceStore, normalize_email};
@@ -147,26 +147,26 @@ pub struct WorkspaceManager {
     store: Arc<dyn WorkspaceStore>,
     inbox: Option<Arc<dyn InboxStore>>,
     pub(crate) live: Mutex<HashMap<String, Arc<LiveWorkspace>>>,
-    proxy_config: ProxyConfig,
+    generated_config: GeneratedConfig,
     source_policy: Arc<SourcePolicy>,
     runtime_config: WorkspaceRuntimeConfig,
 }
 
 impl WorkspaceManager {
-    pub fn new(store: Arc<dyn WorkspaceStore>, proxy_config: ProxyConfig) -> Self {
-        Self::new_with_runtime_config(store, proxy_config, WorkspaceRuntimeConfig::default())
+    pub fn new(store: Arc<dyn WorkspaceStore>, generated_config: GeneratedConfig) -> Self {
+        Self::new_with_runtime_config(store, generated_config, WorkspaceRuntimeConfig::default())
     }
 
     pub fn new_with_runtime_config(
         store: Arc<dyn WorkspaceStore>,
-        proxy_config: ProxyConfig,
+        generated_config: GeneratedConfig,
         runtime_config: WorkspaceRuntimeConfig,
     ) -> Self {
         Self {
             store,
             inbox: None,
             live: Mutex::new(HashMap::new()),
-            proxy_config,
+            generated_config,
             source_policy: Arc::default(),
             runtime_config,
         }
@@ -202,8 +202,8 @@ impl WorkspaceManager {
         self.inbox.clone()
     }
 
-    pub fn proxy_config(&self) -> ProxyConfig {
-        self.proxy_config.clone()
+    pub fn generated_config(&self) -> GeneratedConfig {
+        self.generated_config.clone()
     }
 
     pub fn source_policy(&self) -> Arc<SourcePolicy> {
@@ -1174,7 +1174,7 @@ impl WorkspaceManager {
             Arc::clone(&live.session),
             live.tx.clone(),
             sources,
-            self.proxy_config.clone(),
+            self.generated_config.clone(),
             &self.source_policy,
         )
         .await;

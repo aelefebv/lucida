@@ -25,7 +25,7 @@ use lucida_server::auth::{
 use lucida_server::inbox::{InboxState, MAX_BUNDLE_BYTES, RETENTION_DAYS};
 use lucida_server::storage::{self, DatabaseUrl};
 use lucida_server::workspace::WorkspaceManager;
-use lucida_server::{ProxyConfig, inbox};
+use lucida_server::{GeneratedConfig, inbox};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -122,7 +122,7 @@ async fn rig() -> Rig {
 
     let inbox_store = storage.inbox();
     let manager = Arc::new(
-        WorkspaceManager::new(storage.workspaces(), ProxyConfig::defaults())
+        WorkspaceManager::new(storage.workspaces(), GeneratedConfig::defaults())
             .with_inbox(Arc::clone(&inbox_store)),
     );
     let app: Router = lucida_server::workspace::router(Arc::clone(&manager))

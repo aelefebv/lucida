@@ -1527,20 +1527,8 @@ name = "lucida-protocol"
 version = "0.2.0"
 dependencies = [
  "lucida-content",
- "lucida-proxy",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "lucida-proxy"
-version = "0.2.0"
-dependencies = [
- "blake3",
- "lucida-content",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -1563,7 +1551,6 @@ dependencies = [
  "lucida-content",
  "lucida-core",
  "lucida-protocol",
- "lucida-proxy",
  "lucida-store",
  "lz4_flex",
  "num_cpus",

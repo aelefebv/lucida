@@ -4,10 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, ImageId};
 use lucida_protocol::{
-    AssetCatalogDelta, ChunkFailureKind, DatasetOpenFailureDiagnostic,
-    DatasetOpenProgressDiagnostic, DatasetOpenSuccessDiagnostic, DatasetSourceHealth,
-    GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    ServerTimingBatch, SourceChunkStatus,
+    ChunkFailureKind, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
+    DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerTimingBatch, SourceChunkStatus,
 };
 
 use crate::camera::Camera;
@@ -609,11 +608,6 @@ pub enum ServerMessage {
         request_id: String,
         datasets: Vec<DatasetSourceHealth>,
     },
-    /// Incremental update to a dataset's asset catalog.
-    AssetCatalogUpdate {
-        dataset_id: DatasetId,
-        delta: AssetCatalogDelta,
-    },
     /// Runtime generated-level metadata/readiness update. Server-authored and
     /// unsequenced; clients merge it into their local availability view.
     GeneratedAvailabilityUpdate {
@@ -930,7 +924,7 @@ mod tests {
                 request_id: vec![None, None, Some("web-open-4c1a".into())],
                 family: vec![
                     lucida_protocol::TimingRowFamily::Chunk,
-                    lucida_protocol::TimingRowFamily::Asset,
+                    lucida_protocol::TimingRowFamily::Chunk,
                     lucida_protocol::TimingRowFamily::MetadataRead,
                 ],
                 metadata_phase: vec![
@@ -1868,37 +1862,6 @@ mod tests {
                 assert_eq!(dataset_id, DatasetId("wds-1".into()));
             }
             _ => panic!("expected DatasetRetry"),
-        }
-    }
-
-    #[test]
-    fn asset_catalog_update_round_trips() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-
-        let msg = ServerMessage::AssetCatalogUpdate {
-            dataset_id: DatasetId("ds1".into()),
-            delta: AssetCatalogDelta {
-                added: vec![ProxyAvailability {
-                    entity_id: lucida_content::EntityId("e1".into()),
-                    kinds: vec![ProxyKind::GroupProxy3D],
-                    footprints: vec![],
-                }],
-            },
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"asset_catalog_update\""));
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ServerMessage::AssetCatalogUpdate { dataset_id, delta } => {
-                assert_eq!(dataset_id, DatasetId("ds1".into()));
-                assert_eq!(delta.added.len(), 1);
-                assert_eq!(
-                    delta.added[0].entity_id,
-                    lucida_content::EntityId("e1".into())
-                );
-                assert_eq!(delta.added[0].kinds, vec![ProxyKind::GroupProxy3D]);
-            }
-            _ => panic!("expected AssetCatalogUpdate"),
         }
     }
 

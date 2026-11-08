@@ -73,7 +73,7 @@ async fn a_refused_write_leaves_memory_and_the_database_at_one_seq() {
     let (store, pool) = fresh_store_with_pool().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
     let mut peer = live.tx.subscribe();
 
@@ -121,7 +121,7 @@ async fn a_refused_rename_leaves_the_name_in_memory_and_the_database() {
     let (store, pool) = fresh_store_with_pool().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     refuse_document_writes(&pool).await;
@@ -163,7 +163,7 @@ async fn commands_from_two_clients_leave_the_database_at_the_highest_seq() {
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
     manager
         .upsert_member(
@@ -227,7 +227,7 @@ async fn a_refused_command_tells_its_sender_why() {
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
     let app = workspace_router_with_principal(Arc::clone(&manager), owner.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

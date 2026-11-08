@@ -10,15 +10,12 @@ use object_store::ObjectStore;
 use object_store::path::Path;
 
 use crate::generated::{DerivedChunkCache, GeneratedCoarseService};
-use crate::proxy::{ProxyCache, ProxyGenerator};
 
 /// Operational storage binding. Owns live resources.
 /// Built from ServerBindingSeed + source URL + store + cache.
 ///
 /// `dataset_opened` is kept so a later open of the same URL can reuse the
-/// import and rebroadcast the canonical DatasetOpened. The per-dataset
-/// proxy cache directory and bounded generator are built once and live as
-/// long as the binding.
+/// import and rebroadcast the canonical DatasetOpened.
 pub struct ServerBinding {
     pub source_url: String,
     pub store: Arc<dyn ObjectStore>,
@@ -27,9 +24,6 @@ pub struct ServerBinding {
     pub dataset_opened: DatasetOpened,
     pub derived_chunks: Arc<DerivedChunkCache>,
     pub generated_service: Arc<GeneratedCoarseService>,
-    pub legacy_proxy_enabled: bool,
-    pub proxy_cache: Arc<ProxyCache>,
-    pub proxy_generator: Arc<ProxyGenerator>,
     /// Non-fatal problems from importing this dataset (e.g. skipped collection
     /// groups). Retained so dataset health can surface them durably after the
     /// transient open-progress trail has scrolled past. Kept as typed

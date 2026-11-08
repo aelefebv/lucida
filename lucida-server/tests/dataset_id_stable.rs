@@ -18,7 +18,6 @@ use lucida_protocol::{
 };
 use lucida_server::binding::{ChunkResolver, ServerBinding};
 use lucida_server::generated::DerivedChunkCache;
-use lucida_server::proxy::{ProxyCache, ProxyGenerator};
 use lucida_server::session::Session;
 use lucida_store::cache::CachedStore;
 use lucida_store::import_types::ServerBindingSeed;
@@ -222,9 +221,6 @@ fn in_memory_store() -> Arc<dyn ObjectStore> {
 }
 
 /// Build a `ServerBinding` with stub proxy infrastructure for tests.
-/// The proxy cache is rooted in a per-test tempdir so writes don't
-/// pollute a real cache directory; the generator gets concurrency=1
-/// since these tests never invoke it.
 fn make_binding(
     url: &str,
     register: &DatasetOpened,
@@ -232,19 +228,6 @@ fn make_binding(
     cache: Arc<CachedStore>,
 ) -> ServerBinding {
     let resolver = Arc::new(ChunkResolver::new(&ServerBindingSeed { images: vec![] }));
-    let url_hash = lucida_content::url::dataset_url_hash16(url);
-    // tempfile auto-cleans on drop; we leak it for the duration of the
-    // test which is fine — every test process gets a fresh dir.
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let proxy_cache = Arc::new(ProxyCache::new(tmp.path().to_path_buf(), url_hash));
-    std::mem::forget(tmp); // keep the directory alive for the test process
-    let proxy_generator = Arc::new(ProxyGenerator::new(
-        proxy_cache.clone(),
-        cache.clone(),
-        resolver.clone(),
-        Arc::new(register.manifest.clone()),
-        1,
-    ));
     let derived_chunks = Arc::new(DerivedChunkCache::default());
     ServerBinding {
         source_url: url.to_string(),
@@ -256,9 +239,6 @@ fn make_binding(
         generated_service: Arc::new(lucida_server::generated::GeneratedCoarseService::inert(
             derived_chunks,
         )),
-        legacy_proxy_enabled: false,
-        proxy_cache,
-        proxy_generator,
         import_warnings: Vec::new(),
     }
 }
@@ -327,7 +307,6 @@ fn sample_register(dataset_id: &DatasetId) -> DatasetOpened {
     DatasetOpened {
         manifest,
         fetch,
-        catalog: lucida_protocol::AssetCatalog::default(),
         opener_client_id: None,
     }
 }

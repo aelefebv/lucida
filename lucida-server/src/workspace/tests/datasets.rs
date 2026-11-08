@@ -11,7 +11,7 @@ async fn rename_dataset_survives_evict_and_reopen() {
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
         idle_eviction_config(),
     );
 
@@ -65,7 +65,7 @@ async fn rename_dataset_trims_and_persists_trimmed_name() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     manager
@@ -90,7 +90,7 @@ async fn rename_dataset_is_editor_only_and_never_leaks() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     let viewer = principal("viewer@example.com", false);
     manager
@@ -135,7 +135,7 @@ async fn rename_dataset_missing_id_is_not_found() {
     let owner = principal("owner@example.com", false);
     let (workspace_id, _wds_id) =
         seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     // An editor renaming a dataset that does not exist in the document
@@ -161,7 +161,7 @@ async fn rename_dataset_validation_rejects_empty_whitespace_and_overlong() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     for bad in ["", "   ", "\t\n"] {
@@ -193,7 +193,7 @@ async fn rename_dataset_leaves_source_url_unchanged() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     let url_before = store
@@ -225,7 +225,7 @@ async fn rename_dataset_leaves_existing_saved_view_name_unchanged() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     // A saved view references dataset ids, not names; renaming the dataset
     // must not rewrite the saved view's own name.
@@ -258,7 +258,7 @@ async fn rename_dataset_broadcasts_command_to_peers() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "original.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     // A co-present peer subscribes to the live broadcast channel.
@@ -293,7 +293,7 @@ async fn live_workspace_sessions_are_independent() {
     let owner = principal("owner@example.com", false);
     let a = store.create_workspace(&owner, Some("A")).await.unwrap();
     let b = store.create_workspace(&owner, Some("B")).await.unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store), GeneratedConfig::defaults());
 
     let live_a = manager.live_workspace(&a.id, &owner).await.unwrap();
     let live_b = manager.live_workspace(&b.id, &owner).await.unwrap();
@@ -349,7 +349,7 @@ async fn apply_document_command_is_editor_gated_and_never_mutates_on_deny() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     let viewer = principal("viewer@example.com", false);
     manager
@@ -436,7 +436,7 @@ async fn dataset_source_for_retry_is_editor_gated() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     let viewer = principal("viewer@example.com", false);
     manager
@@ -492,7 +492,7 @@ async fn gate_store_failure_is_infrastructure_not_an_authorization_verdict() {
     let (store, pool) = fresh_store_with_pool().await;
     let owner = principal("owner@example.com", false);
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     // Kill the store: role lookups (and everything else) now error.

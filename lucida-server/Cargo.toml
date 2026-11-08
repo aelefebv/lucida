@@ -12,7 +12,6 @@ path = "src/main.rs"
 lucida-content = { path = "../lucida-content" }
 lucida-core = { path = "../lucida-core" }
 lucida-protocol = { path = "../lucida-protocol" }
-lucida-proxy = { path = "../lucida-proxy" }
 lucida-store = { path = "../lucida-store" }
 object_store = "0.12"
 tokio = { version = "1", features = ["full"] }
