@@ -35,14 +35,33 @@ export interface WireGeneratedChunkStatusUpdate {
   message?: string | null;
 }
 
+/** `[min, max, count]`: the smallest and largest sample in one bin, and how many it holds. */
+export type HistogramBin = readonly [min: number, max: number, count: number];
+
+/**
+ * The source samples under one timepoint and channel of a generated level,
+ * in the source's units, each counted once. The server sends it once that
+ * timepoint and channel is wholly generated, and never changes it after.
+ */
+export interface WireGeneratedLevelHistogram {
+  image_id: string;
+  level_index: number;
+  t: number;
+  c: number;
+  /** Ascending and disjoint. */
+  bins: readonly HistogramBin[];
+}
+
 export interface WireGeneratedAvailabilitySnapshot {
   levels?: WireGeneratedLevelAvailability[];
   chunks?: WireGeneratedChunkStatusUpdate[];
+  histograms?: WireGeneratedLevelHistogram[];
 }
 
 export interface WireGeneratedAvailabilityDelta {
   levels?: WireGeneratedLevelAvailability[];
   chunks?: WireGeneratedChunkStatusUpdate[];
+  histograms?: WireGeneratedLevelHistogram[];
 }
 
 export type WireGeneratedAvailabilityByDataset = Record<string, WireGeneratedAvailabilitySnapshot>;
@@ -50,11 +69,14 @@ export type WireGeneratedAvailabilityByDataset = Record<string, WireGeneratedAva
 interface DatasetAvailability {
   levels: Map<string, WireGeneratedLevelAvailability>;
   chunks: Map<string, WireGeneratedChunkStatusUpdate>;
+  histograms: Map<string, WireGeneratedLevelHistogram>;
 }
 
 export interface GeneratedAvailabilitySnapshot {
   levels: WireGeneratedLevelAvailability[];
   chunks: WireGeneratedChunkStatusUpdate[];
+  /** Shared with the catalog, not copied: a histogram never changes once sent. */
+  histograms: WireGeneratedLevelHistogram[];
 }
 
 export interface GeneratedStatusCounts {
@@ -97,11 +119,23 @@ export class GeneratedAvailabilityCatalog {
 
   snapshot(datasetId: string): GeneratedAvailabilitySnapshot {
     const state = this.byDataset.get(datasetId);
-    if (!state) return { levels: [], chunks: [] };
+    if (!state) return { levels: [], chunks: [], histograms: [] };
     return {
       levels: Array.from(state.levels.values()).map(cloneLevelAvailability),
       chunks: Array.from(state.chunks.values()).map(cloneChunkStatus),
+      histograms: Array.from(state.histograms.values()),
     };
+  }
+
+  /** One timepoint and channel's histogram of a generated level, once the server has sent it. */
+  histogram(
+    datasetId: string,
+    imageId: string,
+    levelIndex: number,
+    t: number,
+    c: number,
+  ): WireGeneratedLevelHistogram | undefined {
+    return this.byDataset.get(datasetId)?.histograms.get(histogramKey(imageId, levelIndex, t, c));
   }
 
   statusFor(
@@ -141,6 +175,12 @@ export class GeneratedAvailabilityCatalog {
         cloneChunkStatus(chunk),
       );
     }
+    for (const histogram of delta.histograms ?? []) {
+      state.histograms.set(
+        histogramKey(histogram.image_id, histogram.level_index, histogram.t, histogram.c),
+        histogram,
+      );
+    }
   }
 }
 
@@ -171,7 +211,7 @@ export function mergeGeneratedAvailabilityIntoManifest(
 }
 
 function emptyDatasetAvailability(): DatasetAvailability {
-  return { levels: new Map(), chunks: new Map() };
+  return { levels: new Map(), chunks: new Map(), histograms: new Map() };
 }
 
 function emptyStatusCounts(levels = 0): GeneratedStatusCounts {
@@ -234,6 +274,10 @@ function levelKey(imageId: string, levelIndex: number): string {
 
 function chunkKey(imageId: string, levelIndex: number, key: string): string {
   return `${imageId}|${levelIndex}|${key}`;
+}
+
+function histogramKey(imageId: string, levelIndex: number, t: number, c: number): string {
+  return `${imageId}|${levelIndex}|${t}|${c}`;
 }
 
 function upsertLevelGeometry(image: ImageSpec, incoming: LevelGeometry): void {

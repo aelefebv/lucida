@@ -1417,6 +1417,11 @@ export class CpuCache {
     return this.chunkStore.get(entityId, chunkKey) ?? this.overviewStore.get(entityId, chunkKey);
   }
 
+  /** Whether the server answered that it is still generating the chunk, and has not said it is ready. */
+  awaitsServer(req: ChunkRequest): boolean {
+    return this.getFailureRecord(chunkSchedulerKey(req, req.tier))?.kind === "pending";
+  }
+
   /** Searches detail then overview; null when neither has the chunk. */
   getCachedChunkTier(entityId: string, chunkKey: string): EvictionTier | null {
     const entry =

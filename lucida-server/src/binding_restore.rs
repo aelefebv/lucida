@@ -182,6 +182,7 @@ async fn restore_one_workspace_binding(
             Ok(delta) => {
                 generated_initial_delta.levels.extend(delta.levels);
                 generated_initial_delta.chunks.extend(delta.chunks);
+                generated_initial_delta.histograms.extend(delta.histograms);
             }
             Err(e) => {
                 tracing::warn!(

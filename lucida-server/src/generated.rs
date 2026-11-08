@@ -17,18 +17,21 @@ use lucida_core::protocol::{
 };
 use lucida_protocol::{
     GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary,
+    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelHistogram,
+    GeneratedLevelSummary, HistogramBin,
 };
 use lucida_store::cache::CachedStore;
+use lucida_store::fill::FillValue;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 
 use crate::BroadcastItem;
 use crate::binding::ChunkResolver;
+use crate::sample_histogram::SampleHistogram;
 use crate::session::Session;
 use crate::source_region::{RegionReadError, VolumeRegion, fetch_volume_region};
 
-pub const GENERATED_COARSE_GENERATOR_VERSION: &str = "generated-coarse-v2";
+pub const GENERATED_COARSE_GENERATOR_VERSION: &str = "generated-coarse-v3";
 const DEFAULT_TARGET_LONG_AXIS: u64 = 512;
 const DEFAULT_CHUNK_LONG_AXIS: u64 = 256;
 const DEFAULT_MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
@@ -491,6 +494,32 @@ struct DerivedChunkState {
     availability: GeneratedAvailabilitySnapshot,
     chunks: HashMap<DerivedChunkKey, DerivedChunkEntry>,
     level_identities: HashMap<(ImageId, u32), String>,
+    histograms: HashMap<HistogramKey, TcHistogram>,
+}
+
+/// One timepoint and channel of a generated level: image, level, `t`, `c`.
+type HistogramKey = (ImageId, u32, u32, u32);
+
+/// How far one timepoint and channel's histogram has got.
+#[derive(Debug)]
+enum TcHistogram {
+    /// The chunks counted so far and their source samples. A chunk is
+    /// counted once, however often it is generated again.
+    Filling {
+        counted: HashSet<String>,
+        histogram: SampleHistogram,
+    },
+    /// Every chunk counted, and the histogram in the availability snapshot.
+    Complete,
+}
+
+/// A histogram as the disk cache keeps it, one file per timepoint and
+/// channel, next to the chunks it describes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DerivedHistogramFile {
+    t: u32,
+    c: u32,
+    bins: Vec<HistogramBin>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -589,6 +618,11 @@ impl DerivedChunkCache {
         state.availability = snapshot.clone();
         state.chunks.clear();
         state.level_identities.clear();
+        state.histograms = snapshot
+            .histograms
+            .iter()
+            .map(|h| (histogram_key(h), TcHistogram::Complete))
+            .collect();
         self.memory.memory.release(self.memory.owner);
         for chunk in snapshot.chunks {
             let key = DerivedChunkKey {
@@ -614,6 +648,11 @@ impl DerivedChunkCache {
     pub fn apply_delta(&self, delta: GeneratedAvailabilityDelta) {
         let mut state = self.inner.lock().unwrap();
         state.availability.apply_delta(delta.clone());
+        for histogram in &delta.histograms {
+            state
+                .histograms
+                .insert(histogram_key(histogram), TcHistogram::Complete);
+        }
         for chunk in delta.chunks {
             let key = DerivedChunkKey {
                 image_id: chunk.image_id,
@@ -636,7 +675,7 @@ impl DerivedChunkCache {
     pub fn upsert_level(&self, level: GeneratedLevelAvailability) {
         self.apply_delta(GeneratedAvailabilityDelta {
             levels: vec![level],
-            chunks: vec![],
+            ..Default::default()
         });
     }
 
@@ -657,6 +696,7 @@ impl DerivedChunkCache {
                 status,
                 message,
             }],
+            histograms: vec![],
         });
     }
 
@@ -690,6 +730,7 @@ impl DerivedChunkCache {
                 status: GeneratedChunkStatus::Ready,
                 message: None,
             }],
+            histograms: vec![],
         });
         if let Some(identity) = level_identity {
             state
@@ -734,6 +775,10 @@ impl DerivedChunkCache {
     /// Adopt a chunk an earlier run, or another dataset over the same
     /// source, left in the disk cache. Its bytes stay on disk until a client
     /// asks for them.
+    ///
+    /// Only a chunk whose timepoint and channel has its histogram is
+    /// adopted. Any other is generated again, since generating is the only
+    /// way to count its source samples.
     pub fn load_ready_chunk(
         &self,
         level_identity: &str,
@@ -744,11 +789,81 @@ impl DerivedChunkCache {
         let Some(disk) = &self.disk else {
             return Ok(false);
         };
-        if !disk.chunk_exists(level_identity, level_index, &key) {
+        let counted = parse_generated_chunk_key(&key)
+            .is_some_and(|c| self.histogram_complete(&image_id, level_index, c.t, c.c));
+        if !counted || !disk.chunk_exists(level_identity, level_index, &key) {
             return Ok(false);
         }
         self.mark_ready(Some(level_identity), image_id, level_index, key);
         Ok(true)
+    }
+
+    /// Count one generated chunk's source samples toward its timepoint and
+    /// channel's histogram. Answers the histogram once this chunk completes
+    /// it, for the caller to publish, and keeps it on disk for later opens.
+    fn count_histogram(
+        &self,
+        plan: &GeneratedCoarsePlan,
+        coords: GeneratedChunkCoords,
+        key: &str,
+        samples: &SampleHistogram,
+    ) -> Option<GeneratedLevelHistogram> {
+        let grid = plan.availability.level.grid_shape;
+        let per_tc = checked_product(&[grid[2], grid[3], grid[4]])?;
+        let complete = {
+            let mut state = self.inner.lock().unwrap();
+            let entry = state
+                .histograms
+                .entry((plan.image_id.clone(), plan.level_index, coords.t, coords.c))
+                .or_insert_with(|| TcHistogram::Filling {
+                    counted: HashSet::new(),
+                    histogram: SampleHistogram::default(),
+                });
+            let TcHistogram::Filling { counted, histogram } = entry else {
+                return None;
+            };
+            if !counted.insert(key.to_string()) {
+                return None;
+            }
+            histogram.merge(samples);
+            if (counted.len() as u64) < per_tc {
+                return None;
+            }
+            match std::mem::replace(entry, TcHistogram::Complete) {
+                TcHistogram::Filling { histogram, .. } => histogram,
+                TcHistogram::Complete => return None,
+            }
+        };
+        let histogram = GeneratedLevelHistogram {
+            image_id: plan.image_id.clone(),
+            level_index: plan.level_index,
+            t: coords.t,
+            c: coords.c,
+            bins: complete.wire_bins(),
+        };
+        if let Some(disk) = &self.disk
+            && let Err(e) = disk.put_histogram(&plan.cache_identity, &histogram)
+        {
+            tracing::warn!(
+                image = %plan.image_id.0,
+                t = coords.t,
+                c = coords.c,
+                error = %e,
+                "generated coarse histogram persist failed"
+            );
+        }
+        Some(histogram)
+    }
+
+    fn histogram_complete(&self, image_id: &ImageId, level_index: u32, t: u32, c: u32) -> bool {
+        matches!(
+            self.inner
+                .lock()
+                .unwrap()
+                .histograms
+                .get(&(image_id.clone(), level_index, t, c)),
+            Some(TcHistogram::Complete)
+        )
     }
 
     pub fn is_ready(&self, image_id: &ImageId, level_index: u32, key: &str) -> bool {
@@ -811,6 +926,7 @@ impl DerivedChunkCache {
         GeneratedAvailabilityDelta {
             levels: vec![],
             chunks,
+            histograms: vec![],
         }
     }
 
@@ -822,14 +938,16 @@ impl DerivedChunkCache {
             disk.put_manifest(plan)?;
         }
 
-        let recovered_chunks = if let Some(disk) = &self.disk {
-            disk.recover_readiness(plan)?
+        let (recovered_chunks, histograms) = if let Some(disk) = &self.disk {
+            let histograms = disk.recover_histograms(plan)?;
+            (disk.recover_readiness(plan, &histograms)?, histograms)
         } else {
-            vec![]
+            (vec![], vec![])
         };
         let delta = GeneratedAvailabilityDelta {
             levels: vec![plan.availability.clone()],
             chunks: recovered_chunks,
+            histograms,
         };
 
         {
@@ -1044,14 +1162,26 @@ impl DerivedDiskCache {
         self.put_bytes_atomic(&self.index_path(level_identity), &bytes)
     }
 
+    /// The chunks a plan's level already holds on disk. A chunk is
+    /// recovered as ready only when its timepoint and channel's histogram
+    /// was recovered too, in `histograms`: the rest are generated again so
+    /// their source samples get counted.
     fn recover_readiness(
         &self,
         plan: &GeneratedCoarsePlan,
+        histograms: &[GeneratedLevelHistogram],
     ) -> io::Result<Vec<GeneratedChunkStatusUpdate>> {
         let expected_bytes = expected_generated_chunk_bytes(plan);
+        let counted: HashSet<(u32, u32)> = histograms.iter().map(|h| (h.t, h.c)).collect();
         // A whole chunk file is what makes a chunk ready, whatever an index
         // written before it says.
-        let ready = self.scan_ready_chunk_keys(plan, expected_bytes)?;
+        let ready: Vec<String> = self
+            .scan_ready_chunk_keys(plan, expected_bytes)?
+            .into_iter()
+            .filter(|key| {
+                parse_generated_chunk_key(key).is_some_and(|c| counted.contains(&(c.t, c.c)))
+            })
+            .collect();
         let ready_keys: HashSet<&String> = ready.iter().collect();
         let mut recovered: Vec<_> = self
             .read_index(&plan.cache_identity)?
@@ -1077,6 +1207,75 @@ impl DerivedDiskCache {
             message: None,
         }));
         Ok(recovered)
+    }
+
+    fn histogram_path(&self, level_identity: &str, level_index: u32, t: u32, c: u32) -> PathBuf {
+        self.level_dir(level_identity, level_index)
+            .join(format!("t{t}-c{c}.hist"))
+    }
+
+    fn put_histogram(
+        &self,
+        level_identity: &str,
+        histogram: &GeneratedLevelHistogram,
+    ) -> io::Result<()> {
+        let file = DerivedHistogramFile {
+            t: histogram.t,
+            c: histogram.c,
+            bins: histogram.bins.clone(),
+        };
+        let bytes =
+            serde_json::to_vec(&file).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        self.put_bytes_atomic(
+            &self.histogram_path(level_identity, histogram.level_index, file.t, file.c),
+            &bytes,
+        )
+    }
+
+    /// The histograms an earlier run, or another dataset over the same
+    /// source, wrote for a plan's level, under this plan's image. A file
+    /// that does not parse, or names a timepoint or channel the level lacks,
+    /// is passed over, and its chunks are generated again.
+    fn recover_histograms(
+        &self,
+        plan: &GeneratedCoarsePlan,
+    ) -> io::Result<Vec<GeneratedLevelHistogram>> {
+        let dir = self.level_dir(&plan.cache_identity, plan.level_index);
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => return Err(e),
+        };
+        let shape = plan.availability.level.shape;
+        let mut histograms = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("hist") {
+                continue;
+            }
+            let Some(file) = fs::read(&path)
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<DerivedHistogramFile>(&bytes).ok())
+            else {
+                continue;
+            };
+            if u64::from(file.t) >= shape[0]
+                || u64::from(file.c) >= shape[1]
+                || path
+                    != self.histogram_path(&plan.cache_identity, plan.level_index, file.t, file.c)
+            {
+                continue;
+            }
+            histograms.push(GeneratedLevelHistogram {
+                image_id: plan.image_id.clone(),
+                level_index: plan.level_index,
+                t: file.t,
+                c: file.c,
+                bins: file.bins,
+            });
+        }
+        histograms.sort_by_key(|h| (h.t, h.c));
+        Ok(histograms)
     }
 
     fn read_index(&self, level_identity: &str) -> io::Result<Option<DerivedReadinessIndex>> {
@@ -1272,6 +1471,15 @@ impl DerivedDiskCache {
             evictions: self.eviction_counter.load(Ordering::Relaxed),
         })
     }
+}
+
+fn histogram_key(histogram: &GeneratedLevelHistogram) -> HistogramKey {
+    (
+        histogram.image_id.clone(),
+        histogram.level_index,
+        histogram.t,
+        histogram.c,
+    )
 }
 
 fn hex16(bytes: &[u8; 16]) -> String {
@@ -2098,7 +2306,7 @@ pub async fn publish_generated_level_availability(
         dataset_id,
         GeneratedAvailabilityDelta {
             levels: vec![level],
-            chunks: vec![],
+            ..Default::default()
         },
         cache,
         session,
@@ -2264,24 +2472,25 @@ where
         return MaterializeOneResult::Failed;
     };
 
-    let bytes = match generate_chunk_with_fallback(&image, coords, plan, &store, &resolver).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            publish_chunk_status(
-                &plan.dataset_id,
-                &plan.image_id,
-                plan.level_index,
-                key,
-                generated_status_for_chunk_error(&e),
-                Some(e.to_string()),
-                cache,
-                session,
-                tx,
-            )
-            .await;
-            return MaterializeOneResult::Failed;
-        }
-    };
+    let (bytes, samples) =
+        match generate_chunk_with_fallback(&image, coords, plan, &store, &resolver).await {
+            Ok(generated) => generated,
+            Err(e) => {
+                publish_chunk_status(
+                    &plan.dataset_id,
+                    &plan.image_id,
+                    plan.level_index,
+                    key,
+                    generated_status_for_chunk_error(&e),
+                    Some(e.to_string()),
+                    cache,
+                    session,
+                    tx,
+                )
+                .await;
+                return MaterializeOneResult::Failed;
+            }
+        };
 
     if should_cancel().await {
         return MaterializeOneResult::Canceled;
@@ -2294,13 +2503,25 @@ where
         bytes,
     ) {
         Ok(withdrawal_delta) => {
-            publish_chunk_status(
-                &plan.dataset_id,
-                &plan.image_id,
-                plan.level_index,
-                key,
-                GeneratedChunkStatus::Ready,
-                None,
+            // A histogram goes out with the chunk that completes it, so a
+            // client holds it before it holds that chunk.
+            let histograms = cache
+                .count_histogram(plan, coords, &key, &samples)
+                .into_iter()
+                .collect();
+            publish_generated_delta(
+                plan.dataset_id.clone(),
+                GeneratedAvailabilityDelta {
+                    levels: vec![],
+                    chunks: vec![GeneratedChunkStatusUpdate {
+                        image_id: plan.image_id.clone(),
+                        level_index: plan.level_index,
+                        key,
+                        status: GeneratedChunkStatus::Ready,
+                        message: None,
+                    }],
+                    histograms,
+                },
                 cache.clone(),
                 session.clone(),
                 tx.clone(),
@@ -2336,13 +2557,15 @@ where
     }
 }
 
+/// One generated chunk's bytes, and the source samples it accounts for in
+/// its timepoint and channel's histogram.
 async fn generate_chunk_with_fallback(
     image: &ImageSpec,
     coords: GeneratedChunkCoords,
     plan: &GeneratedCoarsePlan,
     store: &Arc<CachedStore>,
     resolver: &Arc<ChunkResolver>,
-) -> Result<Vec<u8>, GeneratedChunkBuildError> {
+) -> Result<(Vec<u8>, SampleHistogram), GeneratedChunkBuildError> {
     let mut last_error = None;
     for source_level_index in &plan.input_level_candidates {
         match generate_chunk_from_source_level(
@@ -2355,7 +2578,7 @@ async fn generate_chunk_with_fallback(
         )
         .await
         {
-            Ok(bytes) => return Ok(bytes),
+            Ok(generated) => return Ok(generated),
             Err(e) => last_error = Some(e),
         }
     }
@@ -2375,7 +2598,7 @@ async fn generate_chunk_from_source_level(
     source_level_index: usize,
     store: &Arc<CachedStore>,
     resolver: &Arc<ChunkResolver>,
-) -> Result<Vec<u8>, GeneratedChunkBuildError> {
+) -> Result<(Vec<u8>, SampleHistogram), GeneratedChunkBuildError> {
     let source_level = image
         .multiscale
         .levels
@@ -2401,7 +2624,21 @@ async fn generate_chunk_from_source_level(
         resolver,
     )
     .await?;
-    downsample_region_to_generated_chunk(
+    let owned = owned_source_region(source_dims, output_dims, level, coords)
+        .map_err(GeneratedChunkBuildError::Downsample)?;
+    let samples = region_histogram(
+        &source_data,
+        image.multiscale.data_type,
+        source_region,
+        region_dims,
+        owned,
+    )
+    .map_err(GeneratedChunkBuildError::Downsample)?;
+    let fill = resolver
+        .level_info(&image.image_id, source_level_index as u32)
+        .map(|info| info.fill_value)
+        .unwrap_or_default();
+    let bytes = downsample_region_to_generated_chunk(
         &source_data,
         image.multiscale.data_type,
         source_region,
@@ -2410,8 +2647,10 @@ async fn generate_chunk_from_source_level(
         output_dims,
         level,
         coords,
+        fill,
     )
-    .map_err(GeneratedChunkBuildError::Downsample)
+    .map_err(GeneratedChunkBuildError::Downsample)?;
+    Ok((bytes, samples))
 }
 
 fn spatial_dims_u32(shape: [u64; 5]) -> Result<[u32; 3], &'static str> {
@@ -2475,6 +2714,87 @@ fn output_chunk_bounds(
     })
 }
 
+/// The source samples one output chunk counts toward its level's
+/// histogram. On each axis, output `[a, b)` owns source `[a * in / out,
+/// b * in / out)`, rounded down, so a level's chunks divide the source
+/// between them and every sample counts once, though pooling windows on
+/// either side of a chunk edge share samples.
+fn owned_source_region(
+    source_dims: [u32; 3],
+    output_dims: [u32; 3],
+    level: &LevelGeometry,
+    coords: GeneratedChunkCoords,
+) -> Result<VolumeRegion, String> {
+    let bounds = output_chunk_bounds(output_dims, level, coords)?;
+    let start = |o: u32, axis: usize| {
+        u64::from(o) * u64::from(source_dims[axis]) / u64::from(output_dims[axis])
+    };
+    Ok(VolumeRegion {
+        z0: start(bounds.z0, 0),
+        z1: start(bounds.z1, 0),
+        y0: start(bounds.y0, 1),
+        y1: start(bounds.y1, 1),
+        x0: start(bounds.x0, 2),
+        x1: start(bounds.x1, 2),
+    })
+}
+
+/// The finite samples inside `owned`, out of a fetched `region` of
+/// `data_type` samples.
+fn region_histogram(
+    source: &[u8],
+    data_type: DataType,
+    region: VolumeRegion,
+    region_dims: [u32; 3],
+    owned: VolumeRegion,
+) -> Result<SampleHistogram, String> {
+    macro_rules! histogram_as {
+        ($t:ty) => {
+            owned_histogram::<$t>(source, region, region_dims, owned)
+        };
+    }
+    match data_type {
+        DataType::Uint8 => histogram_as!(u8),
+        DataType::Uint16 => histogram_as!(u16),
+        DataType::Uint32 => histogram_as!(u32),
+        DataType::Int8 => histogram_as!(i8),
+        DataType::Int16 => histogram_as!(i16),
+        DataType::Int32 => histogram_as!(i32),
+        DataType::Float32 => histogram_as!(f32),
+        DataType::Float64 => histogram_as!(f64),
+    }
+}
+
+fn owned_histogram<T: PoolSample>(
+    source: &[u8],
+    region: VolumeRegion,
+    region_dims: [u32; 3],
+    owned: VolumeRegion,
+) -> Result<SampleHistogram, String> {
+    let [dz, dy, dx] = region_dims.map(|d| d as usize);
+    if source.len() != dz * dy * dx * T::SIZE {
+        return Err("source generated coarse region has the wrong length".to_string());
+    }
+    let inside =
+        |lo: u64, hi: u64, from: u64, len: usize| lo >= from && hi >= lo && hi <= from + len as u64;
+    if !inside(owned.z0, owned.z1, region.z0, dz)
+        || !inside(owned.y0, owned.y1, region.y0, dy)
+        || !inside(owned.x0, owned.x1, region.x0, dx)
+    {
+        return Err("generated chunk owns source samples it did not read".to_string());
+    }
+    let values = (owned.z0..owned.z1)
+        .flat_map(|z| (owned.y0..owned.y1).map(move |y| (z, y)))
+        .flat_map(|(z, y)| {
+            let row = ((z - region.z0) as usize * dy + (y - region.y0) as usize) * dx;
+            (owned.x0..owned.x1).map(move |x| {
+                let i = row + (x - region.x0) as usize;
+                T::read(&source[i * T::SIZE..(i + 1) * T::SIZE]).to_f64()
+            })
+        });
+    Ok(SampleHistogram::of(values))
+}
+
 fn source_region_for_output_chunk(
     source_dims: [u32; 3],
     output_dims: [u32; 3],
@@ -2509,6 +2829,7 @@ trait PoolSample: Copy {
     /// The larger sample. A float NaN loses to any number, so a generated
     /// sample is NaN only when every source sample under it is.
     fn pool_max(self, other: Self) -> Self;
+    fn to_f64(self) -> f64;
 }
 
 macro_rules! pool_sample {
@@ -2524,6 +2845,9 @@ macro_rules! pool_sample {
             }
             fn pool_max(self, other: Self) -> Self {
                 <$t>::max(self, other)
+            }
+            fn to_f64(self) -> f64 {
+                self as f64
             }
         }
     )*};
@@ -2567,7 +2891,8 @@ impl PoolSample for Half {
 
 /// Max-pool one generated chunk from a source region of `data_type`
 /// samples (little-endian bytes, as `fetch_volume_region` returns them) into
-/// that chunk's bytes, in the same type.
+/// that chunk's bytes, in the same type. An edge chunk is padded with the
+/// source's fill value, as the source's own edge chunks read.
 #[allow(clippy::too_many_arguments)]
 fn downsample_region_to_generated_chunk(
     source: &[u8],
@@ -2578,6 +2903,7 @@ fn downsample_region_to_generated_chunk(
     output_dims: [u32; 3],
     level: &LevelGeometry,
     coords: GeneratedChunkCoords,
+    fill: FillValue,
 ) -> Result<Vec<u8>, String> {
     macro_rules! pool_as {
         ($t:ty) => {
@@ -2589,6 +2915,7 @@ fn downsample_region_to_generated_chunk(
                 output_dims,
                 level,
                 coords,
+                fill,
             )
         };
     }
@@ -2607,6 +2934,7 @@ fn downsample_region_to_generated_chunk(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn max_pool_region<T: PoolSample>(
     source: &[u8],
     source_region: VolumeRegion,
@@ -2615,6 +2943,7 @@ fn max_pool_region<T: PoolSample>(
     output_dims: [u32; 3],
     level: &LevelGeometry,
     coords: GeneratedChunkCoords,
+    fill: FillValue,
 ) -> Result<Vec<u8>, String> {
     let expected = (region_dims[0] as usize)
         .checked_mul(region_dims[1] as usize)
@@ -2637,7 +2966,7 @@ fn max_pool_region<T: PoolSample>(
         .checked_mul(chunk_y as usize)
         .and_then(|v| v.checked_mul(chunk_x as usize))
         .ok_or_else(|| "generated coarse chunk is too large".to_string())?;
-    let mut chunk = vec![0_u8; chunk_voxels * T::SIZE];
+    let mut chunk = fill.bytes(chunk_voxels * T::SIZE);
 
     let [in_z, in_y, in_x] = source_dims;
     let [out_z, out_y, out_x] = output_dims;
@@ -2764,6 +3093,7 @@ async fn publish_chunk_status(
                 status,
                 message,
             }],
+            histograms: vec![],
         },
         cache,
         session,
@@ -3309,6 +3639,14 @@ mod tests {
         levels: &[LevelGeometry],
         data_type: DataType,
     ) -> ServerBindingSeed {
+        binding_seed_with_fill(levels, data_type, FillValue::default())
+    }
+
+    fn binding_seed_with_fill(
+        levels: &[LevelGeometry],
+        data_type: DataType,
+        fill: FillValue,
+    ) -> ServerBindingSeed {
         ServerBindingSeed {
             images: vec![ImageBindingSeed {
                 image_id: ImageId("img-1".into()),
@@ -3338,7 +3676,7 @@ mod tests {
                                 chunk_size_c: 1,
                             },
                             chunk_key_encoding: Default::default(),
-                            fill_value: Default::default(),
+                            fill_value: fill,
                             shard: None,
                             regrid: None,
                         }
@@ -3346,6 +3684,24 @@ mod tests {
                     .collect(),
             }],
         }
+    }
+
+    /// Count every chunk of `(t, c)` toward its histogram, as generating
+    /// them all does, so the level's chunks there can be adopted later.
+    fn complete_histogram(
+        cache: &DerivedChunkCache,
+        plan: &GeneratedCoarsePlan,
+        t: u32,
+        c: u32,
+    ) -> GeneratedLevelHistogram {
+        let mut completed = None;
+        for key in plan.chunk_keys_for_tc(t, c) {
+            assert!(completed.is_none(), "completed before its last chunk");
+            let coords = parse_generated_chunk_key(&key).unwrap();
+            completed =
+                cache.count_histogram(plan, coords, &key, &SampleHistogram::of([coords.x as f64]));
+        }
+        completed.expect("the last chunk completes the histogram")
     }
 
     fn service_for_plan(
@@ -3571,7 +3927,15 @@ mod tests {
         let region =
             source_region_for_output_chunk(in_dims, out_dims, &level, coords).expect("region");
         downsample_region_to_generated_chunk(
-            source, data_type, region, in_dims, in_dims, out_dims, &level, coords,
+            source,
+            data_type,
+            region,
+            in_dims,
+            in_dims,
+            out_dims,
+            &level,
+            coords,
+            FillValue::default(),
         )
         .expect("pooled")
     }
@@ -3592,7 +3956,7 @@ mod tests {
     }
 
     #[test]
-    fn generated_chunk_pads_edge_chunks_to_nominal_shape() {
+    fn generated_chunk_pads_edge_chunks_with_the_fill_value() {
         let level = LevelGeometry {
             level_index: 1,
             shape: [1, 1, 1, 3, 3],
@@ -3622,6 +3986,7 @@ mod tests {
             [1, 3, 3],
             &level,
             coords,
+            FillValue::parse(&serde_json::json!(7), DataType::Uint16).unwrap(),
         )
         .expect("pooled");
         let values: Vec<u16> = bytes
@@ -3631,7 +3996,7 @@ mod tests {
             .map(|b| u16::from_le_bytes(*b))
             .collect();
 
-        assert_eq!(values, vec![9, 0, 0, 0]);
+        assert_eq!(values, vec![9, 7, 7, 7]);
     }
 
     /// Generated samples are source samples: negative and out-of-[0, 1]
@@ -3744,11 +4109,25 @@ mod tests {
             .unwrap();
 
         let reopened = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [7; 16]);
-        assert!(
+        let adopt = || {
             reopened
                 .load_ready_chunk("identity", ImageId("img-1".into()), 1, "1/0/0/0/0/0".into())
                 .unwrap()
-        );
+        };
+        // Generating it is the only way to count its samples until its
+        // timepoint and channel has a histogram.
+        assert!(!adopt());
+        reopened.apply_delta(GeneratedAvailabilityDelta {
+            histograms: vec![GeneratedLevelHistogram {
+                image_id: ImageId("img-1".into()),
+                level_index: 1,
+                t: 0,
+                c: 0,
+                bins: vec![],
+            }],
+            ..Default::default()
+        });
+        assert!(adopt());
         match reopened.lookup(&ImageId("img-1".into()), 1, "1/0/0/0/0/0") {
             DerivedChunkLookup::Ready(bytes) => assert_eq!(bytes, vec![1, 2, 3, 4]),
             DerivedChunkLookup::Status { status, .. } => panic!("expected ready, got {status:?}"),
@@ -3789,10 +4168,12 @@ mod tests {
             GeneratedChunkStatus::Ready,
             None,
         );
+        let histogram = complete_histogram(&cache, &plan, 0, 0);
 
         let reopened = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [9; 16]);
         let delta = reopened.register_generated_plan(&plan).unwrap();
 
+        assert_eq!(delta.histograms, vec![histogram]);
         assert_eq!(delta.chunks.len(), 1);
         assert_eq!(delta.chunks[0].status, GeneratedChunkStatus::Ready);
         match reopened.lookup(&plan.image_id, plan.level_index, "1/0/0/0/0/0") {
@@ -3822,6 +4203,7 @@ mod tests {
                 bytes,
             )
             .unwrap();
+        complete_histogram(&cache, &plan, 0, 0);
         let _ = fs::remove_file(
             cache
                 .disk
@@ -4226,6 +4608,7 @@ mod tests {
                 bytes.clone(),
             )
             .unwrap();
+        let histogram = complete_histogram(&first, &first_plan, 0, 0);
         // A failure recorded by the first dataset, carried in its index.
         first.set_chunk_status(
             first_plan.image_id.clone(),
@@ -4245,6 +4628,13 @@ mod tests {
                 .chunks
                 .iter()
                 .all(|chunk| chunk.image_id == second_plan.image_id)
+        );
+        assert_eq!(
+            delta.histograms,
+            vec![GeneratedLevelHistogram {
+                image_id: second_plan.image_id.clone(),
+                ..histogram
+            }]
         );
         match second.lookup(&second_plan.image_id, second_plan.level_index, &key) {
             DerivedChunkLookup::Ready(recovered) => assert_eq!(recovered, bytes),
@@ -4283,6 +4673,7 @@ mod tests {
                 vec![0; expected_generated_chunk_bytes(&plan) as usize],
             )
             .unwrap();
+        complete_histogram(&cache, &plan, 0, 0);
 
         let reopened = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [14; 16]);
         let delta = reopened.register_generated_plan(&plan).unwrap();
@@ -4604,7 +4995,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generated_coarse_treats_missing_source_chunks_as_zero_fill() {
+    async fn generated_coarse_reads_missing_source_chunks_as_the_fill_value() {
         use object_store::PutPayload;
         use object_store::memory::InMemory;
         use tokio::sync::broadcast;
@@ -4622,7 +5013,8 @@ mod tests {
         )
         .pop()
         .expect("plan");
-        let seed = binding_seed_for(&[source_level]);
+        let fill = FillValue::parse(&serde_json::json!(5), DataType::Uint16).unwrap();
+        let seed = binding_seed_with_fill(&[source_level], DataType::Uint16, fill);
         let resolver = Arc::new(ChunkResolver::new(&seed));
         let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
         let source_path = source_path(&resolver, "0/0/0/0/0/1");
@@ -4663,12 +5055,190 @@ mod tests {
                     .copied()
                     .map(u16::from_le_bytes)
                     .collect();
-                assert_eq!(values, vec![0]);
+                assert_eq!(values, vec![5]);
             }
             DerivedChunkLookup::Status { status, message } => {
                 panic!("expected generated bytes, got {status:?}: {message:?}");
             }
         }
+    }
+
+    /// Every availability delta sent on `rx` so far.
+    fn sent_deltas(rx: &mut broadcast::Receiver<BroadcastItem>) -> Vec<GeneratedAvailabilityDelta> {
+        let mut out = Vec::new();
+        while let Ok(item) = rx.try_recv() {
+            if let BroadcastItem::GeneratedAvailabilityUpdate { json } = item
+                && let Ok(ServerMessage::GeneratedAvailabilityUpdate { delta, .. }) =
+                    serde_json::from_str(&json)
+            {
+                out.push(delta);
+            }
+        }
+        out
+    }
+
+    /// A 5 × 5 source in 2 × 2 chunks pooled to 2 × 2, so pooling windows
+    /// straddle chunk edges, with the chunk at row 0, column 1 never
+    /// written. Sample `(y, x)` reads `100 + 10y + x` and the fill is 9.
+    async fn five_by_five_source() -> (
+        DatasetManifest,
+        GeneratedCoarsePlan,
+        Arc<CachedStore>,
+        Arc<ChunkResolver>,
+        Vec<f64>,
+    ) {
+        use object_store::PutPayload;
+        use object_store::memory::InMemory;
+
+        let source_level = level(0, [1, 1, 1, 5, 5], [1, 1, 1, 2, 2]);
+        let manifest =
+            source_manifest_with_levels(vec![source_level.clone()], None, DataType::Uint16);
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 2,
+                chunk_long_axis: 2,
+                max_chunk_bytes: 64,
+            },
+        )
+        .pop()
+        .expect("plan");
+        assert_eq!(plan.chunk_keys_for_tc(0, 0).len(), 4);
+        let fill = FillValue::parse(&serde_json::json!(9), DataType::Uint16).unwrap();
+        let resolver = Arc::new(ChunkResolver::new(&binding_seed_with_fill(
+            &[source_level],
+            DataType::Uint16,
+            fill,
+        )));
+        let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let sample = |y: u64, x: u64| 100 + 10 * y as u16 + x as u16;
+        let mut expected = Vec::new();
+        for y in 0..5 {
+            for x in 0..5 {
+                let written = (y / 2, x / 2) != (0, 1);
+                expected.push(f64::from(if written { sample(y, x) } else { 9 }));
+            }
+        }
+        for gy in 0..3_u64 {
+            for gx in 0..3_u64 {
+                if (gy, gx) == (0, 1) {
+                    continue;
+                }
+                // An edge chunk is stored at full size, padded past the level.
+                let bytes: Vec<u8> = (0..4)
+                    .flat_map(|i| sample(gy * 2 + i / 2, gx * 2 + i % 2).to_le_bytes())
+                    .collect();
+                store
+                    .put(
+                        &source_path(&resolver, &format!("0/0/0/0/{gy}/{gx}")),
+                        PutPayload::from(bytes),
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        (
+            manifest,
+            plan,
+            Arc::new(CachedStore::new(store, 1024 * 1024)),
+            resolver,
+            expected,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_generated_level_counts_each_source_sample_once_and_sends_its_histogram_with_its_last_chunk()
+     {
+        let (manifest, plan, store, resolver, expected) = five_by_five_source().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Arc::new(DerivedChunkCache::new_on_disk(
+            dir.path().to_path_buf(),
+            [21; 16],
+        ));
+        cache.register_generated_plan(&plan).unwrap();
+        let session = Arc::new(AsyncMutex::new(Session::new()));
+        let (tx, mut rx) = broadcast::channel(64);
+        let manifest = Arc::new(manifest);
+
+        materialize_generated_coarse_plan(
+            plan.clone(),
+            manifest.clone(),
+            store.clone(),
+            resolver.clone(),
+            cache.clone(),
+            session.clone(),
+            tx.clone(),
+        )
+        .await;
+
+        let deltas = sent_deltas(&mut rx);
+        let with_histogram: Vec<_> = deltas.iter().filter(|d| !d.histograms.is_empty()).collect();
+        assert_eq!(
+            with_histogram.len(),
+            1,
+            "one histogram per timepoint and channel"
+        );
+        let last = deltas.last().unwrap();
+        assert_eq!(last.chunks.len(), 1);
+        assert_eq!(last.chunks[0].status, GeneratedChunkStatus::Ready);
+        let histogram = &last.histograms[0];
+        assert_eq!((histogram.t, histogram.c), (0, 0));
+        assert_eq!(histogram.image_id, plan.image_id);
+        assert_eq!(histogram.bins, SampleHistogram::of(expected).wire_bins());
+        assert_eq!(histogram.bins.iter().map(|b| b.2).sum::<u64>(), 25);
+        assert_eq!(
+            session.lock().await.generated_availability[&plan.dataset_id].histograms,
+            vec![histogram.clone()]
+        );
+
+        // Generating a chunk again counts nothing twice and sends nothing new.
+        let coords = parse_generated_chunk_key(&plan.chunk_keys_for_tc(0, 0)[0]).unwrap();
+        let fresh = Arc::new(DerivedChunkCache::default());
+        fresh.upsert_level(plan.availability.clone());
+        for _ in 0..2 {
+            materialize_generated_coarse_key(
+                &plan,
+                coords,
+                manifest.clone(),
+                store.clone(),
+                resolver.clone(),
+                fresh.clone(),
+                session.clone(),
+                tx.clone(),
+                || async { false },
+            )
+            .await;
+        }
+        assert!(sent_deltas(&mut rx).iter().all(|d| d.histograms.is_empty()));
+
+        // A later open finds the histogram with the chunks it describes.
+        let reopened = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [21; 16]);
+        let delta = reopened.register_generated_plan(&plan).unwrap();
+        assert_eq!(delta.histograms, vec![histogram.clone()]);
+        assert_eq!(delta.chunks.len(), 4);
+
+        // Without it, the chunks are generated again to count their samples.
+        let hist_path = cache.disk.as_ref().unwrap().histogram_path(
+            &plan.cache_identity,
+            plan.level_index,
+            0,
+            0,
+        );
+        fs::remove_file(hist_path).unwrap();
+        let bare = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [21; 16]);
+        let delta = bare.register_generated_plan(&plan).unwrap();
+        assert!(delta.histograms.is_empty());
+        assert!(delta.chunks.is_empty());
+        assert!(
+            !bare
+                .load_ready_chunk(
+                    &plan.cache_identity,
+                    plan.image_id.clone(),
+                    plan.level_index,
+                    plan.chunk_keys_for_tc(0, 0)[0].clone(),
+                )
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -5071,6 +5641,7 @@ mod tests {
         let snapshot = GeneratedAvailabilitySnapshot {
             levels: vec![generated_level()],
             chunks: vec![],
+            histograms: vec![],
         };
 
         merge_generated_availability_into_manifest(&mut manifest, &snapshot);
