@@ -250,7 +250,7 @@ fn same_scale(a: f64, b: f64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::StorageCompression;
+    use crate::codec::{BytesCodec, StorageCompression};
 
     fn axes() -> Vec<String> {
         ["c", "y", "x"].iter().map(|s| s.to_string()).collect()
@@ -259,9 +259,11 @@ mod tests {
     fn binding(level: u32, chunk_shape: [u64; 3]) -> LevelBindingInfo {
         LevelBindingInfo {
             level_index: level,
-            compression: StorageCompression::Zstd,
+            compression: StorageCompression::compressed(BytesCodec::Zstd, 2),
             chunk_shape: chunk_shape.to_vec(),
             chunk_byte_layout: compute_chunk_byte_layout(&axes(), &chunk_shape, 2, &[]).unwrap(),
+            chunk_key_encoding: Default::default(),
+            fill_value: Default::default(),
             shard: None,
             regrid: None,
         }

@@ -49,7 +49,8 @@ fn decode_chunk(dir: &Path, resolver: &ChunkResolver, image_id: &ImageId, key: &
     let bytes = fs::read(dir.join(path.as_ref())).unwrap_or_else(|e| panic!("{path}: {e}"));
     decode_storage_bytes(
         &bytes,
-        info.compression,
+        &info.compression,
+        &info.chunk_shape,
         info.chunk_byte_layout.on_disk_byte_size,
     )
     .unwrap()
