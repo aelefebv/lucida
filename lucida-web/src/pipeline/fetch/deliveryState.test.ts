@@ -20,25 +20,64 @@ describe("DeliveryState", () => {
     expect(state.wasChunkSent("img-0", 0, "1/0/0/0/0/0", "coarse")).toBe(false);
 
     state.markChunkSent("img-0", 0, "1/0/0/0/0/0", "coarse");
-    state.clearChunkSent("img-0", 0, "1/0/0/0/0/0", "coarse");
+    state.markChunkRefused("img-0", 0, "1/0/0/0/0/0", "coarse");
 
     expect(state.wasChunkSent("img-0", 0, "1/0/0/0/0/0", "detail")).toBe(true);
     expect(state.wasChunkSent("img-0", 0, "1/0/0/0/0/0", "coarse")).toBe(false);
-
-    state.clearChunkSent("img-0", 0, "1/0/0/0/0/0");
-    expect(state.wasChunkSent("img-0", 0, "1/0/0/0/0/0", "detail")).toBe(false);
   });
 
-  it("clears individual chunk keys and image-wide chunk state", () => {
+  it("holds a chunk only once the worker says so, and keeps it until the worker reports it lost", () => {
+    const state = new DeliveryState();
+    state.markChunkSent("img-0", 0, "a", "detail");
+    expect(state.isChunkHeld("img-0", 0, "a", "detail")).toBe(false);
+
+    state.markChunkHeld("img-0", 0, "a", "detail");
+    expect(state.isChunkHeld("img-0", 0, "a", "detail")).toBe(true);
+    // Sending again would only re-send what the worker holds.
+    state.markChunkSent("img-0", 0, "a", "detail");
+    expect(state.isChunkHeld("img-0", 0, "a", "detail")).toBe(true);
+
+    state.markChunkLost("img-0", 0, "a", "detail");
+    expect(state.wasChunkSent("img-0", 0, "a", "detail")).toBe(false);
+  });
+
+  it("lets a refused chunk go again", () => {
+    const state = new DeliveryState();
+    state.markChunkSent("img-0", 0, "a", "detail");
+    state.markChunkRefused("img-0", 0, "a", "detail");
+    expect(state.wasChunkSent("img-0", 0, "a", "detail")).toBe(false);
+  });
+
+  it("keeps a copy sent after a loss: the loss is of the slot it replaces", () => {
+    const state = new DeliveryState();
+    state.markChunkSent("img-0", 0, "a", "detail");
+    state.markChunkLost("img-0", 0, "a", "detail");
+    expect(state.wasChunkSent("img-0", 0, "a", "detail")).toBe(true);
+    expect(state.isChunkHeld("img-0", 0, "a", "detail")).toBe(false);
+  });
+
+  it("treats a missing report as a disagreement only for a held chunk", () => {
+    const state = new DeliveryState();
+    state.markChunkSent("img-0", 0, "sent", "detail");
+    state.markChunkSent("img-0", 0, "held", "detail");
+    state.markChunkHeld("img-0", 0, "held", "detail");
+
+    // The report predates the answer to a chunk still in transit.
+    expect(state.markChunkMissing("img-0", 0, "sent", "detail")).toBe(false);
+    expect(state.wasChunkSent("img-0", 0, "sent", "detail")).toBe(true);
+    expect(state.markChunkMissing("img-0", 0, "never", "detail")).toBe(false);
+
+    expect(state.markChunkMissing("img-0", 0, "held", "detail")).toBe(true);
+    expect(state.wasChunkSent("img-0", 0, "held", "detail")).toBe(false);
+  });
+
+  it("clears image-wide chunk state", () => {
     const state = new DeliveryState();
     state.markChunkSent("img-0", 0, "a");
-    state.markChunkSent("img-0", 1, "b");
-    state.clearChunkSent("img-0", 0, "a");
-
-    expect(state.wasChunkSent("img-0", 0, "a")).toBe(false);
-    expect(state.wasChunkSent("img-0", 1, "b")).toBe(true);
+    state.markChunkHeld("img-0", 1, "b");
 
     state.clearChunksForImage("img-0");
+    expect(state.wasChunkSent("img-0", 0, "a")).toBe(false);
     expect(state.wasChunkSent("img-0", 1, "b")).toBe(false);
   });
 

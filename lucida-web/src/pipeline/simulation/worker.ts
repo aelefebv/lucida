@@ -1,8 +1,9 @@
 /**
  * The render worker, run in-process on a stand-in GPU device. Messages go
- * through the worker's own dispatcher, so atlas sizing, eviction, the
- * upload filters and the wanted-set report are the production code. Only
- * drawing is skipped: it touches no residency.
+ * through the worker's own dispatcher, so atlas sizing, admission, eviction,
+ * the residency reports and the wanted-set report are the production code.
+ * Only drawing is skipped. The one thing it touches that residency reads, a
+ * slice member's eviction reference, is recorded from the render message.
  *
  * Messages queue in both directions and are delivered when the harness
  * drains, which keeps the main thread and the worker as far apart as a
@@ -18,8 +19,11 @@ import type {
   MainToWorkerMessage,
   MissingChunk,
   MissingProxy,
+  SliceRenderMultiPassMessage,
   WorkerToMainMessage,
 } from "../../renderer/workerProtocol.ts";
+import { setCameraUVForMember } from "../../renderer/slice/eviction.ts";
+import { memberCameraUV } from "../../renderer/slice/render.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 
 /** Messages that only draw, capture or style, so the simulation answers them without a handler. */
@@ -160,6 +164,7 @@ export class SimulatedWorker {
       while (this.inbox.length > 0) {
         const msg = this.inbox.shift()!;
         if (DRAW_ONLY.has(msg.type)) {
+          if (msg.type === "sliceRenderMultiPass") this.noteSliceCamera(msg);
           const frameSeq = (msg as { frameSeq?: number }).frameSeq;
           if (frameSeq !== undefined) this.outbox.push({ type: "frameDone", frameSeq });
           continue;
@@ -171,6 +176,19 @@ export class SimulatedWorker {
         this.onPost?.(msg);
         for (const listener of [...this.listeners]) listener({ data: msg });
       }
+    }
+  }
+
+  /**
+   * A slice frame moves each drawn member's eviction reference to the view
+   * center, so the simulation records it from the render message as the
+   * slice renderer does. Aggregate layers are left out.
+   */
+  private noteSliceCamera(msg: SliceRenderMultiPassMessage): void {
+    for (const layer of msg.layers) {
+      if (layer.isLabel || layer.aggregate) continue;
+      if (!this.ctx.state.memberSourcePools.has(layer.datasetId)) continue;
+      setCameraUVForMember(this.ctx.state, layer.datasetId, memberCameraUV(msg, layer));
     }
   }
 

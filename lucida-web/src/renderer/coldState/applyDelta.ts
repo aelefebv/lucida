@@ -15,6 +15,7 @@ import type {
   ColdStateDeltaMessage,
 } from "../workerProtocol.ts";
 import { applyColdState } from "./apply.ts";
+import { patchWantedChunks } from "../wantedChunks.ts";
 
 export function applyColdStateDelta(
   ctx: WorkerCtx,
@@ -50,6 +51,7 @@ export function applyColdStateDelta(
   cold.activeSet = nextActiveSet;
   cold.visibleRegion = msg.visibleRegion;
   cold.desiredProxyKeys = msg.desiredProxyKeys;
+  cold.wantedChunks = patchWantedChunks(cold.wantedChunks, msg.wantedChunks);
   cold.currentT = msg.currentT;
   cold.currentZ = msg.currentZ;
   cold.renderRadiusView = msg.renderRadiusView;

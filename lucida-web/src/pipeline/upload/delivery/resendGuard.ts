@@ -1,11 +1,11 @@
 /**
  * The bound on the uploader's feedback loop with the render worker.
  *
- * Every chunk the worker refuses, evicts, or still lists as missing comes back
- * eligible to send, so any lasting disagreement between the two sides re-sends
- * the same chunks every tick. A tick whose every send repeats a chunk already
- * sent since the last cold state adds no resident bytes: whatever the worker
- * takes in, it gives back. Past {@link RESEND_GUARD_TICKS} such ticks in a row
+ * Every chunk the worker refuses or reports lost, or lists as missing while
+ * the page holds it, comes back eligible to send, so any lasting disagreement
+ * between the two sides re-sends the same chunks every tick. A tick whose
+ * every send repeats a chunk already sent since the last cold state adds no
+ * resident bytes: whatever the worker takes in, it gives back. Past {@link RESEND_GUARD_TICKS} such ticks in a row
  * the guard holds the repeated chunks until the next cold state, so the view
  * settles covering less instead of drawing at frame rate, and hands them to
  * the caller to name in the trace.
@@ -75,8 +75,9 @@ export class ResendGuard {
   }
 
   /**
-   * The worker's wanted set still lists a chunk. It follows every feedback
-   * message, so it must not overwrite the reason that message gave.
+   * The worker's wanted set lists a chunk the page held. The report can
+   * follow a refusal or loss of the same chunk, so it must not overwrite the
+   * reason that gave.
    */
   noteMissing(imageId: string, c: number, chunkKey: string): void {
     const key = reasonKey(imageId, c, chunkKey);

@@ -1,14 +1,17 @@
 /**
  * Slice-mode eviction state, over `ctx.state.cameraUVPerEntity`: the
- * per-entity camera UV that `findFarthestSlot2D` uses to keep chunks near
+ * per-entity camera UV that `findEvictionSlot2D` uses to keep chunks near
  * the viewport center.
  */
 
+import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 import type { RendererState } from "../worker/state.ts";
 import {
   chunkDistSq as sharedChunkDistSq,
-  findFarthestSlot as sharedFindFarthestSlot,
+  findEvictionSlot,
+  type EvictionCandidate,
 } from "../eviction.ts";
+import { wantedChunksFor } from "../wantedChunks.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import type { SliceAtlasState } from "./atlas.ts";
 
@@ -48,17 +51,19 @@ export function chunkDistSq2D(
   return sharedChunkDistSq(lodMeta, cx, cy, null, cam);
 }
 
-/** Find the best eviction candidate: finer than the member's target first, then stale, then farthest. */
-export function findFarthestSlot2D(
+/** The slot a chunk arriving in `tier`'s pool may take; see `findEvictionSlot`. */
+export function findEvictionSlot2D(
   state: RendererState,
   atlas: SliceAtlasState,
-): { key: string; dist: number } {
-  return sharedFindFarthestSlot({
+  tier: ResidencyTier,
+): EvictionCandidate | null {
+  return findEvictionSlot({
     slots: atlas.slots,
     slotGridIdx: atlas.slotGridIdx,
     entityMetas: atlas.entityMetas,
     cameraFor: (memberId) => state.cameraUVPerEntity.get(memberId) ?? [0.5, 0.5],
     targetLevelFor: (memberId) => state.targetLevelByMember.get(memberId),
+    isWanted: (memberId, chunkKey) => wantedChunksFor(state, memberId, tier)?.has(chunkKey) ?? false,
     is3D: false,
   });
 }
