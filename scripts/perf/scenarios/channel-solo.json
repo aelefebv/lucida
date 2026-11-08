@@ -1,0 +1,10 @@
+{
+  "description": "solo the first channel, then the second, then return to the composite",
+  "requires": ["channels"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "scrub", "axis": "c", "count": 1 },
+    { "kind": "scrub", "axis": "c", "count": 1 },
+    { "kind": "scrub", "axis": "c", "count": -2 }
+  ]
+}

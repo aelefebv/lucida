@@ -1,0 +1,52 @@
+{
+  "datasets": {
+    "large-image": {
+      "description": "large 2D image, one channel",
+      "generate": "--size 8192,8192 --levels 5 --chunk 256"
+    },
+    "image": {
+      "description": "multi-channel 2D image",
+      "generate": "--size 2048,2048 --channels 2 --levels 4 --chunk 256"
+    },
+    "large-volume": {
+      "description": "large 3D volume, one channel",
+      "generate": "--size 256,1024,1024 --levels 4 --chunk 64"
+    },
+    "volume": {
+      "description": "multi-channel 3D volume",
+      "generate": "--size 128,512,512 --channels 3 --levels 3 --chunk 64"
+    },
+    "timeseries-2d": {
+      "description": "2D time series",
+      "generate": "--size 2048,2048 --timepoints 8 --levels 4 --chunk 256"
+    },
+    "timeseries-3d": {
+      "description": "multi-channel 3D time series",
+      "generate": "--size 64,512,512 --timepoints 4 --channels 2 --levels 3 --chunk 64"
+    },
+    "collection": {
+      "description": "collection of 12 multi-channel tiles",
+      "generate": "--tiles 12 --size 512,512 --channels 2 --levels 3 --chunk 128"
+    },
+    "single-level": {
+      "description": "2D image with no pyramid, so the server generates its coarse tier",
+      "generate": "--size 4096,4096 --levels 1 --chunk 512"
+    },
+    "sharded": {
+      "description": "sharded 3D volume",
+      "generate": "--size 128,1024,1024 --levels 4 --chunk 64 --shard 128,256,256"
+    },
+    "float32": {
+      "description": "float32 2D image",
+      "generate": "--size 4096,4096 --levels 5 --chunk 256 --dtype float32 --range 0,1"
+    },
+    "anisotropic": {
+      "description": "thin 3D volume whose levels downsample Y and X only",
+      "generate": "--size 48,1024,1024 --levels 4 --factor 1,2,2 --chunk 16,128,128"
+    },
+    "sparse": {
+      "description": "3D volume with a checkerboard of chunks unwritten",
+      "generate": "--size 128,512,512 --levels 3 --chunk 64 --sparse"
+    }
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "description": "zoom in by 8, then back out to the framing the open settled on",
+  "camera": "slice",
+  "steps": [
+    { "kind": "zoom", "factor": 8 },
+    { "kind": "zoom", "factor": 0.125 }
+  ]
+}

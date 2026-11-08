@@ -1,0 +1,9 @@
+{
+  "description": "step T by one, twice",
+  "requires": ["time"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "scrub", "axis": "t", "count": 1 },
+    { "kind": "scrub", "axis": "t", "count": 1 }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "description": "step Z by one twice, then jump 70 planes, or to the last, past the chunks the open loaded",
+  "requires": ["volume"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "scrub", "axis": "z", "count": 1 },
+    { "kind": "scrub", "axis": "z", "count": 1 },
+    { "kind": "scrub", "axis": "z", "count": 70 }
+  ]
+}

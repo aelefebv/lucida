@@ -813,8 +813,9 @@ export interface ReceivedByLane {
 }
 
 /**
- * Bytes the wire delivered after the view settled, counted once per wire
- * request so rows that coalesced onto one fetch do not multiply it.
+ * Bytes the wire delivered over an interval, counted once per wire request
+ * so rows that coalesced onto one fetch do not multiply it. A request
+ * carries one chunk, so `requests` is the chunks fetched.
  */
 export interface ReceivedSummary {
   bytes: number;
@@ -899,6 +900,23 @@ export interface SteadyStateReading {
   statement: string;
 }
 
+/**
+ * How the run loaded and drew its data, over the whole run whatever the
+ * window, as {@link DiagnosticDocument.sent} is. Times are from the run's
+ * start, which on a cold open comes after the page's own boot.
+ */
+export interface LoadReading {
+  /** When a chunk this run fetched was first on screen, or null when none was. */
+  firstFrameMs: number | null;
+  /**
+   * When the view went quiescent for good: the wall clock less the hold the
+   * close waited out. Null on a run that did not close by settling.
+   */
+  settleMs: number | null;
+  /** What the wire delivered during the run. */
+  received: ReceivedSummary;
+}
+
 export interface DiagnosticDocument {
   schemaVersion: number;
   runId: string;
@@ -930,6 +948,7 @@ export interface DiagnosticDocument {
   gpuMemory: GpuMemorySummary | null;
   /** What the client sent during the run, by message type. */
   sent: SentSummary;
+  load: LoadReading;
   /**
    * What went on after the view settled, and the tiers as the run left
    * them. Its findings rank in {@link findings} with the run's own on a
