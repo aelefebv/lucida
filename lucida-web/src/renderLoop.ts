@@ -187,7 +187,14 @@ export class RenderLoop implements TraceEnvironment {
       const resend = this.uploader.handleChunkResidency(
         msg.memberId, msg.tier, msg.change, msg.keys, this.session.cpuCache, msg.reason,
       );
-      if (resend) this.setDirty("residency", "chunk_residency");
+      if (resend) {
+        this.setDirty("residency", "chunk_residency");
+      } else if (this.session.cpuCache.deliveryState.chunksUnanswered === 0) {
+        this.republishSettle();
+      }
+    };
+    this.client.onFrameDone = () => {
+      if (this.client.framesAwaitingDone() === 0) this.republishSettle();
     };
 
     this.client.onWantedSetDelta = (datasetId, _epochs, missing) => {
@@ -350,14 +357,7 @@ export class RenderLoop implements TraceEnvironment {
    * to reschedule, so a loop with work left to do never looks settled.
    */
   private publishSettle(): void {
-    const state = this.settleState;
-    this.session.cpuCache.settleInputs(state);
-    state.interactiveDirty = this.interactiveDirty;
-    state.residencyDirty = this.residencyDirty;
-    state.frameInFlight = this.rafId !== null;
-    evaluateSettle(state, performance.now());
-    settleSignal.publish(state);
-    traceRecorder.noteQuiescence(state);
+    const state = this.evaluateAndPublishSettle();
 
     // The reading tier rides the same moment. Queue depth and in-flight
     // come off the reading just taken rather than a second scan, and both
@@ -372,6 +372,30 @@ export class RenderLoop implements TraceEnvironment {
       this.session.cpuCache.residentBytes(),
       this.client.takeGpuPassUs(),
     );
+  }
+
+  private evaluateAndPublishSettle(): SettleState {
+    const state = this.settleState;
+    this.session.cpuCache.settleInputs(state);
+    state.interactiveDirty = this.interactiveDirty;
+    state.residencyDirty = this.residencyDirty;
+    // A frame the worker is still drawing counts: until it lands, the canvas
+    // does not show what the view settled on, and a capture would catch it.
+    state.frameInFlight = this.rafId !== null || this.client.framesAwaitingDone() > 0;
+    evaluateSettle(state, performance.now());
+    settleSignal.publish(state);
+    traceRecorder.noteQuiescence(state);
+    return state;
+  }
+
+  /**
+   * Publish the predicate between ticks, once the render worker has answered
+   * the last thing the view waited on: an upload or a frame. The answer
+   * changes nothing the loop would draw, so it asks for no tick, and a tick
+   * already scheduled publishes anyway.
+   */
+  private republishSettle(): void {
+    if (this.rafId === null) this.evaluateAndPublishSettle();
   }
 
   /** {@link TraceEnvironment}: what was already resident when the run opened. */
