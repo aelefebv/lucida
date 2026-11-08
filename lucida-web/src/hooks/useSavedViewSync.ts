@@ -56,6 +56,8 @@ interface Params {
   setAutoContrastMap: React.Dispatch<React.SetStateAction<Map<string, boolean>>>;
   datasetReferenceMode?: DatasetReferenceMode;
   fetchSavedViewById?: (id: string) => Promise<{ id: string; view: SavedView } | null>;
+  /** A `#b=` link named a saved view that couldn't be fetched. */
+  onSavedViewMissing?: (id: string) => void;
   fetchDefaultSavedView?: () => Promise<{ id: string; view: SavedView } | null>;
   fetchViewerProfile?: (profile: string) => Promise<{ id: string; view: SavedView } | null>;
   /** Resolve the caller's remembered last view for a bare workspace open. When
@@ -102,6 +104,7 @@ export function useSavedViewSync({
   setAutoContrastMap,
   datasetReferenceMode = "source-url",
   fetchSavedViewById,
+  onSavedViewMissing,
   fetchDefaultSavedView,
   fetchViewerProfile,
   fetchLastView,
@@ -122,6 +125,7 @@ export function useSavedViewSync({
   collapseDeepLinkHash: () => Promise<void>;
 } {
   const fetchSavedViewByIdRef = useRef(fetchSavedViewById);
+  const onSavedViewMissingRef = useRef(onSavedViewMissing);
   const fetchDefaultSavedViewRef = useRef(fetchDefaultSavedView);
   const fetchViewerProfileRef = useRef(fetchViewerProfile);
   const fetchLastViewRef = useRef(fetchLastView);
@@ -137,6 +141,8 @@ export function useSavedViewSync({
   labelNamesForRef.current = labelNamesFor;
   // eslint-disable-next-line react-hooks/refs
   fetchSavedViewByIdRef.current = fetchSavedViewById;
+  // eslint-disable-next-line react-hooks/refs
+  onSavedViewMissingRef.current = onSavedViewMissing;
   // eslint-disable-next-line react-hooks/refs
   fetchDefaultSavedViewRef.current = fetchDefaultSavedView;
   // eslint-disable-next-line react-hooks/refs
@@ -192,6 +198,7 @@ export function useSavedViewSync({
     const urlSync = new UrlSync(capture, applier, {
       debounceMs,
       fetchSavedViewById: async (id) => fetchSavedViewByIdRef.current?.(id) ?? null,
+      onSavedViewMissing: (id) => onSavedViewMissingRef.current?.(id),
       fetchDefaultSavedView: async () => fetchDefaultSavedViewRef.current?.() ?? null,
       fetchViewerProfile: async (profile) => fetchViewerProfileRef.current?.(profile) ?? null,
       // Read at call time so a resolver wired later (once auth resolves) takes

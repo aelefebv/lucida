@@ -36,11 +36,10 @@ use lucida_content::{
 use lucida_core::camera::{Arcball, Camera, ClipMode, Fly, Slice};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{
-    BookmarkAction, ChunkMessage, ClientMessage, CommandRejection, MessageRejection, PeerIdentity,
-    PresenceState, ServerMessage, ViewerInteractionMode, ViewerInterestChunkKey,
-    ViewerInterestHint, ViewerInterestLane, ViewerInterestMode, ViewerInterestViewport,
-    WatchBoundaryEvent, WatchItem, WatchLevelRange, WatchReading, WatchRunCause, WatchSendTally,
-    WatchTick, WatchTickLevel,
+    ChunkMessage, ClientMessage, CommandRejection, MessageRejection, PeerIdentity, PresenceState,
+    ServerMessage, ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint,
+    ViewerInterestLane, ViewerInterestMode, ViewerInterestViewport, WatchBoundaryEvent, WatchItem,
+    WatchLevelRange, WatchReading, WatchRunCause, WatchSendTally, WatchTick, WatchTickLevel,
 };
 use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
 use lucida_core::scene::{
@@ -237,7 +236,6 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
             "session/server_source_chunk_status_malformed_key.json",
         ],
         ServerMessage::TimingBatch { .. } => &["session/server_timing_batch.json"],
-        ServerMessage::BookmarkChanged { .. } => &["session/server_bookmark_changed.json"],
         ServerMessage::WorkspaceArchived { .. } => &["session/server_workspace_archived.json"],
         ServerMessage::WatchUpdate { .. } => &["session/server_watch_update.json"],
         ServerMessage::WatchHistoryEnd { .. } => &["session/server_watch_history_end.json"],
@@ -376,7 +374,6 @@ struct EnumVocabulary {
     dataset_health_statuses: Vec<DatasetHealthStatus>,
     generated_chunk_statuses: Vec<GeneratedChunkStatus>,
     generated_level_roles: Vec<GeneratedLevelRole>,
-    bookmark_actions: Vec<BookmarkAction>,
     viewer_interest_modes: Vec<ViewerInterestMode>,
     viewer_interaction_modes: Vec<ViewerInteractionMode>,
     viewer_interest_lanes: Vec<ViewerInterestLane>,
@@ -416,7 +413,6 @@ fn enum_vocabulary() -> EnumVocabulary {
             Pending, Unavailable, FailedTransient, FailedPermanent, Ready,
         }),
         generated_level_roles: vocab!(GeneratedLevelRole::{ Coarse }),
-        bookmark_actions: vocab!(BookmarkAction::{ Created, Updated, Deleted }),
         viewer_interest_modes: vocab!(ViewerInterestMode::{ Slice, Volume }),
         viewer_interaction_modes: vocab!(ViewerInteractionMode::{
             Idle, Panning, Zooming, Scrubbing,
@@ -1788,18 +1784,6 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             req("", &["/type", "/reason", "/message"]),
         ),
         (
-            "session/server_bookmark_changed.json",
-            ServerMessage::BookmarkChanged {
-                id: "bookmark-31f7".into(),
-                action: BookmarkAction::Updated,
-                dataset_urls: vec![
-                    "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
-                    "gs://lucida-fixtures/screening-collection-01.zarr".into(),
-                ],
-            },
-            req("", &["/type", "/id", "/action", "/dataset_urls"]),
-        ),
-        (
             "session/server_timing_batch.json",
             ServerMessage::TimingBatch {
                 batch: ServerTimingBatch {
@@ -2620,7 +2604,6 @@ fn enum_vocabulary_matches_golden() {
             "/dataset_health_statuses",
             "/generated_chunk_statuses",
             "/generated_level_roles",
-            "/bookmark_actions",
             "/viewer_interest_modes",
             "/viewer_interaction_modes",
             "/viewer_interest_lanes",

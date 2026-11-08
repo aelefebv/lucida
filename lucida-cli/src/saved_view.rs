@@ -1160,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_view_link_uses_workspace_bookmark_hash() {
+    fn saved_view_link_uses_the_saved_view_hash() {
         assert_eq!(
             saved_view_link(&target(), "sv-1").unwrap(),
             "http://127.0.0.1:9988/w/w#b=sv-1"

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, Stream, StreamExt};
-use lucida_content::url::{DatasetLocation, normalize_dataset_url};
+use lucida_content::url::DatasetLocation;
 use lucida_content::{ChunkKey, DatasetId, DatasetManifest, ImageId};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
@@ -23,7 +23,7 @@ use lucida_protocol::{
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 
 use crate::binding::ChunkResolver;
 use crate::chunk_read::read_chunk;
@@ -43,6 +43,7 @@ use crate::timing::{FLUSH_INTERVAL, MetadataReadSink, RequestProbe, TimingBuffer
 use crate::workspace::{CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager};
 use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
 
+/// Serve one workspace socket until it closes.
 pub async fn handle_workspace_client(
     id: ClientId,
     ws: WebSocket,
@@ -50,35 +51,18 @@ pub async fn handle_workspace_client(
     manager: Arc<WorkspaceManager>,
     principal: AuthPrincipal,
 ) {
-    let session = Arc::clone(&live.session);
-    let tx = live.tx.clone();
-    let unicast_routes = Arc::clone(&live.unicast_routes);
     let proxy_config = manager.proxy_config();
     handle_client_inner(
         id,
         ws,
-        session,
-        tx,
-        unicast_routes,
         proxy_config,
-        Some(WorkspaceScope {
+        WorkspaceScope {
             live,
             manager,
             principal,
-        }),
+        },
     )
     .await;
-}
-
-pub async fn handle_client(
-    id: ClientId,
-    ws: WebSocket,
-    session: Arc<Mutex<Session>>,
-    tx: broadcast::Sender<BroadcastItem>,
-    unicast_routes: UnicastRoutes,
-    proxy_config: ProxyConfig,
-) {
-    handle_client_inner(id, ws, session, tx, unicast_routes, proxy_config, None).await;
 }
 
 /// Tell `sender` its document command was refused.
@@ -107,12 +91,12 @@ fn rename_rejection(error: &WorkspaceError) -> CommandRejection {
 async fn handle_client_inner(
     id: ClientId,
     ws: WebSocket,
-    session: Arc<Mutex<Session>>,
-    tx: broadcast::Sender<BroadcastItem>,
-    unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
-    workspace: Option<WorkspaceScope>,
+    ctx: WorkspaceScope,
 ) {
+    let session = Arc::clone(&ctx.live.session);
+    let tx = ctx.live.tx.clone();
+    let unicast_routes = Arc::clone(&ctx.live.unicast_routes);
     let (mut ws_tx, mut ws_rx) = ws.split();
 
     // Per-client unicast queue for targeted messages (chunk routing). It
@@ -121,11 +105,9 @@ async fn handle_client_inner(
     let mut outbound_close = unicast_tx.close_signal();
     let mut inbound_close = unicast_tx.close_signal();
     unicast_routes.lock().await.insert(id, unicast_tx.clone());
-    if let Some(ctx) = workspace.as_ref() {
-        ctx.manager
-            .attach_connection(&ctx.live, id, &ctx.principal, unicast_tx.clone())
-            .await;
-    }
+    ctx.manager
+        .attach_connection(&ctx.live, id, &ctx.principal, unicast_tx.clone())
+        .await;
 
     // This connection's server-side lifecycle rows. Scoped to the connection
     // rather than the process, so a client can only ever be handed rows its
@@ -134,26 +116,22 @@ async fn handle_client_inner(
     let timings = Arc::new(TimingBuffer::new());
 
     // Presentational identity for this peer's cursor, authored server-side
-    // from the authenticated principal so it cannot be spoofed. The
-    // non-workspace `/ws` path has no principal, so those peers join with
-    // `None` and render by numeric id.
+    // from the authenticated principal so it cannot be spoofed.
     //
     // The raw email is never broadcast, since collaborator emails are
     // owner-only. Only the name, avatar, and a single-grapheme initial
     // cross the wire.
-    let identity = workspace.as_ref().map(|ctx| {
-        PeerIdentity::from_principal_parts(
-            ctx.principal.display_name.clone(),
-            ctx.principal.picture_url.clone(),
-            &ctx.principal.email,
-        )
-    });
+    let identity = PeerIdentity::from_principal_parts(
+        ctx.principal.display_name.clone(),
+        ctx.principal.picture_url.clone(),
+        &ctx.principal.email,
+    );
 
     // Lock session, subscribe (before unlock — no gap), add client, snapshot, unlock.
     let (snapshot_json, mut rx, peer_joined_json) = {
         let mut sess = session.lock().await;
         let rx = tx.subscribe();
-        let presence = sess.add_client(id, identity);
+        let presence = sess.add_client(id, Some(identity));
         let snapshot = sess.snapshot(id);
         let snapshot_json = serde_json::to_string(&snapshot).unwrap();
         let peer_joined = ServerMessage::PeerJoined {
@@ -174,9 +152,7 @@ async fn handle_client_inner(
         let mut sess = session.lock().await;
         sess.remove_client(id);
         unicast_routes.lock().await.remove(&id);
-        if let Some(ctx) = workspace.as_ref() {
-            ctx.live.detach_connection(id);
-        }
+        ctx.live.detach_connection(id);
         return;
     }
 
@@ -335,93 +311,80 @@ async fn handle_client_inner(
                         ClientMessage::Command { command } => {
                             // All commands in ClientMessage are DocumentCommands
                             // by construction — no runtime guard needed.
-                            if let Some(ctx) = workspace.as_ref() {
-                                if matches!(command, DocumentCommand::DatasetOpened(_)) {
-                                    tracing::warn!(
-                                        client_id = %id,
-                                        workspace_id = %ctx.live.workspace_id,
-                                        "workspace.command.rejected_client_dataset_opened"
-                                    );
-                                    reject_command(&tx, id, CommandRejection::Invalid);
-                                    continue;
-                                }
-                                // Authorization lives in WorkspaceManager:
-                                // `rename_dataset` for a dataset rename,
-                                // `apply_document_command` for everything
-                                // else. The manager broadcasts what it applies;
-                                // this loop tells the sender what it refused.
-                                if let DocumentCommand::RenameDataset { id: ds_id, name } = &command
-                                {
-                                    match ctx
-                                        .manager
-                                        .rename_dataset(&ctx.live, &ctx.principal, id, ds_id, name)
-                                        .await
-                                    {
-                                        Ok(_) => {}
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                client_id = %id,
-                                                workspace_id = %ctx.live.workspace_id,
-                                                error = %e,
-                                                "workspace.command.rename_dataset_rejected"
-                                            );
-                                            reject_command(&tx, id, rename_rejection(&e));
-                                        }
-                                    }
-                                    continue;
-                                }
+                            if matches!(command, DocumentCommand::DatasetOpened(_)) {
+                                tracing::warn!(
+                                    client_id = %id,
+                                    workspace_id = %ctx.live.workspace_id,
+                                    "workspace.command.rejected_client_dataset_opened"
+                                );
+                                reject_command(&tx, id, CommandRejection::Invalid);
+                                continue;
+                            }
+                            // Authorization lives in WorkspaceManager:
+                            // `rename_dataset` for a dataset rename,
+                            // `apply_document_command` for everything
+                            // else. The manager broadcasts what it applies;
+                            // this loop tells the sender what it refused.
+                            if let DocumentCommand::RenameDataset { id: ds_id, name } = &command {
                                 match ctx
                                     .manager
-                                    .apply_document_command(&ctx.live, &ctx.principal, id, command)
+                                    .rename_dataset(&ctx.live, &ctx.principal, id, ds_id, name)
                                     .await
                                 {
                                     Ok(_) => {}
-                                    Err(e @ CommandApplyError::Forbidden) => {
+                                    Err(e) => {
                                         tracing::warn!(
                                             client_id = %id,
                                             workspace_id = %ctx.live.workspace_id,
                                             error = %e,
-                                            "workspace.command.forbidden"
+                                            "workspace.command.rename_dataset_rejected"
                                         );
-                                        reject_command(&tx, id, CommandRejection::Forbidden);
-                                    }
-                                    // A role-lookup store failure is not an
-                                    // authorization verdict — no role was
-                                    // read and nothing was applied — so it
-                                    // gets its own event: operators should
-                                    // see infrastructure trouble, not a
-                                    // permissions decision or a persistence
-                                    // fault.
-                                    Err(e @ CommandApplyError::GateUnavailable(_)) => {
-                                        tracing::error!(
-                                            client_id = %id,
-                                            workspace_id = %ctx.live.workspace_id,
-                                            error = %e,
-                                            "workspace.command.authorization_unavailable"
-                                        );
-                                        reject_command(&tx, id, CommandRejection::Unavailable);
-                                    }
-                                    Err(e @ CommandApplyError::PersistFailed(_)) => {
-                                        tracing::error!(
-                                            client_id = %id,
-                                            workspace_id = %ctx.live.workspace_id,
-                                            error = %e,
-                                            "workspace.command.persist_failed"
-                                        );
-                                        reject_command(&tx, id, CommandRejection::Unavailable);
+                                        reject_command(&tx, id, rename_rejection(&e));
                                     }
                                 }
                                 continue;
                             }
-
-                            // The legacy `/ws` session has no membership, so
-                            // nobody holds the editor role a workspace asks
-                            // for before its document changes.
-                            tracing::warn!(
-                                client_id = %id,
-                                "legacy_session.command.rejected"
-                            );
-                            reject_command(&tx, id, CommandRejection::Forbidden);
+                            match ctx
+                                .manager
+                                .apply_document_command(&ctx.live, &ctx.principal, id, command)
+                                .await
+                            {
+                                Ok(_) => {}
+                                Err(e @ CommandApplyError::Forbidden) => {
+                                    tracing::warn!(
+                                        client_id = %id,
+                                        workspace_id = %ctx.live.workspace_id,
+                                        error = %e,
+                                        "workspace.command.forbidden"
+                                    );
+                                    reject_command(&tx, id, CommandRejection::Forbidden);
+                                }
+                                // A role-lookup store failure is not an
+                                // authorization verdict — no role was
+                                // read and nothing was applied — so it
+                                // gets its own event: operators should
+                                // see infrastructure trouble, not a
+                                // permissions decision or a persistence
+                                // fault.
+                                Err(e @ CommandApplyError::GateUnavailable(_)) => {
+                                    tracing::error!(
+                                        client_id = %id,
+                                        workspace_id = %ctx.live.workspace_id,
+                                        error = %e,
+                                        "workspace.command.authorization_unavailable"
+                                    );
+                                    reject_command(&tx, id, CommandRejection::Unavailable);
+                                }
+                                Err(e @ CommandApplyError::PersistFailed(_)) => {
+                                    tracing::error!(
+                                        client_id = %id,
+                                        workspace_id = %ctx.live.workspace_id,
+                                        error = %e,
+                                        "workspace.command.persist_failed"
+                                    );
+                                    reject_command(&tx, id, CommandRejection::Unavailable);
+                                }
+                            }
                         }
                         ClientMessage::Presence {
                             camera,
@@ -493,44 +456,20 @@ async fn handle_client_inner(
                             }
                         }
                         ClientMessage::OpenRemoteDataset { request_id, url } => {
-                            // Adding a dataset takes the editor role, which
-                            // nobody holds on the legacy `/ws` session.
-                            let Some(scope) = workspace.clone() else {
-                                send_open_failed(
-                                    id,
-                                    &request_id,
-                                    &normalize_dataset_url(&url),
-                                    open_failure(
-                                        DatasetOpenStage::Authorization,
-                                        DatasetOpenFailureKind::Authorization,
-                                        false,
-                                        "opening a dataset requires a workspace session",
-                                        None,
-                                    ),
-                                    &unicast_routes,
-                                )
-                                .await;
-                                continue;
-                            };
                             tracing::info!(
                                 client_id = %id,
                                 request_id = %request_id,
                                 url = %url,
                                 "open_remote_dataset.received"
                             );
-                            let session_clone = Arc::clone(&session);
-                            let tx_clone = tx.clone();
-                            let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let proxy_config_clone = proxy_config.clone();
+                            let scope = ctx.clone();
                             let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest { request_id, url };
                             tokio::spawn(async move {
                                 handle_open_remote_dataset(
                                     id,
                                     request,
-                                    session_clone,
-                                    tx_clone,
-                                    unicast_routes_clone,
                                     proxy_config_clone,
                                     scope,
                                     timings_clone,
@@ -561,23 +500,6 @@ async fn handle_client_inner(
                             request_id,
                             dataset_id,
                         } => {
-                            let Some(ctx) = workspace.as_ref() else {
-                                send_open_failed(
-                                    id,
-                                    &request_id,
-                                    dataset_id.as_ref(),
-                                    open_failure(
-                                        DatasetOpenStage::Authorization,
-                                        DatasetOpenFailureKind::Internal,
-                                        false,
-                                        "dataset retry requires a workspace session",
-                                        None,
-                                    ),
-                                    &unicast_routes,
-                                )
-                                .await;
-                                continue;
-                            };
                             // Authorization is the manager's
                             // (`dataset_source_for_retry` gates on editor
                             // before the lookup); here we only translate its
@@ -629,11 +551,8 @@ async fn handle_client_inner(
                                 url = %source.canonical_url,
                                 "dataset_retry.received"
                             );
-                            let session_clone = Arc::clone(&session);
-                            let tx_clone = tx.clone();
-                            let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let proxy_config_clone = proxy_config.clone();
-                            let workspace_clone = ctx.clone();
+                            let scope = ctx.clone();
                             let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest {
                                 request_id,
@@ -643,11 +562,8 @@ async fn handle_client_inner(
                                 handle_open_remote_dataset(
                                     id,
                                     request,
-                                    session_clone,
-                                    tx_clone,
-                                    unicast_routes_clone,
                                     proxy_config_clone,
-                                    workspace_clone,
+                                    scope,
                                     timings_clone,
                                 )
                                 .await;
@@ -757,17 +673,6 @@ async fn handle_client_inner(
                             // Somebody pressed **Send report**. Nothing else
                             // reaches this arm: no run closing, no schedule,
                             // and no other message produces one.
-                            let Some(ctx) = workspace.as_ref() else {
-                                send_report_failed(
-                                    id,
-                                    request_id,
-                                    "this session is not in a workspace, so there is no inbox to send to"
-                                        .to_string(),
-                                    &unicast_routes,
-                                )
-                                .await;
-                                continue;
-                            };
                             let Some(store) = ctx.manager.inbox() else {
                                 send_report_failed(
                                     id,
@@ -1054,9 +959,7 @@ async fn handle_client_inner(
     }
     outbound.abort();
     unicast_routes.lock().await.remove(&id);
-    if let Some(ctx) = workspace.as_ref() {
-        ctx.live.detach_connection(id);
-    }
+    ctx.live.detach_connection(id);
     let generated_services: Vec<_> = {
         let sess = session.lock().await;
         sess.server_bindings
@@ -1480,13 +1383,11 @@ struct OpenRemoteDatasetRequest {
 async fn handle_open_remote_dataset(
     client_id: ClientId,
     request: OpenRemoteDatasetRequest,
-    session: Arc<Mutex<Session>>,
-    tx: broadcast::Sender<BroadcastItem>,
-    unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
     workspace: WorkspaceScope,
     timings: Arc<TimingBuffer>,
 ) {
+    let unicast_routes = Arc::clone(&workspace.live.unicast_routes);
     let OpenRemoteDatasetRequest { request_id, url } = request;
     // A location that does not parse is refused here, echoing the input as
     // given; past this point every envelope carries the canonical URL.
@@ -1530,11 +1431,9 @@ async fn handle_open_remote_dataset(
     };
 
     let ctx = DatasetOpenContext {
-        session,
-        tx,
         proxy_config,
         source_policy: workspace.manager.source_policy(),
-        workspace: Some(workspace),
+        workspace,
     };
     // Every metadata object this open reads files a row against the open's
     // own `request_id`, on the requesting connection's buffer. Scoped
@@ -2267,6 +2166,7 @@ async fn send_to_client(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Mutex;
 
     /// A probe wired to a buffer the test can read back, so what a serve path
     /// *declares* about its own outcome is asserted rather than assumed.

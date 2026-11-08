@@ -375,16 +375,6 @@ export interface BridgeHandlers {
     message?: string | null,
     failure?: ChunkFailureKind | null,
   ) => void;
-  /**
-   * A client mutated a bookmark whose dataset URLs overlap a dataset loaded
-   * in this session. `useBookmarks` refetches or removes it without waiting
-   * for a manual refresh.
-   */
-  onBookmarkChanged?: (
-    id: string,
-    action: BookmarkAction,
-    datasetUrls: string[],
-  ) => void;
   onWorkspaceArchived?: (workspaceId: string) => void;
   /**
    * The server refused one of this client's document commands and applied
@@ -411,20 +401,18 @@ export interface BridgeHandlers {
   onDisconnect?: () => void;
 }
 
-/** Mirror of `lucida_core::protocol::BookmarkAction` (lowercase wire form). */
-export type BookmarkAction = "created" | "updated" | "deleted";
-
 /** Mirror of `lucida_core::protocol::CommandRejection`. */
 export type CommandRejection = "forbidden" | "invalid" | "unavailable";
 
-/** Listener for cross-peer `bookmark_changed` broadcasts, via
- *  [`Bridge.subscribeBookmarkChanged`]. Fan-out lives on the bridge so
- *  feature code doesn't thread a pub-sub through React props. */
-export type BookmarkChangedListener = (
-  id: string,
-  action: BookmarkAction,
-  datasetUrls: string[],
-) => void;
+/** The socket for one workspace, on the page's own origin. Same-origin so
+ *  the session cookie rides the upgrade handshake: browsers withhold
+ *  SameSite=Lax cookies from a cross-origin WebSocket upgrade. The Vite dev
+ *  server proxies `/ws` to the backend; production serves both from one
+ *  origin. */
+export function workspaceSocketUrl(workspaceId: string): string {
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}/ws/workspaces/${encodeURIComponent(workspaceId)}`;
+}
 
 export class Bridge {
   private ws: WebSocket | null = null;
@@ -442,7 +430,6 @@ export class Bridge {
   private pendingCursor: string | null = null;
   private pendingDatasetHealth = new Map<string, PendingDatasetHealthRequest>();
   private pendingSendReports = new Map<string, PendingSendReport>();
-  private bookmarkChangedListeners: BookmarkChangedListener[] = [];
   /** Highest contiguously applied document `seq` on this connection,
    *  advanced by snapshots, in-order broadcasts, and acks of our own
    *  commands (which the server never rebroadcasts to us). `null` until the
@@ -479,20 +466,9 @@ export class Bridge {
    *  the retry timer asking until that snapshot lands. */
   private revertOwed = false;
 
-  constructor(handlers: BridgeHandlers, urlOverride?: string, workspaceId?: string) {
-    // Same-origin WebSocket so the lucida_session cookie is sent on
-    // the upgrade handshake (browsers refuse cross-origin cookies on
-    // WS upgrades with SameSite=Lax). Vite dev server proxies `/ws`
-    // to the backend; production serves both from one origin.
-    if (urlOverride) {
-      this.url = urlOverride;
-    } else {
-      const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-      const path = workspaceId
-        ? `/ws/workspaces/${encodeURIComponent(workspaceId)}`
-        : "/ws";
-      this.url = `${proto}//${window.location.host}${path}`;
-    }
+  /** `url` is a workspace socket; see {@link workspaceSocketUrl}. */
+  constructor(handlers: BridgeHandlers, url: string) {
+    this.url = url;
     this.handlers = handlers;
     this.connect();
   }
@@ -709,24 +685,6 @@ export class Bridge {
           case "message_rejected":
             this.handleMessageRejected(msg as MessageRejectedWire);
             break;
-          case "bookmark_changed": {
-            const action = msg.action as BookmarkAction;
-            const datasetUrls: string[] = Array.isArray(msg.dataset_urls)
-              ? msg.dataset_urls
-              : [];
-            const id: string = typeof msg.id === "string" ? msg.id : "";
-            this.handlers.onBookmarkChanged?.(id, action, datasetUrls);
-            for (const cb of this.bookmarkChangedListeners) {
-              try {
-                cb(id, action, datasetUrls);
-              } catch (e) {
-                bridgeLog("bookmark_changed.listener_threw", {
-                  error: e instanceof Error ? e.message : String(e),
-                });
-              }
-            }
-            break;
-          }
           case "workspace_archived":
             this.handlers.onWorkspaceArchived?.(msg.workspace_id ?? "");
             this.destroy();
@@ -1306,17 +1264,6 @@ export class Bridge {
         }
       }, PRESENCE_THROTTLE_MS);
     }
-  }
-
-  /** Subscribe to cross-peer `bookmark_changed` broadcasts. Returns
-   *  an unsubscribe function. Listeners run in registration order;
-   *  exceptions in a listener are logged but don't break the chain. */
-  subscribeBookmarkChanged(cb: BookmarkChangedListener): () => void {
-    this.bookmarkChangedListeners.push(cb);
-    return () => {
-      const idx = this.bookmarkChangedListeners.indexOf(cb);
-      if (idx >= 0) this.bookmarkChangedListeners.splice(idx, 1);
-    };
   }
 
   /** Low-level send. Drops the frame unless the socket is OPEN; a destroyed

@@ -77,8 +77,8 @@ export function useBridge(params: Params) {
 
   const controllerRef = useRef<SessionController | null>(null);
   const sessionRef = useRef<Session | null>(null);
-  /** State, not a ref, so consumers such as `useBookmarks` re-run their
-   *  subscribe effects once the bridge exists. */
+  /** State, not a ref, so consumers re-run their effects once the bridge
+   *  exists. */
   const [bridge, setBridge] = useState<Bridge | null>(null);
   // `Boolean(bridge)` is not readiness: the bridge exists while its WebSocket is
   // still CONNECTING, and `Bridge.send` silently drops frames before OPEN.

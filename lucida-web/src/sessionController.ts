@@ -8,6 +8,7 @@ import {
   type DatasetImportWarning,
   type DatasetOpenProgressDiagnostic,
   type PresenceState,
+  workspaceSocketUrl,
 } from "./bridge.ts";
 import type { DatasetState } from "./types.ts";
 import { Axis } from "./axes.ts";
@@ -304,7 +305,7 @@ export class SessionController {
         this.clearSurfacedError(["data"]);
       },
     });
-    const bridge = new Bridge(this.buildHandlers(), undefined, deps.workspaceId);
+    const bridge = new Bridge(this.buildHandlers(), workspaceSocketUrl(deps.workspaceId));
     this.session = new Session({
       bridge,
       contentSource: this.contentSource,

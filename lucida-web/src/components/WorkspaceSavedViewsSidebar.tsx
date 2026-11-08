@@ -19,7 +19,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { relativeTimeFromIso } from "../savedView/useBookmarks.ts";
+import { relativeTimeFromIso } from "../relativeTime.ts";
 import { Badge } from "../ui/Badge.tsx";
 import { Button, IconButton } from "../ui/Button.tsx";
 import { Dialog } from "../ui/Dialog.tsx";
