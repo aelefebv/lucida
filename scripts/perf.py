@@ -10,6 +10,7 @@ ratios, and print one table of what each run's diagnostic says.
     uv run scripts/perf.py --suite full
     uv run scripts/perf.py --dataset volume --scenario orbit,z-scrub --ratio 2
     uv run scripts/perf.py --list
+    uv run scripts/perf.py --repeat 3 --save-baseline
 
 It builds whatever is stale (server and CLI, wasm, web bundle), generates the
 datasets the selection needs, starts its own server, gives every run a
@@ -18,7 +19,8 @@ Ctrl-C included. The catalog, scenarios and suites live in `scripts/perf/`;
 `docs/perf.md` describes them.
 
 Every number in the table is a field of a run's diagnostic. This script
-selects and formats; it derives nothing.
+selects and formats; it derives nothing beyond the median and spread across
+repeats and the change against a baseline.
 """
 
 from __future__ import annotations
@@ -32,12 +34,15 @@ import shlex
 import shutil
 import signal
 import socket
+import statistics
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from collections import Counter
+from collections.abc import Callable
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -749,6 +754,18 @@ class Row:
     fields: dict[str, Any] = field(default_factory=dict)
 
 
+def parse_knob(text: str) -> str:
+    """A Dev controls knob as NAME=VALUE, NAME being its `lucida trace` flag without the dashes."""
+    if not re.fullmatch(r"[a-z][a-z0-9-]*=[^\s=]+", text):
+        raise PerfError(f"a knob is NAME=VALUE, such as max-fetches=4, not {text!r}; `lucida trace --help` lists them")
+    return text
+
+
+def knob_args(knobs: tuple[str, ...]) -> list[str]:
+    # The CLI judges the name and the value; a knob it does not know fails the run with its own message.
+    return [arg for knob in knobs for arg in (f"--{knob.split('=', 1)[0]}", knob.split("=", 1)[1])]
+
+
 def _first_error_line(log: Path) -> str:
     lines = [line.strip() for line in log.read_text(encoding="utf-8", errors="replace").splitlines() if line.strip()]
     for line in lines:
@@ -757,7 +774,16 @@ def _first_error_line(log: Path) -> str:
     return lines[-1] if lines else "no output"
 
 
-def run_case(case: Case, built: Build, server_url: str, location: str, out_dir: Path, timeout: int, stamp: str) -> Row:
+def run_case(
+    case: Case,
+    built: Build,
+    server_url: str,
+    location: str,
+    out_dir: Path,
+    timeout: int,
+    stamp: str,
+    knobs: tuple[str, ...] = (),
+) -> Row:
     runs_dir = out_dir / "runs"
     runs_dir.mkdir(parents=True, exist_ok=True)
     row = Row(case, runs_dir / f"{case.id}.json", runs_dir / f"{case.id}.txt")
@@ -805,6 +831,7 @@ def run_case(case: Case, built: Build, server_url: str, location: str, out_dir: 
         argv += ["--width", str(scenario.width)]
     if scenario.height is not None:
         argv += ["--height", str(scenario.height)]
+    argv += knob_args(knobs)
     if scenario.steps:
         # A scenario file is a script file: the CLI reads its steps and
         # ignores the keys around them.
@@ -899,7 +926,7 @@ def _bytes(value: Any) -> str:
 
 
 def _count(value: Any) -> str:
-    return DASH if value is None else f"{value:,}"
+    return DASH if value is None else f"{value:,.0f}"
 
 
 def _limiter(fields: dict[str, Any]) -> str:
@@ -917,44 +944,374 @@ def _steps(fields: dict[str, Any]) -> str:
     return " ".join(f"{step['kind']}:{step['verdict'] or 'no run'}" for step in steps)
 
 
-def table_cells(row: Row, out_dir: Path) -> list[str]:
-    case = row.case
-    scenario = case.scenario.name + (f" #{case.repeat}" if case.repeat > 1 else "")
-    run = row.run_file.relative_to(out_dir).as_posix() if row.run_file.exists() else row.log.relative_to(out_dir).as_posix()
-    if row.error is not None:
-        return [case.dataset.name, scenario, format_ratio(case.ratio), *[DASH] * 6, f"error: {row.error}", DASH, run]
-    f = row.fields
+@dataclass(frozen=True)
+class Metric:
+    """A numeric column the comparison judges. Larger is worse for every one."""
+
+    field: str
+    label: str
+    format: Callable[[Any], str]
+    # A change is noise unless it exceeds both this share of the baseline
+    # and the floor, in the metric's own unit, that keeps small values from
+    # being judged by share alone.
+    relative: float
+    floor: float
+
+    def allowance(self, baseline: float) -> float:
+        return max(self.relative * baseline, self.floor)
+
+
+# The allowances come from noise measured on an RTX A6000 shared with other
+# agents' browsers: seven runs of every quick-suite cell on one build, five as
+# repeats and two as separate invocations. Settle ranged by up to 228 ms on
+# cells under 600 ms, widest on a volume's cold open as the neighbours' load
+# came and went, and by up to 10% on cells near 2 s. First frame ranged by up
+# to 106 ms. Bytes and chunks fetched ranged by up to 4%, or two chunks, and
+# evictions not at all. The settle floor sits just above that noise because
+# `--max-fetches 1` slows the same cells by only 234 to 368 ms.
+METRICS = (
+    Metric("firstFrameMs", "first frame", _ms, relative=0.2, floor=150),
+    Metric("settleMs", "settle", _ms, relative=0.2, floor=250),
+    Metric("bytesFetched", "fetched", _bytes, relative=0.1, floor=1e6),
+    Metric("chunksFetched", "chunks", _count, relative=0.1, floor=8),
+    Metric("chunksEvicted", "evicted", _count, relative=0.1, floor=8),
+)
+
+
+@dataclass(frozen=True)
+class Stats:
+    """One metric across a cell's repeats."""
+
+    n: int
+    median: float
+    low: float
+    high: float
+
+    @classmethod
+    def of(cls, values: list[float]) -> Stats | None:
+        if not values:
+            return None
+        return cls(len(values), statistics.median(values), min(values), max(values))
+
+
+
+@dataclass
+class Cell:
+    """The runs of one dataset, scenario and ratio: a row of the table, and
+    what a baseline keeps and compares, under `key`, for its adapter and ratio."""
+
+    dataset: str
+    scenario: str
+    ratio: float
+    rows: list[Row]
+
+    @property
+    def key(self) -> str:
+        return f"{self.dataset}.{self.scenario}"
+
+    def measured(self) -> list[dict[str, Any]]:
+        return [row.fields for row in self.rows if row.error is None]
+
+    def stats(self, name: str) -> Stats | None:
+        return Stats.of([f[name] for f in self.measured() if isinstance(f.get(name), (int, float))])
+
+    def outcomes(self) -> list[str]:
+        return ["error" if row.error is not None else row.fields.get("verdict") or "no verdict" for row in self.rows]
+
+    def adapter(self) -> str | None:
+        return next((a for a in (adapter_of(f) for f in self.measured()) if a), None)
+
+    def record(self) -> dict[str, Any]:
+        """The cell as a baseline stores it and the comparison reads it."""
+        metrics = {m.field: asdict(s) for m in METRICS if (s := self.stats(m.field)) is not None}
+        return {"runs": len(self.rows), "metrics": metrics, "outcomes": dict(Counter(self.outcomes()))}
+
+
+def adapter_of(fields: dict[str, Any]) -> str | None:
+    return f"{fields['adapter']} ({fields['adapterKind']})" if fields.get("adapter") else None
+
+
+def group_cells(rows: list[Row]) -> list[Cell]:
+    """The rows gathered by dataset, scenario and ratio, in the order each first ran."""
+    cells: dict[tuple[str, str, float], Cell] = {}
+    for row in rows:
+        case = row.case
+        key = (case.dataset.name, case.scenario.name, case.ratio)
+        cells.setdefault(key, Cell(*key, [])).rows.append(row)
+    return list(cells.values())
+
+
+def _distinct(values: list[str]) -> str:
+    """One value when the repeats agree, else each with its count."""
+    counts = Counter(values)
+    if len(counts) == 1:
+        return values[0]
+    return ", ".join(f"{value} ×{n}" for value, n in counts.items())
+
+
+def _stat(stats: Stats | None, fmt: Callable[[Any], str]) -> str:
+    """The median, and half the range across repeats when they differ."""
+    if stats is None:
+        return DASH
+    if stats.high == stats.low:
+        return fmt(stats.median)
+    return f"{fmt(stats.median)} ±{fmt((stats.high - stats.low) / 2)}"
+
+
+def table_cells(cell: Cell, out_dir: Path) -> list[str]:
+    runs = len(cell.rows)
+    first = cell.rows[0]
+    run = (first.run_file if first.run_file.exists() else first.log).relative_to(out_dir).as_posix()
+    measured = cell.measured()
+    verdicts = [f"error: {row.error}" if row.error else row.fields.get("verdict") or DASH for row in cell.rows]
     return [
-        case.dataset.name,
-        scenario,
-        format_ratio(case.ratio),
-        _ms(f.get("firstFrameMs")),
-        _ms(f.get("settleMs")),
-        _bytes(f.get("bytesFetched")),
-        _count(f.get("chunksFetched")),
-        _count(f.get("chunksEvicted")),
-        _limiter(f),
-        f.get("verdict") or DASH,
-        _steps(f),
-        run,
+        cell.dataset,
+        cell.scenario + (f" ×{runs}" if runs > 1 else ""),
+        format_ratio(cell.ratio),
+        *[_stat(cell.stats(m.field), m.format) for m in METRICS],
+        _distinct([_limiter(f) for f in measured]) if measured else DASH,
+        _distinct(verdicts),
+        _distinct([_steps(f) for f in measured]) if measured else DASH,
+        run + (f" +{runs - 1}" if runs > 1 else ""),
     ]
 
 
-def render_markdown(rows: list[Row], out_dir: Path) -> str:
-    def cell(text: str) -> str:
+# ---------------------------------------------------------------------------
+# Baselines
+# ---------------------------------------------------------------------------
+
+BASELINE_COLUMN = "vs baseline"
+
+
+def default_baseline_dir() -> Path:
+    """The clone's git directory, which every worktree of the clone shares and
+    which neither `cargo clean` nor `git clean` empties, as they do `target/`."""
+    common = _git("rev-parse", "--path-format=absolute", "--git-common-dir")
+    return (Path(common) if common else REPO / "target") / "perf-baselines"
+
+
+def baseline_path(root: Path, adapter: str, ratio: float) -> Path:
+    slug = re.sub(r"[^a-z0-9]+", "-", adapter.lower()).strip("-")
+    return root / slug / f"dpr{format_ratio(ratio)}.json"
+
+
+def load_baseline(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    baseline = _read_json(path)
+    if not isinstance(baseline, dict) or not isinstance(baseline.get("cells"), dict):
+        raise PerfError(f"{path} is not a baseline: it has no cells")
+    return baseline
+
+
+@dataclass(frozen=True)
+class Change:
+    """One measure of a cell that moved by more than noise."""
+
+    label: str
+    before: str
+    after: str
+    share: float | None
+    worse: bool
+
+    def __str__(self) -> str:
+        share = "" if self.share is None else f" ({self.share:+.0%})"
+        return f"{self.label} {self.before} -> {self.after}{share}"
+
+
+# Only these outcomes regress a verdict. A stall verdict means a finding
+# crossed its threshold, and on one unchanged build that came and went on one
+# run in three to five of a cell, so it shows in the verdict column unflagged.
+UNSETTLED = frozenset({"unsettled", "error", "no verdict"})
+
+
+def compare_records(baseline: dict[str, Any], current: dict[str, Any]) -> list[Change]:
+    """What moved by more than noise between two records of one cell.
+
+    Records are compared by what they hold, so a record that gains a
+    measure is compared on it once both sides have it.
+    """
+    changes: list[Change] = []
+    for metric in METRICS:
+        stored = [record.get("metrics", {}).get(metric.field) for record in (baseline, current)]
+        if None in stored:
+            continue
+        before, after = (Stats(**s) for s in stored)
+        delta = after.median - before.median
+        if abs(delta) <= metric.allowance(before.median):
+            continue
+        share = delta / before.median if before.median else None
+        before_text, after_text = metric.format(before.median), metric.format(after.median)
+        changes.append(Change(metric.label, before_text, after_text, share, delta > 0))
+    before_outcomes, after_outcomes = baseline.get("outcomes") or {}, current.get("outcomes") or {}
+    settled_before, settled_after = not set(before_outcomes) & UNSETTLED, not set(after_outcomes) & UNSETTLED
+    if before_outcomes and after_outcomes and settled_before != settled_after:
+        changes.append(
+            Change("verdict", _outcome_text(before_outcomes), _outcome_text(after_outcomes), None, settled_before)
+        )
+    return changes
+
+
+def _outcome_text(outcomes: dict[str, int]) -> str:
+    return _distinct([outcome for outcome, n in outcomes.items() for _ in range(n)])
+
+
+@dataclass
+class Comparison:
+    """What the baselines say about an invocation's cells."""
+
+    root: Path
+    # By cell key and ratio; a cell missing here had no baseline to compare with.
+    changes: dict[tuple[str, float], list[Change]] = field(default_factory=dict)
+    notes: list[str] = field(default_factory=list)
+    compared: bool = False
+    refused: bool = False
+
+    def found(self, cell: Cell) -> list[Change] | None:
+        return self.changes.get((cell.key, cell.ratio))
+
+    def regressed(self, cell: Cell) -> bool:
+        return any(change.worse for change in self.found(cell) or [])
+
+    def describe(self, cell: Cell) -> str:
+        changes = self.found(cell)
+        if changes is None:
+            return "no baseline"
+        worse = ", ".join(str(c) for c in changes if c.worse)
+        # Not "better": a view that loads less under a smaller budget also
+        # settles sooner and fetches less.
+        changed = ", ".join(str(c) for c in changes if not c.worse)
+        parts = ([f"worse: {worse}"] if worse else []) + ([f"changed: {changed}"] if changed else [])
+        return "; ".join(parts) or "within noise"
+
+
+def _provenance(entries: list[dict[str, Any]]) -> str:
+    commits = dict.fromkeys(
+        f"{(e.get('commit') or 'unknown')[:9]}{' (dirty)' if e.get('dirty') else ''}, {e.get('savedAt') or 'undated'}"
+        for e in entries
+    )
+    return "; ".join(commits)
+
+
+def _knobs_text(knobs: Any) -> str:
+    return " ".join(f"--{k.replace('=', ' ', 1)}" for k in knobs) if knobs else "none"
+
+
+def compare(cells: list[Cell], root: Path, knobs: tuple[str, ...]) -> Comparison:
+    """Each cell against the baseline its adapter and ratio have under `root`.
+
+    Speed on one adapter says nothing about speed on another, so a baseline
+    is found by adapter and a file recorded on another adapter is refused.
+    """
+    comparison = Comparison(root)
+    adapters = {a for cell in cells if (a := cell.adapter())}
+    if len(adapters) != 1:
+        comparison.notes.append(
+            f"not compared: the runs recorded more than one adapter, {', '.join(sorted(adapters))}"
+            if adapters
+            else "not compared: no run recorded an adapter"
+        )
+        return comparison
+    adapter = adapters.pop()
+    for ratio in dict.fromkeys(cell.ratio for cell in cells):
+        dpr = format_ratio(ratio)
+        path = baseline_path(root, adapter, ratio)
+        try:
+            baseline = load_baseline(path)
+        except PerfError as error:
+            comparison.refused = True
+            comparison.notes.append(f"dpr {dpr}: not compared: {error}")
+            continue
+        if baseline is None:
+            others = sorted(p.parent.name for p in root.glob(f"*/dpr{dpr}.json"))
+            elsewhere = f"; {root} has one for {', '.join(others)}" if others else ""
+            comparison.notes.append(f"dpr {dpr}: no baseline for this adapter{elsewhere}")
+            continue
+        if baseline.get("adapter") != adapter:
+            comparison.refused = True
+            comparison.notes.append(
+                f"dpr {dpr}: not compared: {path} was recorded on {baseline.get('adapter') or 'an unnamed adapter'}, "
+                f"these runs on {adapter}"
+            )
+            continue
+        comparison.compared = True
+        entries = []
+        for cell in cells:
+            entry = baseline["cells"].get(cell.key) if cell.ratio == ratio else None
+            if entry is not None:
+                entries.append(entry)
+                comparison.changes[(cell.key, ratio)] = compare_records(entry, cell.record())
+        comparison.notes.append(f"dpr {dpr}: baseline {path}, from {_provenance(entries) or 'no matching cell'}")
+        theirs = ", ".join(sorted({_knobs_text(e.get("knobs")) for e in entries} - {_knobs_text(knobs)}))
+        if theirs:
+            comparison.notes.append(f"dpr {dpr}: knobs differ: these runs {_knobs_text(knobs)}, the baseline {theirs}")
+    return comparison
+
+
+def save_baseline(cells: list[Cell], root: Path, meta: dict[str, Any], knobs: tuple[str, ...]) -> list[str]:
+    """Write each clean cell into the baseline of its adapter and ratio,
+    replacing that cell and keeping the rest. A cell with a failed run is
+    left out, so a broken run never becomes the reference."""
+    notes: list[str] = []
+    groups: dict[tuple[str, float], list[Cell]] = {}
+    left_out = []
+    for cell in cells:
+        adapter = cell.adapter()
+        if adapter is None or any(row.error is not None for row in cell.rows):
+            left_out.append(f"{cell.key} dpr {format_ratio(cell.ratio)}")
+            continue
+        groups.setdefault((adapter, cell.ratio), []).append(cell)
+    for (adapter, ratio), group in groups.items():
+        path = baseline_path(root, adapter, ratio)
+        baseline = load_baseline(path)
+        if baseline is None or baseline.get("adapter") != adapter:
+            baseline = {"adapter": adapter, "ratio": ratio, "cells": {}}
+        for cell in group:
+            baseline["cells"][cell.key] = {
+                **cell.record(),
+                "commit": meta.get("commit"),
+                "dirty": meta.get("dirty"),
+                "savedAt": meta.get("startedAt"),
+                "knobs": list(knobs),
+            }
+        path.parent.mkdir(parents=True, exist_ok=True)
+        partial = path.with_name(path.name + ".partial")
+        partial.write_text(json.dumps(baseline, indent=2), encoding="utf-8")
+        os.replace(partial, path)
+        notes.append(f"saved {len(group)} cells as the dpr {format_ratio(ratio)} baseline: {path}")
+    if left_out:
+        notes.append(f"not saved, because a run failed: {', '.join(left_out)}")
+    return notes
+
+
+# ---------------------------------------------------------------------------
+# The summary
+# ---------------------------------------------------------------------------
+
+
+def render_markdown(rows: list[Row], out_dir: Path, comparison: Comparison | None = None) -> str:
+    def cell_text(text: str) -> str:
         return text.replace("|", "\\|")
 
-    adapters = sorted({f"{r.fields['adapter']} ({r.fields['adapterKind']})" for r in rows if r.fields.get("adapter")})
-    lines = [f"adapter: {', '.join(adapters) or 'not recorded'}", ""]
-    lines.append("| " + " | ".join(COLUMNS) + " |")
-    lines.append("|" + "|".join(" --- " for _ in COLUMNS) + "|")
-    for row in rows:
-        lines.append("| " + " | ".join(cell(c) for c in table_cells(row, out_dir)) + " |")
+    cells = group_cells(rows)
+    lines = [f"adapter: {', '.join(sorted({a for r in rows if (a := adapter_of(r.fields))})) or 'not recorded'}"]
+    lines += comparison.notes if comparison else []
+    compared = comparison if comparison and comparison.compared else None
+    columns = COLUMNS + ([BASELINE_COLUMN] if compared else [])
+    if compared:
+        # Stable, so the rest keep the order they ran in.
+        cells.sort(key=lambda c: not compared.regressed(c))
+    lines += ["", "| " + " | ".join(columns) + " |", "|" + "|".join(" --- " for _ in columns) + "|"]
+    for cell in cells:
+        texts = table_cells(cell, out_dir) + ([compared.describe(cell)] if compared else [])
+        lines.append("| " + " | ".join(cell_text(t) for t in texts) + " |")
     return "\n".join(lines) + "\n"
 
 
-def summary_json(rows: list[Row], out_dir: Path, meta: dict[str, Any]) -> dict[str, Any]:
-    return {
+def summary_json(
+    rows: list[Row], out_dir: Path, meta: dict[str, Any], comparison: Comparison | None = None
+) -> dict[str, Any]:
+    summary = {
         **meta,
         "rows": [
             {
@@ -970,7 +1327,22 @@ def summary_json(rows: list[Row], out_dir: Path, meta: dict[str, Any]) -> dict[s
             }
             for row in rows
         ],
+        "cells": [
+            {
+                "dataset": cell.dataset,
+                "scenario": cell.scenario,
+                "ratio": cell.ratio,
+                **cell.record(),
+                "vsBaseline": None
+                if comparison is None or (changes := comparison.found(cell)) is None
+                else [{**change.__dict__, "text": str(change)} for change in changes],
+            }
+            for cell in group_cells(rows)
+        ],
     }
+    if comparison is not None:
+        summary["baseline"] = {"dir": str(comparison.root), "notes": comparison.notes, "refused": comparison.refused}
+    return summary
 
 
 def _git(*args: str) -> str:
@@ -980,10 +1352,11 @@ def _git(*args: str) -> str:
         return ""
 
 
-def write_summary(rows: list[Row], out_dir: Path, meta: dict[str, Any]) -> str:
-    markdown = render_markdown(rows, out_dir)
+def write_summary(rows: list[Row], out_dir: Path, meta: dict[str, Any], comparison: Comparison | None = None) -> str:
+    markdown = render_markdown(rows, out_dir, comparison)
     (out_dir / "summary.md").write_text(markdown, encoding="utf-8")
-    (out_dir / "summary.json").write_text(json.dumps(summary_json(rows, out_dir, meta), indent=2), encoding="utf-8")
+    summary = summary_json(rows, out_dir, meta, comparison)
+    (out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     return markdown
 
 
@@ -1004,7 +1377,24 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--dataset", action="append", help="dataset names, comma-separated or repeated")
     parser.add_argument("--scenario", action="append", help="scenario names, comma-separated or repeated")
     parser.add_argument("--ratio", action="append", help="device pixel ratios, comma-separated or repeated")
-    parser.add_argument("--repeat", type=int, default=1, help="runs per dataset, scenario and ratio (default 1)")
+    parser.add_argument(
+        "--repeat", type=int, default=1, help="runs per dataset, scenario and ratio; the table shows their median"
+    )
+    parser.add_argument(
+        "--knob",
+        action="append",
+        help="a Dev controls knob as NAME=VALUE, NAME being its `lucida trace` flag without the dashes",
+    )
+    parser.add_argument(
+        "--save-baseline",
+        action="store_true",
+        help="keep these results as the baseline for their adapter and ratio, cell by cell",
+    )
+    parser.add_argument(
+        "--baseline",
+        type=Path,
+        help="where baselines are kept (default perf-baselines in the clone's git directory)",
+    )
     parser.add_argument("--timeout-seconds", type=int, default=120, help="per wait inside a run (default 120)")
     parser.add_argument("--output", type=Path, help="where runs and the summary go (default target/perf/runs/<time>)")
     parser.add_argument("--data", type=Path, help="where generated datasets are cached (default target/perf/datasets)")
@@ -1034,7 +1424,9 @@ def print_listing(catalog: dict[str, Dataset], scenarios: dict[str, Scenario], s
 
 def main(argv: list[str]) -> int:
     for stream in (sys.stdout, sys.stderr):
-        stream.reconfigure(errors="replace")  # type: ignore[attr-defined]
+        # UTF-8 like summary.md: a Windows pipe, such as Git Bash's terminal,
+        # would otherwise get the table's × and ± in the locale's code page.
+        stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
     args = parse_args(argv)
     catalog = load_catalog(PERF_DIR / "datasets.json", args.local_catalog)
     scenarios = load_scenarios(PERF_DIR / "scenarios")
@@ -1049,6 +1441,7 @@ def main(argv: list[str]) -> int:
         ratios=[parse_ratio(r) for r in _split(args.ratio)],
         repeat=args.repeat,
     )
+    knobs = tuple(parse_knob(k) for k in _split(args.knob))
     cases, skipped = plan(selection, catalog, scenarios, suites)
     if skipped:
         print(f"not applicable, left out: {describe_skipped(skipped, scenarios)}")
@@ -1075,6 +1468,7 @@ def main(argv: list[str]) -> int:
             "scenarios": selection.scenarios,
             "ratios": selection.ratios,
             "repeat": selection.repeat,
+            "knobs": list(knobs),
         },
     }
     rows: list[Row] = []
@@ -1088,7 +1482,8 @@ def main(argv: list[str]) -> int:
         print(f"server {server_url}, runs in {out_dir}", flush=True)
         for index, case in enumerate(cases, start=1):
             print(f"[{index}/{len(cases)}] {case.id} ...", end=" ", flush=True)
-            row = run_case(case, built, server_url, locations[case.dataset.name], out_dir, args.timeout_seconds, stamp)
+            location = locations[case.dataset.name]
+            row = run_case(case, built, server_url, location, out_dir, args.timeout_seconds, stamp, knobs)
             rows.append(row)
             print(f"error: {row.error}" if row.error else (row.fields.get("verdict") or "no verdict"), flush=True)
     except KeyboardInterrupt:
@@ -1097,13 +1492,22 @@ def main(argv: list[str]) -> int:
     finally:
         stop_everything()
         shutil.rmtree(out_dir / "tmp", ignore_errors=True)
-    if rows:
-        print()
-        print(write_summary(rows, out_dir, meta))
-        print(f"summary: {out_dir / 'summary.md'}")
+    if not rows:
+        return 130 if interrupted else 0
+    cells = group_cells(rows)
+    baseline_dir = (args.baseline or default_baseline_dir()).resolve()
+    comparison = compare(cells, baseline_dir, knobs)
+    print()
+    print(write_summary(rows, out_dir, meta, comparison))
+    print(f"summary: {out_dir / 'summary.md'}")
+    if args.save_baseline and not interrupted:
+        for note in save_baseline(cells, baseline_dir, meta, knobs):
+            print(note)
     if interrupted:
         return 130
-    return 1 if any(row.error for row in rows) else 0
+    if comparison.refused:
+        return 2
+    return 1 if any(row.error for row in rows) or any(comparison.regressed(c) for c in cells) else 0
 
 
 if __name__ == "__main__":
