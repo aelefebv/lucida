@@ -2942,6 +2942,7 @@ mod tests {
                         .unwrap() as usize;
                         LevelBindingInfo {
                             level_index: level.level_index,
+                            path: level.level_index.to_string(),
                             compression: StorageCompression::None,
                             chunk_shape: level.chunk_shape.to_vec(),
                             chunk_byte_layout: ChunkByteLayout {
