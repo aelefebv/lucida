@@ -29,4 +29,10 @@ export default defineConfig([
       ],
     },
   },
+  {
+    // Entry point: never hot-reloaded as a component module, so the
+    // fast-refresh export rule does not apply to its lazy() declarations.
+    files: ['src/main.tsx'],
+    rules: { 'react-refresh/only-export-components': 'off' },
+  },
 ])
