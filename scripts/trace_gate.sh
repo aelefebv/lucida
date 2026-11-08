@@ -50,7 +50,7 @@ datasets=(
 # a software rasterizer, so it gets a ninth of the default viewport and one
 # channel: a view draws every channel by default, and at ratio 2, where the
 # view asks for level 0, SwiftShader did not settle three channels inside
-# 300 s. One channel settles in about 80 s.
+# 300 s. One channel settles in about 70 s.
 runs=(
   "image|image||--camera slice"
   "volume|volume||--camera slice"
