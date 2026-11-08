@@ -34,7 +34,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "json"] }
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
-dirs = "5"
+dirs = "7"
 num_cpus = "1"
 rand = "0.8"
 thiserror = "2"
