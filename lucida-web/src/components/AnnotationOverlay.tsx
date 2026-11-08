@@ -68,7 +68,7 @@ interface Props {
    * dimmed, with a locator naming where it lives. */
   viewContext: ViewContext;
   /** The browser-persisted author identity from `annotationAuthorId()`, not the
-   * per-connection `bridge.myId`, so a pin authored here stays mine across
+   * per-connection `myId`, so a pin authored here stays mine across
    * rejoin. Gates move, reshape, and delete. */
   myId: string;
   /** Send a wire command (already wrapped by the bridge). */

@@ -148,7 +148,7 @@ function Viewer({
   const authSession = useAuthSession();
 
   // Browser-persisted author identity, used only for annotation `author` and
-  // ownership checks; `bridge.myId` stays the presence/cursor/follow identity.
+  // ownership checks; the connection's `myId` stays the presence/cursor/follow identity.
   // Persisting it lets a returning user keep control of what they authored.
   const annotationAuthor = useMemo(() => annotationAuthorId(), []);
 
@@ -324,6 +324,8 @@ function Viewer({
     getScene: engine.scene,
     sendOpenRemoteDataset: bridge.sendOpenRemoteDataset,
     sendCommand: bridge.sendCommand,
+    emitPresence: bridge.emitPresence,
+    emitDatasetPresence: bridge.emitDatasetPresence,
     // Any local or remote scene mutation bumps one of these. Viewport-only
     // changes bypass them and go through emitPresenceWithUrl.
     changeTick: datasetsVersion + remoteDocumentVersion,
@@ -482,6 +484,7 @@ function Viewer({
     overlay3dRef,
     breakFollow,
     emitPresence: emitPresenceWithUrl,
+    emitDatasetPresence: emitDatasetPresenceWithUrl,
     collapseDeepLinkHash: savedViewSync.collapseDeepLinkHash,
     docVersion: remoteDocumentVersion,
     onDeepLinkNotFound: setDeepLinkNotFound,
@@ -575,8 +578,7 @@ function Viewer({
     wasmSceneRef: scene.wasmSceneRef,
     loopRef: render.loopRef,
     sessionRef: bridge.sessionRef,
-    followTarget: bridge.followTarget,
-    followTargetRef: bridge.followTargetRef,
+    peerStore: bridge.peerStore,
   });
 
   // The volume viewer owns the fly toggle: entering fly mode also sets the fly
@@ -1002,8 +1004,7 @@ function Viewer({
     onBackToDashboard,
     onUseViewAsPreview: takeViewAsPreview,
     presence: {
-      peers: bridge.peers,
-      followTarget: bridge.followTarget,
+      peerStore: bridge.peerStore,
       onFollow: bridge.handleFollow,
     },
     share: {
@@ -1144,9 +1145,7 @@ function Viewer({
               breakFollow={breakFollow}
               sendCursor={bridge.sendCursor}
               sendCommand={bridge.sendCommand}
-              peers={bridge.peers}
-              myId={bridge.myId}
-              followTarget={bridge.followTarget}
+              peerStore={bridge.peerStore}
               overlay2dRef={overlay2dRef}
               overlay3dRef={overlay3dRef}
               annotationDraftRef={annotationDraftRef}

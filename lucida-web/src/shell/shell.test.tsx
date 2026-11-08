@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, within } from "@testing-librar
 import { createRef } from "react";
 import type { ClientId, PresenceState } from "../bridge.ts";
 import { minimapCardPreference } from "../components/canvasCards.ts";
+import { PeerStore } from "../peerStore.ts";
 import { themePreference } from "../theme/appearance.ts";
 import {
   __resetPreferencesForTesting,
@@ -153,16 +154,23 @@ function peer(id: number, following: ClientId | null = null): PresenceState {
   };
 }
 
+function peerStore(peers: Map<ClientId, PresenceState>, followTarget: ClientId | null = null): PeerStore {
+  const store = new PeerStore();
+  store.setPeers(peers);
+  store.setFollowTarget(followTarget);
+  return store;
+}
+
 describe("PresenceAvatars", () => {
   it("shows nothing when nobody else is here", () => {
-    const { container } = render(<PresenceAvatars peers={new Map()} followTarget={null} onFollow={() => {}} />);
+    const { container } = render(<PresenceAvatars peerStore={peerStore(new Map())} onFollow={() => {}} />);
     expect(container.innerHTML).toBe("");
   });
 
   it("won't follow someone who is following, and collapses a crowd into a menu", () => {
     const onFollow = vi.fn();
     const peers = new Map([1, 2, 3, 4, 5, 6].map((id) => [id, peer(id, id === 2 ? 1 : null)]));
-    render(<PresenceAvatars peers={peers} followTarget={null} onFollow={onFollow} />);
+    render(<PresenceAvatars peerStore={peerStore(peers)} onFollow={onFollow} />);
 
     const busy = screen.getByRole("button", { name: "Person 2 is following someone" }) as HTMLButtonElement;
     expect(busy.disabled).toBe(true);
@@ -176,14 +184,14 @@ describe("PresenceAvatars", () => {
 
 describe("CompactPresence", () => {
   it("shows nothing when nobody else is here", () => {
-    const { container } = render(<CompactPresence peers={new Map()} followTarget={null} onFollow={() => {}} />);
+    const { container } = render(<CompactPresence peerStore={peerStore(new Map())} onFollow={() => {}} />);
     expect(container.innerHTML).toBe("");
   });
 
   it("is one button that counts everyone and follows from its menu", async () => {
     const onFollow = vi.fn();
     const peers = new Map([1, 2, 3].map((id) => [id, peer(id, id === 2 ? 1 : null)]));
-    render(<CompactPresence peers={peers} followTarget={null} onFollow={onFollow} />);
+    render(<CompactPresence peerStore={peerStore(peers)} onFollow={onFollow} />);
 
     const trigger = screen.getByRole("button", { name: "3 other people here" });
     expect(trigger.textContent).toContain("+1");
@@ -201,7 +209,7 @@ describe("CompactPresence", () => {
   it("names whom it follows, and stops from the menu", async () => {
     const onFollow = vi.fn();
     const peers = new Map([1, 2].map((id) => [id, peer(id, null)]));
-    render(<CompactPresence peers={peers} followTarget={2} onFollow={onFollow} />);
+    render(<CompactPresence peerStore={peerStore(peers, 2)} onFollow={onFollow} />);
 
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Following Person 2, 2 other people here" }));

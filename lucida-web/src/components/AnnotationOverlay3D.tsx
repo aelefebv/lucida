@@ -49,7 +49,7 @@ interface Props {
    * same {@link isOffContext} as the 2D overlay. */
   viewContext: ViewContext;
   /** The browser-persisted author identity from `annotationAuthorId()`, not the
-   * per-connection `bridge.myId`, so ownership survives rejoining a workspace.
+   * per-connection `myId`, so ownership survives rejoining a workspace.
    * Own pins are tinted, and only their author may move or delete them. */
   myId: string;
   /** Send a wire command (already wrapped by the bridge). */
