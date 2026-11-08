@@ -745,7 +745,7 @@ describe("plan()", () => {
   });
 });
 
-describe("plan() — depth-bias focal plane (#532)", () => {
+describe("plan() — depth-bias focal plane", () => {
   // A single entity whose detail grid is 1x1x4 along Z (X/Y are one
   // chunk each), so the only thing that varies between detail chunks is
   // depth. chunkWorldZ = 128; Z-chunk world centers are 64, 192, 320,

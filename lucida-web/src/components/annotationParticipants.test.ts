@@ -142,28 +142,28 @@ describe("deriveMentionCandidates — union with workspace members", () => {
       annotations: [pin("alice")],
       currentUserId: "me",
       members: [
-        { email: "ada@x.io", display_name: "Ada Lovelace" },
-        { email: "grace@x.io", display_name: "Grace Hopper" },
+        { email: "ada@example.com", display_name: "Ada Lovelace" },
+        { email: "grace@example.com", display_name: "Grace Hopper" },
       ],
     });
     expect(out.map((c) => c.id)).toEqual([
       "author:me",
       "author:alice",
-      "member:ada@x.io",
-      "member:grace@x.io",
+      "member:ada@example.com",
+      "member:grace@example.com",
     ]);
     // Members are handled by their slugified display name.
-    expect(out.find((c) => c.id === "member:ada@x.io")?.label).toBe("AdaLovelace");
+    expect(out.find((c) => c.id === "member:ada@example.com")?.label).toBe("AdaLovelace");
   });
 
   it("falls back to an email-derived handle when a member name is unusable", () => {
     const out = deriveMentionCandidates({
       annotations: [],
       currentUserId: "me",
-      members: [{ email: "bot@x.io", display_name: "   " }],
+      members: [{ email: "bot@example.com", display_name: "   " }],
     });
-    const member = out.find((c) => c.id === "member:bot@x.io");
-    expect(member?.label).toBe(deriveHandle("bot@x.io"));
+    const member = out.find((c) => c.id === "member:bot@example.com");
+    expect(member?.label).toBe(deriveHandle("bot@example.com"));
     expect(isTokenSafe(member!.label)).toBe(true);
   });
 
@@ -176,10 +176,10 @@ describe("deriveMentionCandidates — union with workspace members", () => {
       currentUserEmail: "Me@Example.com",
       members: [
         { email: "me@example.com", display_name: "Me Myself" },
-        { email: "other@x.io", display_name: "Other Person" },
+        { email: "other@example.com", display_name: "Other Person" },
       ],
     });
-    expect(out.map((c) => c.id)).toEqual(["author:me", "member:other@x.io"]);
+    expect(out.map((c) => c.id)).toEqual(["author:me", "member:other@example.com"]);
     // No member entry leaked the current user's display name.
     expect(out.some((c) => c.label === "MeMyself")).toBe(false);
   });
@@ -189,8 +189,8 @@ describe("deriveMentionCandidates — union with workspace members", () => {
       annotations: [],
       currentUserId: "me",
       members: [
-        { email: "dup@x.io", display_name: "First" },
-        { email: "DUP@x.io", display_name: "Second" },
+        { email: "dup@example.com", display_name: "First" },
+        { email: "DUP@example.com", display_name: "Second" },
       ],
     });
     expect(out.filter((c) => c.id.startsWith("member:"))).toHaveLength(1);
@@ -200,14 +200,14 @@ describe("deriveMentionCandidates — union with workspace members", () => {
     // A participant author string equal to a member email stays a DISTINCT
     // candidate — the two keyspaces are namespaced, so neither shadows the other.
     const out = deriveMentionCandidates({
-      annotations: [pin("ada@x.io")],
+      annotations: [pin("ada@example.com")],
       currentUserId: "me",
-      members: [{ email: "ada@x.io", display_name: "Ada" }],
+      members: [{ email: "ada@example.com", display_name: "Ada" }],
     });
     expect(out.map((c) => c.id)).toEqual([
       "author:me",
-      "author:ada@x.io",
-      "member:ada@x.io",
+      "author:ada@example.com",
+      "member:ada@example.com",
     ]);
   });
 
@@ -216,8 +216,8 @@ describe("deriveMentionCandidates — union with workspace members", () => {
       annotations: [pin("uuid-1", ["uuid-2"])],
       currentUserId: "me",
       members: [
-        { email: "a@x.io", display_name: "Ada Lovelace" },
-        { email: "b@x.io", display_name: "!!!" },
+        { email: "a@example.com", display_name: "Ada Lovelace" },
+        { email: "b@example.com", display_name: "!!!" },
       ],
     });
     for (const c of out) expect(isTokenSafe(c.label)).toBe(true);

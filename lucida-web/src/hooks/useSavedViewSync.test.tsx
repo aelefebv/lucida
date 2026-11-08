@@ -188,7 +188,7 @@ function makeMockLoop(): {
   return { ref, interactiveCalls, residencyCalls };
 }
 
-describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
+describe("useSavedViewSync — exposes notifyChange", () => {
   let scene: MockScene;
   let store: SceneStore;
   let outRef: Captured;
@@ -240,7 +240,7 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
   });
 });
 
-describe("useSavedViewSync — capture surface writes no user state (#923)", () => {
+describe("useSavedViewSync — capture surface writes no user state", () => {
   let scene: MockScene;
   let store: SceneStore;
   let outRef: Captured;
@@ -486,7 +486,7 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
   });
 });
 
-describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
+describe("useSavedViewSync — apply-complete wiring", () => {
   let scene: MockScene;
   let store: SceneStore;
   let outRef: Captured;
@@ -498,7 +498,7 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     window.history.replaceState(null, "", "/");
   });
 
-  it("marks loop interactive + residency dirty after apply (Bug #2)", async () => {
+  it("marks loop interactive + residency dirty after apply", async () => {
     const loop = makeMockLoop();
     await act(async () => {
       render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
