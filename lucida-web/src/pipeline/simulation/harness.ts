@@ -24,6 +24,7 @@ import { applyViewportCommand } from "../../applyAndSend.ts";
 import { bumpSettingsGeneration } from "../../tickCommon.ts";
 import { AVAILABILITY_UPDATE_SOURCE } from "../../invalidation.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
+import { PointEvent } from "../../trace/types.ts";
 import { createQuiescenceState } from "../../trace/quiescence.ts";
 import type { AtlasBudgets } from "../../renderer/worker/state.ts";
 import type { MissingChunk } from "../../renderer/workerProtocol.ts";
@@ -72,7 +73,13 @@ const REPORT_KEY_LIMIT = 12;
 const RESENT_THRESHOLD = 3;
 
 export type ScenarioStep =
-  | { scrub: { z?: number; t?: number; c?: number } };
+  | { scrub: { z?: number; t?: number; c?: number } }
+  /** A drag, in device pixels; an arcball pan in a volume. */
+  | { pan: [dx: number, dy: number] }
+  /** A zoom by a factor about the view center; an arcball zoom in a volume. */
+  | { zoom: number }
+  /** A 3-D orbit, in radians. */
+  | { orbit: [dTheta: number, dPhi: number] };
 
 export interface ScenarioSpec {
   name: string;
@@ -153,6 +160,8 @@ export interface PhaseOutcome {
   frames: number;
   /** Chunks the page sent the worker in this phase. */
   chunksSent: number;
+  /** Distinct chunks among them; equal to `chunksSent` when none went twice. */
+  distinctChunksSent: number;
   quiescence: string;
   detail: TierCount;
   coarse: TierCount;
@@ -164,6 +173,12 @@ export interface PhaseOutcome {
   missingGpu: string[];
   /** Chunks the page sent the worker again and again in this phase, most often first. */
   resent: string[];
+  /**
+   * Chunks the uploader's progress guard held in this phase, with the
+   * worker's last reason. A held chunk means a feedback loop was cut, so the
+   * phase does not count as settled.
+   */
+  held: string[];
   /** The auto-contrast fits handed out in this phase, in order. */
   fits: ContrastFitRecord[];
 }
@@ -245,6 +260,8 @@ class Simulation {
   private loop: RenderLoop | null = null;
   /** `${memberId}/${chunkKey}` → the worker's last feedback reason and how often it was given. */
   private readonly feedback = new Map<string, { reason: string; count: number }>();
+  /** Every chunk the uploader's progress guard held, in order. */
+  private readonly held: string[] = [];
   private framesRun = 0;
   private readonly fits: ContrastFitRecord[] = [];
 
@@ -253,14 +270,13 @@ class Simulation {
     this.dpr = dpr;
     this.worker = new SimulatedWorker(scenario.atlas);
     this.worker.onPost = (msg) => {
-      if (msg.type !== "chunksEvicted") return;
-      const note = (key: string, reason: string): void => {
+      if (msg.type !== "chunkResidency" || msg.change === "held") return;
+      const reason = `${msg.change} ${msg.reason ?? ""}`.trim();
+      for (const key of msg.keys) {
         const id = `${msg.memberId}/${key}`;
         const prior = this.feedback.get(id);
         this.feedback.set(id, { reason, count: (prior?.reason === reason ? prior.count : 0) + 1 });
-      };
-      for (const key of msg.keys) note(key, msg.reason ?? "evicted");
-      for (const key of msg.skipped ?? []) note(key, "atlas-policy");
+      }
     };
     this.source = new SimulatedSource(
       { ...scenario.source, answer: (req) => this.answer(req) },
@@ -308,6 +324,15 @@ class Simulation {
       return worker;
     });
     traceRecorder.reset();
+    // The progress guard reports a held chunk only to the trace.
+    const record = traceRecorder.recordPointEvent.bind(traceRecorder);
+    vi.spyOn(traceRecorder, "recordPointEvent").mockImplementation((kind, reason, chunk, tier) => {
+      if (kind === PointEvent.Held && chunk) {
+        const { level, t, c, z, y, x } = chunk;
+        this.held.push(`${chunk.imageId} ${level}/${t}/${c}/${z}/${y}/${x} (${reason})`);
+      }
+      record(kind, reason, chunk, tier);
+    });
   }
 
   /** Open the dataset the way a live open does: apply, register, fit the camera, start the loop. */
@@ -356,9 +381,10 @@ class Simulation {
     loop.setAutoContrastListener((datasetId, channel, fit) => this.fits.push({ datasetId, channel, fit }));
 
     scene.set_viewport(deviceW, deviceH, this.dpr);
+    // The 3-D view's camera, as switching the dimension control sets it.
+    if (mode === "volume") applyViewportCommand(scene, { type: "set_mode_arcball" });
     scene.fit_camera_to_dataset_bounds(dataset.datasetId);
     loop.markInteractiveDirty("auto_fit_on_open");
-    if (mode === "slice") loop.setSliceParams(scene.z(), scene.t(), scene.c());
 
     if (dataset.generated) {
       const generated = dataset.generated;
@@ -398,12 +424,33 @@ class Simulation {
   apply(step: ScenarioStep): string {
     const scene = this.scene!;
     const loop = this.loop!;
+    const volume = this.scenario.mode === "volume";
+    if ("pan" in step) {
+      const [dx, dy] = step.pan;
+      applyViewportCommand(scene, volume ? { type: "arcball_pan", dx, dy } : { type: "pan", dx, dy });
+      loop.markInput("pan");
+      return `pan ${dx},${dy}`;
+    }
+    if ("zoom" in step) {
+      applyViewportCommand(
+        scene,
+        // The arcball scales its distance by `1 + delta`.
+        volume ? { type: "arcball_zoom", delta: 1 / step.zoom - 1 } : { type: "zoom_by", factor: step.zoom },
+      );
+      loop.markInput("zoom");
+      return `zoom ×${step.zoom}`;
+    }
+    if ("orbit" in step) {
+      const [dTheta, dPhi] = step.orbit;
+      applyViewportCommand(scene, { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi });
+      loop.markInput("orbit");
+      return `orbit ${dTheta},${dPhi}`;
+    }
     const { scrub } = step;
     loop.markInput("scrub");
     if (scrub.z !== undefined) applyViewportCommand(scene, { type: "set_z", z: scrub.z });
     if (scrub.t !== undefined) applyViewportCommand(scene, { type: "set_t", t: scrub.t });
     if (scrub.c !== undefined) applyViewportCommand(scene, { type: "set_c", c: scrub.c });
-    loop.setSliceParams(scene.z(), scene.t(), scene.c());
     return `scrub ${Object.entries(scrub).map(([axis, v]) => `${axis}=${v}`).join(" ")}`;
   }
 
@@ -453,6 +500,7 @@ class Simulation {
     const framesBefore = this.framesRun;
     const fitsBefore = this.fits.length;
     const sentBefore = new Map([...this.worker.deliveries].map(([key, d]) => [key, d.count]));
+    const heldBefore = this.held.length;
     const quietSteps = Math.ceil(QUIET_MS / FRAME_MS);
     let fixedSince: number | null = null;
     let requestsAtFixed = this.source.requestCount;
@@ -462,11 +510,11 @@ class Simulation {
       if (ranFrame || !this.atFixedPoint() || this.source.requestCount !== requestsAtFixed) {
         fixedSince = null;
         requestsAtFixed = this.source.requestCount;
-        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, fitsBefore, sentBefore);
+        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, fitsBefore, sentBefore, heldBefore);
         continue;
       }
       fixedSince ??= i;
-      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, fitsBefore, sentBefore);
+      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, fitsBefore, sentBefore, heldBefore);
     }
   }
 
@@ -477,6 +525,7 @@ class Simulation {
     framesBefore: number,
     fitsBefore: number,
     sentBefore: Map<string, number>,
+    heldBefore: number,
   ): PhaseOutcome {
     const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
     const page = pageSettle();
@@ -484,10 +533,12 @@ class Simulation {
     const missingGpu = this.missingFromGpu();
 
     let chunksSent = 0;
+    let distinctChunksSent = 0;
     const resent: Array<{ text: string; times: number }> = [];
     for (const [key, { tier, count }] of this.worker.deliveries) {
       const times = count - (sentBefore.get(key) ?? 0);
       chunksSent += times;
+      if (times > 0) distinctChunksSent++;
       if (times < RESENT_THRESHOLD) continue;
       const slash = key.indexOf("/");
       resent.push({ text: this.describeKey(key.slice(0, slash), key.slice(slash + 1), tier), times });
@@ -501,6 +552,8 @@ class Simulation {
       why = `fixed point after ${ticks} ticks, but the page publishes ${page.reason}`;
     } else if (this.scenario.gpuComplete && missingGpu.length > 0) {
       why = `fixed point after ${ticks} ticks, but the worker lacks ${missingGpu.length} chunks it wants`;
+    } else if (this.held.length > heldBefore) {
+      why = `fixed point after ${ticks} ticks, but only because the uploader held ${this.held.length - heldBefore} chunks`;
     }
 
     return {
@@ -510,6 +563,7 @@ class Simulation {
       why,
       frames: this.framesRun - framesBefore,
       chunksSent,
+      distinctChunksSent,
       quiescence: page.reason,
       detail: { resident: q.residentDetailChunks, desired: q.desiredDetailChunks },
       coarse: { resident: q.residentCoarseChunks, desired: q.desiredCoarseChunks },
@@ -518,6 +572,7 @@ class Simulation {
       missingCpu,
       missingGpu,
       resent: resent.map((r) => r.text),
+      held: this.held.slice(heldBefore),
       fits: this.fits.slice(fitsBefore),
     };
   }
@@ -573,6 +628,7 @@ class Simulation {
     traceRecorder.reset();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   }
 }
 
@@ -599,6 +655,7 @@ function formatReport(name: string, dpr: number, phases: PhaseOutcome[]): string
       ...formatKeys("wanted by the plan, not in the CPU cache", p.missingCpu),
       ...formatKeys("wanted by the worker, not on the GPU", p.missingGpu),
       ...formatKeys(`sent to the worker ${RESENT_THRESHOLD} or more times`, p.resent),
+      ...formatKeys("held by the uploader to cut a feedback loop", p.held),
     );
   }
   return lines.join("\n");

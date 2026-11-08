@@ -16,7 +16,7 @@ import type { WasmScene } from "lucida-core";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
 import { usePointerCoarse } from "../theme/viewport.ts";
-import { buildAnnotationView, liveViewWithLiveZTC } from "../savedView/buildAnnotationView.ts";
+import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { Annotation } from "./annotationDocument.ts";
 import { useAnnotationOverlay } from "./useAnnotationOverlay.ts";
 import { useAnnotationEditing, type AnnotationPlacement } from "./useAnnotationEditing.ts";
@@ -776,9 +776,7 @@ export const AnnotationOverlay = forwardRef<AnnotationOverlayHandle, Props>(func
    * point would be. */
   const viewForNewPoint = () => {
     const scene = wasmSceneRef.current;
-    return scene
-      ? buildAnnotationView(scene, liveViewWithLiveZTC(scene, viewContext.z, viewContext.t, viewContext.c))
-      : null;
+    return scene ? buildAnnotationView(scene) : null;
   };
   const addPoint = (at: AnnotationPlacement, openThread: boolean) => {
     editing.addPoint(at, { t: viewContext.t, c: viewContext.c, view: viewForNewPoint(), openThread });

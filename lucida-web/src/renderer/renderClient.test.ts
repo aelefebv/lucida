@@ -264,15 +264,15 @@ describe("RenderClient destroy", () => {
 
   it("worker messages flushed after destroy reach no callback but still release bitmaps", () => {
     const { client, worker } = makeReadyClient();
-    const onChunksEvicted = vi.fn();
-    client.onChunksEvicted = onChunksEvicted;
+    const onChunkResidency = vi.fn();
+    client.onChunkResidency = onChunkResidency;
     client.destroy();
 
-    worker.emit({ type: "chunksEvicted", memberId: "ds", keys: ["0/0/0/0/0/0"], skipped: [], reason: "evicted" });
+    worker.emit({ type: "chunkResidency", memberId: "ds", tier: "detail", change: "held", keys: ["0/0/0/0/0/0"] });
     const close = vi.fn();
     worker.emit({ type: "thumbnailResult", id: 99, bitmap: { close } });
 
-    expect(onChunksEvicted).not.toHaveBeenCalled();
+    expect(onChunkResidency).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledTimes(1);
   });
 });

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { TOKEN_NAMES } from "../theme/tokens.ts";
+import type { RowState } from "../trace/diagnose/types.ts";
 import {
   BAND_COLORS,
   CANVAS_COLORS,
+  CANVAS_ROW_STATE_COLORS,
   LANE_COLORS,
   MARK_COLORS,
   MESSAGE_COLORS,
@@ -10,7 +12,14 @@ import {
   ROW_STATE_COLORS,
 } from "./timelinePalette.ts";
 
-const SERIES_TABLES = { PHASE_COLORS, ROW_STATE_COLORS, LANE_COLORS, MESSAGE_COLORS, MARK_COLORS };
+const SERIES_TABLES = {
+  PHASE_COLORS,
+  ROW_STATE_COLORS,
+  CANVAS_ROW_STATE_COLORS,
+  LANE_COLORS,
+  MESSAGE_COLORS,
+  MARK_COLORS,
+};
 
 describe("the timeline palette", () => {
   it("names only theme tokens, so both presets reach every chart", () => {
@@ -26,5 +35,14 @@ describe("the timeline palette", () => {
   it.each(Object.entries(SERIES_TABLES))("gives each entry in %s a colour of its own", (_, table) => {
     const colors = Object.values(table);
     expect(new Set(colors).size).toBe(colors.length);
+  });
+
+  it("paints each row state on the canvas in the canvas variant of its own slot", () => {
+    const slot = (color: string) => /^var\(--lc-(canvas-)?chart-(\w+)\)$/.exec(color);
+    for (const [state, color] of Object.entries(ROW_STATE_COLORS)) {
+      const onCanvas = slot(CANVAS_ROW_STATE_COLORS[state as RowState]);
+      expect(onCanvas?.[1], state).toBe("canvas-");
+      expect(onCanvas?.[2], state).toBe(slot(color)?.[2]);
+    }
   });
 });

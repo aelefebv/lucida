@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type {
-  ChunksEvictedMessage,
+  ChunkResidencyMessage,
   ColdStateMessage,
   GpuErrorMessage,
   VolumeChunkDataMessage,
@@ -161,6 +161,12 @@ function cold(datasetId: string): ColdStateMessage {
       sortCenterVox: null,
       frustumPlanes: null,
     },
+    // The planner wants the whole target level.
+    wantedChunks: [{
+      memberId: `${datasetId}-img`,
+      tier: "detail",
+      chunkKeys: ["1/0/0/0/0/0", "1/0/0/0/0/1", "1/0/0/0/1/0", "1/0/0/0/1/1"],
+    }],
     activeSet: [{
       kind: "tile",
       entityId: `${datasetId}-img`,
@@ -212,8 +218,8 @@ function chunksAt(memberId: string, cells: Array<[number, number]>): VolumeChunk
 
 const DETAIL_POOL = "ds1:32x32x32:detail";
 
-function evictions(posts: WorkerToMainMessage[]): ChunksEvictedMessage[] {
-  return posts.filter((msg): msg is ChunksEvictedMessage => msg.type === "chunksEvicted");
+function residency(posts: WorkerToMainMessage[]): ChunkResidencyMessage[] {
+  return posts.filter((msg): msg is ChunkResidencyMessage => msg.type === "chunkResidency");
 }
 
 afterEach(() => {
@@ -359,11 +365,12 @@ describe("GPU errors", () => {
     gpu.scopeOf(lost.texture)!.resolve({ message: "out of memory" } as GPUError);
     await flush();
 
-    expect(evictions(posts)).toContainEqual({
-      type: "chunksEvicted",
+    expect(residency(posts)).toContainEqual({
+      type: "chunkResidency",
       memberId: "ds1-img",
+      tier: "detail",
+      change: "lost",
       keys: ["1/0/0/0/0/0", "1/0/0/0/0/1"],
-      skipped: [],
       reason: "out-of-memory",
     });
     expect(posts).toContainEqual(expect.objectContaining({ type: "gpuError", kind: "out-of-memory" }));
@@ -399,14 +406,10 @@ describe("a chunk that throws mid-batch", () => {
 
     expect([...pool.slots.keys()].sort()).toEqual(["ds1-img|1/0/0/0/0/0", "ds1-img|1/0/0/0/1/0"]);
     expect(pool.freeSlots.length).toBe(free - 2);
-    expect(evictions(posts)).toContainEqual({
-      type: "chunksEvicted",
-      memberId: "ds1-img",
-      keys: ["1/0/0/0/0/1"],
-      skipped: [],
-      reason: "upload-failed",
-    });
-    expect(evictions(posts).some((msg) => msg.skipped?.includes("1/0/0/0/0/1"))).toBe(false);
+    expect(residency(posts)).toEqual([
+      { type: "chunkResidency", memberId: "ds1-img", tier: "detail", change: "held", keys: ["1/0/0/0/0/0", "1/0/0/0/1/0"], reason: undefined },
+      { type: "chunkResidency", memberId: "ds1-img", tier: "detail", change: "refused", keys: ["1/0/0/0/0/1"], reason: "upload-failed" },
+    ]);
     gpu.settleScopes();
   });
 });

@@ -9,6 +9,7 @@ import type {
   ColdStateDeltaMessage,
   ColdStateDisplayState,
   ColdStateMessage,
+  WantedMemberChunks,
 } from "../../../renderer/workerProtocol.ts";
 import type { DatasetSettings } from "../../../tickCommon.ts";
 import type { SampleFormat } from "../../../renderer/dataTypeUtil.ts";
@@ -134,6 +135,7 @@ export function buildColdState(args: {
   visibleRegion: VisibleRegion;
   renderRadiusView?: { detail: number; coarse: number };
   desiredProxyKeys?: Iterable<string>;
+  wantedChunks: WantedMemberChunks[];
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   dsSettings: DatasetSettings | undefined;
@@ -158,6 +160,7 @@ export function buildColdState(args: {
     visibleRegion: args.visibleRegion,
     renderRadiusView: args.renderRadiusView,
     desiredProxyKeys: Array.from(args.desiredProxyKeys ?? []).sort(),
+    wantedChunks: args.wantedChunks,
     activeSet: coldActiveSet,
     viewMode: args.selection.renderMode,
     sampleFormat: args.sampleFormat,
@@ -251,6 +254,8 @@ export function buildColdStateDelta(args: {
   visibleRegion: VisibleRegion;
   renderRadiusView?: { detail: number; coarse: number };
   desiredProxyKeys?: Iterable<string>;
+  /** The changed entries; see `ColdStateDeltaMessage.wantedChunks`. */
+  wantedChunks: WantedMemberChunks[];
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   dsSettings: DatasetSettings | undefined;
@@ -300,6 +305,7 @@ export function buildColdStateDelta(args: {
     visibleRegion: args.visibleRegion,
     renderRadiusView: args.renderRadiusView,
     desiredProxyKeys: Array.from(args.desiredProxyKeys ?? []).sort(),
+    wantedChunks: args.wantedChunks,
     removedEntityIds,
     upserts,
     activeSetOrder,

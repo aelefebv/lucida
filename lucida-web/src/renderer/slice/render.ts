@@ -292,6 +292,14 @@ function buildAggregateBatches(
   return { quadData, batches, atlases };
 }
 
+/** The view center in a per-member layer's [0,1] coordinates: the slice eviction reference. */
+export function memberCameraUV(msg: SliceRenderMultiPassMessage, layer: SliceLayerParams): [number, number] {
+  return [
+    (msg.cx - (layer.offsetX ?? 0)) / layer.dataW,
+    (msg.cy - (layer.offsetY ?? 0)) / layer.dataH,
+  ];
+}
+
 export async function handleSliceRenderMultiPass(
   ctx: WorkerCtx,
   msg: SliceRenderMultiPassMessage,
@@ -385,10 +393,7 @@ export async function handleSliceRenderMultiPass(
     const ox = layer.offsetX ?? 0;
     const oy = layer.offsetY ?? 0;
     if (hasDetail || hasCoarse) {
-      setCameraUVForMember(ctx.state, memberId, [
-        (msg.cx - ox) / layer.dataW,
-        (msg.cy - oy) / layer.dataH,
-      ]);
+      setCameraUVForMember(ctx.state, memberId, memberCameraUV(msg, layer));
     }
 
     const idx = renderedLayers.length;

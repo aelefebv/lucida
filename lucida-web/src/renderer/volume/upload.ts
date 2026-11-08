@@ -1,10 +1,12 @@
 /**
- * Volume chunk upload: staleness check, eviction, GPU write, and per-member
- * feedback messages.
+ * Volume chunk upload: staleness check, admission against the planner's
+ * wanted keys, eviction, GPU write, and the residency report for every
+ * chunk.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type {
+  ChunkFeedbackReason,
   LabelVolumeChunkDataMessage,
   VolumeChunkDataMessage,
 } from "../workerProtocol.ts";
@@ -12,13 +14,11 @@ import { writeVolumeChunk } from "../gpuContext.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
 import { asUint32, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.ts";
-import {
-  parseCompositeKey,
-  makeCompositeKey,
-} from "../chunkKeys.ts";
-import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
-import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
-import { chunkDistSq, findFarthestSlot, rayHitForMember } from "./eviction.ts";
+import { makeCompositeKey } from "../chunkKeys.ts";
+import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
+import { mayEvict } from "../eviction.ts";
+import { wantedChunksFor } from "../wantedChunks.ts";
+import { chunkDistSq, findEvictionSlot, rayHitForMember } from "./eviction.ts";
 import {
   acquireLabelSlot,
   getOrCreateLabelVolumePool,
@@ -46,7 +46,7 @@ export function handleLabelVolumeChunkData(
   );
   if (!pool) {
     // Nothing of the batch is resident, so the page must not count it as sent.
-    postChunksRejected(ctx, memberId, msg.chunks);
+    postChunkResidency(ctx, memberId, LABEL_TIER, "refused", msg.chunks.map(c => c.key), "atlas-policy");
     return;
   }
 
@@ -102,16 +102,18 @@ export function handleVolumeChunkData(
   poolKey: string,
   memberId: string,
 ): void {
-  const { level, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
+  const { tier, level, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
+  const refuseAll = (reason: ChunkFeedbackReason): void =>
+    postChunkResidency(ctx, memberId, tier, "refused", msg.chunks.map(c => c.key), reason);
 
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
-    postChunksRequeued(ctx, memberId, msg.chunks, "stale");
+    refuseAll("stale");
     return;
   }
 
   const atlas = ctx.state.volumeAtlases.get(poolKey);
   if (!atlas) {
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+    refuseAll("missing-pool");
     return; // pool not yet created by cold state handler
   }
 
@@ -121,43 +123,33 @@ export function handleVolumeChunkData(
   const entityLodMetas = atlas.entityMetas.get(memberId);
   if (!entityLodMetas) {
     console.warn(`[volumeChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-entity-meta");
+    refuseAll("missing-entity-meta");
     return;
   }
   const lodMeta = entityLodMetas.find(m => m.level === level);
   if (!lodMeta) {
     console.warn(`[volumeChunkData] no lodMeta for level ${level} in entity ${memberId}, has levels [${entityLodMetas.map(m => m.level).join(",")}]`);
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-lod-meta");
+    refuseAll("missing-lod-meta");
     return;
   }
 
-  const evictedKeys: string[] = [];
-  const insertedKeys: string[] = []; // composite keys we successfully inserted
-  const radiusFilteredKeys: string[] = [];
-  const radiusFilteredKeySet = new Set<string>();
-  // A chunk that throws goes back to the page to be sent again, and the rest
-  // of the batch still lands.
-  const failedKeys: string[] = [];
-  const failedKeySet = new Set<string>();
+  const wanted = wantedChunksFor(ctx.state, memberId, tier);
+  const batch = new ResidencyBatch();
   let failure: unknown = null;
 
   for (const chunk of msg.chunks) {
     let claimed = -1;
+    let landed = false;
     try {
-      if (
-        !chunkAllowedByCurrentRenderRadius(
-          ctx.state,
-          memberId,
-          msg.tier,
-          { ...chunk, level },
-        )
-      ) {
-        radiusFilteredKeys.push(chunk.key);
-        radiusFilteredKeySet.add(chunk.key);
+      const compositeKey = makeCompositeKey(memberId, chunk.key);
+      if (atlas.slots.has(compositeKey)) {
+        batch.held.push(chunk.key);
         continue;
       }
-      const compositeKey = makeCompositeKey(memberId, chunk.key);
-      if (atlas.slots.has(compositeKey)) continue;
+      if (!wanted?.has(chunk.key)) {
+        batch.refuse(chunk.key, "unwanted");
+        continue;
+      }
 
       // A pool grows only once every slot it has holds a chunk.
       if (atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
@@ -167,17 +159,15 @@ export function handleVolumeChunkData(
       if (atlas.freeSlots.length > 0) {
         slotIndex = atlas.freeSlots.pop()!;
       } else {
-        const { key: evictKey, dist: farthestDist } = findFarthestSlot(ctx.state, atlas);
-        if (!evictKey) continue;
-        const cam = rayHitForMember(ctx.state, memberId);
-        const incomingDist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam);
-        // A tie keeps the resident, or mirror-image chunks displace each other
-        // on every re-send. A T or C scrub still replaces in place, because the
-        // remap unmaps the old selection's slots and they rank at infinite distance.
-        if (incomingDist >= farthestDist) continue;
-        slotIndex = atlas.slots.get(evictKey)!;
-        atlas.slots.delete(evictKey);
-        evictedKeys.push(evictKey);
+        const victim = findEvictionSlot(ctx.state, atlas, tier);
+        const incomingDist = chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, rayHitForMember(ctx.state, memberId));
+        if (!victim || !mayEvict(victim, incomingDist)) {
+          batch.refuse(chunk.key, "atlas-policy");
+          continue;
+        }
+        slotIndex = atlas.slots.get(victim.key)!;
+        atlas.slots.delete(victim.key);
+        batch.evicted.push(victim.key);
         const oldGridIdx = atlas.slotGridIdx[slotIndex];
         if (oldGridIdx >= 0) {
           atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
@@ -210,58 +200,21 @@ export function handleVolumeChunkData(
       }
       atlas.slots.set(compositeKey, slotIndex);
       claimed = -1;
-      insertedKeys.push(compositeKey);
       atlas.indirectionDirty = true;
+      batch.held.push(chunk.key);
+      landed = true;
     } catch (err) {
+      // A chunk that throws goes back to the page to be sent again, and the
+      // rest of the batch still lands.
       failure ??= err;
-      failedKeys.push(chunk.key);
-      failedKeySet.add(chunk.key);
+      if (!landed) batch.refuse(chunk.key, "upload-failed");
       // A slot taken for a chunk that never landed would hold nothing for good.
       if (claimed >= 0) releaseSlot(atlas, claimed);
     }
   }
 
-  const skippedKeys: string[] = [];
-  for (const chunk of msg.chunks) {
-    if (radiusFilteredKeySet.has(chunk.key)) continue;
-    if (failedKeySet.has(chunk.key)) continue;
-    const compositeKey = makeCompositeKey(memberId, chunk.key);
-    if (!atlas.slots.has(compositeKey)) {
-      skippedKeys.push(chunk.key); // report bare chunk key (not composite) for orchestrator
-    }
-  }
-
-  if (evictedKeys.length > 0 || skippedKeys.length > 0 || radiusFilteredKeys.length > 0 || failedKeys.length > 0) {
-    // Eviction keys are composite; each member has its own delivery tracking.
-    const evictedByMember = new Map<string, string[]>();
-    for (const ck of evictedKeys) {
-      const parsed = parseCompositeKey(ck);
-      if (!parsed) continue;
-      const arr = evictedByMember.get(parsed.memberId) ?? [];
-      arr.push(parsed.chunkKey);
-      evictedByMember.set(parsed.memberId, arr);
-    }
-    for (const [evMember, evKeys] of evictedByMember) {
-      ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [], reason: "evicted" });
-    }
-    if (skippedKeys.length > 0) {
-      postChunksRejected(
-        ctx,
-        memberId,
-        skippedKeys.map(key => ({ key })),
-      );
-    }
-    if (radiusFilteredKeys.length > 0) {
-      postChunksRequeued(
-        ctx,
-        memberId,
-        radiusFilteredKeys.map(key => ({ key })),
-        "radius-filter",
-      );
-    }
-    postChunksRequeued(ctx, memberId, failedKeys.map(key => ({ key })), "upload-failed");
-    ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
-  }
+  batch.post(ctx, memberId, tier);
+  if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
 
   if (failure !== null) throw failure;
 }

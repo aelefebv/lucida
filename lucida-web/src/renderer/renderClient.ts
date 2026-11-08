@@ -27,7 +27,7 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type {
   UploadClient,
-  ChunksEvictedHandler,
+  ChunkResidencyHandler,
   WantedSetHandler,
 } from "../pipeline/upload/uploadClient.ts";
 import { tokenColor } from "../theme/tokenColors.ts";
@@ -96,7 +96,7 @@ export class RenderClient implements UploadClient {
   private framePending = new Map<number, (capture: FrameCaptureResult) => void>();
   private frameSeq = 0;
 
-  onChunksEvicted: ChunksEvictedHandler | null = null;
+  onChunkResidency: ChunkResidencyHandler | null = null;
   /** Missing entries cover chunks and proxies; match on `kind`. */
   onWantedSetDelta: WantedSetHandler | null = null;
   /**
@@ -265,8 +265,8 @@ export class RenderClient implements UploadClient {
       if (msg.type === "thumbnailResult" && msg.bitmap) msg.bitmap.close();
       return;
     }
-    if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
-      this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
+    if (msg.type === "chunkResidency" && this.onChunkResidency) {
+      this.onChunkResidency(msg);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
     } else if (msg.type === "entityLevels") {
