@@ -11,8 +11,6 @@ import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import type { CanvasColors, ColdStateMessage, GpuAtlasReport, GpuErrorKind } from "../workerProtocol.ts";
 import type { AtlasState, LabelVolumePool } from "../volume/atlas.ts";
 import type { SliceAtlasState, LabelSlicePool } from "../slice/atlas.ts";
-import type { ProxyAtlasState } from "../proxyAtlas.ts";
-import type { EntityProxyDescriptor } from "../workerContext.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import type { EntitySource } from "../entitySources.ts";
 import type { PendingFrameCapture } from "./captureFrame.ts";
@@ -30,7 +28,7 @@ export interface GpuErrorReport {
 }
 
 export interface RendererState {
-  /** memberId → datasetId (canonical: imageId or imageId:chN; group-as-proxy resolves to entityId). */
+  /** memberId → datasetId (canonical: imageId or imageId:chN). */
   memberToDataset: Map<string, string>;
   /**
    * memberId → (`sourceKey(tier, level)` → pool key): the pool each
@@ -42,19 +40,7 @@ export interface RendererState {
   memberSourcePools: Map<string, Map<string, string>>;
   /** Per-dataset sections snapshot captured during the most recent cold state. */
   currentSourcesByDataset: Map<string, Map<string, EntitySource[]>>;
-  /** groupId → set of child tileEntityIds (used for GroupProxy3D fan-out). */
-  groupToTiles: Map<string, Set<string>>;
-  /**
-   * dataset → groupIds whose entries currently live in {@link groupToTiles}.
-   * Tracked so `removeLayerResources` can drop the group→tiles entries
-   * owned by the removed dataset without scanning every group's child set.
-   */
-  groupsByDataset: Map<string, Set<string>>;
 
-  /** dataset → poolKey → ProxyAtlasState (proxy GPU residency by `(datasetId, kind, slotDims, channel)`). */
-  proxyPoolsByDataset: Map<string, Map<string, ProxyAtlasState>>;
-  /** `${entityId}|${t}|${c}` → tile/group proxy handle pair (CPU mirror of GPU descriptor). */
-  proxyDescriptorsByEntity: Map<string, EntityProxyDescriptor>;
   /** dataset → entity descriptor buffer + index maps (rebuilt fresh on each cold state). */
   descriptorBuffersByDataset: Map<string, EntityDescriptorIndex>;
 
@@ -128,18 +114,6 @@ export interface RendererState {
   closing: boolean;
   /** Label texture sizes, `${memberId}|${w}x${h}x${d}`, that ran out of memory and are not tried again. */
   labelSizesOutOfMemory: Set<string>;
-
-  /** Proxy upload/residency counters exposed via `self.__lucidaProxyStats`. */
-  proxyStats: {
-    uploaded: number;
-    dropped: number;
-    evicted: number;
-    droppedStale: number;
-    droppedNotDesired: number;
-    droppedStaleRequest: number;
-    evictedLru: number;
-    evictedPolicy: number;
-  };
 }
 
 /** Build an empty {@link RendererState}. Called once in `case "init"`. */
@@ -149,10 +123,6 @@ export function createInitialState(atlasBudgets: AtlasBudgets = CEILING_BUDGETS)
     memberToDataset: new Map(),
     memberSourcePools: new Map(),
     currentSourcesByDataset: new Map(),
-    groupToTiles: new Map(),
-    groupsByDataset: new Map(),
-    proxyPoolsByDataset: new Map(),
-    proxyDescriptorsByEntity: new Map(),
     descriptorBuffersByDataset: new Map(),
     volumeAtlases: new Map(),
     sliceAtlases: new Map(),
@@ -174,15 +144,5 @@ export function createInitialState(atlasBudgets: AtlasBudgets = CEILING_BUDGETS)
     gpuFailed: false,
     closing: false,
     labelSizesOutOfMemory: new Set(),
-    proxyStats: {
-      uploaded: 0,
-      dropped: 0,
-      evicted: 0,
-      droppedStale: 0,
-      droppedNotDesired: 0,
-      droppedStaleRequest: 0,
-      evictedLru: 0,
-      evictedPolicy: 0,
-    },
   };
 }

@@ -3,7 +3,6 @@ import type { MainToWorkerMessage, WorkerToMainMessage } from "./workerProtocol.
 import type { WorkerCtx } from "./workerContext.ts";
 import { bootstrapWorker } from "./worker/bootstrap.ts";
 import { dispatchMessage } from "./worker/dispatch.ts";
-import { installDevtools } from "./worker/devtools.ts";
 import { handleDestroy } from "./worker/lifecycle.ts";
 import { inOrder } from "./worker/inOrder.ts";
 
@@ -33,7 +32,6 @@ async function handleMessage(msg: MainToWorkerMessage): Promise<void> {
   try {
     if (msg.type === "init") {
       ctx = await bootstrapWorker(msg.canvas, post, msg.deviceMemoryGiB ?? null, (task) => enqueue(task));
-      installDevtools(ctx.state);
       post({ type: "ready" });
       return;
     }

@@ -3,12 +3,8 @@
 
 import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
 import type { GeneratedChunkStatus } from "../generatedAvailability.ts";
-import type { ProxyKind } from "../assetCatalog.ts";
-import { parseProxyHeader, proxyResponseKey, type ProxyHeaderJs } from "./wireProtocol.ts";
 import { FetchError } from "./retry.ts";
 import type { WireLabel } from "../../trace/types.ts";
-
-export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
 /**
  * Failure statuses the server unicasts when a source chunk's store read
@@ -32,28 +28,9 @@ export interface FetchResult {
   dataType: string;
 }
 
-export interface FetchProxyRequest {
-  datasetId: string;
-  entityId: string;
-  kind: ProxyKind;
-  t: number;
-  c: number;
-}
-
-export interface FetchProxyResult {
-  header: ProxyHeaderJs;
-  /** Raw u16 voxel bytes (little-endian), length `dims[0]*dims[1]*dims[2]*2`. */
-  data: ArrayBuffer;
-}
-
 export interface ContentSource {
   fetch(request: FetchRequest, signal: AbortSignal, onLabel?: LabelSink): Promise<FetchResult>;
-  fetchProxy(
-    request: FetchProxyRequest,
-    signal: AbortSignal,
-    onLabel?: LabelSink,
-  ): Promise<FetchProxyResult>;
-  /** Owns the chunk-vs-proxy dispatch so the transport stays generic. */
+  /** A binary chunk frame off the socket, keyed by its composite chunk key. */
   handleBinary(key: string, data: ArrayBuffer): void;
 }
 
@@ -67,8 +44,6 @@ export interface ContentSource {
  * work.
  */
 export const DEFAULT_TIMEOUT_MS = 10_000;
-/** Proxies can take longer to generate than chunks. */
-const DEFAULT_PROXY_TIMEOUT_MS = 60_000;
 
 /**
  * Told the correlation label the request rode on, synchronously at fetch
@@ -96,38 +71,23 @@ interface PendingRequest {
   timeoutId: ReturnType<typeof setTimeout>;
 }
 
-interface PendingProxyRequest {
-  resolve: (data: ArrayBuffer) => void;
-  reject: (err: Error) => void;
-  timeoutId: ReturnType<typeof setTimeout>;
-}
-
 export class ProxiedContentSource implements ContentSource {
   private pending = new Map<string, PendingGroup>();
   /**
-   * The connection's label counter, shared by chunk and asset requests.
-   * Uniqueness is across the connection, not within a family: a label that
-   * is ambiguous until you also know the message type is not a join key.
-   * Gaps in either family's sequence are harmless — nothing derives order
-   * from contiguity.
+   * The connection's label counter. Uniqueness is across the connection:
+   * gaps in the sequence are harmless, since nothing derives order from
+   * contiguity.
    */
   private nextRid = 0;
   private connectionGeneration = 0;
-  private pendingProxy = new Map<string, PendingProxyRequest>();
   private imageWireFormats = new Map<string, WireFormat>();
 
   private sendMessage: (json: string) => void;
   private timeoutMs: number;
-  private proxyTimeoutMs: number;
 
-  constructor(
-    sendMessage: (json: string) => void,
-    timeoutMs = DEFAULT_TIMEOUT_MS,
-    proxyTimeoutMs = DEFAULT_PROXY_TIMEOUT_MS,
-  ) {
+  constructor(sendMessage: (json: string) => void, timeoutMs = DEFAULT_TIMEOUT_MS) {
     this.sendMessage = sendMessage;
     this.timeoutMs = timeoutMs;
-    this.proxyTimeoutMs = proxyTimeoutMs;
   }
 
   /**
@@ -154,13 +114,12 @@ export class ProxiedContentSource implements ContentSource {
     }
   }
 
-  /** Sniffs `proxy/` prefix to dispatch chunk vs proxy. */
   handleBinary(key: string, data: ArrayBuffer): void {
-    if (key.startsWith("proxy/")) {
-      this.handleProxyData(key, data);
-    } else {
-      this.handleChunkData(key, data);
-    }
+    const entries = this.takePending(key);
+    entries.forEach((entry, idx) => {
+      clearTimeout(entry.timeoutId);
+      entry.resolve(idx === 0 ? data : data.slice(0));
+    });
   }
 
   handleChunkStatus(
@@ -219,22 +178,6 @@ export class ProxiedContentSource implements ContentSource {
     }
   }
 
-  handleChunkData(key: string, data: ArrayBuffer): void {
-    const entries = this.takePending(key);
-    entries.forEach((entry, idx) => {
-      clearTimeout(entry.timeoutId);
-      entry.resolve(idx === 0 ? data : data.slice(0));
-    });
-  }
-
-  handleProxyData(key: string, data: ArrayBuffer): void {
-    const entry = this.pendingProxy.get(key);
-    if (entry) {
-      clearTimeout(entry.timeoutId);
-      this.pendingProxy.delete(key);
-      entry.resolve(data);
-    }
-  }
 
   /** Treated as `abort` downstream; matches caller-driven cancellation. */
   rejectDataset(datasetId: string): void {
@@ -248,7 +191,6 @@ export class ProxiedContentSource implements ContentSource {
         }
       }
     }
-    // Proxy keys aren't dataset-scoped — entity IDs are unique enough.
   }
 
   /** Transient so the cache's `OnceTransientRetry` covers the reconnect. */
@@ -260,11 +202,6 @@ export class ProxiedContentSource implements ContentSource {
       }
     }
     this.pending.clear();
-    for (const [, entry] of this.pendingProxy) {
-      clearTimeout(entry.timeoutId);
-      entry.reject(new FetchError("Bridge disconnected", { kind: "transient" }));
-    }
-    this.pendingProxy.clear();
   }
 
   fetch(request: FetchRequest, signal: AbortSignal, onLabel?: LabelSink): Promise<FetchResult> {
@@ -312,66 +249,6 @@ export class ProxiedContentSource implements ContentSource {
     });
   }
 
-  /** First 64 bytes are the header; rest is the u16 voxel payload. */
-  fetchProxy(
-    request: FetchProxyRequest,
-    signal: AbortSignal,
-    onLabel?: LabelSink,
-  ): Promise<FetchProxyResult> {
-    const { datasetId, entityId, kind, t, c } = request;
-    const responseKey = proxyResponseKey(entityId, kind, t, c);
-
-    return new Promise<FetchProxyResult>((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        this.pendingProxy.delete(responseKey);
-        // Cache won't retry (NeverRetry) but the kind is still transient
-        // so consumers reason about kind uniformly.
-        reject(new FetchError(`Proxy ${responseKey} timed out`, { kind: "transient" }));
-      }, this.proxyTimeoutMs);
-
-      this.pendingProxy.set(responseKey, {
-        resolve: (raw) => {
-          clearTimeout(timeoutId);
-          let header: ProxyHeaderJs;
-          try {
-            header = parseProxyHeader(raw, 0);
-          } catch (e) {
-            // Malformed header → permanent.
-            const message = e instanceof Error ? e.message : String(e);
-            reject(new FetchError(message, { kind: "permanent", cause: e }));
-            return;
-          }
-          const data = raw.slice(64);
-          resolve({
-            header,
-            data,
-          });
-        },
-        reject: (err) => { clearTimeout(timeoutId); reject(err); },
-        timeoutId,
-      });
-
-      // Assets draw from the same counter as chunks, so the label is unique
-      // across the connection rather than within a family.
-      const label = this.mintLabel();
-      onLabel?.(label);
-      this.sendMessage(JSON.stringify({
-        type: "asset_request",
-        rid: label.rid,
-        dataset_id: datasetId,
-        entity_id: entityId,
-        kind,
-        t,
-        c,
-      }));
-
-      signal.addEventListener("abort", () => {
-        clearTimeout(timeoutId);
-        this.pendingProxy.delete(responseKey);
-        reject(new DOMException("Aborted", "AbortError"));
-      });
-    });
-  }
 
   /**
    * Attach to the in-flight fetch for `key`, or open one. Returns the label

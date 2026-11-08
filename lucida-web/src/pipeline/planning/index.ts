@@ -8,11 +8,9 @@ export {
   initialPlanningState,
   type ZoomDirection,
   type ActiveSetEntry,
-  type AssetCatalogSnapshot,
   type BaseEntitySnapshot,
   type CacheStateSnapshot,
   type ChunkRequest,
-  type EntityMode,
   type EntitySnapshot,
   type TileEntry,
   type TileSnapshot,
@@ -23,11 +21,8 @@ export {
   type PlanningSnapshot,
   type PlanningState,
   type PlanStats,
-  type ProxyKind,
-  type ProxyRequest,
   type RequestPlan,
   type SelectionState,
-  type GroupAsProxyEntry,
   type MemberGroup,
   type GroupSnapshot,
 } from "./types.ts";
@@ -54,7 +49,6 @@ export { plan, emitPlanRequests } from "./plan.ts";
 export {
   DEFAULT_PLANNING_CONFIG,
   COARSE_LANE_OFFSET,
-  DEFAULT_PROXY_RESIDENCY_BUDGET_BYTES,
   DEPTH_BIAS_VIEW,
   DETAIL_LANE_OFFSET,
   DISTANCE_WEIGHT,
@@ -64,22 +58,11 @@ export {
   MINIMAP_SEED_FAST_MAX_CHUNKS,
   PREFETCH_DEPTH,
   PREFETCH_LANE_OFFSET,
-  PROXY_LANE_OFFSET,
   RENDER_RADIUS_DISABLED_VIEW,
-  GROUP_PROXY_PRIORITY_BUMP,
   mergeConfig,
   type PlanningConfig,
 } from "./config.ts";
 
-export {
-  planProxyResidency,
-  planProxyResidencyForInputs,
-  proxyRequestKey,
-  type ProxyResidencyBundleDecision,
-  type ProxyResidencyInput,
-  type ProxyResidencyPlan,
-  type ProxyResidencyStats,
-} from "./proxyResidency.ts";
 
 export {
   createSyntheticEntity,

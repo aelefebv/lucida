@@ -69,12 +69,6 @@ export class VolumeRenderer {
   private singleSlotIndirectionBuf: GPUBuffer | null = null;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
-  // The descriptor carries proxy pool and slot indices; the texture handle
-  // stays CPU-side because a bind group cannot index a texture array
-  // without a texture-array binding.
-  private tileProxyTexture: GPUTexture | null = null;
-  private groupProxyTexture: GPUTexture | null = null;
-  private dummyProxyTexture: GPUTexture | null = null;
 
   get isCompiled(): boolean {
     return this.pipeline !== null;
@@ -89,12 +83,12 @@ export class VolumeRenderer {
     const levelIndirectionEntries: GPUBindGroupLayoutEntry[] = [];
     for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
       levelTextureEntries.push({
-        binding: 7 + i,
+        binding: 5 + i,
         visibility: GPUShaderStage.FRAGMENT,
         texture: { sampleType: "uint", viewDimension: "3d" },
       });
       levelIndirectionEntries.push({
-        binding: 7 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
+        binding: 5 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
         visibility: GPUShaderStage.FRAGMENT,
         buffer: { type: "read-only-storage" },
       });
@@ -126,19 +120,8 @@ export class VolumeRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "read-only-storage" },
         },
-        // Proxy textures (tileProxy + groupProxy)
-        {
-          binding: 5,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
-        },
-        {
-          binding: 6,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
-        },
-        // One level pool per resident-level slot: textures at 7..10,
-        // their indirection buffers at 11..14.
+        // One level pool per resident-level slot: textures at 5..8,
+        // their indirection buffers at 9..12.
         ...levelTextureEntries,
         ...levelIndirectionEntries,
       ],
@@ -246,31 +229,6 @@ export class VolumeRenderer {
     // Bind group will be rebuilt on the next setTierAtlases call
   }
 
-  /** r16uint like the real proxy atlases, so the bind-group layout is satisfied. */
-  private getDummyProxyTexture(): GPUTexture {
-    if (!this.dummyProxyTexture) {
-      this.dummyProxyTexture = this.device.createTexture({
-        size: [1, 1, 1],
-        format: "r16uint",
-        dimension: "3d",
-        usage: GPUTextureUsage.TEXTURE_BINDING,
-      });
-    }
-    return this.dummyProxyTexture;
-  }
-
-  /**
-   * Configure proxy textures for the next draw. Slot indices and dims
-   * live in the per-entity descriptor; the shader consults them only
-   * when the entity binds no chunk tier.
-   */
-  setProxyTextures(
-    tileTexture: GPUTexture | null,
-    groupTexture: GPUTexture | null,
-  ) {
-    this.tileProxyTexture = tileTexture;
-    this.groupProxyTexture = groupTexture;
-  }
 
   /**
    * Bind the level pools a member's level sources name, in slot order
@@ -284,21 +242,18 @@ export class VolumeRenderer {
   ) {
     this.levelBindings = levels.slice(0, DESCRIPTOR_MAX_LEVEL_SOURCES);
     this.coarseBinding = coarse;
-    const dummyProxy = this.getDummyProxyTexture();
     const entries: GPUBindGroupEntry[] = [
       { binding: 0, resource: { buffer: this.uniformBuffer } },
       { binding: 1, resource: this.lutTexture.createView() },
       { binding: 2, resource: this.lutSampler },
       { binding: 3, resource: (coarse?.texture ?? this.dummyTexture).createView() },
       { binding: 4, resource: { buffer: coarse?.indirectionBuf ?? this.dummyIndirectionBuffer } },
-      { binding: 5, resource: (this.tileProxyTexture ?? dummyProxy).createView() },
-      { binding: 6, resource: (this.groupProxyTexture ?? dummyProxy).createView() },
     ];
     for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
       const b = this.levelBindings[i] ?? null;
-      entries.push({ binding: 7 + i, resource: (b?.texture ?? this.dummyTexture).createView() });
+      entries.push({ binding: 5 + i, resource: (b?.texture ?? this.dummyTexture).createView() });
       entries.push({
-        binding: 7 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
+        binding: 5 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
         resource: { buffer: b?.indirectionBuf ?? this.dummyIndirectionBuffer },
       });
     }

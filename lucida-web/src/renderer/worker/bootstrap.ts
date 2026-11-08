@@ -16,16 +16,11 @@ import { SliceRenderer } from "../sliceRenderer.ts";
 import { VolumeRenderer } from "../volumeRenderer.ts";
 import { LayerCompositor } from "../layerCompositor.ts";
 import { CursorRenderer } from "../cursorRenderer.ts";
-import { computeWantedSet, type ProxyAtlasSnapshot } from "../wantedSet.ts";
-import {
-  buildDescriptorBuffer,
-  destroyDescriptorBuffer,
-} from "../descriptorBuffer.ts";
+import { computeWantedSet } from "../wantedSet.ts";
 import { createInitialState, type RendererState } from "./state.ts";
 import { ensureOffscreenPool, getOrCreateLUT } from "./resources.ts";
 import { createFrameTiming, type FrameTiming } from "../passTiming.ts";
 import { watchDevice } from "./deviceLoss.ts";
-import { proxyDescriptorKey } from "../workerContext.ts";
 import { sourceKey } from "../poolKeys.ts";
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 
@@ -102,14 +97,6 @@ export async function bootstrapWorker(
     getOrCreateLUT: (name) => getOrCreateLUT(ctx.device, name),
     post,
     postWantedSet,
-    lookupProxyDescriptor(entityId: string, t: number, c: number) {
-      return state.proxyDescriptorsByEntity.get(proxyDescriptorKey(entityId, t, c)) ?? null;
-    },
-    lookupProxyPool(datasetId: string, poolKey: string) {
-      const dsPools = state.proxyPoolsByDataset.get(datasetId);
-      if (!dsPools) return null;
-      return dsPools.get(poolKey) ?? null;
-    },
     lookupEntityDescriptor(datasetId: string) {
       return state.descriptorBuffersByDataset.get(datasetId) ?? null;
     },
@@ -135,24 +122,12 @@ export function createWantedSetPoster(
   state: RendererState,
   post: (msg: WorkerToMainMessage, transfer?: Transferable[]) => void,
 ): (datasetId?: string) => void {
-  /** A flat snapshot of a dataset's proxy pools, in the shape `computeWantedSet()` expects. */
-  function buildProxyAtlasSnapshot(datasetId: string): Map<string, ProxyAtlasSnapshot> {
-    const snap = new Map<string, ProxyAtlasSnapshot>();
-    const pools = state.proxyPoolsByDataset.get(datasetId);
-    if (!pools) return snap;
-    for (const [poolKey, pool] of pools) {
-      snap.set(poolKey, { kind: pool.kind, slots: pool.slots });
-    }
-    return snap;
-  }
-
   return function postWantedSet(datasetId?: string): void {
     const cold = datasetId === undefined
       ? state.currentColdState
       : state.coldStateByDataset.get(datasetId) ?? null;
     if (!cold) return;
     const epochs = cold === state.currentColdState ? state.currentEpochs ?? cold.epochs : cold.epochs;
-    const proxySnap = buildProxyAtlasSnapshot(cold.datasetId);
     const result = computeWantedSet(
       cold,
       state.wantedByDataset.get(cold.datasetId) ?? new Map(),
@@ -160,7 +135,6 @@ export function createWantedSetPoster(
       state.sliceAtlases,
       (memberId, tier, level) =>
         state.memberSourcePools.get(memberId)?.get(sourceKey(tier, level)),
-      proxySnap,
     );
     // Ahead of the missing list, which names these too: the page was told
     // they were held, and a missing chunk it holds is a disagreement.
@@ -186,26 +160,4 @@ export function createWantedSetPoster(
       entities: result.levels,
     });
   };
-}
-
-/**
- * Rebuild the entity descriptor buffer iff `datasetId` is the current cold
- * state. Other datasets' proxy uploads stay resident, but their descriptor
- * waits for their own cold state.
- */
-export function rebuildDescriptorIfMatching(ctx: WorkerCtx, datasetId: string): void {
-  const state = ctx.state;
-  if (!state.currentColdState || state.currentColdState.datasetId !== datasetId) return;
-  const oldDesc = state.descriptorBuffersByDataset.get(datasetId);
-  if (oldDesc) destroyDescriptorBuffer(oldDesc);
-  state.descriptorBuffersByDataset.set(
-    datasetId,
-    buildDescriptorBuffer(
-      ctx.device,
-      state.currentColdState,
-      state.proxyDescriptorsByEntity,
-      state.proxyPoolsByDataset,
-      state.currentSourcesByDataset.get(datasetId) ?? new Map(),
-    ),
-  );
 }

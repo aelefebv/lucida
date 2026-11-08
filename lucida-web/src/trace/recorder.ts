@@ -1047,10 +1047,7 @@ export class TraceRecorder {
    * A metadata read joins on the open it ran under. A chunk joins on the
    * label, which this interval must have minted: labels restart at zero per
    * connection and are minted in order, so the range this interval saw bounds
-   * every label it could place. An asset joins on nothing — assets draw from
-   * the same label counter but this build gives them no lifecycle row, so
-   * every asset row is unplaceable by construction and is refused as a family
-   * rather than by whether its label happens to land inside a chunk's range.
+   * every label it could place.
    */
   private canPlace(
     run: OpenInterval,
@@ -1060,7 +1057,6 @@ export class TraceRecorder {
     family: WireRowFamily,
   ): boolean {
     if (family === "metadata_read") return requestId !== null && run.datasetOpens.has(requestId);
-    if (family === "asset") return false;
     const record = this.connectionRecord(run, generation);
     if (!record || record.firstRid === null || record.lastRid === null) return false;
     return rid >= record.firstRid && rid <= record.lastRid;

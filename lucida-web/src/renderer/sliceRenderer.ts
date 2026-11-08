@@ -32,8 +32,8 @@ export interface SlicePoolBinding {
 
 /**
  * One aggregate sub-batch: a contiguous run of quad records that share
- * the same pool bindings (level pools in slot order, coarse pool,
- * tile/group proxy pools), drawn with exactly those resources bound.
+ * the same pool bindings (level pools in slot order, coarse pool), drawn
+ * with exactly those resources bound.
  * `firstInstance` / `count` address the run inside the layer's quad
  * storage buffer.
  */
@@ -41,8 +41,6 @@ export interface AggregateBatch {
   /** Level pool bindings in slot order (index = the descriptor's `poolIndex`); at most four. */
   levels: Array<SlicePoolBinding | null>;
   coarse: SlicePoolBinding | null;
-  tileProxyTexture: GPUTexture | null;
-  groupProxyTexture: GPUTexture | null;
   firstInstance: number;
   count: number;
 }
@@ -159,12 +157,6 @@ export class SliceRenderer {
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
 
-  // Proxy textures still bound CPU-side (slot indices and dims come
-  // from the descriptor).
-  private tileProxyTexture: GPUTexture | null = null;
-  private groupProxyTexture: GPUTexture | null = null;
-  private dummyProxyTexture: GPUTexture | null = null;
-
   get isCompiled(): boolean {
     return this.pipeline !== null && this.aggregatePipelines !== null;
   }
@@ -178,12 +170,12 @@ export class SliceRenderer {
     const levelIndirectionEntries: GPUBindGroupLayoutEntry[] = [];
     for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
       levelTextureEntries.push({
-        binding: 7 + i,
+        binding: 5 + i,
         visibility: GPUShaderStage.FRAGMENT,
         texture: { sampleType: "uint", viewDimension: "2d" },
       });
       levelIndirectionEntries.push({
-        binding: 7 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
+        binding: 5 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
         visibility: GPUShaderStage.FRAGMENT,
         buffer: { type: "read-only-storage" },
       });
@@ -215,20 +207,8 @@ export class SliceRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "read-only-storage" },
         },
-        // Proxy textures (tileProxy + groupProxy), 3D r16uint as in
-        // volume.wgsl. Slice mode reads at the slot's Z midpoint.
-        {
-          binding: 5,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
-        },
-        {
-          binding: 6,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
-        },
-        // One level pool per resident-level slot: textures at 7..10,
-        // their indirection buffers at 11..14.
+        // One level pool per resident-level slot: textures at 5..8,
+        // their indirection buffers at 9..12.
         ...levelTextureEntries,
         ...levelIndirectionEntries,
       ],
@@ -404,32 +384,6 @@ export class SliceRenderer {
     this.rebuildBindGroup();
   }
 
-  private getDummyProxyTexture(): GPUTexture {
-    if (!this.dummyProxyTexture) {
-      this.dummyProxyTexture = this.device.createTexture({
-        size: [1, 1, 1],
-        format: "r16uint",
-        dimension: "3d",
-        usage: GPUTextureUsage.TEXTURE_BINDING,
-      });
-    }
-    return this.dummyProxyTexture;
-  }
-
-  /**
-   * Configure proxy textures for the next draw. Slot indices and dims
-   * live in the per-entity descriptor; the shader consults them only
-   * when the entity binds no chunk tier.
-   */
-  setProxyTextures(
-    tileTexture: GPUTexture | null,
-    groupTexture: GPUTexture | null,
-  ) {
-    this.tileProxyTexture = tileTexture;
-    this.groupProxyTexture = groupTexture;
-    this.rebuildBindGroup();
-  }
-
   /**
    * Set the declared-label-palette storage buffer for the next categorical
    * draw ([id, packedRgba] pairs). Pass `null` for intensity draws; a
@@ -471,24 +425,19 @@ export class SliceRenderer {
     uniformBuffer: GPUBuffer,
     levels: ReadonlyArray<SlicePoolBinding | null>,
     coarse: SlicePoolBinding | null,
-    tileProxyTexture: GPUTexture | null,
-    groupProxyTexture: GPUTexture | null,
   ): GPUBindGroupEntry[] {
-    const dummyProxy = this.getDummyProxyTexture();
     const entries: GPUBindGroupEntry[] = [
       { binding: 0, resource: { buffer: uniformBuffer } },
       { binding: 1, resource: this.lutTexture.createView() },
       { binding: 2, resource: this.lutSampler },
       { binding: 3, resource: (coarse?.texture ?? this.dummyTexture).createView() },
       { binding: 4, resource: { buffer: coarse?.indirectionBuf ?? this.dummyIndirectionBuffer } },
-      { binding: 5, resource: (tileProxyTexture ?? dummyProxy).createView() },
-      { binding: 6, resource: (groupProxyTexture ?? dummyProxy).createView() },
     ];
     for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
       const b = levels[i] ?? null;
-      entries.push({ binding: 7 + i, resource: (b?.texture ?? this.dummyTexture).createView() });
+      entries.push({ binding: 5 + i, resource: (b?.texture ?? this.dummyTexture).createView() });
       entries.push({
-        binding: 7 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
+        binding: 5 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
         resource: { buffer: b?.indirectionBuf ?? this.dummyIndirectionBuffer },
       });
     }
@@ -502,8 +451,6 @@ export class SliceRenderer {
         this.uniformBuffer,
         this.levelBindings,
         this.coarseBinding,
-        this.tileProxyTexture,
-        this.groupProxyTexture,
       ),
     });
   }
@@ -608,8 +555,6 @@ export class SliceRenderer {
           this.aggregateUniformBuffers[i],
           batch.levels,
           batch.coarse,
-          batch.tileProxyTexture,
-          batch.groupProxyTexture,
         ),
       });
     });

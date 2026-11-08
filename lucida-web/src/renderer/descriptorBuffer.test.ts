@@ -31,7 +31,6 @@ import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 import {
   DESCRIPTOR_ENTRY_SIZE,
   DESCRIPTOR_MAX_LEVEL_SOURCES,
-  DESCRIPTOR_SENTINEL_INDEX,
   DESCRIPTOR_TIER_SOURCE_SIZE,
   OFFSET_COARSE_SOURCE,
   OFFSET_LEVEL_SOURCE_COUNT,
@@ -50,12 +49,7 @@ import {
   selectEntitySources,
   type EntitySource,
 } from "./entitySources.ts";
-import {
-  proxyDescriptorKey,
-  type EntityProxyDescriptor,
-} from "./workerContext.ts";
-import type { ColdStateActiveEntry, ColdStateMessage, ColdStateTileEntry } from "./workerProtocol.ts";
-import type { ProxyAtlasState } from "./proxyAtlas.ts";
+import type { ColdStateActiveEntry, ColdStateMessage } from "./workerProtocol.ts";
 
 // Mock GPU device — buffer creation only.
 
@@ -115,47 +109,19 @@ function defaultDisplayState(): ColdStateActiveEntry["displayStateByChannel"][nu
   };
 }
 
-/**
- * Test-fixture helper. Mode-driven branching keeps existing call sites
- * unchanged: pass `mode: "group-as-proxy"` (with `imageId: ""`) to get
- * the group-as-proxy variant; anything else returns a `kind: "tile"`
- * entry. Hides the discriminated-union construction so test fixtures
- * don't have to know about it.
- */
-type MakeEntryOpts = Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & {
-  entityId: string;
-  imageId: string;
-  mode: ColdStateActiveEntry["mode"];
-};
+type MakeEntryOpts = Partial<ColdStateActiveEntry> & { entityId: string; imageId: string };
 function makeEntry(opts: MakeEntryOpts): ColdStateActiveEntry {
-  const base = {
+  return {
     entityId: opts.entityId,
+    imageId: opts.imageId,
     levels: opts.levels ?? [
       { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
-    proxyKind: opts.proxyKind,
-    proxyAvailable: opts.proxyAvailable ?? false,
-    groupProxyAvailable: opts.groupProxyAvailable ?? false,
     modelMatrix: opts.modelMatrix ?? identityMatrix(),
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplayState() },
-  };
-  if (opts.mode === "group-as-proxy") {
-    return {
-      ...base,
-      kind: "group-as-proxy",
-      mode: "group-as-proxy",
-      parentGroupId: null,
-    };
-  }
-  return {
-    ...base,
-    kind: "tile",
-    imageId: opts.imageId,
-    mode: opts.mode,
     detailLevels: opts.detailLevels ?? [0],
     coarseLevel: opts.coarseLevel ?? null,
-    parentGroupId: opts.parentGroupId ?? null,
   };
 }
 
@@ -166,7 +132,7 @@ function makeCold(
 ): ColdStateMessage {
   return {
     type: "coldState",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 0 },
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
@@ -194,7 +160,6 @@ function makeCold(
  * descriptor's sources see realistic absolute offsets.
  */
 function sourcesFromEntry(entry: ColdStateActiveEntry, detailPoolKey = "ds1:64x64:detail"): EntitySource[] {
-  if (entry.kind !== "tile") return [];
   const out: EntitySource[] = [];
   let offset = 0;
   const sectionFor = (lvl: number, offsetAt: number) => {
@@ -233,8 +198,7 @@ function sourcesFromEntry(entry: ColdStateActiveEntry, detailPoolKey = "ds1:64x6
 function sourcesForCold(cold: ColdStateMessage): Map<string, EntitySource[]> {
   const out = new Map<string, EntitySource[]>();
   for (const entry of cold.activeSet) {
-    const memberId = entry.kind === "group-as-proxy" ? entry.entityId : entry.imageId;
-    out.set(memberId, sourcesFromEntry(entry));
+    out.set(entry.imageId, sourcesFromEntry(entry));
   }
   return out;
 }
@@ -244,15 +208,9 @@ function serialize(
   entry: ColdStateActiveEntry,
   sources: EntitySource[] = sourcesFromEntry(entry),
   displayState = defaultDisplayState(),
-  proxyDesc = new Map<string, EntityProxyDescriptor>(),
-  proxyPoolIdx = new Map<string, number>(),
-  proxyPools: ProxyAtlasState[] = [],
 ): { u32: Uint32Array; f32: Float32Array } {
   const buf = new ArrayBuffer(DESCRIPTOR_ENTRY_SIZE);
-  serializeEntityDescriptor(
-    buf, 0, entry, selectEntitySources(entry, sources), displayState,
-    proxyDesc, proxyPoolIdx, proxyPools, new Map(),
-  );
+  serializeEntityDescriptor(buf, 0, entry, selectEntitySources(entry, sources), displayState, new Map());
   return { u32: new Uint32Array(buf), f32: new Float32Array(buf) };
 }
 
@@ -270,25 +228,9 @@ function readSource(u32: Uint32Array, offsetBytes: number) {
   };
 }
 
-function fakePool(slotDims: [number, number, number]): ProxyAtlasState {
-  return {
-    texture: { destroy() {} } as unknown as GPUTexture,
-    slots: new Map(),
-    freeSlots: [],
-    capacity: 4,
-    requestedCapacity: 4,
-    slotDims,
-    slotsX: 1,
-    slotsY: 1,
-    slotsZ: 4,
-    kind: "GroupProxy3D",
-    channel: 0,
-    touchOrder: [],
-  };
-}
 
 /** A four-level halving pyramid in [Z, Y, X] with one chunk shape. */
-const PYRAMID: ColdStateTileEntry["levels"] = [
+const PYRAMID: ColdStateActiveEntry["levels"] = [
   { level: 0, chunkShape: [1, 64, 64], gridShape: [1, 8, 8], levelDims: [1, 512, 512] },
   { level: 1, chunkShape: [1, 64, 64], gridShape: [1, 4, 4], levelDims: [1, 256, 256] },
   { level: 2, chunkShape: [1, 64, 64], gridShape: [1, 2, 2], levelDims: [1, 128, 128] },
@@ -299,29 +241,23 @@ const PYRAMID: ColdStateTileEntry["levels"] = [
 
 describe("memberIdForColdEntry", () => {
   it("uses imageId for fields (single-channel)", () => {
-    const e = makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" });
+    const e = makeEntry({ entityId: "e1", imageId: "img-0" });
     expect(memberIdForColdEntry(e, 0, false)).toBe("img-0");
   });
-  it("uses entityId for group-as-proxy entries (single-channel)", () => {
-    const e = makeEntry({ entityId: "group-A", imageId: "", mode: "group-as-proxy" });
-    expect(memberIdForColdEntry(e, 0, false)).toBe("group-A");
-  });
+
   it("appends :chN for multi-channel fields", () => {
-    const e = makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" });
+    const e = makeEntry({ entityId: "e1", imageId: "img-0" });
     expect(memberIdForColdEntry(e, 2, true)).toBe("img-0:ch2");
   });
-  it("appends :chN for multi-channel group-as-proxy", () => {
-    const e = makeEntry({ entityId: "group-A", imageId: "", mode: "group-as-proxy" });
-    expect(memberIdForColdEntry(e, 1, true)).toBe("group-A:ch1");
-  });
+
 });
 
 describe("iterateColdMembers", () => {
   it("walks activeSet × visibleChannels with channel as inner loop", () => {
     const cold = makeCold(
       [
-        makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "e2", imageId: "img-1", mode: "tiles-with-detail" }),
+        makeEntry({ entityId: "e1", imageId: "img-0" }),
+        makeEntry({ entityId: "e2", imageId: "img-1" }),
       ],
       [0, 1],
     );
@@ -331,7 +267,7 @@ describe("iterateColdMembers", () => {
 
   it("uses cold-state multiChannel flag instead of visible channel count", () => {
     const cold = makeCold(
-      [makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" })],
+      [makeEntry({ entityId: "e1", imageId: "img-0" })],
       [2],
       true,
     );
@@ -346,8 +282,8 @@ describe("computeMemberIndexMap", () => {
   it("assigns dense indices in canonical iteration order", () => {
     const cold = makeCold(
       [
-        makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "e2", imageId: "img-1", mode: "tiles-with-detail" }),
+        makeEntry({ entityId: "e1", imageId: "img-0" }),
+        makeEntry({ entityId: "e2", imageId: "img-1" }),
       ],
       [0, 1],
     );
@@ -361,15 +297,14 @@ describe("computeMemberIndexMap", () => {
   it("orchestrator's index map matches worker's buildDescriptorBuffer indices", () => {
     const cold = makeCold(
       [
-        makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "e2", imageId: "img-1", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "group-A", imageId: "", mode: "group-as-proxy" }),
+        makeEntry({ entityId: "e1", imageId: "img-0" }),
+        makeEntry({ entityId: "e2", imageId: "img-1" }),
       ],
       [0, 3],
     );
     const orchestratorIdx = computeMemberIndexMap(cold);
     const { device } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, new Map(), new Map(), sourcesForCold(cold));
+    const result = buildDescriptorBuffer(device, cold, sourcesForCold(cold));
     for (const [memberId, i] of orchestratorIdx) {
       expect(result.indexByMember.get(memberId)).toBe(i);
     }
@@ -379,61 +314,12 @@ describe("computeMemberIndexMap", () => {
 
   it("repeat builds with same activeSet → same indices", () => {
     const cold = makeCold([
-      makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" }),
-      makeEntry({ entityId: "e2", imageId: "img-1", mode: "tiles-with-detail" }),
+      makeEntry({ entityId: "e1", imageId: "img-0" }),
+      makeEntry({ entityId: "e2", imageId: "img-1" }),
     ]);
     const a = computeMemberIndexMap(cold);
     const b = computeMemberIndexMap(cold);
     expect(Array.from(a.entries())).toEqual(Array.from(b.entries()));
-  });
-});
-
-// Pool index assignment (proxy pools)
-
-describe("pool index assignment", () => {
-  it("assigns dense indices to referenced poolKeys in first-seen order", () => {
-    const cold = makeCold([
-      makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-proxy-fallback" }),
-      makeEntry({ entityId: "e2", imageId: "img-1", mode: "tiles-with-proxy-fallback" }),
-    ]);
-    const proxyDesc = new Map<string, EntityProxyDescriptor>([
-      [proxyDescriptorKey("e1", 0, 0), { tileProxyHandle: { poolKey: "poolB", slotIndex: 0 }, groupProxyHandle: null }],
-      [proxyDescriptorKey("e2", 0, 0), { tileProxyHandle: { poolKey: "poolA", slotIndex: 1 }, groupProxyHandle: { poolKey: "poolB", slotIndex: 2 } }],
-    ]);
-    const proxyPoolsByDataset = new Map([
-      ["ds1", new Map<string, ProxyAtlasState>([
-        ["poolA", fakePool([8, 8, 8])],
-        ["poolB", fakePool([16, 16, 16])],
-      ])],
-    ]);
-    const { device } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, proxyDesc, proxyPoolsByDataset, new Map());
-    expect(result.proxyPoolIndexByKey.get("poolB")).toBe(0);
-    expect(result.proxyPoolIndexByKey.get("poolA")).toBe(1);
-    expect(result.proxyPoolsByIndex).toHaveLength(2);
-    destroyDescriptorBuffer(result);
-  });
-
-  it("rebuild with same poolKeys → same pool indices", () => {
-    const cold = makeCold([
-      makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-proxy-fallback" }),
-    ]);
-    const proxyDesc = new Map<string, EntityProxyDescriptor>([
-      [proxyDescriptorKey("e1", 0, 0), { tileProxyHandle: { poolKey: "poolX", slotIndex: 0 }, groupProxyHandle: { poolKey: "poolY", slotIndex: 0 } }],
-    ]);
-    const proxyPoolsByDataset = new Map([
-      ["ds1", new Map<string, ProxyAtlasState>([
-        ["poolX", fakePool([8, 8, 8])],
-        ["poolY", fakePool([8, 8, 8])],
-      ])],
-    ]);
-    const { device } = makeMockDevice();
-    const a = buildDescriptorBuffer(device, cold, proxyDesc, proxyPoolsByDataset, new Map());
-    const b = buildDescriptorBuffer(device, cold, proxyDesc, proxyPoolsByDataset, new Map());
-    expect(Array.from(a.proxyPoolIndexByKey.entries()))
-      .toEqual(Array.from(b.proxyPoolIndexByKey.entries()));
-    destroyDescriptorBuffer(a);
-    destroyDescriptorBuffer(b);
   });
 });
 
@@ -444,7 +330,7 @@ describe("EntityDescriptor byte layout", () => {
     const model = new Float32Array(16);
     const inv = new Float32Array(16);
     for (let i = 0; i < 16; i++) { model[i] = i + 1; inv[i] = i + 100; }
-    const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail", modelMatrix: model, invModelMatrix: inv });
+    const entry = makeEntry({ entityId: "e1", imageId: "img-0", modelMatrix: model, invModelMatrix: inv });
     const { f32 } = serialize(entry);
     for (let i = 0; i < 16; i++) {
       expect(f32[i]).toBe(model[i]);
@@ -452,46 +338,16 @@ describe("EntityDescriptor byte layout", () => {
     }
   });
 
-  it("writes proxy fields at offsets 132/136/140/144 (sentinel when no descriptor)", () => {
-    const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" });
-    const { u32 } = serialize(entry);
-    expect(u32[33]).toBe(DESCRIPTOR_SENTINEL_INDEX);
-    expect(u32[34]).toBe(DESCRIPTOR_SENTINEL_INDEX);
-    expect(u32[35]).toBe(DESCRIPTOR_SENTINEL_INDEX);
-    expect(u32[36]).toBe(DESCRIPTOR_SENTINEL_INDEX);
-  });
-
-  it("packs proxy pool/slot indices and slot dims when descriptor exists", () => {
-    const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-proxy-fallback" });
-    const proxyDesc = new Map<string, EntityProxyDescriptor>([
-      ["e1", {
-        tileProxyHandle: { poolKey: "fp", slotIndex: 7 },
-        groupProxyHandle: { poolKey: "wp", slotIndex: 3 },
-      }],
-    ]);
-    const poolIdx = new Map([["fp", 0], ["wp", 1]]);
-    const pools = [fakePool([8, 16, 32]), fakePool([4, 64, 128])];
-    const { u32 } = serialize(entry, sourcesFromEntry(entry), defaultDisplayState(), proxyDesc, poolIdx, pools);
-    expect(u32[33]).toBe(0);  // tileProxyPoolIndex
-    expect(u32[34]).toBe(7);  // tileProxySlotIndex
-    expect(u32[35]).toBe(1);  // groupProxyPoolIndex
-    expect(u32[36]).toBe(3);  // groupProxySlotIndex
-    // tileProxyDims @ 160 = u32 idx 40, vec3 = (Z, Y, X)
-    expect(u32[40]).toBe(8); expect(u32[41]).toBe(16); expect(u32[42]).toBe(32);
-    // groupProxyDims @ 176 = u32 idx 44
-    expect(u32[44]).toBe(4); expect(u32[45]).toBe(64); expect(u32[46]).toBe(128);
-  });
-
-  it("writes the level sources finest first with the count at offset 212 and the array at 224", () => {
+  it("writes the level sources finest first with the count at offset 156 and the array at 176", () => {
     const entry = makeEntry({
-      entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
+      entityId: "e1", imageId: "img-0",
       detailLevels: [1],
       levels: PYRAMID,
     });
     const { u32 } = serialize(entry);
     // Target 1 plus the coarser levels 2 and 3: three level sources.
     expect(u32[OFFSET_LEVEL_SOURCE_COUNT / 4]).toBe(3);
-    expect(levelSourceOffset(0)).toBe(224);
+    expect(levelSourceOffset(0)).toBe(176);
 
     const s0 = readSource(u32, levelSourceOffset(0));
     expect(s0.valid).toBe(1);
@@ -513,7 +369,7 @@ describe("EntityDescriptor byte layout", () => {
   });
 
   it("zero-fills unused level source slots and an absent coarse source", () => {
-    const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" });
+    const entry = makeEntry({ entityId: "e1", imageId: "img-0" });
     const { u32 } = serialize(entry);
     expect(u32[OFFSET_LEVEL_SOURCE_COUNT / 4]).toBe(1);
     for (let i = 1; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
@@ -526,14 +382,14 @@ describe("EntityDescriptor byte layout", () => {
   });
 
   it("never names a level finer than the target and caps at four sources", () => {
-    const deep: ColdStateTileEntry["levels"] = Array.from({ length: 7 }, (_, level) => ({
+    const deep: ColdStateActiveEntry["levels"] = Array.from({ length: 7 }, (_, level) => ({
       level,
       chunkShape: [1, 64, 64] as [number, number, number],
       gridShape: [1, 1, 1] as [number, number, number],
       levelDims: [1, 64, 64] as [number, number, number],
     }));
     const entry = makeEntry({
-      entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
+      entityId: "e1", imageId: "img-0",
       detailLevels: [2],
       levels: deep,
     });
@@ -550,13 +406,13 @@ describe("EntityDescriptor byte layout", () => {
   });
 
   it("names a different pool binding for a level whose chunk shape puts it in another pool", () => {
-    const levels: ColdStateTileEntry["levels"] = [
+    const levels: ColdStateActiveEntry["levels"] = [
       { level: 0, chunkShape: [1, 64, 64], gridShape: [1, 4, 4], levelDims: [1, 256, 256] },
       { level: 1, chunkShape: [1, 32, 32], gridShape: [1, 4, 4], levelDims: [1, 128, 128] },
       { level: 2, chunkShape: [1, 64, 64], gridShape: [1, 1, 1], levelDims: [1, 64, 64] },
     ];
     const entry = makeEntry({
-      entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
+      entityId: "e1", imageId: "img-0",
       detailLevels: [0],
       levels,
     });
@@ -574,7 +430,7 @@ describe("EntityDescriptor byte layout", () => {
 
   it("writes the coarse tier's section into the coarse source", () => {
     const entry = makeEntry({
-      entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
+      entityId: "e1", imageId: "img-0",
       detailLevels: [0],
       coarseLevel: 2,
       levels: [
@@ -609,7 +465,7 @@ describe("EntityDescriptor byte layout", () => {
 
   it("keeps same-level detail and coarse sections apart by tier", () => {
     const entry = makeEntry({
-      entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
+      entityId: "e1", imageId: "img-0",
       detailLevels: [1],
       coarseLevel: 1,
       levels: [
@@ -630,32 +486,32 @@ describe("EntityDescriptor byte layout", () => {
 // Display state (contrast/gamma/opacity/colormap/channelMask)
 
 describe("EntityDescriptor display state", () => {
-  it("writes contrastMin/contrastMax/gamma/opacity at offsets 192..208", () => {
-    const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" });
+  it("writes contrastMin/contrastMax/gamma/opacity at offsets 136..148", () => {
+    const entry = makeEntry({ entityId: "e1", imageId: "img-0" });
     const { f32, u32 } = serialize(entry, sourcesFromEntry(entry), {
       contrastMin: 100, contrastMax: 5000, gamma: 2.2, opacity: 0.75,
       colormapName: "gray", channelMask: 1,
     });
-    expect(f32[48]).toBe(100);
-    expect(f32[49]).toBe(5000);
-    expect(f32[50]).toBeCloseTo(2.2, 5);
-    expect(f32[51]).toBe(0.75);
+    expect(f32[34]).toBe(100);
+    expect(f32[35]).toBe(5000);
+    expect(f32[36]).toBeCloseTo(2.2, 5);
+    expect(f32[37]).toBe(0.75);
     expect(u32[32]).toBe(1);
   });
 
   it("changes to displayState produce different bytes at the display-state offsets", () => {
-    const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" });
+    const entry = makeEntry({ entityId: "e1", imageId: "img-0" });
     const a = serialize(entry, sourcesFromEntry(entry), { ...defaultDisplayState(), contrastMax: 100 });
     const b = serialize(entry, sourcesFromEntry(entry), { ...defaultDisplayState(), contrastMax: 200 });
-    expect(a.f32[49]).toBe(100);
-    expect(b.f32[49]).toBe(200);
-    for (let i = 0; i < 48; i++) expect(a.f32[i]).toBe(b.f32[i]);
+    expect(a.f32[35]).toBe(100);
+    expect(b.f32[35]).toBe(200);
+    for (let i = 0; i < 34; i++) expect(a.f32[i]).toBe(b.f32[i]);
   });
 
   it("falls back to LUT index 0 when colormap is missing from the lookup", () => {
-    const entry = makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" });
+    const entry = makeEntry({ entityId: "e1", imageId: "img-0" });
     const { u32 } = serialize(entry, sourcesFromEntry(entry), { ...defaultDisplayState(), colormapName: "nonexistent" });
-    expect(u32[52]).toBe(0);
+    expect(u32[38]).toBe(0);
   });
 });
 
@@ -665,20 +521,20 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
   it("assigns dense indices to referenced colormap names in first-seen order", () => {
     const cold = makeCold([
       makeEntry({
-        entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
+        entityId: "e1", imageId: "img-0",
         displayStateByChannel: { 0: { ...defaultDisplayState(), colormapName: "magma" } },
       }),
       makeEntry({
-        entityId: "e2", imageId: "img-1", mode: "tiles-with-detail",
+        entityId: "e2", imageId: "img-1",
         displayStateByChannel: { 0: { ...defaultDisplayState(), colormapName: "viridis" } },
       }),
       makeEntry({
-        entityId: "e3", imageId: "img-2", mode: "tiles-with-detail",
+        entityId: "e3", imageId: "img-2",
         displayStateByChannel: { 0: { ...defaultDisplayState(), colormapName: "magma" } },
       }),
     ]);
     const { device } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, new Map(), new Map(), sourcesForCold(cold));
+    const result = buildDescriptorBuffer(device, cold, sourcesForCold(cold));
     expect(result.colormapLutIndices.get("magma")).toBe(0);
     expect(result.colormapLutIndices.get("viridis")).toBe(1);
     expect(result.colormapNameByMember.get("img-0")).toBe("magma");
@@ -690,17 +546,17 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
   it("rebuild with same colormap names → same LUT indices (stable across rebuilds)", () => {
     const cold = makeCold([
       makeEntry({
-        entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
+        entityId: "e1", imageId: "img-0",
         displayStateByChannel: { 0: { ...defaultDisplayState(), colormapName: "magma" } },
       }),
       makeEntry({
-        entityId: "e2", imageId: "img-1", mode: "tiles-with-detail",
+        entityId: "e2", imageId: "img-1",
         displayStateByChannel: { 0: { ...defaultDisplayState(), colormapName: "viridis" } },
       }),
     ]);
     const { device } = makeMockDevice();
-    const a = buildDescriptorBuffer(device, cold, new Map(), new Map(), sourcesForCold(cold));
-    const b = buildDescriptorBuffer(device, cold, new Map(), new Map(), sourcesForCold(cold));
+    const a = buildDescriptorBuffer(device, cold, sourcesForCold(cold));
+    const b = buildDescriptorBuffer(device, cold, sourcesForCold(cold));
     expect(Array.from(a.colormapLutIndices.entries()))
       .toEqual(Array.from(b.colormapLutIndices.entries()));
     destroyDescriptorBuffer(a);
@@ -711,7 +567,7 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
     const cold = makeCold(
       [
         makeEntry({
-          entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
+          entityId: "e1", imageId: "img-0",
           displayStateByChannel: {
             0: { ...defaultDisplayState(), colormapName: "magenta", contrastMax: 1000 },
             1: { ...defaultDisplayState(), colormapName: "green",   contrastMax: 2000 },
@@ -721,7 +577,7 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
       [0, 1],
     );
     const { device } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, new Map(), new Map(), sourcesForCold(cold));
+    const result = buildDescriptorBuffer(device, cold, sourcesForCold(cold));
     expect(result.colormapNameByMember.get("img-0:ch0")).toBe("magenta");
     expect(result.colormapNameByMember.get("img-0:ch1")).toBe("green");
 
@@ -733,52 +589,17 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
     const buf = (result.buffer as unknown as { contents: ArrayBuffer }).contents;
     const f0 = new Float32Array(buf, idx0 * DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_ENTRY_SIZE / 4);
     const f1 = new Float32Array(buf, idx1 * DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_ENTRY_SIZE / 4);
-    expect(f0[49]).toBe(1000);
-    expect(f1[49]).toBe(2000);
+    expect(f0[35]).toBe(1000);
+    expect(f1[35]).toBe(2000);
     destroyDescriptorBuffer(result);
   });
 
-  it("multi-channel proxy descriptors stay scoped to each member channel", () => {
-    const cold = makeCold(
-      [
-        makeEntry({
-          entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
-          displayStateByChannel: {
-            0: { ...defaultDisplayState(), colormapName: "magenta" },
-            1: { ...defaultDisplayState(), colormapName: "green" },
-          },
-        }),
-      ],
-      [0, 1],
-    );
-    const ch0Pool = "ds1|proxy|TileProxy3D|32x32x8|ch0";
-    const ch1Pool = "ds1|proxy|TileProxy3D|32x32x8|ch1";
-    const proxyDesc = new Map<string, EntityProxyDescriptor>([
-      [proxyDescriptorKey("e1", 0, 0), { tileProxyHandle: { poolKey: ch0Pool, slotIndex: 1 }, groupProxyHandle: null }],
-      [proxyDescriptorKey("e1", 0, 1), { tileProxyHandle: { poolKey: ch1Pool, slotIndex: 2 }, groupProxyHandle: null }],
-    ]);
-    const proxyPoolsByDataset = new Map([
-      ["ds1", new Map<string, ProxyAtlasState>([
-        [ch0Pool, fakePool([8, 32, 32])],
-        [ch1Pool, fakePool([8, 32, 32])],
-      ])],
-    ]);
-
-    const { device } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, proxyDesc, proxyPoolsByDataset, new Map());
-
-    expect(result.proxyDescriptorByMember.get("img-0:ch0")?.tileProxyHandle?.poolKey).toBe(ch0Pool);
-    expect(result.proxyDescriptorByMember.get("img-0:ch1")?.tileProxyHandle?.poolKey).toBe(ch1Pool);
-    expect(result.proxyPoolIndexByKey.get(ch0Pool)).toBe(0);
-    expect(result.proxyPoolIndexByKey.get(ch1Pool)).toBe(1);
-    destroyDescriptorBuffer(result);
-  });
 
   it("channel mask packs a single bit per descriptor entry", () => {
     const cold = makeCold(
       [
         makeEntry({
-          entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
+          entityId: "e1", imageId: "img-0",
           displayStateByChannel: {
             0: { ...defaultDisplayState(), channelMask: 1 << 0 },
             2: { ...defaultDisplayState(), channelMask: 1 << 2 },
@@ -788,7 +609,7 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
       [0, 2],
     );
     const { device } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, new Map(), new Map(), sourcesForCold(cold));
+    const result = buildDescriptorBuffer(device, cold, sourcesForCold(cold));
     const idx0 = result.indexByMember.get("img-0:ch0")!;
     const idx2 = result.indexByMember.get("img-0:ch2")!;
     const buf = (result.buffer as unknown as { contents: ArrayBuffer }).contents;
@@ -800,36 +621,22 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
   });
 });
 
-// Mode handling (group-as-proxy vs field modes)
-
-describe("mode → memberId conventions", () => {
-  it("group-as-proxy entries use entityId, field entries use imageId", () => {
-    const cold = makeCold([
-      makeEntry({ entityId: "group-A", imageId: "", mode: "group-as-proxy" }),
-      makeEntry({ entityId: "tile-1", imageId: "img-1", mode: "tiles-with-proxy-fallback" }),
-      makeEntry({ entityId: "tile-2", imageId: "img-2", mode: "tiles-with-detail" }),
-    ]);
-    const idx = computeMemberIndexMap(cold);
-    expect(idx.has("group-A")).toBe(true);
-    expect(idx.has("img-1")).toBe(true);
-    expect(idx.has("img-2")).toBe(true);
-  });
-
+describe("member entries", () => {
   it("buildDescriptorBuffer writes one entry per (entry, channel) combo", () => {
     const cold = makeCold(
       [
-        makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "group-A", imageId: "", mode: "group-as-proxy" }),
+        makeEntry({ entityId: "e1", imageId: "img-0" }),
+        makeEntry({ entityId: "e2", imageId: "img-1" }),
       ],
       [0, 1],
     );
     const { device } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, new Map(), new Map(), sourcesForCold(cold));
+    const result = buildDescriptorBuffer(device, cold, sourcesForCold(cold));
     expect(result.entityCount).toBe(4);
     expect(result.indexByMember.get("img-0:ch0")).toBe(0);
     expect(result.indexByMember.get("img-0:ch1")).toBe(1);
-    expect(result.indexByMember.get("group-A:ch0")).toBe(2);
-    expect(result.indexByMember.get("group-A:ch1")).toBe(3);
+    expect(result.indexByMember.get("img-1:ch0")).toBe(2);
+    expect(result.indexByMember.get("img-1:ch1")).toBe(3);
     destroyDescriptorBuffer(result);
   });
 });
@@ -839,22 +646,22 @@ describe("mode → memberId conventions", () => {
 describe("buildDescriptorBuffer GPU write", () => {
   it("creates a buffer sized to entityCount * DESCRIPTOR_ENTRY_SIZE", () => {
     const cold = makeCold([
-      makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" }),
-      makeEntry({ entityId: "e2", imageId: "img-1", mode: "tiles-with-detail" }),
+      makeEntry({ entityId: "e1", imageId: "img-0" }),
+      makeEntry({ entityId: "e2", imageId: "img-1" }),
     ]);
     const { device } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, new Map(), new Map(), sourcesForCold(cold));
+    const result = buildDescriptorBuffer(device, cold, sourcesForCold(cold));
     expect((result.buffer as unknown as MockBuffer).size).toBe(2 * DESCRIPTOR_ENTRY_SIZE);
     destroyDescriptorBuffer(result);
   });
 
-  it("writes the dataset's sample format at offset 148, so the shader reads float texels as floats", () => {
-    const entries = [makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" })];
+  it("writes the dataset's sample format at offset 132, so the shader reads float texels as floats", () => {
+    const entries = [makeEntry({ entityId: "e1", imageId: "img-0" })];
     const { device, lastWrite } = makeMockDevice();
-    const asU16 = buildDescriptorBuffer(device, makeCold(entries), new Map(), new Map(), new Map());
+    const asU16 = buildDescriptorBuffer(device, makeCold(entries), new Map());
     expect(new Uint32Array(lastWrite()!)[OFFSET_SAMPLE_FORMAT / 4]).toBe(0);
     const asF32 = buildDescriptorBuffer(
-      device, { ...makeCold(entries), sampleFormat: "f32" }, new Map(), new Map(), new Map(),
+      device, { ...makeCold(entries), sampleFormat: "f32" }, new Map(),
     );
     expect(new Uint32Array(lastWrite()!)[OFFSET_SAMPLE_FORMAT / 4]).toBe(1);
     destroyDescriptorBuffer(asU16);
@@ -862,9 +669,9 @@ describe("buildDescriptorBuffer GPU write", () => {
   });
 
   it("writes the assembled buffer to GPU memory", () => {
-    const cold = makeCold([makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" })]);
+    const cold = makeCold([makeEntry({ entityId: "e1", imageId: "img-0" })]);
     const { device, lastWrite } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, new Map(), new Map(), sourcesForCold(cold));
+    const result = buildDescriptorBuffer(device, cold, sourcesForCold(cold));
     const written = lastWrite();
     expect(written).not.toBeNull();
     expect(written!.byteLength).toBe(DESCRIPTOR_ENTRY_SIZE);
@@ -876,8 +683,8 @@ describe("buildDescriptorBuffer GPU write", () => {
     // entity 0's data in the shared indirection buffer, so every field
     // would render the same image.
     const cold = makeCold([
-      makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" }),
-      makeEntry({ entityId: "e2", imageId: "img-1", mode: "tiles-with-detail" }),
+      makeEntry({ entityId: "e1", imageId: "img-0" }),
+      makeEntry({ entityId: "e2", imageId: "img-1" }),
     ]);
     const meta = { level: 0, gridDims: [1, 4, 4] as [number, number, number], chunkDims: [1, 64, 64] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] };
     const sources = new Map<string, EntitySource[]>([
@@ -885,7 +692,7 @@ describe("buildDescriptorBuffer GPU write", () => {
       ["img-1", [{ tier: "detail", poolKey: "p", meta: { ...meta, offset: 16 } }]], // entity 0 occupied [0, 16)
     ]);
     const { device, lastWrite } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, new Map(), new Map(), sources);
+    const result = buildDescriptorBuffer(device, cold, sources);
     const u32 = new Uint32Array(lastWrite()!);
     const entry0 = readSource(u32, levelSourceOffset(0));
     const entry1 = readSource(u32.subarray(DESCRIPTOR_ENTRY_SIZE / 4), levelSourceOffset(0));
@@ -897,7 +704,7 @@ describe("buildDescriptorBuffer GPU write", () => {
   it("mirrors each member's level pools in binding-slot order and its coarse pool for the draw", () => {
     const cold = makeCold([
       makeEntry({
-        entityId: "e1", imageId: "img-0", mode: "tiles-with-detail",
+        entityId: "e1", imageId: "img-0",
         detailLevels: [0], coarseLevel: 2,
         levels: [
           { level: 0, chunkShape: [1, 64, 64], gridShape: [1, 4, 4], levelDims: [1, 256, 256] },
@@ -905,7 +712,7 @@ describe("buildDescriptorBuffer GPU write", () => {
           { level: 2, chunkShape: [1, 64, 64], gridShape: [1, 1, 1], levelDims: [1, 64, 64] },
         ],
       }),
-      makeEntry({ entityId: "group-A", imageId: "", mode: "group-as-proxy", levels: [] }),
+      makeEntry({ entityId: "e2", imageId: "img-1", levels: [] }),
     ]);
     const sources = new Map<string, EntitySource[]>([
       ["img-0", [
@@ -916,12 +723,12 @@ describe("buildDescriptorBuffer GPU write", () => {
       ]],
     ]);
     const { device } = makeMockDevice();
-    const result = buildDescriptorBuffer(device, cold, new Map(), new Map(), sources);
+    const result = buildDescriptorBuffer(device, cold, sources);
     expect(result.sourceBindingByMember.get("img-0")).toEqual({
       levelPoolKeys: ["ds1:64x64:detail", "ds1:32x32:detail"],
       coarsePoolKey: "ds1:64x64:coarse",
     });
-    expect(result.sourceBindingByMember.get("group-A")).toEqual({
+    expect(result.sourceBindingByMember.get("img-1")).toEqual({
       levelPoolKeys: [],
       coarsePoolKey: null,
     });
@@ -932,7 +739,7 @@ describe("buildDescriptorBuffer GPU write", () => {
 // Transient ↔ canonical byte equivalence
 
 describe("transient descriptor matches canonical for equivalent params", () => {
-  it("agrees byte-for-byte on modelMatrix, invModelMatrix, display state, sentinel proxy handles, and the single level source", () => {
+  it("agrees byte-for-byte on modelMatrix, invModelMatrix, display state, and the single level source", () => {
     // Same volume + display state for both writers.
     const volumeDims: [number, number, number] = [128, 64, 32]; // X, Y, Z
     const modelMatrix = new Float32Array([
@@ -962,12 +769,12 @@ describe("transient descriptor matches canonical for equivalent params", () => {
     // Canonical writer fed an entry that mimics the transient's shape:
     //   - one level source, level=0, offset=0, pool binding 0
     //   - gridDims=[1,1,1], chunkDims=levelDims=volumeDims
-    //   - sentinel proxy handles (no proxy descriptor)
+
     //   - colormap absent → lutIdx = 0 (matches transient writer which
     //     skips colormapLutIndex entirely → buffer-init zero)
     //   - channelMask = 0 (transient writer doesn't write it)
     const entry = makeEntry({
-      entityId: "transient", imageId: "transient", mode: "tiles-with-detail",
+      entityId: "transient", imageId: "transient",
       modelMatrix, invModelMatrix,
       detailLevels: [0],
       levels: [{
@@ -985,7 +792,7 @@ describe("transient descriptor matches canonical for equivalent params", () => {
     serializeEntityDescriptor(
       canonicalBuf, 0, entry, selectEntitySources(entry, sourcesFromEntry(entry)),
       { contrastMin, contrastMax, gamma, opacity, colormapName: "missing", channelMask: 0 },
-      new Map(), new Map(), [], new Map(),
+      new Map(),
     );
 
     const tF32 = new Float32Array(transientBuf);
@@ -998,24 +805,13 @@ describe("transient descriptor matches canonical for equivalent params", () => {
     // invModelMatrix at offset 64 (16 f32s)
     for (let i = 0; i < 16; i++) expect(cF32[16 + i]).toBe(tF32[16 + i]);
 
-    // Sentinel proxy handles at offsets 132/136/140/144
-    expect(cU32[33]).toBe(tU32[33]);
-    expect(cU32[34]).toBe(tU32[34]);
-    expect(cU32[35]).toBe(tU32[35]);
-    expect(cU32[36]).toBe(tU32[36]);
-    expect(cU32[33]).toBe(DESCRIPTOR_SENTINEL_INDEX);
-
-    // Proxy dims (canonical defaults to (1,1,1) when handle missing; transient writes (1,1,1))
-    expect(cU32[40]).toBe(tU32[40]); expect(cU32[41]).toBe(tU32[41]); expect(cU32[42]).toBe(tU32[42]);
-    expect(cU32[44]).toBe(tU32[44]); expect(cU32[45]).toBe(tU32[45]); expect(cU32[46]).toBe(tU32[46]);
-
     // Display state: contrast / gamma / opacity
-    expect(cF32[48]).toBe(tF32[48]);
-    expect(cF32[49]).toBe(tF32[49]);
-    expect(cF32[50]).toBe(tF32[50]);
-    expect(cF32[51]).toBe(tF32[51]);
+    expect(cF32[34]).toBe(tF32[34]);
+    expect(cF32[35]).toBe(tF32[35]);
+    expect(cF32[36]).toBe(tF32[36]);
+    expect(cF32[37]).toBe(tF32[37]);
 
-    // levelSourceCount at offset 212
+    // levelSourceCount at offset 156
     expect(cU32[OFFSET_LEVEL_SOURCE_COUNT / 4]).toBe(1);
     expect(tU32[OFFSET_LEVEL_SOURCE_COUNT / 4]).toBe(1);
 

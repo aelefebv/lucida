@@ -86,7 +86,7 @@ function mkChunk(ids: Uint32Array, x: number, y: number, z: number): Chunk {
 function labelVolumeMsg(chunks: Chunk[], dims: Dims): LabelVolumeChunkDataMessage {
   return {
     type: "labelVolumeChunkData",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     memberId: "img-0:label:region-b",
     datasetId: "ds-0",
     chunks,
@@ -251,7 +251,7 @@ describe("handleLabelVolumeChunkData", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     // Worker has advanced to selection epoch 5; the delivery is from epoch 1.
-    ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, asset: 0, request: 1 };
+    ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, request: 1 };
     handleLabelVolumeChunkData(ctx, labelVolumeMsg([mkChunk(new Uint32Array([1, 2, 3, 4, 5, 6, 7, 8]), 0, 0, 0)], DIMS_2));
     expect(writes).toHaveLength(0);
     expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);

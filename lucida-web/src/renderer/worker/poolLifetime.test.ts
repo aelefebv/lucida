@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WorkerCtx } from "../workerContext.ts";
-import { proxyDescriptorKey } from "../workerContext.ts";
+
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
@@ -16,7 +16,7 @@ import type {
   VolumeChunkDataMessage,
   WorkerToMainMessage,
 } from "../workerProtocol.ts";
-import { allocateProxySlot, createProxyAtlas, proxyPoolKey, proxySlotKey } from "../proxyAtlas.ts";
+
 import { getOrCreateLabelSlicePool } from "../slice/index.ts";
 import { getOrCreateLabelVolumePool } from "../volume/index.ts";
 import type { SliceAtlasState } from "../slice/index.ts";
@@ -84,14 +84,12 @@ function makeCtx(device: GPUDevice): { ctx: WorkerCtx; posts: WorkerToMainMessag
     getOrCreateLUT: () => ({} as GPUTexture),
     post: (msg) => { posts.push(msg); },
     postWantedSet: () => {},
-    lookupProxyDescriptor: () => null,
-    lookupProxyPool: () => null,
     lookupEntityDescriptor: () => null,
   };
   return { ctx, posts };
 }
 
-const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
 
 function identity(): Float32Array {
   const m = new Float32Array(16);
@@ -115,16 +113,11 @@ const TWO_SHAPES: Levels = [
 
 function tile(entityId: string, target: number, coarseLevel: number | null = 5): ColdStateActiveEntry {
   return {
-    kind: "tile",
     entityId,
     imageId: entityId,
-    mode: "tiles-with-detail",
     levels: TWO_SHAPES,
     detailLevels: [target],
     coarseLevel,
-    parentGroupId: null,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
     modelMatrix: identity(),
     invModelMatrix: identity(),
     displayStateByChannel: { 0: display, 1: display, 2: display },
@@ -203,8 +196,6 @@ describe("removing a dataset", () => {
     expect(ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!.slots.size).toBe(1);
     getOrCreateLabelSlicePool(ctx, "label", "ds1", 64, 64);
     getOrCreateLabelVolumePool(ctx, "label", "ds1", 64, 64, 32, 32, 32, 32);
-    const proxyKey = proxyPoolKey("ds1", "TileProxy3D", [8, 8, 8], 0);
-    ctx.state.proxyPoolsByDataset.set("ds1", new Map([[proxyKey, createProxyAtlas(gpu.device, "TileProxy3D", [8, 8, 8], 0, 4)]]));
     expect(gpu.live().textures).toBeGreaterThan(baseline.textures);
 
     await dispatchMessage(ctx, { type: "removeLayerResources", datasetId: "ds1" });
@@ -227,7 +218,7 @@ describe("removing a dataset", () => {
     expect(gpu.live()).toEqual(before);
   });
 
-  it("starts a reopened dataset from empty pools and no proxy handles", async () => {
+  it("starts a reopened dataset from empty pools", async () => {
     const gpu = trackingDevice();
     const { ctx } = makeCtx(gpu.device);
     await dispatchMessage(ctx, cold("ds1"));
@@ -236,22 +227,12 @@ describe("removing a dataset", () => {
     const first = ctx.state.volumeAtlases.get(poolKey)!;
     expect(first.slots.size).toBe(1);
 
-    const proxyKey = proxyPoolKey("ds1", "TileProxy3D", [8, 8, 8], 0);
-    const proxyPool = createProxyAtlas(gpu.device, "TileProxy3D", [8, 8, 8], 0, 4);
-    const slotIndex = allocateProxySlot(proxyPool, proxySlotKey("ds1-img", 0, 0));
-    ctx.state.proxyPoolsByDataset.set("ds1", new Map([[proxyKey, proxyPool]]));
-    ctx.state.proxyDescriptorsByEntity.set(proxyDescriptorKey("ds1-img", 0, 0), {
-      tileProxyHandle: { poolKey: proxyKey, slotIndex },
-      groupProxyHandle: null,
-    });
-
     await dispatchMessage(ctx, { type: "removeLayerResources", datasetId: "ds1" });
     await dispatchMessage(ctx, cold("ds1"));
 
     const reopened = ctx.state.volumeAtlases.get(poolKey)!;
     expect(reopened).not.toBe(first);
     expect(reopened.slots.size).toBe(0);
-    expect(ctx.state.proxyDescriptorsByEntity.has(proxyDescriptorKey("ds1-img", 0, 0))).toBe(false);
   });
 });
 
@@ -330,11 +311,10 @@ describe("the atlas report", () => {
       ({ width, height, depthOrArrayLayers: depth, format }) as GPUTexture;
     state.sliceAtlases.set("a", { texture: texture(512, 256, 1, "r16uint"), indirectionBuf: { size: 64 } } as SliceAtlasState);
     state.labelSlicePools.set("b", { texture: texture(100, 50, 1, "r32uint"), indirectionBuf: { size: 4 } } as never);
-    state.proxyPoolsByDataset.set("ds1", new Map([["c", { texture: texture(8, 8, 8, "r16uint") } as never]]));
 
     expect(measureGpuAtlases(state)).toEqual({
-      atlases: 3,
-      bytes: 512 * 256 * 2 + 64 + 100 * 50 * 4 + 4 + 8 * 8 * 8 * 2,
+      atlases: 2,
+      bytes: 512 * 256 * 2 + 64 + 100 * 50 * 4 + 4,
     });
   });
 

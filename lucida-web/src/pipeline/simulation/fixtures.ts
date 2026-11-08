@@ -138,7 +138,6 @@ function fixture(
         })),
       },
     },
-    catalog: { entries: [] },
     opener_client_id: null,
   });
   const resolved = resolveDatasetManifest(wire);

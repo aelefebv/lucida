@@ -28,8 +28,6 @@ export interface DeviceBudgets {
   cpuMainBytes: number;
   /** The CPU cache's coarse overview store. */
   cpuOverviewBytes: number;
-  /** The CPU cache's proxy store. */
-  cpuProxyBytes: number;
   /** Fetched bytes the CPU cache allows outstanding. */
   cpuBytesInFlight: number;
 }
@@ -42,7 +40,6 @@ export const CEILING_BUDGETS: Readonly<DeviceBudgets> = {
   labelTotalVolumeBytes: 512 * MIB,
   cpuMainBytes: 512 * MIB,
   cpuOverviewBytes: 64 * MIB,
-  cpuProxyBytes: 256 * MIB,
   cpuBytesInFlight: 32 * MIB,
 };
 
@@ -54,7 +51,6 @@ const FLOOR_BUDGETS: Readonly<DeviceBudgets> = {
   labelTotalVolumeBytes: 64 * MIB,
   cpuMainBytes: 64 * MIB,
   cpuOverviewBytes: 16 * MIB,
-  cpuProxyBytes: 32 * MIB,
   cpuBytesInFlight: 8 * MIB,
 };
 
@@ -81,7 +77,6 @@ export function fitBudgets(memoryGiB: number | null, gpu?: GpuBudgetLimits): Dev
     labelTotalVolumeBytes: fit("labelTotalVolumeBytes"),
     cpuMainBytes: fit("cpuMainBytes"),
     cpuOverviewBytes: fit("cpuOverviewBytes"),
-    cpuProxyBytes: fit("cpuProxyBytes"),
     cpuBytesInFlight: fit("cpuBytesInFlight"),
   };
   if (gpu && gpu.maxBufferSize > 0) {

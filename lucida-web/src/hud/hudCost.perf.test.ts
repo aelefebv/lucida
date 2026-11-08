@@ -85,8 +85,6 @@ function sampleAt(tick: number): HudSample {
     lanes: {
       inFlight: { detail: 4, coarse: 1, minimap: 1, prefetch: 2, overview: 0 },
       pending: { detail: 40, coarse: 2, minimap: 5, prefetch: 60, overview: 0 },
-      proxyInFlight: 0,
-      proxyPending: 0,
       pendingTotal: 107,
       pendingUnclassified: false,
       pendingScanCap: PENDING_SCAN_CAP,
@@ -94,7 +92,6 @@ function sampleAt(tick: number): HudSample {
     pools: {
       main: { bytes: (100 + tick) * MIB, budgetBytes: 512 * MIB },
       overview: { bytes: 60 * MIB, budgetBytes: 64 * MIB },
-      proxy: { bytes: 0, budgetBytes: 256 * MIB },
     },
     gpuAtlases: { atlases: 6, bytes: (300 + tick) * MIB },
     levels: Array.from({ length: 4 }, (_, i) => ({

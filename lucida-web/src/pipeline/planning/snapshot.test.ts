@@ -2,7 +2,7 @@ import { describe, it, expect } from "vitest";
 import type { WasmScene } from "lucida-core";
 import type { DatasetManifest, ImageSpec, LevelGeometry } from "../../manifestTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
-import type { AssetCatalogSnapshot } from "./index.ts";
+
 import type { SceneEpochs } from "../epochs.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import {
@@ -87,7 +87,7 @@ function makeStubScene(overrides: Partial<StubSceneConfig> = {}): WasmScene {
     t: () => config.t,
     z: () => config.z,
     epochs: () =>
-      JSON.stringify({ content: 1, layout: 1, view: 1, selection: 1, asset: 1 }),
+      JSON.stringify({ content: 1, layout: 1, view: 1, selection: 1 }),
   };
   return stub as unknown as WasmScene;
 }
@@ -158,7 +158,7 @@ function makeDsSettings(overrides?: Partial<DatasetSettings>): DatasetSettings {
 }
 
 function makeEpochs(): SceneEpochs {
-  return { content: 1, layout: 1, view: 1, selection: 1, asset: 1, request: 0 };
+  return { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
 }
 
 interface MakeArgsOverrides {
@@ -166,7 +166,6 @@ interface MakeArgsOverrides {
   dataset?: SnapshotDatasetEntry;
   dsSettings?: DatasetSettings | undefined;
   multiChannel?: boolean;
-  assetCatalog?: AssetCatalogSnapshot;
   mode?: "slice" | "volume";
 }
 
@@ -176,9 +175,7 @@ function makeArgs(overrides?: MakeArgsOverrides): BuildPlanningSnapshotArgs {
     datasetId: "ds1",
     dataset: overrides?.dataset ?? makeDataset(),
     dsSettings: overrides?.dsSettings ?? makeDsSettings(),
-    assetCatalog:
-      overrides?.assetCatalog ??
-      ({ byEntity: new Map() } as AssetCatalogSnapshot),
+
     minimapPending: new Map(),
     mode: overrides?.mode ?? "slice",
     multiChannel: overrides?.multiChannel ?? false,
@@ -414,15 +411,6 @@ describe("buildPlanningSnapshot — selection state", () => {
 });
 
 describe("buildPlanningSnapshot — pass-through tiles", () => {
-  it("threads the asset catalog through into the snapshot", () => {
-    const catalog: AssetCatalogSnapshot = {
-      byEntity: new Map([
-        ["tile-0", { kinds: new Set(["GroupProxy3D"]), footprints: new Map() }],
-      ]),
-    };
-    const built = buildPlanningSnapshot(makeArgs({ assetCatalog: catalog }));
-    expect(built!.snapshot.assetCatalog).toBe(catalog);
-  });
 
   it("threads the epoch counters through into the snapshot", () => {
     const built = buildPlanningSnapshot(makeArgs());

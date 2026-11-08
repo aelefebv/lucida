@@ -308,8 +308,8 @@ export interface BridgeHandlers {
   onAck: (seq: number) => void;
   /**
    * Binary frame, forwarded as (key, payload) after the bridge parses the
-   * envelope (client_id, keyLen, key, payload). Chunk-vs-proxy routing lives
-   * in the content source so the bridge stays a generic binary transport.
+   * envelope (client_id, keyLen, key, payload). Routing by key lives in the
+   * content source so the bridge stays a generic binary transport.
    */
   onBinary?: (key: string, payload: ArrayBuffer) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
@@ -329,10 +329,6 @@ export interface BridgeHandlers {
    * successful one's.
    */
   onOpenDatasetFailed?: (requestId: string, url: string, error: string) => void;
-  /**
-   * The server may emit an empty `delta.added` as a sanity check (no-op).
-   */
-  onAssetCatalogUpdate?: (datasetId: string, deltaJson: string) => void;
   onGeneratedAvailabilityUpdate?: (datasetId: string, deltaJson: string) => void;
   onGeneratedChunkStatus?: (
     datasetId: string,
@@ -654,12 +650,7 @@ export class Bridge {
           case "report_failed":
             this.handleReportReceipt(msg);
             break;
-          case "asset_catalog_update":
-            this.handlers.onAssetCatalogUpdate?.(
-              msg.dataset_id,
-              JSON.stringify(msg.delta ?? { added: [] }),
-            );
-            break;
+
           case "generated_availability_update":
             this.handlers.onGeneratedAvailabilityUpdate?.(
               msg.dataset_id,
@@ -1271,7 +1262,7 @@ export class Bridge {
    *  bridge never transmits.
    *
    *  Every client message passes here, including the content source's chunk
-   *  and asset requests, so each frame that goes out is counted on the trace
+   *  requests, so each frame that goes out is counted on the trace
    *  once, at the bytes the socket carries. A frame dropped here was never a
    *  send. */
   send(json: string) {

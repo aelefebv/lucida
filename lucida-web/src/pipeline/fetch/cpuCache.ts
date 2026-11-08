@@ -1,22 +1,17 @@
 /**
  * CPU cache: holds decoded data between the network and the GPU.
  *
- * Owns the detail, overview, and proxy stores with their eviction policies,
- * the priority-ordered fetch schedulers, and the submit/getDeliverable/
+ * Owns the detail and overview stores with their eviction policies, the
+ * priority-ordered fetch scheduler, and the submit/getDeliverable/
  * snapshot/telemetry API.
  */
 
-import type {
-  ContentSource,
-  FetchResult,
-  FetchProxyResult,
-} from "./contentSource.ts";
+import type { ContentSource, FetchResult } from "./contentSource.ts";
 import type { DecodePool } from "./decodePool.ts";
 import type {
   RequestPlan,
   ChunkRequest,
   CacheStateSnapshot,
-  ProxyRequest,
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { InteractionModeDetector } from "./interactionMode.ts";
@@ -27,13 +22,7 @@ import {
   getTierOrder,
 } from "./eviction.ts";
 import { ChunkStore } from "./chunkStore.ts";
-import {
-  ProxyStore,
-  proxyInnerKey,
-  type ProxyCacheEntry,
-  type ProxyEvictable,
-} from "./proxyStore.ts";
-import { Scheduler, type SchedulableRequest } from "./scheduler.ts";
+import { Scheduler } from "./scheduler.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
 import { parseChunkKey } from "../../renderer/chunkKeys.ts";
@@ -41,7 +30,6 @@ import type { ChunkFeedbackReason } from "../../renderer/workerProtocol.ts";
 import type { CacheQuiescenceInputs } from "../../trace/quiescence.ts";
 import {
   classifyFetchError,
-  NeverRetry,
   OnceTransientRetry,
   type RetryPolicy,
 } from "./retry.ts";
@@ -59,8 +47,6 @@ import {
   type LevelResidency,
   type PoolResidencyReport,
   type ReadyChunkDelivery,
-  type ReadyDelivery,
-  type ReadyProxyDelivery,
 } from "./types.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
@@ -74,8 +60,6 @@ export type {
   EvictionTier,
   Lane,
   ReadyChunkDelivery,
-  ReadyDelivery,
-  ReadyProxyDelivery,
   TierCounters,
   TierResidencyEntry,
 } from "./types.ts";
@@ -84,7 +68,6 @@ export type {
 // ceiling it fits them under.
 export const DEFAULT_MAIN_BUDGET = CEILING_BUDGETS.cpuMainBytes;
 export const DEFAULT_OVERVIEW_BUDGET = CEILING_BUDGETS.cpuOverviewBytes;
-export const DEFAULT_PROXY_BUDGET = CEILING_BUDGETS.cpuProxyBytes;
 export const DEFAULT_MAX_BYTES_IN_FLIGHT = CEILING_BUDGETS.cpuBytesInFlight;
 export const FETCH_CONCURRENCY_MULTIPLIER = 3;
 export const TRANSIENT_RETRY_DELAY_MS = 500;
@@ -188,11 +171,6 @@ interface InFlightChunkMeta {
   epochs: SceneEpochs;
 }
 
-interface InFlightProxyMeta {
-  request: ProxyRequest;
-  lastSeenTick: number;
-  epochs: SceneEpochs;
-}
 
 /**
  * The residency tier a point event carries, read off the entry rather than
@@ -202,6 +180,21 @@ interface InFlightProxyMeta {
  */
 function eventTier(entry: CacheEntry): 0 | 1 {
   return entry.residencyTier === "coarse" ? 1 : 0;
+}
+
+/** Priority first, then a total order on chunk identity so ties are stable. */
+function compareDeliveries(a: ReadyChunkDelivery, b: ReadyChunkDelivery): number {
+  return (
+    (a.priority ?? 0) - (b.priority ?? 0) ||
+    a.imageId.localeCompare(b.imageId) ||
+    a.level - b.level ||
+    a.t - b.t ||
+    a.z - b.z ||
+    a.y - b.y ||
+    a.x - b.x ||
+    a.c - b.c ||
+    a.chunkKey.localeCompare(b.chunkKey)
+  );
 }
 
 export class CpuCache {
@@ -222,12 +215,7 @@ export class CpuCache {
    */
   private overviewStore!: ChunkStore;
 
-  private proxyStore!: ProxyStore;
-
   private chunkScheduler!: Scheduler<ChunkRequest>;
-
-  /** Shares concurrency / bytes caps with `chunkScheduler` via `siblingInFlight`. */
-  private proxyScheduler!: Scheduler<ProxyRequest>;
 
   readonly deliveryState = new DeliveryState();
 
@@ -291,9 +279,6 @@ export class CpuCache {
 
   private chunkRetryPolicy: RetryPolicy = new OnceTransientRetry(TRANSIENT_RETRY_DELAY_MS);
 
-  /** Proxies are not retried in-fetch; orchestrator resubmits next tick. */
-  private proxyRetryPolicy: RetryPolicy = new NeverRetry();
-
   /** Plan-rebuild generation stamped onto wanted cache entries. */
   private currentSubmitTick = 0;
   private desiredDetailKeysThisTick = new Set<string>();
@@ -308,11 +293,10 @@ export class CpuCache {
   /**
    * Latest wanted metadata for in-flight fetches. The request object
    * passed to `fetchAndDecode` may have been queued under an older
-   * camera/LOD plan; these maps let later submits refresh the generation
+   * camera/LOD plan; this map lets later submits refresh the generation
    * and lane while the bytes are still in flight.
    */
   private inFlightChunkMeta = new Map<string, InFlightChunkMeta>();
-  private inFlightProxyMeta = new Map<string, InFlightProxyMeta>();
 
   /**
    * Worker-rejected (atlas full + too far) chunks. `submit()` skips
@@ -327,7 +311,7 @@ export class CpuCache {
   private listeners: (() => void)[] = [];
 
   private currentEpochs: SceneEpochs = {
-    content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
+    content: 0, layout: 0, view: 0, selection: 0, request: 0,
   };
 
   constructor(source: ContentSource, decode: DecodePool, config?: Partial<CpuCacheConfig>) {
@@ -336,7 +320,6 @@ export class CpuCache {
     this.config = {
       mainBudgetBytes: config?.mainBudgetBytes ?? DEFAULT_MAIN_BUDGET,
       overviewBudgetBytes: config?.overviewBudgetBytes ?? DEFAULT_OVERVIEW_BUDGET,
-      proxyBudgetBytes: config?.proxyBudgetBytes ?? DEFAULT_PROXY_BUDGET,
       maxConcurrentFetches: config?.maxConcurrentFetches ?? (decode.size * FETCH_CONCURRENCY_MULTIPLIER),
       maxBytesInFlight: config?.maxBytesInFlight ?? DEFAULT_MAX_BYTES_IN_FLIGHT,
       onChunkFailureStreak: config?.onChunkFailureStreak,
@@ -379,26 +362,13 @@ export class CpuCache {
         traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
       },
     });
-    this.proxyStore = new ProxyStore({
-      policy: new LRUPolicy<ProxyEvictable>(),
-      budgetBytes: this.config.proxyBudgetBytes,
-      recordEviction: () => this.counters.recordEviction("proxy"),
-    });
 
-    // Backpressure log is chunk-path only; proxy scheduler omits it.
     const burstBackpressure = new BurstLogger("cache", "cache.backpressure");
     this.chunkScheduler = new Scheduler<ChunkRequest>(
       {
         maxConcurrentFetches: this.config.maxConcurrentFetches,
         maxBytesInFlight: this.config.maxBytesInFlight,
         burstLogger: burstBackpressure,
-        siblingInFlight: () => {
-          const proxyScheduler = this.proxyScheduler as Scheduler<ProxyRequest> | undefined;
-          return {
-            count: proxyScheduler?.inFlightSize ?? 0,
-            bytes: proxyScheduler?.inFlightBytes ?? 0,
-          };
-        },
       },
       (req) => this.inFlightKey(req),
       (req, controller, _estimate, key, admittedAtMs) => {
@@ -409,25 +379,6 @@ export class CpuCache {
         // pipeline error, so log it.
         this.fetchAndDecode(req, controller, key, 0, startedEpochs, false, admittedAtMs).catch((err: unknown) => {
           console.warn("[CpuCache] unexpected chunk pipeline error:", err);
-        });
-      },
-    );
-    this.proxyScheduler = new Scheduler<ProxyRequest>(
-      {
-        maxConcurrentFetches: this.config.maxConcurrentFetches,
-        maxBytesInFlight: this.config.maxBytesInFlight,
-        siblingInFlight: () => ({
-          count: this.chunkScheduler.inFlightSize,
-          bytes: this.chunkScheduler.inFlightBytes,
-        }),
-      },
-      (req) => this.inFlightProxyKey(req),
-      (req, controller, _estimate, key) => {
-        this.rememberInFlightProxy(key, req, { ...this.currentEpochs });
-        // Same boundary as the chunk arm: `fetchProxy` handles fetch
-        // failures internally; only unexpected pipeline errors land here.
-        this.fetchProxy(req, controller, key).catch((err: unknown) => {
-          console.warn("[CpuCache] unexpected proxy pipeline error:", err);
         });
       },
     );
@@ -557,38 +508,16 @@ export class CpuCache {
     // than two readings of the clock that nearly agree.
     //
     // Only when this submit actually enqueued something. A submit that
-    // enqueues no chunks has no row to attribute, and one arriving from
-    // outside a tick — `requestTestProxy` is the only such caller — would
-    // otherwise close a plan pass that a tick opened long ago and publish the
-    // gap between them as plan time.
+    // enqueues no chunks has no row to attribute, and would otherwise close a
+    // plan pass that a tick opened long ago and publish the gap between them
+    // as plan time.
     if (pendingChunks.length > 0) traceRecorder.notePlanEnqueue(enqueueNow);
     this.chunkScheduler.enqueue(
       orderChunkRequestsForTierAllocation(pendingChunks, pendingTiers),
       enqueueNow,
     );
 
-    const proxyRequests = plan.proxyRequests ?? [];
-    const pendingProxies: ProxyRequest[] = [];
-    for (const req of proxyRequests) {
-      const key = this.inFlightProxyKey(req);
-
-      const cachedProxy = this.proxyStore.get(req.datasetId, proxyInnerKey(req));
-      if (cachedProxy) {
-        cachedProxy.priority = req.priority;
-        cachedProxy.lastSeenTick = this.currentSubmitTick;
-        continue;
-      }
-
-      if (this.proxyScheduler.hasInFlight(key)) {
-        this.rememberInFlightProxy(key, req, { ...this.currentEpochs });
-        continue;
-      }
-
-      pendingProxies.push(req);
-    }
-    this.proxyScheduler.enqueue(pendingProxies, enqueueNow);
-
-    this.drainSchedulers();
+    this.drainScheduler();
     this.armReconcile(nextRetryAt);
   }
 
@@ -634,7 +563,7 @@ export class CpuCache {
       // Replacing the queue drops nothing: whatever it held is wanted, absent
       // and not in flight, so it is in `pending` too, in the same order.
       this.chunkScheduler.enqueue(orderChunkRequestsForTierAllocation(pending, tiers), enqueueNow);
-      this.drainSchedulers();
+      this.drainScheduler();
       this.notifyListeners();
     }
     this.armReconcile(nextRetryAt);
@@ -738,10 +667,9 @@ export class CpuCache {
 
   /**
    * Abort every in-flight and pending chunk fetch for an entity that left
-   * the view. Chunk and proxy schedulers share the concurrency and bytes
-   * caps, so this and {@link cancelProxyWorkForEntity} hand those slots back
-   * to the current view instead of holding them until the transfer timeout.
-   * A returning entity re-enqueues on its next submit.
+   * the view, handing its concurrency and bytes slots back to the current
+   * view instead of holding them until the transfer timeout. A returning
+   * entity re-enqueues on its next submit.
    */
   private cancelChunkWorkForEntity(entityId: string): void {
     const cancelled = this.chunkScheduler.cancelWhere(
@@ -752,25 +680,6 @@ export class CpuCache {
     }
   }
 
-  /**
-   * The proxy counterpart to {@link cancelChunkWorkForEntity}: abort the
-   * departed entity's per-tile proxy fetches so they do not hold a shared
-   * slot until the proxy timeout. A returning entity re-fetches its proxy on
-   * the next submit.
-   */
-  private cancelProxyWorkForEntity(entityId: string): void {
-    const cancelled = this.proxyScheduler.cancelWhere(
-      (entry) =>
-        entry.request.entityId === entityId &&
-        // Group proxies are keyed by group id and stay wanted while other
-        // tiles in the group are visible; plan membership governs them, not
-        // one entity's departure.
-        entry.request.kind !== "GroupProxy3D",
-    );
-    for (const key of cancelled) {
-      this.inFlightProxyMeta.delete(key);
-    }
-  }
 
   /**
    * Drop all state for a removed dataset. The orchestrator owns the
@@ -784,15 +693,8 @@ export class CpuCache {
       (entry) => entityIdSet.has(entry.request.entityId),
     );
 
-    this.proxyScheduler.cancelDataset(
-      (entry) => entry.request.datasetId === datasetId,
-    );
-
     this.chunkStore.cancelDataset(entityIds);
     this.overviewStore.cancelDataset(entityIds);
-
-    this.proxyStore.cancelDataset(datasetId);
-    this.deliveryState.clearProxySentForDataset(datasetId);
 
     // Failure keys are `${entityId}/${chunkKey}`; entityIds may
     // contain slashes (collection naming, e.g. "collectionId:A/1/0"), so
@@ -810,10 +712,6 @@ export class CpuCache {
       this.activeEntityIdsThisRebuild.delete(entityId);
       this.targetLevelByEntity.delete(entityId);
       this.deliveryState.clearChunksForImage(entityId);
-    }
-    const proxyPrefix = `${datasetId}|`;
-    for (const key of this.inFlightProxyMeta.keys()) {
-      if (key.startsWith(proxyPrefix)) this.inFlightProxyMeta.delete(key);
     }
     // A reconcile due before the next plan must not fetch for a dataset
     // that is gone.
@@ -881,13 +779,11 @@ export class CpuCache {
         this.chunkStore.demoteEntity(entityId);
         // The entity was active last rebuild but the just-completed one
         // never requested it: it has left the view entirely. Abort its
-        // in-flight chunk and proxy fetches so they release their shared
-        // concurrency slots to the current view immediately, rather than
-        // holding them until the transfer timeout. Its already-cached
-        // chunks are only demoted (kept, evictable); if it returns, its
-        // next submit re-enqueues.
+        // in-flight fetches so they release their concurrency slots to the
+        // current view immediately, rather than holding them until the
+        // transfer timeout. Its already-cached chunks are only demoted
+        // (kept, evictable); if it returns, its next submit re-enqueues.
         this.cancelChunkWorkForEntity(entityId);
-        this.cancelProxyWorkForEntity(entityId);
       }
     }
     this.activeEntityIds = this.activeEntityIdsThisRebuild;
@@ -902,8 +798,8 @@ export class CpuCache {
     this.disarmReconcile();
   }
 
-  *getDeliverable(): Iterable<ReadyDelivery> {
-    const candidates: ReadyDelivery[] = [];
+  *getDeliverable(): Iterable<ReadyChunkDelivery> {
+    const candidates: ReadyChunkDelivery[] = [];
 
     for (const entry of this.chunkStore.iterateTier("active-detail")) {
       if (entry.lane !== "detail") continue;
@@ -935,34 +831,25 @@ export class CpuCache {
       candidates.push(this.chunkEntryToDelivery(entry));
     }
 
-    for (const entry of this.proxyStore.iterateSeenAt(this.currentSubmitTick)) {
-      if (this.deliveryState.wasProxySent(this.proxyKeyFromEntry(entry))) continue;
-      candidates.push(this.proxyEntryToDelivery(entry));
-    }
-
-    candidates.sort((a, b) => this.compareDeliveries(a, b));
+    candidates.sort(compareDeliveries);
     yield* candidates;
   }
 
-  markSent(delivery: ReadyDelivery): void {
-    if (delivery.kind === "chunk") {
-      // Handed to the renderer. The row's `upload` phase runs until the next
-      // frame proves the worker has written it; the handle is cleared off the
-      // entry so a re-delivery after an eviction cannot re-stamp a row whose
-      // life is already over.
-      if ((delivery.traceRow ?? -1) >= 0) {
-        traceRecorder.noteHandedToRenderer(delivery.traceRow!);
-        const entry =
-          this.chunkStore.get(delivery.entityId, delivery.chunkKey) ??
-          this.overviewStore.get(delivery.entityId, delivery.chunkKey);
-        if (entry) entry.traceRow = -1;
-      }
-      this.deliveryState.markChunkSent(
-        delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier,
-      );
-    } else {
-      this.deliveryState.markProxySent(this.proxyKeyFromDelivery(delivery));
+  markSent(delivery: ReadyChunkDelivery): void {
+    // Handed to the renderer. The row's `upload` phase runs until the next
+    // frame proves the worker has written it; the handle is cleared off the
+    // entry so a re-delivery after an eviction cannot re-stamp a row whose
+    // life is already over.
+    if ((delivery.traceRow ?? -1) >= 0) {
+      traceRecorder.noteHandedToRenderer(delivery.traceRow!);
+      const entry =
+        this.chunkStore.get(delivery.entityId, delivery.chunkKey) ??
+        this.overviewStore.get(delivery.entityId, delivery.chunkKey);
+      if (entry) entry.traceRow = -1;
     }
+    this.deliveryState.markChunkSent(
+      delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier,
+    );
   }
 
   /** The render worker wrote these chunks, or already held them. */
@@ -1034,13 +921,9 @@ export class CpuCache {
     return this.deliveryState.markChunkMissing(imageId, c, chunkKey, tier);
   }
 
-  markProxyMissing(key: string): void {
-    this.deliveryState.clearProxySent(key);
-  }
-
   /**
    * The renderer replaced its GPU device and holds nothing, so every chunk
-   * and proxy is eligible to send again, the ones it refused included.
+   * is eligible to send again, the ones it refused included.
    */
   forgetDelivered(): void {
     this.deliveryState.reset();
@@ -1106,13 +989,13 @@ export class CpuCache {
   }
 
   /**
-   * Every byte the CPU cache holds, across all three stores. Separate from
+   * Every byte the CPU cache holds, across both stores. Separate from
    * {@link telemetry} because the trace samples this per planning pass and
    * `telemetry()` builds a whole report — including a materialised deliverable
    * list — to answer it.
    */
   residentBytes(): number {
-    return this.chunkStore.bytes + this.overviewStore.bytes + this.proxyStore.bytes;
+    return this.chunkStore.bytes + this.overviewStore.bytes;
   }
 
   /**
@@ -1125,7 +1008,6 @@ export class CpuCache {
     return {
       main: { bytes: this.chunkStore.bytes, budgetBytes: this.chunkStore.budgetBytes },
       overview: { bytes: this.overviewStore.bytes, budgetBytes: this.overviewStore.budgetBytes },
-      proxy: { bytes: this.proxyStore.bytes, budgetBytes: this.proxyStore.budgetBytes },
     };
   }
 
@@ -1146,9 +1028,7 @@ export class CpuCache {
     for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
       out.inFlight[entry.request.lane]++;
     }
-    out.proxyInFlight = this.proxyScheduler.inFlightSize;
-    out.proxyPending = this.proxyScheduler.pendingSize;
-    out.pendingTotal = this.chunkScheduler.pendingSize + this.proxyScheduler.pendingSize;
+    out.pendingTotal = this.chunkScheduler.pendingSize;
     out.pendingScanCap = QUIESCENCE_PENDING_SCAN_CAP;
     out.pendingUnclassified = !this.chunkScheduler.forEachPending(
       QUIESCENCE_PENDING_SCAN_CAP,
@@ -1166,13 +1046,11 @@ export class CpuCache {
 
     const mainTiers = this.chunkStore.tierResidency();
     const overviewTotals = this.overviewStore.totalResidency();
-    const proxyTotals = this.proxyStore.totalResidency();
     const tierResidency = {
       activeDetail: mainTiers.activeDetail,
       demotedDetail: mainTiers.demotedDetail,
       prefetch: mainTiers.prefetch,
       overview: overviewTotals,
-      proxy: proxyTotals,
     };
 
     const pendingOldestAgeMs = this.chunkScheduler.oldestPendingAgeMs(now);
@@ -1184,14 +1062,9 @@ export class CpuCache {
       mainBudget: this.config.mainBudgetBytes,
       overviewBytes: this.overviewStore.bytes,
       overviewBudget: this.config.overviewBudgetBytes,
-      proxyBytes: this.proxyStore.bytes,
-      proxyBudget: this.config.proxyBudgetBytes,
       inFlightCount: this.chunkScheduler.inFlightSize,
       inFlightBytes: this.chunkScheduler.inFlightBytes,
-      inFlightProxyCount: this.proxyScheduler.inFlightSize,
-      inFlightProxyBytes: this.proxyScheduler.inFlightBytes,
       pendingCount: this.chunkScheduler.pendingSize,
-      pendingProxyCount: this.proxyScheduler.pendingSize,
       pendingOldestAgeMs,
       readyCount: Array.from(this.getDeliverable()).length,
       hitRate: counters.hitRate,
@@ -1237,7 +1110,7 @@ export class CpuCache {
   quiescenceInputs(out: CacheQuiescenceInputs): CacheQuiescenceInputs {
     const demand = this.computeTierDemandTelemetry();
 
-    let inFlight = this.proxyScheduler.inFlightSize;
+    let inFlight = 0;
     let speculativeInFlight = 0;
     for (const [, entry] of this.chunkScheduler.inFlightEntries()) {
       if (entry.request.lane === "prefetch") speculativeInFlight++;
@@ -1264,8 +1137,7 @@ export class CpuCache {
     out.speculativeInFlight = speculativeInFlight;
     out.speculativePending = speculativePending ?? 0;
     out.pendingUnclassified = speculativePending === null;
-    out.pending =
-      this.chunkScheduler.pendingSize - (speculativePending ?? 0) + this.proxyScheduler.pendingSize;
+    out.pending = this.chunkScheduler.pendingSize - (speculativePending ?? 0);
     return out;
   }
 
@@ -1281,36 +1153,12 @@ export class CpuCache {
     this.applyElasticTierBudgets();
   }
 
-  /** Searches detail then overview; proxies use {@link getCachedProxy}. */
+  /** Searches detail then overview. */
   getCachedChunk(entityId: string, chunkKey: string): ReadyChunkDelivery | null {
     const entry =
       this.chunkStore.get(entityId, chunkKey) ??
       this.overviewStore.get(entityId, chunkKey);
     return entry ? this.chunkEntryToDelivery(entry) : null;
-  }
-
-  getCachedProxy(
-    datasetId: string,
-    entityId: string,
-    kind: "GroupProxy3D" | "TileProxy3D",
-    t: number,
-    c: number,
-  ): ReadyProxyDelivery | null {
-    const entry = this.proxyStore.get(datasetId, proxyInnerKey({ entityId, kind, t, c }));
-    if (!entry) return null;
-    return this.proxyEntryToDelivery(entry);
-  }
-
-  isProxyInFlight(
-    datasetId: string,
-    entityId: string,
-    kind: "GroupProxy3D" | "TileProxy3D",
-    t: number,
-    c: number,
-  ): boolean {
-    return this.proxyScheduler.hasInFlight(
-      `${datasetId}|${proxyInnerKey({ entityId, kind, t, c })}`,
-    );
   }
 
   /** Searches detail then overview; null when neither has the chunk. */
@@ -1333,10 +1181,6 @@ export class CpuCache {
     return this.chunkScheduler.pendingSnapshot();
   }
 
-  getPendingProxySnapshot(): readonly ProxyRequest[] {
-    return this.proxyScheduler.pendingSnapshot();
-  }
-
   subscribe(listener: () => void): () => void {
     this.listeners.push(listener);
     return () => {
@@ -1351,11 +1195,9 @@ export class CpuCache {
 
   reset(): void {
     this.chunkScheduler.reset();
-    this.proxyScheduler.reset();
 
     this.chunkStore.reset();
     this.overviewStore.reset();
-    this.proxyStore.reset();
 
     this.activeEntityIds.clear();
     this.activeEntityIdsThisRebuild.clear();
@@ -1370,7 +1212,6 @@ export class CpuCache {
     this.rejectionTracker.clear();
     this.deliveryState.reset();
     this.inFlightChunkMeta.clear();
-    this.inFlightProxyMeta.clear();
     this.wantedRequests = [];
     this.disarmReconcile();
     this.lastReconcileAt = -Infinity;
@@ -1422,7 +1263,7 @@ export class CpuCache {
       if (fe.kind === "abort") {
         // A silent teardown: the caller cancelled. Release only what this
         // settle still owns (see {@link settleFetch}).
-        this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller);
+        this.settleFetch(key, controller);
         return;
       }
       if (fe.kind === "pending") {
@@ -1432,14 +1273,14 @@ export class CpuCache {
         // asked for on every plan or never again. An update that already
         // overtook this answer has nothing left to wait for.
         const overtaken = this.settledWhileInFlight.has(key);
-        if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
+        if (this.settleFetch(key, controller)) {
           if (!overtaken) {
             this.recordFailure(key, "pending", req);
           } else {
             if (this.isWanted(key)) this.armReconcileForAvailability();
             this.notifyListeners();
           }
-          this.drainSchedulers();
+          this.drainScheduler();
         }
         return;
       }
@@ -1479,7 +1320,7 @@ export class CpuCache {
         this.recordChunkFailureForStreak(fe.message);
         fed = true;
       }
-      if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
+      if (this.settleFetch(key, controller)) {
         this.recordFailure(key, isPermanent ? "permanent" : "transient", req);
         this.counters.recordFetchFailure(isPermanent, fe.message);
         this.recordFailureForBurstDetection(isPermanent, fe.message);
@@ -1516,7 +1357,7 @@ export class CpuCache {
       // transient backoff so the key is not re-fetched every rebuild, and
       // feeds the streak once.
       const streakMessage = `decode failed: ${message}`;
-      if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
+      if (this.settleFetch(key, controller)) {
         if (!fedStreak) {
           this.recordChunkFailureForStreak(streakMessage);
         }
@@ -1546,7 +1387,7 @@ export class CpuCache {
     // record clears so its attempt/backoff bookkeeping starts clean; a
     // superseded settle leaves the successor's slot, metadata, and failure
     // state untouched.
-    if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
+    if (this.settleFetch(key, controller)) {
       this.recordChunkDelivered();
       this.clearFailure(key);
     }
@@ -1589,14 +1430,14 @@ export class CpuCache {
         // saying so is the difference between a chunk that stalled and one
         // that was never going to arrive.
         traceRecorder.finishRow(traceRow, RowOutcome.Retired);
-        this.drainSchedulers();
+        this.drainScheduler();
         return;
       }
       this.overviewStore.insert(cacheEntry);
     } else {
       if (stale && this.chunkStore.bytes + cacheEntry.sizeBytes > this.chunkStore.budgetBytes) {
         traceRecorder.finishRow(traceRow, RowOutcome.Retired);
-        this.drainSchedulers();
+        this.drainScheduler();
         return;
       }
       this.chunkStore.insert(cacheEntry);
@@ -1607,93 +1448,11 @@ export class CpuCache {
 
     this.notifyListeners();
 
-    this.drainSchedulers();
+    this.drainScheduler();
   }
 
-  private async fetchProxy(
-    req: ProxyRequest,
-    controller: AbortController,
-    key: string,
-  ): Promise<void> {
-    let result: FetchProxyResult;
-    try {
-      result = await this.source.fetchProxy(
-        {
-          datasetId: req.datasetId,
-          entityId: req.entityId,
-          kind: req.kind,
-          t: req.t,
-          c: req.c,
-        },
-        controller.signal,
-      );
-    } catch (err: unknown) {
-      const fe = classifyFetchError(err);
-      if (fe.kind === "abort") {
-        this.settleFetch(this.proxyScheduler, this.inFlightProxyMeta, key, controller);
-        return;
-      }
-      // Consulted for symmetry; NeverRetry always returns false.
-      if (this.proxyRetryPolicy.shouldRetry(fe, 0)) {
-        await new Promise(r => setTimeout(r, this.proxyRetryPolicy.delayMs(0)));
-        if (!this.proxyScheduler.hasInFlight(key)) return;
-        return this.fetchProxy(req, controller, key);
-      }
-      // Proxies carry no per-key failure record or delivery streak; the
-      // orchestrator resubmits next tick if still wanted.
-      if (this.settleFetch(this.proxyScheduler, this.inFlightProxyMeta, key, controller)) {
-        this.counters.recordError(fe.message);
-      }
-      return;
-    }
-
-    const responseBytes = result.data.byteLength;
-    // Correct the in-flight byte estimate only while this settle still owns
-    // the slot; a superseded successor keeps its own accounting.
-    if (this.proxyScheduler.isCurrent(key, controller)) {
-      this.proxyScheduler.correctInFlightBytes(key, responseBytes);
-    }
-
-    const latestMeta = this.inFlightProxyMeta.get(key);
-    const effectiveReq = latestMeta?.request ?? req;
-    const lastSeenTick = latestMeta?.lastSeenTick ?? this.currentSubmitTick;
-
-    const cacheEntry: ProxyCacheEntry = {
-      header: result.header,
-      data: result.data,
-      bytes: responseBytes,
-      datasetId: effectiveReq.datasetId,
-      entityId: effectiveReq.entityId,
-      imageId: effectiveReq.imageId,
-      proxyKind: effectiveReq.kind,
-      t: effectiveReq.t,
-      c: effectiveReq.c,
-      insertedAt: this.lruCounter++,
-      epochs: { ...this.currentEpochs },
-      priority: effectiveReq.priority,
-      lastSeenTick,
-    };
-
-    // Cache even if superseded during the fetch — the bytes are valid; the
-    // settle below releases the slot and metadata only when this controller
-    // still owns the key.
-    this.proxyStore.insert(effectiveReq.datasetId, proxyInnerKey(effectiveReq), cacheEntry);
-
-    this.settleFetch(this.proxyScheduler, this.inFlightProxyMeta, key, controller);
-
-    this.notifyListeners();
-
-    this.drainSchedulers();
-  }
-
-  private drainSchedulers(): void {
-    const estimateBytes = () => this.counters.averageDecodedBytes();
-
-    // The two schedulers share caps through `siblingInFlight`. Drain the
-    // proxy side first so fallback assets cannot sit behind a saturated
-    // detail queue until the next camera move/submission wakes them.
-    this.proxyScheduler.drain(estimateBytes);
-    this.chunkScheduler.drain(estimateBytes);
+  private drainScheduler(): void {
+    this.chunkScheduler.drain(() => this.counters.averageDecodedBytes());
   }
 
   private applyElasticTierBudgets(): void {
@@ -1733,22 +1492,6 @@ export class CpuCache {
     this.settledWhileInFlight.delete(key);
   }
 
-  private rememberInFlightProxy(
-    key: string,
-    req: ProxyRequest,
-    epochs: SceneEpochs,
-  ): void {
-    this.inFlightProxyMeta.set(key, {
-      request: req,
-      lastSeenTick: this.currentSubmitTick,
-      epochs,
-    });
-  }
-
-  private inFlightProxyKey(req: ProxyRequest): string {
-    return `${req.datasetId}|${proxyInnerKey(req)}`;
-  }
-
   /**
    * Release the scheduler slot and in-flight metadata for a completion, but
    * only when the settling controller still owns the key. Every completion
@@ -1757,14 +1500,9 @@ export class CpuCache {
    * nothing and cannot start a duplicate fetch. Returns whether this settle
    * owned the key; callers gate per-key bookkeeping on it.
    */
-  private settleFetch<Req extends SchedulableRequest, M>(
-    scheduler: Scheduler<Req>,
-    meta: Map<string, M>,
-    key: string,
-    controller: AbortController,
-  ): boolean {
-    if (!scheduler.markInFlightDoneIfCurrent(key, controller)) return false;
-    meta.delete(key);
+  private settleFetch(key: string, controller: AbortController): boolean {
+    if (!this.chunkScheduler.markInFlightDoneIfCurrent(key, controller)) return false;
+    this.inFlightChunkMeta.delete(key);
     this.settledWhileInFlight.delete(key);
     return true;
   }
@@ -1921,25 +1659,8 @@ export class CpuCache {
     this.config.onChunkFailureRecovered?.();
   }
 
-  private proxyEntryToDelivery(entry: ProxyCacheEntry): ReadyProxyDelivery {
-    return {
-      kind: "proxy",
-      datasetId: entry.datasetId,
-      entityId: entry.entityId,
-      imageId: entry.imageId,
-      proxyKind: entry.proxyKind,
-      t: entry.t,
-      c: entry.c,
-      header: entry.header,
-      data: entry.data,
-      epochs: entry.epochs,
-      priority: entry.priority,
-    };
-  }
-
   private chunkEntryToDelivery(entry: CacheEntry): ReadyChunkDelivery {
     return {
-      kind: "chunk",
       entityId: entry.entityId,
       imageId: entry.imageId,
       level: entry.level,
@@ -1959,47 +1680,6 @@ export class CpuCache {
     };
   }
 
-  private compareDeliveries(a: ReadyDelivery, b: ReadyDelivery): number {
-    const priority = (a.priority ?? 0) - (b.priority ?? 0);
-    if (priority !== 0) return priority;
-
-    if (a.kind !== b.kind) {
-      return a.kind === "proxy" ? -1 : 1;
-    }
-
-    if (a.kind === "proxy" && b.kind === "proxy") {
-      return (
-        a.datasetId.localeCompare(b.datasetId) ||
-        a.entityId.localeCompare(b.entityId) ||
-        a.proxyKind.localeCompare(b.proxyKind) ||
-        a.t - b.t ||
-        a.c - b.c
-      );
-    }
-
-    if (a.kind === "chunk" && b.kind === "chunk") {
-      return (
-        a.imageId.localeCompare(b.imageId) ||
-        a.level - b.level ||
-        a.t - b.t ||
-        a.z - b.z ||
-        a.y - b.y ||
-        a.x - b.x ||
-        a.c - b.c ||
-        a.chunkKey.localeCompare(b.chunkKey)
-      );
-    }
-
-    return 0;
-  }
-
-  private proxyKeyFromEntry(entry: ProxyCacheEntry): string {
-    return `${entry.datasetId}|${entry.entityId}|${entry.proxyKind}|${entry.t}|${entry.c}`;
-  }
-
-  private proxyKeyFromDelivery(delivery: ReadyProxyDelivery): string {
-    return `${delivery.datasetId}|${delivery.entityId}|${delivery.proxyKind}|${delivery.t}|${delivery.c}`;
-  }
 
   private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
     // minimap/overview/coarse share the overview/coarse cache.

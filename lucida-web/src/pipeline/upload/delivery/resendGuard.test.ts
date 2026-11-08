@@ -4,7 +4,6 @@ import { RESEND_GUARD_TICKS, ResendGuard } from "./resendGuard.ts";
 
 function chunk(x: number, tier: "detail" | "coarse" = "detail"): ReadyChunkDelivery {
   return {
-    kind: "chunk",
     entityId: "tile-0",
     imageId: "img-0",
     level: 0,
@@ -16,7 +15,7 @@ function chunk(x: number, tier: "detail" | "coarse" = "detail"): ReadyChunkDeliv
     chunkKey: `0/0/0/0/0/${x}`,
     data: new ArrayBuffer(8),
     dataType: "uint16",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 0 },
     lane: "detail",
     residencyTier: tier,
   };

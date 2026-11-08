@@ -46,7 +46,7 @@ function makeRecorder(overrides: Partial<ConstructorParameters<typeof TraceRecor
   });
   recorder.setEnvironment({
     captureWarmth: () => ({
-      detailChunks: 4, detailBytes: 40, coarseChunks: 1, coarseBytes: 10, proxyBytes: 0,
+      detailChunks: 4, detailBytes: 40, coarseChunks: 1, coarseBytes: 10,
     }),
     captureConditions: () => ({
       datasetIds: ["ds"],
@@ -643,21 +643,6 @@ describe("TraceRecorder server rows", () => {
     expect(run.serverRowsDiscarded).toBe(1);
   });
 
-  it("refuses an asset row, which this build gives no browser bracket at all", () => {
-    const { recorder } = makeRecorder();
-    recorder.openRun(OPEN_CAUSE);
-    const row = recorder.beginChunkRow(CHUNK, 0);
-    // Assets draw from the same label counter as chunks, so an asset's rid
-    // lands inside the range this run's chunks minted — and nothing here can
-    // place it even so. The family decides, not the arithmetic.
-    recorder.labelRow(row, { rid: 5, connectionGeneration: 2 });
-    recorder.ingestServerBatch({ ...BATCH, family: ["asset" as const] }, 2);
-    recorder.closeRun("explicit");
-
-    const run = recorder.exportDocument().runs[0];
-    expect(run.serverRows).toHaveLength(0);
-    expect(run.serverRowsDiscarded).toBe(1);
-  });
 
   it("counts server rows that arrive after the run truncated into the unrecorded total", () => {
     const { recorder } = makeRecorder();

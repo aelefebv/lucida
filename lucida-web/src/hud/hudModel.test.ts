@@ -23,7 +23,6 @@ function pools(overrides: Partial<PoolResidencyReport> = {}): PoolResidencyRepor
   return {
     main: { bytes: 128 * MIB, budgetBytes: 512 * MIB },
     overview: { bytes: 63 * MIB, budgetBytes: 64 * MIB },
-    proxy: { bytes: 0, budgetBytes: 256 * MIB },
     ...overrides,
   };
 }
@@ -139,15 +138,15 @@ describe("in flight and pending by lane", () => {
     expect(view.lanes.note).toEqual({ text: "pending not split by lane: queue deeper than 4,096", tone: "busy" });
   });
 
-  it("shows the historical and proxy buckets only when they carry work", () => {
+  it("shows the historical bucket only when it carries work", () => {
     const view = buildHudView(
       after([
         hudSample(0, {
-          lanes: lanes({ inFlight: { detail: 0, coarse: 0, minimap: 0, prefetch: 0, overview: 1 }, proxyPending: 2 }),
+          lanes: lanes({ inFlight: { detail: 0, coarse: 0, minimap: 0, prefetch: 0, overview: 1 } }),
         }),
       ]),
     );
-    expect(view.lanes.rows.map((r) => r.label)).toEqual(["detail", "coarse", "minimap", "prefetch", "overview", "proxy assets"]);
+    expect(view.lanes.rows.map((r) => r.label)).toEqual(["detail", "coarse", "minimap", "prefetch", "overview"]);
   });
 
   it("states that there is no session when the cache is not there to ask", () => {
@@ -163,11 +162,10 @@ describe("resident bytes against budget", () => {
     expect(view.pools.map((p) => [p.label, p.text, p.state, p.tone])).toEqual([
       ["main", "128 / 512 MiB", "under budget", "ok"],
       ["overview", "63 / 64 MiB", "at budget", "busy"],
-      ["proxy", "0 / 256 MiB", "under budget", "ok"],
       ["GPU", "not reported", "not reported", "absent"],
     ]);
     expect(view.pools[0].fill).toBeCloseTo(0.25);
-    expect(view.pools[3].fill).toBeNull();
+    expect(view.pools[2].fill).toBeNull();
   });
 
   it("calls a pool near its budget before it is at it", () => {
@@ -180,15 +178,15 @@ describe("resident bytes against budget", () => {
 
   it("reads absent pools as absent when there is no session", () => {
     const view = buildHudView(after([hudSample(0, { pools: null })]));
-    expect(view.pools.map((p) => p.state)).toEqual(["no session", "no session", "no session", "not reported"]);
+    expect(view.pools.map((p) => p.state)).toEqual(["no session", "no session", "not reported"]);
   });
 
   it("reads the render worker's atlases into the GPU row, with no budget to fill against", () => {
     const view = buildHudView(after([hudSample(0, { gpuAtlases: { atlases: 6, bytes: 412 * MIB } })]));
-    expect(view.pools[3]).toEqual({ label: "GPU", text: "412 MiB", fill: null, state: "6 atlases", tone: "info" });
+    expect(view.pools[2]).toEqual({ label: "GPU", text: "412 MiB", fill: null, state: "6 atlases", tone: "info" });
 
     const one = buildHudView(after([hudSample(0, { gpuAtlases: { atlases: 1, bytes: 0.5 * MIB } })]));
-    expect([one.pools[3].text, one.pools[3].state]).toEqual(["0.5 MiB", "1 atlas"]);
+    expect([one.pools[2].text, one.pools[2].state]).toEqual(["0.5 MiB", "1 atlas"]);
   });
 });
 

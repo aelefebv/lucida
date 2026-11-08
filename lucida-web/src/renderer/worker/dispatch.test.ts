@@ -36,7 +36,7 @@ describe("worker dispatch and the pipeline compile", () => {
     let settled = false;
     const done = dispatchMessage(ctx, {
       type: "sliceRenderMultiPass",
-      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
       layers: [],
       zoom: 1,
       cx: 0,
@@ -96,7 +96,7 @@ describe("worker dispatch upload feedback", () => {
       fullResDepth: 1,
       levelDepth: 1,
       fullResZ: 0,
-      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     });
 
     expect(posts).toEqual([
@@ -128,7 +128,7 @@ describe("worker dispatch upload feedback", () => {
       chunkX: 1,
       chunkY: 1,
       chunkZ: 1,
-      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     });
 
     expect(posts).toEqual([
@@ -167,7 +167,7 @@ describe("worker dispatch upload feedback", () => {
       chunkX: 1,
       chunkY: 1,
       chunkZ: 1,
-      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     });
 
     expect(posts).toEqual([
@@ -231,7 +231,7 @@ describe("worker dispatch upload feedback", () => {
       chunkX: chunk,
       chunkY: chunk,
       chunkZ: chunk,
-      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     });
 
     await upload(2, 8);
@@ -266,9 +266,8 @@ describe("worker dispatch upload feedback", () => {
         sortCenterVox: null,
         frustumPlanes: null,
       },
-      desiredProxyKeys: [],
       wantedChunks: [],
-      epochs: { content: 1, layout: 1, view: 1, selection: 2, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 2, request: 1 },
     });
 
     expect(posts).toEqual([]);
@@ -296,12 +295,11 @@ describe("worker dispatch upload feedback", () => {
         sortCenterVox: null,
         frustumPlanes: null,
       },
-      desiredProxyKeys: [],
       wantedChunks: [],
       removedEntityIds: [],
       upserts: [],
       activeSetOrder: [],
-      epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
     });
 
     expect(posts).toEqual([]);

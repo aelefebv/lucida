@@ -20,7 +20,6 @@ import {
   FetchError,
   classifyFetchError,
   OnceTransientRetry,
-  NeverRetry,
 } from "./retry.ts";
 
 // FetchError
@@ -167,22 +166,5 @@ describe("OnceTransientRetry", () => {
     expect(new OnceTransientRetry(500).delayMs(0)).toBe(500);
     expect(new OnceTransientRetry(1000).delayMs(0)).toBe(1000);
     expect(new OnceTransientRetry(0).delayMs(0)).toBe(0);
-  });
-});
-
-// NeverRetry
-
-describe("NeverRetry", () => {
-  it("shouldRetry always returns false", () => {
-    const policy = new NeverRetry();
-    expect(policy.shouldRetry(new FetchError("blip", { kind: "transient" }), 0)).toBe(false);
-    expect(policy.shouldRetry(new FetchError("404", { kind: "permanent" }), 0)).toBe(false);
-    expect(policy.shouldRetry(new FetchError("cancelled", { kind: "abort" }), 0)).toBe(false);
-  });
-
-  it("delayMs always returns 0", () => {
-    const policy = new NeverRetry();
-    expect(policy.delayMs(0)).toBe(0);
-    expect(policy.delayMs(5)).toBe(0);
   });
 });

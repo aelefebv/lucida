@@ -22,7 +22,7 @@ const CHUNK = {
 
 const ENVIRONMENT = {
   captureWarmth: () => ({
-    detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+    detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
   }),
   captureConditions: () => ({
     datasetIds: ["ds"],

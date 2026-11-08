@@ -4,7 +4,6 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
-import { destroyProxyAtlas } from "../proxyAtlas.ts";
 import { destroyDescriptorBuffer } from "../descriptorBuffer.ts";
 import { destroyAllSliceResources, removeSliceResources } from "../slice/index.ts";
 import { destroyAllVolumeResources, removeVolumeResources } from "../volume/index.ts";
@@ -28,18 +27,6 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
   removeVolumeResources(ctx, id);
   removeMinimapResources(id);
 
-  const dsPools = state.proxyPoolsByDataset.get(id);
-  if (dsPools) {
-    for (const pool of dsPools.values()) destroyProxyAtlas(pool);
-    state.proxyPoolsByDataset.delete(id);
-    // A handle into a freed pool would point at whatever a reopened pool
-    // under the same key later puts in that slot.
-    for (const [key, desc] of state.proxyDescriptorsByEntity) {
-      if (desc.tileProxyHandle && dsPools.has(desc.tileProxyHandle.poolKey)) desc.tileProxyHandle = null;
-      if (desc.groupProxyHandle && dsPools.has(desc.groupProxyHandle.poolKey)) desc.groupProxyHandle = null;
-      if (!desc.tileProxyHandle && !desc.groupProxyHandle) state.proxyDescriptorsByEntity.delete(key);
-    }
-  }
   const desc = state.descriptorBuffersByDataset.get(id);
   if (desc) {
     destroyDescriptorBuffer(desc);
@@ -58,12 +45,6 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
       state.cameraUVPerEntity.delete(memberId);
       state.rayHitPerEntity.delete(memberId);
     }
-  }
-  // groupsByDataset avoids scanning every group's child set.
-  const groups = state.groupsByDataset.get(id);
-  if (groups) {
-    for (const groupId of groups) state.groupToTiles.delete(groupId);
-    state.groupsByDataset.delete(id);
   }
   if (state.currentColdState?.datasetId === id) {
     state.currentColdState = null;
@@ -90,8 +71,6 @@ export function handleDestroy(ctx: WorkerCtx): void {
   state.targetLevelByMember.clear();
   state.currentSourcesByDataset.clear();
   state.wantedByDataset.clear();
-  state.groupToTiles.clear();
-  state.groupsByDataset.clear();
   releaseDeviceResources(ctx);
   destroyAllMinimapResources();
   self.close();
@@ -104,11 +83,6 @@ export function handleDestroy(ctx: WorkerCtx): void {
  */
 export function releaseDeviceResources(ctx: WorkerCtx): void {
   const state = ctx.state;
-  for (const dsPools of state.proxyPoolsByDataset.values()) {
-    for (const pool of dsPools.values()) destroyProxyAtlas(pool);
-  }
-  state.proxyPoolsByDataset.clear();
-  state.proxyDescriptorsByEntity.clear();
   for (const desc of state.descriptorBuffersByDataset.values()) {
     destroyDescriptorBuffer(desc);
   }

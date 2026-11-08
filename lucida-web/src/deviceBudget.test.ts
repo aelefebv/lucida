@@ -22,7 +22,6 @@ describe("fitBudgets", () => {
       labelTotalVolumeBytes: 256 * MIB,
       cpuMainBytes: 256 * MIB,
       cpuOverviewBytes: 32 * MIB,
-      cpuProxyBytes: 128 * MIB,
       cpuBytesInFlight: 16 * MIB,
     });
   });

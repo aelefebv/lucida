@@ -128,10 +128,8 @@ vi.mock("lucida-core", () => {
     import_dataset_presence(_json: string) {}
     compute_peer_cursors() { return JSON.stringify({ gpu: [], labels: [] }); }
     fit_camera_to_dataset_bounds(_id: string) {}
-    apply_asset_catalog_delta(_datasetId: string, _deltaJson: string) {}
-    asset_epoch() { return 0; }
     epochs() {
-      return JSON.stringify({ content: 0, layout: 0, asset: 0, ...this.epochCounts });
+      return JSON.stringify({ content: 0, layout: 0, ...this.epochCounts });
     }
     free() {}
   }
@@ -209,7 +207,6 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     poolResidency = vi.fn(() => ({
       main: { bytes: 0, budgetBytes: 1 },
       overview: { bytes: 0, budgetBytes: 1 },
-      proxy: { bytes: 0, budgetBytes: 1 },
     }));
     laneOutstanding = vi.fn((out: unknown) => out);
     constructor(_source: unknown, _pool: unknown) {}

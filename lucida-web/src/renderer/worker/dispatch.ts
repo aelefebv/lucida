@@ -15,7 +15,6 @@ import {
   applyColdStateSelection,
   applyColdStateDelta,
 } from "../coldState/index.ts";
-import { handleProxyUpload } from "../proxy/index.ts";
 import {
   handleLabelSliceChunkData,
   handleSliceChunkData,
@@ -34,7 +33,6 @@ import {
   handleMinimapUploadOverviewChunks,
   handleThumbnailRender,
 } from "../minimapHandlers.ts";
-import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
 import { removeDatasetResources } from "./lifecycle.ts";
 import { postGpuAtlasesIfChanged } from "./atlasReport.ts";
 import { handleCaptureFrame } from "./captureFrame.ts";
@@ -107,13 +105,6 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       postFrameDone(ctx, msg.frameSeq);
       postGpuAtlasesIfChanged(ctx);
       return;
-
-    case "proxyAssetData": {
-      const outcome = handleProxyUpload(ctx, msg);
-      if (outcome.rebuildDescriptor) rebuildDescriptorIfMatching(ctx, msg.datasetId);
-      if (outcome.wantedSetChanged) ctx.postWantedSet(msg.datasetId);
-      return;
-    }
 
     case "minimapInit":
       handleMinimapInit(ctx, msg);

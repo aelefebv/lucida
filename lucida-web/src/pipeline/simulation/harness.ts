@@ -27,9 +27,9 @@ import { traceRecorder } from "../../trace/recorder.ts";
 import { PointEvent } from "../../trace/types.ts";
 import { createQuiescenceState } from "../../trace/quiescence.ts";
 import type { AtlasBudgets } from "../../renderer/worker/state.ts";
-import type { MissingChunk } from "../../renderer/workerProtocol.ts";
+
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
-import { AssetCatalog } from "../assetCatalog.ts";
+
 import {
   GeneratedAvailabilityCatalog,
   type WireGeneratedAvailabilityDelta,
@@ -341,13 +341,10 @@ class Simulation {
     }
     this.datasets.set(dataset.datasetId, manifest);
 
-    const assetCatalog = new AssetCatalog(scene);
-    assetCatalog.applyInitial(dataset.datasetId, { entries: [] });
     const session = {
       scene,
       cpuCache: this.cpuCache,
       contentSource: this.source,
-      assetCatalog,
       generatedAvailability: this.availability,
       bridge: { sendViewerInterest: () => {} },
     } as unknown as Session;
@@ -581,7 +578,6 @@ class Simulation {
   private missingFromGpu(): string[] {
     return this.worker
       .missingNow(this.scenario.dataset.datasetId)
-      .filter((m): m is MissingChunk => m.kind === "chunk")
       .map((m) => this.describeKey(m.memberId, m.chunkKey, m.tier));
   }
 
