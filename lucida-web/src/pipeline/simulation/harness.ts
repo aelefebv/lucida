@@ -348,7 +348,6 @@ class Simulation {
     scene.set_viewport(deviceW, deviceH, this.dpr);
     scene.fit_camera_to_dataset_bounds(dataset.datasetId);
     loop.markInteractiveDirty("auto_fit_on_open");
-    if (mode === "slice") loop.setSliceParams(scene.z(), scene.t(), scene.c());
 
     if (dataset.generated) {
       const generated = dataset.generated;
@@ -393,7 +392,6 @@ class Simulation {
     if (scrub.z !== undefined) applyViewportCommand(scene, { type: "set_z", z: scrub.z });
     if (scrub.t !== undefined) applyViewportCommand(scene, { type: "set_t", t: scrub.t });
     if (scrub.c !== undefined) applyViewportCommand(scene, { type: "set_c", c: scrub.c });
-    loop.setSliceParams(scene.z(), scene.t(), scene.c());
     return `scrub ${Object.entries(scrub).map(([axis, v]) => `${axis}=${v}`).join(" ")}`;
   }
 

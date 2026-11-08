@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  CANVAS_ROW_STATE_COLORS,
   PHASE_COLORS,
   PLANNED_COLOR,
   ROW_STATE_COLORS,
@@ -92,8 +93,8 @@ describe("phase color", () => {
     const { list } = drawOver(saturatedReopen(), [cell(0), cell(300)], { phaseColor: true });
 
     // Row 0 completed; row 300 is still in the queue.
-    expect(list.items[0].fill).toBe(withAlpha(ROW_STATE_COLORS.complete, PHASE_FILL_ALPHA));
-    expect(list.items[1].fill).toBe(withAlpha(PHASE_COLORS.queue, PHASE_FILL_ALPHA));
+    expect(list.items[0].fill).toBe(withAlpha(CANVAS_ROW_STATE_COLORS.complete, PHASE_FILL_ALPHA));
+    expect(list.items[1].fill).toBe(withAlpha(CANVAS_ROW_STATE_COLORS.queue, PHASE_FILL_ALPHA));
     expect(list.items[1].tooltip).toContain("phase queue");
     expect(list.withRow).toBe(2);
   });
@@ -101,7 +102,8 @@ describe("phase color", () => {
   it("reads the one table the timeline reads: a phase is one color in space and in time", () => {
     // The timeline's occupancy chart and the dock's live bar both take a
     // phase's color from PHASE_COLORS; the overlay takes it from the row
-    // state table, whose phase entries are those same entries.
+    // state table, whose phase entries are those same entries, in their
+    // canvas variants.
     for (const phase of PHASES) {
       expect(ROW_STATE_COLORS[phase]).toBe(PHASE_COLORS[phase]);
       expect(seriesColor("occupancy.browser", phase)).toBe(PHASE_COLORS[phase]);
@@ -112,8 +114,9 @@ describe("phase color", () => {
       makeRow({ startUs: 10 * MS, durations: { plan: 100, queue: MS, wire: 5 * MS }, outcome: "in-flight" }, 0),
     ];
     const { list } = drawOver(makeRun({ header: { durationUs: 100 * MS }, rows }), [cell(0)], { phaseColor: true });
-    // The rgba the overlay paints is the timeline's color with an alpha, nothing else.
-    expect(list.items[0].fill).toBe(withAlpha(seriesColor("occupancy.browser", "decode"), PHASE_FILL_ALPHA));
+    // The rgba the overlay paints is the timeline's slot with an alpha, nothing else.
+    expect(seriesColor("occupancy.browser", "decode")).toBe(ROW_STATE_COLORS.decode);
+    expect(list.items[0].fill).toBe(withAlpha(CANVAS_ROW_STATE_COLORS.decode, PHASE_FILL_ALPHA));
   });
 
   it("leaves a cell with no row unpainted and says why, rather than giving it a phase", () => {
