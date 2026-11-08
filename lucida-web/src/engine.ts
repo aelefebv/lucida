@@ -2,10 +2,11 @@
  * The viewer's engine as one handle: the scene, its view-state store, the
  * session, the render client, the render loop, and the canvas they draw into.
  *
- * Built once per viewer mount and handed down through context, so a consumer
- * holds one identity for the viewer's life. Each part is read through a
- * getter at call time, never captured, because the scene, session, client,
- * and loop each come and go within that life (a reconnect, a 2D/3D switch).
+ * Built once per viewer mount (see `viewer/EngineProvider.tsx`) and handed
+ * down through context, so a consumer holds one identity for the viewer's
+ * life. Each part is read through a getter at call time, never captured,
+ * because the scene, session, client, and loop each come and go within that
+ * life (a reconnect, a 2D/3D switch).
  */
 import { createContext, useContext } from "react";
 import type { WasmScene } from "lucida-core";
@@ -22,26 +23,6 @@ export interface Engine {
   client(): RenderClient | null;
   loop(): RenderLoop | null;
   canvas(): HTMLCanvasElement | null;
-}
-
-interface EngineRefs {
-  store: SceneStore;
-  scene: React.RefObject<WasmScene | null>;
-  session: React.RefObject<Session | null>;
-  client: React.RefObject<RenderClient | null>;
-  loop: React.RefObject<RenderLoop | null>;
-  canvas: React.RefObject<HTMLCanvasElement | null>;
-}
-
-export function createEngine(refs: EngineRefs): Engine {
-  return {
-    store: refs.store,
-    scene: () => refs.scene.current,
-    session: () => refs.session.current,
-    client: () => refs.client.current,
-    loop: () => refs.loop.current,
-    canvas: () => refs.canvas.current,
-  };
 }
 
 export const EngineContext = createContext<Engine | null>(null);

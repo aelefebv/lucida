@@ -4,30 +4,18 @@ import {
   ChatCircleIcon,
   CompassIcon,
   InfoIcon,
-  SquaresFourIcon,
-  StackIcon,
 } from "@phosphor-icons/react";
-import { VolumeViewer } from "./components/VolumeViewer.tsx";
-import { SliceViewer } from "./components/SliceViewer.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
-import { PeerCursorLayer } from "./components/PeerCursorLayer.tsx";
-import { AnnotationOverlay } from "./components/AnnotationOverlay.tsx";
 import type { Annotation, AnnotationOverlayHandle } from "./components/annotationDocument.ts";
-import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
-import { AnnotationDraftOverlay } from "./components/AnnotationDraftOverlay.tsx";
 import { sceneClipDepth } from "./components/clipDepth.ts";
 import type { AnnotationDraft } from "./components/annotationDraft.ts";
 import type { Tool } from "./components/annotationTool.ts";
-import type { ClientPoint } from "./components/cameraProjection.ts";
 import { CommentsPanel } from "./components/CommentsPanel.tsx";
 import { countUnread, findMentionsOfMe } from "./components/mentionsOfMe.ts";
-import {
-  currentDatasetAnnotations,
-  resolveAnnotationDatasetId,
-} from "./components/currentDatasetAnnotations.ts";
+import { currentDatasetAnnotations } from "./components/currentDatasetAnnotations.ts";
 import { FpsCounter } from "./components/FpsCounter.tsx";
-import { CollectionSelector, extractCollectionData } from "./components/CollectionSelector.tsx";
+import { extractCollectionData } from "./components/CollectionSelector.tsx";
 import { frameRect } from "./components/groupFraming.ts";
 import type { VoxelRect } from "./pipeline/layoutBuilders.ts";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
@@ -36,15 +24,8 @@ import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSide
 import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
 import { DatasetInfoPanel } from "./components/DatasetInfoPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
-import { ShareButton } from "./share/ShareButton.tsx";
-import { applyViewportCommand } from "./applyAndSend.ts";
 import { runCommand } from "./ui/commands.ts";
-import { toast } from "./ui/toastQueue.ts";
-import {
-  invalidateDisplaySettings,
-  invalidateAfterViewRestore,
-  requestRender,
-} from "./invalidation.ts";
+import { invalidateDisplaySettings, requestRender } from "./invalidation.ts";
 import { annotationAuthorId } from "./annotationIdentity.ts";
 import { deriveMentionCandidates } from "./components/annotationParticipants.ts";
 import { useAuthSession } from "./auth/AuthSession.ts";
@@ -56,10 +37,14 @@ import {
   onRenderRadiusPreviewChanged,
 } from "./debug/logging.ts";
 import type { DatasetState } from "./types.ts";
-import { SceneStore } from "./sceneStore.ts";
-import { createEngine, EngineContext } from "./engine.ts";
-import { useWasmScene } from "./hooks/useWasmScene.ts";
-import { useRenderClient } from "./hooks/useRenderClient.ts";
+import { useEngine } from "./engine.ts";
+import { CanvasLayers } from "./viewer/CanvasLayers.tsx";
+import { EngineProvider } from "./viewer/EngineProvider.tsx";
+import { useEngineParts } from "./viewer/engineParts.ts";
+import { useAnnotationNavigation } from "./viewer/useAnnotationNavigation.ts";
+import type { ChromeInputs } from "./shell/chrome.ts";
+import { desktopChrome } from "./shell/desktopChrome.tsx";
+import { phoneChrome } from "./shell/phone/phoneChrome.tsx";
 import { useDatasetSettings, type BridgeCallbacks, type DatasetCallbacks } from "./hooks/useDatasetSettings.ts";
 import { useDimensions } from "./hooks/useDimensions.ts";
 import { useBridge } from "./hooks/useBridge.ts";
@@ -71,8 +56,6 @@ import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useScriptControls } from "./hooks/useScriptControls.ts";
 import { useViewedMentions } from "./hooks/useViewedMentions.ts";
 import type { SavedView } from "./savedView/types.ts";
-import { restoreAnnotationView } from "./savedView/restoreAnnotationView.ts";
-import { useAnnotationDeepLink } from "./hooks/useAnnotationDeepLink.ts";
 import {
   getWorkspaceSavedView,
   getWorkspaceViewerProfile,
@@ -93,14 +76,9 @@ import { CanvasStage, type CanvasSize } from "./shell/CanvasStage.tsx";
 import { WebGpuUnavailable } from "./shell/WebGpuUnavailable.tsx";
 import { DimensionBar } from "./shell/DimensionBar.tsx";
 import { useOpenRightPanel } from "./shell/sidePanels.ts";
-import { LeftPanel } from "./shell/LeftPanel.tsx";
-import { ChannelChips } from "./shell/phone/ChannelChips.tsx";
-import { PhoneSheet } from "./shell/phone/PhoneSheet.tsx";
-import { PhoneTopBar } from "./shell/phone/PhoneTopBar.tsx";
 import { revealCanvas } from "./shell/phone/sheet.ts";
-import { RightRail, type RailPanel } from "./shell/RightRail.tsx";
+import type { RailPanel } from "./shell/RightRail.tsx";
 import { ToolPalette } from "./shell/ToolPalette.tsx";
-import { TopBar } from "./shell/TopBar.tsx";
 import { useViewportClass } from "./theme/viewport.ts";
 import { useDeveloperSurfaces } from "./shell/useDeveloperSurfaces.ts";
 import { useViewerCommands } from "./shell/useViewerCommands.ts";
@@ -109,13 +87,10 @@ import { useWorkspacePreview } from "./workspacePreview/useWorkspacePreview.ts";
 import "./App.css";
 
 // The debug UI is code-split: the panel loads on first open, the overlay layer
-// only when an overlay is on or a radius preview is being dragged. The main
-// bundle keeps only the small gate module, debug/logging.ts.
+// (in CanvasLayers) only when an overlay is on or a radius preview is being
+// dragged. The main bundle keeps only the small gate module, debug/logging.ts.
 const DevControls = lazy(() =>
   import("./debug/DevControls.tsx").then((m) => ({ default: m.DevControls })),
-);
-const DebugOverlays = lazy(() =>
-  import("./debug/DebugOverlays.tsx").then((m) => ({ default: m.DebugOverlays })),
 );
 // Ships in every build, code-split so a session that never opens it never
 // downloads it.
@@ -143,7 +118,16 @@ interface AppProps {
   onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
 }
 
-function App({
+/** The viewer for one workspace, inside the engine it drives. */
+function App(props: AppProps) {
+  return (
+    <EngineProvider>
+      <Viewer {...props} />
+    </EngineProvider>
+  );
+}
+
+function Viewer({
   workspaceId,
   workspaceName,
   workspaceRole,
@@ -164,10 +148,9 @@ function App({
   // Persisting it lets a returning user keep control of what they authored.
   const annotationAuthor = useMemo(() => annotationAuthorId(), []);
 
-  const scene = useWasmScene();
-  // React reads the scene's view state here and nowhere else.
-  const [sceneStore] = useState(() => new SceneStore(() => scene.wasmSceneRef.current));
-  const render = useRenderClient();
+  const engine = useEngine();
+  const sceneStore = engine.store;
+  const { scene, render, setSession } = useEngineParts();
   // `?render=1` is the chrome-free capture surface for `dataset montage`,
   // `dataset explore`, and the trace driver: no UI chrome and no persisted
   // writes. Read `captureSurface.ts` before wiring anything new in here.
@@ -269,6 +252,7 @@ function App({
     datasetsRef,
     datasetCallbacksRef,
     savedViewHooksRef,
+    onSessionChanged: setSession,
     bumpLayerSettingsVersion: layers.bumpLayerSettingsVersion,
     initLayerMaps: (id) => {
       layers.initLayerMaps(id);
@@ -279,26 +263,6 @@ function App({
     bumpRemoteDocumentVersion,
     onWorkspaceArchived: onBackToDashboard,
   });
-
-  // One handle on the engine for the viewer's life. Every part is a ref, so
-  // this is built once.
-  const engine = useMemo(
-    () => createEngine({
-      store: sceneStore,
-      scene: scene.wasmSceneRef,
-      session: bridge.sessionRef,
-      client: render.clientRef,
-      loop: render.loopRef,
-      canvas: render.canvasRef,
-    }),
-    [sceneStore, scene.wasmSceneRef, bridge.sessionRef, render.clientRef, render.loopRef, render.canvasRef],
-  );
-
-  // A snapshot creates the scene, or replaces it, without a write the store
-  // would hear.
-  useEffect(() => {
-    sceneStore.sync();
-  }, [sceneStore, scene.wasmScene]);
 
   // On apply, re-target `selectedDatasetId` at the first
   // visible dataset so dimension/contrast controls land on something
@@ -495,164 +459,23 @@ function App({
     });
   }, [currentAnnotations, annotationAuthor, workspaceMembers, authSession.principal.email]);
 
-  // Annotation navigation has two tiers. Gentle (a pin clicked on the canvas)
-  // opens the thread and recenters, never touching camera, contrast, or zoom.
-  // Explicit (a mention or "Go to author's view") restores the author's
-  // captured view and falls back to gentle when the pin has none.
-  //
-  // `gentleOnContext` brings the pin on-context by matching its Z/T/C, breaking
-  // follow, and emitting presence.
-  const gentleOnContext = useCallback((pin: Annotation) => {
-    const ws = scene.wasmSceneRef.current;
-    if (!ws) return;
-    const targetZ = pin.z ?? 0;
-    const targetT = pin.t ?? 0;
-    const targetC = pin.c ?? 0;
-    let contextChanged = false;
-    if (targetZ !== ws.z()) {
-      applyViewportCommand(ws, { type: "set_z", z: targetZ });
-      contextChanged = true;
-    }
-    if (targetT !== ws.t()) {
-      applyViewportCommand(ws, { type: "set_t", t: targetT });
-      contextChanged = true;
-    }
-    if (targetC !== ws.c()) {
-      applyViewportCommand(ws, { type: "set_c", c: targetC });
-      contextChanged = true;
-    }
-    if (contextChanged) {
-      requestRender(render.loopRef.current, "annotation_context");
-      bridge.breakFollow();
-      emitPresenceWithUrl();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable bridge/emit/render refs/scene ref.
-  }, []);
-
-  // Focus a pin in whichever overlay is mounted for a GIVEN view mode (2D vs
-  // 3D). Pass the mode explicitly because a just-restored 3D camera may have
-  // flipped the view mode out from under the live `dims.viewMode` this render.
-  const focusPinForMode = useCallback((pinId: string, mode: "2d" | "3d") => {
-    const handle = mode === "3d" ? overlay3dRef.current : overlay2dRef.current;
-    handle?.focusPin(pinId);
-  }, []);
-
-  // The explicit tier: restore the author's camera (switching 2D/3D mode before
-  // focusing), z-slab/t/c, and display through `restoreAnnotationView`, which
-  // issues only local ViewportCommands, then recenter on the pin. A pin without
-  // a captured view takes the gentle path.
-  const restoreCapturedView = useCallback((pin: Annotation, datasetIdOverride?: string) => {
-    const ws = scene.wasmSceneRef.current;
-    if (!ws || !pin.view) {
-      // No captured view or no scene: take the gentle path, then focus.
-      gentleOnContext(pin);
-      const focus = () => focusPinForMode(pin.id, dims.viewMode);
-      if (!annotationsVisible) {
-        setAnnotationsVisible(true);
-        requestAnimationFrame(focus);
-      } else {
-        focus();
-      }
-      return;
-    }
-
-    // Clamp against the pin's own dataset. A deep link passes it explicitly;
-    // otherwise resolve it the way the pin set was read. With no selection,
-    // `selectedDatasetId ?? ""` would clamp against the `[1,1,1]` sentinel and
-    // collapse a deep Z to plane 0, so an unresolvable dataset passes
-    // `undefined` and the clamp is skipped.
-    const pinDatasetId =
-      datasetIdOverride ?? resolveAnnotationDatasetId(ws, selectedDatasetId) ?? undefined;
-    const result = restoreAnnotationView({
-      scene: ws,
-      view: pin.view,
-      datasetId: pinDatasetId,
-      dimensionExtentsFor: dims.dimensionExtentsFor,
-      labelNamesFor: dims.labelNamesFor,
-    });
-
-    bridge.breakFollow();
-    emitPresenceWithUrl();
-    invalidateAfterViewRestore(render.loopRef.current, "annotation_view_restore");
-
-    if (result.notice) toast({ title: result.notice, tone: "info" });
-
-    // If the mode flipped or annotations were hidden, wait a frame so the right
-    // overlay's ref exists. Focus with the restored mode, not the possibly stale
-    // `dims.viewMode`.
-    const focus = () => focusPinForMode(pin.id, result.viewMode);
-    const needsRemount = result.cameraModeChanged || !annotationsVisible;
-    if (!annotationsVisible) setAnnotationsVisible(true);
-    if (needsRemount) {
-      requestAnimationFrame(focus);
-    } else {
-      focus();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters/bridge/emit/render refs/scene ref; reactive deps listed.
-  }, [dims.viewMode, dims.dimensionExtentsFor, dims.labelNamesFor, annotationsVisible, selectedDatasetId, gentleOnContext, focusPinForMode]);
-
-  // A mention jump restores the author's view, or recenters gently when the pin
-  // has none.
-  // eslint-disable-next-line react-hooks/preserve-manual-memoization -- the compiler infers the stable `setAnnotationsVisible` setter as a dep; the manual deps are the reactive values actually read.
-  const handleNavigateToMention = useCallback((pinId: string) => {
-    const pin = currentAnnotations.find((p) => p.id === pinId);
-    if (!pin) {
-      // Unknown pin: still try a focus, a no-op if the overlay lacks the pin, so
-      // a stale id never wedges navigation.
-      const focus = () => focusPinForMode(pinId, dims.viewMode);
-      if (!annotationsVisible) {
-        setAnnotationsVisible(true);
-        requestAnimationFrame(focus);
-      } else {
-        focus();
-      }
-      return;
-    }
-    restoreCapturedView(pin);
-  }, [currentAnnotations, restoreCapturedView, focusPinForMode, dims.viewMode, annotationsVisible]);
-
-  // "Go to author's view" in a pin's thread: the explicit restore for a pin
-  // selected on the canvas.
-  const handleGoToAuthorView = useCallback((pinId: string) => {
-    const pin = currentAnnotations.find((p) => p.id === pinId);
-    if (!pin) return;
-    restoreCapturedView(pin);
-  }, [currentAnnotations, restoreCapturedView]);
-
-  // `#a=<annotationId>` deep link. The pin may live on an unselected dataset;
-  // selecting it mounts that dataset's overlay, so the restore waits a frame
-  // for the overlay's ref.
-  const restoreAnnotationDeepLinkPin = useCallback(
-    (pin: Annotation, datasetId: string, onRestored: () => void) => {
-      // Collapse `#a=` to `#view=` only after the restore, in the same frame, so
-      // the URL captures the restored camera rather than the stale one.
-      const run = () => {
-        restoreCapturedView(pin, datasetId);
-        onRestored();
-      };
-      if (selectedDatasetId !== datasetId) {
-        setSelectedDatasetId(datasetId);
-        requestAnimationFrame(run);
-      } else {
-        run();
-      }
-    },
-    [restoreCapturedView, selectedDatasetId],
-  );
-
-  // The hook re-checks on every `remoteDocumentVersion` bump, so the restore
-  // runs on the first tick where the pin is readable, not at scene bootstrap
-  // while the document is still empty.
-  const collapseDeepLinkHash = savedViewSync.collapseDeepLinkHash;
-  const handleDeepLinkCollapse = useCallback(() => {
-    void collapseDeepLinkHash();
-  }, [collapseDeepLinkHash]);
-  useAnnotationDeepLink({
-    getScene: engine.scene,
+  const { navigateToMention, goToAuthorView } = useAnnotationNavigation({
+    engine,
+    viewMode: dims.viewMode,
+    dimensionExtentsFor: dims.dimensionExtentsFor,
+    labelNamesFor: dims.labelNamesFor,
+    annotations: currentAnnotations,
+    selectedDatasetId,
+    setSelectedDatasetId,
+    annotationsVisible,
+    setAnnotationsVisible,
+    overlay2dRef,
+    overlay3dRef,
+    breakFollow,
+    emitPresence: emitPresenceWithUrl,
+    collapseDeepLinkHash: savedViewSync.collapseDeepLinkHash,
     docVersion: remoteDocumentVersion,
-    onRestore: restoreAnnotationDeepLinkPin,
-    onCollapseHash: handleDeepLinkCollapse,
-    onNotFound: setDeepLinkNotFound,
+    onDeepLinkNotFound: setDeepLinkNotFound,
   });
 
   // Populate callback refs — runs during render, before effects fire.
@@ -978,9 +801,6 @@ function App({
     [breakFollow, savedViewApplier, notifySavedViewChange],
   );
 
-  const openContextMenu2d = useCallback((at: ClientPoint) => overlay2dRef.current?.openContextMenu(at), []);
-  const openContextMenu3d = useCallback((at: ClientPoint) => overlay3dRef.current?.openContextMenu(at), []);
-
   const hasData = layers.layerInfos.length > 0;
 
   const takeViewAsPreview = useWorkspacePreview({
@@ -1041,17 +861,12 @@ function App({
   const datasetStatus =
     scene.wasmError || (render.gpuUnavailable ? null : render.renderError) || bridge.remoteDatasetError;
 
-  // The JSX block below reads `.current` from refs returned by useRenderClient,
-  // useWasmScene, useBridge, etc. — passing them as props to
-  // SliceViewer / VolumeViewer / PeerCursors / Minimap / DebugOverlays
-  // so those children can read the latest canvas, scene, loop, etc.
-  // each render. This is the canonical "ref-as-current-value-prop" idiom that
-  // partners with the App.tsx hook order above: callback refs are populated AFTER
-  // all hooks return, then read in the same render via `.current`. The
-  // versioning state (datasetsVersion, remoteDocumentVersion) drives the
-  // re-render that surfaces ref updates downstream. The new
-  // eslint-plugin-react-hooks@7 "rules of react" treat all such reads as
-  // suspicious; they are intentional and load-bearing here.
+  // The JSX block below reads `.current` from the engine's refs (the canvas,
+  // the dataset map, the render client) to pass the latest values to the
+  // Explore panel, the HUD, the minimap, and the canvas layers. The versioning
+  // state (datasetsVersion, remoteDocumentVersion) drives the re-render that
+  // surfaces a ref's update. eslint-plugin-react-hooks@7 treats every such
+  // read as suspicious; these are intentional.
   /* eslint-disable react-hooks/refs */
   // The layer panel, the dimension bar, and the rail's panels sit beside and
   // over the canvas on wider screens, and in the bottom sheet on a phone.
@@ -1166,7 +981,7 @@ function App({
           extents={{ z: dims.dimZ, t: dims.dimT }}
           onNavigate={(pinId) => {
             revealCanvas();
-            handleNavigateToMention(pinId);
+            navigateToMention(pinId);
           }}
           onMarkViewed={markViewed}
         />
@@ -1208,47 +1023,45 @@ function App({
       ),
     },
   ];
-  const presence = {
-    peers: bridge.peers,
-    followTarget: bridge.followTarget,
-    onFollow: bridge.handleFollow,
-  };
-  const shareProps = {
+  const chromeInputs: ChromeInputs = {
     workspaceId,
-    canManageAccess: workspaceRole === "owner",
-    getCurrentSavedView: savedViewSync.captureBuilder,
+    workspaceName,
+    onRenameWorkspace: canRenameWorkspace ? onRenameWorkspace : undefined,
+    onBackToDashboard,
+    onUseViewAsPreview: takeViewAsPreview,
+    presence: {
+      peers: bridge.peers,
+      followTarget: bridge.followTarget,
+      onFollow: bridge.handleFollow,
+    },
+    share: {
+      workspaceId,
+      canManageAccess: workspaceRole === "owner",
+      getCurrentSavedView: savedViewSync.captureBuilder,
+    },
+    developer,
+    layerPanel,
+    dimensionBar,
+    channelChips: {
+      layers: layers.layerInfos,
+      selectedLayerId: selectedDatasetId,
+      soloChannel: dims.soloChannel,
+      onChannelSetVisible: layers.handleChannelSetVisible,
+      onSoloChannel: dims.handleSoloChannel,
+      onShowAllChannels: dims.handleShowAllChannels,
+    },
+    navigator: navigatorProps,
+    railPanels,
   };
+  const chrome = phone ? phoneChrome(chromeInputs) : desktopChrome(chromeInputs, { captureSurface });
 
   // The canvas stage keeps its place in the tree whichever chrome is around
-  // it, so a phone turned sideways never remounts the canvas the render
-  // worker draws into, nor the minimap's.
+  // it (see `shell/chrome.ts`).
   return (
-    <EngineContext.Provider value={engine}>
     <div className="lc-shell" data-capture={captureSurface || undefined} data-layout={phone ? "phone" : undefined}>
-      {!captureSurface &&
-        (phone ? (
-          <PhoneTopBar
-            workspaceName={workspaceName}
-            onRenameWorkspace={canRenameWorkspace ? onRenameWorkspace : undefined}
-            onBackToDashboard={onBackToDashboard}
-            onUseViewAsPreview={takeViewAsPreview}
-            share={shareProps}
-            presence={presence}
-          />
-        ) : (
-          <TopBar
-            workspaceId={workspaceId}
-            workspaceName={workspaceName}
-            onRenameWorkspace={canRenameWorkspace ? onRenameWorkspace : undefined}
-            onBackToDashboard={onBackToDashboard}
-            onUseViewAsPreview={takeViewAsPreview}
-            presence={presence}
-            share={<ShareButton {...shareProps} />}
-            developer={developer}
-          />
-        ))}
+      {chrome.top}
       <div className="lc-shell-body">
-        {!captureSurface && !phone && <LeftPanel label="Layers">{layerPanel}</LeftPanel>}
+        {chrome.left}
         <div className="lc-shell-center">
           <CanvasStage
             canvasRef={render.canvasRef}
@@ -1329,8 +1142,8 @@ function App({
                   )}
                 </>
               ),
-              "bottom-left": !phone && navigatorProps && <CollectionSelector {...navigatorProps} />,
-              "bottom-center": !phone && dimensionBar,
+              "bottom-left": chrome.canvasBottomLeft,
+              "bottom-center": chrome.canvasBottomCenter,
               // Mounted before any dataset opens, and only hidden until one
               // does: its first 2D-canvas draw must land before an open's
               // first frame (see Minimap.tsx).
@@ -1341,118 +1154,30 @@ function App({
               ),
             }}
           >
-            {datasetsVersion > 0 && dims.viewMode === "2d" && scene.wasmScene && render.client && bridge.sessionRef.current && (
-              <SliceViewer
-                session={bridge.sessionRef.current}
-                scene={scene.wasmScene}
-                datasets={datasetsRef.current}
-                client={render.client}
-                canvas={render.canvasRef.current!}
-                remoteDocumentVersion={remoteDocumentVersion}
-                emitPresence={emitPresenceWithUrl}
-                breakFollow={bridge.breakFollow}
-                sendCursor={bridge.sendCursor}
-                loopRef={render.loopRef}
-                onLoopChange={render.setActiveLoop}
-                annotationDatasetId={selectedDatasetId}
-                tool={tool}
-                myId={annotationAuthor}
-                sendCommand={bridge.sendCommand}
-                onDocumentChanged={bumpRemoteDocumentVersion}
-                annotationDraftRef={annotationDraftRef}
-                onLongPress={openContextMenu2d}
-              />
-            )}
-            {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
-              <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
-            )}
-            {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
-              <AnnotationOverlay
-                ref={overlay2dRef}
-                datasetId={selectedDatasetId}
-                wasmSceneRef={scene.wasmSceneRef}
-                canvas={render.canvasRef.current}
-                version={remoteDocumentVersion}
-                viewContext={{ z: dims.z, t: dims.t, c: dims.c }}
-                myId={annotationAuthor}
-                sendCommand={bridge.sendCommand}
-                onDocumentChanged={bumpRemoteDocumentVersion}
-                onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
-                visible={annotationsVisible}
-                tool={tool}
-                mentionCandidates={mentionCandidates}
-                onGoToAuthorView={handleGoToAuthorView}
-              />
-            )}
-            {datasetsVersion > 0 && dims.viewMode === "3d" && scene.wasmScene && render.client && bridge.sessionRef.current && (
-              <VolumeViewer
-                session={bridge.sessionRef.current}
-                scene={scene.wasmScene}
-                datasets={datasetsRef.current}
-                client={render.client}
-                canvas={render.canvasRef.current!}
-                remoteDocumentVersion={remoteDocumentVersion}
-                emitPresence={emitPresenceWithUrl}
-                breakFollow={bridge.breakFollow}
-                sendCursor={bridge.sendCursor}
-                cameraMode={dims.cameraMode}
-                loopRef={render.loopRef}
-                onLoopChange={render.setActiveLoop}
-                annotationDatasetId={selectedDatasetId}
-                tool={tool}
-                myId={annotationAuthor}
-                sendCommand={bridge.sendCommand}
-                onDocumentChanged={bumpRemoteDocumentVersion}
-                annotationDraftRef={annotationDraftRef}
-                onLongPress={openContextMenu3d}
-              />
-            )}
-            {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
-              <AnnotationDraftOverlay draftRef={annotationDraftRef} visible={annotationsVisible} />
-            )}
-            {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
-              <AnnotationOverlay3D
-                ref={overlay3dRef}
-                datasetId={selectedDatasetId}
-                wasmSceneRef={scene.wasmSceneRef}
-                canvas={render.canvasRef.current}
-                version={remoteDocumentVersion}
-                viewContext={{ z: dims.z, t: dims.t, c: dims.c }}
-                myId={annotationAuthor}
-                sendCommand={bridge.sendCommand}
-                onDocumentChanged={bumpRemoteDocumentVersion}
-                onViewportChanged={() => requestRender(render.loopRef.current, "annotation_viewport")}
-                visible={annotationsVisible}
-                tool={tool}
-                mentionCandidates={mentionCandidates}
-                onGoToAuthorView={handleGoToAuthorView}
-              />
-            )}
-            <PeerCursorLayer
+            <CanvasLayers
+              datasets={datasetsRef.current}
+              hasDatasets={datasetsVersion > 0}
+              selectedDatasetId={selectedDatasetId}
+              tool={tool}
+              annotationsVisible={annotationsVisible}
+              annotationAuthor={annotationAuthor}
+              remoteDocumentVersion={remoteDocumentVersion}
+              onDocumentChanged={bumpRemoteDocumentVersion}
+              emitPresence={emitPresenceWithUrl}
+              breakFollow={breakFollow}
+              sendCursor={bridge.sendCursor}
+              sendCommand={bridge.sendCommand}
               peers={bridge.peers}
               myId={bridge.myId}
               followTarget={bridge.followTarget}
-              viewMode={dims.viewMode}
-              z={dims.z}
-              t={dims.t}
-              c={dims.c}
-              wasmSceneRef={scene.wasmSceneRef}
-              clientReady={render.clientReady}
-              wasmReady={scene.wasmReady}
+              overlay2dRef={overlay2dRef}
+              overlay3dRef={overlay3dRef}
+              annotationDraftRef={annotationDraftRef}
+              mentionCandidates={mentionCandidates}
+              onGoToAuthorView={goToAuthorView}
               canvasSize={canvasSize}
+              showDebugOverlays={showDebugOverlays}
             />
-            {showDebugOverlays && (
-              <Suspense fallback={null}>
-                <DebugOverlays
-                  wasmSceneRef={scene.wasmSceneRef}
-                  canvasRef={render.canvasRef}
-                  datasets={datasetsRef.current}
-                  renderLoopRef={render.loopRef}
-                  cpuCache={bridge.sessionRef.current?.cpuCache ?? null}
-                  viewMode={dims.viewMode}
-                />
-              </Suspense>
-            )}
           </CanvasStage>
           {developer.monitor && (
             // The dock overlays the canvas rather than resizing it, so opening
@@ -1464,41 +1189,9 @@ function App({
               </Suspense>
             </div>
           )}
-          {phone && (
-            <PhoneSheet
-              peek={
-                <>
-                  <ChannelChips
-                    layers={layers.layerInfos}
-                    selectedLayerId={selectedDatasetId}
-                    soloChannel={dims.soloChannel}
-                    onChannelSetVisible={layers.handleChannelSetVisible}
-                    onSoloChannel={dims.handleSoloChannel}
-                    onShowAllChannels={dims.handleShowAllChannels}
-                  />
-                  {dimensionBar}
-                </>
-              }
-              layerTabs={[
-                { id: "layers", label: "Layers", icon: StackIcon, render: () => layerPanel },
-                ...(navigatorProps
-                  ? [
-                      {
-                        id: "groups",
-                        label: "Groups",
-                        icon: SquaresFourIcon,
-                        render: (active: boolean) => (
-                          <CollectionSelector {...navigatorProps} variant="panel" visible={active} />
-                        ),
-                      },
-                    ]
-                  : []),
-              ]}
-              railTabs={railPanels}
-            />
-          )}
+          {chrome.below}
         </div>
-        {!captureSurface && !phone && <RightRail panels={railPanels} />}
+        {chrome.right}
       </div>
       {!captureSurface && (
         <AddDataDialog
@@ -1510,7 +1203,6 @@ function App({
       )}
       {!captureSurface && <KeyboardHelp />}
     </div>
-    </EngineContext.Provider>
   );
   /* eslint-enable react-hooks/refs */
 }
