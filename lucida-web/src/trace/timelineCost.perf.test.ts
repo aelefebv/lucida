@@ -34,15 +34,15 @@ const DERIVE_CEILING_US = 2_000;
 /** The most one layout of the draw list may cost, at a retina width. */
 const DRAW_LIST_CEILING_US = 2_000;
 
-/** Budgets in nominal microseconds, about twice each typical figure. */
-const DERIVE_BUDGET_US = 2_000;
-const DRAW_LIST_BUDGET_US = 94;
-
 /** How much more a derivation may cost at the largest row population than at the smallest. */
 const FLATNESS_GROWTH_GATE = 4;
 
 /** A small run, and one past the per-run cap, which is the largest row population a run can hold. */
 const POPULATIONS = [2_000, 40_000] as const;
+
+/** Budgets in nominal microseconds, about twice each typical figure; the derivation's by population. */
+const DERIVE_BUDGET_US = [2_300, 800] as const;
+const DRAW_LIST_BUDGET_US = 85;
 
 /** A busy pan's tick rate over the live timeline's default window: more readings than the ring holds. */
 const READINGS_PER_SECOND = 120;
@@ -159,7 +159,7 @@ describe("the dock's live draw cost contract", () => {
     timeDerivation(warm);
     warm.reset();
 
-    const readings = POPULATIONS.map((asked) => {
+    const readings = POPULATIONS.map((asked, index) => {
       const recorder = makeRun(asked);
       const rows = recorder.liveProgress!.planned;
       const derivation = timeDerivation(recorder);
@@ -168,13 +168,13 @@ describe("the dock's live draw cost contract", () => {
       expect(derivation.readings).toBeGreaterThan(1_000);
       expect(derivation.readings).toBeLessThanOrEqual(1_025);
       expect(derivation.rowsWalked).toBe(false);
-      return { rows, timed: derivation.timed };
+      return { rows, timed: derivation.timed, budgetUs: DERIVE_BUDGET_US[index] };
     });
 
     for (const r of readings) {
       console.log(
         `[#1064] live timeline derivation: rows=${String(r.rows).padStart(6)} | ` +
-          `${describeTiming(r.timed, DERIVE_BUDGET_US)} | ` +
+          `${describeTiming(r.timed, r.budgetUs)} | ` +
           `${(r.timed.nominalUs / DERIVE_CEILING_US).toFixed(2)}x the ${DERIVE_CEILING_US}µs ceiling`,
       );
     }
@@ -186,7 +186,7 @@ describe("the dock's live draw cost contract", () => {
       `${large.timed.nominalUs.toFixed(1)}µs at ${large.rows} rows against ${small.timed.nominalUs.toFixed(1)}µs at ${small.rows}`,
     ).toBeLessThan(Math.max(small.timed.nominalUs, 1) * FLATNESS_GROWTH_GATE);
     for (const r of readings) {
-      expectWithinBudget(`live timeline derivation at ${r.rows} rows`, r.timed, DERIVE_BUDGET_US);
+      expectWithinBudget(`live timeline derivation at ${r.rows} rows`, r.timed, r.budgetUs);
     }
   });
 

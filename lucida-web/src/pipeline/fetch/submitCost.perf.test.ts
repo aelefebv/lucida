@@ -89,7 +89,7 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
 }
 
 /** In nominal microseconds, about twice the typical figure. */
-const SUBMIT_BUDGET_US = 29_000;
+const SUBMIT_BUDGET_US = 26_000;
 
 describe("submit cost at remote-fixture scale", () => {
   it("stays well under budget with a 21,400-request plan", () => {

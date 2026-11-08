@@ -32,7 +32,7 @@ const CELLS_PER_TICK = 600;
 /** One tick's worth of reads and the draw list over them, in microseconds. Generous; the figure is logged. */
 const TICK_CEILING_US = 2_000;
 /** In nominal microseconds, about twice the typical figure. */
-const TICK_BUDGET_US = 2_000;
+const TICK_BUDGET_US = 1_800;
 
 function makeRecorder() {
   let clock = 1_000;

@@ -23,9 +23,9 @@ import { Boundary, type ChunkRowSource, type RunConditions } from "./types.ts";
 const READ_CEILING_US = 1_000;
 
 /** Budgets in nominal microseconds, about twice each typical figure. */
-const FULL_READ_BUDGET_US = 390;
-const WRAPPED_READ_BUDGET_US = 340;
-const SLID_READ_BUDGET_US = 12;
+const FULL_READ_BUDGET_US = 440;
+const WRAPPED_READ_BUDGET_US = 410;
+const SLID_READ_BUDGET_US = 130;
 
 /**
  * How much more a read may cost at the largest row population than at the

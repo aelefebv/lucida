@@ -12,6 +12,11 @@
  * What is left is the step's cost on the nominal host, and budgets are stated
  * in those microseconds at about twice the typical figure. A step that gets
  * three times slower fails on every host; a slow or busy host does not.
+ *
+ * The reference cancels the host, not the JavaScript engine. A Node major
+ * with a different V8 can move a single figure several times over, so the
+ * budgets are set on the Node that CI installs, and need setting again when
+ * that changes.
  */
 
 import { expect } from "vitest";
@@ -157,4 +162,47 @@ export function describeTiming(timing: StepTiming, budgetUs: number): string {
 /** Assert the step's nominal median is inside `budgetUs`. */
 export function expectWithinBudget(label: string, timing: StepTiming, budgetUs: number): void {
   expect(timing.nominalUs, `${label}: ${describeTiming(timing, budgetUs)}`).toBeLessThan(budgetUs);
+}
+
+export interface RelativeTiming {
+  stepUs: number;
+  baselineUs: number;
+  /** `stepUs / baselineUs`, what a budget holds. */
+  ratio: number;
+}
+
+/**
+ * Time `step` interleaved with `baseline`, a stand-in doing the same kind of
+ * work over the same data, and compare their medians. For a step the generic
+ * reference does not track across hosts: hosts differ in what is cheap, and a
+ * baseline of the same kind is charged the same.
+ */
+export function timeAgainstBaseline(
+  step: () => void,
+  baseline: () => void,
+  options: { samples: number; warmup?: number },
+): RelativeTiming {
+  const { samples, warmup = Math.min(samples, 20) } = options;
+  for (let i = 0; i < warmup; i++) {
+    baseline();
+    step();
+  }
+  const stepTimes: number[] = [];
+  const baselineTimes: number[] = [];
+  for (let i = 0; i < samples; i++) {
+    const first = i % 2 === 0 ? baseline : step;
+    const second = first === step ? baseline : step;
+    const t0 = performance.now();
+    first();
+    const t1 = performance.now();
+    second();
+    const t2 = performance.now();
+    (first === step ? stepTimes : baselineTimes).push(t1 - t0);
+    (second === step ? stepTimes : baselineTimes).push(t2 - t1);
+  }
+  stepTimes.sort((a, b) => a - b);
+  baselineTimes.sort((a, b) => a - b);
+  const stepUs = quantile(stepTimes, 0.5) * 1_000;
+  const baselineUs = quantile(baselineTimes, 0.5) * 1_000;
+  return { stepUs, baselineUs, ratio: stepUs / Math.max(baselineUs, 1e-3) };
 }
