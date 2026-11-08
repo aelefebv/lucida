@@ -476,6 +476,70 @@ impl Page {
         Ok(())
     }
 
+    /// [`Self::dispatch_mouse_event`] without waiting for the page to take
+    /// the event. The browser acknowledges a pointer move only once the page
+    /// has handled it, a frame later, so a sender that waits on each falls
+    /// behind a person's pace by however long the page takes; a mouse does
+    /// not wait. The reply is skipped by whichever call reads next, so an
+    /// acknowledged event after these is one the page took after them.
+    pub async fn dispatch_mouse_event_unacknowledged(
+        &mut self,
+        params: Value,
+    ) -> Result<(), CliError> {
+        let request_id = self.next_id;
+        self.next_id += 1;
+        let message = json!({
+            "id": request_id,
+            "method": "Input.dispatchMouseEvent",
+            "params": params,
+            "sessionId": self.session_id,
+        });
+        self.write
+            .send(Message::Text(message.to_string().into()))
+            .await
+            .map_err(|error| CliError::new(ErrorKind::SessionDisconnect, error.to_string()))
+    }
+
+    /// Synthesize one key event through the browser's input pipeline:
+    /// `params` is the DevTools protocol's `Input.dispatchKeyEvent` request.
+    /// It reaches whatever the page has focused, as a keyboard's would.
+    pub async fn dispatch_key_event(
+        &mut self,
+        params: Value,
+        wait: Duration,
+    ) -> Result<(), CliError> {
+        self.call("Input.dispatchKeyEvent", params, wait).await?;
+        Ok(())
+    }
+
+    /// Synthesize one touch event: `params` is the DevTools protocol's
+    /// `Input.dispatchTouchEvent` request, with points in CSS pixels. The
+    /// page sees the pointer events a finger raises.
+    pub async fn dispatch_touch_event(
+        &mut self,
+        params: Value,
+        wait: Duration,
+    ) -> Result<(), CliError> {
+        self.call("Input.dispatchTouchEvent", params, wait).await?;
+        Ok(())
+    }
+
+    /// Lay the page out in `viewport`, as the launch did: the window a
+    /// headless page has.
+    pub async fn set_viewport(
+        &mut self,
+        viewport: Viewport,
+        wait: Duration,
+    ) -> Result<(), CliError> {
+        self.call(
+            "Emulation.setDeviceMetricsOverride",
+            device_metrics_params(viewport),
+            wait,
+        )
+        .await?;
+        Ok(())
+    }
+
     /// Capture the page as a PNG, as the compositor shows it. That is not
     /// always what the page drew: headless Chrome on Vulkan leaves a WebGPU
     /// canvas out and returns solid black in its place, so a caller that
