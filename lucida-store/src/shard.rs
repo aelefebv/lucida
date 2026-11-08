@@ -13,6 +13,7 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use lucida_content::ChunkKey;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 
@@ -92,13 +93,13 @@ impl ShardLayout {
         shard_shape: &[u64],
     ) -> Result<Self, StoreError> {
         if codecs.len() != 1 {
-            return Err(StoreError::Metadata(format!(
+            return Err(StoreError::unsupported_codec(format!(
                 "the {SHARDING_CODEC} codec must be the only codec in the storage chain, got {} codecs",
                 codecs.len(),
             )));
         }
         let config = first.get("configuration").ok_or_else(|| {
-            StoreError::Metadata(format!(
+            StoreError::unsupported_codec(format!(
                 "{SHARDING_CODEC} codec missing 'configuration' object"
             ))
         })?;
@@ -114,7 +115,7 @@ impl ShardLayout {
             .get("codecs")
             .and_then(|c| c.as_array())
             .ok_or_else(|| {
-                StoreError::Metadata(format!(
+                StoreError::unsupported_codec(format!(
                     "{SHARDING_CODEC} configuration missing 'codecs' array for the inner chunks"
                 ))
             })?;
@@ -122,7 +123,7 @@ impl ShardLayout {
             .iter()
             .any(|c| c.get("name").and_then(|n| n.as_str()) == Some(SHARDING_CODEC))
         {
-            return Err(StoreError::Metadata(format!(
+            return Err(StoreError::unsupported_codec(format!(
                 "nested sharding is not supported: a {SHARDING_CODEC} codec inside another"
             )));
         }
@@ -133,7 +134,7 @@ impl ShardLayout {
             .get("index_codecs")
             .and_then(|c| c.as_array())
             .ok_or_else(|| {
-                StoreError::Metadata(format!(
+                StoreError::unsupported_codec(format!(
                     "{SHARDING_CODEC} configuration missing 'index_codecs' array"
                 ))
             })?;
@@ -143,7 +144,7 @@ impl ShardLayout {
             None | Some("end") => IndexLocation::End,
             Some("start") => IndexLocation::Start,
             Some(other) => {
-                return Err(StoreError::Metadata(format!(
+                return Err(StoreError::unsupported_codec(format!(
                     "index_location '{other}' not supported (use 'start' or 'end')",
                 )));
             }
@@ -164,9 +165,10 @@ impl ShardLayout {
     /// The key addresses inner chunks, so it is read in the inner chunk grid
     /// exactly as an unsharded key is read in its chunk grid, bundled `t` and
     /// `c` included. Each grid coordinate then splits into a shard coordinate
-    /// and a position within the shard. `None` when the key is malformed.
-    pub fn locate_inner_chunk(&self, key: &str, axes: &[String]) -> Option<ShardLocation> {
-        let (level, inner) = crate::chunk_key_grid_coords(key, axes, &self.inner_chunk_shape)?;
+    /// and a position within the shard. `None` when the axes do not match
+    /// the layout's, or the position does not fit in memory.
+    pub fn locate_inner_chunk(&self, key: &ChunkKey, axes: &[String]) -> Option<ShardLocation> {
+        let inner = crate::chunk_key_grid_coords(key, axes, &self.inner_chunk_shape);
         if inner.len() != self.chunks_per_shard.len() {
             return None;
         }
@@ -177,7 +179,7 @@ impl ShardLayout {
             position = position * per_shard + coord % per_shard;
         }
         Some(ShardLocation {
-            path: Path::from(crate::chunk_grid_store_path(level, &shard)),
+            path: Path::from(crate::chunk_grid_store_path(key.level, &shard)),
             position: usize::try_from(position).ok()?,
         })
     }
@@ -464,21 +466,21 @@ fn parse_inner_chunk_shape(
         .get("chunk_shape")
         .and_then(|s| s.as_array())
         .ok_or_else(|| {
-            StoreError::Metadata(format!(
+            StoreError::unsupported_codec(format!(
                 "{SHARDING_CODEC} configuration missing 'chunk_shape' array"
             ))
         })?
         .iter()
         .map(|v| {
             v.as_u64().ok_or_else(|| {
-                StoreError::Metadata(format!(
+                StoreError::unsupported_codec(format!(
                     "{SHARDING_CODEC} chunk_shape entry {v} is not a non-negative integer"
                 ))
             })
         })
         .collect::<Result<_, _>>()?;
     if inner.len() != shard_shape.len() {
-        return Err(StoreError::Metadata(format!(
+        return Err(StoreError::unsupported_codec(format!(
             "{SHARDING_CODEC} chunk_shape has {} axes but the shard shape {shard_shape:?} has {}",
             inner.len(),
             shard_shape.len(),
@@ -486,7 +488,7 @@ fn parse_inner_chunk_shape(
     }
     for (axis, (&i, &s)) in inner.iter().zip(shard_shape).enumerate() {
         if i == 0 || s % i != 0 {
-            return Err(StoreError::Metadata(format!(
+            return Err(StoreError::unsupported_codec(format!(
                 "{SHARDING_CODEC} chunk_shape {inner:?} does not tile the shard shape {shard_shape:?} on axis {axis}",
             )));
         }
@@ -510,7 +512,7 @@ fn parse_index_codecs(codecs: &[serde_json::Value]) -> Result<bool, StoreError> 
     match (names.as_slice(), endian) {
         (["bytes"], Some("little")) => Ok(false),
         (["bytes", "crc32c"], Some("little")) => Ok(true),
-        _ => Err(StoreError::Metadata(format!(
+        _ => Err(StoreError::unsupported_codec(format!(
             "index_codecs {names:?} not supported (expected bytes little-endian, optionally followed by crc32c)",
         ))),
     }
@@ -605,20 +607,24 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
+    fn key(key: &str) -> ChunkKey {
+        ChunkKey::parse(key).unwrap()
+    }
+
     #[test]
     fn an_inner_chunk_key_names_its_shard_and_its_position_in_the_shard() {
         let layout = fixture_layout("twin-sharded.ome.zarr", 0).unwrap();
         let cyx = axes(&["c", "y", "x"]);
         // (c=1, y=2, x=3) in 1x2x2 shards: shard (1, 1, 1), position (0, 0, 1).
         assert_eq!(
-            layout.locate_inner_chunk("0/0/1/0/2/3", &cyx),
+            layout.locate_inner_chunk(&key("0/0/1/0/2/3"), &cyx),
             Some(ShardLocation {
                 path: Path::from("0/c/1/1/1"),
                 position: 1,
             })
         );
         assert_eq!(
-            layout.locate_inner_chunk("1/0/0/0/1/0", &cyx),
+            layout.locate_inner_chunk(&key("1/0/0/0/1/0"), &cyx),
             Some(ShardLocation {
                 path: Path::from("1/c/0/0/0"),
                 position: 2,
@@ -640,7 +646,7 @@ mod tests {
         };
         // c=7 is bundle 1; y=3 and x=2 fall in shard (1, 1) at position (1, 0).
         assert_eq!(
-            layout.locate_inner_chunk("0/0/7/0/3/2", &axes(&["t", "c", "z", "y", "x"])),
+            layout.locate_inner_chunk(&key("0/0/7/0/3/2"), &axes(&["t", "c", "z", "y", "x"])),
             Some(ShardLocation {
                 path: Path::from("0/c/0/1/0/1/1"),
                 position: 2,
@@ -690,7 +696,7 @@ mod tests {
         key: &str,
     ) -> Result<Bytes, object_store::Error> {
         let location = layout
-            .locate_inner_chunk(key, &axes(&["c", "y", "x"]))
+            .locate_inner_chunk(&self::key(key), &axes(&["c", "y", "x"]))
             .unwrap();
         shards
             .read_inner_chunk(store, layout, &location, READER, LABEL)
@@ -718,7 +724,11 @@ mod tests {
                 let from_shard = read_from_shard(&shards, &sharded, &layout, &key)
                     .await
                     .unwrap();
-                let object = crate::chunk_key_to_store_path(&key, &cyx, &layout.inner_chunk_shape);
+                let object = crate::chunk_key_to_store_path(
+                    &self::key(&key),
+                    &cyx,
+                    &layout.inner_chunk_shape,
+                );
                 let from_object = unsharded
                     .get_bytes(&Path::from(object), READER, LABEL)
                     .await
@@ -758,7 +768,7 @@ mod tests {
             ("0/0/0/0/1/0", false),
             ("0/0/0/0/1/1", true),
         ] {
-            let location = layout.locate_inner_chunk(key, &yx).unwrap();
+            let location = layout.locate_inner_chunk(&self::key(key), &yx).unwrap();
             let read = shards
                 .read_inner_chunk(&store, &layout, &location, READER, LABEL)
                 .await;
@@ -780,7 +790,7 @@ mod tests {
         let (layout, shards, store) = fixture_layout_and_cache("sparse-sharded.ome.zarr", 2);
         let yx = axes(&["y", "x"]);
         for key in ["2/0/0/0/0/0", "2/0/0/0/0/1"] {
-            let location = layout.locate_inner_chunk(key, &yx).unwrap();
+            let location = layout.locate_inner_chunk(&self::key(key), &yx).unwrap();
             let read = shards
                 .read_inner_chunk(&store, &layout, &location, READER, LABEL)
                 .await;
@@ -1163,13 +1173,5 @@ mod tests {
         let mut trailing = sharded_chain_with(|_| {});
         trailing.push(serde_json::json!({"name": "gzip"}));
         assert!(layout_error(&trailing).contains("only codec"));
-    }
-
-    #[test]
-    fn a_malformed_key_locates_nothing() {
-        let layout = fixture_layout("twin-sharded.ome.zarr", 0).unwrap();
-        let cyx = axes(&["c", "y", "x"]);
-        assert_eq!(layout.locate_inner_chunk("0/0/1", &cyx), None);
-        assert_eq!(layout.locate_inner_chunk("0/0/1/0/two/3", &cyx), None);
     }
 }

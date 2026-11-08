@@ -60,7 +60,7 @@ async fn served(opened: &Opened, image: &lucida_content::ImageId, key: &str) -> 
         &opened.resolver,
         &opened.store,
         image,
-        key,
+        &key.parse::<lucida_content::ChunkKey>().unwrap(),
         READER,
         LABEL,
         None,
