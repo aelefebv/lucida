@@ -1033,8 +1033,8 @@ pub struct MemberChunkPlan {
     /// is the value the view query reports for it. A level pin, clamped to
     /// the member's source levels, wins over the level the screen calls for.
     pub target_level: u32,
+    /// Nearest the view's focus first, channel by channel.
     pub needed: Vec<ChunkCoord>,
-    pub prefetch: Vec<ChunkCoord>,
 }
 
 #[cfg(test)]

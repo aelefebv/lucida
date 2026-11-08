@@ -1,6 +1,6 @@
 /**
- * Top-level pure planner. Composes active-set assignment + chunk
- * iteration + lane scheduling into a {@link RequestPlan}.
+ * Top-level pure planner. Composes active-set assignment, the core's chunk
+ * enumeration, and lane scheduling into a {@link RequestPlan}.
  */
 
 import type { SceneEpochs } from "../epochs.ts";
@@ -10,9 +10,10 @@ import {
   emitDetailLane,
   emitMinimapLane,
   emitPrefetchLane,
+  enumeratePlanChunks,
+  LaneRequests,
 } from "./emit.ts";
 import { buildActiveSet } from "./activeSet.ts";
-import { compareChunkRequests } from "./chunks.ts";
 import {
   emptyPlanStats,
   type ActiveSetEntry,
@@ -54,33 +55,26 @@ export function emitPlanRequests(
     entityById.set(entity.entityId, entity);
   }
 
-  const allRequests: ChunkRequest[] = [];
+  const chunks = enumeratePlanChunks(activeSet, snapshot, entityById, config, zoomDirection);
+  const lanes = new LaneRequests();
 
-  emitDetailLane(activeSet, snapshot, entityById, stats, allRequests, config);
+  emitDetailLane(chunks, snapshot, stats, lanes, config);
 
-  emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config, zoomDirection);
+  emitPrefetchLane(chunks, snapshot, stats, lanes, config);
 
-  emitCoarseLane(activeSet, snapshot, entityById, stats, allRequests, config);
+  emitCoarseLane(chunks, snapshot, stats, lanes, config);
 
-  // Minimap goes last. Its bulk lane must rank behind every request above,
-  // and lane offsets are not bands because the importance and distance
-  // terms are unbounded, so it gets the plan's maximum priority as a floor.
-  let maxEmittedPriority = 0;
-  for (const req of allRequests) {
-    if (req.priority > maxEmittedPriority) maxEmittedPriority = req.priority;
-  }
+  // Minimap goes last: its bulk lane ranks behind every band above it.
   emitMinimapLane(
     snapshot.minimapPending,
     snapshot.entities,
     snapshot.datasetId,
     config,
-    maxEmittedPriority + 1,
-    allRequests,
+    Math.max(0, lanes.topBand) + 1,
+    lanes,
   );
 
-  allRequests.sort(compareChunkRequests);
-
-  return allRequests;
+  return lanes.finish();
 }
 
 /**

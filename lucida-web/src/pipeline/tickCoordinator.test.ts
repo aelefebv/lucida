@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
 import { CpuCache } from "./fetch/index.ts";
@@ -16,6 +16,9 @@ import { configStore } from "./planning/configStore.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import { initialPlanningState } from "./planning/index.ts";
 import { resolvedLayersJson } from "../resolvedLayerFixtures.ts";
+import { loadWasm } from "../viewProperties.ts";
+
+beforeAll(loadWasm);
 
 // Planner-only tests: epoch caching + multi-dataset planning state.
 // Upload-side describes live in `upload/uploader.test.ts`.

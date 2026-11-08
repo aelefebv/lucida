@@ -49,9 +49,8 @@ export interface Admission {
  * goes next: it is a fallback and takes only the room detail leaves, so the
  * coarse floor grows with the layout instead of stopping at a fixed size
  * while detail room sits empty. Prefetch goes last, into what the view
- * leaves. Priority alone cannot keep that order, because its distance term
- * outweighs the gaps between lane offsets: a prefetch chunk near the center
- * ranks above a view chunk at the edge.
+ * leaves, because the coarse tier borrows from the detail tier's room
+ * before prefetch may. Each pass takes requests in priority order.
  *
  * Two requests for one chunk of one tier, such as the coarse and minimap
  * lanes asking for the same chunk, are admitted or refused together and
