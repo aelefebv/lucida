@@ -18,6 +18,7 @@ import type {
   ChunkLookup,
   DiagnosticDocument,
   Finding,
+  ObservedError,
   SpatialSummary,
   TimelineSection,
 } from "./types.ts";
@@ -736,6 +737,24 @@ function gpuMemoryOf(document: DiagnosticDocument, p: PrintNumber): string {
 /** Held chunks named on the finding's line; the document carries every one. */
 const HELD_LISTED = 5;
 
+/** Errors named on the finding's line; the document carries every one. */
+const ERRORS_LISTED = 3;
+
+function describeErrors(errors: ObservedError[], base: string, p: PrintNumber): string {
+  const named = errors
+    .slice(0, ERRORS_LISTED)
+    .map((error, index) => {
+      const path = `${base}.errors[${index}]`;
+      const at = error.atMs === null ? "" : ` at ${p(`${path}.atMs`, error.atMs)} ms`;
+      const times = error.count > 1 ? ` x${p(`${path}.count`, error.count)}` : "";
+      const where = error.location ? ` (${error.location})` : "";
+      return `${error.source}${at}${times}: ${error.message}${where}`;
+    })
+    .join("; ");
+  const more = errors.length > ERRORS_LISTED ? `; +${errors.length - ERRORS_LISTED} more` : "";
+  return `${named}${more}`;
+}
+
 function describeObservation(finding: Finding, p: PrintNumber): string {
   const observed = finding.observed;
   const base = `findings[${finding.id - 1}].observed`;
@@ -752,7 +771,17 @@ function describeObservation(finding: Finding, p: PrintNumber): string {
     const kinds = Object.entries(observed.breakdown)
       .map(([kind, count]) => `${kind} ${p(`${base}.breakdown.${kind}`, count)}`)
       .join(", ");
-    return `${p(`${base}.n`, observed.n ?? 0)} GPU error(s): ${kinds}`;
+    const said = observed.errors ? `; ${describeErrors(observed.errors, base, p)}` : "";
+    return `${p(`${base}.n`, observed.n ?? 0)} GPU error(s): ${kinds}${said}`;
+  }
+  if (finding.rule === RULESET.pageError.id && observed.errors) {
+    return `${p(`${base}.n`, observed.n ?? 0)} error(s): ${describeErrors(observed.errors, base, p)}`;
+  }
+  if (finding.rule === RULESET.blankFrame.id) {
+    return (
+      `one flat colour, ${observed.colour}, across all ` +
+      `${p(`${base}.width`, observed.width ?? 0)}x${p(`${base}.height`, observed.height ?? 0)} pixels`
+    );
   }
   if (observed.backlogEtaS != null || observed.pending != null) {
     const parts = [

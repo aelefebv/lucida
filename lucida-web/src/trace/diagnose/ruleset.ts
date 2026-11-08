@@ -10,13 +10,14 @@
  */
 
 import type { PhaseClass } from "./types.ts";
+import type { PageErrorSource } from "../types.ts";
 import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.ts";
 
 /**
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 8;
+export const RULESET_VERSION = 9;
 
 export interface AbsoluteRule {
   id: string;
@@ -136,6 +137,30 @@ export interface GpuErrorRule {
   why: string;
 }
 
+/**
+ * Output the page raises that is known benign. An error matches when its
+ * message contains `match` and, if `source` is set, it came from there.
+ */
+export interface AllowedError {
+  source?: PageErrorSource;
+  match: string;
+  why: string;
+}
+
+/** The page or a worker raised an error that is not on the allow list. */
+export interface PageErrorRule {
+  id: string;
+  minErrors: number;
+  why: string;
+  allow: readonly AllowedError[];
+}
+
+/** The settled frame showed one flat colour. */
+export interface BlankFrameRule {
+  id: string;
+  why: string;
+}
+
 /** Planning passes woken by an availability update and nothing else. */
 export interface ReplanRule {
   id: string;
@@ -210,6 +235,10 @@ export interface Ruleset {
   held: HeldRule;
   /** A lost device or a GPU error, which leaves the frame's pixels unproven. */
   gpuError: GpuErrorRule;
+  /** An exception, a rejection nothing handled, or a console error, and the one list of those known benign. */
+  pageError: PageErrorRule;
+  /** A settled frame of one colour, read off the page's own capture. */
+  blankFrame: BlankFrameRule;
   /** Input to frame on an interaction run. */
   lag: LagRule;
   /**
@@ -417,6 +446,16 @@ export const RULESET: Ruleset = {
     id: "gpu.error",
     minErrors: 1,
     why: "WebGPU raises no exception for a lost device, a failed allocation, or an invalid command: the object comes back unusable and the draw that uses it does nothing. A frame drawn around one may be missing data or show none, while the pipeline's own phases look healthy. The renderer replaces a lost device and drops an atlas it could not allocate, and the page sends those chunks again, so the run carries that cost too. One error is enough to report, because a correct build reports none.",
+  },
+  pageError: {
+    id: "page.error",
+    minErrors: 1,
+    why: "A page that throws while it settles can still settle: the handler that threw dropped its work, and the view settles without it. The phases cannot show that, so the error itself is the finding. One is enough, because a correct build raises none. Output known to be benign goes on the allow list below, each entry with its reason, and nowhere else.",
+    allow: [],
+  },
+  blankFrame: {
+    id: "frame.blank",
+    why: "A frame of one flat colour across the whole canvas drew nothing over its background, or drew nothing at all, while every phase can look healthy. It is read off the page's own capture of its canvas, because a DevTools screenshot can leave a WebGPU canvas out. A dark view is not blank: one pixel that differs is enough, and the generated datasets draw a visible picture.",
   },
   lag: {
     id: "lag.input-to-frame",

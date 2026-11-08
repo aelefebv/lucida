@@ -39,6 +39,7 @@ import type {
 import { tokenColor } from "../theme/tokenColors.ts";
 import type { ResolvedColor } from "../theme/tokens.ts";
 import { readDeviceMemoryGiB } from "../deviceBudget.ts";
+import { hearWorkerErrors } from "../pageErrors.ts";
 
 /** The page's device pixels per CSS pixel, or 1 where there is no window. */
 function pagePixelRatio(): number {
@@ -178,6 +179,7 @@ export class RenderClient implements UploadClient {
       new URL("./gpu.worker.ts", import.meta.url),
       { type: "module" },
     );
+    hearWorkerErrors(this.worker);
 
     this.readyPromise = new Promise<void>((resolve, reject) => {
       // Kept so destroy() can settle a still-pending init (settling an
@@ -394,6 +396,12 @@ export class RenderClient implements UploadClient {
   loseDevice(): void {
     if (this.destroyed) return;
     this.worker.postMessage({ type: "loseDevice" });
+  }
+
+  /** Make the worker's device raise a validation error, as a test of how one is reported. Development builds only. */
+  raiseValidationError(): void {
+    if (this.destroyed) return;
+    this.worker.postMessage({ type: "raiseValidationError" });
   }
 
   resize(width: number, height: number) {

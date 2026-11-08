@@ -149,6 +149,11 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       ctx.device.destroy();
       return;
 
+    case "raiseValidationError":
+      // Mapped for reading and for writing at once, which WebGPU forbids.
+      if (import.meta.env.DEV) ctx.device.createBuffer({ size: 4, usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.MAP_WRITE });
+      return;
+
     case "viewHotState":
       applyViewHotState(ctx, msg);
       return;

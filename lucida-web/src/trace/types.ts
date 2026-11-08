@@ -1199,6 +1199,59 @@ export interface TracePointEvent {
 }
 
 /**
+ * What raised an error: an uncaught exception, a promise rejection nothing
+ * handled, a `console.error` call, or the GPU, which raises no exception for
+ * an invalid command or a lost device.
+ */
+export const PAGE_ERROR_SOURCES = ["exception", "rejection", "console", "gpu"] as const;
+export type PageErrorSource = (typeof PAGE_ERROR_SOURCES)[number];
+
+/**
+ * One error the page or one of its workers raised. Repeats of the same error
+ * in one interval fold into its first record, so a draw that throws every
+ * frame is one record with a count.
+ */
+export interface PageError {
+  /** Microseconds from interval start to the first occurrence. Null when no interval was open. */
+  atUs: number | null;
+  /**
+   * The page's clock at the first occurrence, in milliseconds since its time
+   * origin. A trace driver times its steps on this clock, so it can say
+   * which step an error fell in.
+   */
+  pageMs: number;
+  source: PageErrorSource;
+  message: string;
+  /** Where it was raised, as `file:line:column`, or the worker's script when that is all there is. */
+  location: string | null;
+  count: number;
+  /**
+   * Why the error is known benign output, from the ruleset's allow list, or
+   * null. An allowed error is kept so a reader sees it, and fails nothing.
+   */
+  allowed: string | null;
+}
+
+/**
+ * The frame a run settled on, read off the page's own capture of its canvas
+ * once the run closed. A DevTools screenshot can leave a WebGPU canvas out,
+ * so it is never what this reads.
+ */
+export interface FrameReading {
+  /** Device pixels. Zero when the frame could not be read. */
+  width: number;
+  height: number;
+  /**
+   * The one colour every pixel shares, as `#rrggbb` with `aa` added when it
+   * is not opaque, or null when the frame shows more than one colour or was
+   * not read.
+   */
+  flatColour: string | null;
+  /** Why the frame was not read, or null when it was. */
+  unread: string | null;
+}
+
+/**
  * The kinds of hole a run can have. A closed enum, because a reader deciding
  * whether to trust a verdict needs to know the list is exhaustive.
  *
@@ -1340,6 +1393,17 @@ export interface TraceRun {
    * keeping it would spend the budget truncation exists to protect.
    */
   serverRowsDiscarded: number;
+  /**
+   * The errors raised in this interval, in the order they first occurred.
+   * Kept outside the per-run cap, since a truncated run is the one most
+   * likely to be throwing. Absent on a document written before errors were
+   * recorded.
+   */
+  errors?: PageError[];
+  /** Distinct errors past the per-interval limit, counted rather than kept. */
+  errorsDropped?: number;
+  /** The frame the run settled on, when someone read it: the trace driver reads every run it waits for. */
+  frame?: FrameReading;
   /** How the view kept up with input. Absent from an interval that took no input. */
   lag?: TraceLag;
 }
@@ -1452,6 +1516,13 @@ export interface TraceDocument {
    * uncounted one would make the document claim coverage it does not have.
    */
   serverRowsOutsideRun: number;
+  /**
+   * Errors raised while no interval was open: before the viewer registered
+   * an environment, or after it withdrew one. Kept, unlike rows, because an
+   * error at startup can be the reason no run ever opened. Absent on a
+   * document written before errors were recorded.
+   */
+  errorsOutsideRun?: PageError[];
 }
 
 /**

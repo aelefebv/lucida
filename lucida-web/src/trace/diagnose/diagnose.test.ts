@@ -34,6 +34,7 @@ import {
   uninstrumentedPrefixOpen,
 } from "./fixtures.ts";
 import { CONFIDENCE_WORDS, diagnoseDocument, diagnoseRun } from "./diagnose.ts";
+import { renderDiagnostic } from "./renderText.ts";
 import { RULESET, RULESET_VERSION, PHASE_CLASSES } from "./ruleset.ts";
 import type { DiagnosticDocument } from "./types.ts";
 import {
@@ -42,6 +43,7 @@ import {
   interactionCause,
   TRACE_SCHEMA_VERSION,
   type GpuIdentity,
+  type PageError,
   type RunCause,
   type TraceDocument,
   type TracePointEvent,
@@ -396,6 +398,106 @@ describe("GPU errors", () => {
 
   it("are not found on a run without any", () => {
     expect(diagnoseRun(healthyLocalOpen()).findings.some((f) => f.rule === RULESET.gpuError.id)).toBe(false);
+  });
+});
+
+describe("errors the page raised", () => {
+  function pageError(overrides: Partial<PageError> = {}): PageError {
+    return {
+      atUs: 120 * MS,
+      pageMs: 2_000,
+      source: "exception",
+      message: "Uncaught TypeError: x is undefined",
+      location: "/assets/index.js:1:20",
+      count: 1,
+      allowed: null,
+      ...overrides,
+    };
+  }
+
+  it("are a stall that names the first, with its time on the run's clock", () => {
+    const run = healthyLocalOpen();
+    run.errors = [pageError(), pageError({ atUs: 200 * MS, source: "console", message: "[commands] clash", location: null, count: 2 })];
+    const doc = diagnoseRun(run);
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain(
+      "the page raised 3 error(s); the first at 120 ms, an uncaught exception: Uncaught TypeError: x is undefined (/assets/index.js:1:20)",
+    );
+    const [lead] = doc.findings;
+    expect(lead.rule).toBe(RULESET.pageError.id);
+    expect(lead.attribution).toBeNull();
+    expect(lead.observed.errors).toEqual([
+      { atMs: 120, source: "exception", message: "Uncaught TypeError: x is undefined", location: "/assets/index.js:1:20", count: 1 },
+      { atMs: 200, source: "console", message: "[commands] clash", location: null, count: 2 },
+    ]);
+    expect(renderDiagnostic(doc).text).toContain("exception at 120 ms: Uncaught TypeError: x is undefined");
+  });
+
+  it("leave out what the allow list names, and a window leaves out what falls outside it", () => {
+    const run = healthyLocalOpen();
+    run.errors = [pageError({ allowed: "known benign" })];
+    expect(diagnoseRun(run).findings.some((f) => f.rule === RULESET.pageError.id)).toBe(false);
+
+    run.errors = [pageError({ atUs: 10 * MS })];
+    const windowed = diagnoseRun(run, { window: { startMs: 50, endMs: 100 } });
+    expect(windowed.findings.some((f) => f.rule === RULESET.pageError.id)).toBe(false);
+  });
+
+  it("leave the GPU's own errors to the GPU finding, which quotes the first", () => {
+    const run = healthyLocalOpen();
+    run.events = [{ atUs: 100 * MS, kind: "gpu-error", reason: "validation", chunk: null, levelChange: null }];
+    run.errors = [pageError({ source: "gpu", message: "validation: bad buffer usage", location: null })];
+    const doc = diagnoseRun(run);
+
+    expect(doc.findings.map((f) => f.rule)).not.toContain(RULESET.pageError.id);
+    expect(doc.verdict.text).toContain("the first said validation: bad buffer usage");
+  });
+
+  it("follow a GPU error and lead a blank frame", () => {
+    const run = healthyLocalOpen();
+    run.events = [{ atUs: 100 * MS, kind: "gpu-error", reason: "validation", chunk: null, levelChange: null }];
+    run.errors = [pageError()];
+    run.frame = { width: 8, height: 4, flatColour: "#000000", unread: null };
+    expect(diagnoseRun(run).findings.slice(0, 3).map((f) => f.rule)).toEqual([
+      RULESET.gpuError.id,
+      RULESET.pageError.id,
+      RULESET.blankFrame.id,
+    ]);
+  });
+
+  it("are not found on a document written before errors were recorded", () => {
+    const run = healthyLocalOpen();
+    delete run.errors;
+    expect(diagnoseRun(run).findings.some((f) => f.rule === RULESET.pageError.id)).toBe(false);
+  });
+});
+
+describe("a blank settled frame", () => {
+  it("is a stall that names its colour and size", () => {
+    const run = healthyLocalOpen();
+    run.frame = { width: 2880, height: 1800, flatColour: "#000000", unread: null };
+    const doc = diagnoseRun(run);
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain("the settled frame was one flat colour, #000000, across all 2880x1800 pixels");
+    expect(doc.findings[0]).toMatchObject({
+      rule: RULESET.blankFrame.id,
+      observed: { colour: "#000000", width: 2880, height: 1800 },
+      attribution: null,
+    });
+    expect(renderDiagnostic(doc).text).toContain("one flat colour, #000000, across all 2880x1800 pixels");
+  });
+
+  it("is not found on a frame with a picture, one not read, or a window short of the run's end", () => {
+    const run = healthyLocalOpen();
+    run.frame = { width: 8, height: 4, flatColour: null, unread: null };
+    expect(diagnoseRun(run).findings.some((f) => f.rule === RULESET.blankFrame.id)).toBe(false);
+    run.frame = { width: 0, height: 0, flatColour: null, unread: "the render worker could not read its canvas" };
+    expect(diagnoseRun(run).findings.some((f) => f.rule === RULESET.blankFrame.id)).toBe(false);
+    run.frame = { width: 8, height: 4, flatColour: "#000000", unread: null };
+    const windowed = diagnoseRun(run, { window: { startMs: 0, endMs: 10 } });
+    expect(windowed.findings.some((f) => f.rule === RULESET.blankFrame.id)).toBe(false);
   });
 });
 
