@@ -696,8 +696,13 @@ def stop_everything() -> None:
 def _scrubbed_env(**overrides: str) -> dict[str, str]:
     """The caller's environment without its lucida settings, so a run never
     reaches the caller's own server, config, token or database. The browser
-    choice is kept: it says which Chrome this machine has."""
-    env = {k: v for k, v in os.environ.items() if not k.startswith("LUCIDA_") or k == "LUCIDA_BROWSER"}
+    choice is kept, since it says which Chrome this machine has, and so is the
+    source throttle, a condition every run file records."""
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if not k.startswith("LUCIDA_") or k == "LUCIDA_BROWSER" or k.startswith("LUCIDA_SOURCE_THROTTLE")
+    }
     env.update(overrides)
     return env
 
@@ -853,6 +858,7 @@ def read_run(path: Path) -> dict[str, Any]:
         "confidence": attribution.get("confidence"),
         "adapter": run.get("gpu"),
         "adapterKind": (run.get("adapterKind") or {}).get("label"),
+        "sourceThrottle": header.get("sourceThrottle"),
         "steps": [
             {
                 "kind": step.get("kind"),
@@ -945,7 +951,13 @@ def render_markdown(rows: list[Row], out_dir: Path) -> str:
         return text.replace("|", "\\|")
 
     adapters = sorted({f"{r.fields['adapter']} ({r.fields['adapterKind']})" for r in rows if r.fields.get("adapter")})
-    lines = [f"adapter: {', '.join(adapters) or 'not recorded'}", ""]
+    lines = [f"adapter: {', '.join(adapters) or 'not recorded'}"]
+    throttled = sorted(
+        {r.fields["sourceThrottle"]["summary"] for r in rows if (r.fields.get("sourceThrottle") or {}).get("settings")}
+    )
+    if throttled:
+        lines.append(f"throttle: {', '.join(throttled)}")
+    lines.append("")
     lines.append("| " + " | ".join(COLUMNS) + " |")
     lines.append("|" + "|".join(" --- " for _ in COLUMNS) + "|")
     for row in rows:
@@ -953,9 +965,23 @@ def render_markdown(rows: list[Row], out_dir: Path) -> str:
     return "\n".join(lines) + "\n"
 
 
+def source_throttle(rows: list[Row]) -> Any:
+    """The server's source throttle as the runs recorded it: the one record
+    they share, every distinct one if they differ, or None if none recorded it."""
+    records: list[Any] = []
+    for row in rows:
+        record = row.fields.get("sourceThrottle")
+        if record is not None and record not in records:
+            records.append(record)
+    if not records:
+        return None
+    return records[0] if len(records) == 1 else records
+
+
 def summary_json(rows: list[Row], out_dir: Path, meta: dict[str, Any]) -> dict[str, Any]:
     return {
         **meta,
+        "sourceThrottle": source_throttle(rows),
         "rows": [
             {
                 "dataset": row.case.dataset.name,

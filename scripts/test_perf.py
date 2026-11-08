@@ -221,10 +221,12 @@ def test_a_ratio_is_a_positive_number(text: str) -> None:
 # -- reading runs and the table ----------------------------------------------
 
 
-def run_file(tmp_path: Path, diagnostic, script=None) -> Path:
+def run_file(tmp_path: Path, diagnostic, script=None, throttle=None) -> Path:
     header = {"settled": True}
     if script is not None:
         header["script"] = {"steps": script}
+    if throttle is not None:
+        header["sourceThrottle"] = throttle
     return write(tmp_path / "run.json", {"fileVersion": 1, "header": header, "diagnostic": diagnostic, "trace": {}})
 
 
@@ -280,6 +282,34 @@ def test_the_markdown_table_names_the_adapter_and_one_row_per_run(tmp_path: Path
     assert "| error: the server refused \\| the open |" in markdown
     # The header, its rule, and one row per run.
     assert len([line for line in lines if line.startswith("|")]) == 4
+    assert not any(line.startswith("throttle:") for line in lines)
+
+
+REMOTE = {
+    "settings": {"profile": "remote", "latency_ms": 180, "jitter_ms": 100, "bytes_per_sec": 18874368},
+    "summary": "source reads throttled on the server: remote: 180-280 ms per request, 18 MiB/s across all reads",
+}
+
+
+def test_a_throttled_server_says_so_in_the_table_and_the_summary(tmp_path: Path) -> None:
+    path = run_file(tmp_path, DIAGNOSTIC, throttle=REMOTE)
+    row = perf.Row(perf.Case(CATALOG["image"], SCENARIOS["cold-open"], 1.0, 1), path, tmp_path / "a.txt", 0)
+    row.fields = perf.read_run(path)
+    assert perf.render_markdown([row], tmp_path).splitlines()[1] == f"throttle: {REMOTE['summary']}"
+    assert perf.summary_json([row], tmp_path, {})["sourceThrottle"] == REMOTE
+
+    unthrottled = run_file(tmp_path, DIAGNOSTIC, throttle={"summary": "source reads unthrottled"})
+    row.fields = perf.read_run(unthrottled)
+    assert perf.summary_json([row], tmp_path, {})["sourceThrottle"] == {"summary": "source reads unthrottled"}
+    assert not perf.render_markdown([row], tmp_path).splitlines()[1].startswith("throttle:")
+
+
+def test_the_server_keeps_the_callers_source_throttle(monkeypatch) -> None:
+    monkeypatch.setenv("LUCIDA_SOURCE_THROTTLE", "remote")
+    monkeypatch.setenv("LUCIDA_DB_URL", "sqlite://elsewhere.db")
+    env = perf._scrubbed_env()
+    assert env["LUCIDA_SOURCE_THROTTLE"] == "remote"
+    assert "LUCIDA_DB_URL" not in env
 
 
 if __name__ == "__main__":
