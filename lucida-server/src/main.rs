@@ -553,7 +553,14 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         web_dist = %web_dist.display(),
         "static_serve.config",
     );
-    let static_serve_router = static_serve::router(web_dist, deployment_theme.as_ref());
+    // A page load is a browser's first visit, so disabled mode gives each
+    // browser its own anonymous session here, before the app's first
+    // request asks who it is.
+    let static_serve_router = auth::anonymous::with_anonymous_sessions(
+        static_serve::router(web_dist, deployment_theme.as_ref()),
+        Arc::clone(&auth_config),
+        Arc::clone(&session_store_dyn),
+    );
 
     // App routes carry the auth middleware; public auth routes don't.
     // `/` falls through to the SPA so a browser hitting `:9876` sees the

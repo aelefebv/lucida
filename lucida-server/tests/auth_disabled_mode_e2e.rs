@@ -337,3 +337,113 @@ async fn dev_login_404s_on_a_non_loopback_bind() {
     assert_eq!(whoami["email"], "dev@local", "got {whoami}");
     assert_eq!(whoami["is_admin"], false, "got {whoami}");
 }
+
+/// A directory holding a stand-in SPA bundle, for `LUCIDA_WEB_DIST`.
+fn web_dist() -> tempfile::TempDir {
+    let dist = tempfile::tempdir().unwrap();
+    std::fs::write(dist.path().join("index.html"), "<html>lucida</html>").unwrap();
+    dist
+}
+
+/// Load a page the way a browser does, and return the session cookie the
+/// response set, whole, if it set one.
+async fn load_page(server: &SpawnedServer, path: &str, cookie: Option<&str>) -> Option<String> {
+    let mut request = http_client()
+        .get(format!("{}{path}", server.base_url))
+        .header(reqwest::header::ACCEPT, "text/html,application/xhtml+xml");
+    if let Some(cookie) = cookie {
+        request = request.header(reqwest::header::COOKIE, cookie);
+    }
+    let res = request.send().await.expect("GET a page");
+    assert_eq!(res.status(), reqwest::StatusCode::OK);
+    res.headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .find(|v| v.starts_with("lucida_session="))
+        .map(str::to_string)
+}
+
+async fn whoami(server: &SpawnedServer, cookie: Option<&str>) -> Value {
+    let mut request = http_client().get(format!("{}/auth/whoami", server.base_url));
+    if let Some(cookie) = cookie {
+        request = request.header(reqwest::header::COOKIE, cookie);
+    }
+    request
+        .send()
+        .await
+        .expect("GET /auth/whoami")
+        .json()
+        .await
+        .expect("json body")
+}
+
+fn name_value(set_cookie: &str) -> &str {
+    set_cookie.split(';').next().unwrap()
+}
+
+// Each browser that loads the app becomes its own person, through the
+// session store the server already keeps. Anything that never loads the
+// page, such as the command-line client, is still `dev@local`.
+#[tokio::test]
+async fn each_browser_that_loads_the_app_gets_its_own_anonymous_identity() {
+    let dist = web_dist();
+    let server = spawn_server(
+        "127.0.0.1",
+        &[("LUCIDA_WEB_DIST", dist.path().to_str().unwrap())],
+    );
+
+    let first = load_page(&server, "/", None)
+        .await
+        .expect("a first visit mints");
+    assert!(first.contains("HttpOnly"), "{first}");
+    assert!(!first.contains("Secure"), "plain http on loopback: {first}");
+    let second = load_page(&server, "/open?url=/data/a.zarr", None)
+        .await
+        .expect("another browser's first visit mints too");
+
+    let a = whoami(&server, Some(name_value(&first))).await;
+    let b = whoami(&server, Some(name_value(&second))).await;
+    assert_ne!(a["email"], b["email"], "{a} vs {b}");
+    for person in [&a, &b] {
+        assert!(
+            person["email"].as_str().unwrap().starts_with("anon-"),
+            "{person}"
+        );
+        assert_eq!(person["is_admin"], false, "{person}");
+    }
+
+    assert_eq!(
+        load_page(&server, "/", Some(name_value(&first))).await,
+        None,
+        "a browser with a live session keeps it",
+    );
+    assert_eq!(
+        load_page(&server, "/w/ws-1?render=1", None).await,
+        None,
+        "the capture surface stays the CLI that opened it",
+    );
+    assert_whoami_returns_dev_principal(&server).await;
+    let forged = whoami(&server, Some("lucida_session=anon_forged")).await;
+    assert_eq!(forged["email"], "dev@local", "got {forged}");
+}
+
+#[tokio::test]
+async fn the_anonymous_session_cookie_is_secure_on_an_exposed_bind() {
+    let dist = web_dist();
+    let server = spawn_server(
+        "0.0.0.0",
+        &[
+            ("LUCIDA_AUTH", "disabled"),
+            ("LUCIDA_INSECURE", "1"),
+            ("LUCIDA_WEB_DIST", dist.path().to_str().unwrap()),
+        ],
+    );
+    let cookie = load_page(&server, "/", None).await.expect("minted");
+    assert!(cookie.contains("Secure"), "{cookie}");
+    let person = whoami(&server, Some(name_value(&cookie))).await;
+    assert!(
+        person["email"].as_str().unwrap().starts_with("anon-"),
+        "{person}"
+    );
+}
