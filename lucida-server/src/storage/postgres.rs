@@ -1,10 +1,10 @@
 //! PostgreSQL storage backend, selected by a `postgres://` or
 //! `postgresql://` `LUCIDA_DB_URL`. Runs the bundled PostgreSQL migrations
-//! and serves all seven stores.
+//! and serves all six stores.
 //!
 //! This module is the only place in the server that names a PostgreSQL
 //! type. Everything above it works through [`StorageBackend`] and the
-//! seven store traits.
+//! six store traits.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -15,13 +15,12 @@ use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::url::DatabaseUrl;
-use super::{PingError, StorageBackend, StorageError};
+use super::{PingError, StorageBackend, StorageError, log_dropped_bookmarks};
 use crate::auth::{
     BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
     PostgresBearerTokenStore, PostgresCliTokenAuthorizationStore, PostgresPendingAuthStore,
     PostgresSessionStore,
 };
-use crate::bookmarks::{BookmarkStore, PostgresBookmarkStore};
 use crate::inbox::{InboxStore, PostgresInboxStore};
 use crate::workspace::{PostgresWorkspaceStore, WorkspaceStore};
 
@@ -82,13 +81,19 @@ impl PostgresStorageBackend {
                 reason: e.to_string(),
             })?;
 
+        let migrate_failed = |e: sqlx::Error| StorageError::Migrate {
+            target: target.clone(),
+            reason: e.to_string(),
+        };
+        let dropped_bookmarks = bookmarks_to_drop(&pool).await.map_err(migrate_failed)?;
         MIGRATOR
             .run(&pool)
             .await
             .map_err(|e| StorageError::Migrate {
-                target,
+                target: target.clone(),
                 reason: e.to_string(),
             })?;
+        log_dropped_bookmarks(&target, dropped_bookmarks);
 
         Ok(Self { pool })
     }
@@ -97,6 +102,23 @@ impl PostgresStorageBackend {
     pub(crate) fn pool(&self) -> &PgPool {
         &self.pool
     }
+}
+
+/// The bookmark rows the `drop_bookmarks` migration is about to discard,
+/// or `None` where there is no bookmark table: a fresh database, or one
+/// that already dropped it. `to_regclass` resolves through the search
+/// path, as the migrations do.
+async fn bookmarks_to_drop(pool: &PgPool) -> Result<Option<i64>, sqlx::Error> {
+    let exists: bool = sqlx::query_scalar("SELECT to_regclass('bookmarks') IS NOT NULL")
+        .fetch_one(pool)
+        .await?;
+    if !exists {
+        return Ok(None);
+    }
+    sqlx::query_scalar("SELECT COUNT(*) FROM bookmarks")
+        .fetch_one(pool)
+        .await
+        .map(Some)
 }
 
 /// Every accessor builds a fresh handle over the shared pool, as the
@@ -126,10 +148,6 @@ impl StorageBackend for PostgresStorageBackend {
 
     fn cli_token_authorizations(&self) -> Arc<dyn CliTokenAuthorizationStore> {
         Arc::new(PostgresCliTokenAuthorizationStore::new(self.pool.clone()))
-    }
-
-    fn bookmarks(&self) -> Arc<dyn BookmarkStore> {
-        Arc::new(PostgresBookmarkStore::new(self.pool.clone()))
     }
 
     fn workspaces(&self) -> Arc<dyn WorkspaceStore> {
@@ -283,14 +301,14 @@ mod tests {
             return;
         };
 
-        insert_bookmark(&db, "well-formed", r#"{"v":1}"#, "$2::jsonb")
+        insert_workspace(&db, "well-formed", r#"{"seq":0}"#, "$2::jsonb")
             .await
             .expect("a JSON payload is accepted");
         assert!(
-            insert_bookmark(&db, "malformed", "not json", "$2::jsonb")
+            insert_workspace(&db, "malformed", "not json", "$2::jsonb")
                 .await
                 .is_err(),
-            "view_json must hold JSON, not any text",
+            "document_json must hold JSON, not any text",
         );
     }
 
@@ -309,24 +327,24 @@ mod tests {
             return;
         };
         assert!(
-            insert_bookmark(&db, "bound-string", r#"{"v":1}"#, "$2")
+            insert_workspace(&db, "bound-string", r#"{"seq":0}"#, "$2")
                 .await
                 .is_err(),
             "a bound String reaches a jsonb column as text and is refused",
         );
     }
 
-    async fn insert_bookmark(
+    async fn insert_workspace(
         db: &PostgresTestDatabase,
         id: &str,
         payload: &str,
-        view_json_placeholder: &str,
+        document_json_placeholder: &str,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
         sqlx::query(&format!(
-            "INSERT INTO bookmarks \
-             (id, name, created_by, created_by_name, created_at, view_json) \
-             VALUES ($1, 'Bookmark', 'dev@example.com', 'Dev', '2026-01-02T03:04:05Z', \
-             {view_json_placeholder})"
+            "INSERT INTO workspaces \
+             (id, name, created_by, created_at, updated_at, document_json) \
+             VALUES ($1, 'Workspace', 'dev@example.com', '2026-01-02T03:04:05Z', \
+             '2026-01-02T03:04:05Z', {document_json_placeholder})"
         ))
         .bind(id)
         .bind(payload)

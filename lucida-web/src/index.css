@@ -60,7 +60,7 @@ body {
 /* A failed in-viewer workspace create. It sits over the top bar rather than
    in the canvas's banner slot because it comes from the route, outside the
    viewer, and the workspace stays mounted underneath. */
-.workspace-create-error {
+.workspace-root-banner {
   position: fixed;
   top: calc(var(--lc-space-2) + var(--lc-safe-top));
   left: 50%;

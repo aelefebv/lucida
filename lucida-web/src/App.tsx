@@ -298,6 +298,15 @@ function App({
     return { id: savedView.id, view: savedView.view };
   }, [workspaceId]);
 
+  const notifySavedViewMissing = useCallback(() => {
+    toast({
+      title: "Saved view not found",
+      description:
+        "The view this link names isn't in this workspace. It may have been deleted, or the link may name a bookmark, which this server no longer keeps.",
+      tone: "warning",
+    });
+  }, []);
+
   const fetchDefaultWorkspaceSavedView = useCallback(async () => {
     if (!defaultSavedViewId) return null;
     const savedView = await getWorkspaceSavedView(workspaceId, defaultSavedViewId);
@@ -345,6 +354,7 @@ function App({
     setAutoContrastMap: layers.setAutoContrastMap,
     datasetReferenceMode: "workspace-dataset-id",
     fetchSavedViewById: fetchWorkspaceSavedViewById,
+    onSavedViewMissing: notifySavedViewMissing,
     fetchDefaultSavedView: fetchDefaultWorkspaceSavedView,
     fetchViewerProfile: fetchWorkspaceViewerProfile,
     fetchLastView: fetchWorkspaceLastView,

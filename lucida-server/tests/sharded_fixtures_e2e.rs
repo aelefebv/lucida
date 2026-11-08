@@ -4,26 +4,24 @@
 //! object per chunk, so every chunk key must come back byte for byte the
 //! same from both. That equality is the primary seam of the sharded store.
 
+mod common;
+
 use std::collections::HashMap;
 use std::fs;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use common::workspace_rig::WorkspaceRig;
 use lucida_content::{DatasetManifest, ImageId};
 use lucida_protocol::DatasetOpened;
+use lucida_server::ProxyConfig;
 use lucida_server::binding::ChunkResolver;
 use lucida_server::chunk_read::{ChunkRead, read_chunk};
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
@@ -32,7 +30,6 @@ use lucida_server::generated::{
     materialize_generated_coarse_plan, plan_generated_coarse_for_manifest,
 };
 use lucida_server::session::Session;
-use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes, handler};
 use lucida_store::cache::{CachedStore, DEFAULT_SOURCE_CACHE_BYTES};
 use lucida_store::import::import_dataset;
 use lucida_store::import_types::ImportResult;
@@ -215,21 +212,6 @@ async fn generated_coarse_over_the_sharded_twin_produces_the_unsharded_twins_chu
     assert_eq!(outputs[0], outputs[1]);
 }
 
-async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    ws.on_upgrade(move |socket| async move {
-        handler::handle_client(
-            id,
-            socket,
-            state.session,
-            state.tx,
-            state.unicast_routes,
-            state.proxy_config,
-        )
-        .await;
-    })
-}
-
 fn proxy_config(root: &Path) -> ProxyConfig {
     ProxyConfig {
         cache_dir: root.join("proxies"),
@@ -287,15 +269,11 @@ async fn the_server_frames_the_same_bytes_for_the_sharded_and_the_unsharded_twin
     let root = temp_dir("served_twins");
     fs::create_dir_all(&root).unwrap();
 
-    let session = Arc::new(Mutex::new(Session::new()));
-    let (tx, _rx) = broadcast::channel::<BroadcastItem>(256);
-    let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));
+    let rig = WorkspaceRig::start(proxy_config(&root)).await;
     let context = DatasetOpenContext {
-        session: Arc::clone(&session),
-        tx: tx.clone(),
         proxy_config: proxy_config(&root),
         source_policy: Arc::default(),
-        workspace: None,
+        workspace: rig.scope(),
     };
 
     let mut opened_twins = Vec::new();
@@ -326,21 +304,7 @@ async fn the_server_frames_the_same_bytes_for_the_sharded_and_the_unsharded_twin
     let (unsharded_id, unsharded_image) = ids(&unsharded);
     assert_ne!(sharded_id, unsharded_id);
 
-    let state = AppState {
-        session,
-        tx,
-        next_id: Arc::new(AtomicU64::new(0)),
-        unicast_routes,
-        source_policy: Arc::default(),
-        proxy_config: proxy_config(&root),
-    };
-    let app = Router::new().route("/ws", get(ws_route)).with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let (mut ws, _) = connect_async(format!("ws://{addr}/ws"))
-        .await
-        .expect("ws connect");
+    let (mut ws, _) = connect_async(rig.ws_url()).await.expect("ws connect");
 
     let mut rid = 0u32;
     for key in &keys {

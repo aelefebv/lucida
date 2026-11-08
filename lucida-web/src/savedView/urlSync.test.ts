@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import {
   UrlSync,
   parseViewHash,
-  parseBookmarkHash,
+  parseSavedViewHash,
   parseAnnotationHash,
   buildAnnotationLink,
   parseViewerProfileSearch,
@@ -294,35 +294,35 @@ describe("UrlSync", () => {
   });
 });
 
-describe("parseBookmarkHash", () => {
+describe("parseSavedViewHash", () => {
   it("returns null for empty hash", () => {
-    expect(parseBookmarkHash("")).toBeNull();
-    expect(parseBookmarkHash("#")).toBeNull();
+    expect(parseSavedViewHash("")).toBeNull();
+    expect(parseSavedViewHash("#")).toBeNull();
   });
 
-  it("extracts the bookmark id from #b=<id>", () => {
-    expect(parseBookmarkHash("#b=abc-123")).toBe("abc-123");
-    expect(parseBookmarkHash("b=abc-123")).toBe("abc-123");
+  it("extracts the saved-view id from #b=<id>", () => {
+    expect(parseSavedViewHash("#b=abc-123")).toBe("abc-123");
+    expect(parseSavedViewHash("b=abc-123")).toBe("abc-123");
   });
 
   it("returns null for non-b keys", () => {
-    expect(parseBookmarkHash("#view=xxx")).toBeNull();
-    expect(parseBookmarkHash("#foo=bar")).toBeNull();
+    expect(parseSavedViewHash("#view=xxx")).toBeNull();
+    expect(parseSavedViewHash("#foo=bar")).toBeNull();
   });
 
   it("rejects ids with special characters (defense against junk URLs)", () => {
-    expect(parseBookmarkHash("#b=abc/def")).toBeNull();
-    expect(parseBookmarkHash("#b=abc def")).toBeNull();
-    expect(parseBookmarkHash("#b=")).toBeNull();
+    expect(parseSavedViewHash("#b=abc/def")).toBeNull();
+    expect(parseSavedViewHash("#b=abc def")).toBeNull();
+    expect(parseSavedViewHash("#b=")).toBeNull();
   });
 
   it("accepts UUID-like ids", () => {
-    expect(parseBookmarkHash("#b=550e8400-e29b-41d4-a716-446655440000"))
+    expect(parseSavedViewHash("#b=550e8400-e29b-41d4-a716-446655440000"))
       .toBe("550e8400-e29b-41d4-a716-446655440000");
   });
 
   it("decodes URI-encoded ids before validating", () => {
-    expect(parseBookmarkHash("#b=550e8400-e29b")).toBe("550e8400-e29b");
+    expect(parseSavedViewHash("#b=550e8400-e29b")).toBe("550e8400-e29b");
   });
 });
 
@@ -352,7 +352,7 @@ describe("UrlSync — #b=<id> bootstrap", () => {
     });
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       window: win,
-      fetchBookmark: stub,
+      fetchSavedViewById: stub,
     });
     await sync.bootstrap();
 
@@ -365,31 +365,54 @@ describe("UrlSync — #b=<id> bootstrap", () => {
     sync.destroy();
   });
 
-  it("returns gracefully when the saved-view id is unknown (404)", async () => {
+  it("reports an unknown saved-view id (404) and applies nothing", async () => {
     win = makeFakeWindow("#b=missing");
     const stub = vi.fn(async (): Promise<ResolvedSavedView | null> => null);
+    const onSavedViewMissing = vi.fn();
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       window: win,
-      fetchBookmark: stub,
+      fetchSavedViewById: stub,
+      onSavedViewMissing,
     });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await sync.bootstrap();
     expect(stub).toHaveBeenCalled();
     expect(applier.apply).not.toHaveBeenCalled();
+    expect(onSavedViewMissing).toHaveBeenCalledWith("missing");
+    warn.mockRestore();
     sync.destroy();
   });
 
-  it("returns gracefully on fetch error without crashing", async () => {
+  it("reports a fetch error as a missing saved view without crashing", async () => {
     win = makeFakeWindow("#b=err");
     const stub = vi.fn(async (): Promise<ResolvedSavedView | null> => {
       throw new Error("network down");
     });
+    const onSavedViewMissing = vi.fn();
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       window: win,
-      fetchBookmark: stub,
+      fetchSavedViewById: stub,
+      onSavedViewMissing,
     });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     await sync.bootstrap();
     expect(applier.apply).not.toHaveBeenCalled();
+    expect(onSavedViewMissing).toHaveBeenCalledWith("err");
+    warn.mockRestore();
+    sync.destroy();
+  });
+
+  it("with no resolver wired, a #b= link applies nothing and is reported", async () => {
+    win = makeFakeWindow("#b=abc-123");
+    const onSavedViewMissing = vi.fn();
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      onSavedViewMissing,
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await sync.bootstrap();
+    expect(applier.apply).not.toHaveBeenCalled();
+    expect(onSavedViewMissing).toHaveBeenCalledWith("abc-123");
     warn.mockRestore();
     sync.destroy();
   });
@@ -404,7 +427,7 @@ describe("UrlSync — #b=<id> bootstrap", () => {
     }));
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       window: win,
-      fetchBookmark: stub,
+      fetchSavedViewById: stub,
     });
     sync.start();
     (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
@@ -739,12 +762,12 @@ describe("UrlSync — #a=<id> bootstrap (deferred to host; no apply here)", () =
       id: "last-view",
       view: emptyView(),
     }));
-    const fetchBookmark = vi.fn(async (): Promise<ResolvedSavedView | null> => null);
+    const fetchSavedViewById = vi.fn(async (): Promise<ResolvedSavedView | null> => null);
     const sync = new UrlSync(() => emptyView(), applier as unknown as SavedViewApplier, {
       window: win,
       fetchDefaultSavedView: fetchDefault,
       fetchLastView,
-      fetchBookmark,
+      fetchSavedViewById,
       restoreLastViewEnabled: () => true,
     });
 
@@ -753,7 +776,7 @@ describe("UrlSync — #a=<id> bootstrap (deferred to host; no apply here)", () =
     expect(applier.apply).not.toHaveBeenCalled();
     expect(fetchDefault).not.toHaveBeenCalled();
     expect(fetchLastView).not.toHaveBeenCalled();
-    expect(fetchBookmark).not.toHaveBeenCalled();
+    expect(fetchSavedViewById).not.toHaveBeenCalled();
     // The hash is left intact for the host to resolve post-doc-load.
     expect(win.location.hash).toBe("#a=pin-123");
     sync.destroy();

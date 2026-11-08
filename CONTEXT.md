@@ -202,7 +202,7 @@ _Avoid_: store (one kind of record), backend (unqualified)
 
 **Store**:
 The code that reads and writes one kind of server record, such as sessions,
-bookmarks, workspaces, or inbox entries, through its storage backend.
+workspaces, or inbox entries, through its storage backend.
 _Avoid_: object store
 
 **Object store**:

@@ -90,9 +90,9 @@ pub struct PresenceState {
     /// Both arrive together in [`ClientMessage::DatasetPresence`].
     pub dataset_order: Option<Vec<DatasetId>>,
     pub dataset_settings: Option<HashMap<DatasetId, DatasetDisplaySettings>>,
-    /// Presentational identity for the peer's cursor. Server-set from the
-    /// authed principal; `None` for sessions without auth (the
-    /// non-workspace `/ws` path), which render via the numeric-id fallback.
+    /// Presentational identity for the peer's cursor, server-set from the
+    /// authenticated principal. Optional on the wire so a presence without
+    /// one still parses and renders by numeric id.
     pub identity: Option<PeerIdentity>,
 }
 
@@ -629,19 +629,6 @@ pub enum ServerMessage {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         message: Option<String>,
     },
-    /// A server-stored bookmark was created, renamed, or deleted.
-    /// Broadcast to clients whose session has at least one loaded dataset
-    /// that overlaps `dataset_urls`. The client refetches the bookmark by
-    /// id (on Created/Updated) or removes it from local state (on
-    /// Deleted) — keeping the broadcast payload small.
-    ///
-    /// Variant added at the end so the serde tag positions of older
-    /// variants don't shift.
-    BookmarkChanged {
-        id: String,
-        action: BookmarkAction,
-        dataset_urls: Vec<String>,
-    },
     /// A workspace was archived while this client was connected.
     /// Workspace clients should stop reconnecting and leave the workspace route.
     WorkspaceArchived { workspace_id: String },
@@ -751,17 +738,6 @@ pub enum CommandRejection {
     /// The server could not check the sender's role or store the change.
     /// Sending it again may work.
     Unavailable,
-}
-
-/// The kind of mutation a `BookmarkChanged` describes. Wire encoding is
-/// the lowercase variant name (`"created"` / `"updated"` / `"deleted"`)
-/// so the JSON shape stays stable if the Rust enum is later renamed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum BookmarkAction {
-    Created,
-    Updated,
-    Deleted,
 }
 
 /// Chunk-related messages exchanged between clients and server.
@@ -1488,9 +1464,9 @@ mod tests {
 
     #[test]
     fn presence_state_without_identity_is_backward_tolerant() {
-        // A peer (older client, or the anonymous `/ws` path) sends presence
-        // with no `identity` key. It must still parse, with `identity = None`,
-        // so the cursor falls back to the numeric-id rendering.
+        // A presence with no `identity` key must still parse, with
+        // `identity = None`, so the cursor falls back to the numeric-id
+        // rendering.
         let legacy = r#"{
             "client_id": 4,
             "camera": {"mode":"slice","center":[0.0,0.0],"zoom":1.0,"viewport":[800,600]},
@@ -1973,76 +1949,6 @@ mod tests {
                 assert_eq!(message.as_deref(), Some("access denied"));
             }
             _ => panic!("expected SourceChunkStatus"),
-        }
-    }
-
-    #[test]
-    fn bookmark_action_serializes_lowercase() {
-        // Wire-stability assertion: action names are the lowercase enum
-        // variant names. The web client matches on these strings; renaming
-        // a variant must not change the JSON.
-        assert_eq!(
-            serde_json::to_string(&BookmarkAction::Created).unwrap(),
-            "\"created\"",
-        );
-        assert_eq!(
-            serde_json::to_string(&BookmarkAction::Updated).unwrap(),
-            "\"updated\"",
-        );
-        assert_eq!(
-            serde_json::to_string(&BookmarkAction::Deleted).unwrap(),
-            "\"deleted\"",
-        );
-        let parsed: BookmarkAction = serde_json::from_str("\"created\"").unwrap();
-        assert_eq!(parsed, BookmarkAction::Created);
-    }
-
-    #[test]
-    fn bookmark_changed_round_trips() {
-        let msg = ServerMessage::BookmarkChanged {
-            id: "abc-123".into(),
-            action: BookmarkAction::Created,
-            dataset_urls: vec!["gs://bucket/a.zarr".into(), "gs://bucket/b.zarr".into()],
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"bookmark_changed\""));
-        assert!(json.contains("\"action\":\"created\""));
-        assert!(json.contains("\"id\":\"abc-123\""));
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ServerMessage::BookmarkChanged {
-                id,
-                action,
-                dataset_urls,
-            } => {
-                assert_eq!(id, "abc-123");
-                assert_eq!(action, BookmarkAction::Created);
-                assert_eq!(
-                    dataset_urls,
-                    vec![
-                        "gs://bucket/a.zarr".to_string(),
-                        "gs://bucket/b.zarr".to_string()
-                    ],
-                );
-            }
-            _ => panic!("expected BookmarkChanged"),
-        }
-    }
-
-    #[test]
-    fn bookmark_changed_updated_and_deleted_actions_round_trip() {
-        for action in [BookmarkAction::Updated, BookmarkAction::Deleted] {
-            let msg = ServerMessage::BookmarkChanged {
-                id: "id".into(),
-                action,
-                dataset_urls: vec![],
-            };
-            let json = serde_json::to_string(&msg).unwrap();
-            let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-            match parsed {
-                ServerMessage::BookmarkChanged { action: a, .. } => assert_eq!(a, action),
-                _ => panic!("expected BookmarkChanged"),
-            }
         }
     }
 
