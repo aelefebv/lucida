@@ -3,6 +3,7 @@ name = "lucida-server"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
+publish = false
 
 [[bin]]
 name = "lucida-server"
@@ -30,10 +31,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "j
 blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
-num_cpus = "1"
 rand = "0.8"
 thiserror = "1"
-bytemuck = "1"
 async-trait = "0.1"
 # Storage backends. Pin runtime-tokio-rustls to match tokio's runtime;
 # macros for query helpers; chrono for the schema's timestamp columns;

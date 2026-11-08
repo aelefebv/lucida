@@ -71,8 +71,9 @@ RUN set -eux; \
 WORKDIR /workspace
 
 # Copy the workspace. .dockerignore keeps target/, node_modules/,
-# lucida-core/pkg/, lucida-web/dist/, .git/, docs/, extras/, lucida-py/,
-# lucida.db*, secrets, etc. out of the build context.
+# lucida-core/pkg/, lucida-web/dist/, .git/, docs/, extras/, all of
+# lucida-py/ but its manifest and Rust source, lucida.db*, secrets, etc.
+# out of the build context.
 # Cargo.lock is committed: this workspace ships release binaries
 # (lucida-server, the lucida CLI) and this image, so the lock pins the
 # full transitive dep graph. Copying it in and building `--locked`
@@ -83,6 +84,7 @@ COPY lucida-cli/      ./lucida-cli/
 COPY lucida-content/  ./lucida-content/
 COPY lucida-core/     ./lucida-core/
 COPY lucida-protocol/ ./lucida-protocol/
+COPY lucida-py/       ./lucida-py/
 COPY lucida-server/   ./lucida-server/
 COPY lucida-store/    ./lucida-store/
 

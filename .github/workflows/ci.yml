@@ -230,6 +230,18 @@ jobs:
         working-directory: lucida-web
         run: pnpm test
 
+  # Advisories, licenses, duplicate crates and sources, per deny.toml. A new
+  # advisory can fail this job on a pull request that changes no dependency.
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+
   docker:
     name: Docker smoke build (no push)
     runs-on: ubuntu-latest
@@ -432,10 +444,9 @@ jobs:
       - name: Build lucida-server
         run: cargo build --locked -p lucida-server
 
-      # lucida-py is excluded from the cargo workspace, so the `rust` job does
-      # NOT build it — this job is its sole CI gate. Build the pyo3 extension
-      # with maturin and run the client tests. uv provisions a >=3.10
-      # interpreter per pyproject's requires-python.
+      # The `rust` job lints lucida-py but never links it: only maturin builds
+      # the extension module, so this job is what proves it builds and runs.
+      # uv provisions a >=3.10 interpreter per pyproject's requires-python.
       - name: Build extension + run tests
         working-directory: lucida-py
         env:
