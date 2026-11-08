@@ -56,3 +56,10 @@
 .lc-shell[data-capture] {
   background: var(--lc-canvas-bg);
 }
+
+/* A capture can be narrower than the page's floor for a person, and a
+   scrollbar would land in the frame and shift the canvas off center. */
+body:has(> #root > .lc-shell[data-capture]) {
+  min-width: 0;
+  overflow: hidden;
+}
