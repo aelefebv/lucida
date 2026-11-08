@@ -698,20 +698,22 @@ async fn handle_client_inner(
                                 json: serde_json::to_string(&update).unwrap(),
                             });
                         }
-                        ClientMessage::WatchSubscribe => {
-                            // The relay hands this connection the ring before
-                            // registering it, both under the session lock, so
+                        ClientMessage::WatchSubscribe { history } => {
+                            // Asked for history, the relay hands this
+                            // connection the ring and its end marker before
+                            // registering it, all under the session lock, so
                             // the recent past arrives ahead of the live items
                             // with no gap and no repeat.
                             let sender = unicast_routes.lock().await.get(&id).cloned();
                             let Some(sender) = sender else { continue };
                             let (replayed, subscribers) = {
                                 let mut sess = session.lock().await;
-                                let replayed = sess.watch.subscribe(id, sender);
+                                let replayed = sess.watch.subscribe(id, sender, history);
                                 (replayed, sess.watch.subscribers())
                             };
                             tracing::info!(
                                 client_id = %id,
+                                history,
                                 replayed = replayed.len(),
                                 from_seq = replayed.first().copied().unwrap_or(0),
                                 subscribers,
@@ -838,7 +840,7 @@ async fn handle_client_inner(
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
                                     tokio::spawn(async move {
                                         generated_service
-                                            .enqueue_chunk_request(&image_id, level, &key)
+                                            .enqueue_chunk_request(id, &image_id, level, &key)
                                             .await;
                                         serve_generated_chunk_request(
                                             id,
@@ -972,8 +974,8 @@ async fn handle_client_inner(
     let (affected_followers, peer_left_json) = {
         let mut sess = session.lock().await;
         // A subscriber's connection is its subscription: a returning watcher
-        // subscribes again and reads the ring, and a publishing page's toggle
-        // is off after a reconnect.
+        // subscribes again, and a publishing page's toggle is off after a
+        // reconnect.
         sess.watch.unsubscribe(id);
         let affected = sess.remove_client(id);
         let peer_left = ServerMessage::PeerLeft { client_id: id };

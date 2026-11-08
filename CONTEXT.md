@@ -52,6 +52,11 @@ shard. Not unique alone, since one key can be resident in both residency tiers.
 **Composite key**:
 `{dataset_id}/{image_id}/{chunk_key}`, a chunk's address across a session.
 
+**Axis position**:
+Where a view stands on the Z, T, or C axis. People see it counted from 1, as
+`Z 5` or `Z 5/40`, while the wire, URLs, and CLI flags carry the 0-based index.
+_Avoid_: position (unqualified; an entity's position is its place in a layout)
+
 **Level**:
 One resolution step of an image's multiscale pyramid. Level `0` is the finest.
 

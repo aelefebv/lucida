@@ -7,14 +7,15 @@
  * returns to the composite exactly as it was, because solo never touches the
  * per-channel visibility flags.
  */
+import { positionLabel } from "../axes.ts";
 
-/** The user's override, then the metadata label, then `Channel n` counting from 1. */
+/** The user's override, then the metadata label, then the channel's position. */
 export function channelDisplayName(
   index: number,
   override?: string | null,
   label?: string | null,
 ): string {
-  return override?.trim() || label?.trim() || `Channel ${index + 1}`;
+  return override?.trim() || label?.trim() || positionLabel("Channel", index);
 }
 
 /**
