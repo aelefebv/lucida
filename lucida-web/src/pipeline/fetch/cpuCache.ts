@@ -7,6 +7,7 @@
  */
 
 import type {
+  ChunkFailureKind,
   ContentSource,
   FetchResult,
   FetchProxyResult,
@@ -24,6 +25,7 @@ import { BurstLogger, TelemetryCounters } from "./telemetry.ts";
 import {
   LRUPolicy,
   TieredPolicy,
+  WantedLastPolicy,
   getTierOrder,
 } from "./eviction.ts";
 import { ChunkStore } from "./chunkStore.ts";
@@ -38,7 +40,7 @@ import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
 import { parseChunkKey } from "../../renderer/chunkKeys.ts";
 import type { ChunkFeedbackReason } from "../../renderer/workerProtocol.ts";
-import type { CacheQuiescenceInputs } from "../../trace/quiescence.ts";
+import type { CacheSettleInputs } from "../settle.ts";
 import {
   classifyFetchError,
   NeverRetry,
@@ -101,7 +103,7 @@ export const CHUNK_FAILURE_STREAK_THRESHOLD = 10;
 export const CHUNK_FAILURE_NOTIFY_INTERVAL_MS = 15_000;
 export const INTERACTION_MODE_WINDOW = 10;
 /**
- * How deep the pending queue may be before {@link CpuCache.quiescenceInputs}
+ * How deep the pending queue may be before {@link CpuCache.settleInputs}
  * stops classifying it by lane. The predicate runs on the tick path and an
  * oversubscribed remote collection queues tens of thousands of requests, so
  * the scan is bounded; past this depth the answer is "not quiescent",
@@ -169,6 +171,8 @@ interface FailureRecord {
    *  not made yet: not a failure, but it waits like a transient one, unless an
    *  availability update names the chunk first. */
   kind: "permanent" | "transient" | "pending";
+  /** Why the server answered without bytes, when it said. */
+  failure: ChunkFailureKind | null;
   /** The chunk's composite key, which is how an availability update names it. */
   chunk: string;
   /** `now()` at the moment the failure was recorded (the transient backoff
@@ -274,6 +278,27 @@ export class CpuCache {
   private lastReconcileAt = -Infinity;
   /** In-flight chunk keys an availability update settled before they answered. */
   private settledWhileInFlight = new Set<string>();
+  /**
+   * Wanted chunks that arrived and found no room but at the cost of a chunk
+   * at least as urgent. Not asked for again until the next plan, which is
+   * what keeps two wanted chunks from evicting each other in turn.
+   */
+  private refusedThisPlan = new Set<string>();
+  /**
+   * Requests the plans since the last rebuild left out for want of room, per
+   * tier: the coverage the view goes without.
+   */
+  private shortfallThisPlan: Record<ResidencyTier, number> = { detail: 0, coarse: 0 };
+  /** Bytes of detail budget the plans since the last rebuild lent the coarse tier. */
+  private coarseLoanThisPlan = 0;
+  /**
+   * Whether the plans since the last rebuild were admitted against the
+   * budgets. Only then does the wanted set fit, and only then is an evicted
+   * wanted chunk worth asking for again.
+   */
+  private plansAdmitted = false;
+  /** Wanted chunks asked for again after an eviction since the last rebuild. */
+  private retriedThisPlan = new Set<string>();
 
   private lruCounter = 0;
 
@@ -352,6 +377,10 @@ export class CpuCache {
       () => this.interactionDetector.current(),
       (entityId) => this.targetLevelByEntity.get(entityId),
     );
+    // A wanted chunk more urgent than the one arriving stays: an insert
+    // that could only make room by evicting one is refused instead.
+    const protects = (resident: CacheEntry, incoming: CacheEntry): boolean =>
+      resident.lastSeenTick === this.currentSubmitTick && resident.priority < incoming.priority;
     this.chunkStore = new ChunkStore({
       policy: mainPolicy,
       budgetBytes: this.config.mainBudgetBytes,
@@ -359,7 +388,9 @@ export class CpuCache {
       recordEviction: (tier, entry) => {
         this.counters.recordEviction(tier);
         traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
+        this.noteEvicted(entry);
       },
+      protects,
       onEvictionBurst: ({ removed, bytesFreed, bytesNeeded }) => {
         debugLog("cache", "cache.eviction_burst", {
           cache: "main",
@@ -371,13 +402,15 @@ export class CpuCache {
       },
     });
     this.overviewStore = new ChunkStore({
-      policy: new LRUPolicy<CacheEntry>(),
+      policy: new WantedLastPolicy(() => this.currentSubmitTick),
       budgetBytes: this.config.overviewBudgetBytes,
       evictionTier: () => "overview",
       recordEviction: (tier, entry) => {
         this.counters.recordEviction(tier);
         traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
+        this.noteEvicted(entry);
       },
+      protects,
     });
     this.proxyStore = new ProxyStore({
       policy: new LRUPolicy<ProxyEvictable>(),
@@ -480,6 +513,12 @@ export class CpuCache {
       }
     }
 
+    if (plan.shortfall) {
+      this.plansAdmitted = true;
+      this.shortfallThisPlan.detail += plan.shortfall.detail;
+      this.shortfallThisPlan.coarse += plan.shortfall.coarse;
+    }
+    this.coarseLoanThisPlan += plan.coarseLoanBytes ?? 0;
     this.applyElasticTierBudgets();
     this.cancelOmittedChunkWork(unwantedInFlightKeys);
     this.wantedRequests.push(requests);
@@ -500,6 +539,7 @@ export class CpuCache {
       if (this.rejectionTracker.has(req.entityId, req.chunkKey)) {
         continue;
       }
+      if (this.refusedThisPlan.has(key)) continue;
 
       // Refresh lane/tier/priority/lastSeenTick on cached entries so
       // deliverability and eviction reflect the current plan. The lane
@@ -618,6 +658,7 @@ export class CpuCache {
         if (seen.has(key)) continue;
         seen.add(key);
         if (this.rejectionTracker.has(req.entityId, req.chunkKey)) continue;
+        if (this.refusedThisPlan.has(key)) continue;
         if (this.lookupCachedEntry(req) || this.chunkScheduler.hasInFlight(key)) continue;
         const failure = this.excludingFailure(key, now);
         if (failure) {
@@ -899,6 +940,11 @@ export class CpuCache {
     this.rejectionTracker.clear();
     // The submits that follow carry the new wanted set and re-arm for it.
     this.wantedRequests = [];
+    this.refusedThisPlan.clear();
+    this.retriedThisPlan.clear();
+    this.plansAdmitted = false;
+    this.shortfallThisPlan = { detail: 0, coarse: 0 };
+    this.coarseLoanThisPlan = 0;
     this.disarmReconcile();
   }
 
@@ -1133,7 +1179,7 @@ export class CpuCache {
    * What is in flight and what is queued, by lane, written into `out`.
    *
    * In flight is bounded by the concurrency cap, so it is always counted.
-   * Pending is scanned under the same cap as {@link quiescenceInputs}, and
+   * Pending is scanned under the same cap as {@link settleInputs}, and
    * past it the per-lane counts stay at zero while `pendingUnclassified`
    * says so, so a reader shows the total and states that the split is
    * unknown rather than paying for a backlog tens of thousands deep.
@@ -1233,8 +1279,12 @@ export class CpuCache {
    * `pendingUnclassified` is set when the queue is deeper than
    * {@link QUIESCENCE_PENDING_SCAN_CAP}. That reads as not quiescent, so a
    * deep queue keeps a run open instead of closing it on a guess.
+   *
+   * With nothing queued or in flight and demand still unmet, it also says
+   * why each missing chunk is missing, which decides whether the view has
+   * settled covering less or is waiting on something.
    */
-  quiescenceInputs(out: CacheQuiescenceInputs): CacheQuiescenceInputs {
+  settleInputs(out: CacheSettleInputs): CacheSettleInputs {
     const demand = this.computeTierDemandTelemetry();
 
     let inFlight = this.proxyScheduler.inFlightSize;
@@ -1249,9 +1299,11 @@ export class CpuCache {
       QUIESCENCE_PENDING_SCAN_CAP,
     );
 
-    out.desiredDetailChunks = demand.desired.detailChunks;
+    // The shortfall admission declared is wanted too, and never resident.
+    const shortfall = this.shortfallThisPlan;
+    out.desiredDetailChunks = demand.desired.detailChunks + shortfall.detail;
     out.residentDetailChunks = demand.resident.detailChunks;
-    out.desiredCoarseChunks = demand.desired.coarseChunks;
+    out.desiredCoarseChunks = demand.desired.coarseChunks + shortfall.coarse;
     out.residentCoarseChunks = demand.resident.coarseChunks;
     // The whole store against the budget eviction enforces, not the
     // wanted-and-resident subset above: a tier is full when everything it
@@ -1266,7 +1318,101 @@ export class CpuCache {
     out.pendingUnclassified = speculativePending === null;
     out.pending =
       this.chunkScheduler.pendingSize - (speculativePending ?? 0) + this.proxyScheduler.pendingSize;
+    out.failedDetailChunks = 0;
+    out.failedCoarseChunks = 0;
+    this.forEachFailedWantedKey((key) => {
+      if (this.desiredDetailKeysThisTick.has(key)) out.failedDetailChunks++;
+      else out.failedCoarseChunks++;
+    });
+
+    out.uploadsUnanswered = this.deliveryState.chunksUnanswered;
+    out.shortDetailChunks = shortfall.detail;
+    out.shortCoarseChunks = shortfall.coarse;
+    out.serverPendingChunks = 0;
+    out.retryingChunks = 0;
+    out.unrequestedChunks = 0;
+    const unmet =
+      demand.resident.detailChunks < demand.desired.detailChunks ||
+      demand.resident.coarseChunks < demand.desired.coarseChunks;
+    if (unmet && out.pending === 0 && out.inFlight === 0 && !out.pendingUnclassified) {
+      this.countMissing(out, {
+        detail: tierFull(demand.resident.detailBytes, demand.resident.detailChunks, this.chunkStore.budgetBytes),
+        coarse: tierFull(demand.resident.coarseBytes, demand.resident.coarseChunks, this.overviewStore.budgetBytes),
+      });
+    }
     return out;
+  }
+
+  /**
+   * Sort each wanted chunk that is not resident by what it waits on. Walks
+   * the wanted set, so {@link settleInputs} asks only while nothing is
+   * queued or in flight, the one moment the answer can settle or stall the
+   * view.
+   *
+   * A chunk the renderer refused for want of a slot is short of room too,
+   * on the GPU rather than here.
+   */
+  private countMissing(out: CacheSettleInputs, full: Record<ResidencyTier, boolean>): void {
+    const seen = new Set<string>();
+    const short = (tier: ResidencyTier): void => {
+      if (tier === "detail") out.shortDetailChunks++;
+      else out.shortCoarseChunks++;
+    };
+    for (const requests of this.wantedRequests) {
+      for (const req of requests) {
+        const key = chunkSchedulerKey(req, req.tier);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        // Resident as the demand counts reckon it: held, and seen by this plan.
+        const entry = this.lookupCachedEntry(req);
+        if (entry && entry.lastSeenTick === this.currentSubmitTick) continue;
+        if (this.rejectionTracker.has(req.entityId, req.chunkKey) || this.refusedThisPlan.has(key)) {
+          short(req.tier);
+          continue;
+        }
+        if (entry || this.chunkScheduler.hasInFlight(key)) continue;
+        const record = this.getFailureRecord(key);
+        // A permanent failure is counted with the failed chunks above.
+        if (record?.kind === "permanent") continue;
+        if (record?.kind === "pending") out.serverPendingChunks++;
+        else if (record) out.retryingChunks++;
+        else if (full[req.tier]) short(req.tier);
+        else out.unrequestedChunks++;
+      }
+    }
+  }
+
+  /**
+   * The wanted chunks the source failed for good, with the reason it gave
+   * when it gave one. They are not asked for again until the dataset is
+   * reopened, so the view settles without them.
+   */
+  failedWantedChunks(): Array<{ chunk: string; failure: ChunkFailureKind | null }> {
+    const out: Array<{ chunk: string; failure: ChunkFailureKind | null }> = [];
+    this.forEachFailedWantedKey((_key, record) => {
+      out.push({ chunk: record.chunk, failure: record.failure });
+    });
+    return out;
+  }
+
+  /**
+   * Visit each wanted key with a permanent failure record, walking whichever
+   * of the two sets is smaller: both are bounded, but this runs every tick.
+   */
+  private forEachFailedWantedKey(visit: (key: string, record: FailureRecord) => void): void {
+    const wanted = this.desiredDetailKeysThisTick.size + this.desiredCoarseKeysThisTick.size;
+    if (this.permanentFailures.size <= wanted) {
+      for (const [key, record] of this.permanentFailures) {
+        if (this.isWanted(key)) visit(key, record);
+      }
+      return;
+    }
+    for (const keys of [this.desiredDetailKeysThisTick, this.desiredCoarseKeysThisTick]) {
+      for (const key of keys) {
+        const record = this.permanentFailures.get(key);
+        if (record) visit(key, record);
+      }
+    }
   }
 
   /** Live config, for surfaces that edit it (Dev controls) — read-only. */
@@ -1311,6 +1457,15 @@ export class CpuCache {
     return this.proxyScheduler.hasInFlight(
       `${datasetId}|${proxyInnerKey({ entityId, kind, t, c })}`,
     );
+  }
+
+  /**
+   * A resident chunk's samples from either tier, without the delivery copy
+   * {@link getCachedChunk} makes. Auto-contrast checks every chunk it reads
+   * on each tick until they are all resident.
+   */
+  cachedSamples(entityId: string, chunkKey: string): { data: ArrayBuffer; dataType: string } | undefined {
+    return this.chunkStore.get(entityId, chunkKey) ?? this.overviewStore.get(entityId, chunkKey);
   }
 
   /** Searches detail then overview; null when neither has the chunk. */
@@ -1459,7 +1614,7 @@ export class CpuCache {
       }
 
       if (this.chunkRetryPolicy.shouldRetry(fe, retryCount)) {
-        traceRecorder.recordPointEvent(PointEvent.Retry, fe.kind, req, rowTier);
+        traceRecorder.recordPointEvent(PointEvent.Retry, fe.failure ?? fe.kind, req, rowTier);
         await new Promise(r => setTimeout(r, this.chunkRetryPolicy.delayMs(retryCount)));
         if (!this.chunkScheduler.hasInFlight(key)) return; // cancelled during wait
         return this.fetchAndDecode(
@@ -1480,10 +1635,10 @@ export class CpuCache {
         fed = true;
       }
       if (this.settleFetch(this.chunkScheduler, this.inFlightChunkMeta, key, controller)) {
-        this.recordFailure(key, isPermanent ? "permanent" : "transient", req);
+        this.recordFailure(key, isPermanent ? "permanent" : "transient", req, fe.failure);
         this.counters.recordFetchFailure(isPermanent, fe.message);
         this.recordFailureForBurstDetection(isPermanent, fe.message);
-        traceRecorder.recordPointEvent(PointEvent.Failure, fe.kind, req, rowTier);
+        traceRecorder.recordPointEvent(PointEvent.Failure, fe.failure ?? fe.kind, req, rowTier);
       }
       return;
     }
@@ -1592,14 +1747,20 @@ export class CpuCache {
         this.drainSchedulers();
         return;
       }
-      this.overviewStore.insert(cacheEntry);
+      if (!this.overviewStore.insert(cacheEntry)) {
+        this.refuseArrival(key, traceRow);
+        return;
+      }
     } else {
       if (stale && this.chunkStore.bytes + cacheEntry.sizeBytes > this.chunkStore.budgetBytes) {
         traceRecorder.finishRow(traceRow, RowOutcome.Retired);
         this.drainSchedulers();
         return;
       }
-      this.chunkStore.insert(cacheEntry);
+      if (!this.chunkStore.insert(cacheEntry)) {
+        this.refuseArrival(key, traceRow);
+        return;
+      }
     }
     // Cache admission: the moment decoded bytes become resident. Counted, not
     // timed — the insert is well under the platform's clock floor.
@@ -1699,20 +1860,56 @@ export class CpuCache {
   private applyElasticTierBudgets(): void {
     const detailDemand = this.desiredDetailKeysThisTick.size > 0;
     const coarseDemand = this.desiredCoarseKeysThisTick.size > 0;
-    const protectedDetail = this.config.mainBudgetBytes;
-    const protectedCoarse = this.config.overviewBudgetBytes;
+    const loan = Math.min(this.coarseLoanThisPlan, this.config.mainBudgetBytes);
+    const protectedDetail = this.config.mainBudgetBytes - loan;
+    const protectedCoarse = this.config.overviewBudgetBytes + loan;
 
     let detailBudget = protectedDetail;
     let coarseBudget = protectedCoarse;
 
     if (detailDemand && !coarseDemand) {
       detailBudget += Math.max(0, protectedCoarse - this.overviewStore.bytes);
-    } else if (coarseDemand && !detailDemand) {
+    } else if (coarseDemand && !detailDemand && loan === 0) {
       coarseBudget += Math.max(0, protectedDetail - this.chunkStore.bytes);
     }
 
     this.chunkStore.setBudgetBytes(detailBudget);
     this.overviewStore.setBudgetBytes(coarseBudget);
+  }
+
+  /**
+   * The room the budgets give each tier before any plan takes it: what
+   * capacity-aware admission admits a plan against.
+   */
+  tierCapacity(): Record<ResidencyTier, number> {
+    return { detail: this.config.mainBudgetBytes, coarse: this.config.overviewBudgetBytes };
+  }
+
+  /** An arrival its store refused: the row ends, and the plan stops asking for it. */
+  private refuseArrival(key: string, traceRow: number): void {
+    this.refusedThisPlan.add(key);
+    traceRecorder.finishRow(traceRow, RowOutcome.Retired);
+    this.drainSchedulers();
+  }
+
+  /**
+   * A chunk the plan still wants left its store. Ask for it again, as the
+   * reconcile asks for any wanted chunk that is missing: admission keeps the
+   * wanted set within the budgets, so it comes back without displacing
+   * another chunk the plan wants.
+   */
+  private noteEvicted(entry: CacheEntry): void {
+    if (!this.plansAdmitted || entry.lastSeenTick !== this.currentSubmitTick) return;
+    if (entry.lane === "prefetch") return;
+    const key = chunkSchedulerKey(entry, entry.residencyTier);
+    // A second eviction in one plan means the budgets hold less than
+    // admission reckoned, so the chunk is short rather than asked for again.
+    if (this.retriedThisPlan.has(key)) {
+      this.refusedThisPlan.add(key);
+      return;
+    }
+    this.retriedThisPlan.add(key);
+    this.armReconcileForAvailability();
   }
 
   private rememberInFlightChunk(
@@ -1793,7 +1990,12 @@ export class CpuCache {
    * Each store is FIFO-capped independently, so a flood of permanents cannot
    * evict a transient's backoff.
    */
-  private recordFailure(key: string, kind: FailureRecord["kind"], req: ChunkRequest): void {
+  private recordFailure(
+    key: string,
+    kind: FailureRecord["kind"],
+    req: ChunkRequest,
+    failure: ChunkFailureKind | null = null,
+  ): void {
     const chunk = `${req.datasetId}/${req.imageId}/${req.chunkKey}`;
     if (kind === "permanent") {
       this.transientFailures.delete(key);
@@ -1802,6 +2004,7 @@ export class CpuCache {
       this.permanentFailures.delete(key);
       this.permanentFailures.set(key, {
         kind,
+        failure,
         chunk,
         failedAt: this.now(),
         attempt: 0,
@@ -1823,6 +2026,7 @@ export class CpuCache {
     this.transientFailures.delete(key);
     this.transientFailures.set(key, {
       kind,
+      failure,
       chunk,
       failedAt,
       attempt,
@@ -2098,7 +2302,7 @@ export class CpuCache {
  * resolves the tier first and then calls it — so the two paths cannot
  * drift into producing different keys for the same request.
  */
-function chunkSchedulerKey(req: ChunkRequest, tier: ResidencyTier): string {
+function chunkSchedulerKey(req: Pick<ChunkRequest, "entityId" | "chunkKey">, tier: ResidencyTier): string {
   return `${req.entityId}/${tier}/${req.chunkKey}`;
 }
 
@@ -2136,6 +2340,16 @@ function orderChunkRequestsForTierAllocation(
   }
   ordered.push(...other);
   return ordered;
+}
+
+/**
+ * Whether the chunks a tier holds for the view leave no room for one more of
+ * their size. Counted over the wanted chunks rather than the whole store,
+ * because a chunk the view no longer wants gives its room up to one it does.
+ */
+function tierFull(wantedBytes: number, wantedChunks: number, budgetBytes: number): boolean {
+  if (wantedChunks === 0) return budgetBytes <= 0;
+  return wantedBytes + wantedBytes / wantedChunks > budgetBytes;
 }
 
 function isEpochStale(deliveryEpochs: SceneEpochs, currentEpochs: SceneEpochs): boolean {

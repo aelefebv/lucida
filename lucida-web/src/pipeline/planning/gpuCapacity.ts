@@ -13,16 +13,10 @@ import type { DatasetManifest } from "../../manifestTypes.ts";
 import type { GpuCapacityReport } from "../../renderer/workerProtocol.ts";
 import type { DeviceLimits } from "../../renderer/gpuContext.ts";
 import type { ChunkRequest } from "./types.ts";
+import type { GpuSlot } from "./admission.ts";
 import { computeAtlasGeometry, poolCapBytes } from "../../renderer/atlasSizing.ts";
 import { chunkTierPoolKey } from "../../renderer/poolKeys.ts";
 import { bytesPerTexel, datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
-
-/** The pool a chunk lands in, the slots it may hold, and the bytes one slot takes. */
-export interface GpuPoolSlot {
-  pool: string;
-  slots: number;
-  slotBytes: number;
-}
 
 /**
  * The WebGPU minimums. A worker's device can only have larger limits, which
@@ -50,7 +44,7 @@ export function gpuSlotsFor(
   multiChannel: boolean,
   report: GpuCapacityReport | null,
   fallbackTotalBytes: number,
-): (req: ChunkRequest) => GpuPoolSlot | null {
+): (req: ChunkRequest) => GpuSlot | null {
   const reported = new Map(report?.pools.map((pool) => [pool.poolKey, pool]) ?? []);
   const texel = bytesPerTexel(datasetSampleFormat(manifest));
   const cap = poolCapBytes(MIN_LIMITS, report?.budgetBytes ?? fallbackTotalBytes);
@@ -63,7 +57,7 @@ export function gpuSlotsFor(
     }
     chunkDims.set(image.image_id, byLevel);
   }
-  const sized = new Map<string, GpuPoolSlot>();
+  const sized = new Map<string, GpuSlot>();
   return (req) => {
     if (req.lane !== "detail" && req.lane !== "coarse") return null;
     const dims = chunkDims.get(req.imageId)?.get(req.level);

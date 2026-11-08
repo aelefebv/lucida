@@ -3,6 +3,20 @@ import { describe, expect, it } from "vitest";
 import { DeliveryState } from "./deliveryState.ts";
 
 describe("DeliveryState", () => {
+  it("counts the chunks the worker has not yet answered", () => {
+    const state = new DeliveryState();
+    state.markChunkSent("img", 0, "0/0/0/0/0/0");
+    state.markChunkSent("img", 0, "0/0/0/0/0/1");
+    state.markChunkSent("img", 0, "0/0/0/0/0/1");
+    expect(state.chunksUnanswered).toBe(2);
+    state.markChunkHeld("img", 0, "0/0/0/0/0/0");
+    state.markChunkRefused("img", 0, "0/0/0/0/0/1");
+    expect(state.chunksUnanswered).toBe(0);
+    state.markChunkSent("img", 0, "0/0/0/0/0/2");
+    state.clearChunksForImage("img");
+    expect(state.chunksUnanswered).toBe(0);
+  });
+
   it("tracks chunk sent state by image, channel, and chunk key", () => {
     const state = new DeliveryState();
     state.markChunkSent("img-0", 1, "0/0/1/0/0/0");

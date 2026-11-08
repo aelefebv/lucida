@@ -355,6 +355,8 @@ export interface RunIdentity {
   datasetIds: string[];
   cause: RunCause | null;
   endReason: EndReason;
+  /** The end reason in words, with what a stalled run waited on. */
+  endedAs: string;
   wallMs: number;
   devicePixelRatio: number;
   viewport: string;

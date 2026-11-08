@@ -651,7 +651,7 @@ fn capture_saved_view_from_snapshot(
             )
         })?;
     let scene = crate::view::scene_from_presence(&snapshot.document, source_presence);
-    let view = crate::view::saved_view_from_scene(&snapshot.document, scene);
+    let view = lucida_core::viewer_profile::ProfileScene::from(scene).saved_view();
     let source = SavedViewPresenceSource {
         client_id: source_client_id,
         kind: if source_client_id == snapshot.your_id {

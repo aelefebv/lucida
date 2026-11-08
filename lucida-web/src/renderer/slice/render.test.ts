@@ -54,8 +54,6 @@ function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState
     t: 0,
     c: 0,
     slotLevelZ: new Int32Array(1).fill(-1),
-    intensityMin: 0,
-    intensityMax: 0,
     indirectionDirty: false,
   };
 }

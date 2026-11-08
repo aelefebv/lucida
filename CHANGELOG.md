@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.20.1](https://github.com/aelefebv/lucida/compare/v0.20.0...v0.20.1) (2026-11-08)
+
+
+### Bug Fixes
+
+* answer every failed chunk request and unread message with a typed reply ([#1255](https://github.com/aelefebv/lucida/issues/1255)) ([697c31d](https://github.com/aelefebv/lucida/commit/697c31d8ee9426aba33651bc4f04caa08314cbf4))
+* **collab:** keep presence unreported until a client reports it, and merge on follow ([#1231](https://github.com/aelefebv/lucida/issues/1231)) ([e77f20d](https://github.com/aelefebv/lucida/commit/e77f20dcde8b276a26b38845ee7c2b5289b44a5a))
+* **core:** carry the arcball far plane with zoom and retire the CLI's scene planner ([#1237](https://github.com/aelefebv/lucida/issues/1237)) ([15f0bca](https://github.com/aelefebv/lucida/commit/15f0bca426eb9a915cd45434f47c2f72adce2d09))
+* count axis positions from 1 on every surface a person reads ([#1241](https://github.com/aelefebv/lucida/issues/1241)) ([4bc1d29](https://github.com/aelefebv/lucida/commit/4bc1d293b412c404cf330031a6848a753021ed80))
+* parse dataset locations once, into a type that can fail ([#1229](https://github.com/aelefebv/lucida/issues/1229)) ([0ddd0b8](https://github.com/aelefebv/lucida/commit/0ddd0b88876cefc801cbbe0beae657c93473d602))
+* **pipeline:** admit only what the budgets hold, in priority order, and settle covering the rest ([#1261](https://github.com/aelefebv/lucida/issues/1261)) ([45d0204](https://github.com/aelefebv/lucida/commit/45d020417af3bf8f1fec39f278635d1eede2fc83))
+* **pipeline:** keep asking for wanted chunks that are missing until the view settles ([#1239](https://github.com/aelefebv/lucida/issues/1239)) ([6ae04fe](https://github.com/aelefebv/lucida/commit/6ae04fe59ab29d79c74b73894d4731071a68a6db)), closes [#1034](https://github.com/aelefebv/lucida/issues/1034)
+* **py:** keep Python view changes in a viewer profile, applied by the core ([#1247](https://github.com/aelefebv/lucida/issues/1247)) ([d5981de](https://github.com/aelefebv/lucida/commit/d5981def1bd18f93866c125675b0e3f7d5a619aa))
+* **renderer:** free a removed dataset's GPU atlases and the pools no cold state uses ([#1234](https://github.com/aelefebv/lucida/issues/1234)) ([3b4dc97](https://github.com/aelefebv/lucida/commit/3b4dc97667d1cf0ebfa8ffcc5edde8fd244a6ab3))
+* **renderer:** recover from a lost GPU device and surface GPU errors ([#1249](https://github.com/aelefebv/lucida/issues/1249)) ([7f8e3cc](https://github.com/aelefebv/lucida/commit/7f8e3cccc2d0678cdf67cdc79daf3f76f4c7eae9))
+* serve each level at a chunk no larger than itself, and plan at the capped render ratio ([#1259](https://github.com/aelefebv/lucida/issues/1259)) ([b9a9a4a](https://github.com/aelefebv/lucida/commit/b9a9a4a31bc0604445e29ae755a3fcf753f7b8bd))
+* **server:** copy a workspace's preview when duplicating it ([#1246](https://github.com/aelefebv/lucida/issues/1246)) ([8dd4923](https://github.com/aelefebv/lucida/commit/8dd4923e10ee999a4ab8afcf33e454d1f0fc8cab))
+* **server:** harden WebSocket and auth boundaries ([#1233](https://github.com/aelefebv/lucida/issues/1233)) ([a8a0e66](https://github.com/aelefebv/lucida/commit/a8a0e6648f54ef1430e4f46e8d72bf349510996e))
+* **server:** make a watch subscribe live-only unless it asks for history ([#1243](https://github.com/aelefebv/lucida/issues/1243)) ([1da48ce](https://github.com/aelefebv/lucida/commit/1da48ce1b7337ef8a030902f2a7f4d5e677a91dd))
+* **server:** pass the server tests on Windows and run them in CI ([#1226](https://github.com/aelefebv/lucida/issues/1226)) ([8c29a58](https://github.com/aelefebv/lucida/commit/8c29a587d956d93a27b225a951fd5d63e4b9e4cf))
+* **server:** persist a workspace document command before applying it ([#1250](https://github.com/aelefebv/lucida/issues/1250)) ([d5f6456](https://github.com/aelefebv/lucida/commit/d5f6456a5fb1e0ad8c1f4722334e31cf363dac19))
+* **server:** restrict dataset sources when auth is enabled, and bound chunk decoding ([#1242](https://github.com/aelefebv/lucida/issues/1242)) ([9acdf3f](https://github.com/aelefebv/lucida/commit/9acdf3f2bb6bcc7c68fae0196d06811272f6e2dc))
+* settle a view covering less when its budgets are full, and end a stuck run as stalled ([#1256](https://github.com/aelefebv/lucida/issues/1256)) ([af94064](https://github.com/aelefebv/lucida/commit/af940647cfa34b30bc7aefb73f1f9103a27e73e7))
+* show a stored view's region at any pixel ratio and canvas size ([#1238](https://github.com/aelefebv/lucida/issues/1238)) ([1cae279](https://github.com/aelefebv/lucida/commit/1cae279eff5631bdab559649745ccd95aa9b044b))
+* show float and signed samples as their values ([#1235](https://github.com/aelefebv/lucida/issues/1235)) ([0d69796](https://github.com/aelefebv/lucida/commit/0d697968a75241b8a01bee34a65133181baa1a0e))
+* **store:** name collection geometry mismatches instead of hiding them ([#1232](https://github.com/aelefebv/lucida/issues/1232)) ([730a131](https://github.com/aelefebv/lucida/commit/730a1316c06a9ad1994cc6801a2b0f0905357de3))
+* **web:** fit auto-contrast from a defined statistic, not arrival order ([#1260](https://github.com/aelefebv/lucida/issues/1260)) ([0c3bd39](https://github.com/aelefebv/lucida/commit/0c3bd392b8b6cbce0f788980b9f23332a3d09cc0)), closes [#1037](https://github.com/aelefebv/lucida/issues/1037)
+* **web:** give the phone sheet handle a 44 px touch target ([#1240](https://github.com/aelefebv/lucida/issues/1240)) ([38a390f](https://github.com/aelefebv/lucida/commit/38a390f9333a68818631eb3e25ff421c5c5c85fc))
+* **web:** keep each timeline legend label on one line ([#1244](https://github.com/aelefebv/lucida/issues/1244)) ([6b5f20b](https://github.com/aelefebv/lucida/commit/6b5f20bc835e0ddabeace8cb013757320ed409e7))
+* **web:** make the render worker the one owner of GPU residency ([#1254](https://github.com/aelefebv/lucida/issues/1254)) ([6e76893](https://github.com/aelefebv/lucida/commit/6e768939f38bd8ce3df412d583473f81ea38c198))
+* **web:** pick the overlay's phase colors from the canvas background ([#1251](https://github.com/aelefebv/lucida/issues/1251)) ([6ddefd1](https://github.com/aelefebv/lucida/commit/6ddefd1070dacb477b900460fa3b506045ce8ce7))
+* **web:** put thread placement and the FPS readout on the shared frame clock ([#1245](https://github.com/aelefebv/lucida/issues/1245)) ([d9f9207](https://github.com/aelefebv/lucida/commit/d9f92078c9b5d7a9f99d68a7998f9b6a49fad68d))
+* **web:** stop worker feedback loops from keeping a view from settling ([#1236](https://github.com/aelefebv/lucida/issues/1236)) ([8b56103](https://github.com/aelefebv/lucida/commit/8b56103e232c0817137b2801a7623cb5dd45c33e))
+
+
+### Refactors
+
+* **web:** keep viewer identities stable across peer messages ([#1253](https://github.com/aelefebv/lucida/issues/1253)) ([086c5ef](https://github.com/aelefebv/lucida/commit/086c5effe9bd072a2ec8d1727dcaa15a5f95a22a))
+* **web:** read view state from the scene through one store ([#1252](https://github.com/aelefebv/lucida/issues/1252)) ([a6d23eb](https://github.com/aelefebv/lucida/commit/a6d23eb3c1cae6334eee9dfc60c7ab8f84bf5b91))
+* **web:** split App into an engine provider, canvas layers, and two chromes ([#1257](https://github.com/aelefebv/lucida/issues/1257)) ([ac1dbc9](https://github.com/aelefebv/lucida/commit/ac1dbc95ce4f804722109a60dccb9d33b9699491))
+
 ## [0.20.0](https://github.com/aelefebv/lucida/compare/v0.19.0...v0.20.0) (2026-11-06)
 
 

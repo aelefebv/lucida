@@ -130,5 +130,23 @@
     "visible",
     "predicted",
     "background"
+  ],
+  "chunk_failure_kinds": [
+    "malformed_key",
+    "unknown_dataset",
+    "unknown_image",
+    "unknown_level",
+    "corrupt_chunk",
+    "wrong_size",
+    "unsupported_codec",
+    "permission",
+    "storage_backend"
+  ],
+  "message_rejections": [
+    "malformed",
+    "unknown_type",
+    "binary_frame",
+    "throttled",
+    "unknown_dataset"
   ]
 }

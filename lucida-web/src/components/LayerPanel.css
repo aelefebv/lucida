@@ -20,6 +20,15 @@
   padding-bottom: var(--lc-space-6);
 }
 
+.lc-coverage-notice {
+  flex: none;
+  margin: 0;
+  padding: var(--lc-space-2) var(--lc-space-4);
+  border-top: 1px solid var(--lc-border);
+  color: var(--lc-text-muted);
+  font-size: var(--lc-text-sm);
+}
+
 .lc-layer-empty {
   display: flex;
   flex-direction: column;

@@ -25,7 +25,7 @@ import type { LiveTimeline, LiveTimelineOptions } from "./diagnose/timeline.ts";
 import type { DiagnosticDocument, WindowRequest } from "./diagnose/types.ts";
 import { traceRecorder } from "./recorder.ts";
 import type { LiveProgress } from "./liveProgress.ts";
-import type { QuiescenceState } from "./quiescence.ts";
+import type { SettleState } from "../pipeline/settle.ts";
 import {
   SCRUB_AXES,
   scriptControls,
@@ -70,7 +70,7 @@ export interface LucidaTraceSeam {
    * `quiescent` to hold; it never infers settling from the outside, because
    * a stalled pipeline and a finished one both stop drawing.
    */
-  readonly quiescence: QuiescenceState | null;
+  readonly quiescence: SettleState | null;
   /**
    * How long `quiescent` must hold before the run closes itself. A driver
    * that exports the moment the boolean first goes true closes the run as
@@ -78,6 +78,14 @@ export interface LucidaTraceSeam {
    * the wait belongs to whoever polls, and this is how long to wait.
    */
   readonly quiescenceHoldMs: number;
+  /**
+   * How long a run may stay open before it closes as `timeout`, in
+   * milliseconds: sixty seconds unless a driver sets it. `lucida trace` sets
+   * it from `--timeout-seconds` as soon as the seam appears, and a run
+   * already open is held to it from when it opened. A view that settles or
+   * stalls closes its run sooner.
+   */
+  runTimeoutMs: number;
   /**
    * Whether a labelled run is open right now, and how many have concluded on
    * their own. Both are readable without exporting, which would close the
@@ -299,6 +307,12 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
     },
     get quiescenceHoldMs() {
       return traceRecorder.holdMs;
+    },
+    get runTimeoutMs() {
+      return traceRecorder.runTimeoutMs;
+    },
+    set runTimeoutMs(ms: number) {
+      traceRecorder.setRunTimeout(ms);
     },
     get runState() {
       const concluded = traceRecorder.concludedRuns;

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import type {
   Bridge,
@@ -41,6 +41,9 @@ interface Params {
   /** Populated by the SavedView applier after construction, so it can resolve
    * pending opens without the session layer owning applier types. */
   savedViewHooksRef?: React.RefObject<SavedViewBridgeHooks | null>;
+  /** Told when a session is built and when it is torn down, before the
+   *  render that follows either. */
+  onSessionChanged?: (session: Session | null) => void;
   // From useDatasetSettings (called before)
   bumpLayerSettingsVersion: () => void;
   initLayerMaps: (id: string) => void;
@@ -153,6 +156,7 @@ export function useBridge(params: Params) {
     });
     controllerRef.current = controller;
     sessionRef.current = controller.session;
+    portsRef.current.onSessionChanged?.(controller.session);
     setBridge(controller.bridge);
 
     return () => {
@@ -162,6 +166,7 @@ export function useBridge(params: Params) {
       }
       if (sessionRef.current === controller.session) {
         sessionRef.current = null;
+        portsRef.current.onSessionChanged?.(null);
       }
       // Reset connection-scoped state in case this hook instance survives the
       // teardown (a StrictMode remount). No-ops on a real unmount.
@@ -216,10 +221,14 @@ export function useBridge(params: Params) {
     controllerRef.current?.dismissOpenWarnings();
   }, []);
 
-  const followablePeers = Array.from(peers.entries())
-    .filter(([, p]) => p.following === null || p.following === undefined);
+  const followablePeers = useMemo(
+    () => Array.from(peers.entries()).filter(([, p]) => p.following === null || p.following === undefined),
+    [peers],
+  );
 
-  return {
+  // One object per change of the state in it, so a consumer keyed on it
+  // re-runs only when that state moved. The callbacks never change.
+  return useMemo(() => ({
     sessionRef,
     /** Non-null while the WebSocket may still be CONNECTING, so it is not a
      *  readiness signal. Use `connected` or `sessionReady` for that. */
@@ -255,7 +264,13 @@ export function useBridge(params: Params) {
     breakFollow,
     handleFollow,
     followablePeers,
-  };
+  }), [
+    bridge, connected, sessionReady, peers, myId, followTarget,
+    sendCommand, sendCursor, emitPresence, emitDatasetPresence, sendOpenRemoteDataset,
+    remoteDatasetLoading, remoteDatasetError, remoteDatasetProgress,
+    remoteDatasetWarnings, remoteDatasetWarningsOverflow, dismissRemoteDatasetWarnings,
+    datasetImportWarnings, breakFollow, handleFollow, followablePeers,
+  ]);
 }
 
 /**

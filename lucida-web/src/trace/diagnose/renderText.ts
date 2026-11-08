@@ -146,7 +146,7 @@ export function renderDiagnostic(
   push(
     IDENTITY,
     `run       ${document.run.datasetIds.join(", ")} · cause=${causeOf(document)} · ${document.run.warmth} · ` +
-      `${p("run.wallMs", document.run.wallMs)} ms wall · ended: ${document.run.endReason}`,
+      `${p("run.wallMs", document.run.wallMs)} ms wall · ended: ${document.run.endedAs}`,
   );
   push(
     IDENTITY,

@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import { fakeCache, gpuReport, makeRecorder, MIB } from "./hudFixtures.ts";
 import { emptyLaneOutstanding, HudSource } from "./hudSource.ts";
-import { createQuiescenceState, evaluateQuiescence } from "../trace/quiescence.ts";
+import { createSettleState, evaluateSettle } from "../pipeline/settle.ts";
 import { TickCounter } from "../trace/types.ts";
 
 describe("HudSource", () => {
@@ -37,7 +37,7 @@ describe("HudSource", () => {
     advance(16);
     recorder.noteReading(7, 3, 4_500, 6 * MIB, 1_200);
     recorder.noteQuiescence(
-      evaluateQuiescence(Object.assign(createQuiescenceState(), { inFlight: 3 }), now()),
+      evaluateSettle(Object.assign(createSettleState(), { inFlight: 3 }), now()),
     );
 
     const sample = source.sample();

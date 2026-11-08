@@ -35,6 +35,9 @@ import {
 import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
+import { admitRequests, chunkBytesFor, type GpuSlot } from "./planning/admission.ts";
+import { gpuChunkRoomBytes, gpuSlotsFor } from "./planning/gpuCapacity.ts";
+import { pageDeviceBudgets } from "../deviceBudget.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -292,6 +295,25 @@ function displayStatesEqual(
     }
   }
   return true;
+}
+
+/**
+ * The GPU chunk pools admission counts against, as the render worker last
+ * reported them, in either view mode.
+ */
+function gpuSlotsOf(ctx: TickContext, datasetId: string): (req: ChunkRequest) => GpuSlot | null {
+  return gpuSlotsFor(
+    ctx.datasets.get(datasetId)!.manifest,
+    ctx.mode,
+    ctx.scene.multi_channel(),
+    ctx.client.gpuCapacity(),
+    pageDeviceBudgets().gpuTotalBytes,
+  );
+}
+
+/** The GPU bytes every dataset's chunk pools may hold between them, from the same report. */
+function gpuRoomOf(ctx: TickContext): number {
+  return gpuChunkRoomBytes(ctx.client.gpuCapacity(), pageDeviceBudgets().gpuTotalBytes);
 }
 
 function emitViewerInterestHint(
@@ -795,9 +817,28 @@ export class TickCoordinator {
       desiredProxyKeysByDataset.set(datasetId, set);
     }
 
+    // Admit each dataset's plan against what the CPU budgets and the GPU
+    // pools have left, in layer order, so the wanted set the cache drives
+    // toward fits both.
+    let capacity = ctx.cpuCache.tierCapacity();
+    let gpuRoom = gpuRoomOf(ctx);
     for (const planned of plannedDatasets) {
       const { dsId, dsSettings, entities, visibleRegion, selection } = planned;
-      const result = planned.result;
+      const admission = admitRequests(
+        planned.result.requests,
+        capacity,
+        chunkBytesFor(ctx.datasets.get(dsId)!.manifest),
+        gpuSlotsOf(ctx, dsId),
+        gpuRoom,
+      );
+      capacity = admission.remaining;
+      gpuRoom = admission.gpuRoomLeft;
+      const result: RequestPlan = {
+        ...planned.result,
+        requests: admission.admitted,
+        shortfall: admission.shortfall,
+        coarseLoanBytes: admission.borrowed,
+      };
       const budgetedProxyRequests = proxyRequestsByDataset.get(dsId) ?? [];
       const budgetedResult: RequestPlan = {
         ...result,
@@ -935,6 +976,8 @@ export class TickCoordinator {
         // `nextState` is required on RequestPlan but unused by submit();
         // forward the planner's pointer so the shape stays honest.
         nextState: result.nextState,
+        shortfall: result.shortfall,
+        coarseLoanBytes: result.coarseLoanBytes,
       });
 
 
@@ -1334,7 +1377,19 @@ export class TickCoordinator {
     // reports any slot the new T/Z leaves stale. The active set is unchanged,
     // so `planningState` stays.
     ctx.cpuCache.onPlanRebuildStart();
-    for (const p of planned) {
+    let capacity = ctx.cpuCache.tierCapacity();
+    let gpuRoom = gpuRoomOf(ctx);
+    for (const scrubbed of planned) {
+      const admission = admitRequests(
+        scrubbed.requests,
+        capacity,
+        chunkBytesFor(ctx.datasets.get(scrubbed.dsId)!.manifest),
+        gpuSlotsOf(ctx, scrubbed.dsId),
+        gpuRoom,
+      );
+      capacity = admission.remaining;
+      gpuRoom = admission.gpuRoomLeft;
+      const p = { ...scrubbed, requests: admission.admitted };
       this.requestEpoch = scrubRequestEpoch;
       this._lastVisibleRegion.set(p.dsId, p.visibleRegion);
 
@@ -1373,6 +1428,8 @@ export class TickCoordinator {
         epochs: scrubEpochs,
         stats: p.stats,
         nextState: p.planningState,
+        shortfall: admission.shortfall,
+        coarseLoanBytes: admission.borrowed,
       });
 
       this.uploader.sendColdStateSelection({
