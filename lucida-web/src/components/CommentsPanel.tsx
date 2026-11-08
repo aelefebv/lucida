@@ -14,6 +14,7 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 import { useMemo, useState } from "react";
+import { positionLabel } from "../axes.ts";
 import { usePointerCoarse } from "../theme/viewport.ts";
 import { IconButton } from "../ui/Button.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
@@ -140,8 +141,8 @@ export function CommentsPanel({
                 const kind = KIND_ICON[pin.kind] ?? KIND_ICON.point;
                 const KindIcon = kind.icon;
                 const where = [
-                  extents && extents.z > 1 ? `Z ${(pin.z ?? 0) + 1}` : null,
-                  extents && extents.t > 1 ? `T ${(pin.t ?? 0) + 1}` : null,
+                  extents && extents.z > 1 ? positionLabel("Z", pin.z ?? 0) : null,
+                  extents && extents.t > 1 ? positionLabel("T", pin.t ?? 0) : null,
                 ].filter(Boolean);
                 const meta = [
                   author(first?.author ?? pin.author),

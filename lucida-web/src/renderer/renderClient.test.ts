@@ -331,3 +331,40 @@ describe("RenderClient pipeline compile", () => {
     await expect(client.ready()).resolves.toBeUndefined();
   });
 });
+
+describe("RenderClient GPU status", () => {
+  beforeEach(() => {
+    FakeWorker.instances = [];
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("hands every listener the worker's GPU errors, restorations and failures until it stops listening", () => {
+    const { client, worker } = makeReadyClient();
+    const heard: unknown[] = [];
+    const stop = client.onGpuStatus((status) => heard.push(status));
+
+    const error = { type: "gpuError", kind: "out-of-memory", message: "m", count: 2 };
+    worker.emit(error);
+    worker.emit({ type: "gpuDeviceRestored" });
+    worker.emit({ type: "gpuFailed", message: "gone" });
+    stop();
+    worker.emit({ type: "gpuDeviceRestored" });
+
+    expect(heard).toEqual([error, { type: "gpuDeviceRestored" }, { type: "gpuFailed", message: "gone" }]);
+  });
+
+  it("asks the worker to lose its device, and not once destroyed", () => {
+    const { client, worker } = makeReadyClient();
+    client.loseDevice();
+    client.destroy();
+    client.loseDevice();
+    expect(worker.posted.filter((msg) => msg.type === "loseDevice")).toHaveLength(1);
+  });
+});
