@@ -22,6 +22,7 @@ interface CapturedAppProps {
   workspaceId: string;
   initialDatasetUrls?: readonly string[];
   onCreateWorkspaceFromDatasets?: (paths: string[]) => void;
+  onAccessRevoked?: () => void;
 }
 const lastAppProps: { current: CapturedAppProps | null } = { current: null };
 // Every `initialDatasetUrls` value the viewer was rendered with, in order, to
@@ -40,6 +41,9 @@ vi.mock("./App.tsx", () => ({
           }
         >
           in-viewer-create-from-datasets
+        </button>
+        <button type="button" onClick={() => props.onAccessRevoked?.()}>
+          server-revokes-access
         </button>
       </div>
     );
@@ -185,6 +189,24 @@ function record(overrides: Partial<WorkspaceRecord> = {}): WorkspaceRecord {
     ...overrides,
   };
 }
+
+describe("WorkspaceRoot — access removed while the viewer is open", () => {
+  it("replaces the viewer with the message and a way back to the dashboard", async () => {
+    window.history.replaceState({}, "", "/w/ws-created");
+    openWorkspaceMock.mockResolvedValueOnce(record());
+    render(<WorkspaceRoot />);
+    fireEvent.click(await screen.findByText("server-revokes-access"));
+
+    const message = await screen.findByTestId("workspace-access-removed");
+    expect(message.textContent).toContain("no longer have access");
+    // The viewer, and with it the connection, is gone.
+    expect(screen.queryByTestId("app-mounted")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "All workspaces" }));
+    expect(window.location.pathname).toBe("/");
+    expect(await screen.findByTestId("dashboard-mounted")).toBeTruthy();
+  });
+});
 
 describe("WorkspaceRoot — create workspace from dataset(s) (#697)", () => {
   const createFromDatasetsMock = vi.mocked(createWorkspaceFromDatasets);

@@ -34,7 +34,7 @@ use std::time::Instant;
 
 use futures_util::StreamExt;
 use object_store::path::Path;
-use object_store::{ObjectStore, gcp::GoogleCloudStorageBuilder};
+use object_store::{ObjectStore, ObjectStoreExt, gcp::GoogleCloudStorageBuilder};
 
 /// One completed read.
 #[derive(Clone, Copy)]
