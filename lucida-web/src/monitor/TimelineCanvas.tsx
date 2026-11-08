@@ -216,7 +216,8 @@ export function TimelineCanvas({ section, provisional, alignSpanMs, brush }: Tim
                     data-testid={`monitor-series-${row.chartId}-${entry.seriesId}`}
                   >
                     <span className="monitor-live-swatch" style={{ background: entry.color }} />
-                    {entry.label} <span className="monitor-dim">{entry.reading}</span>
+                    <span className="monitor-timeline-series">{entry.label}</span>{" "}
+                    <span className="monitor-dim">{entry.reading}</span>
                     {entry.unsampled > 0 && (
                       <span className="monitor-dim"> · {entry.unsampled} bucket(s) unsampled</span>
                     )}
