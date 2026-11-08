@@ -117,9 +117,9 @@ const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
       section
     };
   }
-  // Each step that opened a run takes that run's header fields and verdict
-  // from the document just exported. Filled in place: the bundle export that
-  // follows reads the same object.
+  // Each step that opened a run takes that run's header fields, verdict and
+  // lag reading from the document just exported. Filled in place: the bundle
+  // export that follows reads the same object.
   const script = window.__lucidaTraceScript || null;
   if (script && Array.isArray(script.steps)) {
     for (const step of script.steps) {
@@ -130,8 +130,10 @@ const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
       step.endReason = stepRun.header.endReason || null;
       step.durationUs = typeof stepRun.header.durationUs === 'number' ? stepRun.header.durationUs : null;
       try {
-        const verdict = seam.diagnoseTrace(trace, { runId: step.runId }).verdict;
+        const stepDiagnostic = seam.diagnoseTrace(trace, { runId: step.runId });
+        const verdict = stepDiagnostic.verdict;
         step.verdict = verdict ? { kind: verdict.kind, text: verdict.text } : null;
+        step.lag = stepDiagnostic.lag || null;
       } catch (error) {
         step.verdict = { kind: 'unread', text: 'diagnosis failed: ' + String(error) };
       }

@@ -169,7 +169,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
   );
 
   const movePress = useCallback(
-    (e: ClientPoint) => {
+    (e: ClientPoint, atMs?: number) => {
       const dpr = devicePixelRatio;
       const rect = canvas.getBoundingClientRect();
       sendCursor(eventToWorld(e));
@@ -203,14 +203,14 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
       breakFollow();
       applyViewportCommand(scene, { type: "pan", dx: pdx, dy: pdy });
       emitPresence();
-      loopRef.current?.markInput("pan");
+      loopRef.current?.markInput("pan", atMs);
     },
     [scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef, eventToWorld],
   );
 
   const onPointerMove = useCallback(
     (e: PointerEvent) => {
-      if (e.pointerType !== "touch") movePress(e);
+      if (e.pointerType !== "touch") movePress(e, e.timeStamp);
     },
     [movePress],
   );
@@ -319,7 +319,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
       const newCy = worldY - (cursorY - canvasH / 2) / newZoom;
       applyViewportCommand(scene, { type: "set_center", x: newCx, y: newCy });
       emitPresence();
-      loopRef.current?.markInput("zoom");
+      loopRef.current?.markInput("zoom", e.timeStamp);
     },
     [scene, canvas, emitPresence, breakFollow],
   );

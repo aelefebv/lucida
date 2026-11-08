@@ -67,6 +67,7 @@ import { describe, expect, it } from "vitest";
 
 import { describeTiming, expectWithinBudget, timeStep } from "../test/perfBudget.ts";
 
+import { LagRecord } from "./lagRecord.ts";
 import { TraceRecorder } from "./recorder.ts";
 import { TableTraceSink } from "./sink.ts";
 import {
@@ -733,12 +734,14 @@ describe("recorder cost contract", () => {
     const rig = makeRig(64);
     // A typical run: 2,559 chunks, about 123 kB of rows.
     for (let i = 0; i < 40; i++) rig.tick();
-    const liveBytes = rig.sink()!.byteLength;
+    // A run that took input holds the lag tier beside its sink.
+    const liveBytes = rig.sink()!.byteLength + LagRecord.BYTE_LENGTH;
     rig.recorder.reset();
 
     console.log(
       `[recorder cost] floor check: one 2,560-chunk run holds ${(liveBytes / 1024).toFixed(0)} kB ` +
-        `live vs the 1.05 MB floor (retention's 8 MB cap is a separate, granted budget)`,
+        `live, ${(LagRecord.BYTE_LENGTH / 1024).toFixed(0)} kB of it the lag tier, vs the 1.05 MB floor ` +
+        `(retention's 8 MB cap is a separate, granted budget)`,
     );
 
     expect(liveBytes).toBeLessThan(1.05 * 1024 * 1024);
@@ -832,8 +835,8 @@ describe("recorder cost contract", () => {
     // Steady state is the write path over buffers that already exist: row
     // births into spare capacity, stamps into a live row, the three
     // drop-oldest rings wrapping, the counted-phase and send-tally vectors,
-    // and the frame
-    // hand-off swapping its two lists.
+    // the frame hand-off swapping its two lists, and the lag tier's rings
+    // wrapping as inputs meet their frames.
     //
     // Row appends are inside the window on purpose, and the window is sized to
     // fit inside the capacity the warmup grew. Leaving them out would make the
@@ -863,6 +866,9 @@ describe("recorder cost contract", () => {
       level: 0, t: 0, c: 0, z: 0, y: 0, x: 0,
     };
     const handle = rig.recorder.beginChunkRow(source, 0);
+    // The lag tier is allocated at the run's first input, so that input is
+    // warmup and not steady state.
+    rig.recorder.noteInput("pan");
 
     const ops = 400_000;
     const gc = resolveGc();
@@ -875,7 +881,10 @@ describe("recorder cost contract", () => {
       rig.recorder.countPhase(CountedPhaseIndex.CacheAdmission);
       rig.recorder.countSend(ClientMessageTypeIndex.ChunkRequest, 98);
       rig.recorder.recordPointEvent(PointEvent.Rejection, "atlas-policy", null, 0);
-      rig.recorder.noteFrameDispatched();
+      rig.recorder.noteInput("pan", i);
+      rig.recorder.noteFrameDispatched(i + 1);
+      rig.recorder.noteFrameDone(i + 1, i + 0.5);
+      rig.recorder.noteAnimationFrame(i * 16.7);
       rig.recorder.noteReading(3, 2, 4_000, 1_000_000, i % 2 === 0 ? 900 : null);
       rig.recorder.beginTick("ds");
       rig.recorder.commitTick();
@@ -884,7 +893,7 @@ describe("recorder cost contract", () => {
     gc?.();
     const heapAfter = process.memoryUsage().heapUsed;
     const grown = heapAfter - heapBefore;
-    const calls = ops * 8 + appends;
+    const calls = ops * 11 + appends;
     console.log(
       `[recorder cost] steady state: ${calls} write calls (${appends} of them row births ` +
         `into spare capacity) grew the heap by ${(grown / 1024).toFixed(1)} kB ` +
@@ -898,7 +907,7 @@ describe("recorder cost contract", () => {
     expect(sink!.byteLength).toBe(bytesBefore);
     expect(rig.refusedRows()).toBe(0);
 
-    // The heap half. 512 kB over ~2.4M calls is 0.2 B/call, far below the tens
+    // The heap half. 512 kB over ~4.4M calls is about 0.1 B/call, far below the tens
     // of bytes even one small object per call would cost and far above a
     // runner's background noise. Without a forced gc the same bound would read
     // uncollected garbage as growth, so the ungated fallback is loose enough to
