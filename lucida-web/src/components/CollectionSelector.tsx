@@ -6,7 +6,7 @@ import { Button } from "../ui/Button.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
 import { CanvasCard } from "./CanvasCard.tsx";
 import { navigatorCardPreference } from "./canvasCards.ts";
-import { groupAt, unionRects } from "./groupFraming.ts";
+import { groupAt, unionRects } from "./collectionGroups.ts";
 import { frameClock } from "../frameClock.ts";
 import "./CollectionSelector.css";
 

@@ -14,7 +14,12 @@ import {
 import { UrlSync } from "../savedView/urlSync.ts";
 import { buildCapture } from "../savedView/captureBuilder.ts";
 import { getRestoreLastViewEnabled } from "../lastViewPreference.ts";
-import type { DatasetReferenceMode, LayoutMutationMode, SavedView } from "../savedView/types.ts";
+import {
+  isPersistable,
+  type DatasetReferenceMode,
+  type LayoutMutationMode,
+  type SavedView,
+} from "../savedView/types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { invalidateAfterViewRestore } from "../invalidation.ts";
 import type { SceneStore, ViewEpochs } from "../sceneStore.ts";
@@ -240,9 +245,10 @@ export function useSavedViewSync({
 
   // Debounced "remember my last view" capture, armed by the same change signal
   // as the URL sync and by any move of the camera or the selectors, which
-  // reach the scene without a render. Runs only when `persistLastView` is
-  // wired (absent in auth-off mode) and the toggle is on. Failures (offline,
-  // non-member 403/404, encode error) are logged, never thrown into the UI.
+  // reach the scene without a render. Neither persists an unframed view. Runs
+  // only when `persistLastView` is wired (absent in auth-off mode) and the
+  // toggle is on. Failures (offline, non-member 403/404, encode error) are
+  // logged, never thrown into the UI.
   const lastViewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const armLastView = useCallback(() => {
     if (lastViewTimerRef.current !== null) clearTimeout(lastViewTimerRef.current);
@@ -263,7 +269,7 @@ export function useSavedViewSync({
       if (!persistNow) return;
       if (bundle.applier.isInProgress()) return;
       const view = captureBuilder();
-      if (!view) return;
+      if (!view || !isPersistable(view)) return;
       void Promise.resolve(persistNow(view)).catch((e) => {
         console.warn("[SavedView] last-view capture failed:", e);
       });
@@ -288,9 +294,12 @@ export function useSavedViewSync({
         epochs !== null &&
         (epochs.view !== seen.view || epochs.selection !== seen.selection);
       seen = epochs;
-      if (moved) armLastView();
+      if (!moved) return;
+      // A resize or a new pixel ratio moves the view with no control touched.
+      bundle.urlSync.notifyChange();
+      armLastView();
     });
-  }, [sceneStore, armLastView]);
+  }, [sceneStore, armLastView, bundle.urlSync]);
 
   useEffect(() => {
     if (!onApplyResult) return;

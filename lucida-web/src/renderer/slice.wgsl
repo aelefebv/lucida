@@ -4,12 +4,15 @@
 const MAX_LEVEL_SOURCES: u32 = 4u;
 // The indirection sentinel, and the sample value for "nothing resident here".
 const MISS: u32 = 0xFFFFFFFFu;
+// The indirection entry and sample value for a chunk the source failed for
+// good (INDIRECTION_FAILED in remap.ts). It draws the failed hatch.
+const FAILED: u32 = 0xFFFFFFFEu;
 
 struct Uniforms {
   transform: mat4x4f,                  // offset 0   (64 bytes) — inverse pan/zoom (screen UV → texture UV)
   levelAtlasSlotDims: array<vec4u, 4>, // offset 64  (64 bytes) — xy=slots per axis, one per level pool binding
   coarseAtlasSlotDims: vec4u,          // offset 128 (16 bytes) — xy=slots per axis
-  memberScreenSize: vec4f,             // offset 144 (16 bytes) — xy=member pixel size on screen
+  memberScreenSize: vec4f,             // offset 144 (16 bytes) — xy=member pixel size on screen, z=render pixels per CSS pixel
   borderColor: vec4f,                  // offset 160 (16 bytes) — member footprint border, premultiplied
   // total = 176 bytes
 };
@@ -215,8 +218,8 @@ fn sampleLevel2D(source: ChunkTierSource, uv: vec2f) -> u32 {
   }
   let cell = locateCell2D(source, uv);
   let slot = levelSlotAt(source.poolIndex, cell.gridIdx);
-  if (slot == MISS) {
-    return MISS;
+  if (slot == MISS || slot == FAILED) {
+    return slot;
   }
   return levelTexelAt(source.poolIndex, atlasCoord2D(slot, slotDims.x, cell));
 }
@@ -228,10 +231,33 @@ fn sampleCoarse2D(source: ChunkTierSource, uv: vec2f) -> u32 {
   }
   let cell = locateCell2D(source, uv);
   let slot = coarseIndirection[cell.gridIdx];
-  if (slot == MISS) {
-    return MISS;
+  if (slot == MISS || slot == FAILED) {
+    return slot;
   }
   return textureLoad(coarseTex, atlasCoord2D(slot, slotDims.x, cell), 0).r;
+}
+
+// The failed hatch: faint diagonal lines over a fainter fill, in CSS pixels so
+// it is one size at any pixel ratio. No sample value draws lines, so failed
+// data never reads as zero, and the fill tells it from "not loaded yet",
+// which draws nothing. Same pattern as volume.wgsl.
+const FAILED_HATCH_PERIOD_CSS: f32 = 8.0;
+const FAILED_HATCH_LINE_CSS: f32 = 1.5;
+const FAILED_HATCH_RGB: vec3f = vec3f(0.6, 0.6, 0.6);
+const FAILED_HATCH_LINE_ALPHA: f32 = 0.7;
+const FAILED_HATCH_FILL_ALPHA: f32 = 0.12;
+
+// Premultiplied hatch color at `px`, in render pixels.
+fn failedHatch(px: vec2f, pixelRatio: f32) -> vec4f {
+  let ratio = select(pixelRatio, 1.0, pixelRatio <= 0.0);
+  let along = (px.x + px.y) / ratio;
+  let offLine = abs(fract(along / FAILED_HATCH_PERIOD_CSS + 0.5) - 0.5) * FAILED_HATCH_PERIOD_CSS;
+  // Perpendicular distance to the line, in render pixels, for a one-pixel edge.
+  let dist = offLine * 0.70710678 * ratio;
+  let halfWidth = 0.5 * FAILED_HATCH_LINE_CSS * ratio;
+  let onLine = 1.0 - smoothstep(halfWidth - 0.5, halfWidth + 0.5, dist);
+  let alpha = mix(FAILED_HATCH_FILL_ALPHA, FAILED_HATCH_LINE_ALPHA, onLine);
+  return vec4f(FAILED_HATCH_RGB * alpha, alpha);
 }
 
 // `EntityDescriptor.sampleFormat`: the texel is the sample's float32 bits,
@@ -318,7 +344,8 @@ fn labelColorFor(id: u32, count: u32) -> vec4f {
 // target level, then the coarser resident levels), then the coarse
 // tier, then blank. Every sample comes from exactly one level. Proxy
 // assets are consulted only when the entity binds no chunk tier at all.
-// Returns the sampled value or MISS when nothing is resident at this UV.
+// Returns the sampled value, MISS when nothing is resident at this UV, or
+// FAILED where the first source with an answer holds a failed chunk.
 fn sampleEntityValue(entityIdx: u32, texUV: vec2f) -> u32 {
   let count = min(entityDescriptors[entityIdx].levelSourceCount, MAX_LEVEL_SOURCES);
   let hasTierSources = count != 0u || entityDescriptors[entityIdx].coarseSource.valid != 0u;
@@ -402,6 +429,10 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     return vec4f(labelRgba.rgb * labelOp, labelOp);
   }
 
+  if (chunkVal == FAILED) {
+    // Anchored to the member, so the hatch moves with the data as it pans.
+    return failedHatch(texUV * u.memberScreenSize.xy, u.memberScreenSize.z) * layerOpacity;
+  }
   if (chunkVal == MISS || texelIsNaN(chunkVal, entity.sampleFormat)) {
     return vec4f(0.0, 0.0, 0.0, 0.0);
   }
@@ -481,6 +512,9 @@ fn fsAggregate(input: AggregateVSOut) -> @location(0) vec4f {
   }
 
   let chunkVal = sampleEntityValue(input.entityIdx, input.uv);
+  if (chunkVal == FAILED) {
+    return failedHatch(input.uv * input.memberScreenPx, u.memberScreenSize.z) * entity.opacity;
+  }
   if (chunkVal == MISS || texelIsNaN(chunkVal, entity.sampleFormat)) {
     return vec4f(0.0, 0.0, 0.0, 0.0);
   }

@@ -180,7 +180,7 @@ mod tests {
     }
 
     fn spread_collection() -> Scene {
-        let mut scene = Scene::new([512, 512]);
+        let mut scene = test_helpers::placed_scene([512, 512]);
         let reg = test_helpers::make_collection_dataset_opened(
             "coll",
             "coll",

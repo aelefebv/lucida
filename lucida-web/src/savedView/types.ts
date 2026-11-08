@@ -3,12 +3,19 @@
 
 export const SAVED_VIEW_VERSION = 1;
 
+/** What chose a camera's pose: a fit of everything visible, which a new
+ *  canvas fits again, or a stand-in nothing chose, which is never persisted. */
+export type CameraFraming = "framed" | "unframed";
+
 /** 2D slice camera. `serde(tag = "mode")` puts `mode: "slice"` at top level. */
 export interface SliceCamera {
   mode: "slice";
   center: [number, number];
   zoom: number;
   viewport: [number, number];
+  /** Absent when someone placed the view. See `Framing` in
+   *  `lucida-core/src/camera.rs`. */
+  framing?: CameraFraming;
 }
 
 export interface ArcballCamera {
@@ -23,6 +30,9 @@ export interface ArcballCamera {
   far: number;
   clip_distance?: number;
   clip_mode?: "plane" | "sphere";
+  /** Absent when someone placed the view. See `Framing` in
+   *  `lucida-core/src/camera.rs`. */
+  framing?: CameraFraming;
 }
 
 export interface FlyCamera {
@@ -38,9 +48,18 @@ export interface FlyCamera {
   base_speed?: number;
   clip_distance?: number;
   clip_mode?: "plane" | "sphere";
+  /** Absent when someone placed the view. See `Framing` in
+   *  `lucida-core/src/camera.rs`. */
+  framing?: CameraFraming;
 }
 
 export type Camera = SliceCamera | ArcballCamera | FlyCamera;
+
+/** Whether a client may persist `view`. A stand-in camera, one nothing has
+ *  fitted or placed yet, would restore as a pose nobody chose. */
+export function isPersistable(view: SavedView): boolean {
+  return view.camera.framing !== "unframed";
+}
 
 export interface ZRange {
   start: number;

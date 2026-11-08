@@ -104,7 +104,7 @@ impl Produced {
 }
 
 /// A page that joins once the dataset is open: the document arrives in the
-/// workspace snapshot and nothing fits the camera.
+/// workspace snapshot, and no client asked this page to fit anything.
 pub fn join(f: &Fixture, vp: Viewport, dpr: u32) -> Shown {
     let mut scene = Scene::new(vp.device(dpr));
     let mut document = DocumentState::default();
