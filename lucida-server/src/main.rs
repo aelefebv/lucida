@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -174,7 +173,7 @@ impl LogFormat {
 }
 
 async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let id = connection::next_client_id();
     connection::limit_inbound(ws).on_upgrade(move |socket| async move {
         tracing::info!(client_id = id, "ws.client_connected");
         handler::handle_client(
@@ -279,10 +278,13 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         disk_budget_bytes = ?proxy_config.generated_disk_budget_bytes,
         "generated_coarse.config",
     );
+    tracing::info!(
+        budget_bytes = lucida_store::cache::SourceCacheBudget::process().max_bytes(),
+        "source_cache.config",
+    );
 
     let session = Arc::new(Mutex::new(Session::new()));
     let (tx, _) = broadcast::channel::<BroadcastItem>(256);
-    let next_id = Arc::new(AtomicU64::new(0));
     let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));
 
     // Env-var validation lives in `AuthConfig::from_env`: `LUCIDA_BIND`,
@@ -418,7 +420,6 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let state = AppState {
         session,
         tx,
-        next_id,
         unicast_routes,
         source_policy: Arc::clone(&source_policy),
         proxy_config: proxy_config.clone(),

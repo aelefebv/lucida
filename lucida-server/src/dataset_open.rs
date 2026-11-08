@@ -388,7 +388,7 @@ pub async fn open_dataset(
     let cached = CachedStore::shared_for_source(
         &dataset_source_id,
         store.clone(),
-        lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+        lucida_store::cache::SourceCacheBudget::process(),
     );
     let reads_before = cached.stats();
     let result = match lucida_store::import::import_dataset(&cached, &dataset_id, &name).await {
