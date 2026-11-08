@@ -61,7 +61,7 @@ fn build_router(
         tx: broadcast::channel::<BroadcastItem>(8).0,
         next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes: Arc::new(Mutex::new(HashMap::new())) as UnicastRoutes,
-        data_dir: None,
+        source_policy: Arc::default(),
         proxy_config: ProxyConfig {
             cache_dir: cache_dir.to_path_buf(),
             concurrency: 1,

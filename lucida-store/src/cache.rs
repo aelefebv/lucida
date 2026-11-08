@@ -1563,7 +1563,7 @@ mod tests {
         let dir = temp_dir("hit");
         fs::write(dir.join("chunk1"), b"hello world").unwrap();
 
-        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let inner = crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap();
         let cached = CachedStore::new(inner, 1024);
 
         let path = Path::from("chunk1");
@@ -1585,7 +1585,7 @@ mod tests {
         let dir = temp_dir("probe_exists");
         fs::write(dir.join("present"), vec![7u8; 4096]).unwrap();
 
-        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let inner = crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap();
         let cached = CachedStore::new(inner, 1_000_000);
 
         assert!(cached.probe_exists(&Path::from("present")).await.unwrap());
@@ -1606,7 +1606,7 @@ mod tests {
     #[tokio::test]
     async fn probe_exists_remembers_absence() {
         let dir = temp_dir("probe_absent");
-        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let inner = crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap();
         let cached = CachedStore::new(inner, 1024);
 
         let path = Path::from("never-written");
@@ -1626,7 +1626,7 @@ mod tests {
         fs::write(dir.join("b"), vec![1u8; 60]).unwrap();
 
         // Cache budget = 100 bytes. Each chunk is 60 bytes.
-        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let inner = crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap();
         let cached = CachedStore::new(inner, 100);
 
         let pa = Path::from("a");
@@ -1651,7 +1651,7 @@ mod tests {
     async fn missing_file_returns_error() {
         let dir = temp_dir("missing");
 
-        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let inner = crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap();
         let cached = CachedStore::new(inner, 1024);
 
         let result = cached
@@ -2490,7 +2490,7 @@ mod tests {
         let dir = temp_dir("range_bytes");
         fs::write(dir.join("object"), b"0123456789abcdef").unwrap();
 
-        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let inner = crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap();
         let cached = CachedStore::new(inner, 1024);
 
         let path = Path::from("object");
@@ -2528,7 +2528,7 @@ mod tests {
         let dir = temp_dir("suffix_bytes");
         fs::write(dir.join("object"), b"0123456789abcdef").unwrap();
 
-        let inner = crate::backend::open(dir.to_str().unwrap()).unwrap();
+        let inner = crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap();
         let cached = CachedStore::new(inner, 1024);
 
         let path = Path::from("object");

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 vi.mock("../../debug/logging.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../debug/logging.ts")>();
@@ -14,6 +14,7 @@ import {
   FAILURE_BACKOFF_MAX_MS,
   FAILURE_BACKOFF_JITTER_RATIO,
   MAX_TRACKED_FAILURES,
+  PENDING_BACKOFF_BASE_MS,
   backoffWithJitter,
   type CpuCacheConfig,
   type ReadyDelivery,
@@ -1696,32 +1697,137 @@ describe("CpuCache", () => {
       expect(source.fetchCount).toBe(1); // no retry
     });
 
-    it("treats generated pending as non-failure and re-requests on later submit", async () => {
-      const { cache, source } = createTestCache();
-      const req = makeRequest({ level: 2, lane: "coarse", tier: "coarse" });
-      cache.submit(makePlan([req]));
+    describe("wanted chunks that ended without data", () => {
+      const generatedKey = "entity-1/image-1/2/0/0/0/0/0";
+      const generatedReq = () => makeRequest({ level: 2, lane: "coarse", tier: "coarse" });
+      const pending = () => new FetchError("generated pending", { kind: "pending" });
 
-      source.reject(
-        "entity-1/image-1/2/0/0/0/0/0",
-        new FetchError("generated pending", { kind: "pending" }),
-      );
-      await flush();
+      beforeEach(() => {
+        vi.useFakeTimers();
+      });
+      afterEach(() => {
+        vi.useRealTimers();
+      });
 
-      let tel = cache.telemetry();
-      expect(tel.failedChunks.permanent).toBe(0);
-      expect(tel.failedChunks.transient).toBe(0);
-      expect(tel.inFlightCount).toBe(0);
-      expect(source.fetchCount).toBe(1);
+      /** A cache on the fake clock, with jitter at the floor of its band. */
+      function cacheOnFakeClock() {
+        return createTestCache({ now: () => Date.now(), random: () => 0 });
+      }
 
-      cache.submit(makePlan([req]));
-      expect(source.fetchCount).toBe(2);
-      source.resolve("entity-1/image-1/2/0/0/0/0/0", new ArrayBuffer(8));
-      await flush();
+      it("waits out a pending chunk's backoff without failing it, then asks again unprompted", async () => {
+        const { cache, source } = cacheOnFakeClock();
+        const req = generatedReq();
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([req]));
+        source.reject(generatedKey, pending());
+        await vi.advanceTimersByTimeAsync(0);
 
-      tel = cache.telemetry();
-      expect(tel.failedChunks.permanent).toBe(0);
-      const deliveries = Array.from(cache.getDeliverable()).filter(d => d.kind === "chunk");
-      expect(deliveries[0]).toMatchObject({ chunkKey: "2/0/0/0/0/0", lane: "coarse" });
+        const tel = cache.telemetry();
+        expect(tel.failedChunks).toEqual({ transient: 0, permanent: 0 });
+        expect(tel.inFlightCount).toBe(0);
+
+        // A plan inside the backoff does not ask again.
+        cache.submit(makePlan([req]));
+        expect(source.fetchCount).toBe(1);
+        await vi.advanceTimersByTimeAsync(FAILURE_BACKOFF_MAX_MS / 10);
+        expect(source.fetchCount).toBe(1);
+
+        // Nothing has to plan for it to be asked once the backoff is over.
+        await vi.advanceTimersByTimeAsync(PENDING_BACKOFF_BASE_MS);
+        expect(source.fetchCount).toBe(2);
+        source.resolve(generatedKey, new ArrayBuffer(8));
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(cache.failuresTracked()).toBe(0);
+        const deliveries = Array.from(cache.getDeliverable()).filter(d => d.kind === "chunk");
+        expect(deliveries[0]).toMatchObject({ chunkKey: "2/0/0/0/0/0", lane: "coarse" });
+      });
+
+      it("asks again for a pending chunk once an availability update says it settled", async () => {
+        const { cache, source } = cacheOnFakeClock();
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([generatedReq()]));
+        source.reject(generatedKey, pending());
+        await vi.advanceTimersByTimeAsync(0);
+
+        const update = (status: "pending" | "ready") => [
+          { image_id: "image-1", level_index: 2, key: "2/0/0/0/0/0", status },
+        ];
+        // Still pending on the server: nothing to ask for yet.
+        cache.noteGeneratedAvailability("entity-1", update("pending"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(source.fetchCount).toBe(1);
+
+        // Ready: asked for at once, well inside the backoff.
+        cache.noteGeneratedAvailability("entity-1", update("ready"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(source.fetchCount).toBe(2);
+      });
+
+      it("does not believe a pending answer that an availability update overtook", async () => {
+        // The answer and the update travel separately, so the update can land
+        // while the request that will be answered pending is still in flight.
+        const { cache, source } = cacheOnFakeClock();
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([generatedReq()]));
+        cache.noteGeneratedAvailability("entity-1", [
+          { image_id: "image-1", level_index: 2, key: "2/0/0/0/0/0", status: "ready" },
+        ]);
+        source.reject(generatedKey, pending());
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(cache.failuresTracked()).toBe(0);
+        expect(source.fetchCount).toBe(2);
+      });
+
+      it("retries a transient failure after its backoff with no new plan", async () => {
+        const { cache, source } = cacheOnFakeClock();
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([makeRequest()]));
+        source.reject("entity-1/image-1/0/0/0/0/0/0", new Error("Network error"));
+        await vi.advanceTimersByTimeAsync(TRANSIENT_RETRY_DELAY_MS);
+        source.reject("entity-1/image-1/0/0/0/0/0/0", new Error("Network error"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(cache.failuresTracked()).toBe(1);
+        expect(source.fetchCount).toBe(2);
+
+        await vi.advanceTimersByTimeAsync(FAILURE_BACKOFF_BASE_MS);
+        expect(source.fetchCount).toBe(3);
+      });
+
+      it("holds no timer for a failed chunk the view no longer wants", async () => {
+        const { cache, source } = cacheOnFakeClock();
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([generatedReq()]));
+        source.reject(generatedKey, pending());
+        await vi.advanceTimersByTimeAsync(0);
+
+        // The next plan wants something else, which arrives.
+        source.autoResolveBytes = 64;
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([makeRequest()]));
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(vi.getTimerCount()).toBe(0);
+        await vi.advanceTimersByTimeAsync(FAILURE_BACKOFF_MAX_MS);
+        expect(source.fetchCount).toBe(2);
+      });
+
+      it("wakes subscribers when a fetch ends pending or failed", async () => {
+        const { cache, source } = cacheOnFakeClock();
+        let notified = 0;
+        cache.subscribe(() => notified++);
+        cache.onPlanRebuildStart();
+        cache.submit(makePlan([generatedReq(), makeRequest()]));
+
+        source.reject(generatedKey, pending());
+        await vi.advanceTimersByTimeAsync(0);
+        expect(notified).toBe(1);
+
+        source.reject("entity-1/image-1/0/0/0/0/0/0", new Error("404 not found"));
+        await vi.advanceTimersByTimeAsync(0);
+        expect(notified).toBe(2);
+      });
     });
 
     it("self-heals a transient failure after its backoff; permanent stays excluded", async () => {

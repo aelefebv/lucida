@@ -9,7 +9,7 @@
 //! (the fixtures pin them), so changes here are protocol changes.
 
 use lucida_content::DatasetId;
-use lucida_content::url::is_local_dataset_url;
+use lucida_content::url::{DatasetLocation, LocationError};
 use lucida_protocol::{
     DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
     DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, SourceChunkStatus,
@@ -70,15 +70,31 @@ pub(crate) fn open_warning(
     }
 }
 
+/// A location that does not parse fails before any stage that reads
+/// storage. Its message echoes the input as it was given.
+pub(crate) fn location_failure(error: &LocationError) -> DatasetOpenFailureDiagnostic {
+    let kind = match error {
+        LocationError::UnknownScheme { .. } => DatasetOpenFailureKind::UnsupportedScheme,
+        _ => DatasetOpenFailureKind::InvalidLocation,
+    };
+    open_failure(
+        DatasetOpenStage::RequestReceived,
+        kind,
+        false,
+        error.to_string(),
+        None,
+    )
+}
+
 pub(crate) fn backend_open_failure(
     error: &lucida_store::backend::StoreError,
 ) -> DatasetOpenFailureDiagnostic {
     match error {
-        lucida_store::backend::StoreError::UnsupportedScheme(_) => open_failure(
+        lucida_store::backend::StoreError::Denied(denied) => open_failure(
             DatasetOpenStage::BackendOpen,
-            DatasetOpenFailureKind::UnsupportedScheme,
+            DatasetOpenFailureKind::SourceNotAllowed,
             false,
-            error.to_string(),
+            denied.to_string(),
             None,
         ),
         lucida_store::backend::StoreError::Metadata(message) => {
@@ -218,17 +234,9 @@ impl MetadataReadCost {
 }
 
 pub(crate) fn backend_kind_for_url(url: &str) -> String {
-    if is_local_dataset_url(url) {
-        "local".to_string()
-    } else if url.starts_with("gs://") {
-        "gcs".to_string()
-    } else if url.starts_with("s3://") {
-        "s3".to_string()
-    } else if url.starts_with("http://") || url.starts_with("https://") {
-        "http".to_string()
-    } else {
-        "unknown".to_string()
-    }
+    DatasetLocation::parse(url)
+        .map_or("unknown", |location| location.scheme().as_str())
+        .to_string()
 }
 
 pub(crate) fn is_not_found(error: &object_store::Error) -> bool {
