@@ -20,7 +20,7 @@ use std::sync::OnceLock;
 use bytes::Bytes;
 use lru::LruCache;
 use object_store::path::Path;
-use object_store::{GetOptions, GetRange, ObjectStore};
+use object_store::{GetOptions, GetRange, ObjectStore, ObjectStoreExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Semaphore, broadcast};
 
