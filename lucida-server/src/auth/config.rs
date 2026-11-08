@@ -155,8 +155,9 @@ impl SecureCookieMode {
 /// over the auto-detect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
-    /// Dev-friendly mode: no OAuth. The cookie extractor still runs;
-    /// everything just bypasses the sign-in flow.
+    /// No sign-in. Every caller is the local dev principal, except that on
+    /// a non-loopback bind each browser that loads the app gets an
+    /// anonymous session.
     Disabled,
     /// Production OAuth: /auth/start + /auth/callback wired up against
     /// Google. Requires `LUCIDA_GOOGLE_CLIENT_ID`,
@@ -192,8 +193,9 @@ impl AuthMode {
     ///
     /// The client draws the control only for `Some`, so a mode that
     /// answers `None` has no sign-out control at all. That is the
-    /// honest answer for `Disabled`. There is no session to end, and
-    /// a control that clears nothing is worse than no control.
+    /// honest answer for `Disabled`. There is no sign-in to leave: ending
+    /// a browser's anonymous session would only mint it another on the
+    /// next page load.
     ///
     /// The match is exhaustive on purpose. A new mode does not compile
     /// until it says where its sign-out goes, and a wildcard arm here
