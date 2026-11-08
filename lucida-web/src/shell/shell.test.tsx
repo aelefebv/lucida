@@ -14,7 +14,7 @@ import {
   setPreference,
 } from "../theme/preferences.ts";
 import { __resetShortcutsForTesting } from "../ui/shortcuts.ts";
-import { CanvasStage } from "./CanvasStage.tsx";
+import { CanvasStage, RATIO_CHECK_MS } from "./CanvasStage.tsx";
 import { leftPanelOpenPreference, leftPanelWidthPreference } from "./layoutPreferences.ts";
 import { LeftPanel } from "./LeftPanel.tsx";
 import { CompactPresence, PresenceAvatars } from "./PresenceAvatars.tsx";
@@ -137,6 +137,29 @@ describe("CanvasStage", () => {
       <CanvasStage canvasRef={createRef<HTMLCanvasElement>()} canvasKey={0} pixelated bare label="Empty view" />,
     );
     expect(container.querySelector(".lc-canvas-stage")?.hasAttribute("data-bare")).toBe(true);
+  });
+
+  it("reports a pixel ratio that changed without an event, at the same CSS size", () => {
+    vi.useFakeTimers();
+    const ratio = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+    try {
+      Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
+      const onResize = vi.fn();
+      render(
+        <CanvasStage canvasRef={createRef<HTMLCanvasElement>()} canvasKey={0} pixelated onResize={onResize} label="2D view of sample" />,
+      );
+      vi.advanceTimersByTime(RATIO_CHECK_MS * 2);
+      const before = onResize.mock.calls.length;
+
+      Object.defineProperty(window, "devicePixelRatio", { value: 2, configurable: true });
+      vi.advanceTimersByTime(RATIO_CHECK_MS);
+      expect(onResize).toHaveBeenCalledTimes(before + 1);
+      vi.advanceTimersByTime(RATIO_CHECK_MS * 4);
+      expect(onResize).toHaveBeenCalledTimes(before + 1);
+    } finally {
+      if (ratio) Object.defineProperty(window, "devicePixelRatio", ratio);
+      vi.useRealTimers();
+    }
   });
 });
 
