@@ -6,17 +6,22 @@
  * stroke batched by style, plus the pointer hit test. The camera is a
  * JavaScript pinhole, since the runner has no scene.
  *
- * The ceilings are tripwires at {@link CI_SLACK}× slack, not benchmarks: a
- * millisecond microbenchmark on CI measures the runner. A poll gets 4 ms at
- * the cap (4% of the main thread at ten polls a second); the hit test gets
- * 0.2 ms, since pointer moves arrive far more often than polls.
+ * The design gives a poll 4 ms at the cap (4% of the main thread at ten polls
+ * a second) and the hit test 0.2 ms, since pointer moves arrive far more often
+ * than polls. Each line logs where the figure stands against that ceiling.
+ * What fails the test is a budget at about twice the typical figure, held on
+ * any host the way `perfBudget.ts` describes. The hit test is held against a
+ * walk over the same silhouettes instead of the generic reference: hosts
+ * differ more in what that walk costs than in what the reference does.
  */
 
 import { describe, expect, it } from "vitest";
 
+import { describeTiming, expectWithinBudget, timeAgainstBaseline, timeStep } from "../test/perfBudget.ts";
+
 import type { ChunkReading } from "../trace/diagnose/chunkStates.ts";
 import type { RowState } from "../trace/diagnose/types.ts";
-import { type ChunkCell, type OverlayModes } from "./overlayDrawList.ts";
+import { type ChunkCell, type OverlayModes, type ScreenPoint } from "./overlayDrawList.ts";
 import { OVERLAY_TEST_COLORS } from "./overlayFixtures.ts";
 import { BOX_EDGES, buildVolumeDrawList, hitTestBox, projectChunkBox, type Projector } from "./volumeWireframe.ts";
 
@@ -24,8 +29,10 @@ import { BOX_EDGES, buildVolumeDrawList, hitTestBox, projectChunkBox, type Proje
 const BOXES_PER_POLL = 600;
 const POLL_CEILING_US = 4_000;
 const HIT_TEST_CEILING_US = 200;
-/** The recorder's slack, for the recorder's reason: the same code measures 45× apart across hosts. */
-const CI_SLACK = 16;
+/** In nominal microseconds, about twice the typical figure. */
+const POLL_BUDGET_US = 4_900;
+/** Ten hit tests against a walk of every silhouette's edges at the same ten points: about twice the typical ratio. */
+const HIT_TEST_RATIO_BUDGET = 2.1;
 
 const MODES: OverlayModes = { chunkTier: false, cachedTier: false, plannedRank: false, phaseColor: true, churnTint: true };
 const STATES: RowState[] = ["plan", "queue", "wire", "decode", "upload", "present", "complete", "retired", "unstamped"];
@@ -102,6 +109,23 @@ function readings(specs: BoxSpec[]): Map<string, ChunkReading> {
   return out;
 }
 
+/**
+ * Every edge of every silhouette at one point, the arithmetic a hit test does
+ * on each edge it reaches, with none of its decisions or early exits.
+ */
+function walkHulls(hulls: readonly (readonly ScreenPoint[])[], x: number, y: number): number {
+  let acc = 0;
+  for (const hull of hulls) {
+    const n = hull.length;
+    for (let i = 0; i < n; i++) {
+      const a = hull[i];
+      const b = hull[(i + 1) % n];
+      acc += (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]) > 0 ? 1 : 0;
+    }
+  }
+  return acc;
+}
+
 function poll(specs: BoxSpec[], project: Projector, byKey: Map<string, ChunkReading>) {
   const cells: ChunkCell[] = [];
   for (const spec of specs) {
@@ -121,11 +145,6 @@ function poll(specs: BoxSpec[], project: Projector, byKey: Map<string, ChunkRead
   return buildVolumeDrawList({ cells, colors: OVERLAY_TEST_COLORS, modes: MODES, readingOf: (cell) => byKey.get(cell.key) ?? null, windowMs: 12_000 });
 }
 
-function median(samples: number[]): number {
-  samples.sort((a, b) => a - b);
-  return samples[samples.length >> 1];
-}
-
 describe("the volume overlay's cost contract", () => {
   it("projects, lists and strokes a poll's boxes, and hit-tests them, inside the budget", () => {
     const specs = boxes();
@@ -133,33 +152,35 @@ describe("the volume overlay's cost contract", () => {
     const project = camera();
     const byKey = readings(specs);
 
-    for (let i = 0; i < 5; i++) poll(specs, project, byKey);
-
-    const pollSamples: number[] = [];
     let list = poll(specs, project, byKey);
-    for (let i = 0; i < 41; i++) {
-      const start = performance.now();
+    const polled = timeStep(() => {
       list = poll(specs, project, byKey);
-      pollSamples.push((performance.now() - start) * 1_000);
-    }
+    }, { samples: 41, warmup: 5 });
 
-    const hitSamples: number[] = [];
     let hits = 0;
-    for (let i = 0; i < 41; i++) {
-      const start = performance.now();
-      for (let k = 0; k < 10; k++) if (hitTestBox(list.items, 600 + k * 24, 400 + k * 10)) hits += 1;
-      hitSamples.push(((performance.now() - start) * 1_000) / 10);
-    }
+    let walked = 0;
+    const hulls = list.items.map((item) => item.hull);
+    const hitTests = timeAgainstBaseline(
+      () => {
+        for (let k = 0; k < 10; k++) if (hitTestBox(list.items, 600 + k * 24, 400 + k * 10)) hits += 1;
+      },
+      () => {
+        for (let k = 0; k < 10; k++) walked += walkHulls(hulls, 600 + k * 24, 400 + k * 10);
+      },
+      { samples: 41, warmup: 5 },
+    );
 
-    const pollUs = median(pollSamples);
-    const hitUs = median(hitSamples);
     const segments = list.items.reduce((n, item) => n + item.path.split("M").length - 1, 0);
 
     console.log(
-      `[#1063] volume overlay poll: ${list.items.length} boxes projected, listed and stroked p50=${pollUs.toFixed(0)}µs ` +
-        `(ceiling ${POLL_CEILING_US}µs, gate ${POLL_CEILING_US * CI_SLACK}µs) | ${segments} edge segments in ` +
-        `${list.batches.length} paths | ` +
-        `hit test p50=${hitUs.toFixed(1)}µs (ceiling ${HIT_TEST_CEILING_US}µs, gate ${HIT_TEST_CEILING_US * CI_SLACK}µs)`,
+      `[#1063] volume overlay poll: ${list.items.length} boxes projected, listed and stroked | ` +
+        `${describeTiming(polled, POLL_BUDGET_US)} | ceiling ${POLL_CEILING_US}µs | ${segments} edge segments in ` +
+        `${list.batches.length} paths`,
+    );
+    console.log(
+      `[#1063] volume overlay hit test x10: p50=${hitTests.stepUs.toFixed(1)}µs against a hull walk at ` +
+        `${hitTests.baselineUs.toFixed(1)}µs | ratio ${hitTests.ratio.toFixed(2)}, budget ${HIT_TEST_RATIO_BUDGET} ` +
+        `(${(hitTests.ratio / HIT_TEST_RATIO_BUDGET).toFixed(2)} of it) | ceiling ${HIT_TEST_CEILING_US}µs each`,
     );
 
     expect(list.items).toHaveLength(BOXES_PER_POLL);
@@ -167,7 +188,8 @@ describe("the volume overlay's cost contract", () => {
     expect(list.batches.reduce((n, batch) => n + batch.count, 0)).toBe(BOXES_PER_POLL);
     expect(list.batches.length).toBeLessThan(40);
     expect(hits).toBeGreaterThan(0);
-    expect(pollUs).toBeLessThan(POLL_CEILING_US * CI_SLACK);
-    expect(hitUs).toBeLessThan(HIT_TEST_CEILING_US * CI_SLACK);
+    expect(walked).toBeGreaterThan(0);
+    expectWithinBudget("volume overlay poll", polled, POLL_BUDGET_US);
+    expect(hitTests.ratio, `ten hit tests at ${hitTests.ratio.toFixed(2)}x a hull walk`).toBeLessThan(HIT_TEST_RATIO_BUDGET);
   });
 });
