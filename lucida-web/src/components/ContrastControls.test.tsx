@@ -74,6 +74,44 @@ describe("ContrastControls typed limits", () => {
   });
 });
 
+describe("ContrastControls fields", () => {
+  it("show a 64-bit integer limit whole", () => {
+    renderControls({
+      contrastMin: -6000000000,
+      contrastMax: 1234567890,
+      dataRange: { min: -6e9, max: 6e9 },
+      valueRange: [-(2 ** 63), 2 ** 63],
+    });
+    expect(field("Contrast minimum").value).toBe("-6000000000");
+    expect(field("Contrast maximum").value).toBe("1234567890");
+    expect(field("Contrast maximum").style.getPropertyValue("--lc-field-chars")).toBe("10");
+  });
+
+  it("show a float limit as the float32 the renderer applies, to the last digit it needs", () => {
+    renderControls({
+      integer: false,
+      contrastMin: Math.fround(0.1),
+      contrastMax: 1234.5678,
+      dataRange: { min: 0, max: 2000 },
+      valueRange: null,
+    });
+    expect(field("Contrast minimum").value).toBe("0.1");
+    expect(field("Contrast maximum").value).toBe("1234.5677");
+  });
+
+  it("keep the value a float limit holds when only the other is typed", async () => {
+    const props = renderControls({
+      integer: false,
+      contrastMin: Math.fround(0.1),
+      contrastMax: 1000,
+      dataRange: { min: 0, max: 2000 },
+      valueRange: null,
+    });
+    await typeInto("Contrast maximum", "1500.25", "{Enter}");
+    expect(props.onContrastChange).toHaveBeenLastCalledWith(Math.fround(0.1), 1500.25);
+  });
+});
+
 describe("ContrastControls auto", () => {
   it("fits once on Auto, and waits for data before offering it", async () => {
     const props = renderControls();

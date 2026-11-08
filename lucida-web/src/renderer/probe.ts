@@ -1,8 +1,9 @@
 /**
  * Which resident texel the renderer draws under one canvas point, worked out
  * on the CPU from the last frame's message, the descriptors' sources and the
- * pools' indirection mirrors. Pure and GPU-free, so the readout reads exactly
- * the sample, level and position the shaders pick.
+ * pools' indirection mirrors; in 3D, which texels a ray's march reads and
+ * which of them its pixel is drawn from. Pure and GPU-free, so the readout
+ * reads exactly the sample, level and position the shaders pick.
  *
  * The arithmetic follows `slice.wgsl` and `volume.wgsl` step for step; a change
  * to how either locates a sample must change this too.
@@ -19,7 +20,6 @@ export interface ProbeAtlas {
   slotsX: number;
   slotsY: number;
   slotsZ?: number;
-  format: SampleFormat;
 }
 
 /** One source a descriptor names, with the pool its draw binds, or null where it binds none. */
@@ -46,11 +46,21 @@ export function locateSample<A extends ProbeAtlas>(
   pos: readonly number[],
   mode: "slice" | "volume",
 ): SampleLocation<A> {
+  return answeringSource(levels, coarse, pos, mode).location;
+}
+
+/** {@link locateSample}, with the source that answered: the finest one bound when none did. */
+function answeringSource<A extends ProbeAtlas>(
+  levels: readonly ProbeSource<A>[],
+  coarse: ProbeSource<A> | null,
+  pos: readonly number[],
+  mode: "slice" | "volume",
+): { location: SampleLocation<A>; source: ProbeSource<A> | null } {
   for (const source of coarse ? [...levels, coarse] : levels) {
-    const hit = sampleSource(source, pos, mode);
-    if (hit) return hit;
+    const location = sampleSource(source, pos, mode);
+    if (location) return { location, source };
   }
-  return { kind: "missing" };
+  return { location: { kind: "missing" }, source: levels[0] ?? coarse };
 }
 
 function sampleSource<A extends ProbeAtlas>(
@@ -120,20 +130,26 @@ export function levelZeroPosition(
   return [x, texelIndex(1 - pos[1], height), texelIndex(pos[2], depth)];
 }
 
-/** A slice layer member under the point, at its member-local UV. */
+/**
+ * A slice layer member under the point, at its member-local UV. A label
+ * overlay's hit carries the entity whose image it overlays, and that image's
+ * level-0 extent its quad spans.
+ */
 export interface SliceHit {
   memberId: string;
   uv: [number, number];
+  label?: { entityId: string | undefined; dataW: number; dataH: number };
 }
 
 /** Words per aggregate quad record (`SliceAggregateParams.quads`). */
 const QUAD_STRIDE_WORDS = 8;
 
 /**
- * The intensity members a slice frame drew under the canvas point `(fx, fy)`,
- * given as fractions of the canvas, each at the UV its fragment sampled.
- * The point lands on the render pixel it falls in, and that pixel's center is
- * what the shader sampled. `memberOfIndex` names an aggregate quad's member.
+ * The members and label overlays a slice frame drew under the canvas point
+ * `(fx, fy)`, given as fractions of the canvas, each at the UV its fragment
+ * sampled. The point lands on the render pixel it falls in, and that pixel's
+ * center is what the shader sampled. `memberOfIndex` names an aggregate
+ * quad's member.
  */
 export function sliceHits(
   msg: SliceRenderMultiPassMessage,
@@ -145,10 +161,19 @@ export function sliceHits(
   const py = pixelCenter(fy, msg.canvasH);
   const hits: SliceHit[] = [];
   for (const layer of msg.layers) {
-    if (layer.isLabel) continue;
     // Layer-local level-0 sample coordinates, as `buildSliceUniformData`'s transform gives them.
     const u = ((px - msg.canvasW / 2) / msg.zoom + msg.cx - (layer.offsetX ?? 0)) / layer.dataW;
     const v = ((py - msg.canvasH / 2) / msg.zoom + msg.cy - (layer.offsetY ?? 0)) / layer.dataH;
+    if (layer.isLabel) {
+      if (inUnit(u) && inUnit(v)) {
+        hits.push({
+          memberId: layer.datasetId,
+          uv: [u, v],
+          label: { entityId: layer.entityId, dataW: layer.dataW, dataH: layer.dataH },
+        });
+      }
+      continue;
+    }
     const agg = layer.aggregate;
     if (!agg) {
       if (inUnit(u) && inUnit(v)) hits.push({ memberId: layer.datasetId, uv: [u, v] });
@@ -185,9 +210,33 @@ export function clipPlaneHit(
   fy: number,
   invModel: ArrayLike<number>,
 ): [number, number, number] | null {
-  const clipDist = msg.clipDistance ?? 0;
-  const forward = msg.camForward;
-  if (!(clipDist > 0) || (msg.clipMode ?? 0) >= 0.5 || !forward) return null;
+  if (!((msg.clipDistance ?? 0) > 0) || (msg.clipMode ?? 0) >= 0.5 || !msg.camForward) return null;
+  const ray = entityRay(msg, fx, fy, invModel);
+  if (!ray) return null;
+  const localT = clipPlaneT(msg, ray, invModel);
+  // The plane must be what starts the march: past the cube's entry, before its exit.
+  if (localT === null || !(localT > Math.max(ray.tNear, 0)) || localT >= ray.tFar) return null;
+  return add(ray.ro, scale(ray.rd, localT));
+}
+
+/** The ray under a canvas point, in world space and in one entity's unit cube, as volume.wgsl's `fs` builds it. */
+interface EntityRay {
+  worldRo: Vec3;
+  worldRd: Vec3;
+  ro: Vec3;
+  rd: Vec3;
+  /** Where the ray enters and leaves the unit cube. */
+  tNear: number;
+  tFar: number;
+}
+
+/** The ray under `(fx, fy)` through one entity, or null where it misses the entity's cube. */
+function entityRay(
+  msg: VolumeRenderMultiPassMessage,
+  fx: number,
+  fy: number,
+  invModel: ArrayLike<number>,
+): EntityRay | null {
   const ndcX = (pixelCenter(fx, msg.canvasW) / msg.canvasW) * 2 - 1;
   const ndcY = 1 - (pixelCenter(fy, msg.canvasH) / msg.canvasH) * 2;
   const near = project(msg.invViewProj, [ndcX, ndcY, -1, 1]);
@@ -196,23 +245,187 @@ export function clipPlaneHit(
   const worldRd = normalize(sub(far, near));
   const ro = transform(invModel, [...worldRo, 1]);
   const rd = normalize(transform(invModel, [...worldRd, 0]));
-
   const [tNear, tFar] = intersectUnitCube(ro, rd);
   if (tNear >= tFar || tFar < 0) return null;
-  const tStart = Math.max(tNear, 0);
+  return { worldRo, worldRd, ro, rd, tNear, tFar };
+}
 
-  const normal: [number, number, number] = [forward[0], forward[1], forward[2]];
-  const denom = dot(worldRd, normal);
+/** Where the plane-mode clip plane meets the ray, as the cube's ray parameter; null where it doesn't, ahead of the eye. */
+function clipPlaneT(msg: VolumeRenderMultiPassMessage, ray: EntityRay, invModel: ArrayLike<number>): number | null {
+  const forward = msg.camForward;
+  if (!forward) return null;
+  const normal: Vec3 = [forward[0], forward[1], forward[2]];
+  const denom = dot(ray.worldRd, normal);
   if (Math.abs(denom) <= 1e-6) return null;
-  const eye: [number, number, number] = [msg.eye[0], msg.eye[1], msg.eye[2]];
-  const planePoint = add(eye, scale(normal, clipDist));
-  const tWorld = dot(sub(planePoint, worldRo), normal) / denom;
+  const eye: Vec3 = [msg.eye[0], msg.eye[1], msg.eye[2]];
+  const planePoint = add(eye, scale(normal, msg.clipDistance ?? 0));
+  const tWorld = dot(sub(planePoint, ray.worldRo), normal) / denom;
   if (!(tWorld > 0)) return null;
-  const localHit = transform(invModel, [...add(worldRo, scale(worldRd, tWorld)), 1]);
-  const localT = dot(sub(localHit, ro), rd) / dot(rd, rd);
-  // The plane must be what starts the march: past the cube's entry, before its exit.
-  if (!(localT > tStart) || localT >= tFar) return null;
-  return add(ro, scale(rd, localT));
+  return localRayT(ray, invModel, add(ray.worldRo, scale(ray.worldRd, tWorld)));
+}
+
+/** Where the far side of the sphere-mode clip sphere meets the ray, as the cube's ray parameter; null where it doesn't, ahead of the eye. */
+function clipSphereT(msg: VolumeRenderMultiPassMessage, ray: EntityRay, invModel: ArrayLike<number>): number | null {
+  const radius = msg.clipDistance ?? 0;
+  const oc = sub(ray.worldRo, [msg.eye[0], msg.eye[1], msg.eye[2]]);
+  const a = dot(ray.worldRd, ray.worldRd);
+  const b = 2 * dot(oc, ray.worldRd);
+  const c = dot(oc, oc) - radius * radius;
+  const disc = b * b - 4 * a * c;
+  if (disc < 0) return null;
+  const tWorld = (-b + Math.sqrt(disc)) / (2 * a);
+  if (!(tWorld > 0)) return null;
+  return localRayT(ray, invModel, add(ray.worldRo, scale(ray.worldRd, tWorld)));
+}
+
+function localRayT(ray: EntityRay, invModel: ArrayLike<number>, worldPoint: Vec3): number {
+  const local = transform(invModel, [...worldPoint, 1]);
+  return dot(sub(local, ray.ro), ray.rd) / dot(ray.rd, ray.rd);
+}
+
+/** The stretch of a ray a volume frame marches through one entity, in its unit cube. */
+export interface MarchSpan {
+  ro: Vec3;
+  rd: Vec3;
+  tStart: number;
+  tEnd: number;
+}
+
+/**
+ * What a volume frame marches of the ray under `(fx, fy)` through one entity:
+ * from where the ray enters the cube, or leaves the clip plane or sphere if
+ * that is later, to where it leaves the cube. Null where nothing is marched.
+ */
+export function marchSpan(
+  msg: VolumeRenderMultiPassMessage,
+  fx: number,
+  fy: number,
+  invModel: ArrayLike<number>,
+): MarchSpan | null {
+  const ray = entityRay(msg, fx, fy, invModel);
+  if (!ray) return null;
+  let tStart = Math.max(ray.tNear, 0);
+  if ((msg.clipDistance ?? 0) > 0) {
+    const clipT = (msg.clipMode ?? 0) < 0.5 ? clipPlaneT(msg, ray, invModel) : clipSphereT(msg, ray, invModel);
+    if (clipT !== null) tStart = Math.max(tStart, clipT);
+  }
+  if (tStart >= ray.tFar) return null;
+  return { ro: ray.ro, rd: ray.rd, tStart, tEnd: ray.tFar };
+}
+
+/** One sample a volume march reads: where, in the unit cube, and what answers there. */
+export interface MarchStep<A extends ProbeAtlas> {
+  pos: Vec3;
+  location: SampleLocation<A>;
+}
+
+/**
+ * The samples a volume march reads along `span`, in order, as volume.wgsl's
+ * loops take them: each step is the answering level's own spacing, floored so
+ * `steps` of them reach the end. `steps` is 512 for a translucent or label
+ * march and 256 for MIP. Which samples are read depends only on residency, so
+ * they are known before any value is. The march runs in float32, as the
+ * shader's does, so hundreds of steps don't drift off the shader's positions.
+ */
+export function marchSamples<A extends ProbeAtlas>(
+  levels: readonly ProbeSource<A>[],
+  coarse: ProbeSource<A> | null,
+  span: MarchSpan,
+  steps: number,
+): MarchStep<A>[] {
+  const f = Math.fround;
+  const [ox, oy, oz] = span.ro.map(f);
+  const [dx, dy, dz] = span.rd.map(f);
+  const tEnd = f(span.tEnd);
+  const minStep = f(f(tEnd - f(span.tStart)) / steps);
+  const out: MarchStep<A>[] = [];
+  let t = f(span.tStart);
+  for (let i = 0; i < steps && t < tEnd; i++) {
+    const pos: Vec3 = [f(ox + f(dx * t)), f(oy + f(dy * t)), f(oz + f(dz * t))];
+    const { location, source } = answeringSource(levels, coarse, pos, "volume");
+    out.push({ pos, location });
+    // An entity that binds no tier has no level to step by, so it misses at the unit step.
+    const step = source ? stepForDims(source.meta.levelDims) : 1;
+    t = f(t + Math.max(step, minStep));
+  }
+  return out;
+}
+
+/** `stepForDims` in volume.wgsl: two thirds of a sample along the densest axis. */
+function stepForDims(dims: readonly number[]): number {
+  return Math.fround(1 / Math.fround(Math.max(dims[0], dims[1], dims[2], 1) * 1.5));
+}
+
+/** What a march read at one sample: the value in data units, or why there is none. */
+export type MarchedValue = number | "missing" | "failed";
+
+/** The contrast window a member draws through. */
+export interface DisplayWindow {
+  contrastMin: number;
+  contrastMax: number;
+  gamma: number;
+}
+
+/** A translucent march records the pixel's depth at the first sample past this normalized value. */
+const DEPTH_THRESHOLD = 0.01;
+
+/** A MIP march stops once its maximum reaches this. */
+const MIP_EARLY_OUT = 0.98;
+
+/**
+ * The index of the sample an intensity pixel is drawn from, or -1 where none
+ * is. A translucent pixel blends many samples, so this is the first the shader
+ * counts as the pixel's surface, where it records depth. A MIP pixel is its
+ * brightest sample: the first to reach the maximum before the march stops
+ * early. A u16 zero, a NaN, and a sample not resident add nothing. The window
+ * is applied in float32, as the descriptor holds it.
+ *
+ * The translucent march's own early stop, at alpha 0.98, never comes first:
+ * a sample under the threshold adds under 0.01 * 0.08 alpha, and its 512
+ * steps stay far short.
+ */
+export function pickIntensitySample(
+  values: readonly MarchedValue[],
+  window: DisplayWindow,
+  format: SampleFormat,
+  mode: "translucent" | "max_intensity",
+): number {
+  const f = Math.fround;
+  const min = f(window.contrastMin);
+  const range = f(f(window.contrastMax) - min);
+  const gamma = f(window.gamma);
+  let best = -1;
+  let maxVal = 0;
+  for (let i = 0; i < values.length; i++) {
+    if (mode === "max_intensity" && maxVal >= MIP_EARLY_OUT) break;
+    const value = values[i];
+    if (typeof value !== "number" || Number.isNaN(value) || (format === "u16" && value === 0)) continue;
+    const normalized = f(Math.pow(Math.min(Math.max(f(f(value - min) / range), 0), 1), gamma));
+    if (mode === "translucent") {
+      if (normalized > DEPTH_THRESHOLD) return i;
+    } else if (normalized > maxVal) {
+      maxVal = normalized;
+      best = i;
+    }
+  }
+  return best;
+}
+
+/**
+ * The index of the sample a label overlay draws, or -1 where it draws none:
+ * the first id along the ray that isn't background, or the first failed
+ * chunk, where the march stops and draws the hatch.
+ */
+export function pickLabelSample(values: readonly MarchedValue[]): number {
+  return values.findIndex((value) => value === "failed" || (typeof value === "number" && value !== 0));
+}
+
+/**
+ * A point in one unit cube carried into another through world space: `model`
+ * takes it out of the first, `invModel` into the second. Column-major.
+ */
+export function betweenCubes(pos: readonly number[], model: ArrayLike<number>, invModel: ArrayLike<number>): Vec3 {
+  return transform(invModel, [...transform(model, [pos[0], pos[1], pos[2], 1]), 1]);
 }
 
 /** The center of the render pixel a fraction of the canvas falls in. */
