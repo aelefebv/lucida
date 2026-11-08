@@ -475,6 +475,16 @@ describe("the timeline between the coverage and the verdict", () => {
     expect(screen.getByTestId("monitor-series-frame-main-thread").textContent).toContain("max 3.5");
   });
 
+  it("gives each legend label an element of its own, which the stylesheet keeps on one line", () => {
+    showing(healthyLocalOpen());
+
+    const entry = screen.getByTestId("monitor-series-frame-gpu-pass");
+    expect(entry.querySelector(".monitor-timeline-series")?.textContent).toBe("GPU pass");
+    expect([...entry.childNodes].filter((node) => node.nodeType === Node.TEXT_NODE && node.textContent?.trim())).toEqual(
+      [],
+    );
+  });
+
   it("keeps the closed-run report intact beneath the timeline", () => {
     showing(coldRemoteOpen());
 
