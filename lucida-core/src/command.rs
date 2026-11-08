@@ -316,7 +316,7 @@ pub enum ViewportCommand {
     /// Set or clear a display-name override for a single channel. Local-only
     /// like [`Self::SetChannelColormap`]: it rides presence and saved views.
     /// `name: None` falls the UI back to the manifest's omero label, then
-    /// `Ch {channel}`.
+    /// `Channel n`, counted from 1.
     SetChannelName {
         dataset_id: String,
         channel: u32,

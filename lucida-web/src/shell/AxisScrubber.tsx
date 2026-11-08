@@ -1,6 +1,6 @@
 import { CaretLeftIcon, CaretRightIcon } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
-import { positionNumber } from "../axes.ts";
+import { positionNumber, stepIndex, type IndexChange } from "../axes.ts";
 import { IconButton } from "../ui/Button.tsx";
 import type { KeyCombo } from "../ui/shortcuts.ts";
 import { Slider } from "../ui/Slider.tsx";
@@ -14,8 +14,8 @@ export interface AxisScrubberProps {
   value: number;
   /** How many positions the axis has. */
   count: number;
-  /** Called with a zero-based position, from the slider or a step button. */
-  onChange: (value: number) => void;
+  /** Called with a zero-based position from the slider, or a step from a step button. */
+  onChange: (value: IndexChange) => void;
   previousShortcut?: readonly KeyCombo[];
   nextShortcut?: readonly KeyCombo[];
   /** Drawn after the letter, e.g. a play button. */
@@ -50,7 +50,7 @@ export function AxisScrubber({
         label={`Previous ${name}`}
         shortcut={previousShortcut}
         isDisabled={value <= 0}
-        onPress={() => onChange(Math.max(0, value - 1))}
+        onPress={() => onChange(stepIndex(-1, count))}
       />
       {/* One-based, so the value a screen reader announces matches the readout. */}
       <Slider
@@ -69,7 +69,7 @@ export function AxisScrubber({
         label={`Next ${name}`}
         shortcut={nextShortcut}
         isDisabled={value >= last}
-        onPress={() => onChange(Math.min(last, value + 1))}
+        onPress={() => onChange(stepIndex(1, count))}
       />
       <span className="lc-dim-readout" aria-hidden="true">
         {/* Wide enough for the largest position, so the readout never shifts. */}

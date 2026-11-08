@@ -6,6 +6,23 @@
 export const Axis = { T: 0, C: 1, Z: 2, Y: 3, X: 4 } as const;
 
 /**
+ * A 0-based axis index to move to, or how to get one from the index the axis
+ * holds when the move lands. A step is the function, so presses that land
+ * before the next render each move the axis one position.
+ */
+export type IndexChange = number | ((current: number) => number);
+
+/** A move of `delta` positions on an axis of `count`, stopping at either end. */
+export function stepIndex(delta: number, count: number): (current: number) => number {
+  return (current) => Math.min(count - 1, Math.max(0, current + delta));
+}
+
+/** The index an {@link IndexChange} lands on, from the index the axis holds now. */
+export function resolveIndex(change: IndexChange, current: number): number {
+  return typeof change === "number" ? change : change(current);
+}
+
+/**
  * The number a person sees for a 0-based axis index. People count positions
  * from 1; the wire, URLs, and CLI flags carry the 0-based index. A fractional
  * index, such as a depth picked in 3D, rounds to its slice.

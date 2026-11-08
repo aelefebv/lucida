@@ -1445,6 +1445,40 @@ impl Scene {
         }
     }
 
+    /// A dataset's layouts, source then registered, each marked with whether
+    /// the dataset shows it now. That is the layout [`resolve_layout`] picked,
+    /// so a fallback to the default counts, and a first match shadows a later
+    /// layout with the same id.
+    pub fn available_layouts(&self, dataset_id: &DatasetId) -> Vec<AvailableLayout> {
+        let shown = self.derived.get(dataset_id).map(|d| &d.active_layout.id);
+        let source = self
+            .document
+            .manifests
+            .get(dataset_id)
+            .map(|manifest| manifest.source_layouts())
+            .unwrap_or_default();
+        let registered = self
+            .document
+            .registered_layouts
+            .get(dataset_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut marked = false;
+        source
+            .iter()
+            .chain(registered)
+            .map(|layout| {
+                let active = !marked && shown == Some(&layout.id);
+                marked |= active;
+                AvailableLayout {
+                    id: layout.id.clone(),
+                    name: layout.name.clone(),
+                    active,
+                }
+            })
+            .collect()
+    }
+
     /// The box the renderer draws for `member`, as one transform with both
     /// directions filled in. [`Scene::rendering_transform`] returns the two
     /// halves. The camera projects and measures against this.
@@ -1895,6 +1929,14 @@ fn view_query_diff(
     left.sort_by(|a, b| a.0.cmp(&b.0));
 
     (entered, left, changed)
+}
+
+/// One entry of [`Scene::available_layouts`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AvailableLayout {
+    pub id: LayoutId,
+    pub name: String,
+    pub active: bool,
 }
 
 /// Resolve which layout to use for a dataset.
@@ -2876,6 +2918,58 @@ mod tests {
         let scene = Scene::new([800, 600]);
         let plan = scene.chunk_plan();
         assert!(plan.needed.is_empty());
+    }
+
+    #[test]
+    fn available_layouts_mark_the_one_shown() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_collection_dataset_opened(
+            "c",
+            "c",
+            vec![("m1", [0.0, 0.0]), ("m2", [256.0, 0.0])],
+            [1, 1, 1, 256, 256],
+            [1, 1, 1, 256, 256],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds = DatasetId("c".into());
+        let active = |scene: &Scene| -> Vec<(String, bool)> {
+            scene
+                .available_layouts(&ds)
+                .into_iter()
+                .map(|l| (l.id.0, l.active))
+                .collect()
+        };
+
+        // Nothing chosen yet: the manifest's default is the one shown.
+        assert_eq!(active(&scene), [("default".into(), true)]);
+
+        scene.apply(
+            DocumentCommand::RegisterLayout {
+                dataset_id: ds.clone(),
+                layout: LayoutSpec {
+                    id: LayoutId("alt".into()),
+                    name: "Alt".into(),
+                    placements: vec![],
+                },
+            }
+            .into(),
+        );
+        scene.apply(
+            DocumentCommand::SetActiveLayout {
+                dataset_id: ds.clone(),
+                layout_id: LayoutId("alt".into()),
+            }
+            .into(),
+        );
+        assert_eq!(
+            active(&scene),
+            [("default".into(), false), ("alt".into(), true)]
+        );
+        assert!(
+            scene
+                .available_layouts(&DatasetId("missing".into()))
+                .is_empty()
+        );
     }
 
     #[test]
