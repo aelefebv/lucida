@@ -161,12 +161,22 @@ impl ChunkResolver {
         let img = self.images.get(image_id)?;
         let level = img.levels.get(key.level as usize)?;
         if let Some(layout) = level.shard.as_ref() {
-            let mut location = layout.locate_inner_chunk(key, &img.axes_names)?;
+            let mut location = layout.locate_inner_chunk(
+                key,
+                &level.path,
+                &img.axes_names,
+                level.chunk_key_encoding,
+            )?;
             location.path = img.prefixed(location.path);
             return Some(ChunkLocation::InnerChunk { layout, location });
         }
-        let store_path =
-            lucida_store::chunk_key_to_store_path(key, &img.axes_names, &level.chunk_shape);
+        let store_path = lucida_store::chunk_key_to_store_path(
+            key,
+            &level.path,
+            &img.axes_names,
+            &level.chunk_shape,
+            level.chunk_key_encoding,
+        );
         Some(ChunkLocation::Object(img.prefixed(store_path)))
     }
 }
@@ -207,6 +217,7 @@ mod tests {
         seed.levels = (0..3)
             .map(|level_index| LevelBindingInfo {
                 level_index,
+                path: level_index.to_string(),
                 ..seed.levels[0].clone()
             })
             .collect();
@@ -228,6 +239,7 @@ mod tests {
             store_prefix: prefix.map(String::from),
             levels: vec![LevelBindingInfo {
                 level_index: 0,
+                path: "0".to_string(),
                 compression: StorageCompression::None,
                 chunk_shape,
                 chunk_byte_layout: ChunkByteLayout {
@@ -238,6 +250,8 @@ mod tests {
                     chunk_size_t: 1,
                     chunk_size_c: 1,
                 },
+                chunk_key_encoding: Default::default(),
+                fill_value: Default::default(),
                 shard,
                 regrid: None,
             }],
@@ -322,8 +336,10 @@ mod tests {
             .unwrap();
         let expected = lucida_store::chunk_key_to_store_path(
             &key("2/0/0/5/3/2"),
+            "2",
             &["z".to_string(), "y".to_string(), "x".to_string()],
             &[1, 1, 1],
+            Default::default(),
         );
         assert_eq!(location.path(), &Path::from(expected));
     }
