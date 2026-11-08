@@ -310,15 +310,30 @@ describe("marchSamples", () => {
     expect(new Set(depths)).toEqual(new Set(Array.from({ length: 16 }, (_, z) => z)));
   });
 
-  it("steps by the coarse tier where it answers, and by the finest level where nothing does", () => {
+  it("steps by the coarse tier where it answers, and across each chunk cell where nothing does", () => {
     const fine = resident(0, 32);
     fine.atlas.indirectionData.fill(INDIRECTION_MISS);
     const coarse = resident(2, 8);
     expect(marchSamples([fine], coarse, span(), 512).map((s) => s.location.kind))
       .toEqual(new Array(12).fill("resident"));
+    // Four 8-sample cells deep: one sample in each, just past its near face.
     const nothing = marchSamples([fine], null, span(), 512);
-    expect(nothing).toHaveLength(48);
-    expect(nothing.every((s) => s.location.kind === "missing")).toBe(true);
+    expect(nothing.map((s) => s.location.kind)).toEqual(new Array(4).fill("missing"));
+    nothing.forEach(({ pos }, k) => expect(pos[2]).toBeCloseTo(k / 4, 4));
+  });
+
+  it("steps by the finest level after a miss, never over a resident chunk of it", () => {
+    // The second of the four cells is resident: the march lands at its near
+    // face and reads all of it before skipping the rest.
+    const fine = resident(0, 32);
+    const grid = 4;
+    const centre = (z: number) => z * grid * grid + 2 * grid + 2;
+    for (let z = 0; z < grid; z++) if (z !== 1) fine.atlas.indirectionData[centre(z)] = INDIRECTION_MISS;
+    const steps = marchSamples([fine], null, span(), 512);
+    const read = steps.filter((s) => s.location.kind === "resident");
+    expect(read.length).toBe(12);
+    expect(read[0].pos[2]).toBeCloseTo(0.25, 4);
+    expect(steps.filter((s) => s.location.kind === "missing")).toHaveLength(3);
   });
 
   it("never takes more steps than its budget, however fine the level", () => {
