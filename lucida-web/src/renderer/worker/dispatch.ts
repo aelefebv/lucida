@@ -59,6 +59,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     }
 
     case "canvasColors":
+      ctx.state.canvasColors = msg.colors;
       ctx.getCompositor().setBackground(msg.colors.background);
       ctx.getSliceRenderer().setTileBorderColor(msg.colors.tileBorder);
       return;
@@ -134,10 +135,15 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
 
     case "updateCursorData": {
-      const cr = ctx.getCursorRenderer();
-      cr.updateCursors(new Float32Array(msg.data), msg.count);
+      const cursors = { data: new Float32Array(msg.data), count: msg.count };
+      ctx.state.cursors = cursors;
+      ctx.getCursorRenderer().updateCursors(cursors.data, cursors.count);
       return;
     }
+
+    case "loseDevice":
+      ctx.device.destroy();
+      return;
 
     case "viewHotState":
       applyViewHotState(ctx, msg);

@@ -88,7 +88,7 @@ export const MESSAGE_COLORS: Record<ClientMessageType, string> = {
 };
 
 export const MARK_COLORS: Record<TimelineMark, string> = {
-  ...slots(["eviction", "rejection", "retry", "failure", "level-change", "reconnect", "held"] as const),
+  ...slots(["eviction", "rejection", "retry", "failure", "level-change", "reconnect", "held", "gpu-error"] as const),
   plan: NEUTRAL,
 };
 

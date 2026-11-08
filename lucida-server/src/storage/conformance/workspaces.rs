@@ -75,6 +75,7 @@ conformance_suite! {
         each_workspace_keeps_its_own_preview,
         writing_a_preview_into_an_absent_or_archived_workspace_is_none,
         listings_say_when_each_workspaces_preview_changed,
+        duplicating_carries_the_preview_across,
     ],
     over: [sqlite],
     when_available: [postgres],
@@ -2099,4 +2100,54 @@ async fn listings_say_when_each_workspaces_preview_changed(store: Arc<dyn Worksp
         updated(store.list_workspaces(&owner).await.unwrap()),
         expected
     );
+}
+
+async fn duplicating_carries_the_preview_across(store: Arc<dyn WorkspaceStore>) {
+    let owner = member("owner@example.com");
+    let copier = member("copier@example.com");
+    let source = workspace_named(&store, &owner, "Source").await;
+    let image = preview_bytes(1);
+    put(&store, new_preview(&source.id, &image, 0, -5)).await;
+    let bare = workspace_named(&store, &owner, "Bare").await;
+
+    let copy = store
+        .duplicate_workspace(&source.id, &copier, "Copy of Source")
+        .await
+        .unwrap()
+        .unwrap();
+
+    let copied = store.get_preview(&copy.id).await.unwrap().unwrap();
+    assert_eq!(copied.image, image);
+    assert_eq!(copied.meta.workspace_id, copy.id);
+    assert_eq!(copied.meta.content_type, "image/webp");
+    assert_eq!(copied.meta.size_bytes, image.len() as i64);
+    assert_eq!(
+        copied.meta.updated_at,
+        instant(0),
+        "the picture is as old as the source's",
+    );
+    assert_eq!(
+        copied.meta.updated_by, "copier@example.com",
+        "a copied preview is attributed to whoever made the copy",
+    );
+    let listed = store.list_workspaces(&copier).await.unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .find(|summary| summary.id == copy.id)
+            .map(|summary| summary.preview_updated_at),
+        Some(Some(instant(0))),
+        "the copy's card has its picture straight away",
+    );
+
+    let kept = store.get_preview(&source.id).await.unwrap().unwrap();
+    assert_eq!(kept.image, image);
+    assert_eq!(kept.meta.updated_by, "owner@example.com");
+
+    let bare_copy = store
+        .duplicate_workspace(&bare.id, &copier, "Copy of Bare")
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(store.get_preview(&bare_copy.id).await.unwrap().is_none());
 }
