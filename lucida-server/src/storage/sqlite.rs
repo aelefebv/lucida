@@ -2,11 +2,11 @@
 //!
 //! Opens the database named by a `sqlite:` connection string, creating
 //! the file if it is missing, runs the bundled migrations, and serves
-//! all seven stores from the one pool.
+//! all six stores from the one pool.
 //!
 //! This module is the only place in the server that names a SQLite
 //! type. Everything above it works through [`StorageBackend`] and the
-//! seven store traits.
+//! six store traits.
 
 use std::str::FromStr;
 use std::sync::Arc;
@@ -16,13 +16,12 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use super::url::DatabaseUrl;
-use super::{PingError, StorageBackend, StorageError};
+use super::{PingError, StorageBackend, StorageError, log_archived_bookmarks};
 use crate::auth::{
     BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
     SqliteBearerTokenStore, SqliteCliTokenAuthorizationStore, SqlitePendingAuthStore,
     SqliteSessionStore,
 };
-use crate::bookmarks::{BookmarkStore, SqliteBookmarkStore};
 use crate::inbox::{InboxStore, SqliteInboxStore};
 use crate::workspace::{SqliteWorkspaceStore, WorkspaceStore};
 
@@ -122,13 +121,19 @@ impl SqliteStorageBackend {
                 reason: e.to_string(),
             })?;
 
+        let migrate_failed = |e: sqlx::Error| StorageError::Migrate {
+            target: target.clone(),
+            reason: e.to_string(),
+        };
+        let archived_bookmarks = bookmarks_to_archive(&pool).await.map_err(migrate_failed)?;
         MIGRATOR
             .run(&pool)
             .await
             .map_err(|e| StorageError::Migrate {
-                target,
+                target: target.clone(),
                 reason: e.to_string(),
             })?;
+        log_archived_bookmarks(&target, archived_bookmarks);
 
         Ok(Self { pool })
     }
@@ -146,6 +151,24 @@ impl SqliteStorageBackend {
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+}
+
+/// The bookmark rows the `archive_bookmarks` migration is about to set
+/// aside, or `None` where there is no live bookmark table: a fresh
+/// database, or one that already archived it.
+async fn bookmarks_to_archive(pool: &SqlitePool) -> Result<Option<i64>, sqlx::Error> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bookmarks')",
+    )
+    .fetch_one(pool)
+    .await?;
+    if !exists {
+        return Ok(None);
+    }
+    sqlx::query_scalar("SELECT COUNT(*) FROM bookmarks")
+        .fetch_one(pool)
+        .await
+        .map(Some)
 }
 
 /// Every accessor builds a fresh handle over the shared pool. The
@@ -175,10 +198,6 @@ impl StorageBackend for SqliteStorageBackend {
 
     fn cli_token_authorizations(&self) -> Arc<dyn CliTokenAuthorizationStore> {
         Arc::new(SqliteCliTokenAuthorizationStore::new(self.pool.clone()))
-    }
-
-    fn bookmarks(&self) -> Arc<dyn BookmarkStore> {
-        Arc::new(SqliteBookmarkStore::new(self.pool.clone()))
     }
 
     fn workspaces(&self) -> Arc<dyn WorkspaceStore> {
@@ -233,12 +252,14 @@ mod tests {
     #[tokio::test]
     async fn every_connection_enforces_foreign_keys() {
         let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
-        let orphaned =
-            sqlx::query("INSERT INTO bookmark_datasets (bookmark_id, dataset_url) VALUES (?, ?)")
-                .bind("no-such-bookmark")
-                .bind("file:///data/a.zarr")
-                .execute(backend.pool())
-                .await;
+        let orphaned = sqlx::query(
+            "INSERT INTO workspace_members (workspace_id, email, role, added_at) \
+             VALUES (?, ?, 'viewer', '2026-01-02T03:04:05Z')",
+        )
+        .bind("no-such-workspace")
+        .bind("dev@example.com")
+        .execute(backend.pool())
+        .await;
         assert!(
             orphaned.is_err(),
             "a child row with no parent must be refused",
@@ -318,14 +339,96 @@ mod tests {
         let backend = SqliteStorageBackend::open_in_memory().await.unwrap();
         let refused = sqlx::query(
             r#"
-            INSERT INTO bookmarks
-                (id, name, created_by, created_by_name, created_at, view_json)
-            VALUES ('b', 'Bookmark', 'dev@example.com', 'Dev', '2026-01-02T03:04:05Z', 'not json')
+            INSERT INTO workspaces
+                (id, name, created_by, created_at, updated_at, document_json)
+            VALUES ('w', 'Workspace', 'dev@example.com', '2026-01-02T03:04:05Z',
+                    '2026-01-02T03:04:05Z', 'not json')
             "#,
         )
         .execute(backend.pool())
         .await;
-        assert!(refused.is_err(), "view_json must hold JSON, not any text");
+        assert!(
+            refused.is_err(),
+            "document_json must hold JSON, not any text"
+        );
+    }
+
+    /// A database from before the archive still holds its bookmark rows. The
+    /// open that archives the tables counts the rows first, which is the
+    /// number it logs, and keeps every row under the archived name.
+    #[tokio::test]
+    async fn opening_archives_the_bookmark_tables_after_counting_their_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lucida.db");
+        let url = DatabaseUrl::parse(&format!("sqlite://{}", path.display())).unwrap();
+        {
+            let options = SqliteConnectOptions::from_str(url.as_str())
+                .unwrap()
+                .create_if_missing(true);
+            let pool = SqlitePoolOptions::new()
+                .connect_with(options)
+                .await
+                .unwrap();
+            let mut before_archive = sqlx::migrate!("./migrations/sqlite");
+            before_archive.migrations = before_archive
+                .migrations
+                .iter()
+                .filter(|m| !m.description.contains("archive bookmarks"))
+                .cloned()
+                .collect::<Vec<_>>()
+                .into();
+            before_archive.run(&pool).await.unwrap();
+            for id in ["a", "b"] {
+                sqlx::query(
+                    "INSERT INTO bookmarks \
+                     (id, name, created_by, created_by_name, created_at, view_json) \
+                     VALUES (?, 'Bookmark', 'dev@example.com', 'Dev', \
+                     '2026-01-02T03:04:05Z', '{\"v\":1}')",
+                )
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+                sqlx::query(
+                    "INSERT INTO bookmark_datasets (bookmark_id, dataset_url) \
+                     VALUES (?, 'file:///data/a.zarr')",
+                )
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
+            assert_eq!(bookmarks_to_archive(&pool).await.unwrap(), Some(2));
+            pool.close().await;
+        }
+
+        let backend = SqliteStorageBackend::open(&url).await.unwrap();
+        assert_eq!(bookmarks_to_archive(backend.pool()).await.unwrap(), None);
+        for (live, archived) in [
+            ("bookmarks", "archived_bookmarks"),
+            ("bookmark_datasets", "archived_bookmark_datasets"),
+        ] {
+            let gone = sqlx::query(&format!("SELECT 1 FROM {live}"))
+                .fetch_optional(backend.pool())
+                .await;
+            assert!(gone.is_err(), "{live} is renamed away");
+            let kept: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {archived}"))
+                .fetch_one(backend.pool())
+                .await
+                .unwrap();
+            assert_eq!(kept, 2, "{archived} keeps every row");
+        }
+        // The child table's foreign key follows its parent to the new name.
+        let orphan = sqlx::query(
+            "INSERT INTO archived_bookmark_datasets (bookmark_id, dataset_url) \
+             VALUES ('no-such-bookmark', 'file:///data/a.zarr')",
+        )
+        .execute(backend.pool())
+        .await;
+        assert!(
+            orphan.is_err(),
+            "the archived child still references its parent"
+        );
     }
 
     #[tokio::test]

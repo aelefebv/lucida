@@ -447,3 +447,38 @@ describe("WorkspaceRoot — open link (/open?url=…)", () => {
     expect(window.history.length).toBe(entriesBefore);
   });
 });
+
+describe("WorkspaceRoot — a saved-view link off any workspace", () => {
+  it("lands on the dashboard and says the bookmark it names is gone", async () => {
+    window.history.replaceState({}, "", "/#b=550e8400-e29b-41d4-a716-446655440000");
+
+    render(<WorkspaceRoot />);
+
+    await screen.findByTestId("dashboard-mounted");
+    const notice = screen.getByTestId("bookmark-link-notice");
+    expect(notice.textContent).toContain("no longer keeps bookmarks");
+
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByTestId("bookmark-link-notice")).toBeNull();
+    expect(window.location.hash).toBe("");
+  });
+
+  it("says nothing on a bare dashboard visit", async () => {
+    window.history.replaceState({}, "", "/");
+
+    render(<WorkspaceRoot />);
+
+    await screen.findByTestId("dashboard-mounted");
+    expect(screen.queryByTestId("bookmark-link-notice")).toBeNull();
+  });
+
+  it("leaves a #b= link inside a workspace to the viewer", async () => {
+    openWorkspaceMock.mockResolvedValue(record({ id: "ws-linked" }));
+    window.history.replaceState({}, "", "/w/ws-linked#b=sv-1");
+
+    render(<WorkspaceRoot />);
+
+    await screen.findByTestId("app-mounted");
+    expect(screen.queryByTestId("bookmark-link-notice")).toBeNull();
+  });
+});
