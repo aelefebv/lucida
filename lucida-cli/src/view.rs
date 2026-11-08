@@ -9,7 +9,7 @@ use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessag
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{
     BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings, DisplayState, DocumentState,
-    FrameTarget, RenderMode, Scene,
+    RenderMode, Scene,
 };
 use lucida_core::view::ViewState;
 use lucida_core::viewer_profile::{FITTED_VIEWPORT, FrameError, ProfileCommandError, ProfileScene};
