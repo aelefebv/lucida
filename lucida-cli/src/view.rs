@@ -2400,8 +2400,7 @@ mod tests {
                 }
             },
             "registered_layouts": {},
-            "active_layout_ids": {},
-            "asset_catalogs": {}
+            "active_layout_ids": {}
         }))
         .unwrap()
     }
@@ -2775,8 +2774,7 @@ mod tests {
                 }
             },
             "registered_layouts": {},
-            "active_layout_ids": {},
-            "asset_catalogs": {}
+            "active_layout_ids": {}
         }))
         .unwrap()
     }

@@ -10,7 +10,7 @@ function sliceColdState(z: number): ColdStateMessage {
   identity[0] = identity[5] = identity[10] = identity[15] = 1;
   return {
     type: "coldState",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     datasetId: "ds-0",
     currentT: 0,
     currentZ: z,
@@ -18,16 +18,11 @@ function sliceColdState(z: number): ColdStateMessage {
     visibleRegion: { xyBoundsVox: [0, 0, 128, 128], zRangeVox: [z, z + 1], effectiveZoom: 1, sortCenterVox: null, frustumPlanes: null },
     wantedChunks: [{ memberId: "img:ch0", tier: "detail", chunkKeys: ["0/0/0/0/0/0", "0/0/0/0/0/1"] }],
     activeSet: [{
-      kind: "tile",
       entityId: "img",
       imageId: "img",
-      mode: "tiles-with-detail",
       levels: [{ level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] }],
       detailLevels: [0],
       coarseLevel: null,
-      parentGroupId: null,
-      proxyAvailable: false,
-      groupProxyAvailable: false,
       modelMatrix: identity,
       invModelMatrix: identity,
       displayStateByChannel: {},
@@ -61,6 +56,6 @@ describe("the wanted-set report", () => {
       type: "chunkResidency", memberId: "img:ch0", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "wrong-slice",
     });
     const missing = posts[1].type === "wantedSetDelta" ? posts[1].missing : [];
-    expect(missing.map((m) => (m.kind === "chunk" ? m.chunkKey : m.kind))).toEqual(["0/0/0/0/0/0", "0/0/0/0/0/1"]);
+    expect(missing.map((m) => m.chunkKey)).toEqual(["0/0/0/0/0/0", "0/0/0/0/0/1"]);
   });
 });

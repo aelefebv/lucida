@@ -29,8 +29,8 @@ export interface SceneView {
   readonly viewMode: ViewMode;
 }
 
-/** The epochs that can move what a saved view records. Annotations and the
- *  asset catalog can't, so their epochs are left out. */
+/** The epochs that can move what a saved view records. Annotations can't,
+ *  so their epoch is left out. */
 export interface ViewEpochs {
   readonly content: number;
   readonly layout: number;

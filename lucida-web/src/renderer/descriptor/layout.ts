@@ -10,27 +10,20 @@
  *   0:   modelMatrix         mat4x4<f32>     (64)
  *   64:  invModelMatrix      mat4x4<f32>     (64)
  *   128: channelMask         u32             (4)
- *   132: tileProxyPoolIndex  u32             (4)
- *   136: tileProxySlotIndex  u32             (4)
- *   140: groupProxyPoolIndex u32             (4)
- *   144: groupProxySlotIndex u32             (4)
- *   148: sampleFormat        u32             (4) — 0 = u16 integer texels, 1 = float32 bits
- *   152: _pad_proxy1         u32             (4)
- *   156: _pad_proxy2         u32             (4)
- *   160: tileProxyDims       vec3<u32>+pad   (16) — xyz=(Z,Y,X)
- *   176: groupProxyDims      vec3<u32>+pad   (16) — xyz=(Z,Y,X)
- *   192: contrastMin         f32             (4)
- *   196: contrastMax         f32             (4)
- *   200: gamma               f32             (4)
- *   204: opacity             f32             (4)
- *   208: colormapLutIndex    u32             (4)
- *   212: levelSourceCount    u32             (4) — populated `levelSources` slots
- *   216: colormapMode        u32             (4) — 0 = continuous ramp, 1 = categorical label
- *   220: labelOpacity        f32             (4) — overlay opacity in categorical mode
- *   224: levelSources        ChunkTierSource[4] (256) — resident levels, finest first
- *   480: coarseSource        ChunkTierSource (64)
+ *   132: sampleFormat        u32             (4) — 0 = u16 integer texels, 1 = float32 bits
+ *   136: contrastMin         f32             (4)
+ *   140: contrastMax         f32             (4)
+ *   144: gamma               f32             (4)
+ *   148: opacity             f32             (4)
+ *   152: colormapLutIndex    u32             (4)
+ *   156: levelSourceCount    u32             (4) — populated `levelSources` slots
+ *   160: colormapMode        u32             (4) — 0 = continuous ramp, 1 = categorical label
+ *   164: labelOpacity        f32             (4) — overlay opacity in categorical mode
+ *   168: _pad0, _pad1        u32 × 2         (8) — `ChunkTierSource` aligns to 16
+ *   176: levelSources        ChunkTierSource[4] (256) — resident levels, finest first
+ *   432: coarseSource        ChunkTierSource (64)
  *
- *   total = 544 bytes
+ *   total = 496 bytes
  *
  * `ChunkTierSource` (64B):
  *
@@ -55,41 +48,32 @@ export const DESCRIPTOR_MAX_LEVEL_SOURCES = 4;
 export const DESCRIPTOR_TIER_SOURCE_SIZE = 64;
 
 /** Byte offset of the `levelSources: array<ChunkTierSource, 4>` field within the entry. */
-export const DESCRIPTOR_LEVEL_SOURCES_OFFSET = 224;
+export const DESCRIPTOR_LEVEL_SOURCES_OFFSET = 176;
 
 export const DESCRIPTOR_ENTRY_SIZE =
   DESCRIPTOR_LEVEL_SOURCES_OFFSET +
   (DESCRIPTOR_MAX_LEVEL_SOURCES + 1) * DESCRIPTOR_TIER_SOURCE_SIZE;
 
-/** Shader-side sentinel for missing pool / slot. Matches `0xFFFFFFFFu`. */
-export const DESCRIPTOR_SENTINEL_INDEX = 0xffffffff;
-
 // Top-level field offsets (bytes)
 export const OFFSET_MODEL_MATRIX = 0;            // mat4x4<f32> (64)
 export const OFFSET_INV_MODEL_MATRIX = 64;       // mat4x4<f32> (64)
 export const OFFSET_CHANNEL_MASK = 128;          // u32
-export const OFFSET_TILE_PROXY_POOL_INDEX = 132; // u32
-export const OFFSET_TILE_PROXY_SLOT_INDEX = 136; // u32
-export const OFFSET_GROUP_PROXY_POOL_INDEX = 140;  // u32
-export const OFFSET_GROUP_PROXY_SLOT_INDEX = 144;  // u32
 /** How the entity's texels hold samples (`sampleFormatCode` in `dataTypeUtil.ts`). */
-export const OFFSET_SAMPLE_FORMAT = 148;         // u32
-export const OFFSET_PAD_PROXY1 = 152;            // u32 (pad)
-export const OFFSET_PAD_PROXY2 = 156;            // u32 (pad)
-export const OFFSET_TILE_PROXY_DIMS = 160;      // vec3<u32>+pad (16) — xyz=(Z,Y,X)
-export const OFFSET_GROUP_PROXY_DIMS = 176;       // vec3<u32>+pad (16) — xyz=(Z,Y,X)
-export const OFFSET_CONTRAST_MIN = 192;          // f32
-export const OFFSET_CONTRAST_MAX = 196;          // f32
-export const OFFSET_GAMMA = 200;                 // f32
-export const OFFSET_OPACITY = 204;               // f32
-export const OFFSET_COLORMAP_LUT_INDEX = 208;    // u32
+export const OFFSET_SAMPLE_FORMAT = 132;         // u32
+export const OFFSET_CONTRAST_MIN = 136;          // f32
+export const OFFSET_CONTRAST_MAX = 140;          // f32
+export const OFFSET_GAMMA = 144;                 // f32
+export const OFFSET_OPACITY = 148;               // f32
+export const OFFSET_COLORMAP_LUT_INDEX = 152;    // u32
 /** Number of populated `levelSources` slots (0..4), packed finest first. */
-export const OFFSET_LEVEL_SOURCE_COUNT = 212;    // u32
+export const OFFSET_LEVEL_SOURCE_COUNT = 156;    // u32
 /** 0 = continuous colormap ramp (intensity images); 1 = categorical
  *  label overlay (id → distinct color, id 0 transparent). */
-export const OFFSET_COLORMAP_MODE = 216;         // u32
+export const OFFSET_COLORMAP_MODE = 160;         // u32
 /** Overlay opacity used when `colormapMode` is categorical. */
-export const OFFSET_LABEL_OPACITY = 220;         // f32
+export const OFFSET_LABEL_OPACITY = 164;         // f32
+export const OFFSET_PAD0 = 168;                  // u32 (pad)
+export const OFFSET_PAD1 = 172;                  // u32 (pad)
 export const OFFSET_LEVEL_SOURCES = DESCRIPTOR_LEVEL_SOURCES_OFFSET;
 export const OFFSET_COARSE_SOURCE =
   DESCRIPTOR_LEVEL_SOURCES_OFFSET + DESCRIPTOR_MAX_LEVEL_SOURCES * DESCRIPTOR_TIER_SOURCE_SIZE;

@@ -6,7 +6,6 @@ use axum::Router;
 use axum::routing::{get, post};
 use clap::{Args, Parser, Subcommand};
 
-use lucida_server::admin::{self, admin_clear_proxy_cache};
 use lucida_server::auth;
 use lucida_server::deployment_theme::{self, DeploymentTheme};
 use lucida_server::health;
@@ -15,13 +14,12 @@ use lucida_server::origin::{self, OriginPolicy};
 use lucida_server::static_serve;
 use lucida_server::status;
 use lucida_server::storage;
-use lucida_server::{AppState, ProxyConfig, browse, workspace};
+use lucida_server::{AppState, GeneratedConfig, browse, workspace};
 use lucida_store::source_policy::{SourcePolicy, SourcePolicyConfig};
 
 // CLI supports legacy `lucida-server --data-dir /path` (no subcommand,
-// treated as `serve`) alongside explicit `serve` / `clear-proxy-cache`
-// subcommands. `args_conflicts_with_subcommands` keeps the legacy form
-// unambiguous.
+// treated as `serve`) alongside an explicit `serve` subcommand.
+// `args_conflicts_with_subcommands` keeps the legacy form unambiguous.
 #[derive(Parser, Debug)]
 #[command(name = "lucida-server", about = "Lucida collaborative imaging server")]
 #[command(version)] // pulls from Cargo.toml's [package].version at build time
@@ -40,31 +38,17 @@ struct Cli {
 enum Commands {
     /// Run the WebSocket server (default if no subcommand is given).
     Serve(Box<ServeArgs>),
-    /// Clear the on-disk proxy cache for one dataset URL or all datasets.
-    ClearProxyCache(ClearArgs),
 }
 
 #[derive(Args, Debug, Default)]
 struct ServeArgs {
     #[command(flatten)]
     sources: SourceArgs,
-    /// Override the proxy cache root (default: platform user cache dir).
-    ///
-    /// Also readable from `LUCIDA_PROXY_CACHE_DIR`. CLI flag wins.
-    #[arg(long, env = "LUCIDA_PROXY_CACHE_DIR")]
-    proxy_cache_dir: Option<PathBuf>,
-    /// Override the per-generator concurrency cap (default: NCPU/2).
-    ///
-    /// Also readable from `LUCIDA_PROXY_CONCURRENCY`. CLI flag wins.
-    #[arg(long, env = "LUCIDA_PROXY_CONCURRENCY")]
-    proxy_concurrency: Option<usize>,
-    /// Re-enable retired proxy fallback catalogs and asset generation.
-    #[arg(long, env = "LUCIDA_LEGACY_PROXY_ENABLED", default_value_t = false)]
-    legacy_proxy_enabled: bool,
     /// Enable server-generated coarse chunks.
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_ENABLED", default_value_t = true)]
     generated_coarse_enabled: bool,
-    /// Override the generated coarse derived-cache root.
+    /// Override the generated coarse derived-cache root (default: platform
+    /// user cache dir).
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_CACHE_DIR")]
     generated_coarse_cache_dir: Option<PathBuf>,
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_CONCURRENCY")]
@@ -129,17 +113,6 @@ fn source_policy_config(mode: auth::AuthMode, args: &SourceArgs) -> SourcePolicy
     }
 }
 
-#[derive(Args, Debug)]
-struct ClearArgs {
-    /// URL of the dataset to clear. If omitted, clears every dataset
-    /// subdirectory under the cache root.
-    #[arg(long)]
-    dataset: Option<String>,
-    /// Override the cache directory (default: platform user cache dir).
-    #[arg(long)]
-    cache_dir: Option<PathBuf>,
-}
-
 // LUCIDA_LOG_FORMAT={text,json} (default text) switches between
 // dev-friendly pretty-text and production JSON output. Unknown values
 // fall back to Text so a deploy-manifest typo doesn't break boot.
@@ -200,26 +173,15 @@ async fn main() -> std::io::Result<()> {
 
     match command {
         Commands::Serve(args) => run_serve(*args).await,
-        Commands::ClearProxyCache(args) => run_clear(args),
     }
 }
 
 async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
-    let proxy_cache_dir = args
-        .proxy_cache_dir
-        .unwrap_or_else(ProxyConfig::default_cache_dir);
-    let proxy_concurrency = args
-        .proxy_concurrency
-        .map(|n| n.max(1))
-        .unwrap_or_else(ProxyConfig::default_concurrency);
-
-    let proxy_config = ProxyConfig {
+    let generated_cache_dir_set = args.generated_coarse_cache_dir.is_some();
+    let generated_config = GeneratedConfig {
         generated_cache_dir: args
             .generated_coarse_cache_dir
-            .unwrap_or_else(|| proxy_cache_dir.join("generated-coarse")),
-        cache_dir: proxy_cache_dir,
-        concurrency: proxy_concurrency,
-        legacy_proxy_enabled: args.legacy_proxy_enabled,
+            .unwrap_or_else(GeneratedConfig::default_cache_dir),
         generated_enabled: args.generated_coarse_enabled,
         generated_concurrency: args
             .generated_coarse_concurrency
@@ -235,21 +197,26 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     };
     // Operational logs go through the configured tracing subscriber
     // so RUST_LOG filtering applies.
+    //
+    // Generated levels used to default to a directory under this variable.
+    // A deployment still setting it, and nothing newer, would otherwise lose
+    // its persistent cache without a word.
+    if !generated_cache_dir_set && std::env::var_os("LUCIDA_PROXY_CACHE_DIR").is_some() {
+        tracing::warn!(
+            generated_cache_dir = %generated_config.generated_cache_dir.display(),
+            hint = "set LUCIDA_GENERATED_COARSE_CACHE_DIR",
+            "config.proxy_cache_dir_ignored",
+        );
+    }
     tracing::info!(
-        cache_dir = %proxy_config.cache_dir.display(),
-        concurrency = proxy_config.concurrency,
-        legacy_enabled = proxy_config.legacy_proxy_enabled,
-        "proxy.config",
-    );
-    tracing::info!(
-        enabled = proxy_config.generated_enabled,
-        cache_dir = %proxy_config.generated_cache_dir.display(),
-        concurrency = proxy_config.generated_concurrency,
-        background_chunk_limit = proxy_config.generated_background_chunk_limit,
-        target_long_axis = proxy_config.generated_target_long_axis,
-        chunk_long_axis = proxy_config.generated_chunk_long_axis,
-        max_chunk_bytes = proxy_config.generated_max_chunk_bytes,
-        disk_budget_bytes = ?proxy_config.generated_disk_budget_bytes,
+        enabled = generated_config.generated_enabled,
+        cache_dir = %generated_config.generated_cache_dir.display(),
+        concurrency = generated_config.generated_concurrency,
+        background_chunk_limit = generated_config.generated_background_chunk_limit,
+        target_long_axis = generated_config.generated_target_long_axis,
+        chunk_long_axis = generated_config.generated_chunk_long_axis,
+        max_chunk_bytes = generated_config.generated_max_chunk_bytes,
+        disk_budget_bytes = ?generated_config.generated_disk_budget_bytes,
         "generated_coarse.config",
     );
 
@@ -385,7 +352,6 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     );
     let state = AppState {
         source_policy: Arc::clone(&source_policy),
-        proxy_config: proxy_config.clone(),
     };
 
     // The only place the server picks a database. Nothing downstream
@@ -467,7 +433,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let workspace_manager = Arc::new(
         workspace::WorkspaceManager::new_with_runtime_config(
             workspace_store,
-            proxy_config.clone(),
+            generated_config.clone(),
             workspace_runtime_config,
         )
         // A **Send report** arrives on a workspace socket, so the
@@ -583,7 +549,6 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // `/ws/workspaces/{id}`.
     let app_state_router = Router::new()
         .route("/api/browse", get(browse::browse_handler))
-        .route("/admin/clear-proxy-cache", post(admin_clear_proxy_cache))
         .with_state(state)
         .merge(authed_auth_router)
         .merge(inbox_router)
@@ -640,31 +605,6 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     Ok(())
 }
 
-fn run_clear(args: ClearArgs) -> std::io::Result<()> {
-    let cache_dir = args.cache_dir.unwrap_or_else(admin::default_cache_dir);
-    let outcome = admin::clear_proxy_cache(&cache_dir, args.dataset.as_deref())?;
-    match args.dataset {
-        Some(url) => {
-            eprintln!(
-                "cleared {} dataset for {} ({} files) under {}",
-                outcome.datasets,
-                url,
-                outcome.files,
-                cache_dir.display()
-            );
-        }
-        None => {
-            eprintln!(
-                "cleared {} datasets ({} files) under {}",
-                outcome.datasets,
-                outcome.files,
-                cache_dir.display()
-            );
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod cli_tests {
     use super::*;
@@ -678,8 +618,7 @@ mod cli_tests {
         let cli = parse(&[]);
         assert!(cli.command.is_none(), "bare invocation has no subcommand");
         assert!(cli.serve_args.sources.data_dir.is_empty());
-        assert!(cli.serve_args.proxy_cache_dir.is_none());
-        assert!(!cli.serve_args.legacy_proxy_enabled);
+        assert!(cli.serve_args.generated_coarse_cache_dir.is_none());
     }
 
     #[test]
@@ -695,12 +634,10 @@ mod cli_tests {
     #[test]
     fn explicit_serve_with_data_dir_parses() {
         let cli = parse(&["serve", "--data-dir", "/tmp/foo"]);
-        match cli.command.expect("serve subcommand") {
-            Commands::Serve(args) => {
-                assert_eq!(args.sources.data_dir, vec![PathBuf::from("/tmp/foo")]);
-            }
-            _ => panic!("expected Serve"),
-        }
+        let Some(Commands::Serve(args)) = cli.command else {
+            panic!("serve subcommand");
+        };
+        assert_eq!(args.sources.data_dir, vec![PathBuf::from("/tmp/foo")]);
     }
 
     #[test]
@@ -716,20 +653,18 @@ mod cli_tests {
             "--source-allow-bucket",
             "gs://team-data",
         ]);
-        match cli.command.expect("serve subcommand") {
-            Commands::Serve(args) => {
-                assert_eq!(
-                    args.sources.data_dir,
-                    vec![PathBuf::from("/srv/a"), PathBuf::from("/srv/b")]
-                );
-                assert_eq!(
-                    args.sources.source_allow_host,
-                    ["10.0.0.0/8", "files.internal"]
-                );
-                assert_eq!(args.sources.source_allow_bucket, ["gs://team-data"]);
-            }
-            _ => panic!("expected Serve"),
-        }
+        let Some(Commands::Serve(args)) = cli.command else {
+            panic!("serve subcommand");
+        };
+        assert_eq!(
+            args.sources.data_dir,
+            vec![PathBuf::from("/srv/a"), PathBuf::from("/srv/b")]
+        );
+        assert_eq!(
+            args.sources.source_allow_host,
+            ["10.0.0.0/8", "files.internal"]
+        );
+        assert_eq!(args.sources.source_allow_bucket, ["gs://team-data"]);
     }
 
     /// An enabled auth mode, as behind an authenticating perimeter, is
@@ -747,50 +682,6 @@ mod cli_tests {
                 restricted,
                 "{mode:?}"
             );
-        }
-    }
-
-    #[test]
-    fn legacy_proxy_flag_parses() {
-        let cli = parse(&["serve", "--legacy-proxy-enabled"]);
-        match cli.command.expect("serve subcommand") {
-            Commands::Serve(args) => {
-                assert!(args.legacy_proxy_enabled);
-            }
-            _ => panic!("expected Serve"),
-        }
-    }
-
-    #[test]
-    fn clear_proxy_cache_with_dataset_parses() {
-        let cli = parse(&[
-            "clear-proxy-cache",
-            "--cache-dir",
-            "/tmp/cache",
-            "--dataset",
-            "http://example.com/x",
-        ]);
-        match cli.command.expect("clear subcommand") {
-            Commands::ClearProxyCache(args) => {
-                assert_eq!(
-                    args.cache_dir.as_deref(),
-                    Some(std::path::Path::new("/tmp/cache"))
-                );
-                assert_eq!(args.dataset.as_deref(), Some("http://example.com/x"));
-            }
-            _ => panic!("expected ClearProxyCache"),
-        }
-    }
-
-    #[test]
-    fn clear_proxy_cache_without_dataset_parses() {
-        let cli = parse(&["clear-proxy-cache"]);
-        match cli.command.expect("clear subcommand") {
-            Commands::ClearProxyCache(args) => {
-                assert!(args.dataset.is_none());
-                assert!(args.cache_dir.is_none());
-            }
-            _ => panic!("expected ClearProxyCache"),
         }
     }
 }

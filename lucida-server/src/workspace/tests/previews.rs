@@ -39,7 +39,7 @@ async fn fixture() -> Fixture {
     }
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
     Fixture {
         store,

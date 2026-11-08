@@ -14,7 +14,7 @@ use lucida_content::url::DatasetLocation;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::protocol::{ClientMessage, ServerMessage};
 use lucida_protocol::{DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenStage};
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::auth::{
     AuthConfig, AuthMode, BearerToken, BearerTokenStore, DualCredentialExtractor,
     LoginSessionStore, MemoryBearerTokenStore, MemorySessionStore, PrincipalExtractor,
@@ -67,12 +67,11 @@ async fn start_server_with(root: &Path, source_policy: SourcePolicy) -> Rig {
         .create_workspace(&owner(), Some("Locations"))
         .await
         .unwrap();
-    let mut proxy_config = ProxyConfig::defaults();
-    proxy_config.cache_dir = root.join("proxies");
-    proxy_config.generated_cache_dir = root.join("generated-coarse");
-    proxy_config.generated_enabled = false;
+    let mut generated_config = GeneratedConfig::defaults();
+    generated_config.generated_cache_dir = root.join("generated-coarse");
+    generated_config.generated_enabled = false;
     let manager = Arc::new(
-        WorkspaceManager::new(storage.workspaces(), proxy_config)
+        WorkspaceManager::new(storage.workspaces(), generated_config)
             .with_source_policy(Arc::new(source_policy)),
     );
     let app: Router =

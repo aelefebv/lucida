@@ -33,7 +33,6 @@ function makeVolumeRenderer() {
   const renderer = {
     isCompiled: false,
     compiled,
-    setProxyTextures: vi.fn(),
     setColormapTexture: vi.fn(),
     setVolume: vi.fn(),
     setMatrices: vi.fn(),

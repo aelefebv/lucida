@@ -14,11 +14,10 @@ import { dispatchMessage } from "../../renderer/worker/dispatch.ts";
 import { createInitialState } from "../../renderer/worker/state.ts";
 import { createWantedSetPoster } from "../../renderer/worker/bootstrap.ts";
 import { UNTIMED } from "../../renderer/passTiming.ts";
-import { proxyDescriptorKey, type WorkerCtx } from "../../renderer/workerContext.ts";
+import type { WorkerCtx } from "../../renderer/workerContext.ts";
 import type {
   MainToWorkerMessage,
   MissingChunk,
-  MissingProxy,
   SliceRenderMultiPassMessage,
   WorkerToMainMessage,
 } from "../../renderer/workerProtocol.ts";
@@ -121,10 +120,6 @@ export class SimulatedWorker {
       getOrCreateLUT: () => { throw new Error("the simulated worker does not draw"); },
       post,
       postWantedSet: createWantedSetPoster(state, post),
-      lookupProxyDescriptor: (entityId, t, c) =>
-        state.proxyDescriptorsByEntity.get(proxyDescriptorKey(entityId, t, c)) ?? null,
-      lookupProxyPool: (datasetId, poolKey) =>
-        state.proxyPoolsByDataset.get(datasetId)?.get(poolKey) ?? null,
       lookupEntityDescriptor: (datasetId) => state.descriptorBuffersByDataset.get(datasetId) ?? null,
     };
   }
@@ -230,8 +225,8 @@ export class SimulatedWorker {
    * The worker reports its wanted set only after a cold state or an upload
    * that bounced, so its last report can be stale by the time a run settles.
    */
-  missingNow(datasetId: string): Array<MissingChunk | MissingProxy> {
-    let missing: Array<MissingChunk | MissingProxy> = [];
+  missingNow(datasetId: string): MissingChunk[] {
+    let missing: MissingChunk[] = [];
     createWantedSetPoster(this.ctx.state, (msg) => {
       if (msg.type === "wantedSetDelta") missing = msg.missing;
     })(datasetId);

@@ -18,7 +18,6 @@ import {
   emitPlanRequests,
   emptyPlanStats,
   initialPlanningState,
-  planProxyResidencyForInputs,
   type PlanningConfig,
 } from "./planning/index.ts";
 import { configStore } from "./planning/configStore.ts";
@@ -51,8 +50,6 @@ import type { SceneEpochs } from "./epochs.ts";
 import type { VisibleRegion } from "./viewport.ts";
 
 export type { MinimapChunkCoord } from "./planning/index.ts";
-import type { CpuCache } from "./fetch/index.ts";
-import type { ProxyRequest } from "./planning/index.ts";
 import type { ColdStateCauseKey } from "./upload/telemetry/coldState.ts";
 import { orchTelemetryActive } from "./upload/telemetry/active.ts";
 import { buildRoster } from "./upload/coldState/roster.ts";
@@ -67,37 +64,8 @@ import { traceRecorder } from "../trace/recorder.ts";
 export interface MemberRosterEntry {
   imageId: string;
   position: [number, number];
-  /**
-   * Entity id from the planning active set entry that produced this
-   * roster member. Forwarded to the GPU worker per-layer so it can look
-   * up the proxy descriptor for shader binding.
-   */
+  /** Entity id from the planning active set entry that produced this roster member. */
   entityId?: string;
-  /**
-   * Promotion mode from the planning active set entry. Drives the
-   * shader's `renderMode` branch (group-as-proxy direct sample vs
-   * detail+proxy fallback). Optional for backward compat.
-   */
-  mode?: "group-as-proxy" | "tiles-with-proxy-fallback" | "tiles-with-detail";
-  /**
-   * Optional precomputed world-space model matrix for the `[0,1]^3` unit
-   * cube that bounds this member. When present, the render path uses it
-   * instead of querying `scene.member_model_matrix`. Used by
-   * `group-as-proxy` entries because groups aren't in `derived.members`
-   * and therefore have no native model matrix. Column-major 4×4.
-   * `invModelMatrix` is the matching inverse.
-   */
-  modelMatrix?: Float32Array;
-  invModelMatrix?: Float32Array;
-  /**
-   * Optional 2D world-space footprint of the member (in voxel units, the
-   * same coordinate frame as `position`). When present, the slice path
-   * uses these instead of the dataset's per-image dataW/dataH for layer
-   * sizing — necessary for synthesized `group-as-proxy` entries whose
-   * footprint spans multiple tile images.
-   */
-  dataW?: number;
-  dataH?: number;
 }
 
 export interface TickCoordinatorResult {
@@ -361,12 +329,9 @@ function isStructural(causes: readonly ColdStateCauseKey[]): boolean {
   return (
     causes.includes("content") ||
     causes.includes("layout") ||
-    causes.includes("asset") ||
     causes.includes("manifest")
   );
 }
-
-export { synthesizeGroupRosterEntry } from "./upload/coldState/roster.ts";
 
 export class TickCoordinator {
   private readonly uploader: Uploader;
@@ -427,9 +392,7 @@ export class TickCoordinator {
    * Per-dataset cache of tile model matrices, reused while placement is
    * unchanged. They come from `scene.member_model_matrix`, which has no
    * camera input, so a view move leaves them identical. Keyed by an epoch
-   * fingerprint so a content, layout, or asset change discards them.
-   * `group-as-proxy` matrices are never cached because they derive from the
-   * visible child-tile set, which a view move changes.
+   * fingerprint so a content or layout change discards them.
    */
   private readonly matrixCacheByDataset = new Map<string, {
     epochKey: string;
@@ -440,7 +403,7 @@ export class TickCoordinator {
    * {@link buildPlanningSnapshot}: parsed `member_positions` and the
    * `imageSpecById` / `parentByEntityId` manifest maps. A view move leaves
    * all three identical. An entry is valid only while both keys match:
-   *   - `epochKey`, the content|layout|asset fingerprint. A reflow or
+   *   - `epochKey`, the content|layout fingerprint. A reflow or
    *     add/remove that moves placement bumps it.
    *   - `manifestRef`, the `ds.manifest` reference. Progressively generated
    *     levels swap in a new manifest object with no epoch bump, so
@@ -545,11 +508,6 @@ export class TickCoordinator {
       layout: rawEpochs.layout,
       view: rawEpochs.view,
       selection: rawEpochs.selection,
-      // Compat for WASM builds without the `asset_epoch()` binding.
-      asset:
-        typeof ctx.scene.asset_epoch === "function"
-          ? ctx.scene.asset_epoch()
-          : (rawEpochs.asset ?? 0),
       request: this.requestEpoch,
     };
 
@@ -564,7 +522,6 @@ export class TickCoordinator {
       if (currentEpochs.layout !== last.layout) causes.push("layout");
       if (currentEpochs.view !== last.view) causes.push("view");
       if (currentEpochs.selection !== last.selection) causes.push("selection");
-      if (currentEpochs.asset !== last.asset) causes.push("asset");
       if (this.manifestReplacedSinceRebuild(ctx)) causes.push("manifest");
       if (this.minimapHasUnplannedChunks(minimapPendingFetch)) causes.push("minimap");
       isHit = causes.length === 0;
@@ -673,8 +630,7 @@ export class TickCoordinator {
       const layer = layers.get(dsId);
 
       // See `snapshotInputCacheByDataset` for why both keys are checked.
-      const snapshotInputEpochKey =
-        `${currentEpochs.content}|${currentEpochs.layout}|${currentEpochs.asset}`;
+      const snapshotInputEpochKey = `${currentEpochs.content}|${currentEpochs.layout}`;
       let snapshotInputs = this.snapshotInputCacheByDataset.get(dsId);
       if (
         !snapshotInputs ||
@@ -724,7 +680,6 @@ export class TickCoordinator {
         datasetId: dsId,
         dataset: ds,
         layer,
-        assetCatalog: ctx.assetCatalog.snapshot(),
         minimapPending: minimapPendingFetch,
         mode: ctx.mode as "slice" | "volume",
         currentEpochs,
@@ -764,7 +719,6 @@ export class TickCoordinator {
         ctx.client.datasetLevels(dsId)?.displayed ?? null,
       );
 
-
       plannedDatasets.push({
         dsId,
         dsSettings,
@@ -782,30 +736,6 @@ export class TickCoordinator {
     // that no longer plan (turned invisible / scrolled fully out) drop out.
     this.lastRebuildByDataset.clear();
 
-    const proxyResidency = planProxyResidencyForInputs({
-      inputs: plannedDatasets.map((planned) => ({
-        snapshot: planned.snapshot,
-        activeSet: planned.result.activeSet,
-        proxyRequests: planned.result.proxyRequests,
-      })),
-      config: planningConfig,
-    });
-
-    const proxyRequestsByDataset = new Map<string, ProxyRequest[]>();
-    for (const req of proxyResidency.admittedProxyRequests) {
-      const list = proxyRequestsByDataset.get(req.datasetId) ?? [];
-      list.push(req);
-      proxyRequestsByDataset.set(req.datasetId, list);
-    }
-
-    const desiredProxyKeysByDataset = new Map<string, Set<string>>();
-    for (const key of proxyResidency.desiredProxyKeys) {
-      const datasetId = key.split("|", 1)[0];
-      const set = desiredProxyKeysByDataset.get(datasetId) ?? new Set<string>();
-      set.add(key);
-      desiredProxyKeysByDataset.set(datasetId, set);
-    }
-
     const admissions = admitDatasetPlans(
       ctx,
       plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
@@ -819,16 +749,10 @@ export class TickCoordinator {
         shortfall: admission.shortfall,
         coarseLoanBytes: admission.borrowed,
       };
-      const budgetedProxyRequests = proxyRequestsByDataset.get(dsId) ?? [];
-      const budgetedResult: RequestPlan = {
-        ...result,
-        proxyRequests: budgetedProxyRequests,
-      };
-      this._lastPlanByDataset.set(dsId, budgetedResult);
+      this._lastPlanByDataset.set(dsId, result);
 
       // Build the member roster and per-entity matrix map in one walk.
-      const matrixEpochKey =
-        `${currentEpochs.content}|${currentEpochs.layout}|${currentEpochs.asset}`;
+      const matrixEpochKey = `${currentEpochs.content}|${currentEpochs.layout}`;
       let matrixCacheEntry = this.matrixCacheByDataset.get(dsId);
       if (!matrixCacheEntry || matrixCacheEntry.epochKey !== matrixEpochKey) {
         matrixCacheEntry = { epochKey: matrixEpochKey, matrices: new Map() };
@@ -866,7 +790,6 @@ export class TickCoordinator {
             coarse: planningConfig.coarseRenderRadiusView,
           },
           epochs: result.epochs,
-          desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
           matricesByEntity,
           layer,
         });
@@ -900,7 +823,6 @@ export class TickCoordinator {
             coarse: planningConfig.coarseRenderRadiusView,
           },
           epochs: result.epochs,
-          desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
           matricesByEntity,
           layer,
         });
@@ -941,13 +863,12 @@ export class TickCoordinator {
           ? [...result.requests, ...labelRequests]
           : result.requests;
 
-      // Submit chunks + proxies in a single call so they don't cancel
+      // Submit image and label chunks in a single call so they don't cancel
       // each other. Cancellation contract: a request omitted by the
       // next plan has its in-flight fetch aborted.
       ctx.cpuCache.submit({
         requests: requestsWithLabels,
         activeSet: result.activeSet,
-        proxyRequests: budgetedProxyRequests,
         epochs: result.epochs,
         stats: result.stats,
         // `nextState` is required on RequestPlan but unused by submit();
@@ -956,7 +877,6 @@ export class TickCoordinator {
         shortfall: result.shortfall,
         coarseLoanBytes: result.coarseLoanBytes,
       });
-
 
       // Capture this dataset's display-only fast-path signature: the
       // display state now on the worker, plus every non-display signal a
@@ -969,7 +889,6 @@ export class TickCoordinator {
         nonDisplayKey: nonDisplayKeyForDataset(dsSettings),
       });
     }
-
 
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
@@ -1057,7 +976,7 @@ export class TickCoordinator {
    * non-display signal must match the captured baseline and the settings
    * fingerprint keeps unknown fields, so any other change fails the proof.
    * When it fires it pushes a descriptor patch and reuses the cached roster,
-   * with no plan(), roster, submit, or proxy residency.
+   * with no plan(), roster, or submit.
    *
    * Returns `true` when it handled the tick. On `false` no worker message is
    * sent.
@@ -1190,8 +1109,7 @@ export class TickCoordinator {
       return false;
     }
 
-    // Slice view only: the volume path's proxy residency keys on T in ways
-    // this compact patch does not cover.
+    // Slice view only, the one mode this compact patch is proven against.
     const scalars = this.lastRebuildScalars;
     const mode = ctx.mode as "slice" | "volume";
     if (mode !== "slice" || scalars.mode !== "slice") return false;
@@ -1261,11 +1179,9 @@ export class TickCoordinator {
     // Re-emit requests from the cached active set with only the selection
     // (and z-range, on a Z move) changed. This skips the O(N) `view_query`
     // and `member_positions` serde and `buildActiveSet`, yet yields the same
-    // requests a full `plan()` would. `assetCatalog.snapshot()` is
-    // dataset-agnostic, so one snapshot serves every dataset.
+    // requests a full `plan()` would.
     const scrubRequestEpoch = currentEpochs.request + 1;
     const scrubEpochs: SceneEpochs = { ...currentEpochs, request: scrubRequestEpoch };
-    const assetCatalog = ctx.assetCatalog.snapshot();
     interface ScrubPlanned {
       dsId: string;
       dsSettings: DatasetSettings | undefined;
@@ -1274,7 +1190,6 @@ export class TickCoordinator {
       selection: SelectionState;
       planningState: PlanningState;
       requests: ChunkRequest[];
-      proxyRequests: ProxyRequest[];
       stats: PlanStats;
     }
     const planned: ScrubPlanned[] = perDataset.map((pd) => {
@@ -1296,11 +1211,10 @@ export class TickCoordinator {
         entities: pd.entities,
         visibleRegion,
         selection,
-        assetCatalog,
         minimapPending: minimapPendingFetch,
       };
       const stats = emptyPlanStats();
-      const { requests, proxyRequests } = emitPlanRequests(
+      const requests = emitPlanRequests(
         pd.planningState.previousActiveSet,
         snapshot,
         stats,
@@ -1315,33 +1229,9 @@ export class TickCoordinator {
         selection,
         planningState: pd.planningState,
         requests,
-        proxyRequests,
         stats,
       };
     });
-
-    // Budget proxy residency once (fresh keys for the new selection).
-    const proxyResidency = planProxyResidencyForInputs({
-      inputs: planned.map((p) => ({
-        snapshot: p.snapshot,
-        activeSet: p.planningState.previousActiveSet,
-        proxyRequests: p.proxyRequests,
-      })),
-      config: planningConfig,
-    });
-    const proxyRequestsByDataset = new Map<string, ProxyRequest[]>();
-    for (const req of proxyResidency.admittedProxyRequests) {
-      const list = proxyRequestsByDataset.get(req.datasetId) ?? [];
-      list.push(req);
-      proxyRequestsByDataset.set(req.datasetId, list);
-    }
-    const desiredProxyKeysByDataset = new Map<string, Set<string>>();
-    for (const key of proxyResidency.desiredProxyKeys) {
-      const datasetId = key.split("|", 1)[0];
-      const set = desiredProxyKeysByDataset.get(datasetId) ?? new Set<string>();
-      set.add(key);
-      desiredProxyKeysByDataset.set(datasetId, set);
-    }
 
     // Advance the fetch lifecycle once. The delivery ledger stays: the worker
     // reports any slot the new T/Z leaves stale. The active set is unchanged,
@@ -1358,12 +1248,10 @@ export class TickCoordinator {
         ctx, p.dsId, p.selection, p.visibleRegion, p.requests, this.requestEpoch,
       );
 
-      const budgetedProxyRequests = proxyRequestsByDataset.get(p.dsId) ?? [];
       this._lastPlanByDataset.set(p.dsId, {
         requests: p.requests,
         activeSet: p.planningState.previousActiveSet,
         epochs: scrubEpochs,
-        proxyRequests: budgetedProxyRequests,
         stats: p.stats,
         nextState: p.planningState,
       });
@@ -1385,7 +1273,6 @@ export class TickCoordinator {
       ctx.cpuCache.submit({
         requests: requestsWithLabels,
         activeSet: p.planningState.previousActiveSet,
-        proxyRequests: budgetedProxyRequests,
         epochs: scrubEpochs,
         stats: p.stats,
         nextState: p.planningState,
@@ -1400,7 +1287,6 @@ export class TickCoordinator {
         currentZ: p.selection.z,
         requests: p.requests,
         visibleRegion: p.visibleRegion,
-        desiredProxyKeys: desiredProxyKeysByDataset.get(p.dsId) ?? new Set(),
         epochs: scrubEpochs,
       });
 
@@ -1558,48 +1444,5 @@ export class TickCoordinator {
    */
   hasPendingRebuild(): boolean {
     return this.pendingDeferredRebuild;
-  }
-
-  /**
-   * Debug helper: synthesize a single-proxy `RequestPlan` and submit it
-   * to CpuCache. Exposed on `window.__orch.tickCoordinator` by App.tsx
-   * for dev-console invocation.
-   */
-  requestTestProxy(
-    cpuCache: CpuCache,
-    datasetId: string,
-    entityId: string,
-    imageId: string,
-    kind: "GroupProxy3D" | "TileProxy3D",
-    t: number,
-    c: number,
-  ): void {
-    const proxyRequest: ProxyRequest = {
-      datasetId,
-      entityId,
-      imageId,
-      kind,
-      t,
-      c,
-      priority: 0,
-    };
-    const epochs: SceneEpochs = this.lastEpochs ?? {
-      content: 0,
-      layout: 0,
-      view: 0,
-      selection: 0,
-      asset: 0,
-      request: 0,
-    };
-    cpuCache.submit({
-      requests: [],
-      activeSet: [],
-      proxyRequests: [proxyRequest],
-      epochs,
-      stats: emptyPlanStats(),
-      // submit() doesn't read nextState; placeholder so the literal
-      // satisfies RequestPlan's contract.
-      nextState: initialPlanningState(),
-    });
   }
 }

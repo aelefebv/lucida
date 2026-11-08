@@ -9,7 +9,6 @@ import {
   sourceChunkFailure,
   type ChunkFailureKind,
   type ContentSource,
-  type FetchProxyResult,
   type FetchRequest,
   type FetchResult,
   type LabelSink,
@@ -132,11 +131,6 @@ export class SimulatedSource implements ContentSource {
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
     });
-  }
-
-  fetchProxy(): Promise<FetchProxyResult> {
-    // The fixtures publish no proxy assets, so nothing should ask for one.
-    return Promise.reject(new FetchError("the simulated source serves no proxy assets", { kind: "permanent" }));
   }
 
   handleBinary(): void {}

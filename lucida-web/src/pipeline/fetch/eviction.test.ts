@@ -13,7 +13,7 @@ import type { SceneEpochs } from "../epochs.ts";
 // Helpers
 
 const ZERO_EPOCHS: SceneEpochs = {
-  content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
+  content: 0, layout: 0, view: 0, selection: 0, request: 0,
 };
 
 /** A plan tick no entry was seen at, so nothing is wanted. */
@@ -85,12 +85,12 @@ describe("LRUPolicy", () => {
     expect(policy.selectVictims(entries, 250).map(v => v.chunkKey)).toEqual(["a", "b", "c"]);
   });
 
-  it("works with the generic EvictableEntry shape (proxy adapter)", () => {
-    interface ProxyShim extends EvictableEntry {
+  it("works with any EvictableEntry shape", () => {
+    interface MinimalEntry extends EvictableEntry {
       key: string;
     }
-    const policy = new LRUPolicy<ProxyShim>();
-    const entries: ProxyShim[] = [
+    const policy = new LRUPolicy<MinimalEntry>();
+    const entries: MinimalEntry[] = [
       { insertedAt: 2, sizeBytes: 50, key: "c" },
       { insertedAt: 0, sizeBytes: 50, key: "a" },
       { insertedAt: 1, sizeBytes: 50, key: "b" },

@@ -53,7 +53,6 @@ describe("DevControls — planning config rendering", () => {
     // Priority weights.
     expect(screen.getByText(/Importance weight/)).toBeTruthy();
     expect(screen.getByText(/Distance weight/)).toBeTruthy();
-    expect(screen.getByText(/Group-proxy priority bump/)).toBeTruthy();
     expect(screen.getByText(/Detail render radius/)).toBeTruthy();
     expect(screen.getByText(/Coarse render radius/)).toBeTruthy();
 
@@ -193,8 +192,8 @@ describe("DevControls — cross-constraint warnings", () => {
     render(<DevControls />);
     await user.click(screen.getByRole("button", { name: /show/i }));
 
-    // Push DETAIL lane offset above PROXY lane offset (default 500 vs 1000)
-    // by setting DETAIL to 2000.
+    // Push DETAIL lane offset above PREFETCH lane offset (default 500 vs
+    // 1500) by setting DETAIL to 2000.
     fireEvent.change(
       screen.getByLabelText(/DETAIL lane offset.*slider/i),
       { target: { value: "2000" } },

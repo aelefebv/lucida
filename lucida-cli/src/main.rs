@@ -39,9 +39,8 @@ use lucida_protocol::DatasetSourceHealth;
 use serde_json::Value;
 
 use crate::admin::{
-    AdminClearProxyCacheOutput, AdminClient, AdminWorkspaceDetailsOutput,
-    AdminWorkspaceOwnerOutput, AdminWorkspaceSearchOutput, REMOTE_ADMIN_SCOPE,
-    format_admin_clear_proxy_cache_human, format_admin_workspace_details_human,
+    AdminClient, AdminWorkspaceDetailsOutput, AdminWorkspaceOwnerOutput,
+    AdminWorkspaceSearchOutput, REMOTE_ADMIN_SCOPE, format_admin_workspace_details_human,
     format_admin_workspace_owner_human, format_admin_workspace_search_human,
 };
 use crate::auth::{
@@ -466,12 +465,6 @@ enum AdminCommand {
     Workspace {
         #[command(subcommand)]
         command: AdminWorkspaceCommand,
-    },
-    /// Clear the remote server proxy cache
-    ClearProxyCache {
-        /// Dataset URL to clear. Omit to clear every cached dataset.
-        #[arg(long)]
-        dataset: Option<String>,
     },
 }
 
@@ -2925,20 +2918,6 @@ async fn emit_admin_command(
                 })?;
             }
         },
-        AdminCommand::ClearProxyCache { dataset } => {
-            let result = client.clear_proxy_cache(dataset.as_deref()).await?;
-            let output_payload = AdminClearProxyCacheOutput {
-                scope: REMOTE_ADMIN_SCOPE,
-                server,
-                dataset: dataset.clone(),
-                cleared: result.cleared,
-                datasets: result.datasets,
-                files: result.files,
-            };
-            output.print_either(&output_payload, || {
-                format_admin_clear_proxy_cache_human(&output_payload)
-            })?;
-        }
     }
 
     Ok(())
@@ -5197,19 +5176,6 @@ mod tests {
                 },
             }
         ));
-
-        let clear = parse(&[
-            "admin",
-            "clear-proxy-cache",
-            "--dataset",
-            "file:///data/demo.ome.zarr",
-        ]);
-        match clear.command {
-            Command::Admin {
-                command: AdminCommand::ClearProxyCache { dataset },
-            } => assert_eq!(dataset.as_deref(), Some("file:///data/demo.ome.zarr")),
-            _ => panic!("expected admin clear-proxy-cache"),
-        }
     }
 
     #[test]

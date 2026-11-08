@@ -84,7 +84,7 @@ describe("RenderClient destroy", () => {
 
   it("times each viewport frame from dispatch to the worker's frameDone", () => {
     const { client, worker } = makeReadyClient();
-    const epochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
+    const epochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
     client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
     vi.advanceTimersByTime(5);
     client.volumeRenderMultiPass(noLayers, invViewProj, eye, 10, 10, 10, 10, epochs);

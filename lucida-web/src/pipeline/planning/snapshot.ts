@@ -9,7 +9,6 @@ import type { WasmScene } from "lucida-core";
 import type { ImageSpec, DatasetManifest } from "../../manifestTypes.ts";
 import { shownChannels, type ResolvedLayer } from "../../resolvedLayers.ts";
 import type {
-  AssetCatalogSnapshot,
   EntitySnapshot,
   MinimapChunkCoord,
   PlanningSnapshot,
@@ -71,7 +70,6 @@ export interface BuildPlanningSnapshotArgs {
   dataset: SnapshotDatasetEntry;
   /** The scene's resolved layer: the channels to plan, and the clamped t and z. */
   layer: ResolvedLayer | undefined;
-  assetCatalog: AssetCatalogSnapshot;
   /**
    * Forwarded verbatim into {@link PlanningSnapshot.minimapPending}. Pass
    * `new Map()` for no minimap requests.
@@ -87,8 +85,8 @@ export interface BuildPlanningSnapshotArgs {
    * view-only replans, to skip the `member_positions` parse and the
    * manifest-map rebuilds. Each is optional; an absent one is computed
    * here. A provided value must equal what this builder would compute for
-   * the current content, layout, and asset epochs, or tile positions and
-   * parent edges go wrong.
+   * the current content and layout epochs, or tile positions and parent
+   * edges go wrong.
    */
   precomputed?: {
     /** Parsed `member_positions(datasetId)` — entityId → 2D layout position. */
@@ -132,7 +130,6 @@ export function buildPlanningSnapshot(
     datasetId,
     dataset,
     layer,
-    assetCatalog,
     minimapPending,
     mode,
     currentEpochs,
@@ -231,7 +228,6 @@ export function buildPlanningSnapshot(
     entities,
     visibleRegion,
     selection,
-    assetCatalog,
     minimapPending,
   };
 

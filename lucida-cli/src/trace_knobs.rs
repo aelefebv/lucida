@@ -101,18 +101,6 @@ pub const KNOBS: &[Knob] = &[
         help: "Coefficient on a chunk's distance from the view center",
     },
     Knob {
-        flag: "group-proxy-priority-bump",
-        label: "Group-proxy priority bump",
-        field: "groupProxyPriorityBump",
-        store: KnobStore::Planning,
-        value_name: "BUMP",
-        integer: true,
-        megabytes: false,
-        min: 0.0,
-        max: Some(500.0),
-        help: "Priority added to a parent-group proxy request, pushing it below per-tile proxies",
-    },
-    Knob {
         flag: "detail-render-radius-view",
         label: "Detail render radius (view)",
         field: "detailRenderRadiusView",
@@ -137,18 +125,6 @@ pub const KNOBS: &[Knob] = &[
         help: "Coarse render radius as a multiple of the visible region; 2 disables the filter",
     },
     Knob {
-        flag: "proxy-gpu-budget-bytes",
-        label: "Proxy GPU budget (bytes)",
-        field: "proxyResidencyBudgetBytes",
-        store: KnobStore::Planning,
-        value_name: "BYTES",
-        integer: true,
-        megabytes: false,
-        min: 16.0 * MIB,
-        max: Some(512.0 * MIB),
-        help: "GPU proxy residency budget, in bytes",
-    },
-    Knob {
         flag: "minimap-lane-offset",
         label: "MINIMAP lane offset",
         field: "minimapLaneOffset",
@@ -158,7 +134,7 @@ pub const KNOBS: &[Knob] = &[
         megabytes: false,
         min: 0.0,
         max: Some(5000.0),
-        help: "Priority offset of the minimap lane. The canonical order is MINIMAP < DETAIL < PROXY < PREFETCH < COARSE",
+        help: "Priority offset of the minimap lane. The canonical order is MINIMAP < DETAIL < PREFETCH < COARSE",
     },
     Knob {
         flag: "detail-lane-offset",
@@ -171,18 +147,6 @@ pub const KNOBS: &[Knob] = &[
         min: 0.0,
         max: Some(5000.0),
         help: "Priority offset of the detail lane",
-    },
-    Knob {
-        flag: "proxy-lane-offset",
-        label: "PROXY lane offset",
-        field: "proxyLaneOffset",
-        store: KnobStore::Planning,
-        value_name: "OFFSET",
-        integer: true,
-        megabytes: false,
-        min: 0.0,
-        max: Some(5000.0),
-        help: "Priority offset of the proxy lane",
     },
     Knob {
         flag: "prefetch-lane-offset",
@@ -615,7 +579,7 @@ mod tests {
     fn every_panel_knob_is_a_flag_named_by_its_label_and_nothing_else_is() {
         let panel = panel_knobs();
         assert!(
-            panel.len() >= 16,
+            panel.len() >= 13,
             "the panel declares {} knobs",
             panel.len()
         );

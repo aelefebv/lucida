@@ -1,7 +1,7 @@
 /**
  * The render worker's one GPU budget. Every holder counts against a total
- * fitted to the device: chunk, label, and proxy pools, the viewport's render
- * targets, and the minimap's textures.
+ * fitted to the device: chunk and label pools, the viewport's render targets,
+ * and the minimap's textures.
  *
  * Chunk pools start one row or layer deep and grow while the total has room,
  * so slots the planner no longer wants stay resident as fallback for as long
@@ -53,8 +53,6 @@ import { parseCompositeKey } from "../chunkKeys.ts";
 import { wantedChunksFor } from "../wantedChunks.ts";
 import { gpuLedgerLine } from "./gpuLedger.ts";
 
-/** Bytes one `r16uint` proxy texel holds. */
-const PROXY_BYTES_PER_TEXEL = 2;
 
 /** What every holder has on the GPU now, against the total. */
 export function measureGpuMemory(state: RendererState): GpuMemoryReport {
@@ -83,22 +81,14 @@ export function measureGpuMemory(state: RendererState): GpuMemoryReport {
     labelBytes += labelSlicePoolBytes(pool);
     atlases++;
   }
-  let proxyBytes = 0;
-  for (const pools of state.proxyPoolsByDataset.values()) {
-    for (const pool of pools.values()) {
-      const [dz, dy, dx] = pool.slotDims;
-      proxyBytes += pool.slotsX * dx * pool.slotsY * dy * pool.slotsZ * dz * PROXY_BYTES_PER_TEXEL;
-      atlases++;
-    }
-  }
+
   const targetBytes = gpuLedgerLine("viewportTargets") + gpuLedgerLine("depth");
   const minimapBytes = gpuLedgerLine("minimapTextures") + gpuLedgerLine("minimapTargets");
   return {
     budgetBytes: state.gpuTotalBytes,
-    bytes: chunkBytes + labelBytes + proxyBytes + targetBytes + minimapBytes,
+    bytes: chunkBytes + labelBytes + targetBytes + minimapBytes,
     chunkBytes,
     labelBytes,
-    proxyBytes,
     targetBytes,
     minimapBytes,
     atlases,
@@ -118,7 +108,7 @@ export function postGpuMemoryIfChanged(ctx: WorkerCtx): void {
   const report = measureGpuMemory(ctx.state);
   // Until the first report the page knows of nothing held, which a worker
   // holding nothing has no reason to repeat.
-  const last = ctx.state.gpuMemoryPosted ?? { ...report, bytes: 0, chunkBytes: 0, labelBytes: 0, proxyBytes: 0,
+  const last = ctx.state.gpuMemoryPosted ?? { ...report, bytes: 0, chunkBytes: 0, labelBytes: 0,
     targetBytes: 0, minimapBytes: 0, atlases: 0, slotsHeld: 0, slots: 0, overviewsRefused: 0 };
   if (!(Object.keys(report) as Array<keyof GpuMemoryReport>).every((key) => last[key] === report[key])) {
     ctx.state.gpuMemoryPosted = report;

@@ -86,14 +86,13 @@ COPY lucida-cli/      ./lucida-cli/
 COPY lucida-content/  ./lucida-content/
 COPY lucida-core/     ./lucida-core/
 COPY lucida-protocol/ ./lucida-protocol/
-COPY lucida-proxy/    ./lucida-proxy/
 COPY lucida-py/       ./lucida-py/
 COPY lucida-server/   ./lucida-server/
 COPY lucida-store/    ./lucida-store/
 
 # Build the server binary (release). `-p lucida-server` keeps cargo from
 # walking other workspace members' bin targets unnecessarily; the dep
-# graph still pulls in lucida-core/-content/-protocol/-proxy/-store as
+# graph still pulls in lucida-core/-content/-protocol/-store as
 # library deps. `--locked` fails the build if Cargo.lock is out of sync
 # with the manifests rather than re-resolving deps at image build time.
 RUN cargo build --locked --release -p lucida-server

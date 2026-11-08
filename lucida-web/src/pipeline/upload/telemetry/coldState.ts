@@ -26,7 +26,6 @@ export type ColdStateCauseKey =
   | "layout"
   | "view"
   | "selection"
-  | "asset"
   | "manifest"
   | "minimap";
 

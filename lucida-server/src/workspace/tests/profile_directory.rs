@@ -68,7 +68,7 @@ fn cookie(person: &Person) -> String {
 async fn fresh_manager() -> Arc<WorkspaceManager> {
     Arc::new(WorkspaceManager::new(
         Arc::new(fresh_store().await),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ))
 }
 

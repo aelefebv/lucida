@@ -1,8 +1,6 @@
-/** Canonical encoding for the chunk and proxy atlas pool keys. */
+/** Canonical encoding for the chunk atlas pool keys. */
 
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
-
-export { proxyPoolKey } from "./proxyAtlas.ts";
 
 /**
  * Chunk-pool key for the worker's shared atlas pools, one per channel.

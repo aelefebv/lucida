@@ -11,7 +11,6 @@ import {
   MINIMAP_SEED_FAST_MAX_CHUNKS,
   MINIMAP_SEED_BULK_LANE_OFFSET,
   COARSE_LANE_OFFSET,
-  PROXY_LANE_OFFSET,
   DETAIL_LANE_OFFSET,
   PREFETCH_LANE_OFFSET,
   chunkOutsideFrustum,
@@ -22,7 +21,6 @@ import {
   IMPORTANCE_WEIGHT,
   DISTANCE_WEIGHT,
   DEPTH_BIAS_VIEW,
-  GROUP_PROXY_PRIORITY_BUMP,
   RENDER_RADIUS_DISABLED_VIEW,
   DEFAULT_PLANNING_CONFIG,
   mergeConfig,
@@ -35,27 +33,10 @@ import type {
   PlanningState,
   SelectionState,
   PlanningSnapshot,
-  AssetCatalogSnapshot,
-  ProxyKind,
 } from "./planning/index.ts";
 import type { VisibleRegion } from "./viewport.ts";
 import type { LevelGeometry } from "../manifestTypes.ts";
 import { sliceChunkZ } from "../renderer/slicePlane.ts";
-
-// ---------------------------------------------------------------------------
-// Catalog helper
-// ---------------------------------------------------------------------------
-
-/** Build an AssetCatalogSnapshot from `(entityId, kinds[])` pairs. */
-function makeCatalog(
-  entries: [string, ProxyKind[]][],
-): AssetCatalogSnapshot {
-  const byEntity: AssetCatalogSnapshot["byEntity"] = new Map();
-  for (const [entityId, kinds] of entries) {
-    byEntity.set(entityId, { kinds: new Set(kinds), footprints: new Map() });
-  }
-  return { byEntity };
-}
 
 // ---------------------------------------------------------------------------
 // Active-set entry helper
@@ -75,12 +56,8 @@ function makeTileDetailEntry(
     kind: "tile",
     entityId,
     imageId,
-    mode: "tiles-with-detail",
     detailLevels,
     coarseLevel: null,
-    proxyKind: undefined,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
   };
 }
 
@@ -152,12 +129,8 @@ describe("buildActiveSet", () => {
 
     const [result] = buildActiveSet([entity]);
     const f = asTile(result);
-    expect(f.mode).toBe("tiles-with-detail");
     expect(f.detailLevels).toEqual([1]);
     expect(f.coarseLevel).toBeNull();
-    expect(f.proxyKind).toBeUndefined();
-    expect(f.proxyAvailable).toBe(false);
-    expect(f.groupProxyAvailable).toBe(false);
   });
 
   it("handles single-level images", () => {
@@ -338,23 +311,6 @@ describe("iterateChunks", () => {
     expect(coords).toContainEqual([0, 1]);
     expect(coords).toContainEqual([1, 0]);
     expect(coords).toContainEqual([1, 1]);
-  });
-
-  it("group-as-proxy entry produces no chunk requests", () => {
-    const level0 = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
-    const entity = createSyntheticEntity({
-      entityId: "groupX",
-      imageId: "",
-      kind: "Group",
-      levels: [level0],
-      layoutPositionVox: [0, 0],
-    });
-    // GroupAsProxyEntry carries only `kind` + `entityId`; the
-    // chunk-iteration short-circuit reads `kind`, not `mode`.
-    const entry: ActiveSetEntry = { kind: "group-as-proxy", entityId: "groupX" };
-
-    const result = iterateChunks(entity, entry, makeVisibleRegion(), makeSelection());
-    expect(result).toHaveLength(0);
   });
 
   it("invisible entry produces no chunk requests", () => {
@@ -863,7 +819,6 @@ describe("plan()", () => {
         layout: 2,
         view: 1,
         selection: 4,
-        asset: 0,
         request: 7,
       },
     });
@@ -875,7 +830,6 @@ describe("plan()", () => {
     expect(result.epochs.layout).toBe(2);
     expect(result.epochs.view).toBe(1);
     expect(result.epochs.selection).toBe(4);
-    expect(result.epochs.asset).toBe(0);
   });
 
   it("full integration: two entities, three lanes, sorted output", () => {
@@ -931,11 +885,9 @@ describe("plan()", () => {
     expect(result.activeSet).toHaveLength(2);
     for (const entry of result.activeSet) {
       const tile = asTile(entry);
-      expect(tile.mode).toBe("tiles-with-detail");
       expect(tile.detailLevels).toEqual([0]);
       expect(tile.coarseLevel).toBe(1);
     }
-    expect(result.proxyRequests).toHaveLength(0);
 
     // Detail lane: both entities at L0 with 2x2 grid each = 8 chunks.
     const detailReqs = result.requests.filter((r) => r.lane === "detail");
@@ -1079,7 +1031,7 @@ describe("plan() — depth-bias focal plane (#532)", () => {
 });
 
 describe("plan() — detail and coarse tiers", () => {
-  it("emits no proxy requests or proxy modes even when a catalog advertises proxies", () => {
+  it("gives a visible image one tile entry with coarse work and no overview work", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const level1 = makeLevelGeo(1, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
     const entity = createSyntheticEntity({
@@ -1093,7 +1045,6 @@ describe("plan() — detail and coarse tiers", () => {
     });
     const snapshot = createSyntheticSnapshot({
       entities: [entity],
-      assetCatalog: makeCatalog([["tile-default", ["TileProxy3D"]]]),
       visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 512, 512] }),
       selection: makeSelection(),
     });
@@ -1102,14 +1053,12 @@ describe("plan() — detail and coarse tiers", () => {
 
     expect(DEFAULT_PLANNING_CONFIG.detailRenderRadiusView).toBe(RENDER_RADIUS_DISABLED_VIEW);
     expect(DEFAULT_PLANNING_CONFIG.coarseRenderRadiusView).toBe(RENDER_RADIUS_DISABLED_VIEW);
-    expect(result.proxyRequests).toHaveLength(0);
     expect(result.activeSet.map((entry) => entry.kind)).toEqual(["tile"]);
-    expect(asTile(result.activeSet[0]).proxyAvailable).toBe(false);
     expect(result.requests.some((request) => request.lane === "coarse")).toBe(true);
     expect(result.requests.some((request) => request.lane === "overview")).toBe(false);
   });
 
-  it("emits the target level plus the coarse level and no proxy or overview work", () => {
+  it("emits the target level plus the coarse level and no overview work", () => {
     const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
     const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
     const level2 = makeLevelGeo(2, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
@@ -1138,7 +1087,6 @@ describe("plan() — detail and coarse tiers", () => {
     const entry = asTile(result.activeSet[0]);
     expect(entry.detailLevels).toEqual([0]);
     expect(entry.coarseLevel).toBe(2);
-    expect(result.proxyRequests).toHaveLength(0);
     expect(result.requests.some((r) => r.lane === "overview")).toBe(false);
 
     const detail = result.requests.filter((r) => r.lane === "detail");
@@ -1558,7 +1506,6 @@ describe("plan() edge cases", () => {
 
     expect(result.activeSet).toHaveLength(0);
     expect(result.requests).toHaveLength(0);
-    expect(result.proxyRequests).toHaveLength(0);
     expect(result.epochs.request).toBe(snap.epochs.request + 1);
   });
 
@@ -1568,8 +1515,8 @@ describe("plan() edge cases", () => {
     // iterator early-outs.
     //
     // Together this tests the planner's invariant: invisible entities
-    // make it into the active set as `tiles-with-detail` pass-throughs,
-    // but contribute no chunk requests when there's nothing to fetch.
+    // make it into the active set as pass-throughs, but contribute no
+    // chunk requests when there's nothing to fetch.
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
     const entityA = createSyntheticEntity({
       entityId: "a",
@@ -1842,17 +1789,12 @@ describe("plan() with stale carry-forward state", () => {
     // active set.
     const stale: PlanningState = createSyntheticState({
       previousActiveSet: [
-        { kind: "group-as-proxy", entityId: "ghost-group" },
         {
           kind: "tile",
           entityId: "ghost-tile",
           imageId: "ghost-img",
-          mode: "tiles-with-detail",
           detailLevels: [0],
           coarseLevel: null,
-          proxyKind: "TileProxy3D",
-          proxyAvailable: false,
-          groupProxyAvailable: false,
         },
       ],
     });
@@ -1934,9 +1876,6 @@ describe("PlanningConfig", () => {
     // The default focal-depth bias must be exactly 0 (centered), so the
     // default priorities are byte-identical to no bias.
     expect(DEPTH_BIAS_VIEW).toBe(0);
-    expect(DEFAULT_PLANNING_CONFIG.groupProxyPriorityBump).toBe(
-      GROUP_PROXY_PRIORITY_BUMP,
-    );
     expect(DEFAULT_PLANNING_CONFIG.minimapLaneOffset).toBe(MINIMAP_LANE_OFFSET);
     expect(DEFAULT_PLANNING_CONFIG.minimapSeedFastMaxChunks).toBe(
       MINIMAP_SEED_FAST_MAX_CHUNKS,
@@ -1945,7 +1884,6 @@ describe("PlanningConfig", () => {
       MINIMAP_SEED_BULK_LANE_OFFSET,
     );
     expect(DEFAULT_PLANNING_CONFIG.detailLaneOffset).toBe(DETAIL_LANE_OFFSET);
-    expect(DEFAULT_PLANNING_CONFIG.proxyLaneOffset).toBe(PROXY_LANE_OFFSET);
     expect(DEFAULT_PLANNING_CONFIG.prefetchLaneOffset).toBe(
       PREFETCH_LANE_OFFSET,
     );
@@ -1955,20 +1893,17 @@ describe("PlanningConfig", () => {
   it("named magic numbers have their documented values", () => {
     expect(IMPORTANCE_WEIGHT).toBe(500);
     expect(DISTANCE_WEIGHT).toBe(10);
-    expect(GROUP_PROXY_PRIORITY_BUMP).toBe(100);
   });
 
-  it("lane offsets: 0 / 500 / 1000 / 1500 / 2400 / 2600", () => {
+  it("lane offsets: 0 / 500 / 1500 / 2400 / 2600", () => {
     // Hard-pinned values so a future re-number is loud.
     expect(MINIMAP_LANE_OFFSET).toBe(0);
     expect(DETAIL_LANE_OFFSET).toBe(500);
-    expect(PROXY_LANE_OFFSET).toBe(1000);
     expect(PREFETCH_LANE_OFFSET).toBe(1500);
     expect(COARSE_LANE_OFFSET).toBe(2400);
     expect(MINIMAP_SEED_BULK_LANE_OFFSET).toBe(2600);
     expect(MINIMAP_LANE_OFFSET).toBeLessThan(DETAIL_LANE_OFFSET);
-    expect(DETAIL_LANE_OFFSET).toBeLessThan(PROXY_LANE_OFFSET);
-    expect(PROXY_LANE_OFFSET).toBeLessThan(PREFETCH_LANE_OFFSET);
+    expect(DETAIL_LANE_OFFSET).toBeLessThan(PREFETCH_LANE_OFFSET);
     expect(PREFETCH_LANE_OFFSET).toBeLessThan(COARSE_LANE_OFFSET);
   });
 
@@ -1984,12 +1919,8 @@ describe("PlanningConfig", () => {
     expect(merged.prefetchDepth).toBe(5);
     expect(merged.importanceWeight).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
     expect(merged.distanceWeight).toBe(DEFAULT_PLANNING_CONFIG.distanceWeight);
-    expect(merged.groupProxyPriorityBump).toBe(
-      DEFAULT_PLANNING_CONFIG.groupProxyPriorityBump,
-    );
     expect(merged.minimapLaneOffset).toBe(DEFAULT_PLANNING_CONFIG.minimapLaneOffset);
     expect(merged.detailLaneOffset).toBe(DEFAULT_PLANNING_CONFIG.detailLaneOffset);
-    expect(merged.proxyLaneOffset).toBe(DEFAULT_PLANNING_CONFIG.proxyLaneOffset);
     expect(merged.prefetchLaneOffset).toBe(
       DEFAULT_PLANNING_CONFIG.prefetchLaneOffset,
     );
@@ -2651,7 +2582,7 @@ describe("plan() — minimap lane", () => {
 // compile-time invariant being tested.
 
 describe("ActiveSetEntry variants", () => {
-  it("tile variant: `kind: \"tile\"` + tier levels + proxy availability flags", () => {
+  it("tile variant: `kind: \"tile\"` + tier levels", () => {
     const entities = makeCollectionEntities("groupF", [
       { id: "fF", image: "imgF", px: 200 },
     ]);
@@ -2664,29 +2595,21 @@ describe("ActiveSetEntry variants", () => {
     if (entry.kind === "tile") {
       expect(entry.entityId).toBe("fF");
       expect(entry.imageId).toBe("imgF");
-      expect(entry.mode).toBe("tiles-with-detail");
       expect(entry.detailLevels).toEqual([0]);
       expect(entry.coarseLevel).toBeNull();
-      expect(entry.proxyKind).toBeUndefined();
-      expect(entry.proxyAvailable).toBe(false);
-      expect(entry.groupProxyAvailable).toBe(false);
       // Surface check: the level list and the coarse level are the only
       // level fields.
       expect(Object.keys(entry).sort()).toEqual([
         "coarseLevel",
         "detailLevels",
         "entityId",
-        "groupProxyAvailable",
         "imageId",
         "kind",
-        "mode",
-        "proxyAvailable",
-        "proxyKind",
       ]);
     }
   });
 
-  it("invisible variant: `kind: \"invisible\"` + entityId/imageId/coarsestLod, no tier levels or proxy fields", () => {
+  it("invisible variant: `kind: \"invisible\"` + entityId/imageId/coarsestLod, no tier levels", () => {
     const entity = createSyntheticEntity({
       entityId: "invE",
       imageId: "imgInv",
@@ -2704,8 +2627,7 @@ describe("ActiveSetEntry variants", () => {
       expect(entry.entityId).toBe("invE");
       expect(entry.imageId).toBe("imgInv");
       expect(entry.coarsestLod).toBe(3);
-      // Surface check: exactly four own keys (no mode, tier levels,
-      // proxyKind, proxyAvailable, or groupProxyAvailable).
+      // Surface check: exactly four own keys (no tier levels).
       expect(Object.keys(entry).sort()).toEqual([
         "coarsestLod", "entityId", "imageId", "kind",
       ]);
@@ -2736,22 +2658,20 @@ describe("ActiveSetEntry variants", () => {
     });
     const result = plan(snap, createSyntheticState());
 
-    const byKind = { groupAsProxy: 0, tile: 0, invisible: 0 };
-    let observedTile: { mode: string; detailLevels: number[] } | null = null;
+    const byKind = { tile: 0, invisible: 0 };
+    let observedTile: { detailLevels: number[] } | null = null;
     let observedInvisible: { coarsestLod: number } | null = null;
     for (const entry of result.activeSet) {
-      if (entry.kind === "group-as-proxy") {
-        byKind.groupAsProxy++;
-      } else if (entry.kind === "tile") {
+      if (entry.kind === "tile") {
         byKind.tile++;
-        observedTile = { mode: entry.mode, detailLevels: entry.detailLevels };
+        observedTile = { detailLevels: entry.detailLevels };
       } else {
         byKind.invisible++;
         observedInvisible = { coarsestLod: entry.coarsestLod };
       }
     }
-    expect(byKind).toEqual({ groupAsProxy: 0, tile: 1, invisible: 1 });
-    expect(observedTile).toEqual({ mode: "tiles-with-detail", detailLevels: [0] });
+    expect(byKind).toEqual({ tile: 1, invisible: 1 });
+    expect(observedTile).toEqual({ detailLevels: [0] });
     expect(observedInvisible).toEqual({ coarsestLod: 2 });
   });
 });
@@ -2807,8 +2727,8 @@ describe("createSyntheticEntity — discriminated variants", () => {
 describe("groupMembers — round-trip with discriminated entities", () => {
   it("groups a mixed entity list", () => {
     // Build a snapshot of mixed entity kinds and assert the grouping
-    // structure (group-as-proxy entries indexed by groupId; tiles
-    // indexed by their parent group).
+    // structure (groups indexed by groupId; tiles indexed by their parent
+    // group).
     const entities: EntitySnapshot[] = [
       createSyntheticEntity({
         entityId: "group-A",

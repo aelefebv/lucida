@@ -32,7 +32,7 @@ import { computeLabelChunkRequests } from "../planning/labelRequests.ts";
 import { buildManifestByImage } from "./delivery/manifestIndex.ts";
 import { dispatchLabelChunkDelivery, dispatchLabelVolumeChunkDelivery } from "./delivery/dispatch.ts";
 
-const EPOCHS: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 };
+const EPOCHS: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
 
 function ms(
   id: string,
@@ -110,7 +110,6 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     // 2. cpuCache yields the FULL 3D chunk (2x2x2 = 8 ids): plane0 then plane1.
     const ids = new Uint32Array([10, 11, 12, 13, 92801, 92801 + 65536, 30, 4_294_967_295]);
     const delivery: ReadyChunkDelivery = {
-      kind: "chunk",
       entityId: req.entityId,
       imageId: req.imageId,
       level: req.level,
@@ -181,7 +180,6 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
       new Map<string, DatasetEntry>([["ds-0", { manifest } as unknown as DatasetEntry]]),
     ).get("img-0:label:region-b");
     const delivery: ReadyChunkDelivery = {
-      kind: "chunk",
       entityId: "img-0:label:region-b",
       imageId: "img-0:label:region-b",
       level: 0,
@@ -212,7 +210,6 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
     // 2. cpuCache yields the FULL 3D chunk (2x2x2 = 8 ids), incl. ids past 16 bits.
     const ids = new Uint32Array([10, 11, 12, 13, 92801, 92801 + 65536, 30, 4_294_967_295]);
     const delivery: ReadyChunkDelivery = {
-      kind: "chunk",
       entityId: req.entityId,
       imageId: req.imageId,
       level: req.level,

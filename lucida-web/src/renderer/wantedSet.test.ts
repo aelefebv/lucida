@@ -3,29 +3,20 @@ import {
   computeWantedSet,
   type AtlasLevelMeta,
   type AtlasSnapshot,
-  type ProxyAtlasSnapshot,
   type SourcePoolResolver,
 } from "./wantedSet.ts";
 import type {
   ColdStateMessage,
   ColdStateActiveEntry,
   MissingChunk,
-  MissingProxy,
-  ColdStateTileEntry,
 } from "./workerProtocol.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 import { indexWantedChunks, type WantedChunkIndex } from "./wantedChunks.ts";
 
-/** Type-narrowing helper: only chunk-kind entries from a wanted-set. */
-function chunks(missing: Array<MissingChunk | MissingProxy>): MissingChunk[] {
-  return missing.filter((m): m is MissingChunk => m.kind === "chunk");
-}
-
-/** Type-narrowing helper: only proxy-kind entries from a wanted-set. */
-function proxies(missing: Array<MissingChunk | MissingProxy>): MissingProxy[] {
-  return missing.filter((m): m is MissingProxy => m.kind === "proxy");
+function chunks(missing: MissingChunk[]): MissingChunk[] {
+  return missing;
 }
 
 function makeEpochs(): SceneEpochs {
@@ -34,7 +25,6 @@ function makeEpochs(): SceneEpochs {
     layout: 1,
     view: 1,
     selection: 1,
-    asset: 0,
     request: 1,
   };
 }
@@ -52,24 +42,19 @@ function makeVisibleRegion(
   };
 }
 
-/**
- * Fixture builder for `ColdStateActiveEntry`. The type is a
- * discriminated union (`kind: "tile" | "group-as-proxy"`); this helper
- * inspects `overrides.mode` to pick the right variant (`mode:
- * "group-as-proxy"` with `imageId: ""` yields the group-as-proxy variant).
- */
-type WantedSetEntryOverrides = Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & {
-  mode?: ColdStateActiveEntry["mode"];
-};
+/** Fixture builder for `ColdStateActiveEntry`. */
 function makeActiveEntry(
-  overrides?: WantedSetEntryOverrides,
+  overrides?: Partial<ColdStateActiveEntry>,
 ): ColdStateActiveEntry {
   // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
   // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app).
   const identity = new Float32Array(16) as Float32Array<ArrayBuffer>;
   identity[0] = identity[5] = identity[10] = identity[15] = 1;
-  const base = {
+  return {
     entityId: overrides?.entityId ?? "entity-0",
+    imageId: overrides?.imageId ?? "img",
+    detailLevels: overrides?.detailLevels ?? [0],
+    coarseLevel: overrides?.coarseLevel ?? null,
     levels: overrides?.levels ?? [
       {
         level: 0,
@@ -78,9 +63,6 @@ function makeActiveEntry(
         levelDims: [64, 128, 128] as [number, number, number],
       },
     ],
-    proxyKind: overrides?.proxyKind,
-    proxyAvailable: overrides?.proxyAvailable ?? false,
-    groupProxyAvailable: overrides?.groupProxyAvailable ?? false,
     modelMatrix: overrides?.modelMatrix ?? identity,
     invModelMatrix: overrides?.invModelMatrix ?? identity,
     displayStateByChannel: overrides?.displayStateByChannel ?? {
@@ -93,24 +75,6 @@ function makeActiveEntry(
         channelMask: 1,
       },
     },
-  };
-  const mode = overrides?.mode ?? "tiles-with-detail";
-  if (mode === "group-as-proxy") {
-    return {
-      ...base,
-      kind: "group-as-proxy",
-      mode: "group-as-proxy",
-      parentGroupId: null,
-    };
-  }
-  return {
-    ...base,
-    kind: "tile",
-    imageId: overrides?.imageId ?? "img",
-    mode,
-    detailLevels: overrides?.detailLevels ?? [0],
-    coarseLevel: overrides?.coarseLevel ?? null,
-    parentGroupId: overrides?.parentGroupId ?? null,
   };
 }
 
@@ -193,7 +157,7 @@ describe("computeWantedSet", () => {
     );
 
     expect(chunks(result.missing)).toEqual(FOUR.map((chunkKey) => ({
-      kind: "chunk", datasetId: "ds-0", tier: "detail", entityId: "entity-0", memberId: "img:ch0", c: 0, chunkKey,
+      datasetId: "ds-0", tier: "detail", entityId: "entity-0", memberId: "img:ch0", c: 0, chunkKey,
     })));
   });
 
@@ -488,262 +452,6 @@ describe("computeWantedSet", () => {
     expect(chunks(result.missing).map((m) => m.chunkKey)).toEqual(["1/0/0/0/0/0"]);
   });
 
-  // proxy wanted-set
-
-  describe("proxy wanted-set", () => {
-    /** Helper: pool snapshot with the given resident slot keys. */
-    function makeProxyPool(
-      kind: "GroupProxy3D" | "TileProxy3D",
-      keys: string[],
-    ): ProxyAtlasSnapshot {
-      const slots = new Map<string, number>();
-      keys.forEach((k, i) => slots.set(k, i));
-      return { kind, slots };
-    }
-
-    it("group-as-proxy + no resident proxy -> emits MissingProxy { GroupProxy3D }", () => {
-      const coldState = makeColdState({
-        activeSet: [
-          makeActiveEntry({
-            entityId: "group-1",
-            imageId: "",
-            mode: "group-as-proxy",
-            proxyKind: "GroupProxy3D",
-            proxyAvailable: true,
-            groupProxyAvailable: true,
-          }),
-        ],
-      });
-      const result = computeWantedSet(coldState, NO_WANTED, new Map(), new Map(), noPools, new Map());
-
-      const ps = proxies(result.missing);
-      expect(ps).toHaveLength(1);
-      expect(ps[0]).toMatchObject({
-        kind: "proxy",
-        entityId: "group-1",
-        proxyKind: "GroupProxy3D",
-        t: 0,
-        c: 0,
-      });
-      // No chunks for group-as-proxy.
-      expect(chunks(result.missing)).toHaveLength(0);
-    });
-
-    it("group-as-proxy + resident proxy -> empty wanted-set", () => {
-      const coldState = makeColdState({
-        activeSet: [
-          makeActiveEntry({
-            entityId: "group-1",
-            imageId: "",
-            mode: "group-as-proxy",
-            proxyKind: "GroupProxy3D",
-            proxyAvailable: true,
-            groupProxyAvailable: true,
-          }),
-        ],
-      });
-      const proxyAtlases = new Map<string, ProxyAtlasSnapshot>([
-        ["any-pool", makeProxyPool("GroupProxy3D", ["group-1|0|0"])],
-      ]);
-      const result = computeWantedSet(coldState, NO_WANTED, new Map(), new Map(), noPools, proxyAtlases);
-      expect(result.missing).toHaveLength(0);
-    });
-
-    it("tiles-with-detail + present tile-proxy -> no proxy ask, chunk wanted-set unchanged", () => {
-      const coldState = makeColdState({
-        activeSet: [
-          makeActiveEntry({
-            entityId: "tile-1",
-            imageId: "img",
-            mode: "tiles-with-detail",
-            proxyKind: "TileProxy3D",
-            proxyAvailable: true,
-            groupProxyAvailable: false,
-          }),
-        ],
-      });
-      const volumeAtlases = new Map([["ds-0", makeVolumePool("img:ch0", [LEVEL0_SECTION])]]);
-      const proxyAtlases = new Map<string, ProxyAtlasSnapshot>([
-        ["pool-A", makeProxyPool("TileProxy3D", ["tile-1|0|0"])],
-      ]);
-      const result = computeWantedSet(
-        coldState,
-        wanted(["img:ch0", "detail", ["0/0/0/0/0/0"]]),
-        volumeAtlases,
-        new Map(),
-        poolsFromAtlases(volumeAtlases),
-        proxyAtlases,
-      );
-      expect(proxies(result.missing)).toHaveLength(0);
-      expect(chunks(result.missing)).toHaveLength(1);
-    });
-
-    it("tiles-with-detail + missing advertised tile-proxy -> emits MissingProxy { TileProxy3D }", () => {
-      const coldState = makeColdState({
-        activeSet: [
-          makeActiveEntry({
-            entityId: "tile-1",
-            imageId: "img",
-            mode: "tiles-with-detail",
-            proxyKind: "TileProxy3D",
-            proxyAvailable: true,
-          }),
-        ],
-      });
-      const volumeAtlases = new Map([["ds-0", makeVolumePool("img:ch0", [LEVEL0_SECTION])]]);
-      const result = computeWantedSet(
-        coldState,
-        NO_WANTED,
-        volumeAtlases,
-        new Map(),
-        poolsFromAtlases(volumeAtlases),
-        new Map(),
-      );
-      const ps = proxies(result.missing);
-      expect(ps).toHaveLength(1);
-      expect(ps[0].entityId).toBe("tile-1");
-      expect(ps[0].proxyKind).toBe("TileProxy3D");
-    });
-
-    it("desiredProxyKeys=[] suppresses otherwise-missing proxy asks", () => {
-      const coldState = makeColdState({
-        desiredProxyKeys: [],
-        activeSet: [
-          makeActiveEntry({
-            entityId: "group-1",
-            imageId: "",
-            mode: "group-as-proxy",
-            proxyKind: "GroupProxy3D",
-            proxyAvailable: true,
-            groupProxyAvailable: true,
-          }),
-        ],
-      });
-      const result = computeWantedSet(coldState, NO_WANTED, new Map(), new Map(), noPools, new Map());
-      expect(result.missing).toHaveLength(0);
-    });
-
-    it("desiredProxyKeys gates tile and parent-group proxy asks independently", () => {
-      const coldState = makeColdState({
-        desiredProxyKeys: ["ds-0|group-1|GroupProxy3D|0|0"],
-        activeSet: [
-          makeActiveEntry({
-            entityId: "tile-1",
-            imageId: "img",
-            mode: "tiles-with-proxy-fallback",
-            proxyKind: "TileProxy3D",
-            proxyAvailable: true,
-            groupProxyAvailable: true,
-            parentGroupId: "group-1",
-          }),
-        ],
-      });
-      const result = computeWantedSet(coldState, NO_WANTED, new Map(), new Map(), noPools, new Map());
-      const ps = proxies(result.missing);
-      expect(ps).toHaveLength(1);
-      expect(ps[0]).toMatchObject({
-        entityId: "group-1",
-        proxyKind: "GroupProxy3D",
-      });
-    });
-
-    it("tiles-with-detail + proxyAvailable=false -> no MissingProxy", () => {
-      const coldState = makeColdState({
-        activeSet: [
-          makeActiveEntry({
-            entityId: "tile-1",
-            imageId: "img",
-            mode: "tiles-with-detail",
-            // Catalog says no proxy exists — don't ask for one.
-            proxyKind: "TileProxy3D",
-            proxyAvailable: false,
-          }),
-        ],
-      });
-      const volumeAtlases = new Map([["ds-0", makeVolumePool("img:ch0", [LEVEL0_SECTION])]]);
-      const result = computeWantedSet(
-        coldState,
-        NO_WANTED,
-        volumeAtlases,
-        new Map(),
-        poolsFromAtlases(volumeAtlases),
-        new Map(),
-      );
-      expect(proxies(result.missing)).toHaveLength(0);
-    });
-
-    it("tiles-with-proxy-fallback emits both tile-proxy and parent-group-proxy (deduped per group)", () => {
-      const coldState = makeColdState({
-        activeSet: [
-          makeActiveEntry({
-            entityId: "tile-A",
-            imageId: "imgA",
-            mode: "tiles-with-proxy-fallback",
-            proxyKind: "TileProxy3D",
-            proxyAvailable: true,
-            groupProxyAvailable: true,
-            parentGroupId: "group-1",
-          }),
-          makeActiveEntry({
-            entityId: "tile-B",
-            imageId: "imgB",
-            mode: "tiles-with-proxy-fallback",
-            proxyKind: "TileProxy3D",
-            proxyAvailable: true,
-            groupProxyAvailable: true,
-            parentGroupId: "group-1",
-          }),
-        ],
-      });
-      const result = computeWantedSet(coldState, NO_WANTED, new Map(), new Map(), noPools, new Map());
-      const ps = proxies(result.missing);
-      // 2 tile proxies + 1 deduped group proxy = 3
-      const tileProxies = ps.filter((p) => p.proxyKind === "TileProxy3D");
-      const groupProxies = ps.filter((p) => p.proxyKind === "GroupProxy3D");
-      expect(tileProxies.map((p) => p.entityId).sort()).toEqual(["tile-A", "tile-B"]);
-      expect(groupProxies).toHaveLength(1);
-      expect(groupProxies[0].entityId).toBe("group-1");
-    });
-
-    it("mixed modes: group-as-proxy + tiles-with-detail -> both reported correctly", () => {
-      const coldState = makeColdState({
-        activeSet: [
-          makeActiveEntry({
-            entityId: "group-X",
-            imageId: "",
-            mode: "group-as-proxy",
-            proxyKind: "GroupProxy3D",
-            proxyAvailable: true,
-            groupProxyAvailable: true,
-          }),
-          makeActiveEntry({
-            entityId: "tile-Y",
-            imageId: "imgY",
-            mode: "tiles-with-detail",
-            proxyKind: "TileProxy3D",
-            proxyAvailable: true,
-          }),
-        ],
-      });
-      const volumeAtlases = new Map([["ds-0", makeVolumePool("imgY:ch0", [LEVEL0_SECTION])]]);
-      const result = computeWantedSet(
-        coldState,
-        wanted(["imgY:ch0", "detail", ["0/0/0/0/0/0"]]),
-        volumeAtlases,
-        new Map(),
-        poolsFromAtlases(volumeAtlases),
-        new Map(),
-      );
-      const ps = proxies(result.missing);
-      const groupMissing = ps.filter((p) => p.proxyKind === "GroupProxy3D" && p.entityId === "group-X");
-      const tileMissing = ps.filter((p) => p.proxyKind === "TileProxy3D" && p.entityId === "tile-Y");
-      expect(groupMissing).toHaveLength(1);
-      expect(tileMissing).toHaveLength(1);
-      // Tile-Y also has chunk wanted-set entries.
-      expect(chunks(result.missing)).toHaveLength(1);
-    });
-  });
-
   describe("displayed levels", () => {
     // Halving pyramid with one chunk shape at every level (so one pool).
     const pyramid = [
@@ -904,7 +612,7 @@ describe("computeWantedSet", () => {
 
     it("leaves out entries that have no target level", () => {
       const coldState = makeColdState({
-        activeSet: [makeActiveEntry({ mode: "group-as-proxy", imageId: "" })],
+        activeSet: [makeActiveEntry({ detailLevels: [] })],
       });
 
       expect(levelsFor(coldState, NO_WANTED, new Map())).toEqual([]);

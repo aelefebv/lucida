@@ -44,11 +44,10 @@ const OUTCOME_FROM_WIRE: Record<WireRowOutcome, ServerRowOutcome> = {
 };
 
 /** The same disagreement, one column over. */
-export type WireRowFamily = "chunk" | "asset" | "metadata_read";
+export type WireRowFamily = "chunk" | "metadata_read";
 
 const FAMILY_FROM_WIRE: Record<WireRowFamily, ServerRowFamily> = {
   chunk: "chunk",
-  asset: "asset",
   metadata_read: "metadata-read",
 };
 

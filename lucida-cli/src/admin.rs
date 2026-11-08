@@ -82,23 +82,6 @@ pub struct AdminWorkspaceOwnerOutput {
     pub member: WorkspaceMember,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AdminClearProxyCacheResult {
-    pub cleared: bool,
-    pub datasets: usize,
-    pub files: usize,
-}
-
-#[derive(Debug, Serialize)]
-pub struct AdminClearProxyCacheOutput {
-    pub scope: &'static str,
-    pub server: EffectiveServer,
-    pub dataset: Option<String>,
-    pub cleared: bool,
-    pub datasets: usize,
-    pub files: usize,
-}
-
 pub struct AdminClient {
     base_url: String,
     token: Option<String>,
@@ -182,17 +165,6 @@ impl AdminClient {
         .await
     }
 
-    pub async fn clear_proxy_cache(
-        &self,
-        dataset: Option<&str>,
-    ) -> Result<AdminClearProxyCacheResult, CliError> {
-        self.send_json(
-            self.clear_proxy_cache_request(dataset)?,
-            "admin clear-proxy-cache",
-        )
-        .await
-    }
-
     fn search_workspaces_request(
         &self,
         query: Option<&str>,
@@ -231,17 +203,6 @@ impl AdminClient {
                 &["admin", "workspaces", workspace_id, "owners"],
             )?)
             .json(&body))
-    }
-
-    fn clear_proxy_cache_request(
-        &self,
-        dataset: Option<&str>,
-    ) -> Result<reqwest::RequestBuilder, CliError> {
-        let mut url = api_url(&self.base_url, &["admin", "clear-proxy-cache"])?;
-        if let Some(dataset) = dataset {
-            url.query_pairs_mut().append_pair("dataset", dataset);
-        }
-        Ok(self.http.post(url))
     }
 
     async fn send_json<T: DeserializeOwned>(
@@ -421,16 +382,6 @@ pub fn format_admin_workspace_owner_human(output: &AdminWorkspaceOwnerOutput) ->
     )
 }
 
-pub fn format_admin_clear_proxy_cache_human(output: &AdminClearProxyCacheOutput) -> String {
-    format!(
-        "Remote admin clear-proxy-cache\nDataset: {}\nCleared: {}\nDatasets: {}\nFiles: {}",
-        output.dataset.as_deref().unwrap_or("<all>"),
-        output.cleared,
-        output.datasets,
-        output.files
-    )
-}
-
 fn workspace_state(workspace: &WorkspaceAdminSummary) -> &'static str {
     if workspace.archived_at.is_some() {
         "archived"
@@ -533,49 +484,6 @@ mod tests {
         assert_eq!(error.kind, ErrorKind::Unauthorized);
         assert_eq!(error.to_json()["error"]["kind"], "unauthorized");
         assert_eq!(error.message, "forbidden");
-    }
-
-    #[test]
-    fn clear_proxy_cache_posts_remote_admin_route() {
-        let client = AdminClient::new("http://127.0.0.1:9988", None);
-        let request = client
-            .prepare(
-                client
-                    .clear_proxy_cache_request(Some("file:///data/demo.ome.zarr"))
-                    .unwrap(),
-            )
-            .build()
-            .unwrap();
-
-        assert_eq!(request.method(), reqwest::Method::POST);
-        assert_eq!(request.url().path(), "/admin/clear-proxy-cache");
-        assert_eq!(
-            request.url().query(),
-            Some("dataset=file%3A%2F%2F%2Fdata%2Fdemo.ome.zarr")
-        );
-        assert!(
-            request
-                .headers()
-                .get(reqwest::header::AUTHORIZATION)
-                .is_none()
-        );
-
-        let body = serde_json::json!({
-            "cleared": true,
-            "datasets": 1,
-            "files": 3
-        })
-        .to_string();
-        let result: AdminClearProxyCacheResult = serde_json::from_str(&body).unwrap();
-
-        assert_eq!(
-            result,
-            AdminClearProxyCacheResult {
-                cleared: true,
-                datasets: 1,
-                files: 3
-            }
-        );
     }
 
     #[test]

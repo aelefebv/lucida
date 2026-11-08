@@ -61,7 +61,7 @@ export interface MemberLayerInput {
   indexByMember: Map<string, number>;
   channel: number;
   blendMode: "alpha" | "additive" | "max";
-  /** Fallback footprint for members without their own `dataW`/`dataH`. */
+  /** Every member's footprint, in voxels. */
   fullResWidth: number;
   fullResHeight: number;
   /** Device pixels per voxel at the render backing resolution. */
@@ -102,15 +102,14 @@ export function pushMemberLayers(
   // unique in the frame and needs no counter threaded through the callers.
   const passGroup = layers.length;
 
+  // A non-positive or non-finite extent covers no pixels and would break
+  // the aggregate's union-extent normalization, so cull it here.
+  if (!(fullResWidth > 0) || !(fullResHeight > 0)) return;
+  const dataW = fullResWidth;
+  const dataH = fullResHeight;
+
   const candidates: MemberLayerCandidate[] = [];
   for (const m of members) {
-    // Synthesized aggregate-footprint entries carry their own
-    // dataW/dataH; normal tile entries use the dataset's image dims.
-    const dataW = m.dataW ?? fullResWidth;
-    const dataH = m.dataH ?? fullResHeight;
-    // A non-positive or non-finite extent covers no pixels and would break
-    // the aggregate's union-extent normalization, so cull it here.
-    if (!(dataW > 0) || !(dataH > 0)) continue;
     const memberKey = compositeKey(m.imageId, channel);
     const entityIndex = indexByMember.get(memberKey);
     if (entityIndex === undefined) continue;
@@ -241,10 +240,10 @@ export function pushLabelLayers(
     const sourceLevel0 = source.multiscale.levels[0];
     const labelLevel0 = label.image.multiscale.levels[0];
     const { dataW, dataH } = labelFootprint(sourceLevel0, labelLevel0);
-    // The source tile is often absent from the roster (a collection group
-    // renders as one proxy; off-view tiles aren't active), so fall back to the
-    // scene's per-member layout position, keyed by source entity id. Falling
-    // back to the origin would stack every off-roster label on the first group.
+    // The source tile is often absent from the roster (off-view tiles aren't
+    // active), so fall back to the scene's per-member layout position, keyed
+    // by source entity id. Falling back to the origin would stack every
+    // off-roster label on the first group.
     const sourceMember = members.find((m) => m.imageId === label.source_image_id);
     const position = sourceMember?.position ?? memberPositions?.[source.owner] ?? [0, 0];
     layers.push({

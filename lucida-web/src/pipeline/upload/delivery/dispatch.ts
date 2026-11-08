@@ -1,10 +1,10 @@
 /**
- * Free-function chunk and proxy dispatch helpers. Wrap
- * `client.sliceChunkData` / `client.volumeChunkData` / `client.proxyAssetData`
- * with structured args derived from a delivery + level meta.
+ * Free-function chunk dispatch helpers. Wrap `client.sliceChunkData` /
+ * `client.volumeChunkData` with structured args derived from a delivery +
+ * level meta.
  */
 
-import type { ReadyChunkDelivery, ReadyProxyDelivery } from "../../fetch/index.ts";
+import type { ReadyChunkDelivery } from "../../fetch/index.ts";
 import type { UploadClient } from "../uploadClient.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
@@ -226,22 +226,4 @@ export function dispatchLabelVolumeChunkDelivery(
     epochs,
   );
   return { memberId, bytes: delivery.data.byteLength };
-}
-
-export function dispatchProxy(
-  client: UploadClient,
-  delivery: ReadyProxyDelivery,
-  epochs: SceneEpochs,
-): void {
-  client.proxyAssetData(
-    delivery.datasetId,
-    delivery.entityId,
-    delivery.imageId,
-    delivery.proxyKind,
-    delivery.t,
-    delivery.c,
-    delivery.header.dims,
-    delivery.data,
-    epochs,
-  );
 }

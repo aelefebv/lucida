@@ -424,7 +424,7 @@ mod tests {
         buffer.record(row(1));
         buffer.record(ServedRow {
             outcome: TimingRowOutcome::NotReady,
-            family: TimingRowFamily::Asset,
+            family: TimingRowFamily::MetadataRead,
             ..row(2)
         });
 
@@ -432,7 +432,7 @@ mod tests {
         assert_eq!(batch.rid, vec![1, 2]);
         assert_eq!(
             batch.family,
-            vec![TimingRowFamily::Chunk, TimingRowFamily::Asset]
+            vec![TimingRowFamily::Chunk, TimingRowFamily::MetadataRead]
         );
         assert_eq!(
             batch.outcome,

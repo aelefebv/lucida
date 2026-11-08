@@ -248,8 +248,6 @@ describe("pushMemberLayers", () => {
         imageId: `img-${i}`,
         position: [0, 0],
         entityId: `tile-${i}`,
-        dataW: 0,
-        dataH: 0,
       });
     }
     const layers: SliceLayerParams[] = [];
@@ -258,38 +256,17 @@ describe("pushMemberLayers", () => {
       indexByMember: indexFor(members, 0),
       channel: 0,
       blendMode: "alpha",
-      fullResWidth: 1024,
-      fullResHeight: 1024,
+      fullResWidth: 0,
+      fullResHeight: 0,
       zoom: 0.001,
     });
     expect(layers).toHaveLength(0);
   });
 
-  it("excludes zero-extent members from an otherwise valid aggregate", () => {
-    const members = rosterGrid(5, 5, 1024);
-    members.push(
-      { imageId: "img-flat-0", position: [0, 4096], entityId: "tile-flat-0", dataW: 0, dataH: 512 },
-      { imageId: "img-flat-1", position: [512, 4096], entityId: "tile-flat-1", dataW: 512, dataH: 0 },
-      { imageId: "img-flat-2", position: [1024, 4096], entityId: "tile-flat-2", dataW: 0, dataH: 0 },
-    );
-    const layers: SliceLayerParams[] = [];
-    pushMemberLayers(layers, {
-      members,
-      indexByMember: indexFor(members, 0),
-      channel: 0,
-      blendMode: "alpha",
-      fullResWidth: 1024,
-      fullResHeight: 1024,
-      zoom: 0.001,
-    });
-    expect(layers).toHaveLength(1);
-    expect(layers[0].aggregate!.count).toBe(5);
-  });
-
   it("folds cap overflow in roster order so aggregate quad z-order is stable", () => {
-    // Sizes increase with roster index, so the overflow (smallest) members
-    // are roster indices 0..3. Their quads must appear in roster order,
-    // not size order, because quad order is the aggregate's draw order.
+    // Every member has the dataset's footprint, so the overflow members are
+    // the last four in roster order. Their quads must appear in roster
+    // order, because quad order is the aggregate's draw order.
     const members: MemberRosterEntry[] = [];
     const n = MAX_INDIVIDUAL_MEMBER_PASSES + 4;
     for (let i = 0; i < n; i++) {
@@ -297,8 +274,6 @@ describe("pushMemberLayers", () => {
         imageId: `img-${i}`,
         position: [(i % 20) * 4096, Math.floor(i / 20) * 4096],
         entityId: `tile-${i}`,
-        dataW: 1000 + i * 4,
-        dataH: 1000 + i * 4,
       });
     }
     const layers: SliceLayerParams[] = [];
@@ -316,7 +291,7 @@ describe("pushMemberLayers", () => {
     expect(agg!.aggregate!.count).toBe(4);
     const u32 = new Uint32Array(agg!.aggregate!.quads);
     const entityOrder = [0, 1, 2, 3].map((i) => u32[i * 8 + 4]);
-    expect(entityOrder).toEqual([0, 1, 2, 3]);
+    expect(entityOrder).toEqual([n - 4, n - 3, n - 2, n - 1]);
   });
 });
 
@@ -376,7 +351,7 @@ function makeSeamHarness(opts: {
       },
     },
     layers: resolvedLayers(resolvedLayer("ds1", [shownChannel(0, { blend_mode: "alpha" })])),
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     entityIndexByDataset: new Map([["ds1", indexFor(members, 0)]]),
   };
   const tickCoordinator = {

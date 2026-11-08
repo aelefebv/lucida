@@ -105,8 +105,6 @@ function makeCtx(device: GPUDevice): { ctx: WorkerCtx; posts: WorkerToMainMessag
     getOrCreateLUT: () => ({}) as GPUTexture,
     post,
     postWantedSet: createWantedSetPoster(state, post),
-    lookupProxyDescriptor: () => null,
-    lookupProxyPool: () => null,
     lookupEntityDescriptor: () => null,
   };
   return { ctx, posts };
@@ -134,7 +132,7 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 8; i++) await Promise.resolve();
 }
 
-const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
 
 function identity(): Float32Array {
   const m = new Float32Array(16);
@@ -167,10 +165,8 @@ function cold(datasetId: string): ColdStateMessage {
       chunkKeys: ["1/0/0/0/0/0", "1/0/0/0/0/1", "1/0/0/0/1/0", "1/0/0/0/1/1"],
     }],
     activeSet: [{
-      kind: "tile",
       entityId: `${datasetId}-img`,
       imageId: `${datasetId}-img`,
-      mode: "tiles-with-detail",
       levels: [
         { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
         { level: 1, chunkShape: [32, 32, 32], gridShape: [1, 2, 2], levelDims: [32, 64, 64] },
@@ -178,9 +174,6 @@ function cold(datasetId: string): ColdStateMessage {
       ],
       detailLevels: [1],
       coarseLevel: 2,
-      parentGroupId: null,
-      proxyAvailable: false,
-      groupProxyAvailable: false,
       modelMatrix: identity(),
       invModelMatrix: identity(),
       displayStateByChannel: { 0: display },
