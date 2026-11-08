@@ -36,10 +36,10 @@ use lucida_content::{
 use lucida_core::camera::{Arcball, Camera, ClipMode, Fly, Slice};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{
-    BookmarkAction, ChunkMessage, ClientMessage, PeerIdentity, PresenceState, ServerMessage,
-    ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint, ViewerInterestLane,
-    ViewerInterestMode, ViewerInterestViewport, WatchBoundaryEvent, WatchItem, WatchLevelRange,
-    WatchReading, WatchRunCause, WatchSendTally, WatchTick, WatchTickLevel,
+    BookmarkAction, ChunkMessage, ClientMessage, MessageRejection, PeerIdentity, PresenceState,
+    ServerMessage, ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint,
+    ViewerInterestLane, ViewerInterestMode, ViewerInterestViewport, WatchBoundaryEvent, WatchItem,
+    WatchLevelRange, WatchReading, WatchRunCause, WatchSendTally, WatchTick, WatchTickLevel,
 };
 use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
 use lucida_core::scene::{
@@ -48,17 +48,17 @@ use lucida_core::scene::{
 };
 use lucida_core::view::ViewState;
 use lucida_protocol::{
-    AssetCatalog, AssetCatalogDelta, AssetMessage, DatasetGeneratedCoarseCacheStats,
-    DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth, DatasetHealthComponent,
-    DatasetHealthStatus, DatasetImportWarning, DatasetOpenFailureDiagnostic,
-    DatasetOpenFailureKind, DatasetOpenProgressDiagnostic, DatasetOpenStage,
-    DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats, DatasetSourceHealth,
-    DirectFetchDescriptor, DirectImageSpec, FetchSource, GeneratedAvailabilityDelta,
-    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedChunkStatusUpdate,
-    GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE, LevelAddress,
-    LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor, ProxiedImageSpec,
-    ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch, SourceChunkStatus,
-    TimingRowFamily, TimingRowOutcome, WireFormat,
+    AssetCatalog, AssetCatalogDelta, AssetMessage, ChunkFailureKind,
+    DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth,
+    DatasetHealthComponent, DatasetHealthStatus, DatasetImportWarning,
+    DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
+    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats,
+    DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec, FetchSource,
+    GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
+    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE,
+    LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor,
+    ProxiedImageSpec, ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch,
+    SourceChunkStatus, TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -231,13 +231,17 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         ServerMessage::GeneratedChunkStatus { .. } => {
             &["session/server_generated_chunk_status.json"]
         }
-        ServerMessage::SourceChunkStatus { .. } => &["session/server_source_chunk_status.json"],
+        ServerMessage::SourceChunkStatus { .. } => &[
+            "session/server_source_chunk_status.json",
+            "session/server_source_chunk_status_malformed_key.json",
+        ],
         ServerMessage::TimingBatch { .. } => &["session/server_timing_batch.json"],
         ServerMessage::BookmarkChanged { .. } => &["session/server_bookmark_changed.json"],
         ServerMessage::WorkspaceArchived { .. } => &["session/server_workspace_archived.json"],
         ServerMessage::WatchUpdate { .. } => &["session/server_watch_update.json"],
         ServerMessage::ReportSent { .. } => &["session/server_report_sent.json"],
         ServerMessage::ReportFailed { .. } => &["session/server_report_failed.json"],
+        ServerMessage::MessageRejected { .. } => &["session/server_message_rejected.json"],
     }
 }
 
@@ -368,6 +372,8 @@ struct EnumVocabulary {
     viewer_interest_modes: Vec<ViewerInterestMode>,
     viewer_interaction_modes: Vec<ViewerInteractionMode>,
     viewer_interest_lanes: Vec<ViewerInterestLane>,
+    chunk_failure_kinds: Vec<ChunkFailureKind>,
+    message_rejections: Vec<MessageRejection>,
 }
 
 fn enum_vocabulary() -> EnumVocabulary {
@@ -408,6 +414,13 @@ fn enum_vocabulary() -> EnumVocabulary {
             Idle, Panning, Zooming, Scrubbing,
         }),
         viewer_interest_lanes: vocab!(ViewerInterestLane::{ Visible, Predicted, Background }),
+        chunk_failure_kinds: vocab!(ChunkFailureKind::{
+            MalformedKey, UnknownDataset, UnknownImage, UnknownLevel, CorruptChunk, WrongSize,
+            UnsupportedCodec, Permission, StorageBackend,
+        }),
+        message_rejections: vocab!(MessageRejection::{
+            Malformed, UnknownType, BinaryFrame, Throttled, UnknownDataset,
+        }),
     }
 }
 
@@ -1725,12 +1738,43 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 image_id: ImageId(SINGLE_IMAGE_ID.into()),
                 key: "0/1/0/1/0/0".into(),
                 status: SourceChunkStatus::FailedPermanent,
+                kind: Some(ChunkFailureKind::Permission),
                 message: Some("access to the dataset store was denied".into()),
             },
             req(
                 "",
                 &["/type", "/dataset_id", "/image_id", "/key", "/status"],
             ),
+        ),
+        (
+            "session/server_source_chunk_status_malformed_key.json",
+            ServerMessage::SourceChunkStatus {
+                dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
+                image_id: ImageId(SINGLE_IMAGE_ID.into()),
+                key: "0/1/0/1".into(),
+                status: SourceChunkStatus::FailedPermanent,
+                kind: Some(ChunkFailureKind::MalformedKey),
+                message: Some(
+                    "a chunk key has 6 parts, level/t/c/z/y/x, and this one has 4".into(),
+                ),
+            },
+            req(
+                "",
+                &["/type", "/dataset_id", "/image_id", "/key", "/status"],
+            ),
+        ),
+        (
+            "session/server_message_rejected.json",
+            ServerMessage::MessageRejected {
+                request_id: Some("open-7".into()),
+                rid: Some(42),
+                message_type: Some("open_remote_dataset".into()),
+                reason: MessageRejection::Malformed,
+                message: "the open_remote_dataset message does not have the fields its type \
+                          requires"
+                    .into(),
+            },
+            req("", &["/type", "/reason", "/message"]),
         ),
         (
             "session/server_bookmark_changed.json",

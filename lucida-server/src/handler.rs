@@ -4,25 +4,28 @@ use std::time::{Duration, Instant};
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, Stream, StreamExt};
 use lucida_content::url::{DatasetLocation, normalize_dataset_url};
-use lucida_content::{DatasetId, DatasetManifest, ImageId};
+use lucida_content::{ChunkKey, DatasetId, DatasetManifest, ImageId};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::{ChunkMessage, ClientId, ClientMessage, PeerIdentity, ServerMessage};
+use lucida_core::protocol::{
+    ChunkMessage, ClientId, ClientMessage, MessageRejection, PeerIdentity, ServerMessage,
+};
 use lucida_protocol::{
-    AssetMessage, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
-    DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
-    DatasetImportWarning, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
-    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
-    DatasetSourceCacheStats, DatasetSourceHealth, GeneratedAvailabilitySnapshot,
-    GeneratedChunkStatus, ServerPhase, SourceChunkStatus, TimingRowFamily, TimingRowOutcome,
+    AssetMessage, ChunkFailureKind, DatasetGeneratedCoarseCacheStats,
+    DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth, DatasetHealthComponent,
+    DatasetHealthStatus, DatasetImportWarning, DatasetOpenFailureDiagnostic,
+    DatasetOpenFailureKind, DatasetOpenProgressDiagnostic, DatasetOpenStage,
+    DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats, DatasetSourceHealth,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerPhase, TimingRowFamily,
+    TimingRowOutcome,
 };
 use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
 use tokio::sync::{Mutex, broadcast, mpsc};
 
-use crate::binding::{ChunkResolver, parse_level_from_chunk_key};
-use crate::chunk_read::{ChunkReadError, read_chunk};
+use crate::binding::ChunkResolver;
+use crate::chunk_read::read_chunk;
 use crate::connection::{CloseSignal, client_queue};
 use crate::dataset_open::{self, DatasetOpenContext, DatasetOpenOutcome, WorkspaceScope};
 use crate::generated::{
@@ -31,7 +34,7 @@ use crate::generated::{
 };
 use crate::inbox::{self, InboxStore, Report as InboxReport};
 use crate::open_diagnostics::{
-    backend_kind_for_url, location_failure, open_failure, open_progress, store_error_status,
+    backend_kind_for_url, location_failure, open_failure, open_progress,
 };
 use crate::proxy::{PROXY_TARGET_LONG_AXIS, ProxyGenerator};
 use crate::session::Session;
@@ -161,7 +164,7 @@ async fn handle_client_inner(
         .await
         .is_err()
     {
-        eprintln!("client {id}: failed to send snapshot");
+        tracing::info!(client_id = %id, "ws.connection.snapshot_send_failed");
         let mut sess = session.lock().await;
         sess.remove_client(id);
         unicast_routes.lock().await.remove(&id);
@@ -663,6 +666,18 @@ async fn handle_client_inner(
                                 .is_some_and(|at| at.elapsed() < REQUEST_SNAPSHOT_MIN_INTERVAL)
                             {
                                 tracing::debug!(client_id = %id, "request_snapshot.throttled");
+                                reject_message(
+                                    id,
+                                    Rejected {
+                                        message_type: Some("request_snapshot".into()),
+                                        ..Rejected::new(
+                                            MessageRejection::Throttled,
+                                            "a snapshot was sent under a second ago; ask again later",
+                                        )
+                                    },
+                                    &unicast_routes,
+                                )
+                                .await;
                                 continue;
                             }
                             last_requested_snapshot = Some(Instant::now());
@@ -782,8 +797,6 @@ async fn handle_client_inner(
                             image_id,
                             key,
                         } => {
-                            // Look up the server binding for this dataset.
-                            let level = parse_level_from_chunk_key(&key);
                             let mut probe = RequestProbe::arrived(
                                 rid,
                                 TimingRowFamily::Chunk,
@@ -791,6 +804,23 @@ async fn handle_client_inner(
                                 Arc::clone(&timings),
                             );
                             probe.mark(ServerPhase::Arrival);
+                            let failed = SourceChunkFailure {
+                                client_id: id,
+                                dataset_id: &dataset_id,
+                                image_id: &image_id,
+                                key: &key,
+                                unicast_routes: &unicast_routes,
+                            };
+                            let chunk_key = match ChunkKey::parse(&key) {
+                                Ok(chunk_key) => chunk_key,
+                                Err(error) => {
+                                    failed
+                                        .send(ChunkFailureKind::MalformedKey, &error, probe)
+                                        .await;
+                                    continue;
+                                }
+                            };
+                            let level = chunk_key.level;
                             // The lookup takes the shared session mutex, so
                             // every chunk request from every client in the
                             // workspace serialises here. It looks free and is
@@ -821,7 +851,7 @@ async fn handle_client_inner(
                                             id,
                                             &dataset_id,
                                             &image_id,
-                                            &key,
+                                            &chunk_key,
                                             &resolver,
                                             &cache,
                                             &unicast_routes_clone,
@@ -853,22 +883,32 @@ async fn handle_client_inner(
                                         .await;
                                     });
                                 }
+                                // The phases past the lookup stay unset: the
+                                // request never reached them.
                                 None => {
-                                    eprintln!(
-                                        "server: no binding for dataset {dataset_id} (chunk {key} dropped)"
-                                    );
-                                    // A dropped request still gets a row: the
-                                    // browser's bracket for this label will
-                                    // never close, and an unexplained open
-                                    // bracket is the reading this exists to
-                                    // prevent. The phases past the lookup
-                                    // stay unset — it never reached them.
-                                    probe.finish(TimingRowOutcome::Failed);
+                                    failed
+                                        .send(
+                                            ChunkFailureKind::UnknownDataset,
+                                            &format!("this session holds no dataset {dataset_id}"),
+                                            probe,
+                                        )
+                                        .await;
                                 }
                             }
                         }
                         ChunkMessage::ChunkFetch { .. } => {
-                            // Clients should not send ChunkFetch — ignore.
+                            reject_message(
+                                id,
+                                Rejected {
+                                    message_type: Some("chunk_fetch".into()),
+                                    ..Rejected::new(
+                                        MessageRejection::UnknownType,
+                                        "only the server sends chunk_fetch",
+                                    )
+                                },
+                                &unicast_routes,
+                            )
+                            .await;
                         }
                     }
                     continue;
@@ -900,10 +940,31 @@ async fn handle_client_inner(
                             };
                             probe.mark(ServerPhase::BindingLookup);
                             let Some(generator) = generator else {
-                                eprintln!(
-                                    "server: no binding for dataset {dataset_id} (asset {entity_id:?}/{kind:?} dropped)"
+                                tracing::warn!(
+                                    client_id = %id,
+                                    dataset = %dataset_id,
+                                    entity = %entity_id.0,
+                                    kind = proxy_kind_str(kind),
+                                    t,
+                                    c,
+                                    "asset.request.unknown_dataset"
                                 );
                                 probe.finish(TimingRowOutcome::Failed);
+                                reject_message(
+                                    id,
+                                    Rejected {
+                                        rid: Some(rid),
+                                        message_type: Some("asset_request".into()),
+                                        ..Rejected::new(
+                                            MessageRejection::UnknownDataset,
+                                            format!(
+                                                "this session holds no dataset {dataset_id} with proxy assets"
+                                            ),
+                                        )
+                                    },
+                                    &unicast_routes,
+                                )
+                                .await;
                                 continue;
                             };
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
@@ -925,12 +986,30 @@ async fn handle_client_inner(
                     continue;
                 }
 
-                eprintln!("client {id}: unrecognized message");
+                let rejected = unparsed_rejection(&json);
+                tracing::warn!(
+                    client_id = %id,
+                    reason = ?rejected.reason,
+                    message_type = rejected.message_type.as_deref().unwrap_or(""),
+                    error = %rejected.message,
+                    "ws.inbound.rejected"
+                );
+                reject_message(id, rejected, &unicast_routes).await;
             }
             // Every client message is JSON text. Binary frames flow only
             // from the server, so one arriving here carries nothing to act
-            // on and goes nowhere.
-            Message::Binary(_) => {}
+            // on.
+            Message::Binary(_) => {
+                reject_message(
+                    id,
+                    Rejected::new(
+                        MessageRejection::BinaryFrame,
+                        "the server reads only text messages",
+                    ),
+                    &unicast_routes,
+                )
+                .await;
+            }
             _ => {}
         }
     }
@@ -997,7 +1076,7 @@ async fn handle_client_inner(
         });
     }
 
-    eprintln!("client {id} disconnected");
+    tracing::info!(client_id = %id, "ws.connection.closed");
 }
 
 /// How long a server-side close may take to reach the client before the
@@ -1517,9 +1596,7 @@ enum ChunkDispatch {
 }
 
 /// Every exit files the probe's row. An absent chunk is delivered as fill
-/// like any other chunk, but an object store fault reaches the client as a
-/// status frame: from its side the alternative is a request timeout, which
-/// it has to treat as transient, so a dead source would never surface.
+/// like any other chunk; every failure reaches the client as a status frame.
 // Internal helper threading per-request state from the dispatch site;
 // extracting a struct would just push the bundle one frame up.
 #[allow(clippy::too_many_arguments)]
@@ -1527,7 +1604,7 @@ async fn serve_chunk_from_store(
     client_id: ClientId,
     dataset_id: &DatasetId,
     image_id: &ImageId,
-    chunk_key: &str,
+    chunk_key: &ChunkKey,
     resolver: &ChunkResolver,
     cache: &CachedStore,
     unicast_routes: &UnicastRoutes,
@@ -1549,32 +1626,16 @@ async fn serve_chunk_from_store(
     .await;
     let bytes = match read {
         Ok(read) => read.into_bytes(),
-        Err(ChunkReadError::UnknownImage(_)) => {
-            eprintln!(
-                "server: unknown image_id {image_id} for dataset {dataset_id}, key {chunk_key}"
-            );
-            probe.finish(TimingRowOutcome::Failed);
-            return;
-        }
-        Err(ChunkReadError::Decode(e)) => {
-            eprintln!("server: decode failed for {chunk_key}: {e}");
-            probe.finish(TimingRowOutcome::Failed);
-            return;
-        }
-        Err(ChunkReadError::ObjectStore(e)) => {
-            eprintln!("server: failed to read chunk {chunk_key} for {dataset_id}: {e}");
-            send_source_chunk_status(
+        Err(error) => {
+            SourceChunkFailure {
                 client_id,
                 dataset_id,
                 image_id,
-                chunk_key,
-                store_error_status(&e),
-                Some(e.to_string()),
+                key: &chunk_key.to_string(),
                 unicast_routes,
-            )
+            }
+            .send(error.failure_kind(), &error, probe)
             .await;
-            probe.mark(ServerPhase::Handoff);
-            probe.finish(TimingRowOutcome::Failed);
             return;
         }
     };
@@ -1641,32 +1702,157 @@ async fn serve_generated_chunk_request(
     }
 }
 
-/// Unicast the failure status for a source chunk whose store read failed
-/// (see the error arm in [`serve_chunk_from_store`]). Mirrors
-/// [`send_generated_chunk_status`]: a TEXT frame to the requesting client,
-/// while served bytes always travel as binary chunk frames.
-async fn send_source_chunk_status(
+/// The source chunk request a failure answers.
+struct SourceChunkFailure<'a> {
     client_id: ClientId,
-    dataset_id: &DatasetId,
-    image_id: &ImageId,
-    chunk_key: &str,
-    status: SourceChunkStatus,
-    message: Option<String>,
-    unicast_routes: &UnicastRoutes,
-) {
-    let msg = ServerMessage::SourceChunkStatus {
-        dataset_id: dataset_id.clone(),
-        image_id: image_id.clone(),
-        key: chunk_key.to_string(),
-        status,
-        message,
-    };
-    let json = serde_json::to_string(&msg).unwrap();
-    let senders = unicast_routes.lock().await;
-    if let Some(sender) = senders.get(&client_id) {
-        let _ = sender.send(Message::Text(json.into()));
+    dataset_id: &'a DatasetId,
+    image_id: &'a ImageId,
+    /// The key as the request spelled it, which is what the client matches
+    /// the reply against.
+    key: &'a str,
+    unicast_routes: &'a UnicastRoutes,
+}
+
+impl SourceChunkFailure<'_> {
+    /// Log the failure, send the requester its status frame, and file the
+    /// row. A request that ends without bytes always ends here: from the
+    /// client's side the alternative is a timeout, which it has to treat as
+    /// transient, so a failure that will repeat would never surface.
+    ///
+    /// The frame is TEXT, while served bytes always travel as binary chunk
+    /// frames.
+    async fn send(
+        self,
+        kind: ChunkFailureKind,
+        error: &(dyn std::fmt::Display + Sync),
+        mut probe: RequestProbe,
+    ) {
+        let status = kind.status();
+        tracing::warn!(
+            client_id = %self.client_id,
+            dataset = %self.dataset_id,
+            image = %self.image_id,
+            chunk_key = %self.key,
+            kind = ?kind,
+            status = ?status,
+            error = %error,
+            "chunk.request.failed"
+        );
+        let msg = ServerMessage::SourceChunkStatus {
+            dataset_id: self.dataset_id.clone(),
+            image_id: self.image_id.clone(),
+            key: self.key.to_string(),
+            status,
+            kind: Some(kind),
+            message: Some(error.to_string()),
+        };
+        send_to_client(self.client_id, msg, self.unicast_routes).await;
+        probe.mark(ServerPhase::Handoff);
+        probe.finish(TimingRowOutcome::Failed);
     }
 }
+
+/// What a [`ServerMessage::MessageRejected`] says, before it is sent.
+struct Rejected {
+    request_id: Option<String>,
+    rid: Option<u32>,
+    message_type: Option<String>,
+    reason: MessageRejection,
+    message: String,
+}
+
+impl Rejected {
+    fn new(reason: MessageRejection, message: impl Into<String>) -> Self {
+        Rejected {
+            request_id: None,
+            rid: None,
+            message_type: None,
+            reason,
+            message: message.into(),
+        }
+    }
+
+    fn into_message(self) -> ServerMessage {
+        ServerMessage::MessageRejected {
+            request_id: self.request_id,
+            rid: self.rid,
+            message_type: self.message_type,
+            reason: self.reason,
+            message: self.message,
+        }
+    }
+}
+
+/// Tell a client the server did not act on a message it sent.
+async fn reject_message(client_id: ClientId, rejected: Rejected, unicast_routes: &UnicastRoutes) {
+    send_to_client(client_id, rejected.into_message(), unicast_routes).await;
+}
+
+/// Why a text message matched no message the server reads, with whatever
+/// identifiers could still be read off it so the client can match the reply
+/// to what it sent.
+fn unparsed_rejection(json: &str) -> Rejected {
+    let Ok(serde_json::Value::Object(fields)) = serde_json::from_str::<serde_json::Value>(json)
+    else {
+        return Rejected::new(
+            MessageRejection::Malformed,
+            "the message is not a JSON object",
+        );
+    };
+    let message_type = fields
+        .get("type")
+        .and_then(|t| t.as_str())
+        .map(str::to_string);
+    let (reason, message) = match message_type.as_deref() {
+        None => (
+            MessageRejection::Malformed,
+            "the message has no type".to_string(),
+        ),
+        Some(t) if CLIENT_MESSAGE_TYPES.contains(&t) => (
+            MessageRejection::Malformed,
+            format!("the {t} message does not have the fields its type requires"),
+        ),
+        Some(t) => (
+            MessageRejection::UnknownType,
+            format!("the server does not read messages of type {t:?}"),
+        ),
+    };
+    Rejected {
+        request_id: fields
+            .get("request_id")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        rid: fields
+            .get("rid")
+            .and_then(|v| v.as_u64())
+            .and_then(|rid| u32::try_from(rid).ok()),
+        message_type,
+        reason,
+        message,
+    }
+}
+
+/// The `type` of every message a client sends, so a known type with bad
+/// fields reads as malformed rather than unknown.
+const CLIENT_MESSAGE_TYPES: &[&str] = &[
+    "command",
+    "presence",
+    "cursor",
+    "follow",
+    "steer",
+    "open_remote_dataset",
+    "dataset_health",
+    "dataset_retry",
+    "viewer_interest",
+    "request_snapshot",
+    "dataset_presence",
+    "watch_subscribe",
+    "watch_publish",
+    "send_report",
+    "chunk_request",
+    "chunk_fetch",
+    "asset_request",
+];
 
 async fn send_generated_chunk_status(
     client_id: ClientId,
@@ -1695,7 +1881,7 @@ fn encode_chunk_frame(
     client_id: ClientId,
     dataset_id: &DatasetId,
     image_id: &ImageId,
-    chunk_key: &str,
+    chunk_key: impl std::fmt::Display,
     bytes: &[u8],
 ) -> Vec<u8> {
     // Binary response: [client_id: u32 LE][key_len: u16 LE][key][data].
@@ -1765,7 +1951,15 @@ async fn serve_asset_request(
     let asset = match generator.request(spec, 1).await {
         Ok(a) => a,
         Err(e) => {
-            eprintln!("server: proxy generation failed for {entity_id:?}/{kind:?}/T{t}_C{c}: {e}");
+            tracing::warn!(
+                client_id = %client_id,
+                entity = %entity_id.0,
+                kind = proxy_kind_str(kind),
+                t,
+                c,
+                error = %e,
+                "asset.generation_failed"
+            );
             probe.mark(ServerPhase::SliceEncode);
             probe.finish(TimingRowOutcome::Failed);
             return;
@@ -1775,7 +1969,13 @@ async fn serve_asset_request(
     let buf = match encode_proxy_frame(client_id, &entity_id, kind, t, c, &asset) {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("server: proxy frame encode failed: {e}");
+            tracing::warn!(
+                client_id = %client_id,
+                entity = %entity_id.0,
+                kind = proxy_kind_str(kind),
+                error = %e,
+                "asset.frame_encode_failed"
+            );
             probe.mark(ServerPhase::SliceEncode);
             probe.finish(TimingRowOutcome::Failed);
             return;
@@ -2419,7 +2619,7 @@ mod tests {
             5,
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
-            "0/0/0/0/0/0",
+            &key("0/0/0/0/0/0"),
             &tiny_resolver(),
             &cache,
             &routes,
@@ -2444,22 +2644,26 @@ mod tests {
         assert!(rx.try_recv().is_err());
     }
 
-    #[tokio::test]
-    async fn unknown_image_fails_the_row_and_sends_nothing() {
+    /// Serve one key of `image` from `store` and return the single text
+    /// frame the requesting client received, after checking the row failed.
+    async fn serve_and_expect_status(
+        image: &str,
+        key: &str,
+        resolver: &ChunkResolver,
+        store: Arc<dyn object_store::ObjectStore>,
+    ) -> serde_json::Value {
         let routes: UnicastRoutes = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let (tx, mut rx) = client_queue();
-        routes.lock().await.insert(5, tx);
-        let store =
-            Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        routes.lock().await.insert(7, tx);
         let cache = Arc::new(CachedStore::new(store, 1024));
 
         let timings = Arc::new(TimingBuffer::new());
         serve_chunk_from_store(
-            5,
+            7,
             &DatasetId("ds1".into()),
-            &ImageId("not-bound".into()),
-            "0/0/0/0/0/0",
-            &tiny_resolver(),
+            &ImageId(image.into()),
+            &self::key(key),
+            resolver,
             &cache,
             &routes,
             test_probe(1, &timings),
@@ -2467,14 +2671,146 @@ mod tests {
         .await;
 
         assert_eq!(sole_outcome(&timings), TimingRowOutcome::Failed);
+        let msg = rx.recv().await.expect("status frame");
+        let Message::Text(json) = msg else {
+            panic!("expected text status frame");
+        };
+        assert!(rx.try_recv().is_err(), "the status must be the only frame");
+        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(value["type"], "source_chunk_status");
+        assert_eq!(value["key"], key);
+        value
+    }
+
+    /// An in-memory store holding `bytes` where `key` of the tiny resolver's
+    /// image lives.
+    async fn store_with(
+        resolver: &ChunkResolver,
+        key: &str,
+        bytes: &'static [u8],
+    ) -> Arc<dyn object_store::ObjectStore> {
+        let store = object_store::memory::InMemory::new();
+        let location = resolver
+            .resolve(&ImageId("img1".into()), &self::key(key))
+            .unwrap();
+        object_store::ObjectStore::put(
+            &store,
+            location.path(),
+            object_store::PutPayload::from_static(bytes),
+        )
+        .await
+        .unwrap();
+        Arc::new(store)
+    }
+
+    #[tokio::test]
+    async fn unknown_image_sends_a_permanent_status() {
+        let value = serve_and_expect_status(
+            "not-bound",
+            "0/0/0/0/0/0",
+            &tiny_resolver(),
+            Arc::new(object_store::memory::InMemory::new()),
+        )
+        .await;
+        assert_eq!(value["kind"], "unknown_image");
+        assert_eq!(value["status"], "failed_permanent");
+    }
+
+    #[tokio::test]
+    async fn unknown_level_sends_a_permanent_status() {
+        let value = serve_and_expect_status(
+            "img1",
+            "3/0/0/0/0/0",
+            &tiny_resolver(),
+            Arc::new(object_store::memory::InMemory::new()),
+        )
+        .await;
+        assert_eq!(value["kind"], "unknown_level");
+        assert_eq!(value["status"], "failed_permanent");
+    }
+
+    #[tokio::test]
+    async fn corrupt_chunk_sends_a_permanent_status() {
+        let mut level = four_byte_level();
+        level.compression = crate::decode::StorageCompression::Lz4;
+        let resolver = ChunkResolver::new(&image_seed("img1", vec![level]));
+        let store = store_with(&resolver, "0/0/0/0/0/0", &[4, 0, 0, 0, 0xff, 0xff]).await;
+
+        let value = serve_and_expect_status("img1", "0/0/0/0/0/0", &resolver, store).await;
+        assert_eq!(value["kind"], "corrupt_chunk");
+        assert_eq!(value["status"], "failed_permanent");
+        assert!(value["message"].as_str().unwrap().contains("lz4"));
+    }
+
+    #[tokio::test]
+    async fn wrong_size_chunk_sends_a_permanent_status() {
+        let resolver = tiny_resolver();
+        let store = store_with(&resolver, "0/0/0/0/0/0", &[1, 2]).await;
+
+        let value = serve_and_expect_status("img1", "0/0/0/0/0/0", &resolver, store).await;
+        assert_eq!(value["kind"], "wrong_size");
+        assert_eq!(value["status"], "failed_permanent");
+    }
+
+    #[test]
+    fn a_message_that_matches_nothing_is_rejected_with_what_could_be_read() {
+        let not_json = unparsed_rejection("not json");
+        assert_eq!(not_json.reason, MessageRejection::Malformed);
+        assert_eq!(not_json.message_type, None);
+
+        let unknown = unparsed_rejection(r#"{"type":"frobnicate","request_id":"r-1"}"#);
+        assert_eq!(unknown.reason, MessageRejection::UnknownType);
+        assert_eq!(unknown.message_type.as_deref(), Some("frobnicate"));
+        assert_eq!(unknown.request_id.as_deref(), Some("r-1"));
+
+        let bad_fields = unparsed_rejection(r#"{"type":"chunk_request","rid":9,"key":"0/0"}"#);
+        assert_eq!(bad_fields.reason, MessageRejection::Malformed);
+        assert_eq!(bad_fields.message_type.as_deref(), Some("chunk_request"));
+        assert_eq!(bad_fields.rid, Some(9));
+
+        let untyped = unparsed_rejection(r#"{"request_id":"r-2"}"#);
+        assert_eq!(untyped.reason, MessageRejection::Malformed);
+        assert_eq!(untyped.request_id.as_deref(), Some("r-2"));
+    }
+
+    /// The list that tells a malformed message from an unknown type holds
+    /// every type a client sends: each client fixture's type is in it.
+    #[test]
+    fn every_client_message_type_is_known_to_the_rejection() {
+        let root =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../wire-fixtures/session");
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(root).unwrap() {
+            let path = entry.unwrap().path();
+            let text = std::fs::read_to_string(&path).unwrap();
+            let is_client = serde_json::from_str::<ClientMessage>(&text).is_ok()
+                || serde_json::from_str::<ChunkMessage>(&text).is_ok()
+                || serde_json::from_str::<AssetMessage>(&text).is_ok();
+            if !is_client {
+                continue;
+            }
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            let message_type = value["type"].as_str().unwrap().to_string();
+            assert!(
+                CLIENT_MESSAGE_TYPES.contains(&message_type.as_str()),
+                "{} has type {message_type}, which the rejection reads as unknown",
+                path.display()
+            );
+            seen.insert(message_type);
+        }
         assert!(
-            rx.try_recv().is_err(),
-            "no frame for a key with no location"
+            seen.len() >= 15,
+            "only {} client types in the fixtures",
+            seen.len()
         );
     }
 
     fn tiny_resolver() -> ChunkResolver {
         ChunkResolver::new(&image_seed("img1", vec![four_byte_level()]))
+    }
+
+    fn key(key: &str) -> ChunkKey {
+        ChunkKey::parse(key).unwrap()
     }
 
     /// Drive `serve_chunk_from_store` against a [`FailingStore`] and return
@@ -2491,7 +2827,7 @@ mod tests {
             7,
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
-            "0/0/0/0/0/0",
+            &key("0/0/0/0/0/0"),
             &tiny_resolver(),
             &cache,
             &routes,
@@ -2517,7 +2853,7 @@ mod tests {
         let store = object_store::memory::InMemory::new();
         let resolver = tiny_resolver();
         let location = resolver
-            .resolve(&ImageId("img1".into()), "0/0/0/0/0/0")
+            .resolve(&ImageId("img1".into()), &key("0/0/0/0/0/0"))
             .unwrap();
         object_store::ObjectStore::put(
             &store,
@@ -2536,7 +2872,7 @@ mod tests {
             5,
             &DatasetId("ds1".into()),
             &ImageId("img1".into()),
-            "0/0/0/0/0/0",
+            &key("0/0/0/0/0/0"),
             &resolver,
             &cache,
             &routes,
@@ -2568,6 +2904,7 @@ mod tests {
         assert_eq!(value["image_id"], "img1");
         assert_eq!(value["key"], "0/0/0/0/0/0");
         assert_eq!(value["status"], "unavailable");
+        assert_eq!(value["kind"], "storage_backend");
         assert!(
             value["message"]
                 .as_str()
@@ -2581,6 +2918,7 @@ mod tests {
         let value = serve_against_failing_store(StoreFailure::PermissionDenied).await;
         assert_eq!(value["type"], "source_chunk_status");
         assert_eq!(value["status"], "failed_permanent");
+        assert_eq!(value["kind"], "permission");
         assert!(
             value["message"]
                 .as_str()
@@ -2813,7 +3151,7 @@ mod tests {
                     1,
                     &DatasetId("ds1".into()),
                     &ImageId("img1".into()),
-                    &format!("0/0/0/0/0/{index}"),
+                    &key(&format!("0/0/0/0/0/{index}")),
                     &resolver,
                     &cache,
                     &routes,
@@ -2839,7 +3177,7 @@ mod tests {
                     2,
                     &DatasetId("ds1".into()),
                     &ImageId("img1".into()),
-                    "0/0/0/0/1/0",
+                    &key("0/0/0/0/1/0"),
                     &resolver,
                     &cache,
                     &routes,

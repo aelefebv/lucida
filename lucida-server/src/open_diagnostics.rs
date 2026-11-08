@@ -12,8 +12,9 @@ use lucida_content::DatasetId;
 use lucida_content::url::{DatasetLocation, LocationError};
 use lucida_protocol::{
     DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
-    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, SourceChunkStatus,
+    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
 };
+use lucida_store::backend::{MetadataFault, StoreError};
 
 pub(crate) fn open_failure(
     stage: DatasetOpenStage,
@@ -86,97 +87,57 @@ pub(crate) fn location_failure(error: &LocationError) -> DatasetOpenFailureDiagn
     )
 }
 
-pub(crate) fn backend_open_failure(
-    error: &lucida_store::backend::StoreError,
-) -> DatasetOpenFailureDiagnostic {
-    match error {
-        lucida_store::backend::StoreError::Denied(denied) => open_failure(
-            DatasetOpenStage::BackendOpen,
-            DatasetOpenFailureKind::SourceNotAllowed,
-            false,
-            denied.to_string(),
-            None,
-        ),
-        lucida_store::backend::StoreError::Metadata(message) => {
-            let lower = message.to_ascii_lowercase();
-            let kind = if lower.contains("bucket") || lower.contains("credential") {
-                DatasetOpenFailureKind::CloudConfiguration
-            } else {
-                DatasetOpenFailureKind::MissingMetadata
-            };
-            open_failure(
-                DatasetOpenStage::BackendOpen,
-                kind,
-                false,
-                error.to_string(),
-                None,
-            )
-        }
-        lucida_store::backend::StoreError::ObjectStore(inner) => {
-            let message = inner.to_string();
-            let lower = message.to_ascii_lowercase();
-            let (kind, retryable) = if is_not_found(inner) {
-                (DatasetOpenFailureKind::MissingObject, false)
-            } else if lower.contains("canonical")
-                || lower.contains("no such file")
-                || lower.contains("not a directory")
-            {
-                (DatasetOpenFailureKind::LocalPath, false)
-            } else if lower.contains("permission")
-                || lower.contains("forbidden")
-                || lower.contains("unauthorized")
-                || lower.contains("denied")
-            {
-                (DatasetOpenFailureKind::Permission, false)
-            } else if lower.contains("credential")
-                || lower.contains("token")
-                || lower.contains("region")
-                || lower.contains("bucket")
-            {
-                (DatasetOpenFailureKind::CloudConfiguration, false)
-            } else if lower.contains("http") || lower.contains("status") {
-                (DatasetOpenFailureKind::Http, true)
-            } else {
-                (DatasetOpenFailureKind::StorageBackend, true)
-            };
-            open_failure(
-                DatasetOpenStage::BackendOpen,
-                kind,
-                retryable,
-                format!("storage error: {message}"),
-                None,
-            )
-        }
-    }
+/// The failure of opening a storage backend, triaged by where it happened.
+pub(crate) fn backend_open_failure(error: &StoreError) -> DatasetOpenFailureDiagnostic {
+    let (kind, retryable) = store_error_kind(error, DatasetOpenFailureKind::MissingObject);
+    open_failure(
+        DatasetOpenStage::BackendOpen,
+        kind,
+        retryable,
+        error.to_string(),
+        None,
+    )
 }
 
-pub(crate) fn import_failure(error: &dyn std::fmt::Display) -> DatasetOpenFailureDiagnostic {
-    let message = error.to_string();
-    let lower = message.to_ascii_lowercase();
-    let kind = if lower.contains("codec")
-        || lower.contains("blosc")
-        || lower.contains("cname")
-        || lower.contains("compressor")
-    {
-        DatasetOpenFailureKind::UnsupportedCodec
-    } else if lower.contains("chunk")
-        || lower.contains("axis")
-        || lower.contains("non-prefix")
-        || lower.contains("layout")
-    {
-        DatasetOpenFailureKind::UnsupportedLayout
-    } else if lower.contains("missing") || lower.contains("not found") {
-        DatasetOpenFailureKind::MissingMetadata
-    } else if lower.contains("json")
-        || lower.contains("metadata")
-        || lower.contains("multiscale")
-        || lower.contains("malformed")
-    {
-        DatasetOpenFailureKind::MalformedMetadata
-    } else {
-        DatasetOpenFailureKind::Import
-    };
-    open_failure(DatasetOpenStage::MetadataImport, kind, false, message, None)
+/// The failure of importing a dataset's metadata. An object the import
+/// needed and did not find is missing metadata, not a missing dataset.
+pub(crate) fn import_failure(error: &StoreError) -> DatasetOpenFailureDiagnostic {
+    let (kind, retryable) = store_error_kind(error, DatasetOpenFailureKind::MissingMetadata);
+    open_failure(
+        DatasetOpenStage::MetadataImport,
+        kind,
+        retryable,
+        error.to_string(),
+        None,
+    )
+}
+
+/// The open-failure kind of a store error, and whether a retry can help.
+/// Every arm reads the error's variant; none reads its message.
+fn store_error_kind(
+    error: &StoreError,
+    not_found: DatasetOpenFailureKind,
+) -> (DatasetOpenFailureKind, bool) {
+    match error {
+        StoreError::Denied(_) => (DatasetOpenFailureKind::SourceNotAllowed, false),
+        StoreError::LocalPath(_) => (DatasetOpenFailureKind::LocalPath, false),
+        StoreError::BackendConfiguration(_) => (DatasetOpenFailureKind::CloudConfiguration, false),
+        StoreError::Metadata { fault, .. } => (
+            match fault {
+                MetadataFault::Missing => DatasetOpenFailureKind::MissingMetadata,
+                MetadataFault::Malformed => DatasetOpenFailureKind::MalformedMetadata,
+                MetadataFault::UnsupportedCodec => DatasetOpenFailureKind::UnsupportedCodec,
+                MetadataFault::UnsupportedLayout => DatasetOpenFailureKind::UnsupportedLayout,
+            },
+            false,
+        ),
+        StoreError::ObjectStore(object_store::Error::NotFound { .. }) => (not_found, false),
+        StoreError::ObjectStore(
+            object_store::Error::PermissionDenied { .. }
+            | object_store::Error::Unauthenticated { .. },
+        ) => (DatasetOpenFailureKind::Permission, false),
+        StoreError::ObjectStore(_) => (DatasetOpenFailureKind::StorageBackend, true),
+    }
 }
 
 pub(crate) fn open_success(
@@ -239,24 +200,12 @@ pub(crate) fn backend_kind_for_url(url: &str) -> String {
         .to_string()
 }
 
+/// Whether a read found nothing at the path, which a chunk read serves as
+/// fill. Decided by the variant alone, so a single-flight follower, whose
+/// reconstructed error keeps the leader's variant but not its path, reads
+/// the same as its leader.
 pub(crate) fn is_not_found(error: &object_store::Error) -> bool {
     matches!(error, object_store::Error::NotFound { .. })
-        || error.to_string().contains("not found")
-        || error.to_string().contains("No such file or directory")
-}
-
-/// Triage a non-not-found store error from a source-chunk read into the
-/// wire status vocabulary. Permission/credential rejections are permanent
-/// (the store answered; retrying without operator action cannot succeed);
-/// everything else — backend faults, unreachable services — reports the
-/// source as unavailable. Callers must handle not-found before calling
-/// this: a missing chunk is legitimate sparse data, not a failure.
-pub(crate) fn store_error_status(error: &object_store::Error) -> SourceChunkStatus {
-    match error {
-        object_store::Error::PermissionDenied { .. }
-        | object_store::Error::Unauthenticated { .. } => SourceChunkStatus::FailedPermanent,
-        _ => SourceChunkStatus::Unavailable,
-    }
 }
 
 #[cfg(test)]
@@ -309,33 +258,79 @@ mod tests {
         }
     }
 
+    /// Each kind of store error is triaged by its variant, so the same
+    /// failure classifies the same way whatever its message says.
     #[test]
-    fn permission_class_store_errors_are_permanent() {
-        let denied = object_store::Error::PermissionDenied {
-            path: "chunk".into(),
-            source: boxed("403 Forbidden"),
+    fn store_errors_are_triaged_by_variant() {
+        let generic = |message: &str| object_store::Error::Generic {
+            store: "test",
+            source: boxed(message),
         };
-        let unauthenticated = object_store::Error::Unauthenticated {
-            path: "chunk".into(),
-            source: boxed("credentials expired"),
-        };
-        assert_eq!(
-            store_error_status(&denied),
-            SourceChunkStatus::FailedPermanent
-        );
-        assert_eq!(
-            store_error_status(&unauthenticated),
-            SourceChunkStatus::FailedPermanent
-        );
+        let cases = [
+            (
+                StoreError::LocalPath(generic("permission denied: bucket credential")),
+                DatasetOpenFailureKind::LocalPath,
+                false,
+            ),
+            (
+                StoreError::BackendConfiguration(generic("no such file")),
+                DatasetOpenFailureKind::CloudConfiguration,
+                false,
+            ),
+            (
+                StoreError::ObjectStore(object_store::Error::PermissionDenied {
+                    path: "zarr.json".into(),
+                    source: boxed("http status 403"),
+                }),
+                DatasetOpenFailureKind::Permission,
+                false,
+            ),
+            (
+                StoreError::ObjectStore(generic("a codec chunk is missing from the bucket")),
+                DatasetOpenFailureKind::StorageBackend,
+                true,
+            ),
+            (
+                StoreError::missing_metadata("the json has no codec"),
+                DatasetOpenFailureKind::MissingMetadata,
+                false,
+            ),
+            (
+                StoreError::malformed_metadata("chunk axis layout"),
+                DatasetOpenFailureKind::MalformedMetadata,
+                false,
+            ),
+            (
+                StoreError::unsupported_layout("missing json"),
+                DatasetOpenFailureKind::UnsupportedLayout,
+                false,
+            ),
+        ];
+        for (error, kind, retryable) in cases {
+            for diagnostic in [backend_open_failure(&error), import_failure(&error)] {
+                assert_eq!(diagnostic.kind, kind, "{error}");
+                assert_eq!(diagnostic.retryable, retryable, "{error}");
+                assert_eq!(diagnostic.message, error.to_string());
+            }
+        }
     }
 
+    /// A missing object is the dataset itself while the backend opens, and a
+    /// metadata object once the import reads one.
     #[test]
-    fn other_store_errors_report_unavailable() {
-        let generic = object_store::Error::Generic {
-            store: "test",
-            source: boxed("503 Service Unavailable"),
-        };
-        assert_eq!(store_error_status(&generic), SourceChunkStatus::Unavailable);
+    fn a_missing_object_depends_on_the_stage() {
+        let missing = StoreError::ObjectStore(object_store::Error::NotFound {
+            path: "zarr.json".into(),
+            source: boxed("permission"),
+        });
+        assert_eq!(
+            backend_open_failure(&missing).kind,
+            DatasetOpenFailureKind::MissingObject
+        );
+        assert_eq!(
+            import_failure(&missing).kind,
+            DatasetOpenFailureKind::MissingMetadata
+        );
     }
 
     #[test]
@@ -385,15 +380,12 @@ mod tests {
     fn reconstructed_follower_errors_classify_like_their_leader() {
         // A single-flight follower reconstructs a coalesced failure carrying
         // the leader's error *variant* but an empty path (the real path lives
-        // in the preserved message). Both classifiers must key off the variant
-        // so a follower triages identically to the leader that produced it —
-        // otherwise a coalesced 403 could self-heal into a retry storm, or a
-        // coalesced 404 could look like a hard failure instead of sparse data.
+        // in the preserved message), so not-found must key off the variant:
+        // a coalesced 404 must read as sparse data, not as a hard failure.
         let not_found = object_store::Error::NotFound {
             path: String::new(),
             source: boxed("object at gs://bucket/chunk not found"),
         };
-        // Recognized by variant, not a fragile message substring.
         assert!(is_not_found(&not_found));
 
         let denied = object_store::Error::PermissionDenied {
@@ -401,16 +393,12 @@ mod tests {
             source: boxed("403 Forbidden"),
         };
         assert!(!is_not_found(&denied));
-        assert_eq!(
-            store_error_status(&denied),
-            SourceChunkStatus::FailedPermanent
-        );
 
+        // A message that says "not found" on another variant is not an absence.
         let other = object_store::Error::Generic {
             store: "source",
-            source: boxed("503 Service Unavailable"),
+            source: boxed("upstream not found: 503"),
         };
         assert!(!is_not_found(&other));
-        assert_eq!(store_error_status(&other), SourceChunkStatus::Unavailable);
     }
 }

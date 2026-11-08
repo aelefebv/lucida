@@ -160,7 +160,12 @@ async fn five_channels_per_chunk_resolve_and_slice_independently() {
     let mut all_channels_bytes = Vec::with_capacity(5);
     for c in 0..5u16 {
         let canonical_key = format!("0/0/{c}/0/0/0");
-        let location = resolver.resolve(&image_id, &canonical_key).unwrap();
+        let location = resolver
+            .resolve(
+                &image_id,
+                &canonical_key.parse::<lucida_content::ChunkKey>().unwrap(),
+            )
+            .unwrap();
         // All 5 channels resolve to the same on-disk chunk file
         // (chunk_shape[c] = 5 means c-axis-grid has only 1 chunk).
         assert_eq!(
@@ -177,7 +182,7 @@ async fn five_channels_per_chunk_resolve_and_slice_independently() {
             &resolver,
             &store,
             &image_id,
-            &canonical_key,
+            &canonical_key.parse::<lucida_content::ChunkKey>().unwrap(),
             ReaderId::UNATTRIBUTED,
             RequestLabel::UNATTRIBUTED,
             None,
