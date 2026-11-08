@@ -35,6 +35,7 @@ use crate::storage::test_support::sqlite_pool;
 use super::*;
 mod access;
 mod datasets;
+mod document_writes;
 mod duplicate;
 mod previews;
 mod profile_directory;

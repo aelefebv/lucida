@@ -218,8 +218,10 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
 
     expect(msg.type).toBe("coldState");
@@ -263,8 +265,10 @@ describe("buildColdState", () => {
         "ds1|ent-a|TileProxy3D|0|0",
       ]),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
 
     expect(msg.desiredProxyKeys).toEqual([
@@ -306,8 +310,10 @@ describe("buildColdState", () => {
       multiChannel: true,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings,
+      sampleFormat: "u16",
     });
 
     expect(msg.visibleChannels).toEqual([0, 1]);
@@ -360,8 +366,10 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: matrices,
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
 
     expect(msg.activeSet).toHaveLength(3);
@@ -382,8 +390,10 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
 
     expect(msg.type).toBe("coldState");
@@ -413,8 +423,10 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
     const msg2 = buildColdState({
       datasetId: "ds2",
@@ -424,8 +436,10 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
 
     expect(msg1.datasetId).toBe("ds1");
@@ -490,8 +504,10 @@ describe("computeActiveSetIndexMap / iterateActiveSetMembers", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: makeDsSettings(),
+      sampleFormat: "u16",
     });
     const fromActiveSet = computeActiveSetIndexMap(activeSet, [0], false);
     // Single-channel member id is the imageId.
@@ -520,6 +536,7 @@ describe("buildColdStateDelta", () => {
     selection: makeSelection(),
     visibleRegion: makeVisibleRegion(),
     epochs: makeEpochs(),
+    wantedChunks: [],
     matricesByEntity: makeMatrices(),
     dsSettings: makeDsSettings(),
   });

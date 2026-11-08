@@ -1,12 +1,12 @@
 /** 2D slice viewer. WebGPU rendering runs in a worker via RenderClient. */
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { SLICE_ZOOM_IN_PER_NOTCH, SLICE_ZOOM_OUT_PER_NOTCH } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
 import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
-import { buildAnnotationView, liveViewWithLiveZTC } from "../savedView/buildAnnotationView.ts";
+import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
 import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from "./annotationTool.ts";
@@ -32,9 +32,6 @@ const PAN_DIRECTIONS: Readonly<Record<string, readonly [number, number]>> = {
 const ARROW_KEY_CONTROLS = 'input[type="range"], input[type="radio"], [role="slider"]';
 
 interface Props {
-  z: number;
-  t: number;
-  c: number;
   session: Session;
   scene: WasmScene;
   datasets: Map<string, DatasetEntry>;
@@ -66,7 +63,7 @@ interface Props {
   onLongPress?: (at: ClientPoint) => void;
 }
 
-export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
+function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
@@ -84,13 +81,10 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
   } | null>(null);
 
   // Mirror placement props into refs so the pointer handlers, which depend on
-  // `canvas` only, read the latest values without re-binding on every doc or
-  // slice change. A dropped pin records its Z/T/C from these.
+  // `canvas` only, read the latest values without re-binding on every doc
+  // change.
   const annotationDatasetIdRef = useRef(annotationDatasetId);
   const toolRef = useRef(tool);
-  const zRef = useRef(z);
-  const tRef = useRef(t);
-  const cRef = useRef(c);
   const myIdRef = useRef(myId);
   const sendCommandRef = useRef(sendCommand);
   const onDocumentChangedRef = useRef(onDocumentChanged);
@@ -100,9 +94,6 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
   useEffect(() => {
     annotationDatasetIdRef.current = annotationDatasetId;
     toolRef.current = tool;
-    zRef.current = z;
-    tRef.current = t;
-    cRef.current = c;
     myIdRef.current = myId;
     sendCommandRef.current = sendCommand;
     onDocumentChangedRef.current = onDocumentChanged;
@@ -125,10 +116,6 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
       onLoopChange(null);
     };
   }, [session, client, canvas]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    loopRef.current?.setSliceParams(z, t, c);
-  }, [z, t, c, scene, client, canvas]);
 
   useEffect(() => {
     loopRef.current?.markInteractiveDirty();
@@ -249,13 +236,8 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
         : `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
       const end = eventToWorld(e);
       // Snapshot the author's view onto the pin so navigation can restore it.
-      // Z/T/C come from the slider refs, but slab thickness and `multi_channel`
-      // come from the scene's presence, so a multi-plane or multi-channel view
-      // isn't collapsed. A null capture just omits the view.
-      const capturedView = buildAnnotationView(
-        scene,
-        liveViewWithLiveZTC(scene, zRef.current, tRef.current, cRef.current),
-      );
+      // A null capture just omits the view.
+      const capturedView = buildAnnotationView(scene);
       // Apply locally and send: the server's rebroadcast excludes the sender, so
       // without the local apply the author would never see their shape. The
       // client-supplied id makes the local and peer copies converge.
@@ -272,18 +254,18 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
           // at the release.
           position: drawShape ? press.world : end,
           end: drawShape ? end : null,
-          z: zRef.current,
+          z: scene.z(),
           // The overlay shows the pin off-context when the view's T/C differ.
-          t: tRef.current,
-          c: cRef.current,
+          t: scene.t(),
+          c: scene.c(),
           author: String(myIdRef.current),
           kind: drawShape ? kind : "point",
           ...(capturedView ? { view: capturedView } : {}),
         },
         sendCommandRef.current,
+        loopRef.current,
       );
       onDocumentChangedRef.current();
-      loopRef.current?.markInteractiveDirty();
     },
     [eventToWorld, scene, annotationDraftRef],
   );
@@ -477,3 +459,7 @@ export function SliceViewer({ z, t, c, session, scene, datasets, client, canvas,
 
   return null;
 }
+
+// Memoized so a viewer render that changes none of its props, such as one
+// for a peer's message, skips it; its props are stable for that reason.
+export const SliceViewer = memo(SliceViewerBody);

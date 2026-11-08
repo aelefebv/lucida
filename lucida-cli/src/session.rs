@@ -23,7 +23,9 @@ use std::time::Duration;
 
 use futures_util::{Sink, SinkExt, Stream, StreamExt};
 use lucida_core::DatasetId;
-use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessage};
+use lucida_core::protocol::{
+    ClientId, ClientMessage, CommandRejection, PresenceState, ServerMessage,
+};
 use lucida_core::scene::DocumentState;
 use lucida_protocol::GeneratedAvailabilitySnapshot;
 use tokio::net::TcpStream;
@@ -214,6 +216,24 @@ where
     .await
 }
 
+fn command_rejected(reason: CommandRejection) -> CliError {
+    match reason {
+        CommandRejection::Forbidden => CliError::new(
+            ErrorKind::Unauthorized,
+            "the server refused the command: your workspace role cannot change the document",
+        ),
+        CommandRejection::Invalid => CliError::new(
+            ErrorKind::RejectedCommand,
+            "the server refused the command: it names something the workspace does not hold, \
+             or carries a value the server does not accept",
+        ),
+        CommandRejection::Unavailable => CliError::new(
+            ErrorKind::RejectedCommand,
+            "the server could not save the command, and nothing changed; try again",
+        ),
+    }
+}
+
 async fn wait_for_server_message<S, T, F>(
     messages: &mut S,
     wait: Duration,
@@ -245,6 +265,11 @@ where
                                 outcomes.archived_outcome
                             ),
                         ));
+                    }
+                    // Only this connection's own commands are refused to it,
+                    // so a refusal answers whatever command is being awaited.
+                    if let ServerMessage::CommandRejected { reason } = message {
+                        return Err(command_rejected(reason));
                     }
                     if let Some(result) = on_message(message)? {
                         return Ok(result);
@@ -544,6 +569,33 @@ mod tests {
 
         assert_eq!(error.kind, ErrorKind::RejectedCommand);
         assert!(error.message.contains("test confirmation"));
+    }
+
+    #[tokio::test]
+    async fn observe_until_reports_a_refused_command_without_waiting_out_the_timeout() {
+        for (reason, kind) in [
+            ("forbidden", ErrorKind::Unauthorized),
+            ("invalid", ErrorKind::RejectedCommand),
+            ("unavailable", ErrorKind::RejectedCommand),
+        ] {
+            let mut messages = text_messages(vec![
+                serde_json::json!({ "type": "command_rejected", "reason": reason }).to_string(),
+            ]);
+
+            let error = observe_until(
+                &mut messages,
+                Duration::from_secs(60),
+                &ack_wait(),
+                |message| match message {
+                    ServerMessage::Ack { seq } => Ok(Some(seq)),
+                    _ => Ok(None),
+                },
+            )
+            .await
+            .unwrap_err();
+
+            assert_eq!(error.kind, kind, "{reason}");
+        }
     }
 
     #[tokio::test]

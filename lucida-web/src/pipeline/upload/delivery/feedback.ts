@@ -1,11 +1,14 @@
 /**
- * WorkerFeedback — owns the worker → main-thread feedback handlers
- * (`chunksEvicted`, `wantedSetDelta`).
+ * WorkerFeedback — owns the worker → main-thread residency handlers
+ * (`chunkResidency`, `wantedSetDelta`). The worker owns its slots; these
+ * keep the CPU cache's delivery state a mirror of them.
  */
 
 import type { CpuCache } from "../../fetch/index.ts";
+import type { ResidencyTier } from "../../residencyTier.ts";
 import type {
   ChunkFeedbackReason,
+  ChunkResidencyChange,
   MissingChunk,
   MissingProxy,
 } from "../../../renderer/workerProtocol.ts";
@@ -18,9 +21,6 @@ import {
 } from "./dispatch.ts";
 
 export class WorkerFeedback {
-  private readonly datasetsWithWantedSnapshot = new Set<string>();
-  private readonly missingChunksByDataset = new Map<string, Map<string, Map<number, Set<string>>>>();
-
   private readonly guard: ResendGuard | null;
 
   /** `guard` hears every chunk the worker hands back, so a held chunk names its reason. */
@@ -29,114 +29,85 @@ export class WorkerFeedback {
   }
 
   /**
-   * - `evicted` chunks were displaced by closer arrivals — re-eligible
-   *   under the same plan.
-   * - `skipped` chunks never made it in (atlas full + too far) —
-   *   recorded as rejected and forwarded to `cpuCache.markRejected`
-   *   when the entityId is known, so the cache stops re-fetching them.
-   *
-   * `cpuCache` is a parameter because the orchestrator owns no
-   * cpuCache reference today (it gets one through `ctx.cpuCache`).
+   * Apply one residency report. `cpuCache` is a parameter because the
+   * uploader owns no cpuCache reference (it gets one through `ctx.cpuCache`).
+   * Returns whether a chunk may now be sent again.
    */
-  handleChunksEvicted(
+  handleChunkResidency(
     memberId: string,
-    evicted: string[],
-    skipped: string[],
+    tier: ResidencyTier,
+    change: ChunkResidencyChange,
+    keys: string[],
     cpuCache: CpuCache,
     reason?: ChunkFeedbackReason,
-  ): void {
+  ): boolean {
+    if (keys.length === 0) return false;
     const parsed = parseWorkerMemberId(memberId);
-    const byChannel = new Map<number, { evicted: string[]; skipped: string[] }>();
-    const collect = (chunkKey: string, bucket: "evicted" | "skipped"): void => {
+    const byChannel = new Map<number, string[]>();
+    for (const chunkKey of keys) {
       const c = parsed.c ?? channelFromChunkKey(chunkKey) ?? 0;
-      let group = byChannel.get(c);
-      if (!group) {
-        group = { evicted: [], skipped: [] };
-        byChannel.set(c, group);
-      }
-      group[bucket].push(chunkKey);
-    };
+      const group = byChannel.get(c);
+      if (group) group.push(chunkKey);
+      else byChannel.set(c, [chunkKey]);
+    }
 
-    for (const chunkKey of evicted) collect(chunkKey, "evicted");
-    for (const chunkKey of skipped) collect(chunkKey, "skipped");
+    if (change === "held") {
+      for (const [c, group] of byChannel) cpuCache.markChunksHeld(parsed.imageId, c, tier, group);
+      return false;
+    }
 
+    const why = reason ?? (change === "lost" ? "evicted" : "atlas-policy");
     for (const [c, group] of byChannel) {
-      cpuCache.markChunkEvicted(parsed.imageId, c, group.evicted, group.skipped, reason);
+      if (change === "lost") cpuCache.markChunksLost(parsed.imageId, c, tier, group, why);
+      else cpuCache.markChunksRefused(parsed.imageId, c, tier, group, why);
       if (this.guard) {
-        for (const key of group.evicted) this.guard.noteReturned(parsed.imageId, c, key, reason ?? "evicted");
-        for (const key of group.skipped) this.guard.noteReturned(parsed.imageId, c, key, "atlas-policy");
+        for (const key of group) this.guard.noteReturned(parsed.imageId, c, key, why);
       }
     }
-
-    if (evicted.length > 0 || skipped.length > 0) {
-      debugLog("orch", "upload.worker_chunk_feedback", {
-        memberId,
-        imageId: parsed.imageId,
-        reason: reason ?? "evicted",
-        requeued: evicted.length,
-        rejected: skipped.length,
-      });
-    }
+    debugLog("orch", "upload.worker_chunk_feedback", {
+      memberId,
+      imageId: parsed.imageId,
+      tier,
+      change,
+      reason: why,
+      chunks: keys.length,
+    });
+    // An `atlas-policy` refusal waits for the next plan; the rest may go again now.
+    return change === "lost" || why !== "atlas-policy";
   }
 
   /**
-   * Worker wanted-set is authoritative residency feedback. Chunks clear
-   * optimistic sent state; proxies do the same through their composite
-   * proxy key. Both paths schedule a residency tick in RenderLoop.
+   * Proxies the worker lacks are re-delivered. A missing chunk normally
+   * changes nothing, since every loss is reported on its own, but one the
+   * mirror holds is a disagreement: it is logged, named to the guard, and
+   * made sendable again. Returns whether anything may now be sent again.
    */
   handleWantedSetDelta(
     datasetId: string,
     missing: Array<MissingChunk | MissingProxy>,
     cpuCache: CpuCache,
-  ): void {
-    this.datasetsWithWantedSnapshot.add(datasetId);
-    const missingChunksForDataset = new Map<string, Map<number, Set<string>>>();
-    let missingChunks = 0;
+  ): boolean {
+    const disagreements: string[] = [];
     let missingProxies = 0;
     for (const entry of missing) {
       if (entry.kind === "chunk") {
         const parsed = parseWorkerMemberId(entry.memberId);
         const c = entry.c ?? parsed.c ?? channelFromChunkKey(entry.chunkKey) ?? 0;
-        const imageId = parsed.imageId;
-        let byChannel = missingChunksForDataset.get(imageId);
-        if (!byChannel) {
-          byChannel = new Map();
-          missingChunksForDataset.set(imageId, byChannel);
+        if (cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, entry.tier)) {
+          this.guard?.noteMissing(parsed.imageId, c, entry.chunkKey);
+          disagreements.push(`${entry.memberId}/${entry.chunkKey} [${entry.tier}]`);
         }
-        let keys = byChannel.get(c);
-        if (!keys) {
-          keys = new Set();
-          byChannel.set(c, keys);
-        }
-        keys.add(entry.chunkKey);
-        cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, entry.tier);
-        this.guard?.noteMissing(parsed.imageId, c, entry.chunkKey);
-        missingChunks++;
       } else if (entry.kind === "proxy") {
         cpuCache.markProxyMissing(proxyKeyFromMissing(entry));
         missingProxies++;
       }
     }
-    if (missingChunks > 0 || missingProxies > 0) {
-      debugLog("orch", "upload.worker_wanted_set_delta", {
-        missingChunks,
-        missingProxies,
-      });
+    if (disagreements.length > 0) {
+      debugLog("orch", "upload.residency_disagreement", { datasetId, chunks: disagreements });
     }
-    this.missingChunksByDataset.set(datasetId, missingChunksForDataset);
-  }
-
-  chunkResidency(
-    datasetId: string,
-    imageId: string,
-    c: number,
-    chunkKey: string,
-  ): "resident" | "missing" | "unknown" {
-    if (!this.datasetsWithWantedSnapshot.has(datasetId)) return "unknown";
-    const missing = this.missingChunksByDataset.get(datasetId)
-      ?.get(imageId)
-      ?.get(c)
-      ?.has(chunkKey) ?? false;
-    return missing ? "missing" : "resident";
+    if (missingProxies > 0) {
+      debugLog("orch", "upload.worker_wanted_set_delta", { missingProxies });
+    }
+    return disagreements.length > 0 || missingProxies > 0;
   }
 }

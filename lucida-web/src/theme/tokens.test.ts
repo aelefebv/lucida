@@ -115,6 +115,7 @@ function canvasTokens(canvas: string, theme: "dark" | "light"): Map<string, stri
 const DRAWN_OVER_DATA = CANVAS_TOKEN_NAMES.filter(
   (name) => !["--lc-canvas-bg", "--lc-canvas-stroke", "--lc-canvas-label"].includes(name),
 );
+const CANVAS_CHART = CANVAS_TOKEN_NAMES.filter((name) => name.startsWith("--lc-canvas-chart-"));
 
 describe.each([
   ["black", "dark"],
@@ -132,7 +133,20 @@ describe.each([
 
   it("draws axes, markers, and statuses at 3:1 or better against the background", () => {
     for (const name of DRAWN_OVER_DATA) {
+      // The theme canvas's chart series are the theme's own slots, checked below.
+      if (canvas === "theme" && CANVAS_CHART.includes(name)) continue;
       expect(contrast(parseColor(tokens.get(name)!).rgb, bg), name).toBeGreaterThanOrEqual(3);
+    }
+  });
+
+  it("draws chart series in the slots its background calls for", () => {
+    // The theme canvas takes the theme's own slots, so a series on it matches
+    // the dock's. A dark canvas takes the dark theme's. White has its own set,
+    // held to 3:1 above.
+    if (canvas === "white") return;
+    const slots = canvas === "theme" && theme === "light" ? light : dark;
+    for (const name of CANVAS_CHART) {
+      expect(tokens.get(name), name).toBe(slots.get(name.replace("--lc-canvas-chart-", "--lc-chart-")));
     }
   });
 

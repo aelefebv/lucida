@@ -102,15 +102,40 @@ describe("normalize", () => {
     expect(out).toBe(src);
   });
 
-  it("float32: normalizes unit-range samples to u16", () => {
-    const src = new Float32Array([-1, 0, 0.5, 1, 2, Number.NaN]).buffer;
-    const out = new Uint16Array(normalize(src, "float32"));
-    expect(Array.from(out)).toEqual([0, 0, 32768, 65535, 65535, 0]);
+  it("float32: keeps every value, outside [0, 1] and infinite included", () => {
+    const values = [-5, 0, 0.5, 1, 500.25, 2 ** 100, Infinity, -Infinity];
+    const out = new Float32Array(normalize(new Float32Array(values).buffer, "Float32"));
+    expect(Array.from(out)).toEqual(values);
   });
 
-  it("default (unrecognized dataType): returns input unchanged", () => {
-    const src = new Uint8Array([1, 2, 3]).buffer;
-    const out = normalize(src, "float64");
-    expect(out).toBe(src);
+  it("float32: rewrites every NaN as one pattern, never the all-ones miss sentinel", () => {
+    const bits = new Uint32Array([0xffffffff, 0x7f800001, 0xffc00000, 0x3f800000]);
+    const out = new Uint32Array(normalize(bits.buffer, "float32"));
+    expect(Array.from(out)).toEqual([0x7fc00000, 0x7fc00000, 0x7fc00000, 0x3f800000]);
+  });
+
+  it("float64: draws as the nearest float32", () => {
+    const src = new Float64Array([-2.5, 1e6 + 0.25, 0.1, Number.NaN]).buffer;
+    const out = new Float32Array(normalize(src, "Float64"));
+    expect(out.length).toBe(4);
+    expect(Array.from(out.subarray(0, 3))).toEqual([-2.5, Math.fround(1e6 + 0.25), Math.fround(0.1)]);
+    expect(new Uint32Array(out.buffer)[3]).toBe(0x7fc00000);
+  });
+
+  it("signed integers: keep their values as float32", () => {
+    expect(Array.from(new Float32Array(normalize(new Int8Array([-128, -1, 127]).buffer, "Int8"))))
+      .toEqual([-128, -1, 127]);
+    expect(Array.from(new Float32Array(normalize(new Int16Array([-32768, -2, 32767]).buffer, "Int16"))))
+      .toEqual([-32768, -2, 32767]);
+    expect(Array.from(new Float32Array(normalize(new Int32Array([-70000, 16777216]).buffer, "Int32"))))
+      .toEqual([-70000, 16777216]);
+  });
+
+  it("throws on a buffer that does not divide into samples", () => {
+    expect(() => normalize(new ArrayBuffer(6), "float64")).toThrowError(/multiple of 8/);
+  });
+
+  it("refuses a data type it has no layout for, naming it", () => {
+    expect(() => normalize(new ArrayBuffer(8), "int64")).toThrowError("unsupported data type: int64");
   });
 });

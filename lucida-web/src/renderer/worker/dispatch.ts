@@ -38,7 +38,7 @@ import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
 import { removeDatasetResources } from "./lifecycle.ts";
 import { postGpuAtlasesIfChanged } from "./atlasReport.ts";
 import { handleCaptureFrame } from "./captureFrame.ts";
-import { postChunksRequeued } from "../chunkUploadFeedback.ts";
+import { postChunkResidency } from "../chunkUploadFeedback.ts";
 import { sourceKey } from "../poolKeys.ts";
 
 /**
@@ -70,7 +70,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         .get(memberId)
         ?.get(sourceKey(msg.tier, msg.level));
       if (!poolKey) {
-        postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+        postChunkResidency(ctx, memberId, msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool");
         return;
       }
       handleSliceChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
@@ -93,7 +93,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       if (!poolKey) {
         // No section for this (tier, level): cold state hasn't arrived for
         // this member, or the level is no longer a resident level.
-        postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+        postChunkResidency(ctx, memberId, msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool");
         return;
       }
       handleVolumeChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
@@ -111,7 +111,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "proxyAssetData": {
       const outcome = handleProxyUpload(ctx, msg);
       if (outcome.rebuildDescriptor) rebuildDescriptorIfMatching(ctx, msg.datasetId);
-      if (outcome.wantedSetChanged) ctx.postWantedSet();
+      if (outcome.wantedSetChanged) ctx.postWantedSet(msg.datasetId);
       return;
     }
 
@@ -154,7 +154,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       ctx.state.currentEpochs = msg.epochs;
       ctx.state.coldStateByDataset.set(msg.datasetId, msg);
       applyColdState(ctx, msg);
-      ctx.postWantedSet();
+      ctx.postWantedSet(msg.datasetId);
       postGpuAtlasesIfChanged(ctx);
       return;
 
@@ -166,7 +166,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "coldStateSelection":
       // A T/Z scrub changes the wanted chunks, so the wanted-set is posted.
       applyColdStateSelection(ctx, msg);
-      ctx.postWantedSet();
+      ctx.postWantedSet(msg.datasetId);
       postGpuAtlasesIfChanged(ctx);
       return;
 
@@ -174,7 +174,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       // Posted even when the delta was a no-op, matching the full and
       // selection paths.
       applyColdStateDelta(ctx, msg);
-      ctx.postWantedSet();
+      ctx.postWantedSet(msg.datasetId);
       postGpuAtlasesIfChanged(ctx);
       return;
 

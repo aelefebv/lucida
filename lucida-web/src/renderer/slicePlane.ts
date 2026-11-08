@@ -2,11 +2,11 @@
  * Where a full-resolution plane lands at a coarser level, in one place.
  *
  * The slice atlas keys chunks by each level's own chunk grid, so the planner,
- * the upload path and the wanted set must agree on which chunk along Z holds
- * the plane a full-resolution `z` names: a delivery lands in the chunk the
- * wanted set looked for, or the two never meet and the delivery is refused
- * and re-sent forever. All three go through these functions, and
- * `slice_level_z` in `lucida-core/src/chunk.rs` computes the same plane.
+ * which picks the chunk along Z the worker wants, and the worker, which cuts
+ * the plane from it and checks a slot still holds that plane, must agree on
+ * the plane a full-resolution `z` names, or a delivery is refused and re-sent
+ * forever. Both go through these functions, and `slice_level_z` in
+ * `lucida-core/src/chunk.rs` computes the same plane.
  */
 
 /**

@@ -269,7 +269,7 @@ describe("handleLabelVolumeChunkData", () => {
     expect(ctx.state.labelVolumePools.has("img-0:label:region-b")).toBe(false);
     expect(writes).toHaveLength(0);
     // Refused, so the page does not count the chunk as resident.
-    expect(ctx.post).toHaveBeenCalledWith(expect.objectContaining({ type: "chunksEvicted", keys: [], reason: "atlas-policy" }));
+    expect(ctx.post).toHaveBeenCalledWith(expect.objectContaining({ type: "chunkResidency", change: "refused", reason: "atlas-policy" }));
   });
 });
 
