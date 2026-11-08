@@ -57,6 +57,7 @@ import {
   RowOutcome,
   SEND_COLUMNS,
   TRACE_SCHEMA_VERSION,
+  UNSET_STAMP,
   type ChunkCoordinates,
   type ChunkEventSource,
   type ChunkRowSource,
@@ -258,6 +259,18 @@ interface ClosedInterval {
 /** Row indices are packed with the run generation so a stale handle is inert. */
 const GENERATION_STRIDE = 0x1000000;
 
+/**
+ * What the per-row paths read, copied from their imports once. An import is
+ * a live binding, and the test runner's module loader reads one through a
+ * getter on every use, which would charge every row a call per read.
+ */
+const PER_RUN_CAP = PER_RUN_CAP_BYTES;
+const RESIDENT_CAP = RESIDENT_CAP_BYTES;
+const clamp = clampStamp;
+const PRESENT_START = Boundary.PresentStart;
+const PRESENT_END = Boundary.PresentEnd;
+const COMPLETE = RowOutcome.Complete;
+
 export class TraceRecorder {
   private readonly sinkFactory: TraceSinkFactory;
   private readonly now: () => number;
@@ -300,6 +313,22 @@ export class TraceRecorder {
   private openPlanStartMs: number | null = null;
   /** The ring slot the open pass's span is in, or -1 before it enqueues. */
   private openPlanSlot = -1;
+  /** Bumped whenever a span in the ring changes, so a resolved admission knows it is stale. */
+  private planSpanVersion = 0;
+
+  /**
+   * The `plan` and `queue` stamps of the last admission a row was born at,
+   * and what they were resolved against. One submit dispatches its whole
+   * burst at a single admission time against a single plan pass, so the
+   * ring is searched once per burst rather than once per row.
+   */
+  private readonly admission = {
+    atMs: Number.NaN,
+    generation: -1,
+    planSpanVersion: -1,
+    planStartUs: UNSET_STAMP,
+    queueStartUs: 0,
+  };
 
   /**
    * Rows handed to the renderer but not yet covered by a frame, and rows
@@ -819,24 +848,45 @@ export class TraceRecorder {
       this.countRefusedRow();
       return -1;
     }
-    const index = run.sink.append(src, tier);
-    if (index < 0) return -1;
 
     // One clock read for both boundaries: the moment the request goes out is
     // the moment the queue ends, so reading the clock twice would open a gap
     // between two halves of the same boundary.
     const dispatchedAtMs = this.now();
     const admittedMs = admittedAtMs ?? this.latestPlanEndMs() ?? dispatchedAtMs;
+    const admission = this.admission;
+    if (
+      admission.atMs !== admittedMs ||
+      admission.generation !== run.generation ||
+      admission.planSpanVersion !== this.planSpanVersion
+    ) {
+      this.resolveAdmission(run, admittedMs);
+    }
+    const index = run.sink.appendDispatched(
+      src,
+      tier,
+      admission.planStartUs,
+      admission.queueStartUs,
+      this.offsetUs(run, dispatchedAtMs),
+    );
+    if (index < 0) return -1;
+    return run.generation * GENERATION_STRIDE + index;
+  }
+
+  /** The `plan` and `queue` stamps for rows admitted at `admittedMs`, into {@link admission}. */
+  private resolveAdmission(run: OpenInterval, admittedMs: number): void {
+    const admission = this.admission;
     const pass = this.planPassAt(admittedMs);
     let queuedMs = admittedMs;
+    admission.planStartUs = UNSET_STAMP;
     if (pass >= 0) {
-      run.sink.stamp(index, Boundary.PlanStart, this.offsetUs(run, this.planStartsMs[pass]));
+      admission.planStartUs = this.offsetUs(run, this.planStartsMs[pass]);
       queuedMs = Math.min(admittedMs, this.planEndsMs[pass]);
     }
-    run.sink.stamp(index, Boundary.QueueStart, this.offsetUs(run, queuedMs));
-    run.sink.stamp(index, Boundary.WireStart, this.offsetUs(run, dispatchedAtMs));
-
-    return run.generation * GENERATION_STRIDE + index;
+    admission.queueStartUs = this.offsetUs(run, queuedMs);
+    admission.atMs = admittedMs;
+    admission.generation = run.generation;
+    admission.planSpanVersion = this.planSpanVersion;
   }
 
   /** A row nobody kept is counted either way, so coverage is never overstated. */
@@ -880,6 +930,7 @@ export class TraceRecorder {
       this.planSpanCount++;
     }
     this.planEndsMs[this.openPlanSlot] = enqueuedAtMs;
+    this.planSpanVersion++;
   }
 
   /**
@@ -906,14 +957,14 @@ export class TraceRecorder {
   noteFrameDispatched(): void {
     const drawn = this.awaitingDrawn;
     for (let i = 0; i < drawn.length; i++) {
-      this.stamp(drawn[i], Boundary.PresentEnd);
-      this.finishRow(drawn[i], RowOutcome.Complete);
+      this.stamp(drawn[i], PRESENT_END);
+      this.finishRow(drawn[i], COMPLETE);
     }
     drawn.length = 0;
 
     const resident = this.awaitingResident;
     for (let i = 0; i < resident.length; i++) {
-      this.stamp(resident[i], Boundary.PresentStart);
+      this.stamp(resident[i], PRESENT_START);
     }
     // Swap rather than reallocate: the drained list becomes the next
     // frame's pending list.
@@ -1375,6 +1426,7 @@ export class TraceRecorder {
     this.serverRowsOutsideRun = 0;
     this.lastQuiescence = null;
     this.planSpanCount = 0;
+    this.planSpanVersion++;
     this.openPlanStartMs = null;
     this.openPlanSlot = -1;
     this.lastTargetByDataset.clear();
@@ -1517,7 +1569,7 @@ export class TraceRecorder {
     if (!run || run.truncation) return null;
 
     const openBytes = intervalBytes(run);
-    if (openBytes <= PER_RUN_CAP_BYTES) {
+    if (openBytes <= PER_RUN_CAP) {
       this.evictToResidentCap(openBytes);
       return run;
     }
@@ -1554,7 +1606,7 @@ export class TraceRecorder {
    * being recorded right now is the one somebody is about to ask about.
    */
   private evictToResidentCap(openBytes: number): void {
-    while (this.closed.length > 0 && this.closedBytes + openBytes > RESIDENT_CAP_BYTES) {
+    while (this.closed.length > 0 && this.closedBytes + openBytes > RESIDENT_CAP) {
       const evicted = this.closed.shift();
       if (!evicted) return;
       this.closedBytes -= evicted.byteLength;
@@ -1600,7 +1652,7 @@ export class TraceRecorder {
   }
 
   private offsetUs(run: OpenInterval, atMs: number): number {
-    return clampStamp(Math.round((atMs - run.startedAtMs) * 1000));
+    return clamp(Math.round((atMs - run.startedAtMs) * 1000));
   }
 
   private latestPlanEndMs(): number | null {
