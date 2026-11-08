@@ -34,7 +34,7 @@ jobs:
       # repository's cache a second time, and writing its scope would replace
       # that job's entries.
       - name: Build the lucida CLI
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: cli
@@ -46,7 +46,7 @@ jobs:
           cache-to: type=gha,mode=min,scope=trace-gate-cli
 
       - name: Build the server image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
