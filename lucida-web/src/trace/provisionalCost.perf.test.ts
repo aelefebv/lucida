@@ -23,8 +23,8 @@ import { Boundary, type ChunkRowSource, type RunConditions } from "./types.ts";
 const READ_CEILING_US = 1_000;
 
 /** Budgets in nominal microseconds, about twice each typical figure. */
-const FULL_READ_BUDGET_US = 440;
-const WRAPPED_READ_BUDGET_US = 410;
+const FULL_READ_BUDGET_US = 410;
+const WRAPPED_READ_BUDGET_US = 380;
 const SLID_READ_BUDGET_US = 130;
 
 /**

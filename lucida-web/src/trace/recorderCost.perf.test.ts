@@ -84,16 +84,16 @@ const WORST_TICK_CEILING_US = 250;
 
 /** Per-event budgets in nominal nanoseconds, by burst size, about twice each typical figure. */
 const PER_EVENT_BUDGET_NS: Readonly<Record<number, number>> = {
-  1: 620,
-  8: 320,
-  128: 17,
-  2943: 12,
+  1: 580,
+  8: 310,
+  128: 16,
+  2943: 11,
 };
 
 /** Tick budgets in nominal microseconds, about twice each typical figure. */
-const WORST_TICK_BUDGET_US = 90;
-const MATCHED_TICK_BUDGET_US = 11;
-const LIVE_READ_BUDGET_US = 2;
+const WORST_TICK_BUDGET_US = 87;
+const MATCHED_TICK_BUDGET_US = 10;
+const LIVE_READ_BUDGET_US = 1.9;
 
 /**
  * How much more the largest burst may cost per event than the cheapest. Wide,

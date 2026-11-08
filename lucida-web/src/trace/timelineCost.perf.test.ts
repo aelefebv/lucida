@@ -41,8 +41,8 @@ const FLATNESS_GROWTH_GATE = 4;
 const POPULATIONS = [2_000, 40_000] as const;
 
 /** Budgets in nominal microseconds, about twice each typical figure; the derivation's by population. */
-const DERIVE_BUDGET_US = [2_300, 800] as const;
-const DRAW_LIST_BUDGET_US = 85;
+const DERIVE_BUDGET_US = [2_300, 830] as const;
+const DRAW_LIST_BUDGET_US = 79;
 
 /** A busy pan's tick rate over the live timeline's default window: more readings than the ring holds. */
 const READINGS_PER_SECOND = 120;
