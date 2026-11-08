@@ -410,15 +410,10 @@ export class CpuCache {
     );
     // A wanted chunk more urgent than the one arriving stays: an insert
     // that could only make room by evicting one is refused instead. The
-    // view's chunks outrank prefetch whatever their priorities, which mix
-    // in distance and so rank a prefetch chunk near the center above a view
-    // chunk at the edge.
-    const protects = (resident: CacheEntry, incoming: CacheEntry): boolean => {
-      if (resident.lastSeenTick !== this.currentSubmitTick) return false;
-      const residentSpeculative = resident.lane === "prefetch";
-      if (residentSpeculative !== (incoming.lane === "prefetch")) return !residentSpeculative;
-      return resident.priority < incoming.priority;
-    };
+    // priority puts every lane wholly ahead of the next, so the view's
+    // chunks outrank prefetch wherever they lie.
+    const protects = (resident: CacheEntry, incoming: CacheEntry): boolean =>
+      resident.lastSeenTick === this.currentSubmitTick && resident.priority < incoming.priority;
     this.chunkStore = new ChunkStore({
       policy: mainPolicy,
       budgetBytes: this.config.mainBudgetBytes,

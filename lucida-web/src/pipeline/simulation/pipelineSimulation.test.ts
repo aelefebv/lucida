@@ -278,9 +278,9 @@ describe("a zoom, pan and orbit inside a volume with a full atlas", () => {
 
 describe("a two-timepoint volume whose detail budget holds the view but not its prefetch", () => {
   // The view wants level 0 of the first timepoint, 128 chunks, and prefetch
-  // asks for the same 128 of the second. Prefetch chunks near the center rank
-  // above view chunks at the corners, but only what the view leaves is
-  // prefetch's, and an evicted prefetch chunk is no reason to wait.
+  // asks for the same 128 of the second. Only what the view leaves is
+  // prefetch's, even at the center, and an evicted prefetch chunk is no
+  // reason to wait.
   const block = singleImage({
     id: "block",
     pyramid: { shape: [2, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },

@@ -67,8 +67,8 @@ export function checkUniqueImageIds(snapshot: PlanningSnapshot): void {
 
 /**
  * Check 4: every level's `shape` and `chunk_shape` have five axes (TCZYX).
- * `iterateChunks`, `chunkOutsideFrustum`, and every `Axis`-indexed read
- * in the planner assume it.
+ * The queries the planner sends the core's chunk enumerator, and every
+ * `Axis`-indexed read in the planner, assume it.
  */
 export function checkLevelShapeArity(snapshot: PlanningSnapshot): void {
   for (const e of snapshot.entities) {

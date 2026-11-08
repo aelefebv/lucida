@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { beforeAll, describe, it, expect } from "vitest";
 
 import {
   buildActiveSet,
@@ -13,9 +13,8 @@ import {
   COARSE_LANE_OFFSET,
   DETAIL_LANE_OFFSET,
   PREFETCH_LANE_OFFSET,
-  chunkOutsideFrustum,
   emptyPlanStats,
-  iterateChunks,
+  enumerateChunks,
   plan,
   PREFETCH_DEPTH,
   IMPORTANCE_WEIGHT,
@@ -28,6 +27,7 @@ import {
 import type { CreateSyntheticEntityOverrides, PlanningConfig } from "./planning/index.ts";
 import type {
   ActiveSetEntry,
+  ChunkRequest,
   EntitySnapshot,
   MinimapChunkCoord,
   PlanningState,
@@ -37,29 +37,9 @@ import type {
 import type { VisibleRegion } from "./viewport.ts";
 import type { LevelGeometry } from "../manifestTypes.ts";
 import { sliceChunkZ } from "../renderer/slicePlane.ts";
+import { loadWasm } from "../viewProperties.ts";
 
-// ---------------------------------------------------------------------------
-// Active-set entry helper
-// ---------------------------------------------------------------------------
-
-/**
- * Build a tile entry for an Image-kind entity whose detail tier holds
- * `detailLevels` and whose coarse tier holds nothing. Returns the
- * discriminated `TileEntry` variant explicitly.
- */
-function makeTileDetailEntry(
-  entityId: string,
-  imageId: string,
-  detailLevels: number[] = [0],
-): ActiveSetEntry {
-  return {
-    kind: "tile",
-    entityId,
-    imageId,
-    detailLevels,
-    coarseLevel: null,
-  };
-}
+beforeAll(loadWasm);
 
 // ActiveSetEntry is a discriminated union; tests that read
 // tile-only fields (`mode`, `detailLevels`, etc.) need to narrow
@@ -193,7 +173,7 @@ describe("buildActiveSet", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Test helpers for iterateChunks
+// Test helpers for snapshots
 // ---------------------------------------------------------------------------
 
 /** Build a LevelGeometry from 5D shape and chunk_shape arrays. */
@@ -256,298 +236,123 @@ function makeSelection(overrides?: Partial<SelectionState>): SelectionState {
 }
 
 // ---------------------------------------------------------------------------
-// chunkOutsideFrustum
+// Chunk enumeration
 // ---------------------------------------------------------------------------
 
-describe("chunkOutsideFrustum", () => {
-  it("returns false when chunk is inside all planes", () => {
-    // A single plane: x >= 0  (normal = [1,0,0], d = 0)
-    const planes: [number, number, number, number][] = [[1, 0, 0, 0]];
-    const result = chunkOutsideFrustum([1, 1, 1], [2, 2, 2], planes);
-    expect(result).toBe(false);
-  });
-
-  it("returns true when chunk is outside a plane", () => {
-    // Plane: x >= 5  (normal = [1,0,0], d = -5)
-    const planes: [number, number, number, number][] = [[1, 0, 0, -5]];
-    const result = chunkOutsideFrustum([0, 0, 0], [3, 3, 3], planes);
-    expect(result).toBe(true);
-  });
-
-  it("returns false when chunk straddles the plane boundary", () => {
-    // Plane: x >= 2  (normal = [1,0,0], d = -2)
-    const planes: [number, number, number, number][] = [[1, 0, 0, -2]];
-    const result = chunkOutsideFrustum([0, 0, 0], [3, 3, 3], planes);
-    expect(result).toBe(false);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// iterateChunks
-// ---------------------------------------------------------------------------
-
-describe("iterateChunks", () => {
-  it("2D viewport clips to expected grid cells", () => {
-    // 4x4 chunk grid: shape [1,1,1,1024,1024], chunk [1,1,1,256,256]
-    const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
-    const entity = createSyntheticEntity({
-      entityId: "e0",
-      imageId: "img0",
-      levels: [level0],
-      layoutPositionVox: [0, 0],
+describe("chunk enumeration through the core", () => {
+  /** A snapshot holding one visible image at `level` of `levels`, and no coarse tier. */
+  function oneImage(
+    levels: LevelGeometry[],
+    region: Partial<VisibleRegion>,
+    overrides?: Partial<CreateSyntheticEntityOverrides>,
+    selection?: Partial<SelectionState>,
+  ): PlanningSnapshot {
+    return createSyntheticSnapshot({
+      entities: [
+        createSyntheticEntity({
+          entityId: "e0",
+          imageId: "img0",
+          levels,
+          targetLevel: 0,
+          coarseLevel: null,
+          ...overrides,
+        }),
+      ],
+      visibleRegion: makeVisibleRegion(region),
+      selection: makeSelection(selection),
     });
-    const entry = makeTileDetailEntry("e0", "img0");
+  }
 
-    // Visible region covers only top-left quarter: [0,0]-[512,512]
-    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 512, 512] });
-    const selection = makeSelection();
-
-    const result = iterateChunks(entity, entry, region, selection);
-
-    // Expect 2x2 = 4 chunks (cols 0-1, rows 0-1)
-    expect(result).toHaveLength(4);
-    const coords = result.map((r) => [r.y, r.x]);
-    expect(coords).toContainEqual([0, 0]);
-    expect(coords).toContainEqual([0, 1]);
-    expect(coords).toContainEqual([1, 0]);
-    expect(coords).toContainEqual([1, 1]);
+  it("asks the core for each visible image's target level, where the layout puts it", () => {
+    // Two tiles side by side: the region covers the second tile's first
+    // chunk only, in its own coordinates.
+    const levels = [makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256])];
+    const snapshot = createSyntheticSnapshot({
+      entities: [
+        createSyntheticEntity({ entityId: "a", imageId: "img-a", kind: "Tile", levels, layoutPositionVox: [0, 0] }),
+        createSyntheticEntity({ entityId: "b", imageId: "img-b", kind: "Tile", levels, layoutPositionVox: [1100, 0] }),
+      ],
+      visibleRegion: makeVisibleRegion({ xyBoundsVox: [1080, 0, 1200, 100] }),
+    });
+    const detail = plan(snapshot, createSyntheticState()).requests.filter((r) => r.lane === "detail");
+    expect(detail.map((r) => `${r.entityId} ${r.chunkKey}`)).toEqual(["b 0/0/0/0/0/0"]);
   });
 
-  it("invisible entry produces no chunk requests", () => {
-    // InvisibleEntry is a distinct variant — iterateChunks
-    // short-circuits on `kind !== "tile"`.
-    const level0 = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
-    const entity = createSyntheticEntity({
-      entityId: "invX",
-      imageId: "imgInv",
-      kind: "Image",
-      visible: false,
-      levels: [level0],
-      layoutPositionVox: [0, 0],
-    });
-    const entry: ActiveSetEntry = {
-      kind: "invisible",
-      entityId: "invX",
-      imageId: "imgInv",
-      coarsestLod: 0,
-    };
-
-    const result = iterateChunks(entity, entry, makeVisibleRegion(), makeSelection());
-    expect(result).toHaveLength(0);
+  it("emits one request per channel per chunk, channels innermost", () => {
+    const levels = [makeLevelGeo(0, [1, 2, 1, 256, 512], [1, 1, 1, 256, 256])];
+    const snapshot = oneImage(levels, { xyBoundsVox: [0, 0, 512, 256] }, {}, { visibleChannels: [0, 1] });
+    const detail = plan(snapshot, createSyntheticState()).requests.filter((r) => r.lane === "detail");
+    // Both chunks sit at one distance from the center, so the tiebreak orders them.
+    expect(detail.map((r) => [r.x, r.c])).toEqual([[0, 0], [0, 1], [1, 0], [1, 1]]);
   });
 
-  it("3D frustum planes cull chunks", () => {
-    // 4x4x4 chunk grid
-    const level0 = makeLevelGeo(0, [1, 1, 4, 1024, 1024], [1, 1, 1, 256, 256]);
-    const entity = createSyntheticEntity({
-      entityId: "e0",
-      imageId: "img0",
-      levels: [level0],
-      layoutPositionVox: [0, 0],
-    });
-    const entry = makeTileDetailEntry("e0", "img0");
-
-    // Visible region covers all, but with a frustum plane that rejects
-    // chunks whose local cmin.x >= 512 (i.e., only keeps cols 0 and 1).
-    // Plane [-1, 0, 0, 256]: test = (-1)*cmin_x + 256 < 0 → cmin_x > 256
-    // col 0 (cmin_x=0): kept, col 1 (cmin_x=256): kept, col 2+: culled.
-    const region = makeVisibleRegion({
-      xyBoundsVox: [0, 0, 1024, 1024],
-      zRangeVox: [0, 4],
-      frustumPlanes: [[-1, 0, 0, 256]],
-    });
-    const selection = makeSelection();
-
-    const all = iterateChunks(
-      entity,
-      entry,
-      makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024], zRangeVox: [0, 4] }),
-      selection,
+  it("counts every culling stage once per channel", () => {
+    // A 4 × 4 grid four planes deep; the region keeps a quadrant of one plane.
+    const levels = [makeLevelGeo(0, [1, 3, 4, 1024, 1024], [1, 1, 1, 256, 256])];
+    const snapshot = oneImage(
+      levels,
+      { xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 1] },
+      {},
+      { visibleChannels: [0, 1, 2] },
     );
-    const culled = iterateChunks(entity, entry, region, selection);
-
-    // Without frustum: 4*4*4 = 64 chunks
-    expect(all).toHaveLength(64);
-    // With frustum: only x-columns 0,1 survive (x*256 < 512), so 2*4*4 = 32
-    expect(culled).toHaveLength(32);
-    for (const req of culled) {
-      expect(req.x).toBeLessThan(2);
-    }
-  });
-
-  it("emits all visible chunks regardless of cache state", () => {
-    // Planning does not filter cached chunks: CpuCache.submit()
-    // refreshes cached entries' priority/lastSeenTick from the request,
-    // so eviction can spare them. iterateChunks must therefore emit
-    // every visible chunk, cached or not.
-    const level0 = makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
-    const entity = createSyntheticEntity({
-      entityId: "e0",
-      imageId: "img0",
-      levels: [level0],
-      layoutPositionVox: [0, 0],
+    const { stats, requests } = plan(snapshot, createSyntheticState());
+    expect(stats.culling).toEqual({
+      considered: 64 * 3,
+      afterXyBounds: 16 * 3,
+      afterZRange: 4 * 3,
+      afterFrustum: 4 * 3,
     });
-    const entry = makeTileDetailEntry("e0", "img0");
-    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 512, 512] });
-    const selection = makeSelection();
-
-    const result = iterateChunks(entity, entry, region, selection);
-
-    // 2x2 grid → 4 chunks, regardless of what's cached.
-    expect(result).toHaveLength(4);
-  });
-
-  it("multi-channel produces one request per channel per spatial cell", () => {
-    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
-    const entity = createSyntheticEntity({
-      entityId: "e0",
-      imageId: "img0",
-      levels: [level0],
-      layoutPositionVox: [0, 0],
-    });
-    const entry = makeTileDetailEntry("e0", "img0");
-    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 256, 256] });
-    const selection = makeSelection({ visibleChannels: [0, 2, 3] });
-
-    const result = iterateChunks(entity, entry, region, selection);
-
-    // 1 spatial cell * 3 channels = 3 requests
-    expect(result).toHaveLength(3);
-    const channels = result.map((r) => r.c).sort();
-    expect(channels).toEqual([0, 2, 3]);
-  });
-
-  it("multi-channel request order interleaves channels per spatial cell", () => {
-    const level0 = makeLevelGeo(0, [1, 2, 1, 256, 512], [1, 1, 1, 256, 256]);
-    const entity = createSyntheticEntity({
-      entityId: "e0",
-      imageId: "img0",
-      levels: [level0],
-      layoutPositionVox: [0, 0],
-    });
-    const entry = makeTileDetailEntry("e0", "img0");
-    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 512, 256] });
-    const selection = makeSelection({ visibleChannels: [0, 1] });
-
-    const result = iterateChunks(entity, entry, region, selection);
-
-    expect(result.map((r) => [r.x, r.c])).toEqual([
-      [0, 0],
-      [0, 1],
-      [1, 0],
-      [1, 1],
-    ]);
-  });
-
-  it("returns all visible chunks regardless of sort order", () => {
-    // 4x1x1 grid so chunks are spread along X.
-    const level0 = makeLevelGeo(0, [1, 1, 1, 256, 1024], [1, 1, 1, 256, 256]);
-    const entity = createSyntheticEntity({
-      entityId: "e0",
-      imageId: "img0",
-      levels: [level0],
-      layoutPositionVox: [0, 0],
-    });
-    const entry = makeTileDetailEntry("e0", "img0");
-
-    const region = makeVisibleRegion({
-      xyBoundsVox: [0, 0, 1024, 256],
-      sortCenterVox: [960, 128, 0],
-    });
-    const selection = makeSelection();
-
-    const result = iterateChunks(entity, entry, region, selection);
-
-    // All 4 columns should be present.
-    expect(result).toHaveLength(4);
-    const xs = result.map((r) => r.x).sort();
-    expect(xs).toEqual([0, 1, 2, 3]);
-  });
-
-  it("entity position offsets the visible region correctly", () => {
-    // Entity at position [500, 500], visible region [400,400]-[600,600].
-    // In local coords: [-100,-100]-[100,100].
-    // Only the [0,0]-[100,100] portion overlaps the entity (shape 1024x1024).
-    const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
-    const entity = createSyntheticEntity({
-      entityId: "e0",
-      imageId: "img0",
-      levels: [level0],
-      layoutPositionVox: [500, 500],
-    });
-    const entry = makeTileDetailEntry("e0", "img0");
-    const region = makeVisibleRegion({ xyBoundsVox: [400, 400, 600, 600] });
-    const selection = makeSelection();
-
-    const result = iterateChunks(entity, entry, region, selection);
-
-    // Local range: x=[-100,100], y=[-100,100].
-    // Clamped to [0,100] x [0,100] → col 0, row 0 only.
-    expect(result).toHaveLength(1);
-    expect(result[0].x).toBe(0);
-    expect(result[0].y).toBe(0);
-  });
-
-  it("iterates every level in the entry's detail-tier list", () => {
-    // 3 levels: 0, 1, 2.
-    // Level 0: 1024x1024, chunk 256x256, grid 4x4
-    // Level 1: 512x512, chunk 256x256, grid 2x2
-    // Level 2: 256x256, chunk 256x256, grid 1x1
-    const level0 = makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]);
-    const level1 = makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]);
-    const level2 = makeLevelGeo(2, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
-
-    const entity = createSyntheticEntity({
-      entityId: "e0",
-      imageId: "img0",
-      levels: [level0, level1, level2],
-      layoutPositionVox: [0, 0],
-    });
-    const entry = makeTileDetailEntry("e0", "img0", [0, 1, 2]);
-    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024] });
-    const selection = makeSelection();
-
-    const result = iterateChunks(entity, entry, region, selection);
-
-    // Level 0: 4x4 = 16, Level 1: 2x2 = 4, Level 2: 1x1 = 1 → total 21
-    expect(result).toHaveLength(21);
-
-    const levelCounts = new Map<number, number>();
-    for (const req of result) {
-      levelCounts.set(req.level, (levelCounts.get(req.level) ?? 0) + 1);
-    }
-    expect(levelCounts.get(0)).toBe(16);
-    expect(levelCounts.get(1)).toBe(4);
-    expect(levelCounts.get(2)).toBe(1);
+    expect(requests).toHaveLength(4 * 3);
   });
 
   it("asks a slice view for the chunk along Z that the render worker maps the plane to", () => {
-    // Level 1 halves 100 planes to 50, in chunks 8 deep. Under a 2-D view
-    // each plane wants exactly the chunk sliceChunkZ names, which is the one
-    // the worker files the plane under.
-    const level0 = makeLevelGeo(0, [1, 1, 100, 256, 256], [1, 1, 8, 256, 256]);
-    const level1 = makeLevelGeo(1, [1, 1, 50, 128, 128], [1, 1, 8, 128, 128]);
-    const entity = createSyntheticEntity({
-      entityId: "e0", imageId: "img0", levels: [level0, level1], layoutPositionVox: [0, 0],
-    });
-    const entry = makeTileDetailEntry("e0", "img0", [1]);
+    // Level 1 halves 100 planes to 50, in chunks 8 deep. Each plane wants
+    // exactly the chunk sliceChunkZ names, the one the worker files it under.
+    const levels = [
+      makeLevelGeo(0, [1, 1, 100, 256, 256], [1, 1, 8, 256, 256]),
+      makeLevelGeo(1, [1, 1, 50, 128, 128], [1, 1, 8, 128, 128]),
+    ];
     for (let z = 0; z < 100; z++) {
-      const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 256, 256], zRangeVox: [z, z + 1] });
-      const zs = iterateChunks(entity, entry, region, makeSelection({ z })).map((r) => r.z);
+      const snapshot = oneImage(levels, { xyBoundsVox: [0, 0, 256, 256], zRangeVox: [z, z + 1] }, { targetLevel: 1 }, { z });
+      const zs = plan(snapshot, createSyntheticState()).requests.map((r) => r.z);
       expect(zs).toEqual([sliceChunkZ(z, 100, 50, 8)]);
     }
   });
 
-  it("asks a slice view for one chunk along Z even where the plane's slab spans two level planes", () => {
-    // Plane 2 of 10 spans level planes 0 and 1 of 4; only its center's plane is drawn.
-    const level0 = makeLevelGeo(0, [1, 1, 10, 256, 256], [1, 1, 1, 256, 256]);
-    const level1 = makeLevelGeo(1, [1, 1, 4, 128, 128], [1, 1, 1, 128, 128]);
+  it("finds nothing and counts nothing for a level the image lacks", () => {
+    const entity = createSyntheticEntity({ levels: [makeLevelGeo(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256])] });
+    const found = enumerateChunks(makeVisibleRegion({ xyBoundsVox: [0, 0, 512, 512] }), 0, [
+      { entity, level: 3, radiusView: RENDER_RADIUS_DISABLED_VIEW },
+      { entity, level: 0, radiusView: RENDER_RADIUS_DISABLED_VIEW },
+    ]);
+    const culling = emptyPlanStats().culling;
+    found.addCounts(0, culling, 1);
+    expect([found.size(0), culling.considered]).toEqual([0, 0]);
+    expect(found.size(1)).toBe(4);
+    const cells: number[][] = [];
+    found.forEach(1, (x, y, z) => cells.push([x, y, z]));
+    expect(cells).toEqual([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]]);
+  });
+
+  it("enumerates each level of an image in one call", () => {
     const entity = createSyntheticEntity({
-      entityId: "e0", imageId: "img0", levels: [level0, level1], layoutPositionVox: [0, 0],
+      levels: [
+        makeLevelGeo(0, [1, 1, 1, 1024, 1024], [1, 1, 1, 256, 256]),
+        makeLevelGeo(1, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256]),
+        makeLevelGeo(2, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]),
+      ],
     });
-    const entry = makeTileDetailEntry("e0", "img0", [1]);
-    const region = makeVisibleRegion({ xyBoundsVox: [0, 0, 256, 256], zRangeVox: [2, 3] });
-    expect(iterateChunks(entity, entry, region, makeSelection({ z: 2 })).map((r) => r.z)).toEqual([1]);
+    const found = enumerateChunks(
+      makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024] }),
+      0,
+      [0, 1, 2].map((level) => ({ entity, level, radiusView: RENDER_RADIUS_DISABLED_VIEW })),
+    );
+    expect([found.size(0), found.size(1), found.size(2)]).toEqual([16, 4, 1]);
+  });
+
+  it("plans nothing for an image with no levels", () => {
+    const snapshot = oneImage([], {});
+    expect(plan(snapshot, createSyntheticState()).requests).toEqual([]);
   });
 });
 
@@ -606,12 +411,8 @@ describe("request scheduling", () => {
   });
 
   it("prefetch requests have lower priority than coarse", () => {
-    // Lane offsets are not bands: the distance term is unbounded, and the
-    // coarse chunk sits at a different level (a different distance) from
-    // the prefetch chunks. Zero the distance weight so the assertion is
-    // about the lane offsets alone.
     const snapshot = makeSchedulingSnapshot();
-    const result = plan(snapshot, createSyntheticState(), mergeConfig({ distanceWeight: 0 }));
+    const result = plan(snapshot, createSyntheticState());
 
     const prefetchReqs = result.requests.filter((r) => r.lane === "prefetch");
     const coarseReqs = result.requests.filter((r) => r.lane === "coarse");
@@ -709,6 +510,30 @@ describe("request scheduling", () => {
     const maxT11Priority = Math.max(...t11Reqs.map((r) => r.priority));
     const minT12Priority = Math.min(...t12Reqs.map((r) => r.priority));
     expect(maxT11Priority).toBeLessThan(minT12Priority);
+  });
+
+  it("keeps each lane and prefetch step behind the one before it however far the chunks spread", () => {
+    // A 32 × 32 grid seen whole: the corner chunks lie thousands of samples
+    // from the center, far more than the gaps between lane offsets. Two
+    // entities of very different importance share the view.
+    const levels = [
+      makeLevelGeo(0, [4, 1, 1, 8192, 8192], [1, 1, 1, 256, 256]),
+      makeLevelGeo(1, [4, 1, 1, 4096, 4096], [1, 1, 1, 256, 256]),
+    ];
+    const entity = (id: string, importance: number, x: number) =>
+      createSyntheticEntity({ entityId: id, imageId: `img-${id}`, levels, coarseLevel: 1, importance, layoutPositionVox: [x, 0] });
+    const snapshot = createSyntheticSnapshot({
+      entities: [entity("big", 5000, 0), entity("small", 0.01, 8192)],
+      visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 16384, 8192], sortCenterVox: [4096, 4096, 0] }),
+      selection: makeSelection({ t: 0 }),
+    });
+    const result = plan(snapshot, createSyntheticState(), mergeConfig({ prefetchDepth: 2 }));
+    const step = (r: ChunkRequest) =>
+      r.lane === "detail" ? 0 : r.lane === "prefetch" ? r.t : r.lane === "coarse" ? 3 : 4;
+    for (let i = 1; i < result.requests.length; i++) {
+      expect(step(result.requests[i])).toBeGreaterThanOrEqual(step(result.requests[i - 1]));
+    }
+    expect(new Set(result.requests.map(step))).toEqual(new Set([0, 1, 2, 3]));
   });
 });
 
@@ -986,20 +811,20 @@ describe("plan() — depth-bias focal plane (#532)", () => {
     // additive term that is exactly 0 at the default and short-circuits
     // before any arithmetic, so an explicit `depthBiasView: 0` must
     // reproduce the same numbers, and they must match the hand-computed
-    // unbiased priority: detailLaneOffset + dist * distanceWeight
-    // (importance 1 ⇒ the importance term is 0).
+    // unbiased order (importance 1 ⇒ the importance term is 0).
     const golden = detailPriorityByZ(DEFAULT_PLANNING_CONFIG);
     const explicitZero = detailPriorityByZ(mergeConfig({ depthBiasView: 0 }));
     expect(explicitZero).toEqual(golden);
 
-    // Hand-computed unbiased priorities. centerZ = 256; chunk centers
-    // 64/192/320/448 ⇒ |Δ| = 192/64/64/192.
+    // centerZ = 256; chunk centers 64/192/320/448 ⇒ |Δ| = 192/64/64/192.
+    // The nearest pair opens the detail band, and the farthest pair sits
+    // further in, short of the next whole number.
     const lane = DEFAULT_PLANNING_CONFIG.detailLaneOffset;
-    const w = DEFAULT_PLANNING_CONFIG.distanceWeight;
-    expect(golden.get(0)).toBeCloseTo(lane + 192 * w, 6);
-    expect(golden.get(1)).toBeCloseTo(lane + 64 * w, 6);
-    expect(golden.get(2)).toBeCloseTo(lane + 64 * w, 6);
-    expect(golden.get(3)).toBeCloseTo(lane + 192 * w, 6);
+    expect(golden.get(1)).toBe(lane);
+    expect(golden.get(2)).toBe(lane);
+    expect(golden.get(0)).toBe(golden.get(3));
+    expect(golden.get(0)!).toBeGreaterThan(lane);
+    expect(golden.get(0)!).toBeLessThan(lane + 1);
   });
 
   it("biasing toward NEAR makes near-plane chunks more urgent than far-plane chunks", () => {
@@ -1324,178 +1149,6 @@ describe("plan() — the detail lane follows the target level", () => {
 });
 
 // ---------------------------------------------------------------------------
-// iterateGridCells stats accumulation (characterization)
-// ---------------------------------------------------------------------------
-
-describe("iterateGridCells stats accumulation", () => {
-  /**
-   * Single-LOD, single-channel entity with a 4x4x4 grid and 256-voxel
-   * chunks. Reused across the stats tests so each one only needs to
-   * tweak the visible region / frustum.
-   */
-  function makeStatsFixture(): { entity: EntitySnapshot; entry: ActiveSetEntry } {
-    const level0 = makeLevelGeo(0, [1, 1, 4, 1024, 1024], [1, 1, 1, 256, 256]);
-    const entity = createSyntheticEntity({
-      entityId: "e0",
-      imageId: "img0",
-      levels: [level0],
-      layoutPositionVox: [0, 0],
-    });
-    const entry = makeTileDetailEntry("e0", "img0");
-    return { entity, entry };
-  }
-
-  it("considered increments by maxCol * maxRow * maxZ per call", () => {
-    const { entity, entry } = makeStatsFixture();
-    const region = makeVisibleRegion({
-      xyBoundsVox: [0, 0, 1024, 1024],
-      zRangeVox: [0, 4],
-    });
-    const stats = emptyPlanStats();
-
-    iterateChunks(entity, entry, region, makeSelection(), stats);
-
-    // 4 * 4 * 4 = 64 grid cells considered.
-    expect(stats.culling.considered).toBe(64);
-  });
-
-  it("after XY clipping, afterXyBounds reflects the clipped count", () => {
-    const { entity, entry } = makeStatsFixture();
-    // Clip to top-left quadrant: 2x2 columns kept, all 4 z slices.
-    const region = makeVisibleRegion({
-      xyBoundsVox: [0, 0, 512, 512],
-      zRangeVox: [0, 4],
-    });
-    const stats = emptyPlanStats();
-
-    iterateChunks(entity, entry, region, makeSelection(), stats);
-
-    expect(stats.culling.considered).toBe(64);
-    // 2 cols * 2 rows * 4 z = 16
-    expect(stats.culling.afterXyBounds).toBe(16);
-  });
-
-  it("after Z clipping, afterZRange reflects the further clip", () => {
-    const { entity, entry } = makeStatsFixture();
-    // Full XY but only z=0..1 (one z slice kept).
-    const region = makeVisibleRegion({
-      xyBoundsVox: [0, 0, 1024, 1024],
-      zRangeVox: [0, 1],
-    });
-    const stats = emptyPlanStats();
-
-    iterateChunks(entity, entry, region, makeSelection(), stats);
-
-    // afterXyBounds = full 4*4*4 cube of cols/rows times all z = 64
-    expect(stats.culling.afterXyBounds).toBe(64);
-    // afterZRange clips z to a single slice: 4 * 4 * 1 = 16
-    expect(stats.culling.afterZRange).toBe(16);
-  });
-
-  it("afterFrustum increments per surviving cell", () => {
-    const { entity, entry } = makeStatsFixture();
-    // Tight frustum: keep only x-cols where cmin_x < 256, i.e. col 0.
-    const region = makeVisibleRegion({
-      xyBoundsVox: [0, 0, 1024, 1024],
-      zRangeVox: [0, 4],
-      // Plane (-1, 0, 0, 0): outside iff -1*cmin_x + 0 < 0 → cmin_x > 0.
-      // p-vertex picks cmax_x for negative-x normal (here normal[0] = -1 < 0,
-      // so px = cmin_x). Plane = [-1, 0, 0, 256] keeps cmin_x <= 256.
-      frustumPlanes: [[-1, 0, 0, 256]],
-    });
-    const stats = emptyPlanStats();
-
-    iterateChunks(entity, entry, region, makeSelection(), stats);
-
-    // Only x-cols 0,1 (cmin_x = 0, 256) survive: 2 cols * 4 rows * 4 z = 32.
-    expect(stats.culling.afterFrustum).toBe(32);
-  });
-
-  it("hierarchy invariant holds across multiple calls: considered ≥ afterXyBounds ≥ afterZRange ≥ afterFrustum", () => {
-    const { entity, entry } = makeStatsFixture();
-    const stats = emptyPlanStats();
-
-    // Mix of regions: full, XY clipped, Z clipped, frustum culled.
-    iterateChunks(
-      entity,
-      entry,
-      makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024], zRangeVox: [0, 4] }),
-      makeSelection(),
-      stats,
-    );
-    iterateChunks(
-      entity,
-      entry,
-      makeVisibleRegion({ xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 4] }),
-      makeSelection(),
-      stats,
-    );
-    iterateChunks(
-      entity,
-      entry,
-      makeVisibleRegion({
-        xyBoundsVox: [0, 0, 1024, 1024],
-        zRangeVox: [0, 1],
-        frustumPlanes: [[-1, 0, 0, 256]],
-      }),
-      makeSelection(),
-      stats,
-    );
-
-    expect(stats.culling.considered).toBeGreaterThanOrEqual(
-      stats.culling.afterXyBounds,
-    );
-    expect(stats.culling.afterXyBounds).toBeGreaterThanOrEqual(
-      stats.culling.afterZRange,
-    );
-    expect(stats.culling.afterZRange).toBeGreaterThanOrEqual(
-      stats.culling.afterFrustum,
-    );
-  });
-
-  it("early-out (no overlap) only increments considered; others stay at zero", () => {
-    const { entity, entry } = makeStatsFixture();
-    // Visible region wholly to the right of the entity (which sits at
-    // origin with a 1024-wide level-0 shape). Local maxX <= 0 triggers
-    // the early-out before any axis indices are computed.
-    const region = makeVisibleRegion({
-      xyBoundsVox: [-2000, -2000, -1000, -1000],
-      zRangeVox: [0, 4],
-    });
-    const stats = emptyPlanStats();
-
-    const result = iterateChunks(entity, entry, region, makeSelection(), stats);
-
-    expect(result).toHaveLength(0);
-    expect(stats.culling.considered).toBe(64);
-    expect(stats.culling.afterXyBounds).toBe(0);
-    expect(stats.culling.afterZRange).toBe(0);
-    expect(stats.culling.afterFrustum).toBe(0);
-  });
-
-  it("all-frustum-culled scenario: empty result, afterFrustum=0, afterZRange records the clipped count", () => {
-    const { entity, entry } = makeStatsFixture();
-    // XY-bounds and Z keep everything, but the frustum plane rejects
-    // every chunk (plane forces cmin_x > entity extent).
-    const region = makeVisibleRegion({
-      xyBoundsVox: [0, 0, 1024, 1024],
-      zRangeVox: [0, 1],
-      frustumPlanes: [[-1, 0, 0, -2000]],
-    });
-    const stats = emptyPlanStats();
-
-    const result = iterateChunks(entity, entry, region, makeSelection(), stats);
-
-    expect(result).toHaveLength(0);
-    expect(stats.culling.afterFrustum).toBe(0);
-    // After Z clipping (z=[0,1] keeps a single z slice): 4 * 4 * 1 = 16.
-    expect(stats.culling.afterZRange).toBe(16);
-    expect(stats.culling.afterXyBounds).toBe(64);
-    expect(stats.culling.considered).toBe(64);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // Edge cases
 // ---------------------------------------------------------------------------
 
@@ -1700,13 +1353,8 @@ describe("prefetch lane — the next level in the zoom direction", () => {
     expect(twoAhead).toHaveLength(8);
   });
 
-  it("ranks the level step's lane offset behind the timepoint steps'", () => {
-    // Lane offsets are not bands (the distance term is unbounded and a
-    // finer chunk sits nearer the center), so zero the distance weight to
-    // assert the offsets alone.
-    const prefetch = prefetchOf(
-      planAfterZoom(1, 2, makeZoomEntity({}, 3), mergeConfig({ distanceWeight: 0 })),
-    );
+  it("ranks the level step behind the timepoint steps, though its chunks sit nearer the center", () => {
+    const prefetch = prefetchOf(planAfterZoom(1, 2, makeZoomEntity({}, 3)));
     const timepoint = prefetch.filter((r) => r.level === 1);
     const level = prefetch.filter((r) => r.level === 0);
     expect(Math.min(...level.map((r) => r.priority))).toBeGreaterThan(
@@ -1762,18 +1410,6 @@ describe("prefetch lane — the next level in the zoom direction", () => {
   });
 });
 
-describe("iterateChunks edge cases", () => {
-  it("tile-mode entry with empty levels → empty result", () => {
-    const entity = createSyntheticEntity({
-      entityId: "e0",
-      levels: [],
-    });
-    const entry = makeTileDetailEntry("e0", "img0");
-    const result = iterateChunks(entity, entry, makeVisibleRegion(), makeSelection());
-    expect(result).toHaveLength(0);
-  });
-});
-
 // {@link TileSnapshot} requires a non-null `parentId` at the type
 // level — an orphan tile is a producer invariant violation, not a
 // code path. The snapshot builder throws on a missing manifest
@@ -1802,52 +1438,6 @@ describe("plan() with stale carry-forward state", () => {
 
     expect(() => plan(snap, stale)).not.toThrow();
     expect(plan(snap, stale).activeSet).toEqual([]);
-  });
-});
-
-describe("chunkOutsideFrustum multi-plane scenarios", () => {
-  it("3+ planes simulating a real camera frustum: chunk inside all planes is kept", () => {
-    // Approximate a camera frustum with 6 planes (left/right/top/bottom/near/far)
-    // around the box x in [0, 100], y in [0, 100], z in [0, 100].
-    // Each plane is `n . p + d >= 0`, where n is the inward-pointing normal.
-    const planes: [number, number, number, number][] = [
-      [1, 0, 0, 0],     // left:   x >= 0
-      [-1, 0, 0, 100],  // right:  x <= 100
-      [0, 1, 0, 0],     // bottom: y >= 0
-      [0, -1, 0, 100],  // top:    y <= 100
-      [0, 0, 1, 0],     // near:   z >= 0
-      [0, 0, -1, 100],  // far:    z <= 100
-    ];
-    // Chunk wholly inside the frustum.
-    expect(chunkOutsideFrustum([10, 10, 10], [40, 40, 40], planes)).toBe(false);
-  });
-
-  it("3+ planes: chunk straddling just one plane is still kept (p-vertex test)", () => {
-    const planes: [number, number, number, number][] = [
-      [1, 0, 0, 0],
-      [-1, 0, 0, 100],
-      [0, 1, 0, 0],
-      [0, -1, 0, 100],
-      [0, 0, 1, 0],
-      [0, 0, -1, 100],
-    ];
-    // Chunk straddles the right plane (x crosses 100). p-vertex picks
-    // cmin_x for the right plane (normal[0] = -1 < 0, so px = cmin_x =
-    // 90), and (-1)*90 + 100 = 10 >= 0 → not outside.
-    expect(chunkOutsideFrustum([90, 10, 10], [120, 40, 40], planes)).toBe(false);
-  });
-
-  it("3+ planes: chunk fully behind one plane is culled even when inside all others", () => {
-    const planes: [number, number, number, number][] = [
-      [1, 0, 0, 0],
-      [-1, 0, 0, 100],
-      [0, 1, 0, 0],
-      [0, -1, 0, 100],
-      [0, 0, 1, 0],
-      [0, 0, -1, 100],
-    ];
-    // Chunk wholly past the far plane (z > 100).
-    expect(chunkOutsideFrustum([10, 10, 200], [40, 40, 250], planes)).toBe(true);
   });
 });
 
@@ -2458,13 +2048,10 @@ describe("plan() — minimap lane", () => {
     }
   });
 
-  it("bulk seeding sorts after view lanes even when distance terms exceed the bulk offset", () => {
-    // Lane offsets are not bands: computePriority adds unbounded
-    // importance/distance terms, so on a wide view a coarse request's
-    // effective priority (2400 + distance × weight) runs far past any
-    // constant bulk offset. Demoted seeding must rank behind the view's
-    // requests by construction, not by hoping a constant outruns the
-    // distance term.
+  it("bulk seeding sorts after view lanes even when a lane's offset is set past the bulk offset", () => {
+    // The lane offsets are knobs, so a lane can sit above the bulk offset.
+    // Demoted seeding must rank behind the view's requests by
+    // construction, however far the view's chunks lie from its center.
     const level0 = makeLevelGeo(0, [1, 1, 1, 256, 256], [1, 1, 1, 256, 256]);
     const level3 = makeLevelGeo(3, [1, 1, 1, 32, 32], [1, 1, 1, 32, 32]);
     const entity = createSyntheticEntity({
@@ -2478,15 +2065,15 @@ describe("plan() — minimap lane", () => {
     });
     const snap = createSyntheticSnapshot({
       entities: [entity],
-      // Wide region: the view center sits ~14k voxels from the entity's
-      // chunks, so coarse priority ≈ 2400 + 14k×10 ≫ the bulk offset.
+      // Wide region: the view center sits ~14k samples from the entity's chunks.
       visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 20000, 20000] }),
       selection: makeSelection(),
       minimapPending: new Map([
         ["imgFar", makeManyCoords(MINIMAP_SEED_FAST_MAX_CHUNKS + 1)],
       ]),
     });
-    const result = plan(snap, createSyntheticState());
+    const config = mergeConfig({ coarseLaneOffset: MINIMAP_SEED_BULK_LANE_OFFSET + 400 });
+    const result = plan(snap, createSyntheticState(), config);
     const minimap = result.requests.filter((r) => r.lane === "minimap");
     const others = result.requests.filter((r) => r.lane !== "minimap");
     expect(minimap.length).toBe(MINIMAP_SEED_FAST_MAX_CHUNKS + 1);
