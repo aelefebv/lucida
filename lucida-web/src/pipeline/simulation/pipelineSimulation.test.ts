@@ -77,28 +77,58 @@ describe("a static volume", () => {
   }));
 });
 
+/** 36 tiles of one 128-sample pyramid, a coarse chunk per tile. */
+const WIDE = collection({
+  id: "wide",
+  rows: 6,
+  columns: 6,
+  pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 2 },
+});
+
 describe("a wide collection with more tiles than the coarse budget holds", () => {
-  // 36 tiles, one coarse chunk each, against a coarse budget of 20 chunks.
+  // A coarse budget of 20 chunks, with the detail budget's spare room beside
+  // it: the coarse floor grows with the layout, so the view covers it all.
   const scenario = describeScenario({
     name: "wide collection",
-    dataset: collection({
-      id: "wide",
-      rows: 6,
-      columns: 6,
-      pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 2 },
-    }),
+    dataset: WIDE,
     cache: { overviewBudgetBytes: 20 * CHUNK_64_BYTES },
-    // The view wants more than the budget holds, so covering less is the settled state.
     gpuComplete: false,
   });
   for (const dpr of DEVICE_PIXEL_RATIOS) {
-    it(`settles covering less at device pixel ratio ${dpr}`, async () => {
+    it(`settles covering every tile at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.quiescence).toBe("quiescent");
+      expect(open.coarse).toEqual({ resident: 36, desired: 36 });
+    });
+  }
+});
+
+describe("a wide collection whose demand exceeds both budgets", () => {
+  // 40 detail chunks and 20 coarse chunks of room. At ratio 1 the view wants
+  // 36 detail and 36 coarse chunks, at ratio 2 it wants 144 and 36.
+  const scenario = describeScenario({
+    name: "wide collection over budget",
+    dataset: WIDE,
+    cache: { mainBudgetBytes: 40 * CHUNK_64_BYTES, overviewBudgetBytes: 20 * CHUNK_64_BYTES },
+    gpuComplete: false,
+    tickBound: 120,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles covering less within the tick bound, without refetching, at device pixel ratio ${dpr}`, async () => {
       const run = await runScenario(scenario, { dpr });
       expectSettled(run);
       const [open] = run.phases;
       expect(open.quiescence).toBe("coverage_limited");
-      expect(open.coarse).toEqual({ resident: 20, desired: 36 });
       expect(open.coverage).toBeLessThan(1);
+      // Whatever was admitted is resident, it fits the 60 chunks of room,
+      // and each resident chunk took one request: nothing was evicted and
+      // fetched again.
+      expect(open.missingCpu).toEqual([]);
+      const resident = open.detail.resident + open.coarse.resident;
+      expect(resident).toBeLessThanOrEqual(60);
+      expect(open.sourceRequests).toBe(resident);
     });
   }
 });

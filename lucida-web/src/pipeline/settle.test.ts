@@ -33,6 +33,7 @@ describe("evaluateSettle", () => {
     ["frameInFlight", { frameInFlight: true }, "frame_in_flight"],
     ["chunks in flight", { inFlight: 1 }, "chunks_in_flight"],
     ["chunks pending", { pending: 1 }, "chunks_pending"],
+    ["uploads the renderer has not answered", { uploadsUnanswered: 2 }, "uploads_unanswered"],
     ["detail short of demand", { residentDetailChunks: 11 }, "detail_not_resident"],
     ["coarse short of demand", { residentCoarseChunks: 2 }, "coarse_not_resident"],
   ])("is not quiescent on %s", (_label, overrides, reason) => {

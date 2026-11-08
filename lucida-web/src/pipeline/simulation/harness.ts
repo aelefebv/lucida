@@ -175,6 +175,8 @@ export interface PhaseOutcome {
   missingGpu: string[];
   /** Chunks the page sent the worker again and again in this phase, most often first. */
   resent: string[];
+  /** Chunk requests the source has answered since the open. */
+  sourceRequests: number;
   /**
    * Chunks the uploader's progress guard held in this phase, with the
    * worker's last reason. A held chunk means a feedback loop was cut, so the
@@ -585,6 +587,7 @@ class Simulation {
       missingCpu,
       missingGpu,
       resent: resent.map((r) => r.text),
+      sourceRequests: this.source.requestCount,
       held: this.held.slice(heldBefore),
       failed: this.cpuCache
         .failedWantedChunks()

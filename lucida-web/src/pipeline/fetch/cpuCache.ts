@@ -25,6 +25,7 @@ import { BurstLogger, TelemetryCounters } from "./telemetry.ts";
 import {
   LRUPolicy,
   TieredPolicy,
+  WantedLastPolicy,
   getTierOrder,
 } from "./eviction.ts";
 import { ChunkStore } from "./chunkStore.ts";
@@ -277,6 +278,27 @@ export class CpuCache {
   private lastReconcileAt = -Infinity;
   /** In-flight chunk keys an availability update settled before they answered. */
   private settledWhileInFlight = new Set<string>();
+  /**
+   * Wanted chunks that arrived and found no room but at the cost of a chunk
+   * at least as urgent. Not asked for again until the next plan, which is
+   * what keeps two wanted chunks from evicting each other in turn.
+   */
+  private refusedThisPlan = new Set<string>();
+  /**
+   * Requests the plans since the last rebuild left out for want of room, per
+   * tier: the coverage the view goes without.
+   */
+  private shortfallThisPlan: Record<ResidencyTier, number> = { detail: 0, coarse: 0 };
+  /** Bytes of detail budget the plans since the last rebuild lent the coarse tier. */
+  private coarseLoanThisPlan = 0;
+  /**
+   * Whether the plans since the last rebuild were admitted against the
+   * budgets. Only then does the wanted set fit, and only then is an evicted
+   * wanted chunk worth asking for again.
+   */
+  private plansAdmitted = false;
+  /** Wanted chunks asked for again after an eviction since the last rebuild. */
+  private retriedThisPlan = new Set<string>();
 
   private lruCounter = 0;
 
@@ -355,6 +377,10 @@ export class CpuCache {
       () => this.interactionDetector.current(),
       (entityId) => this.targetLevelByEntity.get(entityId),
     );
+    // A wanted chunk more urgent than the one arriving stays: an insert
+    // that could only make room by evicting one is refused instead.
+    const protects = (resident: CacheEntry, incoming: CacheEntry): boolean =>
+      resident.lastSeenTick === this.currentSubmitTick && resident.priority < incoming.priority;
     this.chunkStore = new ChunkStore({
       policy: mainPolicy,
       budgetBytes: this.config.mainBudgetBytes,
@@ -362,7 +388,9 @@ export class CpuCache {
       recordEviction: (tier, entry) => {
         this.counters.recordEviction(tier);
         traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
+        this.noteEvicted(entry);
       },
+      protects,
       onEvictionBurst: ({ removed, bytesFreed, bytesNeeded }) => {
         debugLog("cache", "cache.eviction_burst", {
           cache: "main",
@@ -374,13 +402,15 @@ export class CpuCache {
       },
     });
     this.overviewStore = new ChunkStore({
-      policy: new LRUPolicy<CacheEntry>(),
+      policy: new WantedLastPolicy(() => this.currentSubmitTick),
       budgetBytes: this.config.overviewBudgetBytes,
       evictionTier: () => "overview",
       recordEviction: (tier, entry) => {
         this.counters.recordEviction(tier);
         traceRecorder.recordPointEvent(PointEvent.Eviction, "evicted", entry, eventTier(entry));
+        this.noteEvicted(entry);
       },
+      protects,
     });
     this.proxyStore = new ProxyStore({
       policy: new LRUPolicy<ProxyEvictable>(),
@@ -483,6 +513,12 @@ export class CpuCache {
       }
     }
 
+    if (plan.shortfall) {
+      this.plansAdmitted = true;
+      this.shortfallThisPlan.detail += plan.shortfall.detail;
+      this.shortfallThisPlan.coarse += plan.shortfall.coarse;
+    }
+    this.coarseLoanThisPlan += plan.coarseLoanBytes ?? 0;
     this.applyElasticTierBudgets();
     this.cancelOmittedChunkWork(unwantedInFlightKeys);
     this.wantedRequests.push(requests);
@@ -503,6 +539,7 @@ export class CpuCache {
       if (this.rejectionTracker.has(req.entityId, req.chunkKey)) {
         continue;
       }
+      if (this.refusedThisPlan.has(key)) continue;
 
       // Refresh lane/tier/priority/lastSeenTick on cached entries so
       // deliverability and eviction reflect the current plan. The lane
@@ -621,6 +658,7 @@ export class CpuCache {
         if (seen.has(key)) continue;
         seen.add(key);
         if (this.rejectionTracker.has(req.entityId, req.chunkKey)) continue;
+        if (this.refusedThisPlan.has(key)) continue;
         if (this.lookupCachedEntry(req) || this.chunkScheduler.hasInFlight(key)) continue;
         const failure = this.excludingFailure(key, now);
         if (failure) {
@@ -902,6 +940,11 @@ export class CpuCache {
     this.rejectionTracker.clear();
     // The submits that follow carry the new wanted set and re-arm for it.
     this.wantedRequests = [];
+    this.refusedThisPlan.clear();
+    this.retriedThisPlan.clear();
+    this.plansAdmitted = false;
+    this.shortfallThisPlan = { detail: 0, coarse: 0 };
+    this.coarseLoanThisPlan = 0;
     this.disarmReconcile();
   }
 
@@ -1256,9 +1299,11 @@ export class CpuCache {
       QUIESCENCE_PENDING_SCAN_CAP,
     );
 
-    out.desiredDetailChunks = demand.desired.detailChunks;
+    // The shortfall admission declared is wanted too, and never resident.
+    const shortfall = this.shortfallThisPlan;
+    out.desiredDetailChunks = demand.desired.detailChunks + shortfall.detail;
     out.residentDetailChunks = demand.resident.detailChunks;
-    out.desiredCoarseChunks = demand.desired.coarseChunks;
+    out.desiredCoarseChunks = demand.desired.coarseChunks + shortfall.coarse;
     out.residentCoarseChunks = demand.resident.coarseChunks;
     // The whole store against the budget eviction enforces, not the
     // wanted-and-resident subset above: a tier is full when everything it
@@ -1280,8 +1325,9 @@ export class CpuCache {
       else out.failedCoarseChunks++;
     });
 
-    out.shortDetailChunks = 0;
-    out.shortCoarseChunks = 0;
+    out.uploadsUnanswered = this.deliveryState.chunksUnanswered;
+    out.shortDetailChunks = shortfall.detail;
+    out.shortCoarseChunks = shortfall.coarse;
     out.serverPendingChunks = 0;
     out.retryingChunks = 0;
     out.unrequestedChunks = 0;
@@ -1320,7 +1366,7 @@ export class CpuCache {
         // Resident as the demand counts reckon it: held, and seen by this plan.
         const entry = this.lookupCachedEntry(req);
         if (entry && entry.lastSeenTick === this.currentSubmitTick) continue;
-        if (this.rejectionTracker.has(req.entityId, req.chunkKey)) {
+        if (this.rejectionTracker.has(req.entityId, req.chunkKey) || this.refusedThisPlan.has(key)) {
           short(req.tier);
           continue;
         }
@@ -1701,14 +1747,20 @@ export class CpuCache {
         this.drainSchedulers();
         return;
       }
-      this.overviewStore.insert(cacheEntry);
+      if (!this.overviewStore.insert(cacheEntry)) {
+        this.refuseArrival(key, traceRow);
+        return;
+      }
     } else {
       if (stale && this.chunkStore.bytes + cacheEntry.sizeBytes > this.chunkStore.budgetBytes) {
         traceRecorder.finishRow(traceRow, RowOutcome.Retired);
         this.drainSchedulers();
         return;
       }
-      this.chunkStore.insert(cacheEntry);
+      if (!this.chunkStore.insert(cacheEntry)) {
+        this.refuseArrival(key, traceRow);
+        return;
+      }
     }
     // Cache admission: the moment decoded bytes become resident. Counted, not
     // timed — the insert is well under the platform's clock floor.
@@ -1808,20 +1860,56 @@ export class CpuCache {
   private applyElasticTierBudgets(): void {
     const detailDemand = this.desiredDetailKeysThisTick.size > 0;
     const coarseDemand = this.desiredCoarseKeysThisTick.size > 0;
-    const protectedDetail = this.config.mainBudgetBytes;
-    const protectedCoarse = this.config.overviewBudgetBytes;
+    const loan = Math.min(this.coarseLoanThisPlan, this.config.mainBudgetBytes);
+    const protectedDetail = this.config.mainBudgetBytes - loan;
+    const protectedCoarse = this.config.overviewBudgetBytes + loan;
 
     let detailBudget = protectedDetail;
     let coarseBudget = protectedCoarse;
 
     if (detailDemand && !coarseDemand) {
       detailBudget += Math.max(0, protectedCoarse - this.overviewStore.bytes);
-    } else if (coarseDemand && !detailDemand) {
+    } else if (coarseDemand && !detailDemand && loan === 0) {
       coarseBudget += Math.max(0, protectedDetail - this.chunkStore.bytes);
     }
 
     this.chunkStore.setBudgetBytes(detailBudget);
     this.overviewStore.setBudgetBytes(coarseBudget);
+  }
+
+  /**
+   * The room the budgets give each tier before any plan takes it: what
+   * capacity-aware admission admits a plan against.
+   */
+  tierCapacity(): Record<ResidencyTier, number> {
+    return { detail: this.config.mainBudgetBytes, coarse: this.config.overviewBudgetBytes };
+  }
+
+  /** An arrival its store refused: the row ends, and the plan stops asking for it. */
+  private refuseArrival(key: string, traceRow: number): void {
+    this.refusedThisPlan.add(key);
+    traceRecorder.finishRow(traceRow, RowOutcome.Retired);
+    this.drainSchedulers();
+  }
+
+  /**
+   * A chunk the plan still wants left its store. Ask for it again, as the
+   * reconcile asks for any wanted chunk that is missing: admission keeps the
+   * wanted set within the budgets, so it comes back without displacing
+   * another chunk the plan wants.
+   */
+  private noteEvicted(entry: CacheEntry): void {
+    if (!this.plansAdmitted || entry.lastSeenTick !== this.currentSubmitTick) return;
+    if (entry.lane === "prefetch") return;
+    const key = chunkSchedulerKey(entry, entry.residencyTier);
+    // A second eviction in one plan means the budgets hold less than
+    // admission reckoned, so the chunk is short rather than asked for again.
+    if (this.retriedThisPlan.has(key)) {
+      this.refusedThisPlan.add(key);
+      return;
+    }
+    this.retriedThisPlan.add(key);
+    this.armReconcileForAvailability();
   }
 
   private rememberInFlightChunk(
@@ -2214,7 +2302,7 @@ export class CpuCache {
  * resolves the tier first and then calls it — so the two paths cannot
  * drift into producing different keys for the same request.
  */
-function chunkSchedulerKey(req: ChunkRequest, tier: ResidencyTier): string {
+function chunkSchedulerKey(req: Pick<ChunkRequest, "entityId" | "chunkKey">, tier: ResidencyTier): string {
   return `${req.entityId}/${tier}/${req.chunkKey}`;
 }
 
