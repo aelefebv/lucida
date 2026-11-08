@@ -40,7 +40,8 @@
       "detail_level_override": 1,
       "label_names": [
         "region-a"
-      ]
+      ],
+      "solo": 0
     }
   }
 }

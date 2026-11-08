@@ -58,11 +58,17 @@ def test_explore_sidecar_carries_extent_and_cell_ztc():
     assert extent["max"] == [100.0, 80.0, 40.0]
     assert extent["min"] == [0.0, 0.0, 0.0]
 
-    # Each cell carries z/t/c matching its own child view's destination indices.
+    # Each cell carries z/t matching its own child view's destination indices,
+    # and `c` only when the child solos a channel.
     for cell in sidecar["cells"]:
         assert cell["z"] == cell["view"]["view"]["z_range"]["start"]
         assert cell["t"] == cell["view"]["view"]["t"]
-        assert cell["c"] == cell["view"]["view"]["c"]
+        solos = [s.get("solo") for s in cell["view"]["dataset_settings"].values()]
+        solo = next((s for s in solos if s is not None), None)
+        assert cell.get("c") == solo
+    # From the composite, the next channel step solos the first channel.
+    stepc = next(cell for cell in sidecar["cells"] if cell["transform"] == "stepc:+1")
+    assert stepc["c"] == 0
 
 
 def test_explore_descend_from_supplied_view_carries_breadcrumb():

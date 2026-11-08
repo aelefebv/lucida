@@ -149,7 +149,7 @@ def snapshot():
                     "zoom": 2.0,
                     "viewport": [800, 600],
                 },
-                "view": {"z_range": {"start": 0, "end": 1}, "t": 0, "c": 0},
+                "view": {"z_range": {"start": 0, "end": 1}, "t": 0},
                 "display": {
                     "contrast_min": 0.0,
                     "contrast_max": 65535.0,

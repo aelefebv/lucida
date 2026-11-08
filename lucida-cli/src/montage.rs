@@ -28,12 +28,12 @@ pub enum MontageAxis {
     Single,
 }
 
-/// One montage cell: the view it renders + a short human label.
+/// One montage cell: the view it renders + a short human label. Every cell
+/// shows the dataset's composite.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MontageCell {
     pub z: u32,
     pub t: u32,
-    pub c: u32,
     /// Tile index (0 for a single-image dataset).
     pub tile: usize,
     pub label: String,
@@ -85,8 +85,8 @@ fn grid_cols(n: usize, max_cols: u32) -> u32 {
 /// `image_count` members (tiles), sampling at most `max_cells` positions.
 ///
 /// Axis priority: a multi-tile collection samples tiles; else a Z>1 stack samples
-/// Z; else a T>1 series samples T; else a single cell. The mid Z (and t=0,
-/// c=0) anchor the non-Z axes. `max_cols` caps the grid width.
+/// Z; else a T>1 series samples T; else a single cell. The mid Z (and t=0)
+/// anchor the non-Z axes. `max_cols` caps the grid width.
 pub fn plan_montage(
     dims: [u64; 5],
     image_count: usize,
@@ -104,7 +104,6 @@ pub fn plan_montage(
             .map(|f| MontageCell {
                 z: mid_z,
                 t: 0,
-                c: 0,
                 tile: f,
                 label: position_label("tile", f as u64),
             })
@@ -116,7 +115,6 @@ pub fn plan_montage(
             .map(|z| MontageCell {
                 z,
                 t: 0,
-                c: 0,
                 tile: 0,
                 label: position_label("Z", z),
             })
@@ -128,7 +126,6 @@ pub fn plan_montage(
             .map(|t| MontageCell {
                 z: 0,
                 t,
-                c: 0,
                 tile: 0,
                 label: position_label("T", t),
             })
@@ -140,7 +137,6 @@ pub fn plan_montage(
             vec![MontageCell {
                 z: 0,
                 t: 0,
-                c: 0,
                 tile: 0,
                 label: position_label("Z", 0u32),
             }],
@@ -174,7 +170,7 @@ fn fit_slice_camera(full_x: u64, full_y: u64, viewport: [u32; 2]) -> Slice {
 }
 
 /// Build the inline `SavedView` for one montage cell: a fit 2D camera at the
-/// cell's z/t/c with the dataset visible. Source URLs are left empty
+/// cell's z/t with the dataset's composite visible. Source URLs are left empty
 /// (workspace-dataset-id form — the dataset is already open in the target
 /// workspace); the caller encodes this into a `#view=` URL.
 ///
@@ -182,7 +178,7 @@ fn fit_slice_camera(full_x: u64, full_y: u64, viewport: [u32; 2]) -> Slice {
 /// stretches its own slice — fine for a single view, but flattens a contact
 /// sheet of a densely-labelled stack). `Some([lo, hi])` pins one **shared**
 /// window across all cells (auto off) so brightness is comparable and a clipped
-/// `lo` suppresses the background — and restores the channel's natural colormap
+/// `lo` suppresses the background — and restores each channel's natural colormap
 /// (`default_for_channel`), which an explicit window would otherwise reset to gray.
 pub fn build_cell_view(
     ds_id: &str,
@@ -191,24 +187,23 @@ pub fn build_cell_view(
     full_y: u64,
     viewport: [u32; 2],
     contrast: Option<[f64; 2]>,
+    channel_count: u64,
 ) -> SavedView {
     let mut view = SavedView::empty(viewport);
     view.camera = Camera::Slice(fit_slice_camera(full_x, full_y, viewport));
     view.view = ViewState {
         z_range: cell.z..cell.z + 1,
         t: cell.t,
-        c: cell.c,
-        multi_channel: false,
+        ..ViewState::new()
     };
     let id = DatasetId(ds_id.to_string());
     view.dataset_order = vec![id.clone()];
     match contrast {
         Some([lo, hi]) => {
             // Per-channel settings carry the colormap (an explicit dataset
-            // setting otherwise resets it to gray) and the same window, up to
-            // the active channel; the dataset-level contrast covers the
-            // single-channel render path.
-            let channel_settings = (0..=cell.c as usize)
+            // setting otherwise resets it to gray) and the same window, for
+            // every channel of the composite.
+            let channel_settings = (0..channel_count.max(1) as usize)
                 .map(|i| ChannelSettings {
                     colormap: Colormap::default_for_channel(i),
                     contrast_min: lo,
@@ -382,11 +377,10 @@ mod tests {
         let cell = MontageCell {
             z: 42,
             t: 3,
-            c: 1,
             tile: 0,
             label: "Z 43".into(),
         };
-        let view = build_cell_view("wds-abc", &cell, 400, 200, [256, 256], None);
+        let view = build_cell_view("wds-abc", &cell, 400, 200, [256, 256], None, 3);
         match view.camera {
             Camera::Slice(s) => {
                 assert_eq!(s.center, [200.0, 100.0]);
@@ -397,9 +391,12 @@ mod tests {
         }
         assert_eq!(view.view.z_range, 42..43);
         assert_eq!(view.view.t, 3);
-        assert_eq!(view.view.c, 1);
         let id = DatasetId("wds-abc".into());
         assert_eq!(view.dataset_order, vec![id.clone()]);
+        assert_eq!(
+            view.dataset_settings[&id].solo, None,
+            "a cell shows the composite"
+        );
         assert_eq!(view.auto_contrast.get(&id), Some(&true));
         assert!(
             view.datasets.is_empty(),
@@ -412,18 +409,17 @@ mod tests {
         let cell = MontageCell {
             z: 10,
             t: 0,
-            c: 1,
             tile: 0,
             label: "Z 11".into(),
         };
-        let view = build_cell_view("wds-x", &cell, 256, 256, [256, 256], Some([60.0, 196.0]));
+        let view = build_cell_view("wds-x", &cell, 256, 256, [256, 256], Some([60.0, 196.0]), 2);
         let id = DatasetId("wds-x".into());
         // Auto OFF so the window is shared across all cells, not per-slice.
         assert_eq!(view.auto_contrast.get(&id), Some(&false));
         let settings = view.dataset_settings.get(&id).expect("settings");
         assert_eq!(settings.contrast_min, 60.0);
         assert_eq!(settings.contrast_max, 196.0);
-        // Channel settings exist up to the active channel and keep the natural
+        // Every channel of the composite has settings that keep the natural
         // per-channel colormap (not reset to gray) + the shared window.
         assert_eq!(settings.channel_settings.len(), 2);
         assert_eq!(

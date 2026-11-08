@@ -774,7 +774,11 @@ class ViewResource:
 
     def slice(self, axis: str, index: int, *, timeout: float = 30.0) -> dict[str, Any]:
         axis = axis.lower()
-        if axis not in {"z", "t", "c"}:
+        if axis == "c":
+            raise LucidaError(
+                "config", "channels are shown per layer; use channel.solo(dataset, channel)"
+            )
+        if axis not in {"z", "t"}:
             raise LucidaError("config", f"unknown slice axis: {axis}")
 
         def mutate(presence: dict[str, Any]) -> None:
@@ -940,15 +944,28 @@ class ChannelResource:
     def __init__(self, workspace: WorkspaceResource):
         self._workspace = workspace
 
-    def mode(self, mode: str, *, timeout: float = 30.0) -> dict[str, Any]:
-        mode = mode.lower()
-        if mode not in {"single", "multi"}:
-            raise LucidaError("config", "channel.mode must be 'single' or 'multi'")
+    def solo(
+        self,
+        dataset: str,
+        channel: int | None = None,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Show one channel of a layer alone, or its composite with `channel=None`.
 
-        def mutate(presence: dict[str, Any]) -> None:
-            presence["view"]["multi_channel"] = mode == "multi"
+        Other layers keep what they show.
+        """
+        if channel is not None and channel < 0:
+            raise LucidaError("config", "channel index must be non-negative")
 
-        return self._workspace.view._apply(mutate, timeout=timeout)
+        def mutate(snapshot: dict[str, Any], presence: dict[str, Any]) -> None:
+            settings = ensure_dataset_settings(snapshot, presence, dataset)
+            if channel is None:
+                settings.pop("solo", None)
+            else:
+                settings["solo"] = channel
+
+        return self._workspace.layer._apply(mutate, timeout=timeout)
 
     def visible(
         self,

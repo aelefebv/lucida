@@ -29,7 +29,12 @@ use crate::view::ViewState;
 /// accept only this version. Recipients that see a higher version should
 /// best-effort apply known fields and surface a warning; recipients that
 /// see a missing/zero version should reject.
-pub const SAVED_VIEW_VERSION: u32 = 1;
+///
+/// Version 2 moved solo onto each layer. A URL encoder that strips defaults
+/// drops a version 1 view's `c: 0` and `multi_channel: false`, which meant
+/// "solo channel 0", so only the version tells such a payload from a
+/// version 2 composite.
+pub const SAVED_VIEW_VERSION: u32 = 2;
 
 /// Capture record for a "saved view": the user's complete view of one or
 /// more datasets at a moment in time. Encoded into the URL hash by
@@ -45,11 +50,15 @@ pub const SAVED_VIEW_VERSION: u32 = 1;
 /// byte-identical to the inbound bytes (see [`crate::command`]). A `HashMap`
 /// re-serializes in random order; `IndexMap` keeps insertion order, as
 /// [`DocumentState`](crate::scene::DocumentState)'s collections do.
+///
+/// A view recorded before solo was per layer decodes with its scene-wide
+/// channel mode moved onto each layer's
+/// [`solo`](crate::scene::DatasetDisplaySettings::solo).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "SavedViewWire")]
 pub struct SavedView {
-    /// Schema version. Always [`SAVED_VIEW_VERSION`] (currently `1`) in
-    /// the on-the-wire payload. The decoder rejects payloads where this
-    /// field is missing or zero.
+    /// Schema version, [`SAVED_VIEW_VERSION`] when this build records it.
+    /// The decoder rejects payloads where this field is missing or zero.
     pub v: u32,
 
     /// Origin URLs of datasets this view depends on, in the order they
@@ -102,8 +111,53 @@ pub struct SavedView {
     pub auto_contrast: IndexMap<DatasetId, bool>,
 }
 
+/// The JSON shape of [`SavedView`].
+#[derive(Deserialize)]
+struct SavedViewWire {
+    v: u32,
+    #[serde(default)]
+    datasets: Vec<String>,
+    #[serde(default)]
+    active_layouts: IndexMap<DatasetId, LayoutId>,
+    camera: Camera,
+    view: ViewState,
+    display: DisplayState,
+    #[serde(default)]
+    dataset_order: Vec<DatasetId>,
+    #[serde(default)]
+    dataset_settings: IndexMap<DatasetId, DatasetDisplaySettings>,
+    #[serde(default)]
+    auto_contrast: IndexMap<DatasetId, bool>,
+}
+
+impl From<SavedViewWire> for SavedView {
+    fn from(wire: SavedViewWire) -> Self {
+        let mut view = wire.view;
+        let mut dataset_settings = wire.dataset_settings;
+        if let Some(legacy) = view.take_legacy_channels() {
+            // A captured entry lists every channel of its layer, so its
+            // length is the layer's channel count.
+            for settings in dataset_settings.values_mut() {
+                let channel_count = settings.channel_settings.len() as u32;
+                settings.adopt_legacy_channels(legacy, channel_count);
+            }
+        }
+        Self {
+            v: wire.v,
+            datasets: wire.datasets,
+            active_layouts: wire.active_layouts,
+            camera: wire.camera,
+            view,
+            display: wire.display,
+            dataset_order: wire.dataset_order,
+            dataset_settings,
+            auto_contrast: wire.auto_contrast,
+        }
+    }
+}
+
 impl SavedView {
-    /// Build an empty `v: 1` saved view from a viewport size — useful as a
+    /// Build an empty saved view from a viewport size — useful as a
     /// scaffold in tests and as a fallback when no scene state exists.
     pub fn empty(viewport: [u32; 2]) -> Self {
         Self {
@@ -225,7 +279,6 @@ mod tests {
         );
         v.dataset_order.push(DatasetId("ds-aaaa".into()));
         v.view.t = 7;
-        v.view.c = 2;
         v.view.set_z_range(10..15);
         v.display.contrast_min = 100.0;
         v.display.contrast_max = 5000.0;
@@ -246,6 +299,7 @@ mod tests {
                 // A user channel-name override rides the saved view too.
                 name: Some("Region A".into()),
             }],
+            solo: Some(0),
             ..Default::default()
         };
         v.dataset_settings.insert(DatasetId("ds-aaaa".into()), s);
@@ -306,7 +360,60 @@ mod tests {
     fn version_serialized_as_v_field() {
         let v = SavedView::empty([800, 600]);
         let json = serde_json::to_string(&v).unwrap();
-        assert!(json.contains("\"v\":1"));
+        assert!(json.contains("\"v\":2"));
+    }
+
+    fn legacy_view(view: &str) -> SavedView {
+        let channels = |n: usize| {
+            let entry = r#"{"visible":true,"colormap":"gray","contrast_min":0.0,"contrast_max":1.0,"gamma":1.0}"#;
+            vec![entry; n].join(",")
+        };
+        let settings = |n: usize| {
+            format!(
+                r#"{{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","channel_settings":[{}]}}"#,
+                channels(n)
+            )
+        };
+        let json = format!(
+            r#"{{"v":1,"camera":{{"mode":"slice","center":[0.0,0.0],"zoom":1.0,"viewport":[800,600]}},"view":{view},"display":{{"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0}},"dataset_settings":{{"three":{},"two":{},"one":{}}}}}"#,
+            settings(3),
+            settings(2),
+            settings(1)
+        );
+        serde_json::from_str(&json).unwrap()
+    }
+
+    fn solos(v: &SavedView) -> Vec<Option<u32>> {
+        ["three", "two", "one"]
+            .iter()
+            .map(|id| v.dataset_settings[&DatasetId((*id).into())].solo)
+            .collect()
+    }
+
+    #[test]
+    fn a_legacy_single_channel_view_solos_each_layer_that_has_the_channel() {
+        let v = legacy_view(r#"{"z_range":{"start":0,"end":1},"t":0,"c":2,"multi_channel":false}"#);
+        assert_eq!(solos(&v), vec![Some(2), None, None]);
+        assert_eq!(v.view.legacy_channels(), None);
+
+        let v = legacy_view(r#"{"z_range":{"start":0,"end":1},"t":0,"c":1}"#);
+        assert_eq!(solos(&v), vec![Some(1), Some(1), None]);
+    }
+
+    #[test]
+    fn a_legacy_composite_view_restores_as_the_composite() {
+        let v = legacy_view(r#"{"z_range":{"start":0,"end":1},"t":0,"c":1,"multi_channel":true}"#);
+        assert_eq!(solos(&v), vec![None, None, None]);
+    }
+
+    #[test]
+    fn a_decoded_legacy_view_encodes_in_the_current_form() {
+        let v = legacy_view(r#"{"z_range":{"start":0,"end":1},"t":0,"c":0,"multi_channel":false}"#);
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(!json.contains("multi_channel"), "{json}");
+        assert!(json.contains(r#""solo":0"#), "{json}");
+        let again: SavedView = serde_json::from_str(&json).unwrap();
+        assert_eq!(again, v);
     }
 
     #[test]
@@ -431,7 +538,7 @@ mod tests {
     /// keeps the parsed order, so it round-trips verbatim.
     #[test]
     fn rebroadcast_of_multi_dataset_view_is_byte_identical() {
-        const CLIENT_WIRE: &str = r#"{"v":1,"datasets":[],"active_layouts":{"ds-aaaa":"L-a","ds-bbbb":"L-b","ds-cccc":"L-c"},"camera":{"mode":"slice","center":[0.0,0.0],"zoom":1.0,"viewport":[1024,768]},"view":{"z_range":{"start":0,"end":1},"t":0,"c":0,"multi_channel":false},"display":{"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0},"dataset_order":["ds-aaaa","ds-bbbb","ds-cccc"],"dataset_settings":{"ds-aaaa":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"label_settings":[],"channel_blend_mode":"additive"},"ds-bbbb":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"label_settings":[],"channel_blend_mode":"additive"},"ds-cccc":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"label_settings":[],"channel_blend_mode":"additive"}},"auto_contrast":{"ds-aaaa":false,"ds-bbbb":false,"ds-cccc":false}}"#;
+        const CLIENT_WIRE: &str = r#"{"v":2,"datasets":[],"active_layouts":{"ds-aaaa":"L-a","ds-bbbb":"L-b","ds-cccc":"L-c"},"camera":{"mode":"slice","center":[0.0,0.0],"zoom":1.0,"viewport":[1024,768]},"view":{"z_range":{"start":0,"end":1},"t":0},"display":{"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0},"dataset_order":["ds-aaaa","ds-bbbb","ds-cccc"],"dataset_settings":{"ds-aaaa":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"label_settings":[],"channel_blend_mode":"additive"},"ds-bbbb":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"label_settings":[],"channel_blend_mode":"additive"},"ds-cccc":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","render_mode":"translucent","channel_settings":[],"label_settings":[],"channel_blend_mode":"additive"}},"auto_contrast":{"ds-aaaa":false,"ds-bbbb":false,"ds-cccc":false}}"#;
         let parsed: SavedView = serde_json::from_str(CLIENT_WIRE).unwrap();
         let rebroadcast = serde_json::to_string(&parsed).unwrap();
         assert_eq!(

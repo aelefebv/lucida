@@ -78,8 +78,13 @@ impl PyScene {
         serde_json::to_string(&cmd).unwrap()
     }
 
-    fn set_c(&mut self, c: u32) -> String {
-        let cmd = ViewportCommand::SetC { c };
+    /// Show one channel of a layer alone, or its composite with `None`.
+    #[pyo3(signature = (dataset_id, channel=None))]
+    fn set_channel_solo(&mut self, dataset_id: &str, channel: Option<u32>) -> String {
+        let cmd = ViewportCommand::SetChannelSolo {
+            dataset_id: dataset_id.to_string(),
+            channel,
+        };
         self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
     }
@@ -126,8 +131,10 @@ impl PyScene {
         self.inner.view.t
     }
 
-    fn c(&self) -> u32 {
-        self.inner.view.c
+    /// What every layer shows, as JSON: which channels, through which
+    /// colormap and window, at which z and t.
+    fn resolved_layers(&self) -> String {
+        serde_json::to_string(&self.inner.resolved_layers()).unwrap()
     }
 
     fn import_presence(&mut self, json: &str) -> PyResult<()> {

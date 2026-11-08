@@ -679,7 +679,7 @@ enum ViewCommand {
         #[arg(long, allow_hyphen_values = true)]
         y: f64,
     },
-    /// Set one selected dimension index
+    /// Set one selected dimension index. Channels are per layer: see `channel solo`
     Slice { axis: SliceAxis, index: u32 },
     /// Set the selected Z slab range
     ZRange { start: u32, end: u32 },
@@ -707,7 +707,6 @@ impl ViewCommand {
             ViewCommand::Slice { axis, index } => match axis {
                 SliceAxis::Z => ViewportCommand::SetZ { z: *index },
                 SliceAxis::T => ViewportCommand::SetT { t: *index },
-                SliceAxis::C => ViewportCommand::SetC { c: *index },
             },
             ViewCommand::ZRange { start, end } => {
                 if end <= start {
@@ -740,7 +739,6 @@ impl ViewCommand {
 enum SliceAxis {
     Z,
     T,
-    C,
 }
 
 #[derive(Subcommand, Debug)]
@@ -980,8 +978,12 @@ impl LayerCommand {
 
 #[derive(Subcommand, Debug)]
 enum ChannelCommand {
-    /// Switch single-channel or multichannel rendering mode
-    Mode { mode: ChannelMode },
+    /// Show one channel of a dataset alone, or its composite without CHANNEL.
+    /// Other datasets keep what they show
+    Solo {
+        dataset: String,
+        channel: Option<u32>,
+    },
     /// Show a dataset channel
     Show { dataset: String, channel: u32 },
     /// Hide a dataset channel
@@ -1017,16 +1019,16 @@ enum ChannelCommand {
 
 #[derive(Debug)]
 enum ChannelCommandAction {
-    Viewport(ViewportCommand),
     Dataset(DatasetDisplayCommand),
 }
 
 impl ChannelCommand {
     fn action(&self) -> Result<ChannelCommandAction, CliError> {
         Ok(match self {
-            ChannelCommand::Mode { mode } => {
-                ChannelCommandAction::Viewport(ViewportCommand::SetMultiChannel {
-                    enabled: *mode == ChannelMode::Multi,
+            ChannelCommand::Solo { dataset, channel } => {
+                ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelSolo {
+                    selector: dataset.clone(),
+                    channel: *channel,
                 })
             }
             ChannelCommand::Show { dataset, channel } => {
@@ -1426,12 +1428,6 @@ enum TraceInboxCommand {
 enum DebugCommand {
     /// Show read-only workspace snapshot and selected viewer state
     State,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum ChannelMode {
-    Single,
-    Multi,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2429,6 +2425,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     full_y,
                     viewport,
                     None,
+                    dims[1],
                 );
                 let probe_url =
                     montage::with_render_param(&viewer_inline_view_web_url(&target, &probe_saved)?);
@@ -2458,6 +2455,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         full_y,
                         viewport,
                         shared_contrast,
+                        dims[1],
                     );
                     let url = viewer_inline_view_web_url(&target, &saved)?;
                     cell_json.push(serde_json::json!({
@@ -2467,7 +2465,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         // no counting: cell at (row, col) == cells[row*cols + col].
                         "row": index as u32 / plan.cols.max(1),
                         "col": index as u32 % plan.cols.max(1),
-                        "z": cell.z, "t": cell.t, "c": cell.c, "tile": cell.tile,
+                        "z": cell.z, "t": cell.t, "tile": cell.tile,
                         "label": cell.label,
                         "url": url,
                     }));
@@ -2709,18 +2707,6 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             timeout_seconds,
             command,
         } => match command.action()? {
-            ChannelCommandAction::Viewport(command) => {
-                emit_viewport_command(
-                    &cli,
-                    &config,
-                    output,
-                    command,
-                    viewer_profile,
-                    *from_peer,
-                    *timeout_seconds,
-                )
-                .await?;
-            }
             ChannelCommandAction::Dataset(command) => {
                 emit_dataset_presence_command(
                     &cli,
@@ -5463,7 +5449,9 @@ mod tests {
         let mut current = default_view(ds_id, dims, [320, 320]);
         // Sit in the interior so steps in both directions are offered.
         current.view.t = 2;
-        current.view.c = 1;
+        for settings in current.dataset_settings.values_mut() {
+            settings.solo = Some(1);
+        }
         let mut sidecar = ExplorationSidecar::build(&current, &extent, 0, Vec::new());
         assert!(!sidecar.cells.is_empty(), "expected some next-step cells");
 
@@ -5499,7 +5487,8 @@ mod tests {
         for (cell, src) in cells.iter().zip(sidecar.cells.iter()) {
             assert_eq!(cell["z"], serde_json::json!(src.view.view.z_range.start));
             assert_eq!(cell["t"], serde_json::json!(src.view.view.t));
-            assert_eq!(cell["c"], serde_json::json!(src.view.view.c));
+            let solo = src.view.dataset_settings.values().find_map(|s| s.solo);
+            assert_eq!(cell.get("c").and_then(|c| c.as_u64()), solo.map(u64::from));
             assert_eq!(cell["url"], serde_json::json!(src.url));
             assert!(
                 cell["url"].as_str().unwrap().contains("#view="),
@@ -5700,15 +5689,23 @@ mod tests {
 
     #[test]
     fn channel_commands_parse_and_map_to_presence_or_dataset_presence() {
-        let mode = parse(&["channel", "mode", "multi"]);
-        match mode.command {
-            Command::Channel { command, .. } => match command.action().unwrap() {
-                ChannelCommandAction::Viewport(ViewportCommand::SetMultiChannel { enabled }) => {
-                    assert!(enabled);
-                }
-                _ => panic!("expected multi-channel view command"),
-            },
-            _ => panic!("expected channel mode"),
+        for (args, expected) in [
+            (&["channel", "solo", "demo.zarr", "2"][..], Some(2)),
+            (&["channel", "solo", "demo.zarr"][..], None),
+        ] {
+            match parse(args).command {
+                Command::Channel { command, .. } => match command.action().unwrap() {
+                    ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelSolo {
+                        selector,
+                        channel,
+                    }) => {
+                        assert_eq!(selector, "demo.zarr");
+                        assert_eq!(channel, expected);
+                    }
+                    _ => panic!("expected a channel solo"),
+                },
+                _ => panic!("expected channel solo"),
+            }
         }
 
         let colormap = parse(&["channel", "colormap", "demo.zarr", "1", "viridis"]);

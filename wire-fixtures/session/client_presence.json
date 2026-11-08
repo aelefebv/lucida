@@ -17,9 +17,7 @@
       "start": 10,
       "end": 14
     },
-    "t": 2,
-    "c": 1,
-    "multi_channel": true
+    "t": 2
   },
   "display": {
     "contrast_min": 120.0,
