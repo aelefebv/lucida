@@ -226,7 +226,7 @@ describe("the list is bounded", () => {
   });
 });
 
-describe("two sections on one scale (#1066)", () => {
+describe("two sections on one scale", () => {
   const tickXs = (list: ReturnType<typeof buildTimelineDrawList>): number[] =>
     list.axis.flatMap((primitive) => (primitive.kind === "tick" ? [primitive.x] : []));
 

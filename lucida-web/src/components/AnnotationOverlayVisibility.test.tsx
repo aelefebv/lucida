@@ -68,7 +68,7 @@ afterEach(() => {
   cleanup();
 });
 
-describe("AnnotationOverlay (2D) — visible prop (issue #792)", () => {
+describe("AnnotationOverlay (2D) — visible prop", () => {
   function renderOverlay(pins: Annotation[], visible?: boolean) {
     const sceneRef = createRef<WasmScene | null>();
     sceneRef.current = make2DScene(pins);
@@ -175,7 +175,7 @@ describe("AnnotationOverlay (2D) — visible prop (issue #792)", () => {
   });
 });
 
-describe("AnnotationOverlay3D — visible prop (issue #792)", () => {
+describe("AnnotationOverlay3D — visible prop", () => {
   function renderOverlay(pins: Annotation[], visible?: boolean) {
     const sceneRef = createRef<WasmScene | null>();
     sceneRef.current = make3DScene(pins);
@@ -237,7 +237,7 @@ describe("AnnotationOverlay3D — visible prop (issue #792)", () => {
   });
 });
 
-describe("toolbar toggle wiring (issue #792) — button flips overlay visibility", () => {
+describe("toolbar toggle wiring — button flips overlay visibility", () => {
   /** Reproduces App.tsx's wiring (button -> state -> `visible` -> overlay)
    * without standing up App's WASM, render, and auth. */
   function Harness() {

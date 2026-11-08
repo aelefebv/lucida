@@ -1053,7 +1053,7 @@ describe("TraceRecorder dataset opens", () => {
   });
 });
 
-describe("what a run in progress can say about itself (#937)", () => {
+describe("what a run in progress can say about itself", () => {
   it("says nothing while no labelled run is open", () => {
     const { recorder } = makeRecorder();
     // Steady state is not a run: it has no cause to report and nothing to
@@ -1146,7 +1146,7 @@ describe("what a run in progress can say about itself (#937)", () => {
   });
 });
 
-describe("the provisional reading over a trailing window (#1057)", () => {
+describe("the provisional reading over a trailing window", () => {
   it("says nothing while no labelled run is open", () => {
     const { recorder } = makeRecorder();
     expect(recorder.provisionalReading()).toBeNull();

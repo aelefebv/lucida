@@ -61,8 +61,8 @@ fn render(q: &ErrorQuery) -> String {
 
 fn render_hd_mismatch(attempted_email: &str, allowed_domains_raw: &str) -> String {
     // The query-param form is comma-separated; render as a friendly
-    // list ("calicolabs.com" vs "calicolabs.com or othercorp.com" vs
-    // "calicolabs.com, mid.org, or zlast.com"). Empty fallback "your
+    // list ("example.com" vs "example.com or example.org" vs
+    // "example.com, example.net, or example.org"). Empty fallback "your
     // organization" keeps the page sane even if the redirect omitted
     // the param.
     let domains: Vec<&str> = allowed_domains_raw
@@ -179,12 +179,12 @@ mod tests {
     fn hd_mismatch_renders_email_and_domains() {
         let body = render(&q(
             "hd_mismatch",
-            Some("alice@gmail.com"),
-            Some("calicolabs.com"),
+            Some("alice@example.net"),
+            Some("example.com"),
         ));
         assert!(body.contains("Account not allowed"));
-        assert!(body.contains("alice@gmail.com"));
-        assert!(body.contains("calicolabs.com"));
+        assert!(body.contains("alice@example.net"));
+        assert!(body.contains("example.com"));
         assert!(body.contains(r#"href="/auth/start""#));
     }
 
@@ -192,21 +192,21 @@ mod tests {
     fn hd_mismatch_two_domains_uses_or() {
         let body = render(&q(
             "hd_mismatch",
-            Some("a@x.com"),
-            Some("calicolabs.com,othercorp.com"),
+            Some("a@example.net"),
+            Some("example.com,example.org"),
         ));
-        assert!(body.contains("calicolabs.com or othercorp.com"));
+        assert!(body.contains("example.com or example.org"));
     }
 
     #[test]
     fn hd_mismatch_three_domains_uses_oxford_comma() {
         let body = render(&q(
             "hd_mismatch",
-            Some("a@x.com"),
-            Some("acorp.com,mid.org,zlast.com"),
+            Some("a@example.net"),
+            Some("acorp.example.com,mid.example.com,zlast.example.com"),
         ));
-        // Three values: "acorp.com, mid.org, or zlast.com"
-        assert!(body.contains("acorp.com, mid.org, or zlast.com"));
+        // Three values: "acorp.example.com, mid.example.com, or zlast.example.com"
+        assert!(body.contains("acorp.example.com, mid.example.com, or zlast.example.com"));
     }
 
     #[test]
@@ -249,8 +249,8 @@ mod tests {
     fn html_escape_blocks_xss_in_email_param() {
         let body = render(&q(
             "hd_mismatch",
-            Some("<script>alert(1)</script>@x.com"),
-            Some("calicolabs.com"),
+            Some("<script>alert(1)</script>@example.net"),
+            Some("example.com"),
         ));
         assert!(!body.contains("<script>alert(1)</script>"));
         assert!(body.contains("&lt;script&gt;"));
@@ -258,7 +258,11 @@ mod tests {
 
     #[test]
     fn html_escape_blocks_xss_in_domain_param() {
-        let body = render(&q("hd_mismatch", Some("a@x.com"), Some("<img onerror=x>")));
+        let body = render(&q(
+            "hd_mismatch",
+            Some("a@example.net"),
+            Some("<img onerror=x>"),
+        ));
         assert!(!body.contains("<img onerror=x>"));
         assert!(body.contains("&lt;img onerror=x&gt;"));
     }
@@ -267,8 +271,8 @@ mod tests {
     async fn handler_returns_html_with_200() {
         let res = auth_error(Query(q(
             "hd_mismatch",
-            Some("a@x.com"),
-            Some("calicolabs.com"),
+            Some("a@example.net"),
+            Some("example.com"),
         )))
         .await;
         assert_eq!(res.status(), StatusCode::OK);
