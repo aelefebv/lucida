@@ -13,6 +13,7 @@ import type { ChunkFailureKind, SourceChunkStatus } from "./pipeline/fetch/conte
 import { traceRecorder } from "./trace/recorder.ts";
 import { classifyClientMessage, utf8ByteLength } from "./trace/sendAccounting.ts";
 import type { ServerTimingBatch } from "./trace/serverRowTable.ts";
+import type { SocketClose } from "./trace/types.ts";
 import type {
   GeneratedChunkStatus,
   WireGeneratedAvailabilityByDataset,
@@ -402,7 +403,7 @@ export interface BridgeHandlers {
    * there is no server-side trace store to poll.
    */
   onTimingBatch?: (batch: ServerTimingBatch, generation: number) => void;
-  onDisconnect?: () => void;
+  onDisconnect?: (close: SocketClose) => void;
 }
 
 /** Mirror of `lucida_core::protocol::CommandRejection`. */
@@ -728,7 +729,7 @@ export class Bridge {
       this.documentDatasetIds = null;
       this.clearGraceTimer();
       this.clearRetryTimer();
-      this.handlers.onDisconnect?.();
+      this.handlers.onDisconnect?.({ code: event.code, reason: event.reason });
       this.scheduleReconnect();
     };
 

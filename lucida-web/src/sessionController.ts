@@ -1229,7 +1229,7 @@ export class SessionController {
         this.endConnection();
         this.deps.events.onAccessRevoked();
       },
-      onDisconnect: () => {
+      onDisconnect: (close) => {
         // Re-arm both readiness signals so a reconnect's `onopen` and fresh
         // snapshot must re-establish them before gated work (e.g. a pending
         // seed open) fires. Warnings described opens on the dead connection,
@@ -1242,7 +1242,7 @@ export class SessionController {
         // Start of the gap the reconnect will close. Declared here rather
         // than inferred from a silence, because a silent socket and a dead
         // one look identical from the rows.
-        traceRecorder.noteDisconnected();
+        traceRecorder.noteDisconnected(close);
         watchStream.detach();
       },
     };

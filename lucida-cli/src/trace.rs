@@ -1609,11 +1609,12 @@ fn parse_run_file(text: &str, path: &Path) -> Result<TraceRunFile, CliError> {
 /// pipeline went on, and a regression there is as much a build failure as a
 /// stall.
 ///
-/// The gate reads two things: the header's settled flag and the closed run's
-/// verdict. A run that closed without going quiescent fails before its verdict
-/// is consulted, and a provisional reading over an open run carries no
-/// verdict, so nothing read while a run was still open can fail a build. Every
-/// ceiling and its rationale live in the page's ruleset, not here.
+/// The gate reads three things: the header's settled flag, the socket outages
+/// the document records, and the closed run's verdict. A run that closed
+/// without going quiescent fails before its verdict is consulted, and a
+/// provisional reading over an open run carries no verdict, so nothing read
+/// while a run was still open can fail a build. Every ceiling and its
+/// rationale live in the page's ruleset, not here.
 pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
     if !file.header.settled {
         let ended = file.header.end_reason.as_deref().unwrap_or("no end reason");
@@ -1621,6 +1622,9 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
             Some(reason) => format!("the run never settled ({ended}: {reason})"),
             None => format!("the run never settled ({ended})"),
         });
+    }
+    if let Some(reason) = socket_outage_failure(&file.trace) {
+        return Some(reason);
     }
     if let Some(kind) = file
         .diagnostic
@@ -1641,6 +1645,70 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
     // from the record the page filled at export, so a slow orbit fails the
     // gate whether or not a scrub came after it.
     file.header.script.as_ref().and_then(script_gate_failure)
+}
+
+/// Why a page that lost its session socket fails the gate, or `None` when it
+/// never did.
+///
+/// A run measured across a lost socket settled on a different pipeline from
+/// the one the gate judges: requests in flight were dropped and retried, and
+/// the server discarded what it had buffered for the page. The server closes
+/// a client that falls too far behind, so the drop is itself the regression.
+///
+/// Every interval in the document is read, not only the run the driver waited
+/// for. The drop is recorded in the interval open when the socket died and
+/// the reconnect in the one open when the page got back, and those need not
+/// be the waited run.
+fn socket_outage_failure(trace: &Value) -> Option<String> {
+    let set = |record: &Value, field: &str| record.get(field).is_some_and(|value| !value.is_null());
+    let mut drops = 0_usize;
+    let mut reconnects = 0_usize;
+    let mut closes: Vec<String> = Vec::new();
+    let connections = trace
+        .get("runs")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|run| run.pointer("/header/connections").and_then(Value::as_array))
+        .flatten();
+    for connection in connections {
+        if set(connection, "closedAtUs") {
+            drops += 1;
+            if let Some(code) = connection.pointer("/close/code").and_then(Value::as_u64) {
+                let reason = connection
+                    .pointer("/close/reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let close = format!("{code} {reason}").trim_end().to_string();
+                if !closes.contains(&close) {
+                    closes.push(close);
+                }
+            }
+        }
+        if set(connection, "gapUs") {
+            reconnects += 1;
+        }
+    }
+    // A page that never reconnected records a drop and no reconnect, and one
+    // whose drop fell outside every recorded interval records only the
+    // reconnect, so each outage shows up in at least one of the two counts.
+    let outages = drops.max(reconnects);
+    if outages == 0 {
+        return None;
+    }
+    let times = if outages == 1 {
+        "once".to_string()
+    } else {
+        format!("{outages} times")
+    };
+    let closed = if closes.is_empty() {
+        String::new()
+    } else {
+        format!(" (closed {})", closes.join(", "))
+    };
+    Some(format!(
+        "the page lost its session socket {times} during the trace{closed}"
+    ))
 }
 
 /// The default rendering: the page's own text, under the three things the page
@@ -2911,6 +2979,63 @@ mod tests {
             "timeout",
         );
         assert!(gate_failure(&unsettled).unwrap().contains("never settled"));
+    }
+
+    /// A page the server dropped reconnects, retries what it lost and can
+    /// settle clear, so the gate reads the outage off the document, and off
+    /// every interval in it: the reconnect can land in a run other than the
+    /// one the driver waited for.
+    #[test]
+    fn the_gate_fails_a_page_that_lost_its_socket_even_when_the_run_settled_clear() {
+        let clear = json!({ "verdict": { "kind": "clear", "text": "no stall" } });
+        let connection = |generation: u64, closed: Option<u64>, gap: Option<u64>| {
+            json!({
+                "generation": generation,
+                "openedAtUs": gap.map(|_| 9_000_000),
+                "closedAtUs": closed,
+                "gapUs": gap,
+                "firstRid": 0,
+                "lastRid": 40,
+            })
+        };
+
+        let mut steady = run_file(clear.clone(), true, "quiescent");
+        steady.trace = json!({ "runs": [
+            { "header": { "runId": "run-1-1", "connections": [connection(1, None, None)] } },
+        ] });
+        assert_eq!(gate_failure(&steady), None);
+
+        let mut dropped = run_file(clear, true, "quiescent");
+        dropped.trace = json!({ "runs": [
+            { "header": { "runId": "run-1-1", "connections": [{
+                "generation": 1,
+                "openedAtUs": null,
+                "closedAtUs": 7_000_000,
+                "gapUs": null,
+                "close": { "code": 1013, "reason": "client fell too far behind" },
+            }] } },
+            { "header": { "runId": "run-1-2", "connections": [connection(2, None, Some(2_000_000))] } },
+        ] });
+        assert_eq!(
+            gate_failure(&dropped).as_deref(),
+            Some(
+                "the page lost its session socket once during the trace \
+                 (closed 1013 client fell too far behind)"
+            ),
+        );
+
+        // A page too old to record the close frame still fails, on the
+        // reconnect alone.
+        dropped.trace = json!({ "runs": [
+            { "header": { "runId": "run-1-2", "connections": [
+                connection(2, None, Some(2_000_000)),
+                connection(3, None, Some(2_000_000)),
+            ] } },
+        ] });
+        assert_eq!(
+            gate_failure(&dropped).as_deref(),
+            Some("the page lost its session socket 2 times during the trace"),
+        );
     }
 
     /// An interaction run over the frame-time ceiling reaches the gate as a
