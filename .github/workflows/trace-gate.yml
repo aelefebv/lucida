@@ -30,9 +30,10 @@ jobs:
         uses: docker/setup-buildx-action@v3
 
       # Both builds read the cache the CI workflow's Docker job writes, so on
-      # an unchanged build context they rebuild nothing. The CLI's own stage
-      # keeps a separate scope: writing the shared one would replace the
-      # Docker job's entries with the CLI's.
+      # a build context main has already built they rebuild nothing. Each
+      # also keeps a scope of its own, for runs whose context main has not
+      # built: writing the shared scope would replace the Docker job's
+      # entries, and one scope for both targets would keep only the last.
       - name: Build the lucida CLI
         uses: docker/build-push-action@v6
         with:
@@ -43,6 +44,7 @@ jobs:
           cache-from: |
             type=gha
             type=gha,scope=trace-gate-cli
+            type=gha,scope=trace-gate-server
           cache-to: type=gha,mode=max,scope=trace-gate-cli
 
       - name: Build the server image
@@ -52,7 +54,11 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: lucida:ci-smoke
-          cache-from: type=gha
+          cache-from: |
+            type=gha
+            type=gha,scope=trace-gate-server
+            type=gha,scope=trace-gate-cli
+          cache-to: type=gha,mode=max,scope=trace-gate-server
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
@@ -78,31 +84,58 @@ jobs:
           echo "::error::healthz never responded within 30s"
           exit 1
 
-      # The CLI launches Chrome with flags that reach a real GPU through
-      # Vulkan. The runner has none, so WebGPU and ANGLE are pointed at the
-      # SwiftShader Vulkan device Chrome ships with. Flags after the CLI's
-      # win, and the sandbox is off because the runner's AppArmor policy
-      # refuses the user namespaces it needs.
-      - name: Point Chrome at SwiftShader
+      - name: Probe Chrome flags (temporary)
         run: |
-          set -euo pipefail
-          cat > "$RUNNER_TEMP/chrome-swiftshader" <<'EOF'
-          #!/bin/sh
-          exec google-chrome "$@" \
-            --use-vulkan=swiftshader \
-            --use-webgpu-adapter=swiftshader \
-            --enable-unsafe-swiftshader \
-            --no-sandbox
-          EOF
-          chmod +x "$RUNNER_TEMP/chrome-swiftshader"
-          google-chrome --version
+          set -uo pipefail
+          out="$RUNNER_TEMP/gate-out"; mkdir -p "$out"
+          uv run extras/synthetic_ome_zarr.py "$RUNNER_TEMP/gate-data/image.ome.zarr" --size 2048,2048 --channels 2 --levels 4 --chunk 256
+          export LUCIDA_CONFIG_PATH="$out/probe-config.json" LUCIDA_TRACE_DIR="$out"
+          cli="$RUNNER_TEMP/cli/lucida"
+          strip='s/ --enable-features=Vulkan / /; s/ --use-angle=vulkan / /; s/ --disable-vulkan-surface / /'
+          declare -A variants=(
+            [a-current]='keep|--use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
+            [b-angle-sw]='keep|--use-angle=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
+            [c-no-vulkan-sw]='keep|--use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
+            [d-strip-angle-sw]='strip|--enable-features=Vulkan --use-angle=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
+            [e-strip-novulkan]='strip|--use-angle=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
+            [f-current-nowatchdog]='keep|--use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox --disable-gpu-watchdog'
+          )
+          picked=""
+          for v in a-current b-angle-sw c-no-vulkan-sw d-strip-angle-sw e-strip-novulkan f-current-nowatchdog; do
+            mode="${variants[$v]%%|*}"; extra="${variants[$v]#*|}"
+            w="$RUNNER_TEMP/chrome-$v"
+            {
+              echo '#!/bin/bash'
+              if [[ "$mode" == strip ]]; then
+                echo 'args=" $* "'
+                echo "args=\"\$(sed -e '$strip' <<< \"\$args\")\""
+                echo "exec google-chrome \$args $extra --enable-logging --log-file=$out/chrome-$v.log"
+              else
+                echo "exec google-chrome \"\$@\" $extra --enable-logging --log-file=$out/chrome-$v.log"
+              fi
+            } > "$w"
+            chmod +x "$w"
+            cat "$w"
+            "$cli" --server http://127.0.0.1:9876 workspace create "probe-$v" > /dev/null
+            LUCIDA_BROWSER="$w" timeout 150 "$cli" --server http://127.0.0.1:9876 --workspace "probe-$v" \
+              trace "$RUNNER_TEMP/gate-data/image.ome.zarr" --camera slice --timeout-seconds 60 --gate \
+              --output "$out/probe-$v.json" > "$out/probe-$v.txt" 2>&1
+            status=$?
+            echo "=== $v exit $status"
+            grep -E "VERDICT|^client|^run  |^error" "$out/probe-$v.txt"
+            grep -iE "lost|crash|vulkan|dawn|webgpu|swiftshader|gpu_process|context" "$out/chrome-$v.log" | grep -v "Fontconfig" | head -25
+            if [[ "$status" -eq 0 && -z "$picked" ]]; then picked="$w"; fi
+          done
+          echo "picked: ${picked:-none}"
+          echo "LUCIDA_BROWSER=${picked:-$RUNNER_TEMP/chrome-a-current}" >> "$GITHUB_ENV"
+          rm -rf "$RUNNER_TEMP/gate-data/image.ome.zarr"
 
       - name: Run the gate
         env:
           LUCIDA_GATE_CLI: ${{ runner.temp }}/cli/lucida
           LUCIDA_GATE_DATA: ${{ runner.temp }}/gate-data
           LUCIDA_GATE_OUTPUT: ${{ runner.temp }}/gate-out
-          LUCIDA_BROWSER: ${{ runner.temp }}/chrome-swiftshader
+          LUCIDA_GATE_TIMEOUT: '90'
         run: scripts/trace_gate.sh
 
       - name: Server logs
