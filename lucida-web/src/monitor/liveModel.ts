@@ -1,5 +1,5 @@
 /**
- * The run in progress, as a surface renders it (#937).
+ * The run in progress, as a surface renders it.
  *
  * Counters and a phase bar, and deliberately nothing that reads as a verdict.
  * The prototype's auto-following window was nearly useless — by the time you
@@ -56,7 +56,7 @@ export interface LiveView {
 /**
  * Rows that exist but have stamped no boundary.
  *
- * Kept although the recorder can no longer produce one: since #949 a chunk row
+ * Kept although the recorder does not produce one: a chunk row
  * is born at dispatch with `queue` stamped and `wire` open, so every row the
  * pipeline makes is already in a phase. This is the bar's residual — what
  * makes its segments sum to the in-flight count — and dropping it would turn
@@ -134,7 +134,7 @@ export interface ProvisionalFindingView {
 }
 
 /**
- * A provisional reading as the live view shows it (#1057). Every field is a
+ * A provisional reading as the live view shows it. Every field is a
  * selection from the reading the seam returned; nothing here is computed,
  * so the dock and the text an agent reads cannot disagree.
  */

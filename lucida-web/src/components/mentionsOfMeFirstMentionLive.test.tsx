@@ -90,7 +90,7 @@ function badgeText(): string {
   return document.querySelector(".lc-right-rail-badge")?.textContent ?? "0";
 }
 
-describe("#802 resolver: currentDatasetAnnotations with no dataset selected", () => {
+describe("resolver: currentDatasetAnnotations with no dataset selected", () => {
   it("returns the annotated dataset's pins when selectedDatasetId is null", () => {
     const scene = sceneWithMention();
     // Sanity: the scene really has the annotation, just no manifest/selection.
@@ -122,7 +122,7 @@ describe("#802 resolver: currentDatasetAnnotations with no dataset selected", ()
   });
 });
 
-describe("#802 badge: the Comments badge reflects a first mention with no selection", () => {
+describe("badge: the Comments badge reflects a first mention with no selection", () => {
   it("shows the first mention's count even when selectedDatasetId is null", () => {
     const scene = sceneWithMention();
     const annotations = currentDatasetAnnotations(scene as AnnotationScene, null);
