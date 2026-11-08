@@ -154,16 +154,19 @@ async fn assert_still_open(ws: &mut WsClient) {
 async fn a_binary_frame_from_a_client_goes_nowhere() {
     let rig = start_server().await;
     let mut sender = connect(rig.addr).await;
-    let ServerMessage::Snapshot { your_id: 0, .. } = next_message(&mut sender).await else {
-        panic!("first client is id 0");
+    let ServerMessage::Snapshot { .. } = next_message(&mut sender).await else {
+        panic!("first client's snapshot");
     };
     let mut target = connect(rig.addr).await;
-    let ServerMessage::Snapshot { your_id: 1, .. } = next_message(&mut target).await else {
-        panic!("second client is id 1");
+    let ServerMessage::Snapshot {
+        your_id: target_id, ..
+    } = next_message(&mut target).await
+    else {
+        panic!("second client's snapshot");
     };
 
-    // The envelope the server uses for chunk frames, addressed to client 1.
-    let mut frame = 1u32.to_le_bytes().to_vec();
+    // The envelope the server uses for chunk frames, addressed to the target.
+    let mut frame = u32::try_from(target_id).unwrap().to_le_bytes().to_vec();
     frame.extend_from_slice(&3u16.to_le_bytes());
     frame.extend_from_slice(b"key");
     frame.extend_from_slice(&[7u8; 64]);

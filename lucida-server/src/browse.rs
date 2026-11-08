@@ -237,6 +237,7 @@ mod tests {
             generated_chunk_long_axis: 256,
             generated_max_chunk_bytes: 2 * 1024 * 1024,
             generated_disk_budget_bytes: None,
+            generated_memory: crate::generated::GeneratedChunkMemory::new(1 << 20),
         };
         let (tx, _) = broadcast::channel::<BroadcastItem>(8);
         AppState {

@@ -19,6 +19,7 @@ use lucida_protocol::{
     GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary,
 };
 use lucida_store::cache::CachedStore;
+use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 
@@ -32,6 +33,11 @@ const DEFAULT_TARGET_LONG_AXIS: u64 = 512;
 const DEFAULT_CHUNK_LONG_AXIS: u64 = 256;
 const DEFAULT_MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
 const DOWNSAMPLE_ALGORITHM_VERSION: &str = "max-pool-v1";
+
+/// Default budget for generated chunk bytes held in memory, across every
+/// dataset in the process. Memory is the hot copy; the disk cache is the
+/// lasting one.
+pub const DEFAULT_GENERATED_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedCoarseConfig {
@@ -166,6 +172,8 @@ pub struct GeneratedCoarseService {
 
 struct GeneratedCoarseServiceInner {
     plans: HashMap<(ImageId, u32), GeneratedCoarsePlan>,
+    /// The plans in a fixed order for background fill to walk.
+    plan_order: Vec<(ImageId, u32)>,
     manifest: Arc<DatasetManifest>,
     store: Arc<CachedStore>,
     resolver: Arc<ChunkResolver>,
@@ -180,6 +188,9 @@ struct GeneratedCoarseServiceInner {
 #[derive(Debug, Default)]
 struct GeneratedSchedulerState {
     shutdown_reason: Option<String>,
+    /// How far background fill has walked. `None` before it starts and
+    /// after it stops.
+    background: Option<BackgroundCursor>,
     interests: HashMap<(ClientId, DatasetId), ViewerInterestHint>,
     /// The clients with a chunk request waiting on each work key. A request
     /// keeps its work alive until the work finishes, whatever the hints say,
@@ -199,6 +210,72 @@ struct GeneratedSchedulerState {
     materialization_latency_samples: u64,
     materialization_latency_total_ms: u64,
     last_materialization_latency_ms: u64,
+}
+
+/// A position in every plan's chunks, in plan order, then `t`, `c`, and the
+/// chunk grid, so background fill can queue a few at a time and still reach
+/// all of them.
+#[derive(Debug)]
+struct BackgroundCursor {
+    plan: usize,
+    tc: u64,
+    chunk: u64,
+    /// The cache's eviction count when the fill started. Once the cache
+    /// evicts, filling further only churns it, so the fill stops.
+    evictions_at_start: u64,
+}
+
+impl BackgroundCursor {
+    fn new(evictions_at_start: u64) -> Self {
+        Self {
+            plan: 0,
+            tc: 0,
+            chunk: 0,
+            evictions_at_start,
+        }
+    }
+
+    fn next(
+        &mut self,
+        plans: &HashMap<(ImageId, u32), GeneratedCoarsePlan>,
+        plan_order: &[(ImageId, u32)],
+    ) -> Option<GeneratedWorkKey> {
+        loop {
+            let plan = plans.get(plan_order.get(self.plan)?)?;
+            let level = &plan.availability.level;
+            let grid = level.grid_shape;
+            let per_tc = grid[2].saturating_mul(grid[3]).saturating_mul(grid[4]);
+            let tcs = level.shape[0].saturating_mul(level.shape[1]);
+            if self.tc >= tcs || per_tc == 0 {
+                self.plan += 1;
+                self.tc = 0;
+                self.chunk = 0;
+                continue;
+            }
+            if self.chunk >= per_tc {
+                self.tc += 1;
+                self.chunk = 0;
+                continue;
+            }
+            let (t, c) = (self.tc / level.shape[1], self.tc % level.shape[1]);
+            let plane = grid[3] * grid[4];
+            let (z, y, x) = (
+                self.chunk / plane,
+                self.chunk % plane / grid[4],
+                self.chunk % grid[4],
+            );
+            self.chunk += 1;
+            let (Ok(t), Ok(c)) = (u32::try_from(t), u32::try_from(c)) else {
+                continue;
+            };
+            return Some(GeneratedWorkKey {
+                dataset_id: plan.dataset_id.clone(),
+                image_id: plan.image_id.clone(),
+                level_index: plan.level_index,
+                key: chunk_key(plan.level_index, t, c, z, y, x),
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,7 +322,162 @@ struct DerivedChunkKey {
 struct DerivedChunkEntry {
     status: GeneratedChunkStatus,
     message: Option<String>,
-    bytes: Option<Vec<u8>>,
+}
+
+/// One byte budget, and one LRU order, over the generated chunk bytes every
+/// dataset holds in memory.
+///
+/// A ready chunk whose bytes were evicted is read back from the disk cache
+/// when next asked for. Without a disk cache it is generated again.
+#[derive(Debug)]
+pub struct GeneratedChunkMemory {
+    state: Mutex<GeneratedMemoryState>,
+    next_owner: AtomicU64,
+}
+
+#[derive(Debug)]
+struct GeneratedMemoryState {
+    lru: LruCache<(u64, DerivedChunkKey), Vec<u8>>,
+    max_bytes: u64,
+    current_bytes: u64,
+    /// Bytes and evictions per owning cache, for its telemetry.
+    owners: HashMap<u64, (u64, u64)>,
+}
+
+impl GeneratedChunkMemory {
+    pub fn new(max_bytes: u64) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(GeneratedMemoryState {
+                lru: LruCache::unbounded(),
+                max_bytes,
+                current_bytes: 0,
+                owners: HashMap::new(),
+            }),
+            next_owner: AtomicU64::new(0),
+        })
+    }
+
+    pub fn max_bytes(&self) -> u64 {
+        self.state.lock().unwrap().max_bytes
+    }
+
+    /// Resident bytes across every cache on this budget.
+    pub fn current_bytes(&self) -> u64 {
+        self.state.lock().unwrap().current_bytes
+    }
+
+    fn get(&self, owner: u64, key: &DerivedChunkKey) -> Option<Vec<u8>> {
+        self.state
+            .lock()
+            .unwrap()
+            .lru
+            .get(&(owner, key.clone()))
+            .cloned()
+    }
+
+    fn contains(&self, owner: u64, key: &DerivedChunkKey) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .lru
+            .contains(&(owner, key.clone()))
+    }
+
+    /// Bytes larger than the whole budget are not kept.
+    fn put(&self, owner: u64, key: DerivedChunkKey, bytes: Vec<u8>) {
+        let size = bytes.len() as u64;
+        let mut state = self.state.lock().unwrap();
+        let state = &mut *state;
+        if let Some(previous) = state.lru.pop(&(owner, key.clone())) {
+            state.forget(owner, previous.len() as u64, false);
+        }
+        if size > state.max_bytes {
+            return;
+        }
+        while state.current_bytes + size > state.max_bytes {
+            let Some(((evicted_owner, _), evicted)) = state.lru.pop_lru() else {
+                break;
+            };
+            state.forget(evicted_owner, evicted.len() as u64, true);
+        }
+        state.current_bytes += size;
+        state.owners.entry(owner).or_default().0 += size;
+        state.lru.put((owner, key), bytes);
+    }
+
+    fn remove(&self, owner: u64, key: &DerivedChunkKey) {
+        let mut state = self.state.lock().unwrap();
+        if let Some(bytes) = state.lru.pop(&(owner, key.clone())) {
+            state.forget(owner, bytes.len() as u64, false);
+        }
+    }
+
+    fn release(&self, owner: u64) {
+        let mut state = self.state.lock().unwrap();
+        let keys: Vec<_> = state
+            .lru
+            .iter()
+            .filter(|((entry_owner, _), _)| *entry_owner == owner)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            if let Some(bytes) = state.lru.pop(&key) {
+                state.current_bytes -= bytes.len() as u64;
+            }
+        }
+        state.owners.remove(&owner);
+    }
+
+    /// `(bytes, evictions)` for one owning cache.
+    fn usage(&self, owner: u64) -> (u64, u64) {
+        self.state
+            .lock()
+            .unwrap()
+            .owners
+            .get(&owner)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+impl GeneratedMemoryState {
+    fn forget(&mut self, owner: u64, size: u64, evicted: bool) {
+        self.current_bytes -= size;
+        let usage = self.owners.entry(owner).or_default();
+        usage.0 -= size;
+        if evicted {
+            usage.1 += 1;
+        }
+    }
+}
+
+/// One cache's place on a [`GeneratedChunkMemory`], giving its bytes back
+/// when the last clone of the cache goes away.
+#[derive(Debug)]
+struct MemorySlot {
+    owner: u64,
+    memory: Arc<GeneratedChunkMemory>,
+}
+
+impl MemorySlot {
+    fn on(memory: Arc<GeneratedChunkMemory>) -> Self {
+        Self {
+            owner: memory.next_owner.fetch_add(1, Ordering::Relaxed),
+            memory,
+        }
+    }
+}
+
+impl Default for MemorySlot {
+    fn default() -> Self {
+        Self::on(GeneratedChunkMemory::new(DEFAULT_GENERATED_MEMORY_BYTES))
+    }
+}
+
+impl Drop for MemorySlot {
+    fn drop(&mut self) {
+        self.memory.release(self.owner);
+    }
 }
 
 #[derive(Debug, Default)]
@@ -276,6 +508,9 @@ struct DerivedDiskCache {
     root_dir: PathBuf,
     url_hash: [u8; 16],
     disk_budget_bytes: Option<u64>,
+    /// Bytes under the dataset directory as of the last scan, plus what has
+    /// been written since. Only a total past the budget pays for a rescan.
+    known_bytes: Mutex<Option<u64>>,
     tmp_counter: AtomicU64,
     eviction_counter: AtomicU64,
 }
@@ -288,6 +523,7 @@ struct DerivedDiskCache {
 pub struct DerivedChunkCache {
     inner: Arc<Mutex<DerivedChunkState>>,
     disk: Option<Arc<DerivedDiskCache>>,
+    memory: Arc<MemorySlot>,
 }
 
 impl DerivedChunkCache {
@@ -311,6 +547,7 @@ impl DerivedChunkCache {
                 root_dir,
                 url_hash,
                 disk_budget_bytes,
+                known_bytes: Mutex::new(None),
                 tmp_counter: AtomicU64::new(0),
                 eviction_counter: AtomicU64::new(0),
             })),
@@ -326,7 +563,15 @@ impl DerivedChunkCache {
         Self {
             inner: Arc::new(Mutex::new(DerivedChunkState::default())),
             disk,
+            memory: Arc::default(),
         }
+    }
+
+    /// Hold this cache's in-memory bytes on `memory`, shared with every other
+    /// cache on it, instead of on a budget of its own.
+    pub fn with_memory(mut self, memory: Arc<GeneratedChunkMemory>) -> Self {
+        self.memory = Arc::new(MemorySlot::on(memory));
+        self
     }
 
     pub fn snapshot(&self) -> GeneratedAvailabilitySnapshot {
@@ -338,6 +583,7 @@ impl DerivedChunkCache {
         state.availability = snapshot.clone();
         state.chunks.clear();
         state.level_identities.clear();
+        self.memory.memory.release(self.memory.owner);
         for chunk in snapshot.chunks {
             let key = DerivedChunkKey {
                 image_id: chunk.image_id,
@@ -349,67 +595,35 @@ impl DerivedChunkCache {
                 DerivedChunkEntry {
                     status: chunk.status,
                     message: chunk.message,
-                    bytes: None,
                 },
             );
         }
     }
 
+    /// The readiness index is not rewritten here: a status changes once per
+    /// generated chunk, and the index holds the whole level. Ready chunks are
+    /// recovered from their files, so the index only has to carry the other
+    /// statuses, and [`Self::persist_readiness_indexes`] writes it at
+    /// shutdown.
     pub fn apply_delta(&self, delta: GeneratedAvailabilityDelta) {
-        let indexes = {
-            let mut state = self.inner.lock().unwrap();
-            state.availability.apply_delta(delta.clone());
-            let mut affected_identities = HashSet::new();
-            for chunk in delta.chunks {
-                let image_id = chunk.image_id;
-                let level_index = chunk.level_index;
-                if let Some(identity) = state
-                    .level_identities
-                    .get(&(image_id.clone(), level_index))
-                    .cloned()
-                {
-                    affected_identities.insert(identity);
-                }
-                let key = DerivedChunkKey {
-                    image_id,
-                    level_index,
-                    key: chunk.key,
-                };
-                state
-                    .chunks
-                    .entry(key)
-                    .and_modify(|entry| {
-                        entry.status = chunk.status;
-                        entry.message = chunk.message.clone();
-                        if chunk.status != GeneratedChunkStatus::Ready {
-                            entry.bytes = None;
-                        }
-                    })
-                    .or_insert(DerivedChunkEntry {
-                        status: chunk.status,
-                        message: chunk.message,
-                        bytes: None,
-                    });
+        let mut state = self.inner.lock().unwrap();
+        state.availability.apply_delta(delta.clone());
+        for chunk in delta.chunks {
+            let key = DerivedChunkKey {
+                image_id: chunk.image_id,
+                level_index: chunk.level_index,
+                key: chunk.key,
+            };
+            if chunk.status != GeneratedChunkStatus::Ready {
+                self.memory.memory.remove(self.memory.owner, &key);
             }
-            affected_identities
-                .into_iter()
-                .map(|identity| {
-                    let chunks = chunks_for_identity_locked(&state, &identity);
-                    (identity, chunks)
-                })
-                .collect::<Vec<_>>()
-        };
-
-        if let Some(disk) = &self.disk {
-            for (identity, chunks) in indexes {
-                if let Err(e) = disk.put_index(&identity, &chunks) {
-                    tracing::warn!(
-                        identity = %identity,
-                        error = %e,
-                        "generated coarse readiness index persist failed"
-                    );
-                }
-            }
+            state.chunks.insert(
+                key,
+                DerivedChunkEntry {
+                    status: chunk.status,
+                    message: chunk.message,
+                },
+            );
         }
     }
 
@@ -447,6 +661,21 @@ impl DerivedChunkCache {
         key: String,
         bytes: Vec<u8>,
     ) {
+        let chunk_key = self.mark_ready(None, image_id, level_index, key);
+        self.memory
+            .memory
+            .put(self.memory.owner, chunk_key, bytes);
+    }
+
+    /// Record a chunk as ready without holding its bytes, and the level
+    /// identity its disk copy lives under when the level has none yet.
+    fn mark_ready(
+        &self,
+        level_identity: Option<&str>,
+        image_id: ImageId,
+        level_index: u32,
+        key: String,
+    ) -> DerivedChunkKey {
         let mut state = self.inner.lock().unwrap();
         state.availability.apply_delta(GeneratedAvailabilityDelta {
             levels: vec![],
@@ -458,20 +687,29 @@ impl DerivedChunkCache {
                 message: None,
             }],
         });
+        if let Some(identity) = level_identity {
+            state
+                .level_identities
+                .entry((image_id.clone(), level_index))
+                .or_insert_with(|| identity.to_string());
+        }
+        let chunk_key = DerivedChunkKey {
+            image_id,
+            level_index,
+            key,
+        };
         state.chunks.insert(
-            DerivedChunkKey {
-                image_id,
-                level_index,
-                key,
-            },
+            chunk_key.clone(),
             DerivedChunkEntry {
                 status: GeneratedChunkStatus::Ready,
                 message: None,
-                bytes: Some(bytes),
             },
         );
+        chunk_key
     }
 
+    /// Keep a generated chunk, and answer the ready chunks the disk cache
+    /// evicted to make room for it, as a withdrawal to publish.
     pub fn put_ready_chunk_atomic(
         &self,
         level_identity: &str,
@@ -479,14 +717,21 @@ impl DerivedChunkCache {
         level_index: u32,
         key: String,
         bytes: Vec<u8>,
-    ) -> io::Result<()> {
-        if let Some(disk) = &self.disk {
-            disk.put(level_identity, &image_id, level_index, &key, &bytes)?;
-        }
-        self.seed_ready_chunk(image_id, level_index, key, bytes);
-        Ok(())
+    ) -> io::Result<GeneratedAvailabilityDelta> {
+        let evicted = match &self.disk {
+            Some(disk) => disk.put(level_identity, level_index, &key, &bytes)?,
+            None => vec![],
+        };
+        let chunk_key = self.mark_ready(Some(level_identity), image_id, level_index, key);
+        self.memory
+            .memory
+            .put(self.memory.owner, chunk_key, bytes);
+        Ok(self.withdraw_evicted(&evicted))
     }
 
+    /// Adopt a chunk an earlier run, or another dataset over the same
+    /// source, left in the disk cache. Its bytes stay on disk until a client
+    /// asks for them.
     pub fn load_ready_chunk(
         &self,
         level_identity: &str,
@@ -497,11 +742,74 @@ impl DerivedChunkCache {
         let Some(disk) = &self.disk else {
             return Ok(false);
         };
-        let Some(bytes) = disk.get(level_identity, &image_id, level_index, &key)? else {
+        if !disk.chunk_exists(level_identity, level_index, &key) {
             return Ok(false);
-        };
-        self.seed_ready_chunk(image_id, level_index, key, bytes);
+        }
+        self.mark_ready(Some(level_identity), image_id, level_index, key);
         Ok(true)
+    }
+
+    pub fn is_ready(&self, image_id: &ImageId, level_index: u32, key: &str) -> bool {
+        self.inner
+            .lock()
+            .unwrap()
+            .chunks
+            .get(&DerivedChunkKey {
+                image_id: image_id.clone(),
+                level_index,
+                key: key.to_string(),
+            })
+            .is_some_and(|entry| entry.status == GeneratedChunkStatus::Ready)
+    }
+
+    /// A ready chunk this cache can no longer serve: its bytes left memory
+    /// and there is no disk copy to read them back from.
+    pub fn needs_regeneration(&self, image_id: &ImageId, level_index: u32, key: &str) -> bool {
+        if self.disk.is_some() {
+            return false;
+        }
+        let chunk_key = DerivedChunkKey {
+            image_id: image_id.clone(),
+            level_index,
+            key: key.to_string(),
+        };
+        self.is_ready(image_id, level_index, key)
+            && !self.memory.memory.contains(self.memory.owner, &chunk_key)
+    }
+
+    /// The ready chunks of every level whose disk directory was evicted, as
+    /// unavailable. Answered from what this cache knows, without touching
+    /// the disk, so a put that evicts nothing costs nothing here.
+    fn withdraw_evicted(&self, evicted_dirs: &[String]) -> GeneratedAvailabilityDelta {
+        if evicted_dirs.is_empty() {
+            return GeneratedAvailabilityDelta::default();
+        }
+        let state = self.inner.lock().unwrap();
+        let levels: HashSet<&(ImageId, u32)> = state
+            .level_identities
+            .iter()
+            .filter(|(_, identity)| evicted_dirs.contains(&sanitize_segment(identity)))
+            .map(|(level, _)| level)
+            .collect();
+        let chunks = state
+            .chunks
+            .iter()
+            .filter(|(key, entry)| {
+                entry.status == GeneratedChunkStatus::Ready
+                    && levels.contains(&(key.image_id.clone(), key.level_index))
+            })
+            .map(|(key, _)| GeneratedChunkStatusUpdate {
+                image_id: key.image_id.clone(),
+                level_index: key.level_index,
+                key: key.key.clone(),
+                status: GeneratedChunkStatus::Unavailable,
+                message: Some("generated chunk was evicted from derived cache".into()),
+            })
+            .collect();
+        GeneratedAvailabilityDelta {
+            levels: vec![],
+            chunks,
+        }
     }
 
     pub fn register_generated_plan(
@@ -562,36 +870,12 @@ impl DerivedChunkCache {
         }
     }
 
-    pub fn missing_ready_delta(&self) -> GeneratedAvailabilityDelta {
-        let Some(disk) = &self.disk else {
-            return GeneratedAvailabilityDelta::default();
-        };
-        let state = self.inner.lock().unwrap();
-        let chunks = state
-            .chunks
-            .iter()
-            .filter_map(|(key, entry)| {
-                if entry.status != GeneratedChunkStatus::Ready {
-                    return None;
-                }
-                let identity = state
-                    .level_identities
-                    .get(&(key.image_id.clone(), key.level_index))?;
-                if disk.chunk_exists(identity, &key.image_id, key.level_index, &key.key) {
-                    return None;
-                }
-                Some(GeneratedChunkStatusUpdate {
-                    image_id: key.image_id.clone(),
-                    level_index: key.level_index,
-                    key: key.key.clone(),
-                    status: GeneratedChunkStatus::Unavailable,
-                    message: Some("generated chunk was evicted from derived cache".into()),
-                })
-            })
-            .collect();
-        GeneratedAvailabilityDelta {
-            levels: vec![],
-            chunks,
+    /// How many times the lasting copy, the disk cache or without one the
+    /// memory budget, has evicted this cache's chunks.
+    pub fn evictions(&self) -> u64 {
+        match &self.disk {
+            Some(disk) => disk.eviction_counter.load(Ordering::Relaxed),
+            None => self.memory.memory.usage(self.memory.owner).1,
         }
     }
 
@@ -599,19 +883,13 @@ impl DerivedChunkCache {
         if let Some(disk) = &self.disk {
             return disk.telemetry().unwrap_or_default();
         }
-        let state = self.inner.lock().unwrap();
-        let bytes = state
-            .chunks
-            .values()
-            .filter_map(|entry| entry.bytes.as_ref())
-            .map(|bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
-            .fold(0_u64, u64::saturating_add);
+        let (bytes, evictions) = self.memory.memory.usage(self.memory.owner);
         DerivedCacheTelemetry {
             storage: DerivedCacheStorage::Memory,
             bytes,
-            budget_bytes: None,
+            budget_bytes: Some(self.memory.memory.max_bytes()),
             root_dir: None,
-            evictions: 0,
+            evictions,
         }
     }
 
@@ -626,17 +904,26 @@ impl DerivedChunkCache {
     }
 
     pub fn lookup(&self, image_id: &ImageId, level_index: u32, key: &str) -> DerivedChunkLookup {
+        let chunk_key = DerivedChunkKey {
+            image_id: image_id.clone(),
+            level_index,
+            key: key.to_string(),
+        };
         let disk_load = {
             let state = self.inner.lock().unwrap();
-            let chunk_key = DerivedChunkKey {
-                image_id: image_id.clone(),
-                level_index,
-                key: key.to_string(),
-            };
             if let Some(entry) = state.chunks.get(&chunk_key) {
                 if entry.status == GeneratedChunkStatus::Ready {
-                    if let Some(bytes) = &entry.bytes {
-                        return DerivedChunkLookup::Ready(bytes.clone());
+                    if let Some(bytes) = self.memory.memory.get(self.memory.owner, &chunk_key) {
+                        return DerivedChunkLookup::Ready(bytes);
+                    }
+                    if self.disk.is_none() {
+                        // Evicted with nowhere to read it back from. The
+                        // request that brought us here queued it to be
+                        // generated again, and a ready update follows.
+                        return DerivedChunkLookup::Status {
+                            status: GeneratedChunkStatus::Pending,
+                            message: Some("generated chunk is being generated again".into()),
+                        };
                     }
                     state
                         .level_identities
@@ -662,14 +949,11 @@ impl DerivedChunkCache {
         };
 
         if let (Some(identity), Some(disk)) = (disk_load, &self.disk) {
-            match disk.get(&identity, image_id, level_index, key) {
+            match disk.get(&identity, level_index, key) {
                 Ok(Some(bytes)) => {
-                    self.seed_ready_chunk(
-                        image_id.clone(),
-                        level_index,
-                        key.to_string(),
-                        bytes.clone(),
-                    );
+                    self.memory
+                        .memory
+                        .put(self.memory.owner, chunk_key, bytes.clone());
                     return DerivedChunkLookup::Ready(bytes);
                 }
                 Ok(None) => {}
@@ -706,16 +990,16 @@ impl DerivedDiskCache {
         self.identity_dir(level_identity).join("readiness.json")
     }
 
-    fn chunk_path(
-        &self,
-        level_identity: &str,
-        image_id: &ImageId,
-        level_index: u32,
-        key: &str,
-    ) -> PathBuf {
+    /// No image id in the path: an identity names one image already, and the
+    /// image id carries the dataset id, which differs between datasets that
+    /// share this directory's source.
+    fn level_dir(&self, level_identity: &str, level_index: u32) -> PathBuf {
         self.identity_dir(level_identity)
-            .join(sanitize_segment(&image_id.0))
             .join(format!("L{level_index}"))
+    }
+
+    fn chunk_path(&self, level_identity: &str, level_index: u32, key: &str) -> PathBuf {
+        self.level_dir(level_identity, level_index)
             .join(format!("{}.bin", sanitize_segment(key)))
     }
 
@@ -759,39 +1043,33 @@ impl DerivedDiskCache {
         plan: &GeneratedCoarsePlan,
     ) -> io::Result<Vec<GeneratedChunkStatusUpdate>> {
         let expected_bytes = expected_generated_chunk_bytes(plan);
-        let mut recovered = Vec::new();
-        let mut seen = HashSet::new();
-
-        if let Some(index) = self.read_index(&plan.cache_identity)? {
-            for chunk in index.chunks {
-                let valid = chunk.status != GeneratedChunkStatus::Ready
-                    || self
-                        .chunk_file_valid(
-                            &plan.cache_identity,
-                            &chunk.image_id,
-                            chunk.level_index,
-                            &chunk.key,
-                            expected_bytes,
-                        )
-                        .unwrap_or(false);
-                if valid {
-                    seen.insert(chunk.key.clone());
-                    recovered.push(chunk);
-                }
-            }
-        }
-
-        for key in self.scan_ready_chunk_keys(plan, expected_bytes)? {
-            if seen.insert(key.clone()) {
-                recovered.push(GeneratedChunkStatusUpdate {
-                    image_id: plan.image_id.clone(),
-                    level_index: plan.level_index,
-                    key,
-                    status: GeneratedChunkStatus::Ready,
-                    message: None,
-                });
-            }
-        }
+        // A whole chunk file is what makes a chunk ready, whatever an index
+        // written before it says.
+        let ready = self.scan_ready_chunk_keys(plan, expected_bytes)?;
+        let ready_keys: HashSet<&String> = ready.iter().collect();
+        let mut recovered: Vec<_> = self
+            .read_index(&plan.cache_identity)?
+            .map(|index| index.chunks)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|chunk| {
+                chunk.status != GeneratedChunkStatus::Ready && !ready_keys.contains(&chunk.key)
+            })
+            // Another dataset over this source may have written the index,
+            // with its own dataset id in the image id.
+            .map(|chunk| GeneratedChunkStatusUpdate {
+                image_id: plan.image_id.clone(),
+                level_index: plan.level_index,
+                ..chunk
+            })
+            .collect();
+        recovered.extend(ready.iter().map(|key| GeneratedChunkStatusUpdate {
+            image_id: plan.image_id.clone(),
+            level_index: plan.level_index,
+            key: key.clone(),
+            status: GeneratedChunkStatus::Ready,
+            message: None,
+        }));
         Ok(recovered)
     }
 
@@ -812,10 +1090,7 @@ impl DerivedDiskCache {
         plan: &GeneratedCoarsePlan,
         expected_bytes: u64,
     ) -> io::Result<Vec<String>> {
-        let dir = self
-            .identity_dir(&plan.cache_identity)
-            .join(sanitize_segment(&plan.image_id.0))
-            .join(format!("L{}", plan.level_index));
+        let dir = self.level_dir(&plan.cache_identity, plan.level_index);
         let entries = match fs::read_dir(&dir) {
             Ok(entries) => entries,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(vec![]),
@@ -845,42 +1120,17 @@ impl DerivedDiskCache {
         Ok(keys)
     }
 
-    fn chunk_file_valid(
-        &self,
-        level_identity: &str,
-        image_id: &ImageId,
-        level_index: u32,
-        key: &str,
-        expected_bytes: u64,
-    ) -> io::Result<bool> {
-        let metadata =
-            match fs::metadata(self.chunk_path(level_identity, image_id, level_index, key)) {
-                Ok(metadata) => metadata,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
-                Err(e) => return Err(e),
-            };
-        Ok(metadata.len() == expected_bytes)
-    }
-
-    fn chunk_exists(
-        &self,
-        level_identity: &str,
-        image_id: &ImageId,
-        level_index: u32,
-        key: &str,
-    ) -> bool {
-        self.chunk_path(level_identity, image_id, level_index, key)
-            .exists()
+    fn chunk_exists(&self, level_identity: &str, level_index: u32, key: &str) -> bool {
+        self.chunk_path(level_identity, level_index, key).exists()
     }
 
     fn get(
         &self,
         level_identity: &str,
-        image_id: &ImageId,
         level_index: u32,
         key: &str,
     ) -> io::Result<Option<Vec<u8>>> {
-        let path = self.chunk_path(level_identity, image_id, level_index, key);
+        let path = self.chunk_path(level_identity, level_index, key);
         let mut file = match File::open(&path) {
             Ok(file) => file,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -891,16 +1141,18 @@ impl DerivedDiskCache {
         Ok(Some(bytes))
     }
 
+    /// Write one chunk, then hold the directory to its budget. Answers the
+    /// directory names of the levels evicted for room.
     fn put(
         &self,
         level_identity: &str,
-        image_id: &ImageId,
         level_index: u32,
         key: &str,
         bytes: &[u8],
-    ) -> io::Result<()> {
-        let path = self.chunk_path(level_identity, image_id, level_index, key);
-        self.put_bytes_atomic(&path, bytes)
+    ) -> io::Result<Vec<String>> {
+        let path = self.chunk_path(level_identity, level_index, key);
+        self.put_bytes_atomic(&path, bytes)?;
+        self.enforce_budget(bytes.len() as u64)
     }
 
     fn put_bytes_atomic(&self, path: &PathBuf, bytes: &[u8]) -> io::Result<()> {
@@ -947,20 +1199,35 @@ impl DerivedDiskCache {
         if let Ok(dir) = File::open(parent) {
             let _ = dir.sync_all();
         }
-        self.enforce_budget()?;
         Ok(())
     }
 
-    fn enforce_budget(&self) -> io::Result<()> {
+    /// Evict whole levels, oldest first, until the directory fits its budget.
+    ///
+    /// Walking the directory costs a stat per file, so it is walked only when
+    /// the bytes known from the last walk plus those written since pass the
+    /// budget. Another cache writing the same directory makes the known total
+    /// an undercount, which the next walk corrects.
+    fn enforce_budget(&self, written: u64) -> io::Result<Vec<String>> {
         let Some(budget) = self.disk_budget_bytes else {
-            return Ok(());
+            return Ok(vec![]);
         };
+        let mut known = self.known_bytes.lock().unwrap();
+        if let Some(bytes) = known.as_mut() {
+            *bytes = bytes.saturating_add(written);
+            if *bytes <= budget {
+                return Ok(vec![]);
+            }
+        }
         let dataset_dir = self.dataset_dir();
         let mut identities = Vec::new();
         let mut total = 0_u64;
         let entries = match fs::read_dir(&dataset_dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                *known = Some(0);
+                return Ok(vec![]);
+            }
             Err(e) => return Err(e),
         };
         for entry in entries.flatten() {
@@ -973,6 +1240,7 @@ impl DerivedDiskCache {
             identities.push((path, bytes, modified));
         }
         identities.sort_by_key(|(_, _, modified)| *modified);
+        let mut evicted = Vec::new();
         for (path, bytes, _) in identities {
             if total <= budget {
                 break;
@@ -980,8 +1248,12 @@ impl DerivedDiskCache {
             fs::remove_dir_all(&path)?;
             self.eviction_counter.fetch_add(1, Ordering::Relaxed);
             total = total.saturating_sub(bytes);
+            if let Some(name) = path.file_name() {
+                evicted.push(name.to_string_lossy().into_owned());
+            }
         }
-        Ok(())
+        *known = Some(total);
+        Ok(evicted)
     }
 
     fn telemetry(&self) -> io::Result<DerivedCacheTelemetry> {
@@ -1066,11 +1338,12 @@ fn plan_generated_coarse_for_image(
         scale,
     };
     let config_id = config.config_id();
+    let image_key = source_relative_image_id(&manifest.dataset_id, &image.image_id);
     let generated_level_id =
-        generated_level_identity(&source_content_id, &image.image_id, &level, &config_id);
+        generated_level_identity(&source_content_id, image_key, &level, &config_id);
     let cache_identity = generated_cache_identity(
         &source_content_id,
-        &image.image_id,
+        image_key,
         &generated_level_id,
         &level,
         image.multiscale.data_type,
@@ -1167,13 +1440,16 @@ impl GeneratedCoarseService {
         tx: broadcast::Sender<BroadcastItem>,
         config: GeneratedSchedulingConfig,
     ) -> Self {
-        let plan_map = plans
+        let plan_map: HashMap<_, _> = plans
             .into_iter()
             .map(|plan| ((plan.image_id.clone(), plan.level_index), plan))
             .collect();
+        let mut plan_order: Vec<_> = plan_map.keys().cloned().collect();
+        plan_order.sort_by(|a, b| (&a.0.0, a.1).cmp(&(&b.0.0, b.1)));
         Self {
             inner: Arc::new(GeneratedCoarseServiceInner {
                 plans: plan_map,
+                plan_order,
                 manifest,
                 store,
                 resolver,
@@ -1243,6 +1519,7 @@ impl GeneratedCoarseService {
                 state.requested.clear();
                 state.queued.clear();
                 state.queued_keys.clear();
+                state.background = None;
                 canceled_queued
             }
         };
@@ -1286,6 +1563,9 @@ impl GeneratedCoarseService {
         let mut state = self.inner.state.lock().await;
         if state.shutdown_reason.is_some() {
             return;
+        }
+        if self.inner.cache.needs_regeneration(image_id, level_index, key) {
+            state.completed_keys.remove(&work_key);
         }
         // Finished work has nothing left to wait on, so recording the request
         // would leave it outstanding until the client disconnects.
@@ -1349,44 +1629,66 @@ impl GeneratedCoarseService {
         telemetry_locked(&state, cache_telemetry)
     }
 
+    /// Start generating every chunk of every plan in the background.
+    ///
+    /// At most `background_chunk_limit` of them wait in the queue at once,
+    /// topped up as work finishes, so the queue stays short however large
+    /// the level is.
     pub async fn enqueue_background_fill(&self) {
         if self.inner.config.background_chunk_limit == 0 {
             return;
         }
-        let mut admitted = 0usize;
-        for plan in self.inner.plans.values() {
-            'tc: for t in 0..plan.availability.level.shape[0] {
-                for c in 0..plan.availability.level.shape[1] {
-                    let (Ok(t), Ok(c)) = (u32::try_from(t), u32::try_from(c)) else {
-                        continue;
-                    };
-                    for key in plan.chunk_keys_for_tc(t, c) {
-                        let work_key = GeneratedWorkKey {
-                            dataset_id: plan.dataset_id.clone(),
-                            image_id: plan.image_id.clone(),
-                            level_index: plan.level_index,
-                            key,
-                        };
-                        self.enqueue_work(work_key, GeneratedSchedulingLane::Background)
-                            .await;
-                        admitted += 1;
-                        if admitted >= self.inner.config.background_chunk_limit {
-                            break 'tc;
-                        }
-                    }
-                }
-            }
+        let mut state = self.inner.state.lock().await;
+        if state.shutdown_reason.is_some() || state.background.is_some() {
+            return;
+        }
+        state.background = Some(BackgroundCursor::new(self.inner.cache.evictions()));
+        let queued = self.top_up_background_locked(&mut state);
+        drop(state);
+        if queued {
+            self.inner.notify.notify_waiters();
         }
     }
 
-    async fn enqueue_work(&self, work_key: GeneratedWorkKey, lane: GeneratedSchedulingLane) {
-        let mut state = self.inner.state.lock().await;
-        if state.shutdown_reason.is_some() {
-            return;
+    /// Queue background work until `background_chunk_limit` items wait.
+    /// Answers whether anything was queued.
+    fn top_up_background_locked(&self, state: &mut GeneratedSchedulerState) -> bool {
+        let Some(mut cursor) = state.background.take() else {
+            return false;
+        };
+        let cache = &self.inner.cache;
+        if cache.evictions() > cursor.evictions_at_start {
+            tracing::info!(
+                evictions = cache.evictions() - cursor.evictions_at_start,
+                "generated_coarse.background_fill_stopped_at_budget"
+            );
+            return false;
         }
-        enqueue_work_locked(&mut state, work_key, lane);
-        drop(state);
-        self.inner.notify.notify_waiters();
+        let limit = self.inner.config.background_chunk_limit;
+        let mut waiting = state
+            .queued
+            .iter()
+            .filter(|item| item.lane == GeneratedSchedulingLane::Background)
+            .count();
+        let mut queued = false;
+        while waiting < limit {
+            let Some(work_key) = cursor.next(&self.inner.plans, &self.inner.plan_order) else {
+                tracing::debug!("generated_coarse.background_fill_walked");
+                return queued;
+            };
+            if state.completed_keys.contains(&work_key)
+                || state.running.contains(&work_key)
+                || state.queued_keys.contains_key(&work_key)
+                || cache.is_ready(&work_key.image_id, work_key.level_index, &work_key.key)
+            {
+                continue;
+            }
+            enqueue_work_locked(state, work_key, GeneratedSchedulingLane::Background);
+            waiting += 1;
+            queued = true;
+        }
+        state.background = Some(cursor);
+        queued
     }
 
     async fn worker_loop(self) {
@@ -1432,6 +1734,10 @@ impl GeneratedCoarseService {
                 MaterializeOneResult::Canceled => {
                     state.canceled += 1;
                 }
+            }
+            if self.top_up_background_locked(&mut state) {
+                drop(state);
+                self.inner.notify.notify_waiters();
             }
         }
     }
@@ -1874,12 +2180,16 @@ where
         coords.y,
         coords.x,
     );
+    // Clients already hold a ready status for a chunk recovered when the
+    // level was registered, so adopting its file announces nothing new.
+    let announced = cache.is_ready(&plan.image_id, plan.level_index, &key);
     match cache.load_ready_chunk(
         &plan.cache_identity,
         plan.image_id.clone(),
         plan.level_index,
         key.clone(),
     ) {
+        Ok(true) if announced => return MaterializeOneResult::CacheReused,
         Ok(true) => {
             publish_chunk_status(
                 &plan.dataset_id,
@@ -1964,7 +2274,7 @@ where
         key.clone(),
         bytes,
     ) {
-        Ok(()) => {
+        Ok(withdrawal_delta) => {
             publish_chunk_status(
                 &plan.dataset_id,
                 &plan.image_id,
@@ -1977,7 +2287,6 @@ where
                 tx.clone(),
             )
             .await;
-            let withdrawal_delta = cache.missing_ready_delta();
             if !withdrawal_delta.chunks.is_empty() {
                 publish_generated_delta(
                     plan.dataset_id.clone(),
@@ -2438,10 +2747,24 @@ fn dir_size_and_modified(path: &PathBuf) -> io::Result<(u64, std::time::SystemTi
     Ok((total, oldest))
 }
 
+/// An image's id with its dataset's id taken off the front.
+///
+/// Every workspace that opens a source gets a dataset id of its own, and
+/// image ids start with it. The generated identities are built from what is
+/// left, so every dataset over one source finds the same generated level on
+/// disk. The disk cache is already a directory per source, which keeps two
+/// sources apart.
+fn source_relative_image_id<'a>(dataset_id: &DatasetId, image_id: &'a ImageId) -> &'a str {
+    image_id
+        .0
+        .strip_prefix(dataset_id.0.as_str())
+        .unwrap_or(&image_id.0)
+}
+
 fn source_content_id_for_image(manifest: &DatasetManifest, image: &ImageSpec) -> String {
     let value = serde_json::json!({
-        "dataset_id": &manifest.dataset_id.0,
-        "image": image,
+        "image": source_relative_image_id(&manifest.dataset_id, &image.image_id),
+        "multiscale": &image.multiscale,
         "generator": GENERATED_COARSE_GENERATOR_VERSION,
     });
     hex32(blake3::hash(value.to_string().as_bytes()).as_bytes())
@@ -2449,13 +2772,13 @@ fn source_content_id_for_image(manifest: &DatasetManifest, image: &ImageSpec) ->
 
 fn generated_level_identity(
     source_content_id: &str,
-    image_id: &ImageId,
+    image_key: &str,
     level: &LevelGeometry,
     config_id: &str,
 ) -> String {
     let value = serde_json::json!({
         "source_content_id": source_content_id,
-        "image_id": &image_id.0,
+        "image_id": image_key,
         "level": level,
         "config_id": config_id,
         "generator": GENERATED_COARSE_GENERATOR_VERSION,
@@ -2468,7 +2791,7 @@ fn generated_level_identity(
 
 fn generated_cache_identity(
     source_content_id: &str,
-    image_id: &ImageId,
+    image_key: &str,
     generated_level_id: &str,
     level: &LevelGeometry,
     data_type: DataType,
@@ -2477,7 +2800,7 @@ fn generated_cache_identity(
 ) -> String {
     let value = serde_json::json!({
         "source_content_id": source_content_id,
-        "image_id": &image_id.0,
+        "image_id": image_key,
         "input_scope": input_level_candidates,
         "output_geometry": level,
         "output_dtype": data_type,
@@ -3021,6 +3344,17 @@ mod tests {
         plan: GeneratedCoarsePlan,
         config: GeneratedSchedulingConfig,
     ) -> GeneratedCoarseService {
+        let cache = Arc::new(DerivedChunkCache::default());
+        cache.upsert_level(plan.availability.clone());
+        service_with_cache(manifest, plan, config, cache)
+    }
+
+    fn service_with_cache(
+        manifest: DatasetManifest,
+        plan: GeneratedCoarsePlan,
+        config: GeneratedSchedulingConfig,
+        cache: Arc<DerivedChunkCache>,
+    ) -> GeneratedCoarseService {
         let store =
             Arc::new(object_store::memory::InMemory::new()) as Arc<dyn object_store::ObjectStore>;
         let cached = Arc::new(CachedStore::new(store, 1024 * 1024));
@@ -3029,8 +3363,6 @@ mod tests {
             &image.multiscale.levels,
             image.multiscale.data_type,
         )));
-        let cache = Arc::new(DerivedChunkCache::default());
-        cache.upsert_level(plan.availability.clone());
         let (tx, _rx) = broadcast::channel(16);
         GeneratedCoarseService::new(
             vec![plan],
@@ -3282,12 +3614,7 @@ mod tests {
             DerivedChunkLookup::Status { status, .. } => panic!("expected ready, got {status:?}"),
         }
 
-        let chunk_dir = dir
-            .path()
-            .join(hex16(&[7; 16]))
-            .join("identity")
-            .join("img-1")
-            .join("L1");
+        let chunk_dir = dir.path().join(hex16(&[7; 16])).join("identity").join("L1");
         let leftovers: Vec<_> = fs::read_dir(chunk_dir)
             .unwrap()
             .filter_map(Result::ok)
@@ -3382,7 +3709,6 @@ mod tests {
         cache.register_generated_plan(&plan).unwrap();
         let path = cache.disk.as_ref().unwrap().chunk_path(
             &plan.cache_identity,
-            &plan.image_id,
             plan.level_index,
             "1/0/0/0/0/0",
         );
@@ -3405,7 +3731,7 @@ mod tests {
         let cache =
             DerivedChunkCache::new_on_disk_with_budget(dir.path().to_path_buf(), [12; 16], Some(1));
         cache.register_generated_plan(&plan).unwrap();
-        cache
+        let delta = cache
             .put_ready_chunk_atomic(
                 &plan.cache_identity,
                 plan.image_id.clone(),
@@ -3419,9 +3745,8 @@ mod tests {
         assert!(telemetry.evictions > 0);
         assert!(telemetry.bytes <= 1);
 
-        let delta = cache.missing_ready_delta();
-
         assert_eq!(delta.chunks.len(), 1);
+        assert_eq!(delta.chunks[0].key, "1/0/0/0/0/0");
         assert_eq!(delta.chunks[0].status, GeneratedChunkStatus::Unavailable);
         assert_eq!(
             delta.chunks[0].message.as_deref(),
@@ -3575,6 +3900,454 @@ mod tests {
             DerivedChunkLookup::Status { status, message } => {
                 panic!("expected generated bytes, got {status:?}: {message:?}");
             }
+        }
+    }
+
+    fn chunk(n: u64) -> String {
+        chunk_key(1, 0, 0, 0, 0, n)
+    }
+
+    #[test]
+    fn generated_bytes_share_one_budget_and_evict_the_coldest() {
+        let memory = GeneratedChunkMemory::new(10);
+        let first = DerivedChunkCache::default().with_memory(memory.clone());
+        let second = DerivedChunkCache::default().with_memory(memory.clone());
+        let image = ImageId("img-1".into());
+        for cache in [&first, &second] {
+            cache.upsert_level(generated_level());
+        }
+
+        first.seed_ready_chunk(image.clone(), 1, chunk(0), vec![1; 4]);
+        first.seed_ready_chunk(image.clone(), 1, chunk(1), vec![2; 4]);
+        // Touch chunk 0 so chunk 1 is the coldest across both caches.
+        assert!(matches!(
+            first.lookup(&image, 1, &chunk(0)),
+            DerivedChunkLookup::Ready(_)
+        ));
+        second.seed_ready_chunk(image.clone(), 1, chunk(0), vec![3; 4]);
+
+        assert!(memory.current_bytes() <= 10);
+        assert!(matches!(
+            first.lookup(&image, 1, &chunk(0)),
+            DerivedChunkLookup::Ready(_)
+        ));
+        assert!(matches!(
+            second.lookup(&image, 1, &chunk(0)),
+            DerivedChunkLookup::Ready(bytes) if bytes == vec![3; 4]
+        ));
+        assert_eq!(first.telemetry().evictions, 1);
+        assert_eq!(first.telemetry().budget_bytes, Some(10));
+
+        // Without a disk copy, an evicted chunk is generated again, and says
+        // so instead of claiming to be ready with nothing to send.
+        assert!(first.needs_regeneration(&image, 1, &chunk(1)));
+        match first.lookup(&image, 1, &chunk(1)) {
+            DerivedChunkLookup::Status { status, .. } => {
+                assert_eq!(status, GeneratedChunkStatus::Pending)
+            }
+            DerivedChunkLookup::Ready(_) => panic!("evicted bytes were served"),
+        }
+
+        drop(first);
+        assert_eq!(memory.current_bytes(), 4, "a dropped cache frees its bytes");
+    }
+
+    #[test]
+    fn an_evicted_generated_chunk_is_read_back_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let memory = GeneratedChunkMemory::new(4);
+        let cache =
+            DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [3; 16]).with_memory(memory.clone());
+        let image = ImageId("img-1".into());
+        cache
+            .put_ready_chunk_atomic("identity", image.clone(), 1, chunk(0), vec![1, 2, 3, 4])
+            .unwrap();
+        cache
+            .put_ready_chunk_atomic("identity", image.clone(), 1, chunk(1), vec![5, 6, 7, 8])
+            .unwrap();
+        assert_eq!(memory.current_bytes(), 4);
+
+        assert!(!cache.needs_regeneration(&image, 1, &chunk(0)));
+        match cache.lookup(&image, 1, &chunk(0)) {
+            DerivedChunkLookup::Ready(bytes) => assert_eq!(bytes, vec![1, 2, 3, 4]),
+            DerivedChunkLookup::Status { status, message } => {
+                panic!("expected the disk copy, got {status:?}: {message:?}")
+            }
+        }
+        assert_eq!(memory.current_bytes(), 4, "reading back stays in budget");
+    }
+
+    #[tokio::test]
+    async fn a_request_for_an_evicted_chunk_with_no_disk_copy_queues_it_again() {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256])],
+            None,
+            DataType::Uint16,
+        );
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 512,
+                chunk_long_axis: 256,
+                max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+            },
+        )
+        .pop()
+        .expect("plan");
+        let cache = Arc::new(DerivedChunkCache::default().with_memory(GeneratedChunkMemory::new(4)));
+        cache.upsert_level(plan.availability.clone());
+        let service = service_with_cache(
+            manifest,
+            plan.clone(),
+            GeneratedSchedulingConfig::default(),
+            cache.clone(),
+        );
+        let key = chunk_key(plan.level_index, 0, 0, 0, 0, 0);
+        let work_key = GeneratedWorkKey {
+            dataset_id: plan.dataset_id.clone(),
+            image_id: plan.image_id.clone(),
+            level_index: plan.level_index,
+            key: key.clone(),
+        };
+        service
+            .inner
+            .state
+            .lock()
+            .await
+            .completed_keys
+            .insert(work_key);
+        cache.seed_ready_chunk(plan.image_id.clone(), plan.level_index, key.clone(), vec![1; 4]);
+        cache.seed_ready_chunk(
+            plan.image_id.clone(),
+            plan.level_index,
+            chunk_key(plan.level_index, 0, 0, 0, 0, 1),
+            vec![2; 4],
+        );
+
+        service
+            .enqueue_chunk_request(1, &plan.image_id, plan.level_index, &key)
+            .await;
+
+        assert_eq!(service.telemetry().await.queued_requested, 1);
+    }
+
+    /// Two datasets over one source: the second workspace to open a source
+    /// gets a dataset id of its own, and its image ids carry it.
+    fn manifest_as_dataset(dataset: &str) -> DatasetManifest {
+        let manifest = source_manifest();
+        let mut image = manifest.images()[0].clone();
+        image.image_id = ImageId(format!("{dataset}:image:0"));
+        DatasetManifest::new(
+            DatasetId(dataset.into()),
+            manifest.name.clone(),
+            manifest.kind.clone(),
+            manifest.entities().to_vec(),
+            vec![],
+            vec![image],
+            vec![],
+            None,
+        )
+    }
+
+    #[test]
+    fn a_second_dataset_over_one_source_reuses_the_generated_level_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let first_plan =
+            plan_generated_coarse_for_manifest(&manifest_as_dataset("ds-first"), GeneratedCoarseConfig::default())
+                .pop()
+                .unwrap();
+        let second_plan =
+            plan_generated_coarse_for_manifest(&manifest_as_dataset("ds-second"), GeneratedCoarseConfig::default())
+                .pop()
+                .unwrap();
+        assert_ne!(first_plan.image_id, second_plan.image_id);
+        assert_eq!(first_plan.cache_identity, second_plan.cache_identity);
+
+        let first = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [13; 16]);
+        first.register_generated_plan(&first_plan).unwrap();
+        let bytes = vec![9_u8; expected_generated_chunk_bytes(&first_plan) as usize];
+        let key = chunk_key(first_plan.level_index, 0, 0, 0, 0, 0);
+        first
+            .put_ready_chunk_atomic(
+                &first_plan.cache_identity,
+                first_plan.image_id.clone(),
+                first_plan.level_index,
+                key.clone(),
+                bytes.clone(),
+            )
+            .unwrap();
+        // A failure recorded by the first dataset, carried in its index.
+        first.set_chunk_status(
+            first_plan.image_id.clone(),
+            first_plan.level_index,
+            chunk_key(first_plan.level_index, 0, 0, 0, 0, 1),
+            GeneratedChunkStatus::FailedPermanent,
+            None,
+        );
+        first.persist_readiness_indexes();
+
+        let second = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [13; 16]);
+        let delta = second.register_generated_plan(&second_plan).unwrap();
+
+        assert_eq!(delta.chunks.len(), 2);
+        assert!(
+            delta
+                .chunks
+                .iter()
+                .all(|chunk| chunk.image_id == second_plan.image_id)
+        );
+        match second.lookup(&second_plan.image_id, second_plan.level_index, &key) {
+            DerivedChunkLookup::Ready(recovered) => assert_eq!(recovered, bytes),
+            DerivedChunkLookup::Status { status, message } => {
+                panic!("expected the first dataset's chunk, got {status:?}: {message:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn a_chunk_file_outranks_a_stale_status_in_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = plan_generated_coarse_for_manifest(&source_manifest(), GeneratedCoarseConfig::default())
+            .pop()
+            .unwrap();
+        let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [14; 16]);
+        cache.register_generated_plan(&plan).unwrap();
+        let key = chunk_key(plan.level_index, 0, 0, 0, 0, 0);
+        cache.set_chunk_status(
+            plan.image_id.clone(),
+            plan.level_index,
+            key.clone(),
+            GeneratedChunkStatus::FailedTransient,
+            None,
+        );
+        cache.persist_readiness_indexes();
+        cache
+            .put_ready_chunk_atomic(
+                &plan.cache_identity,
+                plan.image_id.clone(),
+                plan.level_index,
+                key.clone(),
+                vec![0; expected_generated_chunk_bytes(&plan) as usize],
+            )
+            .unwrap();
+
+        let reopened = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [14; 16]);
+        let delta = reopened.register_generated_plan(&plan).unwrap();
+
+        assert_eq!(delta.chunks.len(), 1);
+        assert_eq!(delta.chunks[0].status, GeneratedChunkStatus::Ready);
+    }
+
+    #[test]
+    fn storing_a_chunk_reads_nothing_about_the_chunks_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let plan = plan_generated_coarse_for_manifest(&source_manifest(), GeneratedCoarseConfig::default())
+            .pop()
+            .unwrap();
+        let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [15; 16]);
+        cache.register_generated_plan(&plan).unwrap();
+        let put = |n: u64| {
+            cache
+                .put_ready_chunk_atomic(
+                    &plan.cache_identity,
+                    plan.image_id.clone(),
+                    plan.level_index,
+                    chunk_key(plan.level_index, 0, 0, 0, 0, n),
+                    vec![0; 8],
+                )
+                .unwrap()
+        };
+        put(0);
+        // Gone behind the cache's back. A put that checked every ready chunk
+        // on disk would find this one missing and withdraw it, which made
+        // each chunk slower than the last as a level filled.
+        let disk = cache.disk.as_ref().unwrap();
+        fs::remove_file(disk.chunk_path(
+            &plan.cache_identity,
+            plan.level_index,
+            &chunk_key(plan.level_index, 0, 0, 0, 0, 0),
+        ))
+        .unwrap();
+
+        assert!(put(1).chunks.is_empty());
+        // A status change does not rewrite the level's index either.
+        assert!(!disk.index_path(&plan.cache_identity).exists());
+        cache.persist_readiness_indexes();
+        assert!(disk.index_path(&plan.cache_identity).exists());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_fill_generates_every_chunk_a_few_at_a_time() {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 1, 256, 256], [1, 1, 1, 64, 64])],
+            None,
+            DataType::Uint16,
+        );
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 256,
+                chunk_long_axis: 64,
+                max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+            },
+        )
+        .pop()
+        .expect("plan");
+        assert_eq!(plan.availability.level.grid_shape, [1, 1, 1, 4, 4]);
+        let service = service_for_plan(
+            manifest,
+            plan.clone(),
+            GeneratedSchedulingConfig {
+                background_chunk_limit: 3,
+                ..GeneratedSchedulingConfig::default()
+            },
+        );
+
+        service.enqueue_background_fill().await;
+        assert_eq!(service.telemetry().await.queued_background, 3);
+        service.start();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while service.telemetry().await.completed < 16 {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the whole level is generated");
+
+        for key in plan.chunk_keys_for_all_tc() {
+            assert!(service.inner.cache.is_ready(&plan.image_id, plan.level_index, &key));
+        }
+        let telemetry = service.telemetry().await;
+        assert_eq!(telemetry.queued_background, 0);
+        assert_eq!(telemetry.completed, 16);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_fill_stops_once_the_cache_has_to_evict() {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 1, 256, 256], [1, 1, 1, 64, 64])],
+            None,
+            DataType::Uint16,
+        );
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 256,
+                chunk_long_axis: 64,
+                max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+            },
+        )
+        .pop()
+        .expect("plan");
+        // Room for two chunks of the sixteen.
+        let chunk_bytes = expected_generated_chunk_bytes(&plan);
+        let cache =
+            Arc::new(DerivedChunkCache::default().with_memory(GeneratedChunkMemory::new(2 * chunk_bytes)));
+        cache.upsert_level(plan.availability.clone());
+        let service = service_with_cache(
+            manifest,
+            plan.clone(),
+            GeneratedSchedulingConfig {
+                background_chunk_limit: 1,
+                ..GeneratedSchedulingConfig::default()
+            },
+            cache.clone(),
+        );
+
+        service.enqueue_background_fill().await;
+        service.start();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let telemetry = service.telemetry().await;
+                if telemetry.queued_background == 0 && telemetry.running == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the fill stops");
+
+        let completed = service.telemetry().await.completed;
+        assert!(completed < 16, "the fill kept churning the budget");
+        assert!(cache.evictions() > 0);
+    }
+
+    /// A level of 35 by 35 chunks generated one at a time onto a real disk
+    /// cache, with each chunk's ready status published as the service does.
+    async fn generate_level_timed(root: &std::path::Path) -> Vec<std::time::Duration> {
+        use object_store::PutPayload;
+        use object_store::memory::InMemory;
+        use tokio::sync::broadcast;
+
+        let side = 35 * 64;
+        let source_level = level(0, [1, 1, 1, side, side], [1, 1, 1, 64, 64]);
+        let manifest =
+            source_manifest_with_levels(vec![source_level.clone()], None, DataType::Uint16);
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: side,
+                chunk_long_axis: 64,
+                max_chunk_bytes: 64 * 64 * 2,
+            },
+        )
+        .pop()
+        .expect("plan");
+        assert_eq!(plan.availability.level.grid_shape, [1, 1, 1, 35, 35]);
+        let seed = binding_seed_for(&[source_level]);
+        let resolver = Arc::new(ChunkResolver::new(&seed));
+        let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        for y in 0..35 {
+            for x in 0..35 {
+                let path = source_path(&resolver, &format!("0/0/0/0/{y}/{x}"));
+                store
+                    .put(&path, PutPayload::from(vec![7_u8; 64 * 64 * 2]))
+                    .await
+                    .unwrap();
+            }
+        }
+        let cache = Arc::new(DerivedChunkCache::new_on_disk(root.to_path_buf(), [21; 16]));
+        cache.register_generated_plan(&plan).unwrap();
+        let session = Arc::new(AsyncMutex::new(Session::new()));
+        let (tx, _rx) = broadcast::channel(16);
+        let manifest = Arc::new(manifest);
+        let cached = Arc::new(CachedStore::new(store, 64 * 1024 * 1024));
+
+        let mut elapsed = Vec::new();
+        for key in plan.chunk_keys_for_tc(0, 0) {
+            let started = Instant::now();
+            let result = materialize_generated_coarse_key(
+                &plan,
+                parse_generated_chunk_key(&key).unwrap(),
+                manifest.clone(),
+                cached.clone(),
+                resolver.clone(),
+                cache.clone(),
+                session.clone(),
+                tx.clone(),
+                || async { false },
+            )
+            .await;
+            assert_eq!(result, MaterializeOneResult::Ready);
+            elapsed.push(started.elapsed());
+        }
+        elapsed
+    }
+
+    #[tokio::test]
+    #[ignore = "a measurement, not a check: prints chunks per second as a level fills"]
+    async fn generation_rate_across_one_level() {
+        let dir = tempfile::tempdir().unwrap();
+        let elapsed = generate_level_timed(dir.path()).await;
+        for (window, times) in elapsed.chunks(175).enumerate() {
+            let total: std::time::Duration = times.iter().sum();
+            println!(
+                "chunks {:>4}..{:>4}: {:>6.1} chunks/s",
+                window * 175,
+                window * 175 + times.len(),
+                times.len() as f64 / total.as_secs_f64()
+            );
         }
     }
 

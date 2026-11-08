@@ -63,6 +63,7 @@ fn proxy_config(root: &Path) -> ProxyConfig {
         generated_chunk_long_axis: 32,
         generated_max_chunk_bytes: 1024 * 1024,
         generated_disk_budget_bytes: None,
+        generated_memory: lucida_server::generated::GeneratedChunkMemory::new(1 << 20),
     }
 }
 

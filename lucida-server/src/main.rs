@@ -89,6 +89,9 @@ struct ServeArgs {
     generated_coarse_max_chunk_bytes: Option<u64>,
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_DISK_BUDGET_BYTES")]
     generated_coarse_disk_budget_bytes: Option<u64>,
+    /// Bytes of generated chunks held in memory, across every dataset.
+    #[arg(long, env = "LUCIDA_GENERATED_COARSE_MEMORY_BUDGET_BYTES")]
+    generated_coarse_memory_budget_bytes: Option<u64>,
     /// How long a live workspace with no connected clients remains in memory.
     #[arg(long, env = "LUCIDA_WORKSPACE_IDLE_TTL_SECS", default_value_t = 3600)]
     workspace_idle_ttl_secs: u64,
@@ -258,6 +261,10 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             .generated_coarse_max_chunk_bytes
             .unwrap_or(2 * 1024 * 1024),
         generated_disk_budget_bytes: args.generated_coarse_disk_budget_bytes,
+        generated_memory: lucida_server::generated::GeneratedChunkMemory::new(
+            args.generated_coarse_memory_budget_bytes
+                .unwrap_or(lucida_server::generated::DEFAULT_GENERATED_MEMORY_BYTES),
+        ),
     };
     // Operational logs go through the configured tracing subscriber
     // so RUST_LOG filtering applies.
@@ -276,6 +283,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         chunk_long_axis = proxy_config.generated_chunk_long_axis,
         max_chunk_bytes = proxy_config.generated_max_chunk_bytes,
         disk_budget_bytes = ?proxy_config.generated_disk_budget_bytes,
+        memory_budget_bytes = proxy_config.generated_memory.max_bytes(),
         "generated_coarse.config",
     );
     tracing::info!(

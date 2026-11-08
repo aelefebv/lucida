@@ -547,7 +547,8 @@ pub async fn open_dataset(
         proxy_config.generated_cache_dir.clone(),
         url_hash16,
         proxy_config.generated_disk_budget_bytes,
-    ));
+    )
+    .with_memory(Arc::clone(&proxy_config.generated_memory)));
     let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
     for plan in &generated_plans {
         match derived_chunks.register_generated_plan(plan) {
@@ -1137,6 +1138,7 @@ mod tests {
                 generated_chunk_long_axis: 32,
                 generated_max_chunk_bytes: 1024 * 1024,
                 generated_disk_budget_bytes: None,
+                generated_memory: crate::generated::GeneratedChunkMemory::new(1 << 20),
             },
             source_policy: Arc::default(),
             workspace: None,
