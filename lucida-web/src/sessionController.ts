@@ -221,6 +221,16 @@ export class SessionController {
   /** Co-present peers, self excluded. Replace-on-write: every mutation builds
    *  and emits a new Map. */
   private peers = new Map<ClientId, PresenceState>();
+  /** Whether this client has reported presence, and dataset presence, on any
+   *  connection. A reconnect reports again only what was reported: a client
+   *  that never reported stays unreported rather than sending values nobody
+   *  chose. */
+  private reportedPresence = false;
+  private reportedDatasetPresence = false;
+  /** Set when the connection drops and spent by the next snapshot, which is
+   *  the new connection's join. A resync snapshot on a live connection needs
+   *  nothing: the server still has this client's presence. */
+  private rejoinOwed = false;
   private remoteActivity: RemoteDatasetActivity = {
     loading: false,
     error: null,
@@ -376,12 +386,22 @@ export class SessionController {
   emitPresence(): void {
     const scene = this.deps.getScene();
     if (!scene) return;
-    this.session.bridge.sendPresence(scene.export_presence());
+    this.reportPresence(scene);
   }
 
   emitDatasetPresence(): void {
     const scene = this.deps.getScene();
     if (!scene) return;
+    this.reportDatasetPresence(scene);
+  }
+
+  private reportPresence(scene: WasmScene): void {
+    this.reportedPresence = true;
+    this.session.bridge.sendPresence(scene.export_presence());
+  }
+
+  private reportDatasetPresence(scene: WasmScene): void {
+    this.reportedDatasetPresence = true;
     this.session.bridge.sendDatasetPresence(scene.export_dataset_presence());
   }
 
@@ -469,7 +489,7 @@ export class SessionController {
         });
         this.importPresence(scene, presenceJson);
         requestRender(this.deps.getLoop(), "follow_presence");
-        this.session.bridge.sendPresence(scene.export_presence());
+        this.reportPresence(scene);
       } catch (e) {
         console.warn("[Bridge] failed to import peer presence:", e);
       }
@@ -484,11 +504,33 @@ export class SessionController {
           scene.import_dataset_presence(json));
         invalidateDisplaySettings(this.deps.getLoop(), "follow_dataset_presence");
         this.deps.bumpLayerSettingsVersion();
-        this.session.bridge.sendDatasetPresence(scene.export_dataset_presence());
+        this.reportDatasetPresence(scene);
       } catch (e) {
         console.warn("[Bridge] failed to import peer dataset presence:", e);
       }
     }
+  }
+
+  /**
+   * The first snapshot on a new connection. The server forgot this client's
+   * presence and follow with the old one, and peers now know it by a new id,
+   * so report again what it had reported. A follow carries on if its target
+   * is still here.
+   */
+  private rejoin(previousPeers: ReadonlyMap<ClientId, PresenceState>): void {
+    const target = this.followTarget;
+    if (target !== null) {
+      const before = previousPeers.get(target);
+      const now = this.peers.get(target);
+      // Ids restart with the server process, so the same id can name someone else.
+      if (now && before?.identity?.display_name === now.identity?.display_name) {
+        this.follow(target);
+      } else {
+        this.setFollowTarget(null);
+      }
+    }
+    if (this.reportedPresence) this.emitPresence();
+    if (this.reportedDatasetPresence) this.emitDatasetPresence();
   }
 
   // Connection-scoped state, mirrored out through events.
@@ -958,6 +1000,7 @@ export class SessionController {
           // replayed in this tick must not read a stale id for `isOpener`.
           this.setMyId(yourId);
 
+          const previousPeers = this.peers;
           const peerMap = new Map<ClientId, PresenceState>();
           for (const peer of snapshotPeers) {
             if (peer.client_id !== yourId) {
@@ -1006,6 +1049,10 @@ export class SessionController {
             }
           }
           this.applyGeneratedAvailabilitySnapshots(generatedAvailability);
+          if (this.rejoinOwed) {
+            this.rejoinOwed = false;
+            this.rejoin(previousPeers);
+          }
 
           this.scheduleRemoteDocumentChanged();
           this.deps.events.onDatasetsChanged();
@@ -1236,6 +1283,7 @@ export class SessionController {
         // so they clear too.
         this.deps.events.onConnectedChanged(false);
         this.deps.events.onSessionReadyChanged(false);
+        this.rejoinOwed = true;
         this.clearAllOpenWarnings();
         this.updateRemoteActivity({ loading: false, progress: null });
         this.contentSource.rejectAll();
