@@ -492,6 +492,23 @@ export interface RenderTiming {
   gpuPass: GpuPassTiming;
 }
 
+/** The render worker's GPU memory over the readings that carried it. */
+export interface GpuMemorySummary {
+  /** The most any reading held. */
+  peakBytes: number;
+  /** The budget the peak was held under. */
+  peakBudgetBytes: number;
+  /** Whether any reading held more than its budget. */
+  overBudget: boolean;
+  /** The last reading's bytes and budget, which an out-of-memory failure may have halved. */
+  lastBytes: number;
+  lastBudgetBytes: number;
+  /** Chunk pool slots holding a chunk, and slots allocated, at the last reading. */
+  slotsHeld: number;
+  slots: number;
+  samples: number;
+}
+
 export interface NextStep {
   why: string;
   command: string;
@@ -905,6 +922,8 @@ export interface DiagnosticDocument {
   aggregates: AggregateCandidate[];
   /** Main-thread time and GPU pass time, or the stated reason the second is missing. */
   renderTiming: RenderTiming;
+  /** GPU memory against its budget, or null when no reading carried it. */
+  gpuMemory: GpuMemorySummary | null;
   /** What the client sent during the run, by message type. */
   sent: SentSummary;
   /**

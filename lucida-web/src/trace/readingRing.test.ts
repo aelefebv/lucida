@@ -32,6 +32,18 @@ describe("ReadingRing", () => {
     ]);
   });
 
+  it("carries the GPU memory a reading has, and leaves it out of one that has none", () => {
+    const ring = new ReadingRing(4);
+    const memory = { bytes: 450_000_000, budgetBytes: 1_610_612_736, slotsHeld: 300, slots: 512 };
+
+    ring.append(0, reading(1, 1), null);
+    ring.append(10, reading(1, 1), null, memory);
+
+    const [before, after] = ring.serialise();
+    expect(before).not.toHaveProperty("gpuMemory");
+    expect(after.gpuMemory).toEqual(memory);
+  });
+
   it("copies the reading rather than holding the caller's buffer", () => {
     const ring = new ReadingRing(4);
     const values = reading(5, 100);

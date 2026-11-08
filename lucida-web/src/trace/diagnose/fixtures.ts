@@ -769,6 +769,27 @@ export function gpuTimedOpen(): TraceRun {
 }
 
 /**
+ * The healthy open with the render worker's GPU memory on every reading after
+ * the first: growing to a peak, then held under a budget an out-of-memory
+ * failure halved.
+ */
+export function gpuMemoryOpen(): TraceRun {
+  const base = healthyLocalOpen();
+  const MIB = 1024 * 1024;
+  return makeRun({
+    header: { runId: "local-gpu-memory", durationUs: base.header.durationUs },
+    rows: base.rows,
+    readings: base.readings.map((reading, i) => {
+      if (i === 0) return reading;
+      const budgetBytes = i < 8 ? 1536 * MIB : 768 * MIB;
+      return { ...reading, gpuMemory: { bytes: Math.min(i, 6) * 100 * MIB, budgetBytes, slotsHeld: i * 40, slots: 512 } };
+    }),
+    datasetOpens: base.datasetOpens,
+    serverRows: base.serverRows,
+  });
+}
+
+/**
  * The same open on an adapter without timestamp queries. No reading carries a
  * GPU pass time, and the document has to say the render time it does have is
  * main-thread time rather than let it pass for the GPU's.

@@ -5,7 +5,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { fakeCache, makeRecorder, MIB } from "./hudFixtures.ts";
+import { fakeCache, gpuReport, makeRecorder, MIB } from "./hudFixtures.ts";
 import { emptyLaneOutstanding, HudSource } from "./hudSource.ts";
 import { createQuiescenceState, evaluateQuiescence } from "../trace/quiescence.ts";
 import { TickCounter } from "../trace/types.ts";
@@ -18,7 +18,7 @@ describe("HudSource", () => {
       recorder,
       now,
       getCache: () => cache,
-      getGpuAtlases: () => ({ atlases: 4, bytes: 96 * MIB }),
+      getGpuMemory: () => gpuReport({ atlases: 4, bytes: 96 * MIB }),
       datasetName: (id) => `${id}.zarr`,
     });
     source.start();
@@ -57,7 +57,7 @@ describe("HudSource", () => {
     expect(sample.lanes?.inFlight.detail).toBe(3);
     expect(sample.lanes?.pending.prefetch).toBe(7);
     expect(sample.pools?.main.bytes).toBe(5 * MIB);
-    expect(sample.gpuAtlases).toEqual({ atlases: 4, bytes: 96 * MIB });
+    expect(sample.gpuMemory).toEqual(gpuReport({ atlases: 4, bytes: 96 * MIB }));
     expect(cache.calls).toBe(1);
     source.dispose();
   });
@@ -87,7 +87,7 @@ describe("HudSource", () => {
     expect(sample.quiescence).toBeNull();
     expect(sample.lanes).toBeNull();
     expect(sample.pools).toBeNull();
-    expect(sample.gpuAtlases).toBeNull();
+    expect(sample.gpuMemory).toBeNull();
     expect(sample.levels).toEqual([]);
     expect(sample.runOpen).toBe(false);
   });

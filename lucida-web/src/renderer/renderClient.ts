@@ -9,7 +9,8 @@ import type {
   WorkerToMainMessage,
   CaptureFailure,
   FrameCaptureResult,
-  GpuAtlasReport,
+  GpuCapacityReport,
+  GpuMemoryReport,
   ColdStateMessage,
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
@@ -146,8 +147,11 @@ export class RenderClient implements UploadClient {
   private readonly levelsByDataset = new Map<string, DatasetLevels>();
 
   private gpuPassUs: number | null = null;
-  /** The worker starts with no atlases and posts only changes. */
-  private gpuAtlasReport: GpuAtlasReport = { atlases: 0, bytes: 0 };
+  /** Null until the worker's first report; it posts only changes after that. */
+  private gpuMemoryReport: GpuMemoryReport | null = null;
+  private gpuCapacityReport: GpuCapacityReport | null = null;
+  /** Hears minimap overviews the worker lost to an out-of-memory failure. */
+  onMinimapOverviewsLost: ((memberIds: string[]) => void) | null = null;
 
   /** The last viewport frame dispatched. */
   private viewportFrameSeq = 0;
@@ -214,9 +218,14 @@ export class RenderClient implements UploadClient {
     return gpuPassUs;
   }
 
-  /** The worker's latest atlas count and bytes. */
-  gpuAtlases(): GpuAtlasReport {
-    return this.gpuAtlasReport;
+  /** What the worker last reported holding on the GPU, or null before its first report. */
+  gpuMemory(): GpuMemoryReport | null {
+    return this.gpuMemoryReport;
+  }
+
+  /** The chunk pools' capacities the worker last reported, which planning admits against, or null before. */
+  gpuCapacity(): GpuCapacityReport | null {
+    return this.gpuCapacityReport;
   }
 
   /**
@@ -281,8 +290,14 @@ export class RenderClient implements UploadClient {
       // Latest wins: when two frames land between ticks, the newer one is
       // the frame on screen.
       this.gpuPassUs = msg.gpuPassUs;
-    } else if (msg.type === "gpuAtlases") {
-      this.gpuAtlasReport = { atlases: msg.atlases, bytes: msg.bytes };
+    } else if (msg.type === "gpuMemory") {
+      const { type: _type, ...report } = msg;
+      this.gpuMemoryReport = report;
+    } else if (msg.type === "gpuCapacity") {
+      const { type: _type, ...report } = msg;
+      this.gpuCapacityReport = report;
+    } else if (msg.type === "minimapOverviewsLost") {
+      this.onMinimapOverviewsLost?.(msg.memberIds);
     } else if (msg.type === "frameDone") {
       this.noteFrameDone(msg.frameSeq);
     } else if (msg.type === "pipelinesCompiled") {

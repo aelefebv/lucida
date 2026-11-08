@@ -26,7 +26,7 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
   const state = ctx.state;
   removeSliceResources(ctx, id);
   removeVolumeResources(ctx, id);
-  removeMinimapResources(id);
+  removeMinimapResources(ctx, id);
 
   const dsPools = state.proxyPoolsByDataset.get(id);
   if (dsPools) {
@@ -116,6 +116,8 @@ export function releaseDeviceResources(ctx: WorkerCtx): void {
   destroyAllSliceResources(ctx);
   destroyAllVolumeResources(ctx);
   releaseMinimapDeviceResources();
+  // The page uploads every overview again to a replacement device.
+  state.overviewsRefused.clear();
   ctx.passTimer.destroy();
   destroyAllResources();
 }

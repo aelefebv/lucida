@@ -595,6 +595,18 @@ export interface TraceReading extends Record<ReadingName, number> {
    * read-back is asynchronous and the reading is taken at tick end.
    */
   gpuPassUs?: number;
+  /** What the render worker held on the GPU, from its latest report. Absent before its first. */
+  gpuMemory?: GpuMemoryReading;
+}
+
+/** The render worker's GPU memory against its one device-fitted budget. */
+export interface GpuMemoryReading {
+  /** Every holder: chunk, label, and proxy pools, render targets, minimap textures. */
+  bytes: number;
+  budgetBytes: number;
+  /** Chunk pool slots holding a chunk, of the `slots` the pools have allocated. */
+  slotsHeld: number;
+  slots: number;
 }
 
 /**
@@ -964,6 +976,7 @@ const CHUNK_FEEDBACK_REASONS = [
   "atlas-policy",
   "upload-failed",
   "out-of-memory",
+  "replaced",
 ] as const satisfies readonly ChunkFeedbackReason[];
 
 /** The GPU's own error kinds. `out-of-memory` is shared with the chunk feedback above. */

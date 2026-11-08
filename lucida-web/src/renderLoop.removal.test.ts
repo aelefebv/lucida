@@ -32,6 +32,7 @@ function makeLoop() {
     datasets: new Map(),
     client: {
       takeGpuPassUs: () => null,
+      gpuMemory: () => null,
       takeFrameLatency: () => null,
       lastFrameSeq: () => 0,
       setCanvasColors: () => {},

@@ -154,7 +154,7 @@ describe("a full atlas with more wanted chunks than worker slots", () => {
         pyramid: { shape: [1, 1, 1, 512, 512], chunk: [1, 64, 64], levels: 3 },
       }),
       viewport: [320, 200],
-      atlas: { sliceAtlasBytes: 25 * CHUNK_64_BYTES },
+      gpuTotalBytes: 25 * CHUNK_64_BYTES,
       gpuComplete: false,
     }),
   );
@@ -171,7 +171,7 @@ describe("two mirror-image chunks and one worker slot", () => {
       id: "pair",
       pyramid: { shape: [1, 1, 1, 64, 128], chunk: [1, 64, 64], levels: 1 },
     }),
-    atlas: { sliceAtlasBytes: CHUNK_64_BYTES },
+    gpuTotalBytes: CHUNK_64_BYTES,
     gpuComplete: false,
   });
   // Two chunks in each of two tiers, each sent once: the one that does not fit
@@ -197,7 +197,7 @@ describe("a pan and zoom across a full atlas", () => {
         pyramid: { shape: [1, 1, 1, 512, 512], chunk: [1, 64, 64], levels: 3 },
       }),
       viewport: [320, 200],
-      atlas: { sliceAtlasBytes: 25 * CHUNK_64_BYTES },
+      gpuTotalBytes: 25 * CHUNK_64_BYTES,
       gpuComplete: false,
       steps: [{ pan: [150, 40] }, { pan: [-300, -80] }, { zoom: 2 }, { zoom: 0.5 }],
     }),
@@ -231,7 +231,7 @@ describe("a zoom, pan and orbit inside a volume with a full atlas", () => {
       id: "block",
       pyramid: { shape: [1, 2, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
     }),
-    atlas: { volumeAtlasBytes: 24 * 32 * 32 * 32 * 2 },
+    gpuTotalBytes: 24 * 32 * 32 * 32 * 2,
     gpuComplete: false,
     steps: [{ zoom: 4 }, { orbit: [0.6, 0.3] }, { pan: [120, 60] }, { orbit: [-1.2, -0.4] }],
   }));
