@@ -254,7 +254,7 @@ describe("TraceRecorder run lifecycle", () => {
 });
 
 describe("TraceRecorder gesture rule", () => {
-  it("opens a run on each of the five inputs, under a cause that names the input", () => {
+  it("opens a run on each input, under a cause that names the input", () => {
     for (const input of INPUT_KINDS) {
       const { recorder } = makeRecorder();
       recorder.noteInput(input);
@@ -270,8 +270,11 @@ describe("TraceRecorder gesture rule", () => {
     expect(interactionCause("pan").epoch).toBe("view");
     expect(interactionCause("zoom").epoch).toBe("view");
     expect(interactionCause("orbit").epoch).toBe("view");
+    expect(interactionCause("resize").epoch).toBe("view");
     expect(interactionCause("scrub").epoch).toBe("selection");
     expect(interactionCause("select").epoch).toBe("selection");
+    expect(interactionCause("contrast").epoch).toBe("selection");
+    expect(interactionCause("remove").epoch).toBe("selection");
   });
 
   it("makes one run of a continuous drag, and a second run of the next gesture", () => {

@@ -282,6 +282,26 @@ export interface LucidaTraceSeam {
    */
   select(target: SelectTarget, visible?: boolean): StepOutcome;
   /**
+   * A scripted contrast: set the window of a channel of the dataset in hand
+   * through the handler the layer panel's limits call, which stops
+   * auto-contrast for the dataset as a hand-set limit does. The layer panel
+   * is hidden on the capture surface, as for {@link select}.
+   */
+  contrast(channel: number, min: number, max: number): StepOutcome;
+  /**
+   * A scripted add: open a dataset in this workspace by source URL through
+   * the handler the add-data dialog calls, which the capture surface does
+   * not mount. Answers once the dataset has opened or failed to, or after
+   * `timeoutMs`, sixty seconds unless given.
+   */
+  addDataset(url: string, timeoutMs?: number): Promise<StepOutcome>;
+  /**
+   * A scripted remove: take the dataset opened from a source URL out of this
+   * workspace through the handler the layer panel's remove calls once a
+   * person has confirmed it.
+   */
+  removeDataset(url: string): Promise<StepOutcome>;
+  /**
    * Close the run in progress without exporting: the *Stop & analyse* path.
    *
    * A driver that gave up on a run that never settled passes `"timeout"`:
@@ -401,12 +421,38 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
       }
       return refused("a select names a channel index or a layer id");
     },
+    contrast: (channel: number, min: number, max: number) => {
+      const controls = scriptControls();
+      if (!controls) return noControls();
+      if (!Number.isInteger(channel) || channel < 0) {
+        return refused(`a channel is a whole number from 0, not ${channel}`);
+      }
+      if (!Number.isFinite(min) || !Number.isFinite(max) || min >= max) {
+        return refused(`a contrast window is two finite numbers, the minimum below the maximum, not ${min},${max}`);
+      }
+      return controls.contrast(channel, min, max);
+    },
+    addDataset: async (url: string, timeoutMs: number = DEFAULT_ADD_TIMEOUT_MS) => {
+      const controls = scriptControls();
+      if (!controls) return noControls();
+      if (typeof url !== "string" || url.trim() === "") return refused("a dataset is named by its source URL");
+      const wait = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEFAULT_ADD_TIMEOUT_MS;
+      return controls.addDataset(url, wait);
+    },
+    removeDataset: async (url: string) => {
+      const controls = scriptControls();
+      if (!controls) return noControls();
+      if (typeof url !== "string" || url.trim() === "") return refused("a dataset is named by its source URL");
+      return controls.removeDataset(url);
+    },
     closeRun: (endReason: "explicit" | "timeout" = "explicit") =>
       traceRecorder.closeRun(endReason),
   };
   target.lucidaTrace = seam;
   return seam;
 }
+
+const DEFAULT_ADD_TIMEOUT_MS = 60_000;
 
 function refused(reason: string): StepOutcome {
   return { applied: false, reason };

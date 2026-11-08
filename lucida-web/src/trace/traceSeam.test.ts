@@ -593,7 +593,7 @@ describe("the trace seam", () => {
    * capture surface hides the controls they would otherwise land on, and
    * the view is read the same way before and after every step.
    */
-  it("reads the view and takes a scrub or a select through the registered controls", () => {
+  it("reads the view and takes each step through the registered controls", async () => {
     const seam = installTraceSeam();
     const calls: unknown[] = [];
     const view = { v: 1, camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [8, 6] } };
@@ -607,6 +607,18 @@ describe("the trace seam", () => {
         calls.push(["select", target, visible]);
         return { applied: true, reason: null };
       },
+      contrast: (channel, min, max) => {
+        calls.push(["contrast", channel, min, max]);
+        return { applied: true, reason: null };
+      },
+      addDataset: (url, timeoutMs) => {
+        calls.push(["add", url, timeoutMs]);
+        return Promise.resolve({ applied: true, reason: null });
+      },
+      removeDataset: (url) => {
+        calls.push(["remove", url]);
+        return Promise.resolve({ applied: true, reason: null });
+      },
     });
     try {
       expect(seam.view()).toBe(view);
@@ -614,6 +626,7 @@ describe("the trace seam", () => {
         camera: { mode: "slice", center: [0, 0], zoom: 1 },
         view: null,
         visibility: {},
+        contrast: {},
       });
       // The viewers' own constants, so the driver's pixels are the page's.
       expect(seam.inputScale.orbitRadiansPerPixel).toBe(0.005);
@@ -621,17 +634,25 @@ describe("the trace seam", () => {
       expect(seam.scrub("t", 3)).toEqual({ applied: true, reason: null });
       expect(seam.select({ channel: 1 }, false)).toEqual({ applied: true, reason: null });
       expect(seam.select({ layer: "ds-2" })).toEqual({ applied: true, reason: null });
+      expect(seam.contrast(0, 10, 200)).toEqual({ applied: true, reason: null });
+      await expect(seam.addDataset("/data/b.zarr", 5000)).resolves.toEqual({ applied: true, reason: null });
+      await expect(seam.addDataset("/data/c.zarr")).resolves.toEqual({ applied: true, reason: null });
+      await expect(seam.removeDataset("/data/b.zarr")).resolves.toEqual({ applied: true, reason: null });
       expect(calls).toEqual([
         ["scrub", "t", 3],
         ["select", { channel: 1 }, false],
         ["select", { layer: "ds-2" }, true],
+        ["contrast", 0, 10, 200],
+        ["add", "/data/b.zarr", 5000],
+        ["add", "/data/c.zarr", 60_000],
+        ["remove", "/data/b.zarr"],
       ]);
     } finally {
       setScriptControls(null);
     }
   });
 
-  it("answers a step with nothing registered, and a malformed one, by saying so rather than throwing", () => {
+  it("answers a step with nothing registered, and a malformed one, by saying so rather than throwing", async () => {
     const seam = installTraceSeam();
     setScriptControls(null);
     expect(seam.view()).toBeNull();
@@ -649,10 +670,22 @@ describe("the trace seam", () => {
       view: () => null,
       scrub: () => ({ applied: true, reason: null }),
       select: () => ({ applied: true, reason: null }),
+      contrast: () => ({ applied: true, reason: null }),
+      addDataset: () => Promise.resolve({ applied: true, reason: null }),
+      removeDataset: () => Promise.resolve({ applied: true, reason: null }),
     });
     try {
       // The arguments arrive over the DevTools protocol, so the seam checks
       // them before any handler sees them.
+      expect(seam.contrast(0, 5, 5)).toEqual({
+        applied: false,
+        reason: "a contrast window is two finite numbers, the minimum below the maximum, not 5,5",
+      });
+      expect(seam.contrast(1.5, 0, 5).applied).toBe(false);
+      await expect(seam.removeDataset("")).resolves.toEqual({
+        applied: false,
+        reason: "a dataset is named by its source URL",
+      });
       expect(seam.scrub("q" as never, 1)).toEqual({ applied: false, reason: "no selector is called q" });
       expect(seam.select({} as never)).toEqual({
         applied: false,
