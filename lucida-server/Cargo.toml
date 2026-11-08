@@ -24,7 +24,7 @@ serde = { version = "1", features = ["derive"] }
 # `raw_value` lets the inbox lift a bundle's header out as the slice of
 # text the page wrote, rather than as something re-serialized.
 serde_json = { version = "1", features = ["raw_value"] }
-lz4_flex = "0.11"
+lz4_flex = "0.14"
 zstd = "0.14"
 # The gzip and zlib storage codecs, and Blosc's zlib compressor.
 flate2 = "1"
@@ -63,8 +63,8 @@ reqwest = { version = "0.13", default-features = false, features = ["rustls", "j
 # jsonwebtoken 10 dropped the `ring` backend (used elsewhere via rustls) and makes
 # the crypto backend explicit. We pick `aws_lc_rs` over `rust_crypto`: the latter
 # pulls the `rsa` crate (RUSTSEC-2023-0071 "Marvin", unpatched), which would add a
-# new advisory. 10.3 fixes the exp/nbf type-confusion authz bypass; APIs unchanged.
-jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
+# new advisory.
+jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 base64 = "0.23"
 urlencoding = "2"
 
@@ -85,5 +85,5 @@ rsa = { version = "0.9", features = ["sha2"] }
 # strict feature unification means listing it here lets the test
 # import it without a workspace round-trip.
 urlencoding = "2"
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
