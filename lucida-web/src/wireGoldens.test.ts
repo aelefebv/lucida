@@ -1997,7 +1997,9 @@ describe("wire goldens: enum vocabulary", () => {
       annotation_kinds: annotationKinds,
       axis_kinds: ["Time", "Channel", "Space"],
       entity_kinds: entityKinds,
-      data_types: ["Uint8", "Uint16", "Uint32", "Int8", "Int16", "Int32", "Float32", "Float64"],
+      data_types: [
+        "Uint8", "Uint16", "Uint32", "Int8", "Int16", "Int32", "Float32", "Float64", "Uint64", "Int64", "Float16",
+      ],
       positioning_modes: ["Explicit", "Derived"],
       dataset_open_stages: openStages,
       // No TS union today: the kind string is carried and rendered verbatim.

@@ -1449,6 +1449,9 @@ fn parse_data_type(s: &str) -> Result<DataType, StoreError> {
         "int32" => Ok(DataType::Int32),
         "float32" => Ok(DataType::Float32),
         "float64" => Ok(DataType::Float64),
+        "uint64" => Ok(DataType::Uint64),
+        "int64" => Ok(DataType::Int64),
+        "float16" => Ok(DataType::Float16),
         other => Err(StoreError::UnsupportedDataType(other.to_string())),
     }
 }
@@ -2871,6 +2874,9 @@ mod tests {
         assert_eq!(parse_data_type("int32").unwrap(), DataType::Int32);
         assert_eq!(parse_data_type("float32").unwrap(), DataType::Float32);
         assert_eq!(parse_data_type("float64").unwrap(), DataType::Float64);
+        assert_eq!(parse_data_type("uint64").unwrap(), DataType::Uint64);
+        assert_eq!(parse_data_type("int64").unwrap(), DataType::Int64);
+        assert_eq!(parse_data_type("float16").unwrap(), DataType::Float16);
     }
 
     #[test]
@@ -5538,13 +5544,14 @@ mod tests {
         let source_owner = EntityId("owner".to_string());
 
         // The probe discovers all declared names — cheap, and expected.
-        let probed = probe_labels_for_image(&store, &ZarrFormat::V3, "").await;
+        let probed =
+            probe_labels_for_image(&store, &ZarrFormat::V3 { consolidated: None }, "").await;
         assert_eq!(probed.names, vec!["keep0", "keep1", "over"]);
 
         let imported = build_labels_within_budget(
             &mut budget,
             &store,
-            &ZarrFormat::V3,
+            &ZarrFormat::V3 { consolidated: None },
             "ds",
             &source_image_id,
             &source_owner,

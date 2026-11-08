@@ -165,6 +165,9 @@ pub enum DataType {
     Int32,
     Float32,
     Float64,
+    Uint64,
+    Int64,
+    Float16,
 }
 
 impl DataType {
@@ -172,9 +175,9 @@ impl DataType {
     pub fn size_bytes(self) -> usize {
         match self {
             DataType::Uint8 | DataType::Int8 => 1,
-            DataType::Uint16 | DataType::Int16 => 2,
+            DataType::Uint16 | DataType::Int16 | DataType::Float16 => 2,
             DataType::Uint32 | DataType::Int32 | DataType::Float32 => 4,
-            DataType::Float64 => 8,
+            DataType::Uint64 | DataType::Int64 | DataType::Float64 => 8,
         }
     }
 }

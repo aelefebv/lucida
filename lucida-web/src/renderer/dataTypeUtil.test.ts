@@ -18,7 +18,7 @@ describe("sampleFormatOf", () => {
   });
 
   it("draws every other numeric type as float32", () => {
-    for (const t of ["Uint32", "Int8", "int16", "Int32", "Float32", "float64"]) {
+    for (const t of ["Uint32", "Int8", "int16", "Int32", "Float32", "float64", "Int64", "uint64", "Float16"]) {
       expect(sampleFormatOf(t)).toBe("f32");
     }
   });
@@ -41,8 +41,8 @@ describe("datasetSampleFormat", () => {
 
 describe("drawnAtFloat32Precision", () => {
   it("names the types a float32 can't hold every value of", () => {
-    expect(["Float64", "Int32", "Uint32"].every(drawnAtFloat32Precision)).toBe(true);
-    expect(["Uint8", "Uint16", "Int8", "Int16", "Float32"].some(drawnAtFloat32Precision)).toBe(false);
+    expect(["Float64", "Int32", "Uint32", "Int64", "Uint64"].every(drawnAtFloat32Precision)).toBe(true);
+    expect(["Uint8", "Uint16", "Int8", "Int16", "Float32", "Float16"].some(drawnAtFloat32Precision)).toBe(false);
   });
 });
 

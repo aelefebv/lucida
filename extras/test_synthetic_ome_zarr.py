@@ -469,7 +469,7 @@ def test_parse_args_rejects_inconsistent_options(argv: list[str]) -> None:
         gen.parse_args(argv)
 
 
-@pytest.mark.parametrize("dtype", ["int16", "int32", "float32", "float64"])
+@pytest.mark.parametrize("dtype", ["int16", "int32", "int64", "float16", "float32", "float64"])
 def test_dtype_and_range_set_the_stored_type_and_the_values_it_spans(tmp_path: Path, dtype: str) -> None:
     out = generate(tmp_path, f"{dtype}.ome.zarr", "--size", "64,64", "--levels", "2", "--dtype", dtype, "--range=-200,1000")
     assert read_json(out / "0" / "zarr.json")["data_type"] == dtype
@@ -481,6 +481,13 @@ def test_dtype_and_range_set_the_stored_type_and_the_values_it_spans(tmp_path: P
     assert level0.min() < 0 < level0.max()
     if dtype.startswith("float"):
         assert not np.all(level0 == np.rint(level0))
+
+
+def test_a_64_bit_range_reaches_past_32_bits(tmp_path: Path) -> None:
+    out = generate(tmp_path, "uint64.ome.zarr", "--size", "32,32", "--levels", "1", "--dtype", "uint64", "--range=0,18000000000000000000")
+    values = level_array(out, 0)
+    assert values.dtype == np.uint64
+    assert values.max() > 2**63
 
 
 def test_parse_args_reads_the_storage_options() -> None:

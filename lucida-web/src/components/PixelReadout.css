@@ -1,0 +1,98 @@
+.lc-pixel-readout {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  gap: var(--lc-space-2);
+  max-width: 280px;
+  padding: var(--lc-space-1) var(--lc-space-2);
+  border: 1px solid var(--lc-border);
+  border-radius: var(--lc-radius);
+  background: var(--lc-surface-float);
+  box-shadow: var(--lc-shadow-1);
+  color: var(--lc-text);
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-sm);
+  line-height: 1.4;
+  pointer-events: none;
+  transform: translate(var(--lc-readout-offset), var(--lc-readout-offset));
+  white-space: nowrap;
+}
+
+.lc-pixel-readout[data-flip-x] {
+  transform: translate(calc(-100% - var(--lc-readout-offset)), var(--lc-readout-offset));
+}
+
+.lc-pixel-readout[data-flip-y] {
+  transform: translate(var(--lc-readout-offset), calc(-100% - var(--lc-readout-offset)));
+}
+
+.lc-pixel-readout[data-flip-x][data-flip-y] {
+  transform: translate(calc(-100% - var(--lc-readout-offset)), calc(-100% - var(--lc-readout-offset)));
+}
+
+/* Above the finger, which would hide anything beside or below it. */
+.lc-pixel-readout[data-touch] {
+  transform: translate(-50%, calc(-100% - 4 * var(--lc-readout-offset)));
+}
+
+.lc-pixel-readout-title {
+  overflow: hidden;
+  color: var(--lc-text-muted);
+  text-overflow: ellipsis;
+}
+
+.lc-pixel-readout-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--lc-space-3);
+}
+
+.lc-pixel-readout-position {
+  display: flex;
+  gap: var(--lc-space-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.lc-pixel-readout-axis,
+.lc-pixel-readout-level {
+  color: var(--lc-text-muted);
+}
+
+.lc-pixel-readout-rows {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: var(--lc-space-3);
+  margin: 0;
+}
+
+.lc-pixel-readout-row {
+  display: contents;
+}
+
+.lc-pixel-readout-row dt {
+  display: flex;
+  align-items: center;
+  gap: var(--lc-space-1);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lc-pixel-readout-row dd {
+  margin: 0;
+  font-family: var(--lc-font-mono);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.lc-pixel-readout-row[data-absent] dd {
+  color: var(--lc-text-muted);
+  font-family: var(--lc-font);
+}
+
+.lc-pixel-readout-swatch {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--lc-radius-full);
+}

@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use common::workspace_rig::WorkspaceRig;
-use lucida_content::{ChunkKey, DatasetManifest, ImageId};
+use lucida_content::{ChunkKey, DataType, DatasetManifest, ImageId};
 use lucida_protocol::DatasetOpenFailureKind;
 use lucida_server::GeneratedConfig;
 use lucida_server::binding::ChunkResolver;
@@ -191,6 +191,97 @@ async fn a_consolidated_zarr_v2_open_reads_only_its_root_metadata() {
     );
 }
 
+/// A Zarr v3 collection whose levels are named `s0` and `s1`, with every
+/// metadata document consolidated inline in its root `zarr.json`.
+#[tokio::test]
+async fn a_consolidated_zarr_v3_collection_with_named_levels_serves_its_twin_s_chunks() {
+    let present =
+        assert_served_identically("v3-consolidated.ome.zarr", "collection-unsharded.ome.zarr")
+            .await;
+    assert_eq!(present, 3 * (9 + 2));
+}
+
+/// Opening a consolidated v3 hierarchy reads its root `zarr.json` and nothing
+/// else that metadata holds, though every group and level still has its own
+/// `zarr.json` beside the copy.
+#[tokio::test]
+async fn a_consolidated_zarr_v3_open_reads_only_its_root_metadata() {
+    let reads = |name: &'static str| async move {
+        import_dir(&fixture_dir(name))
+            .await
+            .store
+            .stats()
+            .source_reads
+    };
+    let consolidated = reads("v3-consolidated.ome.zarr").await;
+    let unconsolidated = reads("collection-unsharded.ome.zarr").await;
+    // zarr.json, then one origin-chunk probe per level for the
+    // unwritten-level check.
+    assert_eq!(consolidated, 1 + 2, "consolidated open");
+    assert!(
+        unconsolidated > consolidated + 3 * 3,
+        "unconsolidated open read {unconsolidated} objects, consolidated {consolidated}"
+    );
+}
+
+/// The samples of every chunk of a single-image fixture, at every level, as
+/// the server serves them: little-endian, `size` bytes each.
+async fn served_samples(name: &str, size: usize) -> Vec<Vec<u8>> {
+    let imported = import_dir(&fixture_dir(name)).await;
+    let mut samples = Vec::new();
+    for (image_id, key) in chunk_keys(&imported.result.manifest) {
+        let ChunkRead::Present(bytes) = served(&imported, &image_id, &key).await else {
+            panic!("{name}: {image_id}/{key} read as absent");
+        };
+        assert_eq!(bytes.len() % size, 0, "{name}: {key}");
+        samples.extend(bytes.chunks_exact(size).map(<[u8]>::to_vec));
+    }
+    samples
+}
+
+/// 64-bit integers and halves are imported as their own types and served
+/// whole, so values only those types hold arrive intact.
+#[tokio::test]
+async fn data_types_past_32_bits_and_below_float32_serve_their_own_values() {
+    for (name, data_type) in [
+        ("dtype-int64.ome.zarr", DataType::Int64),
+        ("dtype-uint64.ome.zarr", DataType::Uint64),
+        ("dtype-float16.ome.zarr", DataType::Float16),
+    ] {
+        let imported = import_dir(&fixture_dir(name)).await;
+        let image = &imported.result.manifest.images()[0];
+        assert_eq!(image.multiscale.data_type, data_type, "{name}");
+    }
+
+    let int64: Vec<i64> = served_samples("dtype-int64.ome.zarr", 8)
+        .await
+        .iter()
+        .map(|b| i64::from_le_bytes(b.as_slice().try_into().unwrap()))
+        .collect();
+    assert!(int64.iter().any(|&v| v < -(1 << 31)), "{int64:?}");
+    assert!(int64.iter().any(|&v| v > 1 << 31), "{int64:?}");
+    assert!(int64.iter().all(|v| v.abs() <= 6_000_000_000));
+
+    let uint64: Vec<u64> = served_samples("dtype-uint64.ome.zarr", 8)
+        .await
+        .iter()
+        .map(|b| u64::from_le_bytes(b.as_slice().try_into().unwrap()))
+        .collect();
+    assert!(uint64.iter().any(|&v| v > 1 << 63), "{uint64:?}");
+
+    let halves: Vec<u16> = served_samples("dtype-float16.ome.zarr", 2)
+        .await
+        .iter()
+        .map(|b| u16::from_le_bytes(b.as_slice().try_into().unwrap()))
+        .collect();
+    let negative = |h: u16| h & 0x8000 != 0;
+    // Every sample is finite and within the range written, which a byte
+    // swap or a misread width would scatter.
+    assert!(halves.iter().all(|&h| h & 0x7c00 != 0x7c00), "{halves:?}");
+    assert!(halves.iter().all(|&h| (h & 0x7fff) <= 0x63d0), "{halves:?}");
+    assert!(halves.iter().any(|&h| negative(h)) && halves.iter().any(|&h| !negative(h)));
+}
+
 /// `[transpose, bytes(big), gzip, crc32c]`.
 #[tokio::test]
 async fn a_zarr_v3_chain_of_transpose_big_endian_gzip_and_crc32c_serves_its_twin_s_chunks() {
@@ -242,6 +333,10 @@ async fn every_committed_fixture_of_another_format_or_layout_opens_through_the_s
         "v2-collection.ome.zarr",
         "v2-consolidated.ome.zarr",
         "v3-level-paths.ome.zarr",
+        "v3-consolidated.ome.zarr",
+        "dtype-int64.ome.zarr",
+        "dtype-uint64.ome.zarr",
+        "dtype-float16.ome.zarr",
     ] {
         let outcome = open(&fixture_dir(name))
             .await

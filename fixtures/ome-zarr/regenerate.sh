@@ -50,3 +50,12 @@ uv run "$gen" "$dest/v3-level-paths.ome.zarr" "${twin[@]}" --shard 16 --level-pr
 uv run "$gen" "$dest/v2-consolidated.ome.zarr" \
   --tiles 3 --size 24,24 --levels 2 --factor 3,2 --chunk 8 --seed 1 --overwrite \
   --zarr-version 2 --level-prefix s --consolidated
+uv run "$gen" "$dest/v3-consolidated.ome.zarr" \
+  --tiles 3 --size 24,24 --levels 2 --factor 3,2 --chunk 8 --seed 1 --overwrite \
+  --level-prefix s --consolidated
+
+# Data types past 32 bits and below float32, with values only their own type holds.
+dtype=(--size 16,16 --levels 2 --chunk 8 --seed 1 --overwrite)
+uv run "$gen" "$dest/dtype-int64.ome.zarr" "${dtype[@]}" --dtype int64 --range=-6000000000,6000000000
+uv run "$gen" "$dest/dtype-uint64.ome.zarr" "${dtype[@]}" --dtype uint64 --range=0,18000000000000000000
+uv run "$gen" "$dest/dtype-float16.ome.zarr" "${dtype[@]}" --dtype float16 --range=-1000,1000

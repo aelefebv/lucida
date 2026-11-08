@@ -20,6 +20,7 @@ describe("checkSource", () => {
     ["C:\\data\\sample.zarr", "c:/data/sample.zarr"],
     ["file:///C:/data/sample.zarr", "c:/data/sample.zarr"],
     ["file:///data/sample.zarr", "/data/sample.zarr"],
+    ["file:///data/my%20sample.zarr", "/data/my sample.zarr"],
     ["file://server/share/sample.zarr", "//server/share/sample.zarr"],
     ["\\\\server\\share\\sample.zarr", "//server/share/sample.zarr"],
     ["gs://bucket/sample.zarr", "gs://bucket/sample.zarr"],

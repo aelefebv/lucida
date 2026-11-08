@@ -1,7 +1,7 @@
 # Synthetic OME-Zarr fixtures
 
 Small OME-Zarr datasets for offline tests, written by
-`extras/synthetic_ome_zarr.py`. None is larger than 20 KB. Generate anything
+`extras/synthetic_ome_zarr.py`. None is larger than 30 KB. Generate anything
 larger on demand with the same script rather than committing it:
 
 ```sh
@@ -40,12 +40,14 @@ fixtures differ from what it writes.
 | `v2-collection.ome.zarr` | `collection-unsharded` as OME-NGFF 0.4 on Zarr v2, in Fortran order, big-endian, with `.` between chunk coordinates | A Zarr v2 collection, and the v2 options that change how a chunk is laid out. |
 | `v3-level-paths.ome.zarr` | `twin-sharded` with its level arrays named `s0`, `s1`, `s2` | Levels found by their multiscale path, not their index, through shards. |
 | `v2-consolidated.ome.zarr` | `collection-unsharded` as OME-NGFF 0.4 on Zarr v2, with levels named `s0` and `s1` and every metadata document consolidated into `.zmetadata` | Named levels in a collection, and an open that reads only the root's metadata. |
+| `v3-consolidated.ome.zarr` | `collection-unsharded` with levels named `s0` and `s1` and every metadata document consolidated inline in the root `zarr.json` | The Zarr v3 form of consolidation. |
+| `dtype-int64.ome.zarr`, `dtype-uint64.ome.zarr`, `dtype-float16.ome.zarr` | 2D, 16×16, two levels, 8×8 chunks, in `int64` spanning ±6×10⁹, `uint64` reaching past 2⁶³, and `float16` spanning ±1000 | Data types past 32 bits and below float32, with values only their own type holds. |
 
-Sample values are `uint16` in every fixture. Unless the table says otherwise,
-the dataset is OME-Zarr 0.5 on Zarr v3 and its codec chain is `bytes`
-(little-endian) followed by `zstd`. A sharded fixture wraps that same chain in
-`sharding_indexed` with the index at the end of each shard. Each fixture in the
-last five rows holds the same samples as its twin.
+Unless the table says otherwise, sample values are `uint16`, the dataset is
+OME-Zarr 0.5 on Zarr v3, and its codec chain is `bytes` (little-endian)
+followed by `zstd`. A sharded fixture wraps that same chain in
+`sharding_indexed` with the index at the end of each shard. Each fixture from
+`v2-twin` to `v3-consolidated` holds the same samples as its twin.
 
 ## End-to-end checks
 
