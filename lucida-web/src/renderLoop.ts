@@ -405,8 +405,12 @@ export class RenderLoop implements TraceEnvironment {
    * explicitly between ticks, and a stale reading would understate it.
    */
   captureOutstanding(): Outstanding {
-    const { pendingUnclassified: _unclassified, ...outstanding } =
-      this.session.cpuCache.quiescenceInputs(createQuiescenceState());
+    const {
+      pendingUnclassified: _unclassified,
+      failedDetailChunks: _failedDetail,
+      failedCoarseChunks: _failedCoarse,
+      ...outstanding
+    } = this.session.cpuCache.quiescenceInputs(createQuiescenceState());
     return outstanding;
   }
 

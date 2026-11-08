@@ -11,7 +11,7 @@ import { VolumeViewer } from "./components/VolumeViewer.tsx";
 import { SliceViewer } from "./components/SliceViewer.tsx";
 import { LayerPanel } from "./components/LayerPanel.tsx";
 import { Minimap } from "./components/Minimap.tsx";
-import { PeerCursors, type CursorLabel } from "./components/PeerCursors.tsx";
+import { PeerCursorLayer } from "./components/PeerCursorLayer.tsx";
 import { AnnotationOverlay } from "./components/AnnotationOverlay.tsx";
 import type { Annotation, AnnotationOverlayHandle } from "./components/annotationDocument.ts";
 import { AnnotationOverlay3D } from "./components/AnnotationOverlay3D.tsx";
@@ -19,6 +19,7 @@ import { AnnotationDraftOverlay } from "./components/AnnotationDraftOverlay.tsx"
 import { sceneClipDepth } from "./components/clipDepth.ts";
 import type { AnnotationDraft } from "./components/annotationDraft.ts";
 import type { Tool } from "./components/annotationTool.ts";
+import type { ClientPoint } from "./components/cameraProjection.ts";
 import { CommentsPanel } from "./components/CommentsPanel.tsx";
 import { countUnread, findMentionsOfMe } from "./components/mentionsOfMe.ts";
 import {
@@ -56,6 +57,7 @@ import {
 } from "./debug/logging.ts";
 import type { DatasetState } from "./types.ts";
 import { SceneStore } from "./sceneStore.ts";
+import { createEngine, EngineContext } from "./engine.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
 import { useDatasetSettings, type BridgeCallbacks, type DatasetCallbacks } from "./hooks/useDatasetSettings.ts";
@@ -278,6 +280,20 @@ function App({
     onWorkspaceArchived: onBackToDashboard,
   });
 
+  // One handle on the engine for the viewer's life. Every part is a ref, so
+  // this is built once.
+  const engine = useMemo(
+    () => createEngine({
+      store: sceneStore,
+      scene: scene.wasmSceneRef,
+      session: bridge.sessionRef,
+      client: render.clientRef,
+      loop: render.loopRef,
+      canvas: render.canvasRef,
+    }),
+    [sceneStore, scene.wasmSceneRef, bridge.sessionRef, render.clientRef, render.loopRef, render.canvasRef],
+  );
+
   // A snapshot creates the scene, or replaces it, without a write the store
   // would hear.
   useEffect(() => {
@@ -330,7 +346,7 @@ function App({
   // Saved-view wiring. Must come after `useBridge`, whose functions the applier
   // needs, and before the savedViewHooksRef populate below.
   const savedViewSync = useSavedViewSync({
-    getScene: () => scene.wasmSceneRef.current,
+    getScene: engine.scene,
     sendOpenRemoteDataset: bridge.sendOpenRemoteDataset,
     sendCommand: bridge.sendCommand,
     // Any local or remote scene mutation bumps one of these. Viewport-only
@@ -407,18 +423,22 @@ function App({
 
   // Every viewport mutation also calls urlSync.notifyChange(), because
   // changeTick doesn't bump on viewport-only changes like pan or contrast.
-  // Threaded to every caller of bridge.emitPresence.
+  // Threaded to every caller of bridge.emitPresence. Both are keyed on stable
+  // callbacks alone: the canvas viewers bind their listeners to them, and a
+  // peer message must not rebind those.
+  const { emitPresence, emitDatasetPresence, breakFollow } = bridge;
+  const notifySavedViewChange = savedViewSync.notifyChange;
   const emitPresenceWithUrl = useCallback(() => {
-    bridge.emitPresence();
-    savedViewSync.notifyChange();
+    emitPresence();
+    notifySavedViewChange();
     // The live view no longer matches the opened saved view. Guarded so it
     // doesn't re-render on every pan frame.
     setCurrentOpenSavedViewId((prev) => (prev === null ? prev : null));
-  }, [bridge, savedViewSync]);
+  }, [emitPresence, notifySavedViewChange]);
   const emitDatasetPresenceWithUrl = useCallback(() => {
-    bridge.emitDatasetPresence();
-    savedViewSync.notifyChange();
-  }, [bridge, savedViewSync]);
+    emitDatasetPresence();
+    notifySavedViewChange();
+  }, [emitDatasetPresence, notifySavedViewChange]);
 
   // Fetch the roster once per workspace; see `workspaceMembers`.
   useEffect(() => {
@@ -628,7 +648,7 @@ function App({
     void collapseDeepLinkHash();
   }, [collapseDeepLinkHash]);
   useAnnotationDeepLink({
-    getScene: () => scene.wasmSceneRef.current,
+    getScene: engine.scene,
     docVersion: remoteDocumentVersion,
     onRestore: restoreAnnotationDeepLinkPin,
     onCollapseHash: handleDeepLinkCollapse,
@@ -757,64 +777,6 @@ function App({
     followTarget: bridge.followTarget,
     followTargetRef: bridge.followTargetRef,
   });
-
-  const [cursorLabels, setCursorLabels] = useState<CursorLabel[]>([]);
-
-  // Sync peer cursor geometry to GPU worker
-  useEffect(() => {
-    const client = render.clientRef.current;
-    const ws = scene.wasmSceneRef.current;
-    if (!client || !ws) {
-      return;
-    }
-    if (bridge.peers.size === 0) {
-      client.updateCursorData(new Float32Array(0), 0);
-      // Reset on no-peers — the peers Map IS the external state we sync to.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setCursorLabels([]);
-      return;
-    }
-
-    const peersArr = Array.from(bridge.peers.values())
-      .filter(p => {
-        if (p.cursor !== null) return true;
-        // Hide defaulted cursor for peers in a follow relationship with us
-        return !(p.following === bridge.myId || bridge.followTarget === p.client_id);
-      })
-      .map(p => {
-        const mode = (p.camera as { mode?: string })?.mode ?? "slice";
-        if (p.cursor === null) {
-          const center = mode === "slice"
-            ? (p.camera as { center?: [number, number] })?.center ?? [0, 0]
-            : [0.5, 0.5];
-          return { id: p.client_id, cursor: center, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: true };
-        }
-        return { id: p.client_id, cursor: p.cursor, mode, camera: p.camera, view_z: p.view?.z_range?.start, label_only: false };
-      });
-    const canvasEl = render.canvasRef.current;
-    const dpr = window.devicePixelRatio || 1;
-    const screenW = Math.round((canvasEl?.clientWidth ?? 800) * dpr);
-    const screenH = Math.round((canvasEl?.clientHeight ?? 600) * dpr);
-    const resultJson = ws.compute_peer_cursors(JSON.stringify(peersArr), bridge.myId, screenW, screenH);
-    const result = JSON.parse(resultJson) as {
-      gpu: number[][];
-      labels: { id: number; sx: number; sy: number }[];
-    };
-
-    if (result.gpu.length > 0) {
-      const flat = new Float32Array(result.gpu.length * 16);
-      for (let i = 0; i < result.gpu.length; i++) {
-        flat.set(result.gpu[i], i * 16);
-      }
-      client.updateCursorData(flat, result.gpu.length);
-    } else {
-      client.updateCursorData(new Float32Array(0), 0);
-    }
-
-    setCursorLabels(result.labels);
-    requestRender(render.loopRef.current, "peer_cursors");
-    // canvasSize re-projects the labels after a panel moves the canvas edges.
-  }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef, canvasSize]);
 
   // The volume viewer owns the fly toggle: entering fly mode also sets the fly
   // speed from the volume's size and shows the fly hint, which a bare switch
@@ -987,7 +949,6 @@ function App({
     return spec?.name ?? activeId;
   }, [selectedDatasetId, layoutRegistry]);
   const savedViewApplier = savedViewSync.applier;
-  const notifySavedViewChange = savedViewSync.notifyChange;
   const handleOpenWorkspaceSavedView = useCallback(async (view: SavedView, savedViewId: string) => {
     revealCanvas();
     await savedViewApplier.apply(view);
@@ -1011,12 +972,15 @@ function App({
   // the active row (an explored view is ephemeral until bookmarked).
   const applyExploreView = useCallback(
     async (view: SavedView) => {
-      bridge.breakFollow();
+      breakFollow();
       await savedViewApplier.apply(view);
       notifySavedViewChange();
     },
-    [bridge, savedViewApplier, notifySavedViewChange],
+    [breakFollow, savedViewApplier, notifySavedViewChange],
   );
+
+  const openContextMenu2d = useCallback((at: ClientPoint) => overlay2dRef.current?.openContextMenu(at), []);
+  const openContextMenu3d = useCallback((at: ClientPoint) => overlay3dRef.current?.openContextMenu(at), []);
 
   const hasData = layers.layerInfos.length > 0;
 
@@ -1260,6 +1224,7 @@ function App({
   // it, so a phone turned sideways never remounts the canvas the render
   // worker draws into, nor the minimap's.
   return (
+    <EngineContext.Provider value={engine}>
     <div className="lc-shell" data-capture={captureSurface || undefined} data-layout={phone ? "phone" : undefined}>
       {!captureSurface &&
         (phone ? (
@@ -1396,7 +1361,7 @@ function App({
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 annotationDraftRef={annotationDraftRef}
-                onLongPress={(at) => overlay2dRef.current?.openContextMenu(at)}
+                onLongPress={openContextMenu2d}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "2d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
@@ -1440,7 +1405,7 @@ function App({
                 sendCommand={bridge.sendCommand}
                 onDocumentChanged={bumpRemoteDocumentVersion}
                 annotationDraftRef={annotationDraftRef}
-                onLongPress={(at) => overlay3dRef.current?.openContextMenu(at)}
+                onLongPress={openContextMenu3d}
               />
             )}
             {datasetsVersion > 0 && dims.viewMode === "3d" && selectedDatasetId && scene.wasmScene && render.canvasRef.current && (
@@ -1464,20 +1429,19 @@ function App({
                 onGoToAuthorView={handleGoToAuthorView}
               />
             )}
-            {bridge.peers.size > 0 && scene.wasmScene && render.canvasRef.current && (
-              <PeerCursors
-                peers={bridge.peers}
-                myId={bridge.myId}
-                followTarget={bridge.followTarget}
-                wasmSceneRef={scene.wasmSceneRef}
-                canvas={render.canvasRef.current}
-                viewMode={dims.viewMode}
-                z={dims.z}
-                t={dims.t}
-                c={dims.c}
-                cursorLabels={cursorLabels}
-              />
-            )}
+            <PeerCursorLayer
+              peers={bridge.peers}
+              myId={bridge.myId}
+              followTarget={bridge.followTarget}
+              viewMode={dims.viewMode}
+              z={dims.z}
+              t={dims.t}
+              c={dims.c}
+              wasmSceneRef={scene.wasmSceneRef}
+              clientReady={render.clientReady}
+              wasmReady={scene.wasmReady}
+              canvasSize={canvasSize}
+            />
             {showDebugOverlays && (
               <Suspense fallback={null}>
                 <DebugOverlays
@@ -1547,6 +1511,7 @@ function App({
       )}
       {!captureSurface && <KeyboardHelp />}
     </div>
+    </EngineContext.Provider>
   );
   /* eslint-enable react-hooks/refs */
 }

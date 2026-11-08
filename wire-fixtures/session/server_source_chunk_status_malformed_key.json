@@ -1,0 +1,9 @@
+{
+  "type": "source_chunk_status",
+  "dataset_id": "wds-0f3a",
+  "image_id": "multiscale-0",
+  "key": "0/1/0/1",
+  "status": "failed_permanent",
+  "kind": "malformed_key",
+  "message": "a chunk key has 6 parts, level/t/c/z/y/x, and this one has 4"
+}

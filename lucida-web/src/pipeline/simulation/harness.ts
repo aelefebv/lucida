@@ -179,6 +179,11 @@ export interface PhaseOutcome {
    * phase does not count as settled.
    */
   held: string[];
+  /**
+   * Wanted chunks the source failed for good, each with the reason it gave.
+   * A view settles without them, and this is how the run names them.
+   */
+  failed: string[];
   /** The auto-contrast fits handed out in this phase, in order. */
   fits: ContrastFitRecord[];
 }
@@ -573,6 +578,10 @@ class Simulation {
       missingGpu,
       resent: resent.map((r) => r.text),
       held: this.held.slice(heldBefore),
+      failed: this.cpuCache
+        .failedWantedChunks()
+        .map(({ chunk, failure }) => `${chunk}: ${failure ?? "failed with no reason given"}`)
+        .sort(),
       fits: this.fits.slice(fitsBefore),
     };
   }
@@ -656,6 +665,7 @@ function formatReport(name: string, dpr: number, phases: PhaseOutcome[]): string
       ...formatKeys("wanted by the worker, not on the GPU", p.missingGpu),
       ...formatKeys(`sent to the worker ${RESENT_THRESHOLD} or more times`, p.resent),
       ...formatKeys("held by the uploader to cut a feedback loop", p.held),
+      ...formatKeys("failed for good, so the view settles without them", p.failed),
     );
   }
   return lines.join("\n");
