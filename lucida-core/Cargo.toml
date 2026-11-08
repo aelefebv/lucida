@@ -3,6 +3,7 @@ name = "lucida-core"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
+publish = false
 
 [lib]
 crate-type = ["cdylib", "rlib"]
