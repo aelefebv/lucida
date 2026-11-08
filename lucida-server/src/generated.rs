@@ -106,6 +106,10 @@ impl Default for GeneratedSchedulingConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GeneratedSchedulingLane {
     Visible,
+    /// Asked for by a chunk request that no live hint names. Still demand,
+    /// but possibly from a view the client has since left, so it yields to
+    /// what the latest hints call visible.
+    Requested,
     Predicted,
     Background,
 }
@@ -114,8 +118,9 @@ impl GeneratedSchedulingLane {
     fn rank(self) -> u8 {
         match self {
             GeneratedSchedulingLane::Visible => 0,
-            GeneratedSchedulingLane::Predicted => 1,
-            GeneratedSchedulingLane::Background => 2,
+            GeneratedSchedulingLane::Requested => 1,
+            GeneratedSchedulingLane::Predicted => 2,
+            GeneratedSchedulingLane::Background => 3,
         }
     }
 }
@@ -137,6 +142,7 @@ pub struct GeneratedWorkItem {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GeneratedSchedulerTelemetry {
     pub queued_visible: usize,
+    pub queued_requested: usize,
     pub queued_predicted: usize,
     pub queued_background: usize,
     pub running: usize,
@@ -175,6 +181,11 @@ struct GeneratedCoarseServiceInner {
 struct GeneratedSchedulerState {
     shutdown_reason: Option<String>,
     interests: HashMap<(ClientId, DatasetId), ViewerInterestHint>,
+    /// The clients with a chunk request waiting on each work key. A request
+    /// keeps its work alive until the work finishes, whatever the hints say,
+    /// because a client asks for a chunk once and then waits for the update
+    /// that says it is ready.
+    requested: HashMap<GeneratedWorkKey, HashSet<ClientId>>,
     queued: VecDeque<GeneratedWorkItem>,
     queued_keys: HashMap<GeneratedWorkKey, GeneratedSchedulingLane>,
     running: HashSet<GeneratedWorkKey>,
@@ -1229,6 +1240,7 @@ impl GeneratedCoarseService {
                 state.shutdown_reason = Some(reason.to_string());
                 state.canceled = state.canceled.saturating_add(canceled_queued);
                 state.interests.clear();
+                state.requested.clear();
                 state.queued.clear();
                 state.queued_keys.clear();
                 canceled_queued
@@ -1253,7 +1265,15 @@ impl GeneratedCoarseService {
         self.inner.state.lock().await.shutdown_reason.is_some()
     }
 
-    pub async fn enqueue_chunk_request(&self, image_id: &ImageId, level_index: u32, key: &str) {
+    /// A client asked for a generated chunk. Its work stays queued until it
+    /// finishes or the client disconnects.
+    pub async fn enqueue_chunk_request(
+        &self,
+        client_id: ClientId,
+        image_id: &ImageId,
+        level_index: u32,
+        key: &str,
+    ) {
         let Some(plan) = self.inner.plans.get(&(image_id.clone(), level_index)) else {
             return;
         };
@@ -1263,8 +1283,22 @@ impl GeneratedCoarseService {
             level_index,
             key: key.to_string(),
         };
-        self.enqueue_work(work_key, GeneratedSchedulingLane::Visible)
-            .await;
+        let mut state = self.inner.state.lock().await;
+        if state.shutdown_reason.is_some() {
+            return;
+        }
+        // Finished work has nothing left to wait on, so recording the request
+        // would leave it outstanding until the client disconnects.
+        if !state.completed_keys.contains(&work_key) {
+            state
+                .requested
+                .entry(work_key.clone())
+                .or_default()
+                .insert(client_id);
+        }
+        enqueue_work_locked(&mut state, work_key, GeneratedSchedulingLane::Requested);
+        drop(state);
+        self.inner.notify.notify_waiters();
     }
 
     pub async fn apply_viewer_interest(
@@ -1300,6 +1334,10 @@ impl GeneratedCoarseService {
             return;
         }
         state.interests.retain(|(cid, _), _| *cid != client_id);
+        state.requested.retain(|_, clients| {
+            clients.remove(&client_id);
+            !clients.is_empty()
+        });
         prune_stale_queued_locked(&mut state, &self.inner.plans, current_unix_millis());
         drop(state);
         self.inner.notify.notify_waiters();
@@ -1366,6 +1404,10 @@ impl GeneratedCoarseService {
             let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
             let mut state = self.inner.state.lock().await;
             state.running.remove(&item.work_key);
+            // A finished run settles the requests that waited on it. Each
+            // client learns the outcome from the availability update, and one
+            // still missing the chunk asks again.
+            state.requested.remove(&item.work_key);
             state.materialization_latency_samples =
                 state.materialization_latency_samples.saturating_add(1);
             state.materialization_latency_total_ms = state
@@ -1635,7 +1677,7 @@ fn wanted_work_keys_locked(
     plans: &HashMap<(ImageId, u32), GeneratedCoarsePlan>,
     now_ms: u64,
 ) -> HashSet<GeneratedWorkKey> {
-    let mut wanted = HashSet::new();
+    let mut wanted: HashSet<GeneratedWorkKey> = state.requested.keys().cloned().collect();
     for interest in state.interests.values() {
         if interest.timestamp_ms.saturating_add(interest.ttl_ms) < now_ms {
             continue;
@@ -1701,6 +1743,7 @@ fn telemetry_locked(
     for item in &state.queued {
         match item.lane {
             GeneratedSchedulingLane::Visible => telemetry.queued_visible += 1,
+            GeneratedSchedulingLane::Requested => telemetry.queued_requested += 1,
             GeneratedSchedulingLane::Predicted => telemetry.queued_predicted += 1,
             GeneratedSchedulingLane::Background => telemetry.queued_background += 1,
         }
@@ -3831,6 +3874,104 @@ mod tests {
         let telemetry = service.telemetry().await;
         assert_eq!(telemetry.queued_visible, 0);
         assert_eq!(telemetry.canceled, 1);
+    }
+
+    /// A plan with four generated chunks, `1/0/0/0/{0,1}/{0,1}`.
+    fn four_chunk_plan() -> (DatasetManifest, GeneratedCoarsePlan) {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 1, 512, 512], [1, 1, 1, 256, 256])],
+            None,
+            DataType::Uint16,
+        );
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            GeneratedCoarseConfig {
+                target_long_axis: 512,
+                chunk_long_axis: 256,
+                max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+            },
+        )
+        .pop()
+        .expect("plan");
+        (manifest, plan)
+    }
+
+    #[tokio::test]
+    async fn chunk_request_outlives_an_expired_hint() {
+        let (manifest, plan) = four_chunk_plan();
+        let service =
+            service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
+
+        service
+            .enqueue_chunk_request(1, &plan.image_id, plan.level_index, "1/0/0/0/0/0")
+            .await;
+        // An expired hint from the same client prunes everything no live
+        // interest names.
+        let mut hint = interest(
+            plan.dataset_id.clone(),
+            plan.image_id.clone(),
+            "1/0/0/0/0/1",
+            ViewerInterestLane::Visible,
+            current_unix_millis().saturating_sub(60_000),
+        );
+        hint.ttl_ms = 1;
+        service.apply_viewer_interest(1, hint).await;
+
+        assert_eq!(service.telemetry().await.queued_requested, 1);
+        let running = service.pop_next_work_item().await.expect("work");
+        assert_eq!(running.lane, GeneratedSchedulingLane::Requested);
+        assert_eq!(running.work_key.key, "1/0/0/0/0/0");
+        assert!(!service.should_cancel(&running).await);
+    }
+
+    #[tokio::test]
+    async fn disconnect_drops_requested_work() {
+        let (manifest, plan) = four_chunk_plan();
+        let service =
+            service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
+
+        for client in [1, 2] {
+            service
+                .enqueue_chunk_request(client, &plan.image_id, plan.level_index, "1/0/0/0/0/0")
+                .await;
+        }
+        service.remove_client_interest(1).await;
+        assert_eq!(service.telemetry().await.queued_requested, 1);
+
+        service.remove_client_interest(2).await;
+        let telemetry = service.telemetry().await;
+        assert_eq!(telemetry.queued_requested, 0);
+        assert_eq!(telemetry.canceled, 1);
+    }
+
+    #[tokio::test]
+    async fn hinted_visible_work_runs_before_requested_work() {
+        let (manifest, plan) = four_chunk_plan();
+        let service =
+            service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
+
+        service.enqueue_background_fill().await;
+        service
+            .enqueue_chunk_request(1, &plan.image_id, plan.level_index, "1/0/0/0/0/0")
+            .await;
+        service
+            .apply_viewer_interest(
+                1,
+                interest(
+                    plan.dataset_id.clone(),
+                    plan.image_id.clone(),
+                    "1/0/0/0/1/1",
+                    ViewerInterestLane::Visible,
+                    current_unix_millis(),
+                ),
+            )
+            .await;
+
+        let first = service.pop_next_work_item().await.expect("work");
+        assert_eq!(first.work_key.key, "1/0/0/0/1/1");
+        let second = service.pop_next_work_item().await.expect("work");
+        assert_eq!(second.lane, GeneratedSchedulingLane::Requested);
+        assert_eq!(second.work_key.key, "1/0/0/0/0/0");
     }
 
     #[tokio::test]
