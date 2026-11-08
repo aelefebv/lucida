@@ -1459,6 +1459,15 @@ export class CpuCache {
     );
   }
 
+  /**
+   * A resident chunk's samples from either tier, without the delivery copy
+   * {@link getCachedChunk} makes. Auto-contrast checks every chunk it reads
+   * on each tick until they are all resident.
+   */
+  cachedSamples(entityId: string, chunkKey: string): { data: ArrayBuffer; dataType: string } | undefined {
+    return this.chunkStore.get(entityId, chunkKey) ?? this.overviewStore.get(entityId, chunkKey);
+  }
+
   /** Searches detail then overview; null when neither has the chunk. */
   getCachedChunkTier(entityId: string, chunkKey: string): EvictionTier | null {
     const entry =
