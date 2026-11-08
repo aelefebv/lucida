@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WasmScene } from "lucida-core";
-import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, overviewLayerParams, readMemberRenderMatrices, readMinimapOverviewEpochs, tickMinimap, tickMinimapOverview } from "./minimapPath.ts";
+import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, overviewKeyFor, overviewLayerParams, readMemberRenderMatrices, readMinimapOverviewEpochs, tickMinimap, tickMinimapOverview } from "./minimapPath.ts";
 import { resolvedLayer, resolvedLayers, shownChannel } from "./resolvedLayerFixtures.ts";
 import type { MinimapState } from "./minimapPath.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
@@ -780,6 +780,9 @@ describe("tickMinimap overview/overlay split", () => {
   });
 });
 
+/** A CPU cache that never failed a chunk. */
+const noFailures = { failedChunksVersion: () => 0, failedChunks: () => [] };
+
 describe("tickMinimapOverview throttle", () => {
   it("throttles the O(members) seed-scan to the scan interval", () => {
     // The seed-scan must run at most once per interval, not every rAF.
@@ -791,6 +794,7 @@ describe("tickMinimapOverview throttle", () => {
     const ctx = {
       scene: { resolved_layers: tSpy },
       datasets: new Map(),
+      cpuCache: noFailures,
     } as unknown as TickContext;
 
     tickMinimapOverview(ctx, state, 1000); // first scan runs (never scanned before)
@@ -814,6 +818,7 @@ describe("tickMinimapOverview throttle", () => {
     const ctx = {
       scene: { t: () => 0, resolved_layers: () => "[]" },
       datasets: new Map(),
+      cpuCache: noFailures,
     } as unknown as TickContext;
 
     tickMinimapOverview(ctx, state, 1000); // establishes lastOverviewScanMs
@@ -835,7 +840,10 @@ describe("tickMinimapOverview throttle", () => {
     const ctx = {
       scene: { t: () => 0, resolved_layers: () => "[]" },
       datasets: new Map(),
-      cpuCache: { getCachedChunk: (memberId: string, key: string) => cache.get(`${memberId}/${key}`) ?? null },
+      cpuCache: {
+        ...noFailures,
+        getCachedChunk: (memberId: string, key: string) => cache.get(`${memberId}/${key}`) ?? null,
+      },
     } as unknown as TickContext;
 
     tickMinimapOverview(ctx, state, 1000); // establishes lastOverviewScanMs
@@ -852,5 +860,54 @@ describe("tickMinimapOverview throttle", () => {
 
     state.pendingFetch.clear(); // seeding complete
     expect(tickMinimapOverview(ctx, state, 1040)).toBe(false); // skipped → loop may quiesce
+  });
+});
+
+describe("tickMinimapOverview with a chunk that failed for good", () => {
+  it("opens the member's overview once with no chunk, so the worker can draw it hatched", () => {
+    const state = createMinimapState();
+    state.enabled = true;
+    const uploads: { overview: string; chunks: number; imageId: string; level: number }[] = [];
+    const ctx = {
+      scene: { t: () => 0, resolved_layers: () => "[]" },
+      datasets: new Map([
+        [
+          "ds",
+          {
+            manifest: {
+              images: [
+                {
+                  image_id: "ds",
+                  owner: "ds",
+                  multiscale: {
+                    data_type: "Uint16",
+                    coarse_level_index: 1,
+                    levels: [
+                      { level_index: 0, shape: [1, 1, 1, 4, 4], chunk_shape: [1, 1, 1, 4, 4] },
+                      { level_index: 1, shape: [1, 1, 1, 2, 2], chunk_shape: [1, 1, 1, 2, 2] },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      ]),
+      cpuCache: {
+        getCachedChunk: () => null,
+        failedChunksVersion: () => 1,
+        failedChunks: () => [{ datasetId: "ds", imageId: "ds", chunkKey: "1/0/0/0/0/0", failure: null }],
+      },
+      client: {
+        minimapUploadOverviewChunksForLayer: (overview: string, chunks: unknown[], imageId: string, level: number) => {
+          uploads.push({ overview, chunks: chunks.length, imageId, level });
+        },
+      },
+    } as unknown as TickContext;
+
+    tickMinimapOverview(ctx, state, 1000);
+    tickMinimapOverview(ctx, state, 2000);
+
+    expect(uploads).toEqual([{ overview: overviewKeyFor("ds", 0), chunks: 0, imageId: "ds", level: 1 }]);
   });
 });

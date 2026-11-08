@@ -6,6 +6,8 @@ import type {
   VolumeLayerParams,
   SliceLayerParams,
   MinimapLayerParams,
+  MinimapRenderMessage,
+  ThumbnailRenderMessage,
   WorkerToMainMessage,
   CaptureFailure,
   FrameCaptureResult,
@@ -37,6 +39,11 @@ import type {
 import { tokenColor } from "../theme/tokenColors.ts";
 import type { ResolvedColor } from "../theme/tokens.ts";
 import { readDeviceMemoryGiB } from "../deviceBudget.ts";
+
+/** The page's device pixels per CSS pixel, or 1 where there is no window. */
+function pagePixelRatio(): number {
+  return typeof devicePixelRatio === "number" && devicePixelRatio > 0 ? devicePixelRatio : 1;
+}
 
 /** What the render worker says about its GPU device. */
 export type GpuStatus = GpuErrorMessage | GpuDeviceRestoredMessage | GpuFailedMessage;
@@ -622,7 +629,9 @@ export class RenderClient implements UploadClient {
   }
 
   minimapRender(layers: MinimapLayerParams[], invViewProj: Float32Array, eye: Float32Array, canvasW: number, canvasH: number) {
-    this.worker.postMessage({ type: "minimapRender", layers, invViewProj, eye, canvasW, canvasH });
+    this.worker.postMessage({
+      type: "minimapRender", layers, invViewProj, eye, canvasW, canvasH, pixelRatio: pagePixelRatio(),
+    } satisfies MinimapRenderMessage);
   }
 
   /**
@@ -645,7 +654,9 @@ export class RenderClient implements UploadClient {
     const id = this.thumbnailSeq++;
     return new Promise<ImageBitmap | null>((resolve) => {
       this.thumbnailPending.set(id, resolve);
-      this.worker.postMessage({ type: "thumbnailRender", id, layers, invViewProj, eye, size });
+      this.worker.postMessage({
+        type: "thumbnailRender", id, layers, invViewProj, eye, size, pixelRatio: pagePixelRatio(),
+      } satisfies ThumbnailRenderMessage);
     });
   }
 
@@ -688,6 +699,8 @@ export class RenderClient implements UploadClient {
   minimapUploadOverviewChunksForLayer(
     datasetId: string,
     chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
+    imageId: string,
+    level: number,
     t: number,
     c: number,
     levelWidth: number,
@@ -710,6 +723,7 @@ export class RenderClient implements UploadClient {
         type: "minimapUploadOverviewChunksForLayer",
         datasetId,
         chunks: workerChunks,
+        imageId, level,
         t, c,
         levelWidth, levelHeight, levelDepth,
         chunkX, chunkY, chunkZ,

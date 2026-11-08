@@ -193,7 +193,7 @@ describe("removing a dataset", () => {
     await dispatchMessage(ctx, cold("ds1", { visibleChannels: [0, 1] }));
     await dispatchMessage(ctx, chunkAt(`ds1-img:ch0`));
     expect(ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!.slots.size).toBe(1);
-    getOrCreateLabelSlicePool(ctx, "label", "ds1", 64, 64);
+    getOrCreateLabelSlicePool(ctx, "label", "ds1", 64, 64, 32, 32);
     getOrCreateLabelVolumePool(ctx, "label", "ds1", 64, 64, 32, 32, 32, 32);
     expect(gpu.live().textures).toBeGreaterThan(baseline.textures);
 
