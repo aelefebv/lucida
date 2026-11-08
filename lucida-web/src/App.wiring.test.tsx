@@ -12,7 +12,7 @@
 // still run, so the planner-visible effect is observable too.
 
 import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from "vitest";
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 // Boundary doubles. The WASM scene is a small stateful fake: it stores the
@@ -33,6 +33,11 @@ vi.mock("lucida-core", () => {
     view = { z: 0, t: 0 };
     mode = "slice";
     epochCounts = { view: 0, selection: 0 };
+    // The camera and the layer order and opacities, as presence carries them
+    // between clients.
+    camera: unknown = { mode: "slice", center: [0, 0], zoom: 1 };
+    order: string[] | null = null;
+    opacity: Record<string, number> = {};
     constructor(_w?: number, _h?: number) {
       FakeWasmScene.instances.push(this);
     }
@@ -45,6 +50,8 @@ vi.mock("lucida-core", () => {
       if (cmd.type === "set_z") this.view.z = cmd.z;
       if (cmd.type === "set_z_range") this.view.z = cmd.start;
       if (cmd.type === "set_t") this.view.t = cmd.t;
+      if (cmd.type === "set_dataset_order") this.order = cmd.order;
+      if (cmd.type === "set_dataset_opacity") this.opacity[cmd.dataset_id] = cmd.opacity;
       if (typeof cmd.type === "string" && cmd.type.startsWith("set_mode_")) {
         this.mode = { set_mode_slice: "slice", set_mode_arcball: "arcball", set_mode_fly: "fly" }[cmd.type as string] ?? this.mode;
         this.epochCounts.view++;
@@ -52,10 +59,10 @@ vi.mock("lucida-core", () => {
       this.epochCounts.selection++;
     }
     dataset_order() {
-      return JSON.stringify(Object.keys(this.doc.manifests ?? {}));
+      return JSON.stringify(this.order ?? Object.keys(this.doc.manifests ?? {}));
     }
     dataset_ids() {
-      return this.dataset_order();
+      return JSON.stringify(Object.keys(this.doc.manifests ?? {}));
     }
     pinnable_levels() {
       return Uint32Array.from([0]);
@@ -118,8 +125,8 @@ vi.mock("lucida-core", () => {
     dataset_fit_bounds(_id: string) { return new Float64Array([0, 0, 0, 8, 8, 0]); }
     export_presence() {
       return JSON.stringify({
-        camera: { mode: "slice", center: [0, 0], zoom: 1 },
-        view: { z_range: { start: 0, end: 1 }, t: 0 },
+        camera: this.camera,
+        view: { z_range: { start: this.view.z, end: this.view.z + 1 }, t: this.view.t },
         display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
       });
     }
@@ -127,13 +134,19 @@ vi.mock("lucida-core", () => {
     // object makes every capture throw and no-op, and a "nothing was
     // persisted" assertion would pass for the wrong reason.
     export_dataset_presence() {
+      const settings: Record<string, { opacity: number }> = {};
+      for (const [id, opacity] of Object.entries(this.opacity)) settings[id] = { opacity };
       return JSON.stringify({
-        dataset_order: Object.keys(this.doc.manifests ?? {}),
-        dataset_settings: {},
+        dataset_order: JSON.parse(this.dataset_order()),
+        dataset_settings: settings,
       });
     }
     import_presence(json: string) {
-      const presence = JSON.parse(json) as { view?: { z_range: { start: number }; t: number } };
+      const presence = JSON.parse(json) as {
+        camera?: unknown;
+        view?: { z_range: { start: number }; t: number };
+      };
+      if (presence.camera) this.camera = presence.camera;
       if (presence.view) {
         this.view.z = presence.view.z_range.start;
         this.view.t = presence.view.t;
@@ -141,7 +154,17 @@ vi.mock("lucida-core", () => {
       this.epochCounts.view++;
       this.epochCounts.selection++;
     }
-    import_dataset_presence(_json: string) {}
+    import_dataset_presence(json: string) {
+      const presence = JSON.parse(json) as {
+        dataset_order: string[];
+        dataset_settings: Record<string, { opacity?: number }>;
+      };
+      if (presence.dataset_order.length > 0) this.order = presence.dataset_order;
+      for (const [id, s] of Object.entries(presence.dataset_settings)) {
+        if (s.opacity !== undefined) this.opacity[id] = s.opacity;
+      }
+      this.epochCounts.selection++;
+    }
     compute_peer_cursors() { return JSON.stringify({ gpu: [], labels: [] }); }
     frame(_width: number, _height: number) { return false; }
     explore() { return JSON.stringify({ error: "unavailable" }); }
@@ -323,10 +346,11 @@ import App from "./App.tsx";
 import "./hud/Hud.tsx";
 import "./monitor/MonitorDock.tsx";
 import { AuthSessionContext } from "./auth/AuthSession.ts";
-import { Bridge, type BridgeHandlers } from "./bridge.ts";
+import { Bridge, type BridgeHandlers, type PresenceState } from "./bridge.ts";
 import { WasmScene } from "lucida-core";
+import { SessionController } from "./sessionController.ts";
 import { getSceneSettings } from "./tickCommon.ts";
-import { updateWorkspaceLastView } from "./workspaceApi.ts";
+import { getWorkspaceUserState, updateWorkspaceLastView } from "./workspaceApi.ts";
 import {
   __resetPreferencesForTesting,
   developerToolsPreference,
@@ -347,13 +371,22 @@ const MockedBridge = Bridge as unknown as {
     handlers: BridgeHandlers;
     sendCommand: ReturnType<typeof vi.fn>;
     sendFollow: ReturnType<typeof vi.fn>;
+    sendPresence: ReturnType<typeof vi.fn>;
+    sendDatasetPresence: ReturnType<typeof vi.fn>;
   }>;
 };
+type FakeSceneInstance = {
+  commands: Array<Record<string, unknown>>;
+  doc: unknown;
+  view: { z: number; t: number };
+  camera: unknown;
+  order: string[] | null;
+  opacity: Record<string, number>;
+  compute_peer_cursors: () => string;
+};
 const FakeScene = WasmScene as unknown as {
-  instances: Array<{
-    commands: Array<Record<string, unknown>>;
-    doc: unknown;
-  }>;
+  new (): FakeSceneInstance;
+  instances: FakeSceneInstance[];
 };
 
 function makeManifest(datasetId: string, channels = 1) {
@@ -546,7 +579,7 @@ describe("App wiring: layout switch (the #780 class)", () => {
 describe("App wiring: annotation-view restore fan-out", () => {
   it("a #a= deep-link restore fires the full view-restore intent once", async () => {
     window.location.hash = "#a=pin-1";
-    const { scene } = await mountWithSnapshot(
+    const { bridge, scene } = await mountWithSnapshot(
       documentJson(["wds-1"], { "wds-1": [makePinWithView("pin-1")] }),
     );
 
@@ -560,6 +593,9 @@ describe("App wiring: annotation-view restore fan-out", () => {
       .mocked(invalidateAfterViewRestore)
       .mock.calls.filter(([, source]) => source === "annotation_view_restore");
     expect(restoreCalls).toHaveLength(1);
+    // Peers hear the restored camera and the restored layer display.
+    expect(JSON.parse(bridge.sendPresence.mock.lastCall![0] as string).view.z_range.start).toBe(1);
+    expect(bridge.sendDatasetPresence).toHaveBeenCalled();
   });
 });
 
@@ -808,6 +844,89 @@ describe("App wiring: the shell", () => {
   });
 });
 
+describe("App wiring: following after a restore", () => {
+  const datasets = ["wds-1", "wds-2"];
+  const restored = {
+    v: 1,
+    datasets: [],
+    active_layouts: {},
+    camera: { mode: "slice", center: [6, 2], zoom: 3, viewport: [800, 600] },
+    view: { z_range: { start: 2, end: 3 }, t: 0 },
+    display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
+    dataset_order: ["wds-2", "wds-1"],
+    dataset_settings: Object.fromEntries(datasets.map((id) => [id, {
+      visible: true,
+      opacity: id === "wds-2" ? 0.25 : 1,
+      contrast_min: 0,
+      contrast_max: 65535,
+      gamma: 1,
+      blend_mode: "alpha",
+    }])),
+  };
+
+  /** A second client that joins once the leader has restored, as a session
+   *  controller over its own scene: the server hands it the leader's last
+   *  reported presence in its snapshot. */
+  function joinAndFollow(leader: PresenceState) {
+    const scene = new FakeScene();
+    const follower = new SessionController({
+      workspaceId: "ws-1",
+      ensureScene: () => scene as never,
+      getScene: () => scene as never,
+      getLoop: () => null,
+      getViewportSize: () => null,
+      datasets: new Map(),
+      removeDatasetLocal: () => {},
+      getSavedViewHooks: () => null,
+      bumpLayerSettingsVersion: () => {},
+      initLayerMaps: () => {},
+      setSelectedDatasetId: () => {},
+      events: {
+        onConnectedChanged: () => {},
+        onSessionReadyChanged: () => {},
+        onSelfIdChanged: () => {},
+        onPeersChanged: () => {},
+        onFollowTargetChanged: () => {},
+        onRemoteDatasetActivity: () => {},
+        onSceneChanged: () => {},
+        onDatasetsChanged: () => {},
+        onRemoteDocumentChanged: () => {},
+        onWorkspaceArchived: () => {},
+        onAccessRevoked: () => {},
+        onCommandRejected: () => {},
+        onDatasetImportWarnings: () => {},
+      },
+    });
+    onTestFinished(() => follower.destroy());
+    const bridge = MockedBridge.instances[MockedBridge.instances.length - 1];
+    bridge.handlers.onSnapshot(1, documentJson(datasets), [leader], 2, {});
+    follower.follow(leader.client_id);
+    return scene;
+  }
+
+  it("a peer who follows after the last view was restored sees the restored view", async () => {
+    vi.mocked(getWorkspaceUserState).mockResolvedValueOnce({ last_view: restored } as never);
+    const { bridge, scene } = await mountWithSnapshot(documentJson(datasets));
+    await waitFor(() => expect(scene.view.z).toBe(2));
+    expect(bridge.sendPresence).toHaveBeenCalled();
+    expect(bridge.sendDatasetPresence).toHaveBeenCalled();
+
+    const leader: PresenceState = {
+      client_id: 1,
+      following: null,
+      cursor: null,
+      ...JSON.parse(bridge.sendPresence.mock.lastCall![0] as string),
+      ...JSON.parse(bridge.sendDatasetPresence.mock.lastCall![0] as string),
+    };
+    const followerScene = joinAndFollow(leader);
+
+    expect(followerScene.camera).toEqual(restored.camera);
+    expect(followerScene.view.z).toBe(2);
+    expect(followerScene.order).toEqual(["wds-2", "wds-1"]);
+    expect(followerScene.opacity["wds-2"]).toBe(0.25);
+  });
+});
+
 describe("App wiring: peer messages", () => {
   const peer = {
     client_id: 7,
@@ -821,15 +940,16 @@ describe("App wiring: peer messages", () => {
     identity: { display_name: "Ada Lovelace" },
   };
 
-  it("leave the canvas listeners and the frame clock alone, and render App once each", async () => {
+  it("leave the canvas listeners and the frame clock alone, and never render App", async () => {
     gpu.ready = true;
     const canvasBinds = vi.spyOn(HTMLCanvasElement.prototype, "addEventListener");
     const clockSubscribes = vi.spyOn(frameClock, "subscribe");
-    const { bridge } = await mountWithSnapshot(documentJson(["wds-1"]), [peer]);
+    const { bridge, scene } = await mountWithSnapshot(documentJson(["wds-1"]), [peer]);
     // The 2D viewer is up and has bound its listeners.
     expect(canvasBinds.mock.calls.some(([type]) => type === "wheel")).toBe(true);
     canvasBinds.mockClear();
     clockSubscribes.mockClear();
+    const cursorPlacements = vi.spyOn(scene, "compute_peer_cursors");
     appRenders.count = 0;
 
     const messages = 10;
@@ -840,11 +960,31 @@ describe("App wiring: peer messages", () => {
       await act(async () => {
         bridge.handlers.onPresenceUpdate?.(7, { ...peer.camera, center: [i, i] }, peer.view, peer.display);
       });
+      await act(async () => {
+        bridge.handlers.onDatasetPresenceUpdate?.(7, ["wds-1"], { "wds-1": { opacity: i / messages } });
+      });
     }
+    // The peer layer placed the cursors again for every one of them.
+    expect(cursorPlacements.mock.calls.length).toBeGreaterThanOrEqual(3 * messages);
+
+    // The avatars follow a peer arriving, following someone, and leaving.
+    const grace = { ...peer, client_id: 8, identity: { display_name: "Grace Hopper" } };
+    await act(async () => {
+      bridge.handlers.onPeerJoined?.(8, grace);
+    });
+    expect(screen.getByRole("button", { name: "Follow Grace Hopper" })).toBeTruthy();
+    await act(async () => {
+      bridge.handlers.onFollowChanged?.(8, 7);
+    });
+    expect(screen.getByRole("button", { name: "Grace Hopper is following someone" })).toBeTruthy();
+    await act(async () => {
+      bridge.handlers.onPeerLeft?.(8);
+    });
+    expect(screen.queryByRole("button", { name: /Grace Hopper/ })).toBeNull();
 
     expect(canvasBinds).not.toHaveBeenCalled();
     expect(clockSubscribes).not.toHaveBeenCalled();
-    expect(appRenders.count).toBeLessThanOrEqual(2 * messages);
+    expect(appRenders.count).toBe(0);
     canvasBinds.mockRestore();
     clockSubscribes.mockRestore();
   });
