@@ -85,6 +85,12 @@ Options:
     --dimension-separator S
                          The separator between chunk coordinates in a Zarr v2
                          chunk key: / (default) or a dot.
+    --level-prefix P     Name level L's array P followed by L, as the multiscale
+                         metadata gives it. Default empty, so the arrays are
+                         0, 1, 2, and so on.
+    --consolidated       Consolidate every metadata document into the root:
+                         `.zmetadata` on Zarr v2, `consolidated_metadata` in
+                         the root `zarr.json` on Zarr v3.
     --seed N             Seed for the picture. The same seed gives the same
                          samples whatever the layout. Default 0.
     --overwrite          Replace OUT if it exists.
@@ -174,6 +180,8 @@ class Options:
     endian: str = "little"
     checksum: bool = False
     dimension_separator: str = "/"
+    level_prefix: str = ""
+    consolidated: bool = False
     seed: int = 0
     overwrite: bool = False
 
@@ -279,6 +287,8 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     parser.add_argument("--endian", choices=("little", "big"), default="little", help="byte order of each sample (default little)")
     parser.add_argument("--checksum", action="store_true", help="end each chunk in a crc32c checksum (Zarr v3 only)")
     parser.add_argument("--dimension-separator", choices=("/", "."), default="/", help="Zarr v2 chunk key separator (default /)")
+    parser.add_argument("--level-prefix", default="", metavar="P", help="name level L's array P followed by L (default empty)")
+    parser.add_argument("--consolidated", action="store_true", help="consolidate every metadata document into the root")
     parser.add_argument("--seed", type=int, default=0, metavar="N", help="seed for the picture (default 0)")
     parser.add_argument("--overwrite", action="store_true", help="replace OUT if it exists")
     args = parser.parse_args(argv)
@@ -344,6 +354,8 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         endian=args.endian,
         checksum=args.checksum,
         dimension_separator=args.dimension_separator,
+        level_prefix=args.level_prefix,
+        consolidated=args.consolidated,
         seed=args.seed,
         overwrite=args.overwrite,
     )
@@ -374,7 +386,7 @@ def multiscales_attributes(opts: Options, levels: list[Level], name: str) -> dic
     leading_scale = [1.0] * len(opts.leading_axes)
     datasets = [
         {
-            "path": str(level.index),
+            "path": f"{opts.level_prefix}{level.index}",
             "coordinateTransformations": [{"type": "scale", "scale": leading_scale + [float(s) for s in level.scale]}],
         }
         for level in levels
@@ -504,9 +516,10 @@ def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, leve
     leading_shape = tuple(size for _, size in opts.leading_axes)
     leading_ones = (1,) * len(leading_shape)
     chunk = opts.chunk_for(level)
+    level_path = f"{opts.level_prefix}{level.index}"
     array = zarr.create_array(
         store=store,
-        name=f"{prefix}/{level.index}" if prefix else str(level.index),
+        name=f"{prefix}/{level_path}" if prefix else level_path,
         shape=leading_shape + level.shape,
         chunks=leading_ones + chunk,
         shards=(leading_ones + opts.shard) if opts.shard else None,
@@ -554,6 +567,7 @@ def generate(opts: Options) -> list[Level]:
 
     if opts.tiles is None:
         write_image(store, "", opts, levels, tile=0, name=name)
+        consolidate(store, opts)
         return levels
 
     zarr.create_group(store=store, attributes=collection_attributes(opts, opts.tiles, name), zarr_format=opts.zarr_version)
@@ -566,7 +580,13 @@ def generate(opts: Options) -> list[Level]:
         zarr.create_group(store=store, path=group_path, attributes=group_attributes, zarr_format=opts.zarr_version)
         tile_levels = plan_levels(opts, opts.size_of(tile))
         write_image(store, f"{group_path}/0", opts, tile_levels, tile=tile, name=f"{name} {group_path}")
+    consolidate(store, opts)
     return levels
+
+
+def consolidate(store: zarr.storage.LocalStore, opts: Options) -> None:
+    if opts.consolidated:
+        zarr.consolidate_metadata(store, zarr_format=opts.zarr_version)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
