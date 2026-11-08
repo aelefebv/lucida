@@ -66,12 +66,9 @@ function makeDescIndex(
     indexByMember: new Map(memberIds.map((id, i) => [id, i])),
     memberByIndex: [...memberIds],
     sourceBindingByMember: new Map(),
-    proxyPoolIndexByKey: new Map(),
-    proxyPoolsByIndex: [],
     entityCount: memberIds.length,
     colormapLutIndices: new Map([["gray", 0]]),
     colormapNameByMember: new Map(memberIds.map((id) => [id, "gray"])),
-    proxyDescriptorByMember: new Map(),
     ...overrides,
   };
 }
@@ -82,7 +79,6 @@ function bindings(entries: Record<string, MemberSourceBinding>): Map<string, Mem
 
 interface MockRenderer {
   setColormapTexture: ReturnType<typeof vi.fn>;
-  setProxyTextures: ReturnType<typeof vi.fn>;
   setTierAtlases: ReturnType<typeof vi.fn>;
   setRenderMode: ReturnType<typeof vi.fn>;
   setPixelRatio: ReturnType<typeof vi.fn>;
@@ -96,7 +92,6 @@ interface MockRenderer {
 function makeRenderer(): MockRenderer {
   return {
     setColormapTexture: vi.fn(),
-    setProxyTextures: vi.fn(),
     setTierAtlases: vi.fn(),
     setRenderMode: vi.fn(),
     setPixelRatio: vi.fn(),
@@ -151,11 +146,10 @@ function makeCtx(opts: {
     ensureOffscreenPool: () => [{ createView: () => ({}) }],
     getOrCreateLUT: () => ({}),
     lookupEntityDescriptor: () => opts.descIndex,
-    lookupProxyDescriptor: () => null,
   } as unknown as WorkerCtx;
 }
 
-const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 };
+const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
 
 function msgFor(layers: Array<{ memberId: string; entityIndex: number; blendMode?: "alpha" | "additive" }>): VolumeRenderMultiPassMessage {
   return {
@@ -364,45 +358,4 @@ describe("handleVolumeRenderMultiPass", () => {
     expect(coarsePool.indirectionDirty).toBe(false);
   });
 
-  it("renders a layer backed only by a resident tile proxy", async () => {
-    const device = makeDevice();
-    const renderer = makeRenderer();
-    const composite = vi.fn();
-    const state = createInitialState();
-    const tileProxyTexture = {} as GPUTexture;
-    const descIndex = makeDescIndex(["img-a:ch1"], {
-      proxyPoolIndexByKey: new Map([["tile-proxy-ch1", 0]]),
-      proxyPoolsByIndex: [{
-        texture: tileProxyTexture,
-        slots: new Map(),
-        freeSlots: [],
-        capacity: 1,
-        requestedCapacity: 1,
-        slotDims: [8, 16, 32],
-        slotsX: 1,
-        slotsY: 1,
-        slotsZ: 1,
-        kind: "TileProxy3D",
-        channel: 1,
-        touchOrder: [],
-      }],
-      colormapLutIndices: new Map([["green", 0]]),
-      colormapNameByMember: new Map([["img-a:ch1", "green"]]),
-      proxyDescriptorByMember: new Map([
-        ["img-a:ch1", {
-          tileProxyHandle: { poolKey: "tile-proxy-ch1", slotIndex: 0 },
-          groupProxyHandle: null,
-        }],
-      ]),
-    });
-    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
-
-    await handleVolumeRenderMultiPass(ctx, msgFor([{ memberId: "img-a:ch1", entityIndex: 0, blendMode: "additive" }]));
-
-    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
-    expect(renderer.setProxyTextures).toHaveBeenCalledWith(tileProxyTexture, null);
-    // No chunk tier is bound; the shader takes the proxy path.
-    expect(renderer.setTierAtlases).toHaveBeenCalledWith([], null);
-    expect(composite).toHaveBeenCalledTimes(1);
-  });
 });

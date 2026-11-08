@@ -1,26 +1,23 @@
 /**
  * Peer cursors: their geometry on the GPU and their labels over the canvas.
  *
- * Every peer cursor or presence message changes `peers`, so this layer
- * re-renders on each one, and it keeps the projected labels itself so that
- * placing them doesn't render the whole viewer a second time.
+ * Every peer cursor or presence message changes the peers, so this layer
+ * subscribes to them itself and keeps the projected labels too. Neither a
+ * message nor placing its labels renders the viewer around it.
  */
 import { memo, useEffect, useState, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
-import type { ClientId, PresenceState } from "../bridge.ts";
 import { useEngine } from "../engine.ts";
 import { requestRender } from "../invalidation.ts";
+import { usePeerState, type PeerStore } from "../peerStore.ts";
 import type { ViewMode } from "../types.ts";
 import { PeerCursors, type CursorLabel } from "./PeerCursors.tsx";
 
 interface Props {
-  peers: Map<ClientId, PresenceState>;
-  myId: ClientId;
-  followTarget: ClientId | null;
+  peerStore: PeerStore;
   viewMode: ViewMode;
   z: number;
   t: number;
-  c: number;
   wasmSceneRef: RefObject<WasmScene | null>;
   /** The client and scene become readable when these turn true. */
   clientReady: boolean;
@@ -30,19 +27,17 @@ interface Props {
 }
 
 function PeerCursorLayerBody({
-  peers,
-  myId,
-  followTarget,
+  peerStore,
   viewMode,
   z,
   t,
-  c,
   wasmSceneRef,
   clientReady,
   wasmReady,
   canvasSize,
 }: Props) {
   const engine = useEngine();
+  const { peers, myId, followTarget } = usePeerState(peerStore);
   const [cursorLabels, setCursorLabels] = useState<CursorLabel[]>([]);
 
   useEffect(() => {
@@ -108,7 +103,6 @@ function PeerCursorLayerBody({
       viewMode={viewMode}
       z={z}
       t={t}
-      c={c}
       cursorLabels={cursorLabels}
     />
   );

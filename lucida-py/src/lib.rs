@@ -9,7 +9,7 @@ use lucida_content::DatasetId;
 use lucida_core::camera::Camera;
 use lucida_core::command::{Command, ViewportCommand};
 use lucida_core::protocol::ClientMessage;
-use lucida_core::saved_view::SavedView;
+use lucida_core::saved_view::{self, SavedView};
 use lucida_core::scene::{DisplayState, DocumentState, Scene};
 use lucida_core::view::ViewState;
 use lucida_core::view_transform;
@@ -79,8 +79,13 @@ impl PyScene {
         serde_json::to_string(&cmd).unwrap()
     }
 
-    fn set_c(&mut self, c: u32) -> String {
-        let cmd = ViewportCommand::SetC { c };
+    /// Show one channel of a layer alone, or its composite with `None`.
+    #[pyo3(signature = (dataset_id, channel=None))]
+    fn set_channel_solo(&mut self, dataset_id: &str, channel: Option<u32>) -> String {
+        let cmd = ViewportCommand::SetChannelSolo {
+            dataset_id: dataset_id.to_string(),
+            channel,
+        };
         self.inner.apply(cmd.clone().into());
         serde_json::to_string(&cmd).unwrap()
     }
@@ -127,8 +132,10 @@ impl PyScene {
         self.inner.view.t
     }
 
-    fn c(&self) -> u32 {
-        self.inner.view.c
+    /// What every layer shows, as JSON: which channels, through which
+    /// colormap and window, at which z and t.
+    fn resolved_layers(&self) -> String {
+        serde_json::to_string(&self.inner.resolved_layers()).unwrap()
     }
 
     fn import_presence(&mut self, json: &str) -> PyResult<()> {
@@ -226,6 +233,13 @@ impl PyProfileScene {
     /// The view as the profile stores it, a `SavedView` JSON string.
     fn saved_view_json(&self) -> PyResult<String> {
         serde_json::to_string(&self.inner.saved_view())
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+
+    /// What every layer shows, as JSON: which channels, through which
+    /// colormap and window, at which z and t.
+    fn resolved_layers(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.scene.resolved_layers())
             .map_err(|e| PyValueError::new_err(e.to_string()))
     }
 }
@@ -328,11 +342,30 @@ fn explore(
     serde_json::to_string(&sidecar).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
+/// Encode a `SavedView` JSON string as the `#view=` payload of a viewer URL,
+/// the same payload the viewer and the CLI write for the same view.
+#[pyfunction]
+fn encode_view_payload(view_json: &str) -> PyResult<String> {
+    let view: serde_json::Value =
+        serde_json::from_str(view_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    saved_view::encode_payload(&view).map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Decode a viewer URL's `#view=` payload into a `SavedView` JSON string.
+#[pyfunction]
+fn decode_view_payload(payload: &str) -> PyResult<String> {
+    saved_view::decode_payload(payload)
+        .map(|view| view.to_string())
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
 #[pymodule]
 fn lucida(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyScene>()?;
     m.add_class::<PyStore>()?;
     m.add_class::<PyProfileScene>()?;
     m.add_function(wrap_pyfunction!(explore, m)?)?;
+    m.add_function(wrap_pyfunction!(encode_view_payload, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_view_payload, m)?)?;
     Ok(())
 }

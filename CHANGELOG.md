@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.22.0](https://github.com/aelefebv/lucida/compare/v0.21.0...v0.22.0) (2026-11-08)
+
+
+### Features
+
+* hover pixel readout, 64-bit and half data types, percent-decoded file URLs, v3 consolidated metadata ([#1325](https://github.com/aelefebv/lucida/issues/1325)) ([b51be99](https://github.com/aelefebv/lucida/commit/b51be999808f0a3bab36adbaa545df333b77e5fe))
+* open single-channel images gray, through one saved-view codec in core ([#1324](https://github.com/aelefebv/lucida/issues/1324)) ([4104433](https://github.com/aelefebv/lucida/commit/41044334cbb3f4358d505b9324fec27377cd14eb))
+* per-layer channel model in core ([#1295](https://github.com/aelefebv/lucida/issues/1295)) ([b45151d](https://github.com/aelefebv/lucida/commit/b45151d052ce280230d93bf81b83d1f9229be8e3))
+
+
+### Bug Fixes
+
+* **cli:** run on an 8 MiB stack so debug builds don't overflow on Windows ([#1318](https://github.com/aelefebv/lucida/issues/1318)) ([f8e22d2](https://github.com/aelefebv/lucida/commit/f8e22d24b00eb2c96be86b22a06a17e3168481e8))
+* fit generated coarse levels' auto-contrast from a server histogram, and pool their fill value ([#1321](https://github.com/aelefebv/lucida/issues/1321)) ([49fb887](https://github.com/aelefebv/lucida/commit/49fb887df83f4728a15a0844d68d8f523a36d3c9)), closes [#1287](https://github.com/aelefebv/lucida/issues/1287)
+* give the dev-controls knobs one lifetime as preferences ([#1302](https://github.com/aelefebv/lucida/issues/1302)) ([120addf](https://github.com/aelefebv/lucida/commit/120addf1af528f6fe45cfe4dc2d1f3e4b1c373b3))
+* **web:** draw collection members in the minimap ([#1319](https://github.com/aelefebv/lucida/issues/1319)) ([10ef317](https://github.com/aelefebv/lucida/commit/10ef317c7b99f28b0e9e37e963a2bf8e7b412bd3))
+* **web:** draw failed label and minimap chunks hatched ([#1322](https://github.com/aelefebv/lucida/issues/1322)) ([dbcd26b](https://github.com/aelefebv/lucida/commit/dbcd26b3dbb89596f5d32f238097767f55751be8))
+* **web:** restores report presence, a steer adopts dataset presence, and peer messages skip App ([#1323](https://github.com/aelefebv/lucida/issues/1323)) ([bc5a248](https://github.com/aelefebv/lucida/commit/bc5a248cbab65d6a40e231bb44b1922b3a4c8602))
+* **web:** send the slice view one plane per chunk and stop needless resends ([#1329](https://github.com/aelefebv/lucida/issues/1329)) ([6be373e](https://github.com/aelefebv/lucida/commit/6be373e9eacc4e067dc2e0824a9a6293c8d3bab9))
+
+
+### Refactors
+
+* **planning:** enumerate chunks in the core and keep each lane in its own priority band ([#1326](https://github.com/aelefebv/lucida/issues/1326)) ([bf2bd8e](https://github.com/aelefebv/lucida/commit/bf2bd8ea7860355163e2b034ef39af7e6f45607c))
+* **web:** move the remaining raw controls onto the ui primitives ([#1328](https://github.com/aelefebv/lucida/issues/1328)) ([c00e3dc](https://github.com/aelefebv/lucida/commit/c00e3dc369639e2e9ed011edb4ccf7acf7954428))
+
+## [0.21.0](https://github.com/aelefebv/lucida/compare/v0.20.1...v0.21.0) (2026-11-08)
+
+
+### Features
+
+* read Zarr v2 / OME-NGFF 0.4 and any decodable codec chain through a codec registry ([#1264](https://github.com/aelefebv/lucida/issues/1264)) ([7282a32](https://github.com/aelefebv/lucida/commit/7282a3208ef55e0389dcfcef47ed497ce6cd0f3f))
+
+
+### Bug Fixes
+
+* one framing policy in core: fit any unframed camera, on every client ([#1279](https://github.com/aelefebv/lucida/issues/1279)) ([d9b3543](https://github.com/aelefebv/lucida/commit/d9b35435cdaacdb5463cfb7a664a16fa27b6e7ab))
+* **pipeline:** keep prefetch behind the view in admission, eviction and settle ([#1297](https://github.com/aelefebv/lucida/issues/1297)) ([7dea80d](https://github.com/aelefebv/lucida/commit/7dea80df8757c3173aea8a8eb9832ba62415eec1))
+* read each level under its multiscale path, and Zarr v2 metadata from .zmetadata ([#1291](https://github.com/aelefebv/lucida/issues/1291)) ([9801d74](https://github.com/aelefebv/lucida/commit/9801d74cd4bfb2d54d6e844d5a8453df64f1554a))
+* recover a live workspace after a stale write, close sockets on archive, stop reconnecting after access is removed ([#1299](https://github.com/aelefebv/lucida/issues/1299)) ([af019c3](https://github.com/aelefebv/lucida/commit/af019c32ea4cb8d948c137b03fa2544e97e67837))
+* remove the races and timing dependencies behind the flaky tests ([#1296](https://github.com/aelefebv/lucida/issues/1296)) ([cb9e211](https://github.com/aelefebv/lucida/commit/cb9e21151e52517dc91897ef0f94df21db93586c))
+* **server:** bound server memory per process and let the page cancel chunk requests ([#1258](https://github.com/aelefebv/lucida/issues/1258)) ([e974bd0](https://github.com/aelefebv/lucida/commit/e974bd0526fa59767ff7ec0632846c6744752c2b))
+* small web fixes: touch targets, light chart contrast, step presses, channel names, health, active layout ([#1301](https://github.com/aelefebv/lucida/issues/1301)) ([24f3095](https://github.com/aelefebv/lucida/commit/24f30956ff66a1eb147f8768bd75df4df5d4f966))
+* **trace:** charge backlog waits to queue, and run the trace gate nightly ([#1298](https://github.com/aelefebv/lucida/issues/1298)) ([929c781](https://github.com/aelefebv/lucida/commit/929c78101da16f972720d09421c9a51df20fcb12))
+* **web:** draw chunks that failed for good hatched, and name them per dataset ([#1293](https://github.com/aelefebv/lucida/issues/1293)) ([71ec3a5](https://github.com/aelefebv/lucida/commit/71ec3a51d244c5c3c5f8ede3f02fb71aeb88d3c1))
+* **web:** fit one GPU budget to the device across every holder ([#1278](https://github.com/aelefebv/lucida/issues/1278)) ([3e0629a](https://github.com/aelefebv/lucida/commit/3e0629afd2023d296d169b24f5f0d5e54eb8f7ce))
+
+
+### Refactors
+
+* remove proxy assets end to end ([#1292](https://github.com/aelefebv/lucida/issues/1292)) ([c7065a8](https://github.com/aelefebv/lucida/commit/c7065a883a23af84d91c5a123d447ca32768feb8))
+* remove the global /ws route and bookmarks ([#1262](https://github.com/aelefebv/lucida/issues/1262)) ([54a719d](https://github.com/aelefebv/lucida/commit/54a719d54c580ff4f2caff97a82106598675e8fd))
+
 ## [0.20.1](https://github.com/aelefebv/lucida/compare/v0.20.0...v0.20.1) (2026-11-08)
 
 

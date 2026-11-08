@@ -1,19 +1,23 @@
 // @vitest-environment happy-dom
 //
 // Drives the real hook against happy-dom's localStorage: viewed ids persist,
-// are scoped by dataset, marking is idempotent, and broken or absent storage
-// degrades to "nothing viewed" rather than throwing.
+// are scoped by dataset, marking is idempotent, broken storage never throws,
+// and the old per-dataset keys move into the preference once.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
-import {
-  useViewedMentions,
-  VIEWED_MENTIONS_KEY_PREFIX,
-} from "./useViewedMentions.ts";
+import { useViewedMentions, viewedMentionsPreference } from "./useViewedMentions.ts";
+import { __resetPreferencesForTesting, getPreference } from "../theme/preferences.ts";
 
-beforeEach(() => localStorage.clear());
+const LEGACY_PREFIX = "lucida.mentions.viewed.";
+
+beforeEach(() => {
+  localStorage.clear();
+  __resetPreferencesForTesting();
+});
 afterEach(() => {
   localStorage.clear();
+  __resetPreferencesForTesting();
   vi.restoreAllMocks();
 });
 
@@ -23,26 +27,15 @@ describe("useViewedMentions", () => {
     expect(result.current.viewedCommentIds).toEqual([]);
   });
 
-  it("markViewed adds the id and persists it under the dataset key", () => {
+  it("markViewed adds the id and persists it under the dataset", () => {
     const { result } = renderHook(() => useViewedMentions("ds-1"));
-
     act(() => result.current.markViewed("c-1"));
-
     expect(result.current.viewedCommentIds).toEqual(["c-1"]);
-    // Persisted as a JSON string[] under the dataset-scoped key.
-    const raw = localStorage.getItem(`${VIEWED_MENTIONS_KEY_PREFIX}ds-1`);
-    expect(JSON.parse(raw ?? "null")).toEqual(["c-1"]);
-  });
+    expect(getPreference(viewedMentionsPreference)).toEqual({ "ds-1": ["c-1"] });
 
-  it("seeds from persisted storage on mount (next-visit reuse)", () => {
-    localStorage.setItem(
-      `${VIEWED_MENTIONS_KEY_PREFIX}ds-1`,
-      JSON.stringify(["c-1", "c-2"]),
-    );
-    const { result } = renderHook(() => useViewedMentions("ds-1"));
-    expect(new Set(result.current.viewedCommentIds)).toEqual(
-      new Set(["c-1", "c-2"]),
-    );
+    // A new page load in the same browser reads it back.
+    __resetPreferencesForTesting();
+    expect(renderHook(() => useViewedMentions("ds-1")).result.current.viewedCommentIds).toEqual(["c-1"]);
   });
 
   it("markViewed is idempotent: same id twice keeps a stable array reference", () => {
@@ -50,7 +43,6 @@ describe("useViewedMentions", () => {
     act(() => result.current.markViewed("c-1"));
     const first = result.current.viewedCommentIds;
     act(() => result.current.markViewed("c-1"));
-    // No churn: identical state object, single entry.
     expect(result.current.viewedCommentIds).toBe(first);
     expect(result.current.viewedCommentIds).toEqual(["c-1"]);
   });
@@ -63,60 +55,50 @@ describe("useViewedMentions", () => {
     act(() => result.current.markViewed("c-1"));
     expect(result.current.viewedCommentIds).toEqual(["c-1"]);
 
-    // Switch datasets: the new dataset has its own (empty) read-state.
     rerender({ id: "ds-2" });
     expect(result.current.viewedCommentIds).toEqual([]);
     act(() => result.current.markViewed("c-9"));
     expect(result.current.viewedCommentIds).toEqual(["c-9"]);
 
-    // Switch back: ds-1's read-state is intact and ds-2's never bled in.
     rerender({ id: "ds-1" });
     expect(result.current.viewedCommentIds).toEqual(["c-1"]);
   });
 
-  it("a null dataset (no selection) persists under a stable sentinel key", () => {
+  it("a null dataset (no selection) persists under a stable sentinel", () => {
     const { result } = renderHook(() => useViewedMentions(null));
     act(() => result.current.markViewed("c-1"));
     expect(result.current.viewedCommentIds).toEqual(["c-1"]);
-    // Survives a fresh mount with the same null selection.
     const second = renderHook(() => useViewedMentions(null));
     expect(second.result.current.viewedCommentIds).toEqual(["c-1"]);
   });
 
-  it("degrades to empty (never throws) when reading malformed storage", () => {
-    localStorage.setItem(`${VIEWED_MENTIONS_KEY_PREFIX}ds-1`, "not json {");
-    const { result } = renderHook(() => useViewedMentions("ds-1"));
-    expect(result.current.viewedCommentIds).toEqual([]);
-  });
-
-  it("tolerates non-array / non-string persisted values", () => {
-    localStorage.setItem(
-      `${VIEWED_MENTIONS_KEY_PREFIX}ds-1`,
-      JSON.stringify({ nope: true }),
-    );
-    const a = renderHook(() => useViewedMentions("ds-1"));
-    expect(a.result.current.viewedCommentIds).toEqual([]);
-
-    localStorage.setItem(
-      `${VIEWED_MENTIONS_KEY_PREFIX}ds-2`,
-      JSON.stringify(["ok", 7, null, "ok2"]),
-    );
-    const b = renderHook(() => useViewedMentions("ds-2"));
-    expect(new Set(b.result.current.viewedCommentIds)).toEqual(
-      new Set(["ok", "ok2"]),
-    );
-  });
-
   it("never throws when localStorage.setItem throws (quota / private browsing)", () => {
-    const spy = vi
-      .spyOn(Storage.prototype, "setItem")
-      .mockImplementation(() => {
-        throw new Error("QuotaExceeded");
-      });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceeded");
+    });
     const { result } = renderHook(() => useViewedMentions("ds-1"));
-    // Marking still updates in-memory state without throwing out of the hook.
     expect(() => act(() => result.current.markViewed("c-1"))).not.toThrow();
     expect(result.current.viewedCommentIds).toEqual(["c-1"]);
-    spy.mockRestore();
+  });
+});
+
+describe("the old per-dataset keys", () => {
+  it("move into the preference once, keeping only string ids, and are removed", () => {
+    localStorage.setItem(`${LEGACY_PREFIX}ds-1`, JSON.stringify(["c-1", "c-2"]));
+    localStorage.setItem(`${LEGACY_PREFIX}ds-2`, JSON.stringify(["ok", 7, null, "ok2"]));
+    localStorage.setItem(`${LEGACY_PREFIX}__none__`, JSON.stringify(["c-3"]));
+    localStorage.setItem(`${LEGACY_PREFIX}ds-3`, "not json {");
+    localStorage.setItem(`${LEGACY_PREFIX}ds-4`, JSON.stringify({ nope: true }));
+    __resetPreferencesForTesting();
+
+    expect(getPreference(viewedMentionsPreference)).toEqual({
+      "ds-1": ["c-1", "c-2"],
+      "ds-2": ["ok", "ok2"],
+      __none__: ["c-3"],
+    });
+    expect(renderHook(() => useViewedMentions(null)).result.current.viewedCommentIds).toEqual(["c-3"]);
+    for (let i = 0; i < localStorage.length; i++) {
+      expect(localStorage.key(i)?.startsWith(LEGACY_PREFIX)).toBe(false);
+    }
   });
 });

@@ -60,17 +60,19 @@ pub struct ChunkGridConfig {
 /// Which Zarr version a dataset is stored in. One hierarchy is one version,
 /// so the dataset's root decides it for every group and array beneath.
 ///
-/// A Zarr v2 hierarchy may also have copied every metadata document into
-/// its root `.zmetadata`. A document found there is read from there, as
+/// A hierarchy may also have copied every metadata document into its root:
+/// a Zarr v2 `.zmetadata`, or the `consolidated_metadata` a Zarr v3 root
+/// `zarr.json` holds inline. A document found there is read from there, as
 /// zarr-python reads a consolidated hierarchy, which saves a round trip per
 /// group and per level.
 #[derive(Debug, Clone)]
 pub(crate) enum ZarrFormat {
-    V2 {
-        consolidated: Option<Arc<serde_json::Map<String, serde_json::Value>>>,
-    },
-    V3,
+    V2 { consolidated: Option<Documents> },
+    V3 { consolidated: Option<Documents> },
 }
+
+/// Consolidated metadata documents, keyed by the object path each copies.
+type Documents = Arc<serde_json::Map<String, serde_json::Value>>;
 
 impl ZarrFormat {
     /// The object holding the metadata of the group at `prefix`, or of the
@@ -78,7 +80,7 @@ impl ZarrFormat {
     pub(crate) fn group_key(&self, prefix: &str) -> String {
         let name = match self {
             ZarrFormat::V2 { .. } => ".zattrs",
-            ZarrFormat::V3 => "zarr.json",
+            ZarrFormat::V3 { .. } => "zarr.json",
         };
         join(prefix, name)
     }
@@ -87,7 +89,7 @@ impl ZarrFormat {
     fn array_key(&self, prefix: &str) -> String {
         let name = match self {
             ZarrFormat::V2 { .. } => ".zarray",
-            ZarrFormat::V3 => "zarr.json",
+            ZarrFormat::V3 { .. } => "zarr.json",
         };
         join(prefix, name)
     }
@@ -102,19 +104,13 @@ impl ZarrFormat {
             .map_err(|e| StoreError::malformed_metadata(format!("invalid JSON in {key}: {e}")))?;
         Ok(match self {
             ZarrFormat::V2 { .. } => zarr_v2::group(value),
-            ZarrFormat::V3 => value,
+            ZarrFormat::V3 { .. } => value,
         })
     }
 
     /// The consolidated copy of the document at `key`, if there is one.
     fn consolidated(&self, key: &str) -> Option<Bytes> {
-        let ZarrFormat::V2 {
-            consolidated: Some(documents),
-        } = self
-        else {
-            return None;
-        };
-        let document = documents.get(key)?;
+        let document = self.documents()?.get(key)?;
         Some(Bytes::from(serde_json::to_vec(document).ok()?))
     }
 
@@ -138,11 +134,17 @@ impl ZarrFormat {
         store: &CachedStore,
         key: &str,
     ) -> Result<Option<Bytes>, object_store::Error> {
+        match self.documents() {
+            Some(_) => Ok(self.consolidated(key)),
+            None => store.get_optional_metadata_bytes(&Path::from(key)).await,
+        }
+    }
+
+    fn documents(&self) -> Option<&Documents> {
         match self {
-            ZarrFormat::V2 {
-                consolidated: Some(_),
-            } => Ok(self.consolidated(key)),
-            _ => store.get_optional_metadata_bytes(&Path::from(key)).await,
+            ZarrFormat::V2 { consolidated } | ZarrFormat::V3 { consolidated } => {
+                consolidated.as_ref()
+            }
         }
     }
 }
@@ -175,6 +177,32 @@ fn consolidated_documents(bytes: &[u8]) -> Option<serde_json::Map<String, serde_
     }
 }
 
+/// The documents a Zarr v3 root's inline `consolidated_metadata` copies,
+/// keyed by the `zarr.json` each stands for, or `None` when it holds none
+/// lucida can use. Its keys are node paths, `A/1/0`, where a document is read
+/// as `A/1/0/zarr.json`.
+fn inline_consolidated_documents(
+    consolidated: &serde_json::Value,
+) -> Option<serde_json::Map<String, serde_json::Value>> {
+    if consolidated.is_null() {
+        return None;
+    }
+    if consolidated.get("kind").and_then(|v| v.as_str()) != Some("inline") {
+        tracing::warn!("import.consolidated_metadata.unknown_format");
+        return None;
+    }
+    let Some(serde_json::Value::Object(nodes)) = consolidated.get("metadata") else {
+        tracing::warn!("import.consolidated_metadata.no_documents");
+        return None;
+    };
+    Some(
+        nodes
+            .iter()
+            .map(|(path, document)| (join(path, "zarr.json"), document.clone()))
+            .collect(),
+    )
+}
+
 fn join(prefix: &str, name: &str) -> String {
     if prefix.is_empty() {
         name.to_string()
@@ -184,10 +212,11 @@ fn join(prefix: &str, name: &str) -> String {
 }
 
 /// Read the dataset root's group metadata and tell which Zarr version holds
-/// it. A v3 root costs the one read it always has. Only a dataset with no
-/// `zarr.json` is asked for a v2 `.zattrs`, and for its `.zmetadata` in the
-/// same round trip, so a hierarchy that consolidated nothing pays no extra
-/// wait for the chance.
+/// it. A v3 root costs the one read it always has, and carries any
+/// consolidated metadata inside it. Only a dataset with no `zarr.json` is
+/// asked for a v2 `.zattrs`, and for its `.zmetadata` in the same round
+/// trip, so a hierarchy that consolidated nothing pays no extra wait for the
+/// chance.
 pub(crate) async fn read_root(
     store: &Arc<CachedStore>,
 ) -> Result<(ZarrFormat, serde_json::Value), StoreError> {
@@ -195,10 +224,22 @@ pub(crate) async fn read_root(
         .get_optional_metadata_bytes(&Path::from("zarr.json"))
         .await?
     {
-        return Ok((
-            ZarrFormat::V3,
-            ZarrFormat::V3.group_json("zarr.json", &bytes)?,
-        ));
+        let mut root = ZarrFormat::V3 { consolidated: None }.group_json("zarr.json", &bytes)?;
+        // The copies can be most of the root's bytes, so the root handed on
+        // leaves them out.
+        let inline = root
+            .as_object_mut()
+            .and_then(|object| object.remove("consolidated_metadata"));
+        let consolidated =
+            inline
+                .as_ref()
+                .and_then(inline_consolidated_documents)
+                .map(|mut documents| {
+                    // The copies cover the whole hierarchy, the root included.
+                    documents.insert("zarr.json".to_string(), root.clone());
+                    Arc::new(documents)
+                });
+        return Ok((ZarrFormat::V3 { consolidated }, root));
     }
     let (zattrs_key, zmetadata_key) = (Path::from(".zattrs"), Path::from(".zmetadata"));
     let (zattrs, zmetadata) = tokio::join!(
@@ -472,11 +513,12 @@ fn declared_scale(node: &serde_json::Value, axes_names: &[String]) -> [f64; 5] {
 /// Generic and safe on untrusted input: the block is optional and often
 /// wrong, so this never panics, errors, or mislabels.
 ///
-/// - A missing or non-array `channels` → empty `Vec` (caller falls back to `Ch N`).
+/// - A missing or non-array `channels` → empty `Vec` (caller falls back to `Channel n`).
 /// - A usable label is a non-blank string.
 /// - Results stay aligned to channel index: a label-less channel in the
-///   middle gets the `Ch {i}` fallback so later labels still line up, and a
-///   label-less trailing run is dropped. No usable label at all → empty.
+///   middle gets the `Channel n` fallback, counted from 1 like every other
+///   channel name, so later labels still line up, and a label-less trailing
+///   run is dropped. No usable label at all → empty.
 /// - A non-string `color` becomes `None`; the raw hex is carried verbatim.
 ///
 /// Not reconciled against the C-axis size: parse stays a pure function of
@@ -526,7 +568,7 @@ pub(crate) fn parse_omero_channels(root_json: &serde_json::Value) -> Vec<Channel
         .enumerate()
         .map(|(i, slot)| {
             slot.unwrap_or(ChannelInfo {
-                label: format!("Ch {i}"),
+                label: format!("Channel {}", i + 1),
                 color: None,
             })
         })
@@ -707,7 +749,7 @@ pub(crate) async fn read_level_metas(
             let level_bytes = format.document(store, &format.array_key(&level)).await?;
             match format {
                 ZarrFormat::V2 { .. } => zarr_v2::array_meta(&level_bytes),
-                ZarrFormat::V3 => {
+                ZarrFormat::V3 { .. } => {
                     serde_json::from_slice::<ArrayMeta>(&level_bytes).map_err(|e| e.to_string())
                 }
             }
@@ -759,6 +801,68 @@ mod tests {
             OptionalZarrJson::Absent
         ));
         assert_eq!(store.stats().source_reads, 0);
+    }
+
+    #[test]
+    fn inline_consolidated_metadata_is_keyed_by_the_documents_it_copies() {
+        let consolidated = serde_json::json!({
+            "kind": "inline",
+            "must_understand": false,
+            "metadata": {"A": {"node_type": "group"}, "A/1/0": {"node_type": "array"}}
+        });
+        let documents = inline_consolidated_documents(&consolidated).unwrap();
+        assert_eq!(documents["A/zarr.json"]["node_type"], "group");
+        assert_eq!(documents["A/1/0/zarr.json"]["node_type"], "array");
+        for unusable in [
+            serde_json::json!(null),
+            serde_json::json!({"kind": "external", "metadata": {}}),
+            serde_json::json!({"kind": "inline"}),
+            serde_json::json!({"kind": "inline", "metadata": []}),
+        ] {
+            assert!(
+                inline_consolidated_documents(&unusable).is_none(),
+                "{unusable}"
+            );
+        }
+    }
+
+    /// A v3 root's inline copies answer for the hierarchy, and the root
+    /// handed back no longer carries them.
+    #[tokio::test]
+    async fn a_consolidated_v3_root_answers_from_its_copy() {
+        let memory = Arc::new(object_store::memory::InMemory::new());
+        let root = serde_json::json!({
+            "zarr_format": 3,
+            "node_type": "group",
+            "attributes": {"ome": {"version": "0.5"}},
+            "consolidated_metadata": {
+                "kind": "inline",
+                "must_understand": false,
+                "metadata": {"A": {"zarr_format": 3, "node_type": "group", "attributes": {"ome": {"well": {}}}}}
+            }
+        });
+        use object_store::ObjectStoreExt;
+        memory
+            .put(
+                &Path::from("zarr.json"),
+                serde_json::to_vec(&root).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        let store = Arc::new(CachedStore::new(memory, 1 << 20));
+
+        let (format, root) = read_root(&store).await.unwrap();
+        assert!(root.get("consolidated_metadata").is_none());
+        assert!(root["attributes"]["ome"].is_object());
+        let reads = store.stats().source_reads;
+        assert_eq!(read_group(&store, &format, "").await.unwrap(), root);
+        let group = read_group(&store, &format, "A").await.unwrap();
+        assert!(group["attributes"]["ome"]["well"].is_object());
+        assert!(matches!(
+            read_optional_group(&store, &format, "A/labels").await,
+            OptionalZarrJson::Absent
+        ));
+        assert_eq!(store.stats().source_reads, reads);
     }
 
     /// A scale on the multiscale itself multiplies each level's own.
@@ -1267,7 +1371,7 @@ mod tests {
         }));
         assert!(
             parse_omero_channels(&root).is_empty(),
-            "no usable label anywhere must fully fall back to Ch N (empty list)",
+            "no usable label anywhere must fully fall back to Channel n (empty list)",
         );
     }
 
@@ -1289,21 +1393,21 @@ mod tests {
 
     #[test]
     fn omero_channels_interior_gaps_keep_positions_aligned() {
-        // Channel 1 has no usable label but channel 2 does: index 1 must be
-        // filled with the positional fallback so "Marker" still maps to ch 2.
+        // Index 1 has no usable label but index 2 does: index 1 must be
+        // filled with the positional fallback so "Third" still maps to index 2.
         let root = root_with_omero(serde_json::json!({
             "channels": [
-                {"label": "Channel 0"},
+                {"label": "First"},
                 {"label": "   "},
-                {"label": "Marker"}
+                {"label": "Third"}
             ]
         }));
         let infos = parse_omero_channels(&root);
         assert_eq!(infos.len(), 3);
-        assert_eq!(infos[0].label, "Channel 0");
-        assert_eq!(infos[1].label, "Ch 1"); // positional fallback, alignment preserved
+        assert_eq!(infos[0].label, "First");
+        assert_eq!(infos[1].label, "Channel 2"); // counted from 1, alignment preserved
         assert_eq!(infos[1].color, None);
-        assert_eq!(infos[2].label, "Marker");
+        assert_eq!(infos[2].label, "Third");
     }
 
     #[test]

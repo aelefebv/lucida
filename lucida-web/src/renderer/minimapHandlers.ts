@@ -1,6 +1,7 @@
 import type { WorkerCtx } from "./workerContext.ts";
 import type {
   MinimapInitMessage,
+  MinimapLayerParams,
   MinimapRenderMessage,
   MinimapUploadOverviewChunksForLayerMessage,
   ThumbnailRenderMessage,
@@ -12,17 +13,38 @@ import { allocateWatched } from "./worker/gpuErrors.ts";
 import { handleGpuOutOfMemory, reserveGpuBytes } from "./worker/gpuBudget.ts";
 import { setGpuLedgerLine } from "./worker/gpuLedger.ts";
 import { OFFSCREEN_BYTES_PER_TEXEL } from "./worker/resources.ts";
+import {
+  applyFailedMarks,
+  cellIndex,
+  emptyIndirection,
+  failedCellsAt,
+  failedKeysForImage,
+  type CellGrid,
+} from "./failedCells.ts";
+import { INDIRECTION_MISS } from "./remap.ts";
 
 interface MinimapOverviewEntry {
   texture: GPUTexture;
   format: SampleFormat;
   uploaded: Set<string>;
+  imageId: string;
+  level: number;
   t: number;
   c: number;
   width: number;
   height: number;
   depth: number;
-  /** What the texture holds, counted against the GPU total. */
+  chunkDims: [number, number, number];
+  grid: CellGrid;
+  /**
+   * Each chunk cell maps to itself once its chunk is written, so a cell
+   * whose chunk never arrived misses rather than reading the texture's zeros,
+   * and one whose chunk failed for good reads FAILED.
+   */
+  indirection: Uint32Array<ArrayBuffer>;
+  indirectionBuf: GPUBuffer;
+  markedFailed: Set<number>;
+  /** What the texture and indirection hold, counted against the GPU total. */
   bytes: number;
 }
 
@@ -75,6 +97,7 @@ function dropOverview(datasetId: string): void {
   const entry = minimapOverviewPerDataset.get(datasetId);
   if (!entry) return;
   entry.texture.destroy();
+  entry.indirectionBuf.destroy();
   overviewBytes -= entry.bytes;
   minimapOverviewPerDataset.delete(datasetId);
   noteOverviewBytes();
@@ -186,29 +209,11 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
     if (!overview) continue;
 
     const idx = renderedLayers.length;
-    // The transient descriptor sets proxy slot indices to the sentinel, so
-    // the draw falls through to the chunk path. Clear any proxy textures a
-    // main-view draw left bound.
-    renderer.setProxyTextures(null, null);
-    // Bind the active channel's LUT for the minimap's own draw; otherwise it
-    // keeps whatever the volume renderer last had, which stays gray in 2D mode.
-    // Set it before setVolume, which rebuilds the bind group from the current LUT.
-    renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
-    renderer.setVolume(overview.texture);
-    renderer.setMatrices(msg.invViewProj, msg.eye);
-    // Bind a transient single-entity descriptor so the shader's
-    // descriptor reads return the minimap layer's model matrix, single
-    // LOD over the full overview volume, plus the minimap layer's
-    // contrast/gamma (opacity hard-wired to 1.0 for minimap).
-    renderer.setTransientDescriptor(
-      layer.modelMatrix, layer.invModelMatrix,
-      [overview.width, overview.height, overview.depth],
-      layer.contrastMin, layer.contrastMax, layer.gamma, 1.0, overview.format,
-    );
+    bindOverviewLayer(ctx, overview, layer, msg.invViewProj, msg.eye, msg.pixelRatio);
     const layerEncoder = ctx.device.createCommandEncoder();
     renderer.renderTo(minimapOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, msg.canvasW, msg.canvasH);
     ctx.device.queue.submit([layerEncoder.finish()]);
-    renderedLayers.push({ view: minimapOffscreenPool[idx].createView(), blendMode: "alpha" });
+    renderedLayers.push({ view: minimapOffscreenPool[idx].createView(), blendMode: layer.blendMode });
   }
 
   // Drawn even with no overview resident, so the minimap shows the canvas
@@ -257,23 +262,11 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
     if (!overview) continue;
 
     const idx = renderedLayers.length;
-    // Same single-LOD overview draw as the minimap: reset proxy textures, bind
-    // the active channel's LUT before setVolume (setVolume rebuilds the bind
-    // group from the current LUT), then a transient descriptor so the shader
-    // reads this layer's model matrix + contrast/gamma over the full overview.
-    renderer.setProxyTextures(null, null);
-    renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
-    renderer.setVolume(overview.texture);
-    renderer.setMatrices(msg.invViewProj, msg.eye);
-    renderer.setTransientDescriptor(
-      layer.modelMatrix, layer.invModelMatrix,
-      [overview.width, overview.height, overview.depth],
-      layer.contrastMin, layer.contrastMax, layer.gamma, 1.0, overview.format,
-    );
+    bindOverviewLayer(ctx, overview, layer, msg.invViewProj, msg.eye, msg.pixelRatio);
     const layerEncoder = ctx.device.createCommandEncoder();
     renderer.renderTo(thumbnailOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, size, size);
     ctx.device.queue.submit([layerEncoder.finish()]);
-    renderedLayers.push({ view: thumbnailOffscreenPool[idx].createView(), blendMode: "alpha" });
+    renderedLayers.push({ view: thumbnailOffscreenPool[idx].createView(), blendMode: layer.blendMode });
   }
 
   if (renderedLayers.length === 0 || !thumbnailContext || !thumbnailCanvas) {
@@ -296,10 +289,10 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
 }
 
 export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUploadOverviewChunksForLayerMessage): void {
-  const { datasetId, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ, sampleFormat } = msg;
+  const { datasetId, imageId, level, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ, sampleFormat } = msg;
   let entry = minimapOverviewPerDataset.get(datasetId);
 
-  if (entry && (entry.t !== t || entry.c !== c || entry.format !== sampleFormat)) {
+  if (entry && (entry.level !== level || entry.t !== t || entry.c !== c || entry.format !== sampleFormat)) {
     dropOverview(datasetId);
     entry = undefined;
   }
@@ -308,11 +301,17 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
     // A refused overview stays refused for its selection: taking it later
     // would draw only the chunks that arrived after, which the page counts as
     // sent.
-    const selection = `${t}/${c}/${sampleFormat}`;
+    const selection = `${level}/${t}/${c}/${sampleFormat}`;
     const refused = ctx.state.overviewsRefused;
     if (refused.get(datasetId) === selection) return;
     refused.delete(datasetId);
-    const bytes = levelWidth * levelHeight * levelDepth * bytesPerTexel(sampleFormat);
+    const grid: CellGrid = {
+      x: Math.ceil(levelWidth / chunkX),
+      y: Math.ceil(levelHeight / chunkY),
+      z: Math.ceil(levelDepth / chunkZ),
+    };
+    const indirection = emptyIndirection(grid.x * grid.y * grid.z);
+    const bytes = levelWidth * levelHeight * levelDepth * bytesPerTexel(sampleFormat) + indirection.byteLength;
     if (
       overviewBytes + bytes > ctx.state.gpuTotalBytes * MINIMAP_OVERVIEW_SHARE ||
       !reserveGpuBytes(ctx, bytes)
@@ -332,10 +331,16 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
         else refused.set(datasetId, selection);
       },
     );
+    const indirectionBuf = ctx.device.createBuffer({
+      size: indirection.byteLength,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
     entry = {
       texture, format: sampleFormat, uploaded: new Set(),
-      t, c,
+      imageId, level, t, c,
       width: levelWidth, height: levelHeight, depth: levelDepth,
+      chunkDims: [chunkX, chunkY, chunkZ],
+      grid, indirection, indirectionBuf, markedFailed: new Set(),
       bytes,
     };
     minimapOverviewPerDataset.set(datasetId, entry);
@@ -345,6 +350,8 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
 
   for (const chunk of msg.chunks) {
     if (entry.uploaded.has(chunk.key)) continue;
+    const cell = cellIndex(entry.grid, chunk.x, chunk.y, chunk.z);
+    if (cell < entry.indirection.length) entry.indirection[cell] = cell;
     const data = atlasTexels(chunk.data, chunk.dataType, entry.format);
     const xOff = chunk.x * chunkX;
     const yOff = chunk.y * chunkY;
@@ -359,6 +366,65 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
     );
     entry.uploaded.add(chunk.key);
   }
+  ctx.device.queue.writeBuffer(entry.indirectionBuf, 0, entry.indirection);
+}
+
+/**
+ * Bind one overview for a minimap or thumbnail draw: this channel's LUT, the
+ * overview as a level laid out in place with its failed chunks marked, and a
+ * transient descriptor carrying the layer's placement and contrast. The LUT
+ * goes first, because binding the atlas rebuilds the bind group from it.
+ */
+function bindOverviewLayer(
+  ctx: WorkerCtx,
+  overview: MinimapOverviewEntry,
+  layer: MinimapLayerParams,
+  invViewProj: Float32Array,
+  eye: Float32Array,
+  pixelRatio: number,
+): void {
+  markOverviewFailed(ctx, overview);
+  const renderer = ctx.getVolumeRenderer();
+  renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
+  renderer.setTierAtlases(
+    [{
+      texture: overview.texture,
+      indirectionBuf: overview.indirectionBuf,
+      slotsX: overview.grid.x,
+      slotsY: overview.grid.y,
+      slotsZ: overview.grid.z,
+    }],
+    null,
+  );
+  renderer.setMatrices(invViewProj, eye);
+  renderer.setPixelRatio(pixelRatio);
+  // Opacity is 1: the minimap shows every layer at full strength.
+  renderer.setTransientDescriptor(
+    layer.modelMatrix, layer.invModelMatrix,
+    [overview.width, overview.height, overview.depth],
+    layer.contrastMin, layer.contrastMax, layer.gamma, 1.0, overview.format,
+    {
+      gridDims: [overview.grid.x, overview.grid.y, overview.grid.z],
+      chunkDims: overview.chunkDims,
+    },
+  );
+}
+
+/** Mark the overview's chunks that failed for good, as the page last listed them. */
+function markOverviewFailed(ctx: WorkerCtx, overview: MinimapOverviewEntry): void {
+  const failed = failedCellsAt(
+    failedKeysForImage(ctx.state, overview.imageId),
+    overview.grid,
+    { level: overview.level, t: overview.t, c: overview.c },
+  );
+  const changed = applyFailedMarks(
+    overview.indirection,
+    overview.markedFailed,
+    failed,
+    (_cell, key) => overview.uploaded.has(key),
+    () => INDIRECTION_MISS,
+  );
+  if (changed) ctx.device.queue.writeBuffer(overview.indirectionBuf, 0, overview.indirection);
 }
 
 export function handleMinimapDestroy(): void {
@@ -390,7 +456,10 @@ export function handleMinimapDestroy(): void {
  */
 export function releaseMinimapDeviceResources(): void {
   deferredMinimapRender = null;
-  for (const entry of minimapOverviewPerDataset.values()) entry.texture.destroy();
+  for (const entry of minimapOverviewPerDataset.values()) {
+    entry.texture.destroy();
+    entry.indirectionBuf.destroy();
+  }
   minimapOverviewPerDataset.clear();
   overviewBytes = 0;
   noteOverviewBytes();
@@ -417,7 +486,10 @@ export function removeMinimapResources(ctx: WorkerCtx, datasetId: string): void 
 }
 
 export function destroyAllMinimapResources(): void {
-  for (const mmE of minimapOverviewPerDataset.values()) mmE.texture.destroy();
+  for (const mmE of minimapOverviewPerDataset.values()) {
+    mmE.texture.destroy();
+    mmE.indirectionBuf.destroy();
+  }
   minimapOverviewPerDataset.clear();
   overviewBytes = 0;
   noteOverviewBytes();

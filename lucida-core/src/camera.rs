@@ -572,8 +572,8 @@ pub const SLICE_ZOOM_MAX: f64 = 1e9;
 /// zoom-out multiplies `distance` to Inf, and `Arcball::pan` with a zero
 /// delta then computes `0 × Inf = NaN` into `target`.
 pub const ARCBALL_DISTANCE_MAX: f64 = 1e9;
-/// The least `near` an arcball zoom-in pulls the near plane down to, as a
-/// share of `far`: a fresh arcball's 0.01 against 100.
+/// The least `near` a volume camera pulls the near plane down to, as a share
+/// of `far`: a fresh camera's 0.01 against 100.
 const NEAR_PER_FAR: f64 = 1e-4;
 /// Component-wise bound for positional camera state (slice `center`, arcball
 /// `target`, fly `position`). Generous for any real world coordinate (slice
@@ -1093,8 +1093,8 @@ impl Arcball {
         // Clamp Z to volume bounds (members don't have Z offsets).
         // XY bounds are not clamped to [0, shape] — for collections, the camera
         // may be looking at a group at a large XY offset. The per-member AABB
-        // test in chunk_plan_for handles member-level visibility, and the
-        // chunk grid iteration in visible_chunks clamps to valid grid indices.
+        // test in chunk_plan_for handles member-level visibility, and chunk
+        // enumeration clamps to valid grid indices.
         voxel_min[2] = voxel_min[2].max(0.0);
         voxel_max[2] = voxel_max[2].min(shape_z);
 
@@ -1277,6 +1277,37 @@ impl Fly {
         // base-speed write.
         let diagonal = 2.0 * Aabb::sanitized(min, max).bounding_radius();
         self.base_speed = (diagonal * 0.3).clamp(1e-6, FLY_BASE_SPEED_MAX);
+    }
+
+    /// Put `near` and `far` around `data`'s bounding sphere as the eye sees it
+    /// now, at the depth of the sphere's center along the look ray, so the
+    /// bracket holds at any orientation. From where a fit leaves the eye it
+    /// is the fit's own bracket.
+    ///
+    /// An arcball carries its planes with the eye because its target stays
+    /// at the data. A fly camera has no target, so it brackets again from the
+    /// data after every move: planes left where a fit put them would sit in
+    /// front of the data once the camera flies away, and past the part of it
+    /// nearest the eye once it flies in.
+    pub fn bracket_depth(&mut self, data: WorldBox) {
+        let aabb = Aabb::sanitized(data.min, data.max);
+        let center = aabb.center();
+        let radius = aabb.bounding_radius();
+        let forward = self.forward_vector();
+        let depth: f64 = (0..3)
+            .map(|i| (center[i] - self.position[i]) * forward[i])
+            .sum();
+        // The fit's slack past the back. With the data behind the eye the
+        // range still spans the sphere, because a range that collapses onto
+        // `near` leaves a projection too ill-conditioned to unproject a ray.
+        let far = (depth.max(0.0) + radius) * 1.05;
+        let near = (depth - radius).max(far * NEAR_PER_FAR);
+        if near.is_finite() && far.is_finite() {
+            // `sanitize` resets a larger `near`, and must pass every camera
+            // this produces through unchanged. `far` still clears it.
+            self.near = near.min(ARCBALL_DISTANCE_MAX);
+            self.far = far;
+        }
     }
 
     /// Advance the fly camera by one tick.
@@ -2372,6 +2403,93 @@ mod tests {
         let orig = cam.orientation;
         cam.fly_tick(0.05, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
         assert!(cam.orientation != orig, "yaw should change orientation");
+    }
+
+    /// The nearest and farthest depth along `cam`'s look ray of any corner of
+    /// the box.
+    fn corner_depths(cam: &Fly, min: [f64; 3], max: [f64; 3]) -> (f64, f64) {
+        let forward = cam.forward_vector();
+        (0..8)
+            .map(|corner| {
+                (0..3)
+                    .map(|i| {
+                        let end = if corner >> i & 1 == 1 { max[i] } else { min[i] };
+                        (end - cam.position[i]) * forward[i]
+                    })
+                    .sum::<f64>()
+            })
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), d| {
+                (lo.min(d), hi.max(d))
+            })
+    }
+
+    #[test]
+    fn bracket_depth_keeps_the_data_between_the_planes_wherever_the_fly_camera_goes() {
+        let (min, max) = ([0.0; 3], [1.0, 4.0, 4.0]);
+        let data = WorldBox::new(min, max);
+        let mut cam = Fly::new([800, 600]);
+        cam.fit_to_bounds(data, FIT_MARGIN_3D);
+        let (near, far) = (cam.near, cam.far);
+        // In place, it is the fit's own bracket.
+        cam.bracket_depth(data);
+        assert!((cam.near - near).abs() < 1e-9 && (cam.far - far).abs() < 1e-9);
+        // Backed out far past the fit, flown in to the middle of the data, and
+        // turned partly away. Inside the data `near` drops to a sliver of it.
+        let radius = Aabb::sanitized(min, max).bounding_radius();
+        for (back, yaw) in [
+            (100.0, 0.0),
+            (-cam.near - 2.0, 0.0),
+            (20.0, 4.0),
+            (0.0, 15.0),
+        ] {
+            let mut moved = cam.clone();
+            moved.base_speed = f64::abs(back) / 0.1;
+            moved.fly_tick(0.1, -f64::signum(back), 0.0, 0.0, yaw, 0.0, 0.0);
+            moved.bracket_depth(data);
+            let (lo, hi) = corner_depths(&moved, min, max);
+            assert!(
+                moved.near > 0.0
+                    && (lo >= moved.near || moved.near <= radius * 1e-3)
+                    && hi <= moved.far,
+                "back {back} yaw {yaw}: near {} far {} around corners at {lo}..{hi}",
+                moved.near,
+                moved.far
+            );
+        }
+        // Flying back to the fit returns the planes to it.
+        let mut out = cam.clone();
+        out.base_speed = 100.0;
+        out.fly_tick(0.1, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        out.fly_tick(0.1, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        out.bracket_depth(data);
+        assert!((out.near - near).abs() < 1e-9 && (out.far - far).abs() < 1e-9);
+    }
+
+    #[test]
+    fn bracket_depth_keeps_a_usable_range_with_the_data_behind() {
+        let data = WorldBox::new([0.0; 3], [1.0; 3]);
+        let radius = Aabb::sanitized(data.min, data.max).bounding_radius();
+        let mut cam = Fly::new([800, 600]);
+        cam.fit_to_bounds(data, FIT_MARGIN_3D);
+        cam.fly_tick(0.1, 0.0, 0.0, 0.0, std::f64::consts::PI / 0.1, 0.0, 0.0);
+        cam.bracket_depth(data);
+        assert!(
+            cam.far >= radius,
+            "far {} under the radius {radius}",
+            cam.far
+        );
+        assert!(cam.near >= cam.far * NEAR_PER_FAR, "near {}", cam.near);
+    }
+
+    #[test]
+    fn bracket_depth_stays_inside_what_sanitize_passes() {
+        let mut cam = Fly::new([800, 600]);
+        cam.position = [0.0, 0.0, CAMERA_POSITION_MAX];
+        cam.bracket_depth(WorldBox::new([0.0; 3], [1.0; 3]));
+        assert!(cam.near <= ARCBALL_DISTANCE_MAX && cam.far > cam.near);
+        let mut sanitized = Camera::Fly(cam.clone());
+        sanitized.sanitize();
+        assert_eq!(sanitized, Camera::Fly(cam));
     }
 
     #[test]

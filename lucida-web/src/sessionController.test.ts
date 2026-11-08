@@ -61,6 +61,7 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     static instances: MockCpuCache[] = [];
     reset = vi.fn();
     resetChunkFailureStreak = vi.fn();
+    applyKnobs = vi.fn();
     config: unknown;
     constructor(_source: unknown, _pool: unknown, config?: unknown) {
       this.config = config;
@@ -94,6 +95,7 @@ const MockedBridge = Bridge as unknown as {
     workspaceId?: string;
     destroy: ReturnType<typeof vi.fn>;
     sendPresence: ReturnType<typeof vi.fn>;
+    sendDatasetPresence: ReturnType<typeof vi.fn>;
     sendFollow: ReturnType<typeof vi.fn>;
     sendOpenRemoteDataset: ReturnType<typeof vi.fn>;
     requestDatasetHealth: ReturnType<typeof vi.fn>;
@@ -126,9 +128,9 @@ function makeFakeScene() {
   return {
     load_document: vi.fn(),
     apply_command: vi.fn(),
-    apply_asset_catalog_delta: vi.fn(),
     available_layouts: vi.fn(() => "[]"),
     export_presence: vi.fn(() => "{}"),
+    export_dataset_presence: vi.fn(() => "{}"),
     import_presence: vi.fn(),
     import_dataset_presence: vi.fn(),
     set_viewport: vi.fn(),
@@ -205,7 +207,7 @@ function makePresence(clientId: number): PresenceState {
   return {
     client_id: clientId,
     camera: { position: [0, 0, 1] },
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
     following: null,
     cursor: null,
@@ -422,6 +424,41 @@ describe("SessionController follow", () => {
     expect(scene.import_dataset_presence).toHaveBeenCalledExactlyOnceWith(
       JSON.stringify({ dataset_order: ["wds-1"], dataset_settings: { "wds-1": { visible: false } } }),
     );
+  });
+
+  it("a steer adopts the target's camera, order and settings, as following does", () => {
+    const { handlers, bridge, deps, scene } = makeHarness();
+    const peer: PresenceState = {
+      ...makePresence(2),
+      dataset_order: ["wds-1"],
+      dataset_settings: { "wds-1": { visible: false } },
+    };
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [peer], 7, {});
+
+    handlers.onFollowChanged?.(7, 2);
+
+    expect(scene.import_presence).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({ camera: peer.camera, view: peer.view, display: peer.display }),
+    );
+    expect(scene.import_dataset_presence).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({ dataset_order: ["wds-1"], dataset_settings: { "wds-1": { visible: false } } }),
+    );
+    expect(deps.bumpLayerSettingsVersion).toHaveBeenCalled();
+    // What it adopted is now its own view, reported for anyone who follows it.
+    expect(bridge.sendPresence).toHaveBeenCalled();
+    expect(bridge.sendDatasetPresence).toHaveBeenCalled();
+  });
+
+  it("the echo of its own follow adopts nothing a second time", () => {
+    const { controller, handlers, scene } = makeHarness();
+    const peer: PresenceState = { ...makePresence(2), dataset_order: ["wds-1"], dataset_settings: {} };
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [peer], 7, {});
+
+    controller.follow(2);
+    handlers.onFollowChanged?.(7, 2);
+
+    expect(scene.import_presence).toHaveBeenCalledTimes(1);
+    expect(scene.import_dataset_presence).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1113,6 +1150,7 @@ describe("SessionController durable import warnings", () => {
 
 describe("SessionController import warnings from dataset health", () => {
   const shapeWarning = {
+    kind: "mismatched_tile_geometry" as const,
     target: "wds-1",
     message: "tiles differ in shape, and smaller tiles are padded with fill",
     degrades: true,

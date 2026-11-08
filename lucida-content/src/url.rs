@@ -19,9 +19,11 @@ use std::str::FromStr;
 ///     `C:\data\a.zarr` → `c:/data/a.zarr`.
 ///   - UNC paths use forward slashes: `\\server\share\a.zarr` →
 ///     `//server/share/a.zarr`.
-///   - A `file://` URL becomes the path it names (RFC 8089):
+///   - A `file://` URL becomes the path it names (RFC 8089), percent-decoded:
 ///     `file:///srv/a.zarr` → `/srv/a.zarr`, `file:///C:/a.zarr` →
-///     `c:/a.zarr`, `file://server/share/a.zarr` → `//server/share/a.zarr`.
+///     `c:/a.zarr`, `file://server/share/a.zarr` → `//server/share/a.zarr`,
+///     `file:///srv/a%20b.zarr` → `/srv/a b.zarr`. A bare path is never
+///     decoded, since `%` is an ordinary filename character.
 ///   - `gs://`, `s3://`, `http://`, and `https://` URLs lowercase the scheme
 ///     and nothing else, since bucket names and object paths are
 ///     case-sensitive.
@@ -132,7 +134,9 @@ impl DatasetLocation {
             "s3" => Self::bucket(LocationScheme::S3, "s3", rest),
             "http" => Self::host(LocationScheme::Http, "http", rest),
             "https" => Self::host(LocationScheme::Https, "https", rest),
-            "file" => file_url_path(rest).map(Self::local).ok_or_else(relative),
+            "file" => file_url_path(&percent_decode(rest))
+                .map(Self::local)
+                .ok_or_else(relative),
             _ => Err(LocationError::UnknownScheme {
                 scheme: scheme.to_string(),
             }),
@@ -217,7 +221,7 @@ impl DatasetLocation {
         dataset_id_for_url(&self.canonical)
     }
 
-    /// The proxy cache's directory hash; see [`dataset_url_hash16`].
+    /// The generated-level cache's directory hash; see [`dataset_url_hash16`].
     pub fn hash16(&self) -> [u8; 16] {
         dataset_url_hash16(&self.canonical)
     }
@@ -271,7 +275,7 @@ pub fn dataset_id_for_url(canonical: &str) -> String {
     format!("ds-{:016x}", u64::from_le_bytes(prefix))
 }
 
-/// 16-byte URL hash used by the proxy cache for its per-dataset
+/// 16-byte URL hash used by the generated-level cache for its per-dataset
 /// directory name. Shares the underlying BLAKE3 digest with
 /// [`dataset_id_for_url`] so the two stay in lockstep — the cache
 /// directory's first 8 bytes (in BLAKE3 order) match the bytes from
@@ -302,6 +306,33 @@ fn split_scheme(raw: &str) -> Option<(&str, &str)> {
             .iter()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'));
     shaped.then_some((scheme, rest))
+}
+
+/// `text` with each `%XX` escape replaced by the byte it names (RFC 3986
+/// §2.1). An escape that is not two hex digits stays as written, and so does
+/// the whole text when the decoded bytes are not UTF-8, since a path the
+/// decoding cannot name is better opened as typed.
+fn percent_decode(text: &str) -> String {
+    if !text.contains('%') {
+        return text.to_string();
+    }
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |at: usize| bytes.get(at).and_then(|b| (*b as char).to_digit(16));
+        match (bytes[i], hex(i + 1), hex(i + 2)) {
+            (b'%', Some(high), Some(low)) => {
+                out.push((high * 16 + low) as u8);
+                i += 3;
+            }
+            (byte, _, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_string())
 }
 
 /// The canonical form of a filesystem path, or `None` when it is relative.
@@ -430,6 +461,19 @@ mod tests {
             ("file:///", "/"),
             ("file://localhost/srv/x.zarr", "/srv/x.zarr"),
             ("FILE:///srv/X.zarr", "/srv/X.zarr"),
+            // A file:// URL is percent-decoded; a malformed escape stays.
+            ("file:///a%20b.zarr", "/a b.zarr"),
+            ("file:///srv/100%25%2Fx.zarr", "/srv/100%/x.zarr"),
+            ("file:///srv/caf%C3%A9.zarr", "/srv/café.zarr"),
+            ("file:///srv/50%zz%2.zarr", "/srv/50%zz%2.zarr"),
+            ("file:///srv/%FF.zarr", "/srv/%FF.zarr"),
+            ("file:///C:/my%20data/a.zarr", "c:/my data/a.zarr"),
+            (
+                "file://server/my%20share/a.zarr",
+                "//server/my share/a.zarr",
+            ),
+            // A bare path is not a URL, so its `%` is a filename character.
+            ("/srv/a%20b.zarr", "/srv/a%20b.zarr"),
             // Drive-letter case variants — all collapse to `c:/foo`.
             ("C:\\foo", "c:/foo"),
             ("c:/foo", "c:/foo"),

@@ -26,24 +26,25 @@ import { AVAILABILITY_UPDATE_SOURCE } from "../../invalidation.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { PointEvent } from "../../trace/types.ts";
 import { createSettleState, settleSignal } from "../settle.ts";
-import type { MissingChunk } from "../../renderer/workerProtocol.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import type { ChannelFit } from "../autoContrast.ts";
-import { AssetCatalog } from "../assetCatalog.ts";
 import {
   GeneratedAvailabilityCatalog,
   type WireGeneratedAvailabilityDelta,
 } from "../generatedAvailability.ts";
 import { CpuCache, type CpuCacheConfig } from "../fetch/index.ts";
-import type { DatasetFixture } from "./fixtures.ts";
+import { generatedHistograms, type DatasetFixture } from "./fixtures.ts";
 import {
   passThroughDecodePool,
+  rampSamples,
   SimulatedSource,
   type SourceAnswer,
   type SourceRequest,
   type SourceSpec,
 } from "./source.ts";
-import { GPU_USAGE_GLOBALS, SimulatedWorker } from "./worker.ts";
+import { deliveryKey, GPU_USAGE_GLOBALS, SimulatedWorker, type ChunkDeliveries } from "./worker.ts";
+import type { ResidencyTier } from "../residencyTier.ts";
+import { workerMemberId } from "../upload/delivery/dispatch.ts";
 
 /** One step of the simulation clock: a frame at 60 Hz. */
 export const FRAME_MS = 16;
@@ -72,7 +73,7 @@ const REPORT_KEY_LIMIT = 12;
 const RESENT_THRESHOLD = 3;
 
 export type ScenarioStep =
-  | { scrub: { z?: number; t?: number; c?: number } }
+  | { scrub: { z?: number; t?: number } }
   /** A drag, in device pixels; an arcball pan in a volume. */
   | { pan: [dx: number, dy: number] }
   /** A zoom by a factor about the view center; an arcball zoom in a volume. */
@@ -154,10 +155,12 @@ export interface PhaseOutcome {
   why: string;
   /** Frames the render loop ran in this phase. */
   frames: number;
-  /** Chunks the page sent the worker in this phase. */
+  /** Chunks the page sent the worker in this phase, a chunk resident in both tiers once per tier. */
   chunksSent: number;
   /** Distinct chunks among them; equal to `chunksSent` when none went twice. */
   distinctChunksSent: number;
+  /** The bytes of chunk data the page sent the worker in this phase. */
+  bytesSent: number;
   quiescence: string;
   /** The share of the wanted set the page says is resident. */
   coverage: number;
@@ -186,6 +189,12 @@ export interface PhaseOutcome {
   failed: string[];
   /** The worker's indirection cells the shader draws as failed (see `SimulatedWorker.failedCells`). */
   drawnFailed: string[];
+  /**
+   * Label cells drawing another plane than the view's (see
+   * `SimulatedWorker.staleLabelCells`). A phase that ends with one has not
+   * settled: the screen shows a plane as one it isn't.
+   */
+  staleLabelCells: string[];
   /** The auto-contrast fits handed out in this phase, in order. */
   fits: ContrastFitRecord[];
 }
@@ -357,6 +366,10 @@ class Simulation {
 
     const scene = new WasmScene(deviceW, deviceH);
     scene.apply_command(dataset.openCommand);
+    // A fixture's labels are there to be drawn, and a label opens hidden.
+    for (let label = 0; label < (dataset.manifest.labels?.length ?? 0); label++) {
+      scene.apply_command(JSON.stringify({ type: "set_label_visible", dataset_id: dataset.datasetId, label, visible: true }));
+    }
     bumpSettingsGeneration();
     this.scene = scene;
 
@@ -367,13 +380,10 @@ class Simulation {
     }
     this.datasets.set(dataset.datasetId, manifest);
 
-    const assetCatalog = new AssetCatalog(scene);
-    assetCatalog.applyInitial(dataset.datasetId, { entries: [] });
     const session = {
       scene,
       cpuCache: this.cpuCache,
       contentSource: this.source,
-      assetCatalog,
       generatedAvailability: this.availability,
       bridge: { sendViewerInterest: () => {} },
     } as unknown as Session;
@@ -411,7 +421,9 @@ class Simulation {
           status: "ready" as const,
         })),
       );
-      setTimeout(() => this.applyAvailability({ chunks }), generated.readyAtMs);
+      // The server sends a histogram with the last chunk of its timepoint and channel.
+      const histograms = generatedHistograms(generated, this.scenario.source.samples ?? rampSamples);
+      setTimeout(() => this.applyAvailability({ chunks, histograms }), generated.readyAtMs);
     }
   }
 
@@ -462,7 +474,6 @@ class Simulation {
     loop.markInput("scrub");
     if (scrub.z !== undefined) applyViewportCommand(scene, { type: "set_z", z: scrub.z });
     if (scrub.t !== undefined) applyViewportCommand(scene, { type: "set_t", t: scrub.t });
-    if (scrub.c !== undefined) applyViewportCommand(scene, { type: "set_c", c: scrub.c });
     return `scrub ${Object.entries(scrub).map(([axis, v]) => `${axis}=${v}`).join(" ")}`;
   }
 
@@ -511,7 +522,7 @@ class Simulation {
   async settle(label: string): Promise<PhaseOutcome> {
     const framesBefore = this.framesRun;
     const fitsBefore = this.fits.length;
-    const sentBefore = new Map([...this.worker.deliveries].map(([key, d]) => [key, d.count]));
+    const sentBefore = new Map([...this.worker.deliveries].map(([key, d]) => [key, { ...d }]));
     const heldBefore = this.held.length;
     const quietSteps = Math.ceil(QUIET_MS / FRAME_MS);
     let fixedSince: number | null = null;
@@ -536,24 +547,27 @@ class Simulation {
     fixed: boolean,
     framesBefore: number,
     fitsBefore: number,
-    sentBefore: Map<string, number>,
+    sentBefore: Map<string, ChunkDeliveries>,
     heldBefore: number,
   ): PhaseOutcome {
     const q = this.cpuCache.settleInputs(createSettleState());
     const page = pageSettle();
     const missingCpu = this.missingFromCpu();
     const missingGpu = this.missingFromGpu();
+    const staleLabelCells = this.worker.staleLabelCells();
 
     let chunksSent = 0;
     let distinctChunksSent = 0;
+    let bytesSent = 0;
     const resent: Array<{ text: string; times: number }> = [];
-    for (const [key, { tier, count }] of this.worker.deliveries) {
-      const times = count - (sentBefore.get(key) ?? 0);
+    for (const [key, { tier, memberId, chunkKey, count, bytes }] of this.worker.deliveries) {
+      const before = sentBefore.get(key);
+      const times = count - (before?.count ?? 0);
       chunksSent += times;
+      bytesSent += bytes - (before?.bytes ?? 0);
       if (times > 0) distinctChunksSent++;
       if (times < RESENT_THRESHOLD) continue;
-      const slash = key.indexOf("/");
-      resent.push({ text: this.describeKey(key.slice(0, slash), key.slice(slash + 1), tier), times });
+      resent.push({ text: this.describeKey(memberId, chunkKey, tier), times });
     }
     resent.sort((a, b) => b.times - a.times);
 
@@ -566,6 +580,8 @@ class Simulation {
       why = `fixed point after ${ticks} ticks, but the worker lacks ${missingGpu.length} chunks it wants`;
     } else if (this.held.length > heldBefore) {
       why = `fixed point after ${ticks} ticks, but only because the uploader held ${this.held.length - heldBefore} chunks`;
+    } else if (staleLabelCells.length > 0) {
+      why = `fixed point after ${ticks} ticks, but ${staleLabelCells.length} label cells draw another plane than the view's`;
     }
 
     return {
@@ -576,6 +592,7 @@ class Simulation {
       frames: this.framesRun - framesBefore,
       chunksSent,
       distinctChunksSent,
+      bytesSent,
       quiescence: page.reason,
       coverage: page.coverage,
       detail: { resident: q.residentDetailChunks, desired: q.desiredDetailChunks },
@@ -592,6 +609,7 @@ class Simulation {
         .map(({ chunk, failure }) => `${chunk}: ${failure ?? "failed with no reason given"}`)
         .sort(),
       drawnFailed: this.worker.failedCells(this.scenario.dataset.datasetId),
+      staleLabelCells,
       fits: this.fits.slice(fitsBefore),
     };
   }
@@ -612,7 +630,7 @@ class Simulation {
     for (const plan of plans.values()) {
       for (const req of plan.requests) {
         if (req.lane === "prefetch" || this.cpuCache.holds(req)) continue;
-        out.push(this.describeKey(req.imageId, req.chunkKey, req.tier));
+        out.push(this.describeKey(workerMemberId(req.imageId, req.c), req.chunkKey, req.tier));
       }
     }
     return out;
@@ -622,18 +640,17 @@ class Simulation {
   private missingFromGpu(): string[] {
     return this.worker
       .missingNow(this.scenario.dataset.datasetId)
-      .filter((m): m is MissingChunk => m.kind === "chunk")
       .map((m) => this.describeKey(m.memberId, m.chunkKey, m.tier));
   }
 
   /** A key with the last word on it from the source and the worker. */
-  private describeKey(memberId: string, chunkKey: string, tier: string): string {
+  private describeKey(memberId: string, chunkKey: string, tier: ResidencyTier): string {
     const imageId = memberId.replace(/:ch\d+$/, "");
     const notes: string[] = [];
     const source = this.source.records.get(`${imageId}/${chunkKey}`);
     if (!source) notes.push("never requested");
     else notes.push(`source answered ${source.last} (${times(source.requests, "request")})`);
-    const sent = this.worker.deliveries.get(`${memberId}/${chunkKey}`)?.count ?? 0;
+    const sent = this.worker.deliveries.get(deliveryKey(tier, memberId, chunkKey))?.count ?? 0;
     if (sent > 0) notes.push(`sent to the worker ${times(sent, "time")}`);
     const feedback = this.feedback.get(`${memberId}/${chunkKey}`);
     if (feedback) notes.push(`last worker feedback ${feedback.reason} (${feedback.count} in a row)`);
@@ -669,7 +686,7 @@ function formatReport(name: string, dpr: number, phases: PhaseOutcome[]): string
   for (const p of phases) {
     lines.push(
       `phase "${p.label}": ${p.why}.`,
-      `  ${p.frames} frames, ${p.chunksSent} chunks sent to the worker; ` +
+      `  ${p.frames} frames, ${p.chunksSent} chunks (${p.bytesSent} bytes) sent to the worker; ` +
         `CPU cache holds detail ${p.detail.resident}/${p.detail.desired}, ` +
         `coarse ${p.coarse.resident}/${p.coarse.desired}; ${p.queued} queued, ${p.inFlight} in flight; ` +
         `the page reports ${Math.round(p.coverage * 100)}% coverage.`,
@@ -678,6 +695,7 @@ function formatReport(name: string, dpr: number, phases: PhaseOutcome[]): string
       ...formatKeys(`sent to the worker ${RESENT_THRESHOLD} or more times`, p.resent),
       ...formatKeys("held by the uploader to cut a feedback loop", p.held),
       ...formatKeys("failed for good, so the view settles without them", p.failed),
+      ...formatKeys("label cells drawing another plane than the view's", p.staleLabelCells),
     );
   }
   return lines.join("\n");

@@ -6,6 +6,8 @@ import type {
   VolumeLayerParams,
   SliceLayerParams,
   MinimapLayerParams,
+  MinimapRenderMessage,
+  ThumbnailRenderMessage,
   WorkerToMainMessage,
   CaptureFailure,
   FrameCaptureResult,
@@ -22,6 +24,8 @@ import type {
   GpuErrorMessage,
   GpuDeviceRestoredMessage,
   GpuFailedMessage,
+  ProbeMessage,
+  ProbeSample,
 } from "./workerProtocol.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
 import { summarizeDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
@@ -35,6 +39,11 @@ import type {
 import { tokenColor } from "../theme/tokenColors.ts";
 import type { ResolvedColor } from "../theme/tokens.ts";
 import { readDeviceMemoryGiB } from "../deviceBudget.ts";
+
+/** The page's device pixels per CSS pixel, or 1 where there is no window. */
+function pagePixelRatio(): number {
+  return typeof devicePixelRatio === "number" && devicePixelRatio > 0 ? devicePixelRatio : 1;
+}
 
 /** What the render worker says about its GPU device. */
 export type GpuStatus = GpuErrorMessage | GpuDeviceRestoredMessage | GpuFailedMessage;
@@ -97,6 +106,10 @@ export class RenderClient implements UploadClient {
    *  Resolved when the matching `frameCaptured` arrives. */
   private framePending = new Map<number, (capture: FrameCaptureResult) => void>();
   private frameSeq = 0;
+
+  /** Pending `probe` requests, keyed by the id sent to the worker. */
+  private probePending = new Map<number, (samples: ProbeSample[]) => void>();
+  private probeSeq = 0;
 
   onChunkResidency: ChunkResidencyHandler | null = null;
   /** Missing entries cover chunks and proxies; match on `kind`. */
@@ -319,6 +332,10 @@ export class RenderClient implements UploadClient {
         // No waiter, so release the GPU-backed bitmap rather than leak it.
         msg.bitmap.close();
       }
+    } else if (msg.type === "probeResult") {
+      const resolve = this.probePending.get(msg.id);
+      this.probePending.delete(msg.id);
+      resolve?.(msg.samples);
     } else if (msg.type === "frameCaptured") {
       const resolve = this.framePending.get(msg.id);
       if (resolve) {
@@ -467,13 +484,12 @@ export class RenderClient implements UploadClient {
     epochs: SceneEpochs,
     tier: ResidencyTier,
   ) {
-    const transferList: ArrayBuffer[] = [];
-    const workerChunks: Chunk[] = chunks.map(chunk => {
-      // Copy before transfer, as in `volumeChunkData`.
-      const buf = chunk.data.slice(0);
-      transferList.push(buf);
-      return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
-    });
+    // Each buffer is a plane the caller cut for the worker, so it moves
+    // without a second copy.
+    const transferList = chunks.map(chunk => chunk.data);
+    const workerChunks: Chunk[] = chunks.map(chunk => (
+      { data: chunk.data, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key }
+    ));
     this.worker.postMessage(
       {
         type: "sliceChunkData",
@@ -501,16 +517,14 @@ export class RenderClient implements UploadClient {
     levelHeight: number,
     chunkX: number,
     chunkY: number,
+    plane: number,
     epochs: SceneEpochs,
   ) {
-    const transferList: ArrayBuffer[] = [];
-    const workerChunks: Chunk[] = chunks.map(chunk => {
-      // The delivery path extracted a fresh per-plane buffer, but copy +
-      // transfer keeps the API uniform with the other chunk senders.
-      const buf = chunk.data.slice(0);
-      transferList.push(buf);
-      return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
-    });
+    // As in `sliceChunkData`, each buffer is a plane cut for the worker.
+    const transferList = chunks.map(chunk => chunk.data);
+    const workerChunks: Chunk[] = chunks.map(chunk => (
+      { data: chunk.data, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key }
+    ));
     this.worker.postMessage(
       {
         type: "labelSliceChunkData",
@@ -522,6 +536,7 @@ export class RenderClient implements UploadClient {
         t, c,
         levelWidth, levelHeight,
         chunkX, chunkY,
+        plane,
       },
       transferList,
     );
@@ -553,40 +568,6 @@ export class RenderClient implements UploadClient {
    */
   viewHotState(msg: ViewHotStateMessage) {
     this.worker.postMessage(msg);
-  }
-
-  /**
-   * Forward a proxy asset to the worker. Copies before transferring because
-   * the CpuCache keeps `data` for re-delivery after worker-side eviction.
-   */
-  proxyAssetData(
-    datasetId: string,
-    entityId: string,
-    imageId: string,
-    kind: "GroupProxy3D" | "TileProxy3D",
-    t: number,
-    c: number,
-    dims: [number, number, number],
-    data: ArrayBuffer,
-    epochs: SceneEpochs,
-  ) {
-    const buf = data.slice(0);
-    this.worker.postMessage(
-      {
-        type: "proxyAssetData",
-        epochs,
-        datasetId,
-        entityId,
-        imageId,
-        kind,
-        t,
-        c,
-        dims,
-        dataType: "u16",
-        data: buf,
-      },
-      [buf],
-    );
   }
 
   volumeRenderMultiPass(
@@ -646,7 +627,9 @@ export class RenderClient implements UploadClient {
   }
 
   minimapRender(layers: MinimapLayerParams[], invViewProj: Float32Array, eye: Float32Array, canvasW: number, canvasH: number) {
-    this.worker.postMessage({ type: "minimapRender", layers, invViewProj, eye, canvasW, canvasH });
+    this.worker.postMessage({
+      type: "minimapRender", layers, invViewProj, eye, canvasW, canvasH, pixelRatio: pagePixelRatio(),
+    } satisfies MinimapRenderMessage);
   }
 
   /**
@@ -669,7 +652,9 @@ export class RenderClient implements UploadClient {
     const id = this.thumbnailSeq++;
     return new Promise<ImageBitmap | null>((resolve) => {
       this.thumbnailPending.set(id, resolve);
-      this.worker.postMessage({ type: "thumbnailRender", id, layers, invViewProj, eye, size });
+      this.worker.postMessage({
+        type: "thumbnailRender", id, layers, invViewProj, eye, size, pixelRatio: pagePixelRatio(),
+      } satisfies ThumbnailRenderMessage);
     });
   }
 
@@ -712,6 +697,8 @@ export class RenderClient implements UploadClient {
   minimapUploadOverviewChunksForLayer(
     datasetId: string,
     chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
+    imageId: string,
+    level: number,
     t: number,
     c: number,
     levelWidth: number,
@@ -734,6 +721,7 @@ export class RenderClient implements UploadClient {
         type: "minimapUploadOverviewChunksForLayer",
         datasetId,
         chunks: workerChunks,
+        imageId, level,
         t, c,
         levelWidth, levelHeight, levelDepth,
         chunkX, chunkY, chunkZ,
@@ -741,6 +729,21 @@ export class RenderClient implements UploadClient {
       } satisfies MinimapUploadOverviewChunksForLayerMessage,
       transferList,
     );
+  }
+
+  /**
+   * The samples the last frame drew under a canvas point, given as fractions
+   * of the canvas: per visible channel of each entity there, the resident
+   * value and its level. Empty when nothing is drawn there, before the worker
+   * is ready, and after destroy.
+   */
+  probe(x: number, y: number): Promise<ProbeSample[]> {
+    if (this.destroyed || !this.workerReady) return Promise.resolve([]);
+    const id = this.probeSeq++;
+    return new Promise((resolve) => {
+      this.probePending.set(id, resolve);
+      this.worker.postMessage({ type: "probe", id, x, y } satisfies ProbeMessage);
+    });
   }
 
   updateCursorData(data: Float32Array, count: number) {
@@ -783,6 +786,8 @@ export class RenderClient implements UploadClient {
       resolve({ frame: null, reason: DESTROYED_BEFORE_ANSWER });
     }
     this.framePending.clear();
+    for (const resolve of this.probePending.values()) resolve([]);
+    this.probePending.clear();
     // Settle a still-pending init so `ready()` awaiters don't hang (no-op
     // once the worker has reported ready).
     this.readyReject(new Error("RenderClient destroyed"));

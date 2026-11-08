@@ -4,13 +4,11 @@
 //! here, named by the label the panel shows, kebab-cased: "Prefetch depth" is
 //! `--prefetch-depth` and "Main budget (MB)" is `--main-budget-mb`. The value
 //! is what a person would type into the panel, in the panel's unit, and it
-//! lands where the panel's own edit lands: the persisted planning
-//! configuration for the planning knobs, and a storage envelope for the four
-//! session-scoped CPU cache knobs, which the panel writes onto the live cache
-//! and which therefore need a place a page can read before its cache exists.
-//! Both are written into the page's browser storage before the page loads,
-//! so the page starts under them rather than switching to them after its
-//! first requests are in flight.
+//! lands where the panel's own edit lands: the knob's preference. The page is
+//! the capture surface, which reads no browser storage, so the driver hands
+//! the preferences over in a page global it sets before the page loads, with
+//! developer tools on, since knobs apply only then. The page starts under them
+//! rather than switching to them after its first requests are in flight.
 //!
 //! `--versus` splits the knob flags into two configurations: the knobs before
 //! it are the first run's and the knobs after it are the second's. The driver
@@ -29,13 +27,23 @@ use serde_json::{Value, json};
 
 use crate::trace::json_string;
 
-/// Which store a knob lands in.
+/// Which group of preferences a knob belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnobStore {
-    /// The persisted planning configuration Dev controls writes.
+    /// The planning configuration's knobs, `planning.<field>`.
     Planning,
-    /// The CPU cache's envelope, read once when the session constructs its cache.
+    /// The CPU cache's knobs, `cache.<field>`.
     Cache,
+}
+
+impl KnobStore {
+    /// The preference key of `field` in this group, as the page names it.
+    pub fn preference_key(self, field: &str) -> String {
+        match self {
+            KnobStore::Planning => format!("planning.{field}"),
+            KnobStore::Cache => format!("cache.{field}"),
+        }
+    }
 }
 
 /// One Dev controls knob, as the panel shows it and as the driver takes it.
@@ -101,18 +109,6 @@ pub const KNOBS: &[Knob] = &[
         help: "Coefficient on a chunk's distance from the view center",
     },
     Knob {
-        flag: "group-proxy-priority-bump",
-        label: "Group-proxy priority bump",
-        field: "groupProxyPriorityBump",
-        store: KnobStore::Planning,
-        value_name: "BUMP",
-        integer: true,
-        megabytes: false,
-        min: 0.0,
-        max: Some(500.0),
-        help: "Priority added to a parent-group proxy request, pushing it below per-tile proxies",
-    },
-    Knob {
         flag: "detail-render-radius-view",
         label: "Detail render radius (view)",
         field: "detailRenderRadiusView",
@@ -137,18 +133,6 @@ pub const KNOBS: &[Knob] = &[
         help: "Coarse render radius as a multiple of the visible region; 2 disables the filter",
     },
     Knob {
-        flag: "proxy-gpu-budget-bytes",
-        label: "Proxy GPU budget (bytes)",
-        field: "proxyResidencyBudgetBytes",
-        store: KnobStore::Planning,
-        value_name: "BYTES",
-        integer: true,
-        megabytes: false,
-        min: 16.0 * MIB,
-        max: Some(512.0 * MIB),
-        help: "GPU proxy residency budget, in bytes",
-    },
-    Knob {
         flag: "minimap-lane-offset",
         label: "MINIMAP lane offset",
         field: "minimapLaneOffset",
@@ -158,7 +142,7 @@ pub const KNOBS: &[Knob] = &[
         megabytes: false,
         min: 0.0,
         max: Some(5000.0),
-        help: "Priority offset of the minimap lane. The canonical order is MINIMAP < DETAIL < PROXY < PREFETCH < COARSE",
+        help: "Priority offset of the minimap lane. The canonical order is MINIMAP < DETAIL < PREFETCH < COARSE",
     },
     Knob {
         flag: "detail-lane-offset",
@@ -171,18 +155,6 @@ pub const KNOBS: &[Knob] = &[
         min: 0.0,
         max: Some(5000.0),
         help: "Priority offset of the detail lane",
-    },
-    Knob {
-        flag: "proxy-lane-offset",
-        label: "PROXY lane offset",
-        field: "proxyLaneOffset",
-        store: KnobStore::Planning,
-        value_name: "OFFSET",
-        integer: true,
-        megabytes: false,
-        min: 0.0,
-        max: Some(5000.0),
-        help: "Priority offset of the proxy lane",
     },
     Knob {
         flag: "prefetch-lane-offset",
@@ -218,7 +190,7 @@ pub const KNOBS: &[Knob] = &[
         megabytes: true,
         min: 1.0,
         max: None,
-        help: "The CPU cache's main store budget, in megabytes. Session-scoped, as in the panel",
+        help: "The CPU cache's main store budget, in megabytes",
     },
     Knob {
         flag: "overview-budget-mb",
@@ -230,7 +202,7 @@ pub const KNOBS: &[Knob] = &[
         megabytes: true,
         min: 1.0,
         max: None,
-        help: "The CPU cache's overview store budget, in megabytes. Session-scoped",
+        help: "The CPU cache's overview store budget, in megabytes",
     },
     Knob {
         flag: "max-fetches",
@@ -242,7 +214,7 @@ pub const KNOBS: &[Knob] = &[
         megabytes: false,
         min: 1.0,
         max: None,
-        help: "Concurrent fetches the CPU cache allows. Session-scoped",
+        help: "Concurrent fetches the CPU cache allows",
     },
     Knob {
         flag: "max-in-flight-mb",
@@ -254,17 +226,15 @@ pub const KNOBS: &[Knob] = &[
         megabytes: true,
         min: 1.0,
         max: None,
-        help: "Bytes the CPU cache allows in flight at once, in megabytes. Session-scoped",
+        help: "Bytes the CPU cache allows in flight at once, in megabytes",
     },
 ];
 
-/// The browser-storage key and envelope version of the persisted planning
-/// configuration. The page's own constants; a test holds these to them.
-pub const PLANNING_STORAGE_KEY: &str = "lucida.planning.config";
-pub const PLANNING_SCHEMA_VERSION: u32 = 3;
-/// The same for the CPU cache knobs' envelope.
-pub const CACHE_STORAGE_KEY: &str = "lucida.cache.config";
-pub const CACHE_SCHEMA_VERSION: u32 = 1;
+/// The page global the capture surface starts its preferences from, and the
+/// preference that turns developer tools on. The page's own names; a test
+/// holds these to them.
+pub const PREFERENCE_SEED_GLOBAL: &str = "lucidaPreferenceSeed";
+pub const DEVELOPER_TOOLS_PREFERENCE: &str = "developer.tools";
 
 /// The knob by its flag, for a test that has the flag's text.
 #[cfg(test)]
@@ -277,10 +247,10 @@ pub fn knob_for_flag(flag: &str) -> Option<&'static Knob> {
 /// the driver's default, which is the page's.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct KnobSettings {
-    /// Planning fields, as written to the persisted planning configuration.
+    /// Planning fields, as the planning configuration holds them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub planning: BTreeMap<String, Value>,
-    /// CPU cache fields, in bytes and counts, as written to the cache envelope.
+    /// CPU cache fields, in bytes and counts, as the cache's config holds them.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub cache: BTreeMap<String, Value>,
 }
@@ -349,43 +319,25 @@ impl KnobSettings {
     }
 
     /// The script the driver runs in the page before any of the page's own:
-    /// each store's envelope, written into browser storage exactly as the
-    /// panel writes it, so the page hydrates from it as it starts. None when
-    /// nothing was set, and the page is left to its defaults.
-    ///
-    /// The storage write is guarded because the script also runs on the
-    /// blank document the target is created with, whose opaque origin has no
-    /// storage to write.
+    /// the page global the capture surface starts its preferences from, each
+    /// knob under the preference key the panel writes, and developer tools on
+    /// so the knobs apply. None when nothing was set, and the page is left to
+    /// its defaults.
     pub fn new_document_script(&self) -> Option<String> {
         if self.is_empty() {
             return None;
         }
-        let mut writes = Vec::new();
-        if !self.planning.is_empty() {
-            let envelope = json!({
-                "schemaVersion": PLANNING_SCHEMA_VERSION,
-                "config": self.planning,
-            });
-            writes.push(format!(
-                "localStorage.setItem({}, {});",
-                json_string(PLANNING_STORAGE_KEY),
-                json_string(&envelope.to_string())
-            ));
-        }
-        if !self.cache.is_empty() {
-            let envelope = json!({
-                "schemaVersion": CACHE_SCHEMA_VERSION,
-                "config": self.cache,
-            });
-            writes.push(format!(
-                "localStorage.setItem({}, {});",
-                json_string(CACHE_STORAGE_KEY),
-                json_string(&envelope.to_string())
-            ));
+        let mut seed = serde_json::Map::new();
+        seed.insert(DEVELOPER_TOOLS_PREFERENCE.to_string(), json!(true));
+        for store in [KnobStore::Planning, KnobStore::Cache] {
+            for (field, value) in self.store(store) {
+                seed.insert(store.preference_key(field), value.clone());
+            }
         }
         Some(format!(
-            "(() => {{ try {{ {} }} catch (error) {{ /* no storage on this origin */ }} }})();",
-            writes.join(" ")
+            "globalThis[{}] = {};",
+            json_string(PREFERENCE_SEED_GLOBAL),
+            Value::Object(seed)
         ))
     }
 
@@ -615,7 +567,7 @@ mod tests {
     fn every_panel_knob_is_a_flag_named_by_its_label_and_nothing_else_is() {
         let panel = panel_knobs();
         assert!(
-            panel.len() >= 16,
+            panel.len() >= 13,
             "the panel declares {} knobs",
             panel.len()
         );
@@ -663,40 +615,35 @@ mod tests {
         }
     }
 
-    /// The envelopes are read by the page's own constants, and a version bump
-    /// on either side has to be met here.
+    /// The seed global, the developer tools preference, and every knob's
+    /// preference key are the page's own names, so a rename on either side
+    /// has to be met here.
     #[test]
-    fn the_store_keys_and_versions_are_the_pages() {
+    fn the_seed_global_and_preference_keys_are_the_pages() {
+        let preferences = web_source("theme/preferences.ts");
+        assert!(
+            preferences.contains(&format!(
+                "const PREFERENCE_SEED_GLOBAL = \"{PREFERENCE_SEED_GLOBAL}\";"
+            )),
+            "the page's seed global moved"
+        );
+        assert!(
+            preferences.contains(&format!(
+                "booleanPreference(\"{DEVELOPER_TOOLS_PREFERENCE}\", false)"
+            )),
+            "the page's developer tools preference moved"
+        );
         let planning = web_source("pipeline/planning/configStore.ts");
-        assert!(
-            planning.contains(&format!("const STORAGE_KEY = \"{PLANNING_STORAGE_KEY}\";")),
-            "the page's planning storage key moved"
-        );
-        assert!(
-            planning.contains(&format!(
-                "const SCHEMA_VERSION = {PLANNING_SCHEMA_VERSION};"
-            )),
-            "the page's planning schema version moved"
-        );
         let cache = web_source("pipeline/fetch/cacheKnobs.ts");
-        assert!(
-            cache.contains(&format!(
-                "const CACHE_KNOBS_STORAGE_KEY = \"{CACHE_STORAGE_KEY}\";"
-            )),
-            "the page's cache knobs storage key moved"
-        );
-        assert!(
-            cache.contains(&format!(
-                "const CACHE_KNOBS_SCHEMA_VERSION = {CACHE_SCHEMA_VERSION};"
-            )),
-            "the page's cache knobs schema version moved"
-        );
-        // The page reads only the fields its own list names.
-        for knob in KNOBS.iter().filter(|knob| knob.store == KnobStore::Cache) {
+        for knob in KNOBS {
+            let source = match knob.store {
+                KnobStore::Planning => &planning,
+                KnobStore::Cache => &cache,
+            };
+            let key = knob.store.preference_key(knob.field);
             assert!(
-                cache.contains(&format!("\"{}\",", knob.field)),
-                "the page's cache knob list does not name {}",
-                knob.field
+                source.contains(&format!("\"{key}\"")),
+                "the page has no preference {key}"
             );
         }
     }
@@ -767,10 +714,11 @@ mod tests {
         assert_eq!(KnobSettings::default().describe(), "");
     }
 
-    /// The script writes each store's envelope in the shape the page's store
-    /// hydrates from, and nothing when nothing was set.
+    /// The script seeds each knob under the preference key the page reads,
+    /// with developer tools on, touches no storage, and is absent when
+    /// nothing was set.
     #[test]
-    fn the_new_document_script_writes_the_envelopes_the_page_reads() {
+    fn the_new_document_script_seeds_the_preferences_the_page_reads() {
         assert_eq!(KnobSettings::default().new_document_script(), None);
 
         let mut settings = KnobSettings::default();
@@ -778,26 +726,21 @@ mod tests {
             .set(knob_for_flag("prefetch-depth").unwrap(), 0.0)
             .unwrap();
         let script = settings.new_document_script().unwrap();
-        assert!(script.contains("localStorage.setItem(\"lucida.planning.config\", "));
-        // The envelope rides as a JSON string literal, quotes escaped.
-        assert!(script.contains(r#"\"schemaVersion\":3"#), "{script}");
-        assert!(
-            script.contains(r#"\"config\":{\"prefetchDepth\":0}"#),
-            "{script}"
+        assert_eq!(
+            script,
+            r#"globalThis["lucidaPreferenceSeed"] = {"developer.tools":true,"planning.prefetchDepth":0};"#
         );
-        assert!(!script.contains("lucida.cache.config"));
-        assert!(script.starts_with("(() => { try {"));
 
         settings
             .set(knob_for_flag("max-fetches").unwrap(), 2.0)
             .unwrap();
         let script = settings.new_document_script().unwrap();
-        assert!(script.contains("localStorage.setItem(\"lucida.cache.config\", "));
-        assert!(script.contains(r#"\"schemaVersion\":1"#), "{script}");
         assert!(
-            script.contains(r#"\"config\":{\"maxConcurrentFetches\":2}"#),
+            script.contains(r#""cache.maxConcurrentFetches":2"#),
             "{script}"
         );
+        assert!(script.contains(r#""planning.prefetchDepth":0"#), "{script}");
+        assert!(!script.contains("localStorage"), "{script}");
     }
 
     fn parse(args: &[&str]) -> Result<KnobArgs, clap::Error> {

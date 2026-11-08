@@ -15,22 +15,17 @@ describe("CommentCountBadge", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("shows the count with a singular aria-label at one comment", () => {
-    render(<CommentCountBadge count={1} onToggleThread={() => {}} />);
-    const badge = screen.getByLabelText("1 comment");
-    expect(badge.textContent).toBe("1");
-  });
-
-  it("pluralizes the aria-label past one comment", () => {
-    render(<CommentCountBadge count={3} onToggleThread={() => {}} />);
-    const badge = screen.getByLabelText("3 comments");
+  it("shows the count, hidden from assistive technology since the marker's name says it", () => {
+    const { container } = render(<CommentCountBadge count={3} onToggleThread={() => {}} />);
+    const badge = container.firstChild as HTMLElement;
     expect(badge.textContent).toBe("3");
+    expect(badge.getAttribute("aria-hidden")).toBe("true");
   });
 
   it("clicking the badge fires the thread toggle", () => {
     const onToggleThread = vi.fn();
-    render(<CommentCountBadge count={2} onToggleThread={onToggleThread} />);
-    fireEvent.click(screen.getByLabelText("2 comments"));
+    const { container } = render(<CommentCountBadge count={2} onToggleThread={onToggleThread} />);
+    fireEvent.click(container.firstChild as HTMLElement);
     expect(onToggleThread).toHaveBeenCalledTimes(1);
   });
 });

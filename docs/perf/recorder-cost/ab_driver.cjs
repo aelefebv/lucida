@@ -1,11 +1,12 @@
 'use strict';
-// Recorder A/B frame-throughput driver (issue #928).
+// Recorder A/B frame-throughput driver.
 //
 // Loads an already-opened viewer URL twice in one browser context and counts
 // rendered frames over a fixed ten-second window on the SECOND load — the warm
-// re-open, which is the shape #888 measured (1,148 frames in ten seconds,
-// debug panel open against debug panel closed). One arm per bundle: the tree's
-// real sink, and the same tree with `noopSinkFactory` in the recorder singleton.
+// re-open, which is the shape the debug-panel A/B measured (1,148 frames in
+// ten seconds, debug panel open against debug panel closed). One arm per
+// bundle: the tree's real sink, and the same tree with `noopSinkFactory` in
+// the recorder singleton.
 //
 // Frames come from `window.__lucidaCaptureReady.frameCount`, the counter the
 // product already keeps for capture readiness — nothing is added to the page
@@ -58,7 +59,7 @@ const seam = () => (window.lucidaTrace ? window.lucidaTrace.schemaVersion : null
 // Keep the pipeline working for the whole window rather than measuring an
 // idle viewer: the render loop is dirty-driven, so a still page draws nothing
 // and both arms would tie at zero. A slow orbit round the canvas centre is the
-// same drive the #888 harness used.
+// same drive the debug-panel harness used.
 async function drive(page, ms) {
   const t = await page.evaluate(() => {
     const c = document.querySelector('canvas');

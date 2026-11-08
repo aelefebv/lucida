@@ -23,6 +23,7 @@ import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { frameClock } from "../frameClock.ts";
 import { requestRender } from "../invalidation.ts";
 import type { CameraMode } from "../sceneStore.ts";
+import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
 
 interface Props {
   session: Session;
@@ -44,7 +45,7 @@ interface Props {
   /** The canvas tool: pan, or the annotation shape a press draws. */
   tool: Tool;
   /** Stable, browser-persisted annotation-author identity, recorded as a 3D pin's
-   * `author`. From `annotationAuthorId()`, not the per-connection `bridge.myId`,
+   * `author`. From `annotationAuthorId()`, not the per-connection `myId`,
    * so pins stay yours across leaving and rejoining a workspace. */
   myId: string;
   /** Send a wire command (already wrapped by the bridge). */
@@ -302,9 +303,9 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
           position: [anchor[0], anchor[1]],
           end,
           z,
-          // In 3D `z` is the picked depth, while T/C are the view's selectors.
+          // In 3D `z` is the picked depth, while T is the view's selector.
           t: scene.t(),
-          c: scene.c(),
+          c: shownChannels(readResolvedLayers(scene).get(datasetId))[0],
           author: String(myIdRef.current),
           kind: shape ? kind : "point",
           ...(capturedView ? { view: capturedView } : {}),

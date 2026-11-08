@@ -94,6 +94,7 @@
   gap: var(--lc-space-2);
   box-sizing: border-box;
   min-width: 0;
+  min-height: var(--lc-target-min);
   margin: 0;
   padding: var(--lc-space-2);
   border: none;

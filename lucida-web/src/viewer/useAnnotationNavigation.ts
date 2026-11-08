@@ -7,7 +7,9 @@
 import { useCallback, type RefObject } from "react";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import type { Annotation, AnnotationOverlayHandle } from "../components/annotationDocument.ts";
+import { inChannelContext, pinChannels } from "../components/annotationContext.ts";
 import { resolveAnnotationDatasetId } from "../components/currentDatasetAnnotations.ts";
+import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
 import type { Engine } from "../engine.ts";
 import { useAnnotationDeepLink } from "../hooks/useAnnotationDeepLink.ts";
 import { invalidateAfterViewRestore, requestRender } from "../invalidation.ts";
@@ -31,6 +33,7 @@ interface Params {
   overlay3dRef: RefObject<AnnotationOverlayHandle | null>;
   breakFollow: () => void;
   emitPresence: () => void;
+  emitDatasetPresence: () => void;
   /** Collapses a resolved `#a=` hash to the live `#view=` form. */
   collapseDeepLinkHash: () => Promise<void>;
   /** The document version; the deep link re-checks on each bump. */
@@ -52,17 +55,18 @@ export function useAnnotationNavigation({
   overlay3dRef,
   breakFollow,
   emitPresence,
+  emitDatasetPresence,
   collapseDeepLinkHash,
   docVersion,
   onDeepLinkNotFound,
 }: Params) {
-  // The gentle tier: bring the pin on-context by matching its Z/T/C.
+  // The gentle tier: bring the pin on-context by matching its Z/T and showing
+  // a channel it was placed on.
   const gentleOnContext = useCallback((pin: Annotation) => {
     const scene = engine.scene();
     if (!scene) return;
     const targetZ = pin.z ?? 0;
     const targetT = pin.t ?? 0;
-    const targetC = pin.c ?? 0;
     let contextChanged = false;
     if (targetZ !== scene.z()) {
       applyViewportCommand(scene, { type: "set_z", z: targetZ });
@@ -72,16 +76,23 @@ export function useAnnotationNavigation({
       applyViewportCommand(scene, { type: "set_t", t: targetT });
       contextChanged = true;
     }
-    if (targetC !== scene.c()) {
-      applyViewportCommand(scene, { type: "set_c", c: targetC });
+    const datasetId = resolveAnnotationDatasetId(scene, selectedDatasetId);
+    const layer = datasetId ? readResolvedLayers(scene).get(datasetId) : undefined;
+    const placement = pinChannels(pin);
+    if (datasetId && layer && !inChannelContext(placement, shownChannels(layer))) {
+      // A pin placed on a solo gets that solo back; one placed in the
+      // composite gets the composite back.
+      const solo = placement.length === 1 && placement[0] < layer.channel_count ? placement[0] : null;
+      applyViewportCommand(scene, { type: "set_channel_solo", dataset_id: datasetId, channel: solo });
       contextChanged = true;
     }
     if (contextChanged) {
       requestRender(engine.loop(), "annotation_context");
       breakFollow();
       emitPresence();
+      emitDatasetPresence();
     }
-  }, [engine, breakFollow, emitPresence]);
+  }, [engine, selectedDatasetId, breakFollow, emitPresence, emitDatasetPresence]);
 
   // Focus a pin in whichever overlay is mounted for a given view mode. The
   // mode is passed in because a just-restored 3D camera may have flipped it
@@ -131,13 +142,14 @@ export function useAnnotationNavigation({
 
     breakFollow();
     emitPresence();
+    emitDatasetPresence();
     invalidateAfterViewRestore(engine.loop(), "annotation_view_restore");
 
     if (result.notice) toast({ title: result.notice, tone: "info" });
     focusWhenShown(pin.id, result.viewMode, result.cameraModeChanged);
   }, [
     engine, viewMode, dimensionExtentsFor, labelNamesFor, selectedDatasetId,
-    gentleOnContext, focusWhenShown, breakFollow, emitPresence,
+    gentleOnContext, focusWhenShown, breakFollow, emitPresence, emitDatasetPresence,
   ]);
 
   // A mention jump restores the author's view, or recenters gently when the

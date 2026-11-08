@@ -1,24 +1,26 @@
 /**
  * Auto-contrast limits fitted from a defined statistic over a defined set of
- * chunks, so one view gets one set of limits whatever order its chunks
- * arrive in.
+ * samples, so one view gets one set of limits whatever order its data
+ * arrives in.
  *
- * The fit reads, per dataset and channel, the chunks the view wants at each
- * visible member's coarsest source level: the coarse tier's level when the
- * source holds it, the target level when the coarse level is generated. A
- * generated level is max-pooled, which lifts every percentile, so it only
- * stands in until the fit's own chunks are resident. The minimap's textures
- * are never read.
+ * Where the coarse level is the source's, the fit reads, per dataset and
+ * channel, the chunks the view wants at each visible member's coarse
+ * level. Where it is generated, the fit reads the server's histogram of the
+ * source samples under each member's generated level at the view's
+ * timepoint, which no pan or zoom changes. A generated level's own values
+ * are max-pooled, which lifts every percentile, so they only stand in until
+ * the histograms arrive. The minimap's textures are never read.
  *
- * The statistic is the 0.1st and 99.9th percentiles of a fixed lattice of
- * each chunk's in-bounds samples. Both are order statistics of a multiset,
- * so no arrival order changes them.
+ * The statistic is the 0.1st and 99.9th percentiles: of a fixed lattice of
+ * each chunk's in-bounds samples, or of every sample a histogram counts.
+ * Both are order statistics of a multiset, so no arrival order changes them.
  */
 
 import type { DatasetManifest, ImageSpec, LevelGeometry } from "../manifestTypes.ts";
 import type { ChunkRequest, RequestPlan } from "./planning/types.ts";
 import type { LaneOutstanding } from "./fetch/types.ts";
 import { LANES } from "./fetch/types.ts";
+import type { HistogramBin } from "./generatedAvailability.ts";
 import { decodedValues } from "../renderer/dataTypeUtil.ts";
 
 export const LOW_QUANTILE = 0.001;
@@ -46,11 +48,25 @@ export interface ChannelFit {
 
 export type AutoContrastListener = (datasetId: string, channel: number, fit: ChannelFit) => void;
 
+/** What the fitter reads of the server's generated levels. */
+export interface FitHistograms {
+  /** One timepoint and channel's source histogram under a generated level, once the server sent it. */
+  histogram(
+    datasetId: string,
+    imageId: string,
+    levelIndex: number,
+    t: number,
+    c: number,
+  ): { readonly bins: readonly HistogramBin[] } | undefined;
+}
+
 /** What the fitter reads of the CPU cache. */
 export interface FitCache {
   /** A resident chunk's decoded samples, from either tier. */
   cachedSamples(entityId: string, chunkKey: string): { data: ArrayBuffer; dataType: string } | undefined;
   laneOutstanding(out: LaneOutstanding): LaneOutstanding;
+  /** Whether the server is still generating the chunk. */
+  awaitsServer(req: ChunkRequest): boolean;
 }
 
 /**
@@ -124,6 +140,44 @@ export function fitValues(parts: readonly Float32Array[]): Omit<ChannelFit, "pro
   };
 }
 
+/**
+ * The limits and range of every sample in `histograms`, by the percentiles
+ * {@link fitValues} takes, or `null` when they count none. Each limit is
+ * the near edge of the bin its percentile falls in, the smallest sample for
+ * the low limit and the largest for the high one, so a limit is a sample
+ * value and never clips more than the percentile does. Bins of two
+ * histograms can share a range; walking them by their smallest sample puts
+ * a percentile within one bin of where merging them would.
+ */
+export function fitHistograms(
+  histograms: readonly { readonly bins: readonly HistogramBin[] }[],
+): Omit<ChannelFit, "provisional"> | null {
+  const bins = histograms.flatMap((h) => h.bins).filter((bin) => bin[2] > 0);
+  bins.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+  let total = 0;
+  let max = -Infinity;
+  for (const [, binMax, count] of bins) {
+    total += count;
+    if (binMax > max) max = binMax;
+  }
+  if (total === 0) return null;
+  const lowRank = Math.floor(LOW_QUANTILE * (total - 1));
+  const highRank = Math.ceil(HIGH_QUANTILE * (total - 1));
+  let below = 0;
+  let low: number | null = null;
+  let high = max;
+  for (const [binMin, binMax, count] of bins) {
+    below += count;
+    if (low === null && lowRank < below) low = binMin;
+    if (highRank < below) {
+      high = binMax;
+      break;
+    }
+  }
+  const range = { min: bins[0][0], max };
+  return { limits: low !== null && high > low ? { min: low, max: high } : range, range };
+}
+
 /** The `k`th smallest value of `a`, reordering `a` in place. */
 function selectNth(a: Float32Array, k: number): number {
   let left = 0;
@@ -158,12 +212,26 @@ function swap(a: Float32Array, i: number, j: number): void {
   a[j] = t;
 }
 
+/** One generated level's histogram the fit reads, short of the channel. */
+interface HistogramRef {
+  imageId: string;
+  level: number;
+  t: number;
+}
+
 /** One channel's chunks: the ones the fit reads, and the ones that stand in before it can. */
 interface ChannelChunks {
   fit: ChunkRequest[];
   fitKey: string;
   standIn: ChunkRequest[];
   standInKey: string;
+  /**
+   * The histograms the fit reads in place of `fit`, when every member the
+   * channel shows has a generated coarse level; empty otherwise. `fit` then
+   * holds the target level's chunks, read only if no histogram comes.
+   */
+  histograms: HistogramRef[];
+  histogramKey: string;
 }
 
 interface DatasetChunks {
@@ -180,15 +248,18 @@ interface ChannelState {
 }
 
 /**
- * Fits each visible channel's contrast limits as its chunks become resident.
+ * Fits each visible channel's contrast limits as its chunks become resident,
+ * or its histograms arrive.
  *
  * Before a channel has limits, the coarse tier stands in once it is
- * resident. Once every chunk the fit reads is resident, the fit settles. If
- * some never arrive and the view has nothing left to fetch, as when it
- * settles covering less, the fit reads the resident ones. A view change that
- * changes the chunks keeps the limits until the new chunks settle, so the
- * limits move at most twice per view: once when the stand-in gives way, and
- * once when the fit settles.
+ * resident. Once every chunk or histogram the fit reads is in, the fit
+ * settles. If some never come and the view has nothing left to fetch, as
+ * when it settles covering less, the fit reads the ones that did. A view
+ * change that changes what the fit reads keeps the limits until the new fit
+ * settles, so the limits move at most twice per view: once when the
+ * stand-in gives way, and once when the fit settles. A channel whose
+ * histograms are still missing once its view is idle reads its resident
+ * target-level chunks in the meantime, one more provisional step.
  */
 export class AutoContrastFitter {
   private readonly chunks = new Map<string, DatasetChunks>();
@@ -200,6 +271,7 @@ export class AutoContrastFitter {
     plans: ReadonlyMap<string, RequestPlan>,
     datasets: ReadonlyMap<string, { manifest: DatasetManifest }>,
     cache: FitCache,
+    histograms: FitHistograms,
     emit: AutoContrastListener,
   ): void {
     let fetching: boolean | null = null;
@@ -222,31 +294,18 @@ export class AutoContrastFitter {
           state = { fitted: null, last: null };
           states.set(channel, state);
         }
-        const settled = `settled ${wanted.fitKey}`;
-        if (state.fitted === settled) continue;
+        const byHistogram = wanted.histograms.length > 0;
+        if (state.fitted === `settled ${byHistogram ? wanted.histogramKey : wanted.fitKey}`) continue;
+        const isFetching = () => (fetching ??= this.viewFetching(cache));
+        const choice = byHistogram
+          ? histogramInput(datasetId, channel, wanted, state, cache, histograms, isFetching)
+          : chunkInput(wanted, state, cache, isFetching);
+        if (choice === null || choice.input === state.fitted) continue;
+        state.fitted = choice.input;
 
-        const resident = wanted.fit.filter((req) => cache.cachedSamples(req.entityId, req.chunkKey));
-        let input: string | null = null;
-        let read = resident;
-        let provisional = false;
-        if (resident.length > 0 && resident.length === wanted.fit.length) {
-          input = settled;
-        } else if (resident.length > 0 && !(fetching ??= this.viewFetching(cache))) {
-          input = `covered ${chunkSetKey(resident)}`;
-        } else if (state.last === null && wanted.standIn.length > 0) {
-          const standIn = wanted.standIn.filter((req) => cache.cachedSamples(req.entityId, req.chunkKey));
-          if (standIn.length === wanted.standIn.length) {
-            input = `stand-in ${wanted.standInKey}`;
-            read = standIn;
-            provisional = true;
-          }
-        }
-        if (input === null || input === state.fitted) continue;
-        state.fitted = input;
-
-        const values = this.fit(read, manifest, cache);
+        const values = "histograms" in choice ? fitHistograms(choice.histograms) : this.fit(choice.chunks, manifest, cache);
         if (!values) continue;
-        const fit: ChannelFit = { ...values, provisional };
+        const fit: ChannelFit = { ...values, provisional: choice.provisional };
         if (state.last && sameRange(state.last.limits, fit.limits) && sameRange(state.last.range, fit.range)) {
           continue;
         }
@@ -301,13 +360,84 @@ export class AutoContrastFitter {
   }
 }
 
+/** What one fit reads, and the input key that says whether it has been read. */
+type FitInput = { input: string; provisional: boolean } & (
+  | { chunks: ChunkRequest[] }
+  | { histograms: { readonly bins: readonly HistogramBin[] }[] }
+);
+
+function residentOf(reqs: readonly ChunkRequest[], cache: FitCache): ChunkRequest[] {
+  return reqs.filter((req) => cache.cachedSamples(req.entityId, req.chunkKey));
+}
+
+/** The coarse tier, while the channel has no limits yet and all of it is resident. */
+function standInInput(wanted: ChannelChunks, state: ChannelState, cache: FitCache): FitInput | null {
+  if (state.last !== null || wanted.standIn.length === 0) return null;
+  const held = residentOf(wanted.standIn, cache);
+  if (held.length !== wanted.standIn.length) return null;
+  return { input: `stand-in ${wanted.standInKey}`, chunks: held, provisional: true };
+}
+
+function chunkInput(
+  wanted: ChannelChunks,
+  state: ChannelState,
+  cache: FitCache,
+  fetching: () => boolean,
+): FitInput | null {
+  const resident = residentOf(wanted.fit, cache);
+  if (resident.length > 0 && resident.length === wanted.fit.length) {
+    return { input: `settled ${wanted.fitKey}`, chunks: resident, provisional: false };
+  }
+  if (resident.length > 0 && !fetching()) {
+    return { input: `covered ${chunkSetKey(resident)}`, chunks: resident, provisional: false };
+  }
+  return standInInput(wanted, state, cache);
+}
+
+function histogramInput(
+  datasetId: string,
+  channel: number,
+  wanted: ChannelChunks,
+  state: ChannelState,
+  cache: FitCache,
+  source: FitHistograms,
+  fetching: () => boolean,
+): FitInput | null {
+  const sent = wanted.histograms.flatMap((ref) => {
+    const histogram = source.histogram(datasetId, ref.imageId, ref.level, ref.t, channel);
+    return histogram ? [{ ref, histogram }] : [];
+  });
+  const histograms = sent.map((s) => s.histogram);
+  if (sent.length === wanted.histograms.length) {
+    return { input: `settled ${wanted.histogramKey}`, histograms, provisional: false };
+  }
+  // A histogram comes with the last chunk of its timepoint and channel, so
+  // while the server still makes chunks the view wants, it is on its way.
+  const generating = (req: ChunkRequest) => cache.awaitsServer(req);
+  const idle = (): boolean => !fetching() && !wanted.fit.some(generating) && !wanted.standIn.some(generating);
+  if (sent.length > 0 && idle()) {
+    const key = histogramSetKey(sent.map((s) => s.ref));
+    return { input: `covered ${key}`, histograms, provisional: false };
+  }
+  // None sent with the view idle means the server left the rest of the
+  // timepoint and channel to background fill, which may never reach it, or
+  // failed. The source's own samples beat the max-pooled stand-in or no
+  // limits, and they hold through pans until a histogram comes.
+  const standingIn = state.last === null || (state.fitted?.startsWith("stand-in ") ?? false);
+  if (sent.length === 0 && standingIn && idle()) {
+    const resident = residentOf(wanted.fit, cache);
+    if (resident.length > 0) {
+      return { input: `fallback ${chunkSetKey(resident)}`, chunks: resident, provisional: true };
+    }
+  }
+  return standInInput(wanted, state, cache);
+}
+
 function emptyLaneOutstanding(): LaneOutstanding {
   const zero = () => Object.fromEntries(LANES.map((lane) => [lane, 0])) as LaneOutstanding["pending"];
   return {
     inFlight: zero(),
     pending: zero(),
-    proxyInFlight: 0,
-    proxyPending: 0,
     pendingTotal: 0,
     pendingUnclassified: false,
     pendingScanCap: 0,
@@ -318,14 +448,16 @@ function sameRange(a: ValueRange, b: ValueRange): boolean {
   return a.min === b.min && a.max === b.max;
 }
 
-/** Each channel's fit and stand-in chunks out of one plan. */
+/** Each channel's fit and stand-in chunks, and histograms, out of one plan. */
 function channelChunks(plan: RequestPlan, manifest: DatasetManifest): Map<number, ChannelChunks> {
   const generated = new Map<string, Set<number>>();
+  // Image id → its coarse level, where the server generates it.
+  const generatedCoarse = new Map<string, number>();
   for (const image of manifest.images) {
-    generated.set(
-      image.image_id,
-      new Set((image.multiscale.generated_levels ?? []).map((level) => level.level_index)),
-    );
+    const levels = new Set((image.multiscale.generated_levels ?? []).map((level) => level.level_index));
+    generated.set(image.image_id, levels);
+    const coarse = image.multiscale.coarse_level_index;
+    if (coarse !== null && coarse !== undefined && levels.has(coarse)) generatedCoarse.set(image.image_id, coarse);
   }
   const fitLevel = new Map<string, number>();
   for (const entry of plan.activeSet) {
@@ -335,32 +467,53 @@ function channelChunks(plan: RequestPlan, manifest: DatasetManifest): Map<number
     fitLevel.set(entry.entityId, sourceCoarse ? coarse : entry.detailLevels[0]);
   }
 
-  const byChannel = new Map<number, { fit: Map<string, ChunkRequest>; standIn: Map<string, ChunkRequest> }>();
+  interface Gathered {
+    fit: Map<string, ChunkRequest>;
+    standIn: Map<string, ChunkRequest>;
+    histograms: Map<string, HistogramRef> | null;
+  }
+  const byChannel = new Map<number, Gathered>();
   for (const req of plan.requests) {
     if (req.lane !== "detail" && req.lane !== "coarse") continue;
     let channel = byChannel.get(req.c);
     if (!channel) {
-      channel = { fit: new Map(), standIn: new Map() };
+      channel = { fit: new Map(), standIn: new Map(), histograms: new Map() };
       byChannel.set(req.c, channel);
     }
     // The tiers can want one chunk each, so a chunk is counted once.
     const key = `${req.entityId}/${req.chunkKey}`;
     if (req.level === fitLevel.get(req.entityId)) channel.fit.set(key, req);
     if (req.lane === "coarse") channel.standIn.set(key, req);
+    // Histograms and lattices weigh samples differently, so a channel with
+    // any source coarse member reads lattices throughout.
+    const level = generatedCoarse.get(req.imageId);
+    if (level === undefined) channel.histograms = null;
+    else channel.histograms?.set(`${req.imageId}|${level}|${req.t}`, { imageId: req.imageId, level, t: req.t });
   }
 
   const out = new Map<number, ChannelChunks>();
-  for (const [c, { fit, standIn }] of byChannel) {
+  for (const [c, { fit, standIn, histograms }] of byChannel) {
     const fitChunks = [...fit.values()];
     const standInChunks = [...standIn.values()];
+    const refs = histograms ? [...histograms.values()] : [];
     out.set(c, {
       fit: fitChunks,
       fitKey: chunkSetKey(fitChunks),
       standIn: standInChunks,
       standInKey: chunkSetKey(standInChunks),
+      histograms: refs,
+      histogramKey: histogramSetKey(refs),
     });
   }
   return out;
+}
+
+/** A key for a set of histograms, the same in any order. */
+function histogramSetKey(refs: readonly HistogramRef[]): string {
+  return refs
+    .map((ref) => `${ref.imageId}|${ref.level}|${ref.t}`)
+    .sort()
+    .join(",");
 }
 
 /**

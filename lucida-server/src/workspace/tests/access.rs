@@ -10,7 +10,7 @@ async fn duplicate_route_returns_201_for_member_and_404_for_non_member() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
 
     // Owner POSTs /duplicate → 201 Created, owns the copy named "Copy of …".
@@ -58,7 +58,7 @@ async fn bearer_authenticates_workspace_websocket_upgrade() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
 
     let raw_token = "lucida_pat_ws_test";
@@ -121,7 +121,7 @@ async fn workspace_router_builds_with_archived_static_route() {
     let store = fresh_store().await;
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
     let _router = router(manager);
 }
@@ -136,7 +136,7 @@ async fn admin_support_routes_require_admin_even_for_workspace_owner() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
     let app = workspace_router_with_principal(Arc::clone(&manager), owner.clone());
 
@@ -187,7 +187,7 @@ async fn admin_support_route_returns_details_without_membership() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
     manager
         .upsert_member(
@@ -230,7 +230,7 @@ async fn last_view_rest_round_trips_and_preserves_default() {
         .unwrap();
     let manager = Arc::new(WorkspaceManager::new(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
 
     // Pin a shared default so we can prove the last-view PATCH leaves it.
@@ -300,7 +300,10 @@ async fn last_view_rest_round_trips_and_preserves_default() {
         .await
         .unwrap();
     let body = response_json(res).await;
-    assert_eq!(body["last_view"]["v"], 1);
+    assert_eq!(
+        body["last_view"]["v"],
+        lucida_core::saved_view::SAVED_VIEW_VERSION
+    );
 
     // Invariant at the wire layer: the shared default is untouched.
     let record = store.get_workspace(&workspace.id).await.unwrap().unwrap();
@@ -319,7 +322,7 @@ async fn admin_support_search_and_lifecycle_override_without_membership() {
         .create_workspace(&owner, Some("Support lifecycle"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -386,7 +389,7 @@ async fn admin_can_recover_orphaned_workspace_owner() {
         .create_workspace(&owner, Some("Orphaned"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     assert!(
         store
@@ -440,7 +443,7 @@ async fn owner_can_add_explicit_member_role() {
         .create_workspace(&owner, Some("Shared"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     let member = manager
         .upsert_member(
@@ -472,7 +475,7 @@ async fn anyone_with_link_grants_configured_non_owner_role() {
         .create_workspace(&owner, Some("Linked"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     assert_eq!(store.role_for(&workspace.id, &other).await.unwrap(), None);
 
@@ -525,7 +528,7 @@ async fn explicit_membership_overrides_link_role() {
         .create_workspace(&owner, Some("Linked member"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     manager
         .update_link_access(
@@ -562,7 +565,7 @@ async fn link_workspace_enters_recents_only_after_successful_open() {
         .create_workspace(&owner, Some("Linked recent"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     manager
         .update_link_access(
@@ -602,7 +605,7 @@ async fn link_recents_do_not_make_workspaces_globally_discoverable() {
         .create_workspace(&owner, Some("Private link"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     manager
         .update_link_access(
@@ -632,7 +635,7 @@ async fn pins_are_personal_and_sort_before_recents() {
         .create_workspace(&owner, Some("Second"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     manager
         .upsert_member(
             &first.id,
@@ -685,7 +688,7 @@ async fn link_only_recent_disappears_when_link_access_is_disabled() {
         .create_workspace(&owner, Some("Disable link"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     manager
         .update_link_access(
             &workspace.id,
@@ -728,7 +731,7 @@ async fn unpin_without_existing_state_does_not_create_link_recent() {
         .create_workspace(&owner, Some("No accidental recent"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     manager
         .update_link_access(
             &workspace.id,
@@ -758,7 +761,7 @@ async fn archive_restore_is_owner_only_and_controls_dashboard_visibility() {
         .create_workspace(&owner, Some("Lifecycle"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     manager
         .upsert_member(
             &workspace.id,
@@ -842,7 +845,7 @@ async fn archived_workspace_blocks_new_access_until_restored() {
         .create_workspace(&owner, Some("Archived access"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     manager
         .archive_workspace(&workspace.id, &owner)
@@ -892,7 +895,7 @@ async fn workspace_open_never_leaks_existence_to_non_member() {
         .create_workspace(&alice, Some("Archived"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     manager
         .archive_workspace(&archived.id, &alice)
         .await
@@ -942,7 +945,7 @@ async fn workspace_open_anyone_with_link_still_grants_access() {
         .create_workspace(&alice, Some("Linked"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     // Before enabling the link, bob is a non-member → never-leak 404.
     let before = open_status_body(&manager, &workspace.id, &bob).await;
@@ -974,7 +977,7 @@ async fn archiving_closes_the_workspace_sockets_and_denies_new_mutations() {
         .create_workspace(&owner, Some("Live archive"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
     let open = attach(&manager, &live, 1, &owner).await;
 
@@ -1050,7 +1053,7 @@ async fn idle_eviction_drops_empty_live_workspace_and_reopen_restores_document()
         .unwrap();
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
         idle_eviction_config(),
     );
     let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
@@ -1085,7 +1088,7 @@ async fn presence_identity_is_never_persisted_into_document_json() {
         .unwrap();
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
         idle_eviction_config(),
     );
     let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
@@ -1186,7 +1189,7 @@ async fn active_live_workspace_is_not_idle_evicted() {
         .unwrap();
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
         idle_eviction_config(),
     );
     let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
@@ -1208,7 +1211,7 @@ async fn idle_eviction_preserves_dataset_source_membership_for_reuse() {
         .unwrap();
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
         idle_eviction_config(),
     );
     let workspace_dataset_id = DatasetId("wds-reusable".into());
@@ -1244,7 +1247,7 @@ async fn last_owner_cannot_be_removed_or_demoted() {
         .create_workspace(&owner, Some("Owners"))
         .await
         .unwrap();
-    let manager = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
 
     let err = manager
         .update_member_role(&workspace.id, &owner, &owner.email, WorkspaceRole::Viewer)

@@ -177,7 +177,7 @@
   cursor: pointer;
 }
 
-.lc-thread-picker-option[aria-selected="true"],
+.lc-thread-picker-option[aria-current="true"],
 .lc-thread-picker-option:hover {
   background: var(--lc-surface-3);
 }

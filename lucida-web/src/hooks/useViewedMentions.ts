@@ -2,51 +2,57 @@
  * Per-browser "viewed" state for the "mentions of me" inbox. A mention is viewed
  * once its panel item is clicked; the badge counts only unviewed ones.
  *
- * Read state is personal, so it lives in localStorage, not on the wire. Every
- * storage access is guarded: missing or throwing storage degrades to "nothing
- * viewed" and never throws out of the toolbar. The set is keyed by dataset
- * because comment ids are only unique within one.
+ * Read state is personal, so it is a preference, not on the wire. The ids are
+ * kept per dataset because comment ids are only unique within one.
  */
-import { useCallback, useMemo, useState } from "react";
-
-/** Must stay stable across releases: a returning browser reads whatever is
- * stored under it. The dataset id is appended. */
-export const VIEWED_MENTIONS_KEY_PREFIX = "lucida.mentions.viewed.";
+import { useCallback, useMemo } from "react";
+import {
+  definePreference,
+  getPreference,
+  migrateLegacyKeys,
+  setPreference,
+  usePreference,
+} from "../theme/preferences.ts";
 
 /** The inbox still shows mentions with no dataset selected, so that state needs
- * its own key rather than sharing a real dataset's. */
+ * its own entry rather than sharing a real dataset's. */
 const NO_DATASET_SENTINEL = "__none__";
 
-function storageKey(datasetId: string | null): string {
-  return `${VIEWED_MENTIONS_KEY_PREFIX}${datasetId ?? NO_DATASET_SENTINEL}`;
+type ViewedByDataset = Readonly<Record<string, readonly string[]>>;
+
+function strings(value: unknown): string[] | undefined {
+  return Array.isArray(value) ? value.filter((x): x is string => typeof x === "string") : undefined;
 }
 
-/** The persisted viewed ids for `datasetId`, or an empty set when absent,
- * malformed, or unavailable. Never throws. */
-function readViewed(datasetId: string | null): Set<string> {
-  if (typeof localStorage === "undefined") return new Set();
-  try {
-    const raw = localStorage.getItem(storageKey(datasetId));
-    if (!raw) return new Set();
-    const parsed: unknown = JSON.parse(raw);
-    // Keep only string entries rather than trusting a foreign blob.
-    if (!Array.isArray(parsed)) return new Set();
-    return new Set(parsed.filter((x): x is string => typeof x === "string"));
-  } catch {
-    return new Set();
+/** Viewed comment ids by dataset id. Keeps only string ids rather than trusting a foreign blob. */
+export const viewedMentionsPreference = definePreference<ViewedByDataset>("mentions.viewed", {}, (raw) => {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) return undefined;
+  const viewed: Record<string, string[]> = {};
+  for (const [datasetId, ids] of Object.entries(raw)) {
+    const kept = strings(ids);
+    if (kept) viewed[datasetId] = kept;
   }
-}
+  return viewed;
+});
 
-/** Persist `ids` for `datasetId`. Swallows quota and private-browsing failures:
- * an in-memory set that doesn't survive a reload beats throwing. */
-function writeViewed(datasetId: string | null, ids: Set<string>): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(storageKey(datasetId), JSON.stringify([...ids]));
-  } catch {
-    // The in-memory state keeps the session consistent.
-  }
-}
+const LEGACY_KEY_PREFIX = "lucida.mentions.viewed.";
+
+migrateLegacyKeys(
+  (key) => key.startsWith(LEGACY_KEY_PREFIX),
+  (old) => {
+    const viewed: Record<string, readonly string[]> = { ...getPreference(viewedMentionsPreference) };
+    for (const [key, raw] of old) {
+      let ids: string[] | undefined;
+      try {
+        ids = strings(JSON.parse(raw));
+      } catch {
+        continue;
+      }
+      if (ids) viewed[key.slice(LEGACY_KEY_PREFIX.length)] = ids;
+    }
+    setPreference(viewedMentionsPreference, viewed);
+  },
+);
 
 /**
  * The selected dataset's viewed mention ids, and a `markViewed` that adds and
@@ -56,33 +62,21 @@ export function useViewedMentions(selectedDatasetId: string | null): {
   viewedCommentIds: string[];
   markViewed: (commentId: string) => void;
 } {
-  const [viewed, setViewed] = useState<Set<string>>(() => readViewed(selectedDatasetId));
-
-  // Re-seed during render, not in an effect: the react-hooks lint rejects
-  // setState in an effect, and this skips an extra re-render.
-  // https://react.dev/learn/you-might-not-need-an-effect
-  const [seededDataset, setSeededDataset] = useState(selectedDatasetId);
-  if (seededDataset !== selectedDatasetId) {
-    setSeededDataset(selectedDatasetId);
-    setViewed(readViewed(selectedDatasetId));
-  }
+  const [viewed] = usePreference(viewedMentionsPreference);
+  const key = selectedDatasetId ?? NO_DATASET_SENTINEL;
+  const ids = viewed[key];
 
   const markViewed = useCallback(
     (commentId: string) => {
-      setViewed((prev) => {
-        // Return the same set so React skips the re-render and storage isn't
-        // rewritten.
-        if (prev.has(commentId)) return prev;
-        const next = new Set(prev);
-        next.add(commentId);
-        writeViewed(selectedDatasetId, next);
-        return next;
-      });
+      const current = getPreference(viewedMentionsPreference);
+      const known = current[key] ?? [];
+      if (known.includes(commentId)) return;
+      setPreference(viewedMentionsPreference, { ...current, [key]: [...known, commentId] });
     },
-    [selectedDatasetId],
+    [key],
   );
 
-  const viewedCommentIds = useMemo(() => [...viewed], [viewed]);
+  const viewedCommentIds = useMemo(() => [...(ids ?? [])], [ids]);
 
   return { viewedCommentIds, markViewed };
 }

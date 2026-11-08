@@ -1,12 +1,12 @@
 //! Replaying a bundle in the trace driver.
 //!
 //! A field report becomes a reproducible run. A bundle's header carries what
-//! the driver needs to replay the view (#1055): the dataset, the view URL,
-//! the viewport and device pixel ratio, the planning configuration, and the
-//! pins. [`ReplayPlan`] reads them and says, input by input, which the
-//! driver restores and which it cannot — the build is whatever the server
-//! serves, the adapter is this machine's, and a fresh browser profile is
-//! cold whatever the run's browser held. The plan guesses nothing. An input
+//! the driver needs to replay the view: the dataset, the view URL, the
+//! viewport, device pixel ratio and device memory, the planning
+//! configuration, and the pins. [`ReplayPlan`] reads them and says, input by
+//! input, which the driver restores and which it cannot — the build is
+//! whatever the server serves, the adapter is this machine's, and a fresh
+//! browser profile is cold whatever the run's browser held. The plan guesses nothing. An input
 //! the header lacks runs at the driver's default, and the record in the new
 //! run's header lists it as unrestored, with the reason.
 //!
@@ -22,20 +22,17 @@
 //! read at the run's close. The replay starts instead from the view the
 //! first step recorded before it ran.
 //!
-//! The diff of the original and the replay is the page's (#1059). The
+//! The diff of the original and the replay is the page's. The
 //! header fields that break comparability, the adapter among them, are the
 //! page's to warn about, so a bundle replayed on a different adapter reads
 //! as not comparable without this module judging anything.
 
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
-use lucida_core::saved_view::normalize_dataset_url;
+use lucida_core::saved_view::{decode_payload, encode_payload, normalize_dataset_url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::encode_saved_view_url_payload;
 use crate::error::CliError;
 use crate::montage::with_render_param;
 use crate::trace::{
@@ -104,6 +101,9 @@ pub struct ReplayPlan {
     pub width: u32,
     pub height: u32,
     pub device_pixel_ratio: f64,
+    /// The memory the page is told the device has, in GiB, as the run's page
+    /// read it. None leaves the page reading this machine's.
+    pub device_memory_gib: Option<f64>,
     /// The planning configuration, as the knobs the driver writes before
     /// the page loads. Empty when the header carries none.
     pub knobs: KnobSettings,
@@ -217,6 +217,19 @@ impl ReplayPlan {
         };
         let device_pixel_ratio = ratio.clone().unwrap_or(DEFAULT_DEVICE_PIXEL_RATIO);
 
+        let memory = match header.device_memory_gib {
+            Some(gib) if gib.is_finite() && gib > 0.0 => Ok(gib),
+            Some(gib) => Err(format!(
+                "the header's device memory is {gib} GiB; the page reads this machine's"
+            )),
+            None => Err(
+                "the header carries no device memory, because the run's page read none \
+                 or the bundle predates it; the page reads this machine's"
+                    .to_string(),
+            ),
+        };
+        let device_memory_gib = memory.clone().ok();
+
         // The whole configuration, not the fields that differ from this
         // build's defaults: the run's defaults may not be this build's, and
         // the run file records exactly what was written.
@@ -256,6 +269,7 @@ impl ReplayPlan {
             ("viewUrl", view.map(|_| ())),
             ("viewport", viewport.map(|_| ())),
             ("devicePixelRatio", ratio.map(|_| ())),
+            ("deviceMemoryGib", memory.map(|_| ())),
             ("mode", mode),
             ("planning", planning.map(|_| ())),
             ("pins", pins),
@@ -280,6 +294,7 @@ impl ReplayPlan {
             width,
             height,
             device_pixel_ratio,
+            device_memory_gib,
             knobs,
             script,
             record: ReplayRecord {
@@ -322,66 +337,25 @@ fn readable_view_fragment(url: &str) -> Result<String, String> {
     else {
         return Err(NO_VIEW.to_string());
     };
-    let view = read_view_payload(payload).map_err(|reason| {
+    decode_payload(payload).map_err(|reason| {
         format!(
             "the view in the header's URL could not be read, so the page frames the dataset \
              itself: {reason}"
         )
     })?;
-    if !is_saved_view(&view) {
-        return Err(
-            "the view in the header's URL could not be read, so the page frames the dataset \
-             itself: not a saved view"
-                .to_string(),
-        );
-    }
     Ok(fragment.to_string())
 }
 
 /// A view fragment for the view the script's first step recorded before it
-/// ran, encoded as the page encodes one.
+/// ran. The view stays JSON, as the page handed it over, so a field this
+/// build does not know still reaches the page.
 fn first_step_view(record: &ScriptRecord) -> Result<String, String> {
-    let before = &record.steps[0].view_before;
-    if !is_saved_view(before) {
-        return Err(
-            "the first step of the bundle's script recorded no view before it, and the \
-                    header's view URL is the view after the script, so the page frames the \
-                    dataset itself"
-                .to_string(),
-        );
-    }
-    let payload = encode_saved_view_url_payload(before).map_err(|error| {
-        format!(
-            "the view before the script's first step could not be encoded, so the page frames \
-             the dataset itself: {error}"
-        )
+    let payload = encode_payload(&record.steps[0].view_before).map_err(|_| {
+        "the first step of the bundle's script recorded no view before it, and the header's \
+         view URL is the view after the script, so the page frames the dataset itself"
+            .to_string()
     })?;
     Ok(format!("view={payload}"))
-}
-
-/// Read a view payload as the page does: base64url without padding, then
-/// gzip, then JSON.
-fn read_view_payload(payload: &str) -> Result<Value, String> {
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .map_err(|error| format!("not base64url: {error}"))?;
-    let mut json = String::new();
-    flate2::read::GzDecoder::new(bytes.as_slice())
-        .read_to_string(&mut json)
-        .map_err(|error| format!("not gzip: {error}"))?;
-    serde_json::from_str(&json).map_err(|error| format!("not JSON: {error}"))
-}
-
-/// The page's own test of a view payload: an object with a positive
-/// version. No stricter than that, because the page's encoder strips every
-/// default field and its decoder fills them back, so a payload the page
-/// reads must never be refused here for lacking one.
-fn is_saved_view(value: &Value) -> bool {
-    value.is_object()
-        && value
-            .get("v")
-            .and_then(Value::as_f64)
-            .is_some_and(|version| version.is_finite() && version > 0.0)
 }
 
 /// Whether a fresh browser profile, which is cold, matches what the run's
@@ -402,11 +376,10 @@ fn cold_as_the_run_was(cache_warmth: &Value) -> Result<(), String> {
     }
     let count = |key: &str| fields.get(key).and_then(Value::as_f64).unwrap_or(0.0);
     Err(format!(
-        "the run's browser held {} detail chunks, {} coarse chunks, and {} proxy asset bytes; a \
-         fresh browser profile starts cold",
+        "the run's browser held {} detail chunks and {} coarse chunks; a fresh browser profile \
+         starts cold",
         count("detailChunks"),
-        count("coarseChunks"),
-        count("proxyBytes")
+        count("coarseChunks")
     ))
 }
 
@@ -592,6 +565,7 @@ mod tests {
         assert!(fragment.starts_with("view="));
         assert_eq!((plan.width, plan.height), (1440, 900));
         assert_eq!(plan.device_pixel_ratio, 2.0);
+        assert_eq!(plan.device_memory_gib, Some(4.0));
 
         let planning: Value = plan.knobs.planning.clone().into_iter().collect();
         assert_eq!(planning, bundle.header.planning);
@@ -608,6 +582,7 @@ mod tests {
                 "view URL",
                 "viewport",
                 "device pixel ratio",
+                "device memory",
                 "slice or volume mode",
                 "planning configuration",
                 "level, render mode, contrast, and colormap pins",
@@ -705,7 +680,10 @@ mod tests {
         let fragment = plan.view_fragment.as_deref().unwrap();
         assert_ne!(fragment, header_fragment);
         let payload = fragment.strip_prefix("view=").unwrap();
-        assert_eq!(read_view_payload(payload).unwrap(), a_view());
+        let view = decode_payload(payload).unwrap();
+        assert_eq!(view["datasets"], a_view()["datasets"]);
+        assert_eq!(view["camera"]["mode"], a_view()["camera"]["mode"]);
+        assert_eq!(view["camera"]["theta"], a_view()["camera"]["theta"]);
         assert_eq!(plan.record.view, Some(ViewSource::FirstStep));
         assert!(plan.record.restored.contains(&"view URL".to_string()));
         assert!(
@@ -755,11 +733,12 @@ mod tests {
         bundle.header.view_url = None;
         bundle.header.viewport = None;
         bundle.header.device_pixel_ratio = None;
+        bundle.header.device_memory_gib = None;
         bundle.header.planning = Value::Null;
         bundle.header.build = None;
         bundle.header.gpu = None;
         bundle.header.cache_warmth = json!({
-            "detailChunks": 12, "detailBytes": 4096, "coarseChunks": 3, "coarseBytes": 512, "proxyBytes": 0
+            "detailChunks": 12, "detailBytes": 4096, "coarseChunks": 3, "coarseBytes": 512
         });
 
         let plan = ReplayPlan::from_bundle(&bundle, Path::new("b.json")).unwrap();
@@ -767,6 +746,7 @@ mod tests {
         assert_eq!(plan.record.view, None);
         assert_eq!((plan.width, plan.height), (DEFAULT_WIDTH, DEFAULT_HEIGHT));
         assert_eq!(plan.device_pixel_ratio, DEFAULT_DEVICE_PIXEL_RATIO);
+        assert_eq!(plan.device_memory_gib, None);
         assert!(plan.knobs.is_empty());
         assert_eq!(plan.record.restored, vec!["dataset"]);
         assert_eq!(
@@ -775,6 +755,7 @@ mod tests {
                 "view URL",
                 "viewport",
                 "device pixel ratio",
+                "device memory",
                 "slice or volume mode",
                 "planning configuration",
                 "level, render mode, contrast, and colormap pins",
@@ -787,6 +768,7 @@ mod tests {
         assert!(reason(unrestored, "view URL").contains("no view URL"));
         assert!(reason(unrestored, "viewport").contains("1440x900"));
         assert!(reason(unrestored, "device pixel ratio").contains("2"));
+        assert!(reason(unrestored, "device memory").contains("this machine's"));
         assert!(reason(unrestored, "slice or volume mode").contains("the view"));
         assert!(reason(unrestored, "planning configuration").contains("page's defaults"));
         assert!(reason(unrestored, "build").contains("does not say"));
@@ -900,8 +882,9 @@ mod tests {
         );
         assert!(
             text.contains(
-                "restored  dataset, view URL, viewport, device pixel ratio, slice or volume mode, \
-                 planning configuration, level, render mode, contrast, and colormap pins, cache warmth\n"
+                "restored  dataset, view URL, viewport, device pixel ratio, device memory, slice or \
+                 volume mode, planning configuration, level, render mode, contrast, and colormap \
+                 pins, cache warmth\n"
             ),
             "{text}"
         );

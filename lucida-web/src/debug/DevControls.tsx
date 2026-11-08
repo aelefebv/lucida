@@ -1,33 +1,45 @@
 /**
- * Dev controls: the one mutation surface for the pipeline. It holds the
- * planning knobs backed by {@link configStore}, persisted to localStorage,
- * and four `CpuCache` knobs that are session-scoped and die on reload. The
- * session-scoped section says so on screen, because controls that silently
- * reset beside ones that don't are a trap.
+ * Dev controls: the one mutation surface for the pipeline. Its planning knobs
+ * ({@link configStore}) and four `CpuCache` knobs are preferences, persisted in
+ * this browser and applied only while developer tools are on.
  *
  * Writes are dev-build only. "Reset all to defaults" works in every build:
- * persisted planning knobs still steer production, and without it recovery is
- * a manual localStorage wipe.
+ * with developer tools on, persisted knobs steer a production build too, and a
+ * read-only panel has no other way back.
  */
 
 import { ArrowCounterClockwiseIcon, CaretDownIcon, CaretRightIcon } from "@phosphor-icons/react";
 import { useEffect, useReducer, useState, useSyncExternalStore } from "react";
-import { configStore } from "../pipeline/planning/configStore.ts";
+import { configStore, type PlanningKnob } from "../pipeline/planning/configStore.ts";
 import {
   DEFAULT_PLANNING_CONFIG,
   type PlanningConfig,
 } from "../pipeline/planning/config.ts";
+import {
+  CACHE_KNOB_FIELDS,
+  CACHE_KNOB_PREFERENCES,
+  type CacheKnobField,
+} from "../pipeline/fetch/cacheKnobs.ts";
 import type { CpuCacheConfig } from "../pipeline/fetch/index.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
+import {
+  getPreference,
+  resetPreference,
+  subscribePreferences,
+  usePreference,
+} from "../theme/preferences.ts";
 import { Button, IconButton } from "../ui/Button.tsx";
-import { setRenderRadiusPreviewTier } from "./logging.ts";
+import { NumberField } from "../ui/NumberField.tsx";
+import { Slider } from "../ui/Slider.tsx";
+import { getRenderRadiusPreviewTier, setRenderRadiusPreviewTier } from "./logging.ts";
 import "./DevControls.css";
 
 // Per-field UI metadata. The panel renders from these arrays, so a new field
-// needs only a row here.
+// needs only a row here, and a preference beside the others in configStore.ts
+// whose range matches.
 
 interface TunableSpec {
-  field: keyof PlanningConfig;
+  field: PlanningKnob;
   label: string;
   min: number;
   max: number;
@@ -42,13 +54,6 @@ const PREFETCH: TunableSpec[] = [
 const PRIORITY_WEIGHTS: TunableSpec[] = [
   { field: "importanceWeight", label: "Importance weight", min: 10, max: 2000, step: 10 },
   { field: "distanceWeight", label: "Distance weight", min: 1, max: 100, step: 1 },
-  {
-    field: "groupProxyPriorityBump",
-    label: "Group-proxy priority bump",
-    min: 0,
-    max: 500,
-    step: 5,
-  },
 ];
 
 // `depthBiasView` is user-facing, so it lives in
@@ -72,48 +77,31 @@ const RESIDENCY_BUDGETS: TunableSpec[] = [
     step: 0.05,
     previewRadiusTier: "coarse",
   },
-  {
-    field: "proxyResidencyBudgetBytes",
-    label: "Proxy GPU budget (bytes)",
-    min: 16 * 1024 * 1024,
-    max: 512 * 1024 * 1024,
-    step: 16 * 1024 * 1024,
-  },
 ];
 
 const LANE_OFFSETS: TunableSpec[] = [
   { field: "minimapLaneOffset", label: "MINIMAP lane offset", min: 0, max: 5000, step: 50 },
   { field: "detailLaneOffset", label: "DETAIL lane offset", min: 0, max: 5000, step: 50 },
-  { field: "proxyLaneOffset", label: "PROXY lane offset", min: 0, max: 5000, step: 50 },
   { field: "prefetchLaneOffset", label: "PREFETCH lane offset", min: 0, max: 5000, step: 50 },
   { field: "coarseLaneOffset", label: "COARSE lane offset", min: 0, max: 5000, step: 50 },
 ];
 
 // Canonical lane priority order, lowest offset (most urgent) first. Used
 // to detect inversions in the lane-offsets section.
-const LANE_ORDER: (keyof PlanningConfig)[] = [
+const LANE_ORDER: PlanningKnob[] = [
   "minimapLaneOffset",
   "detailLaneOffset",
-  "proxyLaneOffset",
   "prefetchLaneOffset",
   "coarseLaneOffset",
 ];
 
-/** The four session-scoped cache knobs, in display order. */
-type CacheKnobField =
-  | "mainBudgetBytes"
-  | "overviewBudgetBytes"
-  | "maxConcurrentFetches"
-  | "maxBytesInFlight";
-
 /**
- * The slice of the live `CpuCache` this surface touches: read the
- * current config, write a partial back. Narrow on purpose — Dev controls
- * has no business with the rest of the cache.
+ * The slice of the live `CpuCache` this surface reads: the values the cache
+ * runs under, knob or not. Edits go to the knob preferences, which the
+ * session applies to its cache.
  */
 export interface LiveCacheKnobs {
   getConfig(): Readonly<Pick<CpuCacheConfig, CacheKnobField>>;
-  updateConfig(partial: Partial<CpuCacheConfig>): void;
 }
 
 interface CacheKnobSpec {
@@ -132,32 +120,32 @@ const CACHE_KNOBS: CacheKnobSpec[] = [
 
 /**
  * Returns a warning when a given lane offset breaks the canonical order
- * MINIMAP < DETAIL < PROXY < PREFETCH < COARSE. The warning attaches
+ * MINIMAP < DETAIL < PREFETCH < COARSE. The warning attaches
  * to the field whose value disagrees with its neighbour.
  */
 function laneOrderWarning(
   cfg: PlanningConfig,
-  field: keyof PlanningConfig,
+  field: PlanningKnob,
 ): string | null {
   const idx = LANE_ORDER.indexOf(field);
   if (idx < 0) return null;
-  const value = cfg[field] as number;
+  const value = cfg[field];
   if (idx > 0) {
     const prev = LANE_ORDER[idx - 1];
-    if (value < (cfg[prev] as number)) {
+    if (value < cfg[prev]) {
       return `Below ${labelForField(prev)} — inverts canonical lane order.`;
     }
   }
   if (idx < LANE_ORDER.length - 1) {
     const next = LANE_ORDER[idx + 1];
-    if (value > (cfg[next] as number)) {
+    if (value > cfg[next]) {
       return `Above ${labelForField(next)} — inverts canonical lane order.`;
     }
   }
   return null;
 }
 
-function labelForField(field: keyof PlanningConfig): string {
+function labelForField(field: PlanningKnob): string {
   for (const spec of [
     ...PREFETCH,
     ...PRIORITY_WEIGHTS,
@@ -178,8 +166,9 @@ function usePlanningConfig(): PlanningConfig {
 }
 
 /**
- * One tunable row: label + slider + number input + reset arrow (visible
- * only when the value differs from the default) + optional warning line.
+ * One tunable row: a slider with its label and editable value, a reset arrow
+ * (visible only when the value differs from the default), and an optional
+ * warning line.
  *
  * The row is the same shape for all sections; per-section variation
  * lives entirely in the `TunableSpec` table above.
@@ -195,56 +184,51 @@ function TunableRow({
   warning: string | null;
   editable: boolean;
 }) {
-  const value = cfg[spec.field] as number;
-  const def = DEFAULT_PLANNING_CONFIG[spec.field] as number;
+  const value = cfg[spec.field];
+  const def = DEFAULT_PLANNING_CONFIG[spec.field];
   const dirty = value !== def;
 
   const onChange = (next: number) => {
     if (!editable) return;
     if (Number.isNaN(next)) return;
     const clamped = Math.min(spec.max, Math.max(spec.min, next));
-    configStore.set(spec.field, clamped as PlanningConfig[typeof spec.field]);
+    configStore.set(spec.field, clamped);
   };
 
-  const startRadiusPreview = () => {
-    if (!spec.previewRadiusTier) return;
-    setRenderRadiusPreviewTier(spec.previewRadiusTier);
-    const clear = () => setRenderRadiusPreviewTier(null);
-    window.addEventListener("pointerup", clear, { once: true });
-    window.addEventListener("pointercancel", clear, { once: true });
+  // A radius previews while its value is being adjusted, until the press or
+  // key adjusting it lifts. The slider's own change end misses an edit that
+  // reaches its input directly.
+  const preview = () => {
+    const tier = spec.previewRadiusTier;
+    if (!tier || !editable || getRenderRadiusPreviewTier() === tier) return;
+    setRenderRadiusPreviewTier(tier);
+    const lifted = new AbortController();
+    const clear = () => {
+      setRenderRadiusPreviewTier(null);
+      lifted.abort();
+    };
+    for (const type of ["pointerup", "pointercancel", "keyup"]) {
+      window.addEventListener(type, clear, { signal: lifted.signal });
+    }
   };
-
-  const sliderId = `cfg-${spec.field}`;
 
   return (
     <div className="dev-controls-tunable-row">
-      <label htmlFor={sliderId} className="dev-controls-tunable-label">
-        {spec.label}
-      </label>
       <div className="dev-controls-tunable-controls">
-        <input
-          id={sliderId}
-          type="range"
-          min={spec.min}
-          max={spec.max}
-          step={spec.step}
-          value={value}
-          disabled={!editable}
-          onPointerDown={startRadiusPreview}
-          onChange={(e) => onChange(Number(e.target.value))}
+        <Slider
           className="dev-controls-tunable-slider"
-          aria-label={`${spec.label} slider`}
-        />
-        <input
-          type="number"
-          min={spec.min}
-          max={spec.max}
-          step={spec.step}
+          data-testid={`cfg-${spec.field}`}
+          label={spec.label}
           value={value}
-          disabled={!editable}
-          onChange={(e) => onChange(Number(e.target.value))}
-          className="dev-controls-input"
-          aria-label={`${spec.label} value`}
+          minValue={spec.min}
+          maxValue={spec.max}
+          step={spec.step}
+          valueDisplay="field"
+          isDisabled={!editable}
+          onChange={(next) => {
+            preview();
+            onChange(next);
+          }}
         />
         {editable && dirty ? (
           <IconButton
@@ -270,17 +254,72 @@ function TunableRow({
   );
 }
 
+/** Whether any cache knob holds a value of its own. */
+function useAnyCacheKnobSet(): boolean {
+  return useSyncExternalStore(
+    subscribePreferences,
+    () => CACHE_KNOB_FIELDS.some((field) => getPreference(CACHE_KNOB_PREFERENCES[field]) !== null),
+    () => false,
+  );
+}
+
 /**
- * The four session-scoped `CpuCache` knobs: `updateConfig` assigns onto the
- * live cache and nothing persists. The section says so on screen.
- *
- * Values are read off the live config rather than copied into React state,
- * which could go stale. The session can be replaced independently of this
- * surface, so the cache comes in as a getter re-read on a slow tick.
+ * One cache knob. It shows the value the live cache runs under, which is the
+ * cache's own until the knob is set, and writes the knob's preference.
+ */
+function CacheKnobRow({
+  knob,
+  values,
+  editable,
+}: {
+  knob: CacheKnobSpec;
+  values: Readonly<Pick<CpuCacheConfig, CacheKnobField>>;
+  editable: boolean;
+}) {
+  const pref = CACHE_KNOB_PREFERENCES[knob.field];
+  const [stored, setStored] = usePreference(pref);
+  const divisor = knob.megabytes ? 1024 * 1024 : 1;
+  return (
+    <div className="dev-controls-row">
+      <span>{knob.label}</span>
+      <div className="dev-controls-tunable-controls">
+        <NumberField
+          className="dev-controls-input"
+          label={knob.label}
+          labelPosition="hidden"
+          hideSteppers
+          value={Math.round(values[knob.field] / divisor)}
+          isDisabled={!editable}
+          onChange={(shown) => {
+            if (!editable || !(shown > 0)) return;
+            setStored(shown * divisor);
+          }}
+        />
+        {editable && stored !== null ? (
+          <IconButton
+            icon={ArrowCounterClockwiseIcon}
+            label={`Reset ${knob.label} to the cache's own value`}
+            size="sm"
+            tooltipPlacement="left"
+            onPress={() => resetPreference(pref)}
+          />
+        ) : (
+          <span className="dev-controls-reset-placeholder" aria-hidden="true" />
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The four `CpuCache` knobs. Values are read off the live config rather than
+ * copied into React state, which could go stale. The session can be replaced
+ * independently of this surface, so the cache comes in as a getter re-read on
+ * a slow tick.
  */
 const CACHE_POLL_INTERVAL_MS = 1000;
 
-function SessionCacheKnobs({
+function CacheSection({
   getCpuCache,
   editable,
 }: {
@@ -292,66 +331,51 @@ function SessionCacheKnobs({
     const id = setInterval(refresh, CACHE_POLL_INTERVAL_MS);
     return () => clearInterval(id);
   }, []);
-  const cpuCache = getCpuCache();
-  const values = cpuCache?.getConfig() ?? null;
+  const values = getCpuCache()?.getConfig() ?? null;
 
   return (
     <div className="dev-controls-section">
-      <div className="dev-controls-title">Cache (session-scoped)</div>
-      <div className="dev-controls-note" role="note">
-        Session-scoped: these write the live cache instance and are lost on
-        reload — unlike the knobs above, which persist.
-      </div>
-      {!cpuCache || !values ? (
+      <div className="dev-controls-title">Cache</div>
+      {!values ? (
         <div className="dev-controls-note">No session connected.</div>
       ) : (
-        CACHE_KNOBS.map((knob) => {
-          const divisor = knob.megabytes ? 1024 * 1024 : 1;
-          return (
-            <div className="dev-controls-row" key={knob.field}>
-              <span>{knob.label}</span>
-              <input
-                className="dev-controls-input"
-                type="number"
-                aria-label={knob.label}
-                value={Math.round(values[knob.field] / divisor)}
-                disabled={!editable}
-                onChange={(e) => {
-                  if (!editable) return;
-                  const shown = Number(e.target.value);
-                  if (!(shown > 0)) return;
-                  cpuCache.updateConfig({ [knob.field]: shown * divisor });
-                  refresh();
-                }}
-              />
-            </div>
-          );
-        })
+        CACHE_KNOBS.map((knob) => (
+          <CacheKnobRow key={knob.field} knob={knob} values={values} editable={editable} />
+        ))
       )}
     </div>
   );
+}
+
+function resetAllKnobs(): void {
+  configStore.reset();
+  for (const field of CACHE_KNOB_FIELDS) resetPreference(CACHE_KNOB_PREFERENCES[field]);
 }
 
 export function DevControls({
   getCpuCache = () => null,
   editable = import.meta.env.DEV,
 }: {
-  /** Live cache for the session-scoped knobs; null when no session is up. */
+  /** Live cache the cache knobs show; null when no session is up. */
   getCpuCache?: () => LiveCacheKnobs | null;
   /** Whether the knobs accept edits. Defaults to dev-build-only. */
   editable?: boolean;
 } = {}) {
   const cfg = usePlanningConfig();
+  const anyCacheKnobSet = useAnyCacheKnobSet();
   // Lane offsets default to collapsed — they're a structural knob most
   // users should not be tweaking; surface a warning above them when
   // expanded so the consequences are explicit.
   const [laneOffsetsExpanded, setLaneOffsetsExpanded] = useState(false);
 
-  const warningFor = (field: keyof PlanningConfig): string | null =>
+  const warningFor = (field: PlanningKnob): string | null =>
     LANE_ORDER.includes(field) ? laneOrderWarning(cfg, field) : null;
 
-  const allDefaults = (Object.keys(DEFAULT_PLANNING_CONFIG) as (keyof PlanningConfig)[])
-    .every((k) => cfg[k] === DEFAULT_PLANNING_CONFIG[k]);
+  const allDefaults =
+    !anyCacheKnobSet &&
+    (Object.keys(DEFAULT_PLANNING_CONFIG) as (keyof PlanningConfig)[]).every(
+      (k) => cfg[k] === DEFAULT_PLANNING_CONFIG[k],
+    );
 
   return (
     <div className="dev-controls">
@@ -360,8 +384,8 @@ export function DevControls({
           <div className="dev-controls-title">Dev controls</div>
           {editable ? (
             <div className="dev-controls-note">
-              Live tunables. Each planning change replans on the next frame
-              and persists to localStorage.
+              Live tunables. Each change applies at once and persists in this
+              browser, while developer tools are on.
             </div>
           ) : (
             <div className="dev-controls-note" role="note">
@@ -370,12 +394,10 @@ export function DevControls({
               clearing any persisted knobs.
             </div>
           )}
-          {/* Reset-all stays enabled in EVERY build (only individual knob
-              edits are dev-gated): knobs persisted by an earlier session
-              still steer the planner in prod, and moving toward defaults
-              is a safety valve — without it the only recovery from stale
-              persisted knobs would be a manual localStorage wipe. */}
-          <Button size="sm" onPress={() => configStore.reset()} isDisabled={allDefaults}>
+          {/* Reset-all stays enabled in every build, where only single-knob
+              edits are dev-gated: with developer tools on, persisted knobs
+              steer a production build's planner too. */}
+          <Button size="sm" onPress={resetAllKnobs} isDisabled={allDefaults}>
             Reset all to defaults
           </Button>
         </div>
@@ -441,7 +463,7 @@ export function DevControls({
               <div className="dev-controls-warn" role="note">
                 Structural knobs: changing lane offsets reorders the queue
                 priorities across the system. The canonical order is
-                MINIMAP &lt; DETAIL &lt; PROXY &lt; PREFETCH &lt; COARSE.
+                MINIMAP &lt; DETAIL &lt; PREFETCH &lt; COARSE.
               </div>
               {LANE_OFFSETS.map((spec) => (
                 <TunableRow
@@ -456,7 +478,7 @@ export function DevControls({
           )}
         </div>
 
-        <SessionCacheKnobs getCpuCache={getCpuCache} editable={editable} />
+        <CacheSection getCpuCache={getCpuCache} editable={editable} />
       </div>
     </div>
   );

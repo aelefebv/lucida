@@ -118,6 +118,86 @@ function asFloat32(
   return values.buffer;
 }
 
+/**
+ * Halves as float32 values. Every half is exactly a float32, so nothing is
+ * rounded; the bits are rebuilt by hand because `Float16Array` is not in every
+ * browser lucida runs in.
+ */
+function halvesAsFloat32(buf: ArrayBuffer): ArrayBuffer {
+  if (buf.byteLength % 2 !== 0) {
+    throw new Error(`float16 buffer byteLength ${buf.byteLength} is not a multiple of 2`);
+  }
+  const halves = new Uint16Array(buf);
+  const bits = new Uint32Array(halves.length);
+  for (let i = 0; i < halves.length; i++) bits[i] = halfToFloatBits(halves[i]);
+  const values = new Float32Array(bits.buffer);
+  canonicalizeNaN(values);
+  return bits.buffer;
+}
+
+function halfToFloatBits(half: number): number {
+  const sign = (half & 0x8000) << 16;
+  const exponent = (half >> 10) & 0x1f;
+  let mantissa = half & 0x3ff;
+  if (exponent === 0x1f) return (sign | 0x7f800000 | (mantissa << 13)) >>> 0;
+  if (exponent !== 0) return (sign | ((exponent + 112) << 23) | (mantissa << 13)) >>> 0;
+  if (mantissa === 0) return sign >>> 0;
+  // A subnormal half is a normal float32: shift its leading one into place.
+  let shift = 0;
+  while ((mantissa & 0x400) === 0) {
+    mantissa <<= 1;
+    shift++;
+  }
+  return (sign | ((113 - shift) << 23) | ((mantissa & 0x3ff) << 13)) >>> 0;
+}
+
+/**
+ * 64-bit integers as the nearest float32, the precision the viewer draws them
+ * at. Read as two 32-bit words, so no BigInt is made per sample.
+ */
+function wideIntegersAsFloat32(buf: ArrayBuffer, dataType: string, signed: boolean): ArrayBuffer {
+  if (buf.byteLength % 8 !== 0) {
+    throw new Error(`${dataType} buffer byteLength ${buf.byteLength} is not a multiple of 8`);
+  }
+  const words = new Uint32Array(buf);
+  const values = new Float32Array(words.length / 2);
+  for (let i = 0; i < values.length; i++) {
+    let low = words[2 * i];
+    let high = words[2 * i + 1];
+    const negative = signed && high >= 0x80000000;
+    if (negative) {
+      // The magnitude, by two's complement negation. -2^63's is 2^63.
+      low = (~low + 1) >>> 0;
+      high = (~high + (low === 0 ? 1 : 0)) >>> 0;
+    }
+    const magnitude = wideMagnitude(high, low);
+    values[i] = negative ? -magnitude : magnitude;
+  }
+  return values.buffer;
+}
+
+/**
+ * The unsigned 64-bit integer `high * 2^32 + low` as a double that a float32
+ * rounds to the integer's nearest float32. Past 26 significant bits the
+ * dropped bits fold into one sticky bit, because a double rounding them first
+ * could land on a tie the integer is not, and round the float32 the wrong way.
+ */
+function wideMagnitude(high: number, low: number): number {
+  if (high === 0) return low;
+  const drop = 32 - Math.clz32(high) + 6;
+  let kept: number;
+  let sticky: boolean;
+  if (drop < 32) {
+    kept = high * 2 ** (32 - drop) + (low >>> drop);
+    sticky = (low & ((1 << drop) - 1)) !== 0;
+  } else {
+    const fromHigh = drop - 32;
+    kept = fromHigh === 0 ? high : high >>> fromHigh;
+    sticky = low !== 0 || (fromHigh > 0 && (high & ((1 << fromHigh) - 1)) !== 0);
+  }
+  return (sticky ? kept + 1 - (kept % 2) : kept) * 2 ** drop;
+}
+
 function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
   switch (dataType.toLowerCase()) {
     case "uint8":
@@ -153,6 +233,12 @@ function normalize(buf: ArrayBuffer, dataType: string): ArrayBuffer {
       return asFloat32(buf, dataType, Int16Array);
     case "int32":
       return asFloat32(buf, dataType, Int32Array);
+    case "float16":
+      return halvesAsFloat32(buf);
+    case "int64":
+      return wideIntegersAsFloat32(buf, dataType, true);
+    case "uint64":
+      return wideIntegersAsFloat32(buf, dataType, false);
     default:
       throw new Error(`unsupported data type: ${dataType}`);
   }

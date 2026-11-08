@@ -12,6 +12,8 @@ pub struct GeneratedAvailabilitySnapshot {
     pub levels: Vec<GeneratedLevelAvailability>,
     #[serde(default)]
     pub chunks: Vec<GeneratedChunkStatusUpdate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub histograms: Vec<GeneratedLevelHistogram>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -20,6 +22,8 @@ pub struct GeneratedAvailabilityDelta {
     pub levels: Vec<GeneratedLevelAvailability>,
     #[serde(default)]
     pub chunks: Vec<GeneratedChunkStatusUpdate>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub histograms: Vec<GeneratedLevelHistogram>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -51,6 +55,27 @@ pub struct GeneratedChunkStatusUpdate {
     pub message: Option<String>,
 }
 
+/// The source samples under one timepoint and channel of a generated level,
+/// in the source's own units: every finite sample its chunks were pooled
+/// from, counted once. Sent once every chunk of that timepoint and channel
+/// has been generated, so it never changes after, and auto-contrast reads it
+/// in place of the pooled values, which max-pooling lifts.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeneratedLevelHistogram {
+    pub image_id: ImageId,
+    pub level_index: u32,
+    pub t: u32,
+    pub c: u32,
+    /// Ascending and disjoint.
+    pub bins: Vec<HistogramBin>,
+}
+
+/// `[min, max, count]`: the smallest and largest sample in one bin, and how
+/// many samples it holds. A bin spans at most 1/64 of its values'
+/// magnitude, and each integer below 128 has one to itself.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct HistogramBin(pub f64, pub f64, pub u64);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GeneratedChunkStatus {
@@ -69,6 +94,25 @@ impl GeneratedAvailabilitySnapshot {
         for chunk in delta.chunks {
             upsert_chunk(&mut self.chunks, chunk);
         }
+        for histogram in delta.histograms {
+            upsert_histogram(&mut self.histograms, histogram);
+        }
+    }
+}
+
+fn upsert_histogram(
+    histograms: &mut Vec<GeneratedLevelHistogram>,
+    incoming: GeneratedLevelHistogram,
+) {
+    if let Some(existing) = histograms.iter_mut().find(|h| {
+        h.image_id == incoming.image_id
+            && h.level_index == incoming.level_index
+            && h.t == incoming.t
+            && h.c == incoming.c
+    }) {
+        *existing = incoming;
+    } else {
+        histograms.push(incoming);
     }
 }
 
@@ -144,6 +188,7 @@ mod tests {
                 status: GeneratedChunkStatus::FailedTransient,
                 message: Some("temporary".into()),
             }],
+            histograms: vec![],
         };
 
         let json = serde_json::to_string(&delta).unwrap();
@@ -168,6 +213,7 @@ mod tests {
                 status: GeneratedChunkStatus::Pending,
                 message: None,
             }],
+            histograms: vec![],
         });
         snapshot.apply_delta(GeneratedAvailabilityDelta {
             levels: vec![GeneratedLevelAvailability {
@@ -181,11 +227,47 @@ mod tests {
                 status: GeneratedChunkStatus::Ready,
                 message: None,
             }],
+            histograms: vec![],
         });
 
         assert_eq!(snapshot.levels.len(), 1);
         assert_eq!(snapshot.levels[0].summary, None);
         assert_eq!(snapshot.chunks.len(), 1);
         assert_eq!(snapshot.chunks[0].status, GeneratedChunkStatus::Ready);
+    }
+
+    fn histogram(t: u32, c: u32, bins: Vec<HistogramBin>) -> GeneratedLevelHistogram {
+        GeneratedLevelHistogram {
+            image_id: ImageId("img-1".into()),
+            level_index: 2,
+            t,
+            c,
+            bins,
+        }
+    }
+
+    #[test]
+    fn histograms_upsert_per_timepoint_and_channel_and_bins_ride_as_arrays() {
+        let mut snapshot = GeneratedAvailabilitySnapshot::default();
+        let first = histogram(0, 1, vec![HistogramBin(3.0, 3.0, 10)]);
+        snapshot.apply_delta(GeneratedAvailabilityDelta {
+            histograms: vec![first.clone(), histogram(1, 1, vec![])],
+            ..Default::default()
+        });
+        let replaced = histogram(0, 1, vec![HistogramBin(3.0, 3.0, 12)]);
+        snapshot.apply_delta(GeneratedAvailabilityDelta {
+            histograms: vec![replaced.clone()],
+            ..Default::default()
+        });
+        assert_eq!(snapshot.histograms.len(), 2);
+        assert_eq!(snapshot.histograms[0], replaced);
+
+        let json = serde_json::to_value(&first).unwrap();
+        assert_eq!(json["bins"], serde_json::json!([[3.0, 3.0, 10]]));
+        // An older peer's delta, without histograms, still reads.
+        let old: GeneratedAvailabilityDelta =
+            serde_json::from_str(r#"{"levels":[],"chunks":[]}"#).unwrap();
+        assert!(old.histograms.is_empty());
+        assert!(!serde_json::to_string(&old).unwrap().contains("histograms"));
     }
 }

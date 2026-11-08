@@ -168,7 +168,7 @@ export class UrlSync {
     }
     let view: SavedView;
     try {
-      view = await decode(payload);
+      view = decode(payload);
     } catch (e) {
       console.warn("[UrlSync] invalid #view= payload:", e);
       return;
@@ -259,7 +259,7 @@ export class UrlSync {
     if (view === null || !isPersistable(view)) return;
     let payload: string;
     try {
-      payload = await encode(view);
+      payload = encode(view);
     } catch (e) {
       console.warn("[UrlSync] post-apply encode failed:", e);
       return;
@@ -299,7 +299,7 @@ export class UrlSync {
     if (view === null || !isPersistable(view)) return;
     let payload: string;
     try {
-      payload = await encode(view);
+      payload = encode(view);
     } catch (e) {
       console.warn("[UrlSync] encode failed:", e);
       return;

@@ -1,10 +1,9 @@
 /**
  * Pending queue, in-flight tracking, and concurrency/bytes caps.
  *
- * Generic over the request shape so one class backs both the chunk and
- * proxy schedulers. The caller dedups, and its `startFn` owns decode, retry,
- * and caching; it must close the slot via {@link correctInFlightBytes} and
- * {@link markInFlightDone}.
+ * Generic over the request shape. The caller dedups, and its `startFn` owns
+ * decode, retry, and caching; it must close the slot via
+ * {@link correctInFlightBytes} and {@link markInFlightDone}.
  *
  * Only the first {@link SchedulerConfig.admissionWindow} pending entries
  * carry a timestamp. The backlog behind them can be ~21k requests
@@ -20,9 +19,9 @@ export interface SchedulableRequest {
 
 /**
  * Admission-window floor, applied when a caller's window would otherwise
- * be smaller than this. Keeps the window meaningful for the proxy
- * scheduler and for small/local datasets, where the entire wanted set is
- * routinely under this size and the split should be invisible.
+ * be smaller than this. Keeps the window meaningful for small/local
+ * datasets, where the entire wanted set is routinely under this size and
+ * the split should be invisible.
  */
 export const MIN_ADMISSION_WINDOW = 64;
 
@@ -39,12 +38,6 @@ export interface SchedulerConfig {
   maxConcurrentFetches: number;
   maxBytesInFlight: number;
   burstLogger?: BurstLogger;
-  /**
-   * Counts toward this scheduler's caps from a sibling scheduler. The
-   * proxy scheduler reports the chunk scheduler's totals so combined
-   * load can't exceed the shared cap.
-   */
-  siblingInFlight?: () => { count: number; bytes: number };
   /**
    * How many front-of-queue entries carry an enqueue timestamp. Defaults
    * to `max(MIN_ADMISSION_WINDOW, maxConcurrentFetches *
@@ -99,7 +92,7 @@ export class Scheduler<Req extends SchedulableRequest> {
    */
   private enqueuedAt = new Map<string, number>();
 
-  private readonly admissionWindow: number;
+  private admissionWindow: number;
 
   private readonly config: SchedulerConfig;
   private readonly keyFn: (req: Req) => string;
@@ -110,16 +103,37 @@ export class Scheduler<Req extends SchedulableRequest> {
     keyFn: (req: Req) => string,
     startFn: StartFn<Req>,
   ) {
-    this.config = config;
+    this.config = { ...config };
     this.keyFn = keyFn;
     this.startFn = startFn;
+    this.admissionWindow = this.windowFor(config.maxConcurrentFetches);
+  }
+
+  private windowFor(maxConcurrentFetches: number): number {
     // An explicit window is taken literally; only the derived default
     // gets the floor, so a caller can ask for a small window and a
     // small/local dataset never notices the split.
-    this.admissionWindow = config.admissionWindow ?? Math.max(
+    return this.config.admissionWindow ?? Math.max(
       MIN_ADMISSION_WINDOW,
-      config.maxConcurrentFetches * ADMISSION_WINDOW_CONCURRENCY_MULTIPLE,
+      maxConcurrentFetches * ADMISSION_WINDOW_CONCURRENCY_MULTIPLE,
     );
+  }
+
+  /**
+   * Change both caps. Fetches already in flight keep going; the next drain
+   * admits against the new caps. A derived admission window follows the
+   * concurrency cap, keeping the stamps it already holds.
+   */
+  setCaps(
+    caps: Pick<SchedulerConfig, "maxConcurrentFetches" | "maxBytesInFlight">,
+    now: number = performance.now(),
+  ): void {
+    this.config.maxConcurrentFetches = caps.maxConcurrentFetches;
+    this.config.maxBytesInFlight = caps.maxBytesInFlight;
+    const window = this.windowFor(caps.maxConcurrentFetches);
+    if (window === this.admissionWindow) return;
+    this.admissionWindow = window;
+    this.enqueue(this.pending, now);
   }
 
   get inFlightSize(): number {
@@ -247,16 +261,13 @@ export class Scheduler<Req extends SchedulableRequest> {
     }
 
     if (this.pending.length > 0 && !this.canStartMore() && this.config.burstLogger) {
-      const sibling = this.config.siblingInFlight?.();
-      const totalCount = this.inFlight.size + (sibling?.count ?? 0);
-      const totalBytes = this.inFlightBytesCounter + (sibling?.bytes ?? 0);
       this.config.burstLogger.recordSkipped(
         this.pending.length,
         (skipped) => ({
           pending: this.pending.length,
-          inFlight: totalCount,
+          inFlight: this.inFlight.size,
           maxConcurrent: this.config.maxConcurrentFetches,
-          inFlightBytes: totalBytes,
+          inFlightBytes: this.inFlightBytesCounter,
           maxBytes: this.config.maxBytesInFlight,
           skippedSinceLastLog: skipped,
         }),
@@ -291,12 +302,9 @@ export class Scheduler<Req extends SchedulableRequest> {
   }
 
   private canStartMore(): boolean {
-    const sibling = this.config.siblingInFlight?.();
-    const totalCount = this.inFlight.size + (sibling?.count ?? 0);
-    const totalBytes = this.inFlightBytesCounter + (sibling?.bytes ?? 0);
     return (
-      totalCount < this.config.maxConcurrentFetches &&
-      totalBytes < this.config.maxBytesInFlight
+      this.inFlight.size < this.config.maxConcurrentFetches &&
+      this.inFlightBytesCounter < this.config.maxBytesInFlight
     );
   }
 

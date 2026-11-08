@@ -63,6 +63,7 @@ import {
   type Projector,
   type Vec3,
 } from "./volumeWireframe.ts";
+import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
 import "./DebugOverlays.css";
 
 interface Props {
@@ -76,12 +77,6 @@ interface Props {
 
 const POLL_MS = 100;
 const MAX_CHUNK_RECTS = 600;
-
-const MODE_LABEL: Record<string, string> = {
-  "group-as-proxy": "WP",
-  "tiles-with-proxy-fallback": "FP",
-  "tiles-with-detail": "FD",
-};
 
 interface GroupBadge {
   key: string;
@@ -195,7 +190,6 @@ export function buildGroupTierCoverage(
 // eslint-disable-next-line react-refresh/only-export-components
 export function formatTierCoverageLabel(
   coverage: GroupTierCoverage,
-  fallbackLabel: string,
   fallbackLod: number | null,
 ): string {
   const detail = `D${coverage.detail.shown}/${coverage.detail.wanted}`;
@@ -214,14 +208,11 @@ export function formatTierCoverageLabel(
         ...(coverage.coarse.wanted > 0 ? [coarse] : []),
       ];
   if (parts.length > 0) return parts.join(" ");
-  return `${fallbackLabel}${fallbackLod !== null ? ` L${fallbackLod}` : ""}`;
+  return fallbackLod !== null ? `L${fallbackLod}` : "";
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
-export function tierCoverageMode(
-  coverage: GroupTierCoverage,
-  fallbackMode: string,
-): string {
+export function tierCoverageMode(coverage: GroupTierCoverage): string {
   const detailComplete =
     coverage.detail.wanted > 0 && coverage.detail.shown >= coverage.detail.wanted;
   if (detailComplete) return "render-detail";
@@ -230,13 +221,13 @@ export function tierCoverageMode(
   if (coverage.detail.wanted > 0 || coverage.coarse.wanted > 0) {
     return "render-waiting";
   }
-  return fallbackMode;
+  // Nothing wanted: the planner holds the target level, so nothing is owed.
+  return "render-detail";
 }
 
 // eslint-disable-next-line react-refresh/only-export-components
 export function formatTierCoverageTitle(
   coverage: GroupTierCoverage,
-  fallbackLabel: string,
   fallbackLod: number | null,
 ): string {
   const parts: string[] = [];
@@ -250,9 +241,9 @@ export function formatTierCoverageTitle(
       `coarse available ${coverage.coarse.shown}/${coverage.coarse.wanted}, ready ${coverage.coarse.ready}, in-flight ${coverage.coarse.inFlight}`,
     );
   }
-  const modePart = `${fallbackLabel}${fallbackLod !== null ? ` L${fallbackLod}` : ""}`;
-  if (parts.length === 0) return modePart;
-  return `${parts.join("; ")}; planner ${modePart}`;
+  const levelPart = fallbackLod !== null ? `target L${fallbackLod}` : "no target level";
+  if (parts.length === 0) return levelPart;
+  return `${parts.join("; ")}; ${levelPart}`;
 }
 
 function parseVisibleRegion(ws: WasmScene, dsId: string): VisibleRegion | null {
@@ -534,7 +525,7 @@ export function DebugOverlays({
   const refreshInspector = useCallback(() => {
     const pointer = pointerRef.current;
     const item = pointer ? hitTest(pointer.x, pointer.y) : null;
-    if (!pointer || !item || item.cell.proxyAsset) {
+    if (!pointer || !item) {
       hoveredKeyRef.current = null;
       setInspector(null);
       return;
@@ -774,7 +765,6 @@ export function DebugOverlays({
 
           // Per-group aggregator carrying world centroids of tiles.
           const groups = new Map<string, {
-            mode: string;
             lod: number | null;
             coverage: GroupTierCoverage;
             worldCentroids: Array<[number, number, number]>;
@@ -784,7 +774,6 @@ export function DebugOverlays({
             groupId: string,
             entityId: string,
             imageId: string,
-            mode: string,
             lod: number | null,
           ) => {
             const pos = positions[entityId];
@@ -797,7 +786,6 @@ export function DebugOverlays({
             let agg = groups.get(groupId);
             if (!agg) {
               agg = {
-                mode,
                 lod,
                 coverage: coverageByGroup.get(groupId) ?? emptyGroupTierCoverage(),
                 worldCentroids: [],
@@ -808,21 +796,10 @@ export function DebugOverlays({
           };
 
           for (const entry of plan.activeSet) {
-            if (entry.kind === "group-as-proxy") {
-              for (const ent of ds.manifest.entities) {
-                if (ent.parent === entry.entityId && ent.kind === "Tile") {
-                  const img = ds.manifest.images.find(i => i.image_id === ent.id)
-                    ?? ds.manifest.images[0];
-                  // group-as-proxy entries have no level bookkeeping, so the
-                  // badge shows no level.
-                  if (img) addTile(entry.entityId, ent.id, img.image_id, "group-as-proxy", null);
-                }
-              }
-            } else if (entry.kind === "tile") {
-              const groupId = parentByEntity.get(entry.entityId) ?? entry.entityId;
-              addTile(groupId, entry.entityId, entry.imageId, entry.mode, entry.detailLevels[0] ?? null);
-            }
             // Invisible entries get no badge.
+            if (entry.kind !== "tile") continue;
+            const groupId = parentByEntity.get(entry.entityId) ?? entry.entityId;
+            addTile(groupId, entry.entityId, entry.imageId, entry.detailLevels[0] ?? null);
           }
 
           for (const [groupId, agg] of groups) {
@@ -845,17 +822,9 @@ export function DebugOverlays({
               key: `${dsId}/${groupId}`,
               centerX: screen.x,
               centerY: screen.y,
-              mode: tierCoverageMode(agg.coverage, agg.mode),
-              label: formatTierCoverageLabel(
-                agg.coverage,
-                MODE_LABEL[agg.mode] ?? agg.mode,
-                agg.lod,
-              ),
-              title: formatTierCoverageTitle(
-                agg.coverage,
-                MODE_LABEL[agg.mode] ?? agg.mode,
-                agg.lod,
-              ),
+              mode: tierCoverageMode(agg.coverage),
+              label: formatTierCoverageLabel(agg.coverage, agg.lod),
+              title: formatTierCoverageTitle(agg.coverage, agg.lod),
             });
           }
         }
@@ -864,11 +833,9 @@ export function DebugOverlays({
         setBadges([]);
       }
 
-      // Group-as-proxy entries have no chunks; one proxy asset serves them.
       if (showGrid && plans && cpuCache) {
         const out: ChunkCell[] = [];
-        const t = ws.t();
-        const c = ws.c();
+        const resolvedLayers = readResolvedLayers(ws);
         const planningConfig = configStore.get();
         const snap = cpuCache.snapshot();
         // Rank lookup for "planned" color gradient. Built once per
@@ -880,18 +847,16 @@ export function DebugOverlays({
           const r = pending[i];
           rankByKey.set(`${r.entityId}/${r.chunkKey}`, i);
         }
-        // Same idea for proxies, used by the WP-group rendering path.
-        const pendingProxies = cpuCache.getPendingProxySnapshot();
-        const proxyRankByKey = new Map<string, number>();
-        for (let i = 0; i < pendingProxies.length; i++) {
-          const r = pendingProxies[i];
-          proxyRankByKey.set(`${r.datasetId}|${r.entityId}|${r.kind}|${r.t}|${r.c}`, i);
-        }
 
         outer: for (const [dsId, plan] of plans) {
           if (out.length >= MAX_CHUNK_RECTS) break;
           const ds = datasets.get(dsId);
           if (!ds) continue;
+          // A group proxy is fetched for the layer's first shown channel at
+          // its own timepoint.
+          const layer = resolvedLayers.get(dsId);
+          const t = layer?.t ?? ws.t();
+          const c = shownChannels(layer)[0];
           let positions: Record<string, [number, number]> = {};
           try {
             positions = JSON.parse(ws.member_positions(dsId));
@@ -904,79 +869,8 @@ export function DebugOverlays({
           for (const entry of plan.activeSet) {
             if (out.length >= MAX_CHUNK_RECTS) break outer;
 
-            // Invisible entries contribute no chunks or proxy assets.
+            // Invisible entries contribute no chunks.
             if (entry.kind === "invisible") continue;
-
-            // Group-as-proxy: there's no chunk grid because the group is
-            // served by a single proxy asset. Render one rect per group
-            // colored by proxy status, so collections at WP zoom still
-            // surface load progress.
-            if (entry.kind === "group-as-proxy") {
-              const cached = cpuCache.getCachedProxy(dsId, entry.entityId, "GroupProxy3D", t, c);
-              const inFlight = cpuCache.isProxyInFlight(dsId, entry.entityId, "GroupProxy3D", t, c);
-              let status: ChunkCell["status"] = "planned";
-              let priorityRank: number | undefined;
-              if (cached) {
-                status = "cached";
-              } else if (inFlight) {
-                status = "in-flight";
-              } else if (enabled.plannedRank) {
-                priorityRank = proxyRankByKey.get(`${dsId}|${entry.entityId}|GroupProxy3D|${t}|${c}`);
-              }
-
-              // Union of constituent tiles' world AABBs gives the
-              // group's world AABB in either mode (in 3D each tile has
-              // its own model matrix, so we union after voxelToWorld).
-              let minX = Infinity, minY = Infinity, minZ = Infinity;
-              let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
-              let any = false;
-              for (const ent of ds.manifest.entities) {
-                if (ent.parent !== entry.entityId || ent.kind !== "Tile") continue;
-                const tileImg = ds.manifest.images.find(i => i.image_id === ent.id)
-                  ?? ds.manifest.images[0];
-                if (!tileImg) continue;
-                const fpos = positions[ent.id];
-                if (!fpos) continue;
-                const flvl0 = tileImg.multiscale.levels[0];
-                if (!flvl0) continue;
-                const fframe = getFrame(dsId, ent.id, flvl0.shape);
-                fframe.pos = fpos;
-                for (let i = 0; i < 8; i++) {
-                  const vx = i & 1 ? fframe.fullVoxel[0] : 0;
-                  const vy = (i >> 1) & 1 ? fframe.fullVoxel[1] : 0;
-                  const vz = (i >> 2) & 1 ? fframe.fullVoxel[2] : 0;
-                  const [wx, wy, wz] = voxelToWorld(fframe, vx, vy, vz);
-                  if (wx < minX) minX = wx; if (wx > maxX) maxX = wx;
-                  if (wy < minY) minY = wy; if (wy > maxY) maxY = wy;
-                  if (wz < minZ) minZ = wz; if (wz > maxZ) maxZ = wz;
-                  any = true;
-                }
-              }
-              if (!any) continue;
-              const groupBox = projectChunkBox(worldProjector(ws, dpr), [minX, minY, minZ], [maxX, maxY, maxZ]);
-              if (!groupBox || offScreen(groupBox)) continue;
-              out.push({
-                key: `${dsId}/${entry.entityId}/group-proxy`,
-                datasetId: dsId,
-                entityId: entry.entityId,
-                chunkKey: "group-proxy",
-                level: -1,
-                t,
-                c,
-                z: 0,
-                y: 0,
-                x: 0,
-                left: groupBox.left,
-                top: groupBox.top,
-                width: groupBox.width,
-                height: groupBox.height,
-                status,
-                priorityRank,
-                proxyAsset: true,
-                ...volumeFields(groupBox, [(minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2]),
-              });
-              continue;
-            }
             if (!visibleRegion) continue;
             const pos = positions[entry.entityId];
             const img = imgById.get(entry.imageId);

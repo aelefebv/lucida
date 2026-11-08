@@ -67,12 +67,6 @@ export interface ChunkCell {
   /** For a cached cell: its eviction tier, or null when the lookup failed. */
   tier?: EvictionTier | null;
   /**
-   * True for the one rectangle a group served by a proxy asset gets. Not a
-   * chunk, so it has no row: the trace-reading modes leave it to the cache
-   * colors and say what it is. Its identity fields are placeholders.
-   */
-  proxyAsset?: boolean;
-  /**
    * In volume mode, the chunk box's corners on screen. The rectangle above
    * is their bounds. Absent in slice mode, where the cell is the rectangle.
    */
@@ -278,23 +272,6 @@ export function buildChunkDrawList(input: DrawListInput): ChunkDrawList {
 
   for (const cell of cells) {
     const status = statusText(cell, modes);
-    if (cell.proxyAsset) {
-      items.push({
-        key: cell.key,
-        left: cell.left,
-        top: cell.top,
-        width: cell.width,
-        height: cell.height,
-        fill: cacheFill(cell, modes, paints),
-        border: paints.cellBorder,
-        status,
-        tooltip: `${status} · group proxy asset: not a chunk, so it has no row`,
-        reading: null,
-        selected: false,
-        cell,
-      });
-      continue;
-    }
     const reading = readsTrace ? input.readingOf(cell) : null;
     if (reading) withRow += 1;
     const band = modes.churnTint && reading ? churnBand(reading.fetches, paints) : null;

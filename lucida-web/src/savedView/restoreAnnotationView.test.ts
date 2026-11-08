@@ -34,7 +34,7 @@ function makeScene(opts: {
   const loadedIds = opts.loadedIds ?? Object.keys(shapes);
   const presence = {
     camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 600] } as Camera,
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0, multi_channel: false },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1 },
   };
   const scene = {
@@ -87,7 +87,7 @@ function viewWith(overrides: Partial<SavedView> = {}): SavedView {
     datasets: [],
     active_layouts: {},
     camera: sliceCamera(),
-    view: { z_range: { start: 5, end: 6 }, t: 2, c: 1, multi_channel: false },
+    view: { z_range: { start: 5, end: 6 }, t: 2 },
     display: { contrast_min: 100, contrast_max: 5000, gamma: 1.7 },
     dataset_order: [],
     dataset_settings: {},
@@ -115,11 +115,10 @@ describe("restoreAnnotationView (light tier)", () => {
     expect(calls.find((c) => c.type === "set_gamma")).toMatchObject({ gamma: 1.7 });
     // z/t/c restored unclamped, since the slab fits.
     expect(calls.find((c) => c.type === "set_t")).toMatchObject({ t: 2 });
-    expect(calls.find((c) => c.type === "set_c")).toMatchObject({ c: 1 });
     expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 5, end: 6 });
     // Camera restored via import_presence (the merged presence carries it).
     expect(getPresenceCamera()).toMatchObject({ mode: "slice", center: [123, 456], zoom: 8 });
-    expect(result.applied).toEqual({ zStart: 5, zEnd: 6, t: 2, c: 1 });
+    expect(result.applied).toEqual({ zStart: 5, zEnd: 6, t: 2 });
     expect(result.notice).toBeNull();
   });
 
@@ -131,7 +130,7 @@ describe("restoreAnnotationView (light tier)", () => {
     });
     const view = viewWith({
       camera: arcballCamera(),
-      view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+      view: { z_range: { start: 0, end: 1 }, t: 0 },
     });
 
     const result = restoreAnnotationView({ scene, view, datasetId: DS });
@@ -213,7 +212,7 @@ describe("restoreAnnotationView (light tier)", () => {
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 50, end: 52 }, t: 99, c: 7 },
+      view: { z_range: { start: 50, end: 52 }, t: 99 },
     });
 
     const result = restoreAnnotationView({
@@ -221,21 +220,18 @@ describe("restoreAnnotationView (light tier)", () => {
       view,
       datasetId: DS,
       // T/C extents for the pin's dataset: 3 timepoints, 2 channels.
-      dimensionExtentsFor: (id) => (id === DS ? { t: 3, c: 2 } : {}),
+      dimensionExtentsFor: (id) => (id === DS ? { t: 3 } : {}),
     });
 
     const zr = calls.find((c) => c.type === "set_z_range") as { start: number; end: number };
     expect(zr.end).toBeLessThanOrEqual(4);
     expect(zr.start).toBeLessThan(zr.end);
     expect(calls.find((c) => c.type === "set_t")).toMatchObject({ t: 2 }); // clamped to 3-1
-    expect(calls.find((c) => c.type === "set_c")).toMatchObject({ c: 1 }); // clamped to 2-1
     expect(result.notice).toBeTruthy();
     // Names every adjusted axis.
     expect(result.notice).toContain("Z");
     expect(result.notice).toContain("T");
-    expect(result.notice).toContain("C");
     expect(result.applied.t).toBe(2);
-    expect(result.applied.c).toBe(1);
   });
 
   it("clamps against the PIN's dataset only — a co-loaded shallow neighbor can't crush it", () => {
@@ -249,7 +245,7 @@ describe("restoreAnnotationView (light tier)", () => {
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 200, end: 205 }, t: 0, c: 0 },
+      view: { z_range: { start: 200, end: 205 }, t: 0 },
     });
 
     const result = restoreAnnotationView({ scene, view, datasetId: DS });
@@ -298,7 +294,7 @@ describe("restoreAnnotationView (light tier)", () => {
 // inbox), the caller passes `datasetId: undefined` and restore must pass the
 // captured z/t/c through, not clamp them against the `[1,1,1]` sentinel that
 // `dataset_volume_shape("")` returns.
-describe("restoreAnnotationView — null-selection / inbox path (no clamp-collapse, #814 class)", () => {
+describe("restoreAnnotationView — null-selection / inbox path (no clamp-collapse)", () => {
   it("avc-empty-z: a deep single-plane capture passes through (no datasetId, no collapse)", () => {
     // A deep dataset is loaded, but the pin's dataset is unresolved.
     const { scene, calls } = makeScene({
@@ -306,7 +302,7 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 119, end: 120 }, t: 0, c: 0 },
+      view: { z_range: { start: 119, end: 120 }, t: 0 },
     });
 
     const result = restoreAnnotationView({ scene, view, datasetId: undefined });
@@ -324,7 +320,7 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 50, end: 80 }, t: 0, c: 0 },
+      view: { z_range: { start: 50, end: 80 }, t: 0 },
     });
 
     const result = restoreAnnotationView({ scene, view, datasetId: undefined });
@@ -339,14 +335,13 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 200, end: 210 }, t: 3, c: 2 },
+      view: { z_range: { start: 200, end: 210 }, t: 3 },
     });
 
     const result = restoreAnnotationView({ scene, view, datasetId: undefined });
 
     expect(calls.find((c) => c.type === "set_z_range")).toMatchObject({ start: 200, end: 210 });
     expect(calls.find((c) => c.type === "set_t")).toMatchObject({ t: 3 });
-    expect(calls.find((c) => c.type === "set_c")).toMatchObject({ c: 2 });
     expect(result.notice).toBeNull();
   });
 
@@ -356,7 +351,7 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 119, end: 120 }, t: 0, c: 0 },
+      view: { z_range: { start: 119, end: 120 }, t: 0 },
     });
 
     const result = restoreAnnotationView({ scene, view, datasetId: null });
@@ -371,7 +366,7 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 119, end: 120 }, t: 0, c: 0 },
+      view: { z_range: { start: 119, end: 120 }, t: 0 },
     });
 
     const result = restoreAnnotationView({ scene, view, datasetId: "wds-deep" });
@@ -389,7 +384,7 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 119, end: 120 }, t: 0, c: 0 },
+      view: { z_range: { start: 119, end: 120 }, t: 0 },
     });
 
     // Clamp targets only the pin's dataset, never the shallow neighbor.
@@ -407,7 +402,7 @@ describe("restoreAnnotationView — null-selection / inbox path (no clamp-collap
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 50, end: 52 }, t: 0, c: 0 },
+      view: { z_range: { start: 50, end: 52 }, t: 0 },
     });
 
     const result = restoreAnnotationView({ scene, view, datasetId: "wds-shallow" });
@@ -454,7 +449,7 @@ describe("restoreAnnotationView — per-channel/per-dataset display fidelity (Fi
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 5, end: 6 }, t: 0, c: 0, multi_channel: true },
+      view: { z_range: { start: 5, end: 6 }, t: 0 },
       dataset_order: [DS],
       dataset_settings: {
         [DS]: datasetSettings({
@@ -500,7 +495,7 @@ describe("restoreAnnotationView — per-channel/per-dataset display fidelity (Fi
     });
     const view = viewWith({
       camera: sliceCamera(),
-      view: { z_range: { start: 5, end: 6 }, t: 0, c: 0 },
+      view: { z_range: { start: 5, end: 6 }, t: 0 },
       dataset_order: [DS, "wds-loaded-2", "wds-not-loaded"],
       dataset_settings: {
         [DS]: datasetSettings({ channel_settings: [channel({ colormap: "red" })] }),
@@ -584,7 +579,7 @@ describe("restoreAnnotationView — hardening (Fix 3): a bad captured camera deg
     });
     const view = viewWith({
       camera: sliceCamera([1, 2], 3),
-      view: { z_range: { start: 5, end: 6 }, t: 1, c: 0 },
+      view: { z_range: { start: 5, end: 6 }, t: 1 },
     });
 
     // Must not throw out of the navigate handler.

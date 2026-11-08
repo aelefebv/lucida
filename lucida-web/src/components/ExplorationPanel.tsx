@@ -28,6 +28,7 @@ import { Dialog } from "../ui/Dialog.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
 import { Switch } from "../ui/Switch.tsx";
 import { TextField } from "../ui/TextField.tsx";
+import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import "./BookmarkSidebar.css";
 import "./ExplorationPanel.css";
 
@@ -407,7 +408,7 @@ export function ExplorationPanel({
     if (breadcrumbRef.current.length === 0 && cam.mode === "arcball" && cam.distance > 0) {
       homeDistanceRef.current = cam.distance;
     }
-    setHereLabel(describeView(sidecar.current.view, ds, homeDistanceRef.current));
+    setHereLabel(describeView(sidecar.current.view, datasetIdRef.current, ds, homeDistanceRef.current));
   }, [explore]);
 
   useEffect(() => {
@@ -609,12 +610,11 @@ export function ExplorationPanel({
         <ul className="lc-rail-list">
           {cells.map((cell) => (
             <li key={cell.handle + cell.transform} className="lc-rail-row">
-              <button
-                type="button"
+              <UnstyledButton
                 className="lc-rail-row-open"
                 data-testid="explore-cell"
                 title={cell.label}
-                onClick={() => void descend(cell)}
+                onPress={() => void descend(cell)}
               >
                 {thumbnailsOn && requestThumbnail && canPreview(cell.view) && (
                   <ExploreThumbnail
@@ -630,7 +630,7 @@ export function ExplorationPanel({
                   <span className="lc-rail-row-name">{cell.label}</span>
                   <span className="lc-rail-row-meta lc-explore-transform">{cell.transform}</span>
                 </span>
-              </button>
+              </UnstyledButton>
             </li>
           ))}
         </ul>
@@ -716,7 +716,7 @@ function BookmarkDialog({
  *  The camera part is the only on-screen sign of an orbit or zoom when there are
  *  no thumbnails. T and C show when their count is above 1, so a time series
  *  doesn't read as flat 2D. Without `homeDistance` the raw distance is shown. */
-function describeView(view: SavedView, dims: Dims, homeDistance?: number): string {
+function describeView(view: SavedView, datasetId: string | null, dims: Dims, homeDistance?: number): string {
   const [tCount, cCount, zCount] = dims;
   const parts: string[] = [];
 
@@ -742,8 +742,10 @@ function describeView(view: SavedView, dims: Dims, homeDistance?: number): strin
   if (zCount > 1) parts.push(positionLabel("Z", z, zCount));
   const t = view.view?.t ?? 0;
   if (tCount > 1) parts.push(positionLabel("T", t, tCount));
-  const c = view.view?.c ?? 0;
-  if (cCount > 1) parts.push(positionLabel("C", c, cCount));
+  const solo = datasetId ? view.dataset_settings?.[datasetId]?.solo : undefined;
+  if (cCount > 1) {
+    parts.push(typeof solo === "number" ? positionLabel("C", solo, cCount) : "composite");
+  }
 
   return parts.join(" · ");
 }

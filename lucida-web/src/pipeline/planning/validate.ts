@@ -67,8 +67,8 @@ export function checkUniqueImageIds(snapshot: PlanningSnapshot): void {
 
 /**
  * Check 4: every level's `shape` and `chunk_shape` have five axes (TCZYX).
- * `iterateChunks`, `chunkOutsideFrustum`, and every `Axis`-indexed read
- * in the planner assume it.
+ * The queries the planner sends the core's chunk enumerator, and every
+ * `Axis`-indexed read in the planner, assume it.
  */
 export function checkLevelShapeArity(snapshot: PlanningSnapshot): void {
   for (const e of snapshot.entities) {
@@ -113,7 +113,6 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
   }
 }
 
-// No check 6 (catalog entries name snapshot entities): the catalog spans every dataset seen.
 // No check 7 (minimapPending keys name snapshot images): the minimap covers images view_query omits.
 
 /**
@@ -134,11 +133,10 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
 
 /**
  * Check 9: each previous active-set entry whose entity is still in the
- * snapshot agrees with that entity's kind. `group-as-proxy` needs a
- * Group. `tile` accepts Tile or Image, because `groupMembers` wraps each
- * Image in a synthetic one-tile group. `invisible` accepts any kind. An
- * entity missing from the snapshot is not a violation; entities come and
- * go across ticks.
+ * snapshot agrees with that entity's kind. `tile` accepts Tile or Image,
+ * because `groupMembers` wraps each Image in a synthetic one-tile group.
+ * `invisible` accepts any kind. An entity missing from the snapshot is not
+ * a violation; entities come and go across ticks.
  */
 export function checkPrevActiveSetKindAgreement(
   snapshot: PlanningSnapshot,
@@ -168,8 +166,6 @@ function allowedEntityKindsFor(
   entry: ActiveSetEntry,
 ): EntitySnapshot["kind"][] | null {
   switch (entry.kind) {
-    case "group-as-proxy":
-      return ["Group"];
     case "tile":
       return ["Tile", "Image"];
     case "invisible":

@@ -10,7 +10,6 @@ import { Axis } from "../../axes.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry, poolCapBytes } from "../atlasSizing.ts";
-import { computeProxyAtlasLayout } from "../proxyAtlas.ts";
 import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
 import { postChunkResidency, postSlotsLost, LABEL_TIER } from "../chunkUploadFeedback.ts";
@@ -19,6 +18,8 @@ import { grantGrowth, handleGpuOutOfMemory, reserveGpuBytes } from "../worker/gp
 import { setGpuLedgerLine } from "../worker/gpuLedger.ts";
 import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
 import type { ChunkFeedbackReason } from "../workerProtocol.ts";
+import { applyFailedMarks, failedCellsAt, failedKeysForImage } from "../failedCells.ts";
+import { INDIRECTION_MISS } from "../remap.ts";
 
 /** Bytes one label voxel occupies in the `r32uint` atlas. */
 const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
@@ -75,8 +76,8 @@ export interface AtlasState {
 /**
  * A label overlay's volume pool: a bricked slot-grid `r32uint` 3D atlas
  * holding the chosen level as fixed-size chunks, plus a per-cell indirection
- * buffer. It mirrors the intensity proxy-atlas layout so a level larger than
- * the monolithic texture limit still renders as a compact slot grid.
+ * buffer. Its slots tile a 3-D grid so a level larger than the monolithic
+ * texture limit still renders as a compact slot grid.
  *
  * Ids are read with `textureLoad` (nearest only), so a sampled id is always
  * the id its cell stored, never a blend across bricks. Chunks are written in
@@ -97,6 +98,8 @@ export interface LabelVolumePool {
   indirectionBuf: GPUBuffer;
   /** CPU mirror of {@link indirectionBuf} (uploaded after each delivery). */
   indirectionData: Uint32Array<ArrayBuffer>;
+  /** Cells whose entry reads FAILED because their chunk failed for good. */
+  markedFailed: Set<number>;
   /** Level chunk-grid dims (cells per axis). */
   gridX: number; gridY: number; gridZ: number;
   /** Per-slot voxel dims (one brick). */
@@ -249,9 +252,9 @@ export function computeLabelVolumeSizing(
   const { chunkX: cx, chunkY: cy, chunkZ: cz, gridX, gridY, gridZ, gridCellCount } =
     labelBrickGrid(width, height, depth, chunkX, chunkY, chunkZ);
 
-  // Request the whole grid; computeProxyAtlasLayout clamps only to the device
-  // limit and packs the slots so no atlas axis exceeds it.
-  const layout = computeProxyAtlasLayout([cz, cy, cx], gridCellCount, maxTextureDimension3D);
+  // Request the whole grid; packSlotGrid clamps only to the device limit and
+  // packs the slots so no atlas axis exceeds it.
+  const layout = packSlotGrid([cz, cy, cx], gridCellCount, maxTextureDimension3D);
 
   return {
     chunkX: cx, chunkY: cy, chunkZ: cz,
@@ -264,6 +267,96 @@ export function computeLabelVolumeSizing(
     totalSlots: layout.slotsX * layout.slotsY * layout.slotsZ,
     textureSize: layout.textureSize,
   };
+}
+
+interface SlotGridLayout {
+  capacity: number;
+  slotsX: number;
+  slotsY: number;
+  slotsZ: number;
+  textureSize: [number, number, number];
+}
+
+/**
+ * The 3-D slot grid holding `requestedCapacity` slots of `slotDims`
+ * (`[Z, Y, X]`) under the device's max 3D texture dimension. Capacity is
+ * clamped to what fits. Among grids that fit, the fewest allocated slots
+ * win, then the shortest longest axis, so the texture stays near cubic.
+ */
+function packSlotGrid(
+  slotDims: [number, number, number],
+  requestedCapacity: number,
+  maxTextureDimension3D: number,
+): SlotGridLayout {
+  const [slotZ, slotY, slotX] = slotDims;
+  if (slotX <= 0 || slotY <= 0 || slotZ <= 0) {
+    throw new Error(`[volumeAtlas] invalid slotDims=${slotDims.join(",")}`);
+  }
+
+  const maxSlotsX = Math.floor(maxTextureDimension3D / slotX);
+  const maxSlotsY = Math.floor(maxTextureDimension3D / slotY);
+  const maxSlotsZ = Math.floor(maxTextureDimension3D / slotZ);
+  if (maxSlotsX < 1 || maxSlotsY < 1 || maxSlotsZ < 1) {
+    throw new Error(
+      `[volumeAtlas] slotDims=${slotDims.join(",")} exceed maxTextureDimension3D=${maxTextureDimension3D}`,
+    );
+  }
+
+  const maxCapacity = maxSlotsX * maxSlotsY * maxSlotsZ;
+  const capacity = Math.min(
+    Math.max(1, Math.floor(requestedCapacity)),
+    maxCapacity,
+  );
+
+  let best: SlotGridLayout | null = null;
+  const maxCandidateX = Math.min(maxSlotsX, capacity);
+  for (let slotsX = 1; slotsX <= maxCandidateX; slotsX++) {
+    const maxCandidateY = Math.min(maxSlotsY, Math.ceil(capacity / slotsX));
+    for (let slotsY = 1; slotsY <= maxCandidateY; slotsY++) {
+      const slotsZ = Math.ceil(capacity / (slotsX * slotsY));
+      if (slotsZ < 1 || slotsZ > maxSlotsZ) continue;
+
+      const textureSize: [number, number, number] = [
+        slotsX * slotX,
+        slotsY * slotY,
+        slotsZ * slotZ,
+      ];
+      const candidate: SlotGridLayout = {
+        capacity,
+        slotsX,
+        slotsY,
+        slotsZ,
+        textureSize,
+      };
+      if (!best || compareSlotGrids(candidate, best) < 0) best = candidate;
+    }
+  }
+
+  if (!best) {
+    throw new Error(
+      `[volumeAtlas] cannot pack capacity=${capacity} slotDims=${slotDims.join(",")} ` +
+        `under maxTextureDimension3D=${maxTextureDimension3D}`,
+    );
+  }
+  return best;
+}
+
+function compareSlotGrids(a: SlotGridLayout, b: SlotGridLayout): number {
+  const aAllocated = a.slotsX * a.slotsY * a.slotsZ;
+  const bAllocated = b.slotsX * b.slotsY * b.slotsZ;
+  if (aAllocated !== bAllocated) return aAllocated - bAllocated;
+
+  const aMaxAxis = Math.max(...a.textureSize);
+  const bMaxAxis = Math.max(...b.textureSize);
+  if (aMaxAxis !== bMaxAxis) return aMaxAxis - bMaxAxis;
+
+  const aMinAxis = Math.min(...a.textureSize);
+  const bMinAxis = Math.min(...b.textureSize);
+  if (aMinAxis !== bMinAxis) return bMinAxis - aMinAxis;
+
+  const aArea = a.textureSize[0] * a.textureSize[1] * a.textureSize[2];
+  const bArea = b.textureSize[0] * b.textureSize[1] * b.textureSize[2];
+  return aArea - bArea;
 }
 
 /**
@@ -361,6 +454,7 @@ export function getOrCreateLabelVolumePool(
     texture,
     indirectionBuf,
     indirectionData,
+    markedFailed: new Set(),
     gridX: sizing.gridX, gridY: sizing.gridY, gridZ: sizing.gridZ,
     chunkX: cx, chunkY: cy, chunkZ: cz,
     slotsX: sizing.slotsX, slotsY: sizing.slotsY, slotsZ: sizing.slotsZ,
@@ -426,6 +520,31 @@ export function acquireLabelSlot(
     origin: [sx * pool.chunkX, sy * pool.chunkY, sz * pool.chunkZ],
     evictedKey,
   };
+}
+
+/**
+ * Mark the cells of the level and timepoint `at` whose chunk failed for
+ * good, unless a slot holds that very chunk. A ray that reaches one draws the
+ * hatch, where it would otherwise pass through as background, or stop at a
+ * cell still holding another timepoint. Returns whether the marks changed.
+ */
+export function markLabelVolumeFailed(
+  ctx: WorkerCtx,
+  memberId: string,
+  pool: LabelVolumePool,
+  at: { level: number; t: number },
+): boolean {
+  const grid = { x: pool.gridX, y: pool.gridY, z: pool.gridZ };
+  const failed = failedCellsAt(failedKeysForImage(ctx.state, memberId), grid, { ...at, c: 0 });
+  const changed = applyFailedMarks(
+    pool.indirectionData,
+    pool.markedFailed,
+    failed,
+    (cell, key) => pool.slots.has(cell) && pool.keys.get(cell) === key,
+    (cell) => pool.slots.get(cell) ?? INDIRECTION_MISS,
+  );
+  if (changed) ctx.device.queue.writeBuffer(pool.indirectionBuf, 0, pool.indirectionData);
+  return changed;
 }
 
 export function destroyLabelVolumePool(pool: LabelVolumePool): void {

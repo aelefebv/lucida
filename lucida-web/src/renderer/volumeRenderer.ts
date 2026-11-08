@@ -2,7 +2,7 @@
 import shaderSource from "./volume.wgsl?raw";
 import { OFFSCREEN_FORMAT } from "./gpuContext.ts";
 import { DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
-import { serializeTransientDescriptor } from "./descriptor/transient.ts";
+import { serializeTransientDescriptor, type TransientDescriptorParams } from "./descriptor/transient.ts";
 import type { PassTiming } from "./passTiming.ts";
 import { requireCompiled } from "./pipelineCompile.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
@@ -67,15 +67,8 @@ export class VolumeRenderer {
   private camForward: Float32Array<ArrayBufferLike> = new Float32Array(3);
   private clipDistance = 0;
   private clipMode = 0; // 0=plane, 1=sphere
-  private singleSlotIndirectionBuf: GPUBuffer | null = null;
   private lutTexture: GPUTexture;
   private lutSampler: GPUSampler;
-  // The descriptor carries proxy pool and slot indices; the texture handle
-  // stays CPU-side because a bind group cannot index a texture array
-  // without a texture-array binding.
-  private tileProxyTexture: GPUTexture | null = null;
-  private groupProxyTexture: GPUTexture | null = null;
-  private dummyProxyTexture: GPUTexture | null = null;
 
   get isCompiled(): boolean {
     return this.pipeline !== null;
@@ -90,12 +83,12 @@ export class VolumeRenderer {
     const levelIndirectionEntries: GPUBindGroupLayoutEntry[] = [];
     for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
       levelTextureEntries.push({
-        binding: 7 + i,
+        binding: 5 + i,
         visibility: GPUShaderStage.FRAGMENT,
         texture: { sampleType: "uint", viewDimension: "3d" },
       });
       levelIndirectionEntries.push({
-        binding: 7 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
+        binding: 5 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
         visibility: GPUShaderStage.FRAGMENT,
         buffer: { type: "read-only-storage" },
       });
@@ -127,19 +120,8 @@ export class VolumeRenderer {
           visibility: GPUShaderStage.FRAGMENT,
           buffer: { type: "read-only-storage" },
         },
-        // Proxy textures (tileProxy + groupProxy)
-        {
-          binding: 5,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
-        },
-        {
-          binding: 6,
-          visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: "uint", viewDimension: "3d" },
-        },
-        // One level pool per resident-level slot: textures at 7..10,
-        // their indirection buffers at 11..14.
+        // One level pool per resident-level slot: textures at 5..8,
+        // their indirection buffers at 9..12.
         ...levelTextureEntries,
         ...levelIndirectionEntries,
       ],
@@ -247,32 +229,6 @@ export class VolumeRenderer {
     // Bind group will be rebuilt on the next setTierAtlases call
   }
 
-  /** r16uint like the real proxy atlases, so the bind-group layout is satisfied. */
-  private getDummyProxyTexture(): GPUTexture {
-    if (!this.dummyProxyTexture) {
-      this.dummyProxyTexture = this.device.createTexture({
-        size: [1, 1, 1],
-        format: "r16uint",
-        dimension: "3d",
-        usage: GPUTextureUsage.TEXTURE_BINDING,
-      });
-    }
-    return this.dummyProxyTexture;
-  }
-
-  /**
-   * Configure proxy textures for the next draw. Slot indices and dims
-   * live in the per-entity descriptor; the shader consults them only
-   * when the entity binds no chunk tier.
-   */
-  setProxyTextures(
-    tileTexture: GPUTexture | null,
-    groupTexture: GPUTexture | null,
-  ) {
-    this.tileProxyTexture = tileTexture;
-    this.groupProxyTexture = groupTexture;
-  }
-
   /**
    * Bind the level pools a member's level sources name, in slot order
    * (index = the descriptor's `poolIndex`), plus the coarse pool. `null`
@@ -285,21 +241,18 @@ export class VolumeRenderer {
   ) {
     this.levelBindings = levels.slice(0, DESCRIPTOR_MAX_LEVEL_SOURCES);
     this.coarseBinding = coarse;
-    const dummyProxy = this.getDummyProxyTexture();
     const entries: GPUBindGroupEntry[] = [
       { binding: 0, resource: { buffer: this.uniformBuffer } },
       { binding: 1, resource: this.lutTexture.createView() },
       { binding: 2, resource: this.lutSampler },
       { binding: 3, resource: (coarse?.texture ?? this.dummyTexture).createView() },
       { binding: 4, resource: { buffer: coarse?.indirectionBuf ?? this.dummyIndirectionBuffer } },
-      { binding: 5, resource: (this.tileProxyTexture ?? dummyProxy).createView() },
-      { binding: 6, resource: (this.groupProxyTexture ?? dummyProxy).createView() },
     ];
     for (let i = 0; i < DESCRIPTOR_MAX_LEVEL_SOURCES; i++) {
       const b = this.levelBindings[i] ?? null;
-      entries.push({ binding: 7 + i, resource: (b?.texture ?? this.dummyTexture).createView() });
+      entries.push({ binding: 5 + i, resource: (b?.texture ?? this.dummyTexture).createView() });
       entries.push({
-        binding: 7 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
+        binding: 5 + DESCRIPTOR_MAX_LEVEL_SOURCES + i,
         resource: { buffer: b?.indirectionBuf ?? this.dummyIndirectionBuffer },
       });
     }
@@ -359,6 +312,7 @@ export class VolumeRenderer {
     gamma: number,
     opacity: number,
     sampleFormat: SampleFormat,
+    chunkGrid?: TransientDescriptorParams["chunkGrid"],
   ) {
     if (!this.transientDescriptorBuffer) {
       this.transientDescriptorBuffer = this.device.createBuffer({
@@ -376,28 +330,13 @@ export class VolumeRenderer {
       gamma,
       opacity,
       sampleFormat,
+      chunkGrid,
     });
     this.device.queue.writeBuffer(this.transientDescriptorBuffer, 0, cpu);
     // The minimap/thumbnail path is intensity-only; bind the dummy palette
     // so a prior label draw's (possibly freed) palette buffer can't leak in.
     this.setLabelColorBuffer(null);
     this.setDescriptorBinding(this.transientDescriptorBuffer, 0);
-  }
-
-  /** Bind a monolithic texture as a single-slot atlas at level pool binding 0 (used by minimap). */
-  setVolume(texture: GPUTexture) {
-    if (!this.singleSlotIndirectionBuf) {
-      const data = new Uint32Array([0]);
-      this.singleSlotIndirectionBuf = this.device.createBuffer({
-        size: 4,
-        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-      });
-      this.device.queue.writeBuffer(this.singleSlotIndirectionBuf, 0, data);
-    }
-    this.setTierAtlases(
-      [{ texture, indirectionBuf: this.singleSlotIndirectionBuf, slotsX: 1, slotsY: 1, slotsZ: 1 }],
-      null,
-    );
   }
 
   setRenderMode(mode: number) {

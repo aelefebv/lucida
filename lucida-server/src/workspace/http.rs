@@ -850,7 +850,7 @@ async fn workspace_ws(
     };
     let manager = Arc::clone(&state.manager);
     crate::connection::limit_inbound(ws).on_upgrade(move |socket| async move {
-        let client_id = live.next_client_id();
+        let client_id = crate::connection::next_client_id();
         tracing::info!(client_id, workspace_id = %live.workspace_id, "ws.workspace_client_connected");
         handler::handle_workspace_client(client_id, socket, live, manager, principal).await;
     })

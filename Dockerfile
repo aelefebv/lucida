@@ -53,7 +53,9 @@ RUN rustup target add wasm32-unknown-unknown
 # vitest resolves against (lucida-tm2). The upstream `installer/init.sh` can't
 # be pinned — its served copy hardcodes an older version (was v0.13.1) — so
 # fetch the tagged release tarball directly. musl builds are static, so they
-# run fine on this glibc (bookworm) builder.
+# run fine on this glibc (bookworm) builder. Release downloads can return 504s
+# for long stretches, so a build of the same version from crates.io backs the
+# download up.
 ARG WASM_PACK_VERSION=v0.15.0
 RUN set -eux; \
     arch="$(uname -m)"; \
@@ -63,11 +65,14 @@ RUN set -eux; \
       *) echo "unsupported arch for wasm-pack pin: $arch" >&2; exit 1 ;; \
     esac; \
     dir="wasm-pack-${WASM_PACK_VERSION}-${target}"; \
-    curl -fsSL "https://github.com/rustwasm/wasm-pack/releases/download/${WASM_PACK_VERSION}/${dir}.tar.gz" \
-      -o /tmp/wasm-pack.tar.gz; \
-    tar -xzf /tmp/wasm-pack.tar.gz -C /tmp; \
-    install -m 0755 "/tmp/${dir}/wasm-pack" /usr/local/bin/wasm-pack; \
-    rm -rf /tmp/wasm-pack.tar.gz "/tmp/${dir}"; \
+    if curl -fsSL --retry 5 --retry-all-errors -o /tmp/wasm-pack.tar.gz \
+         "https://github.com/wasm-bindgen/wasm-pack/releases/download/${WASM_PACK_VERSION}/${dir}.tar.gz"; then \
+      tar -xzf /tmp/wasm-pack.tar.gz -C /tmp; \
+      install -m 0755 "/tmp/${dir}/wasm-pack" /usr/local/bin/wasm-pack; \
+      rm -rf /tmp/wasm-pack.tar.gz "/tmp/${dir}"; \
+    else \
+      cargo install wasm-pack --version "${WASM_PACK_VERSION#v}" --locked --root /usr/local; \
+    fi; \
     wasm-pack --version
 
 WORKDIR /workspace
@@ -86,14 +91,13 @@ COPY lucida-cli/      ./lucida-cli/
 COPY lucida-content/  ./lucida-content/
 COPY lucida-core/     ./lucida-core/
 COPY lucida-protocol/ ./lucida-protocol/
-COPY lucida-proxy/    ./lucida-proxy/
 COPY lucida-py/       ./lucida-py/
 COPY lucida-server/   ./lucida-server/
 COPY lucida-store/    ./lucida-store/
 
 # Build the server binary (release). `-p lucida-server` keeps cargo from
 # walking other workspace members' bin targets unnecessarily; the dep
-# graph still pulls in lucida-core/-content/-protocol/-proxy/-store as
+# graph still pulls in lucida-core/-content/-protocol/-store as
 # library deps. `--locked` fails the build if Cargo.lock is out of sync
 # with the manifests rather than re-resolving deps at image build time.
 RUN cargo build --locked --release -p lucida-server

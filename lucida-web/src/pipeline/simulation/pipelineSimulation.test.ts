@@ -169,7 +169,7 @@ describe("a generated level published after the open", () => {
 });
 
 describe("a Z and T scrub", () => {
-  settles(describeScenario({
+  const scenario = describeScenario({
     name: "Z and T scrub",
     dataset: singleImage({
       id: "stack",
@@ -177,7 +177,66 @@ describe("a Z and T scrub", () => {
     }),
     // z 20 → 22 stays inside one chunk along Z; z 3 leaves it.
     steps: [{ scrub: { z: 20 } }, { scrub: { z: 22 } }, { scrub: { t: 1 } }, { scrub: { z: 3 } }],
-  }));
+  });
+  /** One plane of a chunk, an eighth of its bytes. */
+  const PLANE_BYTES = 128 * 128 * 2;
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles at device pixel ratio ${dpr}, sending the plane it draws of each chunk, once`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      for (const phase of run.phases) {
+        expect(phase.bytesSent, phase.label).toBe(phase.chunksSent * PLANE_BYTES);
+        expect(phase.chunksSent, phase.label).toBe(phase.distinctChunksSent);
+      }
+    });
+  }
+});
+
+describe("a Z scrub under a label", () => {
+  // Label chunks 8 planes deep: z 20 → 22 keeps every label chunk's key and
+  // moves the plane each one draws.
+  const scenario = describeScenario({
+    name: "Z scrub under a label",
+    dataset: singleImage({
+      id: "marked",
+      pyramid: { shape: [1, 1, 32, 256, 256], chunk: [8, 64, 64], levels: 2 },
+      label: { shape: [1, 1, 32, 256, 256], chunk: [8, 128, 128], levels: 1 },
+    }),
+    steps: [{ scrub: { z: 20 } }, { scrub: { z: 22 } }],
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`sends the label's new planes and settles drawing them at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      // Settling includes no label cell drawing another plane.
+      expectSettled(run);
+      const step = run.phases[2];
+      // Every image chunk and the label's four, each once.
+      expect(step.chunksSent).toBe(step.detail.desired + step.coarse.desired);
+      expect(step.chunksSent).toBe(step.distinctChunksSent);
+      expect(step.staleLabelCells).toEqual([]);
+    });
+  }
+});
+
+describe("a view whose target level is the coarse level", () => {
+  // One level, so the detail and coarse tiers want the same four chunks
+  // under the same keys.
+  const scenario = describeScenario({
+    name: "target level is the coarse level",
+    dataset: singleImage({ id: "flat", pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 1 } }),
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`counts a chunk sent to both tiers once per tier at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.detail.desired).toBe(4);
+      expect(open.coarse.desired).toBe(4);
+      expect(open.chunksSent).toBe(8);
+      expect(open.distinctChunksSent).toBe(8);
+      expect(open.resent).toEqual([]);
+    });
+  }
 });
 
 describe("a full atlas with more wanted chunks than worker slots", () => {
@@ -278,9 +337,9 @@ describe("a zoom, pan and orbit inside a volume with a full atlas", () => {
 
 describe("a two-timepoint volume whose detail budget holds the view but not its prefetch", () => {
   // The view wants level 0 of the first timepoint, 128 chunks, and prefetch
-  // asks for the same 128 of the second. Prefetch chunks near the center rank
-  // above view chunks at the corners, but only what the view leaves is
-  // prefetch's, and an evicted prefetch chunk is no reason to wait.
+  // asks for the same 128 of the second. Only what the view leaves is
+  // prefetch's, even at the center, and an evicted prefetch chunk is no
+  // reason to wait.
   const block = singleImage({
     id: "block",
     pyramid: { shape: [2, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
@@ -377,7 +436,7 @@ describe("a permanent source failure", () => {
       expect(open.missingGpu[0]).toContain("3/0/0/0/0/0");
       expect(open.missingGpu[0]).toContain("source answered corrupt_chunk (1 request)");
       // The renderer is told, so the chunk draws as failed rather than as nothing.
-      expect(open.drawnFailed).toEqual(["broken-image coarse level 3 cell 0,0"]);
+      expect(open.drawnFailed).toEqual(["broken-image:ch0 coarse level 3 cell 0,0"]);
     });
   }
 });
@@ -405,7 +464,7 @@ describe("a permanent source failure at the target level", () => {
       const target = dpr === 1 ? 1 : 0;
       const [open] = run.phases;
       expect(open.failed).toEqual([`broken/broken-image/${target}/0/0/0/0/0: wrong_size`]);
-      expect(open.drawnFailed).toEqual([`broken-image detail level ${target} cell 0,0`]);
+      expect(open.drawnFailed).toEqual([`broken-image:ch0 detail level ${target} cell 0,0`]);
     });
   }
 });
@@ -432,7 +491,7 @@ describe("a permanent source failure in a volume", () => {
       expectSettled(run);
       const [open] = run.phases;
       expect(open.failed).toEqual(["block/block-image/2/0/0/1/0/0: corrupt_chunk"]);
-      expect(open.drawnFailed).toEqual(["block-image coarse level 2 cell 0,0,1"]);
+      expect(open.drawnFailed).toEqual(["block-image:ch0 coarse level 2 cell 0,0,1"]);
     });
   }
 });
@@ -456,16 +515,25 @@ describe("a Z scrub on a level downsampled along Z", () => {
   // 100 planes at level 0 and 50 at level 1, in chunks 8 planes deep. Plane
   // 16 is the first plane of level 1's chunk 1, where a proportional mapping
   // lands one plane short, in chunk 0; plane 15 is in chunk 0 either way.
-  settles(
-    describeScenario({
-      name: "Z scrub on a Z-downsampled level",
-      dataset: singleImage({
-        id: "deep",
-        pyramid: { shape: [1, 1, 100, 256, 256], chunk: [8, 64, 64], levels: 2, downsampleZ: true },
-      }),
-      steps: [{ scrub: { z: 15 } }, { scrub: { z: 16 } }],
+  // Plane 17 shares level 1's plane 8 with plane 16.
+  const scenario = describeScenario({
+    name: "Z scrub on a Z-downsampled level",
+    dataset: singleImage({
+      id: "deep",
+      pyramid: { shape: [1, 1, 100, 256, 256], chunk: [8, 64, 64], levels: 2, downsampleZ: true },
     }),
-  );
+    steps: [{ scrub: { z: 15 } }, { scrub: { z: 16 } }, { scrub: { z: 17 } }],
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles at device pixel ratio ${dpr}, resending only the chunks whose plane moved`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const last = run.phases[run.phases.length - 1];
+      // Level 0, the detail tier, moved a plane; level 1, the coarse tier, did not.
+      expect(last.chunksSent).toBe(last.detail.desired);
+      expect(last.chunksSent).toBe(last.distinctChunksSent);
+    });
+  }
 });
 
 /** The last auto-contrast fit each channel got in a phase. */
@@ -552,6 +620,36 @@ describe("auto-contrast limits", () => {
         }
       });
     }
+  }
+
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`keeps a generated coarse level's limits through pans and zooms at device pixel ratio ${dpr}`, async () => {
+      // The zoom and the pans at it bring in chunks the view did not read
+      // before; the generated level arrives after the first of them.
+      const run = await runScenario(
+        describeScenario({
+          name: "pans and zooms over a generated coarse level",
+          dataset: singleImage({
+            id: "roam",
+            pyramid: { shape: [1, 1, 1, 2048, 2048], chunk: [1, 64, 64], levels: 3 },
+            generatedCoarse: { readyAtMs: 300 },
+          }),
+          source: { latencyMs: scatteredLatency(false) },
+          steps: [{ zoom: 3 }, { pan: [400, 200] }, { pan: [-700, -350] }, { zoom: 0.25 }],
+        }),
+        { dpr },
+      );
+      expectSettled(run);
+      const fitted = lastFits(run.phases[0]);
+      expect(fitted.size).toBe(1);
+      for (const fit of fitted.values()) expect(fit.provisional).toBe(false);
+      for (const phase of run.phases.slice(1, 4)) {
+        expect(phase.distinctChunksSent, `${phase.label} brings in chunks`).toBeGreaterThan(0);
+      }
+      for (const phase of run.phases.slice(1)) {
+        expect(phase.fits, `${phase.label} keeps the limits`).toEqual([]);
+      }
+    });
   }
 
   for (const dpr of DEVICE_PIXEL_RATIOS) {

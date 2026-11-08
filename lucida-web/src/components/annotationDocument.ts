@@ -27,9 +27,13 @@ export interface Annotation {
   /** Timepoint the pin was placed on; defaults to 0. Drives off-context
    * rendering. */
   t?: number;
-  /** Channel the pin was placed on; defaults to 0. Drives off-context
-   * rendering. */
+  /** A channel the pin's layer showed at placement; defaults to 0. Read only
+   * for a pin without `channels`. */
   c?: number;
+  /** Every channel the pin's layer showed at placement, as the scene derives
+   * them from the pin's view. Drives off-context rendering. Added by
+   * `scene.annotations()`, never on the document wire. */
+  channels?: number[];
   author: string;
   /** "point" | "line" | "box"; absent reads as "point". */
   kind: string;

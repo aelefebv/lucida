@@ -13,7 +13,7 @@ use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
 use serde_json::json;
 
-use crate::{BroadcastItem, ProxyConfig};
+use crate::{BroadcastItem, GeneratedConfig};
 
 use super::manager::{
     MAX_DATASET_NAME_CHARS, ensure_saved_view_readable, saved_view_transition_allowed,
@@ -448,7 +448,7 @@ async fn seed_rich_source(
 }
 
 fn manager_for(store: &SqliteWorkspaceStore) -> WorkspaceManager {
-    WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults())
+    WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults())
 }
 
 /// Seed a pin whose captured author view embeds source dataset URLs in
@@ -483,8 +483,8 @@ async fn seed_pin_with_view_urls(
         .unwrap()
         .unwrap()
         .document;
-    // Bypass `apply` (which now strips) to write a dirty pin straight into
-    // the document, exactly as a pre-fix persisted document would carry it.
+    // Bypass `apply` (which strips) to write a dirty pin straight into the
+    // document, exactly as an older persisted document can carry it.
     doc.add_annotation(
         dataset_id.clone(),
         lucida_core::scene::Annotation {

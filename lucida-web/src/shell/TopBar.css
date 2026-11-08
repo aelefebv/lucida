@@ -56,6 +56,11 @@
   color: var(--lc-text-subtle);
 }
 
+/* The field's wrapper takes no box, so the input lays out as the bar's own child. */
+.lc-workspace-name-field {
+  display: contents;
+}
+
 /* Reads as a title; shows it is a field on hover and focus. */
 .lc-workspace-name {
   box-sizing: border-box;

@@ -74,6 +74,9 @@ function contrast(a: Rgb, b: Rgb): number {
   return (hi + 0.05) / (lo + 0.05);
 }
 
+const CHART = THEMED_TOKEN_NAMES.filter((name) => name.startsWith("--lc-chart-"));
+const FLOAT_CHART = THEMED_TOKEN_NAMES.filter((name) => name.startsWith("--lc-float-chart-"));
+
 describe.each([
   ["dark", dark],
   ["light", light],
@@ -96,6 +99,34 @@ describe.each([
   it.each(["--lc-text", "--lc-text-muted"])("%s meets 4.5:1 on every surface", (text) => {
     for (const [name, rgb] of Object.entries(surfaces)) {
       expect(contrast(solid(text), rgb), `${text} on ${name}`).toBeGreaterThanOrEqual(4.5);
+    }
+  });
+
+  // The dock draws its charts on surface-1 and its bars on a field, popovers
+  // sit on surface-2, and the theme canvas is the background.
+  it("draws chart series at 3:1 on the background, every opaque surface, and the dock's fields", () => {
+    const behind = {
+      bg: surfaces.bg,
+      "surface-1": surface1,
+      "surface-2": surface2,
+      "field on surface-1": surfaces["field on surface-1"],
+    };
+    for (const series of CHART) {
+      for (const [name, rgb] of Object.entries(behind)) {
+        expect(contrast(solid(series), rgb), `${series} on ${name}`).toBeGreaterThanOrEqual(3);
+      }
+    }
+  });
+
+  // The HUD draws its series on the floating card, which lets the data
+  // behind it show through, so they have to hold over the darkest and the
+  // brightest data alike.
+  it("draws the floating card's chart series at 3:1 over black and over white", () => {
+    expect(FLOAT_CHART.length).toBeGreaterThan(0);
+    for (const series of FLOAT_CHART) {
+      for (const name of ["float over black", "float over white"]) {
+        expect(contrast(solid(series), surfaces[name]), `${series} on ${name}`).toBeGreaterThanOrEqual(3);
+      }
     }
   });
 });
@@ -131,20 +162,16 @@ describe.each([
     for (const name of CANVAS_TOKEN_NAMES) expect(tokens.has(name), name).toBe(true);
   });
 
-  it("draws axes, markers, and statuses at 3:1 or better against the background", () => {
+  it("draws axes, markers, statuses, and chart series at 3:1 or better against the background", () => {
     for (const name of DRAWN_OVER_DATA) {
-      // The theme canvas's chart series are the theme's own slots, checked below.
-      if (canvas === "theme" && CANVAS_CHART.includes(name)) continue;
       expect(contrast(parseColor(tokens.get(name)!).rgb, bg), name).toBeGreaterThanOrEqual(3);
     }
   });
 
   it("draws chart series in the slots its background calls for", () => {
     // The theme canvas takes the theme's own slots, so a series on it matches
-    // the dock's. A dark canvas takes the dark theme's. White has its own set,
-    // held to 3:1 above.
-    if (canvas === "white") return;
-    const slots = canvas === "theme" && theme === "light" ? light : dark;
+    // the dock's. A dark canvas takes the dark theme's, and white the light theme's.
+    const slots = canvas === "white" || (canvas === "theme" && theme === "light") ? light : dark;
     for (const name of CANVAS_CHART) {
       expect(tokens.get(name), name).toBe(slots.get(name.replace("--lc-canvas-chart-", "--lc-chart-")));
     }

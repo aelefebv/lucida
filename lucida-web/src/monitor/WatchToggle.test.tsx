@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 /**
- * The watch stream's visible action (#1068).
+ * The watch stream's visible action.
  *
  * Two promises to keep, and both are about what somebody can see: nothing
  * streams until this is pressed, and while it is streaming the control says

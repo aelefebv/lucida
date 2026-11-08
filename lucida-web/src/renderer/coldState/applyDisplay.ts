@@ -1,8 +1,8 @@
 /**
  * Display-only cold-state update: swap the per-channel display state on the
  * dataset's retained cold state and rebuild only its descriptor buffer. A
- * display edit changes no geometry, so pools, indirection, and proxy
- * residency stay untouched. The rebuild uses the full ingest's
+ * display edit changes no geometry, so pools and indirection stay
+ * untouched. The rebuild uses the full ingest's
  * {@link buildDescriptorBuffer}, so the result is byte-identical to a full
  * cold state. No-op when no cold state has landed for the dataset yet.
  */
@@ -38,8 +38,6 @@ export function applyColdStateDisplay(
     buildDescriptorBuffer(
       ctx.device,
       cold,
-      state.proxyDescriptorsByEntity,
-      state.proxyPoolsByDataset,
       sources,
     ),
   );

@@ -47,7 +47,6 @@ function makeScheduler(opts?: {
   maxConcurrentFetches?: number;
   maxBytesInFlight?: number;
   burstLogger?: BurstLogger;
-  siblingInFlight?: () => { count: number; bytes: number };
   admissionWindow?: number;
 }) {
   const startCalls: StartCall[] = [];
@@ -65,7 +64,6 @@ function makeScheduler(opts?: {
       maxConcurrentFetches: opts?.maxConcurrentFetches ?? 4,
       maxBytesInFlight: opts?.maxBytesInFlight ?? 1_000_000,
       burstLogger: opts?.burstLogger,
-      siblingInFlight: opts?.siblingInFlight,
       admissionWindow: opts?.admissionWindow,
     },
     keyOf,
@@ -614,45 +612,6 @@ describe("Scheduler backpressure log", () => {
   });
 });
 
-// siblingInFlight (proxy <-> chunk shared caps)
-
-describe("Scheduler.siblingInFlight", () => {
-  it("counts sibling in-flight against the concurrency cap", () => {
-    const sibling = { count: 2, bytes: 0 };
-    const { scheduler, startCalls } = makeScheduler({
-      maxConcurrentFetches: 3,
-      siblingInFlight: () => sibling,
-    });
-    scheduler.enqueue([
-      req({ chunkKey: "a" }),
-      req({ chunkKey: "b" }),
-    ]);
-    scheduler.drain(() => 0);
-    // 2 sibling + cap 3 = room for 1; second one stays pending.
-    expect(startCalls).toHaveLength(1);
-    expect(scheduler.pendingSize).toBe(1);
-  });
-
-  it("counts sibling bytes against the bytes cap", () => {
-    const sibling = { count: 0, bytes: 100 };
-    const { scheduler, startCalls } = makeScheduler({
-      maxConcurrentFetches: 10,
-      maxBytesInFlight: 200,
-      siblingInFlight: () => sibling,
-    });
-    scheduler.enqueue([
-      req({ chunkKey: "a" }),
-      req({ chunkKey: "b" }),
-      req({ chunkKey: "c" }),
-    ]);
-    scheduler.drain(() => 80);
-    // sibling already at 100; cap 200 → room for one 80B start (180 < 200),
-    // a second 80B start (260 > 200) is blocked.
-    expect(startCalls).toHaveLength(2);
-    expect(scheduler.pendingSize).toBe(1);
-  });
-});
-
 // dump
 
 describe("Scheduler.dump", () => {
@@ -818,5 +777,45 @@ describe("Scheduler admission window", () => {
     expect(scheduler.pendingSize).toBe(0);
     expect(scheduler.admittedSize).toBe(0);
     expect(scheduler.oldestPendingAgeMs(9999)).toBe(0);
+  });
+});
+
+describe("Scheduler.setCaps", () => {
+  function manyReqs(n: number): TestRequest[] {
+    return Array.from({ length: n }, (_, i) => req({ chunkKey: `k${i}` }));
+  }
+
+  it("admits against the new caps from the next drain", () => {
+    const { scheduler, startCalls } = makeScheduler({ maxConcurrentFetches: 1 });
+    scheduler.enqueue(manyReqs(6));
+    scheduler.drain(() => 0);
+    expect(startCalls).toHaveLength(1);
+
+    scheduler.setCaps({ maxConcurrentFetches: 4, maxBytesInFlight: 1_000_000 });
+    scheduler.drain(() => 0);
+    expect(startCalls).toHaveLength(4);
+
+    scheduler.setCaps({ maxConcurrentFetches: 4, maxBytesInFlight: 0 });
+    scheduler.markInFlightDone(keyOf(req({ chunkKey: "k0" })));
+    scheduler.drain(() => 0);
+    expect(startCalls).toHaveLength(4);
+  });
+
+  it("resizes a derived admission window, keeping the stamps it holds", () => {
+    const { scheduler } = makeScheduler({ maxConcurrentFetches: 0 });
+    scheduler.enqueue(manyReqs(1000), 1000);
+    expect(scheduler.admittedSize).toBe(64);
+
+    scheduler.setCaps({ maxConcurrentFetches: 32, maxBytesInFlight: 1_000_000 }, 2000);
+    expect(scheduler.admittedSize).toBe(128);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k0" })))).toBe(1000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k100" })))).toBe(2000);
+  });
+
+  it("leaves an explicit admission window alone", () => {
+    const { scheduler } = makeScheduler({ maxConcurrentFetches: 0, admissionWindow: 8 });
+    scheduler.enqueue(manyReqs(100), 1000);
+    scheduler.setCaps({ maxConcurrentFetches: 32, maxBytesInFlight: 1_000_000 });
+    expect(scheduler.admittedSize).toBe(8);
   });
 });

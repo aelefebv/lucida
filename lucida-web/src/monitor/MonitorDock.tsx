@@ -33,7 +33,7 @@
  * the other. Clearing the brush restores the whole-run report and clears the
  * set, and so does reading another run, showing a file, or closing the dock.
  *
- * The dock is also a drop target (#1066). A saved run, the trace driver's
+ * The dock is also a drop target. A saved run, the trace driver's
  * run file, or a bundle dropped anywhere on it is read with the checks the
  * CLI's reader makes and shown in place of this page's report, at every
  * depth a live run is read, with a bundle's settled frame beside it.
@@ -41,12 +41,13 @@
  * the diff `lucida trace diff` prints, from the same function.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { subscribeAppearance } from "../theme/appearance.ts";
+import { definePreference, getPreference, migrateLegacyKeys, setPreference } from "../theme/preferences.ts";
 import { Button } from "../ui/Button.tsx";
 import "./MonitorDock.css";
-import { CompareSlotView, RunOption, type CompareSlot } from "./CompareSlotView.tsx";
+import { CompareSlotView, RunFileTrigger, RunOption, type CompareSlot } from "./CompareSlotView.tsx";
 import { CompareView } from "./CompareView.tsx";
 import { LiveReport } from "./LiveReport.tsx";
 import { buildLiveView, buildProvisionalView } from "./liveModel.ts";
@@ -100,7 +101,21 @@ export interface MonitorDockProps {
  */
 const LIVE_POLL_MS = 500;
 
-const HEIGHT_KEY = "monitor.dock.height";
+/** The dock's height in CSS pixels, or null for its default share of the viewport. */
+const dockHeightPreference = definePreference<number | null>("monitor.dockHeight", null, (raw) =>
+  typeof raw === "number" && Number.isFinite(raw) ? raw : undefined,
+);
+
+migrateLegacyKeys(
+  (key) => key === "monitor.dock.height",
+  (old) => {
+    for (const raw of old.values()) {
+      const height = Number(raw);
+      if (raw !== "" && Number.isFinite(height)) setPreference(dockHeightPreference, height);
+    }
+  },
+);
+
 const MIN_HEIGHT_PX = 160;
 /** Room left for the toolbar above a dock dragged to its tallest. */
 const TOP_MARGIN_PX = 96;
@@ -153,9 +168,6 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
   // mode returns to it.
   const [compare, setCompare] = useState<CompareSlots | null>(null);
   const [dropping, setDropping] = useState(false);
-  const fileInput = useRef<HTMLInputElement | null>(null);
-  /** Which compare slot the next chosen file is for, or null for the report. */
-  const pickTarget = useRef<CompareSlot | null>(null);
   const read = snapshot?.read;
   const runs = snapshot?.runs ?? [];
   const runId = read?.ok ? read.document.runId : undefined;
@@ -326,20 +338,6 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
     [compare, fillSlot, showFile, stopWatching],
   );
 
-  const pick = useCallback((slot: CompareSlot | null) => {
-    pickTarget.current = slot;
-    fileInput.current?.click();
-  }, []);
-
-  const onPicked = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      openFiles(event.target.files, pickTarget.current ?? undefined);
-      // Cleared so choosing the same file again fires change again.
-      event.target.value = "";
-    },
-    [openFiles],
-  );
-
   const chooseFileRun = useCallback(
     (next: string) => {
       if (!file) return;
@@ -456,6 +454,7 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
             </Button>
           )}
           {(mode === "read" || mode === "file") && shownRuns.length > 0 && (
+            // eslint-disable-next-line no-restricted-syntax -- native, so it opens in a popped-out dock (see RunOption)
             <select
               className="monitor-select"
               aria-label="Run"
@@ -517,9 +516,11 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
               className="monitor-hint"
               title="Or drop a saved run, a run file, or a bundle anywhere on the dock"
             >
-              <Button size="sm" onPress={() => pick(null)} data-testid="monitor-open-file">
-                Open a run or bundle
-              </Button>
+              <RunFileTrigger onSelect={(files) => openFiles(files)} data-testid="monitor-file-input">
+                <Button size="sm" data-testid="monitor-open-file">
+                  Open a run or bundle
+                </Button>
+              </RunFileTrigger>
             </span>
           )}
           {mode === "file" && (
@@ -555,17 +556,6 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
       <p className="monitor-observation-only">
         Observation only — nothing in the dock changes what the pipeline does. {explanation[mode]}
       </p>
-
-      <input
-        ref={fileInput}
-        type="file"
-        accept=".json,application/json"
-        multiple
-        className="monitor-file-input"
-        aria-label="Open a run or bundle"
-        data-testid="monitor-file-input"
-        onChange={onPicked}
-      />
 
       {fileFailed && (
         <p className="monitor-save-failed" data-testid="monitor-file-failed">
@@ -619,7 +609,6 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
                 side={slot}
                 loaded={compare[slot]}
                 pageRun={pageRun}
-                onPick={() => pick(slot)}
                 onDrop={(files) => openFiles(files, slot)}
                 onFill={(loaded) => fillSlot(slot, loaded)}
               />
@@ -697,14 +686,7 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
 function initialHeight(): number {
   const view = typeof window === "undefined" ? null : window;
   const viewportHeight = view?.innerHeight || 800;
-  let stored: number | null = null;
-  try {
-    const raw = view?.localStorage?.getItem(HEIGHT_KEY);
-    stored = raw === null || raw === undefined ? null : Number(raw);
-  } catch {
-    stored = null;
-  }
-  const wanted = stored !== null && Number.isFinite(stored) ? stored : viewportHeight * DEFAULT_HEIGHT_SHARE;
+  const wanted = getPreference(dockHeightPreference) ?? viewportHeight * DEFAULT_HEIGHT_SHARE;
   return clampHeight(wanted, viewportHeight);
 }
 
@@ -716,11 +698,7 @@ function useDockHeight() {
   const [height, setHeight] = useState(initialHeight);
 
   useEffect(() => {
-    try {
-      window.localStorage?.setItem(HEIGHT_KEY, String(height));
-    } catch {
-      // Storage can be unavailable or full; the height then lasts the session.
-    }
+    setPreference(dockHeightPreference, height);
   }, [height]);
 
   const startResize = useCallback(

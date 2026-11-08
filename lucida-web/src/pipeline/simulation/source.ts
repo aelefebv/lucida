@@ -9,7 +9,6 @@ import {
   sourceChunkFailure,
   type ChunkFailureKind,
   type ContentSource,
-  type FetchProxyResult,
   type FetchRequest,
   type FetchResult,
   type LabelSink,
@@ -134,28 +133,28 @@ export class SimulatedSource implements ContentSource {
     });
   }
 
-  fetchProxy(): Promise<FetchProxyResult> {
-    // The fixtures publish no proxy assets, so nothing should ask for one.
-    return Promise.reject(new FetchError("the simulated source serves no proxy assets", { kind: "permanent" }));
-  }
-
   handleBinary(): void {}
 
-  /** A full chunk of uint16 samples, as the raw wire format carries an edge chunk. */
+  /**
+   * A full chunk, as the raw wire format carries an edge chunk: uint16
+   * samples for an image, and for a label uint32 ids, which are the samples
+   * widened.
+   */
   private bytesFor(request: FetchRequest): FetchResult {
-    const image = this.manifestFor(request.datasetId)?.images.find(
-      (img) => img.image_id === request.imageId,
-    );
+    const manifest = this.manifestFor(request.datasetId);
+    const label = manifest?.labels?.find((l) => l.image.image_id === request.imageId);
+    const image = label?.image ?? manifest?.images.find((img) => img.image_id === request.imageId);
     const level = Number(request.chunkKey.split("/")[0]);
     const chunkShape = image?.multiscale.levels.find((l) => l.level_index === level)?.chunk_shape;
     if (!chunkShape) {
       throw new Error(`simulated source: no level ${level} for ${request.imageId}`);
     }
-    const data = this.samples(request, chunkShape.reduce((a, b) => a * b, 1));
+    const samples = this.samples(request, chunkShape.reduce((a, b) => a * b, 1));
+    const dataType = label ? "Uint32" : "Uint16";
     return {
-      bytes: data.buffer,
-      wireFormat: { Raw: { data_type: "Uint16" } },
-      dataType: "Uint16",
+      bytes: label ? Uint32Array.from(samples).buffer : samples.buffer,
+      wireFormat: { Raw: { data_type: dataType } },
+      dataType,
     };
   }
 }

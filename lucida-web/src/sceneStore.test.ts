@@ -7,16 +7,14 @@ function fakeScene() {
   const state = {
     z: 0,
     t: 0,
-    c: 0,
-    multi: false,
+    layers: [] as unknown[],
     mode: "slice",
-    epochs: { content: 0, layout: 0, view: 0, selection: 0, asset: 0, annotation: 0 },
+    epochs: { content: 0, layout: 0, view: 0, selection: 0, annotation: 0 },
   };
   const scene = {
     z: () => state.z,
     t: () => state.t,
-    c: () => state.c,
-    multi_channel: () => state.multi,
+    resolved_layers: () => JSON.stringify(state.layers),
     camera_mode: () => state.mode,
     epochs: () => JSON.stringify(state.epochs),
   } as unknown as WasmScene;
@@ -89,12 +87,31 @@ describe("SceneStore", () => {
   it("catches up on subscribe with a write it missed", () => {
     const { scene, state } = fakeScene();
     const store = new SceneStore(() => scene);
-    state.c = 2;
+    state.t = 2;
     state.epochs.selection++;
 
     store.subscribe(() => {});
 
-    expect(store.getView().c).toBe(2);
+    expect(store.getView().t).toBe(2);
+  });
+
+  it("reads what each layer shows, and keeps it across a camera move", () => {
+    const { scene, state } = fakeScene();
+    const store = new SceneStore(() => scene);
+    store.subscribe(() => {});
+    const read = vi.spyOn(scene, "resolved_layers");
+
+    state.layers = [{ dataset_id: "a", solo: 1, channels: [{ channel: 1 }] }];
+    state.epochs.selection++;
+    noteSceneWrite();
+    const layers = store.getView().layers;
+    expect(layers.get("a")?.solo).toBe(1);
+
+    read.mockClear();
+    state.epochs.view++;
+    noteSceneWrite();
+    expect(read).not.toHaveBeenCalled();
+    expect(store.getView().layers).toBe(layers);
   });
 
   it("reads defaults until there is a scene", () => {

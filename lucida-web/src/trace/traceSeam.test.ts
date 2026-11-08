@@ -42,10 +42,6 @@ class ControlledSource implements ContentSource {
     });
   }
 
-  fetchProxy(): Promise<never> {
-    return new Promise<never>(() => {});
-  }
-
   handleBinary(): void {}
 
   deliver(chunkKey: string, byteLength = 8): void {
@@ -102,8 +98,7 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
   return {
     requests,
     activeSet: [],
-    proxyRequests: [],
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     stats: emptyPlanStats(),
     nextState: initialPlanningState(),
   };
@@ -123,7 +118,7 @@ const settle = async () => {
 function registerEnvironment(): void {
   traceRecorder.setEnvironment({
     captureWarmth: () => ({
-      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
     }),
     captureConditions: () => ({
       datasetIds: ["ds"],
@@ -322,6 +317,22 @@ describe("the trace seam", () => {
     expect(bundle.perfetto).toBeNull();
   });
 
+  it("records the device memory the trace driver told the page", async () => {
+    installTraceSeam();
+    setBundleServices(null);
+    // As the driver's pre-load script installs its override.
+    const own = Object.getOwnPropertyDescriptor(Navigator.prototype, "deviceMemory");
+    Object.defineProperty(Navigator.prototype, "deviceMemory", { get: () => 2, configurable: true });
+    try {
+      traceRecorder.openRun(OPEN_CAUSE);
+      const bundle = await window.lucidaTrace!.exportBundle();
+      expect(bundle.header.deviceMemoryGib).toBe(2);
+    } finally {
+      if (own) Object.defineProperty(Navigator.prototype, "deviceMemory", own);
+      else delete (Navigator.prototype as { deviceMemory?: unknown }).deviceMemory;
+    }
+  });
+
   it("carries the frame and the health the viewer registered, and the projection only when asked", async () => {
     installTraceSeam();
     setBundleServices({
@@ -433,17 +444,19 @@ describe("the trace seam", () => {
     traceRecorder.openRun(OPEN_CAUSE);
     cache.submit(makePlan([makeRequest()]));
     await flush();
+    // The wall is the real clock. Hold it past the window's end and past the
+    // snap to the wall, so the window is the one asked for on any host.
+    while (traceRecorder.openIntervalMs! < 1) {
+      // Spin: a timer only promises a lower bound in whole milliseconds.
+    }
 
-    // The run's wall is whatever the test took, so a window past it is clamped
-    // to it. Either way the reading is scoped, and the text names the window.
     const windowed = window.lucidaTrace!.diagnose(undefined, {
       window: { startMs: 0, endMs: 0.5 },
     });
-    expect(windowed.window).toMatchObject({ startMs: 0 });
-    expect(windowed.window!.endMs).toBeLessThanOrEqual(0.5);
-    expect(windowed.coverage.wallMs).toBeLessThanOrEqual(0.5);
+    expect(windowed.window).toMatchObject({ startMs: 0, endMs: 0.5 });
+    expect(windowed.coverage.wallMs).toBe(0.5);
     expect(window.lucidaTrace!.diagnoseText(windowed.runId, { window: { startMs: 0, endMs: 0.5 } })).toContain(
-      `window    0..${windowed.window!.endMs} ms`,
+      "window    0..0.5 ms",
     );
   });
 
