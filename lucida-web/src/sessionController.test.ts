@@ -225,6 +225,7 @@ function makeEvents(): SessionControllerEvents {
     onDatasetsChanged: vi.fn(),
     onRemoteDocumentChanged: vi.fn(),
     onWorkspaceArchived: vi.fn(),
+    onAccessRevoked: vi.fn(),
     onDatasetImportWarnings: vi.fn(),
     onCommandRejected: vi.fn(),
   };
@@ -1071,6 +1072,22 @@ describe("SessionController durable import warnings", () => {
     });
     handlers.onWorkspaceArchived?.("ws-1");
     expect(lastActivity(events).warnings).toStrictEqual([]);
+  });
+
+  it("losing access ends the connection and tells the host", () => {
+    const { handlers, events } = makeHarness();
+
+    handlers.onDatasetOpenProgress?.("req-1", "gs://x.zarr", {
+      stage: "metadata_import",
+      message: sampledLabelNotice,
+      warning: true,
+    });
+    handlers.onAccessRevoked?.();
+    expect(lastActivity(events).warnings).toStrictEqual([]);
+    expect(events.onConnectedChanged).toHaveBeenLastCalledWith(false);
+    expect(events.onSessionReadyChanged).toHaveBeenLastCalledWith(false);
+    expect(events.onAccessRevoked).toHaveBeenCalledTimes(1);
+    expect(events.onWorkspaceArchived).not.toHaveBeenCalled();
   });
 
   it("removing a dataset leaves collected warnings intact", () => {

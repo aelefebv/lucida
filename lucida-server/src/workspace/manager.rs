@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use lucida_content::DatasetId;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::{ClientId, ServerMessage};
+use lucida_core::protocol::{ClientId, CommandRejection, ServerMessage};
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
 use lucida_store::source_policy::SourcePolicy;
@@ -22,7 +22,10 @@ use serde_json::json;
 use thiserror::Error;
 use tokio::sync::{Mutex, MutexGuard, broadcast};
 
-use crate::connection::{CLOSE_ACCESS_REVOKED, ClientSender};
+use crate::connection::{
+    CLOSE_ACCESS_REVOKED, CLOSE_WORKSPACE_ARCHIVED, CLOSE_WORKSPACE_RELOADED, ClientSender,
+    CloseRequest,
+};
 use crate::inbox::InboxStore;
 use crate::session::Session;
 use crate::{BroadcastItem, GeneratedConfig, UnicastRoutes};
@@ -55,9 +58,18 @@ pub struct LiveWorkspace {
     next_id: AtomicU64,
     empty_since: Mutex<Option<Instant>>,
     background_cancelled: AtomicBool,
+    connections: std::sync::Mutex<Connections>,
+}
+
+#[derive(Default)]
+struct Connections {
     /// Who each open socket acts as, so a membership change can find the
     /// sockets it took access from.
-    connections: std::sync::Mutex<HashMap<ClientId, (AuthPrincipal, ClientSender)>>,
+    open: HashMap<ClientId, (AuthPrincipal, ClientSender)>,
+    /// Set once the workspace stops serving. Kept under the same lock as
+    /// `open`, so a socket that registers after its peers were closed is
+    /// closed the same way rather than served alone.
+    closed: Option<CloseRequest>,
 }
 
 impl LiveWorkspace {
@@ -72,7 +84,7 @@ impl LiveWorkspace {
             next_id: AtomicU64::new(0),
             empty_since: Mutex::new(Some(Instant::now())),
             background_cancelled: AtomicBool::new(false),
-            connections: std::sync::Mutex::new(HashMap::new()),
+            connections: std::sync::Mutex::default(),
         }
     }
 
@@ -95,19 +107,47 @@ impl LiveWorkspace {
 
     /// Forget a socket that ended.
     pub fn detach_connection(&self, id: ClientId) {
-        self.connections
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&id);
+        self.lock_connections().open.remove(&id);
+    }
+
+    fn lock_connections(&self) -> std::sync::MutexGuard<'_, Connections> {
+        self.connections.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     fn connections(&self) -> Vec<(ClientId, AuthPrincipal, ClientSender)> {
-        self.connections
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
+        self.lock_connections()
+            .open
             .iter()
             .map(|(id, (principal, sender))| (*id, principal.clone(), sender.clone()))
             .collect()
+    }
+
+    /// Close every socket, and any that registers from now on, as `request`
+    /// says. The first request wins, as it does for one socket.
+    fn close_all(&self, request: CloseRequest) {
+        let senders: Vec<ClientSender> = {
+            let mut connections = self.lock_connections();
+            connections.closed.get_or_insert(request.clone());
+            connections
+                .open
+                .values()
+                .map(|(_, sender)| sender.clone())
+                .collect()
+        };
+        for sender in senders {
+            sender.request_close(request.clone());
+        }
+    }
+
+    fn close_one(&self, id: ClientId, request: CloseRequest) {
+        let sender = self
+            .lock_connections()
+            .open
+            .get(&id)
+            .map(|(_, sender)| sender.clone());
+        if let Some(sender) = sender {
+            sender.request_close(request);
+        }
     }
 
     pub fn next_client_id(&self) -> u64 {
@@ -1196,10 +1236,17 @@ impl WorkspaceManager {
         principal: &AuthPrincipal,
         sender: ClientSender,
     ) {
-        live.connections
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id, (principal.clone(), sender.clone()));
+        let closed = {
+            let mut connections = live.lock_connections();
+            connections
+                .open
+                .insert(id, (principal.clone(), sender.clone()));
+            connections.closed.clone()
+        };
+        if let Some(request) = closed {
+            sender.request_close(request);
+            return;
+        }
         if !self.still_has_access(&live.workspace_id, principal).await {
             sender.close(CLOSE_ACCESS_REVOKED, "workspace access revoked");
         }
@@ -1311,20 +1358,82 @@ impl WorkspaceManager {
             .ok_or(WorkspaceError::Forbidden)
     }
 
+    /// Close the archived workspace's sockets. Each hears `WorkspaceArchived`
+    /// just before its close, so a client that reads messages but not close
+    /// codes still leaves rather than reconnecting into a 410.
     async fn notify_workspace_archived(&self, workspace_id: &str) {
         let live = self.live.lock().await.remove(workspace_id);
         let Some(live) = live else {
             return;
         };
-        let msg = ServerMessage::WorkspaceArchived {
+        let notice = serde_json::to_string(&ServerMessage::WorkspaceArchived {
             workspace_id: workspace_id.to_string(),
-        };
-        let _ = live.tx.send(BroadcastItem::WorkspaceArchived {
-            json: serde_json::to_string(&msg).unwrap(),
-        });
+        })
+        .unwrap();
+        live.close_all(
+            CloseRequest::new(CLOSE_WORKSPACE_ARCHIVED, "workspace archived").with_notice(notice),
+        );
         self.shutdown_live_workspace_background(&live, "archive")
             .await;
         tracing::info!(workspace_id, "workspace.live_archived_cancelled");
+    }
+
+    /// Stop serving a live workspace whose document the database has moved
+    /// past, and close its sockets so they reconnect to one loaded fresh.
+    ///
+    /// Reloading in place would leave a live workspace that eviction already
+    /// replaced still taking writes beside its replacement, so the two would
+    /// keep refusing each other. `sender`, whose command found the newer
+    /// document, hears that it was refused before its close.
+    async fn retire_stale(&self, live: &LiveWorkspace, sender: Option<ClientId>, seq: u64) {
+        let was_current = {
+            let mut live_map = self.live.lock().await;
+            let current = live_map
+                .get(&live.workspace_id)
+                .is_some_and(|current| std::ptr::eq(Arc::as_ptr(current), live));
+            if current {
+                live_map.remove(&live.workspace_id);
+            }
+            current
+        };
+        let close = CloseRequest::new(
+            CLOSE_WORKSPACE_RELOADED,
+            "workspace changed elsewhere; reconnect to load it",
+        );
+        if let Some(sender) = sender {
+            let refused = ServerMessage::CommandRejected {
+                reason: CommandRejection::Unavailable,
+            };
+            live.close_one(
+                sender,
+                close
+                    .clone()
+                    .with_notice(serde_json::to_string(&refused).unwrap()),
+            );
+        }
+        live.close_all(close);
+        self.shutdown_live_workspace_background(live, "stale_document")
+            .await;
+        tracing::warn!(
+            workspace_id = %live.workspace_id,
+            seq,
+            was_current,
+            "workspace.live_retired_stale"
+        );
+    }
+
+    /// Pass a document write's result through, first retiring `live` if
+    /// the database refused it as stale.
+    async fn document_written(
+        &self,
+        live: &LiveWorkspace,
+        sender: Option<ClientId>,
+        written: Result<(), StoreError>,
+    ) -> Result<(), WorkspaceError> {
+        if let Err(StoreError::StaleDocument(seq)) = &written {
+            self.retire_stale(live, sender, *seq).await;
+        }
+        written.map_err(WorkspaceError::Store)
     }
 
     async fn shutdown_live_workspace_background(&self, live: &LiveWorkspace, reason: &str) {
@@ -1348,14 +1457,17 @@ impl WorkspaceManager {
         );
     }
 
+    /// Persist `sender`'s command at `seq`. A stale write retires `live`;
+    /// see [`Self::retire_stale`].
     pub async fn persist_applied_command(
         &self,
         live: &LiveWorkspace,
+        sender: ClientId,
         command: &DocumentCommand,
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), WorkspaceError> {
-        match command {
+        let written = match command {
             DocumentCommand::RemoveDataset { id } => {
                 self.store
                     .persist_dataset_removed(&live.workspace_id, id, seq, document)
@@ -1366,8 +1478,8 @@ impl WorkspaceManager {
                     .persist_document(&live.workspace_id, seq, document)
                     .await
             }
-        }
-        .map_err(WorkspaceError::Store)
+        };
+        self.document_written(live, Some(sender), written).await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1382,7 +1494,8 @@ impl WorkspaceManager {
         seq: u64,
         document: &DocumentState,
     ) -> Result<(), WorkspaceError> {
-        self.store
+        let written = self
+            .store
             .persist_dataset_opened(
                 &live.workspace_id,
                 workspace_dataset_id,
@@ -1393,8 +1506,10 @@ impl WorkspaceManager {
                 seq,
                 document,
             )
-            .await
-            .map_err(WorkspaceError::Store)
+            .await;
+        // An open is not a command, so nobody is owed a refusal: the
+        // opener's socket closes with the rest.
+        self.document_written(live, None, written).await
     }
 
     pub async fn dataset_by_source(
@@ -1461,7 +1576,8 @@ impl WorkspaceManager {
         };
 
         // 4. Persist: workspace_datasets.display_name + document_json together.
-        self.store
+        let written = self
+            .store
             .persist_dataset_renamed(
                 &live.workspace_id,
                 workspace_dataset_id,
@@ -1469,8 +1585,8 @@ impl WorkspaceManager {
                 seq,
                 &document,
             )
-            .await
-            .map_err(WorkspaceError::Store)?;
+            .await;
+        self.document_written(live, Some(sender), written).await?;
 
         live.session
             .lock()
@@ -1504,7 +1620,7 @@ impl WorkspaceManager {
         }
         let turn = live.document_turn().await;
         let (seq, document) = live.session.lock().await.next(&command);
-        self.persist_applied_command(live, &command, seq, &document)
+        self.persist_applied_command(live, sender, &command, seq, &document)
             .await
             .map_err(CommandApplyError::PersistFailed)?;
         live.session

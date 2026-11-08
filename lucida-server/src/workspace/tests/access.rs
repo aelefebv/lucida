@@ -332,7 +332,7 @@ async fn admin_support_search_and_lifecycle_override_without_membership() {
         .unwrap();
 
     let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
-    let mut rx = live.tx.subscribe();
+    let socket = attach(&manager, &live, 1, &editor).await;
 
     let rows = manager
         .admin_search_workspaces(Some("editor@example.com"), false, 10)
@@ -349,8 +349,10 @@ async fn admin_support_search_and_lifecycle_override_without_membership() {
         .unwrap();
     assert!(archived.workspace.archived_at.is_some());
     assert!(!manager.live.lock().await.contains_key(&workspace.id));
-    let item = rx.recv().await.unwrap();
-    assert!(matches!(item, BroadcastItem::WorkspaceArchived { .. }));
+    assert_eq!(
+        socket.close_signal().requested().await.code,
+        crate::connection::CLOSE_WORKSPACE_ARCHIVED
+    );
     assert!(store.list_workspaces(&owner).await.unwrap().is_empty());
 
     assert!(
@@ -965,7 +967,7 @@ async fn workspace_open_anyone_with_link_still_grants_access() {
 }
 
 #[tokio::test]
-async fn archiving_revokes_live_workspace_and_denies_new_mutations() {
+async fn archiving_closes_the_workspace_sockets_and_denies_new_mutations() {
     let store = fresh_store().await;
     let owner = principal("owner@example.com", false);
     let workspace = store
@@ -974,7 +976,7 @@ async fn archiving_revokes_live_workspace_and_denies_new_mutations() {
         .unwrap();
     let manager = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
-    let mut rx = live.tx.subscribe();
+    let open = attach(&manager, &live, 1, &owner).await;
 
     manager
         .archive_workspace(&workspace.id, &owner)
@@ -983,16 +985,22 @@ async fn archiving_revokes_live_workspace_and_denies_new_mutations() {
 
     assert!(live.background_cancelled());
     assert!(!manager.live.lock().await.contains_key(&workspace.id));
-    let item = rx.recv().await.unwrap();
-    let BroadcastItem::WorkspaceArchived { json } = item else {
-        panic!("expected workspace archived broadcast");
-    };
-    let msg: ServerMessage = serde_json::from_str(&json).unwrap();
-    match msg {
-        ServerMessage::WorkspaceArchived { workspace_id } => {
-            assert_eq!(workspace_id, workspace.id);
+    // A socket upgraded before the archive but registered after it is
+    // closed the same way.
+    let late = attach(&manager, &live, 2, &owner).await;
+    for socket in [open, late] {
+        let close = socket.close_signal().current().expect("the socket closes");
+        assert_eq!(
+            close.frame.code,
+            crate::connection::CLOSE_WORKSPACE_ARCHIVED
+        );
+        let notice: ServerMessage = serde_json::from_str(&close.notice.unwrap()).unwrap();
+        match notice {
+            ServerMessage::WorkspaceArchived { workspace_id } => {
+                assert_eq!(workspace_id, workspace.id);
+            }
+            _ => panic!("expected workspace archived server message"),
         }
-        _ => panic!("expected workspace archived server message"),
     }
 
     let err = manager
@@ -1000,6 +1008,36 @@ async fn archiving_revokes_live_workspace_and_denies_new_mutations() {
         .await
         .unwrap_err();
     assert!(matches!(err, WorkspaceError::Forbidden));
+}
+
+#[tokio::test]
+async fn an_archived_workspace_socket_hears_why_then_closes() {
+    let store = fresh_store().await;
+    let owner = principal("owner@example.com", false);
+    let workspace = store
+        .create_workspace(&owner, Some("Archive socket"))
+        .await
+        .unwrap();
+    let manager = Arc::new(manager_for(&store));
+    let (url, server) =
+        serve_workspace_socket(Arc::clone(&manager), owner.clone(), &workspace.id).await;
+    let mut socket = connect_socket(&url).await;
+    assert_eq!(next_text(&mut socket).await["type"], "snapshot");
+
+    manager
+        .archive_workspace(&workspace.id, &owner)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        next_text(&mut socket).await,
+        json!({ "type": "workspace_archived", "workspace_id": workspace.id }),
+    );
+    assert_eq!(
+        next_close_code(&mut socket).await,
+        crate::connection::CLOSE_WORKSPACE_ARCHIVED
+    );
+    server.abort();
 }
 
 #[tokio::test]
@@ -1243,21 +1281,6 @@ async fn last_owner_cannot_be_removed_or_demoted() {
         store.role_for(&workspace.id, &other_owner).await.unwrap(),
         Some(WorkspaceRole::Owner)
     );
-}
-
-/// Open a socket's worth of server state for `who` on a live workspace:
-/// the queue the handler would register, attached under the principal.
-async fn attach(
-    manager: &WorkspaceManager,
-    live: &LiveWorkspace,
-    id: u64,
-    who: &AuthPrincipal,
-) -> crate::connection::ClientSender {
-    let (sender, _receiver) = crate::connection::client_queue();
-    manager
-        .attach_connection(live, id, who, sender.clone())
-        .await;
-    sender
 }
 
 #[tokio::test]
