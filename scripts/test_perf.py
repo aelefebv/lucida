@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["pytest>=8"]
+# dependencies = ["pytest>=8", "pyyaml>=6"]
 # ///
 """Tests for the perf runner's catalog, scenarios, suites, matrix and table.
 
@@ -17,6 +17,7 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -50,12 +51,6 @@ def test_the_catalog_has_every_shape_the_matrix_needs() -> None:
     assert traits["collection"] == {"collection", "channels"}
     for name in ("single-level", "sharded", "float32", "anisotropic", "sparse"):
         assert name in CATALOG
-
-
-def test_the_gates_datasets_keep_the_gates_generator_options() -> None:
-    gate = Path(perf.REPO / "scripts" / "trace_gate.sh").read_text(encoding="utf-8")
-    for name in ("image", "volume", "collection", "single-level"):
-        assert f'"{name}|{" ".join(CATALOG[name].generate)}"' in gate
 
 
 def test_a_local_catalog_merges_real_datasets_in(tmp_path: Path) -> None:
@@ -186,6 +181,33 @@ def test_flags_override_one_dimension_of_a_suite_and_leave_the_rest() -> None:
     assert {case.ratio for case in cases} == {1.0, 2.0}
 
 
+def test_the_gate_suite_opens_each_shape_cold_at_ratios_1_and_2() -> None:
+    cases, _ = plan(suite="gate")
+    assert [case.id for case in cases] == [
+        f"{run}.dpr{ratio}"
+        for run in (
+            "image.cold-open",
+            "volume.cold-open",
+            "volume.volume-open-small",
+            "collection.cold-open",
+            "single-level.cold-open",
+        )
+        for ratio in (1, 2)
+    ]
+    for case in cases:
+        assert not case.scenario.steps, case.id
+    cold, small = SCENARIOS["cold-open"], SCENARIOS["volume-open-small"]
+    assert (cold.camera, cold.width, cold.height) == ("slice", None, None)
+    assert (small.camera, small.width, small.height) == ("arcball", 480, 300)
+
+
+def test_the_trace_gate_workflow_runs_every_gate_dataset_once() -> None:
+    workflow = yaml.safe_load((perf.REPO / ".github" / "workflows" / "trace-gate.yml").read_text(encoding="utf-8"))
+    legs = workflow["jobs"]["gate"]["strategy"]["matrix"]["include"]
+    named = [name for leg in legs for name in leg["datasets"].split()]
+    assert sorted(named) == sorted(SUITES["gate"].datasets)
+
+
 def test_repeats_each_get_a_run_of_their_own() -> None:
     cases, _ = plan(datasets=["image"], scenarios=["cold-open"], ratios=[1.0], repeat=3)
     assert [case.id for case in cases] == ["image.cold-open.dpr1", "image.cold-open.dpr1.2", "image.cold-open.dpr1.3"]
@@ -216,6 +238,43 @@ def test_a_suite_naming_an_unknown_dataset_is_refused(tmp_path: Path) -> None:
 def test_a_ratio_is_a_positive_number(text: str) -> None:
     with pytest.raises(perf.PerfError):
         perf.parse_ratio(text)
+
+
+# -- building and reporting --------------------------------------------------
+
+
+def test_a_given_cli_and_server_leave_nothing_to_build(tmp_path: Path, monkeypatch) -> None:
+    def refuse(*args, **kwargs):
+        raise AssertionError("built something")
+
+    monkeypatch.setattr(perf, "_run_build", refuse)
+    monkeypatch.setattr(perf, "_tool", refuse)
+    built = perf.build(tmp_path / "lucida", server=False)
+    assert built == perf.Build(tmp_path / "lucida")
+
+
+def test_failed_runs_are_named_and_annotated_in_github_actions(tmp_path: Path, capsys) -> None:
+    ok = perf.Row(
+        perf.Case(CATALOG["image"], SCENARIOS["cold-open"], 1.0, 1), tmp_path / "a.json", tmp_path / "a.txt", 0
+    )
+    failed = perf.Row(
+        perf.Case(CATALOG["volume"], SCENARIOS["volume-open-small"], 2.0, 1), tmp_path / "b.json", tmp_path / "b.txt", 1
+    )
+    failed.error = "the view never settled with 40% of its wanted set resident"
+
+    perf.report_failures([ok, failed], github=False)
+    assert capsys.readouterr().out.splitlines() == [
+        "1 of 2 runs failed:",
+        f"  volume.volume-open-small.dpr2: {failed.error}",
+    ]
+
+    perf.report_failures([ok, failed], github=True)
+    assert capsys.readouterr().out.splitlines()[-1] == (
+        "::error title=volume.volume-open-small.dpr2::the view never settled with 40%25 of its wanted set resident"
+    )
+
+    perf.report_failures([ok], github=True)
+    assert capsys.readouterr().out == ""
 
 
 # -- reading runs and the table ----------------------------------------------
