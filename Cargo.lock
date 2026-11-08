@@ -1604,6 +1604,7 @@ dependencies = [
  "indexmap",
  "lucida-content",
  "lucida-protocol",
+ "miniz_oxide 0.9.1",
  "serde",
  "serde_json",
  "wasm-bindgen",
