@@ -176,8 +176,7 @@ impl Session {
     ///
     /// `identity` is the server-authored presentational identity for the
     /// peer's cursor, derived from the connection's authenticated
-    /// principal. The non-workspace `/ws` path has no principal and passes
-    /// `None`, so anonymous peers still join and render via the numeric-id
+    /// principal. A peer joined without one renders via the numeric-id
     /// fallback.
     pub fn add_client(&mut self, id: ClientId, identity: Option<PeerIdentity>) -> PresenceState {
         let presence = PresenceState::joined(id, identity);
@@ -527,8 +526,8 @@ mod tests {
 
     #[test]
     fn add_client_without_identity_leaves_presence_anonymous() {
-        // The non-workspace `/ws` path passes `None`; the peer still joins and
-        // its presence carries no identity (cursor falls back to numeric id).
+        // A peer joined without an identity still joins, and its presence
+        // carries none (cursor falls back to numeric id).
         let mut session = Session::new();
         let presence = session.add_client(3, None);
         assert_eq!(presence.identity, None);

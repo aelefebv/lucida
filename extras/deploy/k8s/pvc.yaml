@@ -12,7 +12,7 @@
 # Why 50Gi: a starting point. The proxy cache dominates disk usage and
 # scales with the breadth of datasets the deployment serves. Adopters
 # with large datasets or long-tail workloads should resize upward; the
-# SQLite database itself stays small (sessions + bookmarks rows).
+# SQLite database itself stays small (sessions and workspace rows).
 # Resizing the PVC after the fact requires a CSI driver that supports
 # `allowVolumeExpansion: true` on the StorageClass.
 #

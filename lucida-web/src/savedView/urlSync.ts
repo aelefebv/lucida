@@ -11,7 +11,6 @@
 import { encode, decode } from "./encoder.ts";
 import type { SavedView } from "./types.ts";
 import { SavedViewApplier } from "./applier.ts";
-import { getBookmark } from "./bookmarksApi.ts";
 import {
   getRestoreLastViewEnabled,
   resolveInitialViewSource,
@@ -28,10 +27,13 @@ export interface UrlSyncOptions {
   debounceMs?: number;
   /** Override `window` for testing. */
   window?: Window;
-  /** Resolve `#b=<id>` to a saved view. Defaults to the production REST
-   *  helper; tests inject a stub so they don't need a fetch mock. */
-  fetchBookmark?: (id: string) => Promise<ResolvedSavedView | null>;
+  /** Resolve `#b=<id>` to a saved view. Without one, a `#b=` link applies
+   *  nothing. */
   fetchSavedViewById?: (id: string) => Promise<ResolvedSavedView | null>;
+  /** A `#b=<id>` link named a saved view that couldn't be fetched, so the
+   *  host can say so rather than leave the recipient on an unexplained
+   *  view. */
+  onSavedViewMissing?: (id: string) => void;
   /** Resolve the workspace default saved view for bare workspace URLs. */
   fetchDefaultSavedView?: () => Promise<ResolvedSavedView | null>;
   /** Resolve `?viewer_profile=<name>` to a private viewer profile. */
@@ -51,8 +53,6 @@ export type FetchDefaultSavedView = () => Promise<ResolvedSavedView | null>;
 export type FetchViewerProfile = (profile: string) => Promise<ResolvedSavedView | null>;
 export type FetchLastView = () => Promise<ResolvedSavedView | null>;
 
-const defaultFetchSavedViewById: FetchSavedViewById = (id) => getBookmark(id);
-
 export class UrlSync {
   private debounceMs: number;
   private win: Window;
@@ -65,7 +65,8 @@ export class UrlSync {
 
   private readonly captureBuilder: CaptureBuilder;
   private readonly applier: SavedViewApplier;
-  private readonly fetchSavedViewById: FetchSavedViewById;
+  private readonly fetchSavedViewById: FetchSavedViewById | null;
+  private readonly onSavedViewMissing: ((id: string) => void) | null;
   private readonly fetchDefaultSavedView: FetchDefaultSavedView | null;
   private readonly fetchViewerProfile: FetchViewerProfile | null;
   private readonly fetchLastView: FetchLastView | null;
@@ -81,8 +82,8 @@ export class UrlSync {
     this.applier = applier;
     this.debounceMs = options.debounceMs ?? 350;
     this.win = options.window ?? window;
-    this.fetchSavedViewById =
-      options.fetchSavedViewById ?? options.fetchBookmark ?? defaultFetchSavedViewById;
+    this.fetchSavedViewById = options.fetchSavedViewById ?? null;
+    this.onSavedViewMissing = options.onSavedViewMissing ?? null;
     this.fetchDefaultSavedView = options.fetchDefaultSavedView ?? null;
     this.fetchViewerProfile = options.fetchViewerProfile ?? null;
     this.fetchLastView = options.fetchLastView ?? null;
@@ -131,17 +132,19 @@ export class UrlSync {
     // we don't apply the default or last view over the link's target.
     if (parseAnnotationHash(hash) !== null) return;
 
-    const bookmarkId = parseBookmarkHash(hash);
-    if (bookmarkId !== null) {
-      let savedView: ResolvedSavedView | null;
+    const savedViewId = parseSavedViewHash(hash);
+    if (savedViewId !== null) {
+      let savedView: ResolvedSavedView | null = null;
       try {
-        savedView = await this.fetchSavedViewById(bookmarkId);
+        savedView = (await this.fetchSavedViewById?.(savedViewId)) ?? null;
       } catch (e) {
         console.warn("[UrlSync] failed to fetch saved view:", e);
-        return;
       }
       if (savedView === null) {
-        console.warn(`[UrlSync] saved view ${bookmarkId} not found`);
+        console.warn(`[UrlSync] saved view ${savedViewId} not found`);
+        this.onSavedViewMissing?.(savedViewId);
+        // Land where a bare workspace open would, not on an unframed scene.
+        await this.applyInitialViewForEmptyHash();
         return;
       }
       await this.applier.apply(savedView.view);
@@ -258,7 +261,7 @@ export class UrlSync {
     try {
       payload = await encode(view);
     } catch (e) {
-      console.warn("[UrlSync] post-bookmark encode failed:", e);
+      console.warn("[UrlSync] post-apply encode failed:", e);
       return;
     }
     // Destroyed while encoding: the page may have moved on, and this view no
@@ -331,10 +334,10 @@ export function parseViewHash(hash: string): string | null {
   return null;
 }
 
-/** The `#b=<id>` bookmark id, or null. The conservative character class
+/** The `#b=<id>` saved-view id, or null. The conservative character class
  *  (`[A-Za-z0-9._-]+`) admits UUIDs and keeps `#b=<%-encoded-junk>` from
- *  sending wild GETs to the bookmarks API. */
-export function parseBookmarkHash(hash: string): string | null {
+ *  sending wild GETs to the saved-views API. */
+export function parseSavedViewHash(hash: string): string | null {
   if (!hash || hash === "#") return null;
   const stripped = hash.startsWith("#") ? hash.slice(1) : hash;
   for (const part of stripped.split("&")) {
@@ -349,7 +352,7 @@ export function parseBookmarkHash(hash: string): string | null {
   return null;
 }
 
-/** The `#a=<annotation-id>` id, or null. Uses {@link parseBookmarkHash}'s
+/** The `#a=<annotation-id>` id, or null. Uses {@link parseSavedViewHash}'s
  *  character class so a junk link never drives a lookup against an
  *  attacker-chosen string. */
 export function parseAnnotationHash(hash: string): string | null {

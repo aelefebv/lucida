@@ -8,30 +8,25 @@
 //! `dispatch` in a spawned task, and the store phases inside `CachedStore`.
 //! So this drives the whole stack and asserts on what came out the other end.
 
-use std::collections::HashMap;
+mod common;
+
 use std::fs;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use common::workspace_rig::WorkspaceRig;
 use lucida_core::protocol::ServerMessage;
 use lucida_protocol::{PHASE_UNSET, ServerTimingBatch, TimingRowFamily, TimingRowOutcome};
+use lucida_server::ProxyConfig;
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
-use lucida_server::session::Session;
-use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes, handler};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -40,21 +35,6 @@ const READ_TIMEOUT: Duration = Duration::from_secs(20);
 /// A 4x4 uint16 level-0 chunk, uncompressed: the point here is the phases a
 /// serve passes through, not the codec it passes them with.
 const VOXELS: usize = 16;
-
-async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    ws.on_upgrade(move |socket| async move {
-        handler::handle_client(
-            id,
-            socket,
-            state.session,
-            state.tx,
-            state.unicast_routes,
-            state.proxy_config,
-        )
-        .await;
-    })
-}
 
 fn proxy_config(root: &Path) -> ProxyConfig {
     ProxyConfig {
@@ -162,9 +142,7 @@ async fn a_served_chunk_reports_every_phase_it_passed_through() {
     let data = root.join("dataset.zarr");
     write_fixture(&data);
 
-    let session = Arc::new(Mutex::new(Session::new()));
-    let (tx, _rx) = broadcast::channel::<BroadcastItem>(256);
-    let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));
+    let rig = WorkspaceRig::start(proxy_config(&root)).await;
 
     // The binding goes in through the real open path, so the lookup the row
     // measures is the one production takes.
@@ -173,11 +151,9 @@ async fn a_served_chunk_reports_every_phase_it_passed_through() {
         1,
         &data.to_str().unwrap().parse().unwrap(),
         &DatasetOpenContext {
-            session: Arc::clone(&session),
-            tx: tx.clone(),
             proxy_config: proxy_config(&root),
             source_policy: Arc::default(),
-            workspace: None,
+            workspace: rig.scope(),
         },
         &progress,
     )
@@ -195,22 +171,7 @@ async fn a_served_chunk_reports_every_phase_it_passed_through() {
         .image_id
         .clone();
 
-    let state = AppState {
-        session: Arc::clone(&session),
-        tx,
-        next_id: Arc::new(AtomicU64::new(0)),
-        unicast_routes,
-        source_policy: Arc::default(),
-        proxy_config: proxy_config(&root),
-    };
-    let app = Router::new().route("/ws", get(ws_route)).with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-    let (mut ws, _) = connect_async(format!("ws://{addr}/ws"))
-        .await
-        .expect("ws connect");
+    let (mut ws, _) = connect_async(rig.ws_url()).await.expect("ws connect");
 
     let request = serde_json::json!({
         "type": "chunk_request",

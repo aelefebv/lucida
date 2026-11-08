@@ -1,7 +1,7 @@
 //! Storage backends: where the server's persistent state lives.
 //!
 //! A storage backend owns one database connection, runs the migrations,
-//! and hands out the seven stores the rest of the server programs against.
+//! and hands out the six stores the rest of the server programs against.
 //! A store holds one kind of record and knows nothing about the connection.
 //! [`open`] picks the backend from `LUCIDA_DB_URL`'s scheme once at
 //! startup, so adding a backend touches this module and no call site.
@@ -29,7 +29,6 @@ use async_trait::async_trait;
 use crate::auth::{
     BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
 };
-use crate::bookmarks::BookmarkStore;
 use crate::inbox::InboxStore;
 use crate::workspace::WorkspaceStore;
 
@@ -63,7 +62,7 @@ impl PingError {
     }
 }
 
-/// One database, and the seven stores that read and write it.
+/// One database, and the six stores that read and write it.
 ///
 /// Implementations are constructed by [`open`] and shared as
 /// `Arc<dyn StorageBackend>`. Every accessor returns a handle over the
@@ -75,7 +74,6 @@ pub trait StorageBackend: Send + Sync + std::fmt::Debug {
     fn pending_auth(&self) -> Arc<dyn PendingAuthStore>;
     fn bearer_tokens(&self) -> Arc<dyn BearerTokenStore>;
     fn cli_token_authorizations(&self) -> Arc<dyn CliTokenAuthorizationStore>;
-    fn bookmarks(&self) -> Arc<dyn BookmarkStore>;
     fn workspaces(&self) -> Arc<dyn WorkspaceStore>;
     fn inbox(&self) -> Arc<dyn InboxStore>;
 
@@ -96,6 +94,15 @@ pub async fn open(url: &DatabaseUrl) -> Result<Arc<dyn StorageBackend>, StorageE
     match url.scheme() {
         Scheme::Sqlite => Ok(Arc::new(SqliteStorageBackend::open(url).await?)),
         Scheme::Postgres => Ok(Arc::new(PostgresStorageBackend::open(url).await?)),
+    }
+}
+
+/// Report the bookmark rows the `archive_bookmarks` migration set aside, on
+/// the open that ran it. `None` means there was no bookmark table to
+/// archive.
+fn log_archived_bookmarks(target: &str, rows: Option<i64>) {
+    if let Some(rows) = rows {
+        tracing::warn!(target, rows, "storage.migrate.bookmarks_archived");
     }
 }
 
@@ -150,7 +157,6 @@ mod tests {
                 .get_for_poll("absent", "absent")
                 .await
                 .unwrap();
-            backend.bookmarks().get("absent").await.unwrap();
             backend.workspaces().get_workspace("absent").await.unwrap();
             backend
                 .inbox()

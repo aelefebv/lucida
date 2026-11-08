@@ -21,7 +21,6 @@ import { dirname, join } from "node:path";
 import {
   Bridge,
   type BridgeHandlers,
-  type BookmarkAction,
   type DatasetHealthStatus,
   type DatasetOpenProgressDiagnostic,
   type DatasetOpenStage,
@@ -1502,36 +1501,6 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     ]);
   });
 
-  it("bookmark_changed fans out to handler and subscribers", () => {
-    const raw = fixtureRaw("session/server_bookmark_changed.json");
-    COVERED_FIXTURES.add("session/server_bookmark_changed.json");
-    expect(JSON.parse(raw)).toStrictEqual({
-      type: "bookmark_changed",
-      id: "bookmark-31f7",
-      action: "updated",
-      dataset_urls: [
-        "gs://lucida-fixtures/kidney-multiplex.zarr",
-        "gs://lucida-fixtures/screening-collection-01.zarr",
-      ],
-    });
-
-    const onBookmarkChanged = vi.fn();
-    const listener = vi.fn();
-    const { bridge, ws } = openBridge({ onBookmarkChanged });
-    bridge.subscribeBookmarkChanged(listener);
-    deliver(ws, raw);
-    const expectedArgs = [
-      "bookmark-31f7",
-      "updated",
-      [
-        "gs://lucida-fixtures/kidney-multiplex.zarr",
-        "gs://lucida-fixtures/screening-collection-01.zarr",
-      ],
-    ];
-    expect(onBookmarkChanged).toHaveBeenCalledWith(...expectedArgs);
-    expect(listener).toHaveBeenCalledWith(...expectedArgs);
-  });
-
   it("workspace_archived reaches the handler (and tears the bridge down)", () => {
     const raw = fixtureRaw("session/server_workspace_archived.json");
     COVERED_FIXTURES.add("session/server_workspace_archived.json");
@@ -2102,7 +2071,6 @@ describe("wire goldens: enum vocabulary", () => {
       "failed_permanent",
       "ready",
     ];
-    const bookmarkActions: BookmarkAction[] = ["created", "updated", "deleted"];
     const chunkFailureKinds: ChunkFailureKind[] = [
       "malformed_key",
       "unknown_dataset",
@@ -2161,7 +2129,6 @@ describe("wire goldens: enum vocabulary", () => {
       dataset_health_statuses: healthStatuses,
       generated_chunk_statuses: chunkStatuses,
       generated_level_roles: ["coarse"],
-      bookmark_actions: bookmarkActions,
       // Strings the tick coordinator emits (pipeline/tickCoordinator.ts).
       viewer_interest_modes: ["slice", "volume"],
       viewer_interaction_modes: ["idle", "panning", "zooming", "scrubbing"],
