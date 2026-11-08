@@ -21,7 +21,7 @@ use lucida_content::{DatasetId, LayoutId};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
-use crate::camera::Camera;
+use crate::camera::{Arcball, Camera, Framing};
 use crate::scene::{DatasetDisplaySettings, DisplayState};
 use crate::view::ViewState;
 
@@ -57,7 +57,8 @@ pub const SAVED_VIEW_VERSION: u32 = 2;
 ///
 /// A view recorded before solo was per layer decodes with its scene-wide
 /// channel mode moved onto each layer's
-/// [`solo`](crate::scene::DatasetDisplaySettings::solo).
+/// [`solo`](crate::scene::DatasetDisplaySettings::solo), and an arcball
+/// recorded in level-0 sample units decodes as a fit at its orbit angles.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(from = "SavedViewWire")]
 pub struct SavedView {
@@ -146,11 +147,13 @@ impl From<SavedViewWire> for SavedView {
                 settings.adopt_legacy_channels(legacy, channel_count);
             }
         }
+        let mut camera = wire.camera;
+        reframe_sample_unit_camera(&mut camera);
         Self {
             v: wire.v,
             datasets: wire.datasets,
             active_layouts: wire.active_layouts,
-            camera: wire.camera,
+            camera,
             view,
             display: wire.display,
             dataset_order: wire.dataset_order,
@@ -158,6 +161,37 @@ impl From<SavedViewWire> for SavedView {
             auto_contrast: wire.auto_contrast,
         }
     }
+}
+
+/// Normalized world space holds every dataset at or below `y = 1` and within
+/// `0 ≤ z ≤ 1`: a volume is the unit cube scaled down by its physical extent,
+/// and a collection's members spread along `+x` and `−y`. An arcball framed
+/// on level-0 samples instead aims at the middle of `[0, X] × [0, Y] × [0, Z]`,
+/// far past both bounds once a volume is more than eight samples tall and
+/// deep. The margin leaves a person room to pan the target off the data.
+const SAMPLE_UNIT_TARGET_FLOOR: f64 = 4.0;
+
+/// Turn an arcball recorded in level-0 sample units into a fit at its orbit
+/// angles. Read as world units it shows empty space, and a view holds no
+/// geometry to map it back by, so only the angles carry over and the scene
+/// fits the rest on import. Returns whether it converted.
+pub(crate) fn reframe_sample_unit_camera(camera: &mut Camera) -> bool {
+    let Camera::Arcball(arcball) = camera else {
+        return false;
+    };
+    let [_, y, z] = arcball.target;
+    if !(y > SAMPLE_UNIT_TARGET_FLOOR && z > SAMPLE_UNIT_TARGET_FLOOR) {
+        return false;
+    }
+    *arcball = Arcball {
+        theta: arcball.theta,
+        phi: arcball.phi,
+        fov: arcball.fov,
+        clip_mode: arcball.clip_mode,
+        framing: Framing::Framed,
+        ..Arcball::new(arcball.viewport)
+    };
+    true
 }
 
 impl SavedView {
@@ -481,6 +515,51 @@ mod tests {
         match &back.camera {
             Camera::Fly(f) => assert_eq!(f.position, [10.0, 20.0, 30.0]),
             _ => panic!("expected Fly camera"),
+        }
+    }
+
+    /// The scene fits a reframed arcball as it would a fresh open, at the
+    /// angles the view recorded.
+    #[test]
+    fn a_reframed_arcball_frames_the_data_on_import() {
+        use crate::command::DocumentCommand;
+        use crate::framing::WorldBox;
+        use crate::scene::{Scene, test_helpers::make_dataset_opened_with_shape};
+
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(make_dataset_opened_with_shape(
+                "v",
+                "v",
+                1,
+                [1, 1, 128, 512, 512],
+                [1, 1, 32, 32, 32],
+                4,
+            ))
+            .into(),
+        );
+        let mut recorded = Arcball::new([320, 320]);
+        recorded.target = [256.0, 256.0, 64.0];
+        recorded.distance = 1056.8;
+        recorded.theta = 1.285;
+        recorded.framing = Framing::Placed;
+        let mut camera = Camera::Arcball(recorded);
+        assert!(reframe_sample_unit_camera(&mut camera));
+        scene.import_presence(camera, ViewState::new(), DisplayState::default());
+
+        let Camera::Arcball(arcball) = &scene.camera else {
+            panic!("expected an arcball camera, got {:?}", scene.camera);
+        };
+        let WorldBox { min, max } = scene.dataset_world_bounds("v").unwrap();
+        assert_eq!(arcball.framing, Framing::Framed);
+        assert_eq!(arcball.theta, 1.285);
+        for axis in 0..3 {
+            let middle = (min[axis] + max[axis]) / 2.0;
+            assert!(
+                (arcball.target[axis] - middle).abs() < 1e-9,
+                "{:?} is not the middle of {min:?}..{max:?}",
+                arcball.target
+            );
         }
     }
 
