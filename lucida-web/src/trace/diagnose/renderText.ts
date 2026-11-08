@@ -197,7 +197,7 @@ export function renderDiagnostic(
     REQUIRED,
     `NOT A HEALTH SIGNAL  ${document.coverage.notHealthSignals
       .map((signal) => `${signal.metric}=${p(`coverage.notHealthSignals.${signal.metric}`, signal.value)}`)
-      .join(" · ")} — these paths were not exercised; an absence of errors is not evidence of health.`,
+      .join(" · ")} — ${describeNotHealthSignals(document.coverage.notHealthSignals)}`,
   );
 
   if (depth === "phases" || depth === "phase") {
@@ -644,6 +644,26 @@ function causeOf(document: DiagnosticDocument): string {
 export function formatCause(cause: RunCause | null): string {
   if (!cause) return "steady state";
   return `${cause.epoch ?? "none"}/${cause.dirtyKind}/${cause.source}`;
+}
+
+/**
+ * What the not-a-health-signal counters say, as one sentence. A count above
+ * zero says its path ran, so only the zeros are called not exercised; a run
+ * thousands of requests behind can record a zero on every one, which is why a
+ * zero is never read as health. The text and the monitor share this sentence.
+ */
+export function describeNotHealthSignals(signals: readonly { metric: string; value: number }[]): string {
+  const idle = signals.filter((signal) => signal.value === 0).map((signal) => signal.metric);
+  if (idle.length === 0) {
+    return "every one of these paths was exercised; a count says how often, not that the run was healthy.";
+  }
+  const unexercised =
+    idle.length === signals.length
+      ? "none of these paths was exercised"
+      : idle.length === 1
+        ? `the path at zero (${idle[0]}) was not exercised`
+        : `the paths at zero (${idle.join(", ")}) were not exercised`;
+  return `${unexercised}; an absence of errors is not evidence of health.`;
 }
 
 function renderTimingOf(document: DiagnosticDocument, p: PrintNumber): string {
