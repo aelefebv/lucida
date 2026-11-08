@@ -8,7 +8,7 @@ import type { TickContext } from "../renderLoopTypes.ts";
 import { AssetCatalog } from "./assetCatalog.ts";
 import type { ColdStateDeltaMessage, ColdStateMessage } from "../renderer/workerProtocol.ts";
 import type { RequestPlan } from "./planning/index.ts";
-import { TickCoordinator } from "./tickCoordinator.ts";
+import { TickCoordinator, type MinimapChunkCoord } from "./tickCoordinator.ts";
 import { Uploader } from "./upload/uploader.ts";
 import { plan } from "./planning/index.ts";
 import { bumpSettingsGeneration } from "../tickCommon.ts";
@@ -457,11 +457,11 @@ describe("epoch caching", () => {
     expect(planSpy).toHaveBeenCalledTimes(1);
   });
 
-  it("re-derives manifest-based planning inputs when ds.manifest is replaced without an epoch bump", () => {
+  it("re-plans with the new manifest when ds.manifest is replaced without an epoch bump", () => {
     // The generated-availability path replaces ds.manifest with a new object
     // without bumping any scene epoch (renderLoop.updateDatasetManifest only
     // calls setDirty()). An epoch-only cache key would serve a stale ImageSpec
-    // and never request the generated coarse level.
+    // and never request the generated coarse level on a view nobody moves.
     const manifestFor = (coarseLevelIndex: number | null): DatasetManifest =>
       ({
         dataset_id: "ds1",
@@ -492,37 +492,29 @@ describe("epoch caching", () => {
         default_layout_id: null,
       }) as unknown as DatasetManifest;
 
-    vi.useFakeTimers({ toFake: ["performance"] });
-    try {
-      const orch = makeOrch();
-      // v1: no coarse level advertised.
-      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: manifestFor(null) }]]);
-      orch.planAndFetch(
-        makeCtx(createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } }), datasets),
-        emptyMinimap,
-      );
-      planSpy.mockClear();
+    const orch = makeOrch();
+    const scene = createMockScene({ epochs: { content: 1, layout: 1, view: 1, selection: 1 } });
+    // v1: no coarse level advertised.
+    const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: manifestFor(null) }]]);
+    orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
+    planSpy.mockClear();
 
-      // Generated-availability arrives: ds.manifest is replaced (new object)
-      // with coarse level 1 now advertised. No scene epoch changes.
-      datasets.set("ds1", { manifest: manifestFor(1) });
+    // Generated-availability arrives: ds.manifest is replaced (new object)
+    // with coarse level 1 now advertised. No scene epoch changes, and the
+    // camera stays where it is.
+    datasets.set("ds1", { manifest: manifestFor(1) });
+    orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
 
-      // A settled camera move (view epoch only) forces a full replan at the
-      // unchanged content|layout|asset key.
-      vi.advanceTimersByTime(500);
-      orch.planAndFetch(
-        makeCtx(createMockScene({ epochs: { content: 1, layout: 1, view: 2, selection: 1 } }), datasets),
-        emptyMinimap,
-      );
+    expect(planSpy).toHaveBeenCalledTimes(1);
+    const snapshot = planSpy.mock.calls[planSpy.mock.calls.length - 1][0] as { entities: Array<{ entityId: string; coarseLevel: number | null }> };
+    const entity = snapshot.entities.find((e) => e.entityId === "tile-0");
+    // A stale (epoch-only) cache would serve the v1 ImageSpec → coarseLevel null.
+    expect(entity?.coarseLevel).toBe(1);
 
-      expect(planSpy).toHaveBeenCalledTimes(1);
-      const snapshot = planSpy.mock.calls[planSpy.mock.calls.length - 1][0] as { entities: Array<{ entityId: string; coarseLevel: number | null }> };
-      const entity = snapshot.entities.find((e) => e.entityId === "tile-0");
-      // A stale (epoch-only) cache would serve the v1 ImageSpec → coarseLevel null.
-      expect(entity?.coarseLevel).toBe(1);
-    } finally {
-      vi.useRealTimers();
-    }
+    // The replan took the new manifest as its basis, so the next tick is a hit.
+    planSpy.mockClear();
+    orch.planAndFetch(makeCtx(scene, datasets), emptyMinimap);
+    expect(planSpy).not.toHaveBeenCalled();
   });
 
   it("rebuilds on the leading selection change, coalesces the rest, then re-plans on settle", () => {
@@ -951,6 +943,53 @@ describe("display-only fast path", () => {
       };
       expect(patch.datasetId).toBe("ds1");
       expect(patch.currentT).toBe(5);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("requests minimap chunks the last plan did not see, with no epoch change", () => {
+    // The minimap scans for what it lacks after the tick has planned, so on a
+    // view nobody moves its demand would otherwise never reach a plan.
+    vi.useFakeTimers({ toFake: ["performance"] });
+    try {
+      const datasets = new Map<string, DatasetEntry>([["ds1", { manifest: createMockContent() }]]);
+      const orch = makeOrch();
+      const cpuCache = createMockCpuCache();
+      const coldState = vi.fn();
+      const scene = createMockScene({
+        epochs: { content: 1, layout: 1, view: 1, selection: 1 },
+        allSettings: baseSettings(),
+      });
+      const ctx = makeCtx(scene, datasets, { cpuCache, coldState });
+      const minimap = new Map<string, MinimapChunkCoord[]>();
+      bumpSettingsGeneration();
+      orch.planAndFetch(ctx, minimap);
+      planSpy.mockClear();
+      coldState.mockClear();
+      vi.mocked(cpuCache.submit).mockClear();
+
+      minimap.set("img-0", [{ level: 1, t: 0, c: 0, z: 0, y: 0, x: 0, key: "1/0/0/0/0/0" }]);
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(ctx, minimap);
+
+      // Served from the cached active set: no plan, no cold state.
+      expect(planSpy).not.toHaveBeenCalled();
+      expect(coldState).not.toHaveBeenCalled();
+      expect(cpuCache.submit).toHaveBeenCalledTimes(1);
+      const submitted = vi.mocked(cpuCache.submit).mock.calls[0][0] as {
+        requests: { lane: string; chunkKey: string }[];
+      };
+      expect(submitted.requests).toContainEqual(
+        expect.objectContaining({ lane: "minimap", chunkKey: "1/0/0/0/0/0" }),
+      );
+
+      // The scan's next list only lost the chunk that arrived: nothing to plan.
+      vi.mocked(cpuCache.submit).mockClear();
+      minimap.set("img-0", []);
+      vi.advanceTimersByTime(500);
+      orch.planAndFetch(ctx, minimap);
+      expect(cpuCache.submit).not.toHaveBeenCalled();
     } finally {
       vi.useRealTimers();
     }

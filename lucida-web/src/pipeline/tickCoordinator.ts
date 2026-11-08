@@ -340,6 +340,20 @@ function emitViewerInterestHint(
   });
 }
 
+/**
+ * Whether a rebuild's causes change what is placed or what it is made of,
+ * rather than where the camera is or which plane is selected. These rebuild
+ * at once, with no coalescing and no fast path.
+ */
+function isStructural(causes: readonly ColdStateCauseKey[]): boolean {
+  return (
+    causes.includes("content") ||
+    causes.includes("layout") ||
+    causes.includes("asset") ||
+    causes.includes("manifest")
+  );
+}
+
 export { synthesizeGroupRosterEntry } from "./upload/coldState/roster.ts";
 
 export class TickCoordinator {
@@ -353,6 +367,18 @@ export class TickCoordinator {
   private planningState = new Map<string, PlanningState>();
   private lastEpochs: SceneEpochs | null = null;
   private cachedResult: TickCoordinatorResult | null = null;
+  /**
+   * Each dataset's manifest as of the last full rebuild. A generated level
+   * arrives as a replaced manifest with no scene epoch behind it, so the
+   * cached plan is keyed on these references as well as on the epochs.
+   */
+  private lastRebuildManifests = new Map<string, DatasetManifest>();
+  /**
+   * The minimap's pending chunk lists as the last plan saw them. The minimap
+   * finds what it lacks after the tick has planned, so chunks it adds reach
+   * the planner only through a replan this map triggers.
+   */
+  private plannedMinimap = new Map<string, MinimapChunkCoord[]>();
   /**
    * `performance.now()` at the completion of the last full rebuild.
    * Interactive changes within a coalescing window of this are served from
@@ -529,6 +555,8 @@ export class TickCoordinator {
       if (currentEpochs.view !== last.view) causes.push("view");
       if (currentEpochs.selection !== last.selection) causes.push("selection");
       if (currentEpochs.asset !== last.asset) causes.push("asset");
+      if (this.manifestReplacedSinceRebuild(ctx)) causes.push("manifest");
+      if (this.minimapHasUnplannedChunks(minimapPendingFetch)) causes.push("minimap");
       isHit = causes.length === 0;
     }
 
@@ -540,14 +568,10 @@ export class TickCoordinator {
     //     coarse cadence to fetch tiles that scroll into view.
     //   - selection: the leading change rebuilds promptly, and further
     //     changes within the window coalesce.
-    // Structural changes (content, layout, asset) must render immediately.
+    // Structural changes must render immediately.
     let coalescedSkip = false;
     if (!isHit && hasPrior) {
-      const structural =
-        causes.includes("content") ||
-        causes.includes("layout") ||
-        causes.includes("asset");
-      if (!structural) {
+      if (!isStructural(causes)) {
         const interval = causes.includes("selection")
           ? SELECTION_COALESCE_INTERVAL_MS
           : VIEW_REPLAN_INTERVAL_MS;
@@ -580,12 +604,13 @@ export class TickCoordinator {
     const multiChannel = ctx.scene.multi_channel();
     const planningConfig = configStore.get();
 
-    const structural =
-      causes.includes("content") ||
-      causes.includes("layout") ||
-      causes.includes("asset");
+    const structural = isStructural(causes);
     const selectionOnly =
       !structural && causes.length === 1 && causes[0] === "selection";
+    // A selection scrub, minimap chunks no plan asked for, or both: the active
+    // set's inputs are unchanged, so only the requests need emitting again.
+    const requestsOnly =
+      !structural && causes.every((c) => c === "selection" || c === "minimap");
     // A pure view move: only the camera moved, so the active set is a pure
     // function of the new view. This is the sole gate for the view-move
     // cold-state delta. Anything bundled with the view change fails it and
@@ -603,14 +628,16 @@ export class TickCoordinator {
       return this.cachedResult;
     }
 
-    // Selection-scrub fast path: a pure T or Z-plane move in the slice view.
-    // Fetch the new T/Z chunks, but push a compact selection patch instead of
-    // the O(active-set) descriptor array, and reuse the cached roster.
+    // Selection-scrub fast path: a pure T or Z-plane move in the slice view,
+    // or new minimap demand. Fetch the new chunks, but push a compact
+    // selection patch instead of the O(active-set) descriptor array, and reuse
+    // the cached roster.
     if (
-      selectionOnly &&
+      requestsOnly &&
       this.tryScrubOnlyUpdate({
         ctx, currentEpochs, settings, multiChannel, tickStart,
         minimapPendingFetch, planningConfig,
+        minimapChanged: causes.includes("minimap"),
       })
     ) {
       this.serveCachedTelemetry(tickStart);
@@ -925,6 +952,10 @@ export class TickCoordinator {
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
     this.cachedResult = { memberRoster, settings, multiChannel, epochs: outputEpochs, entityIndexByDataset };
+    this.lastRebuildManifests = new Map(
+      [...ctx.datasets].map(([dsId, ds]) => [dsId, ds.manifest]),
+    );
+    this.plannedMinimap = new Map(minimapPendingFetch);
 
     // Capture the scene scalars, layer order, and visible-dataset set this
     // rebuild planned against, so the display-only fast path has a baseline
@@ -955,6 +986,37 @@ export class TickCoordinator {
     }
 
     return this.cachedResult;
+  }
+
+  /**
+   * Whether the minimap waits on a chunk the last plan did not see. Its scan
+   * replaces each member's list on every pass, so a list that only lost
+   * chunks, which arrived, is adopted as planned and is not compared again.
+   */
+  private minimapHasUnplannedChunks(pending: Map<string, MinimapChunkCoord[]>): boolean {
+    let unplanned = false;
+    for (const [memberId, coords] of pending) {
+      const planned = this.plannedMinimap.get(memberId);
+      if (planned === coords) continue;
+      if (planned) {
+        const plannedKeys = new Set(planned.map((coord) => coord.key));
+        if (coords.every((coord) => plannedKeys.has(coord.key))) {
+          this.plannedMinimap.set(memberId, coords);
+          continue;
+        }
+      }
+      unplanned = true;
+    }
+    return unplanned;
+  }
+
+  /** Whether any dataset's manifest is not the one the last rebuild planned against. */
+  private manifestReplacedSinceRebuild(ctx: TickContext): boolean {
+    if (ctx.datasets.size !== this.lastRebuildManifests.size) return true;
+    for (const [dsId, ds] of ctx.datasets) {
+      if (this.lastRebuildManifests.get(dsId) !== ds.manifest) return true;
+    }
+    return false;
   }
 
   /**
@@ -1079,11 +1141,12 @@ export class TickCoordinator {
 
   /**
    * Selection-scrub fast path. Fires only when it can prove the sole change
-   * since the last rebuild is a T scrub and/or Z-plane move in the slice view.
+   * since the last rebuild is a T scrub and/or Z-plane move in the slice view,
+   * or minimap demand no plan has asked for (`minimapChanged`).
    * `currentT`/`currentZ` are top-level cold-state scalars, never part of a
    * descriptor, so the descriptor array is unchanged. A scrub still needs new
    * chunks, so this emits requests and submits them, but pushes a selection
-   * patch instead of a full cold state. The caller's `selectionOnly` gate
+   * patch instead of a full cold state. The caller's `requestsOnly` gate
    * keeps the active set's inputs unchanged, which is why the cached roster
    * can be reused. Any other difference, a z-range width change included,
    * fails the proof.
@@ -1099,6 +1162,7 @@ export class TickCoordinator {
     tickStart: number;
     minimapPendingFetch: Map<string, MinimapChunkCoord[]>;
     planningConfig: PlanningConfig;
+    minimapChanged: boolean;
   }): boolean {
     const { ctx, currentEpochs, settings, multiChannel, minimapPendingFetch, planningConfig } = args;
     if (
@@ -1177,7 +1241,7 @@ export class TickCoordinator {
         newZRange: zRange,
       });
     }
-    if (!anyScrub) return false;
+    if (!anyScrub && !args.minimapChanged) return false;
 
     // Re-emit requests from the cached active set with only the selection
     // (and z-range, on a Z move) changed. This skips the O(N) `view_query`
@@ -1332,6 +1396,7 @@ export class TickCoordinator {
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
     this.cachedResult = { ...this.cachedResult, settings, epochs: outputEpochs };
+    this.plannedMinimap = new Map(minimapPendingFetch);
     this.lastRebuildScalars = { ...scalars, t: newT };
     this.lastRebuildAt = performance.now();
     this.pendingDeferredRebuild = false;
