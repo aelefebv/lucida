@@ -32,9 +32,7 @@ import { derivedBuildersFor } from "./pipeline/layoutBuilders.ts";
 import type { WireAssetCatalog } from "./pipeline/assetCatalog.ts";
 import { Session } from "./session.ts";
 import type { RenderLoop } from "./renderLoop.ts";
-import { bumpSettingsGeneration } from "./tickCommon.ts";
-import { AVAILABILITY_UPDATE_SOURCE, invalidateDisplaySettings } from "./invalidation.ts";
-import { syncSceneViewState, type SceneViewStateSetters } from "./hooks/sceneViewState.ts";
+import { AVAILABILITY_UPDATE_SOURCE, invalidateDisplaySettings, requestRender } from "./invalidation.ts";
 import { shouldAutoFitOnOpen, isOpenerOf } from "./hooks/autoFit.ts";
 import { classifySceneError, guardedSceneCall, observeSceneCalls } from "./sceneGuard.ts";
 import { traceRecorder } from "./trace/recorder.ts";
@@ -194,8 +192,6 @@ export interface SessionControllerDeps {
   initLayerMaps: (id: string) => void;
   /** Auto-select the first dataset registered into an empty registry. */
   setSelectedDatasetId: (id: string) => void;
-  /** Z/T/C/view-mode/multi-channel sinks for presence-follow imports. */
-  viewState: SceneViewStateSetters;
   events: SessionControllerEvents;
 }
 
@@ -469,14 +465,13 @@ export class SessionController {
           });
           guardedSceneCall("import_dataset_presence", scene, () =>
             scene.import_dataset_presence(layerJson));
-          bumpSettingsGeneration();
+          invalidateDisplaySettings(this.deps.getLoop(), "follow_dataset_presence");
           this.deps.bumpLayerSettingsVersion();
         } catch (e) {
           console.warn("Failed to import peer dataset presence:", e);
         }
       }
-      syncSceneViewState(scene, this.deps.viewState);
-      this.deps.getLoop()?.markInteractiveDirty();
+      requestRender(this.deps.getLoop(), "follow_presence");
     } catch (e) {
       console.warn("Failed to import peer presence:", e);
     }
@@ -872,7 +867,7 @@ export class SessionController {
           visible: true,
         };
         guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
-        bumpSettingsGeneration();
+        invalidateDisplaySettings(this.deps.getLoop(), "channel_settings_grown");
       }
     }
     const t4 = performance.now();
@@ -1039,23 +1034,15 @@ export class SessionController {
             }
           }
           guardedSceneCall("apply_command", scene, () => scene.apply_command(commandJson));
-          bumpSettingsGeneration();
+          // Covers the overlay re-projecting a peer's annotation and the
+          // planner re-reading a peer's layout switch.
+          invalidateDisplaySettings(this.deps.getLoop(), "remote_command");
           const cmd = JSON.parse(commandJson);
           if (cmd.type === "dataset_opened") {
             this.handleDatasetOpened(cmd, scene);
           }
           if (cmd.type === "remove_dataset") {
             this.removeDataset(cmd.id);
-          }
-          if (
-            cmd.type === "add_annotation" ||
-            cmd.type === "remove_annotation" ||
-            cmd.type === "add_comment" ||
-            cmd.type === "remove_comment"
-          ) {
-            // apply_command already updated pins and threads; mark the canvas
-            // dirty so the overlay re-projects.
-            this.deps.getLoop()?.markInteractiveDirty();
           }
           if (cmd.type === "register_layout" || cmd.type === "set_active_layout") {
             // Refresh the mirror so peers' layout changes appear locally.
@@ -1066,7 +1053,6 @@ export class SessionController {
               if (cmd.type === "set_active_layout" && cmd.layout_id) {
                 registry.setActiveLocal(cmd.dataset_id, cmd.layout_id);
               }
-              this.deps.getLoop()?.markInteractiveDirty();
             }
           }
           this.notifyRemoteDocumentChanged();
@@ -1117,8 +1103,7 @@ export class SessionController {
             try {
               const presenceJson = JSON.stringify({ camera, view, display });
               this.importPresence(scene, presenceJson);
-              syncSceneViewState(scene, this.deps.viewState);
-              this.deps.getLoop()?.markInteractiveDirty();
+              requestRender(this.deps.getLoop(), "follow_presence");
               this.session.bridge.sendPresence(scene.export_presence());
             } catch (e) {
               console.warn("[Bridge] failed to import presence:", e);
@@ -1154,8 +1139,7 @@ export class SessionController {
                 display: peer.display,
               });
               this.importPresence(scene, presenceJson);
-              syncSceneViewState(scene, this.deps.viewState);
-              this.deps.getLoop()?.markInteractiveDirty();
+              requestRender(this.deps.getLoop(), "follow_presence");
               this.session.bridge.sendPresence(scene.export_presence());
             } catch (e) {
               console.warn("[Bridge] failed to import presence on steer:", e);
@@ -1379,7 +1363,7 @@ export class SessionController {
             fit_camera_to_dataset_bounds?: (id: string) => void;
           }
         ).fit_camera_to_dataset_bounds?.(datasetId);
-        this.deps.getLoop()?.markInteractiveDirty("auto_fit_on_open");
+        requestRender(this.deps.getLoop(), "auto_fit_on_open");
         bridgeLog("auto_fit_on_open.applied", { datasetId });
       } catch (e) {
         bridgeLog("auto_fit_on_open.failed", {

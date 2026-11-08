@@ -39,13 +39,6 @@ export interface CaptureInputs {
   datasetReferenceMode?: DatasetReferenceMode;
   /** From `useDatasetSettings.autoContrastMap`. */
   autoContrastByDatasetId?: AutoContrastByDatasetId;
-  /**
-   * The live Z/T/C selection from React dimension state, captured verbatim as
-   * `view`. Preferred over the scene's presence export, which can lag React
-   * (the scene writes sit behind an `if (scene)` guard) and then reports the
-   * default slab, which the encoder strips. Falls back to the scene's view.
-   */
-  liveView?: ViewState;
   /** When omitted, `label_names` stays as the scene export carried it and the
    *  restore falls back to positional matching. */
   labelNamesFor?: LabelNamesByDatasetId;
@@ -60,7 +53,6 @@ export function buildCapture({
   urlByDatasetId,
   datasetReferenceMode = "source-url",
   autoContrastByDatasetId,
-  liveView,
   labelNamesFor,
 }: CaptureInputs): SavedView {
   const presence = JSON.parse(scene.export_presence()) as {
@@ -69,7 +61,7 @@ export function buildCapture({
     display: DisplayState;
   };
 
-  const view: ViewState = liveView ?? presence.view;
+  const view: ViewState = presence.view;
   const datasetPresence = JSON.parse(scene.export_dataset_presence()) as {
     dataset_order: DatasetId[];
     dataset_settings: Record<DatasetId, DatasetDisplaySettings>;

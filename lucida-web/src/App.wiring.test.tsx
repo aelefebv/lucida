@@ -28,6 +28,10 @@ vi.mock("lucida-core", () => {
       annotations?: Record<string, unknown[]>;
     } = {};
     commands: Array<Record<string, unknown>> = [];
+    // The selectors, with the epochs a selector or camera change bumps, so the
+    // page's scene store reads what a command or a followed peer wrote.
+    view = { z: 0, t: 0, c: 0, multi: false };
+    epochCounts = { view: 0, selection: 0 };
     constructor(_w?: number, _h?: number) {
       FakeWasmScene.instances.push(this);
     }
@@ -35,7 +39,14 @@ vi.mock("lucida-core", () => {
       this.doc = JSON.parse(json);
     }
     apply_command(json: string) {
-      this.commands.push(JSON.parse(json));
+      const cmd = JSON.parse(json);
+      this.commands.push(cmd);
+      if (cmd.type === "set_z") this.view.z = cmd.z;
+      if (cmd.type === "set_z_range") this.view.z = cmd.start;
+      if (cmd.type === "set_t") this.view.t = cmd.t;
+      if (cmd.type === "set_c") this.view.c = cmd.c;
+      if (cmd.type === "set_multi_channel") this.view.multi = cmd.enabled;
+      this.epochCounts.selection++;
     }
     dataset_order() {
       return JSON.stringify(Object.keys(this.doc.manifests ?? {}));
@@ -79,10 +90,10 @@ vi.mock("lucida-core", () => {
     annotations(id: string) {
       return JSON.stringify(this.doc.annotations?.[id] ?? []);
     }
-    z() { return 0; }
-    t() { return 0; }
-    c() { return 0; }
-    multi_channel() { return false; }
+    z() { return this.view.z; }
+    t() { return this.view.t; }
+    c() { return this.view.c; }
+    multi_channel() { return this.view.multi; }
     camera_mode() { return "slice"; }
     zoom() { return 1; }
     center() { return new Float64Array([0, 0]); }
@@ -104,14 +115,23 @@ vi.mock("lucida-core", () => {
         dataset_settings: {},
       });
     }
-    import_presence(_json: string) {}
+    import_presence(json: string) {
+      const presence = JSON.parse(json) as { view?: { z_range: { start: number }; t: number; c: number } };
+      if (presence.view) {
+        this.view.z = presence.view.z_range.start;
+        this.view.t = presence.view.t;
+        this.view.c = presence.view.c;
+      }
+      this.epochCounts.view++;
+      this.epochCounts.selection++;
+    }
     import_dataset_presence(_json: string) {}
     compute_peer_cursors() { return JSON.stringify({ gpu: [], labels: [] }); }
     fit_camera_to_dataset_bounds(_id: string) {}
     apply_asset_catalog_delta(_datasetId: string, _deltaJson: string) {}
     asset_epoch() { return 0; }
     epochs() {
-      return JSON.stringify({ content: 0, layout: 0, view: 0, selection: 0, asset: 0 });
+      return JSON.stringify({ content: 0, layout: 0, asset: 0, ...this.epochCounts });
     }
     free() {}
   }
@@ -701,6 +721,32 @@ describe("App wiring: the shell", () => {
       fireEvent.click(avatar);
     });
     expect(bridge.sendFollow).toHaveBeenLastCalledWith(null);
+  });
+
+  it("shows a followed peer's plane on the Z scrubber", async () => {
+    const peer = {
+      client_id: 7,
+      camera: { mode: "slice", center: [0, 0], zoom: 1 },
+      view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+      display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
+      following: null,
+      cursor: null,
+      dataset_order: [],
+      dataset_settings: {},
+      identity: { display_name: "Ada Lovelace" },
+    };
+    const { bridge } = await mountWithSnapshot(documentJson(["wds-1"]), [peer]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Follow Ada Lovelace" }));
+    });
+
+    await act(async () => {
+      bridge.handlers.onPresenceUpdate?.(7, peer.camera, { z_range: { start: 2, end: 3 }, t: 0, c: 0 }, peer.display);
+    });
+
+    // The import wrote the scene alone; the scrubber reads it from there.
+    const scrubber = document.querySelector('.lc-dim-scrubber[aria-label="Z plane"]');
+    expect(scrubber?.querySelector(".lc-dim-readout")?.textContent).toBe("3 / 4");
   });
 });
 

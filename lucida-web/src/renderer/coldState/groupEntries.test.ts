@@ -92,6 +92,7 @@ function makeCold(
       sortCenterVox: null,
       frustumPlanes: null,
     },
+    wantedChunks: [],
     activeSet,
     viewMode,
     sampleFormat: "u16",

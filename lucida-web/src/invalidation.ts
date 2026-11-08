@@ -3,11 +3,13 @@
  * both bumps the settings generation (so the planner re-reads settings from
  * wasm) and marks the render loop dirty (so a tick runs). Either one alone is
  * a silent no-op, so call sites state what happened and both land together,
- * in the same task.
+ * in the same task. Every intent also tells the scene store, so what React
+ * reads moves in the same task.
  *
  * `interactive` renders next frame; `residency` alone renders on the
  * throttled ~30 fps cadence while the tick still runs every frame.
  */
+import { noteSceneWrite } from "./sceneStore.ts";
 import { bumpSettingsGeneration } from "./tickCommon.ts";
 import type { InputKind } from "./trace/types.ts";
 
@@ -70,6 +72,7 @@ export function invalidateDisplaySettings(
 ): void {
   bumpSettingsGeneration();
   loop?.markInteractiveDirty(source);
+  noteSceneWrite();
 }
 
 /**
@@ -81,6 +84,7 @@ export function invalidateDisplaySettings(
 export function invalidateSelection(loop: InvalidationSink | null | undefined): void {
   bumpSettingsGeneration();
   loop?.markInput("select");
+  noteSceneWrite();
 }
 
 /**
@@ -95,6 +99,7 @@ export function invalidateResidency(
 ): void {
   bumpSettingsGeneration();
   loop?.markResidencyDirty(source);
+  noteSceneWrite();
 }
 
 /**
@@ -111,6 +116,7 @@ export function invalidateAfterViewRestore(
   bumpSettingsGeneration();
   loop?.markInteractiveDirty(source);
   loop?.markResidencyDirty(source);
+  noteSceneWrite();
 }
 
 /**
@@ -123,4 +129,5 @@ export function requestRender(
   source: string = "render_request",
 ): void {
   loop?.markInteractiveDirty(source);
+  noteSceneWrite();
 }

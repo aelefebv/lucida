@@ -968,20 +968,52 @@ export class CpuCache {
     }
   }
 
+  /** The render worker wrote these chunks, or already held them. */
+  markChunksHeld(imageId: string, c: number, tier: ResidencyTier, keys: readonly string[]): void {
+    for (const key of keys) this.deliveryState.markChunkHeld(imageId, c, key, tier);
+  }
+
   /**
-   * `reason` is the renderer's own account of why the chunks came back — its
-   * chunk feedback vocabulary, forwarded rather than re-derived, so the trace
-   * can distinguish an atlas eviction from a stale epoch or a radius filter.
+   * The render worker did not place these chunks. `reason` is its own
+   * account, forwarded so the trace names the refusal as the renderer did.
+   * `atlas-policy` means the pool is full of nearer wanted chunks, so the
+   * chunk is not asked for again until the next plan.
    */
-  markChunkEvicted(
+  markChunksRefused(
     imageId: string,
     c: number,
-    evicted: string[],
-    skipped: string[],
-    reason: ChunkFeedbackReason = "evicted",
+    tier: ResidencyTier,
+    keys: readonly string[],
+    reason: ChunkFeedbackReason,
   ): void {
-    for (const key of evicted) {
-      this.deliveryState.clearChunkSent(imageId, c, key);
+    for (const key of keys) {
+      this.deliveryState.markChunkRefused(imageId, c, key, tier);
+      const entry =
+        this.chunkStore.findByImageChunk(imageId, c, key) ??
+        this.overviewStore.findByImageChunk(imageId, c, key);
+      if (reason === "atlas-policy") {
+        this.markRejected(entry?.entityId ?? imageId, key);
+      } else if (entry) {
+        traceRecorder.recordPointEvent(PointEvent.Rejection, reason, entry, eventTier(entry));
+      }
+    }
+  }
+
+  /**
+   * The render worker stopped holding these chunks. Only an eviction is
+   * recorded: a freed pool or a re-cut plane is the view changing, not
+   * pressure, and would put one event per chunk in the trace on every switch.
+   */
+  markChunksLost(
+    imageId: string,
+    c: number,
+    tier: ResidencyTier,
+    keys: readonly string[],
+    reason: ChunkFeedbackReason,
+  ): void {
+    for (const key of keys) {
+      this.deliveryState.markChunkLost(imageId, c, key, tier);
+      if (reason !== "evicted") continue;
       const entry =
         this.chunkStore.findByImageChunk(imageId, c, key) ??
         this.overviewStore.findByImageChunk(imageId, c, key);
@@ -989,22 +1021,20 @@ export class CpuCache {
         traceRecorder.recordPointEvent(PointEvent.Eviction, reason, entry, eventTier(entry));
       }
     }
-    for (const key of skipped) {
-      this.deliveryState.clearChunkSent(imageId, c, key);
-      const entry =
-        this.chunkStore.findByImageChunk(imageId, c, key) ??
-        this.overviewStore.findByImageChunk(imageId, c, key);
-      this.markRejected(entry?.entityId ?? imageId, key);
-    }
   }
 
+  /**
+   * The render worker's wanted set lists a chunk as not held. Returns
+   * whether the residency mirror held it: a disagreement between the two
+   * records, after which the chunk may be sent again.
+   */
   markChunkMissing(
     imageId: string,
     c: number,
     chunkKey: string,
-    tier?: ResidencyTier,
-  ): void {
-    this.deliveryState.clearChunkSent(imageId, c, chunkKey, tier);
+    tier: ResidencyTier,
+  ): boolean {
+    return this.deliveryState.markChunkMissing(imageId, c, chunkKey, tier);
   }
 
   markProxyMissing(key: string): void {

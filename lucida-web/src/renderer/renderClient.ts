@@ -27,7 +27,7 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type {
   UploadClient,
-  ChunksEvictedHandler,
+  ChunkResidencyHandler,
   WantedSetHandler,
 } from "../pipeline/upload/uploadClient.ts";
 import { tokenColor } from "../theme/tokenColors.ts";
@@ -97,7 +97,7 @@ export class RenderClient implements UploadClient {
   private frameSeq = 0;
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
-  onChunksEvicted: ChunksEvictedHandler | null = null;
+  onChunkResidency: ChunkResidencyHandler | null = null;
   /** Missing entries cover chunks and proxies; match on `kind`. */
   onWantedSetDelta: WantedSetHandler | null = null;
   /**
@@ -268,8 +268,8 @@ export class RenderClient implements UploadClient {
     }
     if (msg.type === "intensityRange" && this.onIntensityRange) {
       this.onIntensityRange(msg.datasetId, msg.min, msg.max);
-    } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
-      this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
+    } else if (msg.type === "chunkResidency" && this.onChunkResidency) {
+      this.onChunkResidency(msg);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
     } else if (msg.type === "entityLevels") {
