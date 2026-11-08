@@ -3,12 +3,8 @@
 
 import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
 import type { GeneratedChunkStatus } from "../generatedAvailability.ts";
-import type { ProxyKind } from "../assetCatalog.ts";
-import { parseProxyHeader, proxyResponseKey, type ProxyHeaderJs } from "./wireProtocol.ts";
 import { FetchError } from "./retry.ts";
 import type { WireLabel } from "../../trace/types.ts";
-
-export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
 /**
  * Failure statuses the server unicasts for a source chunk request it answers
@@ -88,28 +84,9 @@ export interface FetchResult {
   dataType: string;
 }
 
-export interface FetchProxyRequest {
-  datasetId: string;
-  entityId: string;
-  kind: ProxyKind;
-  t: number;
-  c: number;
-}
-
-export interface FetchProxyResult {
-  header: ProxyHeaderJs;
-  /** Raw u16 voxel bytes (little-endian), length `dims[0]*dims[1]*dims[2]*2`. */
-  data: ArrayBuffer;
-}
-
 export interface ContentSource {
   fetch(request: FetchRequest, signal: AbortSignal, onLabel?: LabelSink): Promise<FetchResult>;
-  fetchProxy(
-    request: FetchProxyRequest,
-    signal: AbortSignal,
-    onLabel?: LabelSink,
-  ): Promise<FetchProxyResult>;
-  /** Owns the chunk-vs-proxy dispatch so the transport stays generic. */
+  /** A binary chunk frame off the socket, keyed by its composite chunk key. */
   handleBinary(key: string, data: ArrayBuffer): void;
 }
 
@@ -123,8 +100,6 @@ export interface ContentSource {
  * work.
  */
 export const DEFAULT_TIMEOUT_MS = 10_000;
-/** Proxies can take longer to generate than chunks. */
-const DEFAULT_PROXY_TIMEOUT_MS = 60_000;
 
 /**
  * Told the correlation label the request rode on, synchronously at fetch
@@ -152,38 +127,29 @@ interface PendingRequest {
   timeoutId: ReturnType<typeof setTimeout>;
 }
 
-interface PendingProxyRequest {
-  resolve: (data: ArrayBuffer) => void;
-  reject: (err: Error) => void;
-  timeoutId: ReturnType<typeof setTimeout>;
-}
-
 export class ProxiedContentSource implements ContentSource {
   private pending = new Map<string, PendingGroup>();
   /**
-   * The connection's label counter, shared by chunk and asset requests.
-   * Uniqueness is across the connection, not within a family: a label that
-   * is ambiguous until you also know the message type is not a join key.
-   * Gaps in either family's sequence are harmless — nothing derives order
-   * from contiguity.
+   * The connection's label counter. Uniqueness is across the connection:
+   * gaps in the sequence are harmless, since nothing derives order from
+   * contiguity.
    */
   private nextRid = 0;
   private connectionGeneration = 0;
-  private pendingProxy = new Map<string, PendingProxyRequest>();
+  /**
+   * Labels of chunk requests no caller wants any more, sent as one
+   * `chunk_cancel` once the current task is done: a replan aborts many
+   * requests at once, and one message each would rival the requests.
+   */
+  private cancelledRids: number[] = [];
   private imageWireFormats = new Map<string, WireFormat>();
 
   private sendMessage: (json: string) => void;
   private timeoutMs: number;
-  private proxyTimeoutMs: number;
 
-  constructor(
-    sendMessage: (json: string) => void,
-    timeoutMs = DEFAULT_TIMEOUT_MS,
-    proxyTimeoutMs = DEFAULT_PROXY_TIMEOUT_MS,
-  ) {
+  constructor(sendMessage: (json: string) => void, timeoutMs = DEFAULT_TIMEOUT_MS) {
     this.sendMessage = sendMessage;
     this.timeoutMs = timeoutMs;
-    this.proxyTimeoutMs = proxyTimeoutMs;
   }
 
   /**
@@ -194,6 +160,9 @@ export class ProxiedContentSource implements ContentSource {
   resetConnection(generation: number): void {
     this.connectionGeneration = generation;
     this.nextRid = 0;
+    // The old connection's labels mean nothing on the new one, and the
+    // server dropped that connection's requests when it closed.
+    this.cancelledRids = [];
   }
 
   registerImage(imageId: string, wireFormat: WireFormat): void {
@@ -210,13 +179,12 @@ export class ProxiedContentSource implements ContentSource {
     }
   }
 
-  /** Sniffs `proxy/` prefix to dispatch chunk vs proxy. */
   handleBinary(key: string, data: ArrayBuffer): void {
-    if (key.startsWith("proxy/")) {
-      this.handleProxyData(key, data);
-    } else {
-      this.handleChunkData(key, data);
-    }
+    const entries = this.takePending(key);
+    entries.forEach((entry, idx) => {
+      clearTimeout(entry.timeoutId);
+      entry.resolve(idx === 0 ? data : data.slice(0));
+    });
   }
 
   handleChunkStatus(
@@ -258,36 +226,19 @@ export class ProxiedContentSource implements ContentSource {
     }
   }
 
-  handleChunkData(key: string, data: ArrayBuffer): void {
-    const entries = this.takePending(key);
-    entries.forEach((entry, idx) => {
-      clearTimeout(entry.timeoutId);
-      entry.resolve(idx === 0 ? data : data.slice(0));
-    });
-  }
-
-  handleProxyData(key: string, data: ArrayBuffer): void {
-    const entry = this.pendingProxy.get(key);
-    if (entry) {
-      clearTimeout(entry.timeoutId);
-      this.pendingProxy.delete(key);
-      entry.resolve(data);
-    }
-  }
-
   /** Treated as `abort` downstream; matches caller-driven cancellation. */
   rejectDataset(datasetId: string): void {
     const prefix = datasetId + "/";
     for (const [key, group] of this.pending) {
       if (key.startsWith(prefix)) {
         this.pending.delete(key);
+        this.cancel(group.label);
         for (const entry of group.entries) {
           clearTimeout(entry.timeoutId);
           entry.reject(new FetchError("Dataset removed", { kind: "abort" }));
         }
       }
     }
-    // Proxy keys aren't dataset-scoped — entity IDs are unique enough.
   }
 
   /** Transient so the cache's `OnceTransientRetry` covers the reconnect. */
@@ -299,11 +250,6 @@ export class ProxiedContentSource implements ContentSource {
       }
     }
     this.pending.clear();
-    for (const [, entry] of this.pendingProxy) {
-      clearTimeout(entry.timeoutId);
-      entry.reject(new FetchError("Bridge disconnected", { kind: "transient" }));
-    }
-    this.pendingProxy.clear();
   }
 
   fetch(request: FetchRequest, signal: AbortSignal, onLabel?: LabelSink): Promise<FetchResult> {
@@ -344,69 +290,11 @@ export class ProxiedContentSource implements ContentSource {
 
       signal.addEventListener("abort", () => {
         clearTimeout(pendingEntry.timeoutId);
-        this.removePending(compositeKey, pendingEntry);
+        // Only an abort tells the server to stop. A timed-out request is
+        // retried at once, and the retry rides the read still in flight.
+        const emptied = this.removePending(compositeKey, pendingEntry);
+        if (emptied) this.cancel(emptied);
         // Keep the AbortError shape for downstream `instanceof DOMException`.
-        reject(new DOMException("Aborted", "AbortError"));
-      });
-    });
-  }
-
-  /** First 64 bytes are the header; rest is the u16 voxel payload. */
-  fetchProxy(
-    request: FetchProxyRequest,
-    signal: AbortSignal,
-    onLabel?: LabelSink,
-  ): Promise<FetchProxyResult> {
-    const { datasetId, entityId, kind, t, c } = request;
-    const responseKey = proxyResponseKey(entityId, kind, t, c);
-
-    return new Promise<FetchProxyResult>((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
-        this.pendingProxy.delete(responseKey);
-        // Cache won't retry (NeverRetry) but the kind is still transient
-        // so consumers reason about kind uniformly.
-        reject(new FetchError(`Proxy ${responseKey} timed out`, { kind: "transient" }));
-      }, this.proxyTimeoutMs);
-
-      this.pendingProxy.set(responseKey, {
-        resolve: (raw) => {
-          clearTimeout(timeoutId);
-          let header: ProxyHeaderJs;
-          try {
-            header = parseProxyHeader(raw, 0);
-          } catch (e) {
-            // Malformed header → permanent.
-            const message = e instanceof Error ? e.message : String(e);
-            reject(new FetchError(message, { kind: "permanent", cause: e }));
-            return;
-          }
-          const data = raw.slice(64);
-          resolve({
-            header,
-            data,
-          });
-        },
-        reject: (err) => { clearTimeout(timeoutId); reject(err); },
-        timeoutId,
-      });
-
-      // Assets draw from the same counter as chunks, so the label is unique
-      // across the connection rather than within a family.
-      const label = this.mintLabel();
-      onLabel?.(label);
-      this.sendMessage(JSON.stringify({
-        type: "asset_request",
-        rid: label.rid,
-        dataset_id: datasetId,
-        entity_id: entityId,
-        kind,
-        t,
-        c,
-      }));
-
-      signal.addEventListener("abort", () => {
-        clearTimeout(timeoutId);
-        this.pendingProxy.delete(responseKey);
         reject(new DOMException("Aborted", "AbortError"));
       });
     });
@@ -428,17 +316,34 @@ export class ProxiedContentSource implements ContentSource {
     return { label, send: true };
   }
 
-  private removePending(key: string, entry: PendingRequest): void {
+  /** Returns the group's label when this caller was the last one in it. */
+  private removePending(key: string, entry: PendingRequest): WireLabel | null {
     const group = this.pending.get(key);
-    if (!group) return;
+    if (!group || !group.entries.includes(entry)) return null;
     const next = group.entries.filter((candidate) => candidate !== entry);
     if (next.length === 0) {
       this.pending.delete(key);
-    } else {
-      // The label stays with the group: the wire request it names is still
-      // in flight even though this caller has left.
-      this.pending.set(key, { label: group.label, entries: next });
+      return group.label;
     }
+    // The label stays with the group: the wire request it names is still
+    // in flight even though this caller has left.
+    this.pending.set(key, { label: group.label, entries: next });
+    return null;
+  }
+
+  private cancel(label: WireLabel): void {
+    if (label.connectionGeneration !== this.connectionGeneration) return;
+    if (this.cancelledRids.length === 0) {
+      queueMicrotask(() => this.flushCancels());
+    }
+    this.cancelledRids.push(label.rid);
+  }
+
+  private flushCancels(): void {
+    if (this.cancelledRids.length === 0) return;
+    const rids = this.cancelledRids;
+    this.cancelledRids = [];
+    this.sendMessage(JSON.stringify({ type: "chunk_cancel", rids }));
   }
 
   private takePending(key: string): PendingRequest[] {

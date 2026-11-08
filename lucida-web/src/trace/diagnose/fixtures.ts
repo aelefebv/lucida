@@ -159,7 +159,6 @@ export function makeTick(
       laneCoarse: 0,
       lanePrefetch: 0,
       laneOverview: 0,
-      proxyRequests: 0,
       plannedChunks: 0,
       cullingConsidered: 0,
       cullingAfterXyBounds: 0,
@@ -167,8 +166,6 @@ export function makeTick(
       cullingAfterFrustum: 0,
       catalogDegradations: 0,
       activeSetTotal: 0,
-      activeSetGroupAsProxy: 0,
-      activeSetTilesProxyFallback: 0,
       activeSetTilesDetail: 0,
     },
     counted: {
@@ -208,7 +205,7 @@ export function makeHeader(overrides: Partial<RunHeader> = {}): RunHeader {
     composedView: { url: "/w/ws-1?d=set", mode: "slice" },
     devicePixelRatio: 2,
     viewport: { cssWidth: 1440, cssHeight: 900, deviceWidth: 2880, deviceHeight: 1800 },
-    cacheWarmth: { detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0 },
+    cacheWarmth: { detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0 },
     schemaVersion: TRACE_SCHEMA_VERSION,
     runId: "run-1",
     cause: { epoch: "content", dirtyKind: "interactive", source: "dataset_added" },
@@ -576,7 +573,6 @@ export function firstPaintOpen(slow: FrameBoundPhase = "present", spec: FirstPai
               detailBytes: 40 * 8_192,
               coarseChunks: 4,
               coarseBytes: 4 * 8_192,
-              proxyBytes: 0,
             },
           }
         : {}),

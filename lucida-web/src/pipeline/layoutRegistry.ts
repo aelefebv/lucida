@@ -3,7 +3,7 @@
  * read them without a JSON round-trip per render. Rust/WASM is the
  * authority: every mutation applies locally through `apply_command` and is
  * also sent to peers. Derived-layout specs are stored here because
- * `available_layouts` returns only id and name.
+ * `available_layouts` returns no placements.
  */
 
 import type { LayoutSpec } from "../manifestTypes.ts";

@@ -8,18 +8,19 @@ import {
 } from "../../components/channels.ts";
 import { rampGradient } from "../../components/colormapSwatch.ts";
 import type { LayerInfo } from "../../components/LayerPanel.tsx";
+import type { ResolvedLayers } from "../../resolvedLayers.ts";
 import { watchLongPress } from "../../ui/longPress.ts";
 import "./ChannelChips.css";
 
 export interface ChannelChipsProps {
   layers: readonly LayerInfo[];
   selectedLayerId: string | null;
-  /** The channel shown alone, or `null` for the composite. */
-  soloChannel: number | null;
+  /** What each layer shows, from the scene; a layer's `solo` drives the chips. */
+  resolvedLayers: ResolvedLayers;
   onChannelSetVisible: (id: string, channel: number, visible: boolean) => void;
-  /** Solo a channel, or return to the composite when it is already soloed. */
-  onSoloChannel: (channel: number) => void;
-  onShowAllChannels: () => void;
+  /** Solo a channel of a layer, or return it to its composite when already soloed. */
+  onSoloChannel: (id: string, channel: number) => void;
+  onShowAllChannels: (id: string) => void;
 }
 
 /**
@@ -28,10 +29,11 @@ export interface ChannelChipsProps {
  * panel's eye and its Solo item do. Nothing shows for a single channel.
  */
 export function ChannelChips(props: ChannelChipsProps) {
-  const { layers, selectedLayerId, soloChannel } = props;
+  const { layers, selectedLayerId, resolvedLayers } = props;
   const hintId = useId();
   const layer = channelShortcutTarget(layers, selectedLayerId);
   if (!layer) return null;
+  const soloChannel = resolvedLayers.get(layer.id)?.solo ?? null;
   const visible = layer.channels.map((channel) => channel.visible);
   return (
     <div className="lc-channel-chips" role="group" aria-label={`${layer.name} channels`}>
@@ -44,7 +46,7 @@ export function ChannelChips(props: ChannelChipsProps) {
           solo={soloChannel === i}
           describedBy={hintId}
           onToggle={() => applyChannelToggle(layer, soloChannel, i, props)}
-          onSolo={() => props.onSoloChannel(i)}
+          onSolo={() => props.onSoloChannel(layer.id, i)}
         />
       ))}
       <span id={hintId} hidden>

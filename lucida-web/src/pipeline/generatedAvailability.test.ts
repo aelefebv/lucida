@@ -150,6 +150,27 @@ describe("GeneratedAvailabilityCatalog", () => {
     catalog.applySnapshot("ds-1", generatedSnapshot());
     catalog.removeDataset("ds-1");
 
-    expect(catalog.snapshot("ds-1")).toEqual({ levels: [], chunks: [] });
+    expect(catalog.snapshot("ds-1")).toEqual({ levels: [], chunks: [], histograms: [] });
+  });
+
+  it("keeps one histogram per timepoint and channel, the latest sent", () => {
+    const catalog = new GeneratedAvailabilityCatalog();
+    const histogram = (t: number, c: number, count: number) => ({
+      image_id: "img-1",
+      level_index: 1,
+      t,
+      c,
+      bins: [[7, 7, count]] as const,
+    });
+    catalog.applySnapshot("ds-1", { histograms: [histogram(0, 0, 1)] });
+    catalog.applyDelta("ds-1", { chunks: [], histograms: [histogram(0, 1, 2), histogram(0, 0, 3)] });
+
+    expect(catalog.histogram("ds-1", "img-1", 1, 0, 0)).toEqual(histogram(0, 0, 3));
+    expect(catalog.histogram("ds-1", "img-1", 1, 0, 1)).toEqual(histogram(0, 1, 2));
+    expect(catalog.histogram("ds-1", "img-1", 1, 1, 0)).toBeUndefined();
+    expect(catalog.histogram("ds-2", "img-1", 1, 0, 0)).toBeUndefined();
+    expect(catalog.snapshot("ds-1").histograms).toHaveLength(2);
+    catalog.removeDataset("ds-1");
+    expect(catalog.histogram("ds-1", "img-1", 1, 0, 0)).toBeUndefined();
   });
 });

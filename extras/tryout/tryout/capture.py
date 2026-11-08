@@ -1,7 +1,7 @@
 """Report record shape + on-disk artifact writes — the one writer.
 
-The harness produces machine-readable records for the human verifier (user story
-2): ``DIR/server.log`` (written live by :class:`tryout.server.ServerProcess`),
+The harness produces machine-readable records for the human verifier:
+``DIR/server.log`` (written live by :class:`tryout.server.ServerProcess`),
 ``DIR/up.json`` / ``DIR/drive.json`` (the same record printed to stdout under
 ``--json``), and ``report.html`` / ``report.md``. This module owns BOTH the
 record *shape* (:func:`build_record`, so the stdout object and the on-disk file
@@ -16,8 +16,8 @@ are identical) AND the *writes*:
     (``report.html`` / ``report.md``), best-effort but loud on failure; the
     single text-artifact writer.
 
-Centralizing the writes here replaces the parallel ``_safe_write_*`` copies that
-each module used to carry.
+Every module writes through the two writers, so none keeps its own
+``_safe_write_*`` copy.
 """
 
 from __future__ import annotations

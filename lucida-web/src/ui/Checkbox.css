@@ -1,0 +1,47 @@
+.lc-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--lc-space-1);
+  min-height: var(--lc-target-min);
+  color: var(--lc-text);
+  outline: none;
+  cursor: default;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.lc-checkbox-box {
+  --lc-checkbox-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  box-sizing: border-box;
+  width: var(--lc-checkbox-size);
+  height: var(--lc-checkbox-size);
+  border: 1px solid var(--lc-text-subtle);
+  border-radius: var(--lc-radius-sm);
+  background: var(--lc-field-bg);
+  color: transparent;
+  transition:
+    background-color var(--lc-motion-fast) var(--lc-ease),
+    border-color var(--lc-motion-fast) var(--lc-ease);
+}
+
+.lc-checkbox[data-hovered] .lc-checkbox-box:not([data-selected]) {
+  border-color: var(--lc-text-muted);
+}
+
+.lc-checkbox-box[data-selected] {
+  border-color: var(--lc-accent);
+  background: var(--lc-accent);
+  color: var(--lc-text-on-accent);
+}
+
+.lc-checkbox[data-focus-visible] .lc-checkbox-box {
+  outline: 2px solid var(--lc-focus-ring);
+  outline-offset: 2px;
+}
+
+.lc-checkbox[data-disabled] {
+  opacity: 0.45;
+}

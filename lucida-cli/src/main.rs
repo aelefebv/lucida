@@ -23,14 +23,10 @@ mod view_properties;
 mod watch;
 mod workspace;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
-use flate2::Compression;
-use flate2::write::GzEncoder;
 use lucida_core::command::ViewportCommand;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{BlendMode, Colormap, RenderMode};
@@ -39,9 +35,8 @@ use lucida_protocol::DatasetSourceHealth;
 use serde_json::Value;
 
 use crate::admin::{
-    AdminClearProxyCacheOutput, AdminClient, AdminWorkspaceDetailsOutput,
-    AdminWorkspaceOwnerOutput, AdminWorkspaceSearchOutput, REMOTE_ADMIN_SCOPE,
-    format_admin_clear_proxy_cache_human, format_admin_workspace_details_human,
+    AdminClient, AdminWorkspaceDetailsOutput, AdminWorkspaceOwnerOutput,
+    AdminWorkspaceSearchOutput, REMOTE_ADMIN_SCOPE, format_admin_workspace_details_human,
     format_admin_workspace_owner_human, format_admin_workspace_search_human,
 };
 use crate::auth::{
@@ -467,12 +462,6 @@ enum AdminCommand {
         #[command(subcommand)]
         command: AdminWorkspaceCommand,
     },
-    /// Clear the remote server proxy cache
-    ClearProxyCache {
-        /// Dataset URL to clear. Omit to clear every cached dataset.
-        #[arg(long)]
-        dataset: Option<String>,
-    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -679,7 +668,7 @@ enum ViewCommand {
         #[arg(long, allow_hyphen_values = true)]
         y: f64,
     },
-    /// Set one selected dimension index
+    /// Set one selected dimension index. Channels are per layer: see `channel solo`
     Slice { axis: SliceAxis, index: u32 },
     /// Set the selected Z slab range
     ZRange { start: u32, end: u32 },
@@ -707,7 +696,6 @@ impl ViewCommand {
             ViewCommand::Slice { axis, index } => match axis {
                 SliceAxis::Z => ViewportCommand::SetZ { z: *index },
                 SliceAxis::T => ViewportCommand::SetT { t: *index },
-                SliceAxis::C => ViewportCommand::SetC { c: *index },
             },
             ViewCommand::ZRange { start, end } => {
                 if end <= start {
@@ -740,7 +728,6 @@ impl ViewCommand {
 enum SliceAxis {
     Z,
     T,
-    C,
 }
 
 #[derive(Subcommand, Debug)]
@@ -980,8 +967,12 @@ impl LayerCommand {
 
 #[derive(Subcommand, Debug)]
 enum ChannelCommand {
-    /// Switch single-channel or multichannel rendering mode
-    Mode { mode: ChannelMode },
+    /// Show one channel of a dataset alone, or its composite without CHANNEL.
+    /// Other datasets keep what they show
+    Solo {
+        dataset: String,
+        channel: Option<u32>,
+    },
     /// Show a dataset channel
     Show { dataset: String, channel: u32 },
     /// Hide a dataset channel
@@ -1017,16 +1008,16 @@ enum ChannelCommand {
 
 #[derive(Debug)]
 enum ChannelCommandAction {
-    Viewport(ViewportCommand),
     Dataset(DatasetDisplayCommand),
 }
 
 impl ChannelCommand {
     fn action(&self) -> Result<ChannelCommandAction, CliError> {
         Ok(match self {
-            ChannelCommand::Mode { mode } => {
-                ChannelCommandAction::Viewport(ViewportCommand::SetMultiChannel {
-                    enabled: *mode == ChannelMode::Multi,
+            ChannelCommand::Solo { dataset, channel } => {
+                ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelSolo {
+                    selector: dataset.clone(),
+                    channel: *channel,
                 })
             }
             ChannelCommand::Show { dataset, channel } => {
@@ -1190,9 +1181,10 @@ struct TraceRunArgs {
     /// its memory budgets to it, as `navigator.deviceMemory` does
     #[arg(long, value_name = "GIB", value_parser = trace::parse_device_memory)]
     device_memory: Option<f64>,
-    /// Show every visible channel at once, as the viewer opens a multichannel
-    /// image, instead of the current channel alone
-    #[arg(long)]
+    /// Accepted so older scripts still run. Every layer opens in its
+    /// composite, so it changes nothing.
+    #[arg(long, hide = true)]
+    #[allow(dead_code)]
     multi_channel: bool,
     /// Write the run here instead of the trace directory beside the config
     #[arg(long, short, value_name = "PATH")]
@@ -1436,12 +1428,6 @@ enum DebugCommand {
     State,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum ChannelMode {
-    Single,
-    Multi,
-}
-
 #[derive(Subcommand, Debug)]
 enum LayoutCommand {
     /// List available source and registered layouts
@@ -1669,8 +1655,24 @@ enum ConfigGetCommand {
     Workspace,
 }
 
+/// The stack the CLI runs on. An unoptimized build gives every arm of `run`
+/// and of the command functions it calls its own stack slots, so one poll of
+/// a socket command takes over 1 MiB, the stack Windows gives a main thread.
+const CLI_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn main() {
+    let cli = std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(cli_main)
+        .expect("spawn the CLI thread");
+    if let Err(panic) = cli.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[tokio::main]
-async fn main() {
+async fn cli_main() {
     let cli = Cli::parse();
     let json_errors = cli.json;
     if let Err(error) = run(cli).await {
@@ -2429,7 +2431,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 // read a window, fall back to per-cell auto.
                 let mid = plan.cells.len() / 2;
                 let probe_saved =
-                    montage::build_cell_view(&ds_id, &plan.cells[mid], viewport, None);
+                    montage::build_cell_view(&ds_id, &plan.cells[mid], viewport, None, dims[1]);
                 let probe_url =
                     montage::with_render_param(&viewer_inline_view_web_url(&target, &probe_saved)?);
                 const BG_CLIP: f64 = 0.3;
@@ -2451,7 +2453,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 for (index, cell) in plan.cells.iter().enumerate() {
                     // Same shared window for the sidecar drill-in URL and the
                     // captured thumbnail, so drilling in matches the montage.
-                    let saved = montage::build_cell_view(&ds_id, cell, viewport, shared_contrast);
+                    let saved =
+                        montage::build_cell_view(&ds_id, cell, viewport, shared_contrast, dims[1]);
                     let url = viewer_inline_view_web_url(&target, &saved)?;
                     cell_json.push(serde_json::json!({
                         "index": index,
@@ -2460,7 +2463,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         // no counting: cell at (row, col) == cells[row*cols + col].
                         "row": index as u32 / plan.cols.max(1),
                         "col": index as u32 % plan.cols.max(1),
-                        "z": cell.z, "t": cell.t, "c": cell.c, "tile": cell.tile,
+                        "z": cell.z, "t": cell.t, "tile": cell.tile,
                         "label": cell.label,
                         "url": url,
                     }));
@@ -2708,18 +2711,6 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             timeout_seconds,
             command,
         } => match command.action()? {
-            ChannelCommandAction::Viewport(command) => {
-                emit_viewport_command(
-                    &cli,
-                    &config,
-                    output,
-                    command,
-                    viewer_profile,
-                    *from_peer,
-                    *timeout_seconds,
-                )
-                .await?;
-            }
             ChannelCommandAction::Dataset(command) => {
                 emit_dataset_presence_command(
                     &cli,
@@ -2939,20 +2930,6 @@ async fn emit_admin_command(
                 })?;
             }
         },
-        AdminCommand::ClearProxyCache { dataset } => {
-            let result = client.clear_proxy_cache(dataset.as_deref()).await?;
-            let output_payload = AdminClearProxyCacheOutput {
-                scope: REMOTE_ADMIN_SCOPE,
-                server,
-                dataset: dataset.clone(),
-                cleared: result.cleared,
-                datasets: result.datasets,
-                files: result.files,
-            };
-            output.print_either(&output_payload, || {
-                format_admin_clear_proxy_cache_human(&output_payload)
-            })?;
-        }
     }
 
     Ok(())
@@ -4140,7 +4117,6 @@ async fn run_trace(
     };
     let mut view =
         trace::compose_dataset_view(&dataset_url, args.width, args.height, pin_contrast_for);
-    view.view.multi_channel = args.multi_channel;
     let pins = trace::DisplayPins {
         contrast: args
             .contrast
@@ -4316,7 +4292,7 @@ async fn run_replay(
             width: plan.width,
             height: plan.height,
             device_pixel_ratio: plan.device_pixel_ratio,
-            device_memory_gib: None,
+            device_memory_gib: plan.device_memory_gib,
             camera: None,
         },
         server_warmth: warmth,
@@ -4483,25 +4459,11 @@ fn viewer_inline_view_web_url(
     target: &WorkspaceTarget,
     saved_view: &SavedView,
 ) -> Result<String, CliError> {
-    let payload = encode_saved_view_url_payload(saved_view)?;
+    let payload = saved_view.to_payload();
     let mut url = reqwest::Url::parse(&target.web_url)
         .map_err(|error| CliError::invalid_server(format!("invalid workspace URL: {error}")))?;
     url.set_fragment(Some(&format!("view={payload}")));
     Ok(url.to_string())
-}
-
-/// A view as the page carries one in a URL fragment: gzip, then base64url
-/// without padding. Generic so the trace driver can encode a view it holds
-/// as JSON, as the page handed it over, without reading it into a `SavedView`
-/// first and losing whatever fields this build does not know.
-pub(crate) fn encode_saved_view_url_payload<T: serde::Serialize + ?Sized>(
-    saved_view: &T,
-) -> Result<String, CliError> {
-    let json = serde_json::to_vec(saved_view)?;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&json)?;
-    let gz = encoder.finish()?;
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(gz))
 }
 
 async fn capture_viewer_screenshot(
@@ -4785,7 +4747,6 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use serde_json::json;
-    use std::io::Read;
 
     fn parse(args: &[&str]) -> Cli {
         Cli::parse_from(std::iter::once("lucida").chain(args.iter().copied()))
@@ -5212,19 +5173,6 @@ mod tests {
                 },
             }
         ));
-
-        let clear = parse(&[
-            "admin",
-            "clear-proxy-cache",
-            "--dataset",
-            "file:///data/demo.ome.zarr",
-        ]);
-        match clear.command {
-            Command::Admin {
-                command: AdminCommand::ClearProxyCache { dataset },
-            } => assert_eq!(dataset.as_deref(), Some("file:///data/demo.ome.zarr")),
-            _ => panic!("expected admin clear-proxy-cache"),
-        }
     }
 
     #[test]
@@ -5442,7 +5390,7 @@ mod tests {
     #[test]
     fn explore_output_value_has_core_fields_plus_cli_additions() {
         // The dedup contract: the core sidecar carries `extent` + per-cell
-        // `z`/`t`/`c`, so the CLI no longer injects them — it only fills each
+        // `z`/`t`/`c`, so the CLI does not inject them — it only fills each
         // cell's `url` and adds the top-level `dataset`. This mirrors the handler
         // construction (explore → fill urls → to_value → add dataset) and asserts
         // the printed JSON has all of: extent, per-cell z/t/c, dataset, url.
@@ -5490,7 +5438,8 @@ mod tests {
         for (cell, src) in cells.iter().zip(sidecar.cells.iter()) {
             assert_eq!(cell["z"], serde_json::json!(src.view.view.z_range.start));
             assert_eq!(cell["t"], serde_json::json!(src.view.view.t));
-            assert_eq!(cell["c"], serde_json::json!(src.view.view.c));
+            let solo = src.view.dataset_settings.values().find_map(|s| s.solo);
+            assert_eq!(cell.get("c").and_then(|c| c.as_u64()), solo.map(u64::from));
             assert_eq!(cell["url"], serde_json::json!(src.url));
             assert!(
                 cell["url"].as_str().unwrap().contains("#view="),
@@ -5658,15 +5607,23 @@ mod tests {
 
     #[test]
     fn channel_commands_parse_and_map_to_presence_or_dataset_presence() {
-        let mode = parse(&["channel", "mode", "multi"]);
-        match mode.command {
-            Command::Channel { command, .. } => match command.action().unwrap() {
-                ChannelCommandAction::Viewport(ViewportCommand::SetMultiChannel { enabled }) => {
-                    assert!(enabled);
-                }
-                _ => panic!("expected multi-channel view command"),
-            },
-            _ => panic!("expected channel mode"),
+        for (args, expected) in [
+            (&["channel", "solo", "demo.zarr", "2"][..], Some(2)),
+            (&["channel", "solo", "demo.zarr"][..], None),
+        ] {
+            match parse(args).command {
+                Command::Channel { command, .. } => match command.action().unwrap() {
+                    ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelSolo {
+                        selector,
+                        channel,
+                    }) => {
+                        assert_eq!(selector, "demo.zarr");
+                        assert_eq!(channel, expected);
+                    }
+                    _ => panic!("expected a channel solo"),
+                },
+                _ => panic!("expected channel solo"),
+            }
         }
 
         let colormap = parse(&["channel", "colormap", "demo.zarr", "1", "viridis"]);
@@ -5881,8 +5838,8 @@ mod tests {
             _ => panic!("expected saved-view link"),
         }
 
-        // Promote defaults to shared (the #699 happy path) and accepts an
-        // explicit target visibility.
+        // Promote defaults to shared and accepts an explicit target
+        // visibility.
         let promote = parse(&["saved-view", "promote", "sv-1"]);
         match promote.command {
             Command::SavedView {
@@ -6016,23 +5973,6 @@ mod tests {
             }
             _ => panic!("expected viewer overview"),
         }
-    }
-
-    #[test]
-    fn saved_view_url_payload_is_gzip_base64url_json() {
-        let view = SavedView::empty([640, 480]);
-        let payload = encode_saved_view_url_payload(&view).unwrap();
-        assert!(!payload.contains(['+', '/', '=']));
-
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload)
-            .unwrap();
-        let mut decoder = flate2::read::GzDecoder::new(bytes.as_slice());
-        let mut json = String::new();
-        decoder.read_to_string(&mut json).unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["v"].as_u64(), Some(view.v as u64));
-        assert!(parsed["camera"].is_object());
     }
 
     #[test]
@@ -6293,7 +6233,7 @@ mod tests {
     }
 
     /// The bundle is opt-in like the other sidecars, and its Perfetto
-    /// projection is a second opt-in on top of it (#1055).
+    /// projection is a second opt-in on top of it.
     #[test]
     fn trace_writes_a_bundle_only_when_asked_and_its_projection_only_on_top_of_that() {
         match parse(&[
@@ -6390,7 +6330,7 @@ mod tests {
         assert!(try_parse(&["trace", "inbox", "fetch"]).is_err());
     }
 
-    /// The bundle header lists every field the replay needs (#1055): each
+    /// The bundle header lists every field the replay needs: each
     /// argument of `trace` that shapes the workload maps onto a header field
     /// the replay list names, and the rest are the sidecars and the deadline.
     /// An argument added to the command lands in one list or fails here.
@@ -6403,9 +6343,9 @@ mod tests {
             ("width", "viewport"),
             ("height", "viewport"),
             ("device_pixel_ratio", "devicePixelRatio"),
+            ("device_memory", "deviceMemoryGib"),
             ("camera", "viewUrl"),
             ("zoom", "viewUrl"),
-            ("multi_channel", "viewUrl"),
             ("contrast", "pins"),
             ("colormap", "pins"),
             ("render_mode", "pins"),
@@ -6413,17 +6353,15 @@ mod tests {
             ("pin_contrast", "pins"),
         ]);
         // The planning knobs replay through the header's planning
-        // configuration. The cache knobs have no header field: the panel's
-        // own edits to them die on reload, so a replay runs the cache at
-        // its defaults. Nor does the device memory: a replay runs at the
-        // memory of the machine it runs on.
-        let mut session_scoped = vec!["device_memory"];
+        // configuration. The cache knobs have no header field, so a replay
+        // runs the cache at its own values.
+        let mut not_in_header = vec![];
         for knob in trace_knobs::KNOBS {
             match knob.store {
                 trace_knobs::KnobStore::Planning => {
                     replayed_by.insert(knob.field, "planning");
                 }
-                trace_knobs::KnobStore::Cache => session_scoped.push(knob.field),
+                trace_knobs::KnobStore::Cache => not_in_header.push(knob.field),
             }
         }
         let not_workload = [
@@ -6436,6 +6374,8 @@ mod tests {
             "timeout_seconds",
             "gate",
             "help",
+            // Accepted and ignored: every layer opens in its composite.
+            "multi_channel",
             // A second workload, replayed from its own run's header.
             trace_knobs::VERSUS,
         ];
@@ -6461,7 +6401,7 @@ mod tests {
                     "{id} replays through {field}, which the replay list does not name"
                 ),
                 None if carried_by_script.contains(&id) => {}
-                None if session_scoped.contains(&id) => {}
+                None if not_in_header.contains(&id) => {}
                 None => assert!(
                     not_workload.contains(&id),
                     "{id} is neither a workload argument with a header field nor a sidecar"

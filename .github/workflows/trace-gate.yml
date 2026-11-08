@@ -57,8 +57,9 @@ jobs:
             type=gha,scope=trace-gate-server
           cache-to: type=gha,mode=min,scope=trace-gate-server
 
+      # From PyPI, as in the CI workflow's lucida-py job.
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        run: pipx install uv==0.13.7
 
       # The server opens each dataset by the path the CLI names, so the data
       # directory is mounted at the same path inside the container. Auth is

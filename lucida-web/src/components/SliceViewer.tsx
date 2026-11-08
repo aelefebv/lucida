@@ -15,6 +15,7 @@ import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { useCommand } from "../ui/commands.ts";
 import { pushEscapeLayer } from "../ui/escape.ts";
 import { comboFromEvent, useShortcut } from "../ui/shortcuts.ts";
+import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
 
 /** An arrow key pans by this share of the canvas's shorter side. */
 const KEY_PAN_FRACTION = 0.1;
@@ -48,7 +49,7 @@ interface Props {
   /** The canvas tool: pan, or the annotation shape a press draws. */
   tool: Tool;
   /** Stable, browser-persisted annotation-author identity, recorded as a pin's
-   * `author`. From `annotationAuthorId()`, not the per-connection `bridge.myId`,
+   * `author`. From `annotationAuthorId()`, not the per-connection `myId`,
    * so pins stay yours across leaving and rejoining a workspace. */
   myId: string;
   /** Send a wire command (already wrapped by the bridge). */
@@ -255,9 +256,10 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
           position: drawShape ? press.world : end,
           end: drawShape ? end : null,
           z: scene.z(),
-          // The overlay shows the pin off-context when the view's T/C differ.
+          // The overlay shows the pin off-context when the view's T differs or
+          // none of the channels its layer shows now did then.
           t: scene.t(),
-          c: scene.c(),
+          c: shownChannels(readResolvedLayers(scene).get(datasetId))[0],
           author: String(myIdRef.current),
           kind: drawShape ? kind : "point",
           ...(capturedView ? { view: capturedView } : {}),

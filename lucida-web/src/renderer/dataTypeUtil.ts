@@ -28,11 +28,14 @@ function decodedLayout(dataType: string): DecodedLayout {
     case "uint16":
     case "bool": return "u16";
     case "uint32": return "u32";
+    case "float16":
     case "float32":
     case "float64":
     case "int8":
     case "int16":
-    case "int32": return "f32";
+    case "int32":
+    case "int64":
+    case "uint64": return "f32";
     default: throw new Error(`unsupported data type: ${dataType}`);
   }
 }
@@ -55,15 +58,23 @@ export function datasetSampleFormat(manifest: DatasetManifest | undefined): Samp
 
 /**
  * True for the data types a float32 can't hold every value of, so they draw
- * at float32 precision: float64, and 32-bit integers past 2^24.
+ * at float32 precision: float64, and 32- and 64-bit integers past 2^24.
  */
 export function drawnAtFloat32Precision(dataType: string): boolean {
   switch (dataType.toLowerCase()) {
     case "float64":
     case "int32":
-    case "uint32": return true;
+    case "uint32":
+    case "int64":
+    case "uint64": return true;
     default: return false;
   }
+}
+
+/** Bytes one decoded sample takes in the page's cache (see `decode.worker.ts`). */
+export function decodedBytesPerSample(dataType: string): number {
+  const layout = decodedLayout(dataType);
+  return layout === "u8" ? 1 : layout === "u16" ? 2 : 4;
 }
 
 export function atlasTextureFormat(format: SampleFormat): SliceTextureFormat {
@@ -74,13 +85,19 @@ export function bytesPerTexel(format: SampleFormat): number {
   return format === "f32" ? 4 : 2;
 }
 
+/** The bytes one sample of a decoded chunk buffer takes. */
+export function decodedSampleBytes(dataType: string): number {
+  const layout = decodedLayout(dataType);
+  return layout === "u8" ? 1 : layout === "u16" ? 2 : 4;
+}
+
 /** View a decoded chunk buffer as its values, one array element per sample. */
 export function decodedValues(
   buf: ArrayBuffer,
   dataType: string,
 ): Uint8Array | Uint16Array | Uint32Array | Float32Array {
   const layout = decodedLayout(dataType);
-  const width = layout === "u8" ? 1 : layout === "u16" ? 2 : 4;
+  const width = decodedSampleBytes(dataType);
   if (buf.byteLength % width !== 0) {
     throw new Error(
       `${dataType} chunk byteLength ${buf.byteLength} is not a multiple of ${width} ` +

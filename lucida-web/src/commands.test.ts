@@ -234,7 +234,6 @@ const viewportCases: {
   set_z: { type: "set_z", z: 5 },
   set_z_range: { type: "set_z_range", start: 1, end: 4 },
   set_t: { type: "set_t", t: 2 },
-  set_c: { type: "set_c", c: 1 },
   set_contrast: { type: "set_contrast", min: 10, max: 5000 },
   set_gamma: { type: "set_gamma", gamma: 0.8 },
   set_dataset_order: { type: "set_dataset_order", order: [DS] },
@@ -262,7 +261,7 @@ const viewportCases: {
     dataset_id: DS,
     level: 1,
   },
-  set_multi_channel: { type: "set_multi_channel", enabled: true },
+  set_channel_solo: { type: "set_channel_solo", dataset_id: DS, channel: 1 },
   set_channel_visible: {
     type: "set_channel_visible",
     dataset_id: DS,
@@ -340,10 +339,17 @@ describe("command vocabulary: state-visible commands change the scene", () => {
     expect(scene.t()).toBe(2);
   });
 
-  it("set_c moves the channel selector", () => {
+  it("set_channel_solo solos one channel of the addressed layer", () => {
     const scene = freshScene();
-    apply(scene, viewportCases.set_c);
-    expect(scene.c()).toBe(1);
+    apply(scene, viewportCases.set_channel_solo);
+    const layers = JSON.parse(scene.resolved_layers()) as {
+      dataset_id: string;
+      solo: number | null;
+      channels: { channel: number }[];
+    }[];
+    const layer = layers.find((l) => l.dataset_id === DS);
+    expect(layer?.solo).toBe(1);
+    expect(layer?.channels.map((c) => c.channel)).toEqual([1]);
   });
 
   it("set_channel_contrast lands in the addressed channel's settings", () => {

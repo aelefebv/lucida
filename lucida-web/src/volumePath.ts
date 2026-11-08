@@ -1,15 +1,15 @@
 /** Volume render path: plan-based chunk upload + multi-pass render. */
 import { assertCanvasSize } from "./applyAndSend.ts";
-import { Axis } from "./axes.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
 import { computeScissorRect } from "./pipeline/upload/scissor.ts";
-import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
+import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
 import { labelModelMatrices } from "./renderer/labelLayout.ts";
-import { getActiveChannels, compositeKey } from "./tickCommon.ts";
+import { compositeKey } from "./tickCommon.ts";
 import type { DatasetSettings } from "./tickCommon.ts";
+import type { ResolvedLayers } from "./resolvedLayers.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
@@ -24,6 +24,12 @@ export interface LabelVolumeScene {
   inv_member_model_matrix(datasetId: string, memberId: string): Float32Array;
 }
 
+/** The level and chunk-T of a label that volume mode draws at source `t`, every Z of it. */
+function labelVolumeChunkAt(resolved: ResolvedLabel, t: number): { level: number; t: number } {
+  const chunk = labelChunkAt(resolved, t);
+  return { level: chunk.level, t: chunk.t };
+}
+
 /**
  * Append a first-hit overlay layer for each visible label, over the intensity
  * volume. The drawn set must match what {@link computeLabelChunkRequests}
@@ -36,23 +42,19 @@ export function pushLabelVolumeLayers(
   scene: LabelVolumeScene,
   datasetId: string,
   manifest: DatasetManifest,
-  members: MemberRosterEntry[],
   viewProj: Float32Array,
   canvasW: number,
   canvasH: number,
   labelSettings?: LabelViewSetting[],
+  t?: number,
 ): void {
   // `mode: "volume"` matches the volume fetch, so a label too large for a 3D
   // texture is skipped by both.
   for (const resolved of resolveVisibleLabels(manifest, labelSettings, { mode: "volume" })) {
     const { label, source, opacity } = resolved;
     const sourceImageId = label.source_image_id;
-    // Group-as-proxy roster entries carry their own matrices.
-    const sourceMember = members.find((m) => m.imageId === sourceImageId);
-    const sourceModel = sourceMember?.modelMatrix
-      ?? new Float32Array(scene.member_model_matrix(datasetId, sourceImageId));
-    const sourceInv = sourceMember?.invModelMatrix
-      ?? new Float32Array(scene.inv_member_model_matrix(datasetId, sourceImageId));
+    const sourceModel = new Float32Array(scene.member_model_matrix(datasetId, sourceImageId));
+    const sourceInv = new Float32Array(scene.inv_member_model_matrix(datasetId, sourceImageId));
     // Scale to the label's own extent so a differently scaled label stays
     // aligned (the 3D analog of `labelFootprint`).
     const { model, inv } = labelModelMatrices(
@@ -73,6 +75,7 @@ export function pushLabelVolumeLayers(
       isLabel: true,
       opacity,
       labelColors: label.colors,
+      labelChunk: t === undefined ? undefined : labelVolumeChunkAt(resolved, t),
       modelMatrix: model,
       invModelMatrix: inv,
     });
@@ -87,14 +90,12 @@ export function createVolumeState(): VolumeState { return {}; }
 interface PlanResult {
   memberRoster: Map<string, MemberRosterEntry[]>;
   settings: { layerOrder: string[]; allSettings: Record<string, DatasetSettings> };
+  layers: ResolvedLayers;
   eye: Float32Array;
   canvasW: number;
   canvasH: number;
   fullW: number;
   fullH: number;
-  viewT: number;
-  viewC: number;
-  multiChannel: boolean;
   epochs: SceneEpochs;
   /** Per-dataset memberId → entity index map. */
   entityIndexByDataset: Map<string, Map<string, number>>;
@@ -112,7 +113,7 @@ function uploadAndRenderVolume(
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, datasets } = ctx;
-  const { memberRoster, settings, eye, canvasW, canvasH, fullW, fullH, viewT, viewC, multiChannel, entityIndexByDataset } = plan;
+  const { memberRoster, settings, layers: resolvedLayers, eye, canvasW, canvasH, fullW, fullH, entityIndexByDataset } = plan;
   const { layerOrder, allSettings } = settings;
 
   const budgetExhausted = uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, null);
@@ -131,61 +132,32 @@ function uploadAndRenderVolume(
     const dsVol = datasets.get(dsId);
     if (!dsVol) continue;
     const dsSettings = allSettings[dsId];
-    if (!dsSettings || !dsSettings.visible) continue;
-
-    const dsShapeV = dsVol.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
+    const resolved = resolvedLayers.get(dsId);
+    if (!dsSettings || !resolved || !resolved.visible) continue;
 
     const members = memberRoster.get(dsId)
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
     const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
 
-    if (multiChannel) {
-      const activeChannels = getActiveChannels(dsSettings);
-      const channelBlend = dsSettings.channel_blend_mode as "alpha" | "additive" | "max" || "additive";
-
-      for (const ch of activeChannels) {
-        if (ch >= dsShapeV[Axis.C] || viewT >= dsShapeV[Axis.T]) continue;
-
-        for (const m of members) {
-          const compKey = compositeKey(m.imageId, ch);
-          // The descriptor holds the model matrix, but the CPU needs it too
-          // for the scissor projection.
-          const model = m.modelMatrix
-            ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
-
-          const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
-          if (!scissorRect) continue; // group fully off-screen
-
-          const entityIndex = indexByMember.get(compKey);
-          if (entityIndex === undefined) continue;
-
-          layers.push({
-            datasetId: compKey,
-            blendMode: channelBlend,
-            renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
-            scissorRect,
-            entityId: m.entityId,
-            entityIndex,
-          });
-        }
-      }
-    } else {
-      if (viewC >= dsShapeV[Axis.C] || viewT >= dsShapeV[Axis.T]) continue;
-
+    // A layer past the scene's t draws its clamped timepoint, which the plan
+    // already asked for.
+    for (const ch of resolved.channels) {
       for (const m of members) {
-        const model = m.modelMatrix
-          ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
+        const compKey = compositeKey(m.imageId, ch.channel);
+        // The descriptor holds the model matrix, but the CPU needs it too
+        // for the scissor projection.
+        const model = new Float32Array(scene.member_model_matrix(dsId, m.imageId));
 
         const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
         if (!scissorRect) continue; // group fully off-screen
 
-        const entityIndex = indexByMember.get(m.imageId);
+        const entityIndex = indexByMember.get(compKey);
         if (entityIndex === undefined) continue;
 
         layers.push({
-          datasetId: m.imageId,
-          blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
-          renderMode: (dsSettings.render_mode || "translucent") as "translucent" | "max_intensity",
+          datasetId: compKey,
+          blendMode: ch.blend_mode,
+          renderMode: resolved.render_mode,
           scissorRect,
           entityId: m.entityId,
           entityIndex,
@@ -197,11 +169,11 @@ function uploadAndRenderVolume(
       scene,
       dsId,
       dsVol.manifest,
-      members,
       viewProj,
       canvasW,
       canvasH,
       dsSettings.label_settings,
+      resolved.t,
     );
   }
 
@@ -244,14 +216,11 @@ export function tickVolume(
   // The eye drives the shader's ray-march; `rayHitLocal` is residency-only.
   const eye = new Float32Array(scene.eye_position());
 
-  const viewT = scene.t();
-  const viewC = scene.c();
-
   const planResult: PlanResult = {
     memberRoster: orchResult.memberRoster,
     settings: orchResult.settings,
-    eye, canvasW, canvasH, fullW, fullH, viewT, viewC,
-    multiChannel: orchResult.multiChannel,
+    layers: orchResult.layers,
+    eye, canvasW, canvasH, fullW, fullH,
     epochs: orchResult.epochs,
     entityIndexByDataset: orchResult.entityIndexByDataset,
   };

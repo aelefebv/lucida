@@ -45,8 +45,6 @@ export function lanes(overrides: Partial<LaneOutstanding> = {}): LaneOutstanding
   return {
     inFlight: { detail: 6, coarse: 1, minimap: 0, prefetch: 2, overview: 0 },
     pending: { detail: 40, coarse: 0, minimap: 3, prefetch: 120, overview: 0 },
-    proxyInFlight: 0,
-    proxyPending: 0,
     pendingTotal: 163,
     pendingUnclassified: false,
     pendingScanCap: 4096,
@@ -62,7 +60,6 @@ export function gpuReport(overrides: Partial<GpuMemoryReport> = {}): GpuMemoryRe
     bytes,
     chunkBytes: bytes,
     labelBytes: 0,
-    proxyBytes: 0,
     targetBytes: 0,
     minimapBytes: 0,
     atlases: 0,
@@ -85,7 +82,6 @@ export function hudSample(atMs: number, overrides: Partial<HudSample> = {}): Hud
     pools: {
       main: { bytes: 128 * MIB, budgetBytes: 512 * MIB },
       overview: { bytes: 63 * MIB, budgetBytes: 64 * MIB },
-      proxy: { bytes: 0, budgetBytes: 256 * MIB },
     },
     gpuMemory: null,
     levels: [
@@ -161,7 +157,6 @@ export function fakeCache(): HudCacheReads & { calls: number } {
       return {
         main: { bytes: 5 * MIB, budgetBytes: 512 * MIB },
         overview: { bytes: 1 * MIB, budgetBytes: 64 * MIB },
-        proxy: { bytes: 0, budgetBytes: 256 * MIB },
       };
     },
     laneOutstanding(out: LaneOutstanding) {
@@ -185,7 +180,7 @@ export function makeRecorder() {
   });
   recorder.setEnvironment({
     captureWarmth: () => ({
-      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
     }),
     captureConditions: () => ({
       datasetIds: ["ds"],

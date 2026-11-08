@@ -15,7 +15,6 @@ import {
   applyColdStateSelection,
   applyColdStateDelta,
 } from "../coldState/index.ts";
-import { handleProxyUpload } from "../proxy/index.ts";
 import {
   handleLabelSliceChunkData,
   handleSliceChunkData,
@@ -34,10 +33,10 @@ import {
   handleMinimapUploadOverviewChunks,
   handleThumbnailRender,
 } from "../minimapHandlers.ts";
-import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
 import { removeDatasetResources } from "./lifecycle.ts";
 import { postGpuMemoryIfChanged } from "./gpuBudget.ts";
 import { handleCaptureFrame } from "./captureFrame.ts";
+import { handleProbe } from "./probe.ts";
 import { postChunkResidency } from "../chunkUploadFeedback.ts";
 import { sourceKey } from "../poolKeys.ts";
 
@@ -81,6 +80,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "sliceRenderMultiPass":
       await handleSliceRenderMultiPass(ctx, msg);
+      ctx.state.lastFrame = msg;
       postFrameDone(ctx, msg.frameSeq);
       postGpuMemoryIfChanged(ctx);
       return;
@@ -104,16 +104,10 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "volumeRenderMultiPass":
       await handleVolumeRenderMultiPass(ctx, msg);
+      ctx.state.lastFrame = msg;
       postFrameDone(ctx, msg.frameSeq);
       postGpuMemoryIfChanged(ctx);
       return;
-
-    case "proxyAssetData": {
-      const outcome = handleProxyUpload(ctx, msg);
-      if (outcome.rebuildDescriptor) rebuildDescriptorIfMatching(ctx, msg.datasetId);
-      if (outcome.wantedSetChanged) ctx.postWantedSet(msg.datasetId);
-      return;
-    }
 
     case "minimapInit":
       handleMinimapInit(ctx, msg);
@@ -130,6 +124,9 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "captureFrame":
       handleCaptureFrame(ctx, msg);
+      return;
+    case "probe":
+      handleProbe(ctx, msg);
       return;
     case "minimapDestroy":
       handleMinimapDestroy();

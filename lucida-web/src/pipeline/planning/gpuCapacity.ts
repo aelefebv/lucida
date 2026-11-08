@@ -41,7 +41,6 @@ export function gpuChunkRoomBytes(report: GpuCapacityReport | null, fallbackTota
 export function gpuSlotsFor(
   manifest: DatasetManifest,
   mode: "slice" | "volume",
-  multiChannel: boolean,
   report: GpuCapacityReport | null,
   fallbackTotalBytes: number,
 ): (req: ChunkRequest) => GpuSlot | null {
@@ -62,7 +61,7 @@ export function gpuSlotsFor(
     if (req.lane !== "detail" && req.lane !== "coarse") return null;
     const dims = chunkDims.get(req.imageId)?.get(req.level);
     if (!dims) return null;
-    const pool = chunkTierPoolKey(req.datasetId, req.tier, req.c, dims, multiChannel);
+    const pool = chunkTierPoolKey(req.datasetId, req.tier, req.c, dims);
     const known = reported.get(pool);
     if (known) return { pool, slots: known.maxSlots, slotBytes: known.slotBytes };
     let slot = sized.get(pool);

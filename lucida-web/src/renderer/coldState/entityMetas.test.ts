@@ -8,7 +8,7 @@
 
 import { describe, it, expect } from "vitest";
 import { computeEntityTierMeta } from "./entityMetas.ts";
-import type { ColdStateActiveEntry, ColdStateTileEntry } from "../workerProtocol.ts";
+import type { ColdStateActiveEntry } from "../workerProtocol.ts";
 
 function identityMatrix(): Float32Array {
   const m = new Float32Array(16);
@@ -28,47 +28,29 @@ function defaultDisplay(): ColdStateActiveEntry["displayStateByChannel"][number]
 }
 
 function makeEntry(
-  opts: Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & {
-    entityId: string;
-    imageId: string;
-    mode: ColdStateActiveEntry["mode"];
-  },
+  opts: Partial<ColdStateActiveEntry> & { entityId: string; imageId: string },
 ): ColdStateActiveEntry {
   const base = {
     entityId: opts.entityId,
     levels: opts.levels ?? [
       { level: 0, chunkShape: [1, 64, 64] as [number, number, number], gridShape: [1, 4, 4] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] },
     ],
-    proxyKind: opts.proxyKind,
-    proxyAvailable: opts.proxyAvailable ?? false,
-    groupProxyAvailable: opts.groupProxyAvailable ?? false,
     modelMatrix: opts.modelMatrix ?? identityMatrix(),
     invModelMatrix: opts.invModelMatrix ?? identityMatrix(),
     displayStateByChannel: opts.displayStateByChannel ?? { 0: defaultDisplay() },
   };
-  if (opts.mode === "group-as-proxy") {
-    return {
-      ...base,
-      kind: "group-as-proxy",
-      mode: "group-as-proxy",
-      parentGroupId: null,
-    };
-  }
   return {
     ...base,
-    kind: "tile",
     imageId: opts.imageId,
-    mode: opts.mode,
     detailLevels: opts.detailLevels ?? [0],
     coarseLevel: opts.coarseLevel ?? null,
-    parentGroupId: opts.parentGroupId ?? null,
   };
 }
 
 describe("computeEntityTierMeta — volume (3D arity)", () => {
   it("level that matches → one meta + nextOffset by gridX*gridY*gridZ", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+      entityId: "imgA", imageId: "imgA",
       levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
     });
     const { meta, nextOffset } = computeEntityTierMeta(entry, 0, [32, 64, 64], 0, 3);
@@ -80,7 +62,7 @@ describe("computeEntityTierMeta — volume (3D arity)", () => {
 
   it("threads startOffset into the meta and past its section", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+      entityId: "imgA", imageId: "imgA",
       levels: [
         { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
         { level: 1, chunkShape: [32, 64, 64], gridShape: [1, 2, 2], levelDims: [32, 128, 128] },
@@ -95,7 +77,7 @@ describe("computeEntityTierMeta — volume (3D arity)", () => {
 
   it("a level whose chunk dims mismatch the pool → null meta, offset unchanged", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+      entityId: "imgA", imageId: "imgA",
       levels: [
         { level: 1, chunkShape: [16, 32, 32], gridShape: [4, 8, 8], levelDims: [64, 256, 256] }, // mismatched
       ],
@@ -107,7 +89,7 @@ describe("computeEntityTierMeta — volume (3D arity)", () => {
 
   it("a level the entry lacks → null meta, offset unchanged", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+      entityId: "imgA", imageId: "imgA",
       levels: [{ level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] }],
     });
     const { meta, nextOffset } = computeEntityTierMeta(entry, 2, [32, 64, 64], 7, 3);
@@ -119,7 +101,7 @@ describe("computeEntityTierMeta — volume (3D arity)", () => {
 describe("computeEntityTierMeta — slice (2D arity)", () => {
   it("matches on chunkX/chunkY only; nextOffset by gridX*gridY", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+      entityId: "imgA", imageId: "imgA",
       levels: [{ level: 0, chunkShape: [8, 128, 128], gridShape: [4, 2, 2], levelDims: [32, 256, 256] }],
     });
     // poolChunkDims passed as [1, 128, 128] from groupEntriesByPool (slice).
@@ -134,7 +116,7 @@ describe("computeEntityTierMeta — slice (2D arity)", () => {
 
   it("a level whose X/Y chunk dims mismatch the slice pool → null meta", () => {
     const entry = makeEntry({
-      entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail",
+      entityId: "imgA", imageId: "imgA",
       levels: [{ level: 1, chunkShape: [4, 64, 64], gridShape: [8, 4, 4], levelDims: [32, 256, 256] }],
     });
     const { meta, nextOffset } = computeEntityTierMeta(entry, 1, [1, 128, 128], 3, 2);
@@ -146,7 +128,7 @@ describe("computeEntityTierMeta — slice (2D arity)", () => {
 describe("computeEntityTierMeta — degenerate inputs", () => {
   it("entry with empty levels[] → null meta, nextOffset unchanged", () => {
     const entry = makeEntry({
-      entityId: "groupA", imageId: "", mode: "group-as-proxy",
+      entityId: "imgA", imageId: "imgA",
       levels: [],
     });
     const { meta, nextOffset } = computeEntityTierMeta(entry, 0, [32, 64, 64], 42, 3);

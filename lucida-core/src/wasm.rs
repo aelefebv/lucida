@@ -14,6 +14,25 @@ pub fn chunk_key(level: u32, t: u32, c: u32, z: u32, y: u32, x: u32) -> String {
     crate::chunk::chunk_key(level, t, c, z, y, x)
 }
 
+/// The chunks each query's level samples under one view, with each chunk's
+/// distance from the view's focus, from [`crate::chunk::enumerate_batch`].
+///
+/// `region_json` is a visible region shaped as [`WasmScene::visible_region`]
+/// writes it; `depth_bias` moves the focus along Z. `queries` holds
+/// [`crate::chunk::QUERY_STRIDE`] numbers per query. The planner makes one
+/// call per plan, so the boundary is crossed once however many entities it
+/// covers.
+#[wasm_bindgen]
+pub fn enumerate_chunks(
+    region_json: &str,
+    depth_bias: f64,
+    queries: &[f64],
+) -> Result<Vec<f64>, JsError> {
+    let view = crate::chunk::ChunkView::from_json(region_json, depth_bias)
+        .map_err(|e| JsError::new(&format!("invalid visible region: {e}")))?;
+    Ok(crate::chunk::enumerate_batch(&view, queries))
+}
+
 /// The level the screen calls for, from [`crate::target_level::target_level`],
 /// the rule every record of [`WasmScene::view_query`] applies.
 /// `pixels_per_sample` is device pixels per level-0 sample, `shape_ratios[L]`
@@ -253,8 +272,8 @@ impl WasmScene {
         }
     }
 
-    // `set_z`/`set_t`/`set_c` are also re-asserted every render tick, so they
-    // too lean on the apply-side no-change guard.
+    // `set_z`/`set_t` are also re-asserted every render tick, so they too
+    // lean on the apply-side no-change guard.
 
     pub fn set_z(&mut self, z: u32) {
         self.inner.apply(ViewportCommand::SetZ { z }.into());
@@ -264,12 +283,22 @@ impl WasmScene {
         self.inner.apply(ViewportCommand::SetT { t }.into());
     }
 
-    pub fn set_c(&mut self, c: u32) {
-        self.inner.apply(ViewportCommand::SetC { c }.into());
+    /// What every layer shows, as JSON: [`crate::scene::ResolvedLayer`]s in
+    /// panel order. The renderer, the minimap, explore thumbnails and the
+    /// layer panel all read this rather than derive it from the settings.
+    pub fn resolved_layers(&self) -> String {
+        serde_json::to_string(&self.inner.resolved_layers()).unwrap_or_else(|_| "[]".to_string())
     }
 
-    pub fn multi_channel(&self) -> bool {
-        self.inner.view.multi_channel
+    /// What every layer would show under the saved view in `view_json`, as
+    /// JSON like [`Self::resolved_layers`]; explore previews draw a candidate
+    /// view through it. A view that does not parse resolves to the scene's own.
+    pub fn resolved_view_layers(&self, view_json: &str) -> String {
+        let layers = match serde_json::from_str::<crate::saved_view::SavedView>(view_json) {
+            Ok(view) => self.inner.resolved_view_layers(&view),
+            Err(_) => self.inner.resolved_layers(),
+        };
+        serde_json::to_string(&layers).unwrap_or_else(|_| "[]".to_string())
     }
 
     pub fn contrast_min(&self) -> f64 {
@@ -290,10 +319,6 @@ impl WasmScene {
 
     pub fn t(&self) -> u32 {
         self.inner.view.t
-    }
-
-    pub fn c(&self) -> u32 {
-        self.inner.view.c
     }
 
     pub fn zoom(&self) -> f64 {
@@ -388,8 +413,9 @@ impl WasmScene {
             level0.shape[3] as u32,
             level0.shape[4] as u32,
         ];
+        // A layer shallower than the scene's slab plans its nearest plane.
         let region = self.inner.camera.visible_region(
-            &self.inner.view.z_range,
+            &self.inner.layer_z_range(&ds_id),
             Some(&member.volume_transform),
             Some(&vol_shape),
         );
@@ -764,46 +790,6 @@ impl WasmScene {
         serde_json::to_string(&self.inner.epochs).unwrap_or_default()
     }
 
-    /// Return the current `epochs.asset` value. Convenience accessor for
-    /// the orchestrator so it doesn't have to JSON-decode `epochs()` just
-    /// to read one number.
-    pub fn asset_epoch(&self) -> u64 {
-        self.inner.epochs.asset
-    }
-
-    /// Apply an asset catalog delta. The JSON shape mirrors the
-    /// `ApplyAssetCatalogDelta` document command body (snake_case):
-    /// `{"dataset_id": "...", "delta": {"added": [...]}}`.
-    ///
-    /// Bumps `epochs.asset` exactly once per call. Idempotent on repeat
-    /// applies of the same delta.
-    pub fn apply_asset_catalog_delta(&mut self, json: &str) -> Result<(), JsError> {
-        #[derive(serde::Deserialize)]
-        struct Body {
-            dataset_id: String,
-            delta: lucida_protocol::AssetCatalogDelta,
-        }
-        let body: Body = serde_json::from_str(json).map_err(|e| JsError::new(&e.to_string()))?;
-        let cmd = Command::Document(crate::command::DocumentCommand::ApplyAssetCatalogDelta {
-            dataset_id: DatasetId(body.dataset_id),
-            delta: body.delta,
-        });
-        self.inner.apply(cmd);
-        Ok(())
-    }
-
-    /// Return the asset catalog for `dataset_id` as JSON. If the dataset
-    /// has no catalog (e.g. not yet registered), returns the JSON for an
-    /// empty catalog.
-    pub fn get_asset_catalog(&self, dataset_id: &str) -> String {
-        let id = DatasetId(dataset_id.to_string());
-        match self.inner.document.asset_catalogs.get(&id) {
-            Some(cat) => serde_json::to_string(cat).unwrap_or_else(|_| "{}".to_string()),
-            None => serde_json::to_string(&lucida_protocol::AssetCatalog::empty())
-                .unwrap_or_else(|_| "{}".to_string()),
-        }
-    }
-
     pub fn dataset_ids(&self) -> String {
         let ids: Vec<&str> = self
             .inner
@@ -848,39 +834,12 @@ impl WasmScene {
     // ordinary document commands through [`Self::apply_command`]; only the
     // read side lives here.
 
-    /// Returns a JSON array of `{id, name}` for all available layouts
-    /// (source_layouts + registered_layouts) for a dataset.
+    /// A JSON array of `{id, name, active}` for a dataset's layouts, as
+    /// [`Scene::available_layouts`] lists them.
     pub fn available_layouts(&self, dataset_id: &str) -> String {
-        let ds_id = DatasetId(dataset_id.to_string());
-
-        #[derive(serde::Serialize)]
-        struct LayoutInfo {
-            id: String,
-            name: String,
-        }
-
-        let mut layouts = Vec::new();
-
-        // Source layouts from the content graph
-        if let Some(content) = self.inner.document.manifests.get(&ds_id) {
-            for l in content.source_layouts() {
-                layouts.push(LayoutInfo {
-                    id: l.id.0.clone(),
-                    name: l.name.clone(),
-                });
-            }
-        }
-
-        // Registered layouts
-        if let Some(registered) = self.inner.document.registered_layouts.get(&ds_id) {
-            for l in registered {
-                layouts.push(LayoutInfo {
-                    id: l.id.0.clone(),
-                    name: l.name.clone(),
-                });
-            }
-        }
-
+        let layouts = self
+            .inner
+            .available_layouts(&DatasetId(dataset_id.to_string()));
         serde_json::to_string(&layouts).unwrap()
     }
 
@@ -926,12 +885,29 @@ impl WasmScene {
     /// line/box) are 2D world-space coordinates, so the caller projects each
     /// vertex to screen with the current camera each frame (mirrors the
     /// peer-cursor overlay), keeping every kind glued to the data.
+    ///
+    /// Each pin also carries `channels`, its
+    /// [`crate::scene::Annotation::placement_channels`]. It is derived here
+    /// and never rides the document wire.
     pub fn annotations(&self, dataset_id: &str) -> String {
         let key = DatasetId(dataset_id.to_string());
-        match self.inner.document.annotations.get(&key) {
-            Some(list) => serde_json::to_string(list).unwrap_or_else(|_| "[]".to_string()),
-            None => "[]".to_string(),
-        }
+        let Some(list) = self.inner.document.annotations.get(&key) else {
+            return "[]".to_string();
+        };
+        let pins: Vec<serde_json::Value> = list
+            .iter()
+            .filter_map(|pin| {
+                let mut value = serde_json::to_value(pin).ok()?;
+                if let serde_json::Value::Object(fields) = &mut value {
+                    fields.insert(
+                        "channels".to_string(),
+                        serde_json::json!(pin.placement_channels(&key)),
+                    );
+                }
+                Some(value)
+            })
+            .collect();
+        serde_json::to_string(&pins).unwrap_or_else(|_| "[]".to_string())
     }
 
     /// Returns 36 floats: invViewProj[16] + eye[3] + viewProj[16] + topDown[1].

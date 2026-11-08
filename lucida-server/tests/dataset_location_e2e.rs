@@ -14,7 +14,7 @@ use lucida_content::url::DatasetLocation;
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::protocol::{ClientMessage, ServerMessage};
 use lucida_protocol::{DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenStage};
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::auth::{
     AuthConfig, AuthMode, BearerToken, BearerTokenStore, DualCredentialExtractor,
     LoginSessionStore, MemoryBearerTokenStore, MemorySessionStore, PrincipalExtractor,
@@ -67,12 +67,11 @@ async fn start_server_with(root: &Path, source_policy: SourcePolicy) -> Rig {
         .create_workspace(&owner(), Some("Locations"))
         .await
         .unwrap();
-    let mut proxy_config = ProxyConfig::defaults();
-    proxy_config.cache_dir = root.join("proxies");
-    proxy_config.generated_cache_dir = root.join("generated-coarse");
-    proxy_config.generated_enabled = false;
+    let mut generated_config = GeneratedConfig::defaults();
+    generated_config.generated_cache_dir = root.join("generated-coarse");
+    generated_config.generated_enabled = false;
     let manager = Arc::new(
-        WorkspaceManager::new(storage.workspaces(), proxy_config)
+        WorkspaceManager::new(storage.workspaces(), generated_config)
             .with_source_policy(Arc::new(source_policy)),
     );
     let app: Router =
@@ -274,6 +273,31 @@ async fn a_file_url_opens_the_absolute_path_it_names() {
     assert!(reply.failure.is_none(), "{:?}", reply.failure);
     let expected = DatasetLocation::parse(data.to_str().unwrap()).unwrap();
     assert_eq!(reply.url, expected.as_str());
+}
+
+#[tokio::test]
+async fn a_file_url_is_percent_decoded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("a b.zarr");
+    write_minimal_zarr(&data);
+    let rig = start_server(tmp.path()).await;
+
+    let path = data
+        .to_str()
+        .unwrap()
+        .replace('\\', "/")
+        .replace(' ', "%20");
+    let file_url = if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    };
+    let reply = open(&rig, &file_url).await;
+
+    assert!(reply.failure.is_none(), "{:?}", reply.failure);
+    let expected = DatasetLocation::parse(data.to_str().unwrap()).unwrap();
+    assert_eq!(reply.url, expected.as_str());
+    assert!(reply.url.ends_with("/a b.zarr"), "{}", reply.url);
 }
 
 fn restricted(data_roots: Vec<std::path::PathBuf>) -> SourcePolicy {

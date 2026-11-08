@@ -4,10 +4,9 @@ use serde::{Deserialize, Serialize};
 
 use lucida_content::{DatasetId, ImageId};
 use lucida_protocol::{
-    AssetCatalogDelta, ChunkFailureKind, DatasetOpenFailureDiagnostic,
-    DatasetOpenProgressDiagnostic, DatasetOpenSuccessDiagnostic, DatasetSourceHealth,
-    GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    ServerTimingBatch, SourceChunkStatus,
+    ChunkFailureKind, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
+    DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerTimingBatch, SourceChunkStatus,
 };
 
 use crate::camera::{Camera, Framing, Slice};
@@ -612,11 +611,6 @@ pub enum ServerMessage {
         request_id: String,
         datasets: Vec<DatasetSourceHealth>,
     },
-    /// Incremental update to a dataset's asset catalog.
-    AssetCatalogUpdate {
-        dataset_id: DatasetId,
-        delta: AssetCatalogDelta,
-    },
     /// Runtime generated-level metadata/readiness update. Server-authored and
     /// unsequenced; clients merge it into their local availability view.
     GeneratedAvailabilityUpdate {
@@ -797,8 +791,8 @@ pub enum ChunkMessage {
     ChunkRequest {
         /// Correlation label: the join key between this client's lifecycle
         /// row and the server's row for the same wire request.
-        /// Minted from one per-connection counter shared with
-        /// `AssetRequest`, so `(connection, rid)` is unique.
+        /// Minted from one per-connection counter, so `(connection, rid)` is
+        /// unique.
         ///
         /// Required, not `#[serde(default)]`: a client that stopped sending
         /// it would otherwise degrade silently to `rid: 0` on every row.
@@ -818,6 +812,14 @@ pub enum ChunkMessage {
         image_id: ImageId,
         key: String,
     },
+    /// Viewer -> Server: the client no longer wants these requests, named by
+    /// their `rid`s. A request not yet read is never read, and one being
+    /// read gives up its source-read permit. Nothing is sent back, and a
+    /// label that already finished is ignored.
+    ///
+    /// Variant added at the end so the serde tag positions of older variants
+    /// don't shift.
+    ChunkCancel { rids: Vec<u32> },
 }
 
 #[cfg(test)]
@@ -933,7 +935,7 @@ mod tests {
                 request_id: vec![None, None, Some("web-open-4c1a".into())],
                 family: vec![
                     lucida_protocol::TimingRowFamily::Chunk,
-                    lucida_protocol::TimingRowFamily::Asset,
+                    lucida_protocol::TimingRowFamily::Chunk,
                     lucida_protocol::TimingRowFamily::MetadataRead,
                 ],
                 metadata_phase: vec![
@@ -1875,37 +1877,6 @@ mod tests {
     }
 
     #[test]
-    fn asset_catalog_update_round_trips() {
-        use lucida_protocol::{AssetCatalogDelta, ProxyAvailability, ProxyKind};
-
-        let msg = ServerMessage::AssetCatalogUpdate {
-            dataset_id: DatasetId("ds1".into()),
-            delta: AssetCatalogDelta {
-                added: vec![ProxyAvailability {
-                    entity_id: lucida_content::EntityId("e1".into()),
-                    kinds: vec![ProxyKind::GroupProxy3D],
-                    footprints: vec![],
-                }],
-            },
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        assert!(json.contains("\"type\":\"asset_catalog_update\""));
-        let parsed: ServerMessage = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ServerMessage::AssetCatalogUpdate { dataset_id, delta } => {
-                assert_eq!(dataset_id, DatasetId("ds1".into()));
-                assert_eq!(delta.added.len(), 1);
-                assert_eq!(
-                    delta.added[0].entity_id,
-                    lucida_content::EntityId("e1".into())
-                );
-                assert_eq!(delta.added[0].kinds, vec![ProxyKind::GroupProxy3D]);
-            }
-            _ => panic!("expected AssetCatalogUpdate"),
-        }
-    }
-
-    #[test]
     fn generated_availability_update_round_trips() {
         use lucida_content::{
             GeneratedLevelInfo, GeneratedLevelProvenance, GeneratedLevelRole, LevelGeometry,
@@ -1941,6 +1912,7 @@ mod tests {
                     status: GeneratedChunkStatus::Ready,
                     message: None,
                 }],
+                histograms: vec![],
             },
         };
         let json = serde_json::to_string(&msg).unwrap();

@@ -1,5 +1,5 @@
 /**
- * The live view model (#937).
+ * The live view model.
  *
  * The cases here are about what a run in progress is allowed to say: four
  * counters that partition the work, a bar over the rows still going, and no
@@ -106,7 +106,7 @@ describe("what it withholds", () => {
   });
 });
 
-describe("the provisional reading, as the live view shows it (#1057)", () => {
+describe("the provisional reading, as the live view shows it", () => {
   const readings = (fromUs: number, toUs: number, make: (i: number) => Partial<TraceReading>) =>
     makeReadingSeries(fromUs, toUs, 100_000, make);
 

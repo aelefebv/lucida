@@ -20,6 +20,7 @@ import type {
   SavedView,
   ChannelSettings,
   LabelSettings,
+  ViewState,
 } from "./types.ts";
 
 export interface ApplierBridge {
@@ -342,16 +343,10 @@ export class SavedViewApplier {
         type: "set_gamma",
         gamma: view.display.gamma,
       });
-      if (view.view.multi_channel !== undefined) {
-        this.applyViewport(sceneAfter, {
-          type: "set_multi_channel",
-          enabled: view.view.multi_channel,
-        });
-      }
 
       // `clampViewIndices` narrows to the datasets the view names and keeps
       // visible, so an unreferenced or hidden neighbor can't crush the
-      // restored Z/T/C.
+      // restored Z/T.
       const clampedDatasets = Array.from(loadedAfter, (id) => ({ url: "", id }));
       const clamped = clampViewIndices(
         sceneAfter,
@@ -364,15 +359,15 @@ export class SavedViewApplier {
         this.addWarning(clampNotice(clamped.adjustedAxes));
       }
       this.applyViewport(sceneAfter, { type: "set_t", t: clamped.t });
-      this.applyViewport(sceneAfter, { type: "set_c", c: clamped.c });
       this.applyViewport(sceneAfter, {
         type: "set_z_range",
         start: clamped.zStart,
         end: clamped.zEnd,
       });
 
-      // Camera last.
-      this.importCameraView(sceneAfter, view.camera);
+      // Camera last, with an older view's scene-wide channel mode, which the
+      // scene decodes into each layer's solo over the settings set above.
+      importCameraView(sceneAfter, view.camera, legacyChannelMode(view));
 
       this.emitApplyResult(sceneAfter, view);
 
@@ -501,19 +496,6 @@ export class SavedViewApplier {
     }
   }
 
-  private importCameraView(scene: WasmScene, camera: Camera): void {
-    // `import_presence` sets camera, view, and display atomically and keeps
-    // the local viewport. View and display were already applied, so pass the
-    // live ones back through unchanged.
-    const presence = JSON.parse(scene.export_presence()) as {
-      camera: Camera;
-      view: unknown;
-      display: unknown;
-    };
-    presence.camera = camera;
-    guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
-  }
-
   private updateOpenStatus(url: string, newState: OpenStatus["state"], error?: string): void {
     this.setState({
       ...this.state,
@@ -534,6 +516,36 @@ export class SavedViewApplier {
       warnings: [...this.state.warnings, warning],
     });
   }
+}
+
+/** The scene-wide channel mode of a view recorded before solo was per layer. */
+export type LegacyChannelMode = Pick<ViewState, "c" | "multi_channel">;
+
+/** `view`'s scene-wide channel mode, or `null` for a current view. */
+export function legacyChannelMode(view: SavedView): LegacyChannelMode | null {
+  const { c, multi_channel } = view.view;
+  return c === undefined && multi_channel === undefined ? null : { c, multi_channel };
+}
+
+/**
+ * Import `camera` through `import_presence`, which sets camera, view, and
+ * display atomically and keeps the local viewport. View and display were
+ * already applied, so the live ones go back through unchanged, plus an older
+ * view's channel mode: the scene owns decoding it into each layer's solo.
+ */
+export function importCameraView(
+  scene: WasmScene,
+  camera: Camera,
+  legacy: LegacyChannelMode | null,
+): void {
+  const presence = JSON.parse(scene.export_presence()) as {
+    camera: Camera;
+    view: ViewState;
+    display: unknown;
+  };
+  presence.camera = camera;
+  if (legacy) presence.view = { ...presence.view, ...legacy };
+  guardedSceneCall("import_presence", scene, () => scene.import_presence(JSON.stringify(presence)));
 }
 
 // Per-dataset and per-channel display commands. All are recipient-local
@@ -602,6 +614,7 @@ export function datasetDisplayCommands(
     dataset_id: id,
     level: s.detail_level_override ?? null,
   });
+  cmds.push({ type: "set_channel_solo", dataset_id: id, channel: s.solo ?? null });
   if (s.channel_settings) {
     s.channel_settings.forEach((c, i) => {
       for (const cmd of channelDisplayCommands(id, i, c)) cmds.push(cmd);
@@ -647,13 +660,11 @@ export function datasetDisplayCommands(
 
 export interface ClampedView {
   t: number;
-  c: number;
   zStart: number;
   zEnd: number;
-  /** True iff the clamp moved z, t, or c. Drives the "adjusted to fit"
-   *  notice. */
+  /** True iff the clamp moved z or t. Drives the "adjusted to fit" notice. */
   clamped: boolean;
-  /** Axes that moved, a subset of `["Z", "T", "C"]` in that order. */
+  /** Axes that moved, a subset of `["Z", "T"]` in that order. */
   adjustedAxes: readonly string[];
 }
 
@@ -693,9 +704,9 @@ function visibleAddressedDatasetIds(view: SavedView): Set<string> | undefined {
 }
 
 /**
- * Clamp a saved view's z slab, t, and c to the recipient's loaded datasets.
+ * Clamp a saved view's z slab and t to the recipient's loaded datasets.
  *
- * Z extents come from `dataset_volume_shape`; T/C extents come only from
+ * Z extents come from `dataset_volume_shape`; T extents come only from
  * `extentsFor`. An axis with no known extent passes through. Each axis clamps
  * to the largest extent among the datasets the view names and keeps visible,
  * or among every id in `requestedIds` when the view names none.
@@ -718,7 +729,6 @@ export function clampViewIndices(
   // alone.
   let maxZ: number | undefined;
   let maxT: number | undefined;
-  let maxC: number | undefined;
   const considerMax = (cur: number | undefined, next: number | undefined) => {
     if (next === undefined || !Number.isFinite(next) || next <= 0) return cur;
     return cur === undefined ? next : Math.max(cur, next);
@@ -732,13 +742,12 @@ export function clampViewIndices(
     } catch {
       // Dataset not yet loaded or no shape; its extent is unknown.
     }
-    // T/C extents: only available via the injected resolver (manifest
-    // union on the recipient). Resolver failures are non-fatal.
+    // T extents: only available via the injected resolver (manifest union on
+    // the recipient). Resolver failures are non-fatal.
     if (extentsFor) {
       try {
         const ext = extentsFor(r.id);
         maxT = considerMax(maxT, ext.t);
-        maxC = considerMax(maxC, ext.c);
       } catch {
         // Resolver couldn't determine extents for this dataset; skip.
       }
@@ -760,27 +769,20 @@ export function clampViewIndices(
     t = Math.max(0, Math.min(t, maxT - 1));
   }
 
-  let c = requested.c;
-  if (maxC !== undefined) {
-    c = Math.max(0, Math.min(c, maxC - 1));
-  }
-
   const adjustedAxes: string[] = [];
   if (zStart !== requested.z_range.start || zEnd !== requested.z_range.end) {
     adjustedAxes.push("Z");
   }
   if (t !== requested.t) adjustedAxes.push("T");
-  if (c !== requested.c) adjustedAxes.push("C");
 
-  return { t, c, zStart, zEnd, clamped: adjustedAxes.length > 0, adjustedAxes };
+  return { t, zStart, zEnd, clamped: adjustedAxes.length > 0, adjustedAxes };
 }
 
 /**
  * Build the non-blocking notice shown when `clampViewIndices` adjusted one
  * or more axes, naming exactly which ones moved. Examples:
  *   ["Z"]           -> "Z adjusted to fit this dataset"
- *   ["Z", "C"]      -> "Z and C adjusted to fit this dataset"
- *   ["Z", "T", "C"] -> "Z, T and C adjusted to fit this dataset"
+ *   ["Z", "T"]      -> "Z and T adjusted to fit this dataset"
  * Exported for tests so the wording can be asserted without a WasmScene.
  */
 export function clampNotice(adjustedAxes: readonly string[]): string {

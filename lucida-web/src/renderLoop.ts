@@ -10,10 +10,10 @@ import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset,
 import { TickCoordinator } from "./pipeline/tickCoordinator.ts";
 import { Uploader } from "./pipeline/upload/uploader.ts";
 import { configStore } from "./pipeline/planning/configStore.ts";
-import type { CpuCache } from "./pipeline/fetch/index.ts";
+
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
-import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview, forgetMinimapOverviewUploads, forgetMinimapOverviewsOf } from "./minimapPath.ts";
+import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, clearMinimapForDataset, invalidateMinimapOverview, forgetMinimapOverviewUploads, forgetMinimapOverviewsOf } from "./minimapPath.ts";
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createSettleState, evaluateSettle, settleSignal, type SettleOutcome, type SettleState } from "./pipeline/settle.ts";
 import { failedChunkReport, summarizeFailedChunks } from "./pipeline/failedChunks.ts";
@@ -48,17 +48,15 @@ declare global {
 }
 
 /**
- * The ids the CPU cache holds a dataset's entries under. It keys chunks by
- * entity id, its delivery ledger by image id, and a label's chunks by the
- * label's image id. Only a single-image dataset shares one id between entity
- * and image, and worker member ids add a channel suffix, so no one list
- * reaches every entry. An entry left behind outlives the dataset, and a
- * reopened dataset, which keeps its ids, finds it marked as delivered.
+ * The ids the CPU cache holds a dataset's entries under: each entity's, and
+ * each label's image id, which a label's chunks are requested under. Worker
+ * member ids add a channel suffix, so they reach neither. An entry left
+ * behind outlives the dataset, and a reopened dataset, which keeps its ids,
+ * finds it marked as delivered.
  */
 export function cacheIdsOf(manifest: DatasetManifest | undefined, memberIds: readonly string[]): string[] {
   const ids = new Set(memberIds);
   for (const entity of manifest?.entities ?? []) ids.add(entity.id);
-  for (const image of manifest?.images ?? []) ids.add(image.image_id);
   for (const label of manifest?.labels ?? []) ids.add(label.image.image_id);
   return [...ids];
 }
@@ -121,9 +119,6 @@ export class RenderLoop implements TraceEnvironment {
   /** Lowers the render resolution while a gesture's frames run long. */
   private readonly resolution = new AdaptiveResolution();
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /** Track previous multi_channel state to detect transitions and clean up. */
-  private prevMultiChannel = false;
 
   constructor(opts: RenderLoopOptions) {
     this.session = opts.session;
@@ -256,18 +251,9 @@ export class RenderLoop implements TraceEnvironment {
     this.unsubs.clear();
   }
 
-  /**
-   * Expose the tickCoordinator + cpuCache for HITL debugging via
-   * `window.__lucidaOrch`. The full chain is needed because
-   * `TickCoordinator.requestTestProxy(...)` submits through CpuCache and
-   * the normal subscribe → tick → `deliverToWorker` path forwards the
-   * result to the GPU worker.
-   */
+  /** For the debug overlays and the simulation harness, which read its last plans. */
   getTickCoordinator(): TickCoordinator {
     return this.tickCoordinator;
-  }
-  getCpuCache(): CpuCache {
-    return this.session.cpuCache;
   }
 
   addDataset(id: string, manifest: DatasetManifest): void {
@@ -329,7 +315,7 @@ export class RenderLoop implements TraceEnvironment {
     if (this.datasets.size === 0) {
       const w = this.canvas.clientWidth;
       const h = this.canvas.clientHeight;
-      const zeroEpochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
+      const zeroEpochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
       this.client.resize(w, h);
       if (this.mode === "slice") {
         this.client.sliceRenderMultiPass([], 1, 0, 0, w, h, zeroEpochs);
@@ -421,7 +407,6 @@ export class RenderLoop implements TraceEnvironment {
       detailBytes: telemetry.mainBytes,
       coarseChunks: tiers.overview.count,
       coarseBytes: telemetry.overviewBytes,
-      proxyBytes: telemetry.proxyBytes,
     };
   }
 
@@ -479,27 +464,6 @@ export class RenderLoop implements TraceEnvironment {
     }
     this.renderedFrameCount += 1;
     this.publishCaptureReady(true, "rendered");
-  }
-
-  /**
-   * On multi-channel ↔ single-channel transitions, clear members whose
-   * key shape (composite `:chN` vs plain) no longer matches the new mode,
-   * so they don't leak on the worker.
-   */
-  private handleMultiChannelTransition(): void {
-    const mc = this.session.scene!.multi_channel();
-    if (mc === this.prevMultiChannel) return;
-    this.prevMultiChannel = mc;
-
-    const trackedIds = this.uploader.getTrackedResourceMemberIds();
-    for (const key of trackedIds) {
-      const isComposite = /:ch\d+$/.test(key);
-      if ((mc && !isComposite) || (!mc && isComposite)) {
-        this.client.removeLayerResources(key);
-        this.tickCoordinator.clearMemberResources(key);
-        this.uploader.clearMember(key);
-      }
-    }
   }
 
   /** Collect member IDs associated with a dataset from uploader tracking. */
@@ -597,11 +561,6 @@ export class RenderLoop implements TraceEnvironment {
     }
   }
 
-  markMinimapOverviewSeeded(datasetId: string, t: number, c: number): void {
-    const ctx = this.buildContext();
-    markMinimapOverviewSeeded(ctx, this.minimapState, datasetId, t, c);
-  }
-
   /**
    * Tell the loop the Explore panel wants the per-dataset coarse overview
    * textures uploaded (for thumbnail rendering) even while the minimap is
@@ -673,7 +632,6 @@ export class RenderLoop implements TraceEnvironment {
       resolutionScale: cappedPixelRatioScale(devicePixelRatio) * this.resolution.scale,
       cpuCache: this.session.cpuCache,
       sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
-      assetCatalog: this.session.assetCatalog!,
     };
   }
 
@@ -682,10 +640,10 @@ export class RenderLoop implements TraceEnvironment {
 
     if (!this.interactiveDirty && !this.residencyDirty) return;
 
-    // AssetCatalog not yet wired (the brief window before the first server
-    // snapshot constructs it on Session). Once the catalog appears, the next
+    // No scene yet (the brief window before the first server snapshot sets
+    // it on Session). Once it appears, the next
     // markInteractiveDirty/markResidencyDirty triggers a tick.
-    if (!this.session.assetCatalog) {
+    if (!this.session.scene) {
       this.scheduleIfNeeded();
       return;
     }
@@ -734,9 +692,6 @@ export class RenderLoop implements TraceEnvironment {
 
     const ctx = this.buildContext();
 
-    // Detect multi-channel mode transitions and clean up stale resources
-    this.handleMultiChannelTransition();
-
     // Ahead of this tick's frame, so the frame draws the failures hatched.
     const failed = this.uploader.syncFailedChunks(ctx);
     if (failed) failedChunkReport.publish(summarizeFailedChunks(failed));
@@ -777,6 +732,7 @@ export class RenderLoop implements TraceEnvironment {
         this.tickCoordinator.getLastPlans(),
         this.datasets,
         this.session.cpuCache,
+        this.session.generatedAvailability,
         this.autoContrastListener,
       );
     }

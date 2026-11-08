@@ -1,7 +1,7 @@
 //! Golden-fixture lock tests for the JSON wire protocol.
 //!
 //! Every JSON payload family that crosses the WebSocket is pinned by a
-//! fixture under `wire-fixtures/`. This test serializes the same values and
+//! fixture under `wire-fixtures/`, as is a saved view's `#view=` payload. This test serializes the same values and
 //! asserts byte equality, and `lucida-web/src/wireGoldens.test.ts` parses
 //! the same files, so a schema change on either side fails a suite. Deleting
 //! a `required` key must fail deserialization, and a new wire variant is a
@@ -48,17 +48,17 @@ use lucida_core::scene::{
 };
 use lucida_core::view::ViewState;
 use lucida_protocol::{
-    AssetCatalog, AssetCatalogDelta, AssetMessage, ChunkFailureKind,
-    DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth,
-    DatasetHealthComponent, DatasetHealthStatus, DatasetImportWarning,
-    DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
-    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats,
-    DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec, FetchSource,
-    GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE,
-    LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor,
-    ProxiedImageSpec, ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch,
-    SourceChunkStatus, TimingRowFamily, TimingRowOutcome, WireFormat,
+    ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
+    DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
+    DatasetImportWarning, DatasetImportWarningKind, DatasetOpenFailureDiagnostic,
+    DatasetOpenFailureKind, DatasetOpenProgressDiagnostic, DatasetOpenStage,
+    DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats, DatasetSourceHealth,
+    DirectFetchDescriptor, DirectImageSpec, FetchSource, GeneratedAvailabilityDelta,
+    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedChunkStatusUpdate,
+    GeneratedLevelAvailability, GeneratedLevelHistogram, GeneratedLevelSummary, HistogramBin,
+    LABEL_NONE, LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET,
+    ProxiedFetchDescriptor, ProxiedImageSpec, ServerTimingBatch, SourceChunkStatus,
+    TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -224,7 +224,6 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         }
         ServerMessage::OpenDatasetFailed { .. } => &["session/server_open_dataset_failed.json"],
         ServerMessage::DatasetHealth { .. } => &["session/server_dataset_health.json"],
-        ServerMessage::AssetCatalogUpdate { .. } => &["session/server_asset_catalog_update.json"],
         ServerMessage::GeneratedAvailabilityUpdate { .. } => {
             &["session/server_generated_availability_update.json"]
         }
@@ -261,7 +260,6 @@ fn client_message_fixture_paths(msg: &ClientMessage) -> &'static [&'static str] 
             "session/client_command_set_active_layout.json",
             "session/client_command_remove_dataset.json",
             "session/client_command_rename_dataset.json",
-            "session/client_command_apply_asset_catalog_delta.json",
         ],
         ClientMessage::Presence { .. } => &["session/client_presence.json"],
         ClientMessage::Cursor { .. } => &["session/client_cursor.json"],
@@ -303,9 +301,6 @@ fn document_command_fixture_paths(cmd: &DocumentCommand) -> &'static [&'static s
         DocumentCommand::SetActiveLayout { .. } => {
             &["session/client_command_set_active_layout.json"]
         }
-        DocumentCommand::ApplyAssetCatalogDelta { .. } => {
-            &["session/client_command_apply_asset_catalog_delta.json"]
-        }
         DocumentCommand::AddAnnotation { .. } => &["session/client_command_add_annotation.json"],
         DocumentCommand::RemoveAnnotation { .. } => {
             &["session/client_command_remove_annotation.json"]
@@ -327,12 +322,7 @@ fn chunk_message_fixture_paths(msg: &ChunkMessage) -> &'static [&'static str] {
         // producer and no consumer there is nothing to lock; wire a fixture
         // here if a producer ever appears.
         ChunkMessage::ChunkFetch { .. } => &[],
-    }
-}
-
-fn asset_message_fixture_paths(msg: &AssetMessage) -> &'static [&'static str] {
-    match msg {
-        AssetMessage::AssetRequest { .. } => &["session/asset_request.json"],
+        ChunkMessage::ChunkCancel { .. } => &["session/chunk_cancel.json"],
     }
 }
 
@@ -368,7 +358,6 @@ struct EnumVocabulary {
     entity_kinds: Vec<EntityKind>,
     data_types: Vec<DataType>,
     positioning_modes: Vec<PositioningMode>,
-    proxy_kinds: Vec<ProxyKind>,
     dataset_open_stages: Vec<DatasetOpenStage>,
     dataset_open_failure_kinds: Vec<DatasetOpenFailureKind>,
     dataset_health_statuses: Vec<DatasetHealthStatus>,
@@ -393,9 +382,10 @@ fn enum_vocabulary() -> EnumVocabulary {
         annotation_kinds: vocab!(AnnotationKind::{ Point, Line, Box }),
         axis_kinds: vocab!(AxisKind::{ Time, Channel, Space }),
         entity_kinds: vocab!(EntityKind::{ Image, Group, Tile }),
-        data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Int8, Int16, Int32, Float32, Float64 }),
+        data_types: vocab!(DataType::{
+            Uint8, Uint16, Uint32, Int8, Int16, Int32, Float32, Float64, Uint64, Int64, Float16,
+        }),
         positioning_modes: vocab!(PositioningMode::{ Explicit, Derived }),
-        proxy_kinds: vocab!(ProxyKind::{ GroupProxy3D, TileProxy3D }),
         dataset_open_stages: vocab!(DatasetOpenStage::{
             RequestReceived, Authorization, SourceLookup, BackendOpen, MetadataImport,
             BindingBuild, GeneratedCoarsePlanning, WorkspacePersist, Broadcast, Complete,
@@ -624,21 +614,10 @@ fn single_fetch() -> FetchSource {
     })
 }
 
-fn single_catalog() -> AssetCatalog {
-    AssetCatalog {
-        entries: vec![ProxyAvailability {
-            entity_id: EntityId(SINGLE_ENTITY_ID.into()),
-            kinds: vec![ProxyKind::TileProxy3D],
-            footprints: vec![ProxyFootprint::u16(ProxyKind::TileProxy3D, [50, 128, 128])],
-        }],
-    }
-}
-
 fn single_dataset_opened() -> DatasetOpened {
     DatasetOpened {
         manifest: single_manifest(),
         fetch: single_fetch(),
-        catalog: single_catalog(),
         opener_client_id: Some(7),
     }
 }
@@ -788,7 +767,6 @@ fn collection_dataset_opened() -> DatasetOpened {
         fetch: FetchSource::Proxied(ProxiedFetchDescriptor {
             images: fetch_images,
         }),
-        catalog: AssetCatalog::default(),
         opener_client_id: None,
     }
 }
@@ -830,6 +808,7 @@ fn peer_display_settings() -> DatasetDisplaySettings {
         // entry, matching `single_manifest()`'s sole `region-a` label so the
         // name-keyed reconcile has a real name to exercise on the wire.
         label_names: vec!["region-a".into()],
+        solo: Some(0),
     }
 }
 
@@ -864,8 +843,7 @@ fn shared_view_state() -> ViewState {
     ViewState {
         z_range: 10..14,
         t: 2,
-        c: 1,
-        multi_channel: true,
+        ..ViewState::new()
     }
 }
 
@@ -943,8 +921,7 @@ fn fly_peer_presence() -> PresenceState {
         view: Some(ViewState {
             z_range: 0..50,
             t: 0,
-            c: 0,
-            multi_channel: false,
+            ..ViewState::new()
         }),
         display: Some(DisplayState::default()),
         following: None,
@@ -1029,9 +1006,6 @@ fn snapshot_document() -> DocumentState {
     document
         .active_layout_ids
         .insert(dataset_id.clone(), LayoutId("layout-grid".into()));
-    document
-        .asset_catalogs
-        .insert(dataset_id.clone(), single_catalog());
     document
         .annotations
         .insert(dataset_id, snapshot_annotations());
@@ -1119,6 +1093,23 @@ fn generated_snapshot() -> GeneratedAvailabilitySnapshot {
             },
         ],
         chunks: generated_chunk_updates(),
+        histograms: vec![generated_histogram()],
+    }
+}
+
+/// Bins that cover each shape a bin takes: a lone value, a negative, and a
+/// bin whose samples differ.
+fn generated_histogram() -> GeneratedLevelHistogram {
+    GeneratedLevelHistogram {
+        image_id: ImageId(SINGLE_IMAGE_ID.into()),
+        level_index: 2,
+        t: 0,
+        c: 1,
+        bins: vec![
+            HistogramBin(-3.0, -3.0, 2),
+            HistogramBin(12.0, 12.0, 4096),
+            HistogramBin(1024.0, 1039.0, 37),
+        ],
     }
 }
 
@@ -1132,6 +1123,7 @@ fn generated_delta() -> GeneratedAvailabilityDelta {
             status: GeneratedChunkStatus::Ready,
             message: None,
         }],
+        histograms: vec![generated_histogram()],
     }
 }
 
@@ -1187,19 +1179,10 @@ fn source_health() -> DatasetSourceHealth {
             "tiles differ in shape, and smaller tiles are padded with fill".into(),
         ],
         import_warnings: vec![DatasetImportWarning {
+            kind: DatasetImportWarningKind::MismatchedTileGeometry,
             target: SINGLE_DATASET_ID.into(),
             message: "tiles differ in shape, and smaller tiles are padded with fill".into(),
             degrades: true,
-        }],
-    }
-}
-
-fn asset_catalog_delta() -> AssetCatalogDelta {
-    AssetCatalogDelta {
-        added: vec![ProxyAvailability {
-            entity_id: EntityId(SINGLE_ENTITY_ID.into()),
-            kinds: vec![ProxyKind::GroupProxy3D, ProxyKind::TileProxy3D],
-            footprints: vec![ProxyFootprint::u16(ProxyKind::GroupProxy3D, [50, 256, 256])],
         }],
     }
 }
@@ -1259,21 +1242,11 @@ const PROXIED_FETCH_REQUIRED: &[&str] = &[
     "/Proxied/images/0/wire_format/Zstd/data_type",
 ];
 
-/// Required fields of the populated `AssetCatalog` shape.
-const CATALOG_REQUIRED: &[&str] = &[
-    "/entries/0/entity_id",
-    "/entries/0/kinds",
-    "/entries/0/footprints/0/kind",
-    "/entries/0/footprints/0/dims",
-    "/entries/0/footprints/0/bytes",
-];
-
 /// Required fields of `DatasetOpened` (with the single manifest inside).
 fn dataset_opened_required() -> Vec<String> {
     let mut keys = vec!["/manifest".to_string(), "/fetch".to_string()];
     keys.extend(req("/manifest", MANIFEST_REQUIRED));
     keys.extend(req("/fetch", PROXIED_FETCH_REQUIRED));
-    keys.extend(req("/catalog", CATALOG_REQUIRED));
     keys
 }
 
@@ -1296,7 +1269,6 @@ fn presence_required() -> Vec<String> {
             "/camera/viewport",
             "/view/z_range",
             "/view/t",
-            "/view/c",
             "/view/z_range/start",
             "/view/z_range/end",
             "/display/contrast_min",
@@ -1347,6 +1319,11 @@ const GENERATED_REQUIRED: &[&str] = &[
     "/chunks/0/level_index",
     "/chunks/0/key",
     "/chunks/0/status",
+    "/histograms/0/image_id",
+    "/histograms/0/level_index",
+    "/histograms/0/t",
+    "/histograms/0/c",
+    "/histograms/0/bins",
 ];
 
 /// Required fields of a fully populated `DatasetSourceHealth` (rooted at the
@@ -1681,27 +1658,6 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             },
         ),
         (
-            "session/server_asset_catalog_update.json",
-            ServerMessage::AssetCatalogUpdate {
-                dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
-                delta: asset_catalog_delta(),
-            },
-            {
-                let mut keys = req("", &["/type", "/dataset_id", "/delta", "/delta/added"]);
-                keys.extend(req(
-                    "/delta/added/0",
-                    &[
-                        "/entity_id",
-                        "/kinds",
-                        "/footprints/0/kind",
-                        "/footprints/0/dims",
-                        "/footprints/0/bytes",
-                    ],
-                ));
-                keys
-            },
-        ),
-        (
             "session/server_generated_availability_update.json",
             ServerMessage::GeneratedAvailabilityUpdate {
                 dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
@@ -1719,6 +1675,11 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                         "/chunks/0/level_index",
                         "/chunks/0/key",
                         "/chunks/0/status",
+                        "/histograms/0/image_id",
+                        "/histograms/0/level_index",
+                        "/histograms/0/t",
+                        "/histograms/0/c",
+                        "/histograms/0/bins",
                     ],
                 ));
                 keys
@@ -1789,13 +1750,13 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 batch: ServerTimingBatch {
                     dropped: 3,
                     // The metadata-read row keys on the open's request id
-                    // and leaves the correlation label unset; the chunk and
-                    // asset rows do the reverse.
+                    // and leaves the correlation label unset; the chunk rows
+                    // do the reverse.
                     rid: vec![2558, 2559, 0],
                     request_id: vec![None, None, Some("web-open-4c1a".into())],
                     family: vec![
                         TimingRowFamily::Chunk,
-                        TimingRowFamily::Asset,
+                        TimingRowFamily::Chunk,
                         TimingRowFamily::MetadataRead,
                     ],
                     outcome: vec![
@@ -2110,14 +2071,6 @@ fn command_goldens() -> Vec<(&'static str, DocumentCommand, Vec<&'static str>)> 
             },
             vec!["/id", "/name"],
         ),
-        (
-            "session/client_command_apply_asset_catalog_delta.json",
-            DocumentCommand::ApplyAssetCatalogDelta {
-                dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
-                delta: asset_catalog_delta(),
-            },
-            vec!["/dataset_id", "/delta", "/delta/added"],
-        ),
     ]
 }
 
@@ -2355,33 +2308,20 @@ const GENERATED_FILES: &[&str] = &[
     "generated/availability_delta.json",
 ];
 
-const REQUEST_FILES: &[&str] = &["session/chunk_request.json", "session/asset_request.json"];
+const REQUEST_FILES: &[&str] = &["session/chunk_request.json", "session/chunk_cancel.json"];
 
 const VOCAB_FILES: &[&str] = &["vocab/enum_vocabulary.json"];
 
-/// The two request goldens carry consecutive labels from one counter — `0`
-/// then `1` — because that is what a connection's first chunk request and
-/// first asset request actually get: the counter is shared across families
-/// and starts at zero. The vitest mirror reproduces both from a real
-/// `ProxiedContentSource`, so the shared counter is locked, not just the
-/// field's presence.
+/// The request golden carries label `0`, because that is what a
+/// connection's first chunk request gets: the counter starts at zero. The
+/// vitest mirror reproduces it from a real `ProxiedContentSource`, so the
+/// counter is locked, not just the field's presence.
 fn chunk_request_golden() -> ChunkMessage {
     ChunkMessage::ChunkRequest {
         rid: 0,
         dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
         image_id: ImageId(SINGLE_IMAGE_ID.into()),
         key: "1/2/1/12/3/4".into(),
-    }
-}
-
-fn asset_request_golden() -> AssetMessage {
-    AssetMessage::AssetRequest {
-        rid: 1,
-        dataset_id: DatasetId("wds-collection-77".into()),
-        entity_id: EntityId("tile-A1-f0".into()),
-        kind: ProxyKind::TileProxy3D,
-        t: 0,
-        c: 2,
     }
 }
 
@@ -2431,23 +2371,13 @@ fn request_envelopes_match_goldens() {
         &mut failures,
     );
 
-    let asset = asset_request_golden();
-    assert!(asset_message_fixture_paths(&asset).contains(&"session/asset_request.json"));
+    // The cancel the page sends when it aborts the request above.
+    let cancel = ChunkMessage::ChunkCancel { rids: vec![0] };
+    assert!(chunk_message_fixture_paths(&cancel).contains(&"session/chunk_cancel.json"));
     check(
-        "session/asset_request.json",
-        &asset,
-        &req(
-            "",
-            &[
-                "/type",
-                "/rid",
-                "/dataset_id",
-                "/entity_id",
-                "/kind",
-                "/t",
-                "/c",
-            ],
-        ),
+        "session/chunk_cancel.json",
+        &cancel,
+        &req("", &["/type", "/rids"]),
         &mut failures,
     );
 
@@ -2574,6 +2504,11 @@ fn generated_availability_payloads_match_goldens() {
                 "/chunks/0/level_index",
                 "/chunks/0/key",
                 "/chunks/0/status",
+                "/histograms/0/image_id",
+                "/histograms/0/level_index",
+                "/histograms/0/t",
+                "/histograms/0/c",
+                "/histograms/0/bins",
             ],
         ),
         &mut failures,
@@ -2598,7 +2533,6 @@ fn enum_vocabulary_matches_golden() {
             "/entity_kinds",
             "/data_types",
             "/positioning_modes",
-            "/proxy_kinds",
             "/dataset_open_stages",
             "/dataset_open_failure_kinds",
             "/dataset_health_statuses",
@@ -2615,6 +2549,114 @@ fn enum_vocabulary_matches_golden() {
         &required,
         &mut failures,
     );
+    assert_no_failures(failures);
+}
+
+const SAVED_VIEW_PAYLOAD_FILES: &[&str] = &["saved-view/payload.json"];
+
+/// Payloads the web viewer wrote before one-channel images opened gray, each
+/// with the view its decoder then returned. Hand-frozen, never regenerated:
+/// they prove an old link still restores as it did, magenta included.
+const RECORDED_PAYLOAD_FILES: &[&str] =
+    &["saved-view/recorded_v1.json", "saved-view/recorded_v2.json"];
+
+/// A view and the `#view=` payload the codec writes for it. The web and the
+/// Python client must write the same payload for the same view.
+#[derive(Serialize, serde::Deserialize)]
+struct PayloadGolden {
+    view: SavedView,
+    payload: String,
+}
+
+/// A one-channel layer in gray, which the payload must carry because the
+/// frozen defaults say magenta, beside a three-channel layer in the default
+/// cycle, which it leaves out.
+fn payload_saved_view() -> SavedView {
+    let one = DatasetId(SINGLE_DATASET_ID.into());
+    let three = DatasetId("wds-7c21".into());
+    let mut view = SavedView::empty([1920, 1080]);
+    view.datasets = vec![
+        "gs://lucida-fixtures/sample-plane.zarr".into(),
+        "gs://lucida-fixtures/sample-volume.zarr".into(),
+    ];
+    view.camera = slice_camera();
+    view.view = shared_view_state();
+    view.dataset_order = vec![one.clone(), three.clone()];
+    view.dataset_settings.insert(
+        one.clone(),
+        DatasetDisplaySettings {
+            channel_settings: vec![ChannelSettings {
+                colormap: Colormap::default_for_channel(0, 1),
+                contrast_max: 4000.0,
+                ..Default::default()
+            }],
+            label_settings: vec![LabelSettings {
+                visible: true,
+                opacity: 0.35,
+            }],
+            label_names: vec!["region-a".into()],
+            ..Default::default()
+        },
+    );
+    view.dataset_settings.insert(
+        three,
+        DatasetDisplaySettings {
+            opacity: 0.8,
+            channel_settings: (0..3)
+                .map(|i| ChannelSettings {
+                    colormap: Colormap::default_for_channel(i, 3),
+                    name: (i == 1).then(|| "Region B".into()),
+                    ..Default::default()
+                })
+                .collect(),
+            solo: Some(1),
+            ..Default::default()
+        },
+    );
+    view.auto_contrast.insert(one, false);
+    view
+}
+
+#[test]
+fn saved_view_payloads_match_goldens() {
+    let mut failures = Vec::new();
+    let view = payload_saved_view();
+    let golden = PayloadGolden {
+        payload: view.to_payload(),
+        view,
+    };
+    let mut required = req("/view", SAVED_VIEW_REQUIRED);
+    required.push("/payload".into());
+    check(
+        SAVED_VIEW_PAYLOAD_FILES[0],
+        &golden,
+        &required,
+        &mut failures,
+    );
+    match lucida_core::saved_view::decode_payload(&golden.payload)
+        .map(serde_json::from_value::<SavedView>)
+    {
+        Ok(Ok(decoded)) if decoded == golden.view => {}
+        other => failures.push(format!(
+            "{}: the payload does not decode to its view: {other:?}",
+            SAVED_VIEW_PAYLOAD_FILES[0]
+        )),
+    }
+
+    for rel in RECORDED_PAYLOAD_FILES {
+        let recorded: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(fixture_root().join(rel))
+                .unwrap_or_else(|e| panic!("{rel}: cannot read fixture: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("{rel}: not JSON: {e}"));
+        let payload = recorded["payload"].as_str().expect("a recorded payload");
+        match lucida_core::saved_view::decode_payload(payload) {
+            Ok(decoded) if decoded == recorded["view"] => {}
+            other => failures.push(format!(
+                "{rel}: a recorded payload no longer restores the view it did: {other:?}"
+            )),
+        }
+    }
     assert_no_failures(failures);
 }
 
@@ -2643,6 +2685,8 @@ fn fixture_directory_matches_declared_set() {
         .chain(GENERATED_FILES)
         .chain(REQUEST_FILES)
         .chain(VOCAB_FILES)
+        .chain(SAVED_VIEW_PAYLOAD_FILES)
+        .chain(RECORDED_PAYLOAD_FILES)
     {
         declared.insert((*rel).to_string());
     }

@@ -44,7 +44,7 @@ function makeScene() {
   const calls = { project: 0, region: 0 };
   const scene = {
     t: () => 0,
-    c: () => 0,
+    resolved_layers: () => "[]",
     member_positions: () => JSON.stringify({ tile: [0, 0] }),
     visible_region: () => {
       calls.region += 1;
@@ -108,8 +108,7 @@ function makeDatasets(): Map<string, DatasetState> {
 function makeLoop(): RenderLoop {
   const plan = {
     requests: [],
-    activeSet: [{ kind: "tile", entityId: "tile", imageId: "img", mode: "tiles-with-detail", detailLevels: [0], coarseLevel: null }],
-    proxyRequests: [],
+    activeSet: [{ kind: "tile", entityId: "tile", imageId: "img", detailLevels: [0], coarseLevel: null }],
   } as unknown as RequestPlan;
   return {
     getTickCoordinator: () => ({ getLastPlans: () => new Map([["ds", plan]]) }),
@@ -123,11 +122,8 @@ function makeCache(): CpuCache {
       inFlight: new Map([["tile", new Set(["0/0/0/0/0/1"])]]),
     }),
     getPendingSnapshot: () => [],
-    getPendingProxySnapshot: () => [],
     deliveryState: { isChunkHeld: () => false },
     getCachedChunkTier: () => null,
-    getCachedProxy: () => null,
-    isProxyInFlight: () => false,
   } as unknown as CpuCache;
 }
 

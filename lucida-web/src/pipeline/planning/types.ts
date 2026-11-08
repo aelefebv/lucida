@@ -4,7 +4,6 @@
  */
 
 import type { LevelGeometry } from "../../manifestTypes.ts";
-import type { AssetCatalogSnapshot } from "../assetCatalog.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { VisibleRegion } from "../viewport.ts";
@@ -86,9 +85,9 @@ export interface TileSnapshot extends BaseEntitySnapshot {
 
 export type EntitySnapshot = ImageSnapshot | GroupSnapshot | TileSnapshot;
 
+/** One layer's selectors: the scene's t and z clamped into the layer, and the channels it shows. */
 export interface SelectionState {
   t: number;
-  c: number;
   z: number;
   visibleChannels: number[];
   renderMode: "slice" | "volume";
@@ -101,9 +100,6 @@ export interface CacheStateSnapshot {
   /** entityId -> set of chunk keys currently being fetched. */
   inFlight: Map<string, Set<string>>;
 }
-
-// Re-exported so planning consumers don't need a separate import.
-export type { AssetCatalogSnapshot, ProxyKind } from "../assetCatalog.ts";
 
 /**
  * One missing minimap chunk in {@link PlanningSnapshot.minimapPending}.
@@ -123,20 +119,14 @@ export interface MinimapChunkCoord {
 
 export interface PlanningSnapshot {
   /**
-   * The planner stamps it onto every emitted {@link ChunkRequest} and
-   * {@link ProxyRequest}; the orchestrator does not back-fill it.
+   * The planner stamps it onto every emitted {@link ChunkRequest}; the
+   * orchestrator does not back-fill it.
    */
   datasetId: string;
   epochs: SceneEpochs;
   entities: EntitySnapshot[];
   visibleRegion: VisibleRegion;
   selection: SelectionState;
-  /**
-   * Read only by the proxy residency planner, which goes away with the
-   * proxy-asset path. `null` for callers that opt out, such
-   * as tests and `createSyntheticSnapshot`.
-   */
-  assetCatalog: AssetCatalogSnapshot | null;
   /**
    * Minimap chunks not yet on the GPU minimap atlas, keyed by
    * `EntitySnapshot.imageId`. An empty map means no minimap requests
@@ -190,12 +180,6 @@ export interface RequestPlan {
   activeSet: ActiveSetEntry[];
   epochs: SceneEpochs;
   /**
-   * Always defined, empty when no entry uses a proxy mode. Sorted
-   * ascending by `priority`. CpuCache routes these to
-   * `ContentSource.fetchProxy`.
-   */
-  proxyRequests: ProxyRequest[];
-  /**
    * Counters for this plan run, zeroed when no work happened. The
    * trace's per-tick counters (`traceTick.ts`) and tests read them.
    */
@@ -216,8 +200,9 @@ export interface RequestPlan {
 }
 
 /**
- * Per-plan accumulator. Counters are summed across all `iterateChunks`
- * calls (detail, prefetch, and coarse lanes) and across all entities.
+ * Per-plan accumulator. Counters are summed across the chunks each lane
+ * reads (detail, every prefetch step, and coarse), across all entities and
+ * channels.
  */
 export interface PlanStats {
   /** Frustum / visible-region culling stages. */
@@ -262,50 +247,8 @@ export interface ChunkRequest {
   chunkKey: string;
 }
 
-/**
- * A request to fetch a proxy asset. Mirrors `lucida_protocol::AssetRequest`
- * on the wire; `CpuCache.submit` routes it to `ContentSource.fetchProxy`.
- * The planner emits none, since every tile entry has `proxyAvailable:
- * false`. The type stays until the proxy-asset path is deleted.
- */
-export interface ProxyRequest {
-  datasetId: string;
-  entityId: string;
-  imageId: string;
-  kind: "GroupProxy3D" | "TileProxy3D";
-  t: number;
-  c: number;
-  /** Lower = more urgent. Same scale as `ChunkRequest.priority`. */
-  priority: number;
-}
-
-/**
- * Per-tile mode carried on {@link TileEntry}. The planner emits
- * `tiles-with-detail` for every visible tile, because the tier model
- * renders from chunks alone. `tiles-with-proxy-fallback` belongs to the
- * proxy-asset path; cold-state and worker consumers accept it until that
- * path is deleted.
- */
-export type EntityMode =
-  | "tiles-with-proxy-fallback"
-  | "tiles-with-detail";
-
-/**
- * One entry per visible tile, plus pass-through entries for invisible
- * entities. The planner never produces {@link GroupAsProxyEntry};
- * consumers accept it until the proxy-asset path is deleted.
- */
-export type ActiveSetEntry = GroupAsProxyEntry | TileEntry | InvisibleEntry;
-
-/**
- * A group rendered as one `GroupProxy3D` asset fetched at
- * `PROXY_LANE_OFFSET`, with no tile chunks.
- */
-export interface GroupAsProxyEntry {
-  kind: "group-as-proxy";
-  /** The group's entity id. */
-  entityId: string;
-}
+/** One entry per visible tile, plus pass-through entries for invisible entities. */
+export type ActiveSetEntry = TileEntry | InvisibleEntry;
 
 /** Active-set entry for one visible tile. */
 export interface TileEntry {
@@ -314,7 +257,6 @@ export interface TileEntry {
   entityId: string;
   /** The tile's owning image id (matches `EntitySnapshot.imageId`). */
   imageId: string;
-  mode: EntityMode;
   /**
    * Levels the detail tier requests, target level first; today only the
    * target. Cold state and the worker read the detail tier's levels from
@@ -328,24 +270,13 @@ export interface TileEntry {
    * level.
    */
   coarseLevel: number | null;
-  /** Set when the catalog advertises a tile proxy for this entity. */
-  proxyKind?: "TileProxy3D";
-  /** True if the tile's `TileProxy3D` is in the catalog. */
-  proxyAvailable: boolean;
-  /**
-   * Whether the parent group's `GroupProxy3D` is advertised. Drives the
-   * secondary lower-priority group-proxy request in
-   * `tiles-with-proxy-fallback` and the parent-fallback hint in
-   * `tiles-with-detail`.
-   */
-  groupProxyAvailable: boolean;
 }
 
 /**
  * Pass-through for an invisible entity so CPU cache eviction still sees
  * it. Carries only its coarsest level, the one its cold-state entry
- * lists. A separate variant keeps `mode === "tiles-with-detail"` checks
- * from catching invisible entities.
+ * lists. A separate variant keeps `kind === "tile"` checks from catching
+ * invisible entities.
  */
 export interface InvisibleEntry {
   kind: "invisible";

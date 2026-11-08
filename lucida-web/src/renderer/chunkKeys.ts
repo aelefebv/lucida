@@ -43,16 +43,3 @@ export function parseCompositeKey(
   if (sep < 0) return null;
   return { memberId: key.substring(0, sep), chunkKey: key.substring(sep + 1) };
 }
-
-/**
- * Shared chunk pool key for a memberId: `imageId` → `datasetId`,
- * `imageId:chN` → `datasetId:chN`. Keeps the per-channel split
- * `chunkPoolKey` applies.
- */
-export function derivePoolKey(memberId: string, datasetId: string): string {
-  const colonIdx = memberId.indexOf(":");
-  if (colonIdx >= 0) {
-    return `${datasetId}${memberId.substring(colonIdx)}`;
-  }
-  return datasetId;
-}

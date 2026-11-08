@@ -12,7 +12,6 @@ function makeEpochs(overrides?: Partial<SceneEpochs>): SceneEpochs {
     layout: 1,
     view: 1,
     selection: 1,
-    asset: 0,
     request: 1,
     ...overrides,
   };

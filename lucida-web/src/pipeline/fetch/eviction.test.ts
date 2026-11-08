@@ -13,7 +13,7 @@ import type { SceneEpochs } from "../epochs.ts";
 // Helpers
 
 const ZERO_EPOCHS: SceneEpochs = {
-  content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
+  content: 0, layout: 0, view: 0, selection: 0, request: 0,
 };
 
 /** A plan tick no entry was seen at, so nothing is wanted. */
@@ -85,12 +85,12 @@ describe("LRUPolicy", () => {
     expect(policy.selectVictims(entries, 250).map(v => v.chunkKey)).toEqual(["a", "b", "c"]);
   });
 
-  it("works with the generic EvictableEntry shape (proxy adapter)", () => {
-    interface ProxyShim extends EvictableEntry {
+  it("works with any EvictableEntry shape", () => {
+    interface MinimalEntry extends EvictableEntry {
       key: string;
     }
-    const policy = new LRUPolicy<ProxyShim>();
-    const entries: ProxyShim[] = [
+    const policy = new LRUPolicy<MinimalEntry>();
+    const entries: MinimalEntry[] = [
       { insertedAt: 2, sizeBytes: 50, key: "c" },
       { insertedAt: 0, sizeBytes: 50, key: "a" },
       { insertedAt: 1, sizeBytes: 50, key: "b" },
@@ -342,20 +342,23 @@ describe("TieredPolicy", () => {
   describe("what the latest plan wants goes last", () => {
     const TICK = 7;
     const policyFor = (mode: InteractionMode) => new TieredPolicy(() => mode, () => undefined, () => TICK);
+    // Lane-strict priorities: the prefetch chunk at the center still ranks
+    // below the view's chunk at the edge.
     const entries = () => [
-      makeEntry({ insertedAt: 0, sizeBytes: 50, tier: "active-detail", chunkKey: "view", lastSeenTick: TICK, priority: 900 }),
+      makeEntry({ insertedAt: 0, sizeBytes: 50, tier: "active-detail", chunkKey: "view-near", lastSeenTick: TICK, priority: 500 }),
+      makeEntry({ insertedAt: 1, sizeBytes: 50, tier: "active-detail", chunkKey: "view-edge", lastSeenTick: TICK, priority: 500.4 }),
       makeEntry({
-        insertedAt: 1, sizeBytes: 50, tier: "prefetch", lane: "prefetch", chunkKey: "prefetch", lastSeenTick: TICK, priority: 10,
+        insertedAt: 2, sizeBytes: 50, tier: "prefetch", lane: "prefetch", chunkKey: "prefetch", lastSeenTick: TICK, priority: 1600,
       }),
-      makeEntry({ insertedAt: 2, sizeBytes: 50, tier: "active-detail", chunkKey: "stale-detail", lastSeenTick: TICK - 1 }),
-      makeEntry({ insertedAt: 3, sizeBytes: 50, tier: "prefetch", lane: "prefetch", chunkKey: "stale-prefetch", lastSeenTick: 2 }),
+      makeEntry({ insertedAt: 3, sizeBytes: 50, tier: "active-detail", chunkKey: "stale-detail", lastSeenTick: TICK - 1 }),
+      makeEntry({ insertedAt: 4, sizeBytes: 50, tier: "prefetch", lane: "prefetch", chunkKey: "stale-prefetch", lastSeenTick: 2 }),
     ];
 
     for (const mode of ["idle", "panning", "scrubbing"] as const) {
-      it(`takes the unwanted, then the plan's prefetch, then its view, ${mode}`, () => {
-        const victims = policyFor(mode).selectVictims(entries(), 200).map((v) => v.chunkKey);
+      it(`takes the unwanted, then what the plan wants least urgent first, ${mode}`, () => {
+        const victims = policyFor(mode).selectVictims(entries(), 250).map((v) => v.chunkKey);
         expect(victims.slice(0, 2).sort()).toEqual(["stale-detail", "stale-prefetch"]);
-        expect(victims.slice(2)).toEqual(["prefetch", "view"]);
+        expect(victims.slice(2)).toEqual(["prefetch", "view-edge", "view-near"]);
       });
     }
 

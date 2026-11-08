@@ -25,7 +25,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use common::workspace_rig::WorkspaceRig;
 use lucida_core::protocol::ServerMessage;
 use lucida_protocol::{PHASE_UNSET, ServerTimingBatch, TimingRowFamily, TimingRowOutcome};
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
@@ -36,11 +36,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(20);
 /// serve passes through, not the codec it passes them with.
 const VOXELS: usize = 16;
 
-fn proxy_config(root: &Path) -> ProxyConfig {
-    ProxyConfig {
-        cache_dir: root.join("proxies"),
-        legacy_proxy_enabled: false,
-        concurrency: 1,
+fn generated_config(root: &Path) -> GeneratedConfig {
+    GeneratedConfig {
         generated_enabled: false,
         generated_cache_dir: root.join("generated"),
         generated_concurrency: 1,
@@ -49,6 +46,7 @@ fn proxy_config(root: &Path) -> ProxyConfig {
         generated_chunk_long_axis: 32,
         generated_max_chunk_bytes: 1024 * 1024,
         generated_disk_budget_bytes: None,
+        generated_memory: lucida_server::generated::GeneratedChunkMemory::new(1 << 20),
     }
 }
 
@@ -142,7 +140,7 @@ async fn a_served_chunk_reports_every_phase_it_passed_through() {
     let data = root.join("dataset.zarr");
     write_fixture(&data);
 
-    let rig = WorkspaceRig::start(proxy_config(&root)).await;
+    let rig = WorkspaceRig::start(generated_config(&root)).await;
 
     // The binding goes in through the real open path, so the lookup the row
     // measures is the one production takes.
@@ -151,7 +149,7 @@ async fn a_served_chunk_reports_every_phase_it_passed_through() {
         1,
         &data.to_str().unwrap().parse().unwrap(),
         &DatasetOpenContext {
-            proxy_config: proxy_config(&root),
+            generated_config: generated_config(&root),
             source_policy: Arc::default(),
             workspace: rig.scope(),
         },

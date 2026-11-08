@@ -9,8 +9,8 @@
 #   - This template ships the volume shape: every store lives in one
 #     SQLite file on the PVC, and SQLite + WAL is single-writer, so a
 #     second pod cannot share it.
-#   - The proxy on-disk cache (LUCIDA_PROXY_CACHE_DIR) is also on the
-#     PVC and is single-writer for the same reason.
+#   - The generated-level cache (LUCIDA_GENERATED_COARSE_CACHE_DIR) is
+#     also on the PVC and is single-writer for the same reason.
 #   - Strategy is Recreate so the writer slot is never double-booked
 #     during rollouts (the new pod waits for the old pod to release the
 #     PVC). RollingUpdate would briefly run two writers against the
@@ -121,7 +121,7 @@ spec:
                   name: lucida-google-oauth
                   key: client_secret
 
-            # ---- Required: where the database + the proxy cache live ----
+            # ---- Required: where the database + the generated-level cache live ----
             # The scheme of LUCIDA_DB_URL picks the storage backend.
             # Give SQLite an absolute path under the PVC mount below:
             # anything outside it, including the default `./lucida.db`,
@@ -136,12 +136,12 @@ spec:
             # A single SQLite file cannot serve a second replica, so
             # PostgreSQL is a prerequisite for scaling past
             # `replicas: 1`, and not the only one: the PVC below is
-            # ReadWriteOnce and also holds the proxy cache and the data
-            # directory, so plan those too before raising the count.
+            # ReadWriteOnce and also holds the generated-level cache and the
+            # data directory, so plan those too before raising the count.
             - name: LUCIDA_DB_URL
               value: "sqlite:///var/lib/lucida/lucida.db"
-            - name: LUCIDA_PROXY_CACHE_DIR
-              value: "/var/lib/lucida/proxy-cache"
+            - name: LUCIDA_GENERATED_COARSE_CACHE_DIR
+              value: "/var/lib/lucida/generated-coarse"
             - name: LUCIDA_DATA_DIR
               value: "/var/lib/lucida/data"
 
@@ -174,11 +174,6 @@ spec:
             #   value: "<HOURS>"
             # - name: LUCIDA_SESSION_IDLE_TIMEOUT_HOURS
             #   value: "<HOURS>"
-
-            # Per-generator concurrency cap for the on-disk proxy cache.
-            # CLI flag wins over env if both are set.
-            # - name: LUCIDA_PROXY_CONCURRENCY
-            #   value: "<INT>"
 
             # Run with auth disabled on a non-loopback bind. The server
             # refuses to start that way without it. Do not set this in
@@ -213,8 +208,7 @@ spec:
           resources:
             # Starting points. Tune from your actual usage. The chunk
             # pipeline can spike memory under heavy concurrent fetch;
-            # the proxy cache uses disk, not RAM, but the sled-style
-            # in-process indexes scale with cache size.
+            # the generated-level cache uses disk, not RAM.
             requests:
               cpu: "200m"
               memory: "512Mi"

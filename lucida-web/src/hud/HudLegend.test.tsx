@@ -9,7 +9,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
 
 import { HudLegend } from "./HudLegend.tsx";
-import { DEBUG_OVERLAYS, isOverlayEnabled, setOverlayEnabled } from "../debug/logging.ts";
+import { DEBUG_OVERLAYS, debugOverlaysPreference, isOverlayEnabled, setOverlayEnabled } from "../debug/logging.ts";
+import { getPreference } from "../theme/preferences.ts";
 
 beforeEach(() => {
   localStorage.clear();
@@ -23,10 +24,10 @@ afterEach(() => {
 });
 
 describe("the phase and churn toggles", () => {
-  it("are overlay toggles like the others, persisted in the same storage key", () => {
+  it("are overlay toggles like the others, persisted in the same preference", () => {
     render(<HudLegend windowSource={{ openIntervalMs: null }} />);
-    const phase = screen.getByLabelText("phaseColor") as HTMLInputElement;
-    const churn = screen.getByLabelText("churnTint") as HTMLInputElement;
+    const phase = screen.getByRole("checkbox", { name: "phase" }) as HTMLInputElement;
+    const churn = screen.getByRole("checkbox", { name: /^churn/ }) as HTMLInputElement;
     expect(phase.checked).toBe(false);
     expect(churn.checked).toBe(false);
 
@@ -36,7 +37,7 @@ describe("the phase and churn toggles", () => {
     });
     expect(isOverlayEnabled("phaseColor")).toBe(true);
     expect(isOverlayEnabled("churnTint")).toBe(true);
-    expect(localStorage.getItem("debug.overlays")).toBe("phaseColor,churnTint");
+    expect(getPreference(debugOverlaysPreference)).toEqual(["phaseColor", "churnTint"]);
   });
 
   it("states the churn window beside the toggle, and says when no interval is open", () => {

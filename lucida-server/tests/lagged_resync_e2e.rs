@@ -28,9 +28,9 @@ use lucida_content::{DatasetId, DatasetKind, DatasetManifest};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{MessageRejection, ServerMessage};
 use lucida_core::scene::DocumentState;
-use lucida_protocol::{AssetCatalog, DatasetOpened, FetchSource, ProxiedFetchDescriptor};
+use lucida_protocol::{DatasetOpened, FetchSource, ProxiedFetchDescriptor};
 use lucida_server::workspace::WorkspaceRuntimeConfig;
-use lucida_server::{BroadcastItem, ProxyConfig};
+use lucida_server::{BroadcastItem, GeneratedConfig};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -62,15 +62,14 @@ async fn apply_and_broadcast(rig: &Rig, command: DocumentCommand) {
 /// of `broadcast_capacity` items.
 async fn start_server(broadcast_capacity: usize) -> Rig {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let mut proxy_config = ProxyConfig::defaults();
-    proxy_config.cache_dir = tmp.path().join("proxies");
-    proxy_config.generated_cache_dir = tmp.path().join("generated-coarse");
+    let mut generated_config = GeneratedConfig::defaults();
+    generated_config.generated_cache_dir = tmp.path().join("generated-coarse");
     let runtime = WorkspaceRuntimeConfig {
         broadcast_capacity,
         ..WorkspaceRuntimeConfig::default()
     };
     Rig {
-        workspace: WorkspaceRig::start_with(proxy_config, runtime).await,
+        workspace: WorkspaceRig::start_with(generated_config, runtime).await,
         _tmp: tmp,
     }
 }
@@ -141,7 +140,6 @@ fn dataset_opened_command(idx: usize, name_bytes: usize) -> DocumentCommand {
     DocumentCommand::DatasetOpened(DatasetOpened {
         manifest,
         fetch: FetchSource::Proxied(ProxiedFetchDescriptor { images: vec![] }),
-        catalog: AssetCatalog::default(),
         opener_client_id: None,
     })
 }
@@ -277,7 +275,12 @@ async fn request_snapshot_returns_fresh_snapshot() {
     let rig = start_server(256).await;
 
     let mut client = connect(&rig).await;
-    let ServerMessage::Snapshot { seq, .. } = next_server_message(&mut client).await else {
+    let ServerMessage::Snapshot {
+        seq,
+        your_id: joined_as,
+        ..
+    } = next_server_message(&mut client).await
+    else {
         panic!("join snapshot");
     };
     assert_eq!(seq, 0);
@@ -307,7 +310,7 @@ async fn request_snapshot_returns_fresh_snapshot() {
         panic!("expected snapshot in response to request_snapshot");
     };
     assert_eq!(seq, 3);
-    assert_eq!(your_id, 0);
+    assert_eq!(your_id, joined_as);
     let server_doc = rig.workspace.live.session.lock().await.document.clone();
     assert_eq!(
         serde_json::to_value(&document).unwrap(),

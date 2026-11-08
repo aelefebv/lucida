@@ -26,8 +26,8 @@ interface Bracket {
  * Join each server row to the bracket the browser measured for it and place
  * it inside.
  *
- * There are two joins, because there are two kinds of parent. A chunk or
- * asset row equi-joins on `(connectionGeneration, rid)`; coalesced browser
+ * There are two joins, because there are two kinds of parent. A chunk row
+ * equi-joins on `(connectionGeneration, rid)`; coalesced browser
  * rows all carry the first sender's label, so several rows may share one
  * bracket — that is the cardinality, not a defect to clean up. A
  * metadata-read row joins on the `request_id` of the open that performed

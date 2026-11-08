@@ -1,11 +1,11 @@
 import { useEffect } from "react";
 import type { WasmScene } from "lucida-core";
 import type { Session } from "../session.ts";
-import type { ClientId } from "../bridge.ts";
 import type { ViewportCommand } from "../commands.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { ChannelFit } from "../pipeline/autoContrast.ts";
 import { invalidateResidency } from "../invalidation.ts";
+import type { PeerStore } from "../peerStore.ts";
 import { guardedSceneCall } from "../sceneGuard.ts";
 import { channelRangeKey, parseChannelRangeKey } from "../components/channels.ts";
 
@@ -62,8 +62,7 @@ interface Params {
   wasmSceneRef: React.RefObject<WasmScene | null>;
   loopRef: React.RefObject<RenderLoop | null>;
   sessionRef: React.RefObject<Session | null>;
-  followTarget: ClientId | null;
-  followTargetRef: React.RefObject<ClientId | null>;
+  peerStore: PeerStore;
 }
 
 /** Keep each channel's fit and, where the layer asks for it, its contrast limits. */
@@ -75,8 +74,7 @@ export function useAutoContrast({
   wasmSceneRef,
   loopRef,
   sessionRef,
-  followTarget,
-  followTargetRef,
+  peerStore,
 }: Params) {
   useEffect(() => {
     if (!activeLoop) return;
@@ -90,7 +88,7 @@ export function useAutoContrast({
           loop: loopRef.current,
           session: sessionRef.current,
           auto: autoContrastMapRef.current.get(datasetId) ?? true,
-          following: followTargetRef.current !== null,
+          following: peerStore.getState().followTarget !== null,
         },
         datasetId,
         channel,
@@ -98,27 +96,32 @@ export function useAutoContrast({
       );
     });
     return () => activeLoop.setAutoContrastListener(null);
-  }, [activeLoop, autoContrastMapRef, setContrastFitMap, wasmSceneRef, loopRef, sessionRef, followTargetRef]);
+  }, [activeLoop, autoContrastMapRef, setContrastFitMap, wasmSceneRef, loopRef, sessionRef, peerStore]);
 
   // A client that stops following fits its own limits again. The fits kept
   // arriving while it followed, so the latest ones are its current view's.
   useEffect(() => {
-    if (followTarget !== null) return;
-    for (const [key, fit] of contrastFitMapRef.current) {
-      const parsed = parseChannelRangeKey(key);
-      if (!parsed) continue;
-      applyAutoContrastFit(
-        {
-          scene: wasmSceneRef.current,
-          loop: loopRef.current,
-          session: sessionRef.current,
-          auto: autoContrastMapRef.current.get(parsed.datasetId) ?? true,
-          following: false,
-        },
-        parsed.datasetId,
-        parsed.channel,
-        fit,
-      );
-    }
-  }, [followTarget, contrastFitMapRef, autoContrastMapRef, wasmSceneRef, loopRef, sessionRef]);
+    let following = peerStore.getState().followTarget !== null;
+    return peerStore.subscribe(() => {
+      const wasFollowing = following;
+      following = peerStore.getState().followTarget !== null;
+      if (!wasFollowing || following) return;
+      for (const [key, fit] of contrastFitMapRef.current) {
+        const parsed = parseChannelRangeKey(key);
+        if (!parsed) continue;
+        applyAutoContrastFit(
+          {
+            scene: wasmSceneRef.current,
+            loop: loopRef.current,
+            session: sessionRef.current,
+            auto: autoContrastMapRef.current.get(parsed.datasetId) ?? true,
+            following: false,
+          },
+          parsed.datasetId,
+          parsed.channel,
+          fit,
+        );
+      }
+    });
+  }, [peerStore, contrastFitMapRef, autoContrastMapRef, wasmSceneRef, loopRef, sessionRef]);
 }

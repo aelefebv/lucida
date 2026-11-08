@@ -4,6 +4,7 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
+import type { BlendMode } from "./layerCompositor.ts";
 
 export interface InitMessage {
   type: "init";
@@ -55,14 +56,18 @@ export interface Chunk {
   key: string;
 }
 
+/**
+ * One Z-plane of each of a member's chunks: each `chunk.data` is the
+ * `chunkY*chunkX` samples of the plane `fullResZ` maps to at `level`, cut
+ * from the 3D chunk the page keeps.
+ */
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
   epochs: SceneEpochs;
   tier: ResidencyTier;
   /**
-   * Worker-side member id (the per-channel chunk owner). Format:
-   * `imageId` for single-channel layers, `imageId:chN` for
-   * multi-channel composites. Not a dataset id.
+   * Worker-side member id (the per-channel chunk owner), `imageId:chN`.
+   * Not a dataset id.
    */
   memberId: string;
   chunks: Chunk[];
@@ -107,6 +112,8 @@ export interface LabelSliceChunkDataMessage {
   levelHeight: number;
   chunkX: number;
   chunkY: number;
+  /** The label level's Z plane every chunk was cut at. */
+  plane: number;
 }
 
 export interface VolumeChunkDataMessage {
@@ -154,36 +161,12 @@ export interface LabelVolumeChunkDataMessage {
   chunkZ: number;
 }
 
-/**
- * A generated proxy asset delivered to the worker. Carries the compact
- * `[Z, Y, X]` u16 voxel buffer plus identifying metadata.
- */
-export interface ProxyAssetDataMessage {
-  type: "proxyAssetData";
-  epochs: SceneEpochs;
-  datasetId: string;
-  entityId: string;
-  imageId: string;
-  kind: "GroupProxy3D" | "TileProxy3D";
-  t: number;
-  c: number;
-  /** `[Z, Y, X]` voxel counts. */
-  dims: [number, number, number];
-  dataType: "u16";
-  /** Raw u16 voxels (little-endian), `Z*Y*X*2` bytes. */
-  data: ArrayBuffer;
-}
-
 export interface VolumeLayerParams {
   datasetId: string;
   blendMode: "alpha" | "additive" | "max";
   renderMode: "translucent" | "max_intensity";
   scissorRect?: [number, number, number, number];
-  /**
-   * The tile's entity id, or the group's for `group-as-proxy` entries. For
-   * inspection only: proxy binding comes from the member id, because proxy
-   * residency is scoped by `(entity, t, c)`.
-   */
+  /** The tile's entity id. For inspection only: binding comes from the member id. */
   entityId?: string;
   /** Index into the per-dataset entity descriptor buffer. */
   entityIndex: number;
@@ -208,6 +191,11 @@ export interface VolumeLayerParams {
    */
   labelColors?: { value: number; rgba: [number, number, number, number] }[];
   /**
+   * The level and chunk-T a label layer draws, so the worker marks the
+   * chunks of it that failed for good. Label layers only.
+   */
+  labelChunk?: { level: number; t: number };
+  /**
    * Column-major model matrix (source member's `[0,1]^3` cube → world) and
    * its inverse, for a label layer only. A label overlays its source image's
    * physical extent, so it renders in the source's world placement; the
@@ -222,7 +210,7 @@ export interface VolumeLayerParams {
  * Multi-pass volume render request.
  *
  * Stale-tolerant: the worker draws with whatever residency it has, and
- * render messages skip `isStaleDelivery`. Chunk and proxy data messages are
+ * render messages skip `isStaleDelivery`. Chunk data messages are
  * stale-rejected by `epochs` instead. Re-issuing a render is cheap and the
  * next view epoch sends one anyway, while a stale chunk would write
  * wrong-epoch voxels into the atlas for good.
@@ -306,6 +294,11 @@ export interface SliceLayerParams {
   /** See {@link VolumeLayerParams.labelColors}. */
   labelColors?: { value: number; rgba: [number, number, number, number] }[];
   /**
+   * The plane a label layer draws: its level, chunk-T, chunk-Z, and the
+   * plane within the level. See {@link VolumeLayerParams.labelChunk}.
+   */
+  labelChunk?: { level: number; t: number; z: number; plane: number };
+  /**
    * Batched member quads for an aggregate layer. When present the
    * worker renders the whole batch in one pass (one instanced draw)
    * instead of one pass per member; `datasetId`, `offsetX/offsetY`,
@@ -347,15 +340,19 @@ export interface SliceRenderMultiPassMessage {
 }
 
 export interface MinimapLayerParams {
+  /** The overview texture: a member's id with its channel. */
   datasetId: string;
   modelMatrix: Float32Array;
   invModelMatrix: Float32Array;
   contrastMin: number;
   contrastMax: number;
   gamma: number;
-  /** Active channel's colormap name (snake_case, e.g. "magenta"); the minimap
+  /** The channel's colormap name (snake_case, e.g. "magenta"); the minimap
    * binds its own LUT so 2D matches 3D instead of rendering gray. */
   colormap: string;
+  /** How this channel combines with the overviews drawn before it, as the
+   * main view combines it. */
+  blendMode: BlendMode;
 }
 
 export interface MinimapInitMessage {
@@ -370,6 +367,8 @@ export interface MinimapRenderMessage {
   eye: Float32Array;
   canvasW: number;
   canvasH: number;
+  /** Device pixels per CSS pixel, so the failed hatch is one size at any ratio. */
+  pixelRatio: number;
 }
 
 export interface MinimapDestroyMessage {
@@ -380,6 +379,9 @@ export interface MinimapUploadOverviewChunksForLayerMessage {
   type: "minimapUploadOverviewChunksForLayer";
   datasetId: string;
   chunks: Chunk[];
+  /** The member image the overview draws, and the level its chunk keys name. */
+  imageId: string;
+  level: number;
   t: number;
   c: number;
   levelWidth: number;
@@ -409,6 +411,8 @@ export interface ThumbnailRenderMessage {
   eye: Float32Array;
   /** Square edge length of the off-screen target in device pixels. */
   size: number;
+  /** See {@link MinimapRenderMessage.pixelRatio}. */
+  pixelRatio: number;
 }
 
 export interface RemoveLayerResourcesMessage {
@@ -450,11 +454,14 @@ export interface CaptureFrameMessage {
 }
 
 /**
- * Fields shared by both {@link ColdStateActiveEntry} variants. Not
- * exported; narrow the union on `kind` instead.
+ * Per-entity cold-state record: an image member the worker allocates
+ * sections for and draws. Invisible planner entries arrive here too, with
+ * only their coarsest level, so CPU-side eviction still sees them.
  */
-interface ColdStateActiveEntryBase {
+export interface ColdStateActiveEntry {
   entityId: string;
+  /** Image member id from the planner. Always a non-empty string. */
+  imageId: string;
   /** Layout placement in full-resolution voxel coordinates. */
   layoutPositionVox?: [number, number];
   levels: Array<{
@@ -464,24 +471,20 @@ interface ColdStateActiveEntryBase {
     levelDims: [number, number, number];  // [Z, Y, X] voxel dimensions
   }>;
   /**
-   * Which proxy kind (if any) this entry would prefer. For
-   * `group-as-proxy` this is `GroupProxy3D`; for tile modes it's
-   * `TileProxy3D` if the catalog advertises it.
+   * Levels the detail tier requests, target level first (the planner's
+   * `TileEntry.detailLevels`). The worker allocates detail sections for
+   * the target and the next coarser levels (see
+   * `entitySources.detailTierLevels`), reports missing chunks at these
+   * levels, and samples the target first, then coarser resident levels,
+   * never a finer one.
    */
-  proxyKind?: "GroupProxy3D" | "TileProxy3D";
-  /** Catalog says the preferred proxy is fetchable. */
-  proxyAvailable: boolean;
-  /**
-   * Catalog says the parent group's `GroupProxy3D` is fetchable. For
-   * `group-as-proxy` entries equals `proxyAvailable`; for tile entries
-   * this drives the secondary parent-group-proxy request.
-   */
-  groupProxyAvailable: boolean;
+  detailLevels: number[];
+  /** Level the coarse tier holds for this entity, or `null` for none. */
+  coarseLevel: number | null;
   /**
    * Column-major model matrix from the entity's `[0,1]^3` unit cube to
-   * world space. Group-as-proxy entries synthesise it from the group AABB
-   * (see `synthesizeGroupRosterEntry`). The worker writes it straight into
-   * the descriptor buffer; render messages carry no per-frame model matrices.
+   * world space. The worker writes it straight into the descriptor buffer;
+   * render messages carry no per-frame model matrices.
    */
   modelMatrix: Float32Array;
   /** Inverse of {@link modelMatrix}. */
@@ -493,58 +496,6 @@ interface ColdStateActiveEntryBase {
    */
   displayStateByChannel: Record<number, ColdStateDisplayState>;
 }
-
-/**
- * Per-entity cold-state record, discriminated on `kind`:
- *
- *   - `"tile"`: an image member with a real `imageId`. `mode` says whether
- *     the worker serves the proxy alongside chunks
- *     (`tiles-with-proxy-fallback`) or chunks only (`tiles-with-detail`).
- *     Invisible planner entries also arrive as `tiles-with-detail`, so the
- *     worker fetches no proxies for them.
- *   - `"group-as-proxy"`: a synthesised group entry with no backing image;
- *     the worker renders the group's proxy. Route by `entityId`.
- *
- * Narrow on `kind`. `mode` overlaps it and is kept for logging and
- * inspection paths that read it.
- */
-export type ColdStateActiveEntry =
-  | (ColdStateActiveEntryBase & {
-      kind: "tile";
-      /** Image member id from the planner. Always a non-empty string. */
-      imageId: string;
-      mode: "tiles-with-detail" | "tiles-with-proxy-fallback";
-      /**
-       * Levels the detail tier requests, target level first (the planner's
-       * `TileEntry.detailLevels`). The worker allocates detail sections for
-       * the target and the next coarser levels (see
-       * `entitySources.detailTierLevels`), reports missing chunks at these
-       * levels, and samples the target first, then coarser resident levels,
-       * never a finer one.
-       */
-      detailLevels: number[];
-      /** Level the coarse tier holds for this entity, or `null` for none. */
-      coarseLevel: number | null;
-      /**
-       * Parent group id, so the worker can map a tile's descriptor to its
-       * parent's groupProxyHandle. A string or `null`, never `undefined`.
-       */
-      parentGroupId: string | null;
-    })
-  | (ColdStateActiveEntryBase & {
-      kind: "group-as-proxy";
-      /**
-       * No backing image; route by `entityId`. `?: never` makes the compiler
-       * reject any read.
-       */
-      imageId?: never;
-      mode: "group-as-proxy";
-      /** Groups have no parent group. */
-      parentGroupId: null;
-    });
-
-/** The tile variant of {@link ColdStateActiveEntry}, the entries that carry chunks. */
-export type ColdStateTileEntry = Extract<ColdStateActiveEntry, { kind: "tile" }>;
 
 /**
  * Per-channel display state in cold state. The worker writes these fields
@@ -578,12 +529,7 @@ export interface ColdStateMessage {
   datasetId: string;
   currentT: number;
   currentZ: number;
-  /**
-   * Explicit scene mode. Do not infer this from `visibleChannels.length`:
-   * multi-channel mode can legitimately have one visible channel, and
-   * residency/member keys must still use the multi-channel shape.
-   */
-  multiChannel: boolean;
+  /** The channels the layer shows. Each has its own member ids and pools. */
   visibleChannels: number[];
   visibleRegion: VisibleRegion;
   /** Per-tier render radius as visible-region half-diagonal multipliers. */
@@ -591,8 +537,6 @@ export interface ColdStateMessage {
     detail: number;
     coarse: number;
   };
-  /** Budget-admitted proxy residency keys: `${datasetId}|${entityId}|${kind}|${t}|${c}`. */
-  desiredProxyKeys?: string[];
   /**
    * The chunks the planner delivers for this view: its detail and coarse
    * lanes. The worker admits, keeps, and reports against these keys, so it
@@ -654,8 +598,6 @@ export interface ColdStateSelectionMessage {
   currentT: number;
   currentZ: number;
   visibleRegion: VisibleRegion;
-  /** Budget-admitted proxy residency keys for the new selection. */
-  desiredProxyKeys: string[];
   /** Every wanted chunk at the new selection; see {@link ColdStateMessage.wantedChunks}. */
   wantedChunks: WantedMemberChunks[];
   epochs: SceneEpochs;
@@ -684,8 +626,6 @@ export interface ColdStateDeltaMessage {
     detail: number;
     coarse: number;
   };
-  /** Budget-admitted proxy residency keys for the new view. */
-  desiredProxyKeys?: string[];
   /**
    * The (member, tier) entries of {@link ColdStateMessage.wantedChunks} that
    * changed, each replacing the retained one. An entry with no keys removes
@@ -712,6 +652,20 @@ export interface FailedChunksMessage {
   images: Array<{ imageId: string; chunkKeys: string[] }>;
 }
 
+/**
+ * Read what the last frame drew under one canvas point: for each visible
+ * channel of each entity there, the resident sample and the level it came
+ * from. `x` and `y` are fractions of the canvas, so the page needn't know the
+ * render resolution. Answered by a {@link ProbeResultMessage} with the same
+ * `id`.
+ */
+export interface ProbeMessage {
+  type: "probe";
+  id: number;
+  x: number;
+  y: number;
+}
+
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
@@ -720,7 +674,6 @@ export type MainToWorkerMessage =
   | LabelSliceChunkDataMessage
   | VolumeChunkDataMessage
   | LabelVolumeChunkDataMessage
-  | ProxyAssetDataMessage
   | VolumeRenderMultiPassMessage
   | SliceRenderMultiPassMessage
   | MinimapInitMessage
@@ -738,6 +691,7 @@ export type MainToWorkerMessage =
   | FailedChunksMessage
   | ViewHotStateMessage
   | CaptureFrameMessage
+  | ProbeMessage
   | LoseDeviceMessage;
 
 export interface ReadyMessage {
@@ -854,13 +808,11 @@ export interface ChunkResidencyMessage {
 
 /** A wanted chunk the worker does not hold as the current selection draws it. */
 export type MissingChunk = {
-  kind: "chunk";
   datasetId: string;
   tier: ResidencyTier;
   entityId: string;
   /**
-   * Worker-side member id that owns the missing chunk. Single-channel
-   * mode uses bare image ids; multi-channel mode uses `imageId:chN`.
+   * Worker-side member id that owns the missing chunk, `imageId:chN`.
    */
   memberId: string;
   /** The member's channel. */
@@ -869,33 +821,16 @@ export type MissingChunk = {
 };
 
 /**
- * A proxy asset that the worker is missing from its proxy atlas.
- *
- * `datasetId` is included so the main thread can clear CpuCache's
- * proxy-sent delivery state by composite key. Populated from
- * `coldState.datasetId` in `wantedSet.computeWantedSet`.
- */
-export type MissingProxy = {
-  kind: "proxy";
-  datasetId: string;
-  entityId: string;
-  proxyKind: "GroupProxy3D" | "TileProxy3D";
-  t: number;
-  c: number;
-};
-
-/**
- * What the worker wants and lacks for one dataset. Chunks come from the cold
- * state's {@link ColdStateMessage.wantedChunks}, proxies from its desired
- * proxy keys. A missing proxy is re-delivered. Every chunk loss is reported
- * on its own, so a missing chunk the page's residency mirror holds is a
+ * What the worker wants and lacks for one dataset, from the cold state's
+ * {@link ColdStateMessage.wantedChunks}. Every chunk loss is reported on its
+ * own, so a missing chunk the page's residency mirror holds is a
  * disagreement between the two records.
  */
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
   datasetId: string;
   epochs: SceneEpochs;
-  missing: Array<MissingChunk | MissingProxy>;
+  missing: MissingChunk[];
 }
 
 /** A closed range of levels; `min === max` for a single level. */
@@ -950,7 +885,7 @@ export interface GpuPassTimeMessage {
 
 /**
  * What the render worker holds on the GPU against its one budget. `bytes` is
- * the sum of the five holder lines; colormaps and descriptor buffers, a few
+ * the sum of the four holder lines; colormaps and descriptor buffers, a few
  * KiB, are left out.
  */
 export interface GpuMemoryReport {
@@ -960,12 +895,11 @@ export interface GpuMemoryReport {
   /** Chunk pools: textures and indirection buffers. */
   chunkBytes: number;
   labelBytes: number;
-  proxyBytes: number;
   /** Viewport render targets and the depth texture. */
   targetBytes: number;
   /** Minimap overview textures and the minimap's and thumbnails' render targets. */
   minimapBytes: number;
-  /** Chunk, label, and proxy atlases. */
+  /** Chunk and label atlases. */
   atlases: number;
   /** Chunk pool slots holding a chunk. */
   slotsHeld: number;
@@ -982,7 +916,7 @@ export interface GpuMemoryMessage extends GpuMemoryReport {
 
 /** One chunk pool's capacity, as admission counts it. */
 export interface GpuPoolCapacity {
-  /** `chunkTierPoolKey(datasetId, tier, channel, chunkDims, multiChannel)`. */
+  /** `chunkTierPoolKey(datasetId, tier, channel, chunkDims)`. */
   poolKey: string;
   datasetId: string;
   tier: ResidencyTier;
@@ -1001,7 +935,7 @@ export interface GpuPoolCapacity {
  */
 export interface GpuCapacityReport {
   budgetBytes: number;
-  /** What the other holders take of the total now: label and proxy pools, render targets, minimap textures. */
+  /** What the other holders take of the total now: label pools, render targets, minimap textures. */
   reservedBytes: number;
   pools: GpuPoolCapacity[];
 }
@@ -1069,6 +1003,34 @@ export type FrameCaptureResult =
   | { frame: CapturedFrame; reason: null }
   | { frame: null; reason: string };
 
+/** One channel of one entity under a probed point. */
+export interface ProbeSample {
+  datasetId: string;
+  entityId: string;
+  channel: number;
+  /** The level-0 sample under the point, `[x, y, z]`, 0-based. */
+  position: [number, number, number];
+  /**
+   * `value` when a resident chunk answers, `failed` where the source failed
+   * for good, `missing` where nothing is resident yet.
+   */
+  state: "value" | "failed" | "missing";
+  /** The sample in data units, at the precision the viewer draws it; NaN for a NaN sample. */
+  value?: number;
+  /** The level the sample came from; absent when missing. */
+  level?: number;
+}
+
+/**
+ * Reply to a {@link ProbeMessage}. No samples when nothing was drawn under
+ * the point, or the read-back failed.
+ */
+export interface ProbeResultMessage {
+  type: "probeResult";
+  id: number;
+  samples: ProbeSample[];
+}
+
 export type WorkerToMainMessage =
   | ReadyMessage
   | PipelinesCompiledMessage
@@ -1083,6 +1045,7 @@ export type WorkerToMainMessage =
   | MinimapOverviewsLostMessage
   | FrameDoneMessage
   | FrameCapturedMessage
+  | ProbeResultMessage
   | GpuErrorMessage
   | GpuDeviceRestoredMessage
   | GpuFailedMessage;

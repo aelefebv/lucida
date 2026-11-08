@@ -1,7 +1,8 @@
 // TypeScript mirror of `lucida_core::saved_view::SavedView`. The wire format
 // is the contract, so keep this in step with `lucida-core/src/saved_view.rs`.
 
-export const SAVED_VIEW_VERSION = 1;
+/** Version 2 moved solo onto each layer; see `SAVED_VIEW_VERSION` in Rust. */
+export const SAVED_VIEW_VERSION = 2;
 
 /** What chose a camera's pose: a fit of everything visible, which a new
  *  canvas fits again, or a stand-in nothing chose, which is never persisted. */
@@ -69,7 +70,11 @@ export interface ZRange {
 export interface ViewState {
   z_range: ZRange;
   t: number;
-  c: number;
+  /** The scene-wide channel of a view recorded before solo was per layer.
+   *  Present only on such a view; the scene decodes it into each layer's
+   *  `solo` when the view is imported. */
+  c?: number;
+  /** The scene-wide composite flag of such a view, with `c`. */
   multi_channel?: boolean;
 }
 
@@ -121,6 +126,8 @@ export interface DatasetDisplaySettings {
    *  Omitted on the wire when empty. Lets a restore match per-label settings
    *  by name and occurrence when the current label list differs. */
   label_names?: string[];
+  /** The channel the layer shows alone; omitted for its composite. */
+  solo?: number | null;
 }
 
 export type DatasetId = string;
@@ -149,7 +156,7 @@ export type LayoutMutationMode = "broadcast" | "local" | "refuse";
  * `PresenceState`.
  *
  * `v` is `number`, not the `1` literal, because decoders accept payloads from
- * newer senders best-effort (see `encoder.ts::validateAndRestore`).
+ * newer senders best-effort (see `encoder.ts::decode`).
  */
 export interface SavedView {
   v: number;

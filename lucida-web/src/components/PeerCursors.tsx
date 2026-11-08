@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
-import { positionLabel } from "../axes.ts";
 import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
 import { projectToCanvas } from "./minimapMath.ts";
 import { makeWorldToScreen } from "./cameraProjection.ts";
@@ -41,7 +40,7 @@ export interface CursorLabel {
 }
 
 interface Props {
-  peers: Map<ClientId, PresenceState>;
+  peers: ReadonlyMap<ClientId, PresenceState>;
   myId: ClientId;
   followTarget: ClientId | null;
   wasmSceneRef: RefObject<WasmScene | null>;
@@ -49,12 +48,11 @@ interface Props {
   viewMode: "2d" | "3d";
   z: number;
   t: number;
-  c: number;
   cursorLabels: CursorLabel[];
 }
 
-function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: number, localIs3d: boolean): { dim: boolean; badge: string } {
-  const view = peer.view as { z_range?: { start: number }; t?: number; c?: number } | null;
+function dimBadge(peer: PresenceState, localZ: number, localT: number, localIs3d: boolean): { dim: boolean; badge: string } {
+  const view = peer.view as { z_range?: { start: number }; t?: number } | null;
   if (!view) return { dim: false, badge: "" };
 
   const parts: string[] = [];
@@ -75,18 +73,12 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: n
     parts.push(peerT > localT ? "►" : "◄");
   }
 
-  const peerC = view.c;
-  if (peerC !== undefined && peerC !== localC) {
-    dim = true;
-    parts.push(positionLabel("C", peerC));
-  }
-
   return { dim, badge: parts.join(" ") };
 }
 
 const EDGE_MARGIN = 16;
 
-export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, viewMode, z, t, c, cursorLabels }: Props) {
+export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, viewMode, z, t, cursorLabels }: Props) {
   const labelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const chevronRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
   const chevronLabelRefs = useRef<Map<ClientId, HTMLDivElement>>(new Map());
@@ -236,7 +228,7 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
   return (
     <div className="lc-peer-cursors">
       {peerEntries.map(([clientId, peer]) => {
-        const { dim, badge } = dimBadge(peer, z, t, c, viewMode === "3d");
+        const { dim, badge } = dimBadge(peer, z, t, viewMode === "3d");
         return (
           <div
             key={clientId}

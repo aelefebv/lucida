@@ -72,7 +72,7 @@ function renderOverlay(pins: Annotation[], tool: Tool = "pan") {
       wasmSceneRef={sceneRef}
       canvas={canvas}
       version={v}
-      viewContext={{ z: 3, t: 1, c: 0 }}
+      viewContext={{ z: 3, t: 1, channels: [0] }}
       myId={MY_ID}
       tool={tool}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}

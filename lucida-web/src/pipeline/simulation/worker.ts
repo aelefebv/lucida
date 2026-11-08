@@ -2,8 +2,9 @@
  * The render worker, run in-process on a stand-in GPU device. Messages go
  * through the worker's own dispatcher, so atlas sizing, admission, eviction,
  * the residency reports and the wanted-set report are the production code.
- * Only drawing is skipped. The one thing it touches that residency reads, a
- * slice member's eviction reference, is recorded from the render message.
+ * Only drawing is skipped. The two things it does that residency reads, a
+ * slice member's eviction reference and the label planes it hands back, are
+ * done from the render message.
  *
  * Messages queue in both directions and are delivered when the harness
  * drains, which keeps the main thread and the worker as far apart as a
@@ -14,18 +15,20 @@ import { dispatchMessage } from "../../renderer/worker/dispatch.ts";
 import { createInitialState } from "../../renderer/worker/state.ts";
 import { createWantedSetPoster } from "../../renderer/worker/bootstrap.ts";
 import { UNTIMED } from "../../renderer/passTiming.ts";
-import { proxyDescriptorKey, type WorkerCtx } from "../../renderer/workerContext.ts";
+import type { WorkerCtx } from "../../renderer/workerContext.ts";
 import type {
   MainToWorkerMessage,
   MissingChunk,
-  MissingProxy,
+  SliceLayerParams,
   SliceRenderMultiPassMessage,
   WorkerToMainMessage,
 } from "../../renderer/workerProtocol.ts";
 import { setCameraUVForMember } from "../../renderer/slice/eviction.ts";
 import { memberCameraUV } from "../../renderer/slice/render.ts";
+import { retireOtherLabelPlanes } from "../../renderer/slice/atlas.ts";
 import { INDIRECTION_FAILED } from "../../renderer/remap.ts";
 import { chunkPoolTier } from "../../renderer/poolKeys.ts";
+import { LABEL_TIER } from "../../renderer/chunkUploadFeedback.ts";
 import type { LodIndirectionMeta } from "../../renderer/volume/atlas.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 
@@ -92,6 +95,20 @@ function simulatedDevice(): GPUDevice {
 
 type Listener = (event: { data: WorkerToMainMessage }) => void;
 
+/** What the page sent the worker of one chunk in one tier. */
+export interface ChunkDeliveries {
+  tier: ResidencyTier;
+  memberId: string;
+  chunkKey: string;
+  count: number;
+  bytes: number;
+}
+
+/** A chunk's {@link SimulatedWorker.deliveries} key: detail and coarse share chunk keys. */
+export function deliveryKey(tier: ResidencyTier, memberId: string, chunkKey: string): string {
+  return `${tier}|${memberId}/${chunkKey}`;
+}
+
 export class SimulatedWorker {
   readonly ctx: WorkerCtx;
   private readonly inbox: MainToWorkerMessage[] = [];
@@ -99,8 +116,13 @@ export class SimulatedWorker {
   private readonly listeners = new Set<Listener>();
   /** Called with every message the worker posts, before the page sees it. */
   onPost: ((msg: WorkerToMainMessage) => void) | null = null;
-  /** `${memberId}/${chunkKey}` → how many times the page sent that chunk, and for which tier. */
-  readonly deliveries = new Map<string, { tier: ResidencyTier; count: number }>();
+  /**
+   * {@link deliveryKey} → how many times the page sent that chunk and the
+   * bytes it sent. A chunk resident in both tiers is two entries.
+   */
+  readonly deliveries = new Map<string, ChunkDeliveries>();
+  /** Label member id → the plane the last slice frame drew for it. */
+  private readonly drawnLabelChunks = new Map<string, NonNullable<SliceLayerParams["labelChunk"]>>();
 
   constructor(gpuTotalBytes: number) {
     const state = createInitialState(gpuTotalBytes);
@@ -121,30 +143,37 @@ export class SimulatedWorker {
       getOrCreateLUT: () => { throw new Error("the simulated worker does not draw"); },
       post,
       postWantedSet: createWantedSetPoster(state, post),
-      lookupProxyDescriptor: (entityId, t, c) =>
-        state.proxyDescriptorsByEntity.get(proxyDescriptorKey(entityId, t, c)) ?? null,
-      lookupProxyPool: (datasetId, poolKey) =>
-        state.proxyPoolsByDataset.get(datasetId)?.get(poolKey) ?? null,
       lookupEntityDescriptor: (datasetId) => state.descriptorBuffersByDataset.get(datasetId) ?? null,
     };
   }
 
   // The slice of the `Worker` interface `RenderClient` uses.
 
-  postMessage(msg: MainToWorkerMessage): void {
+  postMessage(msg: MainToWorkerMessage, transfer?: Transferable[]): void {
     if (msg.type === "init") {
       this.outbox.push({ type: "ready" });
       return;
     }
-    if (msg.type === "sliceChunkData" || msg.type === "volumeChunkData") {
+    if (
+      msg.type === "sliceChunkData" || msg.type === "volumeChunkData" ||
+      msg.type === "labelSliceChunkData" || msg.type === "labelVolumeChunkData"
+    ) {
+      const tier = "tier" in msg ? msg.tier : LABEL_TIER;
       for (const chunk of msg.chunks) {
-        const key = `${msg.memberId}/${chunk.key}`;
+        const key = deliveryKey(tier, msg.memberId, chunk.key);
         const prior = this.deliveries.get(key);
-        this.deliveries.set(key, { tier: msg.tier, count: (prior?.count ?? 0) + 1 });
+        this.deliveries.set(key, {
+          tier,
+          memberId: msg.memberId,
+          chunkKey: chunk.key,
+          count: (prior?.count ?? 0) + 1,
+          bytes: (prior?.bytes ?? 0) + chunk.data.byteLength,
+        });
       }
     }
-    // A real postMessage copies, so neither side can see the other mutate.
-    this.inbox.push(structuredClone(msg));
+    // A real postMessage copies, so neither side can see the other mutate,
+    // and empties the sender's copy of whatever it transfers.
+    this.inbox.push(structuredClone(msg, { transfer }));
   }
 
   addEventListener(type: string, listener: Listener): void {
@@ -167,7 +196,7 @@ export class SimulatedWorker {
       while (this.inbox.length > 0) {
         const msg = this.inbox.shift()!;
         if (DRAW_ONLY.has(msg.type)) {
-          if (msg.type === "sliceRenderMultiPass") this.noteSliceCamera(msg);
+          if (msg.type === "sliceRenderMultiPass") this.noteSliceFrame(msg);
           const frameSeq = (msg as { frameSeq?: number }).frameSeq;
           if (frameSeq !== undefined) this.outbox.push({ type: "frameDone", frameSeq });
           continue;
@@ -184,15 +213,45 @@ export class SimulatedWorker {
 
   /**
    * A slice frame moves each drawn member's eviction reference to the view
-   * center, so the simulation records it from the render message as the
+   * center, and hands back each label chunk holding another plane than the
+   * frame draws, so the simulation does both from the render message as the
    * slice renderer does. Aggregate layers are left out.
    */
-  private noteSliceCamera(msg: SliceRenderMultiPassMessage): void {
+  private noteSliceFrame(msg: SliceRenderMultiPassMessage): void {
     for (const layer of msg.layers) {
-      if (layer.isLabel || layer.aggregate) continue;
+      if (layer.isLabel) {
+        if (!layer.labelChunk) continue;
+        this.drawnLabelChunks.set(layer.datasetId, layer.labelChunk);
+        const pool = this.ctx.state.labelSlicePools.get(layer.datasetId);
+        if (pool) retireOtherLabelPlanes(this.ctx, layer.datasetId, pool, layer.labelChunk.plane);
+        continue;
+      }
+      if (layer.aggregate) continue;
       if (!this.ctx.state.memberSourcePools.has(layer.datasetId)) continue;
       setCameraUVForMember(this.ctx.state, layer.datasetId, memberCameraUV(msg, layer));
     }
+  }
+
+  /**
+   * Each label slice cell whose texels are not the plane the last frame drew
+   * there, or whose chunk was handed back and not sent again, as
+   * `member cell x,y: …`. The cell draws them all the same.
+   */
+  staleLabelCells(): string[] {
+    const out: string[] = [];
+    for (const [memberId, pool] of this.ctx.state.labelSlicePools) {
+      const drawn = this.drawnLabelChunks.get(memberId);
+      if (!drawn) continue;
+      for (const [cell, plane] of pool.planes) {
+        const key = pool.keys.get(cell);
+        const [level, t, , z] = (key ?? "").split("/").map(Number);
+        if (plane === drawn.plane && level === drawn.level && t === drawn.t && z === drawn.z) continue;
+        const at = `${cell % 0x10000},${Math.floor(cell / 0x10000)}`;
+        const holds = key === undefined ? "a chunk it handed back" : `chunk ${key}`;
+        out.push(`${memberId} cell ${at}: plane ${plane} of ${holds}, where the frame draws plane ${drawn.plane}`);
+      }
+    }
+    return out.sort();
   }
 
   /**
@@ -230,8 +289,8 @@ export class SimulatedWorker {
    * The worker reports its wanted set only after a cold state or an upload
    * that bounced, so its last report can be stale by the time a run settles.
    */
-  missingNow(datasetId: string): Array<MissingChunk | MissingProxy> {
-    let missing: Array<MissingChunk | MissingProxy> = [];
+  missingNow(datasetId: string): MissingChunk[] {
+    let missing: MissingChunk[] = [];
     createWantedSetPoster(this.ctx.state, (msg) => {
       if (msg.type === "wantedSetDelta") missing = msg.missing;
     })(datasetId);

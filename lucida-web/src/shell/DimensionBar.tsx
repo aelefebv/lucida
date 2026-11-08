@@ -1,5 +1,6 @@
 import { PauseIcon, PlayIcon, VideoCameraIcon } from "@phosphor-icons/react";
 import { useEffect, useRef, useState } from "react";
+import { stepIndex, type IndexChange } from "../axes.ts";
 import type { ClipDepth } from "../components/clipDepth.ts";
 import { ClipPlaneControl } from "../components/ClipPlaneControl.tsx";
 import { FocalDepthControl } from "../components/FocalDepthControl.tsx";
@@ -38,11 +39,11 @@ export interface DimensionBarProps {
   z: number;
   /** Planes along Z; the Z scrubber shows only in 2D, and only with more than one. */
   dimZ: number;
-  onZChange: (z: number) => void;
+  onZChange: (z: IndexChange) => void;
   t: number;
   /** Timepoints; the T scrubber shows only with more than one. */
   dimT: number;
-  onTChange: (t: number) => void;
+  onTChange: (t: IndexChange) => void;
   /** The 3D camera's mode. */
   cameraMode: CameraMode;
   onCameraModeToggle: () => void;
@@ -73,14 +74,14 @@ export function DimensionBar({
   const [playRequested, setPlayRequested] = useState(false);
   const playing = playRequested && showT;
 
-  const stepZ = (delta: number) => onZChange(Math.min(dimZ - 1, Math.max(0, z + delta)));
+  const stepZ = (delta: number) => onZChange(stepIndex(delta, dimZ));
   // A scrub is the user taking over, so it stops playback.
-  const scrubT = (next: number) => {
+  const scrubT = (next: IndexChange) => {
     setPlayRequested(false);
-    onTChange(Math.min(dimT - 1, Math.max(0, next)));
+    onTChange(next);
   };
 
-  usePlayback(playing, () => onTChange((t + 1) % dimT));
+  usePlayback(playing, () => onTChange((current) => (current + 1) % dimT));
 
   useShortcut({
     id: "view.toggleMode",
@@ -114,7 +115,7 @@ export function DimensionBar({
     group: "Dimensions",
     repeat: true,
     enabled: showT,
-    onTrigger: () => scrubT(t - 1),
+    onTrigger: () => scrubT(stepIndex(-1, dimT)),
   });
   useShortcut({
     id: "dimensions.nextT",
@@ -123,7 +124,7 @@ export function DimensionBar({
     group: "Dimensions",
     repeat: true,
     enabled: showT,
-    onTrigger: () => scrubT(t + 1),
+    onTrigger: () => scrubT(stepIndex(1, dimT)),
   });
   useShortcut({
     id: "dimensions.togglePlayback",

@@ -214,11 +214,10 @@ impl HeadlessBrowser {
     /// [`Self::open_page_unrendered`], with `script` run in the page before
     /// any of the page's own scripts, on this navigation and any later one.
     ///
-    /// The trace driver seeds the page's browser storage with the knobs it
-    /// was given this way, so the page hydrates its stores from them as it
-    /// starts. Evaluating after the load would be too late: the planner has
-    /// read its configuration and the first requests are in flight before
-    /// the driver can act.
+    /// The trace driver seeds the page's preferences with the knobs it was
+    /// given this way, so the page starts from them. Evaluating after the
+    /// load would be too late: the planner has read its configuration and the
+    /// first requests are in flight before the driver can act.
     pub async fn open_page_unrendered_with_script(
         &self,
         url: &str,

@@ -1,19 +1,26 @@
 // @vitest-environment happy-dom
 //
 // Hook wiring: notifyChange forwards to UrlSync, apply-complete wakes the
-// render loop, and React reads the applied C/T/Z, viewMode, and multiChannel
-// back from the scene. `dataset_id_for_url` is mocked so the hook builds
+// render loop, and React reads the applied T/Z and viewMode back from the
+// scene. `dataset_id_for_url` is mocked so the hook builds
 // without a wasm init.
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { act, render } from "@testing-library/react";
 
 // Mock lucida-core before importing the hook so the import-time
-// `dataset_id_for_url` reference picks up the stub.
-vi.mock("lucida-core", () => ({
-  dataset_id_for_url: (url: string) => `ds-stub-${url.length.toString(16)}`,
-}));
+// `dataset_id_for_url` reference picks up the stub. The URL codec is the real
+// one, loaded below.
+vi.mock("lucida-core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("lucida-core")>();
+  return {
+    initSync: actual.initSync,
+    encode_view_payload: actual.encode_view_payload,
+    decode_view_payload: actual.decode_view_payload,
+    dataset_id_for_url: (url: string) => `ds-stub-${url.length.toString(16)}`,
+  };
+});
 
 import { useSavedViewSync } from "./useSavedViewSync.ts";
 import type { SavedView } from "../savedView/types.ts";
@@ -23,20 +30,21 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { WasmScene } from "lucida-core";
 import { SceneStore } from "../sceneStore.ts";
 import { useSceneView } from "./useSceneView.ts";
+import { loadWasm } from "../viewProperties.ts";
+
+beforeAll(() => loadWasm());
 
 interface MockScene {
   zVal: number;
-  cVal: number;
   tVal: number;
   cameraModeVal: string;
-  multiChannelVal: boolean;
   epochCounts: { view: number; selection: number };
   epochs: () => string;
   z: () => number;
-  c: () => number;
   t: () => number;
   camera_mode: () => string;
-  multi_channel: () => boolean;
+  resolved_layers: () => string;
+  importedViews: { c?: number; multi_channel?: boolean }[];
   apply_command: (json: string) => void;
   dataset_ids: () => string;
   available_layouts: (id: string) => string;
@@ -49,30 +57,26 @@ interface MockScene {
 function makeMockScene(): MockScene {
   const presence = {
     camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [800, 600] },
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0, multi_channel: false },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
   };
   const m: MockScene = {
     zVal: 0,
-    cVal: 0,
     tVal: 0,
     cameraModeVal: "slice",
-    multiChannelVal: false,
+    importedViews: [],
     epochCounts: { view: 0, selection: 0 },
-    epochs: () => JSON.stringify({ content: 0, layout: 0, asset: 0, ...m.epochCounts }),
+    epochs: () => JSON.stringify({ content: 0, layout: 0, ...m.epochCounts }),
     z: () => m.zVal,
-    c: () => m.cVal,
     t: () => m.tVal,
     camera_mode: () => m.cameraModeVal,
-    multi_channel: () => m.multiChannelVal,
+    resolved_layers: () => "[]",
     apply_command(json: string) {
       try {
         const cmd = JSON.parse(json);
-        if (cmd.type === "set_c") m.cVal = cmd.c;
         if (cmd.type === "set_t") m.tVal = cmd.t;
         if (cmd.type === "set_z") m.zVal = cmd.z;
         if (cmd.type === "set_z_range") m.zVal = cmd.start;
-        if (cmd.type === "set_multi_channel") m.multiChannelVal = cmd.enabled;
         if (cmd.type === "pan") m.epochCounts.view++;
         else m.epochCounts.selection++;
       } catch { /* ignore */ }
@@ -84,6 +88,7 @@ function makeMockScene(): MockScene {
     export_dataset_presence: () => JSON.stringify({ dataset_order: [], dataset_settings: {} }),
     import_presence: (json: string) => {
       const obj = JSON.parse(json);
+      m.importedViews.push(obj.view);
       Object.assign(presence, obj);
       m.epochCounts.view++;
       m.epochCounts.selection++;
@@ -98,7 +103,7 @@ function emptyView(): SavedView {
     datasets: [],
     active_layouts: {},
     camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [800, 600] },
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0, multi_channel: false },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
     dataset_order: [],
     dataset_settings: {},
@@ -109,10 +114,8 @@ interface Captured {
   current: {
     handle: ReturnType<typeof useSavedViewSync>;
     z: number;
-    c: number;
     t: number;
     viewMode: "2d" | "3d";
-    multiChannel: boolean;
   } | null;
 }
 
@@ -135,7 +138,7 @@ function HookHarness({
   lastViewDebounceMs,
   captureSurface,
 }: HarnessProps) {
-  const { z, c, t, viewMode, multiChannel } = useSceneView(store);
+  const { z, t, viewMode } = useSceneView(store);
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
   // Mirror the latest map into a ref via useLayoutEffect — the hook reads
   // .current from event handlers and follow-on effects, all of which fire
@@ -163,7 +166,7 @@ function HookHarness({
     restoreLastViewEnabled: () => true,
   });
   useEffect(() => {
-    outRef.current = { handle, z, c, t, viewMode, multiChannel };
+    outRef.current = { handle, z, t, viewMode };
   });
   return null;
 }
@@ -185,7 +188,7 @@ function makeMockLoop(): {
   return { ref, interactiveCalls, residencyCalls };
 }
 
-describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
+describe("useSavedViewSync — exposes notifyChange", () => {
   let scene: MockScene;
   let store: SceneStore;
   let outRef: Captured;
@@ -226,7 +229,7 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
       await act(async () => {
         outRef.current?.handle.notifyChange();
       });
-      // Past debounce + encode latency.
+      // Past the debounce.
       await act(async () => {
         await new Promise((r) => setTimeout(r, 80));
       });
@@ -237,7 +240,7 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
   });
 });
 
-describe("useSavedViewSync — capture surface writes no user state (#923)", () => {
+describe("useSavedViewSync — capture surface writes no user state", () => {
   let scene: MockScene;
   let store: SceneStore;
   let outRef: Captured;
@@ -395,10 +398,9 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
   let scene: MockScene;
   let store: SceneStore;
   let outRef: Captured;
-  let written: Promise<SavedView["camera"]>[];
+  let written: SavedView["camera"][];
   let originalReplace: History["replaceState"];
 
-  // Real timers: the URL write waits on an encode the fake clock can't drive.
   // The URL writes are read from `replaceState` rather than the hash, since a
   // flush another test left in flight can land on the hash at any time.
   beforeEach(() => {
@@ -410,7 +412,7 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
     originalReplace = window.history.replaceState;
     window.history.replaceState = ((s: unknown, t: string, url?: string | URL | null) => {
       const payload = /view=([^&]+)/.exec(String(url ?? ""))?.[1];
-      if (payload) written.push(decode(payload).then((v) => v.camera));
+      if (payload) written.push(decode(payload).camera);
       return originalReplace.call(window.history, s, t, url);
     }) as History["replaceState"];
   });
@@ -424,9 +426,9 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
     store.sync();
   }
 
-  const writtenCameras = () => Promise.all(written);
+  const writtenCameras = () => written;
 
-  /** Past both debounces and the encode. */
+  /** Past both debounces. */
   const settle = () => act(async () => {
     await new Promise((r) => setTimeout(r, 80));
   });
@@ -452,14 +454,14 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
     });
     await settle();
     expect(persisted).toHaveLength(0);
-    expect((await writtenCameras()).filter((c) => c.framing === "unframed")).toHaveLength(0);
+    expect(writtenCameras().filter((c) => c.framing === "unframed")).toHaveLength(0);
 
     await act(async () => {
       setCamera({ mode: "slice", center: [64, 64], zoom: 2, viewport: [800, 600], framing: "framed" });
     });
     await vi.waitFor(async () => {
       expect(persisted).toHaveLength(1);
-      expect((await writtenCameras()).some((c) => c.framing === "framed")).toBe(true);
+      expect(writtenCameras().some((c) => c.framing === "framed")).toBe(true);
     });
   });
 
@@ -478,13 +480,13 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
       setCamera({ mode: "slice", center: [64, 64], zoom: 0.5, viewport: [400, 600], framing: "framed" });
     });
     await vi.waitFor(async () => {
-      const viewports = (await writtenCameras()).map((c) => c.viewport.join("x"));
+      const viewports = writtenCameras().map((c) => c.viewport.join("x"));
       expect(viewports).toContain("400x600");
     });
   });
 });
 
-describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
+describe("useSavedViewSync — apply-complete wiring", () => {
   let scene: MockScene;
   let store: SceneStore;
   let outRef: Captured;
@@ -496,7 +498,7 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     window.history.replaceState(null, "", "/");
   });
 
-  it("marks loop interactive + residency dirty after apply (Bug #2)", async () => {
+  it("marks loop interactive + residency dirty after apply", async () => {
     const loop = makeMockLoop();
     await act(async () => {
       render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
@@ -512,15 +514,14 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     expect(loop.residencyCalls).toContain("savedview_apply");
   });
 
-  it("lets React read the applied C/T/Z back from the scene", async () => {
+  it("lets React read the applied T/Z back from the scene", async () => {
     const loop = makeMockLoop();
     await act(async () => {
       render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     });
-    expect(outRef.current?.c).toBe(0);
+    expect(outRef.current?.t).toBe(0);
 
     const v = emptyView();
-    v.view.c = 2;
     v.view.t = 5;
     v.view.z_range = { start: 7, end: 8 };
     await act(async () => {
@@ -531,11 +532,9 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     await act(async () => { /* flush pending effects */ });
 
     // Assert via the live scene first (sanity: apply landed at WASM).
-    expect(scene.cVal).toBe(2);
     expect(scene.tVal).toBe(5);
     expect(scene.zVal).toBe(7);
     // Then assert React reads it back.
-    expect(outRef.current?.c).toBe(2);
     expect(outRef.current?.t).toBe(5);
     expect(outRef.current?.z).toBe(7);
   });
@@ -556,46 +555,41 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     expect(outRef.current?.viewMode).toBe("3d");
   });
 
-  it("reads multiChannel from the post-apply scene", async () => {
+  // The scene decodes an older view's scene-wide channel mode into each
+  // layer's solo; the applier only has to hand it over.
+  it("hands a URL recorded with a scene-wide channel mode to the scene to decode", async () => {
     const loop = makeMockLoop();
     await act(async () => {
       render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     });
-    expect(outRef.current?.multiChannel).toBe(false);
 
-    const v = emptyView();
-    v.view.multi_channel = true;
-    await act(async () => {
-      await outRef.current!.handle.applier.apply(v);
-    });
-    await act(async () => { /* flush pending effects */ });
-
-    expect(scene.multiChannelVal).toBe(true);
-    expect(outRef.current?.multiChannel).toBe(true);
-  });
-
-  // The layer panel reads single-channel mode on `c` as that channel soloed.
-  it("restores a URL recorded in single-channel mode on its channel, from a composite", async () => {
-    const loop = makeMockLoop();
-    scene.multiChannelVal = true;
-    await act(async () => {
-      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
-    });
-
-    // Single-channel views were recorded without the flag.
+    // Single-channel views were recorded as version 1 without the flag, and
+    // stripping dropped `c: 0`.
     const recorded = emptyView();
-    recorded.view.c = 1;
-    delete recorded.view.multi_channel;
-    const restored = await decode(await encode(recorded));
+    recorded.v = 1;
+    const restored = decode(encode(recorded));
 
     await act(async () => {
       await outRef.current!.handle.applier.apply(restored);
     });
-    await act(async () => { /* flush pending effects */ });
 
-    expect(scene.multiChannelVal).toBe(false);
-    expect(scene.cVal).toBe(1);
-    expect(outRef.current?.multiChannel).toBe(false);
-    expect(outRef.current?.c).toBe(1);
+    expect(scene.importedViews.at(-1)).toMatchObject({ c: 0, multi_channel: false });
+  });
+
+  it("hands a current view's import no scene-wide channel mode", async () => {
+    const loop = makeMockLoop();
+    await act(async () => {
+      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
+    });
+
+    const restored = decode(encode(emptyView()));
+    await act(async () => {
+      await outRef.current!.handle.applier.apply(restored);
+    });
+
+    const imported = scene.importedViews.at(-1);
+    expect(imported).toBeDefined();
+    expect(imported).not.toHaveProperty("c");
+    expect(imported).not.toHaveProperty("multi_channel");
   });
 });

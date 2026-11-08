@@ -32,7 +32,7 @@ import { computeLabelChunkRequests } from "../planning/labelRequests.ts";
 import { buildManifestByImage } from "./delivery/manifestIndex.ts";
 import { dispatchLabelChunkDelivery, dispatchLabelVolumeChunkDelivery } from "./delivery/dispatch.ts";
 
-const EPOCHS: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 };
+const EPOCHS: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
 
 function ms(
   id: string,
@@ -110,7 +110,6 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     // 2. cpuCache yields the FULL 3D chunk (2x2x2 = 8 ids): plane0 then plane1.
     const ids = new Uint32Array([10, 11, 12, 13, 92801, 92801 + 65536, 30, 4_294_967_295]);
     const delivery: ReadyChunkDelivery = {
-      kind: "chunk",
       entityId: req.entityId,
       imageId: req.imageId,
       level: req.level,
@@ -141,24 +140,24 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
         level: number, t: number, c: number,
         levelWidth: number, levelHeight: number,
         chunkX: number, chunkY: number,
+        plane: number,
         epochs: SceneEpochs,
       ) => {
         const msg: LabelSliceChunkDataMessage = {
           type: "labelSliceChunkData",
           epochs, memberId, datasetId, chunks,
           level, t, c,
-          levelWidth, levelHeight, chunkX, chunkY,
+          levelWidth, levelHeight, chunkX, chunkY, plane,
         };
-        handleLabelSliceChunkData(ctx, msg);
+        // As the real post does, the plane moves to the worker.
+        handleLabelSliceChunkData(ctx, structuredClone(msg, { transfer: chunks.map((chunk) => chunk.data) }));
       }),
     } as unknown as UploadClient;
 
     // sliceZ=1 → the delivery path extracts the z=1 plane (last 4 ids).
     const result = dispatchLabelChunkDelivery(client, delivery, meta!, 1, EPOCHS);
-    expect(result).not.toBeNull();
-    expect(result!.memberId).toBe("img-0:label:region-b");
     // Only ONE 2x2 plane crosses (16 bytes), never the whole 8-id chunk (32).
-    expect(result!.bytes).toBe(16);
+    expect(result).toEqual({ memberId: "img-0:label:region-b", bytes: 16 });
     // The delivery stamped the owning dataset id (from the ManifestEntry key).
     expect(vi.mocked(client.labelSliceChunkData).mock.calls[0][1]).toBe("ds-0");
 
@@ -181,7 +180,6 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
       new Map<string, DatasetEntry>([["ds-0", { manifest } as unknown as DatasetEntry]]),
     ).get("img-0:label:region-b");
     const delivery: ReadyChunkDelivery = {
-      kind: "chunk",
       entityId: "img-0:label:region-b",
       imageId: "img-0:label:region-b",
       level: 0,
@@ -195,7 +193,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     };
     const client = { labelSliceChunkData: vi.fn() } as unknown as UploadClient;
     const result = dispatchLabelChunkDelivery(client, delivery, meta!, 1, EPOCHS);
-    expect(result).toBeNull();
+    expect(result).toBe("other-plane");
     expect(client.labelSliceChunkData).not.toHaveBeenCalled();
   });
 });
@@ -212,7 +210,6 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
     // 2. cpuCache yields the FULL 3D chunk (2x2x2 = 8 ids), incl. ids past 16 bits.
     const ids = new Uint32Array([10, 11, 12, 13, 92801, 92801 + 65536, 30, 4_294_967_295]);
     const delivery: ReadyChunkDelivery = {
-      kind: "chunk",
       entityId: req.entityId,
       imageId: req.imageId,
       level: req.level,
@@ -255,10 +252,8 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
     } as unknown as UploadClient;
 
     const result = dispatchLabelVolumeChunkDelivery(client, delivery, meta!, EPOCHS);
-    expect(result).not.toBeNull();
-    expect(result!.memberId).toBe("img-0:label:region-b");
     // The WHOLE chunk crosses (8 ids * 4 = 32 bytes) — never a single ~plane.
-    expect(result!.bytes).toBe(32);
+    expect(result).toEqual({ memberId: "img-0:label:region-b", bytes: 32 });
     // The delivery stamped the owning dataset id (from the ManifestEntry key).
     expect(vi.mocked(client.labelVolumeChunkData).mock.calls[0][1]).toBe("ds-0");
 

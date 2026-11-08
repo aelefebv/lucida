@@ -318,29 +318,6 @@
     "active_layout_ids": {
       "wds-0f3a": "layout-grid"
     },
-    "asset_catalogs": {
-      "wds-0f3a": {
-        "entries": [
-          {
-            "entity_id": "img-0",
-            "kinds": [
-              "TileProxy3D"
-            ],
-            "footprints": [
-              {
-                "kind": "TileProxy3D",
-                "dims": [
-                  50,
-                  128,
-                  128
-                ],
-                "bytes": 1638400
-              }
-            ]
-          }
-        ]
-      }
-    },
     "annotations": {
       "wds-0f3a": [
         {
@@ -367,7 +344,7 @@
           ],
           "anchor": "img-0",
           "view": {
-            "v": 1,
+            "v": 2,
             "datasets": [],
             "active_layouts": {
               "wds-0f3a": "layout-grid"
@@ -397,9 +374,7 @@
                 "start": 10,
                 "end": 14
               },
-              "t": 2,
-              "c": 1,
-              "multi_channel": true
+              "t": 2
             },
             "display": {
               "contrast_min": 120.0,
@@ -445,7 +420,8 @@
                 "detail_level_override": 1,
                 "label_names": [
                   "region-a"
-                ]
+                ],
+                "solo": 0
               }
             },
             "auto_contrast": {
@@ -509,9 +485,7 @@
           "start": 10,
           "end": 14
         },
-        "t": 2,
-        "c": 1,
-        "multi_channel": true
+        "t": 2
       },
       "display": {
         "contrast_min": 120.0,
@@ -562,7 +536,8 @@
           "detail_level_override": 1,
           "label_names": [
             "region-a"
-          ]
+          ],
+          "solo": 0
         }
       },
       "identity": {
@@ -603,9 +578,7 @@
           "start": 0,
           "end": 50
         },
-        "t": 0,
-        "c": 0,
-        "multi_channel": false
+        "t": 0
       },
       "display": {
         "contrast_min": 0.0,
@@ -746,6 +719,31 @@
           "key": "2/2/0/0/0/0",
           "status": "failed_permanent",
           "message": "chunk exceeds generation budget"
+        }
+      ],
+      "histograms": [
+        {
+          "image_id": "multiscale-0",
+          "level_index": 2,
+          "t": 0,
+          "c": 1,
+          "bins": [
+            [
+              -3.0,
+              -3.0,
+              2
+            ],
+            [
+              12.0,
+              12.0,
+              4096
+            ],
+            [
+              1024.0,
+              1039.0,
+              37
+            ]
+          ]
         }
       ]
     }
