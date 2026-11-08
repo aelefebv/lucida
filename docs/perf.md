@@ -9,6 +9,7 @@ uv run scripts/perf.py --suite full
 uv run scripts/perf.py --dataset volume --scenario orbit,z-scrub --ratio 2 --repeat 3
 uv run scripts/perf.py --list               # datasets, scenarios, suites
 uv run scripts/perf.py --suite full --dry-run
+uv run scripts/perf.py --repeat 3 --save-baseline   # keep these results as the reference
 ```
 
 It rebuilds what is stale, generates the datasets it needs, and starts its own server on a
@@ -22,7 +23,9 @@ but not how fast. The table's first line names the adapter.
 
 ## The table
 
-One row per run. Each column is a field of the run file's diagnostic.
+One row per dataset, scenario and ratio. Each column is a field of the run file's
+diagnostic. With `--repeat N` a number is the median of the N runs, followed by half their
+range when they differ.
 
 | column | field |
 | --- | --- |
@@ -36,6 +39,22 @@ One row per run. Each column is a field of the run file's diagnostic.
 
 Times count from the run's start. A scenario with steps reports the run its last step
 opened, so the steps column is where an earlier step's stall shows.
+
+## Baselines
+
+`--save-baseline` keeps the results as the baseline for their adapter and device pixel
+ratio, cell by cell; a cell with a failed run is not kept. Baselines live in
+`perf-baselines/` in the clone's git directory, which every worktree shares and
+`cargo clean` leaves alone. `--baseline DIR` keeps them elsewhere.
+
+Every invocation compares against its adapter's baseline, if one was saved. A `vs baseline`
+column names what moved by more than the noise allowance in `METRICS` in `scripts/perf.py`,
+and regressions sort first. A regression, a view that no longer settles included, exits 1,
+as a failed run does. A baseline from another adapter is never compared: a file that names
+one exits 2, as a setup error does.
+
+`--knob NAME=VALUE` passes a Dev controls knob to every run; `--knob max-fetches=1` is a
+slowdown the comparison flags.
 
 ## Selection
 
