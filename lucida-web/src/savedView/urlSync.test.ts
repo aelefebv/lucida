@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
   UrlSync,
   parseViewHash,
@@ -122,19 +122,42 @@ describe("UrlSync", () => {
     captureBuilder = () => view;
   });
 
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /**
+   * Fake only the debounce's timers, then let the flushes it fired finish on
+   * real ones: the encode runs through CompressionStream, which does not
+   * round-trip under fake timers.
+   */
+  function debounceTimers() {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  }
+
+  async function settleFlushes(flush: { mock: { results: Array<{ value: unknown }> } }) {
+    vi.useRealTimers();
+    await Promise.all(flush.mock.results.map((result) => result.value));
+  }
+
   it("debounces writes", async () => {
-    // Real timers: CompressionStream doesn't round-trip under fake timers.
-    // vi.waitFor keeps the N-calls-to-1-write check robust to CI jitter.
+    debounceTimers();
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       debounceMs: 30,
       window: win,
     });
+    const flush = vi.spyOn(sync, "flush");
     const spy = vi.spyOn(win.history, "replaceState");
     sync.notifyChange();
+    vi.advanceTimersByTime(20);
     sync.notifyChange();
     sync.notifyChange();
-    expect(spy).not.toHaveBeenCalled();
-    await vi.waitFor(() => expect(spy).toHaveBeenCalledTimes(1));
+    vi.advanceTimersByTime(29);
+    expect(flush).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(flush).toHaveBeenCalledTimes(1);
+    await settleFlushes(flush);
+    expect(spy).toHaveBeenCalledTimes(1);
     expect(win.location.hash.startsWith("#view=")).toBe(true);
     sync.destroy();
   });
@@ -153,13 +176,17 @@ describe("UrlSync", () => {
   });
 
   it("suppresses writes while applier is in progress", async () => {
+    debounceTimers();
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       debounceMs: 20,
       window: win,
     });
+    const flush = vi.spyOn(sync, "flush");
     applier.inProgress = true;
     sync.notifyChange();
-    await new Promise((r) => setTimeout(r, 60));
+    vi.advanceTimersByTime(20);
+    expect(flush).toHaveBeenCalledTimes(1);
+    await settleFlushes(flush);
     expect(win.location.hash).toBe("");
     sync.destroy();
   });
@@ -216,10 +243,12 @@ describe("UrlSync", () => {
       window: win,
     });
     sync.start();
+    const bootstrap = vi.spyOn(sync, "bootstrap");
     (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
     // popstate fires a `bootstrap()` whose decode awaits CompressionStream.
-    // Poll rather than sleep a fixed delay, which races a slow CI runner.
-    await vi.waitFor(() => expect(applier.apply).toHaveBeenCalledTimes(1));
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    await bootstrap.mock.results[0].value;
+    expect(applier.apply).toHaveBeenCalledTimes(1);
     sync.destroy();
   });
 
@@ -290,27 +319,47 @@ describe("UrlSync", () => {
     next.destroy();
   });
 
-  it("destroy cancels pending debounce", async () => {
+  it("destroy cancels pending debounce", () => {
+    debounceTimers();
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       debounceMs: 30,
       window: win,
     });
+    const flush = vi.spyOn(sync, "flush");
     sync.notifyChange();
     sync.destroy();
-    await new Promise((r) => setTimeout(r, 80));
+    vi.advanceTimersByTime(60);
+    expect(flush).not.toHaveBeenCalled();
+    expect(win.location.hash).toBe("");
+  });
+
+  it("writes nothing once destroyed, even from a flush already encoding", async () => {
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+    });
+    const spy = vi.spyOn(win.history, "replaceState");
+    const writing = sync.flush();
+    const collapsing = sync.collapseToLiveView();
+    sync.destroy();
+    await Promise.all([writing, collapsing]);
+    expect(spy).not.toHaveBeenCalled();
     expect(win.location.hash).toBe("");
   });
 
   it("re-arms after destroy + start (Strict-Mode mount→unmount→mount cycle)", async () => {
+    debounceTimers();
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       debounceMs: 30,
       window: win,
     });
+    const flush = vi.spyOn(sync, "flush");
     sync.start();
     sync.destroy();
     sync.start();
     sync.notifyChange();
-    await new Promise((r) => setTimeout(r, 80));
+    vi.advanceTimersByTime(30);
+    expect(flush).toHaveBeenCalledTimes(1);
+    await settleFlushes(flush);
     expect(win.location.hash.startsWith("#view=")).toBe(true);
   });
 });
@@ -469,9 +518,11 @@ describe("UrlSync — #b=<id> bootstrap", () => {
       fetchSavedViewById: stub,
     });
     sync.start();
+    const bootstrap = vi.spyOn(sync, "bootstrap");
     (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
-    // Poll rather than sleep a fixed delay, which races a slow CI runner.
-    await vi.waitFor(() => expect(applier.apply).toHaveBeenCalledOnce());
+    expect(bootstrap).toHaveBeenCalledTimes(1);
+    await bootstrap.mock.results[0].value;
+    expect(applier.apply).toHaveBeenCalledOnce();
     expect(applier.applied[0].view.t).toBe(99);
     sync.destroy();
   });

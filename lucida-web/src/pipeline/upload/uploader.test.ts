@@ -7,6 +7,12 @@ import type {
   FailedChunksMessage,
   MissingChunk,
 } from "../../renderer/workerProtocol.ts";
+import { refreshDebugCategories } from "../../debug/logging.ts";
+import { traceRecorder } from "../../trace/recorder.ts";
+import { PointEvent } from "../../trace/types.ts";
+import { TickCoordinator } from "../tickCoordinator.ts";
+import { RESEND_GUARD_TICKS } from "./delivery/resendGuard.ts";
+import { Uploader } from "./uploader.ts";
 
 interface MockSceneConfig {
   epochs: { content: number; layout: number; view: number; selection: number };
@@ -236,7 +242,6 @@ function makeCtx(args: {
 }
 
 describe("Uploader unified delivery", () => {
-  let Uploader: typeof import("./uploader.ts").Uploader;
   let priorLocalStorage: unknown;
 
   /**
@@ -245,11 +250,14 @@ describe("Uploader unified delivery", () => {
    * category with an in-memory `localStorage` shim and read the stats off
    * the spy.
    */
-  function captureTickStats(uploader: InstanceType<typeof Uploader>) {
+  function captureTickStats(uploader: Uploader) {
     return vi.spyOn(uploader.uploadTelemetry, "publish");
   }
 
-  beforeEach(async () => {
+  // The category set is cached at module load, so it is refreshed here
+  // rather than re-importing the module graph for every case, which on a
+  // loaded host can take longer than the hook may.
+  beforeEach(() => {
     const store = new Map<string, string>();
     priorLocalStorage = (globalThis as Record<string, unknown>).localStorage;
     (globalThis as Record<string, unknown>).localStorage = {
@@ -258,12 +266,12 @@ describe("Uploader unified delivery", () => {
       removeItem: (k: string) => void store.delete(k),
     };
     localStorage.setItem("debug", "orch");
-    vi.resetModules();
-    Uploader = (await import("./uploader.ts")).Uploader;
+    refreshDebugCategories();
   });
 
   afterEach(() => {
     (globalThis as Record<string, unknown>).localStorage = priorLocalStorage;
+    refreshDebugCategories();
   });
 
   it("dispatches deliverables from CpuCache and marks sent only after dispatch", () => {
@@ -301,10 +309,7 @@ describe("Uploader unified delivery", () => {
     expect(publish.mock.calls[0][1].skippedNoMeta).toBe(1);
   });
 
-  it("stops re-sending a chunk the worker keeps handing back, names it in the trace, and retries after a cold state", async () => {
-    const { traceRecorder } = await import("../../trace/recorder.ts");
-    const { PointEvent } = await import("../../trace/types.ts");
-    const { RESEND_GUARD_TICKS } = await import("./delivery/resendGuard.ts");
+  it("stops re-sending a chunk the worker keeps handing back, names it in the trace, and retries after a cold state", () => {
     const recordPointEvent = vi.spyOn(traceRecorder, "recordPointEvent");
     // The cache offers the chunk every tick, as it does when every delivery
     // comes back refused and clears its sent mark.
@@ -441,12 +446,10 @@ describe("Uploader unified delivery", () => {
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
   });
 
-  it("skips telemetry aggregation when the orch category is off", async () => {
+  it("skips telemetry aggregation when the orch category is off", () => {
     // The `orch` log category is the only thing that turns the aggregators on.
     localStorage.removeItem("debug");
-    // The category set is cached at module load; this is the documented
-    // same-tab refresh path.
-    (await import("../../debug/logging.ts")).refreshDebugCategories();
+    refreshDebugCategories();
     const chunk = makeChunkDelivery();
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();
@@ -483,13 +486,6 @@ describe("Uploader unified delivery", () => {
 });
 
 describe("Uploader worker feedback", () => {
-  let Uploader: typeof import("./uploader.ts").Uploader;
-
-  beforeEach(async () => {
-    vi.resetModules();
-    Uploader = (await import("./uploader.ts")).Uploader;
-  });
-
   it("forwards each residency report to CpuCache by image, channel and tier", () => {
     const cpuCache = makeCpuCache();
     const uploader = new Uploader();
@@ -528,15 +524,6 @@ describe("Uploader worker feedback", () => {
 });
 
 describe("Uploader cold and hot state", () => {
-  let Uploader: typeof import("./uploader.ts").Uploader;
-  let TickCoordinator: typeof import("../tickCoordinator.ts").TickCoordinator;
-
-  beforeEach(async () => {
-    vi.resetModules();
-    Uploader = (await import("./uploader.ts")).Uploader;
-    TickCoordinator = (await import("../tickCoordinator.ts")).TickCoordinator;
-  });
-
   it("populates display state by channel from dataset settings", () => {
     const scene = createMockScene({
       c: 1,

@@ -306,6 +306,11 @@ vi.mock("./auth/whoami.ts", () => ({
 vi.mock("./invalidation.ts", { spy: true });
 
 import App from "./App.tsx";
+// The code-split surfaces, loaded with the file. A first import transforms
+// them cold, which on a loaded host outlasts any wait for them to mount, and
+// the wiring is what these tests are about.
+import "./hud/Hud.tsx";
+import "./monitor/MonitorDock.tsx";
 import { AuthSessionContext } from "./auth/AuthSession.ts";
 import { Bridge, type BridgeHandlers } from "./bridge.ts";
 import { WasmScene } from "lucida-core";
@@ -595,9 +600,7 @@ describe("App wiring: the top bar opens the monitor's dock", () => {
       fireEvent.click(toggle);
     });
 
-    // The dock's chunk loads the UI primitives, and transforming them cold
-    // takes longer than findBy's default second.
-    const dock = await screen.findByTestId("monitor-dock", {}, { timeout: 10_000 });
+    const dock = await screen.findByTestId("monitor-dock");
     expect(toggle.getAttribute("aria-pressed")).toBe("true");
     expect(within(dock).getByTestId("monitor-empty").textContent).toContain("trace seam");
 
