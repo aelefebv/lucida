@@ -311,6 +311,19 @@ describe("the shaders read a failed cell as the indirection writes it", () => {
     expect(march.indexOf("s.value == FAILED")).toBeLessThan(march.indexOf("texelValue("));
     expect(march).toMatch(/if \(crossedFailed\) \{\s*let hatch = failedHatch\(/);
   });
+
+  it("draws the hatch for a failed label cell before it reads the value as an id", () => {
+    // FAILED is a valid u32, so a label branch that looked it up first would
+    // paint it as some label's color.
+    const fs = sliceSrc.slice(sliceSrc.indexOf("fn fs("));
+    const sliceLabel = fs.slice(fs.indexOf("if (entity.colormapMode == 1u)"));
+    expect(sliceLabel).toMatch(/^if \(entity\.colormapMode == 1u\) \{[^}]*if \(chunkVal == FAILED\) \{\s*return failedHatch\(/);
+    expect(sliceLabel.indexOf("chunkVal == FAILED")).toBeLessThan(sliceLabel.indexOf("labelColorFor("));
+    const volumeLabel = volumeSrc.slice(volumeSrc.indexOf("if (entity.colormapMode == 1u)"));
+    expect(volumeLabel.indexOf("s.value == FAILED")).toBeGreaterThan(-1);
+    expect(volumeLabel.indexOf("s.value == FAILED")).toBeLessThan(volumeLabel.indexOf("labelColorFor("));
+    expect(volumeLabel.slice(volumeLabel.indexOf("s.value == FAILED"))).toMatch(/^s\.value == FAILED\) \{[\s\S]*?failedHatch\(/);
+  });
 });
 
 describe("the shaders visit the chain in the same order", () => {
