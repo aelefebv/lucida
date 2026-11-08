@@ -33,6 +33,7 @@ interface Params {
   overlay3dRef: RefObject<AnnotationOverlayHandle | null>;
   breakFollow: () => void;
   emitPresence: () => void;
+  emitDatasetPresence: () => void;
   /** Collapses a resolved `#a=` hash to the live `#view=` form. */
   collapseDeepLinkHash: () => Promise<void>;
   /** The document version; the deep link re-checks on each bump. */
@@ -54,6 +55,7 @@ export function useAnnotationNavigation({
   overlay3dRef,
   breakFollow,
   emitPresence,
+  emitDatasetPresence,
   collapseDeepLinkHash,
   docVersion,
   onDeepLinkNotFound,
@@ -88,8 +90,9 @@ export function useAnnotationNavigation({
       requestRender(engine.loop(), "annotation_context");
       breakFollow();
       emitPresence();
+      emitDatasetPresence();
     }
-  }, [engine, selectedDatasetId, breakFollow, emitPresence]);
+  }, [engine, selectedDatasetId, breakFollow, emitPresence, emitDatasetPresence]);
 
   // Focus a pin in whichever overlay is mounted for a given view mode. The
   // mode is passed in because a just-restored 3D camera may have flipped it
@@ -139,13 +142,14 @@ export function useAnnotationNavigation({
 
     breakFollow();
     emitPresence();
+    emitDatasetPresence();
     invalidateAfterViewRestore(engine.loop(), "annotation_view_restore");
 
     if (result.notice) toast({ title: result.notice, tone: "info" });
     focusWhenShown(pin.id, result.viewMode, result.cameraModeChanged);
   }, [
     engine, viewMode, dimensionExtentsFor, labelNamesFor, selectedDatasetId,
-    gentleOnContext, focusWhenShown, breakFollow, emitPresence,
+    gentleOnContext, focusWhenShown, breakFollow, emitPresence, emitDatasetPresence,
   ]);
 
   // A mention jump restores the author's view, or recenters gently when the

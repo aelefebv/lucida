@@ -49,7 +49,7 @@ interface Props {
   /** The canvas tool: pan, or the annotation shape a press draws. */
   tool: Tool;
   /** Stable, browser-persisted annotation-author identity, recorded as a pin's
-   * `author`. From `annotationAuthorId()`, not the per-connection `bridge.myId`,
+   * `author`. From `annotationAuthorId()`, not the per-connection `myId`,
    * so pins stay yours across leaving and rejoining a workspace. */
   myId: string;
   /** Send a wire command (already wrapped by the bridge). */
