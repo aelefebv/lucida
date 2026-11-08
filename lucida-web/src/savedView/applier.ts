@@ -77,6 +77,9 @@ export type ApplyResultListener = (r: ApplyResult) => void;
  *  `useSavedViewSync` uses this to refresh the render loop and React mirrors. */
 export type ApplyCompleteListener = (view: SavedView) => void;
 
+/** Fires once at the start of every `apply()`, before it writes anything. */
+export type ApplyStartListener = () => void;
+
 const IDLE_STATE: ApplierState = {
   inProgress: false,
   openStatuses: [],
@@ -119,6 +122,7 @@ export class SavedViewApplier {
   private listeners = new Set<StateListener>();
   private applyResultListeners = new Set<ApplyResultListener>();
   private applyCompleteListeners = new Set<ApplyCompleteListener>();
+  private applyStartListeners = new Set<ApplyStartListener>();
   // Keyed by dataset id because the DatasetOpened broadcast carries the
   // manifest, not the URL.
   private pendingByDatasetId = new Map<string, {
@@ -188,6 +192,13 @@ export class SavedViewApplier {
     return () => { this.applyCompleteListeners.delete(fn); };
   }
 
+  /** Subscribe to the start of every `apply()`, which comes before any of
+   *  its writes and before it waits on a dataset open. */
+  subscribeApplyStart(fn: ApplyStartListener): () => void {
+    this.applyStartListeners.add(fn);
+    return () => { this.applyStartListeners.delete(fn); };
+  }
+
   getState(): ApplierState {
     return this.state;
   }
@@ -233,6 +244,7 @@ export class SavedViewApplier {
     }
     this.setState({ ...IDLE_STATE, inProgress: true });
     try {
+      for (const fn of this.applyStartListeners) fn();
       // Global views name datasets by source URL and may open them.
       // Workspace views name loaded datasets by id and must not expose
       // source URLs.
