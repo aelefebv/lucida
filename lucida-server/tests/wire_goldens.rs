@@ -389,7 +389,7 @@ fn enum_vocabulary() -> EnumVocabulary {
         annotation_kinds: vocab!(AnnotationKind::{ Point, Line, Box }),
         axis_kinds: vocab!(AxisKind::{ Time, Channel, Space }),
         entity_kinds: vocab!(EntityKind::{ Image, Group, Tile }),
-        data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Float32, Float64 }),
+        data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Int8, Int16, Int32, Float32, Float64 }),
         positioning_modes: vocab!(PositioningMode::{ Explicit, Derived }),
         proxy_kinds: vocab!(ProxyKind::{ GroupProxy3D, TileProxy3D }),
         dataset_open_stages: vocab!(DatasetOpenStage::{
@@ -401,8 +401,8 @@ fn enum_vocabulary() -> EnumVocabulary {
             SourceNotAllowed,
             LocalPath,
             MissingObject, Permission, CloudConfiguration, Http, StorageBackend,
-            UnsupportedCodec, UnsupportedLayout, MalformedMetadata, MissingMetadata, Import,
-            Persistence, Internal,
+            UnsupportedCodec, UnsupportedLayout, UnsupportedDataType, MalformedMetadata,
+            MissingMetadata, Import, Persistence, Internal,
         }),
         dataset_health_statuses: vocab!(DatasetHealthStatus::{ Healthy, Degraded, Unavailable }),
         generated_chunk_statuses: vocab!(GeneratedChunkStatus::{

@@ -112,6 +112,7 @@ function makeCold(activeSet: ColdStateActiveEntry[]): ColdStateMessage {
     desiredProxyKeys: [],
     activeSet,
     viewMode: "volume",
+    sampleFormat: "u16",
   };
 }
 

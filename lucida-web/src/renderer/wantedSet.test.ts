@@ -131,6 +131,7 @@ function makeColdState(
     visibleRegion: makeVisibleRegion(),
     activeSet: [makeActiveEntry()],
     viewMode: "volume",
+    sampleFormat: "u16",
     ...overrides,
   };
 }

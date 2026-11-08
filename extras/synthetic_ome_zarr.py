@@ -61,13 +61,19 @@ Options:
                          screenshot names the level that rendered. Without it,
                          every level samples one smooth picture at its own
                          sample spacing.
+    --dtype T            Sample data type: uint16 (default), uint32, int16,
+                         int32, float32, or float64.
+    --range=LO,HI        The values the picture spans, darkest to brightest.
+                         Default 0,60000. Integer types round to the nearest
+                         whole value; a range reaching below zero needs a
+                         signed or float type. Write it with `=`, since a
+                         negative LO would otherwise read as a flag.
     --seed N             Seed for the picture. The same seed gives the same
                          samples whatever the layout. Default 0.
     --overwrite          Replace OUT if it exists.
 
 Level L has shape ceil(shape of level L-1 / factor) on every spatial axis,
-and its scale transform is the running product of the factors. Sample values
-are uint16.
+and its scale transform is the running product of the factors.
 
 Examples:
 
@@ -77,6 +83,9 @@ Examples:
 
     A 3D level-index pyramid that leaves z alone:
         uv run extras/synthetic_ome_zarr.py levels.ome.zarr --size 32,512,512 --levels 4 --factor 1,2,2 --level-index
+
+    A float volume whose values reach below zero:
+        uv run extras/synthetic_ome_zarr.py float.ome.zarr --size 64,256,256 --dtype float32 --range=-200,1000
 
     A large collection for measurements:
         uv run extras/synthetic_ome_zarr.py big.ome.zarr --tiles 216 --size 2048,2048 --channels 3 --chunk 64 --shard 512
@@ -99,10 +108,11 @@ from zarr.codecs import BytesCodec, ZstdCodec
 
 # Never a one-byte type. zarr-python omits the `bytes` codec's `endian` for
 # those, and lucida's import rejects a `bytes` codec without it.
-DTYPE = np.uint16
+DTYPES = ("uint16", "uint32", "int16", "int32", "float32", "float64")
+DEFAULT_DTYPE = "uint16"
 
-# Below the type's maximum so an auto-contrast window has headroom above the data.
-SAMPLE_MAX = 60000
+# Below uint16's maximum so an auto-contrast window has headroom above the data.
+DEFAULT_RANGE = (0.0, 60000.0)
 
 DEFAULT_SIZE = (256, 256)
 DEFAULT_CHUNK = 64
@@ -135,6 +145,8 @@ class Options:
     sparse: bool = False
     unwritten_levels: tuple[int, ...] = ()
     level_index: bool = False
+    dtype: str = DEFAULT_DTYPE
+    value_range: tuple[float, float] = DEFAULT_RANGE
     seed: int = 0
     overwrite: bool = False
 
@@ -198,6 +210,13 @@ def _positive_ints(text: str) -> tuple[int, ...]:
     return values
 
 
+def _value_range(text: str) -> tuple[float, float]:
+    parts = tuple(float(part) for part in text.split(","))
+    if len(parts) != 2 or not all(math.isfinite(v) for v in parts) or parts[0] >= parts[1]:
+        raise ValueError("takes two finite values, LO,HI, with LO below HI")
+    return parts[0], parts[1]
+
+
 def _per_axis(values: tuple[int, ...], ndim: int, flag: str, parser: argparse.ArgumentParser) -> tuple[int, ...]:
     """Expand a one-value form to every spatial axis and check the arity."""
     if len(values) == 1:
@@ -225,6 +244,8 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     parser.add_argument("--sparse", action="store_true", help="leave a checkerboard of chunks unwritten")
     parser.add_argument("--unwritten-level", type=int, action="append", default=[], metavar="L", help="declare level L but write no chunk for it; repeatable")
     parser.add_argument("--level-index", action="store_true", help="give every sample at level L the value L")
+    parser.add_argument("--dtype", choices=DTYPES, default=DEFAULT_DTYPE, help="sample data type (default uint16)")
+    parser.add_argument("--range", type=_value_range, default=DEFAULT_RANGE, metavar="LO,HI", dest="value_range", help="values the picture spans (default 0,60000)")
     parser.add_argument("--seed", type=int, default=0, metavar="N", help="seed for the picture (default 0)")
     parser.add_argument("--overwrite", action="store_true", help="replace OUT if it exists")
     args = parser.parse_args(argv)
@@ -258,6 +279,11 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
     for level in unwritten:
         if level < 1 or level >= args.levels:
             parser.error(f"--unwritten-level {level} is outside 1..{args.levels - 1}; level 0 is always written")
+    if np.issubdtype(np.dtype(args.dtype), np.integer):
+        info = np.iinfo(args.dtype)
+        lo, hi = args.value_range
+        if lo < info.min or hi > info.max:
+            parser.error(f"--range {lo:g},{hi:g} is outside what {args.dtype} holds, {info.min}..{info.max}")
 
     return Options(
         out=args.out,
@@ -273,6 +299,8 @@ def parse_args(argv: Sequence[str] | None = None) -> Options:
         sparse=args.sparse,
         unwritten_levels=unwritten,
         level_index=args.level_index,
+        dtype=args.dtype,
+        value_range=args.value_range,
         seed=args.seed,
         overwrite=args.overwrite,
     )
@@ -370,7 +398,11 @@ def picture_region(opts: Options, tile: int, t: int, c: int, level: Level, origi
         value += 0.15 * np.sin(2.0 * np.pi * frequencies[axis] * grid + phases[axis])
     distance_squared = sum((grid - spot_center[axis]) ** 2 for axis, grid in enumerate(grids))
     value += 0.4 * np.exp(-distance_squared / (2.0 * spot_width**2))
-    return np.rint(np.clip(value, 0.0, 1.0) * SAMPLE_MAX).astype(DTYPE)
+    lo, hi = opts.value_range
+    scaled = lo + np.clip(value, 0.0, 1.0) * (hi - lo)
+    if np.issubdtype(np.dtype(opts.dtype), np.integer):
+        scaled = np.rint(scaled)
+    return scaled.astype(opts.dtype)
 
 
 def write_image(store: zarr.storage.LocalStore, prefix: str, opts: Options, levels: list[Level], tile: int, name: str) -> None:
@@ -390,7 +422,7 @@ def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, leve
         shape=leading_shape + level.shape,
         chunks=leading_ones + chunk,
         shards=(leading_ones + opts.shard) if opts.shard else None,
-        dtype=DTYPE,
+        dtype=opts.dtype,
         fill_value=0,
         dimension_names=opts.axis_names,
         serializer=BytesCodec(endian="little"),
@@ -416,7 +448,7 @@ def write_level(store: zarr.storage.LocalStore, prefix: str, opts: Options, leve
                 origin = [g * u for g, u in zip(grid_index, unit)]
                 extent = [min(u, s - o) for u, s, o in zip(unit, level.shape, origin)]
                 if opts.level_index:
-                    values = np.full(extent, level.index, dtype=DTYPE)
+                    values = np.full(extent, level.index, dtype=opts.dtype)
                 else:
                     values = picture_region(opts, tile, t, c, level, origin, extent)
                 leading_index = {"t": t, "c": c}
