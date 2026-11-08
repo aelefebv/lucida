@@ -15,7 +15,7 @@ use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
 use super::url::DatabaseUrl;
-use super::{PingError, StorageBackend, StorageError, log_dropped_bookmarks};
+use super::{PingError, StorageBackend, StorageError, log_archived_bookmarks};
 use crate::auth::{
     BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
     PostgresBearerTokenStore, PostgresCliTokenAuthorizationStore, PostgresPendingAuthStore,
@@ -85,7 +85,7 @@ impl PostgresStorageBackend {
             target: target.clone(),
             reason: e.to_string(),
         };
-        let dropped_bookmarks = bookmarks_to_drop(&pool).await.map_err(migrate_failed)?;
+        let archived_bookmarks = bookmarks_to_archive(&pool).await.map_err(migrate_failed)?;
         MIGRATOR
             .run(&pool)
             .await
@@ -93,7 +93,7 @@ impl PostgresStorageBackend {
                 target: target.clone(),
                 reason: e.to_string(),
             })?;
-        log_dropped_bookmarks(&target, dropped_bookmarks);
+        log_archived_bookmarks(&target, archived_bookmarks);
 
         Ok(Self { pool })
     }
@@ -104,11 +104,11 @@ impl PostgresStorageBackend {
     }
 }
 
-/// The bookmark rows the `drop_bookmarks` migration is about to discard,
-/// or `None` where there is no bookmark table: a fresh database, or one
-/// that already dropped it. `to_regclass` resolves through the search
+/// The bookmark rows the `archive_bookmarks` migration is about to set
+/// aside, or `None` where there is no live bookmark table: a fresh
+/// database, or one that already archived it. `to_regclass` resolves through the search
 /// path, as the migrations do.
-async fn bookmarks_to_drop(pool: &PgPool) -> Result<Option<i64>, sqlx::Error> {
+async fn bookmarks_to_archive(pool: &PgPool) -> Result<Option<i64>, sqlx::Error> {
     let exists: bool = sqlx::query_scalar("SELECT to_regclass('bookmarks') IS NOT NULL")
         .fetch_one(pool)
         .await?;

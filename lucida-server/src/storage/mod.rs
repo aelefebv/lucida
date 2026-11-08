@@ -97,11 +97,12 @@ pub async fn open(url: &DatabaseUrl) -> Result<Arc<dyn StorageBackend>, StorageE
     }
 }
 
-/// Report the bookmark rows the `drop_bookmarks` migration discarded, on
-/// the open that ran it. `None` means there was no bookmark table to drop.
-fn log_dropped_bookmarks(target: &str, rows: Option<i64>) {
+/// Report the bookmark rows the `archive_bookmarks` migration set aside, on
+/// the open that ran it. `None` means there was no bookmark table to
+/// archive.
+fn log_archived_bookmarks(target: &str, rows: Option<i64>) {
     if let Some(rows) = rows {
-        tracing::warn!(target, rows, "storage.migrate.bookmarks_dropped");
+        tracing::warn!(target, rows, "storage.migrate.bookmarks_archived");
     }
 }
 

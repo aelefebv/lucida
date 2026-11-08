@@ -16,7 +16,7 @@ use sqlx::SqlitePool;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 use super::url::DatabaseUrl;
-use super::{PingError, StorageBackend, StorageError, log_dropped_bookmarks};
+use super::{PingError, StorageBackend, StorageError, log_archived_bookmarks};
 use crate::auth::{
     BearerTokenStore, CliTokenAuthorizationStore, LoginSessionStore, PendingAuthStore,
     SqliteBearerTokenStore, SqliteCliTokenAuthorizationStore, SqlitePendingAuthStore,
@@ -125,7 +125,7 @@ impl SqliteStorageBackend {
             target: target.clone(),
             reason: e.to_string(),
         };
-        let dropped_bookmarks = bookmarks_to_drop(&pool).await.map_err(migrate_failed)?;
+        let archived_bookmarks = bookmarks_to_archive(&pool).await.map_err(migrate_failed)?;
         MIGRATOR
             .run(&pool)
             .await
@@ -133,7 +133,7 @@ impl SqliteStorageBackend {
                 target: target.clone(),
                 reason: e.to_string(),
             })?;
-        log_dropped_bookmarks(&target, dropped_bookmarks);
+        log_archived_bookmarks(&target, archived_bookmarks);
 
         Ok(Self { pool })
     }
@@ -153,10 +153,10 @@ impl SqliteStorageBackend {
     }
 }
 
-/// The bookmark rows the `drop_bookmarks` migration is about to discard,
-/// or `None` where there is no bookmark table: a fresh database, or one
-/// that already dropped it.
-async fn bookmarks_to_drop(pool: &SqlitePool) -> Result<Option<i64>, sqlx::Error> {
+/// The bookmark rows the `archive_bookmarks` migration is about to set
+/// aside, or `None` where there is no live bookmark table: a fresh
+/// database, or one that already archived it.
+async fn bookmarks_to_archive(pool: &SqlitePool) -> Result<Option<i64>, sqlx::Error> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'bookmarks')",
     )
@@ -353,11 +353,11 @@ mod tests {
         );
     }
 
-    /// A database from before the drop still holds its bookmark rows. The
-    /// open that drops the tables counts the rows first, which is the
-    /// number it logs.
+    /// A database from before the archive still holds its bookmark rows. The
+    /// open that archives the tables counts the rows first, which is the
+    /// number it logs, and keeps every row under the archived name.
     #[tokio::test]
-    async fn opening_drops_the_bookmark_tables_after_counting_their_rows() {
+    async fn opening_archives_the_bookmark_tables_after_counting_their_rows() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("lucida.db");
         let url = DatabaseUrl::parse(&format!("sqlite://{}", path.display())).unwrap();
@@ -369,15 +369,15 @@ mod tests {
                 .connect_with(options)
                 .await
                 .unwrap();
-            let mut before_drop = sqlx::migrate!("./migrations/sqlite");
-            before_drop.migrations = before_drop
+            let mut before_archive = sqlx::migrate!("./migrations/sqlite");
+            before_archive.migrations = before_archive
                 .migrations
                 .iter()
-                .filter(|m| !m.description.contains("drop bookmarks"))
+                .filter(|m| !m.description.contains("archive bookmarks"))
                 .cloned()
                 .collect::<Vec<_>>()
                 .into();
-            before_drop.run(&pool).await.unwrap();
+            before_archive.run(&pool).await.unwrap();
             for id in ["a", "b"] {
                 sqlx::query(
                     "INSERT INTO bookmarks \
@@ -389,19 +389,46 @@ mod tests {
                 .execute(&pool)
                 .await
                 .unwrap();
+                sqlx::query(
+                    "INSERT INTO bookmark_datasets (bookmark_id, dataset_url) \
+                     VALUES (?, 'file:///data/a.zarr')",
+                )
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
             }
-            assert_eq!(bookmarks_to_drop(&pool).await.unwrap(), Some(2));
+            assert_eq!(bookmarks_to_archive(&pool).await.unwrap(), Some(2));
             pool.close().await;
         }
 
         let backend = SqliteStorageBackend::open(&url).await.unwrap();
-        assert_eq!(bookmarks_to_drop(backend.pool()).await.unwrap(), None);
-        for table in ["bookmarks", "bookmark_datasets"] {
-            let gone = sqlx::query(&format!("SELECT 1 FROM {table}"))
+        assert_eq!(bookmarks_to_archive(backend.pool()).await.unwrap(), None);
+        for (live, archived) in [
+            ("bookmarks", "archived_bookmarks"),
+            ("bookmark_datasets", "archived_bookmark_datasets"),
+        ] {
+            let gone = sqlx::query(&format!("SELECT 1 FROM {live}"))
                 .fetch_optional(backend.pool())
                 .await;
-            assert!(gone.is_err(), "{table} is dropped");
+            assert!(gone.is_err(), "{live} is renamed away");
+            let kept: i64 = sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {archived}"))
+                .fetch_one(backend.pool())
+                .await
+                .unwrap();
+            assert_eq!(kept, 2, "{archived} keeps every row");
         }
+        // The child table's foreign key follows its parent to the new name.
+        let orphan = sqlx::query(
+            "INSERT INTO archived_bookmark_datasets (bookmark_id, dataset_url) \
+             VALUES ('no-such-bookmark', 'file:///data/a.zarr')",
+        )
+        .execute(backend.pool())
+        .await;
+        assert!(
+            orphan.is_err(),
+            "the archived child still references its parent"
+        );
     }
 
     #[tokio::test]
