@@ -54,10 +54,10 @@ use lucida_protocol::{
     DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
     DatasetSourceCacheStats, DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec,
     FetchSource, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
-    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE,
-    LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor,
-    ProxiedImageSpec, ServerTimingBatch, SourceChunkStatus, TimingRowFamily, TimingRowOutcome,
-    WireFormat,
+    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelHistogram,
+    GeneratedLevelSummary, HistogramBin, LABEL_NONE, LevelAddress, LocalFetchDescriptor,
+    MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor, ProxiedImageSpec, ServerTimingBatch,
+    SourceChunkStatus, TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -1090,6 +1090,23 @@ fn generated_snapshot() -> GeneratedAvailabilitySnapshot {
             },
         ],
         chunks: generated_chunk_updates(),
+        histograms: vec![generated_histogram()],
+    }
+}
+
+/// Bins that cover each shape a bin takes: a lone value, a negative, and a
+/// bin whose samples differ.
+fn generated_histogram() -> GeneratedLevelHistogram {
+    GeneratedLevelHistogram {
+        image_id: ImageId(SINGLE_IMAGE_ID.into()),
+        level_index: 2,
+        t: 0,
+        c: 1,
+        bins: vec![
+            HistogramBin(-3.0, -3.0, 2),
+            HistogramBin(12.0, 12.0, 4096),
+            HistogramBin(1024.0, 1039.0, 37),
+        ],
     }
 }
 
@@ -1103,6 +1120,7 @@ fn generated_delta() -> GeneratedAvailabilityDelta {
             status: GeneratedChunkStatus::Ready,
             message: None,
         }],
+        histograms: vec![generated_histogram()],
     }
 }
 
@@ -1297,6 +1315,11 @@ const GENERATED_REQUIRED: &[&str] = &[
     "/chunks/0/level_index",
     "/chunks/0/key",
     "/chunks/0/status",
+    "/histograms/0/image_id",
+    "/histograms/0/level_index",
+    "/histograms/0/t",
+    "/histograms/0/c",
+    "/histograms/0/bins",
 ];
 
 /// Required fields of a fully populated `DatasetSourceHealth` (rooted at the
@@ -1648,6 +1671,11 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                         "/chunks/0/level_index",
                         "/chunks/0/key",
                         "/chunks/0/status",
+                        "/histograms/0/image_id",
+                        "/histograms/0/level_index",
+                        "/histograms/0/t",
+                        "/histograms/0/c",
+                        "/histograms/0/bins",
                     ],
                 ));
                 keys
@@ -2472,6 +2500,11 @@ fn generated_availability_payloads_match_goldens() {
                 "/chunks/0/level_index",
                 "/chunks/0/key",
                 "/chunks/0/status",
+                "/histograms/0/image_id",
+                "/histograms/0/level_index",
+                "/histograms/0/t",
+                "/histograms/0/c",
+                "/histograms/0/bins",
             ],
         ),
         &mut failures,
