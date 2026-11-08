@@ -137,7 +137,7 @@ def main() -> int:
     print(f"Server: {args.server}")
     print(f"Workspace ID: {workspace.id}")
     print(f"Dataset ID: {dataset_id}")
-    print(f"Browser URL: {workspace.web_url}")
+    print(f"Browser URL: {workspace.viewer.web_url}")
     print(f"Artifacts: {output_dir}")
     return 0
 

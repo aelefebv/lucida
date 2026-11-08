@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use lucida_content::{
-    DataType, DatasetManifest, EntityId, EntityKind, ImageId, ImageSpec, VoxelTransform,
+    ChunkKey, DataType, DatasetManifest, EntityId, EntityKind, ImageId, ImageSpec, VoxelTransform,
 };
 use lucida_proxy::{ProxyKind, ProxySourceData, ProxySpec, SourceError, TileVolume};
 use lucida_store::cache::CachedStore;
@@ -395,8 +395,14 @@ pub(crate) async fn fetch_volume_region(
     for gz in grid_z0..=grid_z1 {
         for gy in grid_y0..=grid_y1 {
             for gx in grid_x0..=grid_x1 {
-                // Canonical 5D chunk key: "{level}/{t}/{c}/{z}/{y}/{x}".
-                let key = format!("{level}/{t}/{c}/{gz}/{gy}/{gx}");
+                let key = ChunkKey {
+                    level: level as u32,
+                    t: u64::from(t),
+                    c: u64::from(c),
+                    z: gz,
+                    y: gy,
+                    x: gx,
+                };
                 // Charged to the background class, not to a client: proxy
                 // generation is coalesced across every client that asked for
                 // the same spec, so there is no one client whose share it
@@ -423,17 +429,23 @@ pub(crate) async fn fetch_volume_region(
                     Err(ChunkReadError::UnknownImage(image)) => {
                         return Err(BuildSourceError::UnknownImage(image));
                     }
+                    Err(ChunkReadError::UnknownLevel { image, level }) => {
+                        return Err(BuildSourceError::BadLevel {
+                            image,
+                            level: level as usize,
+                        });
+                    }
                     Err(ChunkReadError::ObjectStore(e)) => {
                         return Err(BuildSourceError::Fetch {
                             image: image.image_id.clone(),
-                            key,
+                            key: key.to_string(),
                             message: e.to_string(),
                         });
                     }
                     Err(ChunkReadError::Decode(source)) => {
                         return Err(BuildSourceError::Decode {
                             image: image.image_id.clone(),
-                            key,
+                            key: key.to_string(),
                             source,
                         });
                     }
@@ -469,7 +481,7 @@ pub(crate) async fn fetch_volume_region(
                 if raw.len() < expected_chunk_voxels * bytes_per_voxel {
                     return Err(BuildSourceError::ShortChunk {
                         image: image.image_id.clone(),
-                        key,
+                        key: key.to_string(),
                         got: raw.len() / bytes_per_voxel,
                         expected: expected_chunk_voxels,
                     });

@@ -5,12 +5,15 @@
  * a run that does not settle can say what the source last told the page.
  */
 
-import type {
-  ContentSource,
-  FetchProxyResult,
-  FetchRequest,
-  FetchResult,
-  LabelSink,
+import {
+  sourceChunkFailure,
+  type ChunkFailureKind,
+  type ContentSource,
+  type FetchProxyResult,
+  type FetchRequest,
+  type FetchResult,
+  type LabelSink,
+  type SourceChunkStatus,
 } from "../fetch/contentSource.ts";
 import type { DecodePool } from "../fetch/decodePool.ts";
 import { FetchError } from "../fetch/retry.ts";
@@ -18,10 +21,16 @@ import type { DatasetManifest } from "../../manifestTypes.ts";
 
 /**
  * How the source answers one chunk request, in the server's vocabulary:
- * bytes, a generated chunk not made yet, a store read that failed and may
- * work later, or one that never will.
+ * bytes, a generated chunk not made yet, or a `source_chunk_status` frame.
+ * `transient` and `permanent` are a frame that names no kind, as a server
+ * that predates kinds sends.
  */
-export type SourceAnswer = "ready" | "pending" | "transient" | "permanent";
+export type SourceAnswer =
+  | "ready"
+  | "pending"
+  | "transient"
+  | "permanent"
+  | { status: SourceChunkStatus; failure: ChunkFailureKind };
 
 export interface SourceRequest {
   datasetId: string;
@@ -42,7 +51,8 @@ export interface SourceSpec {
 
 export interface SourceRecord {
   requests: number;
-  last: SourceAnswer | "aborted" | "outstanding";
+  /** The last answer, by its name or the failure it named. */
+  last: string;
 }
 
 export const DEFAULT_SOURCE_LATENCY_MS = 20;
@@ -85,7 +95,11 @@ export class SimulatedSource implements ContentSource {
       const timer = setTimeout(() => {
         signal.removeEventListener("abort", onAbort);
         const answer = this.answer({ ...request, attempt, nowMs: performance.now() });
-        record.last = answer;
+        record.last = typeof answer === "string" ? answer : answer.failure;
+        if (typeof answer === "object") {
+          reject(sourceChunkFailure(request.chunkKey, answer.status, answer.failure, null));
+          return;
+        }
         switch (answer) {
           case "ready":
             resolve(this.bytesFor(request));
@@ -94,16 +108,10 @@ export class SimulatedSource implements ContentSource {
             reject(new FetchError(`Generated chunk ${request.chunkKey} pending`, { kind: "pending" }));
             return;
           case "transient":
-            reject(new FetchError(`Source chunk ${request.chunkKey} unavailable`, {
-              kind: "transient",
-              serverReported: true,
-            }));
+            reject(sourceChunkFailure(request.chunkKey, "unavailable", null, null));
             return;
           case "permanent":
-            reject(new FetchError(`Source chunk ${request.chunkKey} failed permanently`, {
-              kind: "permanent",
-              serverReported: true,
-            }));
+            reject(sourceChunkFailure(request.chunkKey, "failed_permanent", null, null));
             return;
         }
       }, this.latencyMs);

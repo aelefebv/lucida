@@ -1,3 +1,4 @@
+pub mod chunk_key;
 pub mod collection;
 pub mod entity;
 pub mod graph;
@@ -10,6 +11,7 @@ pub mod normalize;
 pub mod transform;
 pub mod url;
 
+pub use chunk_key::{ChunkKey, ChunkKeyError};
 pub use collection::CollectionLayoutError;
 pub use entity::*;
 pub use graph::*;
