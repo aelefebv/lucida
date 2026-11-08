@@ -435,7 +435,7 @@ impl WasmScene {
     /// with the member's position offset baked into the translation.
     ///
     /// The placement math is owned by `Scene::member_world_matrix` (non-gated, so
-    /// the minimap and the camera auto-fit share the exact same world boxes); this
+    /// the minimap and the camera's fit share the exact same world boxes); this
     /// only resolves the member by id (O(1) via the derived-state member index)
     /// and delegates.
     pub fn member_model_matrix(&self, dataset_id: &str, member_id: &str) -> Vec<f32> {
@@ -987,7 +987,7 @@ impl WasmScene {
                 .unwrap_or(true);
             for member in &derived.members {
                 members.push(crate::minimap::MinimapMember {
-                    // Shared with the renderer and auto-fit, so the minimap
+                    // Shared with the renderer and the camera's fit, so the minimap
                     // frames the boxes that are drawn.
                     model: self.inner.member_world_matrix(member),
                     visible,

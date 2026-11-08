@@ -241,7 +241,6 @@ function makeHarness() {
   const savedViewHooks = {
     onDatasetOpened: vi.fn(),
     onOpenDatasetFailed: vi.fn(),
-    isInProgress: vi.fn(() => false),
   };
   const deps = {
     workspaceId: "ws-1",

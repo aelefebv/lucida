@@ -83,10 +83,6 @@ const SURFACED_ERROR_RANK: Record<SurfacedErrorKind, number> = {
 export interface SavedViewBridgeHooks {
   onDatasetOpened: (datasetId: string) => void;
   onOpenDatasetFailed: (url: string, error: string) => void;
-  /** `true` while a saved or last view is mid-restore, through its camera step.
-   * Suppresses auto-fit-on-open so the restore's camera wins. Optional so
-   * older callers stay compatible. */
-  isInProgress?: () => boolean;
 }
 
 /** Aggregate open-remote-dataset UI state (spinner / error banner / progress
