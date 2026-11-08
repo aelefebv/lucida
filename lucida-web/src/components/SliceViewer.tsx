@@ -1,5 +1,5 @@
 /** 2D slice viewer. WebGPU rendering runs in a worker via RenderClient. */
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { SLICE_ZOOM_IN_PER_NOTCH, SLICE_ZOOM_OUT_PER_NOTCH } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
@@ -63,7 +63,7 @@ interface Props {
   onLongPress?: (at: ClientPoint) => void;
 }
 
-export function SliceViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
+function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [dragging, setDragging] = useState(false);
   const lastPos = useRef({ x: 0, y: 0 });
@@ -459,3 +459,7 @@ export function SliceViewer({ session, scene, datasets, client, canvas, remoteDo
 
   return null;
 }
+
+// Memoized so a viewer render that changes none of its props, such as one
+// for a peer's message, skips it; its props are stable for that reason.
+export const SliceViewer = memo(SliceViewerBody);
