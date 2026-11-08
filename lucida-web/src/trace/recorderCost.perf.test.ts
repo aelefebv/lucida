@@ -713,7 +713,7 @@ describe("recorder cost contract", () => {
     );
 
     expectWithinBudget("worst-case tick", burst.timing, WORST_TICK_BUDGET_US);
-    // Linux is the gating host; the Windows runner reads this tick about 1.5x slower, so there the budget gates alone.
+    // Linux is the gating host. The Windows runner reads this tick about 1.5x slower, just over the ceiling, so it keeps to the budget.
     if (process.platform === "linux") {
       expect(
         burst.timing.nominalUs,
