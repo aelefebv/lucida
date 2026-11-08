@@ -459,53 +459,27 @@ def test_dataset_retry_sends_protocol_message_and_reads_result(tmp_path, monkeyp
     assert result["progress"][0]["stage"] == "binding_build"
 
 
-def test_view_pan_sends_presence_update(tmp_path):
+def test_view_commands_send_nothing_over_the_socket(tmp_path):
+    pytest.importorskip("lucida.lucida")
+    from support import ProfileServer  # noqa: PLC0415
+
     connector = FakeConnector([snapshot()])
+    server = ProfileServer()
     client = LucidaClient(
         "http://127.0.0.1:9988",
         config_path=tmp_path / "config.json",
+        transport=server,
         ws_connect=connector,
     )
     workspace = WorkspaceResource(client, workspace_record())
 
-    result = workspace.view.pan(4.0, -2.0)
+    result = workspace.channel.colormap("demo.zarr", 1, "green")
 
-    sent = connector.websocket.sent[0]
-    assert sent["type"] == "presence"
-    assert sent["camera"]["center"] == [12.0, 19.0]
+    # A presence sent on a socket that closes next would vanish with it.
+    assert connector.websocket.sent == []
     assert result["snapshot_seq"] == 12
-
-
-def test_layer_and_channel_commands_send_dataset_presence(tmp_path):
-    connector = FakeConnector([snapshot()])
-    client = LucidaClient(
-        "http://127.0.0.1:9988",
-        config_path=tmp_path / "config.json",
-        ws_connect=connector,
-    )
-    workspace = WorkspaceResource(client, workspace_record())
-
-    workspace.channel.colormap("demo.zarr", 1, "green")
-
-    sent = connector.websocket.sent[0]
-    assert sent["type"] == "dataset_presence"
-    settings = sent["dataset_settings"]["wds-test"]
-    assert settings["channel_settings"][1]["colormap"] == "green"
-
-
-def test_layer_list_labels_the_level_pin(tmp_path):
-    connector = FakeConnector([snapshot()])
-    client = LucidaClient(
-        "http://127.0.0.1:9988",
-        config_path=tmp_path / "config.json",
-        ws_connect=connector,
-    )
-    workspace = WorkspaceResource(client, workspace_record())
-
-    layers = workspace.layer.list()
-
-    assert layers[0]["settings"]["detail_level_override"] is None
-    assert layers[0]["level_pin"] == "follows the screen"
+    stored = server.profiles[("w1", "default")]["view"]
+    assert stored["dataset_settings"]["wds-test"]["channel_settings"][1]["colormap"] == "green"
 
 
 def test_level_pin_label_names_a_pin_and_treats_level_zero_as_a_pin():

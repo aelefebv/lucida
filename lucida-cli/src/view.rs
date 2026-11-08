@@ -1,17 +1,18 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::time::Duration;
 
 use futures_util::{Stream, StreamExt};
 use lucida_core::DatasetId;
 use lucida_core::camera::Camera;
-use lucida_core::command::{Command as CoreCommand, ViewportCommand};
+use lucida_core::command::ViewportCommand;
 use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessage};
-use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
+use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{
     BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings, DisplayState, DocumentState,
     RenderMode, Scene,
 };
 use lucida_core::view::ViewState;
+use lucida_core::viewer_profile::{FITTED_VIEWPORT, FrameError, ProfileCommandError, ProfileScene};
 use lucida_protocol::{GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedLevelSummary};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -639,17 +640,18 @@ impl ViewerProfileClient {
         let break_follow = own_presence(&snapshot)?.following.is_some();
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
 
-        let mut scene = scene_from_saved_view(&snapshot.document, &record.view);
-        validate_viewport_indices(&scene, &command)?;
-        apply_viewport_command(&mut scene, &command);
-        let next_view = saved_view_from_scene(&snapshot.document, scene.clone());
+        let mut stored = ProfileScene::open(&snapshot.document, &record.view);
+        stored
+            .apply(command.clone())
+            .map_err(profile_command_error)?;
         let record = self
-            .upsert_profile(workspace, profile, None, &next_view)
+            .upsert_profile(workspace, profile, None, &stored.saved_view())
             .await?;
 
         if break_follow {
             send_client_message(&mut write, &ClientMessage::Follow { target: None }).await?;
         }
+        let scene = stored.scene;
         send_client_message(
             &mut write,
             &ClientMessage::Presence {
@@ -690,13 +692,15 @@ impl ViewerProfileClient {
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
 
-        let mut scene = scene_from_saved_view(&snapshot.document, &record.view);
-        let viewport_command = display_viewport_command(&scene, command)?;
-        scene.apply(CoreCommand::Viewport(viewport_command.clone()));
-        let next_view = saved_view_from_scene(&snapshot.document, scene.clone());
+        let mut stored = ProfileScene::open(&snapshot.document, &record.view);
+        let viewport_command = display_viewport_command(&stored.scene, command)?;
+        stored
+            .apply(viewport_command.clone())
+            .map_err(profile_command_error)?;
         let record = self
-            .upsert_profile(workspace, profile, None, &next_view)
+            .upsert_profile(workspace, profile, None, &stored.saved_view())
             .await?;
+        let scene = stored.scene;
 
         send_client_message(
             &mut write,
@@ -727,12 +731,15 @@ impl ViewerProfileClient {
         let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
 
-        let mut scene = scene_from_saved_view(&snapshot.document, &record.view);
-        apply_overview_to_scene(&mut scene, viewport)?;
-        let next_view = saved_view_from_scene(&snapshot.document, scene.clone());
+        let mut stored = ProfileScene::open(&snapshot.document, &record.view);
+        stored
+            .scene
+            .frame_visible_2d(viewport)
+            .map_err(frame_error)?;
         let record = self
-            .upsert_profile(workspace, profile, None, &next_view)
+            .upsert_profile(workspace, profile, None, &stored.saved_view())
             .await?;
+        let scene = stored.scene;
 
         send_client_message(
             &mut write,
@@ -759,7 +766,10 @@ impl ViewerProfileClient {
             .diagnostic_scene(workspace, profile, from_peer, wait)
             .await?;
         if let Some(viewport) = overview_viewport {
-            apply_overview_to_scene(&mut diagnostic.scene, viewport)?;
+            diagnostic
+                .scene
+                .frame_visible_2d(viewport)
+                .map_err(frame_error)?;
         }
         Ok(viewer_source_result(
             &diagnostic.snapshot,
@@ -778,7 +788,7 @@ impl ViewerProfileClient {
         let diagnostic = self
             .diagnostic_scene(workspace, profile, Some(client_id), wait)
             .await?;
-        let next_view = saved_view_from_scene(&diagnostic.snapshot.document, diagnostic.scene);
+        let next_view = ProfileScene::from(diagnostic.scene).saved_view();
         let seed_source = format!("peer:{client_id}");
         let record = self
             .upsert_profile(workspace, profile, Some(seed_source.as_str()), &next_view)
@@ -837,7 +847,7 @@ impl ViewerProfileClient {
         }
 
         let record = self.ensure_profile(workspace, profile, &snapshot).await?;
-        let scene = scene_from_saved_view(&snapshot.document, &record.view);
+        let scene = ProfileScene::open(&snapshot.document, &record.view).scene;
         Ok(DiagnosticScene {
             source: DiagnosticViewSource {
                 kind: DiagnosticViewSourceKind::ViewerProfile,
@@ -882,9 +892,8 @@ impl ViewerProfileClient {
         }
 
         // This connection is new, so its own presence holds nothing to seed from.
-        let scene = fitted_scene(&snapshot.document);
         Ok((
-            saved_view_from_scene(&snapshot.document, scene),
+            ProfileScene::fitted(&snapshot.document).saved_view(),
             "workspace_snapshot".to_string(),
         ))
     }
@@ -1244,9 +1253,11 @@ fn apply_presence_command(
         )
     })?;
 
-    let mut scene = scene_from_presence(&snapshot.document, source_presence);
-    validate_viewport_indices(&scene, &command)?;
-    apply_viewport_command(&mut scene, &command);
+    let mut stored = ProfileScene::from(scene_from_presence(&snapshot.document, source_presence));
+    stored
+        .apply(command.clone())
+        .map_err(profile_command_error)?;
+    let scene = stored.scene;
 
     Ok(ViewApplyResult {
         snapshot_seq: snapshot.seq,
@@ -1313,9 +1324,12 @@ fn apply_dataset_presence_command(
         )
     })?;
 
-    let mut scene = scene_from_presence(&snapshot.document, source_presence);
-    let viewport_command = display_viewport_command(&scene, command)?;
-    scene.apply(CoreCommand::Viewport(viewport_command.clone()));
+    let mut stored = ProfileScene::from(scene_from_presence(&snapshot.document, source_presence));
+    let viewport_command = display_viewport_command(&stored.scene, command)?;
+    stored
+        .apply(viewport_command.clone())
+        .map_err(profile_command_error)?;
+    let scene = stored.scene;
 
     Ok(dataset_presence_result(
         snapshot,
@@ -1355,20 +1369,19 @@ fn dataset_presence_result(
 }
 
 /// The scene a client's presence describes. What the client has not reported
-/// comes from the document: every dataset with default settings, framed by
-/// [`fit_scene`].
+/// comes from the document: every dataset with the settings a freshly opened
+/// dataset gets, framed as a new viewer profile is.
 pub(crate) fn scene_from_presence(document: &DocumentState, presence: &PresenceState) -> Scene {
     let viewport = presence
         .camera
         .as_ref()
         .map_or(FITTED_VIEWPORT, Camera::viewport);
     let mut scene = Scene::new(viewport);
-    scene.document = document.clone();
     if let (Some(order), Some(settings)) = (&presence.dataset_order, &presence.dataset_settings) {
         scene.dataset_order = order.clone();
         scene.dataset_settings = settings.clone();
     }
-    hydrate_scene_document_defaults(&mut scene);
+    scene.load_document(document.clone());
     match (&presence.camera, &presence.view, &presence.display) {
         (Some(camera), Some(view), Some(display)) => {
             scene.camera = camera.clone();
@@ -1378,233 +1391,30 @@ pub(crate) fn scene_from_presence(document: &DocumentState, presence: &PresenceS
             scene.view = view.clone();
             scene.display = display.clone();
         }
-        _ => fit_scene(&mut scene),
-    }
-    scene
-}
-
-/// The canvas a fitted view is framed for when no client reported one.
-const FITTED_VIEWPORT: [u32; 2] = [crate::trace::DEFAULT_WIDTH, crate::trace::DEFAULT_HEIGHT];
-
-/// The document's datasets framed in 2D at [`FITTED_VIEWPORT`], or the blank
-/// camera when nothing is visible to frame.
-fn fitted_scene(document: &DocumentState) -> Scene {
-    let mut scene = Scene::new(FITTED_VIEWPORT);
-    scene.document = document.clone();
-    hydrate_scene_document_defaults(&mut scene);
-    fit_scene(&mut scene);
-    scene
-}
-
-fn fit_scene(scene: &mut Scene) {
-    let viewport = scene.camera.viewport();
-    // An empty workspace has nothing to frame and keeps the blank camera.
-    let _ = apply_overview_to_scene(scene, viewport);
-}
-
-fn scene_from_saved_view(document: &DocumentState, view: &SavedView) -> Scene {
-    let mut scene = Scene::new(view.camera.viewport());
-    scene.document = document.clone();
-    scene.camera = view.camera.clone();
-    // Stored camera: clamp into the ranges the interactive mutators enforce
-    // (same rule as `Scene::import_presence`).
-    scene.camera.sanitize();
-    scene.view = view.view.clone();
-    scene.display = view.display.clone();
-    scene.dataset_order = view.dataset_order.clone();
-    // `SavedView.dataset_settings` is an `IndexMap` (deterministic wire order);
-    // the CLI `Scene` mirror keeps a plain `HashMap`, so convert at the boundary.
-    scene.dataset_settings = view.dataset_settings.clone().into_iter().collect();
-    hydrate_scene_document_defaults(&mut scene);
-    scene
-}
-
-pub(crate) fn saved_view_from_scene(document: &DocumentState, scene: Scene) -> SavedView {
-    SavedView {
-        v: SAVED_VIEW_VERSION,
-        datasets: Vec::new(),
-        // The CLI helpers/`Scene` mirror use `HashMap`; collect into
-        // `SavedView`'s `IndexMap` fields at the boundary.
-        active_layouts: active_layouts_from_document(document).into_iter().collect(),
-        camera: scene.camera,
-        view: scene.view,
-        display: scene.display,
-        dataset_order: scene.dataset_order,
-        dataset_settings: scene.dataset_settings.into_iter().collect(),
-        auto_contrast: Default::default(),
-    }
-}
-
-pub(crate) fn apply_overview_to_scene(
-    scene: &mut Scene,
-    viewport: [u32; 2],
-) -> Result<(), CliError> {
-    if viewport[0] == 0 || viewport[1] == 0 {
-        return Err(CliError::config("overview viewport must be positive"));
-    }
-    let bounds = scene.visible_content_bounds_2d().ok_or_else(|| {
-        CliError::new(
-            ErrorKind::MissingResource,
-            "no visible image dataset is available for overview",
-        )
-    })?;
-    let width = bounds.width();
-    let height = bounds.height();
-    if width <= 0.0 || height <= 0.0 {
-        return Err(CliError::new(
-            ErrorKind::MissingResource,
-            "visible image dataset has invalid XY dimensions",
-        ));
-    }
-
-    let zoom_x = viewport[0] as f64 / width;
-    let zoom_y = viewport[1] as f64 / height;
-    let zoom = zoom_x.min(zoom_y).max(f64::EPSILON) * 0.9;
-    apply_viewport_command(scene, &ViewportCommand::SetMode2D);
-    apply_viewport_command(
-        scene,
-        &ViewportCommand::SetViewport {
-            width: viewport[0],
-            height: viewport[1],
-        },
-    );
-    apply_viewport_command(
-        scene,
-        &ViewportCommand::SetCenter {
-            x: bounds.center_x(),
-            y: bounds.center_y(),
-        },
-    );
-    apply_viewport_command(scene, &ViewportCommand::SetZoom { value: zoom });
-    let z = bounds.max_depth.saturating_sub(1) / 2;
-    apply_viewport_command(scene, &ViewportCommand::SetZ { z });
-    Ok(())
-}
-
-fn active_layouts_from_document(
-    document: &DocumentState,
-) -> HashMap<DatasetId, lucida_content::LayoutId> {
-    document
-        .manifests
-        .iter()
-        .filter_map(|(dataset_id, manifest)| {
-            let layout = document
-                .active_layout_ids
-                .get(dataset_id)
-                .or(manifest.default_layout_id.as_ref())
-                .or_else(|| manifest.source_layouts().first().map(|layout| &layout.id))?;
-            Some((dataset_id.clone(), layout.clone()))
-        })
-        .collect()
-}
-
-pub(crate) fn hydrate_scene_document_defaults(scene: &mut Scene) {
-    for id in scene.document.manifests.keys() {
-        if !scene.dataset_order.contains(id) {
-            scene.dataset_order.push(id.clone());
+        // An empty workspace has nothing to frame and keeps the blank camera.
+        _ => {
+            let _ = scene.frame_visible_2d(viewport);
         }
-        scene.dataset_settings.entry(id.clone()).or_default();
     }
-    let dataset_ids = scene
-        .document
-        .manifests
-        .keys()
-        .cloned()
-        .collect::<HashSet<_>>();
-    scene.dataset_order.retain(|id| dataset_ids.contains(id));
     scene
-        .dataset_settings
-        .retain(|id, _| dataset_ids.contains(id));
-    scene.rebuild_derived();
 }
 
-fn apply_viewport_command(scene: &mut Scene, command: &ViewportCommand) {
-    match command {
-        ViewportCommand::Rotate3D { .. }
-        | ViewportCommand::Zoom3D { .. }
-        | ViewportCommand::Pan3D { .. } => {
-            scene.apply(CoreCommand::Viewport(ViewportCommand::SetMode3D))
-        }
-        ViewportCommand::FlyTick { .. } => {
-            scene.apply(CoreCommand::Viewport(ViewportCommand::SetModeFly))
-        }
-        _ => {}
-    }
-    scene.apply(CoreCommand::Viewport(command.clone()));
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ViewIndexBounds {
-    t: u32,
-    c: u32,
-    z: u32,
-}
-
-fn validate_viewport_indices(scene: &Scene, command: &ViewportCommand) -> Result<(), CliError> {
-    let Some(bounds) = visible_view_index_bounds(scene) else {
-        return Ok(());
+fn profile_command_error(error: ProfileCommandError) -> CliError {
+    let kind = if error.is_missing_resource() {
+        ErrorKind::MissingResource
+    } else {
+        ErrorKind::Config
     };
-
-    match command {
-        ViewportCommand::SetZ { z } if *z >= bounds.z => Err(view_index_error("Z", *z, bounds.z)),
-        ViewportCommand::SetZRange { start, end } => {
-            if *start >= bounds.z || *end > bounds.z {
-                return Err(CliError::config(format!(
-                    "visible datasets have {count} Z plane(s); requested Z range {start}..{end}",
-                    count = bounds.z,
-                )));
-            }
-            Ok(())
-        }
-        ViewportCommand::SetT { t } if *t >= bounds.t => Err(view_index_error("T", *t, bounds.t)),
-        ViewportCommand::SetC { c } if *c >= bounds.c => Err(view_index_error("C", *c, bounds.c)),
-        _ => Ok(()),
-    }
+    CliError::new(kind, error.to_string())
 }
 
-fn view_index_error(axis: &str, requested: u32, count: u32) -> CliError {
-    CliError::config(format!(
-        "visible datasets have {count} {axis} value(s); requested {axis} index {requested}"
-    ))
-}
-
-fn visible_view_index_bounds(scene: &Scene) -> Option<ViewIndexBounds> {
-    let mut bounds: Option<ViewIndexBounds> = None;
-    for id in &scene.dataset_order {
-        let settings = scene.dataset_settings.get(id).cloned().unwrap_or_default();
-        if !settings.visible {
-            continue;
-        }
-        let Some(manifest) = scene.document.manifests.get(id) else {
-            continue;
-        };
-        let Some(level) = manifest
-            .images()
-            .first()
-            .and_then(|image| image.multiscale.levels.first())
-        else {
-            continue;
-        };
-        let current = ViewIndexBounds {
-            t: shape_count_to_u32(level.shape[0]),
-            c: shape_count_to_u32(level.shape[1]),
-            z: shape_count_to_u32(level.shape[2]),
-        };
-        bounds = Some(if let Some(existing) = bounds {
-            ViewIndexBounds {
-                t: existing.t.min(current.t),
-                c: existing.c.min(current.c),
-                z: existing.z.min(current.z),
-            }
-        } else {
-            current
-        });
-    }
-    bounds
-}
-
-fn shape_count_to_u32(value: u64) -> u32 {
-    value.min(u32::MAX as u64) as u32
+fn frame_error(error: FrameError) -> CliError {
+    let kind = if error.is_missing_resource() {
+        ErrorKind::MissingResource
+    } else {
+        ErrorKind::Config
+    };
+    CliError::new(kind, error.to_string())
 }
 
 fn display_viewport_command(
@@ -1612,17 +1422,12 @@ fn display_viewport_command(
     command: DatasetDisplayCommand,
 ) -> Result<ViewportCommand, CliError> {
     Ok(match command {
-        DatasetDisplayCommand::SetOrder { selectors } => {
-            let mut order = resolve_dataset_ids(&scene.document, &selectors)?;
-            for id in &scene.dataset_order {
-                if !order.contains(id) {
-                    order.push(id.clone());
-                }
-            }
-            ViewportCommand::SetDatasetOrder {
-                order: order.into_iter().map(|id| id.0).collect(),
-            }
-        }
+        DatasetDisplayCommand::SetOrder { selectors } => ViewportCommand::SetDatasetOrder {
+            order: resolve_dataset_ids(&scene.document, &selectors)?
+                .into_iter()
+                .map(|id| id.0)
+                .collect(),
+        },
         DatasetDisplayCommand::SetDatasetVisible { selector, visible } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
             ViewportCommand::SetDatasetVisible {
@@ -1644,11 +1449,7 @@ fn display_viewport_command(
             max,
         } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(
-                &scene.document,
-                &dataset_id,
-                channel.unwrap_or(scene.view.c),
-            )?;
+            let channel = channel.unwrap_or(scene.view.c);
             ViewportCommand::SetChannelContrast {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1662,11 +1463,7 @@ fn display_viewport_command(
             gamma,
         } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(
-                &scene.document,
-                &dataset_id,
-                channel.unwrap_or(scene.view.c),
-            )?;
+            let channel = channel.unwrap_or(scene.view.c);
             ViewportCommand::SetChannelGamma {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1679,11 +1476,7 @@ fn display_viewport_command(
             colormap,
         } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(
-                &scene.document,
-                &dataset_id,
-                channel.unwrap_or(scene.view.c),
-            )?;
+            let channel = channel.unwrap_or(scene.view.c);
             ViewportCommand::SetChannelColormap {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1723,7 +1516,6 @@ fn display_viewport_command(
             visible,
         } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(&scene.document, &dataset_id, channel)?;
             ViewportCommand::SetChannelVisible {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1736,7 +1528,6 @@ fn display_viewport_command(
             colormap,
         } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(&scene.document, &dataset_id, channel)?;
             ViewportCommand::SetChannelColormap {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1750,7 +1541,6 @@ fn display_viewport_command(
             max,
         } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(&scene.document, &dataset_id, channel)?;
             ViewportCommand::SetChannelContrast {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1764,7 +1554,6 @@ fn display_viewport_command(
             gamma,
         } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = resolve_channel(&scene.document, &dataset_id, channel)?;
             ViewportCommand::SetChannelGamma {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1827,29 +1616,6 @@ fn resolve_dataset_id(document: &DocumentState, selector: &str) -> Result<Datase
             ))
         }
     }
-}
-
-fn resolve_channel(
-    document: &DocumentState,
-    dataset_id: &DatasetId,
-    channel: u32,
-) -> Result<u32, CliError> {
-    let count = channel_count(document, dataset_id).ok_or_else(|| {
-        CliError::new(
-            ErrorKind::MissingResource,
-            format!("dataset {:?} has no image channel metadata", dataset_id.0),
-        )
-    })?;
-    if channel >= count {
-        return Err(CliError::new(
-            ErrorKind::MissingResource,
-            format!(
-                "dataset {:?} has {count} channels; channel {channel} was requested",
-                dataset_id.0
-            ),
-        ));
-    }
-    Ok(channel)
 }
 
 fn channel_count(document: &DocumentState, dataset_id: &DatasetId) -> Option<u32> {
@@ -2155,7 +1921,7 @@ fn viewer_profile_result(
     record: WorkspaceViewerProfileRecord,
     command: Option<ViewportCommand>,
 ) -> ViewerProfileResult {
-    let scene = scene_from_saved_view(&snapshot.document, &record.view);
+    let scene = ProfileScene::open(&snapshot.document, &record.view).scene;
     let layers = layer_states(&scene);
     let multi_channel = scene.view.multi_channel;
     ViewerProfileResult {
@@ -2180,7 +1946,7 @@ fn viewer_source_result(
     source: DiagnosticViewSource,
     scene: Scene,
 ) -> ViewerSourceResult {
-    let saved_view = saved_view_from_scene(&snapshot.document, scene.clone());
+    let saved_view = ProfileScene::from(scene.clone()).saved_view();
     let layers = layer_states(&scene);
     let multi_channel = scene.view.multi_channel;
     ViewerSourceResult {
@@ -3122,7 +2888,7 @@ mod tests {
     #[test]
     fn a_new_viewer_profile_starts_from_a_fitted_view() {
         let document = document_with_pyramid();
-        let seeded = fitted_scene(&document);
+        let seeded = ProfileScene::fitted(&document).scene;
         match &seeded.camera {
             Camera::Slice(slice) => {
                 assert_eq!(slice.viewport, FITTED_VIEWPORT);
@@ -3153,7 +2919,7 @@ mod tests {
             DatasetId("wds-other".to_string()),
         ];
 
-        apply_overview_to_scene(&mut scene, [320, 320]).unwrap();
+        scene.frame_visible_2d([320, 320]).unwrap();
 
         match scene.camera {
             Camera::Slice(slice) => {
