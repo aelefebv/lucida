@@ -334,7 +334,7 @@ jobs:
 
       - name: Set up Docker Buildx
         if: steps.gate.outputs.build == 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # Single-arch (amd64) for speed. Multi-arch is the release
       # workflow's job; for PR signal all we need is "the Dockerfile
