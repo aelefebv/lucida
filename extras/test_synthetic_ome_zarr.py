@@ -374,6 +374,8 @@ def test_parse_args_reads_every_option() -> None:
             "--unwritten-level", "3",
             "--unwritten-level", "1",
             "--level-index",
+            "--dtype", "float32",
+            "--range=-2.5,10",
             "--seed", "7",
             "--overwrite",
         ]
@@ -392,6 +394,8 @@ def test_parse_args_reads_every_option() -> None:
     assert opts.sparse is True
     assert opts.unwritten_levels == (1, 3)
     assert opts.level_index is True
+    assert opts.dtype == "float32"
+    assert opts.value_range == (-2.5, 10.0)
     assert opts.seed == 7
     assert opts.overwrite is True
 
@@ -409,6 +413,8 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
     assert opts.sparse is False
     assert opts.unwritten_levels == ()
     assert opts.level_index is False
+    assert opts.dtype == "uint16"
+    assert opts.value_range == (0.0, 60000.0)
 
 
 @pytest.mark.parametrize(
@@ -428,6 +434,10 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         ["out.zarr", "--size", "16,16", "--size", "8,8"],
         ["out.zarr", "--tiles", "2", "--size", "16,16", "--size", "8,8,8"],
         ["out.zarr", "--clip-chunks", "--chunk", "8", "--shard", "16"],
+        ["out.zarr", "--range=-5,100"],
+        ["out.zarr", "--dtype", "int16", "--range", "0,40000"],
+        ["out.zarr", "--range", "10,10"],
+        ["out.zarr", "--dtype", "uint8"],
     ],
     ids=[
         "size-arity",
@@ -444,11 +454,29 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         "per-tile-size-without-tiles",
         "per-tile-size-arity",
         "clip-with-shard",
+        "negative-range-unsigned",
+        "range-past-type",
+        "empty-range",
+        "one-byte-type",
     ],
 )
 def test_parse_args_rejects_inconsistent_options(argv: list[str]) -> None:
     with pytest.raises(SystemExit):
         gen.parse_args(argv)
+
+
+@pytest.mark.parametrize("dtype", ["int16", "int32", "float32", "float64"])
+def test_dtype_and_range_set_the_stored_type_and_the_values_it_spans(tmp_path: Path, dtype: str) -> None:
+    out = generate(tmp_path, f"{dtype}.ome.zarr", "--size", "64,64", "--levels", "2", "--dtype", dtype, "--range=-200,1000")
+    assert read_json(out / "0" / "zarr.json")["data_type"] == dtype
+    for level in range(2):
+        values = level_array(out, level)
+        assert values.dtype == np.dtype(dtype)
+        assert values.min() >= -200 and values.max() <= 1000
+    level0 = level_array(out, 0)
+    assert level0.min() < 0 < level0.max()
+    if dtype.startswith("float"):
+        assert not np.all(level0 == np.rint(level0))
 
 
 def test_main_refuses_to_overwrite_unless_asked(tmp_path: Path) -> None:

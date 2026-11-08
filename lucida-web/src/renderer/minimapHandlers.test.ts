@@ -97,6 +97,7 @@ function uploadOverview(ctx: WorkerCtx): void {
     chunkY: 2,
     chunkZ: 1,
     chunks: [{ key: "3/0/0/0/0/0", x: 0, y: 0, z: 0, dataType: "uint16", data: new Uint16Array([1, 2, 3, 4]).buffer }],
+    sampleFormat: "u16",
   });
 }
 
