@@ -9,7 +9,7 @@ use lucida_core::protocol::{ClientId, ClientMessage, PresenceState, ServerMessag
 use lucida_core::saved_view::{SAVED_VIEW_VERSION, SavedView};
 use lucida_core::scene::{
     BlendMode, ChannelSettings, Colormap, DatasetDisplaySettings, DisplayState, DocumentState,
-    RenderMode, Scene,
+    FrameTarget, RenderMode, Scene,
 };
 use lucida_core::view::ViewState;
 use lucida_protocol::{GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedLevelSummary};
@@ -1435,6 +1435,8 @@ pub(crate) fn saved_view_from_scene(document: &DocumentState, scene: Scene) -> S
     }
 }
 
+/// `lucida viewer overview`: everything visible fitted in 2D on a canvas of
+/// `viewport`, the fit any client makes, on the mid-Z slice.
 pub(crate) fn apply_overview_to_scene(
     scene: &mut Scene,
     viewport: [u32; 2],
@@ -1442,42 +1444,17 @@ pub(crate) fn apply_overview_to_scene(
     if viewport[0] == 0 || viewport[1] == 0 {
         return Err(CliError::config("overview viewport must be positive"));
     }
-    let bounds = scene.visible_content_bounds_2d().ok_or_else(|| {
-        CliError::new(
-            ErrorKind::MissingResource,
-            "no visible image dataset is available for overview",
-        )
-    })?;
-    let width = bounds.width();
-    let height = bounds.height();
-    if width <= 0.0 || height <= 0.0 {
+    apply_viewport_command(scene, &ViewportCommand::SetMode2D);
+    if !scene.frame(&FrameTarget::Visible, viewport) {
         return Err(CliError::new(
             ErrorKind::MissingResource,
-            "visible image dataset has invalid XY dimensions",
+            "no visible image dataset is available for overview",
         ));
     }
-
-    let zoom_x = viewport[0] as f64 / width;
-    let zoom_y = viewport[1] as f64 / height;
-    let zoom = zoom_x.min(zoom_y).max(f64::EPSILON) * 0.9;
-    apply_viewport_command(scene, &ViewportCommand::SetMode2D);
-    apply_viewport_command(
-        scene,
-        &ViewportCommand::SetViewport {
-            width: viewport[0],
-            height: viewport[1],
-            pixel_ratio: None,
-        },
-    );
-    apply_viewport_command(
-        scene,
-        &ViewportCommand::SetCenter {
-            x: bounds.center_x(),
-            y: bounds.center_y(),
-        },
-    );
-    apply_viewport_command(scene, &ViewportCommand::SetZoom { value: zoom });
-    let z = bounds.max_depth.saturating_sub(1) / 2;
+    let depth = scene
+        .visible_bounds()
+        .map_or(0, |bounds| bounds.vox.max[2] as u32);
+    let z = depth.saturating_sub(1) / 2;
     apply_viewport_command(scene, &ViewportCommand::SetZ { z });
     Ok(())
 }
@@ -2522,6 +2499,7 @@ mod tests {
                 center,
                 zoom: 1.0,
                 viewport: [800, 600],
+                framing: lucida_core::camera::Framing::Placed,
             })),
             view: Some(ViewState::new()),
             display: Some(DisplayState::default()),
@@ -2728,6 +2706,7 @@ mod tests {
                     center: [0.0, 0.0],
                     zoom: 1.0,
                     viewport: [800, 600],
+                    framing: lucida_core::camera::Framing::Placed,
                 }),
                 view: ViewState::new(),
                 display: DisplayState::default(),
@@ -3129,7 +3108,10 @@ mod tests {
                 assert_eq!(slice.viewport, FITTED_VIEWPORT);
                 assert_eq!(slice.center, [2048.0, 2048.0]);
                 let limiting = FITTED_VIEWPORT[1] as f64 / 4096.0;
-                assert!((slice.zoom - limiting * 0.9).abs() < 1e-12);
+                assert!(
+                    (slice.zoom - limiting / lucida_core::framing::FIT_MARGIN_2D).abs() < 1e-12
+                );
+                assert_eq!(slice.framing, lucida_core::camera::Framing::Framed);
             }
             other => panic!("expected slice camera, got {other:?}"),
         }
@@ -3160,7 +3142,7 @@ mod tests {
             Camera::Slice(slice) => {
                 assert_eq!(slice.viewport, [320, 320]);
                 assert_eq!(slice.center, [16.0, 32.0]);
-                assert!((slice.zoom - 4.5).abs() < f64::EPSILON);
+                assert!((slice.zoom - 5.0 / lucida_core::framing::FIT_MARGIN_2D).abs() < 1e-12);
             }
             _ => panic!("expected slice camera"),
         }

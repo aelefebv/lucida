@@ -851,6 +851,7 @@ fn arcball_camera() -> Camera {
         far: 50000.0,
         clip_distance: 120.0,
         clip_mode: ClipMode::Sphere,
+        framing: lucida_core::camera::Framing::Placed,
     })
 }
 
@@ -859,6 +860,7 @@ fn slice_camera() -> Camera {
         center: [1024.5, -512.25],
         zoom: 1.5,
         viewport: [1920, 1080],
+        framing: lucida_core::camera::Framing::Placed,
     })
 }
 
@@ -940,6 +942,7 @@ fn fly_peer_presence() -> PresenceState {
             base_speed: 340.5,
             clip_distance: 0.42,
             clip_mode: ClipMode::Sphere,
+            framing: lucida_core::camera::Framing::Placed,
         })),
         view: Some(ViewState {
             z_range: 0..50,

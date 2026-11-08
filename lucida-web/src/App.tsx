@@ -16,8 +16,8 @@ import { countUnread, findMentionsOfMe } from "./components/mentionsOfMe.ts";
 import { currentDatasetAnnotations } from "./components/currentDatasetAnnotations.ts";
 import { FpsCounter } from "./components/FpsCounter.tsx";
 import { extractCollectionData } from "./components/CollectionSelector.tsx";
-import { frameRect } from "./components/groupFraming.ts";
 import type { VoxelRect } from "./pipeline/layoutBuilders.ts";
+import { frameRegionOnCanvas } from "./applyAndSend.ts";
 import { LoadingViewBanner } from "./components/LoadingViewBanner.tsx";
 import { ImportWarningBanner } from "./components/ImportWarningBanner.tsx";
 import { WorkspaceSavedViewsSidebar } from "./components/WorkspaceSavedViewsSidebar.tsx";
@@ -215,7 +215,6 @@ function Viewer({
   const dims = useDimensions({
     sceneStore,
     wasmSceneRef: scene.wasmSceneRef,
-    selectedDatasetId,
     datasetsRef,
     datasetsVersion,
     bridgeCallbacksRef,
@@ -664,8 +663,8 @@ function Viewer({
 
   // The first VISIBLE dataset (falling back to the first loaded layer) is what
   // the Explore panel points its guided-exploration at: its id + name for the
-  // header, and its `[T, C, Z, Y, X]` shape so the generator can frame Home and
-  // gate dimensional moves. Recomputed from the live layer list + dataset map.
+  // header, and its `[T, C, Z, Y, X]` shape for the labels. Recomputed from
+  // the live layer list + dataset map.
   const exploreTarget = useMemo((): {
     id: string | null;
     name: string | null;
@@ -722,13 +721,6 @@ function Viewer({
       render.loopRef.current?.setThumbnailOverview(false);
     };
   }, [showExplorePanel, render.loopRef, render.activeLoop, datasetsVersion]);
-
-  // Home in the Explore panel frames the box the viewer's own fit uses, in the
-  // live camera's space.
-  const getExploreHomeBounds = (datasetId: string) => {
-    const bounds = scene.wasmSceneRef.current?.dataset_fit_bounds(datasetId);
-    return bounds && bounds.length === 6 ? bounds : null;
-  };
 
   // The Info panel describes the selected dataset, else the first one open.
   const infoDataset = useMemo(() => {
@@ -849,7 +841,7 @@ function Viewer({
         if (!ws || !canvas) return;
         revealCanvas();
         bridge.breakFollow();
-        frameRect(ws, canvas, bounds);
+        frameRegionOnCanvas(ws, canvas, bounds);
         emitPresenceWithUrl();
         requestRender(render.loopRef.current, "collection_group_click");
       },
@@ -1004,7 +996,7 @@ function Viewer({
             render.canvasRef.current?.clientWidth ?? 800,
             render.canvasRef.current?.clientHeight ?? 600,
           ]}
-          getHomeBounds={getExploreHomeBounds}
+          getScene={() => scene.wasmSceneRef.current}
           requestThumbnail={requestThumbnail}
         />
       ),

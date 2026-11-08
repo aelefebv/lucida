@@ -431,6 +431,16 @@ pub fn apply(view: &SavedView, t: &ViewTransform, extent: &ViewExtent) -> Option
         }
     }
 
+    // A rotated or zoomed fit is a chosen view: left framed, the page showing
+    // it would fit it again and undo the move.
+    let steered = matches!(
+        t,
+        ViewTransform::AzimuthDelta(_) | ViewTransform::ElevationDelta(_) | ViewTransform::Zoom(_)
+    );
+    if steered && child.camera != view.camera {
+        child.camera.set_framing(Framing::Placed);
+    }
+
     // No-op omission: if the move changed nothing observable, don't offer it.
     // `SavedView: PartialEq` makes this an exact structural comparison.
     if child == *view {
@@ -1181,12 +1191,7 @@ mod tests {
                 .values()
                 .all(|s| s.render_mode == RenderMode::Translucent)
         );
-        let child = apply(
-            &v,
-            &ViewTransform::ToggleProjection,
-            &extent_of(dims),
-        )
-        .unwrap();
+        let child = apply(&v, &ViewTransform::ToggleProjection, &extent_of(dims)).unwrap();
         assert!(
             child
                 .dataset_settings
@@ -1195,12 +1200,7 @@ mod tests {
             "toggle should flip every entry to max-intensity"
         );
         // Toggling the child back returns to translucent.
-        let back = apply(
-            &child,
-            &ViewTransform::ToggleProjection,
-            &extent_of(dims),
-        )
-        .unwrap();
+        let back = apply(&child, &ViewTransform::ToggleProjection, &extent_of(dims)).unwrap();
         assert!(
             back.dataset_settings
                 .values()
@@ -1766,7 +1766,30 @@ mod tests {
         };
         for axis in 0..3 {
             let mid = (world.min[axis] + world.max[axis]) / 2.0;
-            assert!((a.target[axis] - mid).abs() < 1e-9, "home target {:?}", a.target);
+            assert!(
+                (a.target[axis] - mid).abs() < 1e-9,
+                "home target {:?}",
+                a.target
+            );
+        }
+    }
+
+    #[test]
+    fn a_move_from_a_fitted_view_is_placed_and_a_step_stays_framed() {
+        // A page fits a framed view again on its canvas, which would undo a
+        // rotation or a zoom; a step through Z leaves the fit as it was.
+        let home = home_of("wds-1", [1, 1, 40, 80, 100], [800, 600]);
+        assert_eq!(home.camera.framing(), Framing::Framed);
+        for child in children(&home, &extent_of([1, 1, 40, 80, 100])) {
+            let want = if child.transform.starts_with("azimuth:")
+                || child.transform.starts_with("elevation:")
+                || child.transform.starts_with("zoom:")
+            {
+                Framing::Placed
+            } else {
+                Framing::Framed
+            };
+            assert_eq!(child.view.camera.framing(), want, "{}", child.transform);
         }
     }
 

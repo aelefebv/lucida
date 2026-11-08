@@ -9,7 +9,7 @@
 // pin doesn't exist at scene bootstrap.
 
 import { encode, decode } from "./encoder.ts";
-import type { SavedView } from "./types.ts";
+import { isPersistable, type SavedView } from "./types.ts";
 import { SavedViewApplier } from "./applier.ts";
 import { getBookmark } from "./bookmarksApi.ts";
 import {
@@ -253,7 +253,7 @@ export class UrlSync {
   private async flushAfterSavedViewApply(): Promise<void> {
     if (this.destroyed) return;
     const view = this.captureBuilder();
-    if (view === null) return;
+    if (view === null || !isPersistable(view)) return;
     let payload: string;
     try {
       payload = await encode(view);
@@ -293,7 +293,7 @@ export class UrlSync {
       return;
     }
     const view = this.captureBuilder();
-    if (view === null) return;
+    if (view === null || !isPersistable(view)) return;
     let payload: string;
     try {
       payload = await encode(view);

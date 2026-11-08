@@ -14,8 +14,8 @@ use lucida_content::*;
 
 use crate::camera::{Camera, Framing};
 use crate::chunk::{self, ChunkRequestPlan};
-use crate::framing::{FitBounds, VoxBox, WorldBox};
 use crate::epoch::SceneEpochs;
+use crate::framing::{FitBounds, VoxBox, WorldBox};
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
 use crate::target_level::{self, IN_PLANE_AXES, VOLUME_AXES, level_shape_ratios};
 use crate::transform::{self, VolumeTransform};
@@ -3904,8 +3904,14 @@ mod tests {
             .into(),
         );
 
-        let WorldBox { min: a_min, max: a_max } = scene.dataset_world_bounds("a").expect("a has bounds");
-        let WorldBox { min: b_min, max: b_max } = scene.dataset_world_bounds("b").expect("b has bounds");
+        let WorldBox {
+            min: a_min,
+            max: a_max,
+        } = scene.dataset_world_bounds("a").expect("a has bounds");
+        let WorldBox {
+            min: b_min,
+            max: b_max,
+        } = scene.dataset_world_bounds("b").expect("b has bounds");
 
         // Each frames its own dataset → different boxes.
         assert!(
@@ -4378,7 +4384,10 @@ mod tests {
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1); // 256x256 XY
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let VoxBox { min: min2, max: max2 } = scene
+        let VoxBox {
+            min: min2,
+            max: max2,
+        } = scene
             .dataset_voxel_bounds("ds1")
             .expect("known dataset has voxel bounds");
         let mid_x = (min2[0] + max2[0]) / 2.0;
@@ -4583,7 +4592,10 @@ mod tests {
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
 
-        let WorldBox { min: min3, max: max3 } = scene
+        let WorldBox {
+            min: min3,
+            max: max3,
+        } = scene
             .dataset_world_bounds("ds1")
             .expect("known dataset has normalized bounds");
         let mid = [
@@ -4653,14 +4665,26 @@ mod tests {
     fn each_mode_keeps_its_own_view_across_a_switch() {
         use crate::command::ViewportCommand::*;
         let mut scene = opened_volume([800, 600]);
-        apply_vp(&mut scene, Pan { dx: 30.0, dy: -10.0 });
+        apply_vp(
+            &mut scene,
+            Pan {
+                dx: 30.0,
+                dy: -10.0,
+            },
+        );
         let slice = scene.camera.clone();
         assert_eq!(slice.framing(), Framing::Placed);
 
         // The first visit to 3D fits the data.
         apply_vp(&mut scene, SetMode3D);
         assert_eq!(scene.camera.framing(), Framing::Framed);
-        apply_vp(&mut scene, Rotate3D { d_theta: 0.4, d_phi: 0.1 });
+        apply_vp(
+            &mut scene,
+            Rotate3D {
+                d_theta: 0.4,
+                d_phi: 0.1,
+            },
+        );
         let arcball = scene.camera.clone();
 
         apply_vp(&mut scene, SetMode2D);
@@ -4686,7 +4710,11 @@ mod tests {
         );
         apply_vp(&mut scene, SetMode2D);
         assert_eq!(scene.camera.viewport(), [1000, 700]);
-        assert_eq!(scene.camera.effective_zoom(), zoom, "a resize keeps a placed zoom");
+        assert_eq!(
+            scene.camera.effective_zoom(),
+            zoom,
+            "a resize keeps a placed zoom"
+        );
     }
 
     #[test]
@@ -4701,7 +4729,10 @@ mod tests {
         };
         apply_vp(&mut framed, resize.clone());
         assert_eq!(framed.camera.framing(), Framing::Framed);
-        assert!(framed.camera.effective_zoom() < zoom, "a narrower canvas fits smaller");
+        assert!(
+            framed.camera.effective_zoom() < zoom,
+            "a narrower canvas fits smaller"
+        );
 
         let mut placed = opened_volume([800, 600]);
         apply_vp(&mut placed, Pan { dx: 1.0, dy: 0.0 });
@@ -4772,7 +4803,11 @@ mod tests {
         let source = opened_volume([1280, 800]);
         let mut page = opened_volume([390, 844]);
         page.apply(crate::command::ViewportCommand::Pan { dx: 9.0, dy: 0.0 }.into());
-        page.import_presence(source.camera.clone(), source.view.clone(), source.display.clone());
+        page.import_presence(
+            source.camera.clone(),
+            source.view.clone(),
+            source.display.clone(),
+        );
         assert_eq!(page.camera, opened_volume([390, 844]).camera);
     }
 
@@ -4784,7 +4819,11 @@ mod tests {
         let mut page = opened_volume([800, 600]);
         apply_vp(&mut page, Pan { dx: 9.0, dy: 0.0 });
         let own = page.camera.clone();
-        page.import_presence(leader.camera.clone(), leader.view.clone(), leader.display.clone());
+        page.import_presence(
+            leader.camera.clone(),
+            leader.view.clone(),
+            leader.display.clone(),
+        );
         assert!(page.camera.is_volume());
         apply_vp(&mut page, SetMode2D);
         assert_eq!(page.camera, own);

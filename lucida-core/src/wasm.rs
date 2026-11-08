@@ -190,9 +190,7 @@ impl WasmScene {
         viewport_h: u32,
         depth: u32,
     ) -> String {
-        let error = |message: String| {
-            serde_json::json!({ "error": message }).to_string()
-        };
+        let error = |message: String| serde_json::json!({ "error": message }).to_string();
         let view = match view_json.as_deref() {
             Some(json) if !json.is_empty() => match serde_json::from_str::<SavedView>(json) {
                 Ok(view) => Some(view),
@@ -209,8 +207,9 @@ impl WasmScene {
             depth,
             Vec::new(),
         ) {
-            Some(sidecar) => serde_json::to_string(&sidecar)
-                .unwrap_or_else(|e| error(e.to_string())),
+            Some(sidecar) => {
+                serde_json::to_string(&sidecar).unwrap_or_else(|e| error(e.to_string()))
+            }
             None => error(format!("dataset '{dataset_id}' has nothing to explore")),
         }
     }

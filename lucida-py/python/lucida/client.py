@@ -533,7 +533,7 @@ class DatasetsResource:
     ) -> dict[str, Any]:
         """Plan a guided-exploration step from a view of ``dataset``.
 
-        Looks up the dataset's shape via :meth:`info`, then enumerates the
+        Reads the workspace document from a snapshot, then enumerates the
         sensible next moves (Home / rotate / zoom / step Z) as re-openable child
         views, returning a decoded ``ExplorationSidecar`` dict (``v``,
         ``current``, ``cells``).
@@ -541,9 +541,9 @@ class DatasetsResource:
         Pass ``view`` (a ``SavedView`` dict — e.g. a child cell's ``view`` from a
         previous call) to descend from an explicit view; omit it to start from
         the dataset's Home view (a 3D Arcball for a volume, a 2D Slice for a flat
-        image, framed to the full extent). ``depth`` and ``breadcrumb`` are
-        stamped on the returned current node so a stateless caller can keep an
-        honest trail across calls.
+        image, fitted to the whole dataset as the viewer fits it). ``depth`` and
+        ``breadcrumb`` are stamped on the returned current node so a stateless
+        caller can keep an honest trail across calls.
 
         URLs are deferred: each cell carries a full ``view`` object, which you
         pass back as ``view=`` to descend.
@@ -557,18 +557,13 @@ class DatasetsResource:
                 "`uv run maturin develop` in lucida-py",
             ) from error
 
-        summary = self.info(dataset, timeout=timeout)
-        dims = summary.get("dimensions")
-        if not dims or len(dims) != 5:
-            raise LucidaError(
-                "missing_resource",
-                f"dataset {dataset!r} has no 5D [T,C,Z,Y,X] dimensions to explore",
-            )
+        document = self._workspace.snapshot(timeout=timeout).get("document", {})
+        summary = dataset_info_from_document(document, dataset)
         ds_id = summary["workspace_dataset_id"]
         view_json = json.dumps(view) if view is not None else None
         result = _explore(
+            json.dumps(document),
             ds_id,
-            tuple(dims),
             viewport,
             view_json,
             depth,

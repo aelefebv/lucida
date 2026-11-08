@@ -2,8 +2,9 @@
 //! the properties every view producer owes (`lucida_core::view_properties`).
 //! A test marked `ignore` names behavior that breaks its property today.
 //!
-//! Both producers fit a camera to the viewport the CLI is given, a headless
-//! window at pixel ratio 1, and a page shows the result by importing it.
+//! The CLI works on a headless window at pixel ratio 1, and a page shows what
+//! it made by importing it. The overview fits the CLI's own scene; a montage
+//! cell leaves its camera unframed for the page to fit.
 
 use lucida_core::view_properties::{
     Fixture, PIXEL_RATIOS, Produced, Viewport, assert_on_screen, assert_plans,
@@ -34,26 +35,10 @@ fn montage(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
         .cells
         .iter()
         .map(|cell| {
-            let view = build_cell_view(&id.0, cell, dims[4], dims[3], vp.css, None);
+            let view = build_cell_view(&id.0, cell, vp.css, None);
             Produced::framing(cell.label.clone(), restore(&view, f, vp, dpr))
         })
         .collect()
-}
-
-/// The montage of every fixture but the collection, whose tiles a montage
-/// cell does not place.
-fn montage_of_one_image(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
-    if f.image_count() > 1 {
-        return Vec::new();
-    }
-    montage(f, vp, dpr)
-}
-
-fn montage_of_a_collection(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
-    if f.image_count() == 1 {
-        return Vec::new();
-    }
-    montage(f, vp, dpr)
 }
 
 #[test]
@@ -77,22 +62,8 @@ fn overview_plans_what_is_visible() {
 }
 
 #[test]
-fn montage_cells_frame_a_single_image() {
-    assert_on_screen(
-        "montage cells frame a single image",
-        &PIXEL_RATIOS,
-        montage_of_one_image,
-    );
-}
-
-#[test]
-#[ignore = "a montage cell fits the first image's extent at the origin, so a collection's cell shows one tile"]
-fn montage_cells_frame_a_collection() {
-    assert_on_screen(
-        "montage cells frame a collection",
-        &PIXEL_RATIOS,
-        montage_of_a_collection,
-    );
+fn montage_cells_frame_the_dataset() {
+    assert_on_screen("montage cells frame the dataset", &PIXEL_RATIOS, montage);
 }
 
 #[test]

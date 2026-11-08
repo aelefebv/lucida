@@ -3,8 +3,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::framing::{
-    Aabb, FitBounds, VoxBox, WorldBox, arcball_containment, arcball_view_containment,
-    slice_framing,
+    Aabb, FitBounds, VoxBox, WorldBox, arcball_containment, arcball_view_containment, slice_framing,
 };
 use crate::mat4::{
     cross3, invert4_f32, invert4_f64, look_at, mul4, normalize3, perspective, transform_point,
@@ -2890,7 +2889,10 @@ mod tests {
     #[test]
     fn arcball_fit_centers_target_on_midpoint() {
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds(WorldBox::new([0.0, 0.0, 0.0], [4.0, 8.0, 2.0]), FIT_MARGIN_3D);
+        a.fit_to_bounds(
+            WorldBox::new([0.0, 0.0, 0.0], [4.0, 8.0, 2.0]),
+            FIT_MARGIN_3D,
+        );
         assert_eq!(a.target, [2.0, 4.0, 1.0]);
     }
 
@@ -2898,7 +2900,10 @@ mod tests {
     fn arcball_fit_preserves_viewing_angle() {
         let mut a = Arcball::new([800, 600]);
         let (theta0, phi0, fov0) = (a.theta, a.phi, a.fov);
-        a.fit_to_bounds(WorldBox::new([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]), FIT_MARGIN_3D);
+        a.fit_to_bounds(
+            WorldBox::new([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]),
+            FIT_MARGIN_3D,
+        );
         assert_eq!(a.theta, theta0);
         assert_eq!(a.phi, phi0);
         assert_eq!(a.fov, fov0);
@@ -3048,7 +3053,10 @@ mod tests {
     fn arcball_fit_normalizes_inverted_bounds() {
         // min > max must not collapse the camera onto the center.
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds(WorldBox::new([4.0, 8.0, 2.0], [0.0, 0.0, 0.0]), FIT_MARGIN_3D);
+        a.fit_to_bounds(
+            WorldBox::new([4.0, 8.0, 2.0], [0.0, 0.0, 0.0]),
+            FIT_MARGIN_3D,
+        );
         assert_eq!(a.target, [2.0, 4.0, 1.0]);
         assert!(
             a.distance.is_finite() && a.distance > 0.0,
@@ -3067,7 +3075,13 @@ mod tests {
     #[test]
     fn arcball_fit_sanitizes_non_finite_inputs() {
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds(WorldBox::new([f64::NAN, 0.0, 5.0], [10.0, f64::INFINITY, f64::NEG_INFINITY]), FIT_MARGIN_3D);
+        a.fit_to_bounds(
+            WorldBox::new(
+                [f64::NAN, 0.0, 5.0],
+                [10.0, f64::INFINITY, f64::NEG_INFINITY],
+            ),
+            FIT_MARGIN_3D,
+        );
         for v in a.target {
             assert!(v.is_finite(), "target non-finite: {v}");
         }
@@ -3087,7 +3101,10 @@ mod tests {
     #[test]
     fn arcball_fit_degenerate_box_finite_positive_distance() {
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds(WorldBox::new([5.0, 5.0, 5.0], [5.0, 5.0, 5.0]), FIT_MARGIN_3D);
+        a.fit_to_bounds(
+            WorldBox::new([5.0, 5.0, 5.0], [5.0, 5.0, 5.0]),
+            FIT_MARGIN_3D,
+        );
         assert!(
             a.distance.is_finite() && a.distance > 0.0,
             "distance: {}",

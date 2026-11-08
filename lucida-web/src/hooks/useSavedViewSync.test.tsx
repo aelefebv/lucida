@@ -391,6 +391,81 @@ describe("useSavedViewSync — capture surface writes no user state (#923)", () 
   });
 });
 
+describe("useSavedViewSync — the URL and the last view follow the camera", () => {
+  let scene: MockScene;
+  let store: SceneStore;
+  let outRef: Captured;
+
+  beforeEach(() => {
+    scene = makeMockScene();
+    store = new SceneStore(() => scene as unknown as WasmScene);
+    outRef = { current: null };
+    window.history.replaceState(null, "", "/");
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  function setCamera(camera: Record<string, unknown>) {
+    scene.import_presence(JSON.stringify({ camera }));
+    store.sync();
+  }
+
+  it("persists neither while the camera is unframed, and both once it is fitted", async () => {
+    const loop = makeMockLoop();
+    const persisted: SavedView[] = [];
+    setCamera({ mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 600], framing: "unframed" });
+    await act(async () => {
+      render(
+        <HookHarness
+          scene={scene}
+          store={store}
+          outRef={outRef}
+          loopRef={loop.ref}
+          persistLastView={async (v) => { persisted.push(v); }}
+          lastViewDebounceMs={3000}
+        />,
+      );
+    });
+    await act(async () => {
+      outRef.current!.handle.notifyChange();
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    expect(persisted).toHaveLength(0);
+    expect(window.location.hash).toBe("");
+
+    await act(async () => {
+      setCamera({ mode: "slice", center: [64, 64], zoom: 2, viewport: [800, 600], framing: "framed" });
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    expect(persisted).toHaveLength(1);
+    expect(window.location.hash).toMatch(/^#view=/);
+  });
+
+  it("rewrites #view= when a canvas change moves the view with no control touched", async () => {
+    const loop = makeMockLoop();
+    await act(async () => {
+      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
+    });
+    await act(async () => {
+      outRef.current!.handle.notifyChange();
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    const before = window.location.hash;
+    expect(before).toMatch(/^#view=/);
+
+    // A resize refits a framed camera: only the scene's epochs say so.
+    await act(async () => {
+      setCamera({ mode: "slice", center: [64, 64], zoom: 0.5, viewport: [400, 600], framing: "framed" });
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(window.location.hash).toMatch(/^#view=/);
+    expect(window.location.hash).not.toBe(before);
+  });
+});
+
 describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
   let scene: MockScene;
   let store: SceneStore;

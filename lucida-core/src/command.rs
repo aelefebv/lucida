@@ -772,8 +772,8 @@ impl Scene {
                 }
             }
             ViewportScope::DatasetDisplay => {
-                let visible_before =
-                    matches!(cmd, ViewportCommand::SetDatasetVisible { .. }).then(|| self.visible_set());
+                let visible_before = matches!(cmd, ViewportCommand::SetDatasetVisible { .. })
+                    .then(|| self.visible_set());
                 let order_before = self.dataset_order.clone();
                 let settings_before = self.dataset_settings.clone();
                 self.mutate_viewport(cmd);

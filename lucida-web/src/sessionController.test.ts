@@ -128,7 +128,6 @@ function makeFakeScene() {
     export_presence: vi.fn(() => "{}"),
     import_presence: vi.fn(),
     import_dataset_presence: vi.fn(),
-    fit_camera_to_dataset_bounds: vi.fn(),
     set_viewport: vi.fn(),
     z: vi.fn(() => 0),
     t: vi.fn(() => 0),
@@ -293,32 +292,32 @@ describe("SessionController dataset registration", () => {
     expect(contentSource.registerImage).toHaveBeenCalledTimes(1);
     // A snapshot registration is a join/repair, not a user-initiated open.
     expect(savedViewHooks.onDatasetOpened).not.toHaveBeenCalled();
-    expect(scene.fit_camera_to_dataset_bounds).not.toHaveBeenCalled();
 
     // The dedup rebroadcast case: the same dataset arrives as a live
     // `dataset_opened` (opened by us). Registration is idempotent; the
-    // open reactions (applier notify, loading clear, auto-fit) still run.
+    // open reactions (applier notify, loading clear) still run.
     handlers.onCommand(2, datasetOpenedJson("wds-1", 4));
     expect(contentSource.registerImage).toHaveBeenCalledTimes(1);
     expect(savedViewHooks.onDatasetOpened).toHaveBeenCalledWith("wds-1");
-    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledWith("wds-1");
+    expect(scene.apply_command).toHaveBeenCalledTimes(1);
     expect(events.onRemoteDatasetActivity).toHaveBeenLastCalledWith(
       expect.objectContaining({ loading: false, progress: null }),
     );
   });
 
-  it("fits a fresh open to the canvas's measured size, not the scene's default", () => {
+  it("tells the scene the canvas's measured size before an open it may fit", () => {
     const { handlers, deps, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson([]), [], 4, {});
     deps.getViewportSize.mockReturnValue({ width: 2544, height: 1832, pixelRatio: 2 });
 
-    handlers.onSnapshot(1, snapshotJson([]), [], 4, {});
-    handlers.onCommand(2, datasetOpenedJson("wds-1", 4));
+    // Any peer's open, not only this client's: the scene fits an unplaced
+    // camera whoever opened the dataset.
+    handlers.onCommand(2, datasetOpenedJson("wds-1", 8));
 
     expect(scene.set_viewport).toHaveBeenCalledWith(2544, 1832, 2);
-    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledWith("wds-1");
     // The size lands first, so the fit frames the canvas the user sees.
     expect(scene.set_viewport.mock.invocationCallOrder[0]).toBeLessThan(
-      scene.fit_camera_to_dataset_bounds.mock.invocationCallOrder[0],
+      scene.apply_command.mock.invocationCallOrder[0],
     );
   });
 
@@ -329,7 +328,7 @@ describe("SessionController dataset registration", () => {
     handlers.onCommand(2, datasetOpenedJson("wds-1", 4));
 
     expect(scene.set_viewport).not.toHaveBeenCalled();
-    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledWith("wds-1");
+    expect(scene.apply_command).toHaveBeenCalledTimes(1);
   });
 
   it("registers a brand-new dataset exactly once from a live open", () => {
@@ -348,22 +347,6 @@ describe("SessionController dataset registration", () => {
 });
 
 describe("SessionController self id", () => {
-  it("a dataset_opened handled in the same tick as the snapshot sees the snapshot's self id", () => {
-    const { handlers, scene } = makeHarness();
-
-    // The bridge replays pending commands through onCommand synchronously
-    // right after onSnapshot returns; the opener gate must already see the
-    // snapshot's your_id (not a deferred or stale value), or the opener's own
-    // auto-fit is suppressed.
-    handlers.onSnapshot(1, snapshotJson([]), [], 3, {});
-    handlers.onCommand(1, datasetOpenedJson("wds-1", 3));
-    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledTimes(1);
-
-    // A peer's open (different opener id) never reframes this client.
-    handlers.onCommand(2, datasetOpenedJson("wds-2", 8));
-    expect(scene.fit_camera_to_dataset_bounds).toHaveBeenCalledTimes(1);
-  });
-
   it("a follow steer addressed to the live self id adopts the target's presence", () => {
     const { handlers, events, scene } = makeHarness();
 
