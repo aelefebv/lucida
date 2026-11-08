@@ -187,6 +187,7 @@ function cold(datasetId: string): ColdStateMessage {
       displayStateByChannel: { 0: display },
     }],
     viewMode: "volume",
+    sampleFormat: "u16",
   };
 }
 

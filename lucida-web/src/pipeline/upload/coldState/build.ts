@@ -12,6 +12,7 @@ import type {
   WantedMemberChunks,
 } from "../../../renderer/workerProtocol.ts";
 import type { DatasetSettings } from "../../../tickCommon.ts";
+import type { SampleFormat } from "../../../renderer/dataTypeUtil.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type {
   ActiveSetEntry,
@@ -138,6 +139,7 @@ export function buildColdState(args: {
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
   dsSettings: DatasetSettings | undefined;
+  sampleFormat: SampleFormat;
 }): ColdStateMessage {
   const entityById = new Map(args.entities.map(e => [e.entityId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
@@ -161,6 +163,7 @@ export function buildColdState(args: {
     wantedChunks: args.wantedChunks,
     activeSet: coldActiveSet,
     viewMode: args.selection.renderMode,
+    sampleFormat: args.sampleFormat,
   };
 }
 

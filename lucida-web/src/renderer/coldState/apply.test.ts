@@ -184,6 +184,7 @@ function makeCold(
     wantedChunks: [],
     activeSet,
     viewMode: opts?.viewMode ?? "volume",
+    sampleFormat: "u16",
   };
 }
 

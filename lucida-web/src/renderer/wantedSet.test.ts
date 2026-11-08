@@ -130,6 +130,7 @@ function makeColdState(
     wantedChunks: [],
     activeSet: [makeActiveEntry()],
     viewMode: "volume",
+    sampleFormat: "u16",
     ...overrides,
   };
 }

@@ -11,6 +11,7 @@ import type { WorkerCtx } from "../workerContext.ts";
 import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 import { computeProxyAtlasLayout } from "../proxyAtlas.ts";
+import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
 import { postSlotsLost } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
@@ -44,6 +45,8 @@ export interface AtlasState {
    */
   datasetId: string;
   texture: GPUTexture;
+  /** How the texture holds samples; the dataset's, fixed for the pool's life. */
+  format: SampleFormat;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
   /** Composite keys "memberId:chunkKey" → slotIndex (insertion-order = LRU). */
@@ -465,10 +468,11 @@ function createAtlasTexture(
   device: GPUDevice,
   chunkX: number, chunkY: number, chunkZ: number,
   slotsX: number, slotsY: number, slotsZ: number,
+  format: SampleFormat,
 ): GPUTexture {
   return device.createTexture({
     size: [slotsX * chunkX, slotsY * chunkY, slotsZ * chunkZ],
-    format: "r16uint",
+    format: atlasTextureFormat(format),
     dimension: "3d",
     // COPY_SRC so a growing pool can copy its chunks into the larger texture.
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
@@ -486,6 +490,7 @@ function createVolumeAtlas(
   budgetBytes: number,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
+  format: SampleFormat,
 ): AtlasState {
   const limits = getDeviceLimits(device);
   const geom = computeAtlasGeometry(
@@ -493,13 +498,14 @@ function createVolumeAtlas(
     [chunkX, chunkY, chunkZ],
     budgetBytes,
     "3d",
+    bytesPerTexel(format),
   );
   const { slotsX, slotsY } = geom;
   const maxSlotsZ = geom.slotsZ!;
   const slotsZ = Math.min(1, maxSlotsZ);
   const totalSlots = slotsX * slotsY * slotsZ;
 
-  const texture = createAtlasTexture(device, chunkX, chunkY, chunkZ, slotsX, slotsY, slotsZ);
+  const texture = createAtlasTexture(device, chunkX, chunkY, chunkZ, slotsX, slotsY, slotsZ, format);
 
   // Indirection starts at minimum size; cold state handler resizes after computing entityMetas.
   const indirectionData = new Uint32Array(1);
@@ -518,14 +524,14 @@ function createVolumeAtlas(
 
   return {
     datasetId,
-    texture, indirectionBuf, indirectionData,
+    texture, format, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY, chunkZ,
     slotsX, slotsY, slotsZ,
     maxSlotsZ,
     entityMetas: new Map(),
     t, c,
-    intensityMin: 65535, intensityMax: 0,
+    intensityMin: Infinity, intensityMax: -Infinity,
     indirectionDirty: true,
   };
 }
@@ -545,7 +551,7 @@ export function growVolumeAtlas(device: GPUDevice, atlas: AtlasState): boolean {
   const totalSlots = atlas.slotsX * atlas.slotsY * slotsZ;
 
   const texture = createAtlasTexture(
-    device, atlas.chunkX, atlas.chunkY, atlas.chunkZ, atlas.slotsX, atlas.slotsY, slotsZ,
+    device, atlas.chunkX, atlas.chunkY, atlas.chunkZ, atlas.slotsX, atlas.slotsY, slotsZ, atlas.format,
   );
   const encoder = device.createCommandEncoder();
   encoder.copyTextureToTexture(
@@ -584,16 +590,20 @@ export function getOrCreateVolumePool(
   datasetId: string,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
+  format: SampleFormat,
 ): AtlasState {
   const atlases = ctx.state.volumeAtlases;
   const existing = atlases.get(poolKey);
-  if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY && existing.chunkZ === chunkZ) {
+  if (
+    existing && existing.chunkX === chunkX && existing.chunkY === chunkY && existing.chunkZ === chunkZ
+    && existing.format === format
+  ) {
     existing.t = t;
     existing.c = c;
     return existing;
   }
   if (existing) destroyAtlas(existing);
-  const newAtlas = createWatchedVolumeAtlas(ctx, poolKey, datasetId, chunkX, chunkY, chunkZ, t, c);
+  const newAtlas = createWatchedVolumeAtlas(ctx, poolKey, datasetId, chunkX, chunkY, chunkZ, t, c, format);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }
@@ -604,10 +614,13 @@ function createWatchedVolumeAtlas(
   datasetId: string,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
+  format: SampleFormat,
 ): AtlasState {
   return allocateWatched(
     ctx,
-    () => createVolumeAtlas(ctx.device, datasetId, ctx.state.atlasBudgets.volumeAtlasBytes, chunkX, chunkY, chunkZ, t, c),
+    () => createVolumeAtlas(
+      ctx.device, datasetId, ctx.state.atlasBudgets.volumeAtlasBytes, chunkX, chunkY, chunkZ, t, c, format,
+    ),
     (lost) => replaceLostVolumeAtlas(ctx, poolKey, lost),
   );
 }
@@ -635,7 +648,7 @@ export function replaceLostVolumeAtlas(ctx: WorkerCtx, poolKey: string, lost: At
   atlases.delete(poolKey);
   if (shrinkAtlasBudget(ctx.state.atlasBudgets, "volumeAtlasBytes")) {
     const atlas = createWatchedVolumeAtlas(
-      ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.chunkZ, lost.t, lost.c,
+      ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.chunkZ, lost.t, lost.c, lost.format,
     );
     atlas.entityMetas = lost.entityMetas;
     resizeIndirection(ctx, atlas, lost.indirectionData.length);

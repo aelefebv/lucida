@@ -138,6 +138,7 @@ function makeColdState(
     wantedChunks: [],
     activeSet: opts?.activeSet ?? [],
     viewMode: opts?.viewMode ?? "volume",
+    sampleFormat: "u16",
   };
 }
 

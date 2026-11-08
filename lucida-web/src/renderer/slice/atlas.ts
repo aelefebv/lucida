@@ -11,6 +11,7 @@ import type { WorkerCtx } from "../workerContext.ts";
 import { createSliceTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
+import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
 import { postSlotsLost } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
@@ -173,6 +174,8 @@ export interface SliceAtlasState {
    */
   datasetId: string;
   texture: GPUTexture;
+  /** How the texture holds samples; the dataset's, fixed for the pool's life. */
+  format: SampleFormat;
   indirectionBuf: GPUBuffer;
   indirectionData: Uint32Array<ArrayBuffer>;
   /** Composite keys "memberId|chunkKey" → slotIndex (insertion-order = LRU). */
@@ -211,6 +214,7 @@ function createSliceAtlas(
   budgetBytes: number,
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
+  format: SampleFormat,
 ): SliceAtlasState {
   const limits = getDeviceLimits(device);
   const geom = computeAtlasGeometry(
@@ -218,10 +222,11 @@ function createSliceAtlas(
     [chunkX, chunkY],
     budgetBytes,
     "2d",
+    bytesPerTexel(format),
   );
   const { slotsX, slotsY, totalSlots, atlasW, atlasH } = geom;
 
-  const texture = createSliceTexture(device, atlasW, atlasH, null);
+  const texture = createSliceTexture(device, atlasW, atlasH, null, atlasTextureFormat(format));
 
   const indirectionData = new Uint32Array(1);
   indirectionData[0] = 0xFFFFFFFF;
@@ -239,7 +244,7 @@ function createSliceAtlas(
 
   return {
     datasetId,
-    texture, indirectionBuf, indirectionData,
+    texture, format, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY,
     slotsX, slotsY,
@@ -247,7 +252,7 @@ function createSliceAtlas(
     entityZInfo: new Map(),
     z, t, c,
     slotLevelZ: new Int32Array(totalSlots).fill(-1),
-    intensityMin: 65535, intensityMax: 0,
+    intensityMin: Infinity, intensityMax: -Infinity,
     indirectionDirty: true,
   };
 }
@@ -267,17 +272,18 @@ export function getOrCreateSlicePool(
   datasetId: string,
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
+  format: SampleFormat,
 ): SliceAtlasState {
   const atlases = ctx.state.sliceAtlases;
   const existing = atlases.get(poolKey);
-  if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY) {
+  if (existing && existing.chunkX === chunkX && existing.chunkY === chunkY && existing.format === format) {
     existing.z = z;
     existing.t = t;
     existing.c = c;
     return existing;
   }
   if (existing) destroySliceAtlas(existing);
-  const newAtlas = createWatchedSliceAtlas(ctx, poolKey, datasetId, chunkX, chunkY, z, t, c);
+  const newAtlas = createWatchedSliceAtlas(ctx, poolKey, datasetId, chunkX, chunkY, z, t, c, format);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
 }
@@ -288,10 +294,13 @@ function createWatchedSliceAtlas(
   datasetId: string,
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
+  format: SampleFormat,
 ): SliceAtlasState {
   return allocateWatched(
     ctx,
-    () => createSliceAtlas(ctx.device, datasetId, ctx.state.atlasBudgets.sliceAtlasBytes, chunkX, chunkY, z, t, c),
+    () => createSliceAtlas(
+      ctx.device, datasetId, ctx.state.atlasBudgets.sliceAtlasBytes, chunkX, chunkY, z, t, c, format,
+    ),
     (lost) => replaceLostSliceAtlas(ctx, poolKey, lost),
   );
 }
@@ -310,7 +319,7 @@ export function replaceLostSliceAtlas(ctx: WorkerCtx, poolKey: string, lost: Sli
   atlases.delete(poolKey);
   if (shrinkAtlasBudget(ctx.state.atlasBudgets, "sliceAtlasBytes")) {
     const atlas = createWatchedSliceAtlas(
-      ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.z, lost.t, lost.c,
+      ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.z, lost.t, lost.c, lost.format,
     );
     atlas.entityMetas = lost.entityMetas;
     atlas.entityZInfo = lost.entityZInfo;

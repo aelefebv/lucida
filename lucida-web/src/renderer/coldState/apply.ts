@@ -141,7 +141,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
     if (mode === "volume") {
       const atlas = getOrCreateVolumePool(
-        ctx, group.poolKey, msg.datasetId, pcX, pcY, pcZ, msg.currentT, group.channel,
+        ctx, group.poolKey, msg.datasetId, pcX, pcY, pcZ, msg.currentT, group.channel, msg.sampleFormat,
       );
       atlas.entityMetas = newEntityMetas;
       resizeIndirection(ctx, atlas, offset);
@@ -153,6 +153,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     } else {
       const atlas = getOrCreateSlicePool(
         ctx, group.poolKey, msg.datasetId, pcX, pcY, msg.currentZ, msg.currentT, group.channel,
+        msg.sampleFormat,
       );
       atlas.entityMetas = newEntityMetas;
       resizeSliceIndirection(ctx, atlas, offset);

@@ -34,6 +34,7 @@ function sliceColdState(z: number): ColdStateMessage {
       displayStateByChannel: {},
     }],
     viewMode: "slice",
+    sampleFormat: "u16",
   };
 }
 

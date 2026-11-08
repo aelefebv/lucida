@@ -35,6 +35,7 @@ import {
   DESCRIPTOR_TIER_SOURCE_SIZE,
   OFFSET_COARSE_SOURCE,
   OFFSET_LEVEL_SOURCE_COUNT,
+  OFFSET_SAMPLE_FORMAT,
   SOURCE_OFFSET_CHUNK_DIMS,
   SOURCE_OFFSET_GRID_DIMS,
   SOURCE_OFFSET_INDIRECTION_OFFSET,
@@ -181,6 +182,7 @@ function makeCold(
     wantedChunks: [],
     activeSet,
     viewMode: "slice",
+    sampleFormat: "u16",
   };
 }
 
@@ -844,6 +846,19 @@ describe("buildDescriptorBuffer GPU write", () => {
     const result = buildDescriptorBuffer(device, cold, new Map(), new Map(), sourcesForCold(cold));
     expect((result.buffer as unknown as MockBuffer).size).toBe(2 * DESCRIPTOR_ENTRY_SIZE);
     destroyDescriptorBuffer(result);
+  });
+
+  it("writes the dataset's sample format at offset 148, so the shader reads float texels as floats", () => {
+    const entries = [makeEntry({ entityId: "e1", imageId: "img-0", mode: "tiles-with-detail" })];
+    const { device, lastWrite } = makeMockDevice();
+    const asU16 = buildDescriptorBuffer(device, makeCold(entries), new Map(), new Map(), new Map());
+    expect(new Uint32Array(lastWrite()!)[OFFSET_SAMPLE_FORMAT / 4]).toBe(0);
+    const asF32 = buildDescriptorBuffer(
+      device, { ...makeCold(entries), sampleFormat: "f32" }, new Map(), new Map(), new Map(),
+    );
+    expect(new Uint32Array(lastWrite()!)[OFFSET_SAMPLE_FORMAT / 4]).toBe(1);
+    destroyDescriptorBuffer(asU16);
+    destroyDescriptorBuffer(asF32);
   });
 
   it("writes the assembled buffer to GPU memory", () => {

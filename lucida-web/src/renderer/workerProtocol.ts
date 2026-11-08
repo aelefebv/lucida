@@ -3,6 +3,7 @@
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
+import type { SampleFormat } from "./dataTypeUtil.ts";
 
 export interface InitMessage {
   type: "init";
@@ -373,6 +374,8 @@ export interface MinimapUploadOverviewChunksForLayerMessage {
   chunkX: number;
   chunkY: number;
   chunkZ: number;
+  /** How the overview texture holds samples: the dataset's format. */
+  sampleFormat: SampleFormat;
 }
 
 /**
@@ -584,6 +587,8 @@ export interface ColdStateMessage {
   wantedChunks: WantedMemberChunks[];
   activeSet: ColdStateActiveEntry[];
   viewMode: "slice" | "volume";
+  /** How this dataset's atlases hold samples, and so how its descriptors read them. */
+  sampleFormat: SampleFormat;
 }
 
 /** The chunks the planner wants for one member in one tier. */

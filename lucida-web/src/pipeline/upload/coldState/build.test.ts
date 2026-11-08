@@ -221,6 +221,7 @@ describe("buildColdState", () => {
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
 
     expect(msg.type).toBe("coldState");
@@ -267,6 +268,7 @@ describe("buildColdState", () => {
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
 
     expect(msg.desiredProxyKeys).toEqual([
@@ -311,6 +313,7 @@ describe("buildColdState", () => {
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings,
+      sampleFormat: "u16",
     });
 
     expect(msg.visibleChannels).toEqual([0, 1]);
@@ -366,6 +369,7 @@ describe("buildColdState", () => {
       wantedChunks: [],
       matricesByEntity: matrices,
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
 
     expect(msg.activeSet).toHaveLength(3);
@@ -389,6 +393,7 @@ describe("buildColdState", () => {
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
 
     expect(msg.type).toBe("coldState");
@@ -421,6 +426,7 @@ describe("buildColdState", () => {
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
     const msg2 = buildColdState({
       datasetId: "ds2",
@@ -433,6 +439,7 @@ describe("buildColdState", () => {
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
+      sampleFormat: "u16",
     });
 
     expect(msg1.datasetId).toBe("ds1");
@@ -500,6 +507,7 @@ describe("computeActiveSetIndexMap / iterateActiveSetMembers", () => {
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: makeDsSettings(),
+      sampleFormat: "u16",
     });
     const fromActiveSet = computeActiveSetIndexMap(activeSet, [0], false);
     // Single-channel member id is the imageId.

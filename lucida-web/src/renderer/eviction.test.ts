@@ -209,7 +209,7 @@ function makeSliceMeta(gridY: number, gridX: number): LodIndirectionMeta {
 
 /** A one-slot level-0 volume pool for member A, its camera reference at `rayHit`. */
 function oneSlotVolume(ctx: WorkerCtx, rayHit: [number, number, number]): AtlasState {
-  const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0);
+  const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
   atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
   atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
   atlas.freeSlots = [0];
@@ -261,15 +261,43 @@ describe("volume pool growth", () => {
   it("allocates one layer of the budget's slot grid, not the whole budget", () => {
     const { ctx } = makeGrowthCtx();
     // 32³ r16uint chunks under 512 MiB: a 20×20×20 grid.
-    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0);
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
     expect([atlas.slotsX, atlas.slotsY, atlas.slotsZ, atlas.maxSlotsZ]).toEqual([20, 20, 1, 20]);
     expect(atlas.totalSlots).toBe(400);
     expect(textureSizes(ctx)).toEqual([[640, 640, 32]]);
   });
 
+  it("holds float samples as r32uint bits and reports their range in data units", () => {
+    const { ctx, posts } = makeGrowthCtx();
+    // Four bytes a texel: half the u16 pool's slots under the same budget.
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "f32");
+    expect([atlas.slotsX, atlas.slotsY, atlas.maxSlotsZ]).toEqual([16, 16, 16]);
+    const create = ctx.device.createTexture as unknown as { mock: { calls: [GPUTextureDescriptor][] } };
+    expect(create.mock.calls.at(-1)![0].format).toBe("r32uint");
+    atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
+    atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
+    want(ctx, "imgA", [chunkKey(0, 0, 0, 0, 0, 0)]);
+
+    const values = new Float32Array(32 * 32 * 32).fill(100);
+    values[0] = -5;
+    values[1] = 500.25;
+    values[2] = Number.NaN;
+    values[3] = Infinity;
+    const chunk = { ...makeChunk(0, 0, 0, 0, 0, 0), data: values.buffer, dataType: "Float32" };
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [chunk]), epochs(), "ds1", "imgA");
+
+    const write = ctx.device.queue.writeTexture as unknown as { mock: { calls: unknown[][] } };
+    const [, texels, layout] = write.mock.calls.at(-1)! as [unknown, ArrayBuffer, GPUTexelCopyBufferLayout];
+    expect(Array.from(new Float32Array(texels, 0, 2))).toEqual([-5, 500.25]);
+    expect(layout.bytesPerRow).toBe(32 * 4);
+    expect(posts.filter((m) => m.type === "intensityRange")).toEqual([
+      { type: "intensityRange", datasetId: "imgA", min: -5, max: 500.25 },
+    ]);
+  });
+
   it("doubles its layers once full, copying the resident chunks in place", () => {
     const { ctx, posts, copies } = makeGrowthCtx();
-    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0);
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
     atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
     atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
     const firstTexture = atlas.texture as unknown as { destroyed: boolean };
@@ -293,7 +321,7 @@ describe("volume pool growth", () => {
   it("evicts rather than grows once it holds the whole budget", () => {
     // 64 MiB of 32³ chunks: 1024 slots, a 10×10×10 grid.
     const { ctx, copies } = makeGrowthCtx(64 * 1024 * 1024);
-    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0);
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
     expect([atlas.slotsX, atlas.slotsY, atlas.maxSlotsZ]).toEqual([10, 10, 10]);
     const grown: number[] = [];
     while (growVolumeAtlas(ctx.device, atlas)) grown.push(atlas.slotsZ);
@@ -368,7 +396,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
 
   it("multi-member demux: B's upload evicts A's chunk → the loss is keyed by A, not B", () => {
     const { ctx, posts } = makeMockCtx();
-    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0);
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
     // Two members share the pool; each owns its own LOD section.
     atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
     atlas.entityMetas.set("imgB", [{ ...makeVolumeMeta(2, 4, 4), offset: 2 * 4 * 4 }]);
@@ -428,7 +456,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
 
   it("a resident the planner no longer wants goes before any wanted one, even a farther one", () => {
     const { ctx, posts } = makeMockCtx();
-    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0);
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
     atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
     atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
     atlas.freeSlots = [1, 0];
@@ -504,7 +532,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
     const { ctx, posts } = makeMockCtx();
     const chunk = makeChunk(0, 0, 0, 0, 0, 0);
     handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [chunk]), epochs(), "missing-pool", "imgA");
-    getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0);
+    getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
     handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [chunk]), epochs(), "ds1", "imgA");
 
     expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([
@@ -515,7 +543,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
 
   it("after the target moves coarser, the slots never sampled go first, the greatest key among them", () => {
     const { ctx, posts } = makeMockCtx();
-    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0);
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
     const level0 = makeVolumeMeta(2, 4, 4);
     const level1: LodIndirectionMeta = {
       level: 1, gridDims: [1, 2, 2], chunkDims: [32, 32, 32], levelDims: [32, 64, 64], offset: 2 * 4 * 4,
@@ -561,7 +589,7 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
 describe("handleSliceChunkData — admission, eviction and Z retargeting", () => {
   /** A level-0 slice pool for member A over a 4 × 4 grid. */
   function slicePool(ctx: WorkerCtx, z = 0) {
-    const atlas = getOrCreateSlicePool(ctx, "ds1", "ds1", 32, 32, z, 0, 0);
+    const atlas = getOrCreateSlicePool(ctx, "ds1", "ds1", 32, 32, z, 0, 0, "u16");
     atlas.entityMetas.set("imgA", [makeSliceMeta(4, 4)]);
     atlas.indirectionData = new Uint32Array(4 * 4).fill(0xFFFFFFFF);
     return atlas;
@@ -671,7 +699,7 @@ describe("handleSliceChunkData — admission, eviction and Z retargeting", () =>
 
   it("after the target moves coarser, the planes never sampled go first, the greatest key among them", () => {
     const { ctx, posts } = makeMockCtx();
-    const atlas = getOrCreateSlicePool(ctx, "ds1", "ds1", 32, 32, 0, 0, 0);
+    const atlas = getOrCreateSlicePool(ctx, "ds1", "ds1", 32, 32, 0, 0, 0, "u16");
     const level0 = makeSliceMeta(4, 4);
     const level1: LodIndirectionMeta = {
       level: 1, gridDims: [1, 2, 2], chunkDims: [4, 32, 32], levelDims: [64, 64, 64], offset: 4 * 4,

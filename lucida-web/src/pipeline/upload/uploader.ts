@@ -58,6 +58,7 @@ import { orchTelemetryActive } from "./telemetry/active.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, PointEvent } from "../../trace/types.ts";
 import { debugLog } from "../../debug/logging.ts";
+import { datasetSampleFormat } from "../../renderer/dataTypeUtil.ts";
 
 export class Uploader {
   private readonly resendGuard = new ResendGuard();
@@ -118,6 +119,7 @@ export class Uploader {
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
       dsSettings: args.dsSettings,
+      sampleFormat: datasetSampleFormat(args.ctx.datasets.get(args.datasetId)?.manifest),
     });
     args.ctx.client.coldState(msg);
     this.lastEpochs = args.epochs;

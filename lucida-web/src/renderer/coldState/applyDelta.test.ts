@@ -113,6 +113,7 @@ function makeCold(activeSet: ColdStateActiveEntry[]): ColdStateMessage {
     wantedChunks: [],
     activeSet,
     viewMode: "volume",
+    sampleFormat: "u16",
   };
 }
 
