@@ -265,6 +265,8 @@ export interface FindingObservation {
   lossPct?: number;
   /** Chunks the uploader stopped re-sending, each with the renderer's last reason for handing it back. */
   held?: Array<{ entityId: string; chunkKey: string; reason: string }>;
+  /** The entities a cold-open allowance widened the ceiling by. */
+  entities?: number;
 }
 
 export interface Finding {
