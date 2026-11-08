@@ -470,7 +470,7 @@ describe("tickSlice render-message seam", () => {
     expect(h.resize).toHaveBeenCalledWith(canvasW, canvasH);
     // Planning still sees the full device-pixel viewport.
     expect((h.ctx.scene as unknown as { set_viewport: ReturnType<typeof vi.fn> }).set_viewport)
-      .toHaveBeenCalledWith(6000, 4000);
+      .toHaveBeenCalledWith(6000, 4000, 2);
   });
 
   it("keeps full backing at DPR 2 for the fixed-size canvas (no needless degrade)", () => {
