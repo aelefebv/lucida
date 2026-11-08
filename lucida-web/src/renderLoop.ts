@@ -22,6 +22,7 @@ import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 import { readCanvasColors } from "./renderer/renderClient.ts";
 import { subscribeAppearance } from "./theme/appearance.ts";
 import { AdaptiveResolution, cappedPixelRatioScale } from "./renderResolution.ts";
+import { FramePacer } from "./framePacing.ts";
 import { wakeFrames } from "./frameClock.ts";
 import { AutoContrastFitter, type AutoContrastListener } from "./pipeline/autoContrast.ts";
 
@@ -119,6 +120,9 @@ export class RenderLoop implements TraceEnvironment {
   /** Lowers the render resolution while a gesture's frames run long. */
   private readonly resolution = new AdaptiveResolution();
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly framePacer = new FramePacer();
+  /** The last tick left decoded chunks undelivered for want of upload budget. */
+  private deliveryBacklogged = false;
 
   constructor(opts: RenderLoopOptions) {
     this.session = opts.session;
@@ -193,7 +197,9 @@ export class RenderLoop implements TraceEnvironment {
       }
     };
     this.client.onFrameDone = () => {
-      if (this.client.framesAwaitingDone() === 0) this.republishSettle();
+      if (this.client.framesAwaitingDone() > 0) return;
+      traceRecorder.noteFramesDrawn();
+      this.republishSettle();
     };
 
     this.client.onWantedSetDelta = (datasetId, _epochs, missing) => {
@@ -511,13 +517,16 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
-   * Feed the newest finished frame to the adaptive resolution, and arrange
-   * for a lowered resolution to come back once input stops, with a frame to
-   * show it.
+   * Feed the newest finished frame to the adaptive resolution and the frame
+   * pacer, and arrange for a lowered resolution to come back once input
+   * stops, with a frame to show it.
    */
   private adaptResolution(): void {
     const frame = this.client.takeFrameLatency();
-    if (frame) this.resolution.noteFrame(frame.frameSeq, frame.ms, this.client.lastFrameSeq());
+    if (frame) {
+      this.resolution.noteFrame(frame.frameSeq, frame.ms, this.client.lastFrameSeq());
+      this.framePacer.noteFrameDone(frame.ms, performance.now());
+    }
     const wait = this.resolution.msUntilRestore();
     if (wait === null || this.resolutionRestoreTimer !== null) return;
     this.resolutionRestoreTimer = setTimeout(() => {
@@ -655,23 +664,31 @@ export class RenderLoop implements TraceEnvironment {
 
     const now = performance.now();
     let shouldRender = false;
+    const framesInFlight = this.client.framesAwaitingDone();
 
     if (this.interactiveDirty) {
-      // View changed: render immediately.
-      this.interactiveDirty = false;
-      this.residencyDirty = false;
-      this.lastResidencyRenderTime = now;
-      shouldRender = true;
+      // View changed: render as soon as the GPU can take the frame. Until
+      // then the flag stays set and each tick still delivers chunks.
+      if (this.framePacer.mayDrawInteractive(framesInFlight)) {
+        this.interactiveDirty = false;
+        this.residencyDirty = false;
+        this.lastResidencyRenderTime = now;
+        shouldRender = true;
+      }
     } else if (this.residencyDirty) {
-      if (now - this.lastResidencyRenderTime >= RESIDENCY_RENDER_INTERVAL_MS) {
+      if (
+        now - this.lastResidencyRenderTime >= RESIDENCY_RENDER_INTERVAL_MS &&
+        this.framePacer.mayDrawResidency(now, framesInFlight, this.deliveryBacklogged)
+      ) {
         // Enough time elapsed since the last data render: render now.
         this.residencyDirty = false;
         this.lastResidencyRenderTime = now;
         shouldRender = true;
       } else {
-        // Residency dirty but debounce not elapsed: the tick still runs for
-        // uploads and only the render is suppressed. Skip counts aggregate
-        // into one log per second so chunk bursts don't flood the console.
+        // Residency dirty but debounce not elapsed, or the GPU is still busy:
+        // the tick still runs for uploads and only the render is suppressed.
+        // Skip counts aggregate into one log per second so chunk bursts don't
+        // flood the console.
         this.throttleSkipPending++;
         if (now - this.lastThrottleEmit > RenderLoop.THROTTLE_EMIT_INTERVAL_MS) {
           debugLog("render", "residency_throttled", {
@@ -698,13 +715,11 @@ export class RenderLoop implements TraceEnvironment {
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {
-      if (tickSlice(ctx, this.tickCoordinator, this.uploader, this.minimapState.pendingFetch, shouldRender)) {
-        this.setDirty("residency", "tick_slice_continuation");
-      }
+      this.deliveryBacklogged = tickSlice(ctx, this.tickCoordinator, this.uploader, this.minimapState.pendingFetch, shouldRender);
+      if (this.deliveryBacklogged) this.setDirty("residency", "tick_slice_continuation");
     } else {
-      if (tickVolume(ctx, this.tickCoordinator, this.uploader, this.minimapState.pendingFetch, shouldRender)) {
-        this.setDirty("residency", "tick_volume_continuation");
-      }
+      this.deliveryBacklogged = tickVolume(ctx, this.tickCoordinator, this.uploader, this.minimapState.pendingFetch, shouldRender);
+      if (this.deliveryBacklogged) this.setDirty("residency", "tick_volume_continuation");
     }
 
     // A coalesced view/selection change still owes a trailing rebuild. Mark
