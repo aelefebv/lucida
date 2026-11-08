@@ -58,9 +58,10 @@ async fn first_clients_of_two_workspaces_get_different_ids() {
         storage.workspaces(),
         GeneratedConfig::defaults(),
     ));
-    let extractor: Arc<dyn PrincipalExtractor> = Arc::new(StubPrincipalExtractor::new(Arc::new(
-        AuthConfig::for_tests(),
-    )));
+    let extractor: Arc<dyn PrincipalExtractor> = Arc::new(StubPrincipalExtractor::new(
+        Arc::new(AuthConfig::for_tests()),
+        storage.login_sessions(),
+    ));
     let app =
         lucida_server::workspace::router(manager).layer(axum::middleware::from_fn_with_state(
             extractor,

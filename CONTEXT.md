@@ -224,9 +224,10 @@ administers this server. Every auth mode resolves its credential into one.
 _Avoid_: identity (what a provider asserts; a principal is what lucida resolved)
 
 **Auth mode**:
-How the server learns who a caller is: `disabled` (one local dev principal for
-everyone), `google` (its own sign-in), or `iap` (the identity a perimeter
-established). One mode holds for the whole server.
+How the server learns who a caller is: `disabled` (no sign-in: one local dev
+principal, and on a non-loopback bind an anonymous principal for each browser),
+`google` (its own sign-in), or `iap` (the identity a perimeter established). One
+mode holds for the whole server.
 
 **Perimeter**:
 An authenticating layer in front of lucida that decides who reaches the server.

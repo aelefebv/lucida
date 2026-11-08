@@ -6,6 +6,7 @@
 //! written once per engine, because code generic over the engine needs a
 //! trait bound for every type it binds or decodes.
 
+pub mod anonymous;
 #[cfg(test)]
 mod audit_event_tests;
 pub mod bearer_token;
