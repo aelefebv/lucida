@@ -13,7 +13,10 @@ import {
   type LevelGeometry,
   type MultiscaleInfo,
 } from "../../manifestTypes.ts";
-import type { WireGeneratedAvailabilitySnapshot } from "../generatedAvailability.ts";
+import type {
+  WireGeneratedAvailabilitySnapshot,
+  WireGeneratedLevelAvailability,
+} from "../generatedAvailability.ts";
 
 /** Level-0 shape as `[t, c, z, y, x]`. */
 export type Shape5 = readonly [number, number, number, number, number];
@@ -34,17 +37,26 @@ export interface PyramidSpec {
 }
 
 /**
- * A coarse level the server generates after the open. Its geometry is
- * published at open, and each chunk answers `pending` until `readyAtMs` of
- * the simulation clock, when one availability update names them all ready.
+ * A coarse level the server generates after the open. Each chunk answers
+ * `pending` until `readyAtMs` of the simulation clock, when one availability
+ * update names them all ready.
  */
 export interface GeneratedCoarseSpec {
   readyAtMs: number;
+  /**
+   * When an availability update publishes the level's geometry. By default
+   * it arrives with the open; later, it reaches the page as a replaced
+   * manifest with no scene epoch behind it.
+   */
+  publishedAtMs?: number;
 }
 
 export interface GeneratedCoarseLevel {
   levelIndex: number;
   readyAtMs: number;
+  publishedAtMs: number;
+  /** The level's geometry, one entry per image. */
+  levels: WireGeneratedLevelAvailability[];
   /** The availability snapshot the server sends with the open. */
   snapshot: WireGeneratedAvailabilitySnapshot;
   /** Image id → every chunk key of the generated level. */
@@ -134,10 +146,16 @@ function fixture(
     return { datasetId: wire.dataset_id, openCommand, manifest: resolved, generated: null };
   }
 
-  // The server publishes a generated level's geometry with the open, before
-  // any of its chunks exist.
+  // The server can publish a generated level's geometry before any of its
+  // chunks exist, and usually does so with the open.
   const levelIndex = generated.pyramid.levels;
   const level = levelGeometry(generated.pyramid, levelIndex);
+  const publishedAtMs = generated.publishedAtMs ?? 0;
+  const levels = resolved.images.map((image) => ({
+    image_id: image.image_id,
+    info: { level_index: levelIndex, role: "coarse" as const },
+    level,
+  }));
   return {
     datasetId: wire.dataset_id,
     openCommand,
@@ -145,14 +163,9 @@ function fixture(
     generated: {
       levelIndex,
       readyAtMs: generated.readyAtMs,
-      snapshot: {
-        levels: resolved.images.map((image) => ({
-          image_id: image.image_id,
-          info: { level_index: levelIndex, role: "coarse" },
-          level,
-        })),
-        chunks: [],
-      },
+      publishedAtMs,
+      levels,
+      snapshot: { levels: publishedAtMs > 0 ? [] : levels, chunks: [] },
       chunkKeys: new Map(resolved.images.map((image) => [image.image_id, levelChunkKeys(level)])),
     },
   };
