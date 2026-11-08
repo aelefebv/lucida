@@ -697,6 +697,71 @@ impl Scene {
         )
     }
 
+    /// Device pixels per level-0 sample of `dataset_id`'s first image at the
+    /// view's center: the measure its target level is chosen from, and the
+    /// one [`Self::zoom_to_pixels_per_sample`] sets. `None` when the dataset
+    /// has no image with a level 0.
+    pub fn pixels_per_sample(&self, dataset_id: &DatasetId) -> Option<f64> {
+        Some(self.member_pixels_per_sample(self.first_image(dataset_id)?))
+    }
+
+    /// Move the camera until `dataset_id`'s first image measures
+    /// `pixels_per_sample` at the view's center, so a caller can name the
+    /// level the view targets. A slice camera takes it as its zoom. An
+    /// arcball slides along its view axis, keeping its target and angles.
+    /// Either is left placed, since a zoom is a choice.
+    ///
+    /// Returns `false`, changing nothing, when the dataset has no image, the
+    /// view axis misses it, or the camera can't reach the measure: a slice
+    /// zoom out of range, or a fly camera, which has no target to keep.
+    /// Bumps `epochs.view` when the camera changed.
+    pub fn zoom_to_pixels_per_sample(
+        &mut self,
+        dataset_id: &DatasetId,
+        pixels_per_sample: f64,
+    ) -> bool {
+        if !(pixels_per_sample.is_finite() && pixels_per_sample > 0.0) {
+            return false;
+        }
+        let Some(member) = self.first_image(dataset_id) else {
+            return false;
+        };
+        let transform = self.placed_transform(member);
+        let shape = level0_shape(member);
+        let Some(bounds) = self.dataset_world_bounds(&dataset_id.0) else {
+            return false;
+        };
+        let before = self.camera.clone();
+        let reached = match &mut self.camera {
+            Camera::Slice(slice) => {
+                slice.set_zoom(pixels_per_sample);
+                slice.zoom == pixels_per_sample
+            }
+            Camera::Arcball(arcball) => {
+                arcball.set_pixels_per_sample(&transform, shape, pixels_per_sample, bounds)
+            }
+            Camera::Fly(_) => false,
+        };
+        if !reached {
+            self.camera = before;
+            return false;
+        }
+        self.camera.set_framing(Framing::Placed);
+        if self.camera != before {
+            self.epochs.view += 1;
+        }
+        true
+    }
+
+    /// The dataset's first image with a level 0.
+    fn first_image(&self, dataset_id: &DatasetId) -> Option<&MemberState> {
+        self.derived
+            .get(dataset_id)?
+            .members
+            .iter()
+            .find(|member| !member.levels.is_empty())
+    }
+
     /// Return aggregate bounds for all visible image members in scene XY space.
     pub fn visible_content_bounds_2d(&self) -> Option<VisibleContentBounds2D> {
         let mut bounds: Option<VisibleContentBounds2D> = None;
@@ -4549,6 +4614,118 @@ mod tests {
             }
             other => panic!("expected an Arcball camera, got {other:?}"),
         }
+    }
+
+    /// A scene holding one image of `shape` on `viewport`, its camera fitted
+    /// to it, in 3D when `three_d`.
+    fn fitted_volume(shape: [u64; 5], viewport: [u32; 2], three_d: bool) -> Scene {
+        let mut scene = Scene::new(viewport);
+        scene.apply(
+            DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened_with_shape(
+                "v",
+                "v",
+                1,
+                shape,
+                [1, 1, 32, 32, 32],
+                4,
+            ))
+            .into(),
+        );
+        if three_d {
+            scene.set_mode_3d();
+        }
+        assert!(scene.fit_camera_to_dataset("v"));
+        scene
+    }
+
+    #[test]
+    fn zoom_to_pixels_per_sample_reaches_the_measure_the_level_is_chosen_from() {
+        let id = DatasetId("v".to_string());
+        let cases = [
+            ([1, 1, 128, 512, 512], [2880, 1800]),
+            ([1, 1, 40, 300, 900], [390, 844]),
+        ];
+        for (shape, viewport) in cases {
+            for three_d in [false, true] {
+                for (theta, phi) in [(0.5, 0.8), (2.6, 2.2), (-1.0, 0.1)] {
+                    let mut scene = fitted_volume(shape, viewport, three_d);
+                    if let Camera::Arcball(arcball) = &mut scene.camera {
+                        arcball.rotate(theta - arcball.theta, phi - arcball.phi);
+                    }
+                    for zoom in [8.0, 2.0, 0.177, 0.08, 0.004] {
+                        let before = scene.camera.clone();
+                        let epoch = scene.epochs.view;
+                        assert!(scene.zoom_to_pixels_per_sample(&id, zoom));
+                        let measured = scene.pixels_per_sample(&id).unwrap();
+                        assert!(
+                            (measured - zoom).abs() <= zoom * 1e-6,
+                            "{shape:?} on {viewport:?}, 3D {three_d}: asked {zoom}, measures {measured}"
+                        );
+                        assert_eq!(scene.camera.framing(), Framing::Placed);
+                        assert!(scene.camera == before || scene.epochs.view == epoch + 1);
+                        if let (Camera::Arcball(a), Camera::Arcball(b)) = (&scene.camera, &before) {
+                            assert_eq!((a.target, a.theta, a.phi), (b.target, b.theta, b.phi));
+                            assert!(0.0 < a.near && a.near < a.far);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_to_pixels_per_sample_keeps_the_whole_volume_inside_the_depth_range() {
+        let id = DatasetId("v".to_string());
+        let mut scene = fitted_volume([1, 1, 128, 512, 512], [800, 600], true);
+        let WorldBox { min, max } = scene.dataset_world_bounds("v").unwrap();
+        for zoom in [0.5, 0.05] {
+            assert!(scene.zoom_to_pixels_per_sample(&id, zoom));
+            let Camera::Arcball(arcball) = &scene.camera else {
+                panic!("expected an arcball camera");
+            };
+            let eye = arcball.eye_position();
+            for corner in 0..8 {
+                let point: [f64; 3] = std::array::from_fn(|axis| {
+                    if corner & (1 << axis) == 0 {
+                        min[axis]
+                    } else {
+                        max[axis]
+                    }
+                });
+                let depth: f64 = (0..3)
+                    .map(|axis| (point[axis] - eye[axis]) * arcball.forward_direction()[axis])
+                    .sum();
+                assert!(
+                    arcball.near < depth && depth < arcball.far,
+                    "zoom {zoom}: corner at depth {depth} outside {}..{}",
+                    arcball.near,
+                    arcball.far
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_to_pixels_per_sample_refuses_what_it_cannot_reach() {
+        let id = DatasetId("v".to_string());
+        let mut scene = fitted_volume([1, 1, 128, 512, 512], [800, 600], true);
+        let (fitted, epoch) = (scene.camera.clone(), scene.epochs.view);
+        for zoom in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(!scene.zoom_to_pixels_per_sample(&id, zoom), "zoom {zoom}");
+        }
+        assert!(!scene.zoom_to_pixels_per_sample(&DatasetId("none".to_string()), 1.0));
+        assert_eq!((&scene.camera, scene.epochs.view), (&fitted, epoch));
+        // Looking past the volume, the view axis never meets it.
+        if let Camera::Arcball(arcball) = &mut scene.camera {
+            arcball.target = [10.0, 10.0, 10.0];
+        }
+        let moved = scene.camera.clone();
+        assert!(!scene.zoom_to_pixels_per_sample(&id, 1.0));
+        assert_eq!(scene.camera, moved);
+        scene.set_mode_fly();
+        let fly = scene.camera.clone();
+        assert!(!scene.zoom_to_pixels_per_sample(&id, 1.0));
+        assert_eq!(scene.camera, fly);
     }
 
     #[test]
