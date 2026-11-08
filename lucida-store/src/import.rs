@@ -1688,12 +1688,16 @@ const MAX_LABELS_PER_DATASET: usize = 1 << 16;
 /// memory across a whole collection stays bounded.
 const MAX_LABEL_COLORS_PER_DATASET: usize = 1 << 20;
 
+/// Dataset-wide ceiling on retained label names, as for colors.
+const MAX_LABEL_NAMES_PER_DATASET: usize = 1 << 20;
+
 /// Remaining dataset-wide budget for retained labels and color entries, carried
 /// across every source image / collection tile so aggregate memory is bounded even
 /// when per-label caps are individually satisfied.
 struct LabelBudget {
     labels_remaining: usize,
     colors_remaining: usize,
+    names_remaining: usize,
 }
 
 impl LabelBudget {
@@ -1701,6 +1705,7 @@ impl LabelBudget {
         Self {
             labels_remaining: MAX_LABELS_PER_DATASET,
             colors_remaining: MAX_LABEL_COLORS_PER_DATASET,
+            names_remaining: MAX_LABEL_NAMES_PER_DATASET,
         }
     }
 }
@@ -1905,12 +1910,12 @@ async fn build_labels_within_budget(
         .await
         {
             Ok(mut label) => {
-                // Clamp this label's colors to the remaining dataset-wide budget
-                // before retaining them, then charge both budgets.
-                if label.spec.colors.len() > budget.colors_remaining {
-                    label.spec.colors.truncate(budget.colors_remaining);
-                }
+                // Clamp this label's colors and names to the remaining
+                // dataset-wide budgets before retaining them, then charge them.
+                label.spec.colors.truncate(budget.colors_remaining);
                 budget.colors_remaining -= label.spec.colors.len();
+                label.spec.names.truncate(budget.names_remaining);
+                budget.names_remaining -= label.spec.names.len();
                 budget.labels_remaining -= 1;
                 imported.specs.push(label.spec);
                 imported.fetch.push(label.fetch);
@@ -2015,6 +2020,7 @@ async fn build_label(
         source_image_id: source_image_id.clone(),
         image,
         colors: image_label.colors,
+        names: image_label.names,
         source_declared: image_label.source_declared,
     };
 
@@ -5021,12 +5027,20 @@ mod tests {
                     {"label-value": 2, "rgba": [230, 25, 75, 255]},
                     {"label-value": 92801, "rgba": [0, 0, 128, 255]}
                 ],
+                "properties": [{"label-value": 92801, "name": "far region"}],
                 "source": {"image": "../../"}
             }),
         );
 
         let store = cached_store(dir.to_str().unwrap());
         let result = import_dataset(&store, "lbl-id", "Labeled").await.unwrap();
+        assert_eq!(
+            result.manifest.label_specs()[0].names,
+            vec![lucida_content::LabelName {
+                value: 92801,
+                name: "far region".into()
+            }]
+        );
 
         // The base image import is unchanged.
         assert!(matches!(result.manifest.kind, DatasetKind::Single));
@@ -5538,6 +5552,7 @@ mod tests {
         let mut budget = LabelBudget {
             labels_remaining: 2,
             colors_remaining: MAX_LABEL_COLORS_PER_DATASET,
+            names_remaining: MAX_LABEL_NAMES_PER_DATASET,
         };
 
         let source_image_id = ImageId("img".to_string());

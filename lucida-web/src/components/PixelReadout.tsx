@@ -1,7 +1,8 @@
 /**
  * The value under the pointer: hover the canvas with a mouse or pen, or rest a
  * finger on it, and a card beside the point lists each visible channel's
- * sample there in data units, with its position and the level it came from.
+ * sample there in data units, with its position and the level it came from,
+ * and each visible label overlay's id there, with the name its table gives it.
  *
  * The render worker reads the samples from what it draws (`worker/probe.ts`).
  * One probe is in flight at a time, and a new one goes out only when the
@@ -21,7 +22,8 @@ import { REVEAL_LINGER_MS } from "../ui/longPress.ts";
 import { channelDisplayName } from "./channels.ts";
 import type { ClientPoint } from "./cameraProjection.ts";
 import { rampGradient } from "./colormapSwatch.ts";
-import { readoutBlocks, type ReadoutContext } from "./pixelReadout.ts";
+import { readoutBlocks, type ReadoutContext, type ReadoutLabel } from "./pixelReadout.ts";
+import { labelColor, MAX_GPU_LABEL_COLORS, type RGBA } from "../renderer/labelColors.ts";
 import "./PixelReadout.css";
 
 export interface PixelReadoutHandle {
@@ -159,16 +161,24 @@ export function PixelReadout({ canvas, client, scene, datasets, layers, ref }: P
             </span>
             {block.level && <span className="lc-pixel-readout-level">{block.level}</span>}
           </div>
+          {block.note && <div className="lc-pixel-readout-note">{block.note}</div>}
           <dl className="lc-pixel-readout-rows">
             {block.rows.map((row) => (
               <div key={row.key} className="lc-pixel-readout-row" data-absent={row.absent || undefined}>
                 <dt>
-                  <span className="lc-pixel-readout-swatch" style={{ background: rampGradient(row.colormap, 96) }} aria-hidden />
+                  <span
+                    className="lc-pixel-readout-swatch"
+                    style={{ background: row.colormap ? rampGradient(row.colormap, 96) : row.color }}
+                    data-label={row.colormap ? undefined : true}
+                    aria-hidden
+                  />
                   {row.name}
                 </dt>
                 <dd>
                   {row.value}
+                  {row.detail && <span className="lc-pixel-readout-detail">{row.detail}</span>}
                   {row.level && <span className="lc-pixel-readout-level"> {row.level}</span>}
+                  {row.position && <span className="lc-pixel-readout-at">{row.position}</span>}
                 </dd>
               </div>
             ))}
@@ -188,6 +198,7 @@ function readoutContext(scene: WasmScene, datasets: Map<string, DatasetState>, l
     // Unreadable settings leave the manifest's channel names.
   }
   const multiscale = (id: string) => datasets.get(id)?.manifest.images[0]?.multiscale;
+  const labels = new Map<string, ReadoutLabel | null>();
   return {
     datasetName: (id) => {
       try {
@@ -214,5 +225,41 @@ function readoutContext(scene: WasmScene, datasets: Map<string, DatasetState>, l
       ),
       colormap: layers.get(id)?.channels.find((c) => c.channel === channel)?.colormap ?? "gray",
     }),
+    label: (id, labelImageId) => {
+      const key = `${id}\u0000${labelImageId}`;
+      if (!labels.has(key)) {
+        const spec = datasets.get(id)?.manifest.labels?.find((l) => l.image.image_id === labelImageId);
+        labels.set(key, spec ? readoutLabel(spec.name, spec.colors ?? [], spec.names ?? []) : null);
+      }
+      return labels.get(key) ?? null;
+    },
+  };
+}
+
+/**
+ * A label overlay as the readout shows it. Its id colors follow the draw: the
+ * shader holds the first declared colors only, and the first entry for an id
+ * wins.
+ */
+function readoutLabel(
+  name: string,
+  colors: readonly { value: number; rgba: RGBA }[],
+  names: readonly { value: number; name: string }[],
+): ReadoutLabel {
+  const declared = new Map<number, RGBA>();
+  for (const { value, rgba } of colors.slice(0, MAX_GPU_LABEL_COLORS)) {
+    if (!declared.has(value)) declared.set(value, rgba);
+  }
+  const named = new Map<number, string>();
+  for (const entry of names) {
+    if (!named.has(entry.value)) named.set(entry.value, entry.name);
+  }
+  return {
+    name,
+    idName: (id: number) => named.get(id) ?? null,
+    color: (id: number) => {
+      const [r, g, b, a] = labelColor(id, declared);
+      return `rgba(${r}, ${g}, ${b}, ${a / 255})`;
+    },
   };
 }
