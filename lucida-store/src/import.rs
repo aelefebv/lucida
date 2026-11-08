@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use futures_util::stream::StreamExt;
-use object_store::path::Path;
 
 use lucida_content::normalize::{classify_axes, normalize_to_5d};
 use lucida_content::*;
@@ -57,7 +56,7 @@ async fn import_dataset_with_label_discovery(
     if parse::resolve_ome_block(&root_json, "plate").is_some() {
         import_collection(
             store,
-            format,
+            &format,
             id,
             name,
             &root_json,
@@ -65,13 +64,13 @@ async fn import_dataset_with_label_discovery(
         )
         .await
     } else {
-        import_single_image(store, format, id, name, &root_json).await
+        import_single_image(store, &format, id, name, &root_json).await
     }
 }
 
 async fn import_single_image(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     id: &str,
     name: &str,
     root_json: &serde_json::Value,
@@ -90,7 +89,13 @@ async fn import_single_image(
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     let axes = build_axes(&layout.canonical_names);
     let level_bindings = clamp_chunks_to_levels(
-        build_level_binding_infos(&axes_names, &level_metas, data_type, &layout.pinned)?,
+        build_level_binding_infos(
+            &axes_names,
+            &level_entries,
+            &level_metas,
+            data_type,
+            &layout.pinned,
+        )?,
         &level_metas,
         &axes_names,
         data_type_size(data_type),
@@ -402,7 +407,7 @@ struct SharedTileGeometry {
 /// candidate tile instead of aborting the whole collection.
 async fn read_tile_geometry(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     tile_prefix: &str,
 ) -> Result<SharedTileGeometry, StoreError> {
     let tile_json = parse::read_group(store, format, tile_prefix).await?;
@@ -437,7 +442,7 @@ async fn read_tile_geometry(
 /// future borrows nothing and stays `Send`.
 async fn select_shared_tile_geometry(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     candidate_prefixes: Vec<String>,
 ) -> (Option<SharedTileGeometry>, Vec<String>) {
     let mut unreadable: Vec<String> = Vec::new();
@@ -512,7 +517,7 @@ fn unusable_tile_geometry_warning(
 #[allow(clippy::too_many_arguments)]
 async fn read_stored_tiles(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     tile_prefixes: &[String],
     representative_prefix: &str,
     representative: &StoredTile,
@@ -576,8 +581,14 @@ fn stored_tile_of(
     {
         return Err(format!("level {level} shape does not match its axes"));
     }
-    let bindings = build_level_binding_infos(axes_names, &geometry.level_metas, data_type, pinned)
-        .map_err(|e| e.to_string())?;
+    let bindings = build_level_binding_infos(
+        axes_names,
+        &geometry.level_entries,
+        &geometry.level_metas,
+        data_type,
+        pinned,
+    )
+    .map_err(|e| e.to_string())?;
     if let Some(level) = bindings
         .iter()
         .position(|binding| binding.chunk_shape.contains(&0))
@@ -621,10 +632,7 @@ async fn parse_one_group(
     };
 
     let group_meta_key = format.group_key(&group_path);
-    let group_bytes = match store
-        .get_metadata_bytes(&Path::from(group_meta_key.as_str()))
-        .await
-    {
+    let group_bytes = match format.document(&store, &group_meta_key).await {
         Ok(bytes) => bytes,
         Err(e) => {
             return Err(skipped_group_warning(
@@ -711,7 +719,7 @@ async fn parse_one_group(
 
 async fn import_collection(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     id: &str,
     name: &str,
     root_json: &serde_json::Value,
@@ -803,7 +811,7 @@ async fn import_collection(
                 async move {
                     let outcome = parse_one_group(
                         store,
-                        format,
+                        format.clone(),
                         req.path,
                         req.row_index,
                         req.column_index,
@@ -909,8 +917,13 @@ async fn import_collection(
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     warnings.extend(pinned_axes_warning(id, &layout.pinned));
     let axes = build_axes(&layout.canonical_names);
-    let level_bindings =
-        build_level_binding_infos(&axes_names, &level_metas, data_type, &layout.pinned)?;
+    let level_bindings = build_level_binding_infos(
+        &axes_names,
+        &level_entries,
+        &level_metas,
+        data_type,
+        &layout.pinned,
+    )?;
     let representative_levels =
         build_level_geometries(&level_entries, &level_metas, &level_bindings, &axes_names)?;
 
@@ -1453,18 +1466,21 @@ fn data_type_size(dt: DataType) -> u8 {
 /// `"level 0: unsupported codec 'bz2' in storage chain"`). The first
 /// failing level short-circuits — we don't accumulate all failures.
 ///
-/// Every level is read as `data_type`, the type level 0 declares.
+/// Every level is read as `data_type`, the type level 0 declares, and its
+/// chunks are found under the path its multiscale entry gives.
 fn build_level_binding_infos(
     axes_names: &[String],
+    level_entries: &[parse::LevelEntry],
     level_metas: &[parse::ArrayMeta],
     data_type: DataType,
     pinned: &[PinnedAxis],
 ) -> Result<Vec<LevelBindingInfo>, StoreError> {
     let dtype_size = data_type_size(data_type);
-    level_metas
+    level_entries
         .iter()
+        .zip(level_metas)
         .enumerate()
-        .map(|(i, meta)| {
+        .map(|(i, (entry, meta))| {
             let at_level = |e: StoreError| e.in_context(format!("level {i}"));
             let grid_chunk_shape = &meta.chunk_grid.configuration.chunk_shape;
             let shard = ShardLayout::from_codec_chain(&meta.codecs, grid_chunk_shape, dtype_size)
@@ -1490,6 +1506,7 @@ fn build_level_binding_infos(
                     .map_err(at_level)?;
             Ok(LevelBindingInfo {
                 level_index: i as u32,
+                path: entry.path.clone(),
                 compression,
                 chunk_shape,
                 chunk_byte_layout,
@@ -1776,7 +1793,7 @@ fn unusable_label_index_warning(
 /// happen later in [`build_labels_within_budget`], gated by the shared budget.
 async fn probe_labels_for_image(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     base_prefix: &str,
 ) -> ProbedLabels {
     let labels_prefix = if base_prefix.is_empty() {
@@ -1822,7 +1839,7 @@ async fn probe_labels_for_image(
 /// callers can layer probe passes (sample first, then expand).
 async fn probe_labels_for_tiles(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     tile_prefixes: &[String],
     indices: Vec<usize>,
     probed_labels: &mut [Option<ProbedLabels>],
@@ -1851,7 +1868,7 @@ async fn probe_labels_for_tiles(
 async fn build_labels_within_budget(
     budget: &mut LabelBudget,
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     dataset_id: &str,
     source_image_id: &ImageId,
     source_owner: &EntityId,
@@ -1925,7 +1942,7 @@ struct BuiltLabel {
 /// foundation for later rendering.
 async fn build_label(
     store: &Arc<CachedStore>,
-    format: ZarrFormat,
+    format: &ZarrFormat,
     labels_prefix: &str,
     name: &str,
     source_image_id: &ImageId,
@@ -1955,8 +1972,13 @@ async fn build_label(
         );
     }
     let axes = build_axes(&layout.canonical_names);
-    let level_bindings =
-        build_level_binding_infos(&axes_names, &level_metas, data_type, &layout.pinned)?;
+    let level_bindings = build_level_binding_infos(
+        &axes_names,
+        &level_entries,
+        &level_metas,
+        data_type,
+        &layout.pinned,
+    )?;
     // A zero chunk dimension here returns Err, so the label is skipped by the
     // caller rather than panicking the whole import.
     let levels =
@@ -2016,6 +2038,7 @@ async fn build_label(
 mod tests {
     use super::*;
     use object_store::ObjectStore;
+    use object_store::path::Path;
 
     /// Cache budget for import tests: far above any fixture's metadata, so a
     /// test never measures eviction it did not intend.
@@ -5510,13 +5533,13 @@ mod tests {
         let source_owner = EntityId("owner".to_string());
 
         // The probe discovers all declared names — cheap, and expected.
-        let probed = probe_labels_for_image(&store, ZarrFormat::V3, "").await;
+        let probed = probe_labels_for_image(&store, &ZarrFormat::V3, "").await;
         assert_eq!(probed.names, vec!["keep0", "keep1", "over"]);
 
         let imported = build_labels_within_budget(
             &mut budget,
             &store,
-            ZarrFormat::V3,
+            &ZarrFormat::V3,
             "ds",
             &source_image_id,
             &source_owner,
