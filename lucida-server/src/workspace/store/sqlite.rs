@@ -351,6 +351,14 @@ impl WorkspaceStore for SqliteWorkspaceStore {
                 .map_err(map_sql)?;
         }
 
+        sqlx::query(sql::COPY_PREVIEW_ON_DUPLICATE)
+            .bind(&new_id)
+            .bind(&owner_email)
+            .bind(source_workspace_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sql)?;
+
         tx.commit().await.map_err(map_sql)?;
 
         Ok(Some(WorkspaceRecord {
