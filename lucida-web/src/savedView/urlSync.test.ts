@@ -417,6 +417,24 @@ describe("UrlSync — #b=<id> bootstrap", () => {
     sync.destroy();
   });
 
+  it("a missing saved view falls back to the workspace default, as a bare open does", async () => {
+    win = makeFakeWindow("#b=missing");
+    const defaultView = emptyView();
+    defaultView.view.t = 7;
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+      fetchSavedViewById: async () => null,
+      fetchDefaultSavedView: async () => ({ id: "default", view: defaultView }),
+      restoreLastViewEnabled: () => false,
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await sync.bootstrap();
+    expect(applier.apply).toHaveBeenCalledOnce();
+    expect(applier.applied[0].view.t).toBe(7);
+    warn.mockRestore();
+    sync.destroy();
+  });
+
   it("popstate to a #b=<id> URL re-applies through the same path", async () => {
     win = makeFakeWindow("#b=xyz");
     const sentinel = emptyView();

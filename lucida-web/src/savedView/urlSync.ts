@@ -143,6 +143,8 @@ export class UrlSync {
       if (savedView === null) {
         console.warn(`[UrlSync] saved view ${savedViewId} not found`);
         this.onSavedViewMissing?.(savedViewId);
+        // Land where a bare workspace open would, not on an unframed scene.
+        await this.applyInitialViewForEmptyHash();
         return;
       }
       await this.applier.apply(savedView.view);
