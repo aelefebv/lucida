@@ -1,4 +1,5 @@
 /** Volume render path: plan-based chunk upload + multi-pass render. */
+import { assertCanvasSize } from "./applyAndSend.ts";
 import { Axis } from "./axes.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
@@ -204,7 +205,8 @@ function uploadAndRenderVolume(
     );
   }
 
-  client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode);
+  const pixelRatio = devicePixelRatio * ctx.renderScale * ctx.resolutionScale;
+  client.volumeRenderMultiPass(layers, invVP, eye, canvasW, canvasH, fullW, fullH, plan.epochs, viewProj, camForward, clipDistance, clipMode, pixelRatio);
   // The worker is FIFO, so every chunk posted above is written before this
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.
@@ -230,7 +232,7 @@ export function tickVolume(
   // by the render resolution, which drops while the camera moves.
   const fullW = Math.round(ctx.canvas.clientWidth * devicePixelRatio);
   const fullH = Math.round(ctx.canvas.clientHeight * devicePixelRatio);
-  scene.set_viewport(fullW, fullH, devicePixelRatio);
+  assertCanvasSize(scene, fullW, fullH, devicePixelRatio);
 
   const scale = ctx.renderScale * ctx.resolutionScale;
   const canvasW = Math.round(fullW * scale);

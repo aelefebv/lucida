@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use lucida_core::DatasetId;
-use lucida_core::camera::Camera;
+use lucida_core::camera::{Camera, Framing};
+use lucida_core::framing::WorldBox;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{Colormap, DatasetDisplaySettings, DocumentState, RenderMode, Scene};
 use lucida_core::transform::VolumeTransform;
@@ -290,10 +291,30 @@ pub struct ComposedView {
     pub width: u32,
     pub height: u32,
     pub device_pixel_ratio: f64,
+    /// The memory the page was told the device has, in GiB, when the driver
+    /// overrode it. The page fits its memory budgets to it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_memory_gib: Option<f64>,
     /// The camera the driver composed, when the caller asked for one rather
     /// than the page's own framing, and the level the core says it calls for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub camera: Option<ComposedCamera>,
+}
+
+/// `--device-memory`: a positive number of GiB.
+pub fn parse_device_memory(text: &str) -> Result<f64, String> {
+    match text.parse::<f64>() {
+        Ok(gib) if gib.is_finite() && gib > 0.0 => Ok(gib),
+        _ => Err(format!("{text} is not a positive number of GiB")),
+    }
+}
+
+/// A script that makes the page read `gib` as the device's memory. It runs
+/// before the page's own scripts, which read the memory once at startup.
+fn device_memory_script(gib: f64) -> String {
+    format!(
+        "Object.defineProperty(Navigator.prototype, \"deviceMemory\", {{ get: () => {gib}, configurable: true }});"
+    )
 }
 
 /// Which camera the driver frames the dataset with: the slice camera of the
@@ -1314,6 +1335,9 @@ pub fn compose_camera(
             _ => realize_volume_zoom(&mut scene, dataset_id, zoom)?,
         }
     }
+    // The driver records the level this exact camera targets, so the page
+    // must keep it rather than fit its own.
+    scene.camera.set_framing(Framing::Placed);
 
     let zoom = measure_zoom(&scene, dataset_id).ok_or_else(|| {
         CliError::new(
@@ -1420,7 +1444,7 @@ fn realize_volume_zoom(
     }
     let radius = scene
         .dataset_world_bounds(&dataset_id.0)
-        .map(|(min, max)| {
+        .map(|WorldBox { min, max }| {
             0.5 * ((max[0] - min[0]).powi(2)
                 + (max[1] - min[1]).powi(2)
                 + (max[2] - min[2]).powi(2))
@@ -1674,9 +1698,13 @@ pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         .as_ref()
         .map(|knobs| format!("knobs     {}\n", knobs.describe()))
         .unwrap_or_default();
+    let memory = view
+        .device_memory_gib
+        .map(|gib| format!(" · device memory {gib} GiB"))
+        .unwrap_or_default();
     format!(
         "{replay}\
-         view      {} @ {}x{} DPR {}\n\
+         view      {} @ {}x{} DPR {}{memory}\n\
          {camera}\
          server    {}\n\
          hold      quiescent had to hold {} ms; every duration below is measured against that\n\
@@ -2066,6 +2094,7 @@ pub async fn drive_run(
     let export_expression = run_export_expression(perfetto_path.is_some());
     let request = DriveRequest {
         knobs: (!facts.knobs.is_empty()).then_some(&facts.knobs),
+        device_memory_gib: facts.composed_view.device_memory_gib,
         screenshot: facts.screenshot.as_deref(),
         script: (!facts.script.is_empty()).then_some(&facts.script),
     };
@@ -2129,8 +2158,22 @@ struct Driven {
 #[derive(Debug, Clone, Copy, Default)]
 struct DriveRequest<'a> {
     knobs: Option<&'a KnobSettings>,
+    device_memory_gib: Option<f64>,
     screenshot: Option<&'a Path>,
     script: Option<&'a Script>,
+}
+
+/// What runs in the page before its own scripts: the knobs' storage seed and
+/// the device memory override, or None when the request has neither.
+fn new_document_script(request: &DriveRequest<'_>) -> Option<String> {
+    let parts: Vec<String> = [
+        request.device_memory_gib.map(device_memory_script),
+        request.knobs.and_then(KnobSettings::new_document_script),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!parts.is_empty()).then(|| parts.join("\n"))
 }
 
 /// Drive one run and hand back whatever `export` evaluated to.
@@ -2165,7 +2208,7 @@ async fn drive_and_export(
     bundle: Option<&BundleRequest>,
 ) -> Result<Driven, CliError> {
     let screenshot = request.screenshot;
-    let seed = request.knobs.and_then(KnobSettings::new_document_script);
+    let seed = new_document_script(&request);
     browser::with_browser(viewport, wait, async |browser| {
         let mut page = match seed.as_deref() {
             Some(script) => {
@@ -2658,6 +2701,7 @@ mod tests {
             width: DEFAULT_WIDTH,
             height: DEFAULT_HEIGHT,
             device_pixel_ratio: DEFAULT_DEVICE_PIXEL_RATIO,
+            device_memory_gib: None,
             camera: None,
         }
     }
@@ -3461,6 +3505,52 @@ mod tests {
         );
         let plain_text = format_run_human(&plain, Path::new("/runs/run-1-1.json"), None);
         assert!(!plain_text.contains("knobs"), "{plain_text}");
+    }
+
+    /// A device memory override reaches the page before its scripts, beside
+    /// the knobs' seed, and the header says the run was driven under it.
+    #[test]
+    fn the_device_memory_override_runs_first_and_the_header_names_it() {
+        assert_eq!(parse_device_memory("4"), Ok(4.0));
+        assert_eq!(parse_device_memory("0.5"), Ok(0.5));
+        for bad in ["0", "-2", "NaN", "inf", "four"] {
+            assert!(parse_device_memory(bad).is_err(), "{bad}");
+        }
+
+        assert_eq!(new_document_script(&DriveRequest::default()), None);
+        let knobs = knobs_for(&[("prefetch-depth", 0.0)]);
+        let request = DriveRequest {
+            knobs: Some(&knobs),
+            device_memory_gib: Some(4.0),
+            ..DriveRequest::default()
+        };
+        let script = new_document_script(&request).unwrap();
+        assert!(
+            script.starts_with(
+                "Object.defineProperty(Navigator.prototype, \"deviceMemory\", { get: () => 4, configurable: true });"
+            ),
+            "{script}"
+        );
+        assert!(script.contains("localStorage.setItem"), "{script}");
+
+        let with = DriverFacts {
+            composed_view: ComposedView {
+                device_memory_gib: Some(4.0),
+                ..composed()
+            },
+            ..facts()
+        };
+        let file = assemble_run_file(minimal_export(), &with);
+        let json = serde_json::to_value(&file.header).unwrap();
+        assert_eq!(json["composedView"]["deviceMemoryGib"], json!(4.0));
+        let text = format_run_human(&file, Path::new("/runs/run-1-1.json"), None);
+        assert!(text.contains("DPR 2 · device memory 4 GiB\n"), "{text}");
+        let plain = assemble_run_file(minimal_export(), &facts());
+        assert!(
+            !serde_json::to_string(&plain.header)
+                .unwrap()
+                .contains("deviceMemory")
+        );
     }
 
     #[test]

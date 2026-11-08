@@ -3,6 +3,7 @@ import type { DatasetManifest } from "../../manifestTypes.ts";
 import type { DatasetEntry, TickContext } from "../../renderLoopTypes.ts";
 import type {
   CpuCache,
+  FailedChunk,
   ReadyChunkDelivery,
   ReadyDelivery,
   ReadyProxyDelivery,
@@ -11,6 +12,7 @@ import type { ActiveSetEntry } from "../planning/index.ts";
 import { AssetCatalog } from "../assetCatalog.ts";
 import type {
   ColdStateMessage,
+  FailedChunksMessage,
   MissingChunk,
   MissingProxy,
 } from "../../renderer/workerProtocol.ts";
@@ -690,5 +692,69 @@ describe("Uploader cold and hot state", () => {
     );
     const cold = coldState.mock.calls[0][0] as ColdStateMessage;
     expect((cold.activeSet[0] as ActiveSetEntry).entityId).toBe("tile-0");
+  });
+});
+
+describe("Uploader failed chunks", () => {
+  let Uploader: typeof import("./uploader.ts").Uploader;
+
+  beforeEach(async () => {
+    vi.resetModules();
+    Uploader = (await import("./uploader.ts")).Uploader;
+  });
+
+  function cacheFailing(state: { version: number; failed: FailedChunk[] }): CpuCache {
+    const cpuCache = makeCpuCache();
+    Object.assign(cpuCache, {
+      failedChunksVersion: () => state.version,
+      failedChunks: () => state.failed,
+    });
+    return cpuCache;
+  }
+
+  const failure = (datasetId: string, chunkKey: string): FailedChunk => ({
+    datasetId, imageId: `${datasetId}-img`, chunkKey, failure: "corrupt_chunk",
+  });
+
+  it("tells the worker each dataset's failures when they change, and clears a dataset that has none left", () => {
+    const state = { version: 0, failed: [] as FailedChunk[] };
+    const failedChunks = vi.fn();
+    const ctx = makeCtx({ cpuCache: cacheFailing(state), client: { failedChunks } });
+    const uploader = new Uploader();
+
+    expect(uploader.syncFailedChunks(ctx)).toBeNull();
+    expect(failedChunks).not.toHaveBeenCalled();
+
+    state.version = 1;
+    state.failed = [failure("a", "0/0/0/0/0/0"), failure("b", "1/0/0/0/0/0"), failure("a", "0/0/0/0/0/1")];
+    expect(uploader.syncFailedChunks(ctx)).toHaveLength(3);
+    expect(failedChunks.mock.calls.map(([msg]) => msg as FailedChunksMessage)).toEqual([
+      { type: "failedChunks", datasetId: "a", images: [{ imageId: "a-img", chunkKeys: ["0/0/0/0/0/0", "0/0/0/0/0/1"] }] },
+      { type: "failedChunks", datasetId: "b", images: [{ imageId: "b-img", chunkKeys: ["1/0/0/0/0/0"] }] },
+    ]);
+
+    // An unchanged version costs nothing.
+    failedChunks.mockClear();
+    expect(uploader.syncFailedChunks(ctx)).toBeNull();
+
+    // Only the dataset whose list moved is sent; one with none left is cleared.
+    state.version = 2;
+    state.failed = [failure("a", "0/0/0/0/0/1"), failure("a", "0/0/0/0/0/0")];
+    uploader.syncFailedChunks(ctx);
+    expect(failedChunks.mock.calls.map(([msg]) => msg as FailedChunksMessage)).toEqual([
+      { type: "failedChunks", datasetId: "b", images: [] },
+    ]);
+  });
+
+  it("sends a reopened dataset's failures again", () => {
+    const state = { version: 1, failed: [failure("a", "0/0/0/0/0/0")] };
+    const failedChunks = vi.fn();
+    const ctx = makeCtx({ cpuCache: cacheFailing(state), client: { failedChunks } });
+    const uploader = new Uploader();
+    uploader.syncFailedChunks(ctx);
+    uploader.clearDataset("a");
+    state.version = 2;
+    uploader.syncFailedChunks(ctx);
+    expect(failedChunks).toHaveBeenCalledTimes(2);
   });
 });
