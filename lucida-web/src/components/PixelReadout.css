@@ -54,8 +54,28 @@
 }
 
 .lc-pixel-readout-axis,
-.lc-pixel-readout-level {
+.lc-pixel-readout-level,
+.lc-pixel-readout-note,
+.lc-pixel-readout-at {
   color: var(--lc-text-muted);
+}
+
+/* A label table's name for the id; a long one is cut, not let out of the card. */
+.lc-pixel-readout-detail {
+  display: inline-block;
+  max-width: 12em;
+  margin-left: var(--lc-space-1);
+  overflow: hidden;
+  font-family: var(--lc-font);
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+}
+
+/* Where a 3D ray found this row's sample, under its value. */
+.lc-pixel-readout-at {
+  display: block;
+  font-family: var(--lc-font);
+  font-size: var(--lc-text-xs);
 }
 
 .lc-pixel-readout-rows {
@@ -95,4 +115,11 @@
   width: 8px;
   height: 8px;
   border-radius: var(--lc-radius-full);
+}
+
+/* A label id's one color, square where a channel's ramp is round. */
+.lc-pixel-readout-swatch[data-label] {
+  box-sizing: border-box;
+  border: 1px solid var(--lc-border-strong);
+  border-radius: 2px;
 }

@@ -15,6 +15,14 @@ pub struct LabelColor {
     pub rgba: [u8; 4],
 }
 
+/// One named entry of an OME `image-label` property table: a label value and
+/// the name the table gives it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LabelName {
+    pub value: i64,
+    pub name: String,
+}
+
 /// A segmentation-mask label attached to a source intensity image, stored on
 /// the [`crate::graph::DatasetManifest`] as a first-class overlay member.
 ///
@@ -34,6 +42,10 @@ pub struct LabelSpec {
     /// `image-label.colors`, validated; empty when the block omits colors.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub colors: Vec<LabelColor>,
+    /// The names `image-label.properties` gives label values; empty when it
+    /// names none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub names: Vec<LabelName>,
     /// Whether the `image-label.source.image` back-pointer was declared.
     #[serde(default)]
     pub source_declared: bool,
@@ -156,6 +168,7 @@ mod tests {
                 value: 92801,
                 rgba: [10, 20, 30, 255],
             }],
+            names: vec![],
             source_declared: true,
         }
     }

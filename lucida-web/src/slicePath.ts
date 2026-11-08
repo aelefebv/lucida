@@ -263,6 +263,7 @@ export function pushLabelLayers(
       blendMode: "alpha",
       offsetX: position[0],
       offsetY: position[1],
+      entityId: source.owner,
       entityIndex: 0, // labels render via a transient descriptor, not the cold-state buffer
       isLabel: true,
       opacity,

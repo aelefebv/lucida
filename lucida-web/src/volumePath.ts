@@ -71,6 +71,7 @@ export function pushLabelVolumeLayers(
       blendMode: "alpha",
       renderMode: "translucent",
       scissorRect,
+      entityId: source.owner,
       entityIndex: 0, // labels render via a transient descriptor, not the cold-state buffer
       isLabel: true,
       opacity,
