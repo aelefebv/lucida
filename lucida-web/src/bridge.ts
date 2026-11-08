@@ -84,6 +84,25 @@ export interface DatasetSourceHealth {
   import_warnings?: DatasetImportWarning[];
 }
 
+/** Mirror of `lucida_protocol::SourceThrottleReport`. */
+export interface SourceThrottleReport {
+  /** Absent when the values are not a named profile's. */
+  profile?: string | null;
+  latency_ms: number;
+  jitter_ms: number;
+  /** The cap on all source reads together. Absent when uncapped. */
+  bytes_per_sec?: number | null;
+}
+
+/**
+ * One dataset health reply. The throttle is the server's, on every source
+ * read, and null when it reads sources unthrottled.
+ */
+export interface DatasetHealthReply {
+  datasets: DatasetSourceHealth[];
+  sourceThrottle: SourceThrottleReport | null;
+}
+
 export interface DatasetImportWarning {
   kind: DatasetImportWarningKind;
   target: string;
@@ -153,7 +172,7 @@ export interface MessageRejectedWire {
 }
 
 interface PendingDatasetHealthRequest {
-  resolve: (datasets: DatasetSourceHealth[]) => void;
+  resolve: (reply: DatasetHealthReply) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -862,7 +881,7 @@ export class Bridge {
   }
 
   private handleDatasetHealth(msg: unknown) {
-    const obj = msg as { request_id?: unknown; datasets?: unknown };
+    const obj = msg as { request_id?: unknown; datasets?: unknown; source_throttle?: unknown };
     const requestId = typeof obj.request_id === "string" ? obj.request_id : "";
     if (!requestId) return;
 
@@ -874,11 +893,15 @@ export class Bridge {
     const datasets = Array.isArray(obj.datasets)
       ? (obj.datasets as DatasetSourceHealth[])
       : [];
+    const sourceThrottle =
+      typeof obj.source_throttle === "object" && obj.source_throttle !== null
+        ? (obj.source_throttle as SourceThrottleReport)
+        : null;
     bridgeLog("dataset_health.received", {
       requestId,
       datasetCount: datasets.length,
     }, this.ws?.readyState);
-    pending.resolve(datasets);
+    pending.resolve({ datasets, sourceThrottle });
   }
 
   /**
@@ -1261,6 +1284,11 @@ export class Bridge {
   }
 
   requestDatasetHealth(datasetId?: string | null, timeoutMs = 5000): Promise<DatasetSourceHealth[]> {
+    return this.requestDatasetHealthReply(datasetId, timeoutMs).then((reply) => reply.datasets);
+  }
+
+  /** {@link requestDatasetHealth} with the server's source throttle beside the datasets. */
+  requestDatasetHealthReply(datasetId?: string | null, timeoutMs = 5000): Promise<DatasetHealthReply> {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("WebSocket is not connected"));
     }

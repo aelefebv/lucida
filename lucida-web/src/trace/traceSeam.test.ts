@@ -336,7 +336,7 @@ describe("the trace seam", () => {
   it("carries the frame and the health the viewer registered, and the projection only when asked", async () => {
     installTraceSeam();
     setBundleServices({
-      requestDatasetHealth: () => Promise.resolve([]),
+      requestHealth: () => Promise.resolve({ datasets: [], sourceThrottle: null }),
       captureFrame: () =>
         Promise.resolve({ frame: { png: new Uint8Array([1, 2, 3]).buffer, width: 4, height: 2 }, reason: null }),
       canvasRect: () => null,

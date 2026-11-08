@@ -79,7 +79,12 @@ export function fixtureHealth(id = "ds"): DatasetSourceHealth {
 
 export function fixtureServices(overrides: Partial<BundleServices> = {}): BundleServices {
   return {
-    requestDatasetHealth: () => Promise.resolve([fixtureHealth()]),
+    requestHealth: () =>
+      Promise.resolve({
+        datasets: [fixtureHealth()],
+        // A local source read under the remote profile, which is what the throttle is for.
+        sourceThrottle: { profile: "remote", latency_ms: 180, jitter_ms: 100, bytes_per_sec: 18874368 },
+      }),
     captureFrame: () =>
       Promise.resolve({
         frame: { png: PNG_BYTES.buffer.slice(0), width: 2880, height: 1800 },

@@ -63,5 +63,11 @@
         }
       ]
     }
-  ]
+  ],
+  "source_throttle": {
+    "profile": "remote",
+    "latency_ms": 180,
+    "jitter_ms": 100,
+    "bytes_per_sec": 18874368
+  }
 }

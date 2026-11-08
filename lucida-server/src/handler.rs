@@ -496,6 +496,7 @@ async fn handle_client_inner(
                             let msg = ServerMessage::DatasetHealth {
                                 request_id,
                                 datasets,
+                                source_throttle: lucida_store::source_throttle::report(),
                             };
                             let senders = unicast_routes.lock().await;
                             if let Some(sender) = senders.get(&id) {

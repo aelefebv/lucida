@@ -26,6 +26,7 @@ import {
   type DatasetSourceHealth,
   type MessageRejection,
   type PresenceState,
+  type SourceThrottleReport,
 } from "./bridge.ts";
 import {
   extractDataType,
@@ -797,6 +798,13 @@ const expectedSendReportBundle = (
   fixture("session/client_send_report.json") as { bundle: string }
 ).bundle;
 
+const expectedSourceThrottle: SourceThrottleReport = {
+  profile: "remote",
+  latency_ms: 180,
+  jitter_ms: 100,
+  bytes_per_sec: 18874368,
+};
+
 const expectedSourceHealth: DatasetSourceHealth = {
   workspace_dataset_id: "wds-0f3a",
   name: "kidney-multiplex.zarr",
@@ -1187,11 +1195,13 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       type: string;
       request_id: string;
       datasets: DatasetSourceHealth[];
+      source_throttle: SourceThrottleReport;
     };
     expect(envelope).toStrictEqual({
       type: "dataset_health",
       request_id: "web-health-55e0",
       datasets: [expectedSourceHealth],
+      source_throttle: expectedSourceThrottle,
     });
 
     const { bridge, ws } = openBridge();
@@ -1201,6 +1211,14 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     // the bridge to resolve the right pending promise).
     deliver(ws, JSON.stringify({ ...envelope, request_id: sent.request_id }));
     await expect(pending).resolves.toStrictEqual([expectedSourceHealth]);
+
+    const reply = bridge.requestDatasetHealthReply();
+    const replySent = lastSent(ws) as { request_id: string };
+    deliver(ws, JSON.stringify({ ...envelope, request_id: replySent.request_id }));
+    await expect(reply).resolves.toStrictEqual({
+      datasets: [expectedSourceHealth],
+      sourceThrottle: expectedSourceThrottle,
+    });
   });
 
   const serverReportSent = claimFixture("session/server_report_sent.json");

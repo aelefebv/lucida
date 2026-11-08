@@ -14,6 +14,7 @@ pub(crate) mod parse;
 pub mod shard;
 pub mod source_limiter;
 pub mod source_policy;
+pub mod source_throttle;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod unwritten;

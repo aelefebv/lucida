@@ -9,7 +9,7 @@ use lucida_core::scene::DocumentState;
 use lucida_protocol::{
     DatasetHealthStatus, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
     DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic,
-    DatasetSourceHealth,
+    DatasetSourceHealth, SourceThrottleReport,
 };
 use serde::{Deserialize, Serialize};
 
@@ -112,6 +112,17 @@ pub struct DatasetHealthOutput {
     pub target: WorkspaceTarget,
     pub seq: u64,
     pub datasets: Vec<DatasetSourceHealth>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_throttle: Option<SourceThrottleReport>,
+}
+
+/// One dataset health reply: each dataset's health, and the throttle the
+/// server puts on every source read, which is the server's and not any one
+/// dataset's.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ServerHealth {
+    pub datasets: Vec<DatasetSourceHealth>,
+    pub source_throttle: Option<SourceThrottleReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -295,7 +306,7 @@ impl DatasetWorkspaceClient {
         &self,
         selector: Option<&str>,
         wait: Duration,
-    ) -> Result<(u64, Vec<DatasetSourceHealth>), CliError> {
+    ) -> Result<(u64, ServerHealth), CliError> {
         let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
         let (mut write, read) = socket.split();
         let mut incoming = incoming_messages(read);
@@ -533,15 +544,26 @@ pub fn format_dataset_info_human(output: &DatasetInfoOutput) -> String {
 }
 
 pub fn format_dataset_health_human(output: &DatasetHealthOutput) -> String {
+    let throttle = output
+        .source_throttle
+        .as_ref()
+        .map(|throttle| {
+            format!(
+                "Source reads throttled on the server: {}\n\n",
+                throttle.label()
+            )
+        })
+        .unwrap_or_default();
     if output.datasets.is_empty() {
-        return "No datasets loaded".to_string();
+        return format!("{throttle}No datasets loaded");
     }
-    output
+    let datasets = output
         .datasets
         .iter()
         .map(format_one_dataset_health)
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    format!("{throttle}{datasets}")
 }
 
 pub fn format_dataset_retry_human(output: &DatasetRetryOutput) -> String {
@@ -962,7 +984,7 @@ async fn wait_for_dataset_health_result<S>(
     messages: &mut S,
     request_id: &str,
     wait: Duration,
-) -> Result<Vec<DatasetSourceHealth>, CliError>
+) -> Result<ServerHealth, CliError>
 where
     S: Stream<Item = Result<IncomingSessionMessage, CliError>> + Unpin,
 {
@@ -976,7 +998,11 @@ where
         ServerMessage::DatasetHealth {
             request_id: message_request_id,
             datasets,
-        } if message_request_id == request_id => Ok(Some(datasets)),
+            source_throttle,
+        } if message_request_id == request_id => Ok(Some(ServerHealth {
+            datasets,
+            source_throttle,
+        })),
         _ => Ok(None),
     })
     .await
@@ -1773,15 +1799,31 @@ mod tests {
                 messages: vec![],
                 import_warnings: vec![],
             }],
+            source_throttle: None,
         };
 
         let human = format_dataset_health_human(&output);
 
+        assert!(!human.contains("throttled"));
         assert!(human.contains("Dataset health: demo.zarr"));
         assert!(human.contains("Source cache: 128 / 1024 bytes (12%)"));
         assert!(human.contains("Generated coarse: healthy"));
         assert!(human.contains("Generated cache: 256 / 2048 bytes (12%) on disk"));
         assert!(human.contains("Generated failure: FailedTransient"));
+
+        let throttled = DatasetHealthOutput {
+            source_throttle: Some(SourceThrottleReport {
+                profile: Some("object-store".into()),
+                latency_ms: 100,
+                jitter_ms: 100,
+                bytes_per_sec: None,
+            }),
+            ..output
+        };
+        let human = format_dataset_health_human(&throttled);
+        assert!(human.starts_with(
+            "Source reads throttled on the server: object-store: 100-200 ms per request"
+        ));
     }
 
     #[test]

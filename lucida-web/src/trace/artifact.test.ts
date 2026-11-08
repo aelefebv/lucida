@@ -151,7 +151,9 @@ describe("the side a file hands the compare function", () => {
       planning: artifact.bundle.header.planning,
       cache: null,
       conditions: {},
+      sourceThrottle: { settings: artifact.bundle.health!.sourceThrottle },
     });
+    expect(side.sourceThrottle?.settings?.profile).toBe("remote");
     const comparison = compareTraces(side, compareSideOf(artifact, "candidate.bundle.json"));
     expect(comparison.comparable).toBe(true);
     expect(comparison.left.label).toBe("baseline.bundle.json");
@@ -172,6 +174,7 @@ describe("the side a file hands the compare function", () => {
       planning: side.planning,
       cache: side.cache,
       conditions: side.conditions,
+      sourceThrottle: side.sourceThrottle,
     };
     const produced = JSON.parse(JSON.stringify(facts));
 
@@ -194,7 +197,21 @@ describe("the side a file hands the compare function", () => {
       planning: { prefetchDepth: 0 },
       cache: { maxConcurrentFetches: 8 },
       conditions: { "server warmth": "server warm: the dataset was open before the run" },
+      sourceThrottle: null,
     });
+
+    // A file that recorded the throttle says what it was, unthrottled included.
+    const unthrottled = readArtifact(
+      JSON.stringify(runFile({}, { sourceThrottle: { summary: "source reads unthrottled" } })),
+      "runs/off.json",
+    );
+    expect(compareSideOf(unthrottled, "runs/off.json").sourceThrottle).toEqual({ settings: null });
+    const settings = { profile: "object-store", latency_ms: 100, jitter_ms: 100, bytes_per_sec: 1_250_000_000 };
+    const throttled = readArtifact(
+      JSON.stringify(runFile({}, { sourceThrottle: { settings, summary: "throttled" } })),
+      "runs/on.json",
+    );
+    expect(compareSideOf(throttled, "runs/on.json").sourceThrottle).toEqual({ settings });
 
     // A run file that set no knob ran at the page's defaults, and says so
     // with empty objects rather than with unknowns.
@@ -212,6 +229,7 @@ describe("the side a file hands the compare function", () => {
       planning: null,
       cache: null,
       conditions: null,
+      sourceThrottle: null,
     });
   });
 });

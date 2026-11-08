@@ -483,3 +483,79 @@ pub enum DatasetImportWarningKind {
     PinnedAxis,
     InvalidScale,
 }
+
+/// The throttle a server puts on its own source reads, so a local source
+/// loads the way a remote one does. A dev setting, off unless an operator
+/// sets it, and reported wherever the server reports its health, because a
+/// run measured under it is not comparable with one measured without it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceThrottleReport {
+    /// The named profile, absent when the values are not a profile's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// Added to every source request.
+    pub latency_ms: u64,
+    /// The most added on top of `latency_ms`, drawn per request.
+    pub jitter_ms: u64,
+    /// The cap on all source reads together, absent when uncapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_per_sec: Option<u64>,
+}
+
+impl SourceThrottleReport {
+    /// One line naming the profile and its numbers. Two reports with the
+    /// same settings have the same label, so it is also what a comparison
+    /// of two runs matches on.
+    pub fn label(&self) -> String {
+        let latency = if self.jitter_ms == 0 {
+            format!("{} ms", self.latency_ms)
+        } else {
+            format!(
+                "{}-{} ms",
+                self.latency_ms,
+                self.latency_ms.saturating_add(self.jitter_ms)
+            )
+        };
+        let bandwidth = match self.bytes_per_sec {
+            Some(rate) => {
+                let mib = rate as f64 / (1024.0 * 1024.0);
+                let mib = (mib * 10.0).round() / 10.0;
+                format!("{mib} MiB/s across all reads")
+            }
+            None => "no bandwidth cap".to_string(),
+        };
+        format!(
+            "{}: {latency} per request, {bandwidth}",
+            self.profile.as_deref().unwrap_or("custom")
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_throttle_label_names_the_profile_and_its_numbers() {
+        let profiled = SourceThrottleReport {
+            profile: Some("remote".into()),
+            latency_ms: 180,
+            jitter_ms: 100,
+            bytes_per_sec: Some(18 * 1024 * 1024),
+        };
+        assert_eq!(
+            profiled.label(),
+            "remote: 180-280 ms per request, 18 MiB/s across all reads"
+        );
+        let custom = SourceThrottleReport {
+            profile: None,
+            latency_ms: 50,
+            jitter_ms: 0,
+            bytes_per_sec: None,
+        };
+        assert_eq!(
+            custom.label(),
+            "custom: 50 ms per request, no bandwidth cap"
+        );
+    }
+}

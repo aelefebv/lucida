@@ -7,6 +7,7 @@ use lucida_protocol::{
     ChunkFailureKind, DatasetOpenFailureDiagnostic, DatasetOpenProgressDiagnostic,
     DatasetOpenSuccessDiagnostic, DatasetSourceHealth, GeneratedAvailabilityDelta,
     GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerTimingBatch, SourceChunkStatus,
+    SourceThrottleReport,
 };
 
 use crate::camera::{Camera, Framing, Slice};
@@ -610,6 +611,10 @@ pub enum ServerMessage {
     DatasetHealth {
         request_id: String,
         datasets: Vec<DatasetSourceHealth>,
+        /// The throttle the server puts on every source read. Absent when
+        /// it reads sources unthrottled, which is the default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source_throttle: Option<SourceThrottleReport>,
     },
     /// Runtime generated-level metadata/readiness update. Server-authored and
     /// unsequenced; clients merge it into their local availability view.

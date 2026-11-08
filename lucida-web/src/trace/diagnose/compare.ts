@@ -11,6 +11,7 @@
  * warned about.
  */
 
+import type { SourceThrottleReport } from "../../bridge.ts";
 import { CACHE_KNOB_FIELDS, type CacheKnobs } from "../../pipeline/fetch/cacheKnobs.ts";
 import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "../../pipeline/planning/config.ts";
 import type { RunHeader, TraceDocument } from "../types.ts";
@@ -55,6 +56,13 @@ export interface CompareSide {
   cache?: CacheKnobs | null;
   /** Conditions the caller knows and the trace does not, listed as given and never judged. */
   conditions?: Record<string, HeaderValue> | null;
+  /**
+   * The throttle the server put on its source reads, with null settings
+   * when it read them unthrottled. Null or absent when the side does not
+   * say. When both sides say, a difference breaks comparability, because a
+   * throttle is in every source read the run waited on.
+   */
+  sourceThrottle?: { settings: SourceThrottleReport | null } | null;
 }
 
 /** What each side is, for the text's two identity lines and the JSON. */
@@ -235,6 +243,7 @@ const WARNING_LABELS: Record<string, string> = {
   build: "build",
   cacheWarmth: "browser cache",
   quiescenceHoldMs: "quiescence hold",
+  sourceThrottle: "source throttle",
 };
 
 function compareHeaders(left: ResolvedSide, right: ResolvedSide): HeaderDifference[] {
@@ -256,6 +265,16 @@ function compareHeaders(left: ResolvedSide, right: ResolvedSide): HeaderDifferen
   breaking("build", left.doc.run.build, right.doc.run.build);
   breaking("cacheWarmth", left.doc.run.warmth, right.doc.run.warmth);
   breaking("quiescenceHoldMs", left.run.quiescenceHoldMs, right.run.quiescenceHoldMs);
+  // Only two records that disagree prove the runs ran under different
+  // throttles. A side that does not say, such as a saved run, which never
+  // records one, is listed as unknown beside the other.
+  const leftThrottle = throttleOf(left.side);
+  const rightThrottle = throttleOf(right.side);
+  if (leftThrottle !== null && rightThrottle !== null) {
+    breaking("sourceThrottle", leftThrottle, rightThrottle);
+  } else if (leftThrottle !== null || rightThrottle !== null) {
+    listed("condition", "sourceThrottle", leftThrottle, rightThrottle);
+  }
   // The end reason is an outcome, not a condition: listed, never warned about.
   listed("run", "endReason", left.doc.run.endReason, right.doc.run.endReason);
 
@@ -286,6 +305,22 @@ function compareHeaders(left: ResolvedSide, right: ResolvedSide): HeaderDifferen
     listed("condition", key, left.side.conditions?.[key] ?? null, right.side.conditions?.[key] ?? null);
   }
   return fields;
+}
+
+/** `off`, the profile and its numbers, or null when the side does not say. */
+function throttleOf(side: CompareSide): string | null {
+  if (!side.sourceThrottle) return null;
+  const settings = side.sourceThrottle.settings;
+  if (!settings) return "off";
+  const latency =
+    settings.jitter_ms === 0
+      ? `${settings.latency_ms} ms`
+      : `${settings.latency_ms}-${settings.latency_ms + settings.jitter_ms} ms`;
+  const bandwidth =
+    settings.bytes_per_sec == null
+      ? "no bandwidth cap"
+      : `${Math.round((settings.bytes_per_sec / (1024 * 1024)) * 10) / 10} MiB/s across all reads`;
+  return `${settings.profile ?? "custom"}: ${latency} per request, ${bandwidth}`;
 }
 
 function adapterOf(document: DiagnosticDocument): string {
