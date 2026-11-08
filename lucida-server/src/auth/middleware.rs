@@ -199,7 +199,7 @@ pub async fn build_extractor(
     token_store: Arc<dyn BearerTokenStore>,
 ) -> Result<SharedExtractor, IapError> {
     Ok(match config.mode {
-        AuthMode::Disabled => Arc::new(StubPrincipalExtractor::new(config)),
+        AuthMode::Disabled => Arc::new(StubPrincipalExtractor::new(config, store)),
         AuthMode::Google => Arc::new(DualCredentialExtractor::new(config, store, token_store)),
         AuthMode::Iap => {
             let iap_config = config
