@@ -12,6 +12,11 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  # Keep in lockstep with the wasm-pack pin in Dockerfile, so the image's
+  # lucida-core pkg comes from the same wasm-pack that CI's vitest resolves.
+  WASM_PACK_VERSION: 0.15.0
+
 jobs:
   rust:
     name: Rust workspace (test + clippy)
@@ -123,17 +128,20 @@ jobs:
       - name: Cache cargo build (shared with rust job)
         uses: Swatinem/rust-cache@v2
 
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+      # Built from crates.io and cached, not downloaded from the GitHub
+      # release: release downloads can return 504s for long stretches.
+      - name: Cache wasm-pack
+        id: wasm-pack-cache
+        uses: actions/cache@v4
         with:
-          # Pin an explicit version. `version: latest` resolves via a GitHub
-          # API call from the runner; under rate limits the action silently
-          # falls back to wasm-pack v0.9.1 (2020), whose generated
-          # pkg/package.json vitest cannot resolve — the wasm-importing test
-          # files then fail with "Failed to resolve entry for lucida-core"
-          # while build/install/tsc/lint pass (lucida-cuk). Keep this in lockstep
-          # with the wasm-pack pin in Dockerfile.
-          version: 'v0.15.0'
+          path: ~/.cargo/bin/wasm-pack*
+          key: wasm-pack-${{ env.WASM_PACK_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      # --force: rust-cache can restore a wasm-pack binary that cargo did not
+      # install, and cargo refuses to overwrite one.
+      - name: Install wasm-pack
+        if: steps.wasm-pack-cache.outputs.cache-hit != 'true'
+        run: cargo install wasm-pack --version ${{ env.WASM_PACK_VERSION }} --locked --force
 
       # The version is lucida-web's `packageManager` pin, which Dependabot
       # and the Dockerfile run too, so every lockfile writer agrees.
@@ -202,11 +210,17 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+      # As in the web job.
+      - name: Cache wasm-pack
+        id: wasm-pack-cache
+        uses: actions/cache@v4
         with:
-          # The web job's pin.
-          version: 'v0.15.0'
+          path: ~/.cargo/bin/wasm-pack*
+          key: wasm-pack-${{ env.WASM_PACK_VERSION }}-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install wasm-pack
+        if: steps.wasm-pack-cache.outputs.cache-hit != 'true'
+        run: cargo install wasm-pack --version ${{ env.WASM_PACK_VERSION }} --locked --force
 
       - name: Install pnpm
         uses: pnpm/action-setup@v6
@@ -241,8 +255,27 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The release asset comes through the REST API first and the github.com
+      # download URL second: the download URL can return 504s for long
+      # stretches while the API route still serves. EmbarkStudios/cargo-deny-
+      # action fetches only from the download URL, so it is not used. The
+      # version and checksum are pinned by hand; Dependabot does not see them.
+      - name: Install cargo-deny
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: 0.20.2
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          asset="cargo-deny-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+          gh release download "$VERSION" -R EmbarkStudios/cargo-deny -p "$asset" --clobber \
+            || curl -fsSL --retry 5 --retry-all-errors -o "$asset" \
+                 "https://github.com/EmbarkStudios/cargo-deny/releases/download/$VERSION/$asset"
+          echo "9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f  $asset" | sha256sum -c -
+          tar -xzf "$asset" --strip-components=1 -C /usr/local/bin "${asset%.tar.gz}/cargo-deny"
+
       - name: cargo deny check
-        uses: EmbarkStudios/cargo-deny-action@v2
+        run: cargo deny --all-features check
 
   docker:
     name: Docker smoke build (no push)
@@ -418,10 +451,21 @@ jobs:
       # `kubectl apply --dry-run=client` doesn't work for offline CI
       # because even with --validate=false it tries to look up resource
       # types via REST mapping (hits localhost:8080).
+      #
+      # Fetched as cargo-deny is; the checksum is the release's CHECKSUMS
+      # entry.
       - name: Install kubeconform
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: kubeconform-linux-amd64.tar.gz
         run: |
-          curl -fsSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
-            | tar -xz -C /usr/local/bin kubeconform
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          gh release download v0.6.7 -R yannh/kubeconform -p "$ASSET" --clobber \
+            || curl -fsSL --retry 5 --retry-all-errors -o "$ASSET" \
+                 "https://github.com/yannh/kubeconform/releases/download/v0.6.7/$ASSET"
+          echo "95f14e87aa28c09d5941f11bd024c1d02fdc0303ccaa23f61cef67bc92619d73  $ASSET" | sha256sum -c -
+          tar -xzf "$ASSET" -C /usr/local/bin kubeconform
 
       - name: kubeconform validation
         run: kubeconform -strict -summary /tmp/k8s-rendered/
@@ -439,8 +483,11 @@ jobs:
       - name: Cache cargo build (shared with rust job)
         uses: Swatinem/rust-cache@v2
 
+      # From PyPI rather than astral-sh/setup-uv, which fetches uv from its
+      # GitHub release: release downloads can return 504s for long stretches.
+      # The runner image puts pipx's bin directory on PATH.
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        run: pipx install uv==0.13.7
 
       # The client's integration tests drive a real server.
       - name: Build lucida-server
