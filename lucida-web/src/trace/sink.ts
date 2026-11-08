@@ -34,8 +34,18 @@ import {
 } from "./types.ts";
 
 export interface TraceSink {
-  /** Returns the row's index within this sink. */
-  append(src: ChunkRowSource, tier: 0 | 1): number;
+  /**
+   * A row born at dispatch, with `plan` (unless `planStartUs` is unset),
+   * `queue` and the start of `wire` stamped. Returns the row's index within
+   * this sink.
+   */
+  appendDispatched(
+    src: ChunkRowSource,
+    tier: 0 | 1,
+    planStartUs: number,
+    queueStartUs: number,
+    wireStartUs: number,
+  ): number;
   setLabel(index: number, label: WireLabel): void;
   stamp(index: number, boundary: number, offsetUs: number): void;
   /** The payload bytes the wire delivered for the row. */
@@ -125,7 +135,7 @@ export interface TraceSink {
 export class NoopTraceSink implements TraceSink {
   private rows = 0;
 
-  append(): number {
+  appendDispatched(): number {
     return this.rows++;
   }
 
@@ -221,9 +231,17 @@ export class TableTraceSink implements TraceSink {
   private readonly ticks = new TickRing();
   private readonly readings = new ReadingRing();
   private readonly events = new EventRing();
+  /** The rings never grow, so their bytes are summed once rather than on every row. */
+  private readonly ringBytes = this.ticks.byteLength + this.readings.byteLength + this.events.byteLength;
 
-  append(src: ChunkRowSource, tier: 0 | 1): number {
-    return this.rows.append(src, tier);
+  appendDispatched(
+    src: ChunkRowSource,
+    tier: 0 | 1,
+    planStartUs: number,
+    queueStartUs: number,
+    wireStartUs: number,
+  ): number {
+    return this.rows.appendDispatched(src, tier, planStartUs, queueStartUs, wireStartUs);
   }
 
   setLabel(index: number, label: WireLabel): void {
@@ -333,12 +351,7 @@ export class TableTraceSink implements TraceSink {
 
   /** Every tier a run holds, because the resident cap is on the run. */
   get byteLength(): number {
-    return (
-      this.rows.byteLength +
-      this.ticks.byteLength +
-      this.readings.byteLength +
-      this.events.byteLength
-    );
+    return this.rows.byteLength + this.ringBytes;
   }
 
   get ticksDropped(): number {
