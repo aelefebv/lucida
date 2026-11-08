@@ -21,11 +21,11 @@ import { dirname, join } from "node:path";
 import {
   Bridge,
   type BridgeHandlers,
-  type BookmarkAction,
   type DatasetHealthStatus,
   type DatasetOpenProgressDiagnostic,
   type DatasetOpenStage,
   type DatasetSourceHealth,
+  type MessageRejection,
   type PresenceState,
 } from "./bridge.ts";
 import {
@@ -67,7 +67,10 @@ import {
   type WireAssetCatalog,
   type WireAssetCatalogDelta,
 } from "./pipeline/assetCatalog.ts";
-import { ProxiedContentSource } from "./pipeline/fetch/contentSource.ts";
+import {
+  ProxiedContentSource,
+  type ChunkFailureKind,
+} from "./pipeline/fetch/contentSource.ts";
 import { ServerRowTable, serverRowTotalUs } from "./trace/serverRowTable.ts";
 import { LABEL_NONE, PHASE_UNSET } from "./trace/types.ts";
 import { COLORMAP_NAMES } from "./colormaps.ts";
@@ -1339,6 +1342,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       image_id: "multiscale-0",
       key: "0/1/0/1/0/0",
       status: "failed_permanent",
+      kind: "permission",
       message: "access to the dataset store was denied",
     });
 
@@ -1351,24 +1355,82 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       "0/1/0/1/0/0",
       "failed_permanent",
       "access to the dataset store was denied",
+      "permission",
     );
 
     // Consumption path: the same frame's fields drive the content source,
     // which must fail the pending fetch permanently (never a transient
-    // timeout) so the delivery-failure streak can count a dead source.
+    // timeout) so the delivery-failure streak can count a dead source, and
+    // carry the kind so the trace names the failure.
     const source = new ProxiedContentSource(() => {});
     source.registerImage("multiscale-0", { Raw: { data_type: "Uint16" } });
     const pending = source.fetch(
       { datasetId: "wds-0f3a", imageId: "multiscale-0", chunkKey: "0/1/0/1/0/0" },
       new AbortController().signal,
     );
-    const [datasetId, imageId, key, status, message] = onSourceChunkStatus.mock.calls[0];
-    source.handleSourceChunkStatus(datasetId, imageId, key, status, message);
+    const [datasetId, imageId, key, status, message, failure] = onSourceChunkStatus.mock.calls[0];
+    source.handleSourceChunkStatus(datasetId, imageId, key, status, message, failure);
     await expect(pending).rejects.toMatchObject({
       name: "FetchError",
       kind: "permanent",
+      failure: "permission",
       message: expect.stringContaining("access to the dataset store was denied"),
     });
+  });
+
+  it("source_chunk_status for a malformed key answers the request as the client spelled it", async () => {
+    const raw = fixtureRaw("session/server_source_chunk_status_malformed_key.json");
+    COVERED_FIXTURES.add("session/server_source_chunk_status_malformed_key.json");
+    const envelope = JSON.parse(raw);
+    expect(envelope).toStrictEqual({
+      type: "source_chunk_status",
+      dataset_id: "wds-0f3a",
+      image_id: "multiscale-0",
+      key: "0/1/0/1",
+      status: "failed_permanent",
+      kind: "malformed_key",
+      message: "a chunk key has 6 parts, level/t/c/z/y/x, and this one has 4",
+    });
+
+    const source = new ProxiedContentSource(() => {});
+    source.registerImage("multiscale-0", { Raw: { data_type: "Uint16" } });
+    const pending = source.fetch(
+      { datasetId: "wds-0f3a", imageId: "multiscale-0", chunkKey: "0/1/0/1" },
+      new AbortController().signal,
+    );
+    const { ws } = openBridge({
+      onSourceChunkStatus: (...args) => source.handleSourceChunkStatus(...args),
+    });
+    deliver(ws, raw);
+    await expect(pending).rejects.toMatchObject({
+      name: "FetchError",
+      kind: "permanent",
+      failure: "malformed_key",
+      message: expect.stringContaining("has a malformed key"),
+    });
+  });
+
+  it("message_rejected fails the request it answers with the server's reason", async () => {
+    const raw = fixtureRaw("session/server_message_rejected.json");
+    COVERED_FIXTURES.add("session/server_message_rejected.json");
+    const envelope = JSON.parse(raw) as { request_id: string; reason: MessageRejection };
+    expect(envelope).toStrictEqual({
+      type: "message_rejected",
+      request_id: "open-7",
+      rid: 42,
+      message_type: "open_remote_dataset",
+      reason: "malformed",
+      message: "the open_remote_dataset message does not have the fields its type requires",
+    });
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { bridge, ws } = openBridge();
+    const pending = bridge.sendReport(expectedSendReportBundle);
+    const sent = lastSent(ws) as { request_id: string };
+    deliver(ws, JSON.stringify({ ...envelope, request_id: sent.request_id }));
+    await expect(pending).rejects.toThrow("malformed");
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("does not have the fields"));
+    warn.mockRestore();
   });
 
   it("timing_batch reaches the recorder's table as columns", () => {
@@ -1437,36 +1499,6 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
       // its span is in its own column rather than in any phase.
       [0, "metadata-read", 0, 63441, "web-open-4c1a", "backend-read", null],
     ]);
-  });
-
-  it("bookmark_changed fans out to handler and subscribers", () => {
-    const raw = fixtureRaw("session/server_bookmark_changed.json");
-    COVERED_FIXTURES.add("session/server_bookmark_changed.json");
-    expect(JSON.parse(raw)).toStrictEqual({
-      type: "bookmark_changed",
-      id: "bookmark-31f7",
-      action: "updated",
-      dataset_urls: [
-        "gs://lucida-fixtures/kidney-multiplex.zarr",
-        "gs://lucida-fixtures/screening-collection-01.zarr",
-      ],
-    });
-
-    const onBookmarkChanged = vi.fn();
-    const listener = vi.fn();
-    const { bridge, ws } = openBridge({ onBookmarkChanged });
-    bridge.subscribeBookmarkChanged(listener);
-    deliver(ws, raw);
-    const expectedArgs = [
-      "bookmark-31f7",
-      "updated",
-      [
-        "gs://lucida-fixtures/kidney-multiplex.zarr",
-        "gs://lucida-fixtures/screening-collection-01.zarr",
-      ],
-    ];
-    expect(onBookmarkChanged).toHaveBeenCalledWith(...expectedArgs);
-    expect(listener).toHaveBeenCalledWith(...expectedArgs);
   });
 
   it("workspace_archived reaches the handler (and tears the bridge down)", () => {
@@ -2045,7 +2077,24 @@ describe("wire goldens: enum vocabulary", () => {
       "failed_permanent",
       "ready",
     ];
-    const bookmarkActions: BookmarkAction[] = ["created", "updated", "deleted"];
+    const chunkFailureKinds: ChunkFailureKind[] = [
+      "malformed_key",
+      "unknown_dataset",
+      "unknown_image",
+      "unknown_level",
+      "corrupt_chunk",
+      "wrong_size",
+      "unsupported_codec",
+      "permission",
+      "storage_backend",
+    ];
+    const messageRejections: MessageRejection[] = [
+      "malformed",
+      "unknown_type",
+      "binary_frame",
+      "throttled",
+      "unknown_dataset",
+    ];
     const annotationKinds: WireAnnotation["kind"][] = ["point", "line", "box"];
 
     expect(coveredFixture("vocab/enum_vocabulary.json")).toStrictEqual({
@@ -2086,11 +2135,12 @@ describe("wire goldens: enum vocabulary", () => {
       dataset_health_statuses: healthStatuses,
       generated_chunk_statuses: chunkStatuses,
       generated_level_roles: ["coarse"],
-      bookmark_actions: bookmarkActions,
       // Strings the tick coordinator emits (pipeline/tickCoordinator.ts).
       viewer_interest_modes: ["slice", "volume"],
       viewer_interaction_modes: ["idle", "panning", "zooming", "scrubbing"],
       viewer_interest_lanes: ["visible", "predicted", "background"],
+      chunk_failure_kinds: chunkFailureKinds,
+      message_rejections: messageRejections,
     });
   });
 });

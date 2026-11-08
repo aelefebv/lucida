@@ -12,7 +12,6 @@ use std::sync::Arc;
 use lucida_content::LevelGeometry;
 use lucida_server::binding::ChunkResolver;
 use lucida_server::chunk_read::read_chunk;
-use lucida_server::decode::{StorageCompression, decode_storage_bytes};
 use lucida_store::cache::{CachedStore, DEFAULT_SOURCE_CACHE_BYTES};
 use lucida_store::import::import_dataset;
 use lucida_store::import_types::ImportResult;
@@ -60,7 +59,7 @@ async fn served(opened: &Opened, image: &lucida_content::ImageId, key: &str) -> 
         &opened.resolver,
         &opened.store,
         image,
-        key,
+        &key.parse::<lucida_content::ChunkKey>().unwrap(),
         READER,
         LABEL,
         None,
@@ -80,7 +79,7 @@ fn native_level1_plane(tile: &str, channel: u32) -> Vec<u16> {
         .join("0")
         .join("0");
     let raw = std::fs::read(&path).unwrap();
-    samples(&decode_storage_bytes(&raw, StorageCompression::Zstd, usize::MAX).unwrap())
+    samples(&zstd::decode_all(&raw[..]).unwrap())
 }
 
 #[tokio::test]

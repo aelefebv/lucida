@@ -41,7 +41,7 @@ import type {
   WatchCursor,
   WatchSample,
 } from "./liveProgress.ts";
-import type { QuiescenceState } from "./quiescence.ts";
+import { SETTLE_HOLD_MS, type SettleState } from "../pipeline/settle.ts";
 import { addSend, SEND_COLUMN_COUNT, sendTalliesFrom } from "./sendAccounting.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
 import { TickScratch } from "./tickRing.ts";
@@ -67,6 +67,7 @@ import {
   type EndReason,
   type CacheWarmth,
   type GpuIdentity,
+  type GpuMemoryReading,
   type InputKind,
   type Outstanding,
   type Phase,
@@ -110,18 +111,18 @@ const PLAN_SPAN_RING = 16;
 
 
 /**
- * How long `quiescent` must hold before a run closes on its own. Clears the
- * residency render interval and the minimap scan cadence with margin while
- * staying small against a healthy sub-second local open. It goes
- * in the header because it is baked into every duration a run reports.
+ * How long `quiescent` must hold before a run closes on its own: the hold
+ * the page's settle signal uses. It goes in the header because it is baked
+ * into every duration a run reports.
  */
-export const DEFAULT_QUIESCENCE_HOLD_MS = 500;
+export const DEFAULT_QUIESCENCE_HOLD_MS = SETTLE_HOLD_MS;
 
 /**
- * How long a run may stay open before closing as `timeout`. Three paths can
- * keep a page live indefinitely, and a monitor that emits nothing on the
- * interesting case is the wrong tool — the most diagnostic run is the one
- * that never finished.
+ * How long a run may stay open before closing as `timeout`, unless a trace
+ * driver sets its own through the seam. A view that settles or stalls ends
+ * its run sooner; a run still making progress when this runs out is the
+ * one it exists for, because a monitor that emits nothing on the
+ * interesting case is the wrong tool.
  */
 export const DEFAULT_RUN_TIMEOUT_MS = 60_000;
 
@@ -261,7 +262,7 @@ export class TraceRecorder {
   private readonly now: () => number;
   private readonly epochNow: () => number;
   private readonly quiescenceHoldMs: number;
-  private readonly timeoutMs: number;
+  private timeoutMs: number;
 
   private environment: TraceEnvironment | null = null;
   private gpuIdentity: GpuIdentity | null = null;
@@ -296,6 +297,8 @@ export class TraceRecorder {
   private readonly planEndsMs = new Float64Array(PLAN_SPAN_RING);
   private planSpanCount = 0;
   private openPlanStartMs: number | null = null;
+  /** The ring slot the open pass's span is in, or -1 before it enqueues. */
+  private openPlanSlot = -1;
 
   /**
    * Rows handed to the renderer but not yet covered by a frame, and rows
@@ -344,7 +347,7 @@ export class TraceRecorder {
 
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
   private timeoutTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastQuiescence: QuiescenceState | null = null;
+  private lastQuiescence: SettleState | null = null;
 
   private readonly tickListeners = new Set<TickListener>();
   private readonly latest: LatestReading = {
@@ -431,9 +434,10 @@ export class TraceRecorder {
   }
 
   /**
-   * The labelled runs that concluded on their own, by settling or timing
-   * out, with the id of the most recent one. What a driver waits for, and
-   * readable without exporting because exporting closes the run asked about.
+   * The labelled runs that concluded on their own, by settling, stalling or
+   * timing out, with the id of the most recent one. What a driver waits for,
+   * and readable without exporting because exporting closes the run asked
+   * about.
    *
    * An `explicit` close is excluded because somebody asked for it: a page
    * torn down and rebuilt hands back a run that lived under a millisecond.
@@ -445,7 +449,7 @@ export class TraceRecorder {
     let lastId: string | null = null;
     for (const interval of this.closed) {
       const { cause, endReason, runId } = interval.header;
-      if (!cause || (endReason !== "quiescent" && endReason !== "timeout")) continue;
+      if (!cause || !concludedOnItsOwn(endReason)) continue;
       count += 1;
       lastId = runId;
     }
@@ -463,7 +467,7 @@ export class TraceRecorder {
   }
 
   /** The last state the page published, or null before the first publication. */
-  get quiescence(): QuiescenceState | null {
+  get quiescence(): SettleState | null {
     return this.lastQuiescence;
   }
 
@@ -731,10 +735,32 @@ export class TraceRecorder {
    * merely counting what it saw, only one in which no page has told it what
    * conditions it would be recording under.
    */
-  closeRun(endReason: EndReason): void {
+  closeRun(endReason: EndReason, stallReason: string | null = null): void {
     if (!this.open) return;
-    this.finishInterval(endReason);
+    // A stall concludes a labelled run; steady state has nothing to stall.
+    if (endReason === "stalled" && !this.open.cause) return;
+    this.finishInterval(endReason, endReason === "stalled" ? stallReason : null);
     this.beginInterval(null);
+  }
+
+  /** How long a run may stay open before closing as `timeout`. */
+  get runTimeoutMs(): number {
+    return this.timeoutMs;
+  }
+
+  /**
+   * Set how long a run may stay open. A run already open is held to the new
+   * length from when it opened, so a driver that sets it as the page comes
+   * up governs the open it is waiting for.
+   */
+  setRunTimeout(ms: number): void {
+    if (!Number.isFinite(ms) || ms <= 0 || ms === this.timeoutMs) return;
+    this.timeoutMs = ms;
+    const run = this.open;
+    if (!run?.cause || this.timeoutTimer === null) return;
+    clearTimeout(this.timeoutTimer);
+    const remaining = Math.max(0, run.startedAtMs + ms - this.now());
+    this.timeoutTimer = setTimeout(() => this.closeRun("timeout"), remaining);
   }
 
   /**
@@ -742,7 +768,7 @@ export class TraceRecorder {
    * has held for the hold window, so a momentary lull between two bursts of
    * arrivals does not end the run early.
    */
-  noteQuiescence(state: QuiescenceState): void {
+  noteQuiescence(state: SettleState): void {
     this.lastQuiescence = state;
     // Settling ends a labelled run. The unlabelled interval has nothing to
     // settle into — it is what a settled page records.
@@ -776,12 +802,15 @@ export class TraceRecorder {
    * `queue` and opens `wire`. Splitting it into three calls would triple the
    * per-chunk event count the 250 µs tick ceiling is derived from.
    *
-   * `admittedAtMs` is the scheduler's admission stamp, kept for the admission
-   * window only. A row admitted straight off the backlog dates its queue from
-   * the plan pass that enqueued it, so queue time before the window is a
-   * floor, not a total. `plan` is attributed to the last pass that ended at
-   * or before admission; with none in the ring the plan slot stays unset,
-   * which reads as "not measured" rather than as zero.
+   * `admittedAtMs` is the scheduler's admission stamp, which only the
+   * admission window carries. `plan` is the newest pass that started at or
+   * before admission, and `queue` starts where that pass enqueued, not at the
+   * stamp: a request promoted from the backlog into the window is stamped
+   * when it is promoted, and its wait before that is queue time, not
+   * planning. A request the backlog held across several passes dates its
+   * queue from the newest, so queue time is a floor, not a total. With no
+   * pass in the ring the plan slot stays unset, which reads as "not
+   * measured" rather than as zero.
    */
   beginChunkRow(src: ChunkRowSource, tier: 0 | 1, admittedAtMs?: number): number {
     const run = this.intervalForRecording();
@@ -797,11 +826,13 @@ export class TraceRecorder {
     // between two halves of the same boundary.
     const dispatchedAtMs = this.now();
     const admittedMs = admittedAtMs ?? this.latestPlanEndMs() ?? dispatchedAtMs;
-    const planStartMs = this.planStartAtOrBefore(admittedMs);
-    if (planStartMs !== null) {
-      run.sink.stamp(index, Boundary.PlanStart, this.offsetUs(run, planStartMs));
+    const pass = this.planPassAt(admittedMs);
+    let queuedMs = admittedMs;
+    if (pass >= 0) {
+      run.sink.stamp(index, Boundary.PlanStart, this.offsetUs(run, this.planStartsMs[pass]));
+      queuedMs = Math.min(admittedMs, this.planEndsMs[pass]);
     }
-    run.sink.stamp(index, Boundary.QueueStart, this.offsetUs(run, admittedMs));
+    run.sink.stamp(index, Boundary.QueueStart, this.offsetUs(run, queuedMs));
     run.sink.stamp(index, Boundary.WireStart, this.offsetUs(run, dispatchedAtMs));
 
     return run.generation * GENERATION_STRIDE + index;
@@ -826,22 +857,28 @@ export class TraceRecorder {
    */
   markPlanStart(): void {
     this.openPlanStartMs = this.now();
+    this.openPlanSlot = -1;
   }
 
   /**
-   * Close the plan pass at the moment its requests were handed to the
+   * End the plan pass at the moment its requests were handed to the
    * scheduler. The caller passes the timestamp it enqueued with rather than
    * letting the recorder read the clock again, so a row's plan end and its
    * queue start are the same number and the phases meet exactly.
+   *
+   * A pass submits once per dataset, so it can enqueue more than once. Each
+   * enqueue moves the pass's end: a row enqueued by a later dataset's submit
+   * keeps that dataset's planning in `plan`.
    */
   notePlanEnqueue(enqueuedAtMs: number): void {
     const startMs = this.openPlanStartMs;
     if (startMs === null) return;
-    this.openPlanStartMs = null;
-    const slot = this.planSpanCount % PLAN_SPAN_RING;
-    this.planStartsMs[slot] = startMs;
-    this.planEndsMs[slot] = enqueuedAtMs;
-    this.planSpanCount++;
+    if (this.openPlanSlot < 0) {
+      this.openPlanSlot = this.planSpanCount % PLAN_SPAN_RING;
+      this.planStartsMs[this.openPlanSlot] = startMs;
+      this.planSpanCount++;
+    }
+    this.planEndsMs[this.openPlanSlot] = enqueuedAtMs;
   }
 
   /**
@@ -1203,7 +1240,8 @@ export class TraceRecorder {
    * commit: the planner's epoch cache means a run can fetch for seconds
    * without re-planning, so readings on that cadence would cluster at run
    * start. `gpuPassUs` is null when nothing arrived since the previous
-   * reading, because a zero would read as a fast GPU.
+   * reading, because a zero would read as a fast GPU. `gpuMemory` is the
+   * render worker's latest report, null before its first.
    */
   noteReading(
     queueDepth: number,
@@ -1211,6 +1249,7 @@ export class TraceRecorder {
     frameTimeUs: number,
     residentBytes: number,
     gpuPassUs: number | null = null,
+    gpuMemory: GpuMemoryReading | null = null,
   ): void {
     // Ahead of the run check: the latest reading is read with no run open.
     const latest = this.latest;
@@ -1227,7 +1266,7 @@ export class TraceRecorder {
     this.readingColumns[ReadingColumn.InFlight] = inFlight;
     this.readingColumns[ReadingColumn.FrameTimeUs] = frameTimeUs;
     this.readingColumns[ReadingColumn.ResidentBytes] = residentBytes;
-    run.sink.appendReading(this.offsetUs(run, this.now()), this.readingColumns, gpuPassUs);
+    run.sink.appendReading(this.offsetUs(run, this.now()), this.readingColumns, gpuPassUs, gpuMemory);
   }
 
   /**
@@ -1335,6 +1374,7 @@ export class TraceRecorder {
     this.lastQuiescence = null;
     this.planSpanCount = 0;
     this.openPlanStartMs = null;
+    this.openPlanSlot = -1;
     this.lastTargetByDataset.clear();
     this.beginInterval(null);
   }
@@ -1386,7 +1426,7 @@ export class TraceRecorder {
     }
   }
 
-  private finishInterval(endReason: EndReason): void {
+  private finishInterval(endReason: EndReason, stallReason: string | null = null): void {
     const run = this.open;
     if (!run) return;
     this.clearHoldTimer();
@@ -1442,6 +1482,7 @@ export class TraceRecorder {
         runId: run.runId,
         cause: run.cause,
         endReason,
+        stallReason,
         truncation: run.truncation,
         build: buildIdentity(),
         gpu: this.gpuIdentity,
@@ -1565,18 +1606,20 @@ export class TraceRecorder {
     return this.planEndsMs[(this.planSpanCount - 1) % PLAN_SPAN_RING];
   }
 
-  /** The start of the newest plan pass that had already enqueued by `atMs`. */
-  private planStartAtOrBefore(atMs: number): number | null {
+  /**
+   * The ring slot of the newest enqueuing plan pass that started by `atMs`,
+   * or -1. Matched by start rather than end, because a pass that enqueues
+   * once per dataset ends after the rows its first enqueue admitted.
+   */
+  private planPassAt(atMs: number): number {
     const spans = Math.min(this.planSpanCount, PLAN_SPAN_RING);
-    let bestEnd = -Infinity;
-    let bestStart: number | null = null;
+    let best = -1;
     for (let i = 0; i < spans; i++) {
-      const end = this.planEndsMs[i];
-      if (end > atMs || end <= bestEnd) continue;
-      bestEnd = end;
-      bestStart = this.planStartsMs[i];
+      const start = this.planStartsMs[i];
+      if (start > atMs || (best >= 0 && start <= this.planStartsMs[best])) continue;
+      best = i;
     }
-    return bestStart;
+    return best;
   }
 
   private resolve(handle: number): OpenInterval | null {
@@ -1605,6 +1648,11 @@ function newConnection(
   gapUs: number | null,
 ): ConnectionRecord {
   return { generation, openedAtUs, closedAtUs: null, gapUs, firstRid: null, lastRid: null };
+}
+
+/** Whether a run with this end reason closed without anybody asking it to. */
+function concludedOnItsOwn(endReason: EndReason): boolean {
+  return endReason === "quiescent" || endReason === "stalled" || endReason === "timeout";
 }
 
 /** The bytes column of every type in a send-tally vector, summed. */

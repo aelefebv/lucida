@@ -136,7 +136,7 @@ jobs:
           version: 'v0.15.0'
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 
@@ -207,7 +207,7 @@ jobs:
           version: 'v0.15.0'
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 
@@ -230,6 +230,18 @@ jobs:
         working-directory: lucida-web
         run: pnpm test
 
+  # Advisories, licenses, duplicate crates and sources, per deny.toml. A new
+  # advisory can fail this job on a pull request that changes no dependency.
+  cargo-deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: cargo deny check
+        uses: EmbarkStudios/cargo-deny-action@v2
+
   docker:
     name: Docker smoke build (no push)
     runs-on: ubuntu-latest
@@ -250,7 +262,7 @@ jobs:
       - name: Detect build-context changes
         id: filter
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           filters: |
             build:
@@ -305,7 +317,7 @@ jobs:
       # cold; pushed fixup commits and rebases see warm caches.
       - name: Build image (single-arch, no push)
         if: steps.gate.outputs.build == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64
@@ -416,7 +428,7 @@ jobs:
   python:
     name: lucida-py (maturin + pytest)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -429,12 +441,19 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
-      # lucida-py is excluded from the cargo workspace, so the `rust` job does
-      # NOT build it — this job is its sole CI gate. Build the pyo3 extension
-      # with maturin and run the client tests. uv provisions a >=3.10
-      # interpreter per pyproject's requires-python.
+      # The client's integration tests drive a real server.
+      - name: Build lucida-server
+        run: cargo build --locked -p lucida-server
+
+      # The `rust` job lints lucida-py but never links it: only maturin builds
+      # the extension module, so this job is what proves it builds and runs.
+      # uv provisions a >=3.10 interpreter per pyproject's requires-python.
       - name: Build extension + run tests
         working-directory: lucida-py
+        env:
+          LUCIDA_SERVER_BIN: ${{ github.workspace }}/target/debug/lucida-server
+          # Turn the server tests' skip into a failure, as for Postgres above.
+          LUCIDA_REQUIRE_SERVER_TESTS: "1"
         run: |
           uv sync --python 3.12
           uv run maturin develop

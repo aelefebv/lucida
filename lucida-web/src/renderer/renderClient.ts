@@ -9,11 +9,13 @@ import type {
   WorkerToMainMessage,
   CaptureFailure,
   FrameCaptureResult,
-  GpuAtlasReport,
+  GpuCapacityReport,
+  GpuMemoryReport,
   ColdStateMessage,
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
+  FailedChunksMessage,
   ViewHotStateMessage,
   RgbaColor,
   MinimapUploadOverviewChunksForLayerMessage,
@@ -27,7 +29,7 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type {
   UploadClient,
-  ChunksEvictedHandler,
+  ChunkResidencyHandler,
   WantedSetHandler,
 } from "../pipeline/upload/uploadClient.ts";
 import { tokenColor } from "../theme/tokenColors.ts";
@@ -96,8 +98,7 @@ export class RenderClient implements UploadClient {
   private framePending = new Map<number, (capture: FrameCaptureResult) => void>();
   private frameSeq = 0;
 
-  onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
-  onChunksEvicted: ChunksEvictedHandler | null = null;
+  onChunkResidency: ChunkResidencyHandler | null = null;
   /** Missing entries cover chunks and proxies; match on `kind`. */
   onWantedSetDelta: WantedSetHandler | null = null;
   /**
@@ -146,8 +147,11 @@ export class RenderClient implements UploadClient {
   private readonly levelsByDataset = new Map<string, DatasetLevels>();
 
   private gpuPassUs: number | null = null;
-  /** The worker starts with no atlases and posts only changes. */
-  private gpuAtlasReport: GpuAtlasReport = { atlases: 0, bytes: 0 };
+  /** Null until the worker's first report; it posts only changes after that. */
+  private gpuMemoryReport: GpuMemoryReport | null = null;
+  private gpuCapacityReport: GpuCapacityReport | null = null;
+  /** Hears minimap overviews the worker lost to an out-of-memory failure. */
+  onMinimapOverviewsLost: ((memberIds: string[]) => void) | null = null;
 
   /** The last viewport frame dispatched. */
   private viewportFrameSeq = 0;
@@ -214,9 +218,14 @@ export class RenderClient implements UploadClient {
     return gpuPassUs;
   }
 
-  /** The worker's latest atlas count and bytes. */
-  gpuAtlases(): GpuAtlasReport {
-    return this.gpuAtlasReport;
+  /** What the worker last reported holding on the GPU, or null before its first report. */
+  gpuMemory(): GpuMemoryReport | null {
+    return this.gpuMemoryReport;
+  }
+
+  /** The chunk pools' capacities the worker last reported, which planning admits against, or null before. */
+  gpuCapacity(): GpuCapacityReport | null {
+    return this.gpuCapacityReport;
   }
 
   /**
@@ -248,14 +257,24 @@ export class RenderClient implements UploadClient {
     return this.viewportFrameSeq;
   }
 
+  /** Viewport frames dispatched whose GPU work has not yet finished. */
+  framesAwaitingDone(): number {
+    return this.frameDispatchedAt.size;
+  }
+
+  /** Called after each finished viewport frame is noted. */
+  onFrameDone: (() => void) | null = null;
+
   private noteFrameDone(frameSeq: number): void {
     const dispatchedAt = this.frameDispatchedAt.get(frameSeq);
     for (const seq of this.frameDispatchedAt.keys()) {
       if (seq > frameSeq) break;
       this.frameDispatchedAt.delete(seq);
     }
-    if (dispatchedAt === undefined) return;
-    this.frameLatency = { frameSeq, ms: performance.now() - dispatchedAt };
+    if (dispatchedAt !== undefined) {
+      this.frameLatency = { frameSeq, ms: performance.now() - dispatchedAt };
+    }
+    this.onFrameDone?.();
   }
 
   private onMessage = (e: MessageEvent<WorkerToMainMessage>) => {
@@ -266,10 +285,8 @@ export class RenderClient implements UploadClient {
       if (msg.type === "thumbnailResult" && msg.bitmap) msg.bitmap.close();
       return;
     }
-    if (msg.type === "intensityRange" && this.onIntensityRange) {
-      this.onIntensityRange(msg.datasetId, msg.min, msg.max);
-    } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
-      this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
+    if (msg.type === "chunkResidency" && this.onChunkResidency) {
+      this.onChunkResidency(msg);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
     } else if (msg.type === "entityLevels") {
@@ -281,8 +298,14 @@ export class RenderClient implements UploadClient {
       // Latest wins: when two frames land between ticks, the newer one is
       // the frame on screen.
       this.gpuPassUs = msg.gpuPassUs;
-    } else if (msg.type === "gpuAtlases") {
-      this.gpuAtlasReport = { atlases: msg.atlases, bytes: msg.bytes };
+    } else if (msg.type === "gpuMemory") {
+      const { type: _type, ...report } = msg;
+      this.gpuMemoryReport = report;
+    } else if (msg.type === "gpuCapacity") {
+      const { type: _type, ...report } = msg;
+      this.gpuCapacityReport = report;
+    } else if (msg.type === "minimapOverviewsLost") {
+      this.onMinimapOverviewsLost?.(msg.memberIds);
     } else if (msg.type === "frameDone") {
       this.noteFrameDone(msg.frameSeq);
     } else if (msg.type === "pipelinesCompiled") {
@@ -520,6 +543,10 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage(msg);
   }
 
+  failedChunks(msg: FailedChunksMessage) {
+    this.worker.postMessage(msg);
+  }
+
   /**
    * Post a viewEpoch hot-state message. Sent before the corresponding
    * render message so chunk eviction has the latest ray-pick coords.
@@ -575,13 +602,14 @@ export class RenderClient implements UploadClient {
     camForward?: Float32Array,
     clipDistance?: number,
     clipMode?: number,
+    pixelRatio?: number,
   ) {
     this.worker.postMessage({
       type: "volumeRenderMultiPass",
       epochs,
       layers, invViewProj, eye,
       canvasW, canvasH, fullW, fullH, viewProj,
-      camForward, clipDistance, clipMode,
+      camForward, clipDistance, clipMode, pixelRatio,
       frameSeq: this.nextFrameSeq(),
     });
   }
@@ -594,6 +622,7 @@ export class RenderClient implements UploadClient {
     canvasW: number,
     canvasH: number,
     epochs: SceneEpochs,
+    pixelRatio?: number,
   ) {
     // Aggregate quad buffers are rebuilt per render tick on the main
     // thread; transferring them avoids structured-cloning what can be
@@ -606,7 +635,7 @@ export class RenderClient implements UploadClient {
       type: "sliceRenderMultiPass",
       epochs,
       layers, zoom, cx, cy,
-      canvasW, canvasH,
+      canvasW, canvasH, pixelRatio,
       frameSeq: this.nextFrameSeq(),
     }, transfer);
   }

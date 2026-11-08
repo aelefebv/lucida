@@ -9,6 +9,72 @@
 //! the input sanitization, so an offset, inverted, or degenerate box is
 //! handled the same everywhere.
 
+use serde::{Deserialize, Serialize};
+
+/// A box in voxel space, corners as `[x, y, z]`: level-0 samples, with a
+/// collection's members at their layout positions. The slice camera works in
+/// this space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct VoxBox {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
+/// A box in world space, corners as `[x, y, z]`: where the renderer places
+/// volumes, the unit cube scaled by physical extent. The volume cameras work
+/// in this space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WorldBox {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
+impl VoxBox {
+    pub fn new(min: [f64; 3], max: [f64; 3]) -> Self {
+        Self { min, max }
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        let (min, max) = union(self.min, self.max, other.min, other.max);
+        Self { min, max }
+    }
+}
+
+impl WorldBox {
+    pub fn new(min: [f64; 3], max: [f64; 3]) -> Self {
+        Self { min, max }
+    }
+
+    pub fn union(self, other: Self) -> Self {
+        let (min, max) = union(self.min, self.max, other.min, other.max);
+        Self { min, max }
+    }
+}
+
+fn union(a0: [f64; 3], a1: [f64; 3], b0: [f64; 3], b1: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    (
+        std::array::from_fn(|i| a0[i].min(b0[i])),
+        std::array::from_fn(|i| a1[i].max(b1[i])),
+    )
+}
+
+/// What to frame, in both spaces, so each camera takes the box in its own
+/// and can't be handed the other's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FitBounds {
+    pub vox: VoxBox,
+    pub world: WorldBox,
+}
+
+impl FitBounds {
+    pub fn union(self, other: Self) -> Self {
+        Self {
+            vox: self.vox.union(other.vox),
+            world: self.world.union(other.world),
+        }
+    }
+}
+
 /// Padding factor for the minimap's overview framing: the visible region is
 /// `FIT_PADDING ×` the data's limiting extent. Deliberately looser than the
 /// main camera's margins; it is not the main fit factor.

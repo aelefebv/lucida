@@ -242,6 +242,8 @@ export interface VolumeRenderMultiPassMessage {
   camForward?: Float32Array;
   clipDistance?: number;
   clipMode?: number;
+  /** See {@link SliceRenderMultiPassMessage.pixelRatio}. */
+  pixelRatio?: number;
   /** Echoed in the frame's {@link FrameDoneMessage}. */
   frameSeq?: number;
 }
@@ -312,6 +314,13 @@ export interface SliceLayerParams {
    * Absent for ordinary per-member layers.
    */
   aggregate?: SliceAggregateParams;
+  /**
+   * Consecutive layers with the same group draw into one offscreen target in
+   * one render pass and composite once: one group per (dataset, channel),
+   * whose members never overlap and share a blend mode. A layer without one
+   * draws alone.
+   */
+  passGroup?: number;
 }
 
 /**
@@ -328,6 +337,11 @@ export interface SliceRenderMultiPassMessage {
   cy: number;
   canvasW: number;
   canvasH: number;
+  /**
+   * Render-target pixels per CSS pixel. Screen-space patterns use it to keep
+   * one size on screen at any device pixel ratio or render scale. Defaults to 1.
+   */
+  pixelRatio?: number;
   /** Echoed in the frame's {@link FrameDoneMessage}. */
   frameSeq?: number;
 }
@@ -579,17 +593,31 @@ export interface ColdStateMessage {
   };
   /** Budget-admitted proxy residency keys: `${datasetId}|${entityId}|${kind}|${t}|${c}`. */
   desiredProxyKeys?: string[];
+  /**
+   * The chunks the planner delivers for this view: its detail and coarse
+   * lanes. The worker admits, keeps, and reports against these keys, so it
+   * never wants a chunk the planner will not send.
+   */
+  wantedChunks: WantedMemberChunks[];
   activeSet: ColdStateActiveEntry[];
   viewMode: "slice" | "volume";
   /** How this dataset's atlases hold samples, and so how its descriptors read them. */
   sampleFormat: SampleFormat;
 }
 
+/** The chunks the planner wants for one member in one tier. */
+export interface WantedMemberChunks {
+  /** See {@link SliceChunkDataMessage.memberId}. */
+  memberId: string;
+  tier: ResidencyTier;
+  chunkKeys: string[];
+}
+
 /**
  * Camera-ray pick coordinates for chunk eviction priority, sent once per
  * dataset when `epochs.view` advances. CPU-side residency only; the shader
  * never reads them. The worker stores them in `rayHitPerEntity` for
- * `findFarthestSlot`'s distance metric.
+ * `findEvictionSlot`'s distance metric.
  */
 export interface ViewHotStateMessage {
   type: "viewHotState";
@@ -628,6 +656,8 @@ export interface ColdStateSelectionMessage {
   visibleRegion: VisibleRegion;
   /** Budget-admitted proxy residency keys for the new selection. */
   desiredProxyKeys: string[];
+  /** Every wanted chunk at the new selection; see {@link ColdStateMessage.wantedChunks}. */
+  wantedChunks: WantedMemberChunks[];
   epochs: SceneEpochs;
 }
 
@@ -656,12 +686,30 @@ export interface ColdStateDeltaMessage {
   };
   /** Budget-admitted proxy residency keys for the new view. */
   desiredProxyKeys?: string[];
+  /**
+   * The (member, tier) entries of {@link ColdStateMessage.wantedChunks} that
+   * changed, each replacing the retained one. An entry with no keys removes
+   * it.
+   */
+  wantedChunks: WantedMemberChunks[];
   /** Entity ids that left the active set since the retained cold state. */
   removedEntityIds: string[];
   /** Descriptors for entities new to the active set or whose descriptor changed. */
   upserts: ColdStateActiveEntry[];
   /** The full new active-set order, as entity ids, so worker/main agree on indices. */
   activeSetOrder: string[];
+}
+
+/**
+ * Every chunk of one dataset the source failed for good, replacing the last
+ * list. Failures arrive between cold states, so they travel apart from them.
+ * The worker marks the ones its wanted set holds, so the shader draws them
+ * hatched instead of falling through to a coarser level or to nothing.
+ */
+export interface FailedChunksMessage {
+  type: "failedChunks";
+  datasetId: string;
+  images: Array<{ imageId: string; chunkKeys: string[] }>;
 }
 
 export type MainToWorkerMessage =
@@ -687,6 +735,7 @@ export type MainToWorkerMessage =
   | ColdStateDisplayMessage
   | ColdStateSelectionMessage
   | ColdStateDeltaMessage
+  | FailedChunksMessage
   | ViewHotStateMessage
   | CaptureFrameMessage
   | LoseDeviceMessage;
@@ -710,13 +759,6 @@ export interface ErrorMessage {
   message: string;
 }
 
-export interface IntensityRangeMessage {
-  type: "intensityRange";
-  datasetId: string;
-  min: number;
-  max: number;
-}
-
 /**
  * Reply to a {@link ThumbnailRenderMessage}, correlated by `id`. `bitmap` is the
  * rendered tile as a transferable `ImageBitmap`, or `null` when nothing could be
@@ -729,14 +771,23 @@ export interface ThumbnailResultMessage {
   bitmap: ImageBitmap | null;
 }
 
+/**
+ * Why the worker refused a chunk or stopped holding one. A refusal is
+ * `stale`, `unwanted`, `wrong-slice`, a `missing-*` routing gap,
+ * `atlas-policy`, or `upload-failed`; a loss is `evicted`, `freed`,
+ * `out-of-memory`, `wrong-slice`, or `replaced` (a label cell rewritten in
+ * place with another chunk, such as the next timepoint's).
+ */
 export type ChunkFeedbackReason =
   | "evicted"
+  | "freed"
+  | "replaced"
   | "stale"
+  | "unwanted"
   | "wrong-slice"
   | "missing-pool"
   | "missing-entity-meta"
   | "missing-lod-meta"
-  | "radius-filter"
   | "atlas-policy"
   | "upload-failed"
   | "out-of-memory";
@@ -772,25 +823,36 @@ export interface GpuFailedMessage {
   message: string;
 }
 
-export interface ChunksEvictedMessage {
-  type: "chunksEvicted";
+/**
+ * What one {@link ChunkResidencyMessage} reports:
+ *
+ *   - `held`: the chunks are written, or were already held as the current
+ *     selection draws them.
+ *   - `refused`: the chunks were not placed.
+ *   - `lost`: chunks reported held earlier are held no longer: evicted, their
+ *     pool freed, or cut from a plane the current Z no longer maps to.
+ */
+export type ChunkResidencyChange = "held" | "refused" | "lost";
+
+/**
+ * The worker's account of one member's chunks in one tier: the only source
+ * of the page's residency mirror. The worker owns the slots, so the page
+ * never assumes a chunk it sent is held. Every chunk delivery is answered
+ * once, `held` or `refused`, and a held chunk is reported once more,
+ * `lost`, when its slot stops holding it.
+ */
+export interface ChunkResidencyMessage {
+  type: "chunkResidency";
   /** See {@link SliceChunkDataMessage.memberId}. */
   memberId: string;
-  /**
-   * Chunks that should be eligible for delivery again. Usually these
-   * were present and got evicted, either as finer than their member's
-   * target level or because a closer chunk took their slot. Stale-epoch and
-   * wrong-slice deliveries also use this path because they should clear
-   * optimistic sent state without entering the rejection tracker.
-   */
+  tier: ResidencyTier;
+  change: ChunkResidencyChange;
   keys: string[];
-  /** Chunks from the batch rejected by residency policy (atlas full + too far). */
-  skipped?: string[];
-  /** Observability-only reason for this feedback batch. */
+  /** Absent for `held`. */
   reason?: ChunkFeedbackReason;
 }
 
-/** A chunk that the worker is missing from its atlas. */
+/** A wanted chunk the worker does not hold as the current selection draws it. */
 export type MissingChunk = {
   kind: "chunk";
   datasetId: string;
@@ -801,7 +863,7 @@ export type MissingChunk = {
    * mode uses bare image ids; multi-channel mode uses `imageId:chN`.
    */
   memberId: string;
-  /** Channel index parsed from the wanted-set member/channel loop. */
+  /** The member's channel. */
   c: number;
   chunkKey: string;
 };
@@ -822,11 +884,17 @@ export type MissingProxy = {
   c: number;
 };
 
+/**
+ * What the worker wants and lacks for one dataset. Chunks come from the cold
+ * state's {@link ColdStateMessage.wantedChunks}, proxies from its desired
+ * proxy keys. A missing proxy is re-delivered. Every chunk loss is reported
+ * on its own, so a missing chunk the page's residency mirror holds is a
+ * disagreement between the two records.
+ */
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
   datasetId: string;
   epochs: SceneEpochs;
-  /** The orchestrator re-delivers missing proxies from CpuCache too, not only chunks. */
   missing: Array<MissingChunk | MissingProxy>;
 }
 
@@ -838,16 +906,16 @@ export interface LevelRange {
 
 /**
  * Which level one image-bearing entity's visible pixels come from, as the
- * worker last computed it from the chunk positions its wanted set walks.
+ * worker last computed it from the planner's target-level chunks.
  * `targetLevel` is the level pin or the level the screen calls for;
  * `displayed` spans the finest and coarsest level the renderer samples
  * for those positions today: the target level once resident, else the
  * coarser resident sections, else the coarse tier. Every position is
  * served by exactly one level, so `min === max` means the whole visible
  * footprint comes from one level. `displayed` is `null` when no visible
- * position has any resident level yet. `visible` is false when none of
- * the entity's target-level chunks lies in the visible region, in which
- * case `displayed` is `null` too.
+ * position has any resident level yet. `visible` is false when the planner
+ * wants none of the entity's target-level chunks, in which case `displayed`
+ * is `null` too.
  */
 export interface EntityLevelReport {
   entityId: string;
@@ -857,9 +925,9 @@ export interface EntityLevelReport {
 }
 
 /**
- * Posted alongside every {@link WantedSetDeltaMessage}: the wanted set walks
- * the visible target-level chunks, and this is what those same chunks say
- * about which level is on screen. Feeds the layer panel's level readout.
+ * Posted alongside every {@link WantedSetDeltaMessage}: what the wanted
+ * target-level chunks say about which level is on screen. Feeds the layer
+ * panel's level readout.
  */
 export interface EntityLevelsMessage {
   type: "entityLevels";
@@ -881,18 +949,75 @@ export interface GpuPassTimeMessage {
 }
 
 /**
- * What the worker's chunk, label, and proxy atlases hold on the GPU: how
- * many there are, and the bytes of their textures and indirection buffers.
- * Render targets, colormaps, and minimap textures are not counted.
+ * What the render worker holds on the GPU against its one budget. `bytes` is
+ * the sum of the five holder lines; colormaps and descriptor buffers, a few
+ * KiB, are left out.
  */
-export interface GpuAtlasReport {
-  atlases: number;
+export interface GpuMemoryReport {
+  /** The device-fitted total, halved when the device runs out of memory under it. */
+  budgetBytes: number;
   bytes: number;
+  /** Chunk pools: textures and indirection buffers. */
+  chunkBytes: number;
+  labelBytes: number;
+  proxyBytes: number;
+  /** Viewport render targets and the depth texture. */
+  targetBytes: number;
+  /** Minimap overview textures and the minimap's and thumbnails' render targets. */
+  minimapBytes: number;
+  /** Chunk, label, and proxy atlases. */
+  atlases: number;
+  /** Chunk pool slots holding a chunk. */
+  slotsHeld: number;
+  /** Chunk pool slots allocated. */
+  slots: number;
+  /** Minimap overviews not drawn because the budget had no room for them. */
+  overviewsRefused: number;
 }
 
-/** A changed {@link GpuAtlasReport}. Posted only when a number moves. */
-export interface GpuAtlasesMessage extends GpuAtlasReport {
-  type: "gpuAtlases";
+/** A changed {@link GpuMemoryReport}. Posted only when a number moves. */
+export interface GpuMemoryMessage extends GpuMemoryReport {
+  type: "gpuMemory";
+}
+
+/** One chunk pool's capacity, as admission counts it. */
+export interface GpuPoolCapacity {
+  /** `chunkTierPoolKey(datasetId, tier, channel, chunkDims, multiChannel)`. */
+  poolKey: string;
+  datasetId: string;
+  tier: ResidencyTier;
+  /** Bytes one slot holds. */
+  slotBytes: number;
+  /** Slots the pool has now. */
+  slots: number;
+  /** Slots the pool may grow to while the GPU total has room. */
+  maxSlots: number;
+}
+
+/**
+ * What the GPU total leaves the chunk pools, and each pool's slots, so the
+ * page admits no more than they can hold together. Chunk pools hold at most
+ * `budgetBytes - reservedBytes` between them.
+ */
+export interface GpuCapacityReport {
+  budgetBytes: number;
+  /** What the other holders take of the total now: label and proxy pools, render targets, minimap textures. */
+  reservedBytes: number;
+  pools: GpuPoolCapacity[];
+}
+
+/** A changed {@link GpuCapacityReport}: a pool created, grown, shrunk, or freed, or the total or reserve moved. */
+export interface GpuCapacityMessage extends GpuCapacityReport {
+  type: "gpuCapacity";
+}
+
+/**
+ * Minimap overview textures the device could not allocate. The page uploads
+ * these members' overviews again, under the budget the failure halved.
+ */
+export interface MinimapOverviewsLostMessage {
+  type: "minimapOverviewsLost";
+  memberIds: string[];
 }
 
 /**
@@ -948,13 +1073,14 @@ export type WorkerToMainMessage =
   | ReadyMessage
   | PipelinesCompiledMessage
   | ErrorMessage
-  | IntensityRangeMessage
   | ThumbnailResultMessage
-  | ChunksEvictedMessage
+  | ChunkResidencyMessage
   | WantedSetDeltaMessage
   | EntityLevelsMessage
   | GpuPassTimeMessage
-  | GpuAtlasesMessage
+  | GpuMemoryMessage
+  | GpuCapacityMessage
+  | MinimapOverviewsLostMessage
   | FrameDoneMessage
   | FrameCapturedMessage
   | GpuErrorMessage

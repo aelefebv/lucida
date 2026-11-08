@@ -1,6 +1,7 @@
-//! Shared helpers for proxy-related integration tests.
+//! Shared helpers for integration tests.
 //!
 //! Provides:
+//! - [`workspace_rig`]: a real workspace socket on an ephemeral port.
 //! - [`InstrumentedStore`]: an `ObjectStore` wrapper that counts `get`
 //!   calls and can introduce per-call delays to make timing-sensitive
 //!   tests deterministic.
@@ -9,6 +10,8 @@
 //!   TileProxy3D-shaped image with a configurable level grid.
 
 #![allow(dead_code)]
+
+pub mod workspace_rig;
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -219,22 +222,38 @@ pub async fn build_single_tile_dataset(
         None,
     );
 
+    let chunk_voxels =
+        (chunk_shape[2] as usize) * (chunk_shape[3] as usize) * (chunk_shape[4] as usize);
+    let chunk_bytes = chunk_voxels * 2;
     let resolver = Arc::new(ChunkResolver::new(&ServerBindingSeed {
         images: vec![ImageBindingSeed {
             image_id: image_id.clone(),
             axes_names: vec!["t".into(), "c".into(), "z".into(), "y".into(), "x".into()],
             store_prefix: None,
-            // No per-level info → ChunkResolver::level_info returns None for
-            // every level lookup; the chunk-fetch path then falls back to
-            // StorageCompression::None and no slicing, matching the raw
-            // bytes we put into the store below.
-            levels: vec![],
+            // Raw uint16 chunks, one timepoint and channel each, matching the
+            // bytes put into the store below.
+            levels: vec![lucida_store::import_types::LevelBindingInfo {
+                level_index: 0,
+                path: "0".to_string(),
+                compression: lucida_store::codec::StorageCompression::None,
+                chunk_shape: chunk_shape.to_vec(),
+                chunk_byte_layout: lucida_store::layout::ChunkByteLayout {
+                    canonical_byte_size: chunk_bytes,
+                    on_disk_byte_size: chunk_bytes,
+                    byte_stride_t: 0,
+                    byte_stride_c: 0,
+                    chunk_size_t: 1,
+                    chunk_size_c: 1,
+                },
+                chunk_key_encoding: Default::default(),
+                fill_value: Default::default(),
+                shard: None,
+                regrid: None,
+            }],
         }],
     }));
 
     let mem: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-    let chunk_voxels =
-        (chunk_shape[2] as usize) * (chunk_shape[3] as usize) * (chunk_shape[4] as usize);
 
     // Populate the store with a chunk for each (t, c, z, y, x) grid cell.
     // Even if we only ever request t=0,c=0 we put everything for sanity.
@@ -245,7 +264,7 @@ pub async fn build_single_tile_dataset(
                     for x in 0..grid_shape[4] {
                         let key = format!("0/{t}/{c}/{z}/{y}/{x}");
                         let location = resolver
-                            .resolve(&image_id, &key)
+                            .resolve(&image_id, &key.parse::<lucida_content::ChunkKey>().unwrap())
                             .expect("resolver should map all keys");
                         let bytes = make_chunk_bytes(chunk_voxels, t, c, z, y, x);
                         mem.put(location.path(), PutPayload::from(bytes))

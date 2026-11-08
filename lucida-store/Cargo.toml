@@ -3,6 +3,7 @@ name = "lucida-store"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
+publish = false
 
 [dependencies]
 tiff = "0.9"
@@ -22,7 +23,7 @@ url = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "fs"] }
 futures-util = "0.3"
 bytes = "1"
-lru = "0.16"
+lru = "0.19"
 regex = "1"
 tracing = "0.1"
 lucida-content = { path = "../lucida-content" }

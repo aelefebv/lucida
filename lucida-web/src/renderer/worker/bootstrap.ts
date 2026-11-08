@@ -10,7 +10,7 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type { WorkerToMainMessage } from "../workerProtocol.ts";
-import { getDeviceLimits, initGPU, requestGpuDevice } from "../gpuContext.ts";
+import { initGPU, requestGpuDevice } from "../gpuContext.ts";
 import { fitBudgets } from "../../deviceBudget.ts";
 import { SliceRenderer } from "../sliceRenderer.ts";
 import { VolumeRenderer } from "../volumeRenderer.ts";
@@ -27,6 +27,7 @@ import { createFrameTiming, type FrameTiming } from "../passTiming.ts";
 import { watchDevice } from "./deviceLoss.ts";
 import { proxyDescriptorKey } from "../workerContext.ts";
 import { sourceKey } from "../poolKeys.ts";
+import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 
 /** What is built on one device and rebuilt on its replacement. */
 interface DeviceRenderers {
@@ -67,7 +68,7 @@ export async function bootstrapWorker(
   schedule: (task: () => Promise<void>) => void = (task) => void task(),
 ): Promise<WorkerCtx> {
   const { device, context, format } = await initGPU(canvas);
-  const state = createInitialState(fitBudgets(deviceMemoryGiB, getDeviceLimits(device)));
+  const state = createInitialState(fitBudgets(deviceMemoryGiB).gpuTotalBytes);
   let renderers = createRenderers(device, format, post);
   // The page holds the minimap overlay's content draws until this report
   // (Minimap.tsx).
@@ -97,7 +98,7 @@ export async function bootstrapWorker(
     getCursorRenderer() {
       return renderers.cursor;
     },
-    ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(ctx.device, count, w, h),
+    ensureOffscreenPool: (count, w, h) => ensureOffscreenPool(ctx, count, w, h),
     getOrCreateLUT: (name) => getOrCreateLUT(ctx.device, name),
     post,
     postWantedSet,
@@ -154,12 +155,25 @@ export function createWantedSetPoster(
     const proxySnap = buildProxyAtlasSnapshot(cold.datasetId);
     const result = computeWantedSet(
       cold,
+      state.wantedByDataset.get(cold.datasetId) ?? new Map(),
       state.volumeAtlases,
       state.sliceAtlases,
       (memberId, tier, level) =>
         state.memberSourcePools.get(memberId)?.get(sourceKey(tier, level)),
       proxySnap,
     );
+    // Ahead of the missing list, which names these too: the page was told
+    // they were held, and a missing chunk it holds is a disagreement.
+    const stale = new Map<string, { memberId: string; tier: ResidencyTier; keys: string[] }>();
+    for (const { memberId, tier, chunkKey } of result.stalePlanes) {
+      const id = `${tier}|${memberId}`;
+      const group = stale.get(id);
+      if (group) group.keys.push(chunkKey);
+      else stale.set(id, { memberId, tier, keys: [chunkKey] });
+    }
+    for (const { memberId, tier, keys } of stale.values()) {
+      post({ type: "chunkResidency", memberId, tier, change: "lost", keys, reason: "wrong-slice" });
+    }
     post({
       type: "wantedSetDelta",
       datasetId: cold.datasetId,

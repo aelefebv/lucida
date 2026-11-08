@@ -24,10 +24,11 @@ import { applyViewportCommand } from "../../applyAndSend.ts";
 import { bumpSettingsGeneration } from "../../tickCommon.ts";
 import { AVAILABILITY_UPDATE_SOURCE } from "../../invalidation.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
-import { createQuiescenceState } from "../../trace/quiescence.ts";
-import type { AtlasBudgets } from "../../renderer/worker/state.ts";
+import { PointEvent } from "../../trace/types.ts";
+import { createSettleState, settleSignal } from "../settle.ts";
 import type { MissingChunk } from "../../renderer/workerProtocol.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import type { ChannelFit } from "../autoContrast.ts";
 import { AssetCatalog } from "../assetCatalog.ts";
 import {
   GeneratedAvailabilityCatalog,
@@ -71,7 +72,13 @@ const REPORT_KEY_LIMIT = 12;
 const RESENT_THRESHOLD = 3;
 
 export type ScenarioStep =
-  | { scrub: { z?: number; t?: number; c?: number } };
+  | { scrub: { z?: number; t?: number; c?: number } }
+  /** A drag, in device pixels; an arcball pan in a volume. */
+  | { pan: [dx: number, dy: number] }
+  /** A zoom by a factor about the view center; an arcball zoom in a volume. */
+  | { zoom: number }
+  /** A 3-D orbit, in radians. */
+  | { orbit: [dTheta: number, dPhi: number] };
 
 export interface ScenarioSpec {
   name: string;
@@ -81,10 +88,10 @@ export interface ScenarioSpec {
   viewport?: [number, number];
   source?: SourceSpec;
   /**
-   * The worker's atlas pool budgets. A slice pool holds
-   * `floor(sqrt(bytes / slotBytes))²` slots, so a small budget bounds them.
+   * The worker's GPU total, which every chunk pool shares. Pools grow toward
+   * it as chunks arrive, so a small total bounds them.
    */
-  atlas?: Partial<AtlasBudgets>;
+  gpuTotalBytes?: number;
   cache?: Partial<Pick<CpuCacheConfig, "mainBudgetBytes" | "overviewBudgetBytes">>;
   /** What happens after the open, each followed by its own settle. */
   steps?: ScenarioStep[];
@@ -102,7 +109,7 @@ export interface Scenario {
   readonly mode: "slice" | "volume";
   readonly viewport: readonly [number, number];
   readonly source: SourceSpec;
-  readonly atlas: AtlasBudgets;
+  readonly gpuTotalBytes: number;
   readonly cache: Partial<CpuCacheConfig>;
   readonly steps: readonly ScenarioStep[];
   readonly tickBound: number;
@@ -117,15 +124,19 @@ export function describeScenario(spec: ScenarioSpec): Scenario {
     mode: spec.mode ?? "slice",
     viewport: spec.viewport ?? DEFAULT_VIEWPORT,
     source: spec.source ?? {},
-    atlas: {
-      volumeAtlasBytes: spec.atlas?.volumeAtlasBytes ?? CEILING_BUDGETS.volumeAtlasBytes,
-      sliceAtlasBytes: spec.atlas?.sliceAtlasBytes ?? CEILING_BUDGETS.sliceAtlasBytes,
-    },
+    gpuTotalBytes: spec.gpuTotalBytes ?? CEILING_BUDGETS.gpuTotalBytes,
     cache: { ...spec.cache },
     steps: spec.steps ?? [],
     tickBound: spec.tickBound ?? DEFAULT_TICK_BOUND,
     gpuComplete: spec.gpuComplete ?? true,
   });
+}
+
+/** An auto-contrast fit the render loop handed out. */
+export interface ContrastFitRecord {
+  datasetId: string;
+  channel: number;
+  fit: ChannelFit;
 }
 
 /** One residency tier's wanted-and-resident count in the CPU cache. */
@@ -145,7 +156,11 @@ export interface PhaseOutcome {
   frames: number;
   /** Chunks the page sent the worker in this phase. */
   chunksSent: number;
+  /** Distinct chunks among them; equal to `chunksSent` when none went twice. */
+  distinctChunksSent: number;
   quiescence: string;
+  /** The share of the wanted set the page says is resident. */
+  coverage: number;
   detail: TierCount;
   coarse: TierCount;
   queued: number;
@@ -156,6 +171,23 @@ export interface PhaseOutcome {
   missingGpu: string[];
   /** Chunks the page sent the worker again and again in this phase, most often first. */
   resent: string[];
+  /** Chunk requests the source has answered since the open. */
+  sourceRequests: number;
+  /**
+   * Chunks the uploader's progress guard held in this phase, with the
+   * worker's last reason. A held chunk means a feedback loop was cut, so the
+   * phase does not count as settled.
+   */
+  held: string[];
+  /**
+   * Wanted chunks the source failed for good, each with the reason it gave.
+   * A view settles without them, and this is how the run names them.
+   */
+  failed: string[];
+  /** The worker's indirection cells the shader draws as failed (see `SimulatedWorker.failedCells`). */
+  drawnFailed: string[];
+  /** The auto-contrast fits handed out in this phase, in order. */
+  fits: ContrastFitRecord[];
 }
 
 export interface SimulationRun {
@@ -163,6 +195,8 @@ export interface SimulationRun {
   dpr: number;
   phases: PhaseOutcome[];
   settled: boolean;
+  /** `${imageId}/${chunkKey}` of each chunk the source served, in order. */
+  served: string[];
   /** Why the run did or did not settle, for a failure message. */
   report: string;
 }
@@ -191,6 +225,7 @@ export async function runScenario(scenario: Scenario, opts: { dpr: number }): Pr
       dpr: opts.dpr,
       phases,
       settled,
+      served: sim.served(),
       report: formatReport(scenario.name, opts.dpr, phases),
     };
   } finally {
@@ -205,12 +240,16 @@ export function expectSettled(run: SimulationRun): void {
 
 /**
  * Whether the page says its view settled, and if not, why. This is the
- * published quiescence every settle consumer waits on, read where they read
- * it, so a change to that predicate changes what the simulation accepts.
+ * settle signal every settle consumer waits on, read where they read it, so
+ * a change to that predicate changes what the simulation accepts.
  */
-function pageSettle(): { settled: boolean; reason: string } {
-  const published = traceRecorder.quiescence;
-  return { settled: published?.quiescent ?? false, reason: published?.reason ?? "unpublished" };
+function pageSettle(): { settled: boolean; reason: string; coverage: number } {
+  const published = settleSignal.state;
+  return {
+    settled: settleSignal.outcome === "settled",
+    reason: settleSignal.stallReason ?? published?.reason ?? "unpublished",
+    coverage: published?.coverage ?? 0,
+  };
 }
 
 /** Resolve every pending microtask, including those the resolved ones queue. */
@@ -232,24 +271,26 @@ class Simulation {
   private loop: RenderLoop | null = null;
   /** `${memberId}/${chunkKey}` → the worker's last feedback reason and how often it was given. */
   private readonly feedback = new Map<string, { reason: string; count: number }>();
+  /** Every chunk the uploader's progress guard held, in order. */
+  private readonly held: string[] = [];
   private framesRun = 0;
+  private readonly fits: ContrastFitRecord[] = [];
 
   constructor(scenario: Scenario, dpr: number) {
     this.scenario = scenario;
     this.dpr = dpr;
-    this.worker = new SimulatedWorker(scenario.atlas);
+    this.worker = new SimulatedWorker(scenario.gpuTotalBytes);
     this.worker.onPost = (msg) => {
-      if (msg.type !== "chunksEvicted") return;
-      const note = (key: string, reason: string): void => {
+      if (msg.type !== "chunkResidency" || msg.change === "held") return;
+      const reason = `${msg.change} ${msg.reason ?? ""}`.trim();
+      for (const key of msg.keys) {
         const id = `${msg.memberId}/${key}`;
         const prior = this.feedback.get(id);
         this.feedback.set(id, { reason, count: (prior?.reason === reason ? prior.count : 0) + 1 });
-      };
-      for (const key of msg.keys) note(key, msg.reason ?? "evicted");
-      for (const key of msg.skipped ?? []) note(key, "atlas-policy");
+      }
     };
     this.source = new SimulatedSource(
-      { latencyMs: scenario.source.latencyMs, answer: (req) => this.answer(req) },
+      { ...scenario.source, answer: (req) => this.answer(req) },
       (datasetId) => this.datasets.get(datasetId),
     );
     this.cpuCache = new CpuCache(this.source, passThroughDecodePool(), {
@@ -294,6 +335,16 @@ class Simulation {
       return worker;
     });
     traceRecorder.reset();
+    settleSignal.reset();
+    // The progress guard reports a held chunk only to the trace.
+    const record = traceRecorder.recordPointEvent.bind(traceRecorder);
+    vi.spyOn(traceRecorder, "recordPointEvent").mockImplementation((kind, reason, chunk, tier) => {
+      if (kind === PointEvent.Held && chunk) {
+        const { level, t, c, z, y, x } = chunk;
+        this.held.push(`${chunk.imageId} ${level}/${t}/${c}/${z}/${y}/${x} (${reason})`);
+      }
+      record(kind, reason, chunk, tier);
+    });
   }
 
   /** Open the dataset the way a live open does: apply, register, fit the camera, start the loop. */
@@ -339,11 +390,13 @@ class Simulation {
     this.loop = loop;
     loop.start();
     loop.addDataset(dataset.datasetId, manifest);
+    loop.setAutoContrastListener((datasetId, channel, fit) => this.fits.push({ datasetId, channel, fit }));
 
     scene.set_viewport(deviceW, deviceH, this.dpr);
-    scene.fit_camera_to_dataset_bounds(dataset.datasetId);
-    loop.markInteractiveDirty("auto_fit_on_open");
-    if (mode === "slice") loop.setSliceParams(scene.z(), scene.t(), scene.c());
+    // The 3-D view's camera, as switching the dimension control sets it. The
+    // scene fitted the open, and fits the new mode's camera.
+    if (mode === "volume") applyViewportCommand(scene, { type: "set_mode_arcball" });
+    loop.markInteractiveDirty("dataset_opened");
 
     if (dataset.generated) {
       const generated = dataset.generated;
@@ -383,12 +436,33 @@ class Simulation {
   apply(step: ScenarioStep): string {
     const scene = this.scene!;
     const loop = this.loop!;
+    const volume = this.scenario.mode === "volume";
+    if ("pan" in step) {
+      const [dx, dy] = step.pan;
+      applyViewportCommand(scene, volume ? { type: "arcball_pan", dx, dy } : { type: "pan", dx, dy });
+      loop.markInput("pan");
+      return `pan ${dx},${dy}`;
+    }
+    if ("zoom" in step) {
+      applyViewportCommand(
+        scene,
+        // The arcball scales its distance by `1 + delta`.
+        volume ? { type: "arcball_zoom", delta: 1 / step.zoom - 1 } : { type: "zoom_by", factor: step.zoom },
+      );
+      loop.markInput("zoom");
+      return `zoom ×${step.zoom}`;
+    }
+    if ("orbit" in step) {
+      const [dTheta, dPhi] = step.orbit;
+      applyViewportCommand(scene, { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi });
+      loop.markInput("orbit");
+      return `orbit ${dTheta},${dPhi}`;
+    }
     const { scrub } = step;
     loop.markInput("scrub");
     if (scrub.z !== undefined) applyViewportCommand(scene, { type: "set_z", z: scrub.z });
     if (scrub.t !== undefined) applyViewportCommand(scene, { type: "set_t", t: scrub.t });
     if (scrub.c !== undefined) applyViewportCommand(scene, { type: "set_c", c: scrub.c });
-    loop.setSliceParams(scene.z(), scene.t(), scene.c());
     return `scrub ${Object.entries(scrub).map(([axis, v]) => `${axis}=${v}`).join(" ")}`;
   }
 
@@ -410,10 +484,14 @@ class Simulation {
     return due.length > 0;
   }
 
+  served(): string[] {
+    return [...this.source.served];
+  }
+
   /** Nothing queued, in flight or pending anywhere, and no frame requested. */
   private atFixedPoint(): boolean {
     if (this.frames.size > 0 || !this.worker.idle) return false;
-    const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
+    const q = this.cpuCache.settleInputs(createSettleState());
     return (
       q.pending === 0 &&
       q.inFlight === 0 &&
@@ -432,7 +510,9 @@ class Simulation {
    */
   async settle(label: string): Promise<PhaseOutcome> {
     const framesBefore = this.framesRun;
+    const fitsBefore = this.fits.length;
     const sentBefore = new Map([...this.worker.deliveries].map(([key, d]) => [key, d.count]));
+    const heldBefore = this.held.length;
     const quietSteps = Math.ceil(QUIET_MS / FRAME_MS);
     let fixedSince: number | null = null;
     let requestsAtFixed = this.source.requestCount;
@@ -442,11 +522,11 @@ class Simulation {
       if (ranFrame || !this.atFixedPoint() || this.source.requestCount !== requestsAtFixed) {
         fixedSince = null;
         requestsAtFixed = this.source.requestCount;
-        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, sentBefore);
+        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, fitsBefore, sentBefore, heldBefore);
         continue;
       }
       fixedSince ??= i;
-      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, sentBefore);
+      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, fitsBefore, sentBefore, heldBefore);
     }
   }
 
@@ -455,18 +535,22 @@ class Simulation {
     ticks: number,
     fixed: boolean,
     framesBefore: number,
+    fitsBefore: number,
     sentBefore: Map<string, number>,
+    heldBefore: number,
   ): PhaseOutcome {
-    const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
+    const q = this.cpuCache.settleInputs(createSettleState());
     const page = pageSettle();
     const missingCpu = this.missingFromCpu();
     const missingGpu = this.missingFromGpu();
 
     let chunksSent = 0;
+    let distinctChunksSent = 0;
     const resent: Array<{ text: string; times: number }> = [];
     for (const [key, { tier, count }] of this.worker.deliveries) {
       const times = count - (sentBefore.get(key) ?? 0);
       chunksSent += times;
+      if (times > 0) distinctChunksSent++;
       if (times < RESENT_THRESHOLD) continue;
       const slash = key.indexOf("/");
       resent.push({ text: this.describeKey(key.slice(0, slash), key.slice(slash + 1), tier), times });
@@ -480,6 +564,8 @@ class Simulation {
       why = `fixed point after ${ticks} ticks, but the page publishes ${page.reason}`;
     } else if (this.scenario.gpuComplete && missingGpu.length > 0) {
       why = `fixed point after ${ticks} ticks, but the worker lacks ${missingGpu.length} chunks it wants`;
+    } else if (this.held.length > heldBefore) {
+      why = `fixed point after ${ticks} ticks, but only because the uploader held ${this.held.length - heldBefore} chunks`;
     }
 
     return {
@@ -489,7 +575,9 @@ class Simulation {
       why,
       frames: this.framesRun - framesBefore,
       chunksSent,
+      distinctChunksSent,
       quiescence: page.reason,
+      coverage: page.coverage,
       detail: { resident: q.residentDetailChunks, desired: q.desiredDetailChunks },
       coarse: { resident: q.residentCoarseChunks, desired: q.desiredCoarseChunks },
       queued: q.pending + q.speculativePending,
@@ -497,13 +585,21 @@ class Simulation {
       missingCpu,
       missingGpu,
       resent: resent.map((r) => r.text),
+      sourceRequests: this.source.requestCount,
+      held: this.held.slice(heldBefore),
+      failed: this.cpuCache
+        .failedWantedChunks()
+        .map(({ chunk, failure }) => `${chunk}: ${failure ?? "failed with no reason given"}`)
+        .sort(),
+      drawnFailed: this.worker.failedCells(this.scenario.dataset.datasetId),
+      fits: this.fits.slice(fitsBefore),
     };
   }
 
   private whatIsStillMoving(): string {
     const parts: string[] = [];
     if (this.frames.size > 0) parts.push(`a frame is requested (the page publishes ${pageSettle().reason})`);
-    const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
+    const q = this.cpuCache.settleInputs(createSettleState());
     if (q.pending + q.speculativePending > 0) parts.push(`${q.pending + q.speculativePending} chunks queued`);
     if (q.inFlight + q.speculativeInFlight > 0) parts.push(`${q.inFlight + q.speculativeInFlight} in flight`);
     return parts.join(", ") || "the worker is still busy";
@@ -549,8 +645,10 @@ class Simulation {
     this.loop?.stop();
     this.scene?.free();
     traceRecorder.reset();
+    settleSignal.reset();
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   }
 }
 
@@ -573,10 +671,13 @@ function formatReport(name: string, dpr: number, phases: PhaseOutcome[]): string
       `phase "${p.label}": ${p.why}.`,
       `  ${p.frames} frames, ${p.chunksSent} chunks sent to the worker; ` +
         `CPU cache holds detail ${p.detail.resident}/${p.detail.desired}, ` +
-        `coarse ${p.coarse.resident}/${p.coarse.desired}; ${p.queued} queued, ${p.inFlight} in flight.`,
+        `coarse ${p.coarse.resident}/${p.coarse.desired}; ${p.queued} queued, ${p.inFlight} in flight; ` +
+        `the page reports ${Math.round(p.coverage * 100)}% coverage.`,
       ...formatKeys("wanted by the plan, not in the CPU cache", p.missingCpu),
       ...formatKeys("wanted by the worker, not on the GPU", p.missingGpu),
       ...formatKeys(`sent to the worker ${RESENT_THRESHOLD} or more times`, p.resent),
+      ...formatKeys("held by the uploader to cut a feedback loop", p.held),
+      ...formatKeys("failed for good, so the view settles without them", p.failed),
     );
   }
   return lines.join("\n");

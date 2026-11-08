@@ -52,30 +52,74 @@ export class LRUPolicy<T extends EvictableEntry = CacheEntry> implements Evictio
 }
 
 /**
+ * The coarse store's policy. What the latest plan did not ask for goes
+ * first, oldest first; then what it did, least urgent first, so the view's
+ * most important coarse chunks are the last to go. Insertion order alone
+ * evicts a priority-ordered fill from its most urgent end.
+ */
+export class WantedLastPolicy implements EvictionPolicy {
+  private readonly currentTick: () => number;
+
+  constructor(currentTick: () => number) {
+    this.currentTick = currentTick;
+  }
+
+  selectVictims(entries: readonly CacheEntry[], bytesNeeded: number): CacheEntry[] {
+    if (bytesNeeded <= 0) return [];
+    const tick = this.currentTick();
+    const wanted = (entry: CacheEntry): number => (entry.lastSeenTick === tick ? 1 : 0);
+    const sorted = [...entries].sort(
+      (a, b) =>
+        wanted(a) - wanted(b) ||
+        (wanted(a) === 1 ? b.priority - a.priority : 0) ||
+        a.insertedAt - b.insertedAt,
+    );
+    const victims: CacheEntry[] = [];
+    let freed = 0;
+    for (const entry of sorted) {
+      if (freed >= bytesNeeded) break;
+      victims.push(entry);
+      freed += entry.sizeBytes;
+    }
+    return victims;
+  }
+}
+
+/**
  * The detail cache's policy. Two passes:
  *
  *  1. Chunks finer than their entity's target level, whatever their tier.
  *     Planning requests only the target level, the renderer
  *     never samples finer, and finer levels cost the most, so zooming out
  *     releases these first. Finest level first.
- *  2. Everything else, walking {@link getTierOrder} for the current mode.
- *     Each tier is LRU, except active-detail, which sorts by
- *     `(lastSeenTick ↑, priority ↓, insertedAt ↑)`: chunks absent from the
- *     latest plan go first, then those farthest from focal.
+ *  2. Everything else, walking {@link getTierOrder} for the current mode,
+ *     first over what the latest plan does not want, then over its
+ *     prefetch, then over what its view wants. Each tier is LRU, except
+ *     active-detail, which sorts by `(lastSeenTick ↑, priority ↓,
+ *     insertedAt ↑)`: chunks absent from the latest plan go first, then
+ *     those farthest from focal.
  *
- * `modeProvider` and `targetLevelFor` are thunks so the policy reads live
- * values without re-wiring. An entity with no known target has nothing finer.
+ * Admission fits the view's chunks within the budget, so the view's chunks
+ * going last means the view never loses one while anything else is held.
+ *
+ * `modeProvider`, `targetLevelFor` and `currentTick` are thunks so the
+ * policy reads live values without re-wiring. An entity with no known target
+ * has nothing finer. A chunk is wanted when its `lastSeenTick` is the
+ * current tick.
  */
 export class TieredPolicy implements EvictionPolicy {
   private readonly modeProvider: () => InteractionMode;
   private readonly targetLevelFor: (entityId: string) => number | undefined;
+  private readonly currentTick: () => number;
 
   constructor(
     modeProvider: () => InteractionMode,
     targetLevelFor: (entityId: string) => number | undefined,
+    currentTick: () => number,
   ) {
     this.modeProvider = modeProvider;
     this.targetLevelFor = targetLevelFor;
+    this.currentTick = currentTick;
   }
 
   selectVictims(entries: readonly CacheEntry[], bytesNeeded: number): CacheEntry[] {
@@ -87,11 +131,17 @@ export class TieredPolicy implements EvictionPolicy {
       freed += entry.sizeBytes;
     };
 
+    const tick = this.currentTick();
     const finer: CacheEntry[] = [];
-    const rest: CacheEntry[] = [];
+    const unwanted: CacheEntry[] = [];
+    const prefetch: CacheEntry[] = [];
+    const view: CacheEntry[] = [];
     for (const entry of entries) {
       const target = this.targetLevelFor(entry.entityId);
-      (target !== undefined && entry.level < target ? finer : rest).push(entry);
+      if (target !== undefined && entry.level < target) finer.push(entry);
+      else if (entry.lastSeenTick !== tick) unwanted.push(entry);
+      else if (entry.lane === "prefetch") prefetch.push(entry);
+      else view.push(entry);
     }
     finer.sort((a, b) => a.level - b.level || byDistanceFromView(a, b));
     for (const entry of finer) {
@@ -99,17 +149,20 @@ export class TieredPolicy implements EvictionPolicy {
       take(entry);
     }
 
-    for (const tier of getTierOrder(this.modeProvider())) {
-      if (freed >= bytesNeeded) break;
-      const tierEntries = rest.filter(e => e.tier === tier);
-      if (tier === "active-detail") {
-        tierEntries.sort(byDistanceFromView);
-      } else {
-        tierEntries.sort((a, b) => a.insertedAt - b.insertedAt);
-      }
-      for (const entry of tierEntries) {
-        if (freed >= bytesNeeded) break;
-        take(entry);
+    const order = getTierOrder(this.modeProvider());
+    for (const group of [unwanted, prefetch, view]) {
+      for (const tier of order) {
+        if (freed >= bytesNeeded) return victims;
+        const tierEntries = group.filter(e => e.tier === tier);
+        if (tier === "active-detail") {
+          tierEntries.sort(byDistanceFromView);
+        } else {
+          tierEntries.sort((a, b) => a.insertedAt - b.insertedAt);
+        }
+        for (const entry of tierEntries) {
+          if (freed >= bytesNeeded) break;
+          take(entry);
+        }
       }
     }
 

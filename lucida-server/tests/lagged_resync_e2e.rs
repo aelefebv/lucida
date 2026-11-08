@@ -1,5 +1,5 @@
 //! Broadcast-loss recovery over real WebSockets, against the real
-//! `handle_client` stack.
+//! workspace socket.
 //!
 //! A client that reads too slowly overflows its bounded broadcast receiver
 //! and skips sequenced `CommandBroadcast`s. Two repairs are covered: the
@@ -8,43 +8,36 @@
 //! gets the same snapshot, throttled per client. A broadcast capacity of 8
 //! and ~64 KiB payloads make the overflow deterministic.
 //!
-//! The legacy socket refuses document commands from clients, so the tests
-//! apply and broadcast them server-side, as the workspace path does once a
-//! command passes its role check.
+//! The tests apply and broadcast commands server-side, as the workspace does
+//! once a command passes its role check, so the flood skips persistence.
 
-use std::collections::{BTreeMap, HashMap};
-use std::net::SocketAddr;
-use std::sync::Arc;
+mod common;
+
+use std::collections::BTreeMap;
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::{State, ws::WebSocketUpgrade};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, broadcast};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
+use common::workspace_rig::WorkspaceRig;
 use lucida_content::{DatasetId, DatasetKind, DatasetManifest};
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::ServerMessage;
+use lucida_core::protocol::{MessageRejection, ServerMessage};
 use lucida_core::scene::DocumentState;
 use lucida_protocol::{AssetCatalog, DatasetOpened, FetchSource, ProxiedFetchDescriptor};
-use lucida_server::session::Session;
-use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes, handler};
+use lucida_server::workspace::WorkspaceRuntimeConfig;
+use lucida_server::{BroadcastItem, ProxyConfig};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct Rig {
-    addr: SocketAddr,
-    session: Arc<Mutex<Session>>,
-    tx: broadcast::Sender<BroadcastItem>,
+    workspace: WorkspaceRig,
     _tmp: tempfile::TempDir,
 }
 
@@ -55,8 +48,9 @@ const SERVER_SIDE_SENDER: u64 = u64::MAX;
 /// Apply a document command and broadcast it, the way the handler does
 /// for a command that passed its role check.
 async fn apply_and_broadcast(rig: &Rig, command: DocumentCommand) {
-    let seq = rig.session.lock().await.apply(command.clone());
-    let _ = rig.tx.send(BroadcastItem::CommandBroadcast {
+    let live = &rig.workspace.live;
+    let seq = live.session.lock().await.apply(command.clone());
+    let _ = live.tx.send(BroadcastItem::CommandBroadcast {
         sender: SERVER_SIDE_SENDER,
         broadcast_json: serde_json::to_string(&ServerMessage::CommandBroadcast { seq, command })
             .unwrap(),
@@ -64,55 +58,24 @@ async fn apply_and_broadcast(rig: &Rig, command: DocumentCommand) {
     });
 }
 
-async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = lucida_server::connection::next_client_id();
-    ws.on_upgrade(move |socket| async move {
-        handler::handle_client(
-            id,
-            socket,
-            state.session,
-            state.tx,
-            state.unicast_routes,
-            state.proxy_config,
-        )
-        .await;
-    })
-}
-
-/// Serve the real `/ws` handler on an ephemeral port with a broadcast
-/// channel of `broadcast_capacity` items.
+/// Serve a workspace socket on an ephemeral port with a broadcast channel
+/// of `broadcast_capacity` items.
 async fn start_server(broadcast_capacity: usize) -> Rig {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let session = Arc::new(Mutex::new(Session::new()));
-    let (tx, _) = broadcast::channel::<BroadcastItem>(broadcast_capacity);
-    let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));
     let mut proxy_config = ProxyConfig::defaults();
     proxy_config.cache_dir = tmp.path().join("proxies");
     proxy_config.generated_cache_dir = tmp.path().join("generated-coarse");
-    let state = AppState {
-        session: Arc::clone(&session),
-        tx: tx.clone(),
-        unicast_routes,
-        source_policy: Arc::default(),
-        proxy_config,
+    let runtime = WorkspaceRuntimeConfig {
+        broadcast_capacity,
+        ..WorkspaceRuntimeConfig::default()
     };
-    let app = Router::new().route("/ws", get(ws_route)).with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
     Rig {
-        addr,
-        session,
-        tx,
+        workspace: WorkspaceRig::start_with(proxy_config, runtime).await,
         _tmp: tmp,
     }
 }
 
-async fn connect(addr: SocketAddr) -> WsClient {
+async fn connect(rig: &Rig) -> WsClient {
     // A resync snapshot over a large flooded document exceeds
     // tungstenite's 16 MiB default cap; browsers impose no such limit, so
     // raise it for the test client rather than shrinking the flood below
@@ -120,7 +83,7 @@ async fn connect(addr: SocketAddr) -> WsClient {
     let config = WebSocketConfig::default()
         .max_message_size(Some(256 * 1024 * 1024))
         .max_frame_size(Some(64 * 1024 * 1024));
-    let (ws, _) = connect_async_with_config(format!("ws://{addr}/ws"), Some(config), false)
+    let (ws, _) = connect_async_with_config(rig.workspace.ws_url(), Some(config), false)
         .await
         .expect("ws connect");
     ws
@@ -268,7 +231,7 @@ async fn lagged_client_receives_snapshot_and_converges() {
 
     let rig = start_server(8).await;
 
-    let mut slow = connect(rig.addr).await;
+    let mut slow = connect(&rig).await;
     let mut consumer = SequencedConsumer::from_join_snapshot(next_server_message(&mut slow).await);
 
     // Flood while the slow client does NOT read: its outbound task blocks on
@@ -277,7 +240,7 @@ async fn lagged_client_receives_snapshot_and_converges() {
     for idx in 0..FLOOD {
         apply_and_broadcast(&rig, dataset_opened_command(idx, NAME_BYTES)).await;
     }
-    assert_eq!(rig.session.lock().await.seq, FLOOD as u64);
+    assert_eq!(rig.workspace.live.session.lock().await.seq, FLOOD as u64);
 
     // Now the slow client starts reading: buffered head of the stream, then
     // the Lagged-triggered snapshot, then whatever retained tail follows.
@@ -297,13 +260,13 @@ async fn lagged_client_receives_snapshot_and_converges() {
     );
 
     // Convergence: byte-equal document state with the server.
-    let server_doc = rig.session.lock().await.document.clone();
+    let server_doc = rig.workspace.live.session.lock().await.document.clone();
     assert_eq!(
         serde_json::to_value(&consumer.doc).unwrap(),
         serde_json::to_value(&server_doc).unwrap(),
         "slow client's document must converge to the server document"
     );
-    assert_eq!(consumer.last, rig.session.lock().await.seq);
+    assert_eq!(consumer.last, rig.workspace.live.session.lock().await.seq);
     assert_eq!(consumer.doc.manifests.len(), FLOOD);
 }
 
@@ -313,7 +276,7 @@ async fn lagged_client_receives_snapshot_and_converges() {
 async fn request_snapshot_returns_fresh_snapshot() {
     let rig = start_server(256).await;
 
-    let mut client = connect(rig.addr).await;
+    let mut client = connect(&rig).await;
     let ServerMessage::Snapshot {
         seq,
         your_id: joined_as,
@@ -350,7 +313,7 @@ async fn request_snapshot_returns_fresh_snapshot() {
     };
     assert_eq!(seq, 3);
     assert_eq!(your_id, joined_as);
-    let server_doc = rig.session.lock().await.document.clone();
+    let server_doc = rig.workspace.live.session.lock().await.document.clone();
     assert_eq!(
         serde_json::to_value(&document).unwrap(),
         serde_json::to_value(&server_doc).unwrap(),
@@ -365,7 +328,7 @@ async fn request_snapshot_returns_fresh_snapshot() {
 async fn request_snapshot_is_throttled_per_client() {
     let rig = start_server(256).await;
 
-    let mut client = connect(rig.addr).await;
+    let mut client = connect(&rig).await;
     let ServerMessage::Snapshot { .. } = next_server_message(&mut client).await else {
         panic!("join snapshot");
     };
@@ -380,11 +343,21 @@ async fn request_snapshot_is_throttled_per_client() {
     let ServerMessage::Snapshot { .. } = next_server_message(&mut client).await else {
         panic!("first request must be served");
     };
+    let ServerMessage::MessageRejected {
+        reason,
+        message_type,
+        ..
+    } = next_server_message(&mut client).await
+    else {
+        panic!("second request inside the throttle window must be refused, not served");
+    };
+    assert_eq!(reason, MessageRejection::Throttled);
+    assert_eq!(message_type.as_deref(), Some("request_snapshot"));
     assert!(
         try_next_server_message(&mut client, Duration::from_millis(400))
             .await
             .is_none(),
-        "second request inside the throttle window must be ignored"
+        "the refused request must not also be served"
     );
 
     // Past the interval, requests are served again.

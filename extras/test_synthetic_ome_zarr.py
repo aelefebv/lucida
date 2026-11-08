@@ -438,6 +438,8 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         ["out.zarr", "--dtype", "int16", "--range", "0,40000"],
         ["out.zarr", "--range", "10,10"],
         ["out.zarr", "--dtype", "uint8"],
+        ["out.zarr", "--zarr-version", "2", "--chunk", "8", "--shard", "16"],
+        ["out.zarr", "--zarr-version", "2", "--checksum"],
     ],
     ids=[
         "size-arity",
@@ -457,7 +459,9 @@ def test_parse_args_defaults_describe_a_single_unsharded_image() -> None:
         "negative-range-unsigned",
         "range-past-type",
         "empty-range",
-        "one-byte-type",
+        "default-range-past-one-byte-type",
+        "v2-shard",
+        "v2-checksum",
     ],
 )
 def test_parse_args_rejects_inconsistent_options(argv: list[str]) -> None:
@@ -477,6 +481,112 @@ def test_dtype_and_range_set_the_stored_type_and_the_values_it_spans(tmp_path: P
     assert level0.min() < 0 < level0.max()
     if dtype.startswith("float"):
         assert not np.all(level0 == np.rint(level0))
+
+
+def test_parse_args_reads_the_storage_options() -> None:
+    opts = gen.parse_args(
+        [
+            "out.zarr",
+            "--zarr-version", "2",
+            "--compressor", "blosc-lz4",
+            "--order", "F",
+            "--endian", "big",
+            "--dimension-separator", ".",
+        ]
+    )
+    assert (opts.zarr_version, opts.compressor, opts.order, opts.endian, opts.dimension_separator) == (2, "blosc-lz4", "F", "big", ".")
+    defaults = gen.parse_args(["out.zarr"])
+    assert (defaults.zarr_version, defaults.compressor, defaults.order, defaults.endian, defaults.checksum) == (3, "zstd", "C", "little", False)
+    assert (defaults.level_prefix, defaults.consolidated) == ("", False)
+    assert gen.parse_args(["out.zarr", "--checksum"]).checksum is True
+    named = gen.parse_args(["out.zarr", "--level-prefix", "s", "--consolidated"])
+    assert (named.level_prefix, named.consolidated) == ("s", True)
+
+
+@pytest.mark.parametrize("version", ["2", "3"])
+def test_level_prefix_names_each_level_s_array_and_its_multiscale_path(tmp_path: Path, version: str) -> None:
+    common = ["--size", "16,16", "--levels", "2", "--chunk", "8", "--seed", "4", "--zarr-version", version]
+    named = generate(tmp_path, "named.ome.zarr", *common, "--level-prefix", "s")
+    plain = generate(tmp_path, "plain.ome.zarr", *common)
+    attributes = read_json(named / (".zattrs" if version == "2" else "zarr.json"))
+    ms = attributes["multiscales"][0] if version == "2" else attributes["attributes"]["ome"]["multiscales"][0]
+    assert [d["path"] for d in ms["datasets"]] == ["s0", "s1"]
+    for level in range(2):
+        a = np.asarray(zarr.open_array(str(named / f"s{level}"), mode="r")[:])
+        np.testing.assert_array_equal(a, level_array(plain, level))
+    assert not (named / "0").exists()
+
+
+def test_consolidated_zarr_v2_writes_every_document_into_zmetadata(tmp_path: Path) -> None:
+    out = generate(
+        tmp_path, "consolidated.ome.zarr", "--tiles", "2", "--size", "8,8", "--levels", "2", "--chunk", "8",
+        "--zarr-version", "2", "--consolidated",
+    )
+    consolidated = read_json(out / ".zmetadata")
+    assert consolidated["zarr_consolidated_format"] == 1
+    documents = consolidated["metadata"]
+    assert documents[".zattrs"]["plate"]["version"] == "0.4"
+    assert documents["A/1/.zattrs"]["well"]["images"] == [{"path": "0"}]
+    for tile in ["A/1/0", "A/2/0"]:
+        for level in range(2):
+            assert documents[f"{tile}/{level}/.zarray"] == read_json(out / tile / str(level) / ".zarray")
+
+
+def test_zarr_v2_writes_ome_ngff_0_4_metadata_and_v2_arrays(tmp_path: Path) -> None:
+    out = generate(
+        tmp_path, "v2.ome.zarr", "--size", "16,16", "--channels", "2", "--levels", "2", "--chunk", "8",
+        "--zarr-version", "2", "--compressor", "blosc-lz4", "--order", "F", "--endian", "big", "--dimension-separator", ".",
+    )
+    assert read_json(out / ".zgroup") == {"zarr_format": 2}
+    ms = read_json(out / ".zattrs")["multiscales"][0]
+    assert ms["version"] == "0.4"
+    assert [a["name"] for a in ms["axes"]] == ["c", "y", "x"]
+    assert ms["datasets"][1]["coordinateTransformations"] == [{"type": "scale", "scale": [1.0, 2.0, 2.0]}]
+    meta = read_json(out / "0" / ".zarray")
+    assert (meta["shape"], meta["chunks"], meta["dtype"], meta["order"]) == ([2, 16, 16], [1, 8, 8], ">u2", "F")
+    assert meta["dimension_separator"] == "."
+    assert meta["compressor"]["id"] == "blosc" and meta["compressor"]["cname"] == "lz4"
+    assert (out / "0" / "1.1.1").is_file()
+    assert not (out / "zarr.json").exists()
+
+
+def test_zarr_v2_collection_puts_plate_and_well_at_the_top_of_zattrs(tmp_path: Path) -> None:
+    out = generate(tmp_path, "v2-grid.ome.zarr", "--tiles", "2", "--size", "8,8", "--levels", "1", "--chunk", "8", "--zarr-version", "2")
+    plate = read_json(out / ".zattrs")["plate"]
+    assert plate["version"] == "0.4"
+    assert [w["path"] for w in plate["wells"]] == ["A/1", "A/2"]
+    assert read_json(out / "A" / "1" / ".zattrs") == {"well": {"version": "0.4", "images": [{"path": "0"}]}}
+    assert read_json(out / "A" / "1" / "0" / ".zattrs")["multiscales"][0]["version"] == "0.4"
+
+
+def test_zarr_v3_storage_options_build_the_codec_chain(tmp_path: Path) -> None:
+    out = generate(
+        tmp_path, "chain.ome.zarr", "--size", "16,16", "--levels", "1", "--chunk", "8",
+        "--order", "F", "--endian", "big", "--compressor", "gzip", "--checksum",
+    )
+    codecs = read_json(out / "0" / "zarr.json")["codecs"]
+    assert [c["name"] for c in codecs] == ["transpose", "bytes", "gzip", "crc32c"]
+    assert codecs[0]["configuration"] == {"order": [1, 0]}
+    assert codecs[1]["configuration"] == {"endian": "big"}
+
+
+@pytest.mark.parametrize(
+    "storage",
+    [
+        ["--zarr-version", "2"],
+        ["--zarr-version", "2", "--compressor", "blosc-lz4", "--order", "F", "--endian", "big"],
+        ["--zarr-version", "2", "--compressor", "none", "--dimension-separator", "."],
+        ["--compressor", "blosc-lz4", "--order", "F"],
+        ["--compressor", "gzip", "--endian", "big", "--checksum"],
+    ],
+    ids=["v2", "v2-blosc-fortran-big", "v2-raw-dot", "v3-blosc-transpose", "v3-gzip-big-crc32c"],
+)
+def test_storage_options_never_change_the_samples(tmp_path: Path, storage: list[str]) -> None:
+    common = ["--size", "4,20,20", "--channels", "2", "--levels", "2", "--chunk", "8", "--seed", "5"]
+    reference = generate(tmp_path, "reference.ome.zarr", *common)
+    other = generate(tmp_path, "other.ome.zarr", *common, *storage)
+    for level in range(2):
+        np.testing.assert_array_equal(level_array(other, level), level_array(reference, level))
 
 
 def test_main_refuses_to_overwrite_unless_asked(tmp_path: Path) -> None:
@@ -521,25 +631,40 @@ COMMITTED = [
     "level-index.ome.zarr",
     "collection-unsharded.ome.zarr",
     "collection-mixed.ome.zarr",
+    "v2-twin.ome.zarr",
+    "v3-codec-chain.ome.zarr",
+    "v2-collection.ome.zarr",
+    "v3-level-paths.ome.zarr",
+    "v2-consolidated.ome.zarr",
 ]
+
+# Zarr v3 keeps a node's metadata in zarr.json; Zarr v2 splits it across
+# these, and may consolidate them all into the root .zmetadata.
+METADATA_NAMES = ("zarr.json", ".zarray", ".zattrs", ".zgroup", ".zmetadata")
+
+
+def is_array(meta_path: Path) -> bool:
+    if meta_path.name == "zarr.json":
+        return read_json(meta_path)["node_type"] == "array"
+    return meta_path.name == ".zarray"
 
 
 def test_committed_fixtures_match_regenerate_script(tmp_path: Path) -> None:
     """The committed fixtures are what regenerate.sh writes today.
 
     Compares every metadata document and every array's samples rather than
-    bytes, because the zstd frames can differ between library versions while
-    the data does not. Needs uv on PATH, since regenerate.sh runs the
+    bytes, because compressed frames can differ between library versions
+    while the data does not. Needs uv on PATH, since regenerate.sh runs the
     generator through it.
     """
     subprocess.run(["bash", str(FIXTURES_DIR / "regenerate.sh"), str(tmp_path)], check=True, capture_output=True)
     for name in COMMITTED:
         committed, fresh = FIXTURES_DIR / name, tmp_path / name
-        for meta_path in sorted(committed.rglob("zarr.json")):
+        for meta_path in sorted(p for p in committed.rglob("*") if p.name in METADATA_NAMES):
             rel = meta_path.relative_to(committed)
             meta = read_json(meta_path)
             assert meta == read_json(fresh / rel), f"{name}/{rel}"
-            if meta["node_type"] == "array":
+            if is_array(meta_path):
                 a = np.asarray(zarr.open_array(str(meta_path.parent), mode="r")[:])
                 b = np.asarray(zarr.open_array(str(fresh / rel.parent), mode="r")[:])
                 np.testing.assert_array_equal(a, b, err_msg=f"{name}/{rel.parent}")
@@ -551,9 +676,22 @@ def test_committed_fixtures_match_regenerate_script(tmp_path: Path) -> None:
 
 
 def test_committed_twins_hold_identical_samples() -> None:
-    flat, sharded = FIXTURES_DIR / "twin-unsharded.ome.zarr", FIXTURES_DIR / "twin-sharded.ome.zarr"
+    flat = FIXTURES_DIR / "twin-unsharded.ome.zarr"
+    for twin in ["twin-sharded.ome.zarr", "v2-twin.ome.zarr", "v3-codec-chain.ome.zarr"]:
+        for level in range(3):
+            np.testing.assert_array_equal(level_array(flat, level), level_array(FIXTURES_DIR / twin, level), err_msg=twin)
+    named = FIXTURES_DIR / "v3-level-paths.ome.zarr"
     for level in range(3):
-        np.testing.assert_array_equal(level_array(flat, level), level_array(sharded, level))
+        a = np.asarray(zarr.open_array(str(named / f"s{level}"), mode="r")[:])
+        np.testing.assert_array_equal(level_array(flat, level), a, err_msg=f"v3-level-paths s{level}")
+    collection = FIXTURES_DIR / "collection-unsharded.ome.zarr"
+    v2, consolidated = FIXTURES_DIR / "v2-collection.ome.zarr", FIXTURES_DIR / "v2-consolidated.ome.zarr"
+    for tile in ["A/1/0", "A/2/0", "B/1/0"]:
+        for level in range(2):
+            reference = level_array(collection / tile, level)
+            np.testing.assert_array_equal(reference, level_array(v2 / tile, level), err_msg=tile)
+            a = np.asarray(zarr.open_array(str(consolidated / tile / f"s{level}"), mode="r")[:])
+            np.testing.assert_array_equal(reference, a, err_msg=f"v2-consolidated {tile}")
 
 
 def test_committed_sparse_pyramid_has_absent_inner_chunks_and_an_unwritten_level() -> None:

@@ -40,7 +40,7 @@ export function chunkDistSq(
   return dx * dx + dy * dy + dz * dz;
 }
 
-export interface FindFarthestParams {
+export interface FindEvictionParams {
   /** Composite slot keys → slot indices. */
   slots: Map<string, number>;
   /** slotIndex → globalGridIdx; `< 0` means slot is stale (unmapped). */
@@ -54,10 +54,12 @@ export interface FindFarthestParams {
   cameraFor: (memberId: string) => [number, number] | [number, number, number];
   /**
    * Per-entity target level (`detailLevels[0]` of its cold-state entry),
-   * or `undefined` when the worker holds no cold state for the member. A
-   * resident chunk finer than it is the first to go.
+   * or `undefined` when the worker holds no cold state for the member. The
+   * pool has no section for a resident chunk finer than it.
    */
   targetLevelFor: (memberId: string) => number | undefined;
+  /** Whether the planner wants a resident chunk for the current view. */
+  isWanted: (memberId: string, chunkKey: string) => boolean;
   /**
    * Volume mode → use 3D distance (include the chunk's Z + camera's
    * Z). Slice mode → strip Z; the per-Z filter has already constrained
@@ -67,65 +69,116 @@ export interface FindFarthestParams {
 }
 
 /**
- * Pick the eviction candidate from an atlas's slot map:
- *   1. A chunk finer than its member's target level, finest first. The
- *      pool has no section for it, so the shader never samples it.
- *   2. Else a stale slot: unmapped, member gone from the active set, or
- *      no section for its level.
- *   3. Else the mapped chunk farthest from its member's camera reference,
- *      whatever its level. Among equally far chunks the greatest composite
- *      key goes, so the choice never depends on the order chunks arrived in.
- * Cases 1 and 2 return `dist = Infinity`. A later finer chunk outranks a
- * stale one, so the scan can't stop early except at level 0. The caller
- * evicts only if the incoming chunk is strictly nearer than `dist`.
+ * The three kinds of slot, in the order they are evicted:
+ *
+ *   - `unsampled`: the shader never reads it. It is finer than its member's
+ *     target level, unmapped (another T, C or plane), or has no section.
+ *   - `unwanted`: mapped, and the shader may sample it as a fallback, but the
+ *     planner does not want it.
+ *   - `wanted`: the planner wants it.
  */
-export function findFarthestSlot(params: FindFarthestParams): { key: string; dist: number } {
-  let finerKey = "";
-  let finerLevel = Infinity;
-  let staleKey = "";
-  let farthestKey = "";
-  let maxDist = -1;
+export type EvictionClass = "unsampled" | "unwanted" | "wanted";
+
+export interface EvictionCandidate {
+  key: string;
+  class: EvictionClass;
+  /** Squared distance to the member's camera reference; `Infinity` for `unsampled`. */
+  dist: number;
+}
+
+/**
+ * Pick the slot an incoming chunk may take. Every slot the planner does not
+ * want goes before any it does, and each class has a fixed order, so the
+ * choice never depends on the order chunks arrived in:
+ *   1. `unsampled`: the greatest composite key.
+ *   2. `unwanted`: the farthest from its member's camera reference, keeping
+ *      near fallback longest; the greatest key among equally far.
+ *   3. `wanted`: the farthest, then the greatest key. The caller evicts it
+ *      only for a wanted chunk strictly nearer, so two chunks at one distance
+ *      never trade a slot.
+ * Returns null when the pool holds nothing.
+ */
+export function findEvictionSlot(params: FindEvictionParams): EvictionCandidate | null {
+  let unsampledKey = "";
+  let unwantedKey = "";
+  let unwantedDist = -1;
+  let wantedKey = "";
+  let wantedDist = -1;
 
   for (const [compositeKey, slotIdx] of params.slots) {
-    const parsed = parseCompositeKey(compositeKey);
-    if (!parsed) continue;
-    const chunk = parseChunkKey(parsed.chunkKey);
-    if (!chunk) continue;
-
-    const target = params.targetLevelFor(parsed.memberId);
-    if (target !== undefined && chunk.level < target) {
-      if (chunk.level < finerLevel) {
-        finerLevel = chunk.level;
-        finerKey = compositeKey;
-        if (finerLevel === 0) break;
+    // Once the scan holds an unsampled slot, no other class can outrank it.
+    const slot = classifySlot(params, compositeKey, slotIdx, unsampledKey === "");
+    if (!slot) continue;
+    if (slot.class === "unsampled") {
+      if (compositeKey > unsampledKey) unsampledKey = compositeKey;
+    } else if (slot.class === "wanted") {
+      if (slot.dist > wantedDist || (slot.dist === wantedDist && compositeKey > wantedKey)) {
+        wantedDist = slot.dist;
+        wantedKey = compositeKey;
       }
-      continue;
-    }
-    // Once the scan holds a finer chunk, only a still-finer one can outrank it.
-    if (finerKey) continue;
-
-    const gridIdx = params.slotGridIdx[slotIdx];
-    const lodMeta = gridIdx < 0
-      ? undefined
-      : params.entityMetas.get(parsed.memberId)?.find(m => m.level === chunk.level);
-    if (!lodMeta) {
-      if (!staleKey) staleKey = compositeKey;
-      continue;
-    }
-    if (staleKey) continue;
-
-    const cam = params.cameraFor(parsed.memberId);
-    const dist = params.is3D
-      ? chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam)
-      : chunkDistSq(lodMeta, chunk.x, chunk.y, null, cam);
-
-    if (dist > maxDist || (dist === maxDist && compositeKey > farthestKey)) {
-      maxDist = dist;
-      farthestKey = compositeKey;
+    } else if (slot.dist > unwantedDist || (slot.dist === unwantedDist && compositeKey > unwantedKey)) {
+      unwantedDist = slot.dist;
+      unwantedKey = compositeKey;
     }
   }
 
-  if (finerKey) return { key: finerKey, dist: Infinity };
-  if (staleKey) return { key: staleKey, dist: Infinity };
-  return { key: farthestKey, dist: maxDist };
+  if (unsampledKey) return { key: unsampledKey, class: "unsampled", dist: Infinity };
+  if (unwantedKey) return { key: unwantedKey, class: "unwanted", dist: unwantedDist };
+  if (wantedKey) return { key: wantedKey, class: "wanted", dist: wantedDist };
+  return null;
+}
+
+const CLASS_RANK: Record<EvictionClass, number> = { wanted: 0, unwanted: 1, unsampled: 2 };
+
+/**
+ * Every slot, in the order a pool that must shrink keeps them: the reverse of
+ * {@link findEvictionSlot}'s order, so wanted slots nearest first, then
+ * unwanted ones nearest first, then unsampled ones.
+ */
+export function rankSlotsToKeep(params: FindEvictionParams): EvictionCandidate[] {
+  const ranked: EvictionCandidate[] = [];
+  for (const [compositeKey, slotIdx] of params.slots) {
+    const slot = classifySlot(params, compositeKey, slotIdx, true);
+    ranked.push(slot ?? { key: compositeKey, class: "unsampled", dist: Infinity });
+  }
+  return ranked.sort((a, b) =>
+    CLASS_RANK[a.class] - CLASS_RANK[b.class] ||
+    a.dist - b.dist ||
+    (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+}
+
+/**
+ * One slot's class, and its distance unless `withDistance` is false or the
+ * slot is unsampled. Null for a key that doesn't parse.
+ */
+function classifySlot(
+  params: FindEvictionParams,
+  compositeKey: string,
+  slotIdx: number,
+  withDistance: boolean,
+): EvictionCandidate | null {
+  const parsed = parseCompositeKey(compositeKey);
+  if (!parsed) return null;
+  const chunk = parseChunkKey(parsed.chunkKey);
+  if (!chunk) return null;
+
+  const target = params.targetLevelFor(parsed.memberId);
+  const lodMeta = params.slotGridIdx[slotIdx] < 0
+    ? undefined
+    : params.entityMetas.get(parsed.memberId)?.find(m => m.level === chunk.level);
+  if ((target !== undefined && chunk.level < target) || !lodMeta) {
+    return { key: compositeKey, class: "unsampled", dist: Infinity };
+  }
+  const wanted = params.isWanted(parsed.memberId, parsed.chunkKey);
+  if (!withDistance) return { key: compositeKey, class: wanted ? "wanted" : "unwanted", dist: 0 };
+  const cam = params.cameraFor(parsed.memberId);
+  const dist = params.is3D
+    ? chunkDistSq(lodMeta, chunk.x, chunk.y, chunk.z, cam)
+    : chunkDistSq(lodMeta, chunk.x, chunk.y, null, cam);
+  return { key: compositeKey, class: wanted ? "wanted" : "unwanted", dist };
+}
+
+/** Whether a wanted incoming chunk at `incomingDist` may take `victim`'s slot. */
+export function mayEvict(victim: EvictionCandidate, incomingDist: number): boolean {
+  return victim.class !== "wanted" || incomingDist < victim.dist;
 }

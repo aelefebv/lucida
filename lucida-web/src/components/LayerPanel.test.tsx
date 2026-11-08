@@ -6,6 +6,8 @@ import userEvent from "@testing-library/user-event";
 import { LayerPanel, type LayerChannel, type LayerInfo } from "./LayerPanel.tsx";
 import { __resetShortcutsForTesting, listShortcuts } from "../ui/shortcuts.ts";
 import { __resetCommandsForTesting, listCommands } from "../ui/commands.ts";
+import { createSettleState, evaluateSettle, settleSignal, type SettleState } from "../pipeline/settle.ts";
+import { failedChunkReport, summarizeFailedChunks } from "../pipeline/failedChunks.ts";
 
 function channel(overrides: Partial<LayerChannel> = {}): LayerChannel {
   return {
@@ -127,6 +129,42 @@ describe("LayerPanel header", () => {
     expect(screen.getByText("No layers yet.")).toBeTruthy();
     await userEvent.click(screen.getAllByRole("button", { name: "Add data" })[1]);
     expect(props.onAddData).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("LayerPanel coverage notice", () => {
+  afterEach(() => {
+    settleSignal.reset();
+    vi.useRealTimers();
+  });
+
+  function settle(overrides: Partial<SettleState>): void {
+    const state = Object.assign(createSettleState(), overrides);
+    act(() => {
+      settleSignal.publish(evaluateSettle(state, 0));
+      vi.advanceTimersByTime(settleSignal.holdMs);
+    });
+  }
+
+  it("says quietly how much of the view a full memory budget holds", () => {
+    vi.useFakeTimers();
+    render(<LayerPanel {...baseProps()} />);
+    expect(screen.queryByText(/Memory is full/)).toBeNull();
+
+    settle({ desiredCoarseChunks: 40, residentCoarseChunks: 25, shortCoarseChunks: 15 });
+    expect(screen.getByText(/Memory is full/).textContent).toBe(
+      "Memory is full: this view holds 62% of the data it asks for.",
+    );
+
+    act(() => settleSignal.disturb());
+    expect(screen.queryByText(/Memory is full/)).toBeNull();
+  });
+
+  it("says nothing about a view that holds everything it asks for", () => {
+    vi.useFakeTimers();
+    render(<LayerPanel {...baseProps()} />);
+    settle({ desiredCoarseChunks: 40, residentCoarseChunks: 40 });
+    expect(screen.queryByText(/Memory is full/)).toBeNull();
   });
 });
 
@@ -432,6 +470,27 @@ describe("LayerPanel data problems", () => {
 
     expect(screen.queryByTestId("layer-degraded-wds-1")).toBeNull();
     expect(screen.queryByRole("list", { name: "original.zarr data problems" })).toBeNull();
+  });
+
+  it("names the chunks that could not be read, and drops the note once none are left", () => {
+    render(<LayerPanel {...baseProps()} />);
+    expect(screen.queryByTestId("layer-degraded-wds-1")).toBeNull();
+
+    act(() => {
+      failedChunkReport.publish(summarizeFailedChunks([
+        { datasetId: "wds-1", imageId: "img", chunkKey: "0/0/0/0/0/0", failure: "corrupt_chunk" },
+        { datasetId: "wds-1", imageId: "img", chunkKey: "0/0/0/0/0/1", failure: "corrupt_chunk" },
+        { datasetId: "other", imageId: "img", chunkKey: "0/0/0/0/0/0", failure: "permission" },
+      ]));
+    });
+    expect(screen.getByTestId("layer-degraded-wds-1").textContent).toBe("Degraded");
+    const list = screen.getByRole("list", { name: "original.zarr data problems" });
+    expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "2 chunks could not be read (corrupt), so their regions show hatched.",
+    ]);
+
+    act(() => failedChunkReport.publish(new Map()));
+    expect(screen.queryByTestId("layer-degraded-wds-1")).toBeNull();
   });
 });
 

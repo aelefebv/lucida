@@ -409,6 +409,41 @@ describe("ProxiedContentSource.fetch", () => {
     }
   });
 
+  it("a source-chunk status names the server's reason, and a frame without one names its status", async () => {
+    const ctrl = new AbortController();
+    const named = source.fetch(
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "1/0/0/0/0/0" },
+      ctrl.signal,
+    );
+    source.handleSourceChunkStatus(
+      "ds-1",
+      "image-1",
+      "1/0/0/0/0/0",
+      "failed_permanent",
+      "decoded 2 bytes where the stored chunk shape holds 4",
+      "wrong_size",
+    );
+    await expect(named).rejects.toMatchObject({
+      kind: "permanent",
+      serverReported: true,
+      failure: "wrong_size",
+      message:
+        "Source chunk 1/0/0/0/0/0 decoded to the wrong size: " +
+        "decoded 2 bytes where the stored chunk shape holds 4",
+    });
+
+    const unnamed = source.fetch(
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "1/0/0/0/0/1" },
+      ctrl.signal,
+    );
+    source.handleSourceChunkStatus("ds-1", "image-1", "1/0/0/0/0/1", "unavailable");
+    await expect(unnamed).rejects.toMatchObject({
+      kind: "transient",
+      failure: null,
+      message: "Source chunk 1/0/0/0/0/1 is unavailable",
+    });
+  });
+
   it("a source-chunk status rejects every coalesced waiter and clears the pending slot", async () => {
     const ctrl = new AbortController();
     const request = { datasetId: "ds-1", imageId: "image-1", chunkKey: "2/0/0/0/0/0" };

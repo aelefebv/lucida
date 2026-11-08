@@ -11,25 +11,33 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::camera::Camera;
+use crate::camera::{Camera, Framing};
+use crate::framing::{FitBounds, VoxBox, WorldBox};
 use crate::saved_view::SavedView;
-use crate::scene::{DatasetDisplaySettings, RenderMode};
+use crate::scene::{DatasetDisplaySettings, RenderMode, Scene};
 use crate::view::ViewState;
 use lucida_content::DatasetId;
 
-/// The spatial + dimensional extent of the dataset(s) a view is exploring.
+/// The spatial + dimensional extent of the dataset a view is exploring,
+/// read off a [`Scene`] by [`ViewExtent::of`].
 ///
-/// `min`/`max` are the world-space bounding box (the same coordinate space
-/// [`Camera::fit_to_bounds`] expects); the `*_count` fields are the sizes of the
-/// non-spatial axes. The counts gate dimensional moves — `z_count <= 1` means a
-/// flat dataset with no slices to step through. Supplied by the caller, which
-/// owns dataset geometry; this module treats it as read-only context.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// The box is held in both spaces, so the Home move fits whichever camera the
+/// view has. Only the voxel box goes on the wire, as `min` and `max`. The
+/// `*_count` fields are the sizes of the non-spatial axes and gate the
+/// dimensional moves: `z_count <= 1` means a flat dataset with no slices to
+/// step through.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ViewExtent {
-    /// World-space minimum corner `[x, y, z]`.
-    pub min: [f64; 3],
-    /// World-space maximum corner `[x, y, z]`.
-    pub max: [f64; 3],
+    /// The dataset's box in voxel space.
+    #[serde(flatten)]
+    pub voxels: VoxBox,
+    /// The same box in world space, where a volume camera frames it.
+    #[serde(skip)]
+    pub world: WorldBox,
+    /// What a fit of the box leaves the camera: framed when the dataset is
+    /// everything visible, as [`Scene::frame`] decides.
+    #[serde(skip)]
+    pub fit_framing: Framing,
     /// Number of Z slices in the dataset.
     pub z_count: u32,
     /// Number of timepoints.
@@ -39,135 +47,110 @@ pub struct ViewExtent {
 }
 
 impl ViewExtent {
-    /// Build a [`ViewExtent`] from a dataset shape `dims = [T, C, Z, Y, X]`.
-    ///
-    /// The world-space box spans the full image in X/Y and the Z stack in depth
-    /// (`min` at the origin, `max` at `[X, Y, Z]`); the `*_count` fields carry
-    /// the non-spatial axis sizes the move-set gates on (a flat `z_count <= 1`
-    /// dataset offers no slice-step cells). This is the single source of the
-    /// `[T,C,Z,Y,X]` → extent mapping shared by the CLI, Python, and web tiers.
-    pub fn from_dims(dims: [u64; 5]) -> Self {
-        let [t, c, z, y, x] = dims;
-        ViewExtent {
-            min: [0.0, 0.0, 0.0],
-            max: [x as f64, y as f64, z as f64],
+    /// The extent of `dataset_id` in `scene`: its whole box, every member of
+    /// a collection included, and the axis counts of its first image at
+    /// level 0. `None` when the scene doesn't hold the dataset or it has no
+    /// bounds.
+    pub fn of(scene: &Scene, dataset_id: &DatasetId) -> Option<Self> {
+        let bounds = scene.dataset_bounds(&dataset_id.0)?;
+        let [t, c, z, _, _] = scene
+            .document
+            .manifests
+            .get(dataset_id)?
+            .images()
+            .first()?
+            .multiscale
+            .levels
+            .first()?
+            .shape;
+        let mut visible = scene.visible_dataset_ids();
+        let alone = visible.next() == Some(dataset_id) && visible.next().is_none();
+        Some(ViewExtent {
+            voxels: bounds.vox,
+            world: bounds.world,
+            fit_framing: if alone {
+                Framing::Framed
+            } else {
+                Framing::Placed
+            },
             z_count: z as u32,
             t_count: t as u32,
             c_count: c as u32,
+        })
+    }
+
+    /// The box in both spaces, for [`Camera::fit`].
+    pub fn bounds(&self) -> FitBounds {
+        FitBounds {
+            vox: self.voxels,
+            world: self.world,
         }
     }
 }
 
-/// Synthesize a dataset's "Home" view, the exploration root when a caller
-/// gives no explicit view.
+/// A dataset's "Home" view on a canvas of `viewport` device pixels, the
+/// exploration root when a caller gives no explicit view.
 ///
 /// A volume (`z_count > 1`) opens in a 3D [`Camera::Arcball`] and a flat
-/// image in a 2D [`Camera::Slice`], framed to the full extent. The dataset is
-/// visible with a default display-settings entry, since an absent entry
+/// image in a 2D [`Camera::Slice`]: a new camera fitted to the dataset as
+/// [`Scene::frame`] fits one, so every client gets the same Home. The dataset
+/// is visible with a default display-settings entry, since an absent entry
 /// would reset the colormap. The view sits on the mid-Z slice so a
 /// [`StepZ`](ViewTransform::StepZ) is in range both ways.
 ///
-/// `dims = [T, C, Z, Y, X]`. Shared by the CLI, the pyo3 binding, and the web.
-pub fn default_view(ds_id: &str, dims: [u64; 5], viewport: [u32; 2]) -> SavedView {
-    let extent = ViewExtent::from_dims(dims);
-    let z_count = extent.z_count;
-
-    let mut view = SavedView::empty(viewport);
-    let id = DatasetId(ds_id.to_string());
-    view.dataset_order = vec![id.clone()];
-    // Make the dataset visible: a default display-settings entry (an absent
-    // entry would otherwise reset the colormap) plus auto-contrast on.
-    view.dataset_settings
-        .insert(id.clone(), DatasetDisplaySettings::default());
-    view.auto_contrast.insert(id, true);
-
-    // Start on a single mid-stack slice (so a StepZ in either direction is in
-    // range on a volume); a flat dataset collapses to z 0..1 anyway.
-    let z0 = z_count / 2;
-    view.view = ViewState {
-        z_range: z0..z0 + 1,
-        ..ViewState::new()
-    };
-
-    // Volume → 3D Arcball Home (rotate cells appear); flat → 2D Slice Home.
-    view.camera = if z_count > 1 {
+/// `None` when the scene doesn't hold the dataset or it has no bounds.
+pub fn home_view(scene: &Scene, dataset_id: &DatasetId, viewport: [u32; 2]) -> Option<SavedView> {
+    let extent = ViewExtent::of(scene, dataset_id)?;
+    let mut camera = if extent.z_count > 1 {
         Camera::new_3d(viewport)
     } else {
         Camera::new_2d(viewport)
     };
-    view.camera.fit_to_bounds(extent.min, extent.max);
+    camera.fit(&extent.bounds());
+    camera.set_framing(extent.fit_framing);
 
-    view
+    let mut view = SavedView::empty(viewport);
+    view.camera = camera;
+    view.dataset_order = vec![dataset_id.clone()];
+    // Make the dataset visible: a default display-settings entry (an absent
+    // entry would otherwise reset the colormap) plus auto-contrast on.
+    view.dataset_settings
+        .insert(dataset_id.clone(), DatasetDisplaySettings::default());
+    view.auto_contrast.insert(dataset_id.clone(), true);
+
+    // Start on a single mid-stack slice (so a StepZ in either direction is in
+    // range on a volume); a flat dataset collapses to z 0..1 anyway.
+    let z0 = extent.z_count / 2;
+    view.view = ViewState {
+        z_range: z0..z0 + 1,
+        ..ViewState::new()
+    };
+    Some(view)
 }
 
-/// Build a guided-exploration sidecar for the web (and any other wasm)
-/// surface, as a JSON string, so the SPA never rebuilds a [`ViewExtent`] or a
-/// Home view in TypeScript.
+/// Guided exploration of `dataset_id` in `scene`, from `view` or, without
+/// one, from the dataset's [`home_view`] on a canvas of `viewport`. The web,
+/// the CLI and the Python client all call this, so they share one Home and
+/// one extent.
 ///
-/// `view_json` is the current [`SavedView`], or `None`/empty for the Home view
-/// ([`default_view`]). `t, c, z, y, x` are the dataset shape; `viewport_w` and
-/// `viewport_h` size the Home camera; `depth` is recorded on the sidecar node.
-///
-/// `bounds` is the dataset's box in the current view's camera space,
-/// `[min_x, min_y, min_z, max_x, max_y, max_z]` as
-/// `WasmScene::dataset_fit_bounds` returns it. [`ViewExtent::from_dims`] gives
-/// voxel space, which only a 2D camera shares, so without `bounds` a 3D Home
-/// aims at empty space. It applies only with a `view_json`, since the
-/// synthesized Home picks its own camera; a malformed box is ignored.
-///
-/// Returns the serialized [`ExplorationSidecar`], or `{"error": "<message>"}`
-/// for a malformed `view_json` instead of panicking. Only wasm gets the
-/// `#[wasm_bindgen]` export.
-#[cfg_attr(target_arch = "wasm32", wasm_bindgen::prelude::wasm_bindgen)]
-#[allow(clippy::too_many_arguments)]
-pub fn explore_view(
-    view_json: Option<String>,
-    ds_id: &str,
-    t: u32,
-    c: u32,
-    z: u32,
-    y: u32,
-    x: u32,
-    viewport_w: u32,
-    viewport_h: u32,
+/// `depth` and `breadcrumb` are the caller's walk, stamped on the current
+/// node. `None` when the scene doesn't hold the dataset or it has no bounds.
+pub fn explore(
+    scene: &Scene,
+    dataset_id: &DatasetId,
+    view: Option<&SavedView>,
+    viewport: [u32; 2],
     depth: u32,
-    bounds: Option<Vec<f64>>,
-) -> String {
-    let dims = [t as u64, c as u64, z as u64, y as u64, x as u64];
-    let mut extent = ViewExtent::from_dims(dims);
-    let current = match view_json {
-        Some(j) if !j.is_empty() => match serde_json::from_str::<SavedView>(&j) {
-            Ok(v) => {
-                if let Some((min, max)) = bounds.as_deref().and_then(parse_bounds) {
-                    extent.min = min;
-                    extent.max = max;
-                }
-                v
-            }
-            Err(e) => {
-                return format!(
-                    "{{\"error\":{}}}",
-                    serde_json::to_string(&e.to_string()).unwrap()
-                );
-            }
-        },
-        _ => default_view(ds_id, dims, [viewport_w, viewport_h]),
+    breadcrumb: Vec<String>,
+) -> Option<ExplorationSidecar> {
+    let extent = ViewExtent::of(scene, dataset_id)?;
+    let current = match view {
+        Some(view) => view.clone(),
+        None => home_view(scene, dataset_id, viewport)?,
     };
-    let sidecar = ExplorationSidecar::build(&current, &extent, depth, Vec::new());
-    serde_json::to_string(&sidecar).unwrap_or_else(|_| "{\"error\":\"serialize\"}".to_string())
-}
-
-/// A finite, ordered `[min_x, min_y, min_z, max_x, max_y, max_z]` box, or
-/// `None`.
-fn parse_bounds(raw: &[f64]) -> Option<([f64; 3], [f64; 3])> {
-    let [x0, y0, z0, x1, y1, z1] = *raw else {
-        return None;
-    };
-    let ordered = x0 <= x1 && y0 <= y1 && z0 <= z1;
-    if !ordered || raw.iter().any(|v| !v.is_finite()) {
-        return None;
-    }
-    Some(([x0, y0, z0], [x1, y1, z1]))
+    Some(ExplorationSidecar::build(
+        &current, &extent, depth, breadcrumb,
+    ))
 }
 
 /// One parametric move in the guided-exploration move-set.
@@ -350,9 +333,10 @@ pub fn apply(view: &SavedView, t: &ViewTransform, extent: &ViewExtent) -> Option
 
     match t {
         ViewTransform::Home => {
-            // Mode-preserving fit: a Slice stays 2D, an Arcball stays 3D. We
-            // wrap the camera's own framing math rather than reimplementing it.
-            child.camera.fit_to_bounds(extent.min, extent.max);
+            // Mode-preserving fit: a Slice stays 2D, an Arcball stays 3D, each
+            // taking the box in its own space.
+            child.camera.fit(&extent.bounds());
+            child.camera.set_framing(extent.fit_framing);
         }
         ViewTransform::AzimuthDelta(deg) => match &mut child.camera {
             Camera::Arcball(a) => a.rotate(deg.to_radians(), 0.0),
@@ -445,6 +429,16 @@ pub fn apply(view: &SavedView, t: &ViewTransform, extent: &ViewExtent) -> Option
                 };
             }
         }
+    }
+
+    // A rotated or zoomed fit is a chosen view: left framed, the page showing
+    // it would fit it again and undo the move.
+    let steered = matches!(
+        t,
+        ViewTransform::AzimuthDelta(_) | ViewTransform::ElevationDelta(_) | ViewTransform::Zoom(_)
+    );
+    if steered && child.camera != view.camera {
+        child.camera.set_framing(Framing::Placed);
     }
 
     // No-op omission: if the move changed nothing observable, don't offer it.
@@ -629,8 +623,9 @@ pub struct ExplorationCell {
 
 /// A self-contained guided-exploration snapshot: the current node, the dataset's
 /// extent, plus the menu of next-steps. This is the data structure the CLI /
-/// Python / web tiers serialize, ship, and render.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Python / web tiers serialize, ship, and render. Never read back: the
+/// extent's world box exists only in the scene that built it.
+#[derive(Debug, Clone, Serialize)]
 pub struct ExplorationSidecar {
     /// Wire-format version ([`EXPLORATION_SIDECAR_VERSION`]).
     pub v: u32,
@@ -726,11 +721,35 @@ fn trim_float(x: f64) -> String {
 mod tests {
     use super::*;
     use crate::camera::{Arcball, Camera, Fly, Slice};
+    use crate::command::DocumentCommand;
+    use crate::scene::test_helpers::make_dataset_opened_with_shape;
+
+    /// A scene holding one image of shape `dims` (`[T, C, Z, Y, X]`) as `id`.
+    fn scene_of(id: &str, dims: [u64; 5]) -> Scene {
+        let chunk = [1, 1, dims[2].min(64), dims[3].min(256), dims[4].min(256)];
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(make_dataset_opened_with_shape(
+                id, id, dims[1], dims, chunk, 1,
+            ))
+            .into(),
+        );
+        scene
+    }
+
+    fn extent_of(dims: [u64; 5]) -> ViewExtent {
+        ViewExtent::of(&scene_of("ds", dims), &DatasetId("ds".into())).unwrap()
+    }
+
+    fn home_of(id: &str, dims: [u64; 5], viewport: [u32; 2]) -> SavedView {
+        home_view(&scene_of(id, dims), &DatasetId(id.into()), viewport).unwrap()
+    }
 
     fn extent_3d() -> ViewExtent {
         ViewExtent {
-            min: [0.0, 0.0, 0.0],
-            max: [100.0, 80.0, 40.0],
+            voxels: VoxBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
+            world: WorldBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
+            fit_framing: Framing::Framed,
             z_count: 40,
             t_count: 5,
             c_count: 2,
@@ -1144,16 +1163,16 @@ mod tests {
     fn apply_toggle_projection_on_slice_is_none() {
         // Slice (2D) view with a settings entry: projection toggle is still
         // Arcball-only, so it doesn't apply.
-        let mut v = default_view("wds-flat", [1, 1, 1, 512, 512], [800, 600]);
+        let mut v = home_of("wds-flat", [1, 1, 1, 512, 512], [800, 600]);
         assert!(matches!(v.camera, Camera::Slice(_)));
-        // Force a settings entry to exist (default_view already adds one).
+        // Force a settings entry to exist (the Home view already adds one).
         assert!(!v.dataset_settings.is_empty());
         v.view.z_range = 0..1;
         assert!(
             apply(
                 &v,
                 &ViewTransform::ToggleProjection,
-                &ViewExtent::from_dims([1, 1, 1, 512, 512])
+                &extent_of([1, 1, 1, 512, 512])
             )
             .is_none()
         );
@@ -1164,7 +1183,7 @@ mod tests {
         // A volume Home view (Arcball) has a default dataset_settings entry whose
         // render_mode starts Translucent; toggling flips it to MaxIntensity.
         let dims = [1, 1, 40, 80, 100];
-        let v = default_view("wds-vol", dims, [800, 600]);
+        let v = home_of("wds-vol", dims, [800, 600]);
         assert!(matches!(v.camera, Camera::Arcball(_)));
         // Sanity: starts translucent.
         assert!(
@@ -1172,12 +1191,7 @@ mod tests {
                 .values()
                 .all(|s| s.render_mode == RenderMode::Translucent)
         );
-        let child = apply(
-            &v,
-            &ViewTransform::ToggleProjection,
-            &ViewExtent::from_dims(dims),
-        )
-        .unwrap();
+        let child = apply(&v, &ViewTransform::ToggleProjection, &extent_of(dims)).unwrap();
         assert!(
             child
                 .dataset_settings
@@ -1186,12 +1200,7 @@ mod tests {
             "toggle should flip every entry to max-intensity"
         );
         // Toggling the child back returns to translucent.
-        let back = apply(
-            &child,
-            &ViewTransform::ToggleProjection,
-            &ViewExtent::from_dims(dims),
-        )
-        .unwrap();
+        let back = apply(&child, &ViewTransform::ToggleProjection, &extent_of(dims)).unwrap();
         assert!(
             back.dataset_settings
                 .values()
@@ -1219,8 +1228,9 @@ mod tests {
     /// neighbours.
     fn extent_rich() -> ViewExtent {
         ViewExtent {
-            min: [0.0, 0.0, 0.0],
-            max: [100.0, 80.0, 40.0],
+            voxels: VoxBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
+            world: WorldBox::new([0.0, 0.0, 0.0], [100.0, 80.0, 40.0]),
+            fit_framing: Framing::Framed,
             z_count: 40,
             t_count: 5,
             c_count: 3,
@@ -1305,22 +1315,22 @@ mod tests {
 
     #[test]
     fn children_arcball_full_extent_has_all_enriched_cells() {
-        // A rich volume built by default_view (which seeds a dataset_settings
+        // A rich volume built by home_of (which seeds a dataset_settings
         // entry, so ToggleProjection is live) on a 3D multichannel-timeseries
         // extent offers the full enriched menu: elevation, stept, stepc, and
         // projection:toggle.
         let dims = [40, 3, 340, 512, 512]; // [T, C, Z, Y, X]
-        let mut view = default_view("wds-rich", dims, [800, 600]);
+        let mut view = home_of("wds-rich", dims, [800, 600]);
         assert!(matches!(view.camera, Camera::Arcball(_)));
-        // default_view mid-points Z but leaves t/c at 0; sit them in the interior
+        // home_of mid-points Z but leaves t/c at 0; sit them in the interior
         // so the reverse T/C steps are in range too.
         view.view.t = 20; // t_count = 40
         view.view.c = 1; // c_count = 3
-        let kids = children(&view, &ViewExtent::from_dims(dims));
+        let kids = children(&view, &extent_of(dims));
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
         // Every applicable cell is offered, in the grouped MOVE_SET order:
         // orient → scale → render → step (Z/T/C). `home` is intentionally absent:
-        // `default_view` already fits the camera to the extent, so re-applying
+        // `home_of` already fits the camera to the extent, so re-applying
         // Home is a no-op and is dropped — this view still locks the relative
         // order of the rest.
         assert_eq!(
@@ -1348,8 +1358,8 @@ mod tests {
         // The projection cell names the mode it switches TO, flipping with the
         // current render mode — not the static "Toggle ..." copy.
         let dims = [1, 1, 40, 80, 100];
-        let mut view = default_view("wds-vol", dims, [800, 600]);
-        let extent = ViewExtent::from_dims(dims);
+        let mut view = home_of("wds-vol", dims, [800, 600]);
+        let extent = extent_of(dims);
 
         // Currently translucent -> the toggle offers max-intensity.
         let translucent_label = children(&view, &extent)
@@ -1380,9 +1390,9 @@ mod tests {
         // A 2D Slice node never offers the Arcball-only enriched cells, even
         // with a dataset_settings entry present.
         let dims = [5, 3, 1, 512, 512]; // flat -> Slice Home, but multi-T/C
-        let view = default_view("wds-2d", dims, [800, 600]);
+        let view = home_of("wds-2d", dims, [800, 600]);
         assert!(matches!(view.camera, Camera::Slice(_)));
-        let kids = children(&view, &ViewExtent::from_dims(dims));
+        let kids = children(&view, &extent_of(dims));
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
         assert!(!ids.iter().any(|id| id.starts_with("elevation:")));
         assert!(!ids.iter().any(|id| id.starts_with("projection:")));
@@ -1396,8 +1406,8 @@ mod tests {
         // A genuinely flat single-channel single-timepoint image: no stepz,
         // stept, or stepc cells at all.
         let dims = [1, 1, 1, 1024, 1024]; // [T, C, Z, Y, X]
-        let view = default_view("wds-flat", dims, [800, 600]);
-        let kids = children(&view, &ViewExtent::from_dims(dims));
+        let view = home_of("wds-flat", dims, [800, 600]);
+        let kids = children(&view, &extent_of(dims));
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
         assert!(!ids.iter().any(|id| id.starts_with("stept:")));
         assert!(!ids.iter().any(|id| id.starts_with("stepc:")));
@@ -1514,21 +1524,20 @@ mod tests {
     }
 
     #[test]
-    fn sidecar_round_trips_json() {
+    fn sidecar_serializes_extent_and_cell_indices() {
         let v = arcball_view();
         let extent = extent_3d();
         let side = ExplorationSidecar::build(&v, &extent, 0, Vec::new());
-        let json = serde_json::to_string(&side).unwrap();
-        let back: ExplorationSidecar = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.v, side.v);
-        assert_eq!(back.current.handle, side.current.handle);
-        // extent + per-cell z/t/c survive the round-trip.
-        assert_eq!(back.extent, extent);
-        assert_eq!(back.cells.len(), side.cells.len());
-        for (cell, orig) in back.cells.iter().zip(side.cells.iter()) {
-            assert_eq!(cell.z, orig.z);
-            assert_eq!(cell.t, orig.t);
-            assert_eq!(cell.c, orig.c);
+        let back = serde_json::to_value(&side).unwrap();
+        assert_eq!(back["v"], side.v);
+        assert_eq!(back["current"]["handle"], side.current.handle);
+        assert_eq!(back["extent"], serde_json::to_value(&extent).unwrap());
+        let cells = back["cells"].as_array().unwrap();
+        assert_eq!(cells.len(), side.cells.len());
+        for (cell, orig) in cells.iter().zip(side.cells.iter()) {
+            assert_eq!(cell["z"], orig.z);
+            assert_eq!(cell["t"], orig.t);
+            assert_eq!(cell["c"], orig.c);
         }
     }
 
@@ -1559,8 +1568,9 @@ mod tests {
         // Equal min/max (a single point) must not panic anywhere in the
         // pipeline — Home just fits a degenerate box, the camera sanitizes it.
         let point = ViewExtent {
-            min: [5.0, 5.0, 5.0],
-            max: [5.0, 5.0, 5.0],
+            voxels: VoxBox::new([5.0, 5.0, 5.0], [5.0, 5.0, 5.0]),
+            world: WorldBox::new([5.0, 5.0, 5.0], [5.0, 5.0, 5.0]),
+            fit_framing: Framing::Framed,
             z_count: 0,
             t_count: 0,
             c_count: 0,
@@ -1574,37 +1584,57 @@ mod tests {
     }
 
     #[test]
-    fn from_dims_maps_tczyx_to_extent() {
+    fn extent_maps_tczyx_to_the_voxel_box_and_counts() {
         // dims = [T, C, Z, Y, X]: the box spans X/Y/Z, counts carry T/C/Z.
-        let extent = ViewExtent::from_dims([1, 2, 340, 512, 768]);
-        assert_eq!(extent.min, [0.0, 0.0, 0.0]);
-        assert_eq!(extent.max, [768.0, 512.0, 340.0]);
+        let extent = extent_of([1, 2, 340, 512, 768]);
+        assert_eq!(extent.voxels.min, [0.0, 0.0, 0.0]);
+        assert_eq!(extent.voxels.max, [768.0, 512.0, 340.0]);
         assert_eq!(extent.z_count, 340);
         assert_eq!(extent.t_count, 1);
         assert_eq!(extent.c_count, 2);
     }
 
     #[test]
-    fn from_dims_flat_dataset() {
+    fn extent_of_a_flat_dataset() {
         // A flat (Z = 1) multichannel image: z_count = 1 gates out slice steps.
-        let extent = ViewExtent::from_dims([3, 4, 1, 1024, 2048]);
-        assert_eq!(extent.max, [2048.0, 1024.0, 1.0]);
+        let extent = extent_of([3, 4, 1, 1024, 2048]);
+        assert_eq!(extent.voxels.max, [2048.0, 1024.0, 1.0]);
         assert_eq!(extent.z_count, 1);
         assert_eq!(extent.t_count, 3);
         assert_eq!(extent.c_count, 4);
     }
 
     #[test]
-    fn view_extent_round_trips_json() {
-        let extent = ViewExtent::from_dims([5, 2, 40, 80, 100]);
-        let json = serde_json::to_string(&extent).unwrap();
-        let back: ViewExtent = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, extent);
+    fn extent_holds_the_world_box_the_scene_frames() {
+        let scene = scene_of("ds", [1, 1, 40, 80, 100]);
+        let extent = ViewExtent::of(&scene, &DatasetId("ds".into())).unwrap();
+        assert_eq!(Some(extent.world), scene.dataset_world_bounds("ds"));
+        assert!(
+            extent.world.max[0] < 2.0,
+            "the world box is the normalized one, not the voxel box: {:?}",
+            extent.world
+        );
     }
 
     #[test]
-    fn default_view_is_arcball_for_volume() {
-        let view = default_view("wds-1", [1, 1, 340, 512, 512], [800, 600]);
+    fn extent_puts_only_the_voxel_box_on_the_wire() {
+        let extent = extent_of([5, 2, 40, 80, 100]);
+        let value = serde_json::to_value(&extent).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "min": [0.0, 0.0, 0.0],
+                "max": [100.0, 80.0, 40.0],
+                "z_count": 40,
+                "t_count": 5,
+                "c_count": 2,
+            })
+        );
+    }
+
+    #[test]
+    fn home_is_arcball_for_volume() {
+        let view = home_of("wds-1", [1, 1, 340, 512, 512], [800, 600]);
         assert!(
             matches!(view.camera, Camera::Arcball(_)),
             "a volume (z_count > 1) should open in a 3D Arcball Home"
@@ -1625,8 +1655,8 @@ mod tests {
     }
 
     #[test]
-    fn default_view_is_slice_for_flat() {
-        let view = default_view("wds-2", [1, 3, 1, 1024, 1024], [800, 600]);
+    fn home_is_slice_for_flat() {
+        let view = home_of("wds-2", [1, 3, 1, 1024, 1024], [800, 600]);
         assert!(
             matches!(view.camera, Camera::Slice(_)),
             "a flat image (z_count <= 1) should open in a 2D Slice Home"
@@ -1637,12 +1667,44 @@ mod tests {
     }
 
     #[test]
-    fn default_view_feeds_children() {
+    fn home_matches_the_scenes_own_fit() {
+        // Every client's Home is the camera the scene fits on open, so the
+        // CLI, Python and the viewer agree on it.
+        let dims = [1, 1, 40, 80, 100];
+        let mut scene = scene_of("ds", dims);
+        scene.set_mode_3d();
+        let home = home_view(&scene, &DatasetId("ds".into()), [800, 600]).unwrap();
+        assert_eq!(home.camera, scene.camera);
+        assert_eq!(home.camera.framing(), Framing::Framed);
+    }
+
+    #[test]
+    fn home_of_one_dataset_among_others_is_placed() {
+        // A fit of one dataset is a choice when others are visible, so a page
+        // keeps its region instead of fitting everything.
+        let mut scene = scene_of("a", [1, 1, 1, 64, 64]);
+        scene.apply(
+            DocumentCommand::DatasetOpened(make_dataset_opened_with_shape(
+                "b",
+                "b",
+                1,
+                [1, 1, 1, 512, 512],
+                [1, 1, 1, 256, 256],
+                1,
+            ))
+            .into(),
+        );
+        let home = home_view(&scene, &DatasetId("a".into()), [800, 600]).unwrap();
+        assert_eq!(home.camera.framing(), Framing::Placed);
+    }
+
+    #[test]
+    fn home_feeds_children() {
         // The Home view a volume yields should offer azimuth cells (it's an
         // Arcball) and Z-step cells (mid-stack, in range both ways).
         let dims = [1, 1, 40, 80, 100];
-        let view = default_view("wds-3", dims, [800, 600]);
-        let kids = children(&view, &ViewExtent::from_dims(dims));
+        let view = home_of("wds-3", dims, [800, 600]);
+        let kids = children(&view, &extent_of(dims));
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
         assert!(ids.iter().any(|id| id.starts_with("azimuth:")));
         assert!(ids.contains(&"stepz:+1"));
@@ -1650,140 +1712,91 @@ mod tests {
     }
 
     #[test]
-    fn explore_view_home_volume_has_azimuth_cells() {
-        // No view_json -> synthesize the Home view for a volume (z_count > 1),
-        // which opens in an Arcball and so offers azimuth (rotate) cells.
-        let json = explore_view(None, "wds-1", 1, 1, 40, 80, 100, 800, 600, 0, None);
-        let sidecar: ExplorationSidecar = serde_json::from_str(&json).unwrap();
+    fn explore_from_home_offers_azimuth_cells_for_a_volume() {
+        let scene = scene_of("wds-1", [1, 1, 40, 80, 100]);
+        let id = DatasetId("wds-1".into());
+        let sidecar = explore(&scene, &id, None, [800, 600], 3, Vec::new()).unwrap();
         assert_eq!(sidecar.v, EXPLORATION_SIDECAR_VERSION);
+        assert_eq!(sidecar.current.depth, 3);
         assert!(
             sidecar
                 .cells
                 .iter()
                 .any(|c| c.transform.starts_with("azimuth:")),
-            "a volume Home should offer azimuth cells: {json}"
+            "a volume Home should offer azimuth cells"
         );
     }
 
     #[test]
-    fn explore_view_passes_depth_through() {
-        // The caller's walk depth is recorded on the current node.
-        let json = explore_view(None, "wds-1", 1, 1, 40, 80, 100, 800, 600, 3, None);
-        let sidecar: ExplorationSidecar = serde_json::from_str(&json).unwrap();
-        assert_eq!(sidecar.current.depth, 3);
-    }
-
-    #[test]
-    fn explore_view_explicit_view_json_round_trips() {
-        // A provided (well-formed) view_json is used verbatim as the current
-        // node rather than synthesizing Home.
+    fn explore_uses_a_given_view_as_the_current_node() {
+        let scene = scene_of("wds-1", [1, 1, 40, 80, 100]);
         let mut v = arcball_view();
         v.view.z_range = 10..11;
-        let view_json = serde_json::to_string(&v).unwrap();
-        let json = explore_view(
-            Some(view_json),
-            "wds-1",
-            1,
-            1,
-            40,
-            80,
-            100,
-            800,
-            600,
+        let sidecar = explore(
+            &scene,
+            &DatasetId("wds-1".into()),
+            Some(&v),
+            [800, 600],
             0,
-            None,
-        );
-        let sidecar: ExplorationSidecar = serde_json::from_str(&json).unwrap();
+            Vec::new(),
+        )
+        .unwrap();
         assert_eq!(sidecar.current.handle, view_handle(&v));
     }
 
-    fn home_target(json: &str) -> [f64; 3] {
-        let sidecar: ExplorationSidecar = serde_json::from_str(json).unwrap();
+    #[test]
+    fn explore_home_move_frames_the_world_box_from_an_arcball() {
+        // A 3D camera works in normalized world space, not the voxel box the
+        // shape implies, so Home centers on the world box.
+        let scene = scene_of("wds-1", [1, 1, 40, 80, 100]);
+        let id = DatasetId("wds-1".into());
+        let mut start = arcball_view();
+        if let Camera::Arcball(a) = &mut start.camera {
+            a.target = [9.0, 9.0, 9.0];
+        }
+        let sidecar = explore(&scene, &id, Some(&start), [800, 600], 0, Vec::new()).unwrap();
         let home = sidecar
             .cells
             .iter()
             .find(|c| c.transform == "home")
-            .unwrap_or_else(|| panic!("no home cell: {json}"));
-        match &home.view.camera {
-            Camera::Arcball(a) => a.target,
-            other => panic!("home kept the arcball, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn explore_view_home_frames_the_given_bounds() {
-        // A 3D camera works in normalized world space, not the voxel box the
-        // shape implies, so Home must center on the box the caller passes.
-        let view_json = serde_json::to_string(&arcball_view()).unwrap();
-        let bounds = vec![0.0, 0.0, 0.0, 1.0, 0.8, 0.25];
-        let json = explore_view(
-            Some(view_json),
-            "wds-1",
-            1,
-            1,
-            40,
-            80,
-            100,
-            800,
-            600,
-            0,
-            Some(bounds),
-        );
-        let target = home_target(&json);
-        for (got, want) in target.iter().zip([0.5, 0.4, 0.125]) {
-            assert!((got - want).abs() < 1e-9, "home target {target:?}");
-        }
-    }
-
-    #[test]
-    fn explore_view_ignores_malformed_bounds() {
-        // A short, inverted, or non-finite box falls back to the shape's box.
-        let view_json = serde_json::to_string(&arcball_view()).unwrap();
-        for bounds in [
-            vec![0.0, 0.0, 1.0],
-            vec![1.0, 0.0, 0.0, 0.0, 1.0, 1.0],
-            vec![0.0, 0.0, 0.0, f64::NAN, 1.0, 1.0],
-        ] {
-            let json = explore_view(
-                Some(view_json.clone()),
-                "wds-1",
-                1,
-                1,
-                40,
-                80,
-                100,
-                800,
-                600,
-                0,
-                Some(bounds),
+            .expect("a home cell");
+        let world = scene.dataset_world_bounds("wds-1").unwrap();
+        let Camera::Arcball(a) = &home.view.camera else {
+            panic!("home kept the arcball, got {:?}", home.view.camera);
+        };
+        for axis in 0..3 {
+            let mid = (world.min[axis] + world.max[axis]) / 2.0;
+            assert!(
+                (a.target[axis] - mid).abs() < 1e-9,
+                "home target {:?}",
+                a.target
             );
-            let target = home_target(&json);
-            for (got, want) in target.iter().zip([50.0, 40.0, 20.0]) {
-                assert!((got - want).abs() < 1e-9, "home target {target:?}");
-            }
         }
     }
 
     #[test]
-    fn explore_view_malformed_json_returns_error_string() {
-        // Malformed view_json must not panic — it returns an {"error": ...} blob.
-        let json = explore_view(
-            Some("{not valid json".to_string()),
-            "wds-1",
-            1,
-            1,
-            40,
-            80,
-            100,
-            800,
-            600,
-            0,
-            None,
-        );
-        let value: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(
-            value.get("error").is_some(),
-            "malformed view_json should yield an error object: {json}"
-        );
+    fn a_move_from_a_fitted_view_is_placed_and_a_step_stays_framed() {
+        // A page fits a framed view again on its canvas, which would undo a
+        // rotation or a zoom; a step through Z leaves the fit as it was.
+        let home = home_of("wds-1", [1, 1, 40, 80, 100], [800, 600]);
+        assert_eq!(home.camera.framing(), Framing::Framed);
+        for child in children(&home, &extent_of([1, 1, 40, 80, 100])) {
+            let want = if child.transform.starts_with("azimuth:")
+                || child.transform.starts_with("elevation:")
+                || child.transform.starts_with("zoom:")
+            {
+                Framing::Placed
+            } else {
+                Framing::Framed
+            };
+            assert_eq!(child.view.camera.framing(), want, "{}", child.transform);
+        }
+    }
+
+    #[test]
+    fn explore_of_an_unknown_dataset_is_none() {
+        let scene = scene_of("wds-1", [1, 1, 40, 80, 100]);
+        let ghost = DatasetId("ghost".into());
+        assert!(explore(&scene, &ghost, None, [800, 600], 0, Vec::new()).is_none());
     }
 }

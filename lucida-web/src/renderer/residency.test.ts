@@ -5,6 +5,7 @@ import { remapSliceIndirection, type SliceAtlasState } from "./slice/index.ts";
 import type { ViewHotStateMessage } from "./workerProtocol.ts";
 import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
+import { INDIRECTION_FAILED, INDIRECTION_MISS } from "./remap.ts";
 
 /** Build a minimal ctx whose only populated tile is `state`. The
  * applyViewHotState handler only touches `ctx.state.rayHitPerEntity`. */
@@ -42,7 +43,6 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: str
     maxSlotsZ: 2,
     entityMetas,
     t: 0, c: 0,
-    intensityMin: 65535, intensityMax: 0,
     indirectionDirty: false,
     ...overrides,
   };
@@ -76,12 +76,11 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     freeSlots: [],
     totalSlots,
     chunkX: 32, chunkY: 32,
-    slotsX: 4, slotsY: 4,
+    slotsX: 4, slotsY: 4, maxSlotsY: 4,
     entityMetas,
     entityZInfo,
     z: 0, t: 0, c: 0,
     slotLevelZ: new Int32Array(totalSlots).fill(-1),
-    intensityMin: 65535, intensityMax: 0,
     indirectionDirty: false,
     ...overrides,
   };
@@ -229,6 +228,56 @@ describe("remapSliceIndirection", () => {
 
     remapSliceIndirection(atlas, 0, 0, 16);
     expect(atlas.indirectionData[0]).toBe(1);
+  });
+});
+
+// Failed chunks
+
+describe("remapping chunks the source failed for good", () => {
+  const failed = (...keys: string[]) => new Map([["memA", new Set(keys)]]);
+
+  it("marks a failed chunk's cell failed, not missing", () => {
+    const atlas = makeVolumeAtlas();
+    remapIndirection(atlas, 0, 0, { failed: failed("0/0/0/1/2/3") });
+    const gridIdx = 1 * 4 * 4 + 2 * 4 + 3;
+    expect(atlas.indirectionData[gridIdx]).toBe(INDIRECTION_FAILED);
+    // Every other cell is still a miss.
+    expect([...atlas.indirectionData].filter((v) => v === INDIRECTION_MISS)).toHaveLength(31);
+  });
+
+  it("lets a resident chunk keep its cell", () => {
+    const atlas = makeVolumeAtlas();
+    insertChunk(atlas, 0, 0, 0, 0, 0, 0, 7);
+    remapIndirection(atlas, 0, 0, { failed: failed("0/0/0/0/0/0") });
+    expect(atlas.indirectionData[0]).toBe(7);
+  });
+
+  it("marks only a failed chunk at the current T and C, for a member and level that have a section", () => {
+    const atlas = makeVolumeAtlas();
+    remapIndirection(atlas, 0, 0, {
+      failed: new Map([
+        ["memA", new Set(["0/1/0/0/0/1", "0/0/1/0/0/2", "1/0/0/0/0/3"])],
+        ["memB", new Set(["0/0/0/0/0/0"])],
+      ]),
+    });
+    expect([...atlas.indirectionData].every((v) => v === INDIRECTION_MISS)).toBe(true);
+  });
+
+  it("marks a slice cell only for the chunk that holds the current plane", () => {
+    const atlas = makeSliceAtlas();
+    // chunkZ=32: Z=16 is in chunk 0, Z=48 in chunk 1.
+    remapSliceIndirection(atlas, 0, 0, 48, { failed: failed("0/0/0/0/1/2") });
+    expect(atlas.indirectionData[1 * 4 + 2]).toBe(INDIRECTION_MISS);
+    remapSliceIndirection(atlas, 0, 0, 16, { failed: failed("0/0/0/0/1/2") });
+    expect(atlas.indirectionData[1 * 4 + 2]).toBe(INDIRECTION_FAILED);
+  });
+
+  it("clears the mark once the chunk is no longer listed", () => {
+    const atlas = makeSliceAtlas();
+    remapSliceIndirection(atlas, 0, 0, 16, { failed: failed("0/0/0/0/0/0") });
+    expect(atlas.indirectionData[0]).toBe(INDIRECTION_FAILED);
+    remapSliceIndirection(atlas, 0, 0, 16);
+    expect(atlas.indirectionData[0]).toBe(INDIRECTION_MISS);
   });
 });
 

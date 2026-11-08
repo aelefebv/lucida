@@ -11,6 +11,8 @@
 #   2. node + pnpm         -> lucida-web SPA dist (consumes the wasm pkg)
 #   3. debian:bookworm-slim runtime carrying just the binary, the dist,
 #      and the CA certs needed for outbound HTTPS (Google JWKS, GCS, ...).
+# The `cli` target exports the lucida CLI alone, for CI; the image never
+# carries it.
 #
 # Distroless was considered and deferred: the slim-Debian variant keeps
 # a shell available for diagnostics in v1.
@@ -71,8 +73,9 @@ RUN set -eux; \
 WORKDIR /workspace
 
 # Copy the workspace. .dockerignore keeps target/, node_modules/,
-# lucida-core/pkg/, lucida-web/dist/, .git/, docs/, extras/, lucida-py/,
-# lucida.db*, secrets, etc. out of the build context.
+# lucida-core/pkg/, lucida-web/dist/, .git/, docs/, extras/, all of
+# lucida-py/ but its manifest and Rust source, lucida.db*, secrets, etc.
+# out of the build context.
 # Cargo.lock is committed: this workspace ships release binaries
 # (lucida-server, the lucida CLI) and this image, so the lock pins the
 # full transitive dep graph. Copying it in and building `--locked`
@@ -84,6 +87,7 @@ COPY lucida-content/  ./lucida-content/
 COPY lucida-core/     ./lucida-core/
 COPY lucida-protocol/ ./lucida-protocol/
 COPY lucida-proxy/    ./lucida-proxy/
+COPY lucida-py/       ./lucida-py/
 COPY lucida-server/   ./lucida-server/
 COPY lucida-store/    ./lucida-store/
 
@@ -133,6 +137,15 @@ WORKDIR /web/lucida-web
 # pnpm-lock.yaml drifted from package.json (matches CI).
 RUN pnpm install --frozen-lockfile
 RUN pnpm run build
+
+# The lucida CLI, which CI's trace gate drives a browser with. Built on stage
+# 1 so it reuses the dependencies compiled there. These stages stay above the
+# runtime stage because the last stage is the default target.
+FROM rust-builder AS cli-builder
+RUN cargo build --locked --release -p lucida-cli
+
+FROM scratch AS cli
+COPY --from=cli-builder /workspace/target/release/lucida /lucida
 
 # Stage 3: runtime.
 FROM debian:bookworm-slim AS runtime

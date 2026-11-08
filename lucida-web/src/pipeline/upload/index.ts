@@ -65,6 +65,6 @@ export { Uploader } from "./uploader.ts";
 
 export type {
   UploadClient,
-  ChunksEvictedHandler,
+  ChunkResidencyHandler,
   WantedSetHandler,
 } from "./uploadClient.ts";

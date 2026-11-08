@@ -18,6 +18,7 @@ import {
   handleMinimapUploadOverviewChunks,
   handleThumbnailRender,
 } from "./minimapHandlers.ts";
+import { createInitialState } from "./worker/state.ts";
 
 const IDENTITY = new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
 
@@ -59,8 +60,11 @@ function makeCtx(renderer: ReturnType<typeof makeVolumeRenderer>["renderer"]) {
     device: {
       createTexture: vi.fn(() => texture),
       createCommandEncoder: () => ({ finish: () => ({}) }),
+      pushErrorScope: vi.fn(),
+      popErrorScope: () => Promise.resolve(null),
       queue: { submit: vi.fn(), writeTexture: vi.fn() },
     },
+    state: createInitialState(),
     format: "bgra8unorm",
     getVolumeRenderer: () => renderer,
     getCompositor: () => ({ isCompiled: true, compiled: Promise.resolve(), composite, underlayBackground: vi.fn() }),
@@ -194,7 +198,7 @@ describe("the minimap's overview render", () => {
     await flush();
 
     expect(renderer.renderTo).not.toHaveBeenCalled();
-    expect(posts.filter((post) => post.type !== "intensityRange")).toEqual([
+    expect(posts).toEqual([
       { type: "error", message: "volume shader refused" },
     ]);
   });
@@ -259,7 +263,7 @@ describe("a thumbnail render", () => {
     await flush();
 
     expect(renderer.renderTo).not.toHaveBeenCalled();
-    expect(posts.filter((post) => post.type !== "intensityRange")).toEqual([
+    expect(posts).toEqual([
       { type: "thumbnailResult", id: 7, bitmap: null },
       { type: "error", message: "volume shader refused" },
     ]);

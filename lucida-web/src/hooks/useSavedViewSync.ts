@@ -3,7 +3,7 @@
 // name each dataset by its URL. Mounted after the bridge hook so the applier
 // gets `sendCommand` and `sendOpenRemoteDataset` directly.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { dataset_id_for_url } from "lucida-core";
 import {
@@ -14,10 +14,15 @@ import {
 import { UrlSync } from "../savedView/urlSync.ts";
 import { buildCapture } from "../savedView/captureBuilder.ts";
 import { getRestoreLastViewEnabled } from "../lastViewPreference.ts";
-import type { DatasetReferenceMode, LayoutMutationMode, SavedView, ViewState } from "../savedView/types.ts";
+import {
+  isPersistable,
+  type DatasetReferenceMode,
+  type LayoutMutationMode,
+  type SavedView,
+} from "../savedView/types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { invalidateAfterViewRestore } from "../invalidation.ts";
-import { syncSceneViewState } from "./sceneViewState.ts";
+import type { SceneStore, ViewEpochs } from "../sceneStore.ts";
 
 interface Params {
   getScene: () => WasmScene | null;
@@ -25,6 +30,9 @@ interface Params {
   sendCommand: (json: string) => void;
   /** Increments whenever the scene mutates locally; drives URL re-encoding. */
   changeTick: number;
+  /** The scene's view state. A move of the camera or the selectors arms the
+   *  last-view capture as `changeTick` does, without a render. */
+  sceneStore?: SceneStore;
   /** Debounce override for tests. Default 350. */
   debounceMs?: number;
   /** Fired after every successful apply, so App.tsx can re-target
@@ -33,11 +41,6 @@ interface Params {
   /** The applier writes to WASM only. Without marking the loop dirty, the
    *  pull-based RAF loop sits idle until the next user input. */
   loopRef: React.RefObject<RenderLoop | null>;
-  /** Reads the live Z/T/C from React dimension state. Capture uses it so "Save
-   *  view" records what the user sees even before it reaches the WASM scene,
-   *  whose presence can still report the default `z_range {0,1}`. When omitted,
-   *  capture falls back to the scene's presence view. */
-  getLiveView?: () => ViewState | null;
   /** The recipient's per-dataset T/C counts, so an applied view's out-of-range
    *  timepoint or channel clamps to fit. Z is clamped by the applier from the
    *  volume shape. Omit to leave t/c unclamped. */
@@ -46,13 +49,6 @@ interface Params {
    *  capture to stamp `label_names` and at apply to restore per-label settings by
    *  name and occurrence. Omit to leave per-label handling positional. */
   labelNamesFor?: LabelNamesResolver;
-  /** React-side dim mirrors. The applier writes C/T/Z to WASM only, so without
-   *  these the sliders stay stale after an apply. */
-  setC: React.Dispatch<React.SetStateAction<number>>;
-  setT: React.Dispatch<React.SetStateAction<number>>;
-  setZ: React.Dispatch<React.SetStateAction<number>>;
-  setViewMode: React.Dispatch<React.SetStateAction<"2d" | "3d">>;
-  setMultiChannel: React.Dispatch<React.SetStateAction<boolean>>;
   /** Per-dataset auto-contrast preference, captured and restored. Without this
    *  round-trip the recipient's intensity batcher overwrites the captured
    *  contrast values. */
@@ -60,6 +56,8 @@ interface Params {
   setAutoContrastMap: React.Dispatch<React.SetStateAction<Map<string, boolean>>>;
   datasetReferenceMode?: DatasetReferenceMode;
   fetchSavedViewById?: (id: string) => Promise<{ id: string; view: SavedView } | null>;
+  /** A `#b=` link named a saved view that couldn't be fetched. */
+  onSavedViewMissing?: (id: string) => void;
   fetchDefaultSavedView?: () => Promise<{ id: string; view: SavedView } | null>;
   fetchViewerProfile?: (profile: string) => Promise<{ id: string; view: SavedView } | null>;
   /** Resolve the caller's remembered last view for a bare workspace open. When
@@ -88,6 +86,7 @@ interface SyncBundle {
   applier: SavedViewApplier;
   urlSync: UrlSync;
   urlByDatasetId: Map<string, string>;
+  capture: () => SavedView | null;
 }
 
 export function useSavedViewSync({
@@ -95,21 +94,17 @@ export function useSavedViewSync({
   sendOpenRemoteDataset,
   sendCommand,
   changeTick,
+  sceneStore,
   debounceMs,
   onApplyResult,
   loopRef,
-  getLiveView,
   dimensionExtentsFor,
   labelNamesFor,
-  setC,
-  setT,
-  setZ,
-  setViewMode,
-  setMultiChannel,
   autoContrastMapRef,
   setAutoContrastMap,
   datasetReferenceMode = "source-url",
   fetchSavedViewById,
+  onSavedViewMissing,
   fetchDefaultSavedView,
   fetchViewerProfile,
   fetchLastView,
@@ -130,6 +125,7 @@ export function useSavedViewSync({
   collapseDeepLinkHash: () => Promise<void>;
 } {
   const fetchSavedViewByIdRef = useRef(fetchSavedViewById);
+  const onSavedViewMissingRef = useRef(onSavedViewMissing);
   const fetchDefaultSavedViewRef = useRef(fetchDefaultSavedView);
   const fetchViewerProfileRef = useRef(fetchViewerProfile);
   const fetchLastViewRef = useRef(fetchLastView);
@@ -137,17 +133,16 @@ export function useSavedViewSync({
   const restoreEnabledRef = useRef(restoreLastViewEnabled);
   // Resolvers are read at call time from event handlers and from inside apply,
   // so refs track the latest props without rebuilding the bundle.
-  const getLiveViewRef = useRef(getLiveView);
   const dimensionExtentsForRef = useRef(dimensionExtentsFor);
   const labelNamesForRef = useRef(labelNamesFor);
-  // eslint-disable-next-line react-hooks/refs
-  getLiveViewRef.current = getLiveView;
   // eslint-disable-next-line react-hooks/refs
   dimensionExtentsForRef.current = dimensionExtentsFor;
   // eslint-disable-next-line react-hooks/refs
   labelNamesForRef.current = labelNamesFor;
   // eslint-disable-next-line react-hooks/refs
   fetchSavedViewByIdRef.current = fetchSavedViewById;
+  // eslint-disable-next-line react-hooks/refs
+  onSavedViewMissingRef.current = onSavedViewMissing;
   // eslint-disable-next-line react-hooks/refs
   fetchDefaultSavedViewRef.current = fetchDefaultSavedView;
   // eslint-disable-next-line react-hooks/refs
@@ -159,13 +154,14 @@ export function useSavedViewSync({
   // eslint-disable-next-line react-hooks/refs
   restoreEnabledRef.current = restoreLastViewEnabled;
 
-  // Built once via useState's initializer. `autoContrastMapRef` is read inside
-  // captureFn, which fires from event handlers, never during render, so the
-  // react-hooks/refs warning is a false positive here.
+  // Built once via useState's initializer, so the capture keeps one identity
+  // and nothing keyed on it re-runs on a render. `autoContrastMapRef` is read
+  // inside the capture, which fires from event handlers, never during render,
+  // so the react-hooks/refs warning is a false positive here.
   // eslint-disable-next-line react-hooks/refs
   const [bundle] = useState<SyncBundle>(() => {
     const urlByDatasetId = new Map<string, string>();
-    const captureFn = (): SavedView | null => {
+    const capture = (): SavedView | null => {
       const scene = getScene();
       if (!scene) return null;
       try {
@@ -174,7 +170,6 @@ export function useSavedViewSync({
           urlByDatasetId,
           datasetReferenceMode,
           autoContrastByDatasetId: autoContrastMapRef.current ?? undefined,
-          liveView: getLiveViewRef.current?.() ?? undefined,
           labelNamesFor: (id) => labelNamesForRef.current?.(id),
         });
       } catch (e) {
@@ -200,9 +195,10 @@ export function useSavedViewSync({
       (datasetId) => dimensionExtentsForRef.current?.(datasetId) ?? {},
       (datasetId) => labelNamesForRef.current?.(datasetId),
     );
-    const urlSync = new UrlSync(captureFn, applier, {
+    const urlSync = new UrlSync(capture, applier, {
       debounceMs,
       fetchSavedViewById: async (id) => fetchSavedViewByIdRef.current?.(id) ?? null,
+      onSavedViewMissing: (id) => onSavedViewMissingRef.current?.(id),
       fetchDefaultSavedView: async () => fetchDefaultSavedViewRef.current?.() ?? null,
       fetchViewerProfile: async (profile) => fetchViewerProfileRef.current?.(profile) ?? null,
       // Read at call time so a resolver wired later (once auth resolves) takes
@@ -212,26 +208,9 @@ export function useSavedViewSync({
       restoreLastViewEnabled: () =>
         (restoreEnabledRef.current ?? getRestoreLastViewEnabled)(),
     });
-    return { applier, urlSync, urlByDatasetId };
+    return { applier, urlSync, urlByDatasetId, capture };
   });
-
-  const captureBuilder = useCallback((): SavedView | null => {
-    const scene = getScene();
-    if (!scene) return null;
-    try {
-      return buildCapture({
-        scene,
-        urlByDatasetId: bundle.urlByDatasetId,
-        datasetReferenceMode,
-        autoContrastByDatasetId: autoContrastMapRef.current ?? undefined,
-        liveView: getLiveViewRef.current?.() ?? undefined,
-        labelNamesFor: (id) => labelNamesForRef.current?.(id),
-      });
-    } catch (e) {
-      console.warn("[SavedView] capture failed:", e);
-      return null;
-    }
-  }, [getScene, bundle.urlByDatasetId, datasetReferenceMode, autoContrastMapRef]);
+  const captureBuilder = bundle.capture;
 
   // Every local open goes through here (FileBrowser, URL bar, applier) so the
   // URL to DatasetId map stays complete.
@@ -264,11 +243,16 @@ export function useSavedViewSync({
     bundle.urlSync.notifyChange();
   }, [bundle.urlSync, changeTick]);
 
-  // Debounced "remember my last view" capture on the same change signal as the
-  // URL sync. Runs only when `persistLastView` is wired (absent in auth-off
-  // mode) and the toggle is on. Failures (offline, non-member 403/404, encode
-  // error) are logged, never thrown into the UI.
-  useEffect(() => {
+  // Debounced "remember my last view" capture, armed by the same change signal
+  // as the URL sync and by any move of the camera or the selectors, which
+  // reach the scene without a render. Neither persists an unframed view. Runs
+  // only when `persistLastView` is wired (absent in auth-off mode) and the
+  // toggle is on. Failures (offline, non-member 403/404, encode error) are
+  // logged, never thrown into the UI.
+  const lastViewTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const armLastView = useCallback(() => {
+    if (lastViewTimerRef.current !== null) clearTimeout(lastViewTimerRef.current);
+    lastViewTimerRef.current = null;
     // Return before `setTimeout`: an armed-then-cancelled timer would still
     // make a headless run wait out the debounce before it could quit.
     if (captureSurface) return;
@@ -276,7 +260,8 @@ export function useSavedViewSync({
     // change during the debounce.
     if (!persistLastViewRef.current) return;
     if (!(restoreEnabledRef.current ?? getRestoreLastViewEnabled)()) return;
-    const timer = setTimeout(() => {
+    lastViewTimerRef.current = setTimeout(() => {
+      lastViewTimerRef.current = null;
       // Skip mid-apply so we don't persist the view being applied rather than
       // one the user navigated to.
       if (!(restoreEnabledRef.current ?? getRestoreLastViewEnabled)()) return;
@@ -284,13 +269,37 @@ export function useSavedViewSync({
       if (!persistNow) return;
       if (bundle.applier.isInProgress()) return;
       const view = captureBuilder();
-      if (!view) return;
+      if (!view || !isPersistable(view)) return;
       void Promise.resolve(persistNow(view)).catch((e) => {
         console.warn("[SavedView] last-view capture failed:", e);
       });
     }, lastViewDebounceMs);
-    return () => clearTimeout(timer);
-  }, [bundle.applier, captureBuilder, changeTick, lastViewDebounceMs, captureSurface]);
+  }, [bundle.applier, captureBuilder, lastViewDebounceMs, captureSurface]);
+  useEffect(() => () => {
+    if (lastViewTimerRef.current !== null) clearTimeout(lastViewTimerRef.current);
+  }, []);
+
+  useEffect(() => {
+    armLastView();
+  }, [armLastView, changeTick]);
+
+  useEffect(() => {
+    if (!sceneStore) return;
+    let seen: ViewEpochs | null = sceneStore.getEpochs();
+    return sceneStore.subscribe(() => {
+      const epochs = sceneStore.getEpochs();
+      if (epochs === seen) return;
+      const moved =
+        seen !== null &&
+        epochs !== null &&
+        (epochs.view !== seen.view || epochs.selection !== seen.selection);
+      seen = epochs;
+      if (!moved) return;
+      // A resize or a new pixel ratio moves the view with no control touched.
+      bundle.urlSync.notifyChange();
+      armLastView();
+    });
+  }, [sceneStore, armLastView, bundle.urlSync]);
 
   useEffect(() => {
     if (!onApplyResult) return;
@@ -299,18 +308,11 @@ export function useSavedViewSync({
     });
   }, [bundle.applier, onApplyResult]);
 
-  // The applier writes to WASM only. After it finishes, push the view back to
-  // React state and wake the render loop, as the bridge's presence and follow
-  // handlers do in sessionController.ts.
+  // The applier writes the scene, which the readers of view state follow on
+  // their own. What it leaves to this hook is the auto-contrast preference
+  // and the render loop.
   useEffect(() => {
     return bundle.applier.subscribeApplyComplete((view) => {
-      const scene = getScene();
-      if (!scene) return;
-      try {
-        syncSceneViewState(scene, { setZ, setT, setC, setViewMode, setMultiChannel });
-      } catch (e) {
-        console.warn("[SavedView] post-apply state read failed:", e);
-      }
       // Capture strips defaults, so an absent entry means `true` and only
       // explicit `false` entries need restoring.
       if (view.auto_contrast) {
@@ -328,7 +330,7 @@ export function useSavedViewSync({
       }
       invalidateAfterViewRestore(loopRef.current, "savedview_apply");
     });
-  }, [bundle.applier, getScene, loopRef, setC, setT, setZ, setViewMode, setMultiChannel, setAutoContrastMap]);
+  }, [bundle.applier, loopRef, setAutoContrastMap]);
 
   const notifyChange = useCallback(() => {
     bundle.urlSync.notifyChange();
@@ -339,11 +341,11 @@ export function useSavedViewSync({
     [bundle.urlSync],
   );
 
-  return {
+  return useMemo(() => ({
     applier: bundle.applier,
     captureBuilder,
     trackedSendOpen,
     notifyChange,
     collapseDeepLinkHash,
-  };
+  }), [bundle.applier, captureBuilder, trackedSendOpen, notifyChange, collapseDeepLinkHash]);
 }

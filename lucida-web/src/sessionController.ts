@@ -8,6 +8,7 @@ import {
   type DatasetImportWarning,
   type DatasetOpenProgressDiagnostic,
   type PresenceState,
+  workspaceSocketUrl,
 } from "./bridge.ts";
 import type { DatasetState } from "./types.ts";
 import { Axis } from "./axes.ts";
@@ -32,10 +33,8 @@ import { derivedBuildersFor } from "./pipeline/layoutBuilders.ts";
 import type { WireAssetCatalog } from "./pipeline/assetCatalog.ts";
 import { Session } from "./session.ts";
 import type { RenderLoop } from "./renderLoop.ts";
-import { bumpSettingsGeneration } from "./tickCommon.ts";
-import { AVAILABILITY_UPDATE_SOURCE, invalidateDisplaySettings } from "./invalidation.ts";
-import { syncSceneViewState, type SceneViewStateSetters } from "./hooks/sceneViewState.ts";
-import { shouldAutoFitOnOpen, isOpenerOf } from "./hooks/autoFit.ts";
+import { assertCanvasSize } from "./applyAndSend.ts";
+import { AVAILABILITY_UPDATE_SOURCE, invalidateDisplaySettings, requestRender } from "./invalidation.ts";
 import { classifySceneError, guardedSceneCall, observeSceneCalls } from "./sceneGuard.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import { watchStream } from "./trace/watchStream.ts";
@@ -85,10 +84,6 @@ const SURFACED_ERROR_RANK: Record<SurfacedErrorKind, number> = {
 export interface SavedViewBridgeHooks {
   onDatasetOpened: (datasetId: string) => void;
   onOpenDatasetFailed: (url: string, error: string) => void;
-  /** `true` while a saved or last view is mid-restore, through its camera step.
-   * Suppresses auto-fit-on-open so the restore's camera wins. Optional so
-   * older callers stay compatible. */
-  isInProgress?: () => boolean;
 }
 
 /** Aggregate open-remote-dataset UI state (spinner / error banner / progress
@@ -194,8 +189,6 @@ export interface SessionControllerDeps {
   initLayerMaps: (id: string) => void;
   /** Auto-select the first dataset registered into an empty registry. */
   setSelectedDatasetId: (id: string) => void;
-  /** Z/T/C/view-mode/multi-channel sinks for presence-follow imports. */
-  viewState: SceneViewStateSetters;
   events: SessionControllerEvents;
 }
 
@@ -312,7 +305,7 @@ export class SessionController {
         this.clearSurfacedError(["data"]);
       },
     });
-    const bridge = new Bridge(this.buildHandlers(), undefined, deps.workspaceId);
+    const bridge = new Bridge(this.buildHandlers(), workspaceSocketUrl(deps.workspaceId));
     this.session = new Session({
       bridge,
       contentSource: this.contentSource,
@@ -425,7 +418,7 @@ export class SessionController {
    *  it. */
   private assertViewport(scene: WasmScene): void {
     const viewport = this.deps.getViewportSize();
-    if (viewport) scene.set_viewport(viewport.width, viewport.height, viewport.pixelRatio);
+    if (viewport) assertCanvasSize(scene, viewport.width, viewport.height, viewport.pixelRatio);
   }
 
   private importPresence(scene: WasmScene, presenceJson: string): void {
@@ -469,14 +462,13 @@ export class SessionController {
           });
           guardedSceneCall("import_dataset_presence", scene, () =>
             scene.import_dataset_presence(layerJson));
-          bumpSettingsGeneration();
+          invalidateDisplaySettings(this.deps.getLoop(), "follow_dataset_presence");
           this.deps.bumpLayerSettingsVersion();
         } catch (e) {
           console.warn("Failed to import peer dataset presence:", e);
         }
       }
-      syncSceneViewState(scene, this.deps.viewState);
-      this.deps.getLoop()?.markInteractiveDirty();
+      requestRender(this.deps.getLoop(), "follow_presence");
     } catch (e) {
       console.warn("Failed to import peer presence:", e);
     }
@@ -872,7 +864,7 @@ export class SessionController {
           visible: true,
         };
         guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
-        bumpSettingsGeneration();
+        invalidateDisplaySettings(this.deps.getLoop(), "channel_settings_grown");
       }
     }
     const t4 = performance.now();
@@ -1029,33 +1021,27 @@ export class SessionController {
       },
       onCommand: (_seq, commandJson) => {
         try {
+          const cmd = JSON.parse(commandJson);
           let scene = this.deps.getScene();
           if (!scene) {
-            const cmd = JSON.parse(commandJson);
             if (cmd.type === "dataset_opened") {
               scene = this.ensureScene();
             } else {
               return;
             }
           }
+          // An open can fit the camera, which must see the canvas the user
+          // has rather than the size the scene was built at.
+          if (cmd.type === "dataset_opened") this.assertViewport(scene);
           guardedSceneCall("apply_command", scene, () => scene.apply_command(commandJson));
-          bumpSettingsGeneration();
-          const cmd = JSON.parse(commandJson);
+          // Covers the overlay re-projecting a peer's annotation and the
+          // planner re-reading a peer's layout switch.
+          invalidateDisplaySettings(this.deps.getLoop(), "remote_command");
           if (cmd.type === "dataset_opened") {
             this.handleDatasetOpened(cmd, scene);
           }
           if (cmd.type === "remove_dataset") {
             this.removeDataset(cmd.id);
-          }
-          if (
-            cmd.type === "add_annotation" ||
-            cmd.type === "remove_annotation" ||
-            cmd.type === "add_comment" ||
-            cmd.type === "remove_comment"
-          ) {
-            // apply_command already updated pins and threads; mark the canvas
-            // dirty so the overlay re-projects.
-            this.deps.getLoop()?.markInteractiveDirty();
           }
           if (cmd.type === "register_layout" || cmd.type === "set_active_layout") {
             // Refresh the mirror so peers' layout changes appear locally.
@@ -1066,7 +1052,6 @@ export class SessionController {
               if (cmd.type === "set_active_layout" && cmd.layout_id) {
                 registry.setActiveLocal(cmd.dataset_id, cmd.layout_id);
               }
-              this.deps.getLoop()?.markInteractiveDirty();
             }
           }
           this.notifyRemoteDocumentChanged();
@@ -1117,8 +1102,7 @@ export class SessionController {
             try {
               const presenceJson = JSON.stringify({ camera, view, display });
               this.importPresence(scene, presenceJson);
-              syncSceneViewState(scene, this.deps.viewState);
-              this.deps.getLoop()?.markInteractiveDirty();
+              requestRender(this.deps.getLoop(), "follow_presence");
               this.session.bridge.sendPresence(scene.export_presence());
             } catch (e) {
               console.warn("[Bridge] failed to import presence:", e);
@@ -1154,8 +1138,7 @@ export class SessionController {
                 display: peer.display,
               });
               this.importPresence(scene, presenceJson);
-              syncSceneViewState(scene, this.deps.viewState);
-              this.deps.getLoop()?.markInteractiveDirty();
+              requestRender(this.deps.getLoop(), "follow_presence");
               this.session.bridge.sendPresence(scene.export_presence());
             } catch (e) {
               console.warn("[Bridge] failed to import presence on steer:", e);
@@ -1252,8 +1235,15 @@ export class SessionController {
       onGeneratedChunkStatus: (datasetId, imageId, key, status, message) => {
         this.contentSource.handleChunkStatus(datasetId, imageId, key, status, message);
       },
-      onSourceChunkStatus: (datasetId, imageId, key, status, message) => {
-        this.contentSource.handleSourceChunkStatus(datasetId, imageId, key, status, message);
+      onSourceChunkStatus: (datasetId, imageId, key, status, message, failure) => {
+        this.contentSource.handleSourceChunkStatus(
+          datasetId,
+          imageId,
+          key,
+          status,
+          message,
+          failure,
+        );
       },
       onConnected: (generation) => {
         // Chunk failures accumulated against a dropped transport (or its
@@ -1304,15 +1294,14 @@ export class SessionController {
   }
 
   /** The live `dataset_opened` arm: shared registration, then the policies
-   *  only a live open triggers (loading clear, auto-fit, applier notification).
-   *  A snapshot skips them, since a join or repair is not a user open. */
+   *  only a live open triggers (loading clear, applier notification). A
+   *  snapshot skips them, since a join or repair is not a user open. */
   private handleDatasetOpened(
     cmd: {
       type: string;
       manifest: DatasetManifestWire;
       fetch: FetchSourceWire;
       catalog?: WireAssetCatalog | null;
-      opener_client_id?: number | null;
     },
     scene: WasmScene,
   ): void {
@@ -1353,41 +1342,9 @@ export class SessionController {
       reason: "success",
     });
     this.deps.events.onSceneChanged(scene);
-    // Auto-fit only on the client that opened the dataset: `dataset_opened`
-    // runs on every peer, and the server stamps `opener_client_id`. Also
-    // suppressed while a saved view restores its camera and while following.
-    // Id 0 is a real id here since the snapshot arrives first; a missing
-    // opener id fits no one. Best-effort, so a failed fit can't break the open.
-    const isOpener = isOpenerOf(cmd.opener_client_id, this.myId);
-    const restoreInProgress =
-      this.deps.getSavedViewHooks()?.isInProgress?.() ?? false;
-    const following = this.followTarget !== null;
-    if (shouldAutoFitOnOpen(cmd.type, { isOpener, restoreInProgress, following })) {
-      try {
-        this.assertViewport(scene);
-        // Untyped call: the wasm export may predate the regenerated
-        // bindings, so reach it structurally rather than via the type.
-        (
-          scene as unknown as {
-            fit_camera_to_dataset_bounds?: (id: string) => void;
-          }
-        ).fit_camera_to_dataset_bounds?.(datasetId);
-        this.deps.getLoop()?.markInteractiveDirty("auto_fit_on_open");
-        bridgeLog("auto_fit_on_open.applied", { datasetId });
-      } catch (e) {
-        bridgeLog("auto_fit_on_open.failed", {
-          datasetId,
-          error: String(e),
-        });
-      }
-    } else {
-      bridgeLog("auto_fit_on_open.suppressed", {
-        datasetId,
-        isOpener,
-        restoreInProgress,
-        following,
-      });
-    }
+    // The scene fitted the camera on the open if nothing had placed it, on
+    // every peer alike, so the open needs no fit of its own.
+    requestRender(this.deps.getLoop(), "dataset_opened");
     // Resolve the saved-view applier's pending open. Safe for opens it didn't
     // start: `notifyDatasetOpened` ignores unknown ids.
     this.deps.getSavedViewHooks()?.onDatasetOpened(datasetId);

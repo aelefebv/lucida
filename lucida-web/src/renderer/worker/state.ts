@@ -8,7 +8,7 @@
  */
 
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
-import type { CanvasColors, ColdStateMessage, GpuAtlasReport, GpuErrorKind } from "../workerProtocol.ts";
+import type { CanvasColors, ColdStateMessage, GpuErrorKind, GpuMemoryReport } from "../workerProtocol.ts";
 import type { AtlasState, LabelVolumePool } from "../volume/atlas.ts";
 import type { SliceAtlasState, LabelSlicePool } from "../slice/atlas.ts";
 import type { ProxyAtlasState } from "../proxyAtlas.ts";
@@ -16,10 +16,8 @@ import type { EntityProxyDescriptor } from "../workerContext.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import type { EntitySource } from "../entitySources.ts";
 import type { PendingFrameCapture } from "./captureFrame.ts";
-import { CEILING_BUDGETS, type DeviceBudgets } from "../../deviceBudget.ts";
-
-/** The GPU atlas budgets a pool is sized under. */
-export type AtlasBudgets = Pick<DeviceBudgets, "volumeAtlasBytes" | "sliceAtlasBytes">;
+import type { WantedChunkIndex } from "../wantedChunks.ts";
+import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 
 /** GPU errors of one kind folded into the next report while the last one's spacing runs. */
 export interface GpuErrorReport {
@@ -57,8 +55,12 @@ export interface RendererState {
   /** dataset → entity descriptor buffer + index maps (rebuilt fresh on each cold state). */
   descriptorBuffersByDataset: Map<string, EntityDescriptorIndex>;
 
-  /** Per-pool byte budgets, fitted to the device at init. */
-  atlasBudgets: AtlasBudgets;
+  /**
+   * The one GPU budget every holder counts against, fitted to the device at
+   * init and halved, down to its floor, whenever the device runs out of
+   * memory under it (`worker/gpuBudget.ts`).
+   */
+  gpuTotalBytes: number;
   /** poolKey → volume atlas pool state. */
   volumeAtlases: Map<string, AtlasState>;
   /** poolKey → slice atlas pool state. */
@@ -98,6 +100,10 @@ export interface RendererState {
    * without re-sending it. Cleared on dataset removal.
    */
   coldStateByDataset: Map<string, ColdStateMessage>;
+  /** Per-dataset index of its latest cold state's wanted chunks. */
+  wantedByDataset: Map<string, WantedChunkIndex>;
+  /** dataset → imageId → chunk keys the source failed for good, as the page last listed them. */
+  failedByDataset: Map<string, Map<string, ReadonlySet<string>>>;
 
   /**
    * Captures the trace bundle asked for that no frame has answered yet.
@@ -106,11 +112,16 @@ export interface RendererState {
    */
   frameCaptures: PendingFrameCapture[];
 
+  /** The GPU memory report the page last heard, so only a change is posted. */
+  gpuMemoryPosted: GpuMemoryReport | null;
+  /** The capacity report the page last heard, serialized, so only a change is posted. */
+  gpuCapacityPosted: string | null;
   /**
-   * The atlas report the page last heard. Both sides start from no atlases,
-   * so only a change is ever posted.
+   * Minimap overviews the GPU total had no room for: member → the selection
+   * (`t/c/format`) refused. Refused until the selection changes or the
+   * member is removed.
    */
-  gpuAtlasesPosted: GpuAtlasReport;
+  overviewsRefused: Map<string, string>;
 
   /** The last canvas colors and cursors the page sent, which a replacement device's renderers start from. */
   canvasColors: CanvasColors | null;
@@ -140,9 +151,9 @@ export interface RendererState {
 }
 
 /** Build an empty {@link RendererState}. Called once in `case "init"`. */
-export function createInitialState(atlasBudgets: AtlasBudgets = CEILING_BUDGETS): RendererState {
+export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTotalBytes): RendererState {
   return {
-    atlasBudgets: { volumeAtlasBytes: atlasBudgets.volumeAtlasBytes, sliceAtlasBytes: atlasBudgets.sliceAtlasBytes },
+    gpuTotalBytes,
     memberToDataset: new Map(),
     memberSourcePools: new Map(),
     currentSourcesByDataset: new Map(),
@@ -161,8 +172,12 @@ export function createInitialState(atlasBudgets: AtlasBudgets = CEILING_BUDGETS)
     currentEpochs: null,
     currentColdState: null,
     coldStateByDataset: new Map(),
+    wantedByDataset: new Map(),
+    failedByDataset: new Map(),
     frameCaptures: [],
-    gpuAtlasesPosted: { atlases: 0, bytes: 0 },
+    gpuMemoryPosted: null,
+    gpuCapacityPosted: null,
+    overviewsRefused: new Map(),
     canvasColors: null,
     cursors: null,
     gpuErrorReports: new Map(),

@@ -27,7 +27,7 @@ export {
   chunkDistSq,
   clearAllRayHits,
   clearRayHitForMember,
-  findFarthestSlot,
+  findEvictionSlot,
   getRayHitForMember,
   rayHitForMember,
 } from "./eviction.ts";

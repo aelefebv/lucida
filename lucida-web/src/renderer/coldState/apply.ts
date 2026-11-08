@@ -18,6 +18,7 @@ import {
 import { targetLevelOf, type EntitySource } from "../entitySources.ts";
 import {
   getOrCreateVolumePool,
+  removeLabelVolumePoolsForDataset,
   removeVolumeAtlasesForDataset,
   resizeIndirection,
   remapIndirection,
@@ -25,14 +26,45 @@ import {
 } from "../volume/index.ts";
 import {
   getOrCreateSlicePool,
+  removeLabelSlicePoolsForDataset,
   removeSliceAtlasesForDataset,
   resizeSliceIndirection,
   remapSliceIndirection,
 } from "../slice/index.ts";
 import { reconcileProxyResidency } from "../proxy/residency.ts";
-import { groupEntriesByPool } from "./groupEntries.ts";
+import { groupEntriesByPool, type PoolGroup } from "./groupEntries.ts";
 import { computeEntityTierMeta } from "./entityMetas.ts";
 import { sourceKey } from "../poolKeys.ts";
+import { postFreedPools } from "../chunkUploadFeedback.ts";
+import { indexWantedChunks, wantedEntryKey } from "../wantedChunks.ts";
+
+/**
+ * The failed chunks a pool's members want in its tier, by member. Only wanted
+ * ones are marked: the detail tier wants its target level and the coarse tier
+ * its coarse level, so a failed chunk at a coarser stand-in level stays a
+ * miss and the chain falls through it. The wanted set is this cold state's,
+ * so a list from before a scrub never marks the new plane.
+ */
+function failedInGroup(
+  state: WorkerCtx["state"],
+  datasetId: string,
+  group: PoolGroup,
+): Map<string, Set<string>> | undefined {
+  const failedByImage = state.failedByDataset.get(datasetId);
+  if (!failedByImage) return undefined;
+  const wanted = state.wantedByDataset.get(datasetId);
+  const out = new Map<string, Set<string>>();
+  for (const { entry, memberId } of group.entries) {
+    if (entry.kind !== "tile" || out.has(memberId)) continue;
+    const failed = failedByImage.get(entry.imageId);
+    const want = wanted?.get(wantedEntryKey(group.tier, memberId));
+    if (!failed || !want) continue;
+    const keys = new Set<string>();
+    for (const key of failed) if (want.has(key)) keys.add(key);
+    if (keys.size > 0) out.set(memberId, keys);
+  }
+  return out;
+}
 
 /** Apply a cold-state message. The caller posts the wanted-set afterward. */
 export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
@@ -67,6 +99,8 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     state.proxyStats.evicted += evicted;
     state.proxyStats.evictedPolicy += evicted;
   }
+
+  state.wantedByDataset.set(msg.datasetId, indexWantedChunks(msg.wantedChunks));
 
   for (const [memberId, datasetId] of state.memberToDataset) {
     if (datasetId !== msg.datasetId) continue;
@@ -135,6 +169,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
       offset = nextOffset;
     }
 
+    const failed = failedInGroup(state, msg.datasetId, group);
     if (mode === "volume") {
       const atlas = getOrCreateVolumePool(
         ctx, group.poolKey, msg.datasetId, pcX, pcY, pcZ, msg.currentT, group.channel, msg.sampleFormat,
@@ -145,6 +180,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
         visibleRegion: msg.visibleRegion,
         renderRadiusView: msg.renderRadiusView?.[group.tier],
         entryByMember,
+        failed,
       });
     } else {
       const atlas = getOrCreateSlicePool(
@@ -157,18 +193,23 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
         visibleRegion: msg.visibleRegion,
         renderRadiusView: msg.renderRadiusView?.[group.tier],
         entryByMember,
+        failed,
       });
     }
   }
 
   // 5. Free this dataset's pools that no group above names: a hidden
   // channel, the other view mode, or a chunk shape no resident level uses.
-  // Nothing routes to them now, so nothing would sample them again. The
-  // wanted set posted after every cold state reports a recreated pool as
-  // empty, so the page resends what it needs.
+  // Nothing routes to them now, so nothing would sample them again. Their
+  // chunks are reported lost, so the page resends what a recreated pool needs.
   const referenced = new Set(groups.keys());
+  postFreedPools(ctx, msg.datasetId, referenced);
   removeVolumeAtlasesForDataset(ctx, msg.datasetId, referenced);
   removeSliceAtlasesForDataset(ctx, msg.datasetId, referenced);
+  // Label pools live as long as the view mode that draws them. Their chunks
+  // are reported lost, so switching back sends them again.
+  if (mode === "volume") removeLabelSlicePoolsForDataset(ctx, msg.datasetId, "freed");
+  else removeLabelVolumePoolsForDataset(ctx, msg.datasetId, "freed");
 
   state.currentSourcesByDataset.set(msg.datasetId, currentSources);
 

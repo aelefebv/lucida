@@ -36,9 +36,9 @@ import {
 } from "../minimapHandlers.ts";
 import { rebuildDescriptorIfMatching } from "./bootstrap.ts";
 import { removeDatasetResources } from "./lifecycle.ts";
-import { postGpuAtlasesIfChanged } from "./atlasReport.ts";
+import { postGpuMemoryIfChanged } from "./gpuBudget.ts";
 import { handleCaptureFrame } from "./captureFrame.ts";
-import { postChunksRequeued } from "../chunkUploadFeedback.ts";
+import { postChunkResidency } from "../chunkUploadFeedback.ts";
 import { sourceKey } from "../poolKeys.ts";
 
 /**
@@ -70,7 +70,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
         .get(memberId)
         ?.get(sourceKey(msg.tier, msg.level));
       if (!poolKey) {
-        postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+        postChunkResidency(ctx, memberId, msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool");
         return;
       }
       handleSliceChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
@@ -82,7 +82,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "sliceRenderMultiPass":
       await handleSliceRenderMultiPass(ctx, msg);
       postFrameDone(ctx, msg.frameSeq);
-      postGpuAtlasesIfChanged(ctx);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "volumeChunkData": {
@@ -93,7 +93,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       if (!poolKey) {
         // No section for this (tier, level): cold state hasn't arrived for
         // this member, or the level is no longer a resident level.
-        postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+        postChunkResidency(ctx, memberId, msg.tier, "refused", msg.chunks.map(c => c.key), "missing-pool");
         return;
       }
       handleVolumeChunkData(ctx, msg, ctx.state.currentEpochs, poolKey, memberId);
@@ -105,13 +105,13 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "volumeRenderMultiPass":
       await handleVolumeRenderMultiPass(ctx, msg);
       postFrameDone(ctx, msg.frameSeq);
-      postGpuAtlasesIfChanged(ctx);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "proxyAssetData": {
       const outcome = handleProxyUpload(ctx, msg);
       if (outcome.rebuildDescriptor) rebuildDescriptorIfMatching(ctx, msg.datasetId);
-      if (outcome.wantedSetChanged) ctx.postWantedSet();
+      if (outcome.wantedSetChanged) ctx.postWantedSet(msg.datasetId);
       return;
     }
 
@@ -123,6 +123,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "minimapUploadOverviewChunksForLayer":
       handleMinimapUploadOverviewChunks(ctx, msg);
+      postGpuMemoryIfChanged(ctx);
       return;
     case "thumbnailRender":
       handleThumbnailRender(ctx, msg);
@@ -154,8 +155,8 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       ctx.state.currentEpochs = msg.epochs;
       ctx.state.coldStateByDataset.set(msg.datasetId, msg);
       applyColdState(ctx, msg);
-      ctx.postWantedSet();
-      postGpuAtlasesIfChanged(ctx);
+      ctx.postWantedSet(msg.datasetId);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "coldStateDisplay":
@@ -166,21 +167,33 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
     case "coldStateSelection":
       // A T/Z scrub changes the wanted chunks, so the wanted-set is posted.
       applyColdStateSelection(ctx, msg);
-      ctx.postWantedSet();
-      postGpuAtlasesIfChanged(ctx);
+      ctx.postWantedSet(msg.datasetId);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "coldStateDelta":
       // Posted even when the delta was a no-op, matching the full and
       // selection paths.
       applyColdStateDelta(ctx, msg);
-      ctx.postWantedSet();
-      postGpuAtlasesIfChanged(ctx);
+      ctx.postWantedSet(msg.datasetId);
+      postGpuMemoryIfChanged(ctx);
       return;
+
+    case "failedChunks": {
+      // No residency changed, so no wanted-set is posted. The retained cold
+      // state is re-ingested so the indirection marks the new list now,
+      // not at the next view change.
+      const failed = new Map(msg.images.map(({ imageId, chunkKeys }) => [imageId, new Set(chunkKeys)]));
+      if (failed.size > 0) ctx.state.failedByDataset.set(msg.datasetId, failed);
+      else ctx.state.failedByDataset.delete(msg.datasetId);
+      const cold = ctx.state.coldStateByDataset.get(msg.datasetId);
+      if (cold) applyColdState(ctx, cold);
+      return;
+    }
 
     case "removeLayerResources":
       removeDatasetResources(ctx, msg.datasetId);
-      postGpuAtlasesIfChanged(ctx);
+      postGpuMemoryIfChanged(ctx);
       return;
 
     case "destroy":

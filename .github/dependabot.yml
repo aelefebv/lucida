@@ -1,0 +1,48 @@
+# Minor and patch updates arrive as one pull request per ecosystem each week.
+# A major update gets a pull request of its own, since it usually needs code
+# changes.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      cargo:
+        update-types: [minor, patch]
+
+  - package-ecosystem: npm
+    directory: /lucida-web
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      npm:
+        update-types: [minor, patch]
+
+  - package-ecosystem: uv
+    directory: /lucida-py
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      uv:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: chore
+      include: scope
+    groups:
+      github-actions:
+        update-types: [minor, patch]

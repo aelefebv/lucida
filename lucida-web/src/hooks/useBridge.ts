@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import type {
   Bridge,
@@ -34,22 +34,19 @@ interface Params {
   setWasmScene: React.Dispatch<React.SetStateAction<WasmScene | null>>;
   ensureScene: () => WasmScene;
   loopRef: React.RefObject<RenderLoop | null>;
-  /** The viewer canvas, measured for the auto-fit on open. */
+  /** The viewer canvas, measured so a fit on open or join frames it. */
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;
   /** Populated by the SavedView applier after construction, so it can resolve
    * pending opens without the session layer owning applier types. */
   savedViewHooksRef?: React.RefObject<SavedViewBridgeHooks | null>;
+  /** Told when a session is built and when it is torn down, before the
+   *  render that follows either. */
+  onSessionChanged?: (session: Session | null) => void;
   // From useDatasetSettings (called before)
   bumpLayerSettingsVersion: () => void;
   initLayerMaps: (id: string) => void;
-  // From useDimensions (called before)
-  setZ: React.Dispatch<React.SetStateAction<number>>;
-  setC: React.Dispatch<React.SetStateAction<number>>;
-  setT: React.Dispatch<React.SetStateAction<number>>;
-  setViewMode: React.Dispatch<React.SetStateAction<"2d" | "3d">>;
-  setMultiChannel: React.Dispatch<React.SetStateAction<boolean>>;
   // Lifted state (from App)
   setSelectedDatasetId: React.Dispatch<React.SetStateAction<string | null>>;
   bumpDatasetsVersion: () => void;
@@ -80,8 +77,8 @@ export function useBridge(params: Params) {
 
   const controllerRef = useRef<SessionController | null>(null);
   const sessionRef = useRef<Session | null>(null);
-  /** State, not a ref, so consumers such as `useBookmarks` re-run their
-   *  subscribe effects once the bridge exists. */
+  /** State, not a ref, so consumers re-run their effects once the bridge
+   *  exists. */
   const [bridge, setBridge] = useState<Bridge | null>(null);
   // `Boolean(bridge)` is not readiness: the bridge exists while its WebSocket is
   // still CONNECTING, and `Bridge.send` silently drops frames before OPEN.
@@ -124,13 +121,6 @@ export function useBridge(params: Params) {
       bumpLayerSettingsVersion: () => portsRef.current.bumpLayerSettingsVersion(),
       initLayerMaps: (id) => portsRef.current.initLayerMaps(id),
       setSelectedDatasetId: (id) => portsRef.current.setSelectedDatasetId(id),
-      viewState: {
-        setZ: (v) => portsRef.current.setZ(v),
-        setC: (v) => portsRef.current.setC(v),
-        setT: (v) => portsRef.current.setT(v),
-        setViewMode: (mode) => portsRef.current.setViewMode(mode),
-        setMultiChannel: (multi) => portsRef.current.setMultiChannel(multi),
-      },
       events: {
         onConnectedChanged: setConnected,
         onSessionReadyChanged: setSessionReady,
@@ -166,6 +156,7 @@ export function useBridge(params: Params) {
     });
     controllerRef.current = controller;
     sessionRef.current = controller.session;
+    portsRef.current.onSessionChanged?.(controller.session);
     setBridge(controller.bridge);
 
     return () => {
@@ -175,6 +166,7 @@ export function useBridge(params: Params) {
       }
       if (sessionRef.current === controller.session) {
         sessionRef.current = null;
+        portsRef.current.onSessionChanged?.(null);
       }
       // Reset connection-scoped state in case this hook instance survives the
       // teardown (a StrictMode remount). No-ops on a real unmount.
@@ -229,10 +221,14 @@ export function useBridge(params: Params) {
     controllerRef.current?.dismissOpenWarnings();
   }, []);
 
-  const followablePeers = Array.from(peers.entries())
-    .filter(([, p]) => p.following === null || p.following === undefined);
+  const followablePeers = useMemo(
+    () => Array.from(peers.entries()).filter(([, p]) => p.following === null || p.following === undefined),
+    [peers],
+  );
 
-  return {
+  // One object per change of the state in it, so a consumer keyed on it
+  // re-runs only when that state moved. The callbacks never change.
+  return useMemo(() => ({
     sessionRef,
     /** Non-null while the WebSocket may still be CONNECTING, so it is not a
      *  readiness signal. Use `connected` or `sessionReady` for that. */
@@ -268,7 +264,13 @@ export function useBridge(params: Params) {
     breakFollow,
     handleFollow,
     followablePeers,
-  };
+  }), [
+    bridge, connected, sessionReady, peers, myId, followTarget,
+    sendCommand, sendCursor, emitPresence, emitDatasetPresence, sendOpenRemoteDataset,
+    remoteDatasetLoading, remoteDatasetError, remoteDatasetProgress,
+    remoteDatasetWarnings, remoteDatasetWarningsOverflow, dismissRemoteDatasetWarnings,
+    datasetImportWarnings, breakFollow, handleFollow, followablePeers,
+  ]);
 }
 
 /**

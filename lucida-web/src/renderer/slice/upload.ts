@@ -1,6 +1,7 @@
 /**
- * Slice chunk upload: staleness check, Z-slice filter, eviction, GPU write,
- * intensity sampling, and per-member feedback messages.
+ * Slice chunk upload: staleness check, admission against the planner's
+ * wanted keys, eviction, GPU write, and the residency report for every
+ * chunk.
  *
  * Re-cuts a resident chunk in place when the plane the current Z maps to is
  * not the one its slot holds. Pairs with `slice/zRetarget.ts`.
@@ -8,51 +9,71 @@
 
 import type { WorkerCtx } from "../workerContext.ts";
 import type {
+  ChunkFeedbackReason,
   LabelSliceChunkDataMessage,
   SliceChunkDataMessage,
 } from "../workerProtocol.ts";
 import { writeSliceRegion } from "../gpuContext.ts";
-import { sampleIntensityRange } from "../../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { asUint32Slice, atlasTexels, atlasTextureFormat, decodedValues } from "../dataTypeUtil.ts";
-import { parseCompositeKey, makeCompositeKey } from "../chunkKeys.ts";
-import { postChunksRejected, postChunksRequeued } from "../chunkUploadFeedback.ts";
-import { chunkAllowedByCurrentRenderRadius } from "../chunkRadius.ts";
+import { asUint32Slice, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.ts";
+import { makeCompositeKey } from "../chunkKeys.ts";
+import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
+import { mayEvict } from "../eviction.ts";
 import { sliceLevelZ } from "../slicePlane.ts";
-import { cameraUVForMember, chunkDistSq2D, findFarthestSlot2D } from "./eviction.ts";
-import { getOrCreateLabelSlicePool, type SliceAtlasState } from "./atlas.ts";
+import { wantedChunksFor } from "../wantedChunks.ts";
+import { cameraUVForMember, chunkDistSq2D, findEvictionSlot2D } from "./eviction.ts";
+import {
+  getOrCreateLabelSlicePool,
+  growSlicePoolWithin,
+  labelCellKey,
+  type SliceAtlasState,
+} from "./atlas.ts";
 
 /**
  * Write pre-sliced uint32 label planes into the member's r32uint label pool.
  * The delivery path already extracted the current Z-plane, so each
  * `chunk.data` is `chunkY*chunkX` ids. Ids are categorical, so they keep full
- * 32-bit width and get no intensity sampling.
+ * 32-bit width.
  */
 export function handleLabelSliceChunkData(
   ctx: WorkerCtx,
   msg: LabelSliceChunkDataMessage,
 ): void {
-  // A previous timepoint's plane racing in must not overwrite the pool.
-  if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) return;
-
   const { memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY } = msg;
+  const refuseAll = (reason: ChunkFeedbackReason): void =>
+    postChunkResidency(ctx, memberId, LABEL_TIER, "refused", msg.chunks.map(c => c.key), reason);
+
+  // A previous timepoint's plane racing in must not overwrite the pool.
+  if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) {
+    refuseAll("stale");
+    return;
+  }
 
   const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight);
   if (!pool) {
     // Nothing of the batch is resident, so the page must not count it as sent.
-    postChunksRejected(ctx, memberId, msg.chunks);
+    refuseAll("atlas-policy");
     return;
   }
 
+  const batch = new ResidencyBatch();
+  const replaced: string[] = [];
   for (const chunk of msg.chunks) {
     const xOff = chunk.x * chunkX;
     const yOff = chunk.y * chunkY;
     // The texture may be device-limited below the level's dims.
-    if (xOff >= pool.width || yOff >= pool.height) continue;
     const chunkW = Math.min(chunkX, pool.width - xOff);
     const chunkH = Math.min(chunkY, pool.height - yOff);
-    if (chunkW <= 0 || chunkH <= 0) continue;
+    if (xOff >= pool.width || yOff >= pool.height || chunkW <= 0 || chunkH <= 0) {
+      batch.refuse(chunk.key, "atlas-policy");
+      continue;
+    }
+    const cell = labelCellKey(chunk.x, chunk.y);
+    const previous = pool.keys.get(cell);
+    if (previous !== undefined && previous !== chunk.key) replaced.push(previous);
+    pool.keys.set(cell, chunk.key);
+    batch.held.push(chunk.key);
     const plane = asUint32Slice(chunk.data, 0, chunkY * chunkX);
     writeSliceRegion(
       ctx.device,
@@ -66,6 +87,9 @@ export function handleLabelSliceChunkData(
       "r32uint",
     );
   }
+  batch.post(ctx, memberId, LABEL_TIER);
+  // After held, so a chunk this batch wrote and then overwrote ends lost.
+  postChunkResidency(ctx, memberId, LABEL_TIER, "lost", replaced, "replaced");
 }
 
 export function handleSliceChunkData(
@@ -77,14 +101,18 @@ export function handleSliceChunkData(
 ): void {
   const { level, levelWidth, levelHeight, chunkX, chunkY, chunkZ, fullResDepth, levelDepth, fullResZ } = msg;
 
+  const { tier } = msg;
+  const refuseAll = (reason: ChunkFeedbackReason): void =>
+    postChunkResidency(ctx, memberId, tier, "refused", msg.chunks.map(c => c.key), reason);
+
   if (isStaleDelivery(msg.epochs, currentEpochs)) {
-    postChunksRequeued(ctx, memberId, msg.chunks, "stale");
+    refuseAll("stale");
     return;
   }
 
   const atlas = ctx.state.sliceAtlases.get(poolKey);
   if (!atlas) {
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-pool");
+    refuseAll("missing-pool");
     return;
   }
 
@@ -94,13 +122,13 @@ export function handleSliceChunkData(
   const entityLodMetas = atlas.entityMetas.get(memberId);
   if (!entityLodMetas) {
     console.warn(`[sliceChunkData] no entityMeta for ${memberId} in pool ${poolKey}`);
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-entity-meta");
+    refuseAll("missing-entity-meta");
     return;
   }
   const lodMeta = entityLodMetas.find(m => m.level === level);
   if (!lodMeta) {
     console.warn(`[sliceChunkData] no lodMeta for level ${level} in entity ${memberId}, has levels [${entityLodMetas.map(m => m.level).join(",")}]`);
-    postChunksRequeued(ctx, memberId, msg.chunks, "missing-lod-meta");
+    refuseAll("missing-lod-meta");
     return;
   }
 
@@ -118,72 +146,62 @@ export function handleSliceChunkData(
   const levelZ = sliceLevelZ(fullResZ, fullResDepth, levelDepth);
   const targetChunkZ = Math.floor(levelZ / chunkZ);
   const localZ = levelZ - targetChunkZ * chunkZ;
+  const wanted = wantedChunksFor(ctx.state, memberId, tier);
 
-  let intensityChanged = false;
-  const perChunkSamples = Math.floor(10000 / Math.max(1, msg.chunks.length));
-  const evictedKeys: string[] = [];
-  const requeueKeys: string[] = [];
-  const requeueKeySet = new Set<string>();
-  const radiusFilteredKeys: string[] = [];
-  const radiusFilteredKeySet = new Set<string>();
-  // A chunk that throws goes back to the page to be sent again, and the rest
-  // of the batch still lands.
-  const failedKeys: string[] = [];
-  const failedKeySet = new Set<string>();
+  const batch = new ResidencyBatch();
   let failure: unknown = null;
 
   for (const chunk of msg.chunks) {
     let claimed = -1;
     try {
-      if (chunk.z !== targetChunkZ) {
-        if (!requeueKeySet.has(chunk.key)) {
-          requeueKeySet.add(chunk.key);
-          requeueKeys.push(chunk.key);
-        }
-        continue;
-      }
-      if (
-        !chunkAllowedByCurrentRenderRadius(
-          ctx.state,
-          memberId,
-          msg.tier,
-          { ...chunk, level },
-        )
-      ) {
-        radiusFilteredKeys.push(chunk.key);
-        radiusFilteredKeySet.add(chunk.key);
-        continue;
-      }
       const compositeKey = makeCompositeKey(memberId, chunk.key);
 
       const existingSlot = atlas.slots.get(compositeKey);
-      if (existingSlot !== undefined && atlas.slotLevelZ[existingSlot] === levelZ) continue;
+      if (existingSlot !== undefined && atlas.slotLevelZ[existingSlot] === levelZ) {
+        batch.held.push(chunk.key);
+        continue;
+      }
+      if (!wanted?.has(chunk.key)) {
+        batch.refuse(chunk.key, "unwanted");
+        continue;
+      }
+      // The planner's keys and this cut map Z through one function, so a wanted
+      // chunk holds the plane unless the sender's Z is not the cold state's.
+      if (chunk.z !== targetChunkZ) {
+        batch.refuse(chunk.key, "wrong-slice");
+        continue;
+      }
 
-      const r = sampleIntensityRange(decodedValues(chunk.data, chunk.dataType), perChunkSamples);
-      if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
-      if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
-
+      // A pool grows only once every slot it has holds a chunk, and freely
+      // only while the GPU total has room (`worker/gpuBudget.ts`).
+      if (existingSlot === undefined && atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
+        growSlicePoolWithin(ctx, poolKey, atlas, false);
+      }
       let slotIndex: number;
       if (existingSlot !== undefined) {
         slotIndex = existingSlot;
       } else if (atlas.freeSlots.length > 0) {
         slotIndex = atlas.freeSlots.pop()!;
       } else {
-        const { key: evictKey, dist: farthestDist } = findFarthestSlot2D(ctx.state, atlas);
-        if (!evictKey) continue;
-        const cam = cameraUVForMember(ctx.state, memberId);
-        const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cam);
-        // A tie keeps the resident. Mirror-image chunks sit at one distance, and
-        // letting either displace the other turns their re-sends into a loop. A
-        // T or C scrub still replaces in place: the remap unmaps the old
-        // selection's slots, and an unmapped slot ranks at infinite distance.
-        if (incomingDist >= farthestDist) continue;
-        slotIndex = atlas.slots.get(evictKey)!;
-        atlas.slots.delete(evictKey);
-        evictedKeys.push(evictKey);
-        const oldGridIdx = atlas.slotGridIdx[slotIndex];
-        if (oldGridIdx >= 0) {
-          atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
+        const victim = findEvictionSlot2D(ctx.state, atlas, tier);
+        if (
+          victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
+          growSlicePoolWithin(ctx, poolKey, atlas, true)
+        ) {
+          slotIndex = atlas.freeSlots.pop()!;
+        } else {
+          const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cameraUVForMember(ctx.state, memberId));
+          if (!victim || !mayEvict(victim, incomingDist)) {
+            batch.refuse(chunk.key, "atlas-policy");
+            continue;
+          }
+          slotIndex = atlas.slots.get(victim.key)!;
+          atlas.slots.delete(victim.key);
+          batch.evicted.push(victim.key);
+          const oldGridIdx = atlas.slotGridIdx[slotIndex];
+          if (oldGridIdx >= 0) {
+            atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
+          }
         }
       }
       if (existingSlot === undefined) claimed = slotIndex;
@@ -211,71 +229,20 @@ export function handleSliceChunkData(
       atlas.slots.set(compositeKey, slotIndex);
       atlas.slotLevelZ[slotIndex] = levelZ;
       atlas.indirectionDirty = true;
+      batch.held.push(chunk.key);
     } catch (err) {
+      // A chunk that throws goes back to the page to be sent again, and the
+      // rest of the batch still lands.
       failure ??= err;
-      failedKeys.push(chunk.key);
-      failedKeySet.add(chunk.key);
+      batch.refuse(chunk.key, "upload-failed");
       // A slot taken for a chunk that never landed would hold nothing for good.
       if (claimed >= 0) releaseSlot(atlas, claimed);
     }
   }
 
-  const skippedKeys: string[] = [];
-  for (const chunk of msg.chunks) {
-    if (requeueKeySet.has(chunk.key)) continue;
-    if (radiusFilteredKeySet.has(chunk.key)) continue;
-    if (failedKeySet.has(chunk.key)) continue;
-    const compositeKey = makeCompositeKey(memberId, chunk.key);
-    if (!atlas.slots.has(compositeKey)) {
-      skippedKeys.push(chunk.key);
-    }
-  }
+  batch.post(ctx, memberId, tier);
+  if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
 
-  if (
-    evictedKeys.length > 0 || requeueKeys.length > 0 || skippedKeys.length > 0 ||
-    radiusFilteredKeys.length > 0 || failedKeys.length > 0
-  ) {
-    const evictedByMember = new Map<string, string[]>();
-    for (const ck of evictedKeys) {
-      const parsed = parseCompositeKey(ck);
-      if (!parsed) continue;
-      const arr = evictedByMember.get(parsed.memberId) ?? [];
-      arr.push(parsed.chunkKey);
-      evictedByMember.set(parsed.memberId, arr);
-    }
-    for (const [evMember, evKeys] of evictedByMember) {
-      ctx.post({ type: "chunksEvicted", memberId: evMember, keys: evKeys, skipped: [], reason: "evicted" });
-    }
-    if (requeueKeys.length > 0) {
-      postChunksRequeued(
-        ctx,
-        memberId,
-        requeueKeys.map(key => ({ key })),
-        "wrong-slice",
-      );
-    }
-    if (radiusFilteredKeys.length > 0) {
-      postChunksRequeued(
-        ctx,
-        memberId,
-        radiusFilteredKeys.map(key => ({ key })),
-        "radius-filter",
-      );
-    }
-    if (skippedKeys.length > 0) {
-      postChunksRejected(
-        ctx,
-        memberId,
-        skippedKeys.map(key => ({ key })),
-      );
-    }
-    postChunksRequeued(ctx, memberId, failedKeys.map(key => ({ key })), "upload-failed");
-    ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
-  }
-
-  if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
-  }
   if (failure !== null) throw failure;
 }
 

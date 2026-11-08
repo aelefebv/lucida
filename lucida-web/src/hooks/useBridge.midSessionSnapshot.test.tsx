@@ -21,13 +21,16 @@ vi.mock("../bridge.ts", () => {
     sendCursor = vi.fn();
     sendFollow = vi.fn();
     sendOpenRemoteDataset = vi.fn();
-    subscribeBookmarkChanged = vi.fn(() => () => {});
-    constructor(handlers: unknown, _url?: string, _workspaceId?: string) {
+    constructor(handlers: unknown, _url: string) {
       this.handlers = handlers;
       MockBridge.instances.push(this);
     }
   }
-  return { Bridge: MockBridge, bridgeLog: vi.fn() };
+  return {
+    Bridge: MockBridge,
+    bridgeLog: vi.fn(),
+    workspaceSocketUrl: (id: string) => `ws://test/ws/workspaces/${id}`,
+  };
 });
 
 vi.mock("../pipeline/fetch/index.ts", () => {
@@ -140,11 +143,6 @@ function makeParams(scene: ReturnType<typeof makeFakeScene>) {
       datasetCallbacksRef: { current: { removeDataset: vi.fn() } },
       bumpLayerSettingsVersion: vi.fn(),
       initLayerMaps: vi.fn(),
-      setZ: vi.fn(),
-      setC: vi.fn(),
-      setT: vi.fn(),
-      setViewMode: vi.fn(),
-      setMultiChannel: vi.fn(),
       setSelectedDatasetId: vi.fn(),
       bumpDatasetsVersion: vi.fn(),
       bumpRemoteDocumentVersion: vi.fn(),

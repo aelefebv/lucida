@@ -51,10 +51,11 @@ docs/
 extras/
 
 # --- workspace members not in the image -----------------------------
-# lucida-py is excluded from the rust workspace
-# (`exclude = ["lucida-py"]` in the root Cargo.toml) and is not part
-# of the lucida-server image.
-lucida-py/
+# The image never builds lucida-py, but cargo loads the manifest of every
+# workspace member, and that fails unless the library source exists too.
+lucida-py/*
+!lucida-py/Cargo.toml
+!lucida-py/src/
 
 # --- editor / OS noise ----------------------------------------------
 .idea/

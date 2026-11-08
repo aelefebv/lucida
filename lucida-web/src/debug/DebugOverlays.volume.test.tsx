@@ -113,7 +113,6 @@ function makeLoop(): RenderLoop {
   } as unknown as RequestPlan;
   return {
     getTickCoordinator: () => ({ getLastPlans: () => new Map([["ds", plan]]) }),
-    workerChunkResidency: () => "unknown",
   } as unknown as RenderLoop;
 }
 
@@ -125,7 +124,7 @@ function makeCache(): CpuCache {
     }),
     getPendingSnapshot: () => [],
     getPendingProxySnapshot: () => [],
-    deliveryState: { wasChunkSent: () => false },
+    deliveryState: { isChunkHeld: () => false },
     getCachedChunkTier: () => null,
     getCachedProxy: () => null,
     isProxyInFlight: () => false,

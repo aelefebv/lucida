@@ -6,6 +6,7 @@ import { FRAME_CAPTURE_WAIT_MS, captureRenderedFrame, paddedBytesPerRow } from "
 import { createInitialState } from "./state.ts";
 import { dispatchMessage } from "./dispatch.ts";
 import { UNTIMED } from "../passTiming.ts";
+import { indexWantedChunks } from "../wantedChunks.ts";
 
 async function flush(): Promise<void> {
   for (let i = 0; i < 8; i++) await Promise.resolve();
@@ -25,7 +26,7 @@ describe("worker dispatch and the pipeline compile", () => {
       device: { createCommandEncoder: () => ({ finish: () => ({}) }), queue: { submit } },
       context: { canvas: { width: 0, height: 0 }, getCurrentTexture: () => ({ createView: () => ({}) }) },
       passTimer: UNTIMED,
-      getSliceRenderer: () => ({ compiled }),
+      getSliceRenderer: () => ({ compiled, setPixelRatio: vi.fn() }),
       getCompositor: () => ({ compiled: Promise.resolve(), composite: vi.fn(), underlayBackground: vi.fn() }),
       getCursorRenderer: () => ({ compiled: Promise.resolve(), hasData: () => false }),
       ensureOffscreenPool: () => [],
@@ -100,10 +101,11 @@ describe("worker dispatch upload feedback", () => {
 
     expect(posts).toEqual([
       {
-        type: "chunksEvicted",
+        type: "chunkResidency",
         memberId: "img-0:ch1",
+        tier: "detail",
+        change: "refused",
         keys: ["0/0/1/0/0/0"],
-        skipped: [],
         reason: "missing-pool",
       },
     ]);
@@ -131,10 +133,11 @@ describe("worker dispatch upload feedback", () => {
 
     expect(posts).toEqual([
       {
-        type: "chunksEvicted",
+        type: "chunkResidency",
         memberId: "img-0",
+        tier: "detail",
+        change: "refused",
         keys: ["0/0/0/0/0/0"],
-        skipped: [],
         reason: "missing-pool",
       },
     ]);
@@ -169,10 +172,11 @@ describe("worker dispatch upload feedback", () => {
 
     expect(posts).toEqual([
       {
-        type: "chunksEvicted",
+        type: "chunkResidency",
         memberId: "img-0",
+        tier: "coarse",
+        change: "refused",
         keys: ["2/0/0/0/0/0"],
-        skipped: [],
         reason: "missing-pool",
       },
     ]);
@@ -203,10 +207,13 @@ describe("worker dispatch upload feedback", () => {
       texture: {} as GPUTexture,
       entityMetas: new Map([["img-0", [{ level: 2, gridDims: [1, 1, 1], chunkDims: [8, 8, 8], levelDims: [8, 8, 8], offset: 0 }]]]),
       t: 0, c: 0,
-      intensityMin: 65535, intensityMax: 0,
       indirectionDirty: false,
     };
     ctx.state.volumeAtlases.set("small-chunk-pool", smallChunkPool as never);
+    ctx.state.memberToDataset.set("img-0", "ds");
+    ctx.state.wantedByDataset.set("ds", indexWantedChunks([
+      { memberId: "img-0", tier: "detail", chunkKeys: ["1/0/0/0/0/0", "2/0/0/0/0/0"] },
+    ]));
     (ctx as unknown as { device: unknown }).device = { queue: { writeTexture() {}, writeBuffer() {} } };
 
     const upload = (level: number, chunk: number) => dispatchMessage(ctx, {
@@ -231,9 +238,10 @@ describe("worker dispatch upload feedback", () => {
 
     await upload(1, 16);
     // The first upload also posts an intensity-range update; only the
-    // feedback messages matter here.
-    expect(posts.filter((p) => p.type === "chunksEvicted")).toEqual([
-      expect.objectContaining({ type: "chunksEvicted", memberId: "img-0", keys: ["1/0/0/0/0/0"], reason: "missing-pool" }),
+    // residency reports matter here.
+    expect(posts.filter((p) => p.type === "chunkResidency")).toEqual([
+      expect.objectContaining({ change: "held", memberId: "img-0", keys: ["2/0/0/0/0/0"] }),
+      expect.objectContaining({ change: "refused", memberId: "img-0", keys: ["1/0/0/0/0/0"], reason: "missing-pool" }),
     ]);
   });
 
@@ -258,6 +266,7 @@ describe("worker dispatch upload feedback", () => {
         frustumPlanes: null,
       },
       desiredProxyKeys: [],
+      wantedChunks: [],
       epochs: { content: 1, layout: 1, view: 1, selection: 2, asset: 0, request: 1 },
     });
 
@@ -287,6 +296,7 @@ describe("worker dispatch upload feedback", () => {
         frustumPlanes: null,
       },
       desiredProxyKeys: [],
+      wantedChunks: [],
       removedEntityIds: [],
       upserts: [],
       activeSetOrder: [],

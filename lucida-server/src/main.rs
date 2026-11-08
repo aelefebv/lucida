@@ -1,31 +1,21 @@
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::State;
-use axum::extract::ws::WebSocketUpgrade;
-use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use clap::{Args, Parser, Subcommand};
-use tokio::sync::{Mutex, broadcast};
 
 use lucida_server::admin::{self, admin_clear_proxy_cache};
 use lucida_server::auth;
-use lucida_server::bookmarks;
-use lucida_server::connection;
 use lucida_server::deployment_theme::{self, DeploymentTheme};
 use lucida_server::health;
 use lucida_server::inbox;
 use lucida_server::origin::{self, OriginPolicy};
-use lucida_server::session::Session;
 use lucida_server::static_serve;
 use lucida_server::status;
 use lucida_server::storage;
-use lucida_server::{
-    AppState, BroadcastItem, ProxyConfig, UnicastRoutes, browse, handler, workspace,
-};
+use lucida_server::{AppState, ProxyConfig, browse, workspace};
 use lucida_store::source_policy::{SourcePolicy, SourcePolicyConfig};
 
 // CLI supports legacy `lucida-server --data-dir /path` (no subcommand,
@@ -175,22 +165,6 @@ impl LogFormat {
     }
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = connection::next_client_id();
-    connection::limit_inbound(ws).on_upgrade(move |socket| async move {
-        tracing::info!(client_id = id, "ws.client_connected");
-        handler::handle_client(
-            id,
-            socket,
-            state.session,
-            state.tx,
-            state.unicast_routes,
-            state.proxy_config,
-        )
-        .await;
-    })
-}
-
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     // LUCIDA_LOG_FORMAT={text,json} (default text). Both branches share
@@ -290,10 +264,6 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         budget_bytes = lucida_store::cache::SourceCacheBudget::process().max_bytes(),
         "source_cache.config",
     );
-
-    let session = Arc::new(Mutex::new(Session::new()));
-    let (tx, _) = broadcast::channel::<BroadcastItem>(256);
-    let unicast_routes: UnicastRoutes = Arc::new(Mutex::new(HashMap::new()));
 
     // Env-var validation lives in `AuthConfig::from_env`: `LUCIDA_BIND`,
     // the auto-detect-by-bind auth-mode default, and the
@@ -426,9 +396,6 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         "source_policy.config",
     );
     let state = AppState {
-        session,
-        tx,
-        unicast_routes,
         source_policy: Arc::clone(&source_policy),
         proxy_config: proxy_config.clone(),
     };
@@ -497,22 +464,11 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
             post(auth::handlers::logout).with_state(logout_state),
         );
 
-    // The bookmarks router lands on the protected half, so every
-    // handler sees an `AuthPrincipal` in extensions.
-    let bookmarks_state = bookmarks::handlers::BookmarksState {
-        store: storage.bookmarks(),
-        // Plumb the live session + unicast routes so handlers can
-        // broadcast `BookmarkChanged` to clients with overlapping
-        // loaded datasets after every successful CUD operation.
-        session: Some(Arc::clone(&state.session)),
-        unicast_routes: Some(Arc::clone(&state.unicast_routes)),
-    };
-    let bookmarks_router: Router<()> = bookmarks::routes::router(bookmarks_state);
-
     let workspace_store = storage.workspaces();
     let workspace_runtime_config = workspace::WorkspaceRuntimeConfig {
         idle_ttl: Duration::from_secs(args.workspace_idle_ttl_secs),
         idle_sweep_interval: Duration::from_secs(args.workspace_idle_sweep_secs.max(1)),
+        ..workspace::WorkspaceRuntimeConfig::default()
     };
     tracing::info!(
         idle_ttl_secs = workspace_runtime_config.idle_ttl.as_secs(),
@@ -622,7 +578,7 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
 
     // Serve the SPA bundle from `LUCIDA_WEB_DIST` (default
     // `./lucida-web/dist`) on the public router half. Merged
-    // last so `/auth/*`, `/api/*`, `/admin/*`, and `/ws` take precedence
+    // last so `/auth/*`, `/api/*`, `/admin/*`, and `/ws/*` take precedence
     // and the SPA fallback only fires for unknown paths.
     let web_dist = PathBuf::from(
         std::env::var("LUCIDA_WEB_DIST").unwrap_or_else(|_| "./lucida-web/dist".to_string()),
@@ -635,14 +591,13 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
 
     // App routes carry the auth middleware; public auth routes don't.
     // `/` falls through to the SPA so a browser hitting `:9876` sees the
-    // app. WebSocket clients use `/ws`.
+    // app. A WebSocket client connects to one workspace, at
+    // `/ws/workspaces/{id}`.
     let app_state_router = Router::new()
-        .route("/ws", get(ws_handler))
         .route("/api/browse", get(browse::browse_handler))
         .route("/admin/clear-proxy-cache", post(admin_clear_proxy_cache))
         .with_state(state)
         .merge(authed_auth_router)
-        .merge(bookmarks_router)
         .merge(inbox_router)
         .merge(workspaces_router)
         .layer(axum::middleware::from_fn_with_state(

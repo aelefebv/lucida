@@ -11,7 +11,7 @@
 // to App handler to intent. The intents are module-spied (`spy: true`) and
 // still run, so the planner-visible effect is observable too.
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach, onTestFinished } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
@@ -28,6 +28,11 @@ vi.mock("lucida-core", () => {
       annotations?: Record<string, unknown[]>;
     } = {};
     commands: Array<Record<string, unknown>> = [];
+    // The selectors, with the epochs a selector or camera change bumps, so the
+    // page's scene store reads what a command or a followed peer wrote.
+    view = { z: 0, t: 0, c: 0, multi: false };
+    mode = "slice";
+    epochCounts = { view: 0, selection: 0 };
     constructor(_w?: number, _h?: number) {
       FakeWasmScene.instances.push(this);
     }
@@ -35,7 +40,18 @@ vi.mock("lucida-core", () => {
       this.doc = JSON.parse(json);
     }
     apply_command(json: string) {
-      this.commands.push(JSON.parse(json));
+      const cmd = JSON.parse(json);
+      this.commands.push(cmd);
+      if (cmd.type === "set_z") this.view.z = cmd.z;
+      if (cmd.type === "set_z_range") this.view.z = cmd.start;
+      if (cmd.type === "set_t") this.view.t = cmd.t;
+      if (cmd.type === "set_c") this.view.c = cmd.c;
+      if (cmd.type === "set_multi_channel") this.view.multi = cmd.enabled;
+      if (typeof cmd.type === "string" && cmd.type.startsWith("set_mode_")) {
+        this.mode = { set_mode_slice: "slice", set_mode_arcball: "arcball", set_mode_fly: "fly" }[cmd.type as string] ?? this.mode;
+        this.epochCounts.view++;
+      }
+      this.epochCounts.selection++;
     }
     dataset_order() {
       return JSON.stringify(Object.keys(this.doc.manifests ?? {}));
@@ -79,12 +95,13 @@ vi.mock("lucida-core", () => {
     annotations(id: string) {
       return JSON.stringify(this.doc.annotations?.[id] ?? []);
     }
-    z() { return 0; }
-    t() { return 0; }
-    c() { return 0; }
-    multi_channel() { return false; }
-    camera_mode() { return "slice"; }
+    z() { return this.view.z; }
+    t() { return this.view.t; }
+    c() { return this.view.c; }
+    multi_channel() { return this.view.multi; }
+    camera_mode() { return this.mode; }
     zoom() { return 1; }
+    view_proj() { return new Float32Array(16); }
     center() { return new Float64Array([0, 0]); }
     dataset_volume_shape(_id: string) { return new Uint32Array([4, 8, 8]); }
     dataset_fit_bounds(_id: string) { return new Float64Array([0, 0, 0, 8, 8, 0]); }
@@ -104,14 +121,24 @@ vi.mock("lucida-core", () => {
         dataset_settings: {},
       });
     }
-    import_presence(_json: string) {}
+    import_presence(json: string) {
+      const presence = JSON.parse(json) as { view?: { z_range: { start: number }; t: number; c: number } };
+      if (presence.view) {
+        this.view.z = presence.view.z_range.start;
+        this.view.t = presence.view.t;
+        this.view.c = presence.view.c;
+      }
+      this.epochCounts.view++;
+      this.epochCounts.selection++;
+    }
     import_dataset_presence(_json: string) {}
     compute_peer_cursors() { return JSON.stringify({ gpu: [], labels: [] }); }
-    fit_camera_to_dataset_bounds(_id: string) {}
+    frame(_width: number, _height: number) { return false; }
+    explore() { return JSON.stringify({ error: "unavailable" }); }
     apply_asset_catalog_delta(_datasetId: string, _deltaJson: string) {}
     asset_epoch() { return 0; }
     epochs() {
-      return JSON.stringify({ content: 0, layout: 0, view: 0, selection: 0, asset: 0 });
+      return JSON.stringify({ content: 0, layout: 0, asset: 0, ...this.epochCounts });
     }
     free() {}
   }
@@ -119,7 +146,6 @@ vi.mock("lucida-core", () => {
     default: vi.fn(() => Promise.resolve()),
     WasmScene: FakeWasmScene,
     set_debug_categories: vi.fn(),
-    explore_view: vi.fn(() => JSON.stringify({ error: "unavailable" })),
     camera_matrices: vi.fn(() => new Float32Array(32)),
     is_local_dataset_url: vi.fn(() => true),
     normalize_dataset_url: vi.fn((url: string) => url),
@@ -129,26 +155,66 @@ vi.mock("lucida-core", () => {
   };
 });
 
+// Tests that need a mounted viewer bring the GPU worker up; the rest leave it
+// down, so no RenderLoop exists and the intents run with a null loop, which
+// their contract covers.
+const gpu = vi.hoisted(() => ({ ready: false }));
+// App calls this hook once per render, so its calls count App's renders.
+const appRenders = vi.hoisted(() => ({ count: 0 }));
+
 vi.mock("./renderer/renderClient.ts", () => {
   class MockRenderClient {
-    onIntensityRange: unknown = null;
-    // Never settles: the GPU worker never comes up here, so no RenderLoop
-    // exists and the intents run with a null loop, which their contract covers.
-    ready() { return new Promise(() => {}); }
+    onEntityLevels: unknown = null;
+    pipelinesCompiled = false;
+    ready() { return gpu.ready ? Promise.resolve() : new Promise(() => {}); }
+    oncePipelinesCompiled() { return () => {}; }
+    minimapInit() {}
     destroy() {}
     updateCursorData(_data: Float32Array, _count: number) {}
     removeLayerResources(_id: string) {}
-    gpuAtlases() { return { atlases: 0, bytes: 0 }; }
+    gpuMemory() { return null; }
     onGpuStatus() { return () => {}; }
   }
   return { RenderClient: MockRenderClient };
+});
+
+// The loop draws nothing here; a viewer only needs one to hold.
+vi.mock("./renderLoop.ts", async (importOriginal) => {
+  class StubRenderLoop {
+    start() {}
+    stop() {}
+    markInput() {}
+    markInteractiveDirty() {}
+    markResidencyDirty() {}
+    setRenderScale() {}
+    addDataset() {}
+    removeDataset() {}
+    updateDatasetManifest() {}
+    setMinimap() {}
+    setThumbnailOverview() {}
+    setAutoContrastListener() {}
+    getTickCoordinator() { return {}; }
+    captureFrame() { return Promise.resolve({ frame: null, reason: "stub" }); }
+  }
+  return { ...(await importOriginal<typeof import("./renderLoop.ts")>()), RenderLoop: StubRenderLoop };
+});
+
+vi.mock("./shell/useDeveloperSurfaces.ts", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./shell/useDeveloperSurfaces.ts")>();
+  return {
+    ...real,
+    useDeveloperSurfaces: (...args: Parameters<typeof real.useDeveloperSurfaces>) => {
+      appRenders.count++;
+      return real.useDeveloperSurfaces(...args);
+    },
+  };
 });
 
 vi.mock("./bridge.ts", () => {
   class MockBridge {
     static instances: MockBridge[] = [];
     handlers: unknown;
-    workspaceId: string | undefined;
+    url: string;
     destroy = vi.fn();
     send = vi.fn();
     sendCommand = vi.fn();
@@ -157,14 +223,17 @@ vi.mock("./bridge.ts", () => {
     sendCursor = vi.fn();
     sendFollow = vi.fn();
     sendOpenRemoteDataset = vi.fn();
-    subscribeBookmarkChanged = vi.fn(() => () => {});
-    constructor(handlers: unknown, _url?: string, workspaceId?: string) {
+    constructor(handlers: unknown, url: string) {
       this.handlers = handlers;
-      this.workspaceId = workspaceId;
+      this.url = url;
       MockBridge.instances.push(this);
     }
   }
-  return { Bridge: MockBridge, bridgeLog: vi.fn() };
+  return {
+    Bridge: MockBridge,
+    bridgeLog: vi.fn(),
+    workspaceSocketUrl: (id: string) => `ws://test/ws/workspaces/${id}`,
+  };
 });
 
 vi.mock("./pipeline/fetch/index.ts", () => {
@@ -253,6 +322,7 @@ import {
 } from "./theme/preferences.ts";
 import { leftPanelOpenPreference, rightPanelOpenPreference } from "./shell/layoutPreferences.ts";
 import { showKeyboardHelp } from "./ui/keyboardHelpState.ts";
+import { frameClock } from "./frameClock.ts";
 import {
   invalidateDisplaySettings,
   invalidateAfterViewRestore,
@@ -389,6 +459,7 @@ async function mountWithSnapshot(docJson: string, peers: unknown[] = []) {
 }
 
 beforeEach(() => {
+  gpu.ready = false;
   localStorage.clear();
   __resetPreferencesForTesting();
   vi.clearAllMocks();
@@ -701,6 +772,107 @@ describe("App wiring: the shell", () => {
       fireEvent.click(avatar);
     });
     expect(bridge.sendFollow).toHaveBeenLastCalledWith(null);
+  });
+
+  it("shows a followed peer's plane on the Z scrubber", async () => {
+    const peer = {
+      client_id: 7,
+      camera: { mode: "slice", center: [0, 0], zoom: 1 },
+      view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+      display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
+      following: null,
+      cursor: null,
+      dataset_order: [],
+      dataset_settings: {},
+      identity: { display_name: "Ada Lovelace" },
+    };
+    const { bridge } = await mountWithSnapshot(documentJson(["wds-1"]), [peer]);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Follow Ada Lovelace" }));
+    });
+
+    await act(async () => {
+      bridge.handlers.onPresenceUpdate?.(7, peer.camera, { z_range: { start: 2, end: 3 }, t: 0, c: 0 }, peer.display);
+    });
+
+    // The import wrote the scene alone; the scrubber reads it from there.
+    const scrubber = document.querySelector('.lc-dim-scrubber[aria-label="Z plane"]');
+    expect(scrubber?.querySelector(".lc-dim-readout")?.textContent).toBe("3 / 4");
+  });
+});
+
+describe("App wiring: peer messages", () => {
+  const peer = {
+    client_id: 7,
+    camera: { mode: "slice", center: [0, 0], zoom: 1 },
+    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+    display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
+    following: null,
+    cursor: null,
+    dataset_order: [],
+    dataset_settings: {},
+    identity: { display_name: "Ada Lovelace" },
+  };
+
+  it("leave the canvas listeners and the frame clock alone, and render App once each", async () => {
+    gpu.ready = true;
+    const canvasBinds = vi.spyOn(HTMLCanvasElement.prototype, "addEventListener");
+    const clockSubscribes = vi.spyOn(frameClock, "subscribe");
+    const { bridge } = await mountWithSnapshot(documentJson(["wds-1"]), [peer]);
+    // The 2D viewer is up and has bound its listeners.
+    expect(canvasBinds.mock.calls.some(([type]) => type === "wheel")).toBe(true);
+    canvasBinds.mockClear();
+    clockSubscribes.mockClear();
+    appRenders.count = 0;
+
+    const messages = 10;
+    for (let i = 0; i < messages; i++) {
+      await act(async () => {
+        bridge.handlers.onCursorUpdate?.(7, [i, i]);
+      });
+      await act(async () => {
+        bridge.handlers.onPresenceUpdate?.(7, { ...peer.camera, center: [i, i] }, peer.view, peer.display);
+      });
+    }
+
+    expect(canvasBinds).not.toHaveBeenCalled();
+    expect(clockSubscribes).not.toHaveBeenCalled();
+    expect(appRenders.count).toBeLessThanOrEqual(2 * messages);
+    canvasBinds.mockRestore();
+    clockSubscribes.mockRestore();
+  });
+
+  it("leave the 3D viewer's listeners and frame clock alone too", async () => {
+    gpu.ready = true;
+    // The 2D/3D switch animates its selection, which happy-dom can't.
+    const elementProto = Element.prototype as { getAnimations?: () => Animation[] };
+    const stubbedAnimations = !elementProto.getAnimations;
+    if (stubbedAnimations) elementProto.getAnimations = () => [];
+    onTestFinished(() => {
+      if (stubbedAnimations) delete elementProto.getAnimations;
+    });
+    const { bridge } = await mountWithSnapshot(documentJson(["wds-1"]), [peer]);
+    const canvasBinds = vi.spyOn(HTMLCanvasElement.prototype, "addEventListener");
+    const clockSubscribes = vi.spyOn(frameClock, "subscribe");
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "m", code: "KeyM" });
+    });
+    // The 3D viewer is up, bound to the canvas and subscribed to the clock.
+    expect(canvasBinds.mock.calls.some(([type]) => type === "wheel")).toBe(true);
+    expect(clockSubscribes).toHaveBeenCalled();
+    canvasBinds.mockClear();
+    clockSubscribes.mockClear();
+
+    for (let i = 0; i < 5; i++) {
+      await act(async () => {
+        bridge.handlers.onCursorUpdate?.(7, [i, i]);
+      });
+    }
+
+    expect(canvasBinds).not.toHaveBeenCalled();
+    expect(clockSubscribes).not.toHaveBeenCalled();
+    canvasBinds.mockRestore();
+    clockSubscribes.mockRestore();
   });
 });
 

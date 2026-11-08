@@ -12,10 +12,15 @@ import {
   expectSettled,
   initSimulationWasm,
   runScenario,
+  type PhaseOutcome,
   type Scenario,
+  type ScenarioSpec,
+  type ScenarioStep,
   type SimulationRun,
 } from "./harness.ts";
 import { collection, singleImage, type PyramidSpec } from "./fixtures.ts";
+import { rampSamples, type SourceChunk } from "./source.ts";
+import type { ChannelFit } from "../autoContrast.ts";
 
 beforeAll(initSimulationWasm);
 
@@ -73,26 +78,60 @@ describe("a static volume", () => {
   }));
 });
 
+/** 36 tiles of one 128-sample pyramid, a coarse chunk per tile. */
+const WIDE = collection({
+  id: "wide",
+  rows: 6,
+  columns: 6,
+  pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 2 },
+});
+
 describe("a wide collection with more tiles than the coarse budget holds", () => {
-  // 36 tiles, one coarse chunk each, against a coarse budget of 20 chunks.
-  settles(
-    describeScenario({
-      name: "wide collection",
-      dataset: collection({
-        id: "wide",
-        rows: 6,
-        columns: 6,
-        pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 2 },
-      }),
-      cache: { overviewBudgetBytes: 20 * CHUNK_64_BYTES },
-      // The view wants more than the budget holds, so covering less is the settled state.
-      gpuComplete: false,
-    }),
-    {
-      stallsAt: [1, 2],
-      because: "the wanted set ignores the coarse budget, and settle has no covering-less state",
-    },
-  );
+  // A coarse budget of 20 chunks, with the detail budget's spare room beside
+  // it: the coarse floor grows with the layout, so the view covers it all.
+  const scenario = describeScenario({
+    name: "wide collection",
+    dataset: WIDE,
+    cache: { overviewBudgetBytes: 20 * CHUNK_64_BYTES },
+    gpuComplete: false,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles covering every tile at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.quiescence).toBe("quiescent");
+      expect(open.coarse).toEqual({ resident: 36, desired: 36 });
+    });
+  }
+});
+
+describe("a wide collection whose demand exceeds both budgets", () => {
+  // 40 detail chunks and 20 coarse chunks of room. At ratio 1 the view wants
+  // 36 detail and 36 coarse chunks, at ratio 2 it wants 144 and 36.
+  const scenario = describeScenario({
+    name: "wide collection over budget",
+    dataset: WIDE,
+    cache: { mainBudgetBytes: 40 * CHUNK_64_BYTES, overviewBudgetBytes: 20 * CHUNK_64_BYTES },
+    gpuComplete: false,
+    tickBound: 120,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles covering less within the tick bound, without refetching, at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.quiescence).toBe("coverage_limited");
+      expect(open.coverage).toBeLessThan(1);
+      // Whatever was admitted is resident, it fits the 60 chunks of room,
+      // and each resident chunk took one request: nothing was evicted and
+      // fetched again.
+      expect(open.missingCpu).toEqual([]);
+      const resident = open.detail.resident + open.coarse.resident;
+      expect(resident).toBeLessThanOrEqual(60);
+      expect(open.sourceRequests).toBe(resident);
+    });
+  }
 });
 
 describe("pending generated chunks that become available later", () => {
@@ -154,7 +193,7 @@ describe("a full atlas with more wanted chunks than worker slots", () => {
         pyramid: { shape: [1, 1, 1, 512, 512], chunk: [1, 64, 64], levels: 3 },
       }),
       viewport: [320, 200],
-      atlas: { sliceAtlasBytes: 25 * CHUNK_64_BYTES },
+      gpuTotalBytes: 25 * CHUNK_64_BYTES,
       gpuComplete: false,
     }),
   );
@@ -171,12 +210,12 @@ describe("two mirror-image chunks and one worker slot", () => {
       id: "pair",
       pyramid: { shape: [1, 1, 1, 64, 128], chunk: [1, 64, 64], levels: 1 },
     }),
-    atlas: { sliceAtlasBytes: CHUNK_64_BYTES },
+    gpuTotalBytes: CHUNK_64_BYTES,
     gpuComplete: false,
   });
-  // Two chunks in each of two tiers. Each goes at most twice: once, and again
-  // after a cold state clears the refusal of the one that did not fit.
-  const MAX_SENDS = 2 * 4;
+  // Two chunks in each of two tiers, each sent once: the one that does not fit
+  // is refused, and not asked for again until the next plan.
+  const MAX_SENDS = 2 * 2;
   for (const dpr of DEVICE_PIXEL_RATIOS) {
     it(`settles at device pixel ratio ${dpr} without the two trading the slot`, async () => {
       const run = await runScenario(scenario, { dpr });
@@ -184,6 +223,116 @@ describe("two mirror-image chunks and one worker slot", () => {
       expect(run.phases[0].chunksSent).toBeLessThanOrEqual(MAX_SENDS);
     });
   }
+});
+
+describe("a pan and zoom across a full atlas", () => {
+  // The full-atlas image and slots, with a view that moves. Each step plans a
+  // new wanted set, and the slots the planner no longer wants make room first.
+  settles(
+    describeScenario({
+      name: "pan and zoom on a full atlas",
+      dataset: singleImage({
+        id: "grid",
+        pyramid: { shape: [1, 1, 1, 512, 512], chunk: [1, 64, 64], levels: 3 },
+      }),
+      viewport: [320, 200],
+      gpuTotalBytes: 25 * CHUNK_64_BYTES,
+      gpuComplete: false,
+      steps: [{ pan: [150, 40] }, { pan: [-300, -80] }, { zoom: 2 }, { zoom: 0.5 }],
+    }),
+  );
+});
+
+describe("a view that moves away and back", () => {
+  // Room for everything, so every chunk the worker acknowledged stays held.
+  const scenario = describeScenario({
+    name: "pan away and back",
+    dataset: singleImage({ id: "still", pyramid: IMAGE_1024 }),
+    steps: [{ zoom: 2 }, { pan: [200, 100] }, { pan: [-200, -100] }],
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles at device pixel ratio ${dpr}, never resending a chunk the worker holds`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      for (const phase of run.phases) expect(phase.chunksSent, phase.label).toBe(phase.distinctChunksSent);
+      expect(run.phases[run.phases.length - 1].chunksSent).toBe(0);
+    });
+  }
+});
+
+describe("a zoom, pan and orbit inside a volume with a full atlas", () => {
+  // 24 slots for a level of 128 chunks: every move changes which of them the
+  // view wants nearest, and the pool keeps trading slots.
+  settles(describeScenario({
+    name: "volume moves on a full atlas",
+    mode: "volume",
+    dataset: singleImage({
+      id: "block",
+      pyramid: { shape: [1, 2, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
+    }),
+    gpuTotalBytes: 24 * 32 * 32 * 32 * 2,
+    gpuComplete: false,
+    steps: [{ zoom: 4 }, { orbit: [0.6, 0.3] }, { pan: [120, 60] }, { orbit: [-1.2, -0.4] }],
+  }));
+});
+
+describe("a two-timepoint volume whose detail budget holds the view but not its prefetch", () => {
+  // The view wants level 0 of the first timepoint, 128 chunks, and prefetch
+  // asks for the same 128 of the second. Prefetch chunks near the center rank
+  // above view chunks at the corners, but only what the view leaves is
+  // prefetch's, and an evicted prefetch chunk is no reason to wait.
+  const block = singleImage({
+    id: "block",
+    pyramid: { shape: [2, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
+  });
+  const CHUNK_32_CUBE_BYTES = 32 * 32 * 32 * 2;
+  const steps: ScenarioStep[] = [{ zoom: 2 }, { orbit: [0.5, 0.2] }, { zoom: 0.5 }];
+  const fits = describeScenario({
+    name: "volume prefetch beyond the detail budget",
+    mode: "volume",
+    dataset: block,
+    cache: { mainBudgetBytes: 140 * CHUNK_32_CUBE_BYTES },
+    steps,
+  });
+  const short = describeScenario({
+    name: "volume view beyond the detail budget",
+    mode: "volume",
+    dataset: block,
+    cache: { mainBudgetBytes: 100 * CHUNK_32_CUBE_BYTES },
+    gpuComplete: false,
+    steps,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles covering the whole view in every phase at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(fits, { dpr });
+      expectSettled(run);
+      for (const phase of run.phases) {
+        expect(phase.quiescence, phase.label).toBe("quiescent");
+        expect(phase.detail.resident, phase.label).toBe(phase.detail.desired);
+      }
+    });
+    it(`settles covering less in every phase when the view itself does not fit at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(short, { dpr });
+      expectSettled(run);
+      for (const phase of run.phases) {
+        expect(phase.quiescence, phase.label).toBe("coverage_limited");
+        expect(phase.detail.resident, phase.label).toBe(100);
+      }
+    });
+  }
+});
+
+describe("a zoom and pan across a collection", () => {
+  settles(describeScenario({
+    name: "collection moves",
+    dataset: collection({
+      id: "tiles",
+      rows: 3,
+      columns: 4,
+      pyramid: { shape: [1, 2, 1, 256, 256], chunk: [1, 64, 64], levels: 3 },
+    }),
+    steps: [{ zoom: 3 }, { pan: [300, 0] }, { pan: [0, 200] }, { zoom: 0.33 }],
+  }));
 });
 
 describe("a transient source failure", () => {
@@ -198,6 +347,94 @@ describe("a transient source failure", () => {
       },
     }),
   );
+});
+
+describe("a permanent source failure", () => {
+  // The coarse chunk is wanted at both ratios, and the source answers it with
+  // bytes that will not decode. Nothing asks for it again, so the view
+  // settles without it and says why, instead of waiting for it forever.
+  const scenario = describeScenario({
+    name: "permanent source failure",
+    dataset: singleImage({ id: "broken", pyramid: IMAGE_1024 }),
+    source: {
+      answer: (req) =>
+        req.chunkKey === "3/0/0/0/0/0"
+          ? { status: "failed_permanent", failure: "corrupt_chunk" }
+          : "ready",
+    },
+    // The worker still wants the chunk that failed.
+    gpuComplete: false,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles at device pixel ratio ${dpr} with the failure named`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.failed).toEqual(["broken/broken-image/3/0/0/0/0/0: corrupt_chunk"]);
+      // The failed chunk is the only one the view goes without, and it was
+      // asked for once: a permanent failure is not retried.
+      expect(open.missingGpu).toHaveLength(1);
+      expect(open.missingGpu[0]).toContain("3/0/0/0/0/0");
+      expect(open.missingGpu[0]).toContain("source answered corrupt_chunk (1 request)");
+      // The renderer is told, so the chunk draws as failed rather than as nothing.
+      expect(open.drawnFailed).toEqual(["broken-image coarse level 3 cell 0,0"]);
+    });
+  }
+});
+
+describe("a permanent source failure at the target level", () => {
+  // The target is level 1 at ratio 1 and level 0 at ratio 2. Its corner
+  // chunk fails, and the coarse tier holds data there. The cell draws as
+  // failed instead of falling through to the coarse stand-in, which would
+  // pass for the target forever.
+  const scenario = describeScenario({
+    name: "permanent source failure at the target level",
+    dataset: singleImage({ id: "broken", pyramid: IMAGE_1024 }),
+    source: {
+      answer: (req) =>
+        /^[01]\/0\/0\/0\/0\/0$/.test(req.chunkKey)
+          ? { status: "failed_permanent", failure: "wrong_size" }
+          : "ready",
+    },
+    gpuComplete: false,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`draws the failed chunk as failed at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const target = dpr === 1 ? 1 : 0;
+      const [open] = run.phases;
+      expect(open.failed).toEqual([`broken/broken-image/${target}/0/0/0/0/0: wrong_size`]);
+      expect(open.drawnFailed).toEqual([`broken-image detail level ${target} cell 0,0`]);
+    });
+  }
+});
+
+describe("a permanent source failure in a volume", () => {
+  const scenario = describeScenario({
+    name: "permanent source failure in a volume",
+    mode: "volume",
+    dataset: singleImage({
+      id: "block",
+      pyramid: { shape: [1, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
+    }),
+    source: {
+      answer: (req) =>
+        req.chunkKey === "2/0/0/1/0/0"
+          ? { status: "failed_permanent", failure: "corrupt_chunk" }
+          : "ready",
+    },
+    gpuComplete: false,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`draws the failed chunk as failed at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.failed).toEqual(["block/block-image/2/0/0/1/0/0: corrupt_chunk"]);
+      expect(open.drawnFailed).toEqual(["block-image coarse level 2 cell 0,0,1"]);
+    });
+  }
 });
 
 describe("a source failure that outlasts its first backoff", () => {
@@ -229,4 +466,116 @@ describe("a Z scrub on a level downsampled along Z", () => {
       steps: [{ scrub: { z: 15 } }, { scrub: { z: 16 } }],
     }),
   );
+});
+
+/** The last auto-contrast fit each channel got in a phase. */
+function lastFits(phase: PhaseOutcome): Map<string, ChannelFit> {
+  const out = new Map<string, ChannelFit>();
+  for (const { datasetId, channel, fit } of phase.fits) out.set(`${datasetId}:${channel}`, fit);
+  return out;
+}
+
+/** How many times each channel's limits moved in a phase. */
+function fitCounts(phase: PhaseOutcome): number[] {
+  const counts = new Map<string, number>();
+  for (const { datasetId, channel } of phase.fits) {
+    const key = `${datasetId}:${channel}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.values()];
+}
+
+/**
+ * A latency per chunk from a hash of its key, so chunks arrive out of plan
+ * order. `reversed` turns that order around.
+ */
+function scatteredLatency(reversed: boolean): (chunk: SourceChunk) => number {
+  return (chunk) => {
+    let h = 0;
+    for (const ch of `${chunk.imageId}/${chunk.chunkKey}`) h = (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0;
+    const spread = h % 60;
+    return 10 + (reversed ? 59 - spread : spread);
+  };
+}
+
+describe("auto-contrast limits", () => {
+  const views: Array<Omit<ScenarioSpec, "source">> = [
+    {
+      name: "single image over a generated coarse level",
+      dataset: singleImage({
+        id: "flat",
+        pyramid: { shape: [1, 1, 1, 1024, 1024], chunk: [1, 64, 64], levels: 2 },
+        generatedCoarse: { readyAtMs: 0 },
+      }),
+    },
+    { name: "single image over a source coarse level", dataset: singleImage({ id: "pyramid", pyramid: IMAGE_1024 }) },
+    {
+      name: "volume",
+      mode: "volume",
+      dataset: singleImage({ id: "cube", pyramid: { shape: [1, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 } }),
+    },
+    {
+      name: "two-channel collection",
+      dataset: collection({
+        id: "plate",
+        rows: 3,
+        columns: 4,
+        pyramid: { shape: [1, 2, 1, 256, 256], chunk: [1, 64, 64], levels: 2 },
+      }),
+    },
+  ];
+
+  for (const view of views) {
+    for (const dpr of DEVICE_PIXEL_RATIOS) {
+      it(`gives a ${view.name} one set of limits in any arrival order at device pixel ratio ${dpr}`, async () => {
+        const forward = await runScenario(
+          describeScenario({ ...view, source: { latencyMs: scatteredLatency(false) } }),
+          { dpr },
+        );
+        const reversed = await runScenario(
+          describeScenario({ ...view, source: { latencyMs: scatteredLatency(true) } }),
+          { dpr },
+        );
+        expectSettled(forward);
+        expectSettled(reversed);
+        // The same chunks, in another order.
+        expect([...reversed.served].sort()).toEqual([...forward.served].sort());
+        expect(reversed.served).not.toEqual(forward.served);
+
+        const limits = lastFits(forward.phases[0]);
+        expect(limits.size).toBeGreaterThan(0);
+        expect(lastFits(reversed.phases[0])).toEqual(limits);
+        for (const run of [forward, reversed]) {
+          // At most a stand-in and then the settled fit.
+          for (const count of fitCounts(run.phases[0])) expect(count).toBeLessThanOrEqual(2);
+          for (const fit of lastFits(run.phases[0]).values()) expect(fit.provisional).toBe(false);
+        }
+      });
+    }
+  }
+
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`leaves a generated level out of the settled limits at device pixel ratio ${dpr}`, async () => {
+      const dataset = singleImage({
+        id: "lifted",
+        pyramid: { shape: [1, 1, 1, 1024, 1024], chunk: [1, 64, 64], levels: 2 },
+        generatedCoarse: { readyAtMs: 0 },
+      });
+      const generatedLevel = dataset.generated!.levelIndex;
+      // Max-pooling lifts a generated level's values; these sit far above the source's.
+      const lifted = (chunk: SourceChunk, count: number): Uint16Array<ArrayBuffer> =>
+        Number(chunk.chunkKey.split("/")[0]) === generatedLevel
+          ? new Uint16Array(count).fill(60_000)
+          : rampSamples(chunk, count);
+      const plain = await runScenario(describeScenario({ name: "plain generated level", dataset }), { dpr });
+      const bright = await runScenario(
+        describeScenario({ name: "lifted generated level", dataset, source: { samples: lifted } }),
+        { dpr },
+      );
+      expectSettled(plain);
+      expectSettled(bright);
+      expect(lastFits(bright.phases[0])).toEqual(lastFits(plain.phases[0]));
+      for (const fit of lastFits(bright.phases[0]).values()) expect(fit.limits.max).toBeLessThan(60_000);
+    });
+  }
 });

@@ -7,6 +7,7 @@
  * and *end reason* is why a run closed.
  */
 
+import type { ChunkFailureKind } from "../pipeline/fetch/contentSource.ts";
 import type { FetchErrorKind } from "../pipeline/fetch/retry.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { ChunkFeedbackReason, GpuErrorKind, LevelRange } from "../renderer/workerProtocol.ts";
@@ -216,13 +217,17 @@ export function isDatasetOpenCause(cause: RunCause | null): boolean {
  * Why a run closed. Required on every run: a run that never settled is still
  * a run.
  *
+ * `quiescent` covers a view that settled covering less than it wanted.
+ * `stalled` is a view that stopped making progress without settling, and
+ * the header's `stallReason` says what it waited on.
+ *
  * The last two belong to the unlabelled steady-state interval alone.
  * `run-opened` means a labelled run began, which is not a settling event.
  * `rotated` means the interval reached the per-run cap: steady state has no
  * privileged start, so it hands over to a fresh interval rather than
  * truncating and losing the most recent work.
  */
-export type EndReason = "quiescent" | "timeout" | "explicit" | "run-opened" | "rotated";
+export type EndReason = "quiescent" | "stalled" | "timeout" | "explicit" | "run-opened" | "rotated";
 
 export interface Viewport {
   cssWidth: number;
@@ -398,6 +403,11 @@ export interface RunHeader extends RunConditions {
    */
   cause: RunCause | null;
   endReason: EndReason;
+  /**
+   * What a stalled run waited on, such as `server_pending`; null or absent
+   * for every other end reason.
+   */
+  stallReason?: string | null;
   /** Null on a run that recorded everything it saw. */
   truncation: TruncationRecord | null;
   build: BuildIdentity;
@@ -595,6 +605,18 @@ export interface TraceReading extends Record<ReadingName, number> {
    * read-back is asynchronous and the reading is taken at tick end.
    */
   gpuPassUs?: number;
+  /** What the render worker held on the GPU, from its latest report. Absent before its first. */
+  gpuMemory?: GpuMemoryReading;
+}
+
+/** The render worker's GPU memory against its one device-fitted budget. */
+export interface GpuMemoryReading {
+  /** Every holder: chunk, label, and proxy pools, render targets, minimap textures. */
+  bytes: number;
+  budgetBytes: number;
+  /** Chunk pool slots holding a chunk, of the `slots` the pools have allocated. */
+  slotsHeld: number;
+  slots: number;
 }
 
 /**
@@ -954,15 +976,17 @@ const FETCH_ERROR_REASONS = [
 
 const CHUNK_FEEDBACK_REASONS = [
   "evicted",
+  "freed",
   "stale",
+  "unwanted",
   "wrong-slice",
   "missing-pool",
   "missing-entity-meta",
   "missing-lod-meta",
-  "radius-filter",
   "atlas-policy",
   "upload-failed",
   "out-of-memory",
+  "replaced",
 ] as const satisfies readonly ChunkFeedbackReason[];
 
 /** The GPU's own error kinds. `out-of-memory` is shared with the chunk feedback above. */
@@ -983,10 +1007,26 @@ export type LevelChangeReason = (typeof LEVEL_CHANGE_REASONS)[number];
 
 /**
  * Why a `held` chunk kept coming back: any of the renderer's feedback reasons,
- * or `not-resident` when its wanted set still listed the chunk after delivery
- * without saying why.
+ * or `not-resident` when its wanted set listed as missing a chunk the page's
+ * residency mirror held, without any loss reported.
  */
 export type HeldReason = ChunkFeedbackReason | "not-resident";
+
+/**
+ * Why the server answered a chunk request without bytes, so a failure or a
+ * retry names the cause the server gave and not only whether it retries.
+ */
+const CHUNK_FAILURE_REASONS = [
+  "malformed_key",
+  "unknown_dataset",
+  "unknown_image",
+  "unknown_level",
+  "corrupt_chunk",
+  "wrong_size",
+  "unsupported_codec",
+  "permission",
+  "storage_backend",
+] as const satisfies readonly ChunkFailureKind[];
 
 export const POINT_EVENT_REASONS = [
   ...FETCH_ERROR_REASONS,
@@ -994,15 +1034,18 @@ export const POINT_EVENT_REASONS = [
   ...LEVEL_CHANGE_REASONS,
   "not-resident",
   ...GPU_ERROR_REASONS,
+  ...CHUNK_FAILURE_REASONS,
 ] as const;
 export type PointEventReason = (typeof POINT_EVENT_REASONS)[number];
 
 const _coversFetchErrors: FetchErrorKind extends PointEventReason ? true : never = true;
 const _coversChunkFeedback: ChunkFeedbackReason extends PointEventReason ? true : never = true;
 const _coversGpuErrors: GpuErrorKind extends PointEventReason ? true : never = true;
+const _coversChunkFailures: ChunkFailureKind extends PointEventReason ? true : never = true;
 void _coversFetchErrors;
 void _coversChunkFeedback;
 void _coversGpuErrors;
+void _coversChunkFailures;
 
 /**
  * The identity a point event copies off whatever it happened to: a planned

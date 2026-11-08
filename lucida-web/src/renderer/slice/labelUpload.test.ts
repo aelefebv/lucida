@@ -99,6 +99,23 @@ describe("handleLabelSliceChunkData", () => {
     expect(new Uint32Array(writes[1].buffer)[0]).toBe(5);
   });
 
+  it("reports each chunk it writes held, and the one a rewrite of its cell replaces lost", () => {
+    const ctx = makeCtx([]);
+    const post = ctx.post as unknown as ReturnType<typeof vi.fn>;
+
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array(4)));
+    // The next timepoint's chunk lands in the same cell.
+    const next = labelPlaneMsg(new Uint32Array(4));
+    next.chunks[0].key = "0/1/0/0/0/0";
+    handleLabelSliceChunkData(ctx, next);
+
+    expect(post.mock.calls.map(([msg]) => msg)).toEqual([
+      { type: "chunkResidency", memberId: "img-0:label:region-b", tier: "detail", change: "held", keys: ["0/0/0/0/0/0"], reason: undefined },
+      { type: "chunkResidency", memberId: "img-0:label:region-b", tier: "detail", change: "held", keys: ["0/1/0/0/0/0"], reason: undefined },
+      { type: "chunkResidency", memberId: "img-0:label:region-b", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced" },
+    ]);
+  });
+
   it("clamps the pool texture to the device's max 2D dimension", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes, 64); // tiny device limit
@@ -146,10 +163,11 @@ describe("handleLabelSliceChunkData", () => {
     expect(writes).toHaveLength(0);
     // Refused, so the page does not count the plane as resident.
     expect(ctx.post).toHaveBeenCalledWith({
-      type: "chunksEvicted",
+      type: "chunkResidency",
       memberId: "img-0:label:region-b",
-      keys: [],
-      skipped: ["0/0/0/0/0/0"],
+      tier: "detail",
+      change: "refused",
+      keys: ["0/0/0/0/0/0"],
       reason: "atlas-policy",
     });
   });
@@ -172,7 +190,7 @@ describe("handleLabelSliceChunkData", () => {
     const allocations = (ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
     expect((ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(allocations);
-    expect(ctx.post).toHaveBeenLastCalledWith(expect.objectContaining({ skipped: ["0/0/0/0/0/0"] }));
+    expect(ctx.post).toHaveBeenLastCalledWith(expect.objectContaining({ change: "refused", keys: ["0/0/0/0/0/0"] }));
     clearGpuErrorReports(ctx);
   });
 

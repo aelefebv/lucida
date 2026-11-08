@@ -11,14 +11,70 @@ import type { WireLabel } from "../../trace/types.ts";
 export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
 /**
- * Failure statuses the server unicasts when a source chunk's store read
- * fails with a non-not-found error (`source_chunk_status` frames): revoked
- * access, backend fault, unreachable store. Mirror of
+ * Failure statuses the server unicasts for a source chunk request it answers
+ * without bytes (`source_chunk_status` frames). Mirror of
  * `lucida_protocol::SourceChunkStatus`; not-found is served as a
  * zero-filled binary frame and success as normal chunk bytes, so this
  * vocabulary is failure-only.
  */
 export type SourceChunkStatus = "failed_permanent" | "unavailable";
+
+/**
+ * Why the server sent no bytes for a source chunk request. Mirror of
+ * `lucida_protocol::ChunkFailureKind`. The status says whether to retry;
+ * this says why, so a trace and a person can name the failure.
+ */
+export type ChunkFailureKind =
+  | "malformed_key"
+  | "unknown_dataset"
+  | "unknown_image"
+  | "unknown_level"
+  | "corrupt_chunk"
+  | "wrong_size"
+  | "unsupported_codec"
+  | "permission"
+  | "storage_backend";
+
+const CHUNK_FAILURE_WORDS: Record<ChunkFailureKind, string> = {
+  malformed_key: "has a malformed key",
+  unknown_dataset: "names a dataset the server does not hold",
+  unknown_image: "names an image the dataset does not have",
+  unknown_level: "names a level the image does not have",
+  corrupt_chunk: "is corrupt and could not be decoded",
+  wrong_size: "decoded to the wrong size",
+  unsupported_codec: "is compressed in a way lucida cannot decode",
+  permission: "was refused by the store for lack of permission",
+  storage_backend: "could not be read from the store",
+};
+
+/**
+ * The fetch error a `source_chunk_status` frame rejects with, classified so a
+ * retry happens only where it can help:
+ *
+ * - `failed_permanent` is `permanent`: the same request fails the same way.
+ * - `unavailable` is `transient`, so it self-heals instead of dark-holing
+ *   the chunk until the dataset reopens.
+ *
+ * `serverReported` regardless of status, so a persistently unavailable source
+ * still feeds the delivery-failure streak. A server that predates the kind
+ * sends none, and the message falls back to the status.
+ */
+export function sourceChunkFailure(
+  chunkKey: string,
+  status: SourceChunkStatus,
+  failure: ChunkFailureKind | null,
+  message: string | null,
+): FetchError {
+  const words = failure
+    ? CHUNK_FAILURE_WORDS[failure]
+    : status === "failed_permanent" ? "failed permanently" : "is unavailable";
+  const detail = message ? `: ${message}` : "";
+  return new FetchError(`Source chunk ${chunkKey} ${words}${detail}`, {
+    kind: status === "failed_permanent" ? "permanent" : "transient",
+    serverReported: true,
+    failure,
+  });
+}
 
 export interface FetchRequest {
   datasetId: string;
@@ -190,14 +246,8 @@ export class ProxiedContentSource implements ContentSource {
   }
 
   /**
-   * Server-reported failure for a source chunk's store read. Both statuses
-   * reject the pending fetch, classified so a retry happens only where it
-   * can help:
-   *
-   * - `failed_permanent` (revoked access, invalid credentials) is `permanent`:
-   *   the store will keep answering the same way.
-   * - `unavailable` (backend fault, throttling, timeout) is `transient`, so
-   *   it self-heals instead of dark-holing the chunk until the dataset reopens.
+   * Server-reported failure for a source chunk request. Every status
+   * rejects the pending fetch; see {@link sourceChunkFailure} for how.
    */
   handleSourceChunkStatus(
     datasetId: string,
@@ -205,26 +255,15 @@ export class ProxiedContentSource implements ContentSource {
     chunkKey: string,
     status: SourceChunkStatus,
     message?: string | null,
+    failure?: ChunkFailureKind | null,
   ): void {
     const compositeKey = `${datasetId}/${imageId}/${chunkKey}`;
     const entries = this.takePending(compositeKey);
     if (entries.length === 0) return;
 
-    const detail = message ? `: ${message}` : "";
-    const { reason, kind } =
-      status === "failed_permanent"
-        ? { reason: "failed permanently", kind: "permanent" as const }
-        : { reason: "unavailable", kind: "transient" as const };
     for (const entry of entries) {
       clearTimeout(entry.timeoutId);
-      // `serverReported` regardless of `kind`, so a persistently unavailable
-      // source still feeds the delivery-failure streak. `kind` drives retry.
-      entry.reject(
-        new FetchError(`Source chunk ${chunkKey} ${reason}${detail}`, {
-          kind,
-          serverReported: true,
-        }),
-      );
+      entry.reject(sourceChunkFailure(chunkKey, status, failure ?? null, message ?? null));
     }
   }
 

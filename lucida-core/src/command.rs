@@ -7,7 +7,7 @@ use lucida_content::{
 };
 use lucida_protocol::{AssetCatalogDelta, DatasetOpened};
 
-use crate::camera::Camera;
+use crate::camera::{Camera, Framing};
 use crate::scene::{BlendMode, Colormap, RenderMode, Scene};
 
 /// Commands that mutate shared document state (datasets).
@@ -452,6 +452,24 @@ impl ViewportCommand {
         }
     }
 
+    /// Whether this command moves the camera's pose the way a person steering
+    /// does. The mode, the canvas, the fly speed and the clip distance are not
+    /// steering.
+    fn steers(&self) -> bool {
+        matches!(
+            self,
+            ViewportCommand::Pan { .. }
+                | ViewportCommand::ZoomBy { .. }
+                | ViewportCommand::SetCenter { .. }
+                | ViewportCommand::SetZoom { .. }
+                | ViewportCommand::Rotate3D { .. }
+                | ViewportCommand::Zoom3D { .. }
+                | ViewportCommand::Pan3D { .. }
+                | ViewportCommand::CenterOnVoxel3D { .. }
+                | ViewportCommand::FlyTick { .. }
+        )
+    }
+
     /// Whether every raw floating-point payload on this command is finite.
     ///
     /// `Scene::apply` drops a command carrying NaN/Inf before it touches any
@@ -462,7 +480,7 @@ impl ViewportCommand {
     ///
     /// `SetLabelOpacity` is exempt: its apply arm maps a non-finite opacity to
     /// the 0.5 default, matching the web's `normalizeLabelOpacity`.
-    fn inputs_finite(&self) -> bool {
+    pub(crate) fn inputs_finite(&self) -> bool {
         match self {
             ViewportCommand::SetMode2D
             | ViewportCommand::SetMode3D
@@ -552,8 +570,14 @@ impl Scene {
                         self.derived.insert(dataset_id, derived);
                     }
                     self.epochs.layout += 1;
+                    self.content_changed();
                     return;
                 }
+                // Opening or removing a dataset changes what a framed camera fits.
+                let reframes = matches!(
+                    doc_cmd,
+                    DocumentCommand::DatasetOpened(_) | DocumentCommand::RemoveDataset { .. }
+                );
                 match &doc_cmd {
                     DocumentCommand::DatasetOpened(event) => {
                         let dataset_id = event.manifest.dataset_id.clone();
@@ -687,6 +711,9 @@ impl Scene {
                     }
                 }
                 self.document.apply(doc_cmd);
+                if reframes {
+                    self.content_changed();
+                }
             }
             Command::Viewport(vp_cmd) => self.apply_viewport(vp_cmd),
         }
@@ -717,9 +744,16 @@ impl Scene {
         }
         match cmd.scope() {
             ViewportScope::Camera => {
+                let steers = cmd.steers();
                 let before = self.camera.clone();
                 self.mutate_viewport(cmd);
                 if self.camera != before {
+                    // Steering a fit makes it a choice, which a new canvas
+                    // keeps. A stand-in stays one: moving an empty canvas
+                    // must not stop the data from being fitted once it opens.
+                    if steers && self.camera.framing() == Framing::Framed {
+                        self.camera.set_framing(Framing::Placed);
+                    }
                     self.epochs.view += 1;
                 }
             }
@@ -738,11 +772,16 @@ impl Scene {
                 }
             }
             ViewportScope::DatasetDisplay => {
+                let visible_before = matches!(cmd, ViewportCommand::SetDatasetVisible { .. })
+                    .then(|| self.visible_set());
                 let order_before = self.dataset_order.clone();
                 let settings_before = self.dataset_settings.clone();
                 self.mutate_viewport(cmd);
                 if self.dataset_order != order_before || self.dataset_settings != settings_before {
                     self.epochs.selection += 1;
+                }
+                if let Some(before) = visible_before {
+                    self.visibility_changed(before);
                 }
             }
         }
@@ -2345,8 +2384,22 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         assert_eq!(scene.epochs.content, 1);
         assert_eq!(scene.epochs.layout, 1);
-        assert_eq!(scene.epochs.view, 0);
+        // The new scene's stand-in camera fits the dataset, once.
+        assert_eq!(scene.epochs.view, 1);
         assert_eq!(scene.epochs.selection, 0);
+    }
+
+    #[test]
+    fn dataset_opened_leaves_a_placed_camera_alone() {
+        let mut scene = Scene::new([800, 600]);
+        scene.apply(ViewportCommand::SetCenter { x: 5.0, y: 5.0 }.into());
+        scene.camera.set_framing(Framing::Placed);
+        let camera = scene.camera.clone();
+        let view = scene.epochs.view;
+        let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        assert_eq!(scene.camera, camera);
+        assert_eq!(scene.epochs.view, view);
     }
 
     #[test]
@@ -2371,6 +2424,7 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         // DatasetOpened bumped content+layout to 1.
         let layout_before = scene.epochs.layout;
+        let view_before = scene.epochs.view;
         scene.apply(
             DocumentCommand::RenameDataset {
                 id: DatasetId("ds1".into()),
@@ -2381,7 +2435,7 @@ mod tests {
         // A rename is a content-only change; layout/view/selection are untouched.
         assert_eq!(scene.epochs.content, 2);
         assert_eq!(scene.epochs.layout, layout_before);
-        assert_eq!(scene.epochs.view, 0);
+        assert_eq!(scene.epochs.view, view_before);
         assert_eq!(scene.epochs.selection, 0);
     }
 

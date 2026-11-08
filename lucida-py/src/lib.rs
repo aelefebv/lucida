@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use object_store::ObjectStore;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyLookupError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
@@ -10,9 +10,10 @@ use lucida_core::camera::Camera;
 use lucida_core::command::{Command, ViewportCommand};
 use lucida_core::protocol::ClientMessage;
 use lucida_core::saved_view::SavedView;
-use lucida_core::scene::{DisplayState, Scene};
+use lucida_core::scene::{DisplayState, DocumentState, Scene};
 use lucida_core::view::ViewState;
-use lucida_core::view_transform::{ExplorationSidecar, ViewExtent, default_view};
+use lucida_core::view_transform;
+use lucida_core::viewer_profile::ProfileScene;
 
 #[pyclass]
 struct PyScene {
@@ -177,6 +178,58 @@ impl PyScene {
     }
 }
 
+/// A viewer profile's view opened over the workspace document, changed by the
+/// same commands the viewer's controls apply.
+///
+/// `document_json` is the workspace document from a snapshot, and `view_json`
+/// the profile's `SavedView`. Without `view_json` the view starts as a new
+/// profile does, with the visible datasets framed in 2D.
+#[pyclass(name = "ProfileScene")]
+struct PyProfileScene {
+    inner: ProfileScene,
+}
+
+#[pymethods]
+impl PyProfileScene {
+    #[new]
+    #[pyo3(signature = (document_json, view_json=None))]
+    fn new(document_json: &str, view_json: Option<&str>) -> PyResult<Self> {
+        let document: DocumentState = serde_json::from_str(document_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid workspace document: {e}")))?;
+        let inner = match view_json {
+            Some(json) => {
+                let view: SavedView = serde_json::from_str(json)
+                    .map_err(|e| PyValueError::new_err(format!("invalid saved view: {e}")))?;
+                ProfileScene::open(&document, &view)
+            }
+            None => ProfileScene::fitted(&document),
+        };
+        Ok(Self { inner })
+    }
+
+    /// Apply one viewport command, given as its tagged JSON. Raises
+    /// `LookupError` when it names a dataset, channel or label the workspace
+    /// lacks, and `ValueError` for any other refusal. A refused command
+    /// changes nothing.
+    fn apply(&mut self, command_json: &str) -> PyResult<()> {
+        let command: ViewportCommand = serde_json::from_str(command_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid view command: {e}")))?;
+        self.inner.apply(command).map_err(|error| {
+            if error.is_missing_resource() {
+                PyLookupError::new_err(error.to_string())
+            } else {
+                PyValueError::new_err(error.to_string())
+            }
+        })
+    }
+
+    /// The view as the profile stores it, a `SavedView` JSON string.
+    fn saved_view_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.saved_view())
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+}
+
 #[pyclass]
 struct PyStore {
     store: Arc<dyn ObjectStore>,
@@ -233,36 +286,45 @@ impl PyStore {
 /// Plan a guided-exploration step for a dataset, returning a serialized
 /// `ExplorationSidecar` (JSON string).
 ///
-/// `dims` is the dataset shape `(T, C, Z, Y, X)`; `viewport` is `(width,
-/// height)`. With `view_json = None` the exploration starts from the dataset's
-/// Home view (a 3D Arcball for a volume, a 2D Slice for a flat image, framed to
-/// the full extent); pass a `SavedView` JSON string to descend from an explicit
-/// view (e.g. a child cell's `view` from a previous call). `depth` and
-/// `breadcrumb` are stamped on the returned current node so a stateless caller
-/// can keep an honest trail across calls.
+/// `document_json` is the workspace document as a snapshot carries it, and
+/// `ds_id` names the dataset in it; `viewport` is `(width, height)`. With
+/// `view_json = None` the exploration starts from the dataset's Home view (a
+/// 3D Arcball for a volume, a 2D Slice for a flat image, fitted to the whole
+/// dataset as any client fits it); pass a `SavedView` JSON string to descend
+/// from an explicit view (e.g. a child cell's `view` from a previous call).
+/// `depth` and `breadcrumb` are stamped on the returned current node so a
+/// stateless caller can keep an honest trail across calls.
 ///
-/// This is the same pure engine the CLI's `dataset explore` and the web panel
+/// This is the same engine the CLI's `dataset explore` and the web panel
 /// use; the cells carry full `view` objects, not URLs.
 #[pyfunction]
-#[pyo3(signature = (ds_id, dims, viewport, view_json=None, depth=0, breadcrumb=None))]
+#[pyo3(signature = (document_json, ds_id, viewport, view_json=None, depth=0, breadcrumb=None))]
 fn explore(
+    document_json: &str,
     ds_id: &str,
-    dims: (u64, u64, u64, u64, u64),
     viewport: (u32, u32),
     view_json: Option<&str>,
     depth: u32,
     breadcrumb: Option<Vec<String>>,
 ) -> PyResult<String> {
-    let dims = [dims.0, dims.1, dims.2, dims.3, dims.4];
+    let document: DocumentState =
+        serde_json::from_str(document_json).map_err(|e| PyValueError::new_err(e.to_string()))?;
     let vp = [viewport.0, viewport.1];
-    let extent = ViewExtent::from_dims(dims);
-    let current = match view_json {
-        Some(j) => serde_json::from_str::<SavedView>(j)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?,
-        None => default_view(ds_id, dims, vp),
-    };
-    let sidecar =
-        ExplorationSidecar::build(&current, &extent, depth, breadcrumb.unwrap_or_default());
+    let mut scene = Scene::new(vp);
+    scene.load_document(document);
+    let current = view_json
+        .map(serde_json::from_str::<SavedView>)
+        .transpose()
+        .map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let sidecar = view_transform::explore(
+        &scene,
+        &DatasetId(ds_id.to_string()),
+        current.as_ref(),
+        vp,
+        depth,
+        breadcrumb.unwrap_or_default(),
+    )
+    .ok_or_else(|| PyValueError::new_err(format!("dataset {ds_id:?} has nothing to explore")))?;
     serde_json::to_string(&sidecar).map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
@@ -270,6 +332,7 @@ fn explore(
 fn lucida(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyScene>()?;
     m.add_class::<PyStore>()?;
+    m.add_class::<PyProfileScene>()?;
     m.add_function(wrap_pyfunction!(explore, m)?)?;
     Ok(())
 }

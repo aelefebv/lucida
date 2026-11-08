@@ -24,7 +24,6 @@ use crate::auth::{
     AuthConfig, AuthMode, BearerToken, CliTokenAuthorization, DualCredentialExtractor,
     LoginSession, PendingAuth, PrincipalExtractor, hash_bearer_token,
 };
-use crate::bookmarks::handlers::BookmarksState;
 use crate::workspace::WorkspaceManager;
 
 const EMAIL: &str = "operator@example.com";
@@ -51,18 +50,11 @@ fn app_over(storage: &Arc<dyn StorageBackend>) -> Router {
         storage.workspaces(),
         ProxyConfig::defaults(),
     ));
-    let bookmarks = BookmarksState {
-        store: storage.bookmarks(),
-        session: None,
-        unicast_routes: None,
-    };
 
-    crate::workspace::router(manager)
-        .merge(crate::bookmarks::routes::router(bookmarks))
-        .layer(axum::middleware::from_fn_with_state(
-            extractor,
-            crate::auth::middleware::auth_middleware,
-        ))
+    crate::workspace::router(manager).layer(axum::middleware::from_fn_with_state(
+        extractor,
+        crate::auth::middleware::auth_middleware,
+    ))
 }
 
 /// What a signed-in browser sends: the session cookie by itself.
@@ -140,7 +132,6 @@ async fn the_application_runs_against_postgresql_and_survives_a_restart() {
 struct Written {
     workspace_id: String,
     saved_view_id: String,
-    bookmark_id: String,
 }
 
 /// Bring a server up on `url` and use it the way a deployment's first
@@ -279,27 +270,6 @@ async fn write_everything(url: &DatabaseUrl) -> Written {
         .expect("a saved view has an id")
         .to_string();
 
-    let (status, bookmark) = send(
-        &app,
-        as_browser(Request::builder().method("POST").uri("/api/bookmarks"))
-            .header(header::CONTENT_TYPE, "application/json")
-            .body(Body::from(
-                json!({
-                    "name": "Where I left off",
-                    "datasets": ["file:///data/demo.zarr"],
-                    "view": view(),
-                })
-                .to_string(),
-            ))
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "{bookmark}");
-    let bookmark_id = bookmark["id"]
-        .as_str()
-        .expect("a bookmark has an id")
-        .to_string();
-
     // The other credential: a bearer token reaches the same Workspace,
     // which is the command-line client's whole path in.
     let (status, listed) = send(
@@ -315,7 +285,6 @@ async fn write_everything(url: &DatabaseUrl) -> Written {
     Written {
         workspace_id,
         saved_view_id,
-        bookmark_id,
     }
 }
 
@@ -329,7 +298,6 @@ async fn read_everything_back(url: &DatabaseUrl, written: &Written) {
     let Written {
         workspace_id,
         saved_view_id,
-        bookmark_id,
     } = written;
 
     // The cookie from before the restart still resolves to a principal,
@@ -379,18 +347,6 @@ async fn read_everything_back(url: &DatabaseUrl, written: &Written) {
         stored_view(),
         "a saved view comes back the way it went in"
     );
-
-    let (status, bookmarks) = send(
-        &app,
-        as_browser(Request::builder().uri("/api/bookmarks"))
-            .body(Body::empty())
-            .unwrap(),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "{bookmarks}");
-    assert_eq!(bookmarks[0]["id"], bookmark_id.as_str());
-    assert_eq!(bookmarks[0]["name"], "Where I left off");
-    assert_eq!(bookmarks[0]["datasets"][0], "file:///data/demo.zarr");
 
     // The bearer token outlived the process too.
     let (status, listed) = send(

@@ -3,7 +3,7 @@ import { describe, it, expect, vi } from "vitest";
 import { diagnoseRun } from "./diagnose/diagnose.ts";
 import { TraceRecorder } from "./recorder.ts";
 import { noopSinkFactory } from "./sink.ts";
-import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./quiescence.ts";
+import { createSettleState, evaluateSettle, type SettleState } from "../pipeline/settle.ts";
 import {
   Boundary,
   INPUT_KINDS,
@@ -31,8 +31,8 @@ const CHUNK = {
   x: 3,
 };
 
-function inputs(overrides: Partial<QuiescenceState> = {}): QuiescenceState {
-  return Object.assign(createQuiescenceState(), overrides);
+function inputs(overrides: Partial<SettleState> = {}): SettleState {
+  return Object.assign(createSettleState(), overrides);
 }
 
 function makeRecorder(overrides: Partial<ConstructorParameters<typeof TraceRecorder>[0]> = {}) {
@@ -145,7 +145,7 @@ describe("TraceRecorder run lifecycle", () => {
     try {
       const { recorder } = makeRecorder();
       recorder.openRun(OPEN_CAUSE);
-      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      recorder.noteQuiescence(evaluateSettle(inputs(), 1_000));
 
       vi.advanceTimersByTime(499);
       expect(recorder.exportDocument().runs[0].header.endReason).not.toBe("quiescent");
@@ -159,7 +159,7 @@ describe("TraceRecorder run lifecycle", () => {
     try {
       const { recorder } = makeRecorder();
       recorder.openRun(OPEN_CAUSE);
-      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      recorder.noteQuiescence(evaluateSettle(inputs(), 1_000));
       vi.advanceTimersByTime(500);
 
       const [run] = recorder.exportDocument().runs;
@@ -174,9 +174,9 @@ describe("TraceRecorder run lifecycle", () => {
     try {
       const { recorder } = makeRecorder();
       recorder.openRun(OPEN_CAUSE);
-      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      recorder.noteQuiescence(evaluateSettle(inputs(), 1_000));
       vi.advanceTimersByTime(400);
-      recorder.noteQuiescence(evaluateQuiescence(inputs({ inFlight: 3 }), 1_400));
+      recorder.noteQuiescence(evaluateSettle(inputs({ inFlight: 3 }), 1_400));
       vi.advanceTimersByTime(400);
 
       expect(recorder.exportDocument().runs[0].header.endReason).toBe("explicit");
@@ -194,6 +194,49 @@ describe("TraceRecorder run lifecycle", () => {
 
       const [run] = recorder.exportDocument().runs;
       expect(run.header.endReason).toBe("timeout");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a run as stalled with what the page waited on, and counts it as concluded", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.closeRun("stalled", "server_pending");
+
+    expect(recorder.concludedRuns.count).toBe(1);
+    const [run] = recorder.exportDocument().runs;
+    expect(run.header.endReason).toBe("stalled");
+    expect(run.header.stallReason).toBe("server_pending");
+  });
+
+  it("leaves the steady-state interval alone on a stall", () => {
+    const { recorder } = makeRecorder();
+    recorder.beginChunkRow(CHUNK, 0);
+    recorder.closeRun("stalled", "server_pending");
+
+    expect(recorder.concludedRuns.count).toBe(0);
+    // The row is still in the interval it was written to.
+    expect(recorder.readChunk(CHUNK)).not.toBeNull();
+  });
+
+  it("holds an open run to a timeout set after it opened, from when it opened", () => {
+    vi.useFakeTimers();
+    try {
+      const { recorder, advance } = makeRecorder();
+      recorder.openRun(OPEN_CAUSE);
+      advance(1_000);
+      vi.advanceTimersByTime(1_000);
+      recorder.setRunTimeout(9_000);
+      expect(recorder.runTimeoutMs).toBe(9_000);
+
+      vi.advanceTimersByTime(7_999);
+      expect(recorder.isRunOpen).toBe(true);
+      vi.advanceTimersByTime(1);
+      expect(recorder.isRunOpen).toBe(false);
+      const [run] = recorder.exportDocument().runs;
+      expect(run.header.endReason).toBe("timeout");
+      expect(run.header.timeoutMs).toBe(9_000);
     } finally {
       vi.useRealTimers();
     }
@@ -236,19 +279,19 @@ describe("TraceRecorder gesture rule", () => {
       // A drag. The page goes quiescent between two pointer events, and the
       // second arrives before the hold from that publication has elapsed.
       recorder.noteInput("pan");
-      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      recorder.noteQuiescence(evaluateSettle(inputs(), 1_000));
       vi.advanceTimersByTime(400);
       recorder.noteInput("pan");
       // 800 ms after the first quiescent publication the run is still open.
       // The hold counts from the last input, not the first.
       vi.advanceTimersByTime(400);
       expect(recorder.isRunOpen).toBe(true);
-      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_800));
+      recorder.noteQuiescence(evaluateSettle(inputs(), 1_800));
       vi.advanceTimersByTime(500);
       expect(recorder.isRunOpen).toBe(false);
 
       recorder.noteInput("zoom");
-      recorder.noteQuiescence(evaluateQuiescence(inputs(), 2_400));
+      recorder.noteQuiescence(evaluateSettle(inputs(), 2_400));
       vi.advanceTimersByTime(500);
 
       const runs = recorder.exportDocument().runs;
@@ -264,7 +307,7 @@ describe("TraceRecorder gesture rule", () => {
     try {
       const { recorder } = makeRecorder();
       recorder.openRun(OPEN_CAUSE);
-      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      recorder.noteQuiescence(evaluateSettle(inputs(), 1_000));
       vi.advanceTimersByTime(400);
       recorder.noteInput("pan");
       vi.advanceTimersByTime(400);
@@ -487,6 +530,44 @@ describe("TraceRecorder plan and queue", () => {
     const [serialised] = recorder.exportDocument().runs[0].rows;
     expect(serialised.phases.plan).toBeUndefined();
     expect(serialised.phases.queue).toEqual({ startUs: 30_000, endUs: 30_000, durationUs: 0 });
+  });
+
+  it("charges a row promoted into the admission window its backlog wait as queue, not plan", () => {
+    // The scheduler stamps a backlog entry when it is promoted into the
+    // window, long after the pass that enqueued it ended.
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.markPlanStart();          // t = 1_000
+    advance(8);
+    recorder.notePlanEnqueue(1_008);
+    advance(300);
+
+    recorder.beginChunkRow(CHUNK, 0, 1_300);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.plan).toEqual({ startUs: 0, endUs: 8_000, durationUs: 8_000 });
+    expect(serialised.phases.queue)
+      .toEqual({ startUs: 8_000, endUs: 308_000, durationUs: 300_000 });
+  });
+
+  it("ends a pass that enqueues once per dataset at each dataset's own enqueue", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.markPlanStart();          // t = 1_000
+    advance(5);
+    recorder.notePlanEnqueue(1_005);   // the first dataset's submit
+    advance(15);
+    recorder.notePlanEnqueue(1_020);   // the second dataset's submit
+    advance(10);
+
+    recorder.beginChunkRow(CHUNK, 0, 1_005);
+    recorder.beginChunkRow(CHUNK, 0, 1_020);
+    recorder.closeRun("explicit");
+
+    const [first, second] = recorder.exportDocument().runs[0].rows;
+    expect(first.phases.plan).toEqual({ startUs: 0, endUs: 5_000, durationUs: 5_000 });
+    expect(second.phases.plan).toEqual({ startUs: 0, endUs: 20_000, durationUs: 20_000 });
   });
 
   it("falls back to the last enqueue for a row admitted straight off the backlog", () => {
@@ -917,7 +998,7 @@ describe("TraceRecorder dataset opens", () => {
       // Before the first chunk exists the pipeline is trivially quiescent:
       // nothing dirty, nothing wanted, nothing in flight. The server is
       // several seconds into reading metadata.
-      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      recorder.noteQuiescence(evaluateSettle(inputs(), 1_000));
       advance(4_000);
       vi.advanceTimersByTime(4_000);
       expect(recorder.isRunOpen).toBe(true);
@@ -944,7 +1025,7 @@ describe("TraceRecorder dataset opens", () => {
     try {
       const { recorder } = makeRecorder();
       recorder.noteOpenSent("req-1");
-      recorder.noteQuiescence(evaluateQuiescence(inputs(), 1_000));
+      recorder.noteQuiescence(evaluateSettle(inputs(), 1_000));
       // An unsettled open holds off quiescence, not the timeout: a run that
       // never finishes is the most diagnostic one there is, and it has to
       // be emitted rather than held open forever.
@@ -1059,7 +1140,7 @@ describe("what a run in progress can say about itself (#937)", () => {
   it("carries the page's own predicate, so a stalled run reads as stalled", () => {
     const { recorder } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);
-    recorder.noteQuiescence(evaluateQuiescence(inputs({ inFlight: 3 }), 1_000));
+    recorder.noteQuiescence(evaluateSettle(inputs({ inFlight: 3 }), 1_000));
 
     expect(recorder.liveProgress!.quiescent).toBe(false);
     expect(recorder.liveProgress!.quiescenceReason).toBe("chunks_in_flight");
@@ -1086,7 +1167,7 @@ describe("the provisional reading over a trailing window (#1057)", () => {
     const onTheWire = recorder.beginChunkRow(CHUNK, 0);
     const decoding = recorder.beginChunkRow(CHUNK, 0);
     recorder.stamp(decoding, Boundary.DecodeStart);
-    recorder.noteQuiescence(evaluateQuiescence(inputs({ inFlight: 2, pending: 100 }), 7_000));
+    recorder.noteQuiescence(evaluateSettle(inputs({ inFlight: 2, pending: 100 }), 7_000));
 
     const reading = recorder.provisionalReading()!;
 

@@ -60,8 +60,8 @@ pub struct LiveWorkspace {
 }
 
 impl LiveWorkspace {
-    fn new(workspace_id: String, session: Session) -> Self {
-        let (tx, _) = broadcast::channel::<BroadcastItem>(256);
+    fn new(workspace_id: String, session: Session, broadcast_capacity: usize) -> Self {
+        let (tx, _) = broadcast::channel::<BroadcastItem>(broadcast_capacity);
         Self {
             workspace_id,
             session: Arc::new(Mutex::new(session)),
@@ -121,6 +121,10 @@ impl LiveWorkspace {
 pub struct WorkspaceRuntimeConfig {
     pub idle_ttl: Duration,
     pub idle_sweep_interval: Duration,
+    /// How many broadcast items a live workspace buffers per connection. A
+    /// connection that falls further behind than this skips ahead and is
+    /// repaired with a fresh snapshot.
+    pub broadcast_capacity: usize,
 }
 
 impl Default for WorkspaceRuntimeConfig {
@@ -128,6 +132,7 @@ impl Default for WorkspaceRuntimeConfig {
         Self {
             idle_ttl: Duration::from_secs(60 * 60),
             idle_sweep_interval: Duration::from_secs(60),
+            broadcast_capacity: 256,
         }
     }
 }
@@ -1143,7 +1148,11 @@ impl WorkspaceManager {
         let mut session = Session::new();
         session.document = record.document;
         session.seq = record.seq;
-        let live = Arc::new(LiveWorkspace::new(workspace_id.to_string(), session));
+        let live = Arc::new(LiveWorkspace::new(
+            workspace_id.to_string(),
+            session,
+            self.runtime_config.broadcast_capacity,
+        ));
         let sources = self
             .store
             .list_dataset_sources(workspace_id)

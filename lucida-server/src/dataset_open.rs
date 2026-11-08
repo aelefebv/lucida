@@ -42,9 +42,7 @@ use crate::{BroadcastItem, ProxyConfig};
 
 /// The workspace scope a connection acts under: the live runtime handles,
 /// the [`WorkspaceManager`] that owns authorization and persistence, and
-/// the authenticated principal. `None` wherever it is optional means the
-/// legacy non-workspace `/ws` session, which has no workspace
-/// authorization at all — none is applied there.
+/// the authenticated principal.
 #[derive(Clone)]
 pub struct WorkspaceScope {
     pub live: Arc<LiveWorkspace>,
@@ -52,17 +50,25 @@ pub struct WorkspaceScope {
     pub principal: AuthPrincipal,
 }
 
-/// Everything a dataset open runs against: the shared session + broadcast
-/// hub it mutates, the proxy/generated configuration for the binding it
-/// builds, the source policy the location must pass, and the (optional)
-/// workspace scope that authorizes and persists the open.
+/// Everything a dataset open runs against: the proxy/generated
+/// configuration for the binding it builds, the source policy the location
+/// must pass, and the workspace that authorizes and persists the open and
+/// whose session and broadcast hub it mutates.
 #[derive(Clone)]
 pub struct DatasetOpenContext {
-    pub session: Arc<Mutex<Session>>,
-    pub tx: broadcast::Sender<BroadcastItem>,
     pub proxy_config: ProxyConfig,
     pub source_policy: Arc<SourcePolicy>,
-    pub workspace: Option<WorkspaceScope>,
+    pub workspace: WorkspaceScope,
+}
+
+impl DatasetOpenContext {
+    pub fn session(&self) -> &Arc<Mutex<Session>> {
+        &self.workspace.live.session
+    }
+
+    pub fn tx(&self) -> &broadcast::Sender<BroadcastItem> {
+        &self.workspace.live.tx
+    }
 }
 
 /// Ordered sink for the per-stage progress diagnostics an open emits.
@@ -94,11 +100,11 @@ fn emit(progress: &ProgressSink, diagnostic: DatasetOpenProgressDiagnostic) {
 
 /// Open a dataset URL into the session: probe the storage backend, import
 /// the OME-Zarr metadata, build the server binding, apply and broadcast
-/// `DatasetOpened`, and (in a workspace) persist the membership.
+/// `DatasetOpened`, and persist the workspace membership.
 ///
 /// Every derivation uses the location's canonical form, so spelling
-/// variants of one path dedupe to one source. Workspace clients get an
-/// opaque workspace-local `DatasetId`; the source-derived id only dedupes
+/// variants of one path dedupe to one source. Clients get an opaque
+/// workspace-local `DatasetId`; the source-derived id only dedupes
 /// membership and routes shared caches.
 ///
 /// Concurrent opens of the same URL are safe: the apply step re-checks
@@ -134,9 +140,8 @@ pub async fn open_dataset(
         ),
     );
 
-    if let Some(scope) = ctx.workspace.as_ref()
-        && scope.live.background_cancelled()
-    {
+    let scope = &ctx.workspace;
+    if scope.live.background_cancelled() {
         tracing::info!(
             client_id = %opener,
             workspace_id = %scope.live.workspace_id,
@@ -159,17 +164,14 @@ pub async fn open_dataset(
             "checking workspace permission",
             None,
             Some(dataset_source_id.clone()),
-            ctx.workspace
-                .as_ref()
-                .map(|scope| format!("workspace: {}", scope.live.workspace_id)),
+            Some(format!("workspace: {}", scope.live.workspace_id)),
         ),
     );
 
-    if let Some(scope) = ctx.workspace.as_ref()
-        && let Err(e) = scope
-            .manager
-            .require_editor(&scope.live.workspace_id, &scope.principal)
-            .await
+    if let Err(e) = scope
+        .manager
+        .require_editor(&scope.live.workspace_id, &scope.principal)
+        .await
     {
         tracing::warn!(
             client_id = %opener,
@@ -194,63 +196,50 @@ pub async fn open_dataset(
             "workspace permission accepted",
             None,
             Some(dataset_source_id.clone()),
-            ctx.workspace
-                .as_ref()
-                .map(|scope| format!("workspace: {}", scope.live.workspace_id)),
+            Some(format!("workspace: {}", scope.live.workspace_id)),
         ),
     );
 
-    let existing_workspace_source = if let Some(scope) = ctx.workspace.as_ref() {
-        emit(
-            progress,
-            open_progress(
+    emit(
+        progress,
+        open_progress(
+            DatasetOpenStage::SourceLookup,
+            "checking persisted workspace dataset source",
+            None,
+            Some(dataset_source_id.clone()),
+            Some(format!("workspace: {}", scope.live.workspace_id)),
+        ),
+    );
+    let existing_workspace_source = match scope
+        .manager
+        .dataset_by_source(&scope.live.workspace_id, &dataset_source_id)
+        .await
+    {
+        Ok(source) => source,
+        Err(e) => {
+            tracing::error!(
+                client_id = %opener,
+                workspace_id = %scope.live.workspace_id,
+                dataset_source_id = %dataset_source_id,
+                url = %canonical_url,
+                error = %e,
+                "open_remote_dataset.source_lookup_failed"
+            );
+            return Err(open_failure(
                 DatasetOpenStage::SourceLookup,
-                "checking persisted workspace dataset source",
-                None,
-                Some(dataset_source_id.clone()),
-                Some(format!("workspace: {}", scope.live.workspace_id)),
-            ),
-        );
-        match scope
-            .manager
-            .dataset_by_source(&scope.live.workspace_id, &dataset_source_id)
-            .await
-        {
-            Ok(source) => source,
-            Err(e) => {
-                tracing::error!(
-                    client_id = %opener,
-                    workspace_id = %scope.live.workspace_id,
-                    dataset_source_id = %dataset_source_id,
-                    url = %canonical_url,
-                    error = %e,
-                    "open_remote_dataset.source_lookup_failed"
-                );
-                return Err(open_failure(
-                    DatasetOpenStage::SourceLookup,
-                    DatasetOpenFailureKind::WorkspaceLookup,
-                    true,
-                    "workspace dataset lookup failed",
-                    Some(e.to_string()),
-                ));
-            }
+                DatasetOpenFailureKind::WorkspaceLookup,
+                true,
+                "workspace dataset lookup failed",
+                Some(e.to_string()),
+            ));
         }
-    } else {
-        None
     };
 
     let dataset_id_key = existing_workspace_source
         .as_ref()
         .map(|source| source.workspace_dataset_id.clone())
-        .unwrap_or_else(|| {
-            if ctx.workspace.is_some() {
-                new_workspace_dataset_id()
-            } else {
-                DatasetId(dataset_source_id.clone())
-            }
-        });
+        .unwrap_or_else(new_workspace_dataset_id);
     let dataset_id = dataset_id_key.0.clone();
-    let workspace_scoped = ctx.workspace.is_some();
     emit(
         progress,
         open_progress(
@@ -269,9 +258,9 @@ pub async fn open_dataset(
     // requesting client receives the same content graph + fetch descriptor
     // without re-importing.
     {
-        let sess = ctx.session.lock().await;
+        let sess = ctx.session().lock().await;
         if let Some((existing_dataset_id, mut existing)) =
-            find_loaded_binding(&sess, &dataset_id_key, canonical_url, workspace_scoped)
+            find_loaded_binding(&sess, &dataset_id_key, canonical_url)
         {
             // Re-broadcast the current document manifest, not the stale
             // import-time one cached on the binding: a `DatasetOpened` apply
@@ -316,7 +305,7 @@ pub async fn open_dataset(
                 ),
             );
             let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
-            let _ = ctx.tx.send(BroadcastItem::CommandBroadcast {
+            let _ = ctx.tx().send(BroadcastItem::CommandBroadcast {
                 sender: u64::MAX,
                 broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
                 ack_json: String::new(),
@@ -400,9 +389,7 @@ pub async fn open_dataset(
     };
     let import_reads = MetadataReadCost::between(&reads_before, &cached.stats());
 
-    if let Some(scope) = ctx.workspace.as_ref()
-        && scope.live.background_cancelled()
-    {
+    if scope.live.background_cancelled() {
         tracing::info!(
             client_id = %opener,
             workspace_id = %scope.live.workspace_id,
@@ -582,8 +569,8 @@ pub async fn open_dataset(
         generated_store,
         generated_resolver,
         derived_chunks.clone(),
-        ctx.session.clone(),
-        ctx.tx.clone(),
+        ctx.session().clone(),
+        ctx.tx().clone(),
         GeneratedSchedulingConfig {
             concurrency: proxy_config.generated_concurrency,
             background_chunk_limit: proxy_config.generated_background_chunk_limit,
@@ -601,7 +588,7 @@ pub async fn open_dataset(
     // Clone for the (T=0, C=0) pre-generation task spawned below.
     let prefetch_generator = proxy_generator.clone();
     let prefetch_entries = catalog_entries.clone();
-    let prefetch_live = ctx.workspace.as_ref().map(|scope| scope.live.clone());
+    let prefetch_live = scope.live.clone();
 
     let binding = ServerBinding {
         source_url: canonical_url.to_string(),
@@ -621,18 +608,13 @@ pub async fn open_dataset(
     let command = DocumentCommand::DatasetOpened(dataset_opened);
 
     // Re-check the binding in case a concurrent open raced ahead, then
-    // apply the command and register the binding. In a workspace the
-    // document turn holds from that check through the broadcast, and the
-    // command is persisted before it is applied, so a refused write leaves
-    // the session as it was. The legacy session persists nothing and does
-    // it all under the session lock.
-    let turn = match ctx.workspace.as_ref() {
-        Some(scope) => Some(scope.live.document_turn().await),
-        None => None,
-    };
-    let mut sess = ctx.session.lock().await;
+    // apply the command and register the binding. The document turn holds
+    // from that check through the broadcast, and the command is persisted
+    // before it is applied, so a refused write leaves the session as it was.
+    let turn = scope.live.document_turn().await;
+    let mut sess = ctx.session().lock().await;
     if let Some((existing_dataset_id, mut existing)) =
-        find_loaded_binding(&sess, &dataset_id_key, canonical_url, workspace_scoped)
+        find_loaded_binding(&sess, &dataset_id_key, canonical_url)
     {
         // Lost the race: another open completed the import. Drop our
         // duplicate binding/command and rebroadcast the canonical one.
@@ -675,7 +657,7 @@ pub async fn open_dataset(
                 Some(format!("seq: {seq}")),
             ),
         );
-        let _ = ctx.tx.send(BroadcastItem::CommandBroadcast {
+        let _ = ctx.tx().send(BroadcastItem::CommandBroadcast {
             sender: u64::MAX,
             broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
             ack_json: String::new(),
@@ -692,7 +674,7 @@ pub async fn open_dataset(
             diagnostic,
         });
     }
-    let seq = if let Some(scope) = ctx.workspace.as_ref() {
+    let seq = {
         let (seq, document) = sess.next(&command);
         drop(sess);
         emit(
@@ -745,11 +727,9 @@ pub async fn open_dataset(
                 Some(format!("seq: {seq}")),
             ),
         );
-        sess = ctx.session.lock().await;
+        sess = ctx.session().lock().await;
         sess.commit(seq, command.clone(), document);
         seq
-    } else {
-        sess.apply(command.clone())
     };
     if !generated_initial_delta.levels.is_empty() {
         sess.apply_generated_availability_delta(
@@ -789,7 +769,7 @@ pub async fn open_dataset(
         ),
     );
 
-    let _ = ctx.tx.send(BroadcastItem::CommandBroadcast {
+    let _ = ctx.tx().send(BroadcastItem::CommandBroadcast {
         sender: u64::MAX,
         broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
         ack_json: String::new(), // unused — no client will match
@@ -800,7 +780,7 @@ pub async fn open_dataset(
             dataset_id: DatasetId(dataset_id.clone()),
             delta: generated_initial_delta.clone(),
         };
-        let _ = ctx.tx.send(BroadcastItem::GeneratedAvailabilityUpdate {
+        let _ = ctx.tx().send(BroadcastItem::GeneratedAvailabilityUpdate {
             json: serde_json::to_string(&msg).unwrap(),
         });
     }
@@ -831,10 +811,7 @@ pub async fn open_dataset(
         tokio::spawn(async move {
             for availability in prefetch_entries {
                 for kind in availability.kinds {
-                    if prefetch_live
-                        .as_ref()
-                        .is_some_and(|live| live.background_cancelled())
-                    {
+                    if prefetch_live.background_cancelled() {
                         tracing::info!(
                             dataset = %dataset_id_for_log,
                             "background proxy pre-generation cancelled"
@@ -878,7 +855,6 @@ fn find_loaded_binding(
     sess: &Session,
     dataset_id: &DatasetId,
     canonical_url: &str,
-    allow_source_url_match: bool,
 ) -> Option<(DatasetId, DatasetOpened)> {
     if sess.document.manifests.contains_key(dataset_id)
         && let Some(binding) = sess.server_bindings.get(dataset_id)
@@ -886,17 +862,13 @@ fn find_loaded_binding(
         return Some((dataset_id.clone(), binding.dataset_opened.clone()));
     }
 
-    if allow_source_url_match {
-        for (existing_id, binding) in &sess.server_bindings {
-            if binding.source_url == canonical_url
-                && sess.document.manifests.contains_key(existing_id)
-            {
-                return Some((existing_id.clone(), binding.dataset_opened.clone()));
-            }
-        }
-    }
-
-    None
+    sess.server_bindings
+        .iter()
+        .find(|(existing_id, binding)| {
+            binding.source_url == canonical_url
+                && sess.document.manifests.contains_key(*existing_id)
+        })
+        .map(|(existing_id, binding)| (existing_id.clone(), binding.dataset_opened.clone()))
 }
 
 #[cfg(test)]
@@ -1033,9 +1005,8 @@ mod tests {
         // the manifest adoption + opener re-stamp immediately below are the
         // exact fixes under test (mirroring `open_dataset`'s dedup-reuse path).
         let client_id: ClientId = SECOND_REQUESTER;
-        let (existing_dataset_id, mut existing) =
-            find_loaded_binding(&session, &dataset_id, URL, true)
-                .expect("re-open must find the existing binding (dedup short-circuit)");
+        let (existing_dataset_id, mut existing) = find_loaded_binding(&session, &dataset_id, URL)
+            .expect("re-open must find the existing binding (dedup short-circuit)");
         if let Some(doc_manifest) = session.document.manifests.get(&existing_dataset_id) {
             existing.manifest = doc_manifest.clone();
         }
@@ -1126,31 +1097,28 @@ mod tests {
         .unwrap();
     }
 
-    /// A non-workspace open context whose proxy/generated caches live
-    /// under `root` and whose generated planning is disabled, so nothing
-    /// writes outside the test sandbox.
-    fn test_context(root: &Path) -> DatasetOpenContext {
-        let (tx, _rx) = broadcast::channel(64);
-        DatasetOpenContext {
-            session: Arc::new(Mutex::new(Session::new())),
-            tx,
-            proxy_config: ProxyConfig {
-                cache_dir: root.join("proxies"),
-                legacy_proxy_enabled: false,
-                concurrency: 1,
-                generated_enabled: false,
-                generated_cache_dir: root.join("generated"),
-                generated_concurrency: 1,
-                generated_background_chunk_limit: 4,
-                generated_target_long_axis: 64,
-                generated_chunk_long_axis: 32,
-                generated_max_chunk_bytes: 1024 * 1024,
-                generated_disk_budget_bytes: None,
-                generated_memory: crate::generated::GeneratedChunkMemory::new(1 << 20),
-            },
-            source_policy: Arc::default(),
-            workspace: None,
+    /// Proxy/generated caches under `root` with generated planning
+    /// disabled, so nothing writes outside the test sandbox.
+    fn test_proxy_config(root: &Path) -> ProxyConfig {
+        ProxyConfig {
+            cache_dir: root.join("proxies"),
+            legacy_proxy_enabled: false,
+            concurrency: 1,
+            generated_enabled: false,
+            generated_cache_dir: root.join("generated"),
+            generated_concurrency: 1,
+            generated_background_chunk_limit: 4,
+            generated_target_long_axis: 64,
+            generated_chunk_long_axis: 32,
+            generated_max_chunk_bytes: 1024 * 1024,
+            generated_disk_budget_bytes: None,
+            generated_memory: crate::generated::GeneratedChunkMemory::new(1 << 20),
         }
+    }
+
+    /// An open context inside a fresh workspace, opened by its owner.
+    async fn test_context(root: &Path) -> DatasetOpenContext {
+        workspace_context(root).await.0
     }
 
     fn location(path: &Path) -> DatasetLocation {
@@ -1170,7 +1138,7 @@ mod tests {
     #[tokio::test]
     async fn missing_local_path_fails_at_backend_open_with_staged_progress() {
         let tmp = tempfile::tempdir().unwrap();
-        let ctx = test_context(tmp.path());
+        let ctx = test_context(tmp.path()).await;
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let missing = location(&tmp.path().join("missing.zarr"));
 
@@ -1190,13 +1158,14 @@ mod tests {
                 DatasetOpenStage::Authorization,
                 DatasetOpenStage::Authorization,
                 DatasetOpenStage::SourceLookup,
+                DatasetOpenStage::SourceLookup,
                 DatasetOpenStage::BackendOpen,
             ],
             "failure must arrive after the exact per-stage progress sequence"
         );
 
         // Nothing was applied or bound.
-        let sess = ctx.session.lock().await;
+        let sess = ctx.session().lock().await;
         assert!(sess.server_bindings.is_empty());
         assert!(sess.document.manifests.is_empty());
     }
@@ -1206,7 +1175,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let data_dir = tmp.path().join("empty.zarr");
         fs::create_dir_all(&data_dir).unwrap();
-        let ctx = test_context(tmp.path());
+        let ctx = test_context(tmp.path()).await;
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
 
         let err = open_dataset(7, &location(&data_dir), &ctx, &progress_tx)
@@ -1224,12 +1193,13 @@ mod tests {
                 DatasetOpenStage::Authorization,
                 DatasetOpenStage::Authorization,
                 DatasetOpenStage::SourceLookup,
+                DatasetOpenStage::SourceLookup,
                 DatasetOpenStage::BackendOpen,
                 DatasetOpenStage::MetadataImport,
             ],
         );
 
-        let sess = ctx.session.lock().await;
+        let sess = ctx.session().lock().await;
         assert!(sess.server_bindings.is_empty());
         assert!(sess.document.manifests.is_empty());
     }
@@ -1242,8 +1212,8 @@ mod tests {
         write_minimal_zarr(&data_dir);
         let url = location(&data_dir);
 
-        let ctx = test_context(tmp.path());
-        let mut broadcast_rx = ctx.tx.subscribe();
+        let ctx = test_context(tmp.path()).await;
+        let mut broadcast_rx = ctx.tx().subscribe();
 
         let (p1, _r1) = mpsc::unbounded_channel();
         let first = open_dataset(1, &url, &ctx, &p1).await.expect("first open");
@@ -1278,7 +1248,7 @@ mod tests {
         assert_eq!(second_seq, first_seq);
         assert_eq!(second_opened.opener_client_id, Some(2));
         {
-            let sess = ctx.session.lock().await;
+            let sess = ctx.session().lock().await;
             assert_eq!(sess.server_bindings.len(), 1);
             assert_eq!(sess.document.manifests.len(), 1);
         }
@@ -1314,7 +1284,7 @@ mod tests {
         write_minimal_zarr(&data_dir);
         let url = location(&data_dir);
 
-        let ctx = test_context(tmp.path());
+        let ctx = test_context(tmp.path()).await;
         let (p1, _r1) = mpsc::unbounded_channel();
         let (p2, _r2) = mpsc::unbounded_channel();
         let (a, b) = tokio::join!(
@@ -1336,7 +1306,7 @@ mod tests {
         };
         assert_eq!(opened_a.manifest.dataset_id, opened_b.manifest.dataset_id);
 
-        let sess = ctx.session.lock().await;
+        let sess = ctx.session().lock().await;
         assert_eq!(sess.server_bindings.len(), 1, "no duplicate binding");
         assert_eq!(sess.document.manifests.len(), 1, "no duplicate manifest");
         assert_eq!(sess.seq, 1, "exactly one DatasetOpened was applied");
@@ -1356,25 +1326,23 @@ mod tests {
             is_admin: false,
         };
         let workspace = store.create_workspace(&owner, Some("Demo")).await.unwrap();
-        let base = test_context(root);
-        let manager = Arc::new(WorkspaceManager::new(store, base.proxy_config.clone()));
+        let proxy_config = test_proxy_config(root);
+        let manager = Arc::new(WorkspaceManager::new(store, proxy_config.clone()));
         let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
         let ctx = DatasetOpenContext {
-            session: live.session.clone(),
-            tx: live.tx.clone(),
-            proxy_config: base.proxy_config,
-            source_policy: base.source_policy,
-            workspace: Some(WorkspaceScope {
+            proxy_config,
+            source_policy: Arc::default(),
+            workspace: WorkspaceScope {
                 live,
                 manager,
                 principal: owner,
-            }),
+            },
         };
         (ctx, pool)
     }
 
     async fn stored_seq(ctx: &DatasetOpenContext) -> u64 {
-        let scope = ctx.workspace.as_ref().unwrap();
+        let scope = &ctx.workspace;
         let store = scope.manager.store();
         let stored = store.get_workspace(&scope.live.workspace_id).await;
         stored.unwrap().unwrap().seq
@@ -1388,7 +1356,7 @@ mod tests {
         write_minimal_zarr(&data_dir);
         let url = location(&data_dir);
         let (ctx, pool) = workspace_context(tmp.path()).await;
-        let mut peer = ctx.tx.subscribe();
+        let mut peer = ctx.tx().subscribe();
         let (progress, _progress_rx) = mpsc::unbounded_channel();
 
         sqlx::query(
@@ -1403,7 +1371,7 @@ mod tests {
             .expect_err("a refused write fails the open");
         assert_eq!(err.stage, DatasetOpenStage::WorkspacePersist);
         {
-            let sess = ctx.session.lock().await;
+            let sess = ctx.session().lock().await;
             assert_eq!(sess.seq, 0);
             assert!(sess.document.manifests.is_empty());
             assert!(sess.server_bindings.is_empty());
@@ -1423,7 +1391,7 @@ mod tests {
         };
         assert_eq!(seq, 1);
         assert_eq!(stored_seq(&ctx).await, 1);
-        assert_eq!(ctx.session.lock().await.server_bindings.len(), 1);
+        assert_eq!(ctx.session().lock().await.server_bindings.len(), 1);
     }
 
     /// The document turn holds from the lost-race check through the
@@ -1448,13 +1416,13 @@ mod tests {
         b.expect("open b");
 
         {
-            let sess = ctx.session.lock().await;
+            let sess = ctx.session().lock().await;
             assert_eq!(sess.seq, 1);
             assert_eq!(sess.document.manifests.len(), 1);
             assert_eq!(sess.server_bindings.len(), 1);
         }
         assert_eq!(stored_seq(&ctx).await, 1);
-        let scope = ctx.workspace.as_ref().unwrap();
+        let scope = &ctx.workspace;
         let sources = scope
             .manager
             .store()
@@ -1476,7 +1444,7 @@ mod tests {
         write_minimal_zarr(&data_dir);
         let url = location(&data_dir);
 
-        let ctx = test_context(tmp.path());
+        let ctx = test_context(tmp.path()).await;
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let outcome = open_dataset(9, &url, &ctx, &progress_tx)
             .await
@@ -1498,8 +1466,8 @@ mod tests {
             url.as_str(),
             "the diagnostic reports the canonical source URL"
         );
-        // Non-workspace opens use the URL-derived source id as dataset id.
-        assert_eq!(opened.manifest.dataset_id.0, url.source_id());
+        // The dataset id is workspace-local, not the URL-derived source id.
+        assert_ne!(opened.manifest.dataset_id.0, url.source_id());
         assert_eq!(opened.opener_client_id, Some(9));
 
         drop(progress_tx);
@@ -1511,17 +1479,20 @@ mod tests {
                 DatasetOpenStage::Authorization,
                 DatasetOpenStage::Authorization,
                 DatasetOpenStage::SourceLookup,
+                DatasetOpenStage::SourceLookup,
                 DatasetOpenStage::BackendOpen,
                 DatasetOpenStage::MetadataImport,
                 DatasetOpenStage::MetadataImport,
                 DatasetOpenStage::BindingBuild,
                 DatasetOpenStage::GeneratedCoarsePlanning,
                 DatasetOpenStage::GeneratedCoarsePlanning,
+                DatasetOpenStage::WorkspacePersist,
+                DatasetOpenStage::WorkspacePersist,
                 DatasetOpenStage::Broadcast,
             ],
         );
 
-        let sess = ctx.session.lock().await;
+        let sess = ctx.session().lock().await;
         assert!(
             sess.server_bindings
                 .contains_key(&opened.manifest.dataset_id)
@@ -1607,7 +1578,7 @@ mod tests {
         write_partially_written_zarr(&data_dir);
         let url = location(&data_dir);
 
-        let ctx = test_context(tmp.path());
+        let ctx = test_context(tmp.path()).await;
         let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
         let outcome = open_dataset(11, &url, &ctx, &progress_tx)
             .await
@@ -1635,13 +1606,13 @@ mod tests {
         url: &DatasetLocation,
         tmp: &Path,
     ) -> lucida_protocol::DatasetSourceHealth {
-        let ctx = test_context(tmp);
+        let ctx = test_context(tmp).await;
         let (progress_tx, _progress_rx) = mpsc::unbounded_channel();
         open_dataset(opener, url, &ctx, &progress_tx)
             .await
             .expect("open");
 
-        let sess = ctx.session.lock().await;
+        let sess = ctx.session().lock().await;
         let manifest = sess
             .document
             .manifests

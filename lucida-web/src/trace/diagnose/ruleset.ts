@@ -363,7 +363,7 @@ export const RULESET: Ruleset = {
     id: "upload.held",
     minChunks: 1,
     guardTicks: RESEND_GUARD_TICKS,
-    why: "Every chunk the renderer evicts, refuses, or still lists as missing comes back eligible to send, so a lasting disagreement between the uploader and the renderer re-sends the same chunks every tick and the view never settles. The uploader counts ticks whose every send repeats a chunk it already sent since the last cold state. A real delivery repeats a chunk once or twice after an eviction and moves on, so that many such ticks in a row is a loop: the uploader holds those chunks until the next cold state and names each with the reason the renderer last gave. One held chunk is enough to report, because the view settled without data it asked for.",
+    why: "Every chunk the renderer refuses or reports lost, and every chunk its wanted set lists as missing while the page's residency mirror holds it, comes back eligible to send, so a lasting disagreement between the uploader and the renderer re-sends the same chunks every tick and the view never settles. The uploader counts ticks whose every send repeats a chunk it already sent since the last cold state. A real delivery repeats a chunk once or twice after an eviction and moves on, so that many such ticks in a row is a loop: the uploader holds those chunks until the next cold state and names each with the reason the renderer last gave. One held chunk is enough to report, because the view settled without data it asked for.",
   },
   gpuError: {
     id: "gpu.error",
@@ -385,7 +385,7 @@ export const RULESET: Ruleset = {
     budgetBound: {
       id: "steady.budget-bound",
       minFillPct: 90,
-      why: "Eviction holds a tier under its budget by at most the chunk that did not fit, so a full tier reads a little under it. A tier holding nine tenths of its budget, wanting more chunks than it holds, with nothing pending and nothing in flight, has stopped asking because the rest cannot fit: it is budget-bound, and a run waiting on it cannot settle. Below that fill the same shortfall is something else, chunks the source could not serve yet or a queue that emptied for another reason, and is not blamed on the budget. The loss is stated in chunks of the wanted set, which is the coverage the screen goes without, rather than as the timeout it causes.",
+      why: "Eviction holds a tier under its budget by at most the chunk that did not fit, so a full tier reads a little under it. A tier holding nine tenths of its budget, wanting more chunks than it holds, with nothing pending and nothing in flight, has stopped asking because the rest cannot fit: it is budget-bound, and the view settles covering what it holds. That is the planned behavior under memory pressure, so the finding is a note, not a failure. Below that fill the same shortfall is something else, chunks the source could not serve yet or a queue that emptied for another reason, and is not blamed on the budget. The loss is stated in chunks of the wanted set, which is the coverage the screen goes without.",
     },
     replans: {
       id: "steady.replans",

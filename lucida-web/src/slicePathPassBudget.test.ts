@@ -37,6 +37,25 @@ function indexFor(members: MemberRosterEntry[], channel: number | null): Map<str
 }
 
 describe("pushMemberLayers", () => {
+  it("puts every layer of one (dataset, channel) in one pass group, and the next channel in another", () => {
+    const members = rosterGrid(12, 4, 1024);
+    const layers: SliceLayerParams[] = [];
+    for (const channel of [0, 1]) {
+      pushMemberLayers(layers, {
+        members,
+        indexByMember: indexFor(members, channel),
+        channel,
+        blendMode: "additive",
+        fullResWidth: 1024,
+        fullResHeight: 1024,
+        zoom: 0.5,
+      });
+    }
+    expect(layers).toHaveLength(24);
+    expect(new Set(layers.slice(0, 12).map((layer) => layer.passGroup))).toEqual(new Set([0]));
+    expect(new Set(layers.slice(12).map((layer) => layer.passGroup))).toEqual(new Set([12]));
+  });
+
   it("aggregates a wide collection of sub-pixel members into ONE layer", () => {
     const members = rosterGrid(5000, 100, 1024);
     const layers: SliceLayerParams[] = [];
@@ -367,9 +386,9 @@ function makeSeamHarness(opts: {
   const sliceRenderMultiPass = vi.fn();
   const resize = vi.fn();
   const scene = {
-    set_z: vi.fn(),
-    set_t: vi.fn(),
-    set_c: vi.fn(),
+    z: () => 0,
+    t: () => 0,
+    c: () => 0,
     set_viewport: vi.fn(),
     zoom: () => opts.zoom,
     center: () => new Float32Array([512, 512]),
@@ -436,7 +455,7 @@ afterEach(() => {
 describe("tickSlice render-message seam", () => {
   it("posts a bounded layer count at overview zoom on a wide synthetic collection", () => {
     const h = makeSeamHarness({ memberCount: 5000, zoom: 0.0005 });
-    tickSlice(h.ctx, h.tickCoordinator, h.uploader, 0, 0, 0, new Map());
+    tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());
     const { layers } = h.posted();
     expect(layers.length).toBeLessThanOrEqual(MAX_INDIVIDUAL_MEMBER_PASSES + 1);
     // Aggregate coverage: the single aggregate layer carries every member.
@@ -447,7 +466,7 @@ describe("tickSlice render-message seam", () => {
 
   it("posts per-member layers for a small collection at close-up zoom", () => {
     const h = makeSeamHarness({ memberCount: 6, zoom: 1 });
-    tickSlice(h.ctx, h.tickCoordinator, h.uploader, 0, 0, 0, new Map());
+    tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());
     const { layers } = h.posted();
     expect(layers).toHaveLength(6);
     for (const layer of layers) expect(layer.aggregate).toBeUndefined();
@@ -461,7 +480,7 @@ describe("tickSlice render-message seam", () => {
       clientWidth: 3000,
       clientHeight: 2000,
     });
-    tickSlice(h.ctx, h.tickCoordinator, h.uploader, 0, 0, 0, new Map());
+    tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());
     const { zoom, canvasW, canvasH } = h.posted();
     expect(canvasW * canvasH).toBeLessThanOrEqual(MAX_SLICE_BACKING_PIXELS * 1.01);
     // Field of view preserved: world width per screen = canvasW / zoom.
@@ -476,7 +495,7 @@ describe("tickSlice render-message seam", () => {
   it("keeps full backing at DPR 2 for the fixed-size canvas (no needless degrade)", () => {
     vi.stubGlobal("devicePixelRatio", 2);
     const h = makeSeamHarness({ memberCount: 6, zoom: 1 });
-    tickSlice(h.ctx, h.tickCoordinator, h.uploader, 0, 0, 0, new Map());
+    tickSlice(h.ctx, h.tickCoordinator, h.uploader, new Map());
     const { canvasW, canvasH, zoom } = h.posted();
     expect(canvasW).toBe(1600);
     expect(canvasH).toBe(1200);

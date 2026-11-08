@@ -1,12 +1,12 @@
 /** 3D volume viewer. WebGPU rendering runs in a worker via RenderClient. */
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { ORBIT_RADIANS_PER_PIXEL, VOLUME_ZOOM_PER_WHEEL_DELTA } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
-import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
-import { buildAnnotationView, liveViewWithLiveTC } from "../savedView/buildAnnotationView.ts";
+import { applyDocumentCommand, applyViewportCommand, frameOnCanvas } from "../applyAndSend.ts";
+import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import { useHeldKeys } from "../hooks/useHeldKeys.ts";
 import { CLIP_BINDINGS, FLY_BINDINGS, TOGGLE_FLY_KEYS } from "../config/keyBindings.ts";
 import { useFlyCameraInput } from "../hooks/useFlyCameraInput.ts";
@@ -21,6 +21,8 @@ import { isShapeKind, pressAnnotationKind, type AnnotationKind, type Tool } from
 import { eventToScreenPx, type ClientPoint } from "./cameraProjection.ts";
 import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { frameClock } from "../frameClock.ts";
+import { requestRender } from "../invalidation.ts";
+import type { CameraMode } from "../sceneStore.ts";
 
 interface Props {
   session: Session;
@@ -32,11 +34,11 @@ interface Props {
   emitPresence: () => void;
   breakFollow: () => void;
   sendCursor: (position: [number, number] | null) => void;
-  t: number;
-  c: number;
+  /** The scene's camera mode. A control outside this viewer or a restored
+   *  view can switch it too. */
+  cameraMode: CameraMode;
   loopRef: RefObject<RenderLoop | null>;
   onLoopChange: (loop: RenderLoop | null) => void;
-  onCameraModeChange?: (mode: string) => void;
   /** Dataset to attach a dropped pin to (annotations are scoped per dataset). */
   annotationDatasetId: string | null;
   /** The canvas tool: pan, or the annotation shape a press draws. */
@@ -62,9 +64,8 @@ const INTERACTION_RENDER_SCALE = 0.5;
 const FULL_RENDER_SCALE = 1.0;
 const SCALE_RESTORE_DELAY_MS = 50;
 
-export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, t, c, loopRef: parentLoopRef, onLoopChange, onCameraModeChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
+function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, cameraMode, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
-  const [cameraMode, setCameraMode] = useState<string>(() => scene.camera_mode());
   const [showHint, setShowHint] = useState(false);
 
   // Mirror pin-drop props into refs so the canvas-bound pointer handlers read the
@@ -78,13 +79,6 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const myIdRef = useRef(myId);
   // eslint-disable-next-line react-hooks/refs
   myIdRef.current = myId;
-  // A 3D pin records the view's T/C alongside its picked depth.
-  const tRef = useRef(t);
-  // eslint-disable-next-line react-hooks/refs
-  tRef.current = t;
-  const cRef = useRef(c);
-  // eslint-disable-next-line react-hooks/refs
-  cRef.current = c;
   const sendCommandRef = useRef(sendCommand);
   // eslint-disable-next-line react-hooks/refs
   sendCommandRef.current = sendCommand;
@@ -94,11 +88,6 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const onLongPressRef = useRef(onLongPress);
   // eslint-disable-next-line react-hooks/refs
   onLongPressRef.current = onLongPress;
-
-  // Notify parent of camera mode (after render, to avoid setState-in-render)
-  useEffect(() => {
-    onCameraModeChange?.(cameraMode);
-  }, [cameraMode, onCameraModeChange]);
 
   // Mirror the scene into a ref so the fly-camera input hook sees
   // the latest each frame. Mirror updates are render-phase
@@ -121,16 +110,14 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
   const toggleFly = () => {
     const currentMode = scene.camera_mode();
     if (currentMode === "fly") {
-      scene.set_mode_arcball();
+      applyViewportCommand(scene, { type: "set_mode_arcball" });
     } else if (currentMode === "arcball") {
-      scene.set_mode_fly();
+      applyViewportCommand(scene, { type: "set_mode_fly" });
       const BASE_SPEED_FACTOR = 0.3;
       const diagonal = scene.volume_diagonal();
       scene.fly_set_base_speed(diagonal * BASE_SPEED_FACTOR);
     }
-    const newMode = scene.camera_mode();
-    setCameraMode(newMode);
-    if (newMode === "fly") setShowHint(true);
+    if (scene.camera_mode() === "fly") setShowHint(true);
     breakFollow();
     emitPresence();
     loopRef.current?.markInteractiveDirty();
@@ -193,13 +180,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     loopRef.current?.markInteractiveDirty();
   }, [remoteDocumentVersion]);
 
-  // Mark dirty on T/C changes so the render loop re-evaluates chunks
-  useEffect(() => {
-    loopRef.current?.markInteractiveDirty();
-  }, [t, c]);
-
-  // Held clip keys, and the camera mode followed from the scene, since a
-  // control outside this viewer or a restored view can switch it too.
+  // Held clip keys.
   useEffect(() => {
     let lastTime = 0;
 
@@ -207,7 +188,6 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const dt = lastTime > 0 ? Math.min((time - lastTime) / 1000, 0.1) : 0;
       lastTime = time;
 
-      setCameraMode(scene.camera_mode());
       const farther = clipKeys.has("clipFarther");
       const nearer = clipKeys.has("clipNearer");
       if (farther === nearer) {
@@ -218,7 +198,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const delta = (farther ? 1 : -1) * CLIP_SPEED * (dt * 60); // normalize to ~60fps
       scene.adjust_clip_distance(delta);
       emitPresence();
-      loopRef.current?.markInteractiveDirty();
+      requestRender(loopRef.current, "clip_keys");
       // A held key moves the clip every frame without further input.
       return true;
     });
@@ -307,10 +287,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
       const id = globalThis.crypto?.randomUUID
         ? globalThis.crypto.randomUUID()
         : `pin-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-      // Snapshot the author's view onto the pin so navigation can restore it. T/C
-      // come from the live refs so the view matches the pin's own t/c. A null
-      // capture just omits the view.
-      const capturedView = buildAnnotationView(scene, liveViewWithLiveTC(scene, tRef.current, cRef.current));
+      // Snapshot the author's view onto the pin so navigation can restore it.
+      // A null capture just omits the view.
+      const capturedView = buildAnnotationView(scene);
       // Apply locally and send: the server's rebroadcast excludes the sender, so
       // the local apply is what shows the author their shape. The client-supplied
       // id makes the local and peer copies converge.
@@ -324,16 +303,16 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
           end,
           z,
           // In 3D `z` is the picked depth, while T/C are the view's selectors.
-          t: tRef.current,
-          c: cRef.current,
+          t: scene.t(),
+          c: scene.c(),
           author: String(myIdRef.current),
           kind: shape ? kind : "point",
           ...(capturedView ? { view: capturedView } : {}),
         },
         sendCommandRef.current,
+        loopRef.current,
       );
       onDocumentChangedRef.current();
-      loopRef.current?.markInteractiveDirty();
     },
     [scene, pickVoxel],
   );
@@ -551,18 +530,9 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
           });
           sendTouchCursor(g);
           break;
-        case "doubleTap": {
-          const datasetId = annotationDatasetIdRef.current ?? datasets.keys().next().value;
-          if (!datasetId) break;
-          navigate("zoom", () => {
-            try {
-              scene.fit_camera_to_dataset_bounds(datasetId);
-            } catch {
-              // A dataset with nothing loaded yet has no bounds; the view stays.
-            }
-          });
+        case "doubleTap":
+          navigate("zoom", () => frameOnCanvas(scene, canvas));
           break;
-        }
         case "longPress":
           onLongPressRef.current?.(clientPoint(g));
           break;
@@ -633,3 +603,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     <FlyCameraHint visible={isFlyMode && showHint} onDismiss={dismissHint} />
   );
 }
+
+// Memoized so a viewer render that changes none of its props, such as one
+// for a peer's message, skips it; its props are stable for that reason.
+export const VolumeViewer = memo(VolumeViewerBody);

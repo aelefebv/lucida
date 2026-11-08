@@ -102,6 +102,16 @@ _Avoid_: track (a display track is a timeline row), channel (an image axis)
 **Wanted set**:
 The chunks the current view calls for. Demand, not possession.
 
+**Settled**:
+A view once quiescent has held: covering its whole wanted set, or covering
+less when the memory budgets cannot hold it all, which the view says along
+with its coverage, the share of the wanted set resident. Previews, captures
+and runs all wait on it (`lucida-web/src/pipeline/settle.ts`).
+
+**Stalled**:
+A view that stopped making progress without settling, with a reason such as
+`server_pending`.
+
 **Coalescing**:
 Folding several callers' demand for the same work onto one operation: one wire
 request per composite key, or one backend read per byte range. A leader does the
@@ -127,13 +137,14 @@ trace seam (`lucida-web/src/trace/seam.ts`).
 
 **Run**:
 A labelled interval in the continuous recording, opened by a cause and closed by
-quiescence, a timeout, or explicitly, as its end reason records. An interaction
+quiescence, a stall, a timeout, or explicitly, as its end reason records. An interaction
 run is one gesture. The stretch between runs is the steady-state interval.
 _Avoid_: session (login or socket), capture (see capture surface)
 
 **Quiescent**:
 The page's published boolean that closes a run on its own: nothing left to draw,
-and every chunk the view asked for resident. Prefetch does not count.
+and every chunk the view asked for resident, failed for good, or left out
+because the budgets cannot hold it. Prefetch does not count.
 _Avoid_: ready (`ready` means a frame was drawn)
 
 **Phase**:
@@ -202,7 +213,7 @@ _Avoid_: store (one kind of record), backend (unqualified)
 
 **Store**:
 The code that reads and writes one kind of server record, such as sessions,
-bookmarks, workspaces, or inbox entries, through its storage backend.
+workspaces, or inbox entries, through its storage backend.
 _Avoid_: object store
 
 **Object store**:
@@ -249,6 +260,16 @@ Whether a saved view is `shared`, `personal` (seen only by its maker), or
 What a workspace records for one member: which workspaces they pinned or opened
 recently, and the view they last had open.
 _Avoid_: personal view (a saved view with `personal` visibility)
+
+## Views
+
+**Framing**:
+What chose a camera's pose. A *placed* camera is one someone chose, and on
+another canvas it keeps the region it showed. A *framed* camera is the fit of
+every visible dataset, which a new canvas or new content fits again. An
+*unframed* camera is a stand-in nothing chose: the scene fits it as soon as
+there is data, and a client never persists it.
+_Avoid_: auto-fit (fitting follows the camera's state, not an event such as an open)
 
 ## Surfaces
 

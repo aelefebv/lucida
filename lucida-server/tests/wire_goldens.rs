@@ -36,7 +36,7 @@ use lucida_content::{
 use lucida_core::camera::{Arcball, Camera, ClipMode, Fly, Slice};
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{
-    BookmarkAction, ChunkMessage, ClientMessage, CommandRejection, PeerIdentity, PresenceState,
+    ChunkMessage, ClientMessage, CommandRejection, MessageRejection, PeerIdentity, PresenceState,
     ServerMessage, ViewerInteractionMode, ViewerInterestChunkKey, ViewerInterestHint,
     ViewerInterestLane, ViewerInterestMode, ViewerInterestViewport, WatchBoundaryEvent, WatchItem,
     WatchLevelRange, WatchReading, WatchRunCause, WatchSendTally, WatchTick, WatchTickLevel,
@@ -48,17 +48,17 @@ use lucida_core::scene::{
 };
 use lucida_core::view::ViewState;
 use lucida_protocol::{
-    AssetCatalog, AssetCatalogDelta, AssetMessage, DatasetGeneratedCoarseCacheStats,
-    DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth, DatasetHealthComponent,
-    DatasetHealthStatus, DatasetImportWarning, DatasetOpenFailureDiagnostic,
-    DatasetOpenFailureKind, DatasetOpenProgressDiagnostic, DatasetOpenStage,
-    DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats, DatasetSourceHealth,
-    DirectFetchDescriptor, DirectImageSpec, FetchSource, GeneratedAvailabilityDelta,
-    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, GeneratedChunkStatusUpdate,
-    GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE, LevelAddress,
-    LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor, ProxiedImageSpec,
-    ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch, SourceChunkStatus,
-    TimingRowFamily, TimingRowOutcome, WireFormat,
+    AssetCatalog, AssetCatalogDelta, AssetMessage, ChunkFailureKind,
+    DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth,
+    DatasetHealthComponent, DatasetHealthStatus, DatasetImportWarning,
+    DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
+    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats,
+    DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec, FetchSource,
+    GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
+    GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE,
+    LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor,
+    ProxiedImageSpec, ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch,
+    SourceChunkStatus, TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -231,15 +231,18 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         ServerMessage::GeneratedChunkStatus { .. } => {
             &["session/server_generated_chunk_status.json"]
         }
-        ServerMessage::SourceChunkStatus { .. } => &["session/server_source_chunk_status.json"],
+        ServerMessage::SourceChunkStatus { .. } => &[
+            "session/server_source_chunk_status.json",
+            "session/server_source_chunk_status_malformed_key.json",
+        ],
         ServerMessage::TimingBatch { .. } => &["session/server_timing_batch.json"],
-        ServerMessage::BookmarkChanged { .. } => &["session/server_bookmark_changed.json"],
         ServerMessage::WorkspaceArchived { .. } => &["session/server_workspace_archived.json"],
         ServerMessage::WatchUpdate { .. } => &["session/server_watch_update.json"],
         ServerMessage::WatchHistoryEnd { .. } => &["session/server_watch_history_end.json"],
         ServerMessage::ReportSent { .. } => &["session/server_report_sent.json"],
         ServerMessage::ReportFailed { .. } => &["session/server_report_failed.json"],
         ServerMessage::CommandRejected { .. } => &["session/server_command_rejected.json"],
+        ServerMessage::MessageRejected { .. } => &["session/server_message_rejected.json"],
     }
 }
 
@@ -372,10 +375,11 @@ struct EnumVocabulary {
     dataset_health_statuses: Vec<DatasetHealthStatus>,
     generated_chunk_statuses: Vec<GeneratedChunkStatus>,
     generated_level_roles: Vec<GeneratedLevelRole>,
-    bookmark_actions: Vec<BookmarkAction>,
     viewer_interest_modes: Vec<ViewerInterestMode>,
     viewer_interaction_modes: Vec<ViewerInteractionMode>,
     viewer_interest_lanes: Vec<ViewerInterestLane>,
+    chunk_failure_kinds: Vec<ChunkFailureKind>,
+    message_rejections: Vec<MessageRejection>,
 }
 
 fn enum_vocabulary() -> EnumVocabulary {
@@ -410,12 +414,18 @@ fn enum_vocabulary() -> EnumVocabulary {
             Pending, Unavailable, FailedTransient, FailedPermanent, Ready,
         }),
         generated_level_roles: vocab!(GeneratedLevelRole::{ Coarse }),
-        bookmark_actions: vocab!(BookmarkAction::{ Created, Updated, Deleted }),
         viewer_interest_modes: vocab!(ViewerInterestMode::{ Slice, Volume }),
         viewer_interaction_modes: vocab!(ViewerInteractionMode::{
             Idle, Panning, Zooming, Scrubbing,
         }),
         viewer_interest_lanes: vocab!(ViewerInterestLane::{ Visible, Predicted, Background }),
+        chunk_failure_kinds: vocab!(ChunkFailureKind::{
+            MalformedKey, UnknownDataset, UnknownImage, UnknownLevel, CorruptChunk, WrongSize,
+            UnsupportedCodec, Permission, StorageBackend,
+        }),
+        message_rejections: vocab!(MessageRejection::{
+            Malformed, UnknownType, BinaryFrame, Throttled, UnknownDataset,
+        }),
     }
 }
 
@@ -838,6 +848,7 @@ fn arcball_camera() -> Camera {
         far: 50000.0,
         clip_distance: 120.0,
         clip_mode: ClipMode::Sphere,
+        framing: lucida_core::camera::Framing::Placed,
     })
 }
 
@@ -846,6 +857,7 @@ fn slice_camera() -> Camera {
         center: [1024.5, -512.25],
         zoom: 1.5,
         viewport: [1920, 1080],
+        framing: lucida_core::camera::Framing::Placed,
     })
 }
 
@@ -927,6 +939,7 @@ fn fly_peer_presence() -> PresenceState {
             base_speed: 340.5,
             clip_distance: 0.42,
             clip_mode: ClipMode::Sphere,
+            framing: lucida_core::camera::Framing::Placed,
         })),
         view: Some(ViewState {
             z_range: 0..50,
@@ -1733,6 +1746,7 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 image_id: ImageId(SINGLE_IMAGE_ID.into()),
                 key: "0/1/0/1/0/0".into(),
                 status: SourceChunkStatus::FailedPermanent,
+                kind: Some(ChunkFailureKind::Permission),
                 message: Some("access to the dataset store was denied".into()),
             },
             req(
@@ -1741,16 +1755,34 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             ),
         ),
         (
-            "session/server_bookmark_changed.json",
-            ServerMessage::BookmarkChanged {
-                id: "bookmark-31f7".into(),
-                action: BookmarkAction::Updated,
-                dataset_urls: vec![
-                    "gs://lucida-fixtures/kidney-multiplex.zarr".into(),
-                    "gs://lucida-fixtures/screening-collection-01.zarr".into(),
-                ],
+            "session/server_source_chunk_status_malformed_key.json",
+            ServerMessage::SourceChunkStatus {
+                dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
+                image_id: ImageId(SINGLE_IMAGE_ID.into()),
+                key: "0/1/0/1".into(),
+                status: SourceChunkStatus::FailedPermanent,
+                kind: Some(ChunkFailureKind::MalformedKey),
+                message: Some(
+                    "a chunk key has 6 parts, level/t/c/z/y/x, and this one has 4".into(),
+                ),
             },
-            req("", &["/type", "/id", "/action", "/dataset_urls"]),
+            req(
+                "",
+                &["/type", "/dataset_id", "/image_id", "/key", "/status"],
+            ),
+        ),
+        (
+            "session/server_message_rejected.json",
+            ServerMessage::MessageRejected {
+                request_id: Some("open-7".into()),
+                rid: Some(42),
+                message_type: Some("open_remote_dataset".into()),
+                reason: MessageRejection::Malformed,
+                message: "the open_remote_dataset message does not have the fields its type \
+                          requires"
+                    .into(),
+            },
+            req("", &["/type", "/reason", "/message"]),
         ),
         (
             "session/server_timing_batch.json",
@@ -2587,7 +2619,6 @@ fn enum_vocabulary_matches_golden() {
             "/dataset_health_statuses",
             "/generated_chunk_statuses",
             "/generated_level_roles",
-            "/bookmark_actions",
             "/viewer_interest_modes",
             "/viewer_interaction_modes",
             "/viewer_interest_lanes",

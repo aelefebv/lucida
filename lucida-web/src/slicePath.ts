@@ -1,4 +1,5 @@
 /** Slice render path: upload chunks + render multi-pass. */
+import { assertCanvasSize } from "./applyAndSend.ts";
 import { Axis } from "./axes.ts";
 import { labelFootprint } from "./renderer/labelLayout.ts";
 import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
@@ -97,6 +98,9 @@ export function pushMemberLayers(
     members, indexByMember, channel, blendMode,
     fullResWidth, fullResHeight, zoom,
   } = input;
+  // Every layer this call emits shares one target. The index of the first is
+  // unique in the frame and needs no counter threaded through the callers.
+  const passGroup = layers.length;
 
   const candidates: MemberLayerCandidate[] = [];
   for (const m of members) {
@@ -192,6 +196,7 @@ export function pushMemberLayers(
           count: batched.length,
           quads,
         },
+        passGroup,
       });
     } else {
       // Unreachable while zero-extent members are culled above. Falls back to
@@ -211,6 +216,7 @@ export function pushMemberLayers(
       offsetY: c.member.position[1],
       entityId: c.member.entityId,
       entityIndex: c.entityIndex,
+      passGroup,
     });
   }
 }
@@ -364,7 +370,7 @@ function uploadAndRenderSlice(
   }
 
   client.resize(canvasW, canvasH);
-  client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH, planResult.epochs);
+  client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH, planResult.epochs, dpr * backingScale);
   // The worker is FIFO, so every chunk posted above is written before this
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.
@@ -381,22 +387,20 @@ export function tickSlice(
   ctx: TickContext,
   tickCoordinator: TickCoordinator,
   uploader: Uploader,
-  sliceZ: number,
-  sliceT: number,
-  sliceC: number,
   minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   shouldRender: boolean = true,
 ): boolean {
   const { scene, canvas } = ctx;
 
-  // Set scene params before tickCoordinator queries WASM state
-  scene.set_z(sliceZ);
-  scene.set_t(sliceT);
-  scene.set_c(sliceC);
+  // The scene owns the selectors, as it does for the volume path, so this
+  // reads them and never writes them back.
+  const sliceZ = scene.z();
+  const sliceT = scene.t();
+  const sliceC = scene.c();
   const dpr = devicePixelRatio;
   const canvasW = Math.round(canvas.clientWidth * dpr);
   const canvasH = Math.round(canvas.clientHeight * dpr);
-  scene.set_viewport(canvasW, canvasH, dpr);
+  assertCanvasSize(scene, canvasW, canvasH, dpr);
 
   const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
   if (!orchResult) return false;

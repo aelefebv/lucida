@@ -12,7 +12,8 @@ import { proxyDescriptorKey } from "../workerContext.ts";
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
-  GpuAtlasesMessage,
+  GpuCapacityMessage,
+  GpuMemoryMessage,
   VolumeChunkDataMessage,
   WorkerToMainMessage,
 } from "../workerProtocol.ts";
@@ -23,7 +24,7 @@ import type { SliceAtlasState } from "../slice/index.ts";
 import { UNTIMED } from "../passTiming.ts";
 import { createInitialState } from "./state.ts";
 import { dispatchMessage } from "./dispatch.ts";
-import { measureGpuAtlases } from "./atlasReport.ts";
+import { measureGpuMemory } from "./gpuBudget.ts";
 
 (globalThis as Record<string, unknown>).GPUTextureUsage = {
   COPY_SRC: 0x01, COPY_DST: 0x02, TEXTURE_BINDING: 0x04, STORAGE_BINDING: 0x08, RENDER_ATTACHMENT: 0x10,
@@ -133,13 +134,14 @@ function tile(entityId: string, target: number, coarseLevel: number | null = 5):
 
 function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStateMessage {
   const visibleChannels = opts.visibleChannels ?? [0];
+  const multiChannel = visibleChannels.length > 1 || opts.multiChannel === true;
   return {
     type: "coldState",
     epochs: EPOCHS,
     datasetId,
     currentT: 0,
     currentZ: 0,
-    multiChannel: visibleChannels.length > 1 || opts.multiChannel === true,
+    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -148,6 +150,12 @@ function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStat
       sortCenterVox: null,
       frustumPlanes: null,
     },
+    // The planner wants the one chunk `chunkAt` delivers, in every channel.
+    wantedChunks: visibleChannels.map((c) => ({
+      memberId: multiChannel ? `${datasetId}-img:ch${c}` : `${datasetId}-img`,
+      tier: "detail" as const,
+      chunkKeys: ["2/0/0/0/0/0"],
+    })),
     activeSet: [tile(`${datasetId}-img`, 2)],
     viewMode: "volume",
     sampleFormat: "u16",
@@ -251,12 +259,14 @@ describe("removing a dataset", () => {
 describe("a cold state frees the pools it no longer routes to", () => {
   it("frees a hidden channel's pools and keeps the others with their chunks", async () => {
     const gpu = trackingDevice();
-    const { ctx } = makeCtx(gpu.device);
+    const { ctx, posts } = makeCtx(gpu.device);
     await dispatchMessage(ctx, cold("ds1", { visibleChannels: [0, 1, 2] }));
     await dispatchMessage(ctx, chunkAt("ds1-img:ch0"));
+    await dispatchMessage(ctx, chunkAt("ds1-img:ch1"));
     const ch0 = ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!;
     const ch1 = ctx.state.volumeAtlases.get("ds1:ch1:32x32x32:detail")!;
     const before = gpu.live();
+    posts.length = 0;
 
     await dispatchMessage(ctx, cold("ds1", { visibleChannels: [0, 2] }));
 
@@ -266,6 +276,10 @@ describe("a cold state frees the pools it no longer routes to", () => {
     expect(gpu.live().textures).toBe(before.textures - 3);
     expect(ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")).toBe(ch0);
     expect(ch0.slots.size).toBe(1);
+    // The page hears what went with the freed pool, so it sends it again when the channel returns.
+    expect(posts.filter((m) => m.type === "chunkResidency")).toEqual([
+      { type: "chunkResidency", memberId: "ds1-img:ch1", tier: "detail", change: "lost", keys: ["2/0/0/0/0/0"], reason: "freed" },
+    ]);
   });
 
   it("frees the other view mode's pools on a switch between volume and slice", async () => {
@@ -310,33 +324,88 @@ describe("a cold state frees the pools it no longer routes to", () => {
   });
 });
 
-describe("the atlas report", () => {
-  it("counts each atlas texture and its indirection buffer at the texture format's width", () => {
-    const state = createInitialState();
-    const texture = (width: number, height: number, depth: number, format: GPUTextureFormat) =>
-      ({ width, height, depthOrArrayLayers: depth, format }) as GPUTexture;
-    state.sliceAtlases.set("a", { texture: texture(512, 256, 1, "r16uint"), indirectionBuf: { size: 64 } } as SliceAtlasState);
-    state.labelSlicePools.set("b", { texture: texture(100, 50, 1, "r32uint"), indirectionBuf: { size: 4 } } as never);
-    state.proxyPoolsByDataset.set("ds1", new Map([["c", { texture: texture(8, 8, 8, "r16uint") } as never]]));
+describe("label pools live as long as the view mode that draws them", () => {
+  it("frees the other mode's label pool on a switch and reports its chunks lost", async () => {
+    const gpu = trackingDevice();
+    const { ctx, posts } = makeCtx(gpu.device);
+    await dispatchMessage(ctx, cold("ds1", { viewMode: "slice" }));
+    await dispatchMessage(ctx, {
+      type: "labelSliceChunkData",
+      epochs: EPOCHS,
+      memberId: "label",
+      datasetId: "ds1",
+      chunks: [{ data: new Uint32Array(32 * 32).buffer, dataType: "uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
+      level: 0, t: 0, c: 0,
+      levelWidth: 64, levelHeight: 64, chunkX: 32, chunkY: 32,
+    });
+    const labelTexture = ctx.state.labelSlicePools.get("label")!.texture as unknown as MockTexture;
+    expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(
+      { type: "chunkResidency", memberId: "label", tier: "detail", change: "held", keys: ["0/0/0/0/0/0"], reason: undefined },
+    );
+    posts.length = 0;
 
-    expect(measureGpuAtlases(state)).toEqual({
+    await dispatchMessage(ctx, cold("ds1"));
+
+    expect(ctx.state.labelSlicePools.size).toBe(0);
+    expect(labelTexture.destroyed).toBe(true);
+    expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(
+      { type: "chunkResidency", memberId: "label", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "freed" },
+    );
+  });
+});
+
+describe("the GPU memory report", () => {
+  it("counts every holder's bytes from its own geometry, and the chunk slots held", () => {
+    const state = createInitialState(256 * 1024 * 1024);
+    state.sliceAtlases.set("a", {
+      slotsX: 4, slotsY: 2, chunkX: 64, chunkY: 32, format: "u16", totalSlots: 8,
+      slots: new Map([["m|k", 0]]), indirectionData: new Uint32Array(16),
+    } as unknown as SliceAtlasState);
+    state.labelSlicePools.set("b", { width: 100, height: 50 } as never);
+    state.proxyPoolsByDataset.set("ds1", new Map([["c", { slotDims: [8, 8, 8], slotsX: 1, slotsY: 1, slotsZ: 1 } as never]]));
+
+    expect(measureGpuMemory(state)).toEqual({
+      budgetBytes: 256 * 1024 * 1024,
+      bytes: 4 * 64 * 2 * 32 * 2 + 16 * 4 + 100 * 50 * 4 + 8 * 8 * 8 * 2,
+      chunkBytes: 4 * 64 * 2 * 32 * 2 + 16 * 4,
+      labelBytes: 100 * 50 * 4,
+      proxyBytes: 8 * 8 * 8 * 2,
+      targetBytes: 0,
+      minimapBytes: 0,
       atlases: 3,
-      bytes: 512 * 256 * 2 + 64 + 100 * 50 * 4 + 4 + 8 * 8 * 8 * 2,
+      slotsHeld: 1,
+      slots: 8,
+      overviewsRefused: 0,
     });
   });
 
   it("is posted when it changes and falls back when a dataset is removed", async () => {
     const gpu = trackingDevice();
     const { ctx, posts } = makeCtx(gpu.device);
-    const reports = () => posts.filter((m): m is GpuAtlasesMessage => m.type === "gpuAtlases");
+    const reports = () => posts.filter((m): m is GpuMemoryMessage => m.type === "gpuMemory");
 
     await dispatchMessage(ctx, cold("ds1", { visibleChannels: [0, 1] }));
     await dispatchMessage(ctx, cold("ds1", { visibleChannels: [0, 1] }));
     expect(reports()).toHaveLength(1);
     expect(reports()[0].atlases).toBe(6);
-    expect(reports()[0].bytes).toBe(measureGpuAtlases(ctx.state).bytes);
+    expect(reports()[0].bytes).toBe(measureGpuMemory(ctx.state).bytes);
 
     await dispatchMessage(ctx, { type: "removeLayerResources", datasetId: "ds1" });
-    expect(reports().at(-1)).toEqual({ type: "gpuAtlases", atlases: 0, bytes: 0 });
+    expect(reports().at(-1)).toMatchObject({ type: "gpuMemory", atlases: 0, bytes: 0, slots: 0 });
+  });
+
+  it("posts each chunk pool's capacity for admission, and what the other holders take of the total", async () => {
+    const gpu = trackingDevice();
+    const { ctx, posts } = makeCtx(gpu.device);
+    await dispatchMessage(ctx, cold("ds1"));
+    const capacity = posts.filter((m): m is GpuCapacityMessage => m.type === "gpuCapacity").at(-1)!;
+
+    expect(capacity.budgetBytes).toBe(ctx.state.gpuTotalBytes);
+    expect(capacity.reservedBytes).toBe(0);
+    const detail = capacity.pools.find((pool) => pool.poolKey === "ds1:32x32x32:detail")!;
+    expect(detail).toMatchObject({ datasetId: "ds1", tier: "detail", slotBytes: 32 * 32 * 32 * 2 });
+    const atlas = ctx.state.volumeAtlases.get("ds1:32x32x32:detail")!;
+    expect(detail.slots).toBe(atlas.totalSlots);
+    expect(detail.maxSlots).toBe(atlas.slotsX * atlas.slotsY * atlas.maxSlotsZ);
   });
 });

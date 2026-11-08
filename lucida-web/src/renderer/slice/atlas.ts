@@ -8,13 +8,16 @@
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
+import type { ChunkFeedbackReason } from "../workerProtocol.ts";
 import { createSliceTexture, getDeviceLimits } from "../gpuContext.ts";
-import { computeAtlasGeometry } from "../atlasSizing.ts";
+import { computeAtlasGeometry, poolCapBytes } from "../atlasSizing.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
-import { postPoolChunksLost } from "../chunkUploadFeedback.ts";
-import { shrinkAtlasBudget } from "../../deviceBudget.ts";
+import { LABEL_TIER, postChunkResidency, postSlotsLost } from "../chunkUploadFeedback.ts";
+import { chunkPoolTier } from "../poolKeys.ts";
+import { grantGrowth, handleGpuOutOfMemory, reserveGpuBytes } from "../worker/gpuBudget.ts";
+import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
 
 /**
  * A label overlay's slice pool: one `r32uint` texture holding the current
@@ -29,6 +32,13 @@ export interface LabelSlicePool {
   texture: GPUTexture; // r32uint, size [width, height]
   /** Single-entry indirection ([0]) so the one tile is always slot 0. */
   indirectionBuf: GPUBuffer;
+  /**
+   * Chunk cell (`labelCellKey`) → the chunk key written there. A cell is
+   * rewritten in place on a T scrub, so the key it held is reported lost
+   * then, and every key is reported lost when the pool goes. The page
+   * resends only what it hears is gone.
+   */
+  keys: Map<number, string>;
   /**
    * Owning dataset id. The pool is keyed by the label image id, which dataset
    * removal never sees, so {@link removeLabelSlicePoolsForDataset} matches on
@@ -60,8 +70,9 @@ export function resetLabelSliceAllocWarnings(): void {
  * the dims are unchanged, so a Z/T scrub never blanks the overlay.
  *
  * Returns `null` when the texture or indirection buffer fails to allocate,
- * after unwinding any partial allocation, so the caller skips the label, and
- * for a size the device ran out of memory on.
+ * after unwinding any partial allocation, so the caller skips the label, for
+ * a size the device ran out of memory on, and when the GPU total has no room
+ * for it.
  */
 export function getOrCreateLabelSlicePool(
   ctx: WorkerCtx,
@@ -80,10 +91,11 @@ export function getOrCreateLabelSlicePool(
     existing.datasetId = datasetId;
     return existing;
   }
-  if (existing) destroyLabelSlicePool(existing);
+  if (existing) removeLabelSlicePool(ctx, memberId, "freed");
 
   const sizeKey = `${memberId}|${w}x${h}`;
   if (ctx.state.labelSizesOutOfMemory.has(sizeKey)) return null;
+  if (!reserveGpuBytes(ctx, w * h * LABEL_SLICE_BYTES_PER_TEXEL)) return null;
 
   let texture: GPUTexture | undefined;
   let indirectionBuf: GPUBuffer;
@@ -94,7 +106,8 @@ export function getOrCreateLabelSlicePool(
       (lost) => {
         // A size that ran out of memory once would again on every delivery.
         ctx.state.labelSizesOutOfMemory.add(sizeKey);
-        if (pools.get(memberId)?.texture === lost) removeLabelSlicePool(ctx, memberId);
+        if (pools.get(memberId)?.texture === lost) removeLabelSlicePool(ctx, memberId, "out-of-memory");
+        handleGpuOutOfMemory(ctx);
       },
     );
     indirectionBuf = ctx.device.createBuffer({
@@ -118,9 +131,22 @@ export function getOrCreateLabelSlicePool(
   }
   ctx.device.queue.writeBuffer(indirectionBuf, 0, new Uint32Array([0]));
 
-  const pool: LabelSlicePool = { texture, indirectionBuf, datasetId, width: w, height: h };
+  const pool: LabelSlicePool = { texture, indirectionBuf, keys: new Map(), datasetId, width: w, height: h };
   pools.set(memberId, pool);
   return pool;
+}
+
+/** Bytes one `r32uint` label texel holds. */
+const LABEL_SLICE_BYTES_PER_TEXEL = 4;
+
+/** The bytes a label slice pool's texture holds. */
+export function labelSlicePoolBytes(pool: LabelSlicePool): number {
+  return pool.width * pool.height * LABEL_SLICE_BYTES_PER_TEXEL;
+}
+
+/** The cell a label slice chunk at grid `(x, y)` is written to, as {@link LabelSlicePool.keys} keys it. */
+export function labelCellKey(x: number, y: number): number {
+  return y * 0x10000 + x;
 }
 
 export function destroyLabelSlicePool(pool: LabelSlicePool): void {
@@ -130,10 +156,14 @@ export function destroyLabelSlicePool(pool: LabelSlicePool): void {
   pool.labelColorBuffer?.destroy();
 }
 
-/** Remove a member's label pool (no-op if absent). */
-export function removeLabelSlicePool(ctx: WorkerCtx, memberId: string): void {
+/**
+ * Remove a member's label pool (no-op if absent), reporting every chunk it
+ * held lost for `reason` so the page sends what it still wants.
+ */
+export function removeLabelSlicePool(ctx: WorkerCtx, memberId: string, reason: ChunkFeedbackReason): void {
   const pool = ctx.state.labelSlicePools.get(memberId);
   if (pool) {
+    postChunkResidency(ctx, memberId, LABEL_TIER, "lost", [...pool.keys.values()], reason);
     destroyLabelSlicePool(pool);
     ctx.state.labelSlicePools.delete(memberId);
   }
@@ -142,11 +172,18 @@ export function removeLabelSlicePool(ctx: WorkerCtx, memberId: string): void {
 /**
  * Free every label slice pool whose member key or owning `datasetId` matches
  * `idOrDataset`. Dataset removal passes the dataset id, which never equals a
- * pool key, so the `datasetId` match is what frees the texture.
+ * pool key, so the `datasetId` match is what frees the texture. With a
+ * `reason`, the chunks they held are reported lost; a removed dataset's
+ * delivery record goes with it, so removal passes none.
  */
-export function removeLabelSlicePoolsForDataset(ctx: WorkerCtx, idOrDataset: string): void {
+export function removeLabelSlicePoolsForDataset(
+  ctx: WorkerCtx,
+  idOrDataset: string,
+  reason?: ChunkFeedbackReason,
+): void {
   for (const [memberId, pool] of ctx.state.labelSlicePools) {
     if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
+      if (reason) postChunkResidency(ctx, memberId, LABEL_TIER, "lost", [...pool.keys.values()], reason);
       destroyLabelSlicePool(pool);
       ctx.state.labelSlicePools.delete(memberId);
     }
@@ -182,9 +219,13 @@ export interface SliceAtlasState {
   /** slotIndex → globalGridIdx (for eviction cleanup). */
   slotGridIdx: Int32Array<ArrayBuffer>;
   freeSlots: number[];
+  /** Slots the texture holds now. */
   totalSlots: number;
   chunkX: number; chunkY: number;
+  /** The texture's slot grid now. Only `slotsY` changes, as the pool grows or shrinks. */
   slotsX: number; slotsY: number;
+  /** The rows the pool's cap allows, which it grows toward while the GPU total has room. */
+  maxSlotsY: number;
   /** Per-entity LOD sections (absolute offsets into the shared flat indirection buffer). */
   entityMetas: Map<string, LodIndirectionMeta[]>;
   /**
@@ -202,15 +243,32 @@ export interface SliceAtlasState {
    * leaves it unmapped and the wanted set reports it missing.
    */
   slotLevelZ: Int32Array<ArrayBuffer>;
-  intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
 }
 
-/** Create a shared slice pool. Indirection sized later from entityMetas. */
+function createSliceAtlasTexture(
+  device: GPUDevice,
+  chunkX: number, chunkY: number,
+  slotsX: number, slotsY: number,
+  format: SampleFormat,
+): GPUTexture {
+  return device.createTexture({
+    size: [slotsX * chunkX, slotsY * chunkY],
+    format: atlasTextureFormat(format),
+    // COPY_SRC so a pool that grows or shrinks can copy its chunks into the new texture.
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+  });
+}
+
+/**
+ * Create a shared slice pool one row of slots deep. It grows toward the grid
+ * its cap allows only as chunks fill it and the GPU total has room.
+ * Indirection is sized later from entityMetas.
+ */
 function createSliceAtlas(
   device: GPUDevice,
   datasetId: string,
-  budgetBytes: number,
+  capBytes: number,
   chunkX: number, chunkY: number,
   z: number, t: number, c: number,
   format: SampleFormat,
@@ -219,13 +277,16 @@ function createSliceAtlas(
   const geom = computeAtlasGeometry(
     limits,
     [chunkX, chunkY],
-    budgetBytes,
+    capBytes,
     "2d",
     bytesPerTexel(format),
   );
-  const { slotsX, slotsY, totalSlots, atlasW, atlasH } = geom;
+  const { slotsX } = geom;
+  const maxSlotsY = geom.slotsY;
+  const slotsY = 1;
+  const totalSlots = slotsX * slotsY;
 
-  const texture = createSliceTexture(device, atlasW, atlasH, null, atlasTextureFormat(format));
+  const texture = createSliceAtlasTexture(device, chunkX, chunkY, slotsX, slotsY, format);
 
   const indirectionData = new Uint32Array(1);
   indirectionData[0] = 0xFFFFFFFF;
@@ -246,14 +307,146 @@ function createSliceAtlas(
     texture, format, indirectionBuf, indirectionData,
     slots: new Map(), slotGridIdx, freeSlots, totalSlots,
     chunkX, chunkY,
-    slotsX, slotsY,
+    slotsX, slotsY, maxSlotsY,
     entityMetas: new Map(),
     entityZInfo: new Map(),
     z, t, c,
     slotLevelZ: new Int32Array(totalSlots).fill(-1),
-    intensityMin: Infinity, intensityMax: -Infinity,
     indirectionDirty: true,
   };
+}
+
+/** The bytes a slice pool's texture and indirection hold now. */
+export function sliceAtlasBytes(atlas: SliceAtlasState): number {
+  return sliceRowBytes(atlas) * atlas.slotsY + atlas.indirectionData.length * 4;
+}
+
+/** The bytes one row of a slice pool's slots holds: the step it grows and shrinks by. */
+export function sliceRowBytes(atlas: SliceAtlasState): number {
+  return atlas.slotsX * atlas.chunkX * atlas.chunkY * bytesPerTexel(atlas.format);
+}
+
+/**
+ * Grow a full pool to `toSlotsY` rows, by default double its rows, up to its
+ * cap's. False when it is already there, so the caller evicts instead. The
+ * caller has checked the GPU total.
+ *
+ * A slot's position depends on `slotsX` alone, which never changes, so every
+ * resident slot keeps its texels and its index: growing is one copy of the
+ * old texture into the new one's top rows.
+ */
+export function growSliceAtlas(
+  device: GPUDevice,
+  atlas: SliceAtlasState,
+  toSlotsY: number = atlas.slotsY * 2,
+): boolean {
+  const slotsY = Math.min(atlas.maxSlotsY, toSlotsY);
+  if (slotsY <= atlas.slotsY) return false;
+  const totalSlots = atlas.slotsX * slotsY;
+  const texture = createSliceAtlasTexture(device, atlas.chunkX, atlas.chunkY, atlas.slotsX, slotsY, atlas.format);
+  const encoder = device.createCommandEncoder();
+  encoder.copyTextureToTexture(
+    { texture: atlas.texture },
+    { texture },
+    [atlas.slotsX * atlas.chunkX, atlas.slotsY * atlas.chunkY, 1],
+  );
+  device.queue.submit([encoder.finish()]);
+  // Destruction waits for the copy just submitted.
+  atlas.texture.destroy();
+  atlas.texture = texture;
+
+  const slotGridIdx = new Int32Array(totalSlots).fill(-1);
+  slotGridIdx.set(atlas.slotGridIdx);
+  atlas.slotGridIdx = slotGridIdx;
+  const slotLevelZ = new Int32Array(totalSlots).fill(-1);
+  slotLevelZ.set(atlas.slotLevelZ);
+  atlas.slotLevelZ = slotLevelZ;
+  for (let i = totalSlots - 1; i >= atlas.totalSlots; i--) atlas.freeSlots.push(i);
+  atlas.slotsY = slotsY;
+  atlas.totalSlots = totalSlots;
+  return true;
+}
+
+/** {@link growSliceAtlas}, where a grow the device can't allocate loses the pool. */
+export function growSliceAtlasWatched(
+  ctx: WorkerCtx,
+  poolKey: string,
+  atlas: SliceAtlasState,
+  toSlotsY?: number,
+): boolean {
+  return allocateWatched(
+    ctx,
+    () => growSliceAtlas(ctx.device, atlas, toSlotsY),
+    () => replaceLostSliceAtlas(ctx, poolKey, atlas),
+  );
+}
+
+/**
+ * Grow a full pool as far as the GPU total has room for, at most doubling its
+ * rows. With `reclaim`, grow by one row even when the total has none, if
+ * other pools can give it back from chunks the planner doesn't want.
+ */
+export function growSlicePoolWithin(
+  ctx: WorkerCtx,
+  poolKey: string,
+  atlas: SliceAtlasState,
+  reclaim: boolean,
+): boolean {
+  const maxSteps = Math.min(atlas.maxSlotsY, atlas.slotsY * 2) - atlas.slotsY;
+  const steps = grantGrowth(ctx, atlas, sliceRowBytes(atlas), maxSteps, reclaim);
+  return steps > 0 && growSliceAtlasWatched(ctx, poolKey, atlas, atlas.slotsY + steps);
+}
+
+/**
+ * Shrink a pool to `slotsY` rows, giving their bytes back to the GPU total.
+ * It keeps the first chunks of `keep` that fit, moving any that lay in a
+ * dropped row into a slot that stays, and returns the composite keys it no
+ * longer holds, for the caller to report lost.
+ */
+export function shrinkSliceAtlas(
+  device: GPUDevice,
+  atlas: SliceAtlasState,
+  slotsY: number,
+  keep: Iterable<string>,
+): string[] {
+  if (slotsY >= atlas.slotsY || slotsY < 1) return [];
+  const capacity = atlas.slotsX * slotsY;
+  const plan = planCompaction(atlas.slots, capacity, keep);
+
+  const texture = createSliceAtlasTexture(device, atlas.chunkX, atlas.chunkY, atlas.slotsX, slotsY, atlas.format);
+  const encoder = device.createCommandEncoder();
+  encoder.copyTextureToTexture(
+    { texture: atlas.texture },
+    { texture },
+    [atlas.slotsX * atlas.chunkX, slotsY * atlas.chunkY, 1],
+  );
+  const origin = (slot: number) => ({
+    x: (slot % atlas.slotsX) * atlas.chunkX,
+    y: Math.floor(slot / atlas.slotsX) * atlas.chunkY,
+    z: 0,
+  });
+  for (const { from, to } of plan.moves) {
+    encoder.copyTextureToTexture(
+      { texture: atlas.texture, origin: origin(from) },
+      { texture, origin: origin(to) },
+      [atlas.chunkX, atlas.chunkY, 1],
+    );
+  }
+  device.queue.submit([encoder.finish()]);
+  // Destruction waits for the copies just submitted.
+  atlas.texture.destroy();
+  atlas.texture = texture;
+
+  const slotLevelZ = new Int32Array(capacity).fill(-1);
+  for (const [key, slot] of plan.slots) slotLevelZ[slot] = atlas.slotLevelZ[atlas.slots.get(key)!];
+  atlas.slotGridIdx = remapSlotEntries(atlas.slots, atlas.slotGridIdx, atlas.indirectionData, plan, capacity);
+  atlas.slotLevelZ = slotLevelZ;
+  atlas.slots = plan.slots;
+  atlas.freeSlots = plan.freeSlots;
+  atlas.slotsY = slotsY;
+  atlas.totalSlots = capacity;
+  atlas.indirectionDirty = true;
+  return plan.dropped;
 }
 
 export function destroySliceAtlas(atlas: SliceAtlasState): void {
@@ -298,7 +491,8 @@ function createWatchedSliceAtlas(
   return allocateWatched(
     ctx,
     () => createSliceAtlas(
-      ctx.device, datasetId, ctx.state.atlasBudgets.sliceAtlasBytes, chunkX, chunkY, z, t, c, format,
+      ctx.device, datasetId, poolCapBytes(getDeviceLimits(ctx.device), ctx.state.gpuTotalBytes),
+      chunkX, chunkY, z, t, c, format,
     ),
     (lost) => replaceLostSliceAtlas(ctx, poolKey, lost),
   );
@@ -306,17 +500,17 @@ function createWatchedSliceAtlas(
 
 /**
  * A pool whose texture the device could not allocate holds nothing and can't
- * be bound. Its chunks go back to the page, and a pool with the same sections
- * takes its place under half the budget. At the floor budget the pool is
- * dropped, and the next cold state tries again.
+ * be bound. Its chunks go back to the page, the GPU total halves, and a pool
+ * with the same sections takes its place one row deep. At the floor total
+ * the pool is dropped, and the next cold state tries again.
  */
 export function replaceLostSliceAtlas(ctx: WorkerCtx, poolKey: string, lost: SliceAtlasState): void {
   const atlases = ctx.state.sliceAtlases;
   if (atlases.get(poolKey) !== lost) return;
-  postPoolChunksLost(ctx, lost.slots.keys(), "out-of-memory");
+  postSlotsLost(ctx, chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
   destroySliceAtlas(lost);
   atlases.delete(poolKey);
-  if (shrinkAtlasBudget(ctx.state.atlasBudgets, "sliceAtlasBytes")) {
+  if (handleGpuOutOfMemory(ctx)) {
     const atlas = createWatchedSliceAtlas(
       ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.z, lost.t, lost.c, lost.format,
     );

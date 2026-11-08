@@ -12,7 +12,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import type { WasmScene } from "lucida-core";
 
+import { applyViewportCommand } from "../applyAndSend.ts";
 import type { RenderLoop } from "../renderLoop.ts";
+import { SceneStore } from "../sceneStore.ts";
 import { VIEWPORT_MEDIA, type ViewportClass } from "../theme/viewport.ts";
 import type { DatasetState } from "../types.ts";
 import {
@@ -31,7 +33,6 @@ import {
   type Viewport,
 } from "../viewProperties.ts";
 import type { BridgeCallbacks } from "./useDatasetSettings.ts";
-import { syncSceneViewState } from "./sceneViewState.ts";
 import { useDimensions } from "./useDimensions.ts";
 
 /** A dataset of `channels` channels; only the shape is read. */
@@ -43,7 +44,7 @@ function dataset(id: string, channels: number): DatasetState {
 }
 
 function renderDimensions(datasets: DatasetState[] = []) {
-  const state = { multi: false, c: 0 };
+  const state = { multi: false, c: 0, selection: 0 };
   const commands: Array<Record<string, unknown>> = [];
   const scene = {
     apply_command: vi.fn((json: string) => {
@@ -51,13 +52,14 @@ function renderDimensions(datasets: DatasetState[] = []) {
       commands.push(cmd);
       if (cmd.type === "set_multi_channel") state.multi = cmd.enabled;
       if (cmd.type === "set_c") state.c = cmd.c;
+      state.selection++;
     }),
+    epochs: () => JSON.stringify({ content: 0, layout: 0, view: 0, selection: state.selection }),
     multi_channel: () => state.multi,
     c: () => state.c,
     z: () => 0,
     t: () => 0,
     camera_mode: () => "slice",
-    fit_camera_to_dataset_bounds: vi.fn(),
   } as unknown as WasmScene;
   const loop = {
     markInput: vi.fn(),
@@ -71,12 +73,12 @@ function renderDimensions(datasets: DatasetState[] = []) {
     breakFollow: vi.fn(),
   };
   const datasetsRef = { current: new Map(datasets.map((d) => [d.id, d])) };
+  const sceneStore = new SceneStore(() => scene);
   const { result, rerender } = renderHook(
     ({ version }) =>
       useDimensions({
+        sceneStore,
         wasmSceneRef: { current: scene },
-        wasmScene: scene,
-        selectedDatasetId: null,
         datasetsRef,
         datasetsVersion: version,
         bridgeCallbacksRef: { current: bridge },
@@ -84,7 +86,7 @@ function renderDimensions(datasets: DatasetState[] = []) {
       }),
     { initialProps: { version: 0 } },
   );
-  return { result, rerender, loop, scene, state, commands, datasetsRef };
+  return { result, rerender, loop, scene, sceneStore, state, commands, datasetsRef };
 }
 
 describe("useDimensions as an input source", () => {
@@ -114,7 +116,7 @@ describe("useDimensions channels", () => {
 
     act(() => result.current.handleDatasetRegistered("ds"));
 
-    expect(state.multi).toBe(true);
+    expect(state).toMatchObject({ multi: true });
     expect(result.current.multiChannel).toBe(true);
     expect(result.current.soloChannel).toBeNull();
   });
@@ -140,11 +142,11 @@ describe("useDimensions channels", () => {
     const { result, state } = renderDimensions([dataset("ds", 3)]);
 
     act(() => result.current.handleSoloChannel(1));
-    expect(state).toEqual({ multi: false, c: 1 });
+    expect(state).toMatchObject({ multi: false, c: 1 });
     expect(result.current.soloChannel).toBe(1);
 
     act(() => result.current.handleSoloChannel(2));
-    expect(state).toEqual({ multi: false, c: 2 });
+    expect(state).toMatchObject({ multi: false, c: 2 });
     expect(result.current.soloChannel).toBe(2);
 
     act(() => result.current.handleSoloChannel(2));
@@ -157,14 +159,15 @@ describe("useDimensions channels", () => {
   });
 
   it("reads a restored single-channel view as that channel soloed", () => {
-    const { result, scene, state } = renderDimensions([dataset("ds", 3)]);
+    const { result, sceneStore, state } = renderDimensions([dataset("ds", 3)]);
     act(() => result.current.handleDatasetRegistered("ds"));
     expect(result.current.soloChannel).toBeNull();
 
-    // A saved view, URL, or followed peer writes the scene, then mirrors it.
+    // A saved view, URL, or followed peer writes the scene and announces it.
     state.multi = false;
     state.c = 1;
-    act(() => syncSceneViewState(scene, result.current));
+    state.selection++;
+    act(() => sceneStore.sync());
 
     expect(result.current.soloChannel).toBe(1);
   });
@@ -192,11 +195,11 @@ describe("useDimensions view mode", () => {
   function switched(f: ViewFixture, vp: Viewport, dpr: number, from: "slice" | "arcball"): WasmScene {
     const scene = openedScene(f, vp, dpr, from);
     const ds = { id: datasetId(f), manifest: manifest(f) } as unknown as DatasetState;
+    const sceneStore = new SceneStore(() => scene);
     const { result } = renderHook(() =>
       useDimensions({
+        sceneStore,
         wasmSceneRef: { current: scene },
-        wasmScene: scene,
-        selectedDatasetId: ds.id,
         datasetsRef: { current: new Map([[ds.id, ds]]) },
         datasetsVersion: 0,
         bridgeCallbacksRef: {
@@ -210,10 +213,7 @@ describe("useDimensions view mode", () => {
         loopRef: { current: null },
       }),
     );
-    // The page opens in 2D, so from 3D the first toggle only catches the
-    // toggle up with the scene.
     act(() => result.current.handleViewModeToggle());
-    if (from === "arcball") act(() => result.current.handleViewModeToggle());
     return scene;
   }
 
@@ -242,11 +242,38 @@ describe("useDimensions view mode", () => {
     assertSwitchFrames(VIEWPORTS[1], "phone");
   });
 
-  // Fails while a desktop switch starts each mode from a fixed camera: a 3D
-  // arcball that clips the data or leaves it small, and a 2D slice camera at
-  // one sample per device pixel.
-  it.fails("frames the data in the new mode on a desktop", () => {
+  it("frames the data in the new mode on a desktop", () => {
     loadWasm();
     assertSwitchFrames(VIEWPORTS[0], "desktop");
+  });
+
+  it("brings back the view a mode had when switching back to it", () => {
+    loadWasm();
+    const scene = openedScene(FIXTURES[1], VIEWPORTS[0], 2, "slice");
+    applyViewportCommand(scene, { type: "pan", dx: 40, dy: -25 });
+    const camera = () => JSON.parse(scene.export_presence()).camera;
+    const placed = camera();
+    const ds = { id: datasetId(FIXTURES[1]), manifest: manifest(FIXTURES[1]) } as unknown as DatasetState;
+    const { result } = renderHook(() =>
+      useDimensions({
+        sceneStore: new SceneStore(() => scene),
+        wasmSceneRef: { current: scene },
+        datasetsRef: { current: new Map([[ds.id, ds]]) },
+        datasetsVersion: 0,
+        bridgeCallbacksRef: {
+          current: {
+            sendCommand: vi.fn(),
+            emitPresence: vi.fn(),
+            emitDatasetPresence: vi.fn(),
+            breakFollow: vi.fn(),
+          },
+        },
+        loopRef: { current: null },
+      }),
+    );
+    act(() => result.current.handleViewModeToggle());
+    expect(camera().mode).toBe("arcball");
+    act(() => result.current.handleViewModeToggle());
+    expect(camera()).toEqual(placed);
   });
 });

@@ -12,10 +12,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CpuCache, type CpuCacheConfig } from "./cpuCache.ts";
 import { FetchError } from "./retry.ts";
-import type { ContentSource, FetchRequest, FetchResult } from "./contentSource.ts";
+import {
+  sourceChunkFailure,
+  type ContentSource,
+  type FetchRequest,
+  type FetchResult,
+} from "./contentSource.ts";
 import type { DecodePool } from "./decodePool.ts";
 import type { ChunkRequest, RequestPlan, ActiveSetEntry } from "../planning/index.ts";
 import { emptyPlanStats } from "../planning/index.ts";
+import { createSettleState } from "../settle.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, type TracePointEvent } from "../../trace/types.ts";
 import { createSyntheticState } from "../planning/index.ts";
@@ -171,6 +177,54 @@ describe("cache point events", () => {
     expect(failures0[0].chunk?.entityId).toBe("entity-1");
   });
 
+  it("records a server-named failure under the reason the server gave, and settles without it", async () => {
+    openRun();
+    const { cache, failures } = createCache(64);
+    failures.set(
+      "0/0/0/0/0/0",
+      sourceChunkFailure("0/0/0/0/0/0", "failed_permanent", "corrupt_chunk", "lz4: bad block"),
+    );
+
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    const inputs = cache.settleInputs(createSettleState());
+    expect(inputs.desiredDetailChunks).toBe(1);
+    expect(inputs.residentDetailChunks).toBe(0);
+    expect(inputs.failedDetailChunks).toBe(1);
+    expect(cache.failedWantedChunks()).toEqual([
+      { chunk: "ds-1/image-1/0/0/0/0/0/0", failure: "corrupt_chunk" },
+    ]);
+    const failed = eventsOfKind(exportedEvents(), "failure");
+    expect(failed.map(e => e.reason)).toEqual(["corrupt_chunk"]);
+  });
+
+  it("lists a chunk failed for good for the renderer, and moves its version only when the list changes", async () => {
+    const { cache, failures } = createCache(64);
+    const before = cache.failedChunksVersion();
+    failures.set(
+      "0/0/0/0/0/0",
+      sourceChunkFailure("0/0/0/0/0/0", "failed_permanent", "corrupt_chunk", null),
+    );
+
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    expect(cache.failedChunks()).toEqual([
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0", failure: "corrupt_chunk" },
+    ]);
+    const after = cache.failedChunksVersion();
+    expect(after).not.toBe(before);
+    // A plan that asks for the same view again neither refetches nor relists it.
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    expect(cache.failedChunksVersion()).toBe(after);
+
+    cache.reset();
+    expect(cache.failedChunks()).toEqual([]);
+    expect(cache.failedChunksVersion()).not.toBe(after);
+  });
+
   it("records a retry, under the reason the retry policy read", async () => {
     openRun();
     const { cache, failures } = createCache(64);
@@ -236,18 +290,35 @@ describe("cache point events", () => {
     ]);
   });
 
-  it("carries the renderer's own reason and the chunk's level on a worker-reported eviction", async () => {
+  it("carries the chunk's level on a worker-reported eviction", async () => {
     openRun();
     const { cache } = createCache(64);
 
     cache.submit(makePlan([makeRequest({ level: 1 })], [tile("entity-1", "image-1", 1)]));
     await flush();
-    cache.markChunkEvicted("image-1", 0, ["1/0/0/0/0/0"], [], "stale");
+    cache.markChunksLost("image-1", 0, "detail", ["1/0/0/0/0/0"], "evicted");
 
     const evictions = eventsOfKind(exportedEvents(), "eviction");
     expect(evictions.map(e => [e.reason, e.chunk?.chunkKey, e.chunk?.level])).toEqual([
-      ["stale", "1/0/0/0/0/0", 1],
+      ["evicted", "1/0/0/0/0/0", 1],
     ]);
+  });
+
+  it("records a refusal as a rejection under the renderer's reason, and a freed pool or re-cut plane not at all", async () => {
+    openRun();
+    const { cache } = createCache(64);
+
+    cache.submit(makePlan([makeRequest({ level: 1 })], [tile("entity-1", "image-1", 1)]));
+    await flush();
+    cache.markChunksRefused("image-1", 0, "detail", ["1/0/0/0/0/0"], "stale");
+    cache.markChunksLost("image-1", 0, "detail", ["1/0/0/0/0/0"], "freed");
+    cache.markChunksLost("image-1", 0, "detail", ["1/0/0/0/0/0"], "wrong-slice");
+
+    const events = exportedEvents();
+    expect(eventsOfKind(events, "rejection").map(e => [e.reason, e.chunk?.chunkKey])).toEqual([
+      ["stale", "1/0/0/0/0/0"],
+    ]);
+    expect(eventsOfKind(events, "eviction")).toEqual([]);
   });
 
   it("reads the residency tier off the chunk rather than assuming detail", async () => {
@@ -258,7 +329,7 @@ describe("cache point events", () => {
     // event has to say so — a chunk key is not unique across the two.
     cache.submit(makePlan([makeRequest({ lane: "coarse" })]));
     await flush();
-    cache.markChunkEvicted("image-1", 0, ["0/0/0/0/0/0"], [], "evicted");
+    cache.markChunksLost("image-1", 0, "coarse", ["0/0/0/0/0/0"], "evicted");
 
     const evictions = eventsOfKind(exportedEvents(), "eviction");
     expect(evictions[0].chunk?.residencyTier).toBe("coarse");

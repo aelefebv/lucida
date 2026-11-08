@@ -38,7 +38,7 @@ import type {
 } from "../planning/index.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import { emptyPlanStats } from "../planning/index.ts";
-import { createQuiescenceState } from "../../trace/quiescence.ts";
+import { createSettleState, evaluateSettle, stallReasonOf } from "../settle.ts";
 import { initialPlanningState, createSyntheticState } from "../planning/index.ts";
 
 // Test Factories
@@ -456,17 +456,37 @@ describe("CpuCache", () => {
       cache.markSent(first[0]);
       expect(Array.from(cache.getDeliverable())).toEqual([]);
 
-      cache.markChunkEvicted(detail.imageId, detail.c, [detail.chunkKey], []);
+      // Held until the worker reports it lost.
+      cache.markChunksHeld(detail.imageId, detail.c, "detail", [detail.chunkKey]);
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+      cache.markChunksLost(detail.imageId, detail.c, "detail", [detail.chunkKey], "evicted");
       expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["chunk"]);
 
+      // A missing report clears a held chunk, a disagreement between the records.
       cache.markSent(first[0]);
-      expect(Array.from(cache.getDeliverable())).toEqual([]);
-
-      cache.markChunkMissing(detail.imageId, detail.c, detail.chunkKey);
+      cache.markChunksHeld(detail.imageId, detail.c, "detail", [detail.chunkKey]);
+      expect(cache.markChunkMissing(detail.imageId, detail.c, detail.chunkKey, "detail")).toBe(true);
       expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["chunk"]);
 
-      cache.markChunkEvicted(detail.imageId, detail.c, [], [detail.chunkKey]);
+      // A full atlas refuses it until the next plan.
+      cache.markSent(first[0]);
+      cache.markChunksRefused(detail.imageId, detail.c, "detail", [detail.chunkKey], "atlas-policy");
       expect(Array.from(cache.getDeliverable())).toEqual([]);
+    });
+
+    it("re-delivers a chunk the worker refused for a reason other than a full atlas", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+
+      const detail = makeRequest({ entityId: "image-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0", lane: "detail" });
+      cache.submit(makePlan([detail], [makeActiveEntry("image-1", "image-1")]));
+      await flush();
+
+      const [delivery] = Array.from(cache.getDeliverable());
+      cache.markSent(delivery);
+      cache.markChunksRefused(detail.imageId, detail.c, "detail", [detail.chunkKey], "stale");
+      expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["chunk"]);
     });
 
     it("delivers coarse chunks from the overview/coarse bucket when wanted", async () => {
@@ -555,7 +575,7 @@ describe("CpuCache", () => {
 
       expect(Array.from(cache.getDeliverable())).toHaveLength(1);
 
-      cache.markChunkEvicted(detail.imageId, detail.c, [], [detail.chunkKey]);
+      cache.markChunksRefused(detail.imageId, detail.c, "detail", [detail.chunkKey], "atlas-policy");
 
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });
@@ -3514,20 +3534,20 @@ describe("CpuCache", () => {
       cache.onPlanRebuildStart();
       cache.submit(makePlan([at(2, 0), at(2, 1)]));
       await flush();
-      let inputs = cache.quiescenceInputs(createQuiescenceState());
+      let inputs = cache.settleInputs(createSettleState());
       expect(inputs).toMatchObject({ desiredDetailChunks: 2, residentDetailChunks: 2 });
 
       // The target moves to level 1. The coordinator opens every rebuild with
       // `onPlanRebuildStart`, which is what retires the previous plan's demand.
       cache.onPlanRebuildStart();
       cache.submit(makePlan([at(1, 0)]));
-      inputs = cache.quiescenceInputs(createQuiescenceState());
+      inputs = cache.settleInputs(createSettleState());
       expect(inputs).toMatchObject({ desiredDetailChunks: 1, residentDetailChunks: 0 });
       // Still cached: the zero above is a level mismatch, not an eviction.
       expect(cache.snapshot().cached.get("entity-1")?.has("2/0/0/0/0/0")).toBe(true);
 
       await flush();
-      inputs = cache.quiescenceInputs(createQuiescenceState());
+      inputs = cache.settleInputs(createSettleState());
       expect(inputs).toMatchObject({ desiredDetailChunks: 1, residentDetailChunks: 1 });
     });
 
@@ -3541,12 +3561,122 @@ describe("CpuCache", () => {
       ]));
       await flush();
 
-      const inputs = cache.quiescenceInputs(createQuiescenceState());
+      const inputs = cache.settleInputs(createSettleState());
       const budgets = cache.telemetry().tierBudgets;
       expect(inputs.detailBytes).toBe(128);
       expect(inputs.detailBudgetBytes).toBe(budgets.detailBytes);
       expect(inputs.coarseBytes).toBe(0);
       expect(inputs.coarseBudgetBytes).toBe(budgets.coarseBytes);
+    });
+
+    it("counts a wanted chunk its full tier has no room for as short, and settles on it", async () => {
+      const { cache, source } = createTestCache({ overviewBudgetBytes: 3 * 64 });
+      source.autoResolveBytes = 64;
+      const coarse = (x: number) =>
+        makeRequest({ level: 2, x, lane: "coarse", tier: "coarse", chunkKey: `2/0/0/0/0/${x}` });
+      cache.onPlanRebuildStart();
+      // A detail chunk too, or the coarse tier borrows the idle detail budget.
+      const detail = makeRequest({ lane: "detail", tier: "detail", chunkKey: "0/0/0/0/0/0" });
+      cache.submit(makePlan([detail, ...[0, 1, 2, 3, 4].map(coarse)]));
+      await flush();
+
+      const inputs = cache.settleInputs(createSettleState());
+      expect(inputs).toMatchObject({ desiredCoarseChunks: 5, residentCoarseChunks: 3, shortCoarseChunks: 2 });
+      expect(evaluateSettle(Object.assign(createSettleState(), inputs), 0).reason).toBe("coverage_limited");
+    });
+
+    it("never evicts a wanted chunk more urgent than the one arriving, and counts the refused one short", async () => {
+      const { cache, source } = createTestCache({ mainBudgetBytes: 2 * 64, overviewBudgetBytes: 64 });
+      source.autoResolveBytes = 64;
+      const detail = (x: number) =>
+        makeRequest({ x, priority: x, lane: "detail", tier: "detail", chunkKey: `0/0/0/0/0/${x}` });
+      const coarse = makeRequest({ level: 2, lane: "coarse", tier: "coarse", chunkKey: "2/0/0/0/0/0" });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([detail(0), detail(1), detail(5), coarse]));
+      await flush();
+
+      const cached = cache.snapshot().cached.get("entity-1")!;
+      expect(cached.has("0/0/0/0/0/0")).toBe(true);
+      expect(cached.has("0/0/0/0/0/1")).toBe(true);
+      expect(cached.has("0/0/0/0/0/5")).toBe(false);
+      expect(cache.settleInputs(createSettleState())).toMatchObject({ shortDetailChunks: 1 });
+
+      // Short for this plan: nothing fetches it again.
+      const requestsBefore = source.fetchCount;
+      await flush();
+      expect(source.fetchCount).toBe(requestsBefore);
+    });
+
+    it("lets a view chunk displace prefetch that ranks above it, and keeps a view chunk from prefetch", async () => {
+      const { cache, source } = createTestCache({ mainBudgetBytes: 2 * 64, overviewBudgetBytes: 0 });
+      source.autoResolveBytes = 64;
+      // Priorities mix in distance: the prefetch chunk at the center ranks
+      // above the view chunk at the edge.
+      const viewNear = makeRequest({ x: 0, priority: 500, lane: "detail", chunkKey: "0/0/0/0/0/0" });
+      const prefetchNear = makeRequest({ t: 1, x: 0, priority: 1600, lane: "prefetch", chunkKey: "0/1/0/0/0/0" });
+      const viewFar = makeRequest({ x: 3, priority: 3500, lane: "detail", chunkKey: "0/0/0/0/0/3" });
+      const prefetchFar = makeRequest({ t: 1, x: 3, priority: 4600, lane: "prefetch", chunkKey: "0/1/0/0/0/3" });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([viewNear, prefetchNear]));
+      await flush();
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([viewNear, prefetchNear, viewFar, prefetchFar]));
+      await flush();
+
+      const keys = cache.snapshot().cached.get("entity-1")!;
+      expect([...keys].sort()).toEqual(["0/0/0/0/0/0", "0/0/0/0/0/3"]);
+      expect(cache.settleInputs(createSettleState())).toMatchObject({
+        desiredDetailChunks: 2,
+        residentDetailChunks: 2,
+        shortDetailChunks: 0,
+      });
+    });
+
+    it("never waits on prefetch: a prefetch chunk evicted for room leaves the view settled", async () => {
+      const { cache, source } = createTestCache({ mainBudgetBytes: 2 * 64, overviewBudgetBytes: 0 });
+      source.autoResolveBytes = 64;
+      const view = makeRequest({ x: 0, priority: 500, lane: "detail", chunkKey: "0/0/0/0/0/0" });
+      const prefetch = (x: number) =>
+        makeRequest({ t: 1, x, priority: 1600 + x, lane: "prefetch", chunkKey: `0/1/0/0/0/${x}` });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([view, prefetch(0), prefetch(1)]));
+      await flush();
+
+      const inputs = cache.settleInputs(createSettleState());
+      expect(inputs).toMatchObject({ desiredDetailChunks: 1, residentDetailChunks: 1, unrequestedChunks: 0 });
+      expect(evaluateSettle(Object.assign(createSettleState(), inputs), 0).reason).toBe("quiescent");
+    });
+
+    it("keeps every dataset's queue when a second dataset submits in the same plan rebuild", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 1 });
+      source.autoResolveBytes = 64;
+      const of = (entityId: string, x: number) =>
+        makeRequest({ datasetId: entityId, entityId, imageId: `${entityId}-image`, x, chunkKey: `0/0/0/0/0/${x}` });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([0, 1, 2].map((x) => of("entity-1", x)), [makeActiveEntry("entity-1")]));
+      cache.submit(makePlan([0, 1].map((x) => of("entity-2", x)), [makeActiveEntry("entity-2")]));
+      await flush();
+
+      const cached = cache.snapshot().cached;
+      expect(cached.get("entity-1")?.size).toBe(3);
+      expect(cached.get("entity-2")?.size).toBe(2);
+      expect(cache.settleInputs(createSettleState())).toMatchObject({
+        desiredDetailChunks: 5,
+        residentDetailChunks: 5,
+        unrequestedChunks: 0,
+      });
+    });
+
+    it("counts a wanted chunk the server has not made yet as waiting on it, not as short", async () => {
+      const { cache, source } = createTestCache();
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([makeRequest({ level: 2, lane: "coarse", tier: "coarse" })]));
+      source.reject("entity-1/image-1/2/0/0/0/0/0", new FetchError("generated pending", { kind: "pending" }));
+      await flush();
+
+      const inputs = cache.settleInputs(createSettleState());
+      expect(inputs).toMatchObject({ serverPendingChunks: 1, shortCoarseChunks: 0 });
+      expect(stallReasonOf(evaluateSettle(Object.assign(createSettleState(), inputs), 0))).toBe("server_pending");
     });
 
     it("interleaves detail and coarse fetch starts when both tiers have demand", () => {

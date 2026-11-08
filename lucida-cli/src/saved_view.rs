@@ -651,7 +651,7 @@ fn capture_saved_view_from_snapshot(
             )
         })?;
     let scene = crate::view::scene_from_presence(&snapshot.document, source_presence);
-    let view = crate::view::saved_view_from_scene(&snapshot.document, scene);
+    let view = lucida_core::viewer_profile::ProfileScene::from(scene).saved_view();
     let source = SavedViewPresenceSource {
         client_id: source_client_id,
         kind: if source_client_id == snapshot.your_id {
@@ -1024,6 +1024,7 @@ mod tests {
                 center: [10.0, 20.0],
                 zoom: 2.0,
                 viewport: [800, 600],
+                framing: lucida_core::camera::Framing::Placed,
             })),
             view: Some(ViewState::new()),
             display: Some(DisplayState::default()),
@@ -1159,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_view_link_uses_workspace_bookmark_hash() {
+    fn saved_view_link_uses_the_saved_view_hash() {
         assert_eq!(
             saved_view_link(&target(), "sv-1").unwrap(),
             "http://127.0.0.1:9988/w/w#b=sv-1"

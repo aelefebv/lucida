@@ -1,97 +1,55 @@
 //! What one connection may do to the server, over real sockets: the size of
-//! a message, a binary frame, a client that stops reading, and the legacy
-//! session's refusal to change anything.
+//! a message, a binary frame, and a client that stops reading.
 //!
-//! The route is wired as `main.rs` wires `/ws`: the inbound caps from
-//! `connection::limit_inbound`, then the shared handler loop.
+//! The route is the workspace router `main.rs` mounts: the inbound caps
+//! from `connection::limit_inbound`, then the handler loop.
 
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::Arc;
+mod common;
+
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, broadcast};
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_config};
 
-use lucida_core::protocol::{ClientMessage, CommandRejection, ServerMessage, WatchItem};
-use lucida_protocol::DatasetOpenFailureKind;
+use common::workspace_rig::WorkspaceRig;
+use lucida_core::protocol::{ClientMessage, ServerMessage, WatchItem};
+use lucida_server::ProxyConfig;
 use lucida_server::connection::{
-    CLOSE_TOO_FAR_BEHIND, MAX_INBOUND_MESSAGE_BYTES, OUTBOUND_BUDGET_BYTES, limit_inbound,
+    CLOSE_TOO_FAR_BEHIND, MAX_INBOUND_MESSAGE_BYTES, OUTBOUND_BUDGET_BYTES,
 };
-use lucida_server::session::Session;
-use lucida_server::{AppState, ProxyConfig, handler};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 struct Rig {
-    addr: SocketAddr,
-    session: Arc<Mutex<Session>>,
+    workspace: WorkspaceRig,
     _tmp: tempfile::TempDir,
-}
-
-async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = lucida_server::connection::next_client_id();
-    limit_inbound(ws).on_upgrade(move |socket| async move {
-        handler::handle_client(
-            id,
-            socket,
-            state.session,
-            state.tx,
-            state.unicast_routes,
-            state.proxy_config,
-        )
-        .await;
-    })
 }
 
 async fn start_server() -> Rig {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let session = Arc::new(Mutex::new(Session::new()));
-    let (tx, _) = broadcast::channel(256);
     let mut proxy_config = ProxyConfig::defaults();
     proxy_config.cache_dir = tmp.path().join("proxies");
     proxy_config.generated_cache_dir = tmp.path().join("generated-coarse");
-    let state = AppState {
-        session: Arc::clone(&session),
-        tx,
-        unicast_routes: Arc::new(Mutex::new(HashMap::new())),
-        source_policy: Arc::default(),
-        proxy_config,
-    };
-    let app = Router::new().route("/ws", get(ws_route)).with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral port");
-    let addr = listener.local_addr().expect("local addr");
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.expect("serve");
-    });
     Rig {
-        addr,
-        session,
+        workspace: WorkspaceRig::start(proxy_config).await,
         _tmp: tmp,
     }
 }
 
-async fn connect(addr: SocketAddr) -> WsClient {
+async fn connect(rig: &Rig) -> WsClient {
     // The client side must be able to send past the server's cap, or the
     // oversize case would be refused here instead of there.
     let config = WebSocketConfig::default()
         .max_message_size(Some(256 * 1024 * 1024))
         .max_frame_size(Some(256 * 1024 * 1024));
-    let (ws, _) = connect_async_with_config(format!("ws://{addr}/ws"), Some(config), false)
+    let (ws, _) = connect_async_with_config(rig.workspace.ws_url(), Some(config), false)
         .await
         .expect("ws connect");
     ws
@@ -153,11 +111,11 @@ async fn assert_still_open(ws: &mut WsClient) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_binary_frame_from_a_client_goes_nowhere() {
     let rig = start_server().await;
-    let mut sender = connect(rig.addr).await;
+    let mut sender = connect(&rig).await;
     let ServerMessage::Snapshot { .. } = next_message(&mut sender).await else {
         panic!("first client's snapshot");
     };
-    let mut target = connect(rig.addr).await;
+    let mut target = connect(&rig).await;
     let ServerMessage::Snapshot {
         your_id: target_id, ..
     } = next_message(&mut target).await
@@ -196,7 +154,7 @@ async fn a_binary_frame_from_a_client_goes_nowhere() {
 async fn a_message_over_the_cap_ends_the_connection_and_one_under_it_does_not() {
     let rig = start_server().await;
 
-    let mut client = connect(rig.addr).await;
+    let mut client = connect(&rig).await;
     next_message(&mut client).await;
     // Large and unparseable: logged and ignored, the connection lives.
     let under = "x".repeat(MAX_INBOUND_MESSAGE_BYTES - 1024);
@@ -211,10 +169,10 @@ async fn a_message_over_the_cap_ends_the_connection_and_one_under_it_does_not() 
     let _ = client.send(WsMessage::Text(over.into())).await;
     read_until_closed(&mut client).await;
 
-    let mut next = connect(rig.addr).await;
+    let mut next = connect(&rig).await;
     next_message(&mut next).await;
     assert_eq!(
-        rig.session.lock().await.clients.len(),
+        rig.workspace.live.session.lock().await.clients.len(),
         1,
         "the first client is gone"
     );
@@ -223,7 +181,7 @@ async fn a_message_over_the_cap_ends_the_connection_and_one_under_it_does_not() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_client_that_stops_reading_is_closed_with_a_reason() {
     let rig = start_server().await;
-    let mut client = connect(rig.addr).await;
+    let mut client = connect(&rig).await;
     next_message(&mut client).await;
     send(
         &mut client,
@@ -275,60 +233,4 @@ async fn a_client_that_stops_reading_is_closed_with_a_reason() {
     let (code, reason) = (close.code, close.reason.to_string());
     assert_eq!(u16::from(code), CLOSE_TOO_FAR_BEHIND);
     assert!(reason.contains("behind"), "{reason}");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn the_legacy_session_refuses_document_commands_and_dataset_opens() {
-    let rig = start_server().await;
-    let mut client = connect(rig.addr).await;
-    next_message(&mut client).await;
-
-    send(
-        &mut client,
-        &ClientMessage::Command {
-            command: lucida_core::command::DocumentCommand::SetActiveLayout {
-                dataset_id: lucida_content::DatasetId("ds".into()),
-                layout_id: lucida_content::LayoutId("anything".into()),
-            },
-        },
-    )
-    .await;
-    send(
-        &mut client,
-        &ClientMessage::OpenRemoteDataset {
-            request_id: "open-1".into(),
-            url: "/nowhere/data.ome.zarr".into(),
-        },
-    )
-    .await;
-
-    // The refusal of the command and of the open travel on different
-    // queues, so either may arrive first.
-    let (mut command_refused, mut open_refused) = (false, false);
-    for _ in 0..2 {
-        match next_message(&mut client).await {
-            ServerMessage::CommandRejected { reason } => {
-                assert_eq!(reason, CommandRejection::Forbidden);
-                command_refused = true;
-            }
-            ServerMessage::OpenDatasetFailed {
-                request_id,
-                diagnostic: Some(diagnostic),
-                ..
-            } => {
-                assert_eq!(request_id, "open-1");
-                assert_eq!(diagnostic.kind, DatasetOpenFailureKind::Authorization);
-                open_refused = true;
-            }
-            other => panic!("expected both to be refused, got {other:?}"),
-        }
-    }
-    assert!(command_refused && open_refused);
-    assert!(
-        next_message_within(&mut client, Duration::from_millis(300))
-            .await
-            .is_none(),
-        "the command was neither acked nor broadcast"
-    );
-    assert_eq!(rig.session.lock().await.seq, 0, "nothing was applied");
 }

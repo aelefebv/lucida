@@ -24,9 +24,9 @@ directory, and lucida-server serves the web UI itself.
 
 ### Choose a storage backend
 
-The scheme of `LUCIDA_DB_URL` picks the backend. Both hold the same seven
+The scheme of `LUCIDA_DB_URL` picks the backend. Both hold the same six
 stores: login sessions, pending authentications, bearer tokens, CLI token
-authorizations, bookmarks, workspaces, and inbox.
+authorizations, workspaces, and inbox.
 
 SQLite is the default and suits one person or a small group. PostgreSQL is
 for a second replica, since one SQLite file has one writer, or for a managed

@@ -13,12 +13,14 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
+use lucida_content::ChunkKey;
 use object_store::path::Path;
 use serde::{Deserialize, Serialize};
 
+use crate::ChunkKeyEncoding;
 use crate::backend::StoreError;
 use crate::cache::{ByteRange, CachedStore, SourceReadTiming, TimedRead};
-use crate::codec::{StorageCompression, parse_codec_chain};
+use crate::codec::{ChunkSpec, StorageCompression, parse_codec_chain};
 use crate::source_limiter::{ReaderId, RequestLabel};
 
 /// The codec name Zarr v3 gives the sharding codec.
@@ -62,9 +64,10 @@ impl ShardLayout {
     /// the chain does not start with the sharding codec.
     ///
     /// `shard_shape` is the level's `chunk_grid` chunk shape, which for a
-    /// sharded array is one shard. A sharding layout this module does not
+    /// sharded array is one shard, and `sample_size` is the bytes per sample
+    /// of its data type. A sharding layout this module does not
     /// read (other codecs beside it, an inner shape that does not tile the
-    /// shard, nested sharding, an inner chain outside the allowlist, an
+    /// shard, nested sharding, an inner chain the codec registry refuses, an
     /// index chain other than `bytes` plus optional `crc32c`, or an index
     /// location other than `start` or `end`) is an error that opens by
     /// naming the sharding codec, so the import classifies it as an
@@ -72,6 +75,7 @@ impl ShardLayout {
     pub fn from_codec_chain(
         codecs: &[serde_json::Value],
         shard_shape: &[u64],
+        sample_size: u8,
     ) -> Result<Option<Self>, StoreError> {
         let Some(first) = codecs.first() else {
             return Ok(None);
@@ -79,7 +83,7 @@ impl ShardLayout {
         if first.get("name").and_then(|n| n.as_str()) != Some(SHARDING_CODEC) {
             return Ok(None);
         }
-        Self::parse(first, codecs, shard_shape)
+        Self::parse(first, codecs, shard_shape, sample_size)
             .map(Some)
             .map_err(|e| e.in_context(format!("{SHARDING_CODEC} codec")))
     }
@@ -90,15 +94,16 @@ impl ShardLayout {
         first: &serde_json::Value,
         codecs: &[serde_json::Value],
         shard_shape: &[u64],
+        sample_size: u8,
     ) -> Result<Self, StoreError> {
         if codecs.len() != 1 {
-            return Err(StoreError::Metadata(format!(
+            return Err(StoreError::unsupported_codec(format!(
                 "the {SHARDING_CODEC} codec must be the only codec in the storage chain, got {} codecs",
                 codecs.len(),
             )));
         }
         let config = first.get("configuration").ok_or_else(|| {
-            StoreError::Metadata(format!(
+            StoreError::unsupported_codec(format!(
                 "{SHARDING_CODEC} codec missing 'configuration' object"
             ))
         })?;
@@ -114,7 +119,7 @@ impl ShardLayout {
             .get("codecs")
             .and_then(|c| c.as_array())
             .ok_or_else(|| {
-                StoreError::Metadata(format!(
+                StoreError::unsupported_codec(format!(
                     "{SHARDING_CODEC} configuration missing 'codecs' array for the inner chunks"
                 ))
             })?;
@@ -122,18 +127,22 @@ impl ShardLayout {
             .iter()
             .any(|c| c.get("name").and_then(|n| n.as_str()) == Some(SHARDING_CODEC))
         {
-            return Err(StoreError::Metadata(format!(
+            return Err(StoreError::unsupported_codec(format!(
                 "nested sharding is not supported: a {SHARDING_CODEC} codec inside another"
             )));
         }
-        let inner_compression =
-            parse_codec_chain(inner_codecs).map_err(|e| e.in_context("inner chunk codecs"))?;
+        let spec = ChunkSpec {
+            sample_size,
+            ndim: inner_chunk_shape.len(),
+        };
+        let inner_compression = parse_codec_chain(inner_codecs, spec)
+            .map_err(|e| e.in_context("inner chunk codecs"))?;
 
         let index_codecs = config
             .get("index_codecs")
             .and_then(|c| c.as_array())
             .ok_or_else(|| {
-                StoreError::Metadata(format!(
+                StoreError::unsupported_codec(format!(
                     "{SHARDING_CODEC} configuration missing 'index_codecs' array"
                 ))
             })?;
@@ -143,7 +152,7 @@ impl ShardLayout {
             None | Some("end") => IndexLocation::End,
             Some("start") => IndexLocation::Start,
             Some(other) => {
-                return Err(StoreError::Metadata(format!(
+                return Err(StoreError::unsupported_codec(format!(
                     "index_location '{other}' not supported (use 'start' or 'end')",
                 )));
             }
@@ -164,9 +173,18 @@ impl ShardLayout {
     /// The key addresses inner chunks, so it is read in the inner chunk grid
     /// exactly as an unsharded key is read in its chunk grid, bundled `t` and
     /// `c` included. Each grid coordinate then splits into a shard coordinate
-    /// and a position within the shard. `None` when the key is malformed.
-    pub fn locate_inner_chunk(&self, key: &str, axes: &[String]) -> Option<ShardLocation> {
-        let (level, inner) = crate::chunk_key_grid_coords(key, axes, &self.inner_chunk_shape)?;
+    /// and a position within the shard, and `encoding` names the shard's
+    /// object from its shard coordinates under `level_path`, the level's
+    /// array path. `None` when the axes do not match the layout's, or the
+    /// position does not fit in memory.
+    pub fn locate_inner_chunk(
+        &self,
+        key: &ChunkKey,
+        level_path: &str,
+        axes: &[String],
+        encoding: ChunkKeyEncoding,
+    ) -> Option<ShardLocation> {
+        let inner = crate::chunk_key_grid_coords(key, axes, &self.inner_chunk_shape);
         if inner.len() != self.chunks_per_shard.len() {
             return None;
         }
@@ -177,7 +195,7 @@ impl ShardLayout {
             position = position * per_shard + coord % per_shard;
         }
         Some(ShardLocation {
-            path: Path::from(crate::chunk_grid_store_path(level, &shard)),
+            path: Path::from(encoding.store_path(level_path, &shard)),
             position: usize::try_from(position).ok()?,
         })
     }
@@ -464,21 +482,21 @@ fn parse_inner_chunk_shape(
         .get("chunk_shape")
         .and_then(|s| s.as_array())
         .ok_or_else(|| {
-            StoreError::Metadata(format!(
+            StoreError::unsupported_codec(format!(
                 "{SHARDING_CODEC} configuration missing 'chunk_shape' array"
             ))
         })?
         .iter()
         .map(|v| {
             v.as_u64().ok_or_else(|| {
-                StoreError::Metadata(format!(
+                StoreError::unsupported_codec(format!(
                     "{SHARDING_CODEC} chunk_shape entry {v} is not a non-negative integer"
                 ))
             })
         })
         .collect::<Result<_, _>>()?;
     if inner.len() != shard_shape.len() {
-        return Err(StoreError::Metadata(format!(
+        return Err(StoreError::unsupported_codec(format!(
             "{SHARDING_CODEC} chunk_shape has {} axes but the shard shape {shard_shape:?} has {}",
             inner.len(),
             shard_shape.len(),
@@ -486,7 +504,7 @@ fn parse_inner_chunk_shape(
     }
     for (axis, (&i, &s)) in inner.iter().zip(shard_shape).enumerate() {
         if i == 0 || s % i != 0 {
-            return Err(StoreError::Metadata(format!(
+            return Err(StoreError::unsupported_codec(format!(
                 "{SHARDING_CODEC} chunk_shape {inner:?} does not tile the shard shape {shard_shape:?} on axis {axis}",
             )));
         }
@@ -510,7 +528,7 @@ fn parse_index_codecs(codecs: &[serde_json::Value]) -> Result<bool, StoreError> 
     match (names.as_slice(), endian) {
         (["bytes"], Some("little")) => Ok(false),
         (["bytes", "crc32c"], Some("little")) => Ok(true),
-        _ => Err(StoreError::Metadata(format!(
+        _ => Err(StoreError::unsupported_codec(format!(
             "index_codecs {names:?} not supported (expected bytes little-endian, optionally followed by crc32c)",
         ))),
     }
@@ -582,7 +600,7 @@ mod tests {
 
     fn fixture_layout(name: &str, level: u32) -> Option<ShardLayout> {
         let meta = fixture_level_meta(name, level);
-        ShardLayout::from_codec_chain(&meta.codecs, &meta.chunk_grid.configuration.chunk_shape)
+        ShardLayout::from_codec_chain(&meta.codecs, &meta.chunk_grid.configuration.chunk_shape, 2)
             .unwrap()
     }
 
@@ -591,7 +609,15 @@ mod tests {
         let layout = fixture_layout("twin-sharded.ome.zarr", 0).expect("the fixture is sharded");
         assert_eq!(layout.inner_chunk_shape, [1, 8, 8]);
         assert_eq!(layout.chunks_per_shard, [1, 2, 2]);
-        assert_eq!(layout.inner_compression, StorageCompression::Zstd);
+        assert_eq!(
+            layout.inner_compression,
+            StorageCompression::Codecs(crate::codec::CodecChain {
+                array_to_array: Vec::new(),
+                byte_order: crate::codec::ByteOrder::Little,
+                sample_size: 2,
+                bytes_to_bytes: vec![crate::codec::BytesCodec::Zstd],
+            })
+        );
         assert_eq!(layout.index_location, IndexLocation::End);
         assert_eq!(layout.index_byte_len(), 4 * 16 + 4);
     }
@@ -605,20 +631,24 @@ mod tests {
         names.iter().map(|s| s.to_string()).collect()
     }
 
+    fn key(key: &str) -> ChunkKey {
+        ChunkKey::parse(key).unwrap()
+    }
+
     #[test]
     fn an_inner_chunk_key_names_its_shard_and_its_position_in_the_shard() {
         let layout = fixture_layout("twin-sharded.ome.zarr", 0).unwrap();
         let cyx = axes(&["c", "y", "x"]);
         // (c=1, y=2, x=3) in 1x2x2 shards: shard (1, 1, 1), position (0, 0, 1).
         assert_eq!(
-            layout.locate_inner_chunk("0/0/1/0/2/3", &cyx),
+            layout.locate_inner_chunk(&key("0/0/1/0/2/3"), "0", &cyx, ChunkKeyEncoding::default()),
             Some(ShardLocation {
                 path: Path::from("0/c/1/1/1"),
                 position: 1,
             })
         );
         assert_eq!(
-            layout.locate_inner_chunk("1/0/0/0/1/0", &cyx),
+            layout.locate_inner_chunk(&key("1/0/0/0/1/0"), "1", &cyx, ChunkKeyEncoding::default()),
             Some(ShardLocation {
                 path: Path::from("1/c/0/0/0"),
                 position: 2,
@@ -640,7 +670,12 @@ mod tests {
         };
         // c=7 is bundle 1; y=3 and x=2 fall in shard (1, 1) at position (1, 0).
         assert_eq!(
-            layout.locate_inner_chunk("0/0/7/0/3/2", &axes(&["t", "c", "z", "y", "x"])),
+            layout.locate_inner_chunk(
+                &key("0/0/7/0/3/2"),
+                "0",
+                &axes(&["t", "c", "z", "y", "x"]),
+                ChunkKeyEncoding::default()
+            ),
             Some(ShardLocation {
                 path: Path::from("0/c/0/1/0/1/1"),
                 position: 2,
@@ -662,10 +697,13 @@ mod tests {
     /// layout that level declares.
     fn sharded_twin_keys(level: u32) -> (ShardLayout, Vec<String>) {
         let meta = fixture_level_meta("twin-sharded.ome.zarr", level);
-        let layout =
-            ShardLayout::from_codec_chain(&meta.codecs, &meta.chunk_grid.configuration.chunk_shape)
-                .unwrap()
-                .unwrap();
+        let layout = ShardLayout::from_codec_chain(
+            &meta.codecs,
+            &meta.chunk_grid.configuration.chunk_shape,
+            2,
+        )
+        .unwrap()
+        .unwrap();
         let grid: Vec<u64> = meta
             .shape
             .iter()
@@ -690,7 +728,12 @@ mod tests {
         key: &str,
     ) -> Result<Bytes, object_store::Error> {
         let location = layout
-            .locate_inner_chunk(key, &axes(&["c", "y", "x"]))
+            .locate_inner_chunk(
+                &self::key(key),
+                &self::key(key).level.to_string(),
+                &axes(&["c", "y", "x"]),
+                ChunkKeyEncoding::default(),
+            )
             .unwrap();
         shards
             .read_inner_chunk(store, layout, &location, READER, LABEL)
@@ -718,7 +761,13 @@ mod tests {
                 let from_shard = read_from_shard(&shards, &sharded, &layout, &key)
                     .await
                     .unwrap();
-                let object = crate::chunk_key_to_store_path(&key, &cyx, &layout.inner_chunk_shape);
+                let object = crate::chunk_key_to_store_path(
+                    &self::key(&key),
+                    &level.to_string(),
+                    &cyx,
+                    &layout.inner_chunk_shape,
+                    ChunkKeyEncoding::default(),
+                );
                 let from_object = unsharded
                     .get_bytes(&Path::from(object), READER, LABEL)
                     .await
@@ -758,7 +807,9 @@ mod tests {
             ("0/0/0/0/1/0", false),
             ("0/0/0/0/1/1", true),
         ] {
-            let location = layout.locate_inner_chunk(key, &yx).unwrap();
+            let location = layout
+                .locate_inner_chunk(&self::key(key), "0", &yx, ChunkKeyEncoding::default())
+                .unwrap();
             let read = shards
                 .read_inner_chunk(&store, &layout, &location, READER, LABEL)
                 .await;
@@ -780,7 +831,9 @@ mod tests {
         let (layout, shards, store) = fixture_layout_and_cache("sparse-sharded.ome.zarr", 2);
         let yx = axes(&["y", "x"]);
         for key in ["2/0/0/0/0/0", "2/0/0/0/0/1"] {
-            let location = layout.locate_inner_chunk(key, &yx).unwrap();
+            let location = layout
+                .locate_inner_chunk(&self::key(key), "2", &yx, ChunkKeyEncoding::default())
+                .unwrap();
             let read = shards
                 .read_inner_chunk(&store, &layout, &location, READER, LABEL)
                 .await;
@@ -1116,7 +1169,7 @@ mod tests {
     }
 
     fn layout_error(codecs: &[serde_json::Value]) -> String {
-        ShardLayout::from_codec_chain(codecs, &[1, 16, 16])
+        ShardLayout::from_codec_chain(codecs, &[1, 16, 16], 2)
             .unwrap_err()
             .to_string()
     }
@@ -1133,10 +1186,10 @@ mod tests {
         });
         assert!(layout_error(&nested).contains("nested sharding"));
 
-        let inner_gzip = sharded_chain_with(|config| {
-            config["codecs"][1] = serde_json::json!({"name": "gzip"});
+        let inner_unknown = sharded_chain_with(|config| {
+            config["codecs"][1] = serde_json::json!({"name": "bz2"});
         });
-        assert!(layout_error(&inner_gzip).contains("gzip"));
+        assert!(layout_error(&inner_unknown).contains("bz2"));
 
         let sideways_index = sharded_chain_with(|config| {
             config["index_location"] = serde_json::json!("middle");
@@ -1157,19 +1210,11 @@ mod tests {
         with_transpose.insert(0, serde_json::json!({"name": "transpose"}));
         // A chain that does not start with the sharding codec is not sharded.
         assert_eq!(
-            ShardLayout::from_codec_chain(&with_transpose, &[1, 16, 16]).unwrap(),
+            ShardLayout::from_codec_chain(&with_transpose, &[1, 16, 16], 2).unwrap(),
             None
         );
         let mut trailing = sharded_chain_with(|_| {});
         trailing.push(serde_json::json!({"name": "gzip"}));
         assert!(layout_error(&trailing).contains("only codec"));
-    }
-
-    #[test]
-    fn a_malformed_key_locates_nothing() {
-        let layout = fixture_layout("twin-sharded.ome.zarr", 0).unwrap();
-        let cyx = axes(&["c", "y", "x"]);
-        assert_eq!(layout.locate_inner_chunk("0/0/1", &cyx), None);
-        assert_eq!(layout.locate_inner_chunk("0/0/1/0/two/3", &cyx), None);
     }
 }

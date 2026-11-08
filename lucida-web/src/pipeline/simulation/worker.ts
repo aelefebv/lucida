@@ -1,8 +1,9 @@
 /**
  * The render worker, run in-process on a stand-in GPU device. Messages go
- * through the worker's own dispatcher, so atlas sizing, eviction, the
- * upload filters and the wanted-set report are the production code. Only
- * drawing is skipped: it touches no residency.
+ * through the worker's own dispatcher, so atlas sizing, admission, eviction,
+ * the residency reports and the wanted-set report are the production code.
+ * Only drawing is skipped. The one thing it touches that residency reads, a
+ * slice member's eviction reference, is recorded from the render message.
  *
  * Messages queue in both directions and are delivered when the harness
  * drains, which keeps the main thread and the worker as far apart as a
@@ -10,7 +11,7 @@
  */
 
 import { dispatchMessage } from "../../renderer/worker/dispatch.ts";
-import { createInitialState, type AtlasBudgets } from "../../renderer/worker/state.ts";
+import { createInitialState } from "../../renderer/worker/state.ts";
 import { createWantedSetPoster } from "../../renderer/worker/bootstrap.ts";
 import { UNTIMED } from "../../renderer/passTiming.ts";
 import { proxyDescriptorKey, type WorkerCtx } from "../../renderer/workerContext.ts";
@@ -18,8 +19,14 @@ import type {
   MainToWorkerMessage,
   MissingChunk,
   MissingProxy,
+  SliceRenderMultiPassMessage,
   WorkerToMainMessage,
 } from "../../renderer/workerProtocol.ts";
+import { setCameraUVForMember } from "../../renderer/slice/eviction.ts";
+import { memberCameraUV } from "../../renderer/slice/render.ts";
+import { INDIRECTION_FAILED } from "../../renderer/remap.ts";
+import { chunkPoolTier } from "../../renderer/poolKeys.ts";
+import type { LodIndirectionMeta } from "../../renderer/volume/atlas.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 
 /** Messages that only draw, capture or style, so the simulation answers them without a handler. */
@@ -95,8 +102,8 @@ export class SimulatedWorker {
   /** `${memberId}/${chunkKey}` → how many times the page sent that chunk, and for which tier. */
   readonly deliveries = new Map<string, { tier: ResidencyTier; count: number }>();
 
-  constructor(atlasBudgets: AtlasBudgets) {
-    const state = createInitialState(atlasBudgets);
+  constructor(gpuTotalBytes: number) {
+    const state = createInitialState(gpuTotalBytes);
     const post = (msg: WorkerToMainMessage): void => {
       this.outbox.push(msg);
     };
@@ -160,6 +167,7 @@ export class SimulatedWorker {
       while (this.inbox.length > 0) {
         const msg = this.inbox.shift()!;
         if (DRAW_ONLY.has(msg.type)) {
+          if (msg.type === "sliceRenderMultiPass") this.noteSliceCamera(msg);
           const frameSeq = (msg as { frameSeq?: number }).frameSeq;
           if (frameSeq !== undefined) this.outbox.push({ type: "frameDone", frameSeq });
           continue;
@@ -172,6 +180,49 @@ export class SimulatedWorker {
         for (const listener of [...this.listeners]) listener({ data: msg });
       }
     }
+  }
+
+  /**
+   * A slice frame moves each drawn member's eviction reference to the view
+   * center, so the simulation records it from the render message as the
+   * slice renderer does. Aggregate layers are left out.
+   */
+  private noteSliceCamera(msg: SliceRenderMultiPassMessage): void {
+    for (const layer of msg.layers) {
+      if (layer.isLabel || layer.aggregate) continue;
+      if (!this.ctx.state.memberSourcePools.has(layer.datasetId)) continue;
+      setCameraUVForMember(this.ctx.state, layer.datasetId, memberCameraUV(msg, layer));
+    }
+  }
+
+  /**
+   * Each indirection cell of one dataset's pools that the shader would draw
+   * as failed, as `member tier level L cell x,y[,z]`.
+   */
+  failedCells(datasetId: string): string[] {
+    const out: string[] = [];
+    type Pool = { datasetId: string; indirectionData: Uint32Array; entityMetas: Map<string, LodIndirectionMeta[]> };
+    const pools: Array<readonly [string, Pool, boolean]> = [
+      ...[...this.ctx.state.sliceAtlases].map(([key, atlas]) => [key, atlas, false] as const),
+      ...[...this.ctx.state.volumeAtlases].map(([key, atlas]) => [key, atlas, true] as const),
+    ];
+    for (const [poolKey, atlas, volume] of pools) {
+      if (atlas.datasetId !== datasetId) continue;
+      for (const [memberId, metas] of atlas.entityMetas) {
+        for (const meta of metas) {
+          const [gridZ, gridY, gridX] = meta.gridDims;
+          const cells = gridX * gridY * (volume ? gridZ : 1);
+          for (let i = 0; i < cells; i++) {
+            if (atlas.indirectionData[meta.offset + i] !== INDIRECTION_FAILED) continue;
+            const x = i % gridX;
+            const y = Math.floor(i / gridX) % gridY;
+            const cell = volume ? `${x},${y},${Math.floor(i / (gridX * gridY))}` : `${x},${y}`;
+            out.push(`${memberId} ${chunkPoolTier(poolKey)} level ${meta.level} cell ${cell}`);
+          }
+        }
+      }
+    }
+    return out.sort();
   }
 
   /**

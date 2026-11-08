@@ -26,7 +26,7 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
   const state = ctx.state;
   removeSliceResources(ctx, id);
   removeVolumeResources(ctx, id);
-  removeMinimapResources(id);
+  removeMinimapResources(ctx, id);
 
   const dsPools = state.proxyPoolsByDataset.get(id);
   if (dsPools) {
@@ -47,6 +47,8 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
   }
   state.currentSourcesByDataset.delete(id);
   state.coldStateByDataset.delete(id);
+  state.wantedByDataset.delete(id);
+  state.failedByDataset.delete(id);
 
   // These maps would otherwise grow for the worker's whole lifetime.
   for (const [memberId, dsId] of state.memberToDataset) {
@@ -88,6 +90,8 @@ export function handleDestroy(ctx: WorkerCtx): void {
   state.memberSourcePools.clear();
   state.targetLevelByMember.clear();
   state.currentSourcesByDataset.clear();
+  state.wantedByDataset.clear();
+  state.failedByDataset.clear();
   state.groupToTiles.clear();
   state.groupsByDataset.clear();
   releaseDeviceResources(ctx);
@@ -114,6 +118,8 @@ export function releaseDeviceResources(ctx: WorkerCtx): void {
   destroyAllSliceResources(ctx);
   destroyAllVolumeResources(ctx);
   releaseMinimapDeviceResources();
+  // The page uploads every overview again to a replacement device.
+  state.overviewsRefused.clear();
   ctx.passTimer.destroy();
   destroyAllResources();
 }

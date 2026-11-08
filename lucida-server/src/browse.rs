@@ -211,19 +211,14 @@ fn sort_entries(entries: &mut [BrowseEntry]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use std::sync::Arc;
-    use tokio::sync::{Mutex, broadcast};
 
-    use crate::session::Session;
-    use crate::{BroadcastItem, ProxyConfig};
+    use crate::ProxyConfig;
     use lucida_store::source_policy::{SourcePolicy, SourcePolicyConfig};
 
-    /// Minimal `AppState` for tests that don't need real proxy infra or
-    /// real sessions. Only the source policy is inspected by
+    /// Minimal `AppState`. Only the source policy is inspected by
     /// `browse_handler`; the proxy cache paths are never touched in browse
-    /// tests, so we hand it stub paths. Mirrors the field set in
-    /// `main::main`.
+    /// tests, so we hand it stub paths.
     fn test_state(source_policy: SourcePolicy) -> AppState {
         let proxy_config = ProxyConfig {
             cache_dir: PathBuf::from("/tmp/lucida-browse-test-proxy"),
@@ -239,11 +234,7 @@ mod tests {
             generated_disk_budget_bytes: None,
             generated_memory: crate::generated::GeneratedChunkMemory::new(1 << 20),
         };
-        let (tx, _) = broadcast::channel::<BroadcastItem>(8);
         AppState {
-            session: Arc::new(Mutex::new(Session::new())),
-            tx,
-            unicast_routes: Arc::new(Mutex::new(HashMap::new())),
             source_policy: Arc::new(source_policy),
             proxy_config,
         }

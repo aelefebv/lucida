@@ -3,6 +3,7 @@ name = "lucida-server"
 version = "0.2.0"
 edition = "2024"
 license = "MIT"
+publish = false
 
 [[bin]]
 name = "lucida-server"
@@ -26,15 +27,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 lz4_flex = "0.11"
 zstd = "0.13"
+# The gzip and zlib storage codecs, and Blosc's zlib compressor.
+flate2 = "1"
+crc32c = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry", "json"] }
 blake3 = "1"
-lru = "0.16"
-clap ={ version = "4", features = ["derive", "env"] }
-dirs = "5"
+lru = "0.19"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "7"
 num_cpus = "1"
 rand = "0.8"
-thiserror = "1"
+thiserror = "2"
 bytemuck = "1"
 async-trait = "0.1"
 # Storage backends. Pin runtime-tokio-rustls to match tokio's runtime;
@@ -64,7 +68,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # pulls the `rsa` crate (RUSTSEC-2023-0071 "Marvin", unpatched), which would add a
 # new advisory. 10.3 fixes the exp/nbf type-confusion authz bypass; APIs unchanged.
 jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
-base64 = "0.22"
+base64 = "0.23"
 urlencoding = "2"
 
 [dev-dependencies]

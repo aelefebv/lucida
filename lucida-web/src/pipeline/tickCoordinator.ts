@@ -35,6 +35,9 @@ import {
 import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
+import { admitPlans, chunkBytesFor, type Admission } from "./planning/admission.ts";
+import { gpuChunkRoomBytes, gpuSlotsFor } from "./planning/gpuCapacity.ts";
+import { pageDeviceBudgets } from "../deviceBudget.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -292,6 +295,31 @@ function displayStatesEqual(
     }
   }
   return true;
+}
+
+/**
+ * Admit each dataset's requests against what the CPU budgets and the GPU
+ * pools hold between them, as the render worker last reported its pools, in
+ * either view mode, so the wanted set the cache drives toward fits both.
+ */
+function admitDatasetPlans(
+  ctx: TickContext,
+  plans: readonly { dsId: string; requests: readonly ChunkRequest[] }[],
+): Admission[] {
+  const report = ctx.client.gpuCapacity();
+  const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
+  return admitPlans(
+    plans.map(({ dsId, requests }) => {
+      const manifest = ctx.datasets.get(dsId)!.manifest;
+      return {
+        requests,
+        bytesOf: chunkBytesFor(manifest),
+        slotOf: gpuSlotsFor(manifest, ctx.mode, ctx.scene.multi_channel(), report, gpuTotalBytes),
+      };
+    }),
+    ctx.cpuCache.tierCapacity(),
+    gpuChunkRoomBytes(report, gpuTotalBytes),
+  );
 }
 
 function emitViewerInterestHint(
@@ -795,9 +823,19 @@ export class TickCoordinator {
       desiredProxyKeysByDataset.set(datasetId, set);
     }
 
-    for (const planned of plannedDatasets) {
+    const admissions = admitDatasetPlans(
+      ctx,
+      plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
+    );
+    for (const [index, planned] of plannedDatasets.entries()) {
       const { dsId, dsSettings, entities, visibleRegion, selection } = planned;
-      const result = planned.result;
+      const admission = admissions[index];
+      const result: RequestPlan = {
+        ...planned.result,
+        requests: admission.admitted,
+        shortfall: admission.shortfall,
+        coarseLoanBytes: admission.borrowed,
+      };
       const budgetedProxyRequests = proxyRequestsByDataset.get(dsId) ?? [];
       const budgetedResult: RequestPlan = {
         ...result,
@@ -836,6 +874,7 @@ export class TickCoordinator {
           datasetId: dsId,
           activeSet: result.activeSet,
           previousActiveSet: planned.previousActiveSet,
+          requests: result.requests,
           entities,
           selection,
           visibleRegion,
@@ -871,6 +910,7 @@ export class TickCoordinator {
           ctx,
           datasetId: dsId,
           activeSet: result.activeSet,
+          requests: result.requests,
           entities,
           selection,
           multiChannel,
@@ -933,6 +973,8 @@ export class TickCoordinator {
         // `nextState` is required on RequestPlan but unused by submit();
         // forward the planner's pointer so the shape stays honest.
         nextState: result.nextState,
+        shortfall: result.shortfall,
+        coarseLoanBytes: result.coarseLoanBytes,
       });
 
 
@@ -1328,11 +1370,14 @@ export class TickCoordinator {
       desiredProxyKeysByDataset.set(datasetId, set);
     }
 
-    // Advance the fetch lifecycle once. This clears the delivery ledger,
-    // which is needed because the worker repacks its atlas indirection for
-    // the new T/Z. The active set is unchanged, so `planningState` stays.
+    // Advance the fetch lifecycle once. The delivery ledger stays: the worker
+    // reports any slot the new T/Z leaves stale. The active set is unchanged,
+    // so `planningState` stays.
     ctx.cpuCache.onPlanRebuildStart();
-    for (const p of planned) {
+    const admissions = admitDatasetPlans(ctx, planned);
+    for (const [index, scrubbed] of planned.entries()) {
+      const admission = admissions[index];
+      const p = { ...scrubbed, requests: admission.admitted };
       this.requestEpoch = scrubRequestEpoch;
       this._lastVisibleRegion.set(p.dsId, p.visibleRegion);
 
@@ -1371,6 +1416,8 @@ export class TickCoordinator {
         epochs: scrubEpochs,
         stats: p.stats,
         nextState: p.planningState,
+        shortfall: admission.shortfall,
+        coarseLoanBytes: admission.borrowed,
       });
 
       this.uploader.sendColdStateSelection({
@@ -1378,6 +1425,7 @@ export class TickCoordinator {
         datasetId: p.dsId,
         currentT: p.selection.t,
         currentZ: p.selection.z,
+        requests: p.requests,
         visibleRegion: p.visibleRegion,
         desiredProxyKeys: desiredProxyKeysByDataset.get(p.dsId) ?? new Set(),
         epochs: scrubEpochs,
