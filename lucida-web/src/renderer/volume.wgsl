@@ -174,9 +174,14 @@ fn levelTexelAt(poolIdx: u32, coord: vec3i) -> u32 {
   }
 }
 
+// A source with no pool bound behind it reads as a miss everywhere.
+fn sourceReadable(source: ChunkTierSource, slotDims: vec3u) -> bool {
+  return source.valid != 0u && slotDims.x != 0u && slotDims.y != 0u && slotDims.z != 0u;
+}
+
 fn sampleLevelVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
   let slotDims = u.levelAtlasSlotDims[source.poolIndex].xyz;
-  if (source.valid == 0u || slotDims.x == 0u || slotDims.y == 0u || slotDims.z == 0u) {
+  if (!sourceReadable(source, slotDims)) {
     return MISS;
   }
   let cell = locateCell3D(source, pos);
@@ -189,7 +194,7 @@ fn sampleLevelVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
 
 fn sampleCoarseVolume(source: ChunkTierSource, pos: vec3f) -> u32 {
   let slotDims = u.coarseAtlasSlotDims.xyz;
-  if (source.valid == 0u || slotDims.x == 0u || slotDims.y == 0u || slotDims.z == 0u) {
+  if (!sourceReadable(source, slotDims)) {
     return MISS;
   }
   let cell = locateCell3D(source, pos);
@@ -221,6 +226,12 @@ fn failedHatch(px: vec2f, pixelRatio: f32) -> vec4f {
   return vec4f(FAILED_HATCH_RGB * alpha, alpha);
 }
 
+// How far past a cell boundary a skip lands, in local [0,1] units: well
+// under one sample of any level, and far above f32 rounding at t near 1.
+const CELL_EXIT_NUDGE: f32 = 1e-5;
+// The exit distance of a cell nothing bounds.
+const NO_CELL_EXIT: f32 = 1e30;
+
 // The march step for a level: two thirds of one sample spacing along
 // its densest axis, in local [0,1] units.
 fn stepForDims(dims: vec3<u32>) -> f32 {
@@ -228,9 +239,28 @@ fn stepForDims(dims: vec3<u32>) -> f32 {
   return 1.0 / (f32(max(maxDim, 1u)) * 1.5);
 }
 
-// One ray sample: the value and the march step of the level that
-// answered. On a miss the step is the finest bound level's, so a
-// resident chunk of it is never stepped over.
+// How far along `rd` the ray at `pos` stays inside the chunk cell of
+// `source` that `pos` falls in, the cell `locateCell3D` picks. Worked in
+// the level's texel space, where the cell is an axis-aligned box.
+fn cellExitDistance(source: ChunkTierSource, pos: vec3f, rd: vec3f) -> f32 {
+  let levelDims = vec3f(source.levelDims);
+  let chunkDims = vec3f(source.chunkDims);
+  let texel = vec3f(pos.x * levelDims.x, (1.0 - pos.y) * levelDims.y, pos.z * levelDims.z);
+  let dir = vec3f(rd.x * levelDims.x, -rd.y * levelDims.y, rd.z * levelDims.z);
+  let lo = floor(clamp(floor(texel), vec3f(0.0), levelDims - 1.0) / chunkDims) * chunkDims;
+  let bound = select(lo, lo + chunkDims, dir > vec3f(0.0));
+  // An axis the ray runs parallel to never bounds the exit.
+  let along = select((bound - texel) / dir, vec3f(NO_CELL_EXIT), abs(dir) < vec3f(1e-12));
+  return max(min(min(along.x, along.y), along.z), 0.0);
+}
+
+// One ray sample: the value and how far the march may advance from it.
+// After a hit that is the answering level's step. After a miss it is at
+// least the finest bound level's step, so a resident chunk of it is never
+// stepped over, and it reaches the far side of the cells every source
+// missed in, since each sample before that would miss in the same cells.
+// A view that is still loading is mostly misses, and stepping through
+// them one sample at a time made its frames the slowest it draws.
 struct VolumeSample {
   value: u32,
   step: f32,
@@ -243,7 +273,7 @@ struct VolumeSample {
 //
 // An entity that binds no tier at all has no level dims to step by, so it
 // misses at the unit step.
-fn sampleWithFallback(pos: vec3f) -> VolumeSample {
+fn sampleWithFallback(pos: vec3f, rd: vec3f) -> VolumeSample {
   var out: VolumeSample;
   out.value = MISS;
   out.step = 1.0;
@@ -266,11 +296,24 @@ fn sampleWithFallback(pos: vec3f) -> VolumeSample {
     out.step = stepForDims(activeEntity.coarseSource.levelDims);
     return out;
   }
+  // A source that reads nothing misses everywhere, so it bounds nothing.
+  var skip = NO_CELL_EXIT;
+  for (var i = 0u; i < count; i++) {
+    let source = activeEntity.levelSources[i];
+    if (sourceReadable(source, u.levelAtlasSlotDims[source.poolIndex].xyz)) {
+      skip = min(skip, cellExitDistance(source, pos, rd));
+    }
+  }
+  if (sourceReadable(activeEntity.coarseSource, u.coarseAtlasSlotDims.xyz)) {
+    skip = min(skip, cellExitDistance(activeEntity.coarseSource, pos, rd));
+  }
   if (count != 0u) {
     out.step = stepForDims(activeEntity.levelSources[0].levelDims);
   } else {
     out.step = stepForDims(activeEntity.coarseSource.levelDims);
   }
+  // Past the boundary, so the next sample lands in the next cell.
+  out.step = max(out.step, skip + CELL_EXIT_NUDGE);
   return out;
 }
 
@@ -465,7 +508,7 @@ fn fs(input: VSOut) -> FsOut {
     for (var i = 0; i < 512; i++) {
       if (lt >= tEnd) { break; }
       let pos = ro + rd * lt;
-      let s = sampleWithFallback(pos);
+      let s = sampleWithFallback(pos, rd);
       // FAILED is no label id: the ray stops at the failed cell and draws the
       // hatch there, so missing labels never read as background.
       if (s.value == FAILED) {
@@ -519,7 +562,7 @@ fn fs(input: VSOut) -> FsOut {
 
     let pos = ro + rd * t;
 
-    let s = sampleWithFallback(pos);
+    let s = sampleWithFallback(pos, rd);
     let advance = max(s.step, minStep);
     if (s.value == FAILED) {
       crossedFailed = true;
