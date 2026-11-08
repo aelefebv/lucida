@@ -12,7 +12,7 @@ use std::io::Cursor;
 use font8x8::{BASIC_FONTS, UnicodeFonts};
 use image::{ImageFormat, Rgba, RgbaImage};
 use lucida_content::DatasetId;
-use lucida_core::camera::{Camera, Slice};
+use lucida_core::camera::Camera;
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::{ChannelSettings, Colormap, DatasetDisplaySettings};
 use lucida_core::view::ViewState;
@@ -157,24 +157,10 @@ pub fn plan_montage(
     }
 }
 
-/// A 2D slice camera framing the full `full_x × full_y` voxel extent inside
-/// `viewport` pixels (centered, zoomed so the whole image fits). zoom = 1.0 is
-/// native (1 px/voxel); fit picks the smaller per-axis ratio so nothing clips.
-fn fit_slice_camera(full_x: u64, full_y: u64, viewport: [u32; 2]) -> Slice {
-    let x = full_x.max(1) as f64;
-    let y = full_y.max(1) as f64;
-    let zoom = (viewport[0] as f64 / x)
-        .min(viewport[1] as f64 / y)
-        .max(f64::MIN_POSITIVE);
-    Slice {
-        center: [x / 2.0, y / 2.0],
-        zoom,
-        viewport,
-    }
-}
-
-/// Build the inline `SavedView` for one montage cell: a fit 2D camera at the
-/// cell's z/t/c with the dataset visible. Source URLs are left empty
+/// Build the inline `SavedView` for one montage cell: an unframed 2D camera at
+/// the cell's z/t/c with the dataset visible. The page that renders the cell
+/// fits an unframed camera to the whole dataset on its own canvas, so the
+/// montage keeps no fit math of its own. Source URLs are left empty
 /// (workspace-dataset-id form — the dataset is already open in the target
 /// workspace); the caller encodes this into a `#view=` URL.
 ///
@@ -187,13 +173,11 @@ fn fit_slice_camera(full_x: u64, full_y: u64, viewport: [u32; 2]) -> Slice {
 pub fn build_cell_view(
     ds_id: &str,
     cell: &MontageCell,
-    full_x: u64,
-    full_y: u64,
     viewport: [u32; 2],
     contrast: Option<[f64; 2]>,
 ) -> SavedView {
     let mut view = SavedView::empty(viewport);
-    view.camera = Camera::Slice(fit_slice_camera(full_x, full_y, viewport));
+    view.camera = Camera::new_2d(viewport);
     view.view = ViewState {
         z_range: cell.z..cell.z + 1,
         t: cell.t,
@@ -349,6 +333,7 @@ pub fn with_render_param(url: &str) -> String {
 mod tests {
     use super::*;
     use image::GenericImageView;
+    use lucida_core::camera::Framing;
 
     #[test]
     fn render_param_inserts_before_fragment() {
@@ -386,15 +371,10 @@ mod tests {
             tile: 0,
             label: "Z 43".into(),
         };
-        let view = build_cell_view("wds-abc", &cell, 400, 200, [256, 256], None);
-        match view.camera {
-            Camera::Slice(s) => {
-                assert_eq!(s.center, [200.0, 100.0]);
-                // fit: min(256/400, 256/200) = 0.64
-                assert!((s.zoom - 0.64).abs() < 1e-9, "zoom {}", s.zoom);
-            }
-            _ => panic!("expected 2D slice camera"),
-        }
+        let view = build_cell_view("wds-abc", &cell, [256, 256], None);
+        // The page fits the camera, so the cell asks for a slice and no pose.
+        assert!(matches!(view.camera, Camera::Slice(_)));
+        assert_eq!(view.camera.framing(), Framing::Unframed);
         assert_eq!(view.view.z_range, 42..43);
         assert_eq!(view.view.t, 3);
         assert_eq!(view.view.c, 1);
@@ -416,7 +396,7 @@ mod tests {
             tile: 0,
             label: "Z 11".into(),
         };
-        let view = build_cell_view("wds-x", &cell, 256, 256, [256, 256], Some([60.0, 196.0]));
+        let view = build_cell_view("wds-x", &cell, [256, 256], Some([60.0, 196.0]));
         let id = DatasetId("wds-x".into());
         // Auto OFF so the window is shared across all cells, not per-slice.
         assert_eq!(view.auto_contrast.get(&id), Some(&false));

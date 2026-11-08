@@ -261,6 +261,16 @@ What a workspace records for one member: which workspaces they pinned or opened
 recently, and the view they last had open.
 _Avoid_: personal view (a saved view with `personal` visibility)
 
+## Views
+
+**Framing**:
+What chose a camera's pose. A *placed* camera is one someone chose, and on
+another canvas it keeps the region it showed. A *framed* camera is the fit of
+every visible dataset, which a new canvas or new content fits again. An
+*unframed* camera is a stand-in nothing chose: the scene fits it as soon as
+there is data, and a client never persists it.
+_Avoid_: auto-fit (fitting follows the camera's state, not an event such as an open)
+
 ## Surfaces
 
 **Monitor**:

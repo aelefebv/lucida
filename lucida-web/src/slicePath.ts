@@ -1,4 +1,5 @@
 /** Slice render path: upload chunks + render multi-pass. */
+import { assertCanvasSize } from "./applyAndSend.ts";
 import { Axis } from "./axes.ts";
 import { labelFootprint } from "./renderer/labelLayout.ts";
 import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
@@ -369,7 +370,7 @@ function uploadAndRenderSlice(
   }
 
   client.resize(canvasW, canvasH);
-  client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH, planResult.epochs);
+  client.sliceRenderMultiPass(layers, currentZoom, cx, cy, canvasW, canvasH, planResult.epochs, dpr * backingScale);
   // The worker is FIFO, so every chunk posted above is written before this
   // render runs: `upload` closes here and `present` opens. Rows that opened
   // `present` at the previous frame are drawn by now and close here too.
@@ -399,7 +400,7 @@ export function tickSlice(
   const dpr = devicePixelRatio;
   const canvasW = Math.round(canvas.clientWidth * dpr);
   const canvasH = Math.round(canvas.clientHeight * dpr);
-  scene.set_viewport(canvasW, canvasH, dpr);
+  assertCanvasSize(scene, canvasW, canvasH, dpr);
 
   const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
   if (!orchResult) return false;

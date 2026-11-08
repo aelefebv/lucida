@@ -184,6 +184,8 @@ export interface PhaseOutcome {
    * A view settles without them, and this is how the run names them.
    */
   failed: string[];
+  /** The worker's indirection cells the shader draws as failed (see `SimulatedWorker.failedCells`). */
+  drawnFailed: string[];
   /** The auto-contrast fits handed out in this phase, in order. */
   fits: ContrastFitRecord[];
 }
@@ -391,10 +393,10 @@ class Simulation {
     loop.setAutoContrastListener((datasetId, channel, fit) => this.fits.push({ datasetId, channel, fit }));
 
     scene.set_viewport(deviceW, deviceH, this.dpr);
-    // The 3-D view's camera, as switching the dimension control sets it.
+    // The 3-D view's camera, as switching the dimension control sets it. The
+    // scene fitted the open, and fits the new mode's camera.
     if (mode === "volume") applyViewportCommand(scene, { type: "set_mode_arcball" });
-    scene.fit_camera_to_dataset_bounds(dataset.datasetId);
-    loop.markInteractiveDirty("auto_fit_on_open");
+    loop.markInteractiveDirty("dataset_opened");
 
     if (dataset.generated) {
       const generated = dataset.generated;
@@ -589,6 +591,7 @@ class Simulation {
         .failedWantedChunks()
         .map(({ chunk, failure }) => `${chunk}: ${failure ?? "failed with no reason given"}`)
         .sort(),
+      drawnFailed: this.worker.failedCells(this.scenario.dataset.datasetId),
       fits: this.fits.slice(fitsBefore),
     };
   }

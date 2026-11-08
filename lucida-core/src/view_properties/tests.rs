@@ -5,7 +5,7 @@
 
 use super::*;
 use crate::command::{Command, DocumentCommand, ViewportCommand};
-use crate::view_transform::{ExplorationSidecar, ViewExtent, children, default_view};
+use crate::view_transform::{ExplorationSidecar, ViewExtent, children, home_view};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Mode {
@@ -13,8 +13,7 @@ enum Mode {
     Arcball,
 }
 
-/// The opener's page: the dataset opens and the camera fits it, in whichever
-/// mode the page is in.
+/// The opener's page: the dataset opens on a page in either mode.
 fn open(f: &Fixture, vp: Viewport, dpr: u32, mode: Mode) -> Shown {
     let mut scene = Scene::new(vp.device(dpr));
     if mode == Mode::Arcball {
@@ -23,7 +22,6 @@ fn open(f: &Fixture, vp: Viewport, dpr: u32, mode: Mode) -> Shown {
     scene.apply(Command::Document(DocumentCommand::DatasetOpened(
         f.opened.clone(),
     )));
-    assert!(scene.fit_camera_to_dataset(&f.id().0));
     Shown { scene, dpr }
 }
 
@@ -74,12 +72,13 @@ fn expect_for(transform: &str) -> Expect {
 }
 
 /// The synthesized Home and its children, as `lucida dataset explore` builds
-/// them for a viewport and a page then opens them.
+/// them on a headless window the size of `vp` and a page then opens them.
 fn explore_home(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
-    let dims = f.dims();
-    let home = default_view(&f.id().0, dims, vp.css);
+    let cli = join(f, vp, 1).scene;
+    let home = home_view(&cli, &f.id(), vp.css).unwrap();
+    let extent = ViewExtent::of(&cli, &f.id()).unwrap();
     let mut out = vec![Produced::framing("home", restore(&home, f, vp, dpr))];
-    for child in children(&home, &ViewExtent::from_dims(dims)) {
+    for child in children(&home, &extent) {
         out.push(Produced {
             label: format!("home > {}", child.transform),
             shown: restore(&child.view, f, vp, dpr),
@@ -89,15 +88,13 @@ fn explore_home(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
     out
 }
 
-/// The viewer's Explore panel over its live view: the generator gets the
-/// dataset's box in the camera's own space, and the page applies the cell
-/// the user picks.
+/// The viewer's Explore panel over its live view: the generator reads the
+/// extent off the live scene, and the page applies the cell the user picks.
 fn explore_live(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
     let mut out = Vec::new();
     for mode in [Mode::Slice, Mode::Arcball] {
         let live = open(f, vp, dpr, mode);
-        let mut extent = ViewExtent::from_dims(f.dims());
-        (extent.min, extent.max) = live.scene.dataset_fit_bounds(&f.id().0).unwrap();
+        let extent = ViewExtent::of(&live.scene, &f.id()).unwrap();
         let sidecar = ExplorationSidecar::build(&capture(&live.scene), &extent, 0, Vec::new());
         out.extend(sidecar.cells.iter().map(|cell| Produced {
             label: format!("{mode:?} > {}", cell.transform),
@@ -184,13 +181,11 @@ fn joined(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
 }
 
 #[test]
-#[ignore = "a page joining an open dataset leaves the camera unframed, at zoom 1 with the origin at the canvas center"]
 fn join_frames_the_dataset() {
     assert_on_screen("join frames the dataset", &PIXEL_RATIOS, joined);
 }
 
 #[test]
-#[ignore = "a page joining an open dataset leaves the camera at zoom 1 in device pixels"]
 fn join_shows_the_same_css_size_at_any_pixel_ratio() {
     assert_same_css_size("join shows the same CSS size", joined);
 }
@@ -231,18 +226,33 @@ fn restore_frames_a_slice_view_at_another_pixel_ratio() {
     );
 }
 
-/// A view fitted to a canvas of another shape keeps the whole region it
-/// showed, so the dataset it framed stays in view however small that leaves it.
+/// The opener's view after a person nudged it by a pixel, which makes it
+/// theirs rather than the fit.
+fn nudged(f: &Fixture, vp: Viewport, dpr: u32, mode: Mode) -> Shown {
+    let mut shown = open(f, vp, dpr, mode);
+    let nudge = match mode {
+        Mode::Slice => ViewportCommand::Pan { dx: 1.0, dy: 0.0 },
+        Mode::Arcball => ViewportCommand::Pan3D { dx: 1.0, dy: 0.0 },
+    };
+    shown.scene.apply(nudge.into());
+    assert_eq!(shown.scene.camera.framing(), crate::camera::Framing::Placed);
+    shown
+}
+
+/// A view someone placed keeps the whole region it showed on a canvas of
+/// another shape, so the dataset it framed stays in view however small that
+/// leaves it.
 #[test]
-fn restore_keeps_a_view_in_view_on_another_canvas_shape() {
+fn restore_keeps_a_placed_view_in_view_on_another_canvas_shape() {
     assert_on_screen(
-        "restore keeps a view in view on another canvas shape",
+        "restore keeps a placed view in view on another canvas shape",
         &PIXEL_RATIOS,
         |f, vp, dpr| {
             [Mode::Slice, Mode::Arcball]
                 .map(|mode| Produced {
+                    label: format!("{mode:?} placed on {} {dpr}x", other(vp).name),
+                    shown: restore(&capture(&nudged(f, other(vp), dpr, mode).scene), f, vp, dpr),
                     expect: Expect::Inside,
-                    ..restored(f, mode, other(vp), dpr, vp, dpr)
                 })
                 .into()
         },
@@ -250,7 +260,6 @@ fn restore_keeps_a_view_in_view_on_another_canvas_shape() {
 }
 
 #[test]
-#[ignore = "a restored view keeps the whole region it showed, so a dataset that spans a portrait canvas's width shows small on a landscape one, and a tall one the other way round; filling the canvas needs the restore to know the view framed the dataset"]
 fn restore_frames_a_view_on_another_canvas_shape() {
     assert_on_screen(
         "restore frames a view on another canvas shape",
@@ -301,7 +310,6 @@ fn restore_plans_what_is_visible() {
 }
 
 #[test]
-#[ignore = "switching to 3D starts from a fixed arcball that clips the dataset or leaves it small"]
 fn switching_to_3d_frames_the_dataset() {
     assert_on_screen(
         "switching to 3D frames the dataset",
@@ -316,7 +324,6 @@ fn switching_to_3d_frames_the_dataset() {
 }
 
 #[test]
-#[ignore = "switching to 2D starts from a fixed slice camera at zoom 1 with the origin at the canvas center"]
 fn switching_to_2d_frames_the_dataset() {
     assert_on_screen(
         "switching to 2D frames the dataset",
@@ -341,7 +348,6 @@ fn switching_to_3d_shows_the_same_css_size_at_any_pixel_ratio() {
 }
 
 #[test]
-#[ignore = "switching to 2D starts from a slice camera at zoom 1 in device pixels"]
 fn switching_to_2d_shows_the_same_css_size_at_any_pixel_ratio() {
     assert_same_css_size("switching to 2D shows the same CSS size", |f, vp, dpr| {
         vec![Produced::framing(
@@ -362,13 +368,11 @@ fn switching_plans_what_is_visible() {
 }
 
 #[test]
-#[ignore = "the synthesized explore Home frames the first image's voxel box: a volume's 3D Home points at empty space and a collection's frames one tile"]
 fn explore_home_frames_the_dataset_on_a_1x_canvas() {
     assert_on_screen("explore Home frames the dataset at 1x", &[1], explore_home);
 }
 
 #[test]
-#[ignore = "the synthesized explore Home frames the first image's voxel box, as it does at 1x"]
 fn explore_home_frames_the_dataset_on_a_2x_canvas() {
     assert_on_screen("explore Home frames the dataset at 2x", &[2], explore_home);
 }

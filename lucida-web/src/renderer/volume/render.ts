@@ -194,6 +194,7 @@ export async function handleVolumeRenderMultiPass(
 
   const timing = ctx.passTimer;
   timing.beginFrame();
+  renderer.setPixelRatio(msg.pixelRatio ?? 1);
 
   for (const layer of msg.layers) {
     const memberId = layer.datasetId;
