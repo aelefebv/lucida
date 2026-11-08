@@ -1,34 +1,90 @@
-//! Storage-codec types and import-time codec-chain validation.
+//! The codec registry: every storage codec lucida decodes, looked up by the
+//! names Zarr v3 and numcodecs give it, and the chain a level's metadata
+//! declares, validated once at import.
 //!
-//! The decompression lives in [`lucida_server::decode`], because it needs
-//! `zstd`, `lz4_flex`, and Blosc1, which `lucida-store` deliberately does
-//! not depend on. These types are pure data that travel through
-//! `ImageBindingSeed`. [`parse_codec_chain`] accepts `[bytes(little)]` or
-//! `[bytes(little), compressor]` and rejects anything else with a
-//! [`StoreError::Metadata`] that names the offending value.
+//! The decoding lives in [`lucida_server::decode`], because it needs `zstd`,
+//! `lz4_flex`, and deflate, which `lucida-store` deliberately does not depend
+//! on. These types are pure data that travel through `ImageBindingSeed`.
+//! [`parse_codec_chain`] refuses a codec missing from [`REGISTRY`], or a chain
+//! out of the order Zarr v3 fixes, with a [`StoreError::Metadata`] that names
+//! the offending value.
 
 use serde::{Deserialize, Serialize};
 
 use crate::backend::StoreError;
 
-/// What storage compression an image uses (detected at import from the codec
-/// chain). Pinned-axis byte slicing is handled separately via
-/// [`crate::layout::ChunkByteLayout`]; this enum only describes how to turn
-/// the on-disk bytes back into raw voxel bytes.
-///
-/// `Blosc` carries a validated [`BloscConfig`] so the decoder can cross-check
-/// the on-disk header (typesize, shuffle, compressor code) against what the
-/// codec chain promised.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// How a level's stored chunk bytes decode back to the bytes the wire
+/// carries: samples in little-endian byte order, in C order over the array's
+/// own axes. Pinned-axis byte slicing happens after, through
+/// [`crate::layout::ChunkByteLayout`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StorageCompression {
+    /// The stored bytes already are the wire's.
     None,
-    Lz4,
-    Zstd,
-    Blosc(BloscConfig),
+    /// A codec chain to undo, last codec first.
+    Codecs(CodecChain),
 }
 
-/// Subset of the Blosc1 configuration we accept. Matches what
-/// [`lucida_server::decode::blosc::decode_blosc`] can decompress.
+impl StorageCompression {
+    /// Little-endian samples of `sample_size` bytes behind one
+    /// bytes-to-bytes codec: the `[bytes, compressor]` chain most writers
+    /// emit.
+    pub fn compressed(codec: BytesCodec, sample_size: u8) -> Self {
+        StorageCompression::Codecs(CodecChain {
+            array_to_array: Vec::new(),
+            byte_order: ByteOrder::Little,
+            sample_size,
+            bytes_to_bytes: vec![codec],
+        })
+    }
+}
+
+/// A Zarr v3 codec chain in the order it was applied when the chunk was
+/// written: array-to-array codecs, the one array-to-bytes codec, then
+/// bytes-to-bytes codecs. Decoding runs it backwards.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CodecChain {
+    pub array_to_array: Vec<ArrayCodec>,
+    /// The byte order the `bytes` codec wrote each sample in.
+    pub byte_order: ByteOrder,
+    /// Bytes per sample, the unit a byte swap and a transpose move.
+    pub sample_size: u8,
+    pub bytes_to_bytes: Vec<BytesCodec>,
+}
+
+/// An array-to-array codec.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArrayCodec {
+    /// Axis `i` of the encoded array is axis `order[i]` of the array it
+    /// encodes.
+    Transpose(Vec<usize>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ByteOrder {
+    Little,
+    Big,
+}
+
+/// A bytes-to-bytes codec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BytesCodec {
+    /// An RFC 1952 gzip stream.
+    Gzip,
+    /// An RFC 1950 zlib stream.
+    Zlib,
+    /// A zstd stream of one or more frames.
+    Zstd,
+    /// An lz4 block behind its decoded length as a little-endian `u32`, as
+    /// numcodecs writes it.
+    Lz4,
+    Blosc(BloscConfig),
+    /// A crc32c checksum of the bytes, as a little-endian `u32` after them.
+    Crc32c,
+}
+
+/// The Blosc1 configuration a codec chain declares. The decoder checks each
+/// chunk's own header against it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BloscConfig {
     pub typesize: u8,
@@ -36,10 +92,28 @@ pub struct BloscConfig {
     pub shuffle: BloscShuffle,
 }
 
-/// Inner compressor for Blosc1. Today only `zstd` is supported.
+/// The compressor inside Blosc1. Snappy is the one Blosc1 offers that
+/// lucida does not decode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BloscCompressor {
+    BloscLz,
+    Lz4,
+    Lz4hc,
+    Zlib,
     Zstd,
+}
+
+impl BloscCompressor {
+    /// The format code a Blosc1 header carries for this compressor. `lz4`
+    /// and `lz4hc` write one format.
+    pub fn format_code(self) -> u8 {
+        match self {
+            BloscCompressor::BloscLz => 0,
+            BloscCompressor::Lz4 | BloscCompressor::Lz4hc => 1,
+            BloscCompressor::Zlib => 3,
+            BloscCompressor::Zstd => 4,
+        }
+    }
 }
 
 /// Blosc1 shuffle filter. Matches the Blosc1 header flag bits we recognize.
@@ -50,135 +124,285 @@ pub enum BloscShuffle {
     Bit,
 }
 
-/// Validate a Zarr v3 codec chain and return the corresponding
-/// [`StorageCompression`].
+/// What a level's chunks hold, which the codec configurations are checked
+/// against.
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkSpec {
+    /// Bytes per sample of the array's data type.
+    pub sample_size: u8,
+    /// How many axes the chunk has.
+    pub ndim: usize,
+}
+
+/// Where a codec sits in a chain.
+enum Stage {
+    ArrayToArray(ArrayCodec),
+    ArrayToBytes(ByteOrder),
+    BytesToBytes(BytesCodec),
+}
+
+type ParseCodec = fn(Option<&serde_json::Value>, ChunkSpec) -> Result<Stage, StoreError>;
+
+/// Every codec lucida decodes, under each name Zarr v3 or numcodecs gives it.
+/// Zarr v2 compressors and filters reach it by their numcodecs `id`. A name
+/// missing here is refused at import as an unsupported codec.
+const REGISTRY: &[(&str, ParseCodec)] = &[
+    ("transpose", parse_transpose),
+    ("bytes", parse_bytes),
+    ("gzip", |_, _| Ok(Stage::BytesToBytes(BytesCodec::Gzip))),
+    ("numcodecs.gzip", |_, _| {
+        Ok(Stage::BytesToBytes(BytesCodec::Gzip))
+    }),
+    ("zlib", |_, _| Ok(Stage::BytesToBytes(BytesCodec::Zlib))),
+    ("numcodecs.zlib", |_, _| {
+        Ok(Stage::BytesToBytes(BytesCodec::Zlib))
+    }),
+    ("zstd", |_, _| Ok(Stage::BytesToBytes(BytesCodec::Zstd))),
+    ("numcodecs.zstd", |_, _| {
+        Ok(Stage::BytesToBytes(BytesCodec::Zstd))
+    }),
+    ("numcodecs/zstd", |_, _| {
+        Ok(Stage::BytesToBytes(BytesCodec::Zstd))
+    }),
+    ("lz4", |_, _| Ok(Stage::BytesToBytes(BytesCodec::Lz4))),
+    ("numcodecs.lz4", |_, _| {
+        Ok(Stage::BytesToBytes(BytesCodec::Lz4))
+    }),
+    ("numcodecs/lz4", |_, _| {
+        Ok(Stage::BytesToBytes(BytesCodec::Lz4))
+    }),
+    ("blosc", parse_blosc),
+    ("numcodecs.blosc", parse_blosc),
+    ("crc32c", parse_crc32c),
+    ("numcodecs.crc32c", parse_crc32c),
+];
+
+/// The codec name Zarr v3 gives the sharding codec, which
+/// [`crate::shard::ShardLayout`] reads before this chain is parsed.
+const SHARDING_CODEC: &str = "sharding_indexed";
+
+fn registered_names() -> String {
+    REGISTRY
+        .iter()
+        .map(|(name, _)| *name)
+        .filter(|name| !name.contains(['.', '/']))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Validate a Zarr v3 codec chain against [`REGISTRY`] and the order Zarr v3
+/// fixes: any array-to-array codecs, exactly one array-to-bytes codec, then
+/// any bytes-to-bytes codecs.
 ///
-/// Rules (see module docs for context):
-/// - **Length 1**: must be `[bytes]` with `endian: "little"` →
-///   [`StorageCompression::None`].
-/// - **Length 2**: must be `[bytes(little), <compressor>]`. The compressor is
-///   one of `lz4` / `numcodecs/lz4` / `zstd` / `numcodecs/zstd` / `blosc` with
-///   a validated config.
-/// - All other shapes are rejected with a [`StoreError::Metadata`] whose
-///   message contains the offending value verbatim.
-pub fn parse_codec_chain(codecs: &[serde_json::Value]) -> Result<StorageCompression, StoreError> {
-    if codecs.is_empty() {
-        return Err(StoreError::unsupported_codec(
-            "storage codec chain is empty (expected [bytes] or [bytes, compressor])",
-        ));
-    }
-    if codecs.len() > 2 {
-        return Err(StoreError::unsupported_codec(format!(
-            "storage codec chain too long: got {} codecs (expected 1 or 2)",
-            codecs.len(),
-        )));
-    }
-
-    // First codec must be `bytes` with `endian: "little"`.
-    let first = &codecs[0];
-    let first_name = first.get("name").and_then(|n| n.as_str()).ok_or_else(|| {
-        StoreError::unsupported_codec("first storage codec missing 'name' field (expected 'bytes')")
-    })?;
-    if first_name != "bytes" {
-        return Err(StoreError::unsupported_codec(format!(
-            "first storage codec must be 'bytes', got '{first_name}'",
-        )));
-    }
-    let first_config = first.get("configuration").ok_or_else(|| {
-        StoreError::unsupported_codec(
-            "bytes codec missing 'configuration' object (need endian: little)",
-        )
-    })?;
-    let endian = first_config
-        .get("endian")
-        .and_then(|e| e.as_str())
-        .ok_or_else(|| {
-            StoreError::unsupported_codec("bytes codec missing 'endian' configuration")
+/// A chain that changes nothing, `[bytes]` over little-endian or one-byte
+/// samples, is [`StorageCompression::None`], as is an identity transpose
+/// in it.
+pub fn parse_codec_chain(
+    codecs: &[serde_json::Value],
+    spec: ChunkSpec,
+) -> Result<StorageCompression, StoreError> {
+    let mut array_to_array = Vec::new();
+    let mut byte_order = None;
+    let mut bytes_to_bytes = Vec::new();
+    for (index, codec) in codecs.iter().enumerate() {
+        let name = codec.get("name").and_then(|n| n.as_str()).ok_or_else(|| {
+            StoreError::unsupported_codec(format!("storage codec {index} has no 'name' field"))
         })?;
-    if endian != "little" {
-        return Err(StoreError::unsupported_codec(format!(
-            "bytes codec endian must be 'little', got '{endian}'",
-        )));
+        if name == SHARDING_CODEC {
+            return Err(StoreError::unsupported_codec(format!(
+                "the {SHARDING_CODEC} codec is read only as the first and only codec of a level's chain",
+            )));
+        }
+        let Some((_, parse)) = REGISTRY.iter().find(|(known, _)| *known == name) else {
+            return Err(StoreError::unsupported_codec(format!(
+                "unsupported codec '{name}' in storage chain (supported: {})",
+                registered_names(),
+            )));
+        };
+        let stage = parse(codec.get("configuration"), spec)
+            .map_err(|e| e.in_context(format!("{name} codec")))?;
+        match stage {
+            Stage::ArrayToArray(codec) if byte_order.is_none() => array_to_array.push(codec),
+            Stage::ArrayToBytes(order) if byte_order.is_none() => byte_order = Some(order),
+            Stage::BytesToBytes(codec) if byte_order.is_some() => bytes_to_bytes.push(codec),
+            Stage::ArrayToArray(_) | Stage::ArrayToBytes(_) => {
+                return Err(StoreError::unsupported_codec(format!(
+                    "codec '{name}' comes after the array-to-bytes codec; the chain is out of order",
+                )));
+            }
+            Stage::BytesToBytes(_) => {
+                return Err(StoreError::unsupported_codec(format!(
+                    "codec '{name}' comes before the array-to-bytes codec (expected 'bytes' first)",
+                )));
+            }
+        }
     }
-
-    if codecs.len() == 1 {
+    let Some(mut byte_order) = byte_order else {
+        return Err(StoreError::unsupported_codec(
+            "storage codec chain has no array-to-bytes codec (expected 'bytes')",
+        ));
+    };
+    if spec.sample_size == 1 {
+        byte_order = ByteOrder::Little;
+    }
+    array_to_array.retain(|codec| match codec {
+        ArrayCodec::Transpose(order) => order.iter().enumerate().any(|(i, &axis)| i != axis),
+    });
+    if array_to_array.is_empty() && byte_order == ByteOrder::Little && bytes_to_bytes.is_empty() {
         return Ok(StorageCompression::None);
     }
+    Ok(StorageCompression::Codecs(CodecChain {
+        array_to_array,
+        byte_order,
+        sample_size: spec.sample_size,
+        bytes_to_bytes,
+    }))
+}
 
-    // Second codec is a compressor.
-    let second = &codecs[1];
-    let second_name = second.get("name").and_then(|n| n.as_str()).ok_or_else(|| {
-        StoreError::unsupported_codec(
-            "second storage codec missing 'name' field (expected lz4/zstd/blosc)",
-        )
-    })?;
-    match second_name {
-        "lz4" | "numcodecs/lz4" => Ok(StorageCompression::Lz4),
-        "zstd" | "numcodecs/zstd" => Ok(StorageCompression::Zstd),
-        "blosc" => {
-            let cfg = second.get("configuration").ok_or_else(|| {
-                StoreError::unsupported_codec(
-                    "blosc codec missing 'configuration' object (need cname/shuffle/typesize)",
-                )
-            })?;
-            let blosc = parse_blosc_config(cfg)?;
-            Ok(StorageCompression::Blosc(blosc))
+fn parse_bytes(config: Option<&serde_json::Value>, spec: ChunkSpec) -> Result<Stage, StoreError> {
+    let endian = config.and_then(|c| c.get("endian"));
+    let order = match endian.map(|e| e.as_str()) {
+        Some(Some("little")) => ByteOrder::Little,
+        Some(Some("big")) => ByteOrder::Big,
+        // One-byte samples have no byte order, and writers omit it there.
+        None if spec.sample_size == 1 => ByteOrder::Little,
+        None => {
+            return Err(StoreError::unsupported_codec(format!(
+                "missing 'endian' configuration for {}-byte samples",
+                spec.sample_size,
+            )));
         }
-        other => Err(StoreError::unsupported_codec(format!(
-            "unsupported codec '{other}' in storage chain (supported: lz4, zstd, blosc)",
+        Some(_) => {
+            return Err(StoreError::unsupported_codec(format!(
+                "endian {} not supported (use little or big)",
+                endian.map(|e| e.to_string()).unwrap_or_default(),
+            )));
+        }
+    };
+    Ok(Stage::ArrayToBytes(order))
+}
+
+fn parse_transpose(
+    config: Option<&serde_json::Value>,
+    spec: ChunkSpec,
+) -> Result<Stage, StoreError> {
+    let order = config.and_then(|c| c.get("order")).ok_or_else(|| {
+        StoreError::unsupported_codec("configuration missing 'order' (a permutation of the axes)")
+    })?;
+    let order: Vec<usize> = match order {
+        // Early Zarr v3 drafts named the two memory orders.
+        serde_json::Value::String(s) if s == "C" => (0..spec.ndim).collect(),
+        serde_json::Value::String(s) if s == "F" => (0..spec.ndim).rev().collect(),
+        serde_json::Value::Array(axes) => axes
+            .iter()
+            .map(|axis| axis.as_u64().and_then(|a| usize::try_from(a).ok()))
+            .collect::<Option<_>>()
+            .ok_or_else(|| {
+                StoreError::unsupported_codec(format!(
+                    "order {order} is not a list of axis indices"
+                ))
+            })?,
+        other => {
+            return Err(StoreError::unsupported_codec(format!(
+                "order {other} is not a list of axis indices"
+            )));
+        }
+    };
+    let mut seen = vec![false; spec.ndim];
+    let is_permutation = order.len() == spec.ndim
+        && order
+            .iter()
+            .all(|&axis| axis < spec.ndim && !std::mem::replace(&mut seen[axis], true));
+    if !is_permutation {
+        return Err(StoreError::unsupported_codec(format!(
+            "order {order:?} is not a permutation of the array's {} axes",
+            spec.ndim,
+        )));
+    }
+    Ok(Stage::ArrayToArray(ArrayCodec::Transpose(order)))
+}
+
+fn parse_crc32c(config: Option<&serde_json::Value>, _: ChunkSpec) -> Result<Stage, StoreError> {
+    // numcodecs can put its checksum in front; Zarr v3 and numcodecs'
+    // default put it after.
+    match config.and_then(|c| c.get("location")).map(|l| l.as_str()) {
+        None | Some(Some("end")) => Ok(Stage::BytesToBytes(BytesCodec::Crc32c)),
+        Some(other) => Err(StoreError::unsupported_codec(format!(
+            "location {} not supported (only 'end')",
+            other.unwrap_or("?"),
         ))),
     }
 }
 
-/// Validate a blosc codec's `configuration` object against the supported
-/// subset. Each error message includes the offending value verbatim so the
-/// caller can find it in their OME-Zarr metadata.
-fn parse_blosc_config(cfg: &serde_json::Value) -> Result<BloscConfig, StoreError> {
-    let cname = cfg.get("cname").and_then(|c| c.as_str()).ok_or_else(|| {
-        StoreError::unsupported_codec("blosc configuration missing 'cname' field")
+/// Accepts both the Zarr v3 configuration, with `shuffle` named and
+/// `typesize` given, and the numcodecs one, with `shuffle` as an integer and
+/// the typesize left to the sample size.
+fn parse_blosc(config: Option<&serde_json::Value>, spec: ChunkSpec) -> Result<Stage, StoreError> {
+    let cfg = config.ok_or_else(|| {
+        StoreError::unsupported_codec("missing 'configuration' object (need cname and shuffle)")
     })?;
-    let shuffle_str = cfg.get("shuffle").and_then(|s| s.as_str()).ok_or_else(|| {
-        StoreError::unsupported_codec("blosc configuration missing 'shuffle' field")
-    })?;
-    let typesize_raw = cfg
-        .get("typesize")
-        .and_then(|t| t.as_u64())
-        .ok_or_else(|| {
-            StoreError::unsupported_codec("blosc configuration missing 'typesize' field")
-        })?;
-
+    let cname = cfg
+        .get("cname")
+        .and_then(|c| c.as_str())
+        .ok_or_else(|| StoreError::unsupported_codec("configuration missing 'cname' field"))?;
     let cname = match cname {
+        "blosclz" => BloscCompressor::BloscLz,
+        "lz4" => BloscCompressor::Lz4,
+        "lz4hc" => BloscCompressor::Lz4hc,
+        "zlib" => BloscCompressor::Zlib,
         "zstd" => BloscCompressor::Zstd,
         other => {
             return Err(StoreError::unsupported_codec(format!(
-                "blosc cname '{other}' not supported (only 'zstd')",
+                "cname '{other}' not supported (use blosclz, lz4, lz4hc, zlib, or zstd)",
             )));
         }
     };
-    let shuffle = match shuffle_str {
-        "noshuffle" => BloscShuffle::None,
-        "shuffle" => BloscShuffle::Byte,
-        "bitshuffle" => BloscShuffle::Bit,
-        other => {
-            return Err(StoreError::unsupported_codec(format!(
-                "blosc shuffle '{other}' not supported (use noshuffle, shuffle, or bitshuffle)",
-            )));
-        }
+    let typesize = match cfg.get("typesize") {
+        None | Some(serde_json::Value::Null) => spec.sample_size,
+        Some(value) => match value.as_u64() {
+            Some(t @ 1..=255) => t as u8,
+            _ => {
+                return Err(StoreError::unsupported_codec(format!(
+                    "typesize {value} not supported (1 to 255)",
+                )));
+            }
+        },
     };
-    let typesize = match typesize_raw {
-        1 | 2 | 4 => typesize_raw as u8,
-        other => {
-            return Err(StoreError::unsupported_codec(format!(
-                "blosc typesize {other} not supported (only 1, 2, or 4)",
-            )));
+    let shuffle = match cfg.get("shuffle") {
+        None => {
+            return Err(StoreError::unsupported_codec(
+                "configuration missing 'shuffle' field",
+            ));
         }
+        Some(serde_json::Value::String(s)) => match s.as_str() {
+            "noshuffle" => BloscShuffle::None,
+            "shuffle" => BloscShuffle::Byte,
+            "bitshuffle" => BloscShuffle::Bit,
+            other => {
+                return Err(StoreError::unsupported_codec(format!(
+                    "shuffle '{other}' not supported (use noshuffle, shuffle, or bitshuffle)",
+                )));
+            }
+        },
+        Some(value) => match value.as_i64() {
+            Some(0) => BloscShuffle::None,
+            Some(1) => BloscShuffle::Byte,
+            Some(2) => BloscShuffle::Bit,
+            // numcodecs' automatic choice, made from the sample size.
+            Some(-1) if typesize == 1 => BloscShuffle::Bit,
+            Some(-1) => BloscShuffle::Byte,
+            _ => {
+                return Err(StoreError::unsupported_codec(format!(
+                    "shuffle {value} not supported (use 0, 1, 2, or -1)",
+                )));
+            }
+        },
     };
-
-    Ok(BloscConfig {
+    Ok(Stage::BytesToBytes(BytesCodec::Blosc(BloscConfig {
         typesize,
         cname,
         shuffle,
-    })
+    })))
 }
 
 #[cfg(test)]
@@ -186,235 +410,276 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    const U16_2D: ChunkSpec = ChunkSpec {
+        sample_size: 2,
+        ndim: 2,
+    };
+
     fn bytes_little() -> serde_json::Value {
         json!({"name": "bytes", "configuration": {"endian": "little"}})
     }
 
-    #[test]
-    fn accepts_bytes_only_as_none() {
-        let chain = vec![bytes_little()];
-        assert_eq!(parse_codec_chain(&chain).unwrap(), StorageCompression::None);
+    fn parse(chain: &[serde_json::Value]) -> Result<StorageCompression, StoreError> {
+        parse_codec_chain(chain, U16_2D)
     }
 
-    #[test]
-    fn accepts_lz4() {
-        let chain = vec![bytes_little(), json!({"name": "lz4"})];
-        assert_eq!(parse_codec_chain(&chain).unwrap(), StorageCompression::Lz4);
+    fn chain(compression: StorageCompression) -> CodecChain {
+        match compression {
+            StorageCompression::Codecs(chain) => chain,
+            StorageCompression::None => panic!("expected a codec chain"),
+        }
     }
 
-    #[test]
-    fn accepts_numcodecs_lz4() {
-        let chain = vec![bytes_little(), json!({"name": "numcodecs/lz4"})];
-        assert_eq!(parse_codec_chain(&chain).unwrap(), StorageCompression::Lz4);
-    }
-
-    #[test]
-    fn accepts_zstd() {
-        let chain = vec![bytes_little(), json!({"name": "zstd"})];
-        assert_eq!(parse_codec_chain(&chain).unwrap(), StorageCompression::Zstd);
-    }
-
-    #[test]
-    fn accepts_numcodecs_zstd() {
-        let chain = vec![bytes_little(), json!({"name": "numcodecs/zstd"})];
-        assert_eq!(parse_codec_chain(&chain).unwrap(), StorageCompression::Zstd);
-    }
-
-    #[test]
-    fn accepts_blosc_zstd_noshuffle_typesize_1() {
-        let chain = vec![
-            bytes_little(),
-            json!({
-                "name": "blosc",
-                "configuration": {
-                    "cname": "zstd",
-                    "shuffle": "noshuffle",
-                    "typesize": 1
+    fn error(chain: &[serde_json::Value]) -> String {
+        let err = parse(chain).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                StoreError::Metadata {
+                    fault: crate::backend::MetadataFault::UnsupportedCodec,
+                    ..
                 }
-            }),
-        ];
-        let result = parse_codec_chain(&chain).unwrap();
-        match result {
-            StorageCompression::Blosc(cfg) => {
-                assert_eq!(cfg.cname, BloscCompressor::Zstd);
-                assert_eq!(cfg.shuffle, BloscShuffle::None);
-                assert_eq!(cfg.typesize, 1);
-            }
-            other => panic!("expected Blosc, got {other:?}"),
+            ),
+            "{err}"
+        );
+        err.to_string()
+    }
+
+    #[test]
+    fn bytes_alone_changes_nothing() {
+        assert_eq!(parse(&[bytes_little()]).unwrap(), StorageCompression::None);
+    }
+
+    #[test]
+    fn one_byte_samples_need_no_byte_order() {
+        let spec = ChunkSpec {
+            sample_size: 1,
+            ndim: 2,
+        };
+        for bytes in [
+            json!({"name": "bytes"}),
+            json!({"name": "bytes", "configuration": {"endian": "big"}}),
+        ] {
+            assert_eq!(
+                parse_codec_chain(&[bytes], spec).unwrap(),
+                StorageCompression::None
+            );
         }
     }
 
     #[test]
-    fn accepts_blosc_zstd_byteshuffle_typesize_2() {
-        let chain = vec![
-            bytes_little(),
-            json!({
-                "name": "blosc",
-                "configuration": {
-                    "cname": "zstd",
-                    "shuffle": "shuffle",
-                    "typesize": 2
-                }
-            }),
-        ];
-        let result = parse_codec_chain(&chain).unwrap();
-        match result {
-            StorageCompression::Blosc(cfg) => {
-                assert_eq!(cfg.cname, BloscCompressor::Zstd);
-                assert_eq!(cfg.shuffle, BloscShuffle::Byte);
-                assert_eq!(cfg.typesize, 2);
-            }
-            other => panic!("expected Blosc, got {other:?}"),
+    fn every_registered_compressor_parses_after_bytes() {
+        for (name, expected) in [
+            ("gzip", BytesCodec::Gzip),
+            ("zlib", BytesCodec::Zlib),
+            ("zstd", BytesCodec::Zstd),
+            ("numcodecs/zstd", BytesCodec::Zstd),
+            ("lz4", BytesCodec::Lz4),
+            ("numcodecs.lz4", BytesCodec::Lz4),
+            ("crc32c", BytesCodec::Crc32c),
+        ] {
+            let parsed = chain(parse(&[bytes_little(), json!({"name": name})]).unwrap());
+            assert_eq!(parsed.bytes_to_bytes, vec![expected], "{name}");
         }
     }
 
     #[test]
-    fn accepts_blosc_zstd_bitshuffle_typesize_4() {
-        let chain = vec![
+    fn a_long_chain_keeps_its_order() {
+        let parsed = chain(
+            parse(&[
+                json!({"name": "transpose", "configuration": {"order": [1, 0]}}),
+                json!({"name": "bytes", "configuration": {"endian": "big"}}),
+                json!({"name": "gzip", "configuration": {"level": 5}}),
+                json!({"name": "crc32c"}),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(
+            parsed.array_to_array,
+            vec![ArrayCodec::Transpose(vec![1, 0])]
+        );
+        assert_eq!(parsed.byte_order, ByteOrder::Big);
+        assert_eq!(parsed.sample_size, 2);
+        assert_eq!(
+            parsed.bytes_to_bytes,
+            vec![BytesCodec::Gzip, BytesCodec::Crc32c]
+        );
+    }
+
+    #[test]
+    fn an_identity_transpose_is_dropped() {
+        let chain = [
+            json!({"name": "transpose", "configuration": {"order": [0, 1]}}),
             bytes_little(),
-            json!({
-                "name": "blosc",
-                "configuration": {
-                    "cname": "zstd",
-                    "shuffle": "bitshuffle",
-                    "typesize": 4,
-                    "blocksize": 0,
-                    "clevel": 3
-                }
-            }),
         ];
-        let result = parse_codec_chain(&chain).unwrap();
-        match result {
-            StorageCompression::Blosc(cfg) => {
-                assert_eq!(cfg.cname, BloscCompressor::Zstd);
-                assert_eq!(cfg.shuffle, BloscShuffle::Bit);
-                assert_eq!(cfg.typesize, 4);
-            }
-            other => panic!("expected Blosc, got {other:?}"),
+        assert_eq!(parse(&chain).unwrap(), StorageCompression::None);
+    }
+
+    #[test]
+    fn the_memory_order_names_are_transposes() {
+        let f = json!({"name": "transpose", "configuration": {"order": "F"}});
+        let parsed = chain(parse(&[f, bytes_little()]).unwrap());
+        assert_eq!(
+            parsed.array_to_array,
+            vec![ArrayCodec::Transpose(vec![1, 0])]
+        );
+    }
+
+    #[test]
+    fn blosc_takes_the_zarr_v3_configuration() {
+        let parsed = chain(
+            parse(&[
+                bytes_little(),
+                json!({"name": "blosc", "configuration": {
+                    "cname": "lz4", "clevel": 5, "shuffle": "bitshuffle", "typesize": 2, "blocksize": 0
+                }}),
+            ])
+            .unwrap(),
+        );
+        assert_eq!(
+            parsed.bytes_to_bytes,
+            vec![BytesCodec::Blosc(BloscConfig {
+                typesize: 2,
+                cname: BloscCompressor::Lz4,
+                shuffle: BloscShuffle::Bit,
+            })]
+        );
+    }
+
+    #[test]
+    fn blosc_takes_the_numcodecs_configuration() {
+        for (shuffle, sample_size, expected) in [
+            (0, 2, BloscShuffle::None),
+            (1, 2, BloscShuffle::Byte),
+            (2, 2, BloscShuffle::Bit),
+            (-1, 2, BloscShuffle::Byte),
+            (-1, 1, BloscShuffle::Bit),
+        ] {
+            let spec = ChunkSpec {
+                sample_size,
+                ndim: 2,
+            };
+            let parsed = parse_codec_chain(
+                &[
+                    json!({"name": "bytes", "configuration": {"endian": "little"}}),
+                    json!({"name": "blosc", "configuration": {"cname": "blosclz", "clevel": 5, "shuffle": shuffle}}),
+                ],
+                spec,
+            )
+            .unwrap();
+            assert_eq!(
+                chain(parsed).bytes_to_bytes,
+                vec![BytesCodec::Blosc(BloscConfig {
+                    typesize: sample_size,
+                    cname: BloscCompressor::BloscLz,
+                    shuffle: expected,
+                })],
+                "shuffle {shuffle} over {sample_size}-byte samples",
+            );
         }
     }
 
-    // Reject matrix: each test asserts the error message contains the
-    // verbatim offending value so the operator can grep their metadata.
+    // Each refusal names the value that caused it, so the operator can find
+    // it in their metadata.
     #[test]
-    fn rejects_empty_chain() {
-        let err = parse_codec_chain(&[]).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("empty"), "expected 'empty' in: {msg}");
-    }
-
-    #[test]
-    fn rejects_chain_too_long() {
-        let chain = vec![
-            bytes_little(),
-            json!({"name": "lz4"}),
-            json!({"name": "zstd"}),
-        ];
-        let err = parse_codec_chain(&chain).unwrap_err();
-        let msg = err.to_string();
+    fn an_unknown_codec_is_refused_by_name() {
+        let msg = error(&[bytes_little(), json!({"name": "bz2"})]);
+        assert!(msg.contains("'bz2'"), "{msg}");
         assert!(
-            msg.contains("too long") || msg.contains('3'),
-            "expected length error in: {msg}",
+            msg.contains("gzip"),
+            "the message lists what is supported: {msg}"
         );
     }
 
     #[test]
-    fn rejects_missing_bytes_codec() {
-        let chain = vec![json!({"name": "lz4"})];
-        let err = parse_codec_chain(&chain).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("bytes"), "expected 'bytes' in: {msg}");
+    fn a_chain_without_bytes_is_refused() {
+        assert!(error(&[]).contains("bytes"));
+        assert!(error(&[json!({"name": "zstd"})]).contains("bytes"));
     }
 
     #[test]
-    fn rejects_bytes_with_big_endian() {
-        let chain = vec![json!({"name": "bytes", "configuration": {"endian": "big"}})];
-        let err = parse_codec_chain(&chain).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("big"), "expected 'big' in: {msg}");
-    }
-
-    #[test]
-    fn rejects_bytes_missing_endian() {
-        let chain = vec![json!({"name": "bytes", "configuration": {}})];
-        let err = parse_codec_chain(&chain).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("endian"), "expected 'endian' in: {msg}");
-    }
-
-    #[test]
-    fn rejects_unknown_second_codec_name() {
-        let chain = vec![bytes_little(), json!({"name": "gzip"})];
-        let err = parse_codec_chain(&chain).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("gzip"), "expected 'gzip' in: {msg}");
-    }
-
-    #[test]
-    fn rejects_blosc_with_lz4_cname() {
-        let chain = vec![
+    fn a_chain_out_of_order_is_refused() {
+        let msg = error(&[
             bytes_little(),
-            json!({
-                "name": "blosc",
-                "configuration": {
-                    "cname": "lz4",
-                    "shuffle": "bitshuffle",
-                    "typesize": 2
-                }
-            }),
-        ];
-        let err = parse_codec_chain(&chain).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("lz4"), "expected 'lz4' in: {msg}");
+            json!({"name": "transpose", "configuration": {"order": [1, 0]}}),
+        ]);
+        assert!(msg.contains("transpose"), "{msg}");
+        let msg = error(&[bytes_little(), bytes_little()]);
+        assert!(msg.contains("out of order"), "{msg}");
     }
 
     #[test]
-    fn rejects_blosc_with_weirdshuffle() {
-        let chain = vec![
+    fn multi_byte_samples_need_a_byte_order() {
+        let msg = error(&[json!({"name": "bytes", "configuration": {}})]);
+        assert!(msg.contains("endian"), "{msg}");
+        let msg = error(&[json!({"name": "bytes", "configuration": {"endian": "middle"}})]);
+        assert!(msg.contains("middle"), "{msg}");
+    }
+
+    #[test]
+    fn a_transpose_that_is_not_a_permutation_is_refused() {
+        for order in [json!([0]), json!([0, 0]), json!([0, 2]), json!("Z")] {
+            let msg = error(&[
+                json!({"name": "transpose", "configuration": {"order": order}}),
+                bytes_little(),
+            ]);
+            assert!(msg.contains("order"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn sharding_inside_a_chain_is_refused() {
+        let msg = error(&[bytes_little(), json!({"name": "sharding_indexed"})]);
+        assert!(msg.contains("sharding_indexed"), "{msg}");
+    }
+
+    #[test]
+    fn blosc_with_snappy_is_refused() {
+        let msg = error(&[
             bytes_little(),
-            json!({
-                "name": "blosc",
-                "configuration": {
-                    "cname": "zstd",
-                    "shuffle": "weirdshuffle",
-                    "typesize": 2
-                }
-            }),
-        ];
-        let err = parse_codec_chain(&chain).unwrap_err();
-        let msg = err.to_string();
+            json!({"name": "blosc", "configuration": {"cname": "snappy", "shuffle": "shuffle", "typesize": 2}}),
+        ]);
+        assert!(msg.contains("snappy"), "{msg}");
+    }
+
+    #[test]
+    fn blosc_with_an_unknown_shuffle_is_refused() {
+        let msg = error(&[
+            bytes_little(),
+            json!({"name": "blosc", "configuration": {"cname": "zstd", "shuffle": "weirdshuffle", "typesize": 2}}),
+        ]);
+        assert!(msg.contains("weirdshuffle"), "{msg}");
+        let msg = error(&[
+            bytes_little(),
+            json!({"name": "blosc", "configuration": {"cname": "zstd", "shuffle": 7}}),
+        ]);
+        assert!(msg.contains('7'), "{msg}");
+    }
+
+    #[test]
+    fn blosc_with_an_impossible_typesize_is_refused() {
+        let msg = error(&[
+            bytes_little(),
+            json!({"name": "blosc", "configuration": {"cname": "zstd", "shuffle": "shuffle", "typesize": 300}}),
+        ]);
+        assert!(msg.contains("300"), "{msg}");
+    }
+
+    #[test]
+    fn blosc_without_configuration_is_refused() {
+        let msg = error(&[bytes_little(), json!({"name": "blosc"})]);
         assert!(
-            msg.contains("weirdshuffle"),
-            "expected 'weirdshuffle' in: {msg}"
+            msg.contains("blosc") && msg.contains("configuration"),
+            "{msg}"
         );
     }
 
     #[test]
-    fn rejects_blosc_with_typesize_8() {
-        let chain = vec![
+    fn crc32c_in_front_is_refused() {
+        let msg = error(&[
             bytes_little(),
-            json!({
-                "name": "blosc",
-                "configuration": {
-                    "cname": "zstd",
-                    "shuffle": "bitshuffle",
-                    "typesize": 8
-                }
-            }),
-        ];
-        let err = parse_codec_chain(&chain).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains('8'), "expected '8' in: {msg}");
-    }
-
-    #[test]
-    fn rejects_blosc_with_missing_configuration() {
-        let chain = vec![bytes_little(), json!({"name": "blosc"})];
-        let err = parse_codec_chain(&chain).unwrap_err();
-        let msg = err.to_string();
-        assert!(
-            msg.contains("blosc") && (msg.contains("configuration") || msg.contains("missing")),
-            "expected blosc-config error in: {msg}",
-        );
+            json!({"name": "crc32c", "configuration": {"location": "start"}}),
+        ]);
+        assert!(msg.contains("start"), "{msg}");
     }
 }

@@ -18,6 +18,7 @@ import {
 import { targetLevelOf, type EntitySource } from "../entitySources.ts";
 import {
   getOrCreateVolumePool,
+  removeLabelVolumePoolsForDataset,
   removeVolumeAtlasesForDataset,
   resizeIndirection,
   remapIndirection,
@@ -25,6 +26,7 @@ import {
 } from "../volume/index.ts";
 import {
   getOrCreateSlicePool,
+  removeLabelSlicePoolsForDataset,
   removeSliceAtlasesForDataset,
   resizeSliceIndirection,
   remapSliceIndirection,
@@ -173,6 +175,10 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   postFreedPools(ctx, msg.datasetId, referenced);
   removeVolumeAtlasesForDataset(ctx, msg.datasetId, referenced);
   removeSliceAtlasesForDataset(ctx, msg.datasetId, referenced);
+  // Label pools live as long as the view mode that draws them. Their chunks
+  // are reported lost, so switching back sends them again.
+  if (mode === "volume") removeLabelSlicePoolsForDataset(ctx, msg.datasetId, "freed");
+  else removeLabelVolumePoolsForDataset(ctx, msg.datasetId, "freed");
 
   state.currentSourcesByDataset.set(msg.datasetId, currentSources);
 

@@ -9,13 +9,16 @@
 import { Axis } from "../../axes.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { createEmptyVolumeTexture, getDeviceLimits } from "../gpuContext.ts";
-import { computeAtlasGeometry } from "../atlasSizing.ts";
+import { computeAtlasGeometry, poolCapBytes } from "../atlasSizing.ts";
 import { computeProxyAtlasLayout } from "../proxyAtlas.ts";
 import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
-import { postSlotsLost } from "../chunkUploadFeedback.ts";
+import { postChunkResidency, postSlotsLost, LABEL_TIER } from "../chunkUploadFeedback.ts";
 import { chunkPoolTier } from "../poolKeys.ts";
-import { shrinkAtlasBudget } from "../../deviceBudget.ts";
+import { grantGrowth, handleGpuOutOfMemory, reserveGpuBytes } from "../worker/gpuBudget.ts";
+import { setGpuLedgerLine } from "../worker/gpuLedger.ts";
+import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
+import type { ChunkFeedbackReason } from "../workerProtocol.ts";
 
 /** Bytes one label voxel occupies in the `r32uint` atlas. */
 const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
@@ -58,9 +61,9 @@ export interface AtlasState {
   totalSlots: number;
   /** Shared slot pool dimensions (same chunk dims for all entities in this pool). */
   chunkX: number; chunkY: number; chunkZ: number;
-  /** The texture's slot grid now. Only `slotsZ` changes, as the pool grows. */
+  /** The texture's slot grid now. Only `slotsZ` changes, as the pool grows or shrinks. */
   slotsX: number; slotsY: number; slotsZ: number;
-  /** The layers the budget allows, which the pool grows toward. */
+  /** The layers the pool's cap allows, which it grows toward while the GPU total has room. */
   maxSlotsZ: number;
   /** Per-entity LOD sections. memberId → array of per-LOD indirection meta with absolute offsets. */
   entityMetas: Map<string, LodIndirectionMeta[]>;
@@ -107,6 +110,13 @@ export interface LabelVolumePool {
   freeSlots: number[];
   /** slot index → `gridIdx` it currently holds (or `-1` when free). */
   slotGridIdx: Int32Array<ArrayBuffer>;
+  /**
+   * `gridIdx` → the chunk key its slot holds. A cell is rewritten in place on
+   * a T scrub, so the key it held is reported lost then, and every key is
+   * reported lost when the pool goes. The page resends only what it hears is
+   * gone.
+   */
+  keys: Map<number, string>;
   /**
    * Owning dataset id. The pool is keyed by the label image id, which dataset
    * removal never sees, so {@link removeLabelVolumePoolsForDataset} matches
@@ -263,7 +273,8 @@ export function computeLabelVolumeSizing(
  *
  * Returns `null` (and warns once) when the atlas can't be sized or allocated,
  * so the caller skips the label instead of throwing through the upload path,
- * and for a size the device ran out of memory on.
+ * for a size the device ran out of memory on, and when the GPU total has no
+ * room for it.
  */
 export function getOrCreateLabelVolumePool(
   ctx: WorkerCtx,
@@ -296,7 +307,7 @@ export function getOrCreateLabelVolumePool(
     existing.datasetId = datasetId;
     return existing;
   }
-  if (existing) destroyLabelVolumePool(existing);
+  if (existing) removeLabelVolumePool(ctx, memberId, "freed");
 
   const sizeKey = `${memberId}|${w}x${h}x${d}`;
   if (ctx.state.labelSizesOutOfMemory.has(sizeKey)) return null;
@@ -307,6 +318,9 @@ export function getOrCreateLabelVolumePool(
   try {
     sizing = computeLabelVolumeSizing(w, h, d, cx, cy, cz, limit);
     const [texW, texH, texD] = sizing.textureSize;
+    if (!reserveGpuBytes(ctx, texW * texH * texD * LABEL_VOLUME_BYTES_PER_VOXEL + sizing.gridCellCount * 4)) {
+      return null;
+    }
     texture = allocateWatched(
       ctx,
       () => createEmptyVolumeTexture(ctx.device, texW, texH, texD, "r32uint"),
@@ -314,7 +328,8 @@ export function getOrCreateLabelVolumePool(
         // A size that ran out of memory once would again on every delivery.
         ctx.state.labelSizesOutOfMemory.add(sizeKey);
         const pool = ctx.state.labelVolumePools.get(memberId);
-        if (pool?.texture === lost) removeLabelVolumePool(ctx, memberId);
+        if (pool?.texture === lost) removeLabelVolumePool(ctx, memberId, "out-of-memory");
+        handleGpuOutOfMemory(ctx);
       },
     );
   } catch (err) {
@@ -353,11 +368,18 @@ export function getOrCreateLabelVolumePool(
     slots: new Map(),
     freeSlots,
     slotGridIdx,
+    keys: new Map(),
     datasetId,
     width: w, height: h, depth: d,
   };
   pools.set(memberId, pool);
   return pool;
+}
+
+/** The bytes a label volume pool's texture and indirection hold. */
+export function labelVolumePoolBytes(pool: LabelVolumePool): number {
+  return pool.slotsX * pool.chunkX * pool.slotsY * pool.chunkY * pool.slotsZ * pool.chunkZ * LABEL_VOLUME_BYTES_PER_VOXEL
+    + pool.indirectionData.length * 4;
 }
 
 /**
@@ -368,8 +390,9 @@ export function getOrCreateLabelVolumePool(
 export function acquireLabelSlot(
   pool: LabelVolumePool,
   gridIdx: number,
-): { slot: number; origin: [number, number, number] } | null {
+): { slot: number; origin: [number, number, number]; evictedKey?: string } | null {
   let slot = pool.slots.get(gridIdx);
+  let evictedKey: string | undefined;
   if (slot === undefined) {
     if (pool.freeSlots.length > 0) {
       slot = pool.freeSlots.pop()!;
@@ -380,6 +403,8 @@ export function acquireLabelSlot(
       if (victim.done) return null;
       slot = pool.slots.get(victim.value)!;
       pool.slots.delete(victim.value);
+      evictedKey = pool.keys.get(victim.value);
+      pool.keys.delete(victim.value);
       const oldGrid = pool.slotGridIdx[slot];
       if (oldGrid >= 0 && oldGrid < pool.indirectionData.length) {
         pool.indirectionData[oldGrid] = 0xFFFFFFFF;
@@ -399,6 +424,7 @@ export function acquireLabelSlot(
   return {
     slot,
     origin: [sx * pool.chunkX, sy * pool.chunkY, sz * pool.chunkZ],
+    evictedKey,
   };
 }
 
@@ -409,10 +435,14 @@ export function destroyLabelVolumePool(pool: LabelVolumePool): void {
   pool.labelColorBuffer?.destroy();
 }
 
-/** Remove a member's label volume pool (no-op if absent). */
-export function removeLabelVolumePool(ctx: WorkerCtx, memberId: string): void {
+/**
+ * Remove a member's label volume pool (no-op if absent), reporting every
+ * chunk it held lost for `reason` so the page sends what it still wants.
+ */
+export function removeLabelVolumePool(ctx: WorkerCtx, memberId: string, reason: ChunkFeedbackReason): void {
   const pool = ctx.state.labelVolumePools.get(memberId);
   if (pool) {
+    postChunkResidency(ctx, memberId, LABEL_TIER, "lost", [...pool.keys.values()], reason);
     destroyLabelVolumePool(pool);
     ctx.state.labelVolumePools.delete(memberId);
   }
@@ -421,11 +451,18 @@ export function removeLabelVolumePool(ctx: WorkerCtx, memberId: string): void {
 /**
  * Free every label volume pool whose member key or owning `datasetId` matches
  * `idOrDataset`. Dataset removal passes the dataset id, which never equals a
- * pool key, so the `datasetId` match is what frees the texture.
+ * pool key, so the `datasetId` match is what frees the texture. With a
+ * `reason`, the chunks they held are reported lost; a removed dataset's
+ * delivery record goes with it, so removal passes none.
  */
-export function removeLabelVolumePoolsForDataset(ctx: WorkerCtx, idOrDataset: string): void {
+export function removeLabelVolumePoolsForDataset(
+  ctx: WorkerCtx,
+  idOrDataset: string,
+  reason?: ChunkFeedbackReason,
+): void {
   for (const [memberId, pool] of ctx.state.labelVolumePools) {
     if (memberId === idOrDataset || pool.datasetId === idOrDataset) {
+      if (reason) postChunkResidency(ctx, memberId, LABEL_TIER, "lost", [...pool.keys.values()], reason);
       destroyLabelVolumePool(pool);
       ctx.state.labelVolumePools.delete(memberId);
     }
@@ -455,6 +492,8 @@ export function ensureDepthTexture(device: GPUDevice, w: number, h: number): GPU
   });
   depthW = w;
   depthH = h;
+  // `depth24plus` is stored in four bytes a texel on every backend.
+  setGpuLedgerLine("depth", w * h * 4);
   return depthTexture;
 }
 
@@ -479,14 +518,15 @@ function createAtlasTexture(
 }
 
 /**
- * Create a shared atlas pool one layer of slots deep. It grows
- * toward the budget's grid only as chunks fill it, so a small volume never
- * holds the whole budget. Indirection is sized later from entityMetas.
+ * Create a shared atlas pool one layer of slots deep. It grows toward the
+ * grid its cap allows only as chunks fill it and the GPU total has room, so a
+ * small volume never holds more than it needs. Indirection is sized later
+ * from entityMetas.
  */
 function createVolumeAtlas(
   device: GPUDevice,
   datasetId: string,
-  budgetBytes: number,
+  capBytes: number,
   chunkX: number, chunkY: number, chunkZ: number,
   t: number, c: number,
   format: SampleFormat,
@@ -495,7 +535,7 @@ function createVolumeAtlas(
   const geom = computeAtlasGeometry(
     limits,
     [chunkX, chunkY, chunkZ],
-    budgetBytes,
+    capBytes,
     "3d",
     bytesPerTexel(format),
   );
@@ -534,18 +574,33 @@ function createVolumeAtlas(
   };
 }
 
+/** The bytes a volume pool's texture and indirection hold now. */
+export function volumeAtlasBytes(atlas: AtlasState): number {
+  return volumeLayerBytes(atlas) * atlas.slotsZ + atlas.indirectionData.length * 4;
+}
+
+/** The bytes one layer of a volume pool's slots holds: the step it grows and shrinks by. */
+export function volumeLayerBytes(atlas: AtlasState): number {
+  return atlas.slotsX * atlas.chunkX * atlas.slotsY * atlas.chunkY * atlas.chunkZ * bytesPerTexel(atlas.format);
+}
+
 /**
- * Double a full pool's layers, up to the budget's. False when it is already
- * there, so the caller evicts instead.
+ * Grow a full pool to `slotsZ` layers, by default double its layers, up to
+ * its cap's. False when it is already there, so the caller evicts instead.
+ * The caller has checked the GPU total.
  *
  * A slot's position depends on `slotsX` and `slotsY` alone, which never
  * change, so every resident slot keeps its texels and its index. Growing is
  * one copy of the old texture into the new one's front layers, and the
  * indirection, which holds slot indices, stays valid.
  */
-export function growVolumeAtlas(device: GPUDevice, atlas: AtlasState): boolean {
-  if (atlas.slotsZ >= atlas.maxSlotsZ) return false;
-  const slotsZ = Math.min(atlas.maxSlotsZ, atlas.slotsZ * 2);
+export function growVolumeAtlas(
+  device: GPUDevice,
+  atlas: AtlasState,
+  toSlotsZ: number = atlas.slotsZ * 2,
+): boolean {
+  const slotsZ = Math.min(atlas.maxSlotsZ, toSlotsZ);
+  if (slotsZ <= atlas.slotsZ) return false;
   const totalSlots = atlas.slotsX * atlas.slotsY * slotsZ;
 
   const texture = createAtlasTexture(
@@ -570,6 +625,57 @@ export function growVolumeAtlas(device: GPUDevice, atlas: AtlasState): boolean {
   atlas.slotsZ = slotsZ;
   atlas.totalSlots = totalSlots;
   return true;
+}
+
+/**
+ * Shrink a pool to `slotsZ` layers, giving their bytes back to the GPU total.
+ * It keeps the first chunks of `keep` that fit, moving any that lay in a
+ * dropped layer into a slot that stays, and returns the composite keys it no
+ * longer holds, for the caller to report lost.
+ */
+export function shrinkVolumeAtlas(
+  device: GPUDevice,
+  atlas: AtlasState,
+  slotsZ: number,
+  keep: Iterable<string>,
+): string[] {
+  if (slotsZ >= atlas.slotsZ || slotsZ < 1) return [];
+  const layer = atlas.slotsX * atlas.slotsY;
+  const plan = planCompaction(atlas.slots, layer * slotsZ, keep);
+
+  const texture = createAtlasTexture(
+    device, atlas.chunkX, atlas.chunkY, atlas.chunkZ, atlas.slotsX, atlas.slotsY, slotsZ, atlas.format,
+  );
+  const encoder = device.createCommandEncoder();
+  encoder.copyTextureToTexture(
+    { texture: atlas.texture },
+    { texture },
+    [atlas.slotsX * atlas.chunkX, atlas.slotsY * atlas.chunkY, slotsZ * atlas.chunkZ],
+  );
+  const origin = (slot: number) => ({
+    x: (slot % atlas.slotsX) * atlas.chunkX,
+    y: (Math.floor(slot / atlas.slotsX) % atlas.slotsY) * atlas.chunkY,
+    z: Math.floor(slot / layer) * atlas.chunkZ,
+  });
+  for (const { from, to } of plan.moves) {
+    encoder.copyTextureToTexture(
+      { texture: atlas.texture, origin: origin(from) },
+      { texture, origin: origin(to) },
+      [atlas.chunkX, atlas.chunkY, atlas.chunkZ],
+    );
+  }
+  device.queue.submit([encoder.finish()]);
+  // Destruction waits for the copies just submitted.
+  atlas.texture.destroy();
+  atlas.texture = texture;
+
+  atlas.slotGridIdx = remapSlotEntries(atlas.slots, atlas.slotGridIdx, atlas.indirectionData, plan, layer * slotsZ);
+  atlas.slots = plan.slots;
+  atlas.freeSlots = plan.freeSlots;
+  atlas.slotsZ = slotsZ;
+  atlas.totalSlots = layer * slotsZ;
+  atlas.indirectionDirty = true;
+  return plan.dropped;
 }
 
 export function destroyAtlas(atlas: AtlasState): void {
@@ -617,26 +723,48 @@ function createWatchedVolumeAtlas(
   return allocateWatched(
     ctx,
     () => createVolumeAtlas(
-      ctx.device, datasetId, ctx.state.atlasBudgets.volumeAtlasBytes, chunkX, chunkY, chunkZ, t, c, format,
+      ctx.device, datasetId, poolCapBytes(getDeviceLimits(ctx.device), ctx.state.gpuTotalBytes),
+      chunkX, chunkY, chunkZ, t, c, format,
     ),
     (lost) => replaceLostVolumeAtlas(ctx, poolKey, lost),
   );
 }
 
 /** {@link growVolumeAtlas}, where a grow the device can't allocate loses the pool. */
-export function growVolumeAtlasWatched(ctx: WorkerCtx, poolKey: string, atlas: AtlasState): boolean {
+export function growVolumeAtlasWatched(
+  ctx: WorkerCtx,
+  poolKey: string,
+  atlas: AtlasState,
+  toSlotsZ?: number,
+): boolean {
   return allocateWatched(
     ctx,
-    () => growVolumeAtlas(ctx.device, atlas),
+    () => growVolumeAtlas(ctx.device, atlas, toSlotsZ),
     () => replaceLostVolumeAtlas(ctx, poolKey, atlas),
   );
 }
 
 /**
+ * Grow a full pool as far as the GPU total has room for, at most doubling its
+ * layers. With `reclaim`, grow by one layer even when the total has none, if
+ * other pools can give it back from chunks the planner doesn't want.
+ */
+export function growVolumePoolWithin(
+  ctx: WorkerCtx,
+  poolKey: string,
+  atlas: AtlasState,
+  reclaim: boolean,
+): boolean {
+  const maxSteps = Math.min(atlas.maxSlotsZ, atlas.slotsZ * 2) - atlas.slotsZ;
+  const steps = grantGrowth(ctx, atlas, volumeLayerBytes(atlas), maxSteps, reclaim);
+  return steps > 0 && growVolumeAtlasWatched(ctx, poolKey, atlas, atlas.slotsZ + steps);
+}
+
+/**
  * A pool whose texture the device could not allocate holds nothing and can't
- * be bound. Its chunks go back to the page, and a pool with the same sections
- * takes its place under half the budget. At the floor budget the pool is
- * dropped, and the next cold state tries again.
+ * be bound. Its chunks go back to the page, the GPU total halves, and a pool
+ * with the same sections takes its place one layer deep. At the floor total
+ * the pool is dropped, and the next cold state tries again.
  */
 export function replaceLostVolumeAtlas(ctx: WorkerCtx, poolKey: string, lost: AtlasState): void {
   const atlases = ctx.state.volumeAtlases;
@@ -644,7 +772,7 @@ export function replaceLostVolumeAtlas(ctx: WorkerCtx, poolKey: string, lost: At
   postSlotsLost(ctx, chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
   destroyAtlas(lost);
   atlases.delete(poolKey);
-  if (shrinkAtlasBudget(ctx.state.atlasBudgets, "volumeAtlasBytes")) {
+  if (handleGpuOutOfMemory(ctx)) {
     const atlas = createWatchedVolumeAtlas(
       ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.chunkZ, lost.t, lost.c, lost.format,
     );
@@ -697,4 +825,7 @@ export function destroyAllVolumeAtlasResources(ctx: WorkerCtx): void {
   atlases.clear();
   depthTexture?.destroy();
   depthTexture = null;
+  depthW = 0;
+  depthH = 0;
+  setGpuLedgerLine("depth", 0);
 }

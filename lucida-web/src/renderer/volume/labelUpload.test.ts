@@ -315,10 +315,10 @@ describe("computeLabelVolumeSizing", () => {
     const s = computeLabelVolumeSizing(w, h, d, chunk, chunk, chunk, maxDim);
 
     // The true volume fits the budget, which is why the level is eligible...
-    expect(w * h * d * 4).toBeLessThanOrEqual(CEILING_BUDGETS.volumeAtlasBytes);
+    expect(w * h * d * 4).toBeLessThanOrEqual(CEILING_BUDGETS.labelVolumeBytes);
     // ...but the padded bricks would exceed it.
     const paddedBytes = s.gridCellCount * s.chunkX * s.chunkY * s.chunkZ * 4;
-    expect(paddedBytes).toBeGreaterThan(CEILING_BUDGETS.volumeAtlasBytes);
+    expect(paddedBytes).toBeGreaterThan(CEILING_BUDGETS.labelVolumeBytes);
 
     // Residency invariant: capacity is the whole grid, never clamped to bytes.
     expect(s.capacity).toBe(s.gridCellCount);
