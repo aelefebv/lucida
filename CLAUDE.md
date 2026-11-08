@@ -16,6 +16,8 @@ multi-channel timeseries open fast and exercise far more of the viewer than a sm
 Verify anything the viewer renders at `devicePixelRatio` 2 as well as 1. Headless browsers
 default to 1, and that has hidden whole classes of defects.
 
+To find where the viewer is slow, run `uv run scripts/perf.py`; see `docs/perf.md`.
+
 If `tsc` reports a missing method on a `Wasm*` type, `lucida-core/pkg` is stale. Rebuild it
 with `pnpm build:wasm` from `lucida-web/`.
 

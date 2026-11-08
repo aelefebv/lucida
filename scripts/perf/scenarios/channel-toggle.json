@@ -1,0 +1,9 @@
+{
+  "description": "hide channel 1, then show it again",
+  "requires": ["channels"],
+  "camera": "slice",
+  "steps": [
+    { "kind": "select", "channel": 1, "visible": false },
+    { "kind": "select", "channel": 1, "visible": true }
+  ]
+}
