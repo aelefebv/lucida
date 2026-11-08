@@ -196,7 +196,8 @@ export class RenderLoop implements TraceEnvironment {
         this.republishSettle();
       }
     };
-    this.client.onFrameDone = () => {
+    this.client.onFrameDone = (frameSeq, doneAtMs) => {
+      traceRecorder.noteFrameDone(frameSeq, doneAtMs);
       if (this.client.framesAwaitingDone() > 0) return;
       traceRecorder.noteFramesDrawn();
       this.republishSettle();
@@ -514,9 +515,11 @@ export class RenderLoop implements TraceEnvironment {
    * and opens no run. The next thing that happens on such a page is a
    * dataset open, and that run has to carry its own cause rather than
    * inherit the label of a gesture made over an empty canvas.
+   *
+   * `atMs` is the input event's timestamp, when the caller has the event.
    */
-  markInput(input: InputKind): void {
-    if (this.datasets.size > 0) traceRecorder.noteInput(input);
+  markInput(input: InputKind, atMs?: number): void {
+    if (this.datasets.size > 0) traceRecorder.noteInput(input, atMs);
     settleSignal.restart();
     this.resolution.noteInput();
     this.setDirty("interactive", input);
@@ -650,8 +653,9 @@ export class RenderLoop implements TraceEnvironment {
     };
   }
 
-  private tick = (): void => {
+  private tick = (frameTimeMs?: number): void => {
     this.rafId = null;  // clear so scheduleIfNeeded can re-schedule
+    if (frameTimeMs !== undefined) traceRecorder.noteAnimationFrame(frameTimeMs);
 
     if (!this.interactiveDirty && !this.residencyDirty) return;
 

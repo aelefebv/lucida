@@ -221,6 +221,6 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
  */
 function postFrameDone(ctx: WorkerCtx, frameSeq: number | undefined): void {
   if (frameSeq === undefined) return;
-  const done = () => ctx.post({ type: "frameDone", frameSeq });
+  const done = () => ctx.post({ type: "frameDone", frameSeq, doneAtMs: performance.timeOrigin + performance.now() });
   ctx.device.queue.onSubmittedWorkDone().then(done, done);
 }

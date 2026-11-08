@@ -26,6 +26,7 @@ import {
 } from "../types.ts";
 import { emptyChunkLookup, lookupChunk, worstRowSelector, type WorstRow } from "./chunkLookup.ts";
 import { buildCriticalPath, UNRECORDED_PREFIX } from "./criticalPath.ts";
+import { deriveLag } from "./lag.ts";
 import { backlogExceeded, isPinned, summariseLimiters } from "./limiters.ts";
 import { deriveLoad } from "./load.ts";
 import { RULESET, type AbsoluteRule, type ColdOpenAllowanceRule } from "./ruleset.ts";
@@ -54,6 +55,7 @@ import {
   type DiagnosticCoverage,
   type DiagnosticDocument,
   type Finding,
+  type LagReading,
   type LimiterSummary,
   type ObservedError,
   type RunIdentity,
@@ -199,6 +201,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
       ? "no steady-state interval followed this run in the document"
       : "this reading is scoped to a window of the run's clock, which ends where the run does",
   );
+  const lag = deriveLag(run, window);
   const findings = rankFindings({
     path,
     phases,
@@ -208,6 +211,8 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     attribution,
     interaction,
     coldOpen,
+    lag,
+    softwareAdapter: run.header.gpu?.fallback === true,
     steadyState: steady.findings,
     held: eventsOfKind(run, window, "held"),
     gpuErrors: eventsOfKind(run, window, "gpu-error"),
@@ -229,7 +234,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     schemaVersion: DIAGNOSTIC_SCHEMA_VERSION,
     runId: run.header.runId,
     traceSchemaVersion: run.header.schemaVersion,
-    verdict: buildVerdict(run, findings, attribution, path, coverage),
+    verdict: buildVerdict(run, findings, attribution, path, coverage, lag),
     run: runIdentity(run),
     window: window.requested ? describeWindow(run, window) : null,
     coverage,
@@ -241,6 +246,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     aggregates,
     renderTiming: deriveRenderTiming(run),
     gpuMemory: deriveGpuMemory(run.readings),
+    lag,
     sent: summariseSent(run.sent, run.header.durationUs),
     load: deriveLoad(run),
     steadyState: steady.reading,
@@ -635,6 +641,9 @@ interface FindingsInput {
   interaction: boolean;
   /** Whether content opened the run on a cold browser cache: the page's first paint. */
   coldOpen: boolean;
+  lag: LagReading | null;
+  /** Whether the run rendered on a software fallback adapter, whose frame times say nothing about the build. */
+  softwareAdapter: boolean;
   /** What the steady-state ruleset found, ranked here with the run's own. */
   steadyState: SteadyStateFinding[];
   /** The chunks the uploader stopped re-sending, inside the window. */
@@ -743,6 +752,37 @@ function heldFinding(held: TracePointEvent[]): RawFinding | null {
 }
 
 /**
+ * Input to frame over its p95 ceiling, or failing that over its max ceiling,
+ * on an interaction run. A breach of the p95 is the gesture falling behind;
+ * a breach of the max alone is one freeze.
+ */
+function lagFinding(input: FindingsInput): RawFinding | null {
+  const timing = input.lag?.inputToFrame;
+  if (!input.interaction || !timing) return null;
+  const rule = RULESET.lag;
+  const breach =
+    timing.samples >= rule.p95.minInputs && timing.p95Ms > rule.p95.ceilMs
+      ? { stat: "p95" as const, ms: timing.p95Ms, ceiling: rule.p95 }
+      : timing.maxMs > rule.max.ceilMs
+        ? { stat: "max" as const, ms: timing.maxMs, ceiling: rule.max }
+        : null;
+  if (!breach) return null;
+  return {
+    severity: input.softwareAdapter ? "note" : "stall",
+    rule: rule.id,
+    subject: LAG_SUBJECT,
+    observed: { stat: breach.stat, ms: breach.ms, n: timing.samples },
+    threshold: {
+      kind: "absolute",
+      value: breach.ceiling.ceilMs,
+      why: input.softwareAdapter ? `${breach.ceiling.why} ${rule.softwareAdapter}` : breach.ceiling.why,
+    },
+  };
+}
+
+const LAG_SUBJECT = "input-to-frame";
+
+/**
  * The stall `rule` names, or — on a cold open, for a phase a frame dispatch
  * bounds — the first-paint note. The finding keeps the measuring rule's
  * threshold and takes the first-paint rule's id and rationale.
@@ -770,12 +810,13 @@ const SEVERITY_RANK: Record<Finding["severity"], number> = {
   note: 0,
 };
 
-/** The stalls that are not about the critical path, so never carry its attribution. */
+/** The findings that are not about the critical path, so never carry its attribution. */
 const OFF_PATH_RULES = new Set([
   RULESET.held.id,
   RULESET.gpuError.id,
   RULESET.pageError.id,
   RULESET.blankFrame.id,
+  RULESET.lag.id,
 ]);
 
 function rankFindings(input: FindingsInput): Finding[] {
@@ -921,6 +962,8 @@ function rankFindings(input: FindingsInput): Finding[] {
   if (pageError) raw.push(pageError);
   const blankFrame = blankFrameFinding(input.frame);
   if (blankFrame) raw.push(blankFrame);
+  const lag = lagFinding(input);
+  if (lag) raw.push(lag);
 
   const seen = new Set<string>();
   const ranked = raw
@@ -948,8 +991,8 @@ function rankFindings(input: FindingsInput): Finding[] {
   // The attribution is the run's answer to "what was this waiting on", so it
   // rides the leading finding about the run. A steady-state finding is about
   // the interval after the run and carries the ruleset's rationale instead.
-  // A held chunk, an error or a blank frame is not about the critical path,
-  // so the attribution rides the first finding after them.
+  // A held chunk, an error, a blank frame or a lag finding is not about the
+  // critical path, so the attribution rides the first finding after them.
   const leader = ranked.findIndex(
     (finding) => finding.severity !== "steady-state" && !OFF_PATH_RULES.has(finding.rule),
   );
@@ -1002,6 +1045,7 @@ function buildVerdict(
   attribution: Attribution,
   path: CriticalPath,
   coverage: DiagnosticCoverage,
+  lag: LagReading | null,
 ): Verdict {
   const caveat = coverage.incomplete ? " [coverage incomplete — see gaps]" : "";
   const lead = findings.find((finding) => finding.severity !== "note");
@@ -1101,6 +1145,14 @@ function buildVerdict(
     };
   }
 
+  if (lead.rule === RULESET.lag.id) {
+    return {
+      kind: "stall",
+      text: `${describeLag(run, lead, lag)}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
   // A gate's one line has to say which input was slow, not which reading
   // measured it.
   if (lead.rule === RULESET.interaction.id) {
@@ -1125,6 +1177,17 @@ function buildVerdict(
     text: `${lead.subject} ${lead.observed.stat ? "ran" : "held"} ${amount}${share}${caveat}`,
     confidence: attribution.confidence,
   };
+}
+
+/** A lag finding as one sentence, with the longest long task when there was one, the first place to look for why. */
+function describeLag(run: TraceRun, finding: Finding, lag: LagReading | null): string {
+  const tasks = lag?.longTasks;
+  const longest =
+    tasks && tasks.count > 0 ? `; the longest main-thread task ran ${tasks.longestMs} ms` : "";
+  return (
+    `${run.header.cause?.source ?? "input"} lagged: input to frame ${finding.observed.stat} ${finding.observed.ms} ms ` +
+    `over the ${finding.threshold.value} ms ceiling, across ${finding.observed.n ?? 0} input(s)${longest}`
+  );
 }
 
 /** The held chunks, the first few by name, as one sentence. */

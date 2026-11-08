@@ -93,14 +93,14 @@ describe("worker dispatch frame done", () => {
     const { ctx, posts } = frameCtx(() => Promise.resolve(undefined), Promise.reject(new Error("no pipeline")));
     await expect(dispatchMessage(ctx, frame)).rejects.toThrow("no pipeline");
     await flush();
-    expect(posts).toContainEqual({ type: "frameDone", frameSeq: 7 });
+    expect(posts).toContainEqual({ type: "frameDone", frameSeq: 7, doneAtMs: expect.any(Number) });
   });
 
   it("answers a frame whose device was lost before it finished", async () => {
     const { ctx, posts } = frameCtx(() => Promise.reject(new Error("device lost")), Promise.resolve());
     await dispatchMessage(ctx, frame);
     await flush();
-    expect(posts).toContainEqual({ type: "frameDone", frameSeq: 7 });
+    expect(posts).toContainEqual({ type: "frameDone", frameSeq: 7, doneAtMs: expect.any(Number) });
   });
 });
 

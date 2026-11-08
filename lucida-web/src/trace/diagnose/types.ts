@@ -514,6 +514,41 @@ export interface RenderTiming {
   gpuPass: GpuPassTiming;
 }
 
+/**
+ * How the view kept up with input over the run or the window: input to
+ * frame, the main thread's long tasks, and frames dropped while input waited.
+ * Every field is about the inputs the run took, so a run that took none has
+ * no lag reading at all rather than one of zeros.
+ */
+export interface LagReading {
+  /** Inputs taken inside the window. */
+  inputs: number;
+  /**
+   * From each input event to the GPU finishing the first frame dispatched
+   * after it, over the inputs whose frame finished before the run closed.
+   * Null when none did.
+   */
+  inputToFrame: TimingSummary | null;
+  /** Inputs whose frame had not finished when the run closed, left out of the timing. */
+  unanswered: number;
+  longTasks: {
+    count: number;
+    longestMs: number;
+    totalMs: number;
+  };
+  frames: {
+    /** Frames the GPU finished from the first input to the frame that answered the last. */
+    presented: number;
+    /** Display refreshes that showed no new frame while an input waited. Null without a display interval. */
+    dropped: number | null;
+    displayIntervalMs: number | null;
+  };
+  /** Inputs, frames and long tasks past the tier's capacity, counted and not kept. */
+  unrecorded: number;
+  /** What the figures measure and how closely, in a sentence or two. */
+  statement: string;
+}
+
 /** The render worker's GPU memory over the readings that carried it. */
 export interface GpuMemorySummary {
   /** The most any reading held. */
@@ -964,6 +999,8 @@ export interface DiagnosticDocument {
   renderTiming: RenderTiming;
   /** GPU memory against its budget, or null when no reading carried it. */
   gpuMemory: GpuMemorySummary | null;
+  /** How the view kept up with input, or null when the run, or the window, took none. */
+  lag: LagReading | null;
   /** What the client sent during the run, by message type. */
   sent: SentSummary;
   load: LoadReading;

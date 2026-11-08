@@ -9,6 +9,7 @@
  */
 
 import { buildIdentity } from "./buildInfo.ts";
+import { LagRecord } from "./lagRecord.ts";
 import { computeCoverage } from "./coverage.ts";
 import { readChunk } from "./diagnose/chunkLookup.ts";
 import type { ChunkReading } from "./diagnose/chunkStates.ts";
@@ -144,6 +145,12 @@ export const DEFAULT_RUN_TIMEOUT_MS = 60_000;
  */
 export const MAX_TRACKED_OPENS = 64;
 
+/** Recent animation-frame gaps the display interval is the median of: about a second at 60 Hz. */
+const FRAME_GAP_SAMPLES = 64;
+const MIN_FRAME_GAP_SAMPLES = 8;
+/** Longer than a 20 Hz refresh: a gap this long is the loop idling or stalled, not one refresh. */
+const MAX_FRAME_GAP_MS = 50;
+
 /**
  * How many distinct errors one interval keeps. Repeats fold into a count, so
  * this is only reached by a page raising many different errors, and the
@@ -244,6 +251,8 @@ interface OpenInterval {
    */
   sent: Float64Array;
   generation: number;
+  /** The lag tier, from the interval's first input; null until it takes one. */
+  lag: LagRecord | null;
   /**
    * Set once the interval crosses the per-run cap, and mutated from there on:
    * a truncated interval stops storing records but keeps counting them, which
@@ -269,6 +278,7 @@ interface ClosedInterval {
   datasetOpensDropped: number;
   serverRowsDiscarded: number;
   sent: SendTallies;
+  lag: LagRecord | null;
   /** Frozen at close, so the resident total is a running sum rather than a walk. */
   byteLength: number;
   errors: PageError[];
@@ -417,6 +427,16 @@ export class TraceRecorder {
    */
   private sentBytesTotal = 0;
   private receivedBytesTotal = 0;
+
+  /**
+   * The most recent gaps between the render loop's animation frames, for the
+   * display's refresh interval. Page-scoped, because a run whose ticks
+   * overran the interval rarely ticks on two frames in a row, and the cold
+   * open before it ticks on every one.
+   */
+  private lastAnimationFrameMs = Number.NEGATIVE_INFINITY;
+  private readonly frameGapsMs = new Float64Array(FRAME_GAP_SAMPLES);
+  private frameGaps = 0;
 
   constructor(options: TraceRecorderOptions = {}) {
     this.sinkFactory = options.sinkFactory ?? tableSinkFactory;
@@ -772,13 +792,62 @@ export class TraceRecorder {
    * timeout or explicit close the page may never go quiescent. Extending
    * re-arms the hold, so the run closes on quiescence after the last input;
    * otherwise a slow drag would shatter into a run per pause.
+   *
+   * `atMs` is when the input event happened, on this recorder's clock: the
+   * event's own timestamp, so the time it waited behind a busy main thread
+   * counts as lag. Now when there is no event to read one from.
    */
-  noteInput(input: InputKind): void {
-    if (this.isRunOpen) {
-      this.clearHoldTimer();
-      return;
-    }
-    this.openRun(interactionCause(input));
+  noteInput(input: InputKind, atMs: number = this.now()): void {
+    if (this.isRunOpen) this.clearHoldTimer();
+    else this.openRun(interactionCause(input));
+    const run = this.open;
+    if (!run?.cause) return;
+    (run.lag ??= new LagRecord()).noteInput(input, atMs);
+  }
+
+  /**
+   * The render worker finished viewport frame `frameSeq`, and every frame
+   * before it, at `doneAtMs` on this recorder's clock. Answers the inputs
+   * that frame drew.
+   */
+  noteFrameDone(frameSeq: number, doneAtMs: number): void {
+    this.open?.lag?.noteFrameDone(frameSeq, doneAtMs);
+  }
+
+  /**
+   * A main-thread task ran for 50 ms or more. Kept by an interval that has
+   * taken input, since that is when a blocked main thread is lag.
+   */
+  noteLongTask(startMs: number, durationMs: number): void {
+    this.open?.lag?.noteLongTask(startMs, durationMs);
+  }
+
+  /**
+   * The render loop ticked on an animation frame stamped `frameTimeMs`.
+   * While it ticks on every frame, the gap between two stamps is one display
+   * interval. A gap past {@link MAX_FRAME_GAP_MS} is the loop idling rather
+   * than a refresh, and is not kept.
+   */
+  noteAnimationFrame(frameTimeMs: number): void {
+    const gapMs = frameTimeMs - this.lastAnimationFrameMs;
+    this.lastAnimationFrameMs = frameTimeMs;
+    if (gapMs <= 0 || gapMs > MAX_FRAME_GAP_MS) return;
+    this.frameGapsMs[this.frameGaps % FRAME_GAP_SAMPLES] = gapMs;
+    this.frameGaps++;
+  }
+
+  /**
+   * The display's refresh interval: the median recent gap. Frame stamps
+   * jitter, and a headless browser's do by a millisecond either way with the
+   * odd gap of a few, so the shortest gap reads low; a tick that skipped a
+   * frame reads double, and the median sits between the two. Null before
+   * enough gaps to tell.
+   */
+  private displayIntervalMs(): number | null {
+    const samples = Math.min(this.frameGaps, FRAME_GAP_SAMPLES);
+    if (samples < MIN_FRAME_GAP_SAMPLES) return null;
+    const sorted = Array.from(this.frameGapsMs.subarray(0, samples)).sort((a, b) => a - b);
+    return sorted[samples >> 1];
   }
 
   /**
@@ -985,9 +1054,12 @@ export class TraceRecorder {
   /**
    * A frame was dispatched to the render worker. Everything handed over since
    * the previous frame is resident as of now, and everything resident as of
-   * the previous frame has been drawn.
+   * the previous frame has been drawn. `frameSeq` is the render client's
+   * number for the frame, which its done report carries back.
    */
-  noteFrameDispatched(): void {
+  noteFrameDispatched(frameSeq?: number): void {
+    const lag = this.open?.lag;
+    if (lag?.awaitingFrame && frameSeq !== undefined) lag.noteFrameDispatched(frameSeq, this.now());
     const resident = this.awaitingResident;
     const drawn = this.awaitingDrawn;
     // One reading for every row on both lists: they all change state at this
@@ -1535,6 +1607,8 @@ export class TraceRecorder {
     this.openPlanStartMs = null;
     this.openPlanSlot = -1;
     this.lastTargetByDataset.clear();
+    this.lastAnimationFrameMs = Number.NEGATIVE_INFINITY;
+    this.frameGaps = 0;
     this.beginInterval(null);
   }
 
@@ -1564,6 +1638,7 @@ export class TraceRecorder {
           : [],
       serverRowsDiscarded: 0,
       sent: new Float64Array(SEND_COLUMN_COUNT),
+      lag: null,
       generation: this.generation,
       truncation: null,
       errors: [],
@@ -1624,6 +1699,7 @@ export class TraceRecorder {
     // exactly the news somebody is looking for.
     if (run.cause === null && run.sink.isEmpty && run.serverRows.length === 0 && run.errors.length === 0) return;
 
+    run.lag?.close(this.displayIntervalMs());
     const byteLength = intervalBytes(run);
     this.closed.push({
       startedAtMs: run.startedAtMs,
@@ -1635,6 +1711,7 @@ export class TraceRecorder {
       datasetOpensDropped: run.datasetOpensDropped,
       serverRowsDiscarded: run.serverRowsDiscarded,
       sent: sendTalliesFrom(run.sent),
+      lag: run.lag,
       byteLength,
       errors: run.errors,
       errorsDropped: run.errorsDropped,
@@ -1761,6 +1838,7 @@ export class TraceRecorder {
       errors: interval.errors.map((error) => ({ ...error })),
       errorsDropped: interval.errorsDropped,
       ...(interval.frame ? { frame: interval.frame } : {}),
+      ...(interval.lag ? { lag: interval.lag.serialise(interval.startedAtMs) } : {}),
     };
   }
 
@@ -1830,8 +1908,8 @@ function sentBytes(sent: Float64Array): number {
 }
 
 /** Every tier an interval holds. Allocated bytes, because the cap is on memory. */
-function intervalBytes(interval: Pick<OpenInterval, "sink" | "serverRows">): number {
-  return interval.sink.byteLength + interval.serverRows.byteLength;
+function intervalBytes(interval: Pick<OpenInterval, "sink" | "serverRows" | "lag">): number {
+  return interval.sink.byteLength + interval.serverRows.byteLength + (interval.lag?.byteLength ?? 0);
 }
 
 /**
