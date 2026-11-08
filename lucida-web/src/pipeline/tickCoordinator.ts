@@ -35,7 +35,8 @@ import {
 import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
-import { admitRequests, chunkBytesFor } from "./planning/admission.ts";
+import { admitRequests, chunkBytesFor, sliceSlotsFor, type GpuSlot } from "./planning/admission.ts";
+import { pageDeviceBudgets } from "../deviceBudget.ts";
 import type {
   ActiveSetEntry,
   EntitySnapshot,
@@ -293,6 +294,16 @@ function displayStatesEqual(
     }
   }
   return true;
+}
+
+/**
+ * The GPU slot pools admission counts against: a slice view's fixed-size
+ * pools. A volume view's pools grow as chunks arrive, so it is admitted
+ * against the CPU budgets alone.
+ */
+function gpuSlotsFor(ctx: TickContext, datasetId: string): (req: ChunkRequest) => GpuSlot | null {
+  if (ctx.mode !== "slice") return () => null;
+  return sliceSlotsFor(ctx.datasets.get(datasetId)!.manifest, pageDeviceBudgets().sliceAtlasBytes);
 }
 
 function emitViewerInterestHint(
@@ -805,6 +816,7 @@ export class TickCoordinator {
         planned.result.requests,
         capacity,
         chunkBytesFor(ctx.datasets.get(dsId)!.manifest),
+        gpuSlotsFor(ctx, dsId),
       );
       capacity = admission.remaining;
       const result: RequestPlan = {
@@ -1355,6 +1367,7 @@ export class TickCoordinator {
         scrubbed.requests,
         capacity,
         chunkBytesFor(ctx.datasets.get(scrubbed.dsId)!.manifest),
+        gpuSlotsFor(ctx, scrubbed.dsId),
       );
       capacity = admission.remaining;
       const p = { ...scrubbed, requests: admission.admitted };
