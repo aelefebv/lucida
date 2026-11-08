@@ -35,3 +35,12 @@ uv run "$gen" "$dest/collection-unsharded.ome.zarr" \
 uv run "$gen" "$dest/collection-mixed.ome.zarr" \
   --tiles 3 --size 14,12 --size 16,16 --size 12,10 --channels 2 --levels 2 \
   --chunk 8 --chunk 16 --clip-chunks --seed 1 --overwrite
+
+# Twins of the two above in other formats and codec chains: the same options and
+# seed, so the same samples.
+uv run "$gen" "$dest/v2-twin.ome.zarr" "${twin[@]}" --zarr-version 2 --compressor blosc-lz4
+uv run "$gen" "$dest/v3-codec-chain.ome.zarr" "${twin[@]}" \
+  --order F --endian big --compressor gzip --checksum
+uv run "$gen" "$dest/v2-collection.ome.zarr" \
+  --tiles 3 --size 24,24 --levels 2 --factor 3,2 --chunk 8 --seed 1 --overwrite \
+  --zarr-version 2 --order F --endian big --dimension-separator .
