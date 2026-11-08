@@ -22,7 +22,7 @@ function renderHud() {
   const viewer = document.createElement("canvas");
   const canvasRef = { current: viewer };
   const datasets = new Map([["ds-1", { name: "one.zarr" }]]);
-  return render(<Hud canvasRef={canvasRef} datasets={datasets} getCache={() => null} getGpuAtlases={() => null} />);
+  return render(<Hud canvasRef={canvasRef} datasets={datasets} getCache={() => null} getGpuMemory={() => null} />);
 }
 
 describe("the HUD legend", () => {

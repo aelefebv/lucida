@@ -10,6 +10,7 @@ import {
   chunkDistSq as sharedChunkDistSq,
   findEvictionSlot,
   type EvictionCandidate,
+  type FindEvictionParams,
 } from "../eviction.ts";
 import { wantedChunksFor } from "../wantedChunks.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
@@ -57,7 +58,16 @@ export function findEvictionSlot2D(
   atlas: SliceAtlasState,
   tier: ResidencyTier,
 ): EvictionCandidate | null {
-  return findEvictionSlot({
+  return findEvictionSlot(sliceEvictionParams(state, atlas, tier));
+}
+
+/** What the shared eviction kernels read of a slice pool of `tier`. */
+export function sliceEvictionParams(
+  state: RendererState,
+  atlas: SliceAtlasState,
+  tier: ResidencyTier,
+): FindEvictionParams {
+  return {
     slots: atlas.slots,
     slotGridIdx: atlas.slotGridIdx,
     entityMetas: atlas.entityMetas,
@@ -65,5 +75,5 @@ export function findEvictionSlot2D(
     targetLevelFor: (memberId) => state.targetLevelByMember.get(memberId),
     isWanted: (memberId, chunkKey) => wantedChunksFor(state, memberId, tier)?.has(chunkKey) ?? false,
     is3D: false,
-  });
+  };
 }
