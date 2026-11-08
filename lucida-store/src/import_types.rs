@@ -162,6 +162,9 @@ pub struct ImageBindingSeed {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LevelBindingInfo {
     pub level_index: u32,
+    /// The level's array, relative to its image: the path its multiscale
+    /// `datasets` entry gives, which need not be the level index.
+    pub path: String,
     pub compression: StorageCompression,
     pub chunk_shape: Vec<u64>,
     pub chunk_byte_layout: ChunkByteLayout,

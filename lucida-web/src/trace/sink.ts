@@ -20,6 +20,7 @@ import {
   type ChunkCoordinates,
   type ChunkEventSource,
   type ChunkRowSource,
+  type GpuMemoryReading,
   type LevelChangeReason,
   type MatchedRow,
   type PointEventIndex,
@@ -61,8 +62,9 @@ export interface TraceSink {
   /**
    * `values` is one reading, in `READING_NAMES` order. `gpuPassUs` is the GPU
    * pass time that arrived since the previous reading, or null when none did.
+   * `gpuMemory` is the render worker's latest report, or null before its first.
    */
-  appendReading(atUs: number, values: Float64Array, gpuPassUs: number | null): void;
+  appendReading(atUs: number, values: Float64Array, gpuPassUs: number | null, gpuMemory?: GpuMemoryReading | null): void;
   serialiseReadings(): TraceReading[];
   /**
    * The readings from `startUs` on, led by the one in force at that instant.
@@ -260,8 +262,8 @@ export class TableTraceSink implements TraceSink {
     return this.ticks.serialiseFrom(startUs);
   }
 
-  appendReading(atUs: number, values: Float64Array, gpuPassUs: number | null): void {
-    this.readings.append(atUs, values, gpuPassUs);
+  appendReading(atUs: number, values: Float64Array, gpuPassUs: number | null, gpuMemory: GpuMemoryReading | null = null): void {
+    this.readings.append(atUs, values, gpuPassUs, gpuMemory);
   }
 
   serialiseReadings(): TraceReading[] {
