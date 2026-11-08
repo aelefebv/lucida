@@ -606,6 +606,17 @@ pub(crate) const SET_DEFAULT_SAVED_VIEW_ON_COPY: &str = r#"
     WHERE id = $2
 "#;
 
+/// Give the copy the source's preview, if it has one. The image is as old
+/// as the source's, so its time comes too. The uploader does not: a copy
+/// is attributed to whoever made it and names none of the source's members.
+pub(crate) const COPY_PREVIEW_ON_DUPLICATE: &str = r#"
+    INSERT INTO workspace_previews
+        (workspace_id, content_type, size_bytes, image, updated_at, updated_by)
+    SELECT $1, content_type, size_bytes, image, updated_at, $2
+    FROM workspace_previews
+    WHERE workspace_id = $3
+"#;
+
 pub(crate) const GET_VIEWER_PROFILE: &str = r#"
     SELECT
         workspace_id, user_email, profile, created_at, updated_at,
