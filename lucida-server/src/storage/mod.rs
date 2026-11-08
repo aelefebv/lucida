@@ -9,6 +9,8 @@
 #[cfg(test)]
 mod conformance;
 #[cfg(test)]
+mod duplication;
+#[cfg(test)]
 mod end_to_end;
 mod postgres;
 mod sqlite;
