@@ -56,8 +56,11 @@ export class TickWake {
 export interface InvalidationSink {
   markInteractiveDirty(source?: string): void;
   markResidencyDirty(source?: string): void;
-  /** An interactive dirty that the trace recorder hears by input name. */
-  markInput(input: InputKind): void;
+  /**
+   * An interactive dirty that the trace recorder hears by input name, with
+   * the input event's timestamp when there is an event.
+   */
+  markInput(input: InputKind, atMs?: number): void;
 }
 
 /**
