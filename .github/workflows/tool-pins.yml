@@ -1,0 +1,59 @@
+name: Tool pins
+
+# CI installs some tools at versions pinned by hand, which Dependabot does not
+# see (scripts/check_tool_pins.sh lists them). Once a week this keeps one open
+# issue listing the pins that have a newer release, and closes it when none do.
+on:
+  schedule:
+    - cron: '41 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: tool-pins
+  cancel-in-progress: false
+
+# Guarded to this repository, as release.yml is: a fork or downstream mirror
+# would otherwise file the same issue on itself every week.
+jobs:
+  check:
+    name: Report pins behind their newest release
+    if: github.repository == 'aelefebv/lucida'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Open, update, or close the issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: Pinned CI tools have newer releases
+        run: |
+          set -euo pipefail
+          rows="$(scripts/check_tool_pins.sh)"
+          open="$(gh api "repos/$GITHUB_REPOSITORY/issues?state=open&per_page=100" --paginate \
+            --jq ".[] | select(.pull_request == null and .title == env.TITLE) | .number" | head -n 1)"
+          if [[ -z "$rows" ]]; then
+            if [[ -n "$open" ]]; then
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$open" -f state=closed -f state_reason=completed > /dev/null
+            fi
+            exit 0
+          fi
+          body="$(cat <<EOF
+          These tools are installed at versions pinned by hand, which Dependabot does not see. Each has a newer release.
+
+          | Tool | Pinned | Newest | Pinned in |
+          | --- | --- | --- | --- |
+          $rows
+
+          A pin next to a sha256 needs the new release's checksum as well. The [Tool pins](https://github.com/$GITHUB_REPOSITORY/actions/workflows/tool-pins.yml) workflow updates this list weekly and closes the issue once every pin is current.
+          EOF
+          )"
+          if [[ -n "$open" ]]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/$open" -f body="$body" > /dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues" -f title="$TITLE" -f body="$body" -f 'labels[]=dependencies' > /dev/null
+          fi
