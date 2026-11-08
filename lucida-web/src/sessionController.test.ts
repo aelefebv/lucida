@@ -462,6 +462,84 @@ describe("SessionController follow", () => {
   });
 });
 
+describe("SessionController reconnect", () => {
+  /** Drop the connection and join again, as the bridge reports a reconnect.
+   *  The server hands out a new id, and the snapshot carries `peers`. */
+  function reconnect(handlers: BridgeHandlers, peers: PresenceState[]) {
+    handlers.onDisconnect?.();
+    handlers.onConnected?.(2);
+    handlers.onSnapshot(5, snapshotJson(["wds-1"]), peers, 9, {});
+  }
+
+  it("reports its presence again as soon as it is back, without waiting for a move", () => {
+    const { controller, handlers, bridge, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 7, {});
+    controller.emitPresence();
+    controller.emitDatasetPresence();
+    scene.export_presence.mockReturnValue('{"camera":"moved while away"}');
+    bridge.sendPresence.mockClear();
+    bridge.sendDatasetPresence.mockClear();
+
+    reconnect(handlers, []);
+
+    // The server forgot both with the old connection.
+    expect(bridge.sendPresence).toHaveBeenCalledExactlyOnceWith('{"camera":"moved while away"}');
+    expect(bridge.sendDatasetPresence).toHaveBeenCalledOnce();
+  });
+
+  it("stays unreported across a reconnect if it never reported", () => {
+    const { handlers, bridge } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 7, {});
+
+    reconnect(handlers, []);
+
+    expect(bridge.sendPresence).not.toHaveBeenCalled();
+    expect(bridge.sendDatasetPresence).not.toHaveBeenCalled();
+  });
+
+  it("sends nothing for a resync snapshot on a live connection", () => {
+    const { controller, handlers, bridge } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [], 7, {});
+    controller.emitPresence();
+    bridge.sendPresence.mockClear();
+
+    handlers.onSnapshot(4, snapshotJson(["wds-1"]), [], 7, {});
+
+    expect(bridge.sendPresence).not.toHaveBeenCalled();
+  });
+
+  it("keeps following a target still here, telling the server again and adopting where it is now", () => {
+    const { controller, handlers, bridge, events, scene } = makeHarness();
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [makePresence(2)], 7, {});
+    controller.follow(2);
+    bridge.sendFollow.mockClear();
+    scene.import_presence.mockClear();
+
+    const moved: PresenceState = { ...makePresence(2), camera: { position: [5, 5, 1] } };
+    reconnect(handlers, [moved]);
+
+    expect(bridge.sendFollow).toHaveBeenCalledExactlyOnceWith(2);
+    expect(scene.import_presence).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({ camera: moved.camera, view: moved.view, display: moved.display }),
+    );
+    expect(events.onFollowTargetChanged).toHaveBeenLastCalledWith(2);
+  });
+
+  it("ends a follow whose target is gone, or whose id now names someone else", () => {
+    for (const peers of [[], [{ ...makePresence(2), identity: { display_name: "Someone else" } }]]) {
+      const { controller, handlers, bridge, events } = makeHarness();
+      handlers.onSnapshot(1, snapshotJson(["wds-1"]), [makePresence(2)], 7, {});
+      controller.follow(2);
+      bridge.sendFollow.mockClear();
+
+      reconnect(handlers, peers);
+
+      expect(bridge.sendFollow).not.toHaveBeenCalled();
+      expect(events.onFollowTargetChanged).toHaveBeenLastCalledWith(null);
+    }
+  });
+});
+
 describe("SessionController remote-document-changed coalescing", () => {
   it("a snapshot with N pending replays emits onRemoteDocumentChanged exactly once, after the replays", async () => {
     const { handlers, events, scene } = makeHarness();
