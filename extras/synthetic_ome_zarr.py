@@ -63,7 +63,8 @@ Options:
                          every level samples one smooth picture at its own
                          sample spacing.
     --dtype T            Sample data type: uint16 (default), uint8, uint32,
-                         int8, int16, int32, float32, or float64.
+                         uint64, int8, int16, int32, int64, float16, float32,
+                         or float64.
     --range=LO,HI        The values the picture spans, darkest to brightest.
                          Default 0,60000. Integer types round to the nearest
                          whole value; a range reaching below zero needs a
@@ -133,7 +134,7 @@ import numpy as np
 import zarr
 from zarr.codecs import BloscCodec, BytesCodec, Crc32cCodec, GzipCodec, TransposeCodec, ZstdCodec
 
-DTYPES = ("uint8", "uint16", "uint32", "int8", "int16", "int32", "float32", "float64")
+DTYPES = ("uint8", "uint16", "uint32", "uint64", "int8", "int16", "int32", "int64", "float16", "float32", "float64")
 DEFAULT_DTYPE = "uint16"
 
 # Below uint16's maximum so an auto-contrast window has headroom above the data.

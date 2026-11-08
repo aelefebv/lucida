@@ -8,7 +8,14 @@
  */
 
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
-import type { CanvasColors, ColdStateMessage, GpuErrorKind, GpuMemoryReport } from "../workerProtocol.ts";
+import type {
+  CanvasColors,
+  ColdStateMessage,
+  GpuErrorKind,
+  GpuMemoryReport,
+  SliceRenderMultiPassMessage,
+  VolumeRenderMultiPassMessage,
+} from "../workerProtocol.ts";
 import type { AtlasState, LabelVolumePool } from "../volume/atlas.ts";
 import type { SliceAtlasState, LabelSlicePool } from "../slice/atlas.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
@@ -79,6 +86,8 @@ export interface RendererState {
   currentEpochs: SceneEpochs | null;
   /** Last cold-state message (replaced on every cold state). */
   currentColdState: ColdStateMessage | null;
+  /** The last viewport frame drawn, which a probe reads what is under a point from. */
+  lastFrame: SliceRenderMultiPassMessage | VolumeRenderMultiPassMessage | null;
   /**
    * Per-dataset most-recent cold-state message. A display-only update
    * (`coldStateDisplay`) patches this dataset's entry and rebuilds its
@@ -141,6 +150,7 @@ export function createInitialState(gpuTotalBytes: number = CEILING_BUDGETS.gpuTo
     targetLevelByMember: new Map(),
     currentEpochs: null,
     currentColdState: null,
+    lastFrame: null,
     coldStateByDataset: new Map(),
     wantedByDataset: new Map(),
     failedByDataset: new Map(),

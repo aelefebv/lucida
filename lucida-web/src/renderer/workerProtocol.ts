@@ -652,6 +652,20 @@ export interface FailedChunksMessage {
   images: Array<{ imageId: string; chunkKeys: string[] }>;
 }
 
+/**
+ * Read what the last frame drew under one canvas point: for each visible
+ * channel of each entity there, the resident sample and the level it came
+ * from. `x` and `y` are fractions of the canvas, so the page needn't know the
+ * render resolution. Answered by a {@link ProbeResultMessage} with the same
+ * `id`.
+ */
+export interface ProbeMessage {
+  type: "probe";
+  id: number;
+  x: number;
+  y: number;
+}
+
 export type MainToWorkerMessage =
   | InitMessage
   | ResizeMessage
@@ -677,6 +691,7 @@ export type MainToWorkerMessage =
   | FailedChunksMessage
   | ViewHotStateMessage
   | CaptureFrameMessage
+  | ProbeMessage
   | LoseDeviceMessage;
 
 export interface ReadyMessage {
@@ -988,6 +1003,34 @@ export type FrameCaptureResult =
   | { frame: CapturedFrame; reason: null }
   | { frame: null; reason: string };
 
+/** One channel of one entity under a probed point. */
+export interface ProbeSample {
+  datasetId: string;
+  entityId: string;
+  channel: number;
+  /** The level-0 sample under the point, `[x, y, z]`, 0-based. */
+  position: [number, number, number];
+  /**
+   * `value` when a resident chunk answers, `failed` where the source failed
+   * for good, `missing` where nothing is resident yet.
+   */
+  state: "value" | "failed" | "missing";
+  /** The sample in data units, at the precision the viewer draws it; NaN for a NaN sample. */
+  value?: number;
+  /** The level the sample came from; absent when missing. */
+  level?: number;
+}
+
+/**
+ * Reply to a {@link ProbeMessage}. No samples when nothing was drawn under
+ * the point, or the read-back failed.
+ */
+export interface ProbeResultMessage {
+  type: "probeResult";
+  id: number;
+  samples: ProbeSample[];
+}
+
 export type WorkerToMainMessage =
   | ReadyMessage
   | PipelinesCompiledMessage
@@ -1002,6 +1045,7 @@ export type WorkerToMainMessage =
   | MinimapOverviewsLostMessage
   | FrameDoneMessage
   | FrameCapturedMessage
+  | ProbeResultMessage
   | GpuErrorMessage
   | GpuDeviceRestoredMessage
   | GpuFailedMessage;

@@ -49,6 +49,12 @@ impl FillValue {
                 Float::Value(v) => v.to_le_bytes().to_vec(),
                 Float::Bits(bits) => bits.to_le_bytes().to_vec(),
             })?,
+            DataType::Float16 => float(value).ok_or_else(refused).map(|bits| match bits {
+                Float::Value(v) => f16_bits(v as f32).to_le_bytes().to_vec(),
+                Float::Bits(bits) => u16::try_from(bits)
+                    .map(|b| b.to_le_bytes().to_vec())
+                    .unwrap_or_default(),
+            })?,
             _ => {
                 let integer = integer(value).ok_or_else(refused)?;
                 let fits = |bytes: Option<Vec<u8>>| bytes.ok_or_else(refused);
@@ -77,7 +83,19 @@ impl FillValue {
                             .ok()
                             .map(|v| v.to_le_bytes().to_vec()),
                     )?,
-                    DataType::Float32 | DataType::Float64 => unreachable!("floats parse above"),
+                    DataType::Uint64 => fits(
+                        u64::try_from(integer)
+                            .ok()
+                            .map(|v| v.to_le_bytes().to_vec()),
+                    )?,
+                    DataType::Int64 => fits(
+                        i64::try_from(integer)
+                            .ok()
+                            .map(|v| v.to_le_bytes().to_vec()),
+                    )?,
+                    DataType::Float16 | DataType::Float32 | DataType::Float64 => {
+                        unreachable!("floats parse above")
+                    }
                 }
             }
         };
@@ -138,6 +156,42 @@ fn float(value: &serde_json::Value) -> Option<Float> {
     }
 }
 
+/// The IEEE 754 half-precision bits nearest `value`, ties to even. A value
+/// past the largest half is infinite, and a NaN stays a NaN.
+fn f16_bits(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = ((bits >> 16) & 0x8000) as u16;
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    let mantissa = bits & 0x7f_ffff;
+    if exponent == 0xff {
+        let nan = if mantissa != 0 { 0x200 } else { 0 };
+        return sign | 0x7c00 | nan;
+    }
+    // The half exponent, unbiased from float32's 127 and rebiased to 15.
+    let half_exponent = exponent - 127 + 15;
+    if half_exponent >= 0x1f {
+        return sign | 0x7c00;
+    }
+    if half_exponent <= 0 {
+        // Subnormal or zero: shift the implicit bit into the mantissa.
+        if half_exponent < -10 {
+            return sign;
+        }
+        let full = mantissa | 0x80_0000;
+        let shift = (14 - half_exponent) as u32;
+        let half = full >> shift;
+        let rest = full & ((1 << shift) - 1);
+        let halfway = 1 << (shift - 1);
+        let round_up = rest > halfway || (rest == halfway && half & 1 == 1);
+        return sign | (half + round_up as u32) as u16;
+    }
+    let half = ((half_exponent as u32) << 10) | (mantissa >> 13);
+    let rest = mantissa & 0x1fff;
+    let round_up = rest > 0x1000 || (rest == 0x1000 && half & 1 == 1);
+    // A carry out of the mantissa steps the exponent, up to infinity.
+    sign | (half + round_up as u32) as u16
+}
+
 /// An integer fill value, written as an integer or as a float that is one.
 fn integer(value: &serde_json::Value) -> Option<i128> {
     let n = value.as_number()?;
@@ -195,6 +249,35 @@ mod tests {
     }
 
     #[test]
+    fn a_half_fill_is_the_nearest_half() {
+        let half = |value: serde_json::Value| {
+            let bytes = fill(value, DataType::Float16).bytes(2);
+            u16::from_le_bytes(bytes.try_into().unwrap())
+        };
+        assert_eq!(half(json!(1.0)), 0x3c00);
+        assert_eq!(half(json!(-2.5)), 0xc100);
+        assert_eq!(half(json!(65504.0)), 0x7bff);
+        assert_eq!(half(json!(1e6)), 0x7c00);
+        assert_eq!(half(json!("-Infinity")), 0xfc00);
+        assert_eq!(half(json!("NaN")) & 0x7c00, 0x7c00);
+        assert_ne!(half(json!("NaN")) & 0x3ff, 0);
+        // The smallest subnormal, and halfway below it rounding to even zero.
+        assert_eq!(half(json!(5.960_464_5e-8)), 0x0001);
+        assert_eq!(half(json!(2.980_232_2e-8)), 0x0000);
+        // 1 + 2^-11 is halfway between 1 and the next half: ties to even.
+        assert_eq!(half(json!(1.000_488_281_25)), 0x3c00);
+        assert_eq!(half(json!("0x3555")), 0x3555);
+    }
+
+    #[test]
+    fn a_64_bit_integer_fill_takes_its_whole_range() {
+        let max = fill(json!(u64::MAX), DataType::Uint64).bytes(8);
+        assert_eq!(u64::from_le_bytes(max.try_into().unwrap()), u64::MAX);
+        let min = fill(json!(i64::MIN), DataType::Int64).bytes(8);
+        assert_eq!(i64::from_le_bytes(min.try_into().unwrap()), i64::MIN);
+    }
+
+    #[test]
     fn a_fill_the_data_type_cannot_hold_is_refused() {
         for (value, data_type) in [
             (json!(256), DataType::Uint8),
@@ -202,6 +285,8 @@ mod tests {
             (json!(1.5), DataType::Int32),
             (json!("NaN"), DataType::Uint16),
             (json!("0x7ff8000000000000"), DataType::Float32),
+            (json!("0x7e000"), DataType::Float16),
+            (json!(-1), DataType::Uint64),
             (json!([0]), DataType::Float64),
         ] {
             let err = FillValue::parse(&value, data_type).unwrap_err();

@@ -275,6 +275,31 @@ async fn a_file_url_opens_the_absolute_path_it_names() {
     assert_eq!(reply.url, expected.as_str());
 }
 
+#[tokio::test]
+async fn a_file_url_is_percent_decoded() {
+    let tmp = tempfile::tempdir().unwrap();
+    let data = tmp.path().join("a b.zarr");
+    write_minimal_zarr(&data);
+    let rig = start_server(tmp.path()).await;
+
+    let path = data
+        .to_str()
+        .unwrap()
+        .replace('\\', "/")
+        .replace(' ', "%20");
+    let file_url = if path.starts_with('/') {
+        format!("file://{path}")
+    } else {
+        format!("file:///{path}")
+    };
+    let reply = open(&rig, &file_url).await;
+
+    assert!(reply.failure.is_none(), "{:?}", reply.failure);
+    let expected = DatasetLocation::parse(data.to_str().unwrap()).unwrap();
+    assert_eq!(reply.url, expected.as_str());
+    assert!(reply.url.ends_with("/a b.zarr"), "{}", reply.url);
+}
+
 fn restricted(data_roots: Vec<std::path::PathBuf>) -> SourcePolicy {
     SourcePolicy::new(SourcePolicyConfig {
         restricted: true,

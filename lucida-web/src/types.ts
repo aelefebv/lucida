@@ -12,8 +12,8 @@ export interface DatasetState {
 
 /**
  * Every value an integer data type holds, as `[min, max]`. `null` for a
- * float type, whose values have no useful bound. Handles both lowercase and
- * PascalCase (Rust serde `DataType`) spellings.
+ * float type or a 64-bit integer, whose values have no useful bound. Handles
+ * both lowercase and PascalCase (Rust serde `DataType`) spellings.
  */
 export function dtypeRange(dtype: string): [number, number] | null {
   switch (dtype.toLowerCase()) {
