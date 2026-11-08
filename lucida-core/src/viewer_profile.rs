@@ -169,7 +169,7 @@ impl ProfileScene {
             ViewportCommand::SetZoom { value } if *value <= 0.0 => {
                 return Err(E::InvalidValue("zoom must be positive".into()));
             }
-            ViewportCommand::SetViewport { width, height } if *width == 0 || *height == 0 => {
+            ViewportCommand::SetViewport { width, height, .. } if *width == 0 || *height == 0 => {
                 return Err(E::InvalidValue(
                     "viewport width and height must be positive".into(),
                 ));
@@ -484,6 +484,7 @@ impl Scene {
             ViewportCommand::SetViewport {
                 width: viewport[0],
                 height: viewport[1],
+                pixel_ratio: None,
             },
             ViewportCommand::SetCenter {
                 x: bounds.center_x(),

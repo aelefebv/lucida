@@ -69,7 +69,7 @@ async fn start_server() -> Rig {
         tx,
         next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes: Arc::new(Mutex::new(HashMap::new())),
-        data_dir: None,
+        source_policy: Arc::default(),
         proxy_config,
     };
     let app = Router::new().route("/ws", get(ws_route)).with_state(state);
@@ -224,7 +224,11 @@ async fn a_client_that_stops_reading_is_closed_with_a_reason() {
     let rig = start_server().await;
     let mut client = connect(rig.addr).await;
     next_message(&mut client).await;
-    send(&mut client, &ClientMessage::WatchSubscribe).await;
+    send(
+        &mut client,
+        &ClientMessage::WatchSubscribe { history: false },
+    )
+    .await;
 
     // Publish to ourselves without reading: each item comes back on this
     // client's own queue. Twice the budget is far past what the socket

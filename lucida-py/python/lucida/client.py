@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import platform
+import re
 import stat
 import subprocess
 import uuid
@@ -585,6 +586,7 @@ class DatasetsResource:
         return run_sync(self.async_open(source, timeout=timeout))
 
     async def async_open(self, source: str, *, timeout: float = 300.0) -> dict[str, Any]:
+        source = absolute_dataset_source(source)
         async with self._workspace._connect_ws() as ws:
             snapshot = await recv_snapshot(ws, timeout)
             request_id = f"py-{uuid.uuid4().hex}"
@@ -1424,17 +1426,39 @@ def dataset_open_summary(
     return result
 
 
+_URL_SCHEME = re.compile(r"[A-Za-z][A-Za-z0-9+.-]+://")
+_DRIVE_LETTER = re.compile(r"[A-Za-z]:")
+
+
+def absolute_dataset_source(source: str) -> str:
+    """Resolve a relative path against this process's working directory.
+
+    The server cannot know the client's working directory. A URL, an
+    absolute path, a drive-letter or UNC path, or an empty string passes
+    through unchanged for the server to judge, by the same rules as its
+    location parser.
+    """
+    if (
+        not source
+        or _URL_SCHEME.match(source)
+        or _DRIVE_LETTER.match(source)
+        or source.startswith(("/", "\\\\"))
+    ):
+        return source
+    return os.path.abspath(source)
+
+
 def dataset_open_error_kind(diagnostic: Any) -> str:
     if not isinstance(diagnostic, dict):
         return "dataset_open_failure"
     kind = diagnostic.get("kind")
-    if kind == "authorization":
+    if kind in {"authorization", "source_not_allowed"}:
         return "unauthorized"
     if kind == "session_closed":
         return "session_disconnect"
     if kind in {"local_path", "missing_object", "missing_metadata"}:
         return "missing_resource"
-    if kind in {"cloud_configuration", "unsupported_scheme"}:
+    if kind in {"cloud_configuration", "unsupported_scheme", "invalid_location"}:
         return "config"
     return "dataset_open_failure"
 

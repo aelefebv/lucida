@@ -45,6 +45,7 @@ Add these to any `docker run` above:
 
 ```bash
 # Mount datasets and confine the file picker to them. Unset, it lists from /.
+# With sign-in on, local datasets open only from these directories.
 -v /path/on/host:/var/lib/lucida/data -e LUCIDA_DATA_DIR=/var/lib/lucida/data
 # Keep state across restarts. The default lucida.db lands in the working
 # directory, /var/lib/lucida. The proxy cache goes elsewhere unless moved.

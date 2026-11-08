@@ -28,7 +28,7 @@ fn fixture_dir(name: &str) -> PathBuf {
 async fn import_fixture(name: &str, id: &str) -> (PathBuf, ImportResult) {
     let dir = fixture_dir(name);
     let store = Arc::new(CachedStore::new(
-        lucida_store::backend::open(dir.to_str().unwrap()).unwrap(),
+        lucida_store::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap(),
         DEFAULT_SOURCE_CACHE_BYTES,
     ));
     let result = import_dataset(&store, id, id).await.unwrap();
@@ -43,7 +43,12 @@ fn decode_chunk(dir: &Path, resolver: &ChunkResolver, image_id: &ImageId, key: &
     let info = resolver.level_info(image_id, level).unwrap();
     let path = resolver.resolve(image_id, key).unwrap().path().clone();
     let bytes = fs::read(dir.join(path.as_ref())).unwrap_or_else(|e| panic!("{path}: {e}"));
-    decode_storage_bytes(&bytes, info.compression).unwrap()
+    decode_storage_bytes(
+        &bytes,
+        info.compression,
+        info.chunk_byte_layout.on_disk_byte_size,
+    )
+    .unwrap()
 }
 
 fn samples(bytes: &[u8]) -> Vec<u16> {
