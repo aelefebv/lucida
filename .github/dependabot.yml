@@ -14,6 +14,10 @@ updates:
       cargo:
         update-types: [minor, patch]
 
+  # Dependabot's checkout has no wasm build output, so lucida-web takes the
+  # wasm package by `link:`, which pnpm resolves without the directory. Its
+  # `packageManager` pin makes Dependabot run CI's pnpm rather than its own
+  # newer default, which would rewrite the lockfile in a form CI rejects.
   - package-ecosystem: npm
     directory: /lucida-web
     schedule:

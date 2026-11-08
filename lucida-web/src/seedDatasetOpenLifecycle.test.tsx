@@ -31,7 +31,7 @@ class MockWebSocket {
   readyState: number = MockWebSocket.CONNECTING;
   binaryType = "blob";
   onopen: (() => void) | null = null;
-  onclose: (() => void) | null = null;
+  onclose: ((e: { code: number; reason: string }) => void) | null = null;
   onerror: (() => void) | null = null;
   onmessage: ((ev: { data: unknown }) => void) | null = null;
 
@@ -55,7 +55,7 @@ class MockWebSocket {
 
   close() {
     this.readyState = MockWebSocket.CLOSED;
-    this.onclose?.();
+    this.onclose?.({ code: 1005, reason: "" });
   }
 
   /** Test control: complete the handshake. */

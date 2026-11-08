@@ -174,14 +174,17 @@ async fn handle_client_inner(
         loop {
             // A requested close goes out next, ahead of anything still
             // queued: the connection is ending, and the backlog may be why.
-            if let Some(frame) = outbound_close.current() {
+            if let Some(close) = outbound_close.current() {
                 tracing::warn!(
                     client_id = %id,
-                    code = frame.code,
-                    reason = %frame.reason,
+                    code = close.frame.code,
+                    reason = %close.frame.reason,
                     "ws.connection.closed_by_server"
                 );
-                let _ = ws_tx.send(Message::Close(Some(frame))).await;
+                if let Some(notice) = close.notice {
+                    let _ = ws_tx.send(Message::Text(notice.into())).await;
+                }
+                let _ = ws_tx.send(Message::Close(Some(close.frame))).await;
                 break;
             }
             tokio::select! {
@@ -230,7 +233,6 @@ async fn handle_client_inner(
                                     json
                                 }
                                 BroadcastItem::GeneratedAvailabilityUpdate { json } => json,
-                                BroadcastItem::WorkspaceArchived { json } => json,
                             };
                             if ws_tx
                                 .send(Message::Text(json.clone().into()))
@@ -339,7 +341,9 @@ async fn handle_client_inner(
                                             error = %e,
                                             "workspace.command.rename_dataset_rejected"
                                         );
-                                        reject_command(&tx, id, rename_rejection(&e));
+                                        if !unicast_tx.close_requested() {
+                                            reject_command(&tx, id, rename_rejection(&e));
+                                        }
                                     }
                                 }
                                 continue;
@@ -382,7 +386,12 @@ async fn handle_client_inner(
                                         error = %e,
                                         "workspace.command.persist_failed"
                                     );
-                                    reject_command(&tx, id, CommandRejection::Unavailable);
+                                    // A stale write closes this socket with the
+                                    // refusal as its notice; once more would
+                                    // only race the close.
+                                    if !unicast_tx.close_requested() {
+                                        reject_command(&tx, id, CommandRejection::Unavailable);
+                                    }
                                 }
                             }
                         }
@@ -2613,7 +2622,7 @@ mod tests {
         let location = resolver
             .resolve(&ImageId("img1".into()), &self::key(key))
             .unwrap();
-        object_store::ObjectStore::put(
+        object_store::ObjectStoreExt::put(
             &store,
             location.path(),
             object_store::PutPayload::from_static(bytes),
@@ -2776,7 +2785,7 @@ mod tests {
         let location = resolver
             .resolve(&ImageId("img1".into()), &key("0/0/0/0/0/0"))
             .unwrap();
-        object_store::ObjectStore::put(
+        object_store::ObjectStoreExt::put(
             &store,
             location.path(),
             object_store::PutPayload::from_static(&[1, 2, 3, 4]),
@@ -3002,7 +3011,10 @@ mod tests {
             })
         }
 
-        async fn delete(&self, _location: &Path) -> object_store::Result<()> {
+        fn delete_stream(
+            &self,
+            _locations: futures_util::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<Path>> {
             unimplemented!("reads only")
         }
 
@@ -3021,11 +3033,12 @@ mod tests {
             unimplemented!("reads only")
         }
 
-        async fn copy(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
-            unimplemented!("reads only")
-        }
-
-        async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
+        async fn copy_opts(
+            &self,
+            _from: &Path,
+            _to: &Path,
+            _options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
             unimplemented!("reads only")
         }
     }

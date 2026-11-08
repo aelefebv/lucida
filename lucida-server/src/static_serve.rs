@@ -1,7 +1,8 @@
 //! SPA static-asset serving via `tower_http::services::ServeDir`, so one
 //! container image serves both the API and the UI.
 //!
-//! Unknown paths fall back to `index.html` for client-side routing. When
+//! Unknown paths fall back to `index.html` for client-side routing, except
+//! under `/api` and `/ws`, which answer 404. When
 //! `dist_path` lacks an `index.html`, a landing page with build
 //! instructions is served instead. That check runs per request, so building
 //! the SPA after the server starts needs no restart. Mounts on the public
@@ -18,7 +19,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use axum::Router;
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse, Json, Response};
+use serde_json::json;
 use tower::ServiceExt;
 use tower_http::services::{ServeDir, ServeFile};
 
@@ -61,6 +63,9 @@ fn dist_is_ready(dist_path: &std::path::Path) -> bool {
 /// Fallback handler: delegates to `ServeDir` when the SPA bundle is
 /// present, otherwise renders the build-instructions landing page.
 async fn serve_static(State(state): State<StaticState>, req: Request) -> Response {
+    if let Some(not_found) = not_an_app_route(req.uri().path()) {
+        return not_found;
+    }
     let dist_path: &std::path::Path = state.dist_path.as_ref();
     if !dist_is_ready(dist_path) {
         return missing_dist_landing();
@@ -79,6 +84,23 @@ async fn serve_static(State(state): State<StaticState>, req: Request) -> Respons
         Ok(r) => r.into_response(),
         // Unreachable: ServeDir's error is Infallible.
         Err(e) => match e {},
+    }
+}
+
+/// A 404 for a path under `/api` or `/ws` that no route claimed. Handing
+/// those the page would answer a client that expects JSON or a socket
+/// with HTML and a 200.
+fn not_an_app_route(path: &str) -> Option<Response> {
+    let under = |prefix: &str| {
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
+    if under("/api") {
+        Some((StatusCode::NOT_FOUND, Json(json!({ "error": "not_found" }))).into_response())
+    } else if under("/ws") {
+        Some(StatusCode::NOT_FOUND.into_response())
+    } else {
+        None
     }
 }
 
@@ -264,6 +286,42 @@ mod tests {
         let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
         let body = std::str::from_utf8(&bytes).unwrap();
         assert_eq!(body, html, "SPA fallback must serve index.html verbatim");
+    }
+
+    #[tokio::test]
+    async fn unknown_api_and_socket_paths_are_not_found() {
+        let tmp = TempDir::new().unwrap();
+        write_index(tmp.path(), "<html>HELLO</html>");
+        let missing = PathBuf::from("/nonexistent/lucida-web/dist-does-not-exist");
+        for dist in [tmp.path().to_path_buf(), missing] {
+            let app = router(dist, None);
+            for uri in ["/api", "/api/", "/api/nope", "/api/workspaces/x/nope?y=1"] {
+                let (status, _, body) = get(&app, uri).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+                assert_eq!(
+                    serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                    json!({ "error": "not_found" }),
+                    "{uri}"
+                );
+            }
+            for uri in ["/ws", "/ws/", "/ws/nope", "/ws/workspaces"] {
+                let (status, _, body) = get(&app, uri).await;
+                assert_eq!(status, StatusCode::NOT_FOUND, "{uri}");
+                assert!(!body.contains("<html"), "{uri}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paths_that_only_begin_with_api_or_ws_are_still_app_routes() {
+        let tmp = TempDir::new().unwrap();
+        write_index(tmp.path(), "<html>HELLO</html>");
+        let app = router(tmp.path().to_path_buf(), None);
+        for uri in ["/apiary", "/wsx", "/w/some-workspace"] {
+            let (status, _, body) = get(&app, uri).await;
+            assert_eq!(status, StatusCode::OK, "{uri}");
+            assert_eq!(body, "<html>HELLO</html>", "{uri}");
+        }
     }
 
     const MARKED: &str = "<html><head><!-- deployment theme --><script></script></head></html>";

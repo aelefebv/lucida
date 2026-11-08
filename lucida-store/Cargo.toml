@@ -14,10 +14,10 @@ rayon = "1"
 memmap2 = "0.9"
 lz4_flex = "0.11"
 crc32c = "0.6"
-object_store = { version = "0.12", features = ["gcp", "aws", "http"] }
+object_store = { version = "0.14", features = ["gcp", "aws", "http"] }
 # The HTTP client of a restricted source policy, built to resolve names
 # through the policy. The features match object_store's own client.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-native-roots", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "http2"] }
 ipnet = "2"
 url = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net", "fs"] }
