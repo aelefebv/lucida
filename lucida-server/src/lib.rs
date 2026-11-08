@@ -35,7 +35,6 @@ pub mod workspace;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use lucida_core::protocol::ClientId;
 use lucida_store::source_policy::SourcePolicy;
@@ -77,7 +76,6 @@ pub type UnicastRoutes = Arc<Mutex<HashMap<ClientId, ClientSender>>>;
 pub struct AppState {
     pub session: Arc<Mutex<Session>>,
     pub tx: broadcast::Sender<BroadcastItem>,
-    pub next_id: Arc<AtomicU64>,
     pub unicast_routes: UnicastRoutes,
     /// Where datasets may be opened from, and the data roots that bound
     /// `/api/browse`.

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
@@ -45,7 +45,6 @@ pub struct LiveWorkspace {
     pub session: Arc<Mutex<Session>>,
     pub tx: broadcast::Sender<BroadcastItem>,
     pub unicast_routes: UnicastRoutes,
-    next_id: AtomicU64,
     empty_since: Mutex<Option<Instant>>,
     background_cancelled: AtomicBool,
     /// Who each open socket acts as, so a membership change can find the
@@ -61,7 +60,6 @@ impl LiveWorkspace {
             session: Arc::new(Mutex::new(session)),
             tx,
             unicast_routes: Arc::new(Mutex::new(HashMap::new())),
-            next_id: AtomicU64::new(0),
             empty_since: Mutex::new(Some(Instant::now())),
             background_cancelled: AtomicBool::new(false),
             connections: std::sync::Mutex::new(HashMap::new()),
@@ -83,10 +81,6 @@ impl LiveWorkspace {
             .iter()
             .map(|(id, (principal, sender))| (*id, principal.clone(), sender.clone()))
             .collect()
-    }
-
-    pub fn next_client_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn cancel_background(&self) -> bool {

@@ -213,7 +213,6 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
     use tokio::sync::{Mutex, broadcast};
 
     use crate::session::Session;
@@ -243,7 +242,6 @@ mod tests {
         AppState {
             session: Arc::new(Mutex::new(Session::new())),
             tx,
-            next_id: Arc::new(AtomicU64::new(0)),
             unicast_routes: Arc::new(Mutex::new(HashMap::new())),
             source_policy: Arc::new(source_policy),
             proxy_config,

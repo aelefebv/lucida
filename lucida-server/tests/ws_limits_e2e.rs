@@ -8,7 +8,6 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -43,7 +42,7 @@ struct Rig {
 }
 
 async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let id = lucida_server::connection::next_client_id();
     limit_inbound(ws).on_upgrade(move |socket| async move {
         handler::handle_client(
             id,
@@ -67,7 +66,6 @@ async fn start_server() -> Rig {
     let state = AppState {
         session: Arc::clone(&session),
         tx,
-        next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes: Arc::new(Mutex::new(HashMap::new())),
         source_policy: Arc::default(),
         proxy_config,

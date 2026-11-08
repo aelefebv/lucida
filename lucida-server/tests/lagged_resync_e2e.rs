@@ -15,7 +15,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -66,7 +65,7 @@ async fn apply_and_broadcast(rig: &Rig, command: DocumentCommand) {
 }
 
 async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let id = lucida_server::connection::next_client_id();
     ws.on_upgrade(move |socket| async move {
         handler::handle_client(
             id,
@@ -93,7 +92,6 @@ async fn start_server(broadcast_capacity: usize) -> Rig {
     let state = AppState {
         session: Arc::clone(&session),
         tx: tx.clone(),
-        next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes,
         source_policy: Arc::default(),
         proxy_config,
@@ -316,7 +314,12 @@ async fn request_snapshot_returns_fresh_snapshot() {
     let rig = start_server(256).await;
 
     let mut client = connect(rig.addr).await;
-    let ServerMessage::Snapshot { seq, .. } = next_server_message(&mut client).await else {
+    let ServerMessage::Snapshot {
+        seq,
+        your_id: joined_as,
+        ..
+    } = next_server_message(&mut client).await
+    else {
         panic!("join snapshot");
     };
     assert_eq!(seq, 0);
@@ -346,7 +349,7 @@ async fn request_snapshot_returns_fresh_snapshot() {
         panic!("expected snapshot in response to request_snapshot");
     };
     assert_eq!(seq, 3);
-    assert_eq!(your_id, 0);
+    assert_eq!(your_id, joined_as);
     let server_doc = rig.session.lock().await.document.clone();
     assert_eq!(
         serde_json::to_value(&document).unwrap(),

@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -37,7 +36,7 @@ type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
 async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let id = lucida_server::connection::next_client_id();
     ws.on_upgrade(move |socket| async move {
         handler::handle_client(
             id,
@@ -74,7 +73,6 @@ async fn serve() -> SocketAddr {
     let state = AppState {
         session: Arc::new(Mutex::new(Session::new())),
         tx,
-        next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes: Arc::new(Mutex::new(HashMap::new())),
         source_policy: Arc::default(),
         proxy_config: proxy_config(&root),

@@ -9,7 +9,6 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -216,7 +215,7 @@ async fn generated_coarse_over_the_sharded_twin_produces_the_unsharded_twins_chu
 }
 
 async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let id = lucida_server::connection::next_client_id();
     ws.on_upgrade(move |socket| async move {
         handler::handle_client(
             id,
@@ -329,7 +328,6 @@ async fn the_server_frames_the_same_bytes_for_the_sharded_and_the_unsharded_twin
     let state = AppState {
         session,
         tx,
-        next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes,
         source_policy: Arc::default(),
         proxy_config: proxy_config(&root),

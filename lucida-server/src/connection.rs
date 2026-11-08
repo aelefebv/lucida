@@ -8,12 +8,22 @@
 //! writes it to the socket.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use axum::extract::ws::{CloseFrame, Message, WebSocketUpgrade};
+use lucida_core::protocol::ClientId;
 use tokio::sync::{mpsc, watch};
 
 use crate::inbox::MAX_BUNDLE_BYTES;
+
+/// The id for a new connection, unique across every workspace in the process.
+///
+/// Source reads are shared out per client across the whole process, so two
+/// connections in different workspaces must never be charged as one reader.
+pub fn next_client_id() -> ClientId {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
 
 /// The largest message a client may send, and the largest frame.
 ///

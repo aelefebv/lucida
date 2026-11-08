@@ -7,7 +7,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use axum::Router;
 use axum::body::Body;
@@ -59,7 +58,6 @@ fn build_router(
     let app_state = AppState {
         session: Arc::new(Mutex::new(Session::new())),
         tx: broadcast::channel::<BroadcastItem>(8).0,
-        next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes: Arc::new(Mutex::new(HashMap::new())) as UnicastRoutes,
         source_policy: Arc::default(),
         proxy_config: ProxyConfig {
