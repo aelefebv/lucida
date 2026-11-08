@@ -38,6 +38,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
 use lucida_core::protocol::ClientId;
+use lucida_store::source_policy::SourcePolicy;
 use tokio::sync::{Mutex, broadcast};
 
 use connection::ClientSender;
@@ -82,7 +83,9 @@ pub struct AppState {
     pub tx: broadcast::Sender<BroadcastItem>,
     pub next_id: Arc<AtomicU64>,
     pub unicast_routes: UnicastRoutes,
-    pub data_dir: Option<PathBuf>,
+    /// Where datasets may be opened from, and the data roots that bound
+    /// `/api/browse`.
+    pub source_policy: Arc<SourcePolicy>,
     /// Proxy infrastructure config, plumbed through to per-dataset
     /// `ServerBinding`s when datasets are opened.
     pub proxy_config: ProxyConfig,

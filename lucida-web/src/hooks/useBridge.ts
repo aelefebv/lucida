@@ -281,5 +281,6 @@ function canvasDeviceSize(canvas: HTMLCanvasElement | null): ViewportSize | null
   return {
     width: Math.round(canvas.clientWidth * dpr),
     height: Math.round(canvas.clientHeight * dpr),
+    pixelRatio: dpr,
   };
 }

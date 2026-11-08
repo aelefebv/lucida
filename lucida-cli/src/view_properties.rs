@@ -62,13 +62,11 @@ fn overview_frames_the_dataset_on_a_1x_canvas() {
 }
 
 #[test]
-#[ignore = "the overview is fitted to the CLI's window and a 2x page imports its zoom as device pixels, at half size"]
 fn overview_frames_the_dataset_on_a_2x_canvas() {
     assert_on_screen("overview frames the dataset at 2x", &[2], overview);
 }
 
 #[test]
-#[ignore = "the overview is fitted to the CLI's window and a page imports its zoom as device pixels"]
 fn overview_shows_the_same_css_size_at_any_pixel_ratio() {
     assert_same_css_size("overview shows the same CSS size", overview);
 }
@@ -78,13 +76,11 @@ fn overview_plans_what_is_visible() {
     assert_plans("overview plans what is visible", overview);
 }
 
-// A cell fills its window edge to edge, so a 2x page showing it at half size
-// sits exactly on the framing floor. The CSS-size property catches that case.
 #[test]
-fn montage_cells_frame_a_single_image_on_a_1x_canvas() {
+fn montage_cells_frame_a_single_image() {
     assert_on_screen(
-        "montage cells frame a single image at 1x",
-        &[1],
+        "montage cells frame a single image",
+        &PIXEL_RATIOS,
         montage_of_one_image,
     );
 }
@@ -100,7 +96,6 @@ fn montage_cells_frame_a_collection() {
 }
 
 #[test]
-#[ignore = "a montage cell is fitted to the CLI's window and a page imports its zoom as device pixels"]
 fn montage_cells_show_the_same_css_size_at_any_pixel_ratio() {
     assert_same_css_size("montage cells show the same CSS size", montage);
 }

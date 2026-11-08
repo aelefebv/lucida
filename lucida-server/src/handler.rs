@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, Stream, StreamExt};
-use lucida_content::url::normalize_dataset_url;
+use lucida_content::url::{DatasetLocation, normalize_dataset_url};
 use lucida_content::{DatasetId, DatasetManifest, ImageId};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
@@ -33,7 +33,7 @@ use crate::generated::{
 };
 use crate::inbox::{self, InboxStore, Report as InboxReport};
 use crate::open_diagnostics::{
-    backend_kind_for_url, open_failure, open_progress, store_error_status,
+    backend_kind_for_url, location_failure, open_failure, open_progress, store_error_status,
 };
 use crate::proxy::{PROXY_TARGET_LONG_AXIS, ProxyGenerator};
 use crate::session::Session;
@@ -493,7 +493,7 @@ async fn handle_client_inner(
                         ClientMessage::OpenRemoteDataset { request_id, url } => {
                             // Adding a dataset takes the editor role, which
                             // nobody holds on the legacy `/ws` session.
-                            if workspace.is_none() {
+                            let Some(scope) = workspace.clone() else {
                                 send_open_failed(
                                     id,
                                     &request_id,
@@ -509,7 +509,7 @@ async fn handle_client_inner(
                                 )
                                 .await;
                                 continue;
-                            }
+                            };
                             tracing::info!(
                                 client_id = %id,
                                 request_id = %request_id,
@@ -520,7 +520,6 @@ async fn handle_client_inner(
                             let tx_clone = tx.clone();
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let proxy_config_clone = proxy_config.clone();
-                            let workspace_clone = workspace.clone();
                             let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest { request_id, url };
                             tokio::spawn(async move {
@@ -531,7 +530,7 @@ async fn handle_client_inner(
                                     tx_clone,
                                     unicast_routes_clone,
                                     proxy_config_clone,
-                                    workspace_clone,
+                                    scope,
                                     timings_clone,
                                 )
                                 .await;
@@ -632,7 +631,7 @@ async fn handle_client_inner(
                             let tx_clone = tx.clone();
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let proxy_config_clone = proxy_config.clone();
-                            let workspace_clone = workspace.clone();
+                            let workspace_clone = ctx.clone();
                             let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest {
                                 request_id,
@@ -1398,13 +1397,27 @@ async fn handle_open_remote_dataset(
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
-    workspace: Option<WorkspaceScope>,
+    workspace: WorkspaceScope,
     timings: Arc<TimingBuffer>,
 ) {
     let OpenRemoteDatasetRequest { request_id, url } = request;
-    // Wire envelopes carry the canonical URL — the same (idempotent)
-    // normalization the orchestration applies at its own entry.
-    let canonical_url = normalize_dataset_url(&url);
+    // A location that does not parse is refused here, echoing the input as
+    // given; past this point every envelope carries the canonical URL.
+    let location = match DatasetLocation::parse(&url) {
+        Ok(location) => location,
+        Err(error) => {
+            send_open_failed(
+                client_id,
+                &request_id,
+                &url,
+                location_failure(&error),
+                &unicast_routes,
+            )
+            .await;
+            return;
+        }
+    };
+    let canonical_url = location.as_str().to_string();
 
     // Forward per-stage progress to the requesting client as it happens.
     // The forwarder drains fully (its sender is dropped first) before the
@@ -1433,7 +1446,8 @@ async fn handle_open_remote_dataset(
         session,
         tx,
         proxy_config,
-        workspace,
+        source_policy: workspace.manager.source_policy(),
+        workspace: Some(workspace),
     };
     // Every metadata object this open reads files a row against the open's
     // own `request_id`, on the requesting connection's buffer. Scoped
@@ -1446,7 +1460,7 @@ async fn handle_open_remote_dataset(
     // having.
     let result = lucida_store::metadata_reads::observing(
         Arc::new(MetadataReadSink::new(&request_id, timings)),
-        dataset_open::open_dataset(client_id, &url, &ctx, &progress_tx),
+        dataset_open::open_dataset(client_id, &location, &ctx, &progress_tx),
     )
     .await;
     drop(progress_tx);

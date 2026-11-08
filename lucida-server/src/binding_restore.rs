@@ -10,11 +10,12 @@
 use std::sync::Arc;
 
 use lucida_content::DatasetId;
-use lucida_content::url::{dataset_id_for_url, dataset_url_hash16, normalize_dataset_url};
+use lucida_content::url::DatasetLocation;
 use lucida_protocol::{
     AssetCatalog, DatasetOpenFailureDiagnostic, DatasetOpened, GeneratedAvailabilityDelta,
 };
 use lucida_store::cache::CachedStore;
+use lucida_store::source_policy::SourcePolicy;
 use tokio::sync::{Mutex, broadcast};
 
 use crate::binding::{ChunkResolver, ServerBinding};
@@ -22,7 +23,9 @@ use crate::generated::{
     DerivedChunkCache, GeneratedCoarseConfig, GeneratedCoarseService, GeneratedSchedulingConfig,
     plan_generated_coarse_for_manifest,
 };
-use crate::open_diagnostics::{MetadataReadCost, backend_open_failure, import_failure};
+use crate::open_diagnostics::{
+    MetadataReadCost, backend_open_failure, import_failure, location_failure,
+};
 use crate::proxy::{ProxyCache, ProxyGenerator, proxy_catalog_entries_for_manifest};
 use crate::session::Session;
 use crate::workspace::types::WorkspaceDatasetSource;
@@ -40,8 +43,14 @@ pub async fn restore_workspace_bindings(
     tx: broadcast::Sender<BroadcastItem>,
     sources: Vec<WorkspaceDatasetSource>,
     proxy_config: ProxyConfig,
+    source_policy: &SourcePolicy,
 ) {
     for source in sources {
+        let location = DatasetLocation::parse(&source.canonical_url);
+        let source_url = location
+            .as_ref()
+            .map_or(source.canonical_url.as_str(), DatasetLocation::as_str)
+            .to_string();
         {
             let mut sess = session.lock().await;
             if sess
@@ -52,20 +61,31 @@ pub async fn restore_workspace_bindings(
             }
             sess.record_binding_source(
                 source.workspace_dataset_id.clone(),
-                normalize_dataset_url(&source.canonical_url),
+                source_url.clone(),
                 Some(source.dataset_source_id.clone()),
                 source.display_name.clone(),
             );
         }
-        if let Err(e) =
-            restore_one_workspace_binding(Arc::clone(&session), tx.clone(), &source, &proxy_config)
+        let restored = match &location {
+            Ok(location) => {
+                restore_one_workspace_binding(
+                    Arc::clone(&session),
+                    tx.clone(),
+                    &source,
+                    location,
+                    &proxy_config,
+                    source_policy,
+                )
                 .await
-        {
+            }
+            Err(error) => Err(location_failure(error)),
+        };
+        if let Err(e) = restored {
             {
                 let mut sess = session.lock().await;
                 sess.record_binding_restore_failure(
                     source.workspace_dataset_id.clone(),
-                    normalize_dataset_url(&source.canonical_url),
+                    source_url,
                     Some(source.dataset_source_id.clone()),
                     source.display_name.clone(),
                     e.clone(),
@@ -89,19 +109,21 @@ async fn restore_one_workspace_binding(
     session: Arc<Mutex<Session>>,
     tx: broadcast::Sender<BroadcastItem>,
     source: &WorkspaceDatasetSource,
+    location: &DatasetLocation,
     proxy_config: &ProxyConfig,
+    source_policy: &SourcePolicy,
 ) -> Result<(), DatasetOpenFailureDiagnostic> {
-    let canonical_url = normalize_dataset_url(&source.canonical_url);
     let dataset_id = source.workspace_dataset_id.0.clone();
     let dataset_id_key = DatasetId(dataset_id.clone());
 
-    let store =
-        lucida_store::backend::open(&canonical_url).map_err(|e| backend_open_failure(&e))?;
+    let store = lucida_store::backend::open_permitted(location, source_policy)
+        .await
+        .map_err(|e| backend_open_failure(&e))?;
     // Built before the import so the metadata reads go through the cache and
     // are counted by the same source-cache instrumentation as the chunk reads
     // that follow. Mirrors the interactive open path in `crate::dataset_open`.
     let cached = CachedStore::shared_for_source(
-        &dataset_id_for_url(&canonical_url),
+        &location.source_id(),
         store.clone(),
         lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
     );
@@ -153,7 +175,7 @@ async fn restore_one_workspace_binding(
         vec![]
     };
 
-    let url_hash16 = dataset_url_hash16(&canonical_url);
+    let url_hash16 = location.hash16();
     let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
         proxy_config.generated_cache_dir.clone(),
         url_hash16,
@@ -205,7 +227,7 @@ async fn restore_one_workspace_binding(
     ));
 
     let binding = ServerBinding {
-        source_url: canonical_url.clone(),
+        source_url: location.as_str().to_string(),
         store,
         resolver,
         cache: cached,
@@ -222,7 +244,7 @@ async fn restore_one_workspace_binding(
         let mut sess = session.lock().await;
         sess.record_binding_source(
             dataset_id_key.clone(),
-            canonical_url,
+            location.as_str().to_string(),
             Some(source.dataset_source_id.clone()),
             source.display_name.clone(),
         );

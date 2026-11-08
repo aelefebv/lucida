@@ -3,7 +3,7 @@
 //! An empty `path` asks for the platform root. Windows has no single root,
 //! so there it returns a synthetic list of drives. The response `path` goes
 //! through [`canonical_display_form`] so the SPA never sees `\\?\` verbatim
-//! paths, but the `data_dir` security check runs on the raw canonicalized
+//! paths, but the data-root check runs on the raw canonicalized
 //! `PathBuf`.
 
 use std::path::Path;
@@ -144,8 +144,8 @@ pub async fn browse_handler(
     Query(query): Query<BrowseQuery>,
 ) -> Result<Json<BrowseResponse>, (StatusCode, String)> {
     // Empty or absent path → return the platform root (synthetic drives
-    // list on Windows, `/` listing on Unix). Skip the `data_dir` check
-    // here: the root itself is never under `data_dir`, but every entry
+    // list on Windows, `/` listing on Unix). Skip the data-root check
+    // here: the root itself is never under a data root, but every entry
     // the user clicks into is canonicalized + checked normally below.
     let raw_path = query.path.as_deref().unwrap_or("");
     if raw_path.is_empty() {
@@ -163,19 +163,8 @@ pub async fn browse_handler(
         .await
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid path: {e}")))?;
 
-    // Constrain to data_dir if set. Segment-aware `starts_with` on the
-    // canonicalized `PathBuf`s — UNC-vs-non-UNC mismatch can't happen
-    // because both sides go through `canonicalize`.
-    if let Some(root) = &state.data_dir {
-        let canonical_root = tokio::fs::canonicalize(root).await.map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Invalid data-dir: {e}"),
-            )
-        })?;
-        if !canonical.starts_with(&canonical_root) {
-            return Err((StatusCode::FORBIDDEN, "Path outside data directory".into()));
-        }
+    if !state.source_policy.permits_browse(&canonical) {
+        return Err((StatusCode::FORBIDDEN, "Path outside data directory".into()));
     }
 
     let mut entries = Vec::new();
@@ -229,13 +218,14 @@ mod tests {
 
     use crate::session::Session;
     use crate::{BroadcastItem, ProxyConfig};
+    use lucida_store::source_policy::{SourcePolicy, SourcePolicyConfig};
 
-    /// Minimal `AppState` for tests that don't need real proxy infra,
-    /// real sessions, or a real data-dir. Only the `data_dir` field is
-    /// inspected by `browse_handler`; the proxy cache paths are never
-    /// touched in browse tests, so we hand it stub paths. Mirrors the
-    /// field set in `main::main`.
-    fn test_state(data_dir: Option<PathBuf>) -> AppState {
+    /// Minimal `AppState` for tests that don't need real proxy infra or
+    /// real sessions. Only the source policy is inspected by
+    /// `browse_handler`; the proxy cache paths are never touched in browse
+    /// tests, so we hand it stub paths. Mirrors the field set in
+    /// `main::main`.
+    fn test_state(source_policy: SourcePolicy) -> AppState {
         let proxy_config = ProxyConfig {
             cache_dir: PathBuf::from("/tmp/lucida-browse-test-proxy"),
             legacy_proxy_enabled: false,
@@ -255,7 +245,7 @@ mod tests {
             tx,
             next_id: Arc::new(AtomicU64::new(0)),
             unicast_routes: Arc::new(Mutex::new(HashMap::new())),
-            data_dir,
+            source_policy: Arc::new(source_policy),
             proxy_config,
         }
     }
@@ -313,7 +303,7 @@ mod tests {
     // manually by the author.
     #[tokio::test]
     async fn browse_handler_empty_path_returns_platform_root() {
-        let state = test_state(None);
+        let state = test_state(SourcePolicy::unrestricted());
         let resp = browse_handler(State(state), Query(BrowseQuery { path: None }))
             .await
             .expect("empty-path browse should succeed");
@@ -350,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn browse_handler_empty_string_path_treated_as_root() {
         // Same as `None` — the SPA can send either shape.
-        let state = test_state(None);
+        let state = test_state(SourcePolicy::unrestricted());
         let resp = browse_handler(
             State(state),
             Query(BrowseQuery {
@@ -364,5 +354,57 @@ mod tests {
         assert_eq!(body.path, "/");
         #[cfg(windows)]
         assert_eq!(body.path, "");
+    }
+
+    async fn browse(state: &AppState, path: &std::path::Path) -> StatusCode {
+        match browse_handler(
+            State(state.clone()),
+            Query(BrowseQuery {
+                path: Some(path.to_str().unwrap().to_string()),
+            }),
+        )
+        .await
+        {
+            Ok(_) => StatusCode::OK,
+            Err((status, _)) => status,
+        }
+    }
+
+    #[tokio::test]
+    async fn browsing_stays_under_any_data_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (a, b) = (tmp.path().join("a"), tmp.path().join("b"));
+        std::fs::create_dir_all(a.join("sub")).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        for restricted in [false, true] {
+            let state = test_state(
+                SourcePolicy::new(SourcePolicyConfig {
+                    restricted,
+                    data_roots: vec![a.clone(), b.clone()],
+                    ..Default::default()
+                })
+                .unwrap(),
+            );
+            assert_eq!(browse(&state, &a.join("sub")).await, StatusCode::OK);
+            assert_eq!(browse(&state, &b).await, StatusCode::OK);
+            assert_eq!(browse(&state, tmp.path()).await, StatusCode::FORBIDDEN);
+        }
+    }
+
+    /// With no data roots, an unrestricted server browses anywhere and a
+    /// restricted one nowhere.
+    #[tokio::test]
+    async fn without_data_roots_only_an_unrestricted_server_browses() {
+        let tmp = tempfile::tempdir().unwrap();
+        let open = test_state(SourcePolicy::unrestricted());
+        assert_eq!(browse(&open, tmp.path()).await, StatusCode::OK);
+        let closed = test_state(
+            SourcePolicy::new(SourcePolicyConfig {
+                restricted: true,
+                ..Default::default()
+            })
+            .unwrap(),
+        );
+        assert_eq!(browse(&closed, tmp.path()).await, StatusCode::FORBIDDEN);
     }
 }

@@ -158,10 +158,11 @@ export interface SessionControllerEvents {
  * time (scene, render loop, callback registries) are reached through getters
  * so the controller always sees the current one.
  */
-/** A canvas size in device pixels. */
+/** A canvas size in device pixels, and the device pixel ratio behind it. */
 export interface ViewportSize {
   width: number;
   height: number;
+  pixelRatio: number;
 }
 
 export interface SessionControllerDeps {
@@ -174,8 +175,9 @@ export interface SessionControllerDeps {
   getLoop: () => RenderLoop | null;
   /**
    * The canvas's size in device pixels, or null before it is laid out. The
-   * auto-fit frames against it: the scene otherwise learns its size only from
-   * render ticks, and none has run before the first dataset opens.
+   * scene otherwise learns its size only from render ticks, and none has run
+   * before the first snapshot or open, so a fit or an imported view would
+   * frame the scene's construction default.
    */
   getViewportSize: () => ViewportSize | null;
   /**
@@ -411,6 +413,26 @@ export class SessionController {
     this.clearAllOpenWarnings();
   }
 
+  /** The scene, created on first use, sized to the canvas the user sees. */
+  private ensureScene(): WasmScene {
+    const scene = this.deps.ensureScene();
+    this.assertViewport(scene);
+    return scene;
+  }
+
+  /** Tell the scene the canvas's measured size, which it may not know until
+   *  a render tick: a fit frames it, and an imported view fits its region to
+   *  it. */
+  private assertViewport(scene: WasmScene): void {
+    const viewport = this.deps.getViewportSize();
+    if (viewport) scene.set_viewport(viewport.width, viewport.height, viewport.pixelRatio);
+  }
+
+  private importPresence(scene: WasmScene, presenceJson: string): void {
+    this.assertViewport(scene);
+    guardedSceneCall("import_presence", scene, () => scene.import_presence(presenceJson));
+  }
+
   breakFollow(): void {
     if (this.followTarget === null) return;
     this.setFollowTarget(null);
@@ -437,7 +459,7 @@ export class SessionController {
           view: peer.view,
           display: peer.display,
         });
-        guardedSceneCall("import_presence", scene, () => scene.import_presence(presenceJson));
+        this.importPresence(scene, presenceJson);
       }
       if (peer.dataset_order && peer.dataset_settings) {
         try {
@@ -928,7 +950,7 @@ export class SessionController {
           // The guarded load carries the scene as its subject, so a fatal
           // load failure still surfaces though the catch below swallows the
           // throw. Otherwise a client whose snapshot can't load is a blank shell.
-          const scene = this.deps.ensureScene();
+          const scene = this.ensureScene();
           guardedSceneCall("load_document", scene, () => scene.load_document(documentJson));
           // Adopt the self id before any registration: a `dataset_opened`
           // replayed in this tick must not read a stale id for `isOpener`.
@@ -1002,7 +1024,7 @@ export class SessionController {
           if (!scene) {
             const cmd = JSON.parse(commandJson);
             if (cmd.type === "dataset_opened") {
-              scene = this.deps.ensureScene();
+              scene = this.ensureScene();
             } else {
               return;
             }
@@ -1085,7 +1107,7 @@ export class SessionController {
           if (scene) {
             try {
               const presenceJson = JSON.stringify({ camera, view, display });
-              guardedSceneCall("import_presence", scene, () => scene.import_presence(presenceJson));
+              this.importPresence(scene, presenceJson);
               syncSceneViewState(scene, this.deps.viewState);
               this.deps.getLoop()?.markInteractiveDirty();
               this.session.bridge.sendPresence(scene.export_presence());
@@ -1122,7 +1144,7 @@ export class SessionController {
                 view: peer.view,
                 display: peer.display,
               });
-              guardedSceneCall("import_presence", scene, () => scene.import_presence(presenceJson));
+              this.importPresence(scene, presenceJson);
               syncSceneViewState(scene, this.deps.viewState);
               this.deps.getLoop()?.markInteractiveDirty();
               this.session.bridge.sendPresence(scene.export_presence());
@@ -1333,10 +1355,7 @@ export class SessionController {
     const following = this.followTarget !== null;
     if (shouldAutoFitOnOpen(cmd.type, { isOpener, restoreInProgress, following })) {
       try {
-        // Until a render tick asserts the canvas size, the scene holds its
-        // construction default, which is not the canvas the user sees.
-        const viewport = this.deps.getViewportSize();
-        if (viewport) scene.set_viewport(viewport.width, viewport.height);
+        this.assertViewport(scene);
         // Untyped call: the wasm export may predate the regenerated
         // bindings, so reach it structurally rather than via the type.
         (
