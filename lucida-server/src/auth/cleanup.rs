@@ -240,7 +240,9 @@ mod tests {
     /// expired row is gone shortly after the first tick. Verifies the
     /// JoinHandle stays alive (a dropped handle would abort the task and
     /// the row would survive).
-    #[tokio::test]
+    // Paused time advances only once every task is idle, so the sweep due at
+    // 5 ms has run before the test's 50 ms wait ends, however loaded the host.
+    #[tokio::test(start_paused = true)]
     async fn spawned_loop_runs_periodically() {
         let sessions = Arc::new(MemorySessionStore::new());
         sessions
@@ -254,8 +256,6 @@ mod tests {
             Duration::from_millis(5),
             Duration::from_millis(20),
         );
-        // First sweep happens after STARTUP_DELAY (5ms here); give the
-        // runtime some slack to schedule it.
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(sessions.get("doomed").await.unwrap().is_none());
     }

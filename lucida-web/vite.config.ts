@@ -31,6 +31,28 @@ export default defineConfig({
     // which includes CI since `lts/*` became Node 26. Turn Node's off in the
     // test workers.
     execArgv: ['--no-experimental-webstorage'],
+    projects: [
+      {
+        extends: true,
+        test: {
+          name: 'unit',
+          include: ['src/**/*.test.{ts,tsx}'],
+          exclude: ['src/**/*.perf.test.ts'],
+        },
+      },
+      {
+        // After the rest, one file at a time. On a CI runner's few shared
+        // cores, other test files slow the measured code and the timing
+        // reference by different amounts, which no reference can cancel.
+        extends: true,
+        test: {
+          name: 'perf',
+          include: ['src/**/*.perf.test.ts'],
+          sequence: { groupOrder: 1 },
+          fileParallelism: false,
+        },
+      },
+    ],
   },
   server: {
     fs: {

@@ -7,12 +7,15 @@
  *
  * The derivation reads no row, so it is gated flat in rows. The dock polls
  * twice a second, so the derivation over a thirty-second window holding the
- * whole reading ring gets 2 ms and the draw list 2 ms more at a retina width,
- * both at {@link CI_SLACK}x because a CI runner measures the runner. The real
- * figures are logged on every run.
+ * whole reading ring is designed to take 2 ms and the draw list 2 ms more at
+ * a retina width. Each is held to a budget at about twice its typical figure
+ * on any host, the way `perfBudget.ts` describes. The real figures are
+ * logged on every run.
  */
 
 import { describe, expect, it } from "vitest";
+
+import { describeTiming, expectWithinBudget, timeStep, type StepTiming } from "../test/perfBudget.ts";
 
 import { buildTimelineDrawList } from "../monitor/timelineDraw.ts";
 import { TIMELINE_BUCKETS } from "./diagnose/timeline.ts";
@@ -31,14 +34,15 @@ const DERIVE_CEILING_US = 2_000;
 /** The most one layout of the draw list may cost, at a retina width. */
 const DRAW_LIST_CEILING_US = 2_000;
 
-/** The recorder's slack, for the recorder's reason: the same code measures 45× apart across hosts. */
-const CI_SLACK = 16;
-
 /** How much more a derivation may cost at the largest row population than at the smallest. */
 const FLATNESS_GROWTH_GATE = 4;
 
 /** A small run, and one past the per-run cap, which is the largest row population a run can hold. */
 const POPULATIONS = [2_000, 40_000] as const;
+
+/** Budgets in nominal microseconds, about twice each typical figure; the derivation's by population. */
+const DERIVE_BUDGET_US = [2_300, 800] as const;
+const DRAW_LIST_BUDGET_US = 84;
 
 /** A busy pan's tick rate over the live timeline's default window: more readings than the ring holds. */
 const READINGS_PER_SECOND = 120;
@@ -69,11 +73,6 @@ const CHUNK: ChunkRowSource = {
   datasetId: "ds", entityId: "m", imageId: "i", lane: "detail",
   level: 0, t: 0, c: 0, z: 0, y: 0, x: 0,
 };
-
-interface Timed {
-  p50Us: number;
-  p95Us: number;
-}
 
 /**
  * A run with `rows` rows spread across the phases, and per-tick tiers busier
@@ -127,14 +126,8 @@ function makeRun(rows: number): TraceRecorder {
   return recorder;
 }
 
-function summarise(samples: number[]): Timed {
-  const sorted = [...samples].sort((a, b) => a - b);
-  const at = (fraction: number) => sorted[Math.min(sorted.length - 1, Math.floor(fraction * sorted.length))];
-  return { p50Us: at(0.5) * 1_000, p95Us: at(0.95) * 1_000 };
-}
-
 /** The charts are asserted on so nothing here is dead code an optimiser is free to skip. */
-function timeDerivation(recorder: TraceRecorder): { timed: Timed; readings: number; rowsWalked: boolean } {
+function timeDerivation(recorder: TraceRecorder): { timed: StepTiming; readings: number; rowsWalked: boolean } {
   let readings = 0;
   let rowsWalked = false;
   const read = () => {
@@ -143,30 +136,18 @@ function timeDerivation(recorder: TraceRecorder): { timed: Timed; readings: numb
     const inFlight = live.timeline.charts.find((chart) => chart.id === "in-flight")!.series[0];
     readings += inFlight.recorded ? inFlight.samples : 0;
   };
-  const samples: number[] = [];
-  for (let i = 0; i < 30; i++) read();
-  for (let i = 0; i < 60; i++) {
-    const t0 = performance.now();
-    read();
-    samples.push(performance.now() - t0);
-  }
-  return { timed: summarise(samples), readings: readings / 90, rowsWalked };
+  const timed = timeStep(read, { samples: 60, warmup: 30 });
+  return { timed, readings: readings / 90, rowsWalked };
 }
 
-function timeDrawList(recorder: TraceRecorder): { timed: Timed; primitives: number } {
+function timeDrawList(recorder: TraceRecorder): { timed: StepTiming; primitives: number } {
   const live = recorder.liveTimeline()!;
   let primitives = 0;
   const layout = () => {
     primitives += buildTimelineDrawList(live.timeline, LAYOUT).primitiveCount;
   };
-  const samples: number[] = [];
-  for (let i = 0; i < 30; i++) layout();
-  for (let i = 0; i < 60; i++) {
-    const t0 = performance.now();
-    layout();
-    samples.push(performance.now() - t0);
-  }
-  return { timed: summarise(samples), primitives: primitives / 90 };
+  const timed = timeStep(layout, { samples: 60, warmup: 30 });
+  return { timed, primitives: primitives / 90 };
 }
 
 describe("the dock's live draw cost contract", () => {
@@ -178,7 +159,7 @@ describe("the dock's live draw cost contract", () => {
     timeDerivation(warm);
     warm.reset();
 
-    const readings = POPULATIONS.map((asked) => {
+    const readings = POPULATIONS.map((asked, index) => {
       const recorder = makeRun(asked);
       const rows = recorder.liveProgress!.planned;
       const derivation = timeDerivation(recorder);
@@ -187,25 +168,25 @@ describe("the dock's live draw cost contract", () => {
       expect(derivation.readings).toBeGreaterThan(1_000);
       expect(derivation.readings).toBeLessThanOrEqual(1_025);
       expect(derivation.rowsWalked).toBe(false);
-      return { rows, ...derivation.timed };
+      return { rows, timed: derivation.timed, budgetUs: DERIVE_BUDGET_US[index] };
     });
 
     for (const r of readings) {
       console.log(
         `[#1064] live timeline derivation: rows=${String(r.rows).padStart(6)} | ` +
-          `p50=${r.p50Us.toFixed(1)}µs p95=${r.p95Us.toFixed(1)}µs | ` +
-          `${(r.p50Us / DERIVE_CEILING_US).toFixed(2)}x the ${DERIVE_CEILING_US}µs ceiling, gate ${DERIVE_CEILING_US * CI_SLACK}µs`,
+          `${describeTiming(r.timed, r.budgetUs)} | ` +
+          `${(r.timed.nominalUs / DERIVE_CEILING_US).toFixed(2)}x the ${DERIVE_CEILING_US}µs ceiling`,
       );
     }
 
     const [small, large] = readings;
     expect(large.rows).toBeGreaterThan(small.rows * 4);
     expect(
-      large.p50Us,
-      `${large.p50Us.toFixed(1)}µs at ${large.rows} rows against ${small.p50Us.toFixed(1)}µs at ${small.rows}`,
-    ).toBeLessThan(Math.max(small.p50Us, 1) * FLATNESS_GROWTH_GATE);
+      large.timed.nominalUs,
+      `${large.timed.nominalUs.toFixed(1)}µs at ${large.rows} rows against ${small.timed.nominalUs.toFixed(1)}µs at ${small.rows}`,
+    ).toBeLessThan(Math.max(small.timed.nominalUs, 1) * FLATNESS_GROWTH_GATE);
     for (const r of readings) {
-      expect(r.p50Us, `${r.p50Us.toFixed(1)}µs at ${r.rows} rows`).toBeLessThan(DERIVE_CEILING_US * CI_SLACK);
+      expectWithinBudget(`live timeline derivation at ${r.rows} rows`, r.timed, r.budgetUs);
     }
   });
 
@@ -219,14 +200,14 @@ describe("the dock's live draw cost contract", () => {
     console.log(
       `[#1064] live timeline draw list: ${LAYOUT.width}px at DPR ${LAYOUT.devicePixelRatio} | ` +
         `${primitives.toFixed(0)} primitives over ${seriesCount} series | ` +
-        `p50=${timed.p50Us.toFixed(1)}µs p95=${timed.p95Us.toFixed(1)}µs | ` +
-        `${(timed.p50Us / DRAW_LIST_CEILING_US).toFixed(2)}x the ${DRAW_LIST_CEILING_US}µs ceiling, gate ${DRAW_LIST_CEILING_US * CI_SLACK}µs`,
+        `${describeTiming(timed, DRAW_LIST_BUDGET_US)} | ` +
+        `${(timed.nominalUs / DRAW_LIST_CEILING_US).toFixed(2)}x the ${DRAW_LIST_CEILING_US}µs ceiling`,
     );
 
     // Each series draws at most one primitive per bucket, plus the titles,
     // backgrounds, bands and axis labels: the canvas replay is bounded by
     // this count and never by the run's rows.
     expect(primitives).toBeLessThan(seriesCount * TIMELINE_BUCKETS + live.timeline.charts.length * 3 + 64);
-    expect(timed.p50Us).toBeLessThan(DRAW_LIST_CEILING_US * CI_SLACK);
+    expectWithinBudget("live timeline draw list", timed, DRAW_LIST_BUDGET_US);
   });
 });

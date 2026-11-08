@@ -264,6 +264,9 @@ export class UrlSync {
       console.warn("[UrlSync] post-apply encode failed:", e);
       return;
     }
+    // Destroyed while encoding: the page may have moved on, and this view no
+    // longer belongs in its URL.
+    if (this.destroyed) return;
     const newHash = `#view=${payload}`;
     const url = `${this.win.location.pathname}${this.win.location.search}${newHash}`;
     if (url === this.lastWritten) return;
@@ -304,6 +307,7 @@ export class UrlSync {
       console.warn("[UrlSync] encode failed:", e);
       return;
     }
+    if (this.destroyed) return;
     const newHash = `#view=${payload}`;
     const url = `${this.win.location.pathname}${this.win.location.search}${newHash}`;
     if (url === this.lastWritten) return;
