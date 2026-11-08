@@ -358,6 +358,44 @@ describe("chunks the uploader held", () => {
   });
 });
 
+describe("GPU errors", () => {
+  function gpuError(reason: TracePointEvent["reason"], atUs: number): TracePointEvent {
+    return { atUs, kind: "gpu-error", reason, chunk: null, levelChange: null };
+  }
+
+  it("lead every other stall, held chunks included, and the verdict counts them by kind", () => {
+    const run = healthyLocalOpen();
+    run.events = [
+      gpuError("out-of-memory", 100 * MS),
+      gpuError("out-of-memory", 120 * MS),
+      gpuError("device-lost", 300 * MS),
+      {
+        atUs: 400 * MS,
+        kind: "held",
+        reason: "out-of-memory",
+        chunk: {
+          datasetId: "", entityId: "tile-0", imageId: "image-0", residencyTier: "detail",
+          level: 0, t: 0, c: 0, z: 0, y: 0, x: 0, chunkKey: "0/0/0/0/0/0",
+        },
+        levelChange: null,
+      },
+    ];
+    const doc = diagnoseRun(run);
+
+    expect(doc.verdict.kind).toBe("stall");
+    expect(doc.verdict.text).toContain("the GPU reported 3 error(s) (out-of-memory 2, device-lost 1)");
+    const [lead, next] = doc.findings;
+    expect(lead.rule).toBe(RULESET.gpuError.id);
+    expect(lead.observed).toEqual({ n: 3, breakdown: { "out-of-memory": 2, "device-lost": 1 } });
+    expect(lead.attribution).toBeNull();
+    expect(next.rule).toBe(RULESET.held.id);
+  });
+
+  it("are not found on a run without any", () => {
+    expect(diagnoseRun(healthyLocalOpen()).findings.some((f) => f.rule === RULESET.gpuError.id)).toBe(false);
+  });
+});
+
 describe("first paint on a cold open", () => {
   const presentCeiling = RULESET.absolute.find((rule) => rule.phase === "browser.present")!;
 

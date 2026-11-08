@@ -13,10 +13,10 @@ import { configStore } from "./pipeline/planning/configStore.ts";
 import type { CpuCache } from "./pipeline/fetch/index.ts";
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
-import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview } from "./minimapPath.ts";
+import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview, forgetMinimapOverviewUploads } from "./minimapPath.ts";
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./trace/quiescence.ts";
-import type { CacheWarmth, InputKind, Outstanding, RunConditions } from "./trace/types.ts";
+import { PointEvent, type CacheWarmth, type InputKind, type Outstanding, type RunConditions } from "./trace/types.ts";
 import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 import { readCanvasColors } from "./renderer/renderClient.ts";
 import { subscribeAppearance } from "./theme/appearance.ts";
@@ -106,6 +106,7 @@ export class RenderLoop implements TraceEnvironment {
   private uploader = new Uploader();
   private tickCoordinator = new TickCoordinator(this.uploader);
   private cpuCacheUnsub: () => void;
+  private gpuStatusUnsub: () => void = () => {};
   private configStoreUnsub: () => void;
   private appearanceUnsub: () => void;
 
@@ -193,6 +194,23 @@ export class RenderLoop implements TraceEnvironment {
       }
     };
 
+    this.gpuStatusUnsub = this.client.onGpuStatus((status) => {
+      if (status.type === "gpuError") {
+        // Recovering a lost device sends everything again, so the recovery
+        // is a run of its own, and the loss is recorded inside it.
+        if (status.kind === "device-lost" && this.datasets.size > 0) {
+          traceRecorder.openRun({ epoch: null, dirtyKind: "residency", source: "gpu_device_lost" });
+        }
+        traceRecorder.recordPointEvent(PointEvent.GpuError, status.kind);
+      } else if (status.type === "gpuDeviceRestored") {
+        // A replaced device holds nothing the old one did, so everything is
+        // sent again and the frame redrawn.
+        this.uploader.handleDeviceRestored(this.session.cpuCache);
+        forgetMinimapOverviewUploads(this.minimapState);
+        this.setDirty("interactive", "gpu_device_restored");
+      }
+    });
+
     this.setDirty("interactive", "loop_start");
   }
 
@@ -207,6 +225,7 @@ export class RenderLoop implements TraceEnvironment {
     }
     this.client.onChunksEvicted = null;
     this.client.onWantedSetDelta = null;
+    this.gpuStatusUnsub();
     this.cpuCacheUnsub();
     this.configStoreUnsub();
     this.appearanceUnsub();

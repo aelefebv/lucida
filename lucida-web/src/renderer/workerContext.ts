@@ -22,6 +22,7 @@ export function proxyDescriptorKey(entityId: string, t: number, c: number): stri
 }
 
 export interface WorkerCtx {
+  /** Replaced when a lost device is (`worker/deviceLoss.ts`), so read it where it is used rather than keeping it. */
   device: GPUDevice;
   context: GPUCanvasContext;
   format: GPUTextureFormat;
