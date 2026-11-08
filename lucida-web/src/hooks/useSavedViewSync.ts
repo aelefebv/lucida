@@ -28,6 +28,11 @@ interface Params {
   getScene: () => WasmScene | null;
   sendOpenRemoteDataset: (url: string) => void;
   sendCommand: (json: string) => void;
+  /** Report the camera, view and display, and the dataset order and settings,
+   *  as this client's presence. Called after every restore, so a peer who
+   *  follows this client afterwards adopts the restored view. */
+  emitPresence?: () => void;
+  emitDatasetPresence?: () => void;
   /** Increments whenever the scene mutates locally; drives URL re-encoding. */
   changeTick: number;
   /** The scene's view state. A move of the camera or the selectors arms the
@@ -93,6 +98,8 @@ export function useSavedViewSync({
   getScene,
   sendOpenRemoteDataset,
   sendCommand,
+  emitPresence,
+  emitDatasetPresence,
   changeTick,
   sceneStore,
   debounceMs,
@@ -309,8 +316,10 @@ export function useSavedViewSync({
   }, [bundle.applier, onApplyResult]);
 
   // The applier writes the scene, which the readers of view state follow on
-  // their own. What it leaves to this hook is the auto-contrast preference
-  // and the render loop.
+  // their own. What it leaves to this hook is the auto-contrast preference,
+  // the render loop, and telling peers. Peers keep the last presence a client
+  // reported, so without the report a peer who follows later adopts the view
+  // from before the restore.
   useEffect(() => {
     return bundle.applier.subscribeApplyComplete((view) => {
       // Capture strips defaults, so an absent entry means `true` and only
@@ -329,8 +338,10 @@ export function useSavedViewSync({
         });
       }
       invalidateAfterViewRestore(loopRef.current, "savedview_apply");
+      emitPresence?.();
+      emitDatasetPresence?.();
     });
-  }, [bundle.applier, loopRef, setAutoContrastMap]);
+  }, [bundle.applier, loopRef, setAutoContrastMap, emitPresence, emitDatasetPresence]);
 
   const notifyChange = useCallback(() => {
     bundle.urlSync.notifyChange();

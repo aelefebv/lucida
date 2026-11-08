@@ -5,7 +5,6 @@
  * client, canvas, loop, and session.
  */
 import { lazy, Suspense, useCallback, type RefObject } from "react";
-import type { ClientId, PresenceState } from "../bridge.ts";
 import { AnnotationDraftOverlay } from "../components/AnnotationDraftOverlay.tsx";
 import { AnnotationOverlay } from "../components/AnnotationOverlay.tsx";
 import { AnnotationOverlay3D } from "../components/AnnotationOverlay3D.tsx";
@@ -18,6 +17,7 @@ import { PeerCursorLayer } from "../components/PeerCursorLayer.tsx";
 import { SliceViewer } from "../components/SliceViewer.tsx";
 import { VolumeViewer } from "../components/VolumeViewer.tsx";
 import { useEngine } from "../engine.ts";
+import type { PeerStore } from "../peerStore.ts";
 import { useSceneView } from "../hooks/useSceneView.ts";
 import { shownChannels } from "../resolvedLayers.ts";
 import { requestRender } from "../invalidation.ts";
@@ -47,9 +47,7 @@ interface Props {
   breakFollow: () => void;
   sendCursor: (position: [number, number] | null) => void;
   sendCommand: (json: string) => void;
-  peers: Map<ClientId, PresenceState>;
-  myId: ClientId;
-  followTarget: ClientId | null;
+  peerStore: PeerStore;
   overlay2dRef: RefObject<AnnotationOverlayHandle | null>;
   overlay3dRef: RefObject<AnnotationOverlayHandle | null>;
   annotationDraftRef: RefObject<AnnotationDraft | null>;
@@ -72,9 +70,7 @@ export function CanvasLayers({
   breakFollow,
   sendCursor,
   sendCommand,
-  peers,
-  myId,
-  followTarget,
+  peerStore,
   overlay2dRef,
   overlay3dRef,
   annotationDraftRef,
@@ -201,9 +197,7 @@ export function CanvasLayers({
         </>
       )}
       <PeerCursorLayer
-        peers={peers}
-        myId={myId}
-        followTarget={followTarget}
+        peerStore={peerStore}
         viewMode={viewMode}
         z={z}
         t={t}

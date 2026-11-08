@@ -40,7 +40,7 @@ export interface CursorLabel {
 }
 
 interface Props {
-  peers: Map<ClientId, PresenceState>;
+  peers: ReadonlyMap<ClientId, PresenceState>;
   myId: ClientId;
   followTarget: ClientId | null;
   wasmSceneRef: RefObject<WasmScene | null>;

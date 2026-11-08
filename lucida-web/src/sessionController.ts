@@ -438,43 +438,56 @@ export class SessionController {
 
   /** Start (or stop, with `null`) following a peer's camera. On start,
    *  immediately adopt what the target has reported so the switch is instant
-   *  rather than waiting for their next update. A part it hasn't reported
-   *  stays as it is here until its first update arrives. */
+   *  rather than waiting for their next update. */
   follow(targetId: ClientId | null): void {
     if (targetId === this.myId) return;
     this.setFollowTarget(targetId);
     this.session.bridge.sendFollow(targetId);
     if (targetId === null) return;
     const peer = this.peers.get(targetId);
-    if (!peer) return;
+    if (peer) this.adoptPeer(peer);
+  }
+
+  /**
+   * Adopt what a followed peer reported: its camera, view and display, and
+   * its dataset order and settings. A part it hasn't reported stays as it is
+   * here. Following, a steer and every update from the followed peer all come
+   * through here, so they adopt the same fields.
+   *
+   * Each adopted part is reported back as this client's own presence, so a
+   * peer who follows this client later starts from what it shows.
+   */
+  private adoptPeer(peer: Partial<PresenceState>): void {
     const scene = this.deps.getScene();
     if (!scene) return;
-    try {
-      if (peer.camera && peer.view && peer.display) {
+    if (peer.camera && peer.view && peer.display) {
+      try {
         const presenceJson = JSON.stringify({
           camera: peer.camera,
           view: peer.view,
           display: peer.display,
         });
         this.importPresence(scene, presenceJson);
+        requestRender(this.deps.getLoop(), "follow_presence");
+        this.session.bridge.sendPresence(scene.export_presence());
+      } catch (e) {
+        console.warn("[Bridge] failed to import peer presence:", e);
       }
-      if (peer.dataset_order && peer.dataset_settings) {
-        try {
-          const layerJson = JSON.stringify({
-            dataset_order: peer.dataset_order,
-            dataset_settings: peer.dataset_settings,
-          });
-          guardedSceneCall("import_dataset_presence", scene, () =>
-            scene.import_dataset_presence(layerJson));
-          invalidateDisplaySettings(this.deps.getLoop(), "follow_dataset_presence");
-          this.deps.bumpLayerSettingsVersion();
-        } catch (e) {
-          console.warn("Failed to import peer dataset presence:", e);
-        }
+    }
+    if (peer.dataset_order && peer.dataset_settings) {
+      try {
+        const json = JSON.stringify({
+          dataset_order: peer.dataset_order,
+          dataset_settings: peer.dataset_settings,
+        });
+        guardedSceneCall("import_dataset_presence", scene, () =>
+          scene.import_dataset_presence(json));
+        invalidateDisplaySettings(this.deps.getLoop(), "follow_dataset_presence");
+        this.deps.bumpLayerSettingsVersion();
+        this.session.bridge.sendDatasetPresence(scene.export_dataset_presence());
+      } catch (e) {
+        console.warn("[Bridge] failed to import peer dataset presence:", e);
       }
-      requestRender(this.deps.getLoop(), "follow_presence");
-    } catch (e) {
-      console.warn("Failed to import peer presence:", e);
     }
   }
 
@@ -1083,19 +1096,7 @@ export class SessionController {
           next.set(clientId, { ...existing, camera, view, display });
           this.setPeersMap(next);
         }
-        if (this.followTarget === clientId) {
-          const scene = this.deps.getScene();
-          if (scene) {
-            try {
-              const presenceJson = JSON.stringify({ camera, view, display });
-              this.importPresence(scene, presenceJson);
-              requestRender(this.deps.getLoop(), "follow_presence");
-              this.session.bridge.sendPresence(scene.export_presence());
-            } catch (e) {
-              console.warn("[Bridge] failed to import presence:", e);
-            }
-          }
-        }
+        if (this.followTarget === clientId) this.adoptPeer({ camera, view, display });
       },
       onCursorUpdate: (clientId, position) => {
         const existing = this.peers.get(clientId);
@@ -1112,25 +1113,12 @@ export class SessionController {
           this.setPeersMap(next);
         }
         if (clientId !== this.myId) return;
-        // The server steered this client (e.g. follow set by another
-        // surface): adopt the target's last known presence now.
-        if (target !== null) {
+        // The server steered this client, as another surface can: adopt the
+        // target's last known presence now. The echo of this client's own
+        // follow finds the target already adopted.
+        if (target !== null && target !== this.followTarget) {
           const peer = this.peers.get(target);
-          const scene = this.deps.getScene();
-          if (peer && scene && peer.camera && peer.view && peer.display) {
-            try {
-              const presenceJson = JSON.stringify({
-                camera: peer.camera,
-                view: peer.view,
-                display: peer.display,
-              });
-              this.importPresence(scene, presenceJson);
-              requestRender(this.deps.getLoop(), "follow_presence");
-              this.session.bridge.sendPresence(scene.export_presence());
-            } catch (e) {
-              console.warn("[Bridge] failed to import presence on steer:", e);
-            }
-          }
+          if (peer) this.adoptPeer(peer);
         }
         this.setFollowTarget(target);
       },
@@ -1146,18 +1134,7 @@ export class SessionController {
           this.setPeersMap(next);
         }
         if (this.followTarget === clientId) {
-          const scene = this.deps.getScene();
-          if (scene) {
-            try {
-              const json = JSON.stringify({ dataset_order: datasetOrder, dataset_settings: datasetSettings });
-              guardedSceneCall("import_dataset_presence", scene, () =>
-                scene.import_dataset_presence(json));
-              invalidateDisplaySettings(this.deps.getLoop(), "peer_dataset_presence");
-              this.deps.bumpLayerSettingsVersion();
-            } catch (e) {
-              console.warn("[Bridge] failed to import dataset presence:", e);
-            }
-          }
+          this.adoptPeer({ dataset_order: datasetOrder, dataset_settings: datasetSettings });
         }
       },
       onOpenDatasetFailed: (requestId, url, error) => {

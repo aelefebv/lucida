@@ -95,6 +95,7 @@ const MockedBridge = Bridge as unknown as {
     workspaceId?: string;
     destroy: ReturnType<typeof vi.fn>;
     sendPresence: ReturnType<typeof vi.fn>;
+    sendDatasetPresence: ReturnType<typeof vi.fn>;
     sendFollow: ReturnType<typeof vi.fn>;
     sendOpenRemoteDataset: ReturnType<typeof vi.fn>;
     requestDatasetHealth: ReturnType<typeof vi.fn>;
@@ -129,6 +130,7 @@ function makeFakeScene() {
     apply_command: vi.fn(),
     available_layouts: vi.fn(() => "[]"),
     export_presence: vi.fn(() => "{}"),
+    export_dataset_presence: vi.fn(() => "{}"),
     import_presence: vi.fn(),
     import_dataset_presence: vi.fn(),
     set_viewport: vi.fn(),
@@ -422,6 +424,41 @@ describe("SessionController follow", () => {
     expect(scene.import_dataset_presence).toHaveBeenCalledExactlyOnceWith(
       JSON.stringify({ dataset_order: ["wds-1"], dataset_settings: { "wds-1": { visible: false } } }),
     );
+  });
+
+  it("a steer adopts the target's camera, order and settings, as following does", () => {
+    const { handlers, bridge, deps, scene } = makeHarness();
+    const peer: PresenceState = {
+      ...makePresence(2),
+      dataset_order: ["wds-1"],
+      dataset_settings: { "wds-1": { visible: false } },
+    };
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [peer], 7, {});
+
+    handlers.onFollowChanged?.(7, 2);
+
+    expect(scene.import_presence).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({ camera: peer.camera, view: peer.view, display: peer.display }),
+    );
+    expect(scene.import_dataset_presence).toHaveBeenCalledExactlyOnceWith(
+      JSON.stringify({ dataset_order: ["wds-1"], dataset_settings: { "wds-1": { visible: false } } }),
+    );
+    expect(deps.bumpLayerSettingsVersion).toHaveBeenCalled();
+    // What it adopted is now its own view, reported for anyone who follows it.
+    expect(bridge.sendPresence).toHaveBeenCalled();
+    expect(bridge.sendDatasetPresence).toHaveBeenCalled();
+  });
+
+  it("the echo of its own follow adopts nothing a second time", () => {
+    const { controller, handlers, scene } = makeHarness();
+    const peer: PresenceState = { ...makePresence(2), dataset_order: ["wds-1"], dataset_settings: {} };
+    handlers.onSnapshot(1, snapshotJson(["wds-1"]), [peer], 7, {});
+
+    controller.follow(2);
+    handlers.onFollowChanged?.(7, 2);
+
+    expect(scene.import_presence).toHaveBeenCalledTimes(1);
+    expect(scene.import_dataset_presence).toHaveBeenCalledTimes(1);
   });
 });
 
