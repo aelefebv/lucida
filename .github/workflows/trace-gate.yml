@@ -86,22 +86,25 @@ jobs:
 
       - name: Probe Chrome flags (temporary)
         run: |
-          set -uo pipefail
+          set +e -uo pipefail
           out="$RUNNER_TEMP/gate-out"; mkdir -p "$out"
           uv run extras/synthetic_ome_zarr.py "$RUNNER_TEMP/gate-data/image.ome.zarr" --size 2048,2048 --channels 2 --levels 4 --chunk 256
           export LUCIDA_CONFIG_PATH="$out/probe-config.json" LUCIDA_TRACE_DIR="$out"
           cli="$RUNNER_TEMP/cli/lucida"
           strip='s/ --enable-features=Vulkan / /; s/ --use-angle=vulkan / /; s/ --disable-vulkan-surface / /'
           declare -A variants=(
-            [a-current]='keep|--use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
             [b-angle-sw]='keep|--use-angle=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
             [c-no-vulkan-sw]='keep|--use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
-            [d-strip-angle-sw]='strip|--enable-features=Vulkan --use-angle=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
             [e-strip-novulkan]='strip|--use-angle=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox'
-            [f-current-nowatchdog]='keep|--use-vulkan=swiftshader --use-webgpu-adapter=swiftshader --enable-unsafe-swiftshader --no-sandbox --disable-gpu-watchdog'
+            [g-keep-unsafe]='keep|--enable-unsafe-swiftshader --no-sandbox'
+            [h-keep-vulkansw]='keep|--use-vulkan=swiftshader --enable-unsafe-swiftshader --no-sandbox'
+            [i-strip-vulkan-anglesw]='strip|--enable-features=Vulkan --use-angle=swiftshader --enable-unsafe-swiftshader --no-sandbox'
+            [k-strip-unsafe]='strip|--enable-unsafe-swiftshader --no-sandbox'
+            [l-lavapipe]='keep|--no-sandbox'
           )
           picked=""
-          for v in a-current b-angle-sw c-no-vulkan-sw d-strip-angle-sw e-strip-novulkan f-current-nowatchdog; do
+          for v in b-angle-sw c-no-vulkan-sw e-strip-novulkan g-keep-unsafe h-keep-vulkansw i-strip-vulkan-anglesw k-strip-unsafe l-lavapipe; do
+            if [[ "$v" == l-lavapipe ]]; then sudo apt-get install -y -q mesa-vulkan-drivers > /dev/null 2>&1; echo "lavapipe installed: $?"; fi
             mode="${variants[$v]%%|*}"; extra="${variants[$v]#*|}"
             w="$RUNNER_TEMP/chrome-$v"
             {
@@ -117,17 +120,17 @@ jobs:
             chmod +x "$w"
             cat "$w"
             "$cli" --server http://127.0.0.1:9876 workspace create "probe-$v" > /dev/null
-            LUCIDA_BROWSER="$w" timeout 150 "$cli" --server http://127.0.0.1:9876 --workspace "probe-$v" \
-              trace "$RUNNER_TEMP/gate-data/image.ome.zarr" --camera slice --timeout-seconds 60 --gate \
+            LUCIDA_BROWSER="$w" timeout 100 "$cli" --server http://127.0.0.1:9876 --workspace "probe-$v" \
+              trace "$RUNNER_TEMP/gate-data/image.ome.zarr" --camera slice --timeout-seconds 40 --gate \
               --output "$out/probe-$v.json" > "$out/probe-$v.txt" 2>&1
             status=$?
             echo "=== $v exit $status"
             grep -E "VERDICT|^client|^run  |^error" "$out/probe-$v.txt"
-            grep -iE "lost|crash|vulkan|dawn|webgpu|swiftshader|gpu_process|context" "$out/chrome-$v.log" | grep -v "Fontconfig" | head -25
+            grep -iE "lost|crash|vulkan|dawn|webgpu|swiftshader|gpu_process|CONSOLE|instance" "$out/chrome-$v.log" | grep -v "Fontconfig" | head -12
             if [[ "$status" -eq 0 && -z "$picked" ]]; then picked="$w"; fi
           done
           echo "picked: ${picked:-none}"
-          echo "LUCIDA_BROWSER=${picked:-$RUNNER_TEMP/chrome-a-current}" >> "$GITHUB_ENV"
+          echo "LUCIDA_BROWSER=${picked:-$RUNNER_TEMP/chrome-g-keep-unsafe}" >> "$GITHUB_ENV"
           rm -rf "$RUNNER_TEMP/gate-data/image.ome.zarr"
 
       - name: Run the gate
