@@ -1386,11 +1386,10 @@ export class CpuCache {
     Object.assign(this.config, partial);
     if (partial.now) this.now = partial.now;
     if (partial.random) this.random = partial.random;
-    // The schedulers hold their own caps, so a change has to reach them.
+    // The scheduler holds its own caps, so a change has to reach it.
     this.chunkScheduler.setCaps(this.config);
-    this.proxyScheduler.setCaps(this.config);
     this.applyElasticTierBudgets();
-    this.drainSchedulers();
+    this.drainScheduler();
   }
 
   /**

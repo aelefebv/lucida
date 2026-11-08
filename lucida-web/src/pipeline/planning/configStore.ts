@@ -19,7 +19,6 @@ import {
 } from "../../theme/preferences.ts";
 import { DEFAULT_PLANNING_CONFIG, type PlanningConfig } from "./config.ts";
 
-const MIB = 1024 * 1024;
 const D = DEFAULT_PLANNING_CONFIG;
 
 /** The Dev controls planning knobs. */
@@ -27,10 +26,6 @@ export const PLANNING_KNOB_PREFERENCES = {
   prefetchDepth: numberPreference("planning.prefetchDepth", D.prefetchDepth, { min: 0, max: 5 }),
   importanceWeight: numberPreference("planning.importanceWeight", D.importanceWeight, { min: 10, max: 2000 }),
   distanceWeight: numberPreference("planning.distanceWeight", D.distanceWeight, { min: 1, max: 100 }),
-  groupProxyPriorityBump: numberPreference("planning.groupProxyPriorityBump", D.groupProxyPriorityBump, {
-    min: 0,
-    max: 500,
-  }),
   detailRenderRadiusView: numberPreference("planning.detailRenderRadiusView", D.detailRenderRadiusView, {
     min: 0,
     max: 2,
@@ -39,13 +34,8 @@ export const PLANNING_KNOB_PREFERENCES = {
     min: 0,
     max: 2,
   }),
-  proxyResidencyBudgetBytes: numberPreference("planning.proxyResidencyBudgetBytes", D.proxyResidencyBudgetBytes, {
-    min: 16 * MIB,
-    max: 512 * MIB,
-  }),
   minimapLaneOffset: numberPreference("planning.minimapLaneOffset", D.minimapLaneOffset, { min: 0, max: 5000 }),
   detailLaneOffset: numberPreference("planning.detailLaneOffset", D.detailLaneOffset, { min: 0, max: 5000 }),
-  proxyLaneOffset: numberPreference("planning.proxyLaneOffset", D.proxyLaneOffset, { min: 0, max: 5000 }),
   prefetchLaneOffset: numberPreference("planning.prefetchLaneOffset", D.prefetchLaneOffset, { min: 0, max: 5000 }),
   coarseLaneOffset: numberPreference("planning.coarseLaneOffset", D.coarseLaneOffset, { min: 0, max: 5000 }),
 } as const satisfies Partial<Record<keyof PlanningConfig, Preference<number>>>;
