@@ -40,6 +40,10 @@ pub enum DecodeError {
     /// so they describe some other chunk shape than the binding does.
     #[error("decoded {actual} bytes where the stored chunk shape holds {expected}")]
     WrongSize { expected: usize, actual: usize },
+    /// A transpose's axis order does not fit the stored chunk shape's rank,
+    /// so the binding describes some other array than the chain does.
+    #[error("transpose order {order:?} does not fit a chunk of {rank} axes")]
+    WrongRank { order: Vec<usize>, rank: usize },
     /// The stream decodes, or says it decodes, to more bytes than the
     /// stored chunk shape holds. Decoding stops at the limit.
     #[error("the chunk decodes to more than the {limit} bytes its stored chunk shape holds")]
@@ -52,6 +56,7 @@ impl DecodeError {
         use blosc::BloscError;
         match self {
             DecodeError::WrongSize { .. }
+            | DecodeError::WrongRank { .. }
             | DecodeError::TooLarge { .. }
             | DecodeError::Blosc(
                 BloscError::TooLarge { .. }
@@ -148,14 +153,21 @@ fn decode_chain(
         }
     }
 
-    // The shape each array-to-array codec was handed when writing.
+    // The shape each array-to-array codec was handed when writing. Import
+    // checked each order against the chunk's rank; a binding whose chunk
+    // shape has another rank is refused rather than indexed out of bounds.
     let mut shapes = Vec::with_capacity(chain.array_to_array.len());
     let mut shape: Vec<u64> = chunk_shape.to_vec();
     for codec in &chain.array_to_array {
+        let ArrayCodec::Transpose(order) = codec;
+        if order.len() != shape.len() || order.iter().any(|&axis| axis >= shape.len()) {
+            return Err(DecodeError::WrongRank {
+                order: order.clone(),
+                rank: shape.len(),
+            });
+        }
         shapes.push(shape.clone());
-        shape = match codec {
-            ArrayCodec::Transpose(order) => order.iter().map(|&axis| shape[axis]).collect(),
-        };
+        shape = order.iter().map(|&axis| shape[axis]).collect();
     }
     for (codec, shape) in chain.array_to_array.iter().zip(&shapes).rev() {
         samples = match codec {
@@ -471,6 +483,22 @@ mod tests {
             decode_storage_bytes(&c_order, &twice, &shape, 24).unwrap(),
             c_order
         );
+    }
+
+    #[test]
+    fn a_transpose_that_does_not_fit_the_chunk_s_rank_is_refused() {
+        let chain = StorageCompression::Codecs(CodecChain {
+            array_to_array: vec![ArrayCodec::Transpose(vec![1, 0])],
+            byte_order: ByteOrder::Little,
+            sample_size: 1,
+            bytes_to_bytes: Vec::new(),
+        });
+        let err = decode_storage_bytes(&[0; 4], &chain, &[4], 4).unwrap_err();
+        assert!(
+            matches!(err, DecodeError::WrongRank { rank: 1, .. }),
+            "{err}"
+        );
+        assert_eq!(err.failure_kind(), ChunkFailureKind::WrongSize);
     }
 
     #[test]
