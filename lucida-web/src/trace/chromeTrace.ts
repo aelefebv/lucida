@@ -72,6 +72,9 @@ const COUNTER_SERIES = [
  */
 const GPU_PASS_SERIES = "gpu pass time (ms)";
 
+/** Kept out of `COUNTER_SERIES` for the same reason: only readings after the worker's first report carry it. */
+const GPU_BYTES_SERIES = "gpu bytes";
+
 /**
  * A counter track has no null, and holding the previous value would draw a
  * level that was not on screen. Level 0 is a real level, so the absent marker
@@ -314,6 +317,17 @@ function emitRun(events: ChromeTraceEvent[], run: TraceRun, baseUs: number): voi
         pid: PID_BROWSER,
         tid: COUNTER_TID,
         args: { value: sample.gpuPassUs / 1000 },
+      });
+    }
+    if (sample.gpuMemory) {
+      events.push({
+        name: GPU_BYTES_SERIES,
+        cat: "counters",
+        ph: "C",
+        ts: baseUs + sample.atUs,
+        pid: PID_BROWSER,
+        tid: COUNTER_TID,
+        args: { value: sample.gpuMemory.bytes },
       });
     }
   }
