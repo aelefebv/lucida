@@ -9,6 +9,7 @@ import { createInitialState } from "../worker/state.ts";
 import { handleLabelSliceChunkData } from "./upload.ts";
 import { destroyAllSliceResources, removeSliceResources } from "./index.ts";
 import { resetLabelSliceAllocWarnings } from "./atlas.ts";
+import { clearGpuErrorReports } from "../worker/gpuErrors.ts";
 
 interface WriteTextureCall {
   origin: [number, number, number] | undefined;
@@ -22,6 +23,8 @@ function makeCtx(writes: WriteTextureCall[], maxDim = 8192): WorkerCtx {
     limits: { maxTextureDimension2D: maxDim },
     createTexture: vi.fn(() => ({ destroy: vi.fn(), createView: vi.fn(() => ({})) })),
     createBuffer: vi.fn(() => ({ destroy: vi.fn() })),
+    pushErrorScope: vi.fn(),
+    popErrorScope: vi.fn(() => Promise.resolve(null)),
     queue: {
       writeBuffer: vi.fn(),
       writeTexture: vi.fn(
@@ -32,7 +35,7 @@ function makeCtx(writes: WriteTextureCall[], maxDim = 8192): WorkerCtx {
       submit: vi.fn(),
     },
   } as unknown as GPUDevice;
-  return { device, state: createInitialState() } as unknown as WorkerCtx;
+  return { device, state: createInitialState(), post: vi.fn() } as unknown as WorkerCtx;
 }
 
 /** A pre-sliced 2x2 Z-plane message (the delivery path extracts one plane). */
@@ -141,6 +144,36 @@ describe("handleLabelSliceChunkData", () => {
     expect(() => handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])))).not.toThrow();
     expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
     expect(writes).toHaveLength(0);
+    // Refused, so the page does not count the plane as resident.
+    expect(ctx.post).toHaveBeenCalledWith({
+      type: "chunksEvicted",
+      memberId: "img-0:label:region-b",
+      keys: [],
+      skipped: ["0/0/0/0/0/0"],
+      reason: "atlas-policy",
+    });
+  });
+
+  it("refuses a size the device ran out of memory on, without allocating again", async () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    const outOfMemory = { message: "out of memory" } as GPUError;
+    (ctx.device.popErrorScope as unknown as ReturnType<typeof vi.fn>).mockImplementationOnce(() =>
+      Promise.resolve(outOfMemory),
+    );
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(true);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);
+    expect(ctx.post).toHaveBeenCalledWith(expect.objectContaining({ type: "gpuError", kind: "out-of-memory" }));
+
+    const allocations = (ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>).mock.calls.length;
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
+    expect((ctx.device.createTexture as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(allocations);
+    expect(ctx.post).toHaveBeenLastCalledWith(expect.objectContaining({ skipped: ["0/0/0/0/0/0"] }));
+    clearGpuErrorReports(ctx);
   });
 
   it("destroys the created texture (no orphan) when the indirection buffer alloc fails", () => {

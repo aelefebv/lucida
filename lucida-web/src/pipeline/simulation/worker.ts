@@ -67,6 +67,8 @@ function simulatedDevice(): GPUDevice {
   return {
     createTexture: resource,
     createBuffer: (desc: GPUBufferDescriptor) => ({ size: desc.size, destroy: () => {} }),
+    pushErrorScope: () => {},
+    popErrorScope: () => Promise.resolve(null),
     createCommandEncoder: () => ({
       copyTextureToTexture: () => {},
       copyBufferToBuffer: () => {},

@@ -16,6 +16,9 @@ import type {
   ColdStateDeltaMessage,
   ViewHotStateMessage,
   RgbaColor,
+  GpuErrorMessage,
+  GpuDeviceRestoredMessage,
+  GpuFailedMessage,
 } from "./workerProtocol.ts";
 import { summarizeDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
@@ -28,6 +31,9 @@ import type {
 import { tokenColor } from "../theme/tokenColors.ts";
 import type { ResolvedColor } from "../theme/tokens.ts";
 import { readDeviceMemoryGiB } from "../deviceBudget.ts";
+
+/** What the render worker says about its GPU device. */
+export type GpuStatus = GpuErrorMessage | GpuDeviceRestoredMessage | GpuFailedMessage;
 
 /**
  * How much of the canvas stroke the tile frame takes. Members sit edge to
@@ -298,10 +304,41 @@ export class RenderClient implements UploadClient {
             : { frame: null, reason: `the render worker could not read its canvas: ${failureText(msg.failure)}` },
         );
       }
+    } else if (msg.type === "gpuError") {
+      console.warn(`GPU ${msg.kind}${msg.count > 1 ? ` (x${msg.count})` : ""}: ${msg.message}`);
+      this.noteGpuStatus(msg);
+    } else if (msg.type === "gpuDeviceRestored") {
+      this.noteGpuStatus(msg);
+    } else if (msg.type === "gpuFailed") {
+      console.error(msg.message);
+      this.noteGpuStatus(msg);
     } else if (msg.type === "error") {
       console.error("Render worker error:", msg.message);
     }
   };
+
+  private readonly gpuStatusListeners = new Set<(status: GpuStatus) => void>();
+
+  /**
+   * Hear what the worker says about its GPU device: an error, a lost device
+   * replaced, or one that could not be. Returns the function that stops it.
+   */
+  onGpuStatus(listener: (status: GpuStatus) => void): () => void {
+    this.gpuStatusListeners.add(listener);
+    return () => {
+      this.gpuStatusListeners.delete(listener);
+    };
+  }
+
+  private noteGpuStatus(status: GpuStatus): void {
+    for (const listener of [...this.gpuStatusListeners]) listener(status);
+  }
+
+  /** Destroy the worker's GPU device, as a test of its recovery. */
+  loseDevice(): void {
+    if (this.destroyed) return;
+    this.worker.postMessage({ type: "loseDevice" });
+  }
 
   resize(width: number, height: number) {
     this.worker.postMessage({ type: "resize", width, height });
