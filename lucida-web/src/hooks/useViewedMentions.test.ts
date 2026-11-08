@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import { useViewedMentions, viewedMentionsPreference } from "./useViewedMentions.ts";
 import { __resetPreferencesForTesting, getPreference } from "../theme/preferences.ts";
+import { failingStorage } from "../theme/storageFixtures.ts";
 
 const LEGACY_PREFIX = "lucida.mentions.viewed.";
 
@@ -16,9 +17,9 @@ beforeEach(() => {
   __resetPreferencesForTesting();
 });
 afterEach(() => {
+  vi.unstubAllGlobals();
   localStorage.clear();
   __resetPreferencesForTesting();
-  vi.restoreAllMocks();
 });
 
 describe("useViewedMentions", () => {
@@ -73,9 +74,8 @@ describe("useViewedMentions", () => {
   });
 
   it("never throws when localStorage.setItem throws (quota / private browsing)", () => {
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("QuotaExceeded");
-    });
+    vi.stubGlobal("localStorage", failingStorage());
+    __resetPreferencesForTesting();
     const { result } = renderHook(() => useViewedMentions("ds-1"));
     expect(() => act(() => result.current.markViewed("c-1"))).not.toThrow();
     expect(result.current.viewedCommentIds).toEqual(["c-1"]);

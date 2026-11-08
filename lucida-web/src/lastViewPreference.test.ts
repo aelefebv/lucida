@@ -7,6 +7,7 @@ import {
   resolveInitialViewSource,
 } from "./lastViewPreference.ts";
 import { PREFERENCES_STORAGE_KEY, __resetPreferencesForTesting } from "./theme/preferences.ts";
+import { failingStorage } from "./theme/storageFixtures.ts";
 
 const LEGACY_KEY = "lucida.restoreLastView";
 
@@ -16,9 +17,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   localStorage.clear();
   __resetPreferencesForTesting();
-  vi.restoreAllMocks();
 });
 
 describe("getRestoreLastViewEnabled / setRestoreLastViewEnabled", () => {
@@ -36,9 +37,8 @@ describe("getRestoreLastViewEnabled / setRestoreLastViewEnabled", () => {
   });
 
   it("never throws when writing fails (quota / private browsing)", () => {
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("quota");
-    });
+    vi.stubGlobal("localStorage", failingStorage());
+    __resetPreferencesForTesting();
     expect(() => setRestoreLastViewEnabled(false)).not.toThrow();
     expect(getRestoreLastViewEnabled()).toBe(false);
   });

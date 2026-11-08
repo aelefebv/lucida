@@ -12,6 +12,7 @@ import {
   getPreference,
   setPreference,
 } from "./theme/preferences.ts";
+import { failingStorage } from "./theme/storageFixtures.ts";
 
 const LEGACY_KEY = "lucida.annotation.author";
 
@@ -29,6 +30,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   localStorage.clear();
   window.history.replaceState({}, "", "/");
   reload();
@@ -83,9 +85,8 @@ describe("annotationAuthorId", () => {
   });
 
   it("stays stable in-session even when storage writes throw (private browsing)", () => {
-    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
-      throw new Error("QuotaExceededError");
-    });
+    vi.stubGlobal("localStorage", failingStorage());
+    reload();
     const a = annotationAuthorId();
     expect(a.length).toBeGreaterThan(0);
     expect(annotationAuthorId()).toBe(a);
