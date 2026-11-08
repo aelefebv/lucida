@@ -395,19 +395,36 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
   let scene: MockScene;
   let store: SceneStore;
   let outRef: Captured;
+  let written: Promise<SavedView["camera"]>[];
+  let originalReplace: History["replaceState"];
 
   // Real timers: the URL write waits on an encode the fake clock can't drive.
+  // The URL writes are read from `replaceState` rather than the hash, since a
+  // flush another test left in flight can land on the hash at any time.
   beforeEach(() => {
     scene = makeMockScene();
     store = new SceneStore(() => scene as unknown as WasmScene);
     outRef = { current: null };
     window.history.replaceState(null, "", "/");
+    written = [];
+    originalReplace = window.history.replaceState;
+    window.history.replaceState = ((s: unknown, t: string, url?: string | URL | null) => {
+      const payload = /view=([^&]+)/.exec(String(url ?? ""))?.[1];
+      if (payload) written.push(decode(payload).then((v) => v.camera));
+      return originalReplace.call(window.history, s, t, url);
+    }) as History["replaceState"];
+  });
+
+  afterEach(() => {
+    window.history.replaceState = originalReplace;
   });
 
   function setCamera(camera: Record<string, unknown>) {
     scene.import_presence(JSON.stringify({ camera }));
     store.sync();
   }
+
+  const writtenCameras = () => Promise.all(written);
 
   /** Past both debounces and the encode. */
   const settle = () => act(async () => {
@@ -435,14 +452,14 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
     });
     await settle();
     expect(persisted).toHaveLength(0);
-    expect(window.location.hash).toBe("");
+    expect((await writtenCameras()).filter((c) => c.framing === "unframed")).toHaveLength(0);
 
     await act(async () => {
       setCamera({ mode: "slice", center: [64, 64], zoom: 2, viewport: [800, 600], framing: "framed" });
     });
-    await vi.waitFor(() => {
+    await vi.waitFor(async () => {
       expect(persisted).toHaveLength(1);
-      expect(window.location.hash).toMatch(/^#view=/);
+      expect((await writtenCameras()).some((c) => c.framing === "framed")).toBe(true);
     });
   });
 
@@ -454,16 +471,15 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
     await act(async () => {
       outRef.current!.handle.notifyChange();
     });
-    await vi.waitFor(() => expect(window.location.hash).toMatch(/^#view=/));
-    const before = window.location.hash;
+    await settle();
 
     // A resize refits a framed camera: only the scene's epochs say so.
     await act(async () => {
       setCamera({ mode: "slice", center: [64, 64], zoom: 0.5, viewport: [400, 600], framing: "framed" });
     });
-    await vi.waitFor(() => {
-      expect(window.location.hash).toMatch(/^#view=/);
-      expect(window.location.hash).not.toBe(before);
+    await vi.waitFor(async () => {
+      const viewports = (await writtenCameras()).map((c) => c.viewport.join("x"));
+      expect(viewports).toContain("400x600");
     });
   });
 });
