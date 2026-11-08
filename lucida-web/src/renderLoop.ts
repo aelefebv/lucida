@@ -22,6 +22,7 @@ import { readCanvasColors } from "./renderer/renderClient.ts";
 import { subscribeAppearance } from "./theme/appearance.ts";
 import { AdaptiveResolution, cappedPixelRatioScale } from "./renderResolution.ts";
 import { wakeFrames } from "./frameClock.ts";
+import { AutoContrastFitter, type AutoContrastListener } from "./pipeline/autoContrast.ts";
 
 // Re-exported so imports of these types from the render loop keep working.
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -107,6 +108,8 @@ export class RenderLoop implements TraceEnvironment {
    */
   private uploader = new Uploader();
   private tickCoordinator = new TickCoordinator(this.uploader);
+  private readonly autoContrast = new AutoContrastFitter();
+  private autoContrastListener: AutoContrastListener | null = null;
   private cpuCacheUnsub: () => void;
   private gpuStatusUnsub: () => void = () => {};
   private configStoreUnsub: () => void;
@@ -292,6 +295,7 @@ export class RenderLoop implements TraceEnvironment {
     clearVolumeForMembers(this.volumeState, memberIds);
     clearSliceForMembers(this.sliceState, memberIds);
     clearMinimapForDataset(this.minimapState, id);
+    this.autoContrast.forgetDataset(id);
 
     // Remove GPU + orchestrator + uploader resources for this dataset's
     // members. The orchestrator owns planner-side per-dataset state; the
@@ -533,6 +537,18 @@ export class RenderLoop implements TraceEnvironment {
     resetVolumeState(this.volumeState);
   }
 
+  /**
+   * Hand each channel's auto-contrast fit to `listener` as the view's chunks
+   * become resident. A new listener gets the current fits on the next tick:
+   * a loop that starts on a warm cache fits on its first tick, before its
+   * owner can attach.
+   */
+  setAutoContrastListener(listener: AutoContrastListener | null): void {
+    this.autoContrastListener = listener;
+    this.autoContrast.reset();
+    if (listener) this.setDirty("residency", "auto_contrast_listener");
+  }
+
   setRenderScale(s: number): void {
     this._renderScale = s;
     this.setDirty("interactive", "render_scale");
@@ -715,6 +731,17 @@ export class RenderLoop implements TraceEnvironment {
 
     if (tickMinimapOverview(ctx, this.minimapState, now)) this.setDirty("residency", "minimap_overview_continuation");
     if (shouldRender) tickMinimap(ctx, this.minimapState, ctx.scene.z());
+
+    // Before quiescence is published: limits the listener sets dirty the
+    // loop, so a settled frame is never one drawn with the limits before.
+    if (this.autoContrastListener) {
+      this.autoContrast.update(
+        this.tickCoordinator.getLastPlans(),
+        this.datasets,
+        this.session.cpuCache,
+        this.autoContrastListener,
+      );
+    }
 
     // If work remains (budget exhausted or chunks pending), schedule another frame
     this.scheduleIfNeeded();
