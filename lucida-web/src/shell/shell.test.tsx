@@ -14,7 +14,7 @@ import {
   setPreference,
 } from "../theme/preferences.ts";
 import { __resetShortcutsForTesting } from "../ui/shortcuts.ts";
-import { CanvasStage, RATIO_CHECK_MS } from "./CanvasStage.tsx";
+import { CanvasStage } from "./CanvasStage.tsx";
 import { leftPanelOpenPreference, leftPanelWidthPreference } from "./layoutPreferences.ts";
 import { LeftPanel } from "./LeftPanel.tsx";
 import { CompactPresence, PresenceAvatars } from "./PresenceAvatars.tsx";
@@ -139,26 +139,45 @@ describe("CanvasStage", () => {
     expect(container.querySelector(".lc-canvas-stage")?.hasAttribute("data-bare")).toBe(true);
   });
 
-  it("reports a pixel ratio that changed without an event, at the same CSS size", () => {
-    vi.useFakeTimers();
+  it("reports a pixel ratio change at the same CSS size, and re-arms for the next one", () => {
     const ratio = Object.getOwnPropertyDescriptor(window, "devicePixelRatio");
+    // One fake query per call, holding its listeners, so the test can fire
+    // the change a display switch or a browser zoom would.
+    const queries: { media: string; listeners: Set<() => void> }[] = [];
+    vi.spyOn(window, "matchMedia").mockImplementation((media: string) => {
+      const query = { media, listeners: new Set<() => void>() };
+      queries.push(query);
+      return {
+        media,
+        matches: true,
+        addEventListener: (_: string, listener: () => void) => query.listeners.add(listener),
+        removeEventListener: (_: string, listener: () => void) => query.listeners.delete(listener),
+      } as unknown as MediaQueryList;
+    });
+    const armed = () => queries.filter((query) => query.listeners.size > 0);
+    const changeRatio = (value: number) => {
+      Object.defineProperty(window, "devicePixelRatio", { value, configurable: true });
+      for (const query of armed()) for (const listener of [...query.listeners]) listener();
+    };
     try {
       Object.defineProperty(window, "devicePixelRatio", { value: 1, configurable: true });
       const onResize = vi.fn();
       render(
         <CanvasStage canvasRef={createRef<HTMLCanvasElement>()} canvasKey={0} pixelated onResize={onResize} label="2D view of sample" />,
       );
-      vi.advanceTimersByTime(RATIO_CHECK_MS * 2);
+      expect(armed().map((query) => query.media)).toEqual(["(resolution: 1dppx)"]);
       const before = onResize.mock.calls.length;
 
-      Object.defineProperty(window, "devicePixelRatio", { value: 2, configurable: true });
-      vi.advanceTimersByTime(RATIO_CHECK_MS);
+      changeRatio(2);
       expect(onResize).toHaveBeenCalledTimes(before + 1);
-      vi.advanceTimersByTime(RATIO_CHECK_MS * 4);
-      expect(onResize).toHaveBeenCalledTimes(before + 1);
+      expect(armed().map((query) => query.media)).toEqual(["(resolution: 2dppx)"]);
+
+      changeRatio(1);
+      expect(onResize).toHaveBeenCalledTimes(before + 2);
+      expect(armed().map((query) => query.media)).toEqual(["(resolution: 1dppx)"]);
     } finally {
       if (ratio) Object.defineProperty(window, "devicePixelRatio", ratio);
-      vi.useRealTimers();
+      vi.restoreAllMocks();
     }
   });
 });

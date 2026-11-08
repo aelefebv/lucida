@@ -13,9 +13,6 @@ export type CanvasSlot =
   | "bottom-center"
   | "bottom-right";
 
-/** How often the stage checks for a pixel ratio no event announced. */
-export const RATIO_CHECK_MS = 250;
-
 /** The canvas's size in CSS pixels. */
 export interface CanvasSize {
   readonly width: number;
@@ -104,19 +101,9 @@ export function CanvasStage({
       watchRatio();
     };
     if (typeof window.matchMedia === "function") watchRatio();
-    // Emulation (DevTools, a headless driver) sets the ratio without firing
-    // either, and the frame on screen would stay drawn for the old one.
-    let ratio = window.devicePixelRatio;
-    const ratioCheck = window.setInterval(() => {
-      if (window.devicePixelRatio === ratio) return;
-      ratio = window.devicePixelRatio;
-      if (media) onRatioChange();
-      else report();
-    }, RATIO_CHECK_MS);
     return () => {
       observer.disconnect();
       media?.removeEventListener("change", onRatioChange);
-      window.clearInterval(ratioCheck);
     };
   }, []);
 
