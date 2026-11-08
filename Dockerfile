@@ -134,6 +134,16 @@ WORKDIR /web/lucida-web
 RUN pnpm install --frozen-lockfile
 RUN pnpm run build
 
+# The lucida CLI, which CI's trace gate drives a browser with. Built on stage
+# 1 so it reuses the dependencies compiled there, and exported on its own with
+# `--target cli`. The runtime image does not carry it, and these stages stay
+# above the runtime stage because the last stage is the default target.
+FROM rust-builder AS cli-builder
+RUN cargo build --locked --release -p lucida-cli
+
+FROM scratch AS cli
+COPY --from=cli-builder /workspace/target/release/lucida /lucida
+
 # Stage 3: runtime.
 FROM debian:bookworm-slim AS runtime
 
