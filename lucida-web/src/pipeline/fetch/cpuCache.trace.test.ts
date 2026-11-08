@@ -199,6 +199,32 @@ describe("cache point events", () => {
     expect(failed.map(e => e.reason)).toEqual(["corrupt_chunk"]);
   });
 
+  it("lists a chunk failed for good for the renderer, and moves its version only when the list changes", async () => {
+    const { cache, failures } = createCache(64);
+    const before = cache.failedChunksVersion();
+    failures.set(
+      "0/0/0/0/0/0",
+      sourceChunkFailure("0/0/0/0/0/0", "failed_permanent", "corrupt_chunk", null),
+    );
+
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+
+    expect(cache.failedChunks()).toEqual([
+      { datasetId: "ds-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0", failure: "corrupt_chunk" },
+    ]);
+    const after = cache.failedChunksVersion();
+    expect(after).not.toBe(before);
+    // A plan that asks for the same view again neither refetches nor relists it.
+    cache.submit(makePlan([makeRequest()]));
+    await flush();
+    expect(cache.failedChunksVersion()).toBe(after);
+
+    cache.reset();
+    expect(cache.failedChunks()).toEqual([]);
+    expect(cache.failedChunksVersion()).not.toBe(after);
+  });
+
   it("records a retry, under the reason the retry policy read", async () => {
     openRun();
     const { cache, failures } = createCache(64);
