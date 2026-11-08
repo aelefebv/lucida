@@ -11,14 +11,20 @@
 //! With a deployment theme configured, `index.html` goes out with the
 //! theme written in at [`INDEX_MARKER`], so the pre-paint script applies
 //! it on a first visit.
+//!
+//! The web build writes a `.br` and a `.gz` copy beside each compressible
+//! file, and a browser that accepts one gets it with `Content-Encoding`
+//! set. A file without a copy goes out as it is: the server never
+//! compresses on the fly.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::Router;
+use axum::body::Body;
 use axum::extract::{Request, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Json, Response};
 use serde_json::json;
 use tower::ServiceExt;
@@ -62,29 +68,80 @@ fn dist_is_ready(dist_path: &std::path::Path) -> bool {
 
 /// Fallback handler: delegates to `ServeDir` when the SPA bundle is
 /// present, otherwise renders the build-instructions landing page.
+///
+/// Any path `ServeDir` finds no file for gets `index.html` with a 200, so
+/// client-side routing survives a deep-link refresh. With a theme, every
+/// response that would be `index.html` carries it: `/` and `/index.html`
+/// reach the file through `ServeDir` itself, so they are caught first.
 async fn serve_static(State(state): State<StaticState>, req: Request) -> Response {
-    if let Some(not_found) = not_an_app_route(req.uri().path()) {
+    let path = req.uri().path().to_owned();
+    if let Some(not_found) = not_an_app_route(&path) {
         return not_found;
     }
-    let dist_path: &std::path::Path = state.dist_path.as_ref();
+    let dist_path: &Path = state.dist_path.as_ref();
     if !dist_is_ready(dist_path) {
         return missing_dist_landing();
     }
-    if let Some(snippet) = state.theme_snippet.as_deref() {
-        return serve_with_theme(dist_path, snippet, req).await;
+    let theme = state.theme_snippet.as_deref();
+    if let Some(snippet) = theme
+        && (path == "/" || path == "/index.html")
+    {
+        return themed_index(dist_path, snippet).await;
     }
-    // SPA fallback: any unknown path returns `index.html` so client-side
-    // routing survives deep-link refresh. `.fallback(...)`, not
-    // `.not_found_service(...)`, because the latter would serve the SPA
-    // shell with a 404 status. ServeDir's error type is Infallible, so the
-    // `oneshot` Result is always Ok.
-    let index_file = dist_path.join("index.html");
-    let svc = ServeDir::new(dist_path).fallback(ServeFile::new(index_file));
-    match svc.oneshot(req).await {
+    // Kept for the index fallback, since `ServeDir` consumes the request.
+    let mut index_req = Request::new(Body::empty());
+    *index_req.method_mut() = req.method().clone();
+    *index_req.headers_mut() = req.headers().clone();
+
+    let svc = ServeDir::new(dist_path)
+        .precompressed_br()
+        .precompressed_gzip();
+    let response = match svc.oneshot(req).await {
         Ok(r) => r.into_response(),
-        // Unreachable: ServeDir's error is Infallible.
         Err(e) => match e {},
+    };
+    if response.status() != StatusCode::NOT_FOUND {
+        return with_file_headers(response, cache_control(&path));
     }
+    if let Some(snippet) = theme {
+        return themed_index(dist_path, snippet).await;
+    }
+    let svc = ServeFile::new(dist_path.join("index.html"))
+        .precompressed_br()
+        .precompressed_gzip();
+    let response = match svc.oneshot(index_req).await {
+        Ok(r) => r.into_response(),
+        Err(e) => match e {},
+    };
+    with_file_headers(response, NO_CACHE)
+}
+
+const NO_CACHE: HeaderValue = HeaderValue::from_static("no-cache");
+const IMMUTABLE: HeaderValue = HeaderValue::from_static("public, max-age=31536000, immutable");
+
+/// Vite names every file it writes under `assets/` with a hash of its
+/// content, so a URL there always means the same bytes. Anything else,
+/// `index.html` above all, must be revalidated: a stale page points at
+/// assets the next build no longer has.
+fn cache_control(path: &str) -> HeaderValue {
+    if path.starts_with("/assets/") {
+        IMMUTABLE
+    } else {
+        NO_CACHE
+    }
+}
+
+/// Caching and `Vary` for a response that carries a file. `Vary` goes on
+/// the plain file too, so a shared cache never hands a compressed copy to
+/// a client that did not accept it.
+fn with_file_headers(mut response: Response, cache: HeaderValue) -> Response {
+    let status = response.status();
+    if status.is_success() || status == StatusCode::NOT_MODIFIED {
+        let headers = response.headers_mut();
+        headers.insert(header::CACHE_CONTROL, cache);
+        headers.append(header::VARY, HeaderValue::from_static("accept-encoding"));
+    }
+    response
 }
 
 /// A 404 for a path under `/api` or `/ws` that no route claimed. Handing
@@ -102,25 +159,6 @@ fn not_an_app_route(path: &str) -> Option<Response> {
     } else {
         None
     }
-}
-
-/// The plain path, except that every response that would be `index.html`
-/// carries the theme. `/` and `/index.html` reach the file through
-/// `ServeDir` itself, so they are caught first; any other path is
-/// `index.html` exactly when `ServeDir` finds no file for it.
-async fn serve_with_theme(dist_path: &Path, snippet: &str, req: Request) -> Response {
-    let path = req.uri().path();
-    if path == "/" || path == "/index.html" {
-        return themed_index(dist_path, snippet).await;
-    }
-    let response = match ServeDir::new(dist_path).oneshot(req).await {
-        Ok(r) => r,
-        Err(e) => match e {},
-    };
-    if response.status() == StatusCode::NOT_FOUND {
-        return themed_index(dist_path, snippet).await;
-    }
-    response.into_response()
 }
 
 async fn themed_index(dist_path: &Path, snippet: &str) -> Response {
@@ -400,5 +438,201 @@ mod tests {
         let (status, _, body) = get(&app, "/").await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body, "<html>HELLO</html>");
+    }
+
+    /// A bundle whose compressed copies hold their encoding's name, so a
+    /// test can tell which file went out.
+    fn precompressed_dist() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        write_index(tmp.path(), MARKED);
+        std::fs::write(tmp.path().join("index.html.br"), "br").unwrap();
+        std::fs::write(tmp.path().join("index.html.gz"), "gzip").unwrap();
+        std::fs::write(tmp.path().join("favicon.svg"), "<svg/>").unwrap();
+        let assets = tmp.path().join("assets");
+        std::fs::create_dir(&assets).unwrap();
+        for (name, body) in [
+            ("app-a1b2.js", "plain"),
+            ("app-a1b2.js.br", "br"),
+            ("app-a1b2.js.gz", "gzip"),
+            ("core-a1b2.wasm", "plain"),
+            ("core-a1b2.wasm.br", "br"),
+            ("core-a1b2.wasm.gz", "gzip"),
+            ("style-a1b2.css", "plain"),
+            ("style-a1b2.css.gz", "gzip"),
+        ] {
+            std::fs::write(assets.join(name), body).unwrap();
+        }
+        tmp
+    }
+
+    struct Served {
+        status: StatusCode,
+        header: axum::http::HeaderMap,
+        body: String,
+    }
+
+    impl Served {
+        fn get(&self, name: header::HeaderName) -> Option<&str> {
+            self.header.get(name).map(|v| v.to_str().unwrap())
+        }
+        fn varies_on_encoding(&self) -> bool {
+            self.header
+                .get_all(header::VARY)
+                .iter()
+                .any(|v| v.to_str().unwrap().eq_ignore_ascii_case("accept-encoding"))
+        }
+    }
+
+    async fn fetch(app: &Router, uri: &str, headers: &[(header::HeaderName, &str)]) -> Served {
+        let mut req = Request::builder().uri(uri);
+        for (name, value) in headers {
+            req = req.header(name, *value);
+        }
+        let res = app
+            .clone()
+            .oneshot(req.body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let status = res.status();
+        let header = res.headers().clone();
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
+        Served {
+            status,
+            header,
+            body: String::from_utf8(bytes.to_vec()).unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn each_client_gets_the_best_copy_it_accepts() {
+        let tmp = precompressed_dist();
+        let app = router(tmp.path().to_path_buf(), None);
+        let browser = "gzip, deflate, br, zstd";
+        for (uri, accept, served) in [
+            ("/assets/app-a1b2.js", Some(browser), "br"),
+            ("/assets/app-a1b2.js", Some("gzip"), "gzip"),
+            ("/assets/app-a1b2.js", Some("br;q=0.5, gzip"), "gzip"),
+            ("/assets/app-a1b2.js", Some("identity"), "plain"),
+            ("/assets/app-a1b2.js", None, "plain"),
+            ("/assets/style-a1b2.css", Some(browser), "gzip"),
+            ("/assets/style-a1b2.css", Some("br"), "plain"),
+            ("/favicon.svg", Some(browser), "<svg/>"),
+        ] {
+            let headers: Vec<_> = accept
+                .map(|a| (header::ACCEPT_ENCODING, a))
+                .into_iter()
+                .collect();
+            let res = fetch(&app, uri, &headers).await;
+            let case = format!("{uri} with {accept:?}");
+            assert_eq!(res.status, StatusCode::OK, "{case}");
+            assert_eq!(res.body, served, "{case}");
+            let encoding = res.get(header::CONTENT_ENCODING);
+            match served {
+                "br" | "gzip" => assert_eq!(encoding, Some(served), "{case}"),
+                _ => assert_eq!(encoding, None, "{case}"),
+            }
+            assert!(res.varies_on_encoding(), "{case}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_compressed_copy_keeps_the_original_content_type() {
+        let tmp = precompressed_dist();
+        let app = router(tmp.path().to_path_buf(), None);
+        for (uri, content_type) in [
+            ("/assets/core-a1b2.wasm", "application/wasm"),
+            ("/assets/app-a1b2.js", "text/javascript"),
+            ("/", "text/html"),
+        ] {
+            for accept in ["br", "gzip"] {
+                let res = fetch(&app, uri, &[(header::ACCEPT_ENCODING, accept)]).await;
+                assert_eq!(res.get(header::CONTENT_ENCODING), Some(accept), "{uri}");
+                assert_eq!(res.get(header::CONTENT_TYPE), Some(content_type), "{uri}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_index_fallback_is_compressed_too() {
+        let tmp = precompressed_dist();
+        let app = router(tmp.path().to_path_buf(), None);
+        let res = fetch(&app, "/some/spa/route", &[(header::ACCEPT_ENCODING, "br")]).await;
+        assert_eq!(res.status, StatusCode::OK);
+        assert_eq!(res.body, "br");
+        assert_eq!(res.get(header::CONTENT_ENCODING), Some("br"));
+        assert_eq!(res.get(header::CONTENT_TYPE), Some("text/html"));
+        assert!(res.varies_on_encoding());
+    }
+
+    #[tokio::test]
+    async fn only_hashed_assets_are_cached_for_good() {
+        let tmp = precompressed_dist();
+        let app = router(tmp.path().to_path_buf(), None);
+        let res = fetch(&app, "/assets/app-a1b2.js", &[]).await;
+        assert_eq!(
+            res.get(header::CACHE_CONTROL),
+            Some("public, max-age=31536000, immutable")
+        );
+        // A missing asset gets the page, which must not be cached as the
+        // asset for a year.
+        for uri in [
+            "/",
+            "/index.html",
+            "/favicon.svg",
+            "/some/spa/route",
+            "/assets/gone-c3d4.js",
+        ] {
+            let res = fetch(&app, uri, &[]).await;
+            assert_eq!(res.status, StatusCode::OK, "{uri}");
+            assert_eq!(res.get(header::CACHE_CONTROL), Some("no-cache"), "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn revalidating_the_page_keeps_its_caching_headers() {
+        let tmp = precompressed_dist();
+        let app = router(tmp.path().to_path_buf(), None);
+        let first = fetch(&app, "/", &[(header::ACCEPT_ENCODING, "br")]).await;
+        let modified = first.get(header::LAST_MODIFIED).expect("last-modified");
+        let again = fetch(
+            &app,
+            "/",
+            &[
+                (header::ACCEPT_ENCODING, "br"),
+                (header::IF_MODIFIED_SINCE, modified),
+            ],
+        )
+        .await;
+        assert_eq!(again.status, StatusCode::NOT_MODIFIED);
+        assert_eq!(again.get(header::CACHE_CONTROL), Some("no-cache"));
+        assert!(again.varies_on_encoding());
+    }
+
+    #[tokio::test]
+    async fn assets_beside_a_theme_are_compressed_and_cached() {
+        let tmp = precompressed_dist();
+        let theme = light_theme();
+        let app = router(tmp.path().to_path_buf(), Some(&theme));
+        let res = fetch(
+            &app,
+            "/assets/app-a1b2.js",
+            &[(header::ACCEPT_ENCODING, "br")],
+        )
+        .await;
+        assert_eq!(res.body, "br");
+        assert_eq!(res.get(header::CONTENT_ENCODING), Some("br"));
+        assert_eq!(
+            res.get(header::CACHE_CONTROL),
+            Some("public, max-age=31536000, immutable")
+        );
+        // The themed page differs from every copy on disk, so it goes out
+        // plain whatever the client accepts.
+        let expected = MARKED.replace(INDEX_MARKER, &theme.index_snippet());
+        for uri in ["/", "/some/spa/route", "/assets/gone-c3d4.js"] {
+            let res = fetch(&app, uri, &[(header::ACCEPT_ENCODING, "br")]).await;
+            assert_eq!(res.body, expected, "{uri}");
+            assert_eq!(res.get(header::CONTENT_ENCODING), None, "{uri}");
+            assert_eq!(res.get(header::CACHE_CONTROL), Some("no-cache"), "{uri}");
+        }
     }
 }
