@@ -182,7 +182,7 @@ jobs:
       # header, which is what `lucida trace show` and `trace replay` read.
       - name: Upload runs and bundles
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: trace-gate-runs-${{ strategy.job-index }}
           path: ${{ runner.temp }}/gate-out
