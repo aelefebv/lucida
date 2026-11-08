@@ -35,7 +35,7 @@ blake3 = "1"
 lru = "0.19"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "7"
-rand = "0.8"
+rand = "0.10"
 thiserror = "2"
 async-trait = "0.1"
 # Storage backends. Pin runtime-tokio-rustls to match tokio's runtime;
