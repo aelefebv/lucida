@@ -66,6 +66,7 @@ function makeColdMsg(
       sortCenterVox: null,
       frustumPlanes: null,
     },
+    wantedChunks: [],
     activeSet,
     viewMode: "slice",
   };

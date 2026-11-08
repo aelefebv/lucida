@@ -1,16 +1,19 @@
 /**
  * Volume-mode eviction state and view hot-state application, over
  * `ctx.state.rayHitPerEntity`: the per-entity ray-pick point that
- * `findFarthestSlot` uses to keep chunks near the camera's hit point.
+ * `findEvictionSlot` uses to keep chunks near the camera's hit point.
  */
 
+import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 import type { ViewHotStateMessage } from "../workerProtocol.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import type { RendererState } from "../worker/state.ts";
 import {
   chunkDistSq as sharedChunkDistSq,
-  findFarthestSlot as sharedFindFarthestSlot,
+  findEvictionSlot as sharedFindEvictionSlot,
+  type EvictionCandidate,
 } from "../eviction.ts";
+import { wantedChunksFor } from "../wantedChunks.ts";
 import type { AtlasState, LodIndirectionMeta } from "./atlas.ts";
 
 /** Apply a view hot-state message to the per-entity ray hits. Latest message wins per entity. */
@@ -56,20 +59,19 @@ export function chunkDistSq(
   return sharedChunkDistSq(lodMeta, cx, cy, cz, cam);
 }
 
-/**
- * Find the best eviction candidate: finer than the member's target first,
- * then stale (unmapped) chunks, then the farthest mapped chunk.
- */
-export function findFarthestSlot(
+/** The slot a chunk arriving in `tier`'s pool may take; see the shared `findEvictionSlot`. */
+export function findEvictionSlot(
   state: RendererState,
   atlas: AtlasState,
-): { key: string; dist: number } {
-  return sharedFindFarthestSlot({
+  tier: ResidencyTier,
+): EvictionCandidate | null {
+  return sharedFindEvictionSlot({
     slots: atlas.slots,
     slotGridIdx: atlas.slotGridIdx,
     entityMetas: atlas.entityMetas,
     cameraFor: (memberId) => state.rayHitPerEntity.get(memberId) ?? [0.5, 0.5, 0.5],
     targetLevelFor: (memberId) => state.targetLevelByMember.get(memberId),
+    isWanted: (memberId, chunkKey) => wantedChunksFor(state, memberId, tier)?.has(chunkKey) ?? false,
     is3D: true,
   });
 }

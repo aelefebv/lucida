@@ -1,13 +1,14 @@
 /**
  * Owns the CPU-to-GPU worker hand-off: builds wire messages, posts them,
- * records telemetry, and parses worker feedback. CpuCache decides delivery
- * eligibility and tracks optimistic sent state.
+ * records telemetry, and applies worker feedback. CpuCache decides delivery
+ * eligibility and keeps the mirror of what the worker holds.
  */
 
 import type { CpuCache, ReadyDelivery } from "../fetch/index.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type {
   ActiveSetEntry,
+  ChunkRequest,
   EntitySnapshot,
   SelectionState,
 } from "../planning/index.ts";
@@ -17,6 +18,7 @@ import type { TickContext } from "../../renderLoopTypes.ts";
 import type { DatasetSettings } from "../../tickCommon.ts";
 import type {
   ChunkFeedbackReason,
+  ChunkResidencyChange,
   ColdStateDeltaMessage,
   ColdStateDisplayState,
   ColdStateMessage,
@@ -28,6 +30,11 @@ import {
   type UploadTickStats,
 } from "./telemetry/upload.ts";
 import { buildColdState, buildColdStateDelta } from "./coldState/build.ts";
+import {
+  diffWantedChunks,
+  wantedChunksFromPlan,
+  type WantedChunksByMember,
+} from "./coldState/wanted.ts";
 import {
   buildViewHotState,
   buildViewHotStateFromMembers,
@@ -64,6 +71,9 @@ export class Uploader {
 
   private readonly lastViewEpochByDataset = new Map<string, number>();
 
+  /** The wanted chunks each dataset's last cold state carried, which a delta diffs against. */
+  private readonly wantedByDataset = new Map<string, WantedChunksByMember>();
+
   /** Snapshotted by `sendColdState` so `deliverToWorker` can stamp chunks. */
   private lastEpochs: SceneEpochs | null = null;
 
@@ -81,6 +91,8 @@ export class Uploader {
     ctx: TickContext;
     datasetId: string;
     activeSet: ActiveSetEntry[];
+    /** The plan's requests; its detail and coarse lanes become the wanted chunks. */
+    requests: readonly ChunkRequest[];
     entities: EntitySnapshot[];
     selection: SelectionState;
     multiChannel: boolean;
@@ -91,6 +103,8 @@ export class Uploader {
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     dsSettings: DatasetSettings | undefined;
   }): ColdStateMessage {
+    const wanted = wantedChunksFromPlan(args.requests, args.multiChannel);
+    this.wantedByDataset.set(args.datasetId, wanted);
     const msg = buildColdState({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
@@ -100,6 +114,7 @@ export class Uploader {
       visibleRegion: args.visibleRegion,
       renderRadiusView: args.renderRadiusView,
       desiredProxyKeys: args.desiredProxyKeys,
+      wantedChunks: [...wanted.values()],
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
       dsSettings: args.dsSettings,
@@ -142,10 +157,14 @@ export class Uploader {
     datasetId: string;
     currentT: number;
     currentZ: number;
+    /** The re-emitted plan's requests; see {@link sendColdState}. */
+    requests: readonly ChunkRequest[];
     visibleRegion: VisibleRegion;
     desiredProxyKeys: Iterable<string>;
     epochs: SceneEpochs;
   }): void {
+    const wanted = wantedChunksFromPlan(args.requests, args.ctx.scene.multi_channel());
+    this.wantedByDataset.set(args.datasetId, wanted);
     args.ctx.client.coldStateSelection({
       type: "coldStateSelection",
       datasetId: args.datasetId,
@@ -153,6 +172,7 @@ export class Uploader {
       currentZ: args.currentZ,
       visibleRegion: args.visibleRegion,
       desiredProxyKeys: Array.from(args.desiredProxyKeys).sort(),
+      wantedChunks: [...wanted.values()],
       epochs: args.epochs,
     });
     this.lastEpochs = args.epochs;
@@ -170,6 +190,8 @@ export class Uploader {
     datasetId: string;
     activeSet: ActiveSetEntry[];
     previousActiveSet: ActiveSetEntry[];
+    /** The plan's requests; see {@link sendColdState}. */
+    requests: readonly ChunkRequest[];
     entities: EntitySnapshot[];
     selection: SelectionState;
     visibleRegion: VisibleRegion;
@@ -179,6 +201,9 @@ export class Uploader {
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     dsSettings: DatasetSettings | undefined;
   }): ColdStateDeltaMessage {
+    const wanted = wantedChunksFromPlan(args.requests, args.ctx.scene.multi_channel());
+    const wantedChanges = diffWantedChunks(this.wantedByDataset.get(args.datasetId) ?? new Map(), wanted);
+    this.wantedByDataset.set(args.datasetId, wanted);
     const msg = buildColdStateDelta({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
@@ -188,6 +213,7 @@ export class Uploader {
       visibleRegion: args.visibleRegion,
       renderRadiusView: args.renderRadiusView,
       desiredProxyKeys: args.desiredProxyKeys,
+      wantedChunks: wantedChanges,
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
       dsSettings: args.dsSettings,
@@ -434,33 +460,25 @@ export class Uploader {
 
   // Worker feedback (wired in renderLoop.start)
 
-  handleChunksEvicted(
+  /** Returns whether a chunk may now be sent again. */
+  handleChunkResidency(
     memberId: string,
-    evicted: string[],
-    skipped: string[],
+    tier: ResidencyTier,
+    change: ChunkResidencyChange,
+    keys: string[],
     cpuCache: CpuCache,
     reason?: ChunkFeedbackReason,
-  ): void {
-    this.workerFeedback.handleChunksEvicted(
-      memberId, evicted, skipped, cpuCache, reason,
-    );
+  ): boolean {
+    return this.workerFeedback.handleChunkResidency(memberId, tier, change, keys, cpuCache, reason);
   }
 
+  /** Returns whether a chunk or proxy may now be sent again. */
   handleWantedSetDelta(
     datasetId: string,
     missing: Array<MissingChunk | MissingProxy>,
     cpuCache: CpuCache,
-  ): void {
-    this.workerFeedback.handleWantedSetDelta(datasetId, missing, cpuCache);
-  }
-
-  workerChunkResidency(
-    datasetId: string,
-    imageId: string,
-    c: number,
-    chunkKey: string,
-  ): "resident" | "missing" | "unknown" {
-    return this.workerFeedback.chunkResidency(datasetId, imageId, c, chunkKey);
+  ): boolean {
+    return this.workerFeedback.handleWantedSetDelta(datasetId, missing, cpuCache);
   }
 
   // Lifecycle (dataset removal, multi-channel transitions)
@@ -473,6 +491,7 @@ export class Uploader {
   clearDataset(datasetId: string): void {
     this.workerResources.clearDataset(datasetId);
     this.lastViewEpochByDataset.delete(datasetId);
+    this.wantedByDataset.delete(datasetId);
   }
 
   getTrackedResourceMemberIds(): string[] {

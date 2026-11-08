@@ -131,13 +131,14 @@ function tile(entityId: string, target: number, coarseLevel: number | null = 5):
 
 function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStateMessage {
   const visibleChannels = opts.visibleChannels ?? [0];
+  const multiChannel = visibleChannels.length > 1 || opts.multiChannel === true;
   return {
     type: "coldState",
     epochs: EPOCHS,
     datasetId,
     currentT: 0,
     currentZ: 0,
-    multiChannel: visibleChannels.length > 1 || opts.multiChannel === true,
+    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -146,6 +147,12 @@ function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStat
       sortCenterVox: null,
       frustumPlanes: null,
     },
+    // The planner wants the one chunk `chunkAt` delivers, in every channel.
+    wantedChunks: visibleChannels.map((c) => ({
+      memberId: multiChannel ? `${datasetId}-img:ch${c}` : `${datasetId}-img`,
+      tier: "detail" as const,
+      chunkKeys: ["2/0/0/0/0/0"],
+    })),
     activeSet: [tile(`${datasetId}-img`, 2)],
     viewMode: "volume",
     ...opts,
@@ -248,12 +255,14 @@ describe("removing a dataset", () => {
 describe("a cold state frees the pools it no longer routes to", () => {
   it("frees a hidden channel's pools and keeps the others with their chunks", async () => {
     const gpu = trackingDevice();
-    const { ctx } = makeCtx(gpu.device);
+    const { ctx, posts } = makeCtx(gpu.device);
     await dispatchMessage(ctx, cold("ds1", { visibleChannels: [0, 1, 2] }));
     await dispatchMessage(ctx, chunkAt("ds1-img:ch0"));
+    await dispatchMessage(ctx, chunkAt("ds1-img:ch1"));
     const ch0 = ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!;
     const ch1 = ctx.state.volumeAtlases.get("ds1:ch1:32x32x32:detail")!;
     const before = gpu.live();
+    posts.length = 0;
 
     await dispatchMessage(ctx, cold("ds1", { visibleChannels: [0, 2] }));
 
@@ -263,6 +272,10 @@ describe("a cold state frees the pools it no longer routes to", () => {
     expect(gpu.live().textures).toBe(before.textures - 3);
     expect(ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")).toBe(ch0);
     expect(ch0.slots.size).toBe(1);
+    // The page hears what went with the freed pool, so it sends it again when the channel returns.
+    expect(posts.filter((m) => m.type === "chunkResidency")).toEqual([
+      { type: "chunkResidency", memberId: "ds1-img:ch1", tier: "detail", change: "lost", keys: ["2/0/0/0/0/0"], reason: "freed" },
+    ]);
   });
 
   it("frees the other view mode's pools on a switch between volume and slice", async () => {

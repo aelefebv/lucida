@@ -178,6 +178,7 @@ function makeCold(
       sortCenterVox: null,
       frustumPlanes: null,
     },
+    wantedChunks: [],
     activeSet,
     viewMode: "slice",
   };

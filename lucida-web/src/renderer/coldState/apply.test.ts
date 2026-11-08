@@ -44,9 +44,12 @@ import {
 } from "../proxyAtlas.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
 import { UNTIMED } from "../passTiming.ts";
-import { findFarthestSlot, handleVolumeChunkData } from "../volume/index.ts";
+import { findEvictionSlot, handleVolumeChunkData } from "../volume/index.ts";
 import { handleSliceChunkData } from "../slice/index.ts";
 import { sourceKey } from "../poolKeys.ts";
+import { wantedEntryKey } from "../wantedChunks.ts";
+import type { SceneEpochs } from "../../pipeline/epochs.ts";
+import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 
 // Mock GPU device — texture + buffer creation only.
 
@@ -176,6 +179,7 @@ function makeCold(
       frustumPlanes: null,
     },
     desiredProxyKeys: opts?.desiredProxyKeys,
+    wantedChunks: [],
     activeSet,
     viewMode: opts?.viewMode ?? "volume",
   };
@@ -209,6 +213,30 @@ const HALVING_PYRAMID: ColdStateTileEntry["levels"] = [
  * dispatcher does, so the upload path's radius filter and the epoch
  * check see it.
  */
+/** Add chunks to the wanted set of the member's dataset, as a cold state from the planner would. */
+function wantChunks(ctx: WorkerCtx, memberId: string, tier: ResidencyTier, keys: string[]): void {
+  const datasetId = ctx.state.memberToDataset.get(memberId)!;
+  const index = new Map(ctx.state.wantedByDataset.get(datasetId) ?? []);
+  const entry = wantedEntryKey(tier, memberId);
+  index.set(entry, new Set([...(index.get(entry) ?? []), ...keys]));
+  ctx.state.wantedByDataset.set(datasetId, index);
+}
+
+/** Upload chunks the planner wants. These tests are about sections, not admission. */
+function deliverVolume(
+  ctx: WorkerCtx, msg: VolumeChunkDataMessage, epochs: SceneEpochs, poolKey: string, memberId: string,
+): void {
+  wantChunks(ctx, memberId, msg.tier, msg.chunks.map((c) => c.key));
+  handleVolumeChunkData(ctx, msg, epochs, poolKey, memberId);
+}
+
+function deliverSlice(
+  ctx: WorkerCtx, msg: SliceChunkDataMessage, epochs: SceneEpochs, poolKey: string, memberId: string,
+): void {
+  wantChunks(ctx, memberId, msg.tier, msg.chunks.map((c) => c.key));
+  handleSliceChunkData(ctx, msg, epochs, poolKey, memberId);
+}
+
 function ingest(ctx: WorkerCtx, activeSet: ColdStateActiveEntry[]): ColdStateMessage {
   const cold = makeCold(activeSet);
   ctx.state.currentColdState = cold;
@@ -509,7 +537,7 @@ describe("Suite A — applyColdState", () => {
     ctx.state.currentEpochs = coldCoarse.epochs;
     applyColdState(ctx, coldCoarse);
     const poolKey = poolOf(ctx.state, "imgA", "detail", 2)!;
-    handleVolumeChunkData(ctx, chunkUpload("imgA", 2), coldCoarse.epochs, poolKey, "imgA");
+    deliverVolume(ctx, chunkUpload("imgA", 2), coldCoarse.epochs, poolKey, "imgA");
     const atlas = vol(ctx.state).get(poolKey)!;
     const slot = atlas.slots.get("imgA|2/0/0/0/0/0");
     expect(slot).toBeDefined();
@@ -534,7 +562,7 @@ describe("Suite A — applyColdState", () => {
     expect(atlas.entityMetas.get("imgA")?.map((m) => m.level)).toEqual([3]);
     expect(atlas.slots.has("imgA|2/0/0/0/0/0")).toBe(true);
     expect(atlas.slotGridIdx[slot!]).toBe(-1);
-    expect(findFarthestSlot(ctx.state, atlas)).toEqual({ key: "imgA|2/0/0/0/0/0", dist: Infinity });
+    expect(findEvictionSlot(ctx.state, atlas, "detail")).toEqual({ key: "imgA|2/0/0/0/0/0", class: "unsampled", dist: Infinity });
   });
 
   it("records each member's target level for eviction, and drops it with the dataset", () => {
@@ -581,15 +609,15 @@ describe("Suite A — applyColdState", () => {
     const poolKey = poolOf(ctx.state, "imgA", "detail", 1)!;
     const atlas = vol(ctx.state).get(poolKey)!;
     for (const level of [0, 1, 2, 3, 4, 5]) {
-      handleVolumeChunkData(ctx, uploadAt(level), cold.epochs, poolKey, "imgA");
+      deliverVolume(ctx, uploadAt(level), cold.epochs, poolKey, "imgA");
     }
     expect([...atlas.slots.keys()].sort()).toEqual([1, 2, 3, 4].map((l) => `imgA|${l}/0/0/0/0/0`));
     expect(mappedLevels(atlas, "imgA")).toEqual([1, 2, 3, 4]);
 
     const coldMid = ingest(ctx, [entryAt(2)]);
     expect(mappedLevels(atlas, "imgA")).toEqual([2, 3, 4]);
-    expect(findFarthestSlot(ctx.state, atlas)).toEqual({ key: "imgA|1/0/0/0/0/0", dist: Infinity });
-    handleVolumeChunkData(ctx, uploadAt(5), coldMid.epochs, poolKey, "imgA");
+    expect(findEvictionSlot(ctx.state, atlas, "detail")).toEqual({ key: "imgA|1/0/0/0/0/0", class: "unsampled", dist: Infinity });
+    deliverVolume(ctx, uploadAt(5), coldMid.epochs, poolKey, "imgA");
     expect(mappedLevels(atlas, "imgA")).toEqual([2, 3, 4, 5]);
 
     // Back at target 1, level 1's resident chunk maps again without a
@@ -600,7 +628,7 @@ describe("Suite A — applyColdState", () => {
     expect(atlas.slotGridIdx[atlas.slots.get("imgA|5/0/0/0/0/0")!]).toBe(-1);
   });
 
-  it("a coarser resident leaves only by distance after the target moves finer; the old target's chunks leave first after it moves coarser", () => {
+  it("a coarser resident the planner no longer wants leaves before any wanted chunk; the old target's chunks leave first after it moves coarser", () => {
     const ctx = makeCtx(makeMockDevice());
     const entryAt = (target: number) =>
       makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail", detailLevels: [target], levels: HALVING_PYRAMID });
@@ -617,22 +645,24 @@ describe("Suite A — applyColdState", () => {
     const poolKey = poolOf(ctx.state, "imgA", "detail", 2)!;
     const atlas = vol(ctx.state).get(poolKey)!;
     atlas.freeSlots = [1, 0];
-    handleVolumeChunkData(ctx, uploadAt(2, 0, 0, 0), coldCoarse.epochs, poolKey, "imgA");
+    deliverVolume(ctx, uploadAt(2, 0, 0, 0), coldCoarse.epochs, poolKey, "imgA");
 
     const coldFine = ingest(ctx, [entryAt(0)]);
-    handleVolumeChunkData(ctx, uploadAt(0, 1, 3, 3), coldFine.epochs, poolKey, "imgA");
+    deliverVolume(ctx, uploadAt(0, 1, 3, 3), coldFine.epochs, poolKey, "imgA");
     expect(atlas.slots.size).toBe(2);
 
-    // The far level-0 chunk goes, not the coarser resident nearer the view.
-    handleVolumeChunkData(ctx, uploadAt(0, 0, 0, 0), coldFine.epochs, poolKey, "imgA");
-    expect([...atlas.slots.keys()].sort()).toEqual(["imgA|0/0/0/0/0/0", "imgA|2/0/0/0/0/0"]);
+    // The coarser resident is still mapped as fallback, but the planner wants
+    // only level 0 now, so it goes rather than the farther wanted chunk.
     expect(atlas.slotGridIdx[atlas.slots.get("imgA|2/0/0/0/0/0")!]).toBeGreaterThanOrEqual(0);
+    deliverVolume(ctx, uploadAt(0, 0, 0, 0), coldFine.epochs, poolKey, "imgA");
+    expect([...atlas.slots.keys()].sort()).toEqual(["imgA|0/0/0/0/0/0", "imgA|0/0/0/1/3/3"]);
 
-    // Both residents are now finer than the target: the finest goes first.
+    // Both residents are now finer than the target and never sampled: the
+    // greatest key goes first.
     const coldCoarsest = ingest(ctx, [entryAt(3)]);
-    handleVolumeChunkData(ctx, uploadAt(3, 0, 0, 0), coldCoarsest.epochs, poolKey, "imgA");
-    expect([...atlas.slots.keys()].sort()).toEqual(["imgA|2/0/0/0/0/0", "imgA|3/0/0/0/0/0"]);
-    expect(findFarthestSlot(ctx.state, atlas)).toEqual({ key: "imgA|2/0/0/0/0/0", dist: Infinity });
+    deliverVolume(ctx, uploadAt(3, 0, 0, 0), coldCoarsest.epochs, poolKey, "imgA");
+    expect([...atlas.slots.keys()].sort()).toEqual(["imgA|0/0/0/0/0/0", "imgA|3/0/0/0/0/0"]);
+    expect(findEvictionSlot(ctx.state, atlas, "detail")).toEqual({ key: "imgA|0/0/0/0/0/0", class: "unsampled", dist: Infinity });
   });
 
   it("slice mode: a coarser level's plane stays mapped after the target moves finer, each level retargeting Z on its own depth", () => {
@@ -668,7 +698,7 @@ describe("Suite A — applyColdState", () => {
     ctx.state.currentEpochs = coldCoarse.epochs;
     applyColdState(ctx, coldCoarse);
     const poolKey = poolOf(ctx.state, "imgA", "detail", 1)!;
-    handleSliceChunkData(ctx, sliceUpload(1, 0), coldCoarse.epochs, poolKey, "imgA");
+    deliverSlice(ctx, sliceUpload(1, 0), coldCoarse.epochs, poolKey, "imgA");
     const atlas = sli(ctx.state).get(poolKey)!;
     const slot1 = atlas.slots.get("imgA|1/0/0/0/0/0")!;
     expect(atlas.indirectionData[0]).toBe(slot1);
@@ -684,7 +714,7 @@ describe("Suite A — applyColdState", () => {
 
     // Level 0's chunk for the same plane is z=1; both levels map at once,
     // each against its own chunk-Z target.
-    handleSliceChunkData(ctx, sliceUpload(0, 1), coldFine.epochs, poolOf(ctx.state, "imgA", "detail", 0)!, "imgA");
+    deliverSlice(ctx, sliceUpload(0, 1), coldFine.epochs, poolOf(ctx.state, "imgA", "detail", 0)!, "imgA");
     const slot0 = atlas.slots.get("imgA|0/0/0/1/0/0")!;
     applyColdState(ctx, coldFine);
     expect(atlas.indirectionData[0]).toBe(slot0);

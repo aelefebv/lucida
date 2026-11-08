@@ -135,6 +135,7 @@ function makeColdState(
       frustumPlanes: null,
     },
     desiredProxyKeys: opts?.desiredProxyKeys,
+    wantedChunks: [],
     activeSet: opts?.activeSet ?? [],
     viewMode: opts?.viewMode ?? "volume",
   };

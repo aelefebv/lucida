@@ -455,17 +455,37 @@ describe("CpuCache", () => {
       cache.markSent(first[0]);
       expect(Array.from(cache.getDeliverable())).toEqual([]);
 
-      cache.markChunkEvicted(detail.imageId, detail.c, [detail.chunkKey], []);
+      // Held until the worker reports it lost.
+      cache.markChunksHeld(detail.imageId, detail.c, "detail", [detail.chunkKey]);
+      expect(Array.from(cache.getDeliverable())).toEqual([]);
+      cache.markChunksLost(detail.imageId, detail.c, "detail", [detail.chunkKey], "evicted");
       expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["chunk"]);
 
+      // A missing report clears a held chunk, a disagreement between the records.
       cache.markSent(first[0]);
-      expect(Array.from(cache.getDeliverable())).toEqual([]);
-
-      cache.markChunkMissing(detail.imageId, detail.c, detail.chunkKey);
+      cache.markChunksHeld(detail.imageId, detail.c, "detail", [detail.chunkKey]);
+      expect(cache.markChunkMissing(detail.imageId, detail.c, detail.chunkKey, "detail")).toBe(true);
       expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["chunk"]);
 
-      cache.markChunkEvicted(detail.imageId, detail.c, [], [detail.chunkKey]);
+      // A full atlas refuses it until the next plan.
+      cache.markSent(first[0]);
+      cache.markChunksRefused(detail.imageId, detail.c, "detail", [detail.chunkKey], "atlas-policy");
       expect(Array.from(cache.getDeliverable())).toEqual([]);
+    });
+
+    it("re-delivers a chunk the worker refused for a reason other than a full atlas", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      cache.onPlanRebuildStart();
+
+      const detail = makeRequest({ entityId: "image-1", imageId: "image-1", chunkKey: "0/0/0/0/0/0", lane: "detail" });
+      cache.submit(makePlan([detail], [makeActiveEntry("image-1", "image-1")]));
+      await flush();
+
+      const [delivery] = Array.from(cache.getDeliverable());
+      cache.markSent(delivery);
+      cache.markChunksRefused(detail.imageId, detail.c, "detail", [detail.chunkKey], "stale");
+      expect(Array.from(cache.getDeliverable()).map(d => d.kind)).toEqual(["chunk"]);
     });
 
     it("delivers coarse chunks from the overview/coarse bucket when wanted", async () => {
@@ -554,7 +574,7 @@ describe("CpuCache", () => {
 
       expect(Array.from(cache.getDeliverable())).toHaveLength(1);
 
-      cache.markChunkEvicted(detail.imageId, detail.c, [], [detail.chunkKey]);
+      cache.markChunksRefused(detail.imageId, detail.c, "detail", [detail.chunkKey], "atlas-policy");
 
       expect(Array.from(cache.getDeliverable())).toEqual([]);
     });

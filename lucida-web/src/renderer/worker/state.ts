@@ -16,6 +16,7 @@ import type { EntityProxyDescriptor } from "../workerContext.ts";
 import type { EntityDescriptorIndex } from "../descriptorBuffer.ts";
 import type { EntitySource } from "../entitySources.ts";
 import type { PendingFrameCapture } from "./captureFrame.ts";
+import type { WantedChunkIndex } from "../wantedChunks.ts";
 import { CEILING_BUDGETS, type DeviceBudgets } from "../../deviceBudget.ts";
 
 /** The GPU atlas budgets a pool is sized under. */
@@ -91,6 +92,8 @@ export interface RendererState {
    * without re-sending it. Cleared on dataset removal.
    */
   coldStateByDataset: Map<string, ColdStateMessage>;
+  /** Per-dataset index of its latest cold state's wanted chunks. */
+  wantedByDataset: Map<string, WantedChunkIndex>;
 
   /**
    * Captures the trace bundle asked for that no frame has answered yet.
@@ -140,6 +143,7 @@ export function createInitialState(atlasBudgets: AtlasBudgets = CEILING_BUDGETS)
     currentEpochs: null,
     currentColdState: null,
     coldStateByDataset: new Map(),
+    wantedByDataset: new Map(),
     frameCaptures: [],
     gpuAtlasesPosted: { atlases: 0, bytes: 0 },
     proxyStats: {

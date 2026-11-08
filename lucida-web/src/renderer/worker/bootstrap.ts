@@ -25,6 +25,7 @@ import { ensureOffscreenPool, getOrCreateLUT } from "./resources.ts";
 import { createFrameTiming } from "../passTiming.ts";
 import { proxyDescriptorKey } from "../workerContext.ts";
 import { sourceKey } from "../poolKeys.ts";
+import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
 
 /** Init the GPU and assemble a fresh {@link WorkerCtx}. Called once from `case "init"` in `gpu.worker.ts`. */
 export async function bootstrapWorker(
@@ -122,12 +123,25 @@ export function createWantedSetPoster(
     const proxySnap = buildProxyAtlasSnapshot(cold.datasetId);
     const result = computeWantedSet(
       cold,
+      state.wantedByDataset.get(cold.datasetId) ?? new Map(),
       state.volumeAtlases,
       state.sliceAtlases,
       (memberId, tier, level) =>
         state.memberSourcePools.get(memberId)?.get(sourceKey(tier, level)),
       proxySnap,
     );
+    // Ahead of the missing list, which names these too: the page was told
+    // they were held, and a missing chunk it holds is a disagreement.
+    const stale = new Map<string, { memberId: string; tier: ResidencyTier; keys: string[] }>();
+    for (const { memberId, tier, chunkKey } of result.stalePlanes) {
+      const id = `${tier}|${memberId}`;
+      const group = stale.get(id);
+      if (group) group.keys.push(chunkKey);
+      else stale.set(id, { memberId, tier, keys: [chunkKey] });
+    }
+    for (const { memberId, tier, keys } of stale.values()) {
+      post({ type: "chunkResidency", memberId, tier, change: "lost", keys, reason: "wrong-slice" });
+    }
     post({
       type: "wantedSetDelta",
       datasetId: cold.datasetId,

@@ -108,6 +108,7 @@ function makeCold(activeSet: ColdStateActiveEntry[]): ColdStateMessage {
       sortCenterVox: null, frustumPlanes: null,
     },
     desiredProxyKeys: [],
+    wantedChunks: [],
     activeSet,
     viewMode: "volume",
   };
@@ -136,6 +137,7 @@ describe("applyColdStateDelta", () => {
         sortCenterVox: null, frustumPlanes: null,
       },
       desiredProxyKeys: [],
+      wantedChunks: [],
       removedEntityIds: ["b"],
       upserts: [tile("a", "img-a", 2), tile("d", "img-d", 0)],
       activeSetOrder: ["a", "c", "d"],
@@ -178,6 +180,43 @@ describe("applyColdStateDelta", () => {
     expect(patched.epochs.view).toBe(2);
   });
 
+  it("patches the retained wanted chunks with the delta's changed entries, as a full cold state would carry them", () => {
+    const ctx = makeCtx();
+    const cold1: ColdStateMessage = {
+      ...makeCold([tile("a", "img-a", 1), tile("b", "img-b", 1)]),
+      wantedChunks: [
+        { memberId: "img-a", tier: "detail", chunkKeys: ["1/0/0/0/0/0"] },
+        { memberId: "img-b", tier: "detail", chunkKeys: ["1/0/0/0/0/0"] },
+      ],
+    };
+    ctx.state.coldStateByDataset.set("ds1", cold1);
+    applyColdState(ctx, cold1);
+
+    applyColdStateDelta(ctx, {
+      type: "coldStateDelta",
+      datasetId: "ds1",
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+      currentT: 0,
+      currentZ: 0,
+      visibleRegion: cold1.visibleRegion,
+      desiredProxyKeys: [],
+      wantedChunks: [
+        { memberId: "img-a", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] },
+        { memberId: "img-b", tier: "detail", chunkKeys: [] },
+      ],
+      removedEntityIds: ["b"],
+      upserts: [],
+      activeSetOrder: ["a"],
+    });
+
+    expect(ctx.state.coldStateByDataset.get("ds1")!.wantedChunks).toEqual([
+      { memberId: "img-a", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] },
+    ]);
+    const index = ctx.state.wantedByDataset.get("ds1")!;
+    expect([...index.keys()]).toEqual(["detail|img-a"]);
+    expect([...index.get("detail|img-a")!]).toEqual(["1/0/0/0/0/1"]);
+  });
+
   it("is a no-op when no cold state has landed for the dataset yet", () => {
     const ctx = makeCtx();
     applyColdStateDelta(ctx, {
@@ -191,6 +230,7 @@ describe("applyColdStateDelta", () => {
         sortCenterVox: null, frustumPlanes: null,
       },
       desiredProxyKeys: [],
+      wantedChunks: [],
       removedEntityIds: [],
       upserts: [],
       activeSetOrder: [],
@@ -217,6 +257,7 @@ describe("applyColdStateDelta", () => {
         currentZ: 0,
         visibleRegion: cold.visibleRegion,
         desiredProxyKeys: [],
+        wantedChunks: [],
         removedEntityIds: [],
         upserts: [],
         // "c" is neither retained ([a, b]) nor upserted.
@@ -256,6 +297,7 @@ describe("applyColdStateDelta", () => {
         sortCenterVox: null, frustumPlanes: null,
       },
       desiredProxyKeys: [],
+      wantedChunks: [],
       removedEntityIds: [],
       upserts: [],
       activeSetOrder: ["a", "b"],

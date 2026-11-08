@@ -951,12 +951,13 @@ const FETCH_ERROR_REASONS = [
 
 const CHUNK_FEEDBACK_REASONS = [
   "evicted",
+  "freed",
   "stale",
+  "unwanted",
   "wrong-slice",
   "missing-pool",
   "missing-entity-meta",
   "missing-lod-meta",
-  "radius-filter",
   "atlas-policy",
 ] as const satisfies readonly ChunkFeedbackReason[];
 
@@ -971,8 +972,8 @@ export type LevelChangeReason = (typeof LEVEL_CHANGE_REASONS)[number];
 
 /**
  * Why a `held` chunk kept coming back: any of the renderer's feedback reasons,
- * or `not-resident` when its wanted set still listed the chunk after delivery
- * without saying why.
+ * or `not-resident` when its wanted set listed as missing a chunk the page's
+ * residency mirror held, without any loss reported.
  */
 export type HeldReason = ChunkFeedbackReason | "not-resident";
 

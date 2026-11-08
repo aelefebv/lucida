@@ -42,6 +42,7 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
   }
   state.currentSourcesByDataset.delete(id);
   state.coldStateByDataset.delete(id);
+  state.wantedByDataset.delete(id);
 
   // These maps would otherwise grow for the worker's whole lifetime.
   for (const [memberId, dsId] of state.memberToDataset) {
@@ -81,6 +82,7 @@ export function handleDestroy(ctx: WorkerCtx): void {
   state.memberSourcePools.clear();
   state.targetLevelByMember.clear();
   state.currentSourcesByDataset.clear();
+  state.wantedByDataset.clear();
   for (const dsPools of state.proxyPoolsByDataset.values()) {
     for (const pool of dsPools.values()) destroyProxyAtlas(pool);
   }

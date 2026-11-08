@@ -567,15 +567,29 @@ export interface ColdStateMessage {
   };
   /** Budget-admitted proxy residency keys: `${datasetId}|${entityId}|${kind}|${t}|${c}`. */
   desiredProxyKeys?: string[];
+  /**
+   * The chunks the planner delivers for this view: its detail and coarse
+   * lanes. The worker admits, keeps, and reports against these keys, so it
+   * never wants a chunk the planner will not send.
+   */
+  wantedChunks: WantedMemberChunks[];
   activeSet: ColdStateActiveEntry[];
   viewMode: "slice" | "volume";
+}
+
+/** The chunks the planner wants for one member in one tier. */
+export interface WantedMemberChunks {
+  /** See {@link SliceChunkDataMessage.memberId}. */
+  memberId: string;
+  tier: ResidencyTier;
+  chunkKeys: string[];
 }
 
 /**
  * Camera-ray pick coordinates for chunk eviction priority, sent once per
  * dataset when `epochs.view` advances. CPU-side residency only; the shader
  * never reads them. The worker stores them in `rayHitPerEntity` for
- * `findFarthestSlot`'s distance metric.
+ * `findEvictionSlot`'s distance metric.
  */
 export interface ViewHotStateMessage {
   type: "viewHotState";
@@ -614,6 +628,8 @@ export interface ColdStateSelectionMessage {
   visibleRegion: VisibleRegion;
   /** Budget-admitted proxy residency keys for the new selection. */
   desiredProxyKeys: string[];
+  /** Every wanted chunk at the new selection; see {@link ColdStateMessage.wantedChunks}. */
+  wantedChunks: WantedMemberChunks[];
   epochs: SceneEpochs;
 }
 
@@ -642,6 +658,12 @@ export interface ColdStateDeltaMessage {
   };
   /** Budget-admitted proxy residency keys for the new view. */
   desiredProxyKeys?: string[];
+  /**
+   * The (member, tier) entries of {@link ColdStateMessage.wantedChunks} that
+   * changed, each replacing the retained one. An entry with no keys removes
+   * it.
+   */
+  wantedChunks: WantedMemberChunks[];
   /** Entity ids that left the active set since the retained cold state. */
   removedEntityIds: string[];
   /** Descriptors for entities new to the active set or whose descriptor changed. */
@@ -714,35 +736,52 @@ export interface ThumbnailResultMessage {
   bitmap: ImageBitmap | null;
 }
 
+/**
+ * Why the worker refused a chunk or stopped holding one. A refusal is
+ * `stale`, `unwanted`, `wrong-slice`, a `missing-*` routing gap, or
+ * `atlas-policy`; a loss is `evicted`, `freed`, or `wrong-slice`.
+ */
 export type ChunkFeedbackReason =
   | "evicted"
+  | "freed"
   | "stale"
+  | "unwanted"
   | "wrong-slice"
   | "missing-pool"
   | "missing-entity-meta"
   | "missing-lod-meta"
-  | "radius-filter"
   | "atlas-policy";
 
-export interface ChunksEvictedMessage {
-  type: "chunksEvicted";
+/**
+ * What one {@link ChunkResidencyMessage} reports:
+ *
+ *   - `held`: the chunks are written, or were already held as the current
+ *     selection draws them.
+ *   - `refused`: the chunks were not placed.
+ *   - `lost`: chunks reported held earlier are held no longer: evicted, their
+ *     pool freed, or cut from a plane the current Z no longer maps to.
+ */
+export type ChunkResidencyChange = "held" | "refused" | "lost";
+
+/**
+ * The worker's account of one member's chunks in one tier: the only source
+ * of the page's residency mirror. The worker owns the slots, so the page
+ * never assumes a chunk it sent is held. Every chunk delivery is answered
+ * once, `held` or `refused`, and a held chunk is reported once more,
+ * `lost`, when its slot stops holding it.
+ */
+export interface ChunkResidencyMessage {
+  type: "chunkResidency";
   /** See {@link SliceChunkDataMessage.memberId}. */
   memberId: string;
-  /**
-   * Chunks that should be eligible for delivery again. Usually these
-   * were present and got evicted, either as finer than their member's
-   * target level or because a closer chunk took their slot. Stale-epoch and
-   * wrong-slice deliveries also use this path because they should clear
-   * optimistic sent state without entering the rejection tracker.
-   */
+  tier: ResidencyTier;
+  change: ChunkResidencyChange;
   keys: string[];
-  /** Chunks from the batch rejected by residency policy (atlas full + too far). */
-  skipped?: string[];
-  /** Observability-only reason for this feedback batch. */
+  /** Absent for `held`. */
   reason?: ChunkFeedbackReason;
 }
 
-/** A chunk that the worker is missing from its atlas. */
+/** A wanted chunk the worker does not hold as the current selection draws it. */
 export type MissingChunk = {
   kind: "chunk";
   datasetId: string;
@@ -753,7 +792,7 @@ export type MissingChunk = {
    * mode uses bare image ids; multi-channel mode uses `imageId:chN`.
    */
   memberId: string;
-  /** Channel index parsed from the wanted-set member/channel loop. */
+  /** The member's channel. */
   c: number;
   chunkKey: string;
 };
@@ -774,11 +813,17 @@ export type MissingProxy = {
   c: number;
 };
 
+/**
+ * What the worker wants and lacks for one dataset. Chunks come from the cold
+ * state's {@link ColdStateMessage.wantedChunks}, proxies from its desired
+ * proxy keys. A missing proxy is re-delivered. Every chunk loss is reported
+ * on its own, so a missing chunk the page's residency mirror holds is a
+ * disagreement between the two records.
+ */
 export interface WantedSetDeltaMessage {
   type: "wantedSetDelta";
   datasetId: string;
   epochs: SceneEpochs;
-  /** The orchestrator re-delivers missing proxies from CpuCache too, not only chunks. */
   missing: Array<MissingChunk | MissingProxy>;
 }
 
@@ -790,16 +835,16 @@ export interface LevelRange {
 
 /**
  * Which level one image-bearing entity's visible pixels come from, as the
- * worker last computed it from the chunk positions its wanted set walks.
+ * worker last computed it from the planner's target-level chunks.
  * `targetLevel` is the level pin or the level the screen calls for;
  * `displayed` spans the finest and coarsest level the renderer samples
  * for those positions today: the target level once resident, else the
  * coarser resident sections, else the coarse tier. Every position is
  * served by exactly one level, so `min === max` means the whole visible
  * footprint comes from one level. `displayed` is `null` when no visible
- * position has any resident level yet. `visible` is false when none of
- * the entity's target-level chunks lies in the visible region, in which
- * case `displayed` is `null` too.
+ * position has any resident level yet. `visible` is false when the planner
+ * wants none of the entity's target-level chunks, in which case `displayed`
+ * is `null` too.
  */
 export interface EntityLevelReport {
   entityId: string;
@@ -809,9 +854,9 @@ export interface EntityLevelReport {
 }
 
 /**
- * Posted alongside every {@link WantedSetDeltaMessage}: the wanted set walks
- * the visible target-level chunks, and this is what those same chunks say
- * about which level is on screen. Feeds the layer panel's level readout.
+ * Posted alongside every {@link WantedSetDeltaMessage}: what the wanted
+ * target-level chunks say about which level is on screen. Feeds the layer
+ * panel's level readout.
  */
 export interface EntityLevelsMessage {
   type: "entityLevels";
@@ -902,7 +947,7 @@ export type WorkerToMainMessage =
   | ErrorMessage
   | IntensityRangeMessage
   | ThumbnailResultMessage
-  | ChunksEvictedMessage
+  | ChunkResidencyMessage
   | WantedSetDeltaMessage
   | EntityLevelsMessage
   | GpuPassTimeMessage

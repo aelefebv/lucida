@@ -100,7 +100,7 @@ export class RenderLoop implements TraceEnvironment {
   /**
    * Upload coordinator. Owns telemetry, cold/hot-state emission,
    * dispatch, worker-feedback parsing, and worker resource cleanup.
-   * Constructed alongside the TickCoordinator so `client.onChunksEvicted`
+   * Constructed alongside the TickCoordinator so `client.onChunkResidency`
    * / `client.onWantedSetDelta` callbacks wire directly here.
    */
   private uploader = new Uploader();
@@ -174,21 +174,17 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   start(): void {
-    // When the worker evicts or skips chunks, update the uploader's
-    // delivery tracking so they can be re-sent. Evictions trigger a new
-    // tick.
-    this.client.onChunksEvicted = (memberId: string, evicted: string[], skipped: string[], reason) => {
-      this.uploader.handleChunksEvicted(memberId, evicted, skipped, this.session.cpuCache, reason);
-      if (evicted.length > 0) {
-        this.setDirty("residency", "chunks_evicted");
-      }
+    // The worker's residency reports keep the cache's mirror of its slots.
+    // A tick runs only when one makes a chunk sendable again.
+    this.client.onChunkResidency = (msg) => {
+      const resend = this.uploader.handleChunkResidency(
+        msg.memberId, msg.tier, msg.change, msg.keys, this.session.cpuCache, msg.reason,
+      );
+      if (resend) this.setDirty("residency", "chunk_residency");
     };
 
-    // When the worker reports its wanted-set, update the uploader and
-    // schedule a tick so wanted chunks can be delivered from CpuCache.
     this.client.onWantedSetDelta = (datasetId, _epochs, missing) => {
-      this.uploader.handleWantedSetDelta(datasetId, missing, this.session.cpuCache);
-      if (missing.length > 0) {
+      if (this.uploader.handleWantedSetDelta(datasetId, missing, this.session.cpuCache)) {
         this.setDirty("residency", "wanted_set_delta");
       }
     };
@@ -205,7 +201,7 @@ export class RenderLoop implements TraceEnvironment {
       clearTimeout(this.resolutionRestoreTimer);
       this.resolutionRestoreTimer = null;
     }
-    this.client.onChunksEvicted = null;
+    this.client.onChunkResidency = null;
     this.client.onWantedSetDelta = null;
     this.cpuCacheUnsub();
     this.configStoreUnsub();
@@ -228,14 +224,6 @@ export class RenderLoop implements TraceEnvironment {
   }
   getCpuCache(): CpuCache {
     return this.session.cpuCache;
-  }
-  workerChunkResidency(
-    datasetId: string,
-    imageId: string,
-    c: number,
-    chunkKey: string,
-  ): "resident" | "missing" | "unknown" {
-    return this.uploader.workerChunkResidency(datasetId, imageId, c, chunkKey);
   }
 
   addDataset(id: string, manifest: DatasetManifest): void {

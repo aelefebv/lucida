@@ -218,6 +218,7 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
     });
@@ -263,6 +264,7 @@ describe("buildColdState", () => {
         "ds1|ent-a|TileProxy3D|0|0",
       ]),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
     });
@@ -306,6 +308,7 @@ describe("buildColdState", () => {
       multiChannel: true,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings,
     });
@@ -360,6 +363,7 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: matrices,
       dsSettings: undefined,
     });
@@ -382,6 +386,7 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
     });
@@ -413,6 +418,7 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
     });
@@ -424,6 +430,7 @@ describe("buildColdState", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: undefined,
     });
@@ -490,6 +497,7 @@ describe("computeActiveSetIndexMap / iterateActiveSetMembers", () => {
       multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
+      wantedChunks: [],
       matricesByEntity: makeMatrices(),
       dsSettings: makeDsSettings(),
     });
@@ -520,6 +528,7 @@ describe("buildColdStateDelta", () => {
     selection: makeSelection(),
     visibleRegion: makeVisibleRegion(),
     epochs: makeEpochs(),
+    wantedChunks: [],
     matricesByEntity: makeMatrices(),
     dsSettings: makeDsSettings(),
   });
