@@ -2614,7 +2614,7 @@ mod tests {
         let location = resolver
             .resolve(&ImageId("img1".into()), &self::key(key))
             .unwrap();
-        object_store::ObjectStore::put(
+        object_store::ObjectStoreExt::put(
             &store,
             location.path(),
             object_store::PutPayload::from_static(bytes),
@@ -2777,7 +2777,7 @@ mod tests {
         let location = resolver
             .resolve(&ImageId("img1".into()), &key("0/0/0/0/0/0"))
             .unwrap();
-        object_store::ObjectStore::put(
+        object_store::ObjectStoreExt::put(
             &store,
             location.path(),
             object_store::PutPayload::from_static(&[1, 2, 3, 4]),
@@ -3003,7 +3003,10 @@ mod tests {
             })
         }
 
-        async fn delete(&self, _location: &Path) -> object_store::Result<()> {
+        fn delete_stream(
+            &self,
+            _locations: futures_util::stream::BoxStream<'static, object_store::Result<Path>>,
+        ) -> futures_util::stream::BoxStream<'static, object_store::Result<Path>> {
             unimplemented!("reads only")
         }
 
@@ -3022,11 +3025,12 @@ mod tests {
             unimplemented!("reads only")
         }
 
-        async fn copy(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
-            unimplemented!("reads only")
-        }
-
-        async fn copy_if_not_exists(&self, _from: &Path, _to: &Path) -> object_store::Result<()> {
+        async fn copy_opts(
+            &self,
+            _from: &Path,
+            _to: &Path,
+            _options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
             unimplemented!("reads only")
         }
     }

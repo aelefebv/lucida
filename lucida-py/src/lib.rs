@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use object_store::ObjectStore;
+use object_store::{ObjectStore, ObjectStoreExt};
 use pyo3::exceptions::{PyLookupError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
