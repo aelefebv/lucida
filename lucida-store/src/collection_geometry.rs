@@ -71,6 +71,9 @@ impl DeclaredLevels {
             }
         }
         shapes.truncate(chunk_shapes.len());
+        for (chunk_shape, shape) in chunk_shapes.iter_mut().zip(&shapes) {
+            clamp_to_extent(chunk_shape, shape);
+        }
         let chunk_byte_layouts = chunk_shapes
             .iter()
             .enumerate()
@@ -116,6 +119,18 @@ impl DeclaredLevels {
 fn widen(declared: &mut [u64], stored: &[u64]) {
     for (d, s) in declared.iter_mut().zip(stored) {
         *d = (*d).max(*s);
+    }
+}
+
+/// Clamp a served chunk to the extent of its level, axis by axis.
+///
+/// A writer that keeps one chunk shape across a pyramid gives its coarse
+/// levels chunks larger than the levels themselves, and every resident chunk
+/// costs its served shape in the client's cache and on the GPU. The chunk
+/// grid does not change: an axis the chunk overhangs has one chunk either way.
+pub(crate) fn clamp_to_extent(chunk_shape: &mut [u64], level_shape: &[u64]) {
+    for (c, s) in chunk_shape.iter_mut().zip(level_shape) {
+        *c = (*c).min((*s).max(1));
     }
 }
 
@@ -293,6 +308,26 @@ mod tests {
 
         assert_eq!(declared.shapes, vec![vec![2, 16, 16], vec![2, 8, 8]]);
         assert_eq!(declared.chunk_shapes, vec![vec![1, 8, 8], vec![1, 8, 8]]);
+    }
+
+    #[test]
+    fn a_level_is_declared_at_a_chunk_no_larger_than_itself() {
+        // One chunk shape kept across the pyramid: level 1 stores a 3x256x256
+        // chunk for a 3x32x32 level. A resident level-1 chunk costs what the
+        // level holds, 6,144 bytes of uint16, not 393,216.
+        let tile = tile(&[([3, 256, 256], [3, 256, 256]), ([3, 32, 32], [3, 256, 256])]);
+
+        let declared = declare(&[&tile]);
+
+        assert_eq!(declared.chunk_shapes[1], vec![3, 32, 32]);
+        let [level0, level1] = &declare(&[&tile]).bind(&tile)[..] else {
+            panic!("two levels")
+        };
+        assert!(level0.regrid.is_none());
+        let regrid = level1.regrid.as_ref().expect("level 1 is served regridded");
+        assert_eq!(regrid.chunk_shape, vec![3, 32, 32]);
+        assert_eq!(regrid.chunk_byte_layout.canonical_byte_size, 32 * 32 * 2);
+        assert_eq!(regrid.stored_shape, vec![3, 32, 32]);
     }
 
     #[test]
