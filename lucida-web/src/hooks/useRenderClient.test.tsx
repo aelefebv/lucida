@@ -28,6 +28,9 @@ vi.mock("../renderer/renderClient.ts", () => {
     ready(): Promise<void> {
       return this.readyPromise;
     }
+    onGpuStatus(): () => void {
+      return () => {};
+    }
   }
   return { RenderClient: MockRenderClient };
 });

@@ -847,6 +847,15 @@ export class CpuCache {
     this.deliveryState.clearProxySent(key);
   }
 
+  /**
+   * The renderer replaced its GPU device and holds nothing, so every chunk
+   * and proxy is eligible to send again, the ones it refused included.
+   */
+  forgetDelivered(): void {
+    this.deliveryState.reset();
+    this.rejectionTracker.clear();
+  }
+
   snapshot(): CacheStateSnapshot {
     const cached = new Map<string, Set<string>>();
     for (const [entityId, chunkKeys] of this.chunkStore.entityChunkKeys()) {
