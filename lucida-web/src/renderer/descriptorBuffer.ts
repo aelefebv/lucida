@@ -107,10 +107,9 @@ export interface EntityDescriptorIndex {
 export function memberIdForColdEntry(
   entry: ColdStateActiveEntry,
   channel: number,
-  multiChannel: boolean,
 ): string {
   const base = entry.kind === "group-as-proxy" ? entry.entityId : entry.imageId;
-  return multiChannel ? `${base}:ch${channel}` : base;
+  return `${base}:ch${channel}`;
 }
 
 /**
@@ -125,7 +124,7 @@ export function* iterateColdMembers(
       yield {
         entry,
         channel,
-        memberId: memberIdForColdEntry(entry, channel, cold.multiChannel),
+        memberId: memberIdForColdEntry(entry, channel),
       };
     }
   }

@@ -44,7 +44,7 @@ function makeScene() {
   const calls = { project: 0, region: 0 };
   const scene = {
     t: () => 0,
-    c: () => 0,
+    resolved_layers: () => "[]",
     member_positions: () => JSON.stringify({ tile: [0, 0] }),
     visible_region: () => {
       calls.region += 1;

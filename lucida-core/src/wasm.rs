@@ -223,6 +223,17 @@ impl WasmScene {
         serde_json::to_string(&self.inner.resolved_layers()).unwrap_or_else(|_| "[]".to_string())
     }
 
+    /// What every layer would show under the saved view in `view_json`, as
+    /// JSON like [`Self::resolved_layers`]; explore previews draw a candidate
+    /// view through it. A view that does not parse resolves to the scene's own.
+    pub fn resolved_view_layers(&self, view_json: &str) -> String {
+        let layers = match serde_json::from_str::<crate::saved_view::SavedView>(view_json) {
+            Ok(view) => self.inner.resolved_view_layers(&view),
+            Err(_) => self.inner.resolved_layers(),
+        };
+        serde_json::to_string(&layers).unwrap_or_else(|_| "[]".to_string())
+    }
+
     pub fn contrast_min(&self) -> f64 {
         self.inner.display.contrast_min
     }

@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LayerChannel, LayerInfo } from "../../components/LayerPanel.tsx";
 import { ChannelChips } from "./ChannelChips.tsx";
+import { resolvedLayer, resolvedLayers } from "../../resolvedLayerFixtures.ts";
 
 vi.mock("../../colormaps.ts", () => ({ getColormapData: () => new Uint8Array(256 * 4) }));
 
@@ -54,7 +55,11 @@ function setup(layers: LayerInfo[], soloChannel: number | null = null) {
     onSoloChannel: vi.fn(),
     onShowAllChannels: vi.fn(),
   };
-  render(<ChannelChips layers={layers} selectedLayerId={null} soloChannel={soloChannel} {...handlers} />);
+  // The chips read solo from the scene's resolved layers.
+  const resolved = resolvedLayers(
+    ...layers.map((l) => resolvedLayer(l.id, [0], { solo: soloChannel, channel_count: l.channels.length })),
+  );
+  render(<ChannelChips layers={layers} selectedLayerId={null} resolvedLayers={resolved} {...handlers} />);
   return handlers;
 }
 
@@ -85,9 +90,9 @@ describe("ChannelChips", () => {
     const handlers = setup([layer("multi", [channel("A"), channel("B")])], 0);
     expect(screen.getByRole("button", { name: "A, soloed" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "B" }), { altKey: true });
-    expect(handlers.onSoloChannel).toHaveBeenCalledWith(1);
+    expect(handlers.onSoloChannel).toHaveBeenCalledWith("multi", 1);
     fireEvent.click(screen.getByRole("button", { name: "B" }));
-    expect(handlers.onShowAllChannels).toHaveBeenCalled();
+    expect(handlers.onShowAllChannels).toHaveBeenCalledWith("multi");
   });
 
   it("solos on a long press without also toggling", () => {
@@ -100,7 +105,7 @@ describe("ChannelChips", () => {
     });
     fireEvent.pointerUp(chip, { pointerId: 1, pointerType: "touch", isPrimary: true, clientX: 10, clientY: 10 });
     fireEvent.click(chip);
-    expect(handlers.onSoloChannel).toHaveBeenCalledWith(1);
+    expect(handlers.onSoloChannel).toHaveBeenCalledWith("multi", 1);
     expect(handlers.onChannelSetVisible).not.toHaveBeenCalled();
   });
 });

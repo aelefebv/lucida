@@ -11,7 +11,7 @@ import type {
   ColdStateMessage,
   WantedMemberChunks,
 } from "../../../renderer/workerProtocol.ts";
-import type { DatasetSettings } from "../../../tickCommon.ts";
+import type { ResolvedLayer } from "../../../resolvedLayers.ts";
 import type { SampleFormat } from "../../../renderer/dataTypeUtil.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type {
@@ -131,20 +131,18 @@ export function buildColdState(args: {
   activeSet: ActiveSetEntry[];
   entities: EntitySnapshot[];
   selection: SelectionState;
-  multiChannel: boolean;
   visibleRegion: VisibleRegion;
   renderRadiusView?: { detail: number; coarse: number };
   desiredProxyKeys?: Iterable<string>;
   wantedChunks: WantedMemberChunks[];
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
-  dsSettings: DatasetSettings | undefined;
+  layer: ResolvedLayer | undefined;
   sampleFormat: SampleFormat;
 }): ColdStateMessage {
   const entityById = new Map(args.entities.map(e => [e.entityId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
-    args.selection.visibleChannels,
-    args.dsSettings,
+    args.layer,
   );
   const coldActiveSet = args.activeSet.map(entry =>
     buildColdActiveEntry(entry, entityById, args.matricesByEntity, displayStateByChannel),
@@ -155,7 +153,6 @@ export function buildColdState(args: {
     datasetId: args.datasetId,
     currentT: args.selection.t,
     currentZ: args.selection.z,
-    multiChannel: args.multiChannel,
     visibleChannels: args.selection.visibleChannels,
     visibleRegion: args.visibleRegion,
     renderRadiusView: args.renderRadiusView,
@@ -170,19 +167,18 @@ export function buildColdState(args: {
 /**
  * Worker-side member id for a planner {@link ActiveSetEntry}, matching
  * `memberIdForColdEntry` (the cold-state-entry form) exactly: group-as-proxy
- * routes by `entityId`, everything else by `imageId`, suffixed `:ch${channel}`
- * in multi-channel mode. Both forms agree because a delta reconstructs the
+ * routes by `entityId`, everything else by `imageId`, suffixed `:ch${channel}`.
+ * Both forms agree because a delta reconstructs the
  * worker's active set from the same planner entries this walks.
  */
 export function* iterateActiveSetMembers(
   activeSet: ActiveSetEntry[],
   visibleChannels: number[],
-  multiChannel: boolean,
 ): Generator<string> {
   for (const entry of activeSet) {
     const base = entry.kind === "group-as-proxy" ? entry.entityId : entry.imageId;
     for (const channel of visibleChannels) {
-      yield multiChannel ? `${base}:ch${channel}` : base;
+      yield `${base}:ch${channel}`;
     }
   }
 }
@@ -197,11 +193,10 @@ export function* iterateActiveSetMembers(
 export function computeActiveSetIndexMap(
   activeSet: ActiveSetEntry[],
   visibleChannels: number[],
-  multiChannel: boolean,
 ): Map<string, number> {
   const indexByMember = new Map<string, number>();
   let next = 0;
-  for (const memberId of iterateActiveSetMembers(activeSet, visibleChannels, multiChannel)) {
+  for (const memberId of iterateActiveSetMembers(activeSet, visibleChannels)) {
     if (!indexByMember.has(memberId)) indexByMember.set(memberId, next++);
   }
   return indexByMember;
@@ -258,12 +253,11 @@ export function buildColdStateDelta(args: {
   wantedChunks: WantedMemberChunks[];
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
-  dsSettings: DatasetSettings | undefined;
+  layer: ResolvedLayer | undefined;
 }): ColdStateDeltaMessage {
   const entityById = new Map(args.entities.map(e => [e.entityId, e]));
   const displayStateByChannel = buildDisplayStateByChannel(
-    args.selection.visibleChannels,
-    args.dsSettings,
+    args.layer,
   );
 
   const oldByEntity = new Map<string, ActiveSetEntry>();

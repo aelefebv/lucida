@@ -103,7 +103,6 @@ function makeCold(activeSet: ColdStateActiveEntry[]): ColdStateMessage {
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
-    multiChannel: false,
     visibleChannels: [0],
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024], zRangeVox: [0, 1], effectiveZoom: 1,
@@ -167,16 +166,16 @@ describe("applyColdStateDelta", () => {
     // Descriptor buffer indices agree with the full rebuild's.
     const descDelta = ctxDelta.state.descriptorBuffersByDataset.get("ds1")!;
     const descFull = ctxFull.state.descriptorBuffersByDataset.get("ds1")!;
-    expect(descDelta.memberByIndex).toEqual(["img-a", "img-c", "img-d"]);
+    expect(descDelta.memberByIndex).toEqual(["img-a:ch0", "img-c:ch0", "img-d:ch0"]);
     expect(descDelta.memberByIndex).toEqual(descFull.memberByIndex);
 
     // The removed entity is gone from everything the render path reads — no
     // ghost tile. (Its pool routing is dropped and it never enters the rebuilt
     // descriptor buffer, exactly as a full rebuild on this worker would do.)
-    expect(descDelta.indexByMember.has("img-b")).toBe(false);
-    expect(ctxDelta.state.memberSourcePools.has("img-b")).toBe(false);
-    expect(ctxDelta.state.currentSourcesByDataset.get("ds1")!.has("img-b")).toBe(false);
-    expect(descDelta.indexByMember.has("img-c")).toBe(true);
+    expect(descDelta.indexByMember.has("img-b:ch0")).toBe(false);
+    expect(ctxDelta.state.memberSourcePools.has("img-b:ch0")).toBe(false);
+    expect(ctxDelta.state.currentSourcesByDataset.get("ds1")!.has("img-b:ch0")).toBe(false);
+    expect(descDelta.indexByMember.has("img-c:ch0")).toBe(true);
 
     // The delta re-pointed the retained cold state at the new view.
     expect(patched.visibleRegion).toEqual(delta.visibleRegion);

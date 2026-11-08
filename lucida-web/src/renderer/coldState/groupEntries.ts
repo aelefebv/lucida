@@ -40,14 +40,10 @@ export function groupEntriesByPool(
   mode: "volume" | "slice",
 ): Map<string, PoolGroup> {
   const groups = new Map<string, PoolGroup>();
-  const isMultiCh = cold.multiChannel;
-  const channels = isMultiCh
-    ? cold.visibleChannels
-    : [cold.visibleChannels[0]];
 
-  for (const channel of channels) {
+  for (const channel of cold.visibleChannels) {
     for (const entry of cold.activeSet) {
-      const memberId = memberIdForColdEntry(entry, channel, isMultiCh);
+      const memberId = memberIdForColdEntry(entry, channel);
       for (const source of tierSourcesForEntry(entry)) {
         const levelMeta = entry.levels.find(l => l.level === source.level);
         if (!levelMeta) continue;
@@ -55,8 +51,8 @@ export function groupEntriesByPool(
         // `chunkTierPoolKey` takes `[X, Y, Z]` or `[X, Y]`; the group keeps `[Z, Y, X]`.
         const poolKey =
           mode === "volume"
-            ? chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY, chunkZ], isMultiCh)
-            : chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY], isMultiCh);
+            ? chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY, chunkZ])
+            : chunkTierPoolKey(cold.datasetId, source.tier, channel, [chunkX, chunkY]);
         const dims: [number, number, number] =
           mode === "volume" ? [chunkZ, chunkY, chunkX] : [1, chunkY, chunkX];
 

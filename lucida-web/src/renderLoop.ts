@@ -13,7 +13,7 @@ import { configStore } from "./pipeline/planning/configStore.ts";
 import type { CpuCache } from "./pipeline/fetch/index.ts";
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
-import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview, forgetMinimapOverviewUploads } from "./minimapPath.ts";
+import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, clearMinimapForDataset, invalidateMinimapOverview, forgetMinimapOverviewUploads } from "./minimapPath.ts";
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./trace/quiescence.ts";
 import { PointEvent, type CacheWarmth, type InputKind, type Outstanding, type RunConditions } from "./trace/types.ts";
@@ -114,9 +114,6 @@ export class RenderLoop implements TraceEnvironment {
   /** Lowers the render resolution while a gesture's frames run long. */
   private readonly resolution = new AdaptiveResolution();
   private resolutionRestoreTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /** Track previous multi_channel state to detect transitions and clean up. */
-  private prevMultiChannel = false;
 
   constructor(opts: RenderLoopOptions) {
     this.session = opts.session;
@@ -419,27 +416,6 @@ export class RenderLoop implements TraceEnvironment {
     this.publishCaptureReady(true, "rendered");
   }
 
-  /**
-   * On multi-channel ↔ single-channel transitions, clear members whose
-   * key shape (composite `:chN` vs plain) no longer matches the new mode,
-   * so they don't leak on the worker.
-   */
-  private handleMultiChannelTransition(): void {
-    const mc = this.session.scene!.multi_channel();
-    if (mc === this.prevMultiChannel) return;
-    this.prevMultiChannel = mc;
-
-    const trackedIds = this.uploader.getTrackedResourceMemberIds();
-    for (const key of trackedIds) {
-      const isComposite = /:ch\d+$/.test(key);
-      if ((mc && !isComposite) || (!mc && isComposite)) {
-        this.client.removeLayerResources(key);
-        this.tickCoordinator.clearMemberResources(key);
-        this.uploader.clearMember(key);
-      }
-    }
-  }
-
   /** Collect member IDs associated with a dataset from uploader tracking. */
   private collectMemberIds(dsId: string): string[] {
     const ids = new Set<string>();
@@ -520,11 +496,6 @@ export class RenderLoop implements TraceEnvironment {
     if (enabled) {
       this.setDirty("interactive", "minimap_enabled");
     }
-  }
-
-  markMinimapOverviewSeeded(datasetId: string, t: number, c: number): void {
-    const ctx = this.buildContext();
-    markMinimapOverviewSeeded(ctx, this.minimapState, datasetId, t, c);
   }
 
   /**
@@ -657,9 +628,6 @@ export class RenderLoop implements TraceEnvironment {
     }
 
     const ctx = this.buildContext();
-
-    // Detect multi-channel mode transitions and clean up stale resources
-    this.handleMultiChannelTransition();
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {

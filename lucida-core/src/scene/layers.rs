@@ -9,7 +9,8 @@ use lucida_content::{DatasetId, DatasetManifest};
 use serde::{Deserialize, Serialize};
 
 use super::{BlendMode, Colormap, DatasetDisplaySettings, RenderMode, Scene};
-use crate::view::LegacyChannels;
+use crate::saved_view::SavedView;
+use crate::view::{LegacyChannels, ViewState};
 
 /// One channel a layer shows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,17 +97,57 @@ impl LayerExtent {
     }
 }
 
+/// What one layer shows with `settings` at the selectors in `view`.
+fn resolve(
+    dataset_id: &DatasetId,
+    manifest: &DatasetManifest,
+    settings: &DatasetDisplaySettings,
+    view: &ViewState,
+) -> ResolvedLayer {
+    let extent = LayerExtent::of(manifest);
+    let shown = settings.shown_channels(extent.c);
+    let blend_mode = if shown.len() == 1 {
+        settings.blend_mode
+    } else {
+        settings.channel_blend_mode
+    };
+    let channels = shown
+        .into_iter()
+        .map(|channel| {
+            let entry = settings.channel_settings.get(channel as usize);
+            ShownChannel {
+                channel,
+                // An entry-less channel has never been styled, so it draws
+                // through the layer's window in gray.
+                colormap: entry.map_or(Colormap::Gray, |e| e.colormap),
+                contrast_min: entry.map_or(settings.contrast_min, |e| e.contrast_min),
+                contrast_max: entry.map_or(settings.contrast_max, |e| e.contrast_max),
+                gamma: entry.map_or(settings.gamma, |e| e.gamma),
+                blend_mode,
+            }
+        })
+        .collect();
+    let z_range = extent.clamp_z(&view.z_range);
+    let t = extent.clamp_t(view.t);
+    ResolvedLayer {
+        dataset_id: dataset_id.clone(),
+        visible: settings.visible,
+        opacity: settings.opacity,
+        render_mode: settings.render_mode,
+        channel_count: extent.c,
+        solo: settings.solo.filter(|&solo| solo < extent.c),
+        channels,
+        z_clamped: z_range != view.z_range,
+        z_range,
+        t_clamped: t != view.t,
+        t,
+    }
+}
+
 impl Scene {
     /// Every layer in panel order, then any dataset the order does not list.
     pub fn resolved_layers(&self) -> Vec<ResolvedLayer> {
-        let listed = self.dataset_order.iter();
-        let unlisted = self
-            .document
-            .manifests
-            .keys()
-            .filter(|id| !self.dataset_order.contains(id));
-        listed
-            .chain(unlisted)
+        self.layer_ids()
             .filter_map(|id| self.resolved_layer(id))
             .collect()
     }
@@ -114,7 +155,6 @@ impl Scene {
     /// What `dataset_id` shows, or `None` for a dataset the document lacks.
     pub fn resolved_layer(&self, dataset_id: &DatasetId) -> Option<ResolvedLayer> {
         let manifest = self.document.manifests.get(dataset_id)?;
-        let extent = LayerExtent::of(manifest);
         let seeded;
         let settings = match self.dataset_settings.get(dataset_id) {
             Some(settings) => settings,
@@ -123,43 +163,46 @@ impl Scene {
                 &seeded
             }
         };
-        let shown = settings.shown_channels(extent.c);
-        let blend_mode = if shown.len() == 1 {
-            settings.blend_mode
-        } else {
-            settings.channel_blend_mode
-        };
-        let channels = shown
-            .into_iter()
-            .map(|channel| {
-                let entry = settings.channel_settings.get(channel as usize);
-                ShownChannel {
-                    channel,
-                    // An entry-less channel has never been styled, so it
-                    // draws through the layer's window in gray.
-                    colormap: entry.map_or(Colormap::Gray, |e| e.colormap),
-                    contrast_min: entry.map_or(settings.contrast_min, |e| e.contrast_min),
-                    contrast_max: entry.map_or(settings.contrast_max, |e| e.contrast_max),
-                    gamma: entry.map_or(settings.gamma, |e| e.gamma),
-                    blend_mode,
+        Some(resolve(dataset_id, manifest, settings, &self.view))
+    }
+
+    /// What this scene's layers would show under `view`, as restoring it here
+    /// leaves them: a layer the view styles takes the view's settings, except
+    /// that channels the view lists no entry for keep this scene's styling.
+    pub fn resolved_view_layers(&self, view: &SavedView) -> Vec<ResolvedLayer> {
+        self.layer_ids()
+            .filter_map(|id| {
+                let manifest = self.document.manifests.get(id)?;
+                let mut settings = self
+                    .dataset_settings
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| DatasetDisplaySettings::seeded_for(manifest));
+                if let Some(styled) = view.dataset_settings.get(id) {
+                    let mut channels = settings.channel_settings;
+                    for (i, entry) in styled.channel_settings.iter().enumerate() {
+                        match channels.get_mut(i) {
+                            Some(slot) => *slot = entry.clone(),
+                            None => channels.push(entry.clone()),
+                        }
+                    }
+                    settings = DatasetDisplaySettings {
+                        channel_settings: channels,
+                        ..styled.clone()
+                    };
                 }
+                Some(resolve(id, manifest, &settings, &view.view))
             })
-            .collect();
-        let z_range = extent.clamp_z(&self.view.z_range);
-        let t = extent.clamp_t(self.view.t);
-        Some(ResolvedLayer {
-            dataset_id: dataset_id.clone(),
-            visible: settings.visible,
-            opacity: settings.opacity,
-            render_mode: settings.render_mode,
-            channel_count: extent.c,
-            solo: settings.solo.filter(|&solo| solo < extent.c),
-            channels,
-            z_clamped: z_range != self.view.z_range,
-            z_range,
-            t_clamped: t != self.view.t,
-            t,
-        })
+            .collect()
+    }
+
+    fn layer_ids(&self) -> impl Iterator<Item = &DatasetId> {
+        let unlisted = self
+            .document
+            .manifests
+            .keys()
+            .filter(|id| !self.dataset_order.contains(id));
+        self.dataset_order.iter().chain(unlisted)
     }
 
     /// The scene's z slab clamped into `dataset_id`, or the slab itself for a
@@ -343,6 +386,45 @@ mod tests {
         assert_eq!(channels(&scene), vec![0, 1, 2]);
         solo(&mut scene, "a", Some(1));
         assert_eq!(channels(&scene), vec![1]);
+    }
+
+    #[test]
+    fn a_captured_view_resolves_to_what_the_scene_shows() {
+        let mut scene = scene_with(&[("a", 3), ("b", 2)]);
+        scene.apply(
+            ViewportCommand::SetChannelVisible {
+                dataset_id: "a".into(),
+                channel: 1,
+                visible: false,
+            }
+            .into(),
+        );
+        solo(&mut scene, "b", Some(1));
+        let mut view = SavedView::empty([800, 600]);
+        view.view = scene.view.clone();
+        view.dataset_order = scene.dataset_order.clone();
+        for id in &scene.dataset_order {
+            view.dataset_settings
+                .insert(id.clone(), scene.dataset_settings[id].clone());
+        }
+        assert_eq!(scene.resolved_view_layers(&view), scene.resolved_layers());
+    }
+
+    #[test]
+    fn a_view_that_solos_resolves_to_its_solo_with_the_scene_styling() {
+        let scene = scene_with(&[("a", 3)]);
+        let mut view = SavedView::empty([800, 600]);
+        // An entry listing no channels, as Home's does, keeps the scene's.
+        view.dataset_settings.insert(
+            DatasetId("a".into()),
+            DatasetDisplaySettings {
+                solo: Some(2),
+                ..Default::default()
+            },
+        );
+        let layers = scene.resolved_view_layers(&view);
+        assert_eq!(layers[0].channel_indices(), vec![2]);
+        assert_eq!(layers[0].channels[0].colormap, Colormap::Cyan);
     }
 
     #[test]

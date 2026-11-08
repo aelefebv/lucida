@@ -4,6 +4,7 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
+import type { BlendMode } from "./layerCompositor.ts";
 
 export interface InitMessage {
   type: "init";
@@ -333,15 +334,19 @@ export interface SliceRenderMultiPassMessage {
 }
 
 export interface MinimapLayerParams {
+  /** The overview texture: a member's id with its channel. */
   datasetId: string;
   modelMatrix: Float32Array;
   invModelMatrix: Float32Array;
   contrastMin: number;
   contrastMax: number;
   gamma: number;
-  /** Active channel's colormap name (snake_case, e.g. "magenta"); the minimap
+  /** The channel's colormap name (snake_case, e.g. "magenta"); the minimap
    * binds its own LUT so 2D matches 3D instead of rendering gray. */
   colormap: string;
+  /** How this channel combines with the overviews drawn before it, as the
+   * main view combines it. */
+  blendMode: BlendMode;
 }
 
 export interface MinimapInitMessage {
@@ -564,12 +569,7 @@ export interface ColdStateMessage {
   datasetId: string;
   currentT: number;
   currentZ: number;
-  /**
-   * Explicit scene mode. Do not infer this from `visibleChannels.length`:
-   * multi-channel mode can legitimately have one visible channel, and
-   * residency/member keys must still use the multi-channel shape.
-   */
-  multiChannel: boolean;
+  /** The channels the layer shows. Each has its own member ids and pools. */
   visibleChannels: number[];
   visibleRegion: VisibleRegion;
   /** Per-tier render radius as visible-region half-diagonal multipliers. */

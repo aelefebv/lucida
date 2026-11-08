@@ -23,6 +23,7 @@ import { clientPoint, useTouchGestures } from "../input/useTouchGestures.ts";
 import { frameClock } from "../frameClock.ts";
 import { requestRender } from "../invalidation.ts";
 import type { CameraMode } from "../sceneStore.ts";
+import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
 
 interface Props {
   session: Session;
@@ -302,9 +303,9 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
           position: [anchor[0], anchor[1]],
           end,
           z,
-          // In 3D `z` is the picked depth, while T/C are the view's selectors.
+          // In 3D `z` is the picked depth, while T is the view's selector.
           t: scene.t(),
-          c: scene.c(),
+          c: shownChannels(readResolvedLayers(scene).get(datasetId))[0],
           author: String(myIdRef.current),
           kind: shape ? kind : "point",
           ...(capturedView ? { view: capturedView } : {}),

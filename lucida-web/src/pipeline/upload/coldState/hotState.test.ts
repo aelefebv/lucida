@@ -57,7 +57,6 @@ function makeColdMsg(
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
-    multiChannel: visibleChannels.length > 1,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1, 1],
@@ -99,7 +98,7 @@ describe("buildViewHotState", () => {
     // 3 members → 3 entries, each with the same rayHit.
     expect(msg.rayHitsByEntity).toHaveLength(3);
     const memberIds = msg.rayHitsByEntity.map(([id]) => id);
-    expect(memberIds).toEqual(["img-a", "img-b", "group-c"]);
+    expect(memberIds).toEqual(["img-a:ch0", "img-b:ch0", "group-c:ch0"]);
     for (const [, hit] of msg.rayHitsByEntity) {
       expect(hit).toEqual([10, 20, 30]);
     }
@@ -126,7 +125,7 @@ describe("buildViewHotState", () => {
 
     // 2 unique memberIds → 2 entries (the second "dup" is deduped).
     expect(msg.rayHitsByEntity).toHaveLength(2);
-    expect(msg.rayHitsByEntity.map(([id]) => id)).toEqual(["dup", "img-c"]);
+    expect(msg.rayHitsByEntity.map(([id]) => id)).toEqual(["dup:ch0", "img-c:ch0"]);
   });
 
   it("empty cold msg → empty rayHitsByEntity", () => {

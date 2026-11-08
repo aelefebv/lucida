@@ -77,7 +77,7 @@ function emptyView(): SavedView {
     datasets: [],
     active_layouts: {},
     camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [800, 600] },
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0, multi_channel: false },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
     dataset_order: [],
     dataset_settings: {},
@@ -107,17 +107,15 @@ describe("SavedViewApplier", () => {
     const applier = new SavedViewApplier(bridge, () => scene, fakeIdForUrl);
     const v = emptyView();
     v.view.t = 5;
-    v.view.c = 2;
     v.display.gamma = 1.5;
     await applier.apply(v);
 
     // No dataset opens needed.
     expect(openCalls).toEqual([]);
-    // SetT, SetC, SetZRange, SetContrast, SetGamma, SetMultiChannel called.
+    // SetT, SetZRange, SetContrast, SetGamma called.
     expect(calls.some((c) => c.includes('"type":"set_t"'))).toBe(true);
-    expect(calls.some((c) => c.includes('"type":"set_c"'))).toBe(true);
     expect(calls.some((c) => c.includes('"type":"set_gamma"'))).toBe(true);
-    expect([scene.t(), scene.c(), scene.gamma()]).toEqual([5, 2, 1.5]);
+    expect([scene.t(), scene.gamma()]).toEqual([5, 1.5]);
     expect(applier.isInProgress()).toBe(false);
   });
 
@@ -562,20 +560,19 @@ describe("SavedViewApplier", () => {
   });
 
   it("subscribeApplyComplete fires AFTER the WASM mutations (post-apply state visible)", async () => {
-    // Subscribers read post-apply state from the live scene, so c/t/z must be
+    // Subscribers read post-apply state from the live scene, so t/z must be
     // written before the callback fires.
     const { scene } = createScene();
     const applier = new SavedViewApplier(bridge, () => scene, fakeIdForUrl);
     let seen: number[] = [];
     applier.subscribeApplyComplete(() => {
-      seen = [scene.c(), scene.t(), scene.z()];
+      seen = [scene.t(), scene.z()];
     });
     const v = emptyView();
     v.view.t = 5;
-    v.view.c = 2;
     v.view.z_range = { start: 3, end: 4 };
     await applier.apply(v);
-    expect(seen).toEqual([2, 5, 3]);
+    expect(seen).toEqual([5, 3]);
   });
 
   it("subscribeApplyComplete fires while inProgress is still true", async () => {
@@ -616,18 +613,56 @@ describe("SavedViewApplier", () => {
     expect(b).toBe(1);
   });
 
-  // The WASM-side write; useSavedViewSync.test.ts covers the React mirror.
-  it("set_c includes the captured channel value", async () => {
-    const { scene, calls } = createScene();
-    const applier = new SavedViewApplier(bridge, () => scene, fakeIdForUrl);
-    const v = emptyView();
-    v.view.c = 2;
-    await applier.apply(v);
+  /** A scene with a three-channel layer `a` and a two-channel layer `b`, and a
+   *  workspace view of both whose captured settings list every channel. */
+  function channelScene(view: SavedView["view"], v: number, solos: { a?: number; b?: number } = {}) {
+    const { scene } = createScene(["a"]);
+    openIn(scene, renamed(fixture("image"), "b"));
+    const channel = { visible: true, colormap: "gray" as const, contrast_min: 0, contrast_max: 1, gamma: 1 };
+    const settings = (count: number, solo?: number) => ({
+      ...JSON.parse(scene.dataset_display_settings("a")),
+      channel_settings: Array.from({ length: count }, () => channel),
+      ...(solo === undefined ? {} : { solo }),
+    });
+    const saved: SavedView = {
+      ...emptyView(),
+      v,
+      view,
+      dataset_order: ["a", "b"],
+      dataset_settings: { a: settings(3, solos.a), b: settings(2, solos.b) },
+    };
+    const applier = new SavedViewApplier(
+      bridge, () => scene, fakeIdForUrl, 1000, "workspace-dataset-id", "local",
+    );
+    const shown = () => {
+      const layers = JSON.parse(scene.resolved_layers()) as {
+        dataset_id: string;
+        channels: { channel: number }[];
+      }[];
+      return Object.fromEntries(layers.map((l) => [l.dataset_id, l.channels.map((c) => c.channel)]));
+    };
+    return { applier, saved, shown };
+  }
 
-    const setCCall = calls.find((c) => c.includes('"type":"set_c"'));
-    expect(setCCall).toBeDefined();
-    expect(JSON.parse(setCCall!)).toMatchObject({ type: "set_c", c: 2 });
-    expect(scene.c()).toBe(2);
+  it("restores each layer's solo from a current view", async () => {
+    const { applier, saved, shown } = channelScene({ z_range: { start: 0, end: 1 }, t: 0 }, 2, { a: 1 });
+    await applier.apply(saved);
+    expect(shown()).toEqual({ a: [1], b: [0, 1] });
+  });
+
+  it("restores a view recorded with a scene-wide solo as a solo of each layer that has the channel", async () => {
+    const legacy = { z_range: { start: 0, end: 1 }, t: 0, c: 2, multi_channel: false };
+    const { applier, saved, shown } = channelScene(legacy, 1);
+    await applier.apply(saved);
+    // The two-channel layer has no channel 2 and stays visible in its composite.
+    expect(shown()).toEqual({ a: [2], b: [0, 1] });
+  });
+
+  it("restores a view recorded in the scene-wide composite as the composite", async () => {
+    const legacy = { z_range: { start: 0, end: 1 }, t: 0, c: 1, multi_channel: true };
+    const { applier, saved, shown } = channelScene(legacy, 1, { a: 2 });
+    await applier.apply(saved);
+    expect(shown()).toEqual({ a: [0, 1, 2], b: [0, 1] });
   });
 });
 

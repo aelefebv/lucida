@@ -77,7 +77,6 @@ function makeEntry(
 function makeCold(
   activeSet: ColdStateActiveEntry[],
   visibleChannels: number[] = [0],
-  multiChannel = visibleChannels.length > 1,
 ): ColdStateMessage {
   return {
     type: "coldState",
@@ -85,7 +84,6 @@ function makeCold(
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
-    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -105,30 +103,19 @@ function makeCold(
 // (group-as-proxy is the easy one to get wrong).
 
 describe("Suite D — memberIdForColdEntry matrix", () => {
-  it("single-channel tile → imageId", () => {
+  it("tile → imageId:chN", () => {
     const e = makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail" });
-    expect(memberIdForColdEntry(e, 0, false)).toBe("imgA");
+    expect(memberIdForColdEntry(e, 0)).toBe("imgA:ch0");
+    expect(memberIdForColdEntry(e, 2)).toBe("imgA:ch2");
   });
 
-  it("multi-channel tile → imageId:chN", () => {
-    const e = makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail" });
-    expect(memberIdForColdEntry(e, 2, true)).toBe("imgA:ch2");
-  });
-
-  it("single-channel group-as-proxy → entityId (NOT empty string)", () => {
-    // The helper routes on `entry.kind` and resolves to `entityId`. Building
-    // the key from `entry.imageId` would give "".
-    const e = makeEntry({ entityId: "groupA", imageId: "", mode: "group-as-proxy" });
-    expect(memberIdForColdEntry(e, 0, false)).toBe("groupA");
-    expect(memberIdForColdEntry(e, 0, false)).not.toBe("");
-  });
-
-  it("multi-channel group-as-proxy → entityId:chN (NOT ':chN')", () => {
+  it("group-as-proxy → entityId:chN (NOT ':chN')", () => {
+    // The helper routes on `entry.kind` and resolves to `entityId`.
     // `${entry.imageId}:ch${channel}` would give ":ch2", a member key with
     // no entity prefix.
     const e = makeEntry({ entityId: "groupA", imageId: "", mode: "group-as-proxy" });
-    expect(memberIdForColdEntry(e, 2, true)).toBe("groupA:ch2");
-    expect(memberIdForColdEntry(e, 2, true)).not.toBe(":ch2");
+    expect(memberIdForColdEntry(e, 2)).toBe("groupA:ch2");
+    expect(memberIdForColdEntry(e, 2)).not.toBe(":ch2");
   });
 
   it("memberIdForColdEntry narrows the union via `entry.kind`", () => {
@@ -140,10 +127,8 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
     const group = makeEntry({ entityId: "group-b", imageId: "", mode: "group-as-proxy" });
     expect(tile.kind).toBe("tile");
     expect(group.kind).toBe("group-as-proxy");
-    expect(memberIdForColdEntry(tile, 0, false)).toBe("img-a");
-    expect(memberIdForColdEntry(group, 0, false)).toBe("group-b");
-    expect(memberIdForColdEntry(tile, 1, true)).toBe("img-a:ch1");
-    expect(memberIdForColdEntry(group, 1, true)).toBe("group-b:ch1");
+    expect(memberIdForColdEntry(tile, 1)).toBe("img-a:ch1");
+    expect(memberIdForColdEntry(group, 1)).toBe("group-b:ch1");
   });
 
   it("mixed cold state (tiles + groups, multi-channel) → canonical order", () => {
@@ -173,11 +158,10 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
     }
   });
 
-  it("canonical iteration uses explicit multi-channel mode with one visible channel", () => {
+  it("canonical iteration keys a lone shown channel by that channel", () => {
     const cold = makeCold(
       [makeEntry({ entityId: "imgA", imageId: "imgA", mode: "tiles-with-detail" })],
       [2],
-      true,
     );
 
     expect(Array.from(iterateColdMembers(cold)).map(x => x.memberId)).toEqual([

@@ -15,7 +15,7 @@ import type {
 import type { SceneEpochs } from "../epochs.ts";
 import type { VisibleRegion } from "../viewport.ts";
 import type { TickContext } from "../../renderLoopTypes.ts";
-import type { DatasetSettings } from "../../tickCommon.ts";
+import type { ResolvedLayer } from "../../resolvedLayers.ts";
 import type {
   ChunkFeedbackReason,
   ChunkResidencyChange,
@@ -96,29 +96,27 @@ export class Uploader {
     requests: readonly ChunkRequest[];
     entities: EntitySnapshot[];
     selection: SelectionState;
-    multiChannel: boolean;
     visibleRegion: VisibleRegion;
     renderRadiusView?: { detail: number; coarse: number };
     desiredProxyKeys?: Iterable<string>;
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
-    dsSettings: DatasetSettings | undefined;
+    layer: ResolvedLayer | undefined;
   }): ColdStateMessage {
-    const wanted = wantedChunksFromPlan(args.requests, args.multiChannel);
+    const wanted = wantedChunksFromPlan(args.requests);
     this.wantedByDataset.set(args.datasetId, wanted);
     const msg = buildColdState({
       datasetId: args.datasetId,
       activeSet: args.activeSet,
       entities: args.entities,
       selection: args.selection,
-      multiChannel: args.multiChannel,
       visibleRegion: args.visibleRegion,
       renderRadiusView: args.renderRadiusView,
       desiredProxyKeys: args.desiredProxyKeys,
       wantedChunks: [...wanted.values()],
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
-      dsSettings: args.dsSettings,
+      layer: args.layer,
       sampleFormat: datasetSampleFormat(args.ctx.datasets.get(args.datasetId)?.manifest),
     });
     args.ctx.client.coldState(msg);
@@ -165,7 +163,7 @@ export class Uploader {
     desiredProxyKeys: Iterable<string>;
     epochs: SceneEpochs;
   }): void {
-    const wanted = wantedChunksFromPlan(args.requests, args.ctx.scene.multi_channel());
+    const wanted = wantedChunksFromPlan(args.requests);
     this.wantedByDataset.set(args.datasetId, wanted);
     args.ctx.client.coldStateSelection({
       type: "coldStateSelection",
@@ -201,9 +199,9 @@ export class Uploader {
     desiredProxyKeys?: Iterable<string>;
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
-    dsSettings: DatasetSettings | undefined;
+    layer: ResolvedLayer | undefined;
   }): ColdStateDeltaMessage {
-    const wanted = wantedChunksFromPlan(args.requests, args.ctx.scene.multi_channel());
+    const wanted = wantedChunksFromPlan(args.requests);
     const wantedChanges = diffWantedChunks(this.wantedByDataset.get(args.datasetId) ?? new Map(), wanted);
     this.wantedByDataset.set(args.datasetId, wanted);
     const msg = buildColdStateDelta({
@@ -218,7 +216,7 @@ export class Uploader {
       wantedChunks: wantedChanges,
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
-      dsSettings: args.dsSettings,
+      layer: args.layer,
     });
     args.ctx.client.coldStateDelta(msg);
     this.lastEpochs = args.epochs;
@@ -293,17 +291,19 @@ export class Uploader {
    * strict priority order. Budget is a one-item soft cap: the next
    * priority item is sent while `remaining > 0`, even if oversized, and
    * the loop stops after the send drives `remaining <= 0`.
+   *
+   * `sliceZFor` names the plane each dataset's slice view shows, which is the
+   * scene's z clamped into that dataset; `null` in the volume view.
    */
   deliverToWorker(
     ctx: TickContext,
     budget: number,
-    sliceZ: number | null,
+    sliceZFor: ((datasetId: string) => number) | null,
   ): boolean {
     const tickStart = performance.now();
     this.currentUploadStats = emptyUploadTickStats();
     this.currentUploadStats.bytesBudget = budget;
 
-    const multiChannel = ctx.scene.multi_channel();
     const epochs = this.lastEpochs ?? {
       content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
     };
@@ -352,8 +352,7 @@ export class Uploader {
         delivery,
         ctx,
         manifestByImage,
-        multiChannel,
-        sliceZ,
+        sliceZFor,
         epochs,
       });
       if (sent === 0) continue;
@@ -395,11 +394,10 @@ export class Uploader {
     delivery: ReadyDelivery;
     ctx: TickContext;
     manifestByImage: Map<string, ManifestEntry>;
-    multiChannel: boolean;
-    sliceZ: number | null;
+    sliceZFor: ((datasetId: string) => number) | null;
     epochs: SceneEpochs;
   }): number {
-    const { delivery, ctx, manifestByImage, multiChannel, sliceZ, epochs } = args;
+    const { delivery, ctx, manifestByImage, sliceZFor, epochs } = args;
 
     if (delivery.kind === "proxy") {
       dispatchProxy(ctx.client, delivery, epochs);
@@ -412,6 +410,7 @@ export class Uploader {
       this.currentUploadStats.skippedNoMeta++;
       return 0;
     }
+    const sliceZ = sliceZFor ? sliceZFor(meta.datasetId) : null;
 
     // Label overlays go to the r32uint label pool. The slice view pre-slices
     // to one Z-plane (~64 KB); the volume view sends the whole ~8 MB chunk.
@@ -436,7 +435,6 @@ export class Uploader {
       delivery,
       meta,
       ctx.mode,
-      multiChannel,
       sliceZ,
       epochs,
     );

@@ -75,7 +75,6 @@ function makeCold(
   activeSet: ColdStateActiveEntry[],
   visibleChannels: number[] = [0],
   viewMode: "slice" | "volume" = "volume",
-  multiChannel = visibleChannels.length > 1,
 ): ColdStateMessage {
   return {
     type: "coldState",
@@ -83,7 +82,6 @@ function makeCold(
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
-    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -114,11 +112,11 @@ describe("groupEntriesByPool — volume", () => {
     const groups = groupEntriesByPool(cold, "volume");
     expect(groups.size).toBe(1);
     const [g] = groups.values();
-    expect(g.poolKey).toBe("ds1:64x64x32:detail");
+    expect(g.poolKey).toBe("ds1:ch0:64x64x32:detail");
     expect(g.tier).toBe("detail");
     expect(g.channel).toBe(0);
     expect(g.chunkDims).toEqual([32, 64, 64]);
-    expect(g.entries.map(e => e.memberId)).toEqual(["imgA", "imgB"]);
+    expect(g.entries.map(e => e.memberId)).toEqual(["imgA:ch0", "imgB:ch0"]);
   });
 
   it("two entries with different chunk dims → two pool groups", () => {
@@ -134,7 +132,7 @@ describe("groupEntriesByPool — volume", () => {
     ]);
     const groups = groupEntriesByPool(cold, "volume");
     expect(groups.size).toBe(2);
-    expect(Array.from(groups.keys()).sort()).toEqual(["ds1:32x32x16:detail", "ds1:64x64x32:detail"]);
+    expect(Array.from(groups.keys()).sort()).toEqual(["ds1:ch0:32x32x16:detail", "ds1:ch0:64x64x32:detail"]);
   });
 
   it("multi-channel → channel-suffixed pool keys + ch-suffixed memberIds", () => {
@@ -163,7 +161,6 @@ describe("groupEntriesByPool — volume", () => {
       ],
       [2],
       "volume",
-      true,
     );
 
     const groups = groupEntriesByPool(cold, "volume");
@@ -185,7 +182,7 @@ describe("groupEntriesByPool — volume", () => {
     ]);
     const groups = groupEntriesByPool(cold, "volume");
     expect(groups.size).toBe(1);
-    expect(groups.get("ds1:64x64x32:detail")?.entries.map(e => e.memberId)).toEqual(["imgB"]);
+    expect(groups.get("ds1:ch0:64x64x32:detail")?.entries.map(e => e.memberId)).toEqual(["imgB:ch0"]);
   });
 
   it("detail and coarse sources use separate tiered pool groups even with mismatched chunk dims", () => {
@@ -205,18 +202,18 @@ describe("groupEntriesByPool — volume", () => {
     // coarse tier's level: its chunk shape gives it a detail pool of its
     // own, and the coarse tier keeps a separate pool at the same shape.
     expect(Array.from(groups.keys()).sort()).toEqual([
-      "ds1:128x128x8:coarse",
-      "ds1:128x128x8:detail",
-      "ds1:64x64x32:detail",
+      "ds1:ch0:128x128x8:coarse",
+      "ds1:ch0:128x128x8:detail",
+      "ds1:ch0:64x64x32:detail",
     ]);
-    expect(groups.get("ds1:64x64x32:detail")?.entries).toEqual([
-      expect.objectContaining({ memberId: "imgA", tier: "detail", level: 0 }),
+    expect(groups.get("ds1:ch0:64x64x32:detail")?.entries).toEqual([
+      expect.objectContaining({ memberId: "imgA:ch0", tier: "detail", level: 0 }),
     ]);
-    expect(groups.get("ds1:128x128x8:detail")?.entries).toEqual([
-      expect.objectContaining({ memberId: "imgA", tier: "detail", level: 2 }),
+    expect(groups.get("ds1:ch0:128x128x8:detail")?.entries).toEqual([
+      expect.objectContaining({ memberId: "imgA:ch0", tier: "detail", level: 2 }),
     ]);
-    expect(groups.get("ds1:128x128x8:coarse")?.entries[0]).toMatchObject({
-      memberId: "imgA",
+    expect(groups.get("ds1:ch0:128x128x8:coarse")?.entries[0]).toMatchObject({
+      memberId: "imgA:ch0",
       tier: "coarse",
       level: 2,
     });
@@ -239,7 +236,7 @@ describe("groupEntriesByPool — volume", () => {
     expect(groups.size).toBe(1);
     const [g] = groups.values();
     expect(g.entries.map((e) => e.level)).toEqual([1, 2, 3, 4]);
-    expect(g.entries.every((e) => e.tier === "detail" && e.memberId === "imgA")).toBe(true);
+    expect(g.entries.every((e) => e.tier === "detail" && e.memberId === "imgA:ch0")).toBe(true);
   });
 
   it("detail and coarse sources stay separate when they share the same level", () => {
@@ -255,16 +252,16 @@ describe("groupEntriesByPool — volume", () => {
     ]);
     const groups = groupEntriesByPool(cold, "volume");
     expect(Array.from(groups.keys()).sort()).toEqual([
-      "ds1:64x64x32:coarse",
-      "ds1:64x64x32:detail",
+      "ds1:ch0:64x64x32:coarse",
+      "ds1:ch0:64x64x32:detail",
     ]);
-    expect(groups.get("ds1:64x64x32:detail")?.entries[0]).toMatchObject({
-      memberId: "imgA",
+    expect(groups.get("ds1:ch0:64x64x32:detail")?.entries[0]).toMatchObject({
+      memberId: "imgA:ch0",
       tier: "detail",
       level: 1,
     });
-    expect(groups.get("ds1:64x64x32:coarse")?.entries[0]).toMatchObject({
-      memberId: "imgA",
+    expect(groups.get("ds1:ch0:64x64x32:coarse")?.entries[0]).toMatchObject({
+      memberId: "imgA:ch0",
       tier: "coarse",
       level: 1,
     });
@@ -286,7 +283,7 @@ describe("groupEntriesByPool — slice", () => {
     const groups = groupEntriesByPool(cold, "slice");
     expect(groups.size).toBe(1);
     const [g] = groups.values();
-    expect(g.poolKey).toBe("ds1:128x128:detail");
+    expect(g.poolKey).toBe("ds1:ch0:128x128:detail");
     expect(g.chunkDims).toEqual([1, 128, 128]);
   });
 

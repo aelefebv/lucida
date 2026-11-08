@@ -756,8 +756,10 @@ function describeView(view: SavedView, dims: Dims, homeDistance?: number): strin
   if (zCount > 1) parts.push(positionLabel("Z", z, zCount));
   const t = view.view?.t ?? 0;
   if (tCount > 1) parts.push(positionLabel("T", t, tCount));
-  const c = view.view?.c ?? 0;
-  if (cCount > 1) parts.push(positionLabel("C", c, cCount));
+  const solo = Object.values(view.dataset_settings ?? {}).find((s) => typeof s.solo === "number")?.solo;
+  if (cCount > 1) {
+    parts.push(typeof solo === "number" ? positionLabel("C", solo, cCount) : "composite");
+  }
 
   return parts.join(" · ");
 }

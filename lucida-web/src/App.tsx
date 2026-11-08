@@ -256,7 +256,6 @@ function Viewer({
     bumpLayerSettingsVersion: layers.bumpLayerSettingsVersion,
     initLayerMaps: (id) => {
       layers.initLayerMaps(id);
-      dims.handleDatasetRegistered(id);
     },
     setSelectedDatasetId,
     bumpDatasetsVersion,
@@ -575,13 +574,14 @@ function Viewer({
 
   useScriptControls({
     selectors: {
-      z: dims.z, t: dims.t, c: dims.c,
-      dimZ: dims.dimZ, dimT: dims.dimT, dimC: dims.dimC,
+      z: dims.z, t: dims.t,
+      dimZ: dims.dimZ, dimT: dims.dimT,
       viewMode: dims.viewMode,
     },
+    resolvedLayers: dims.layers,
     setZ: dims.handleZChange,
     setT: dims.handleTChange,
-    setC: dims.handleCChange,
+    setSolo: layers.handleChannelSetSolo,
     setChannelVisible: layers.handleChannelSetVisible,
     setLayerVisible: layers.handleLayerSetVisible,
     captureView: savedViewSync.captureBuilder,
@@ -875,7 +875,7 @@ function Viewer({
       layers={layers.layerInfos}
       selectedLayerId={selectedDatasetId}
       expandedLayerId={layers.expandedLayerId}
-      soloChannel={dims.soloChannel}
+      resolvedLayers={dims.layers}
       importWarnings={bridge.datasetImportWarnings}
       onSelectLayer={layers.handleLayerSelect}
       onToggleExpand={layers.handleLayerToggleExpand}
@@ -896,8 +896,8 @@ function Viewer({
       onChannelSetGamma={layers.handleChannelSetGamma}
       onChannelAutoFit={layers.handleChannelAutoFit}
       onChannelSetBlendMode={layers.handleChannelSetBlendMode}
-      onSoloChannel={dims.handleSoloChannel}
-      onShowAllChannels={dims.handleShowAllChannels}
+      onSoloChannel={layers.handleSoloChannel}
+      onShowAllChannels={layers.handleShowAllChannels}
       onLabelSetVisible={layers.handleLabelSetVisible}
       onLabelSetOpacity={layers.handleLabelSetOpacity}
       onAddData={() => setAddDataOpen(true)}
@@ -1045,10 +1045,10 @@ function Viewer({
     channelChips: {
       layers: layers.layerInfos,
       selectedLayerId: selectedDatasetId,
-      soloChannel: dims.soloChannel,
+      resolvedLayers: dims.layers,
       onChannelSetVisible: layers.handleChannelSetVisible,
-      onSoloChannel: dims.handleSoloChannel,
-      onShowAllChannels: dims.handleShowAllChannels,
+      onSoloChannel: layers.handleSoloChannel,
+      onShowAllChannels: layers.handleShowAllChannels,
     },
     navigator: navigatorProps,
     railPanels,

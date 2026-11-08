@@ -30,7 +30,7 @@ vi.mock("lucida-core", () => {
     commands: Array<Record<string, unknown>> = [];
     // The selectors, with the epochs a selector or camera change bumps, so the
     // page's scene store reads what a command or a followed peer wrote.
-    view = { z: 0, t: 0, c: 0, multi: false };
+    view = { z: 0, t: 0 };
     mode = "slice";
     epochCounts = { view: 0, selection: 0 };
     constructor(_w?: number, _h?: number) {
@@ -45,8 +45,6 @@ vi.mock("lucida-core", () => {
       if (cmd.type === "set_z") this.view.z = cmd.z;
       if (cmd.type === "set_z_range") this.view.z = cmd.start;
       if (cmd.type === "set_t") this.view.t = cmd.t;
-      if (cmd.type === "set_c") this.view.c = cmd.c;
-      if (cmd.type === "set_multi_channel") this.view.multi = cmd.enabled;
       if (typeof cmd.type === "string" && cmd.type.startsWith("set_mode_")) {
         this.mode = { set_mode_slice: "slice", set_mode_arcball: "arcball", set_mode_fly: "fly" }[cmd.type as string] ?? this.mode;
         this.epochCounts.view++;
@@ -97,8 +95,21 @@ vi.mock("lucida-core", () => {
     }
     z() { return this.view.z; }
     t() { return this.view.t; }
-    c() { return this.view.c; }
-    multi_channel() { return this.view.multi; }
+    resolved_layers() {
+      return JSON.stringify(Object.keys(this.doc.manifests ?? {}).map((id) => ({
+        dataset_id: id,
+        visible: true,
+        opacity: 1,
+        render_mode: "translucent",
+        channel_count: 1,
+        solo: null,
+        channels: [{ channel: 0, colormap: "gray", contrast_min: 0, contrast_max: 65535, gamma: 1, blend_mode: "alpha" }],
+        z_range: { start: this.view.z, end: this.view.z + 1 },
+        t: this.view.t,
+        z_clamped: false,
+        t_clamped: false,
+      })));
+    }
     camera_mode() { return this.mode; }
     zoom() { return 1; }
     view_proj() { return new Float32Array(16); }
@@ -108,7 +119,7 @@ vi.mock("lucida-core", () => {
     export_presence() {
       return JSON.stringify({
         camera: { mode: "slice", center: [0, 0], zoom: 1 },
-        view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+        view: { z_range: { start: 0, end: 1 }, t: 0 },
         display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
       });
     }
@@ -122,11 +133,10 @@ vi.mock("lucida-core", () => {
       });
     }
     import_presence(json: string) {
-      const presence = JSON.parse(json) as { view?: { z_range: { start: number }; t: number; c: number } };
+      const presence = JSON.parse(json) as { view?: { z_range: { start: number }; t: number } };
       if (presence.view) {
         this.view.z = presence.view.z_range.start;
         this.view.t = presence.view.t;
-        this.view.c = presence.view.c;
       }
       this.epochCounts.view++;
       this.epochCounts.selection++;
@@ -474,14 +484,10 @@ afterEach(() => {
 });
 
 describe("App wiring: channels", () => {
-  it("opens a multichannel dataset as a composite", async () => {
+  // The composite is the scene's own default, so opening sends no mode.
+  it("opens a multichannel dataset without writing a channel mode", async () => {
     const { scene } = await mountWithSnapshot(documentJson(["wds-1"], undefined, 3));
-    expect(scene.commands).toContainEqual({ type: "set_multi_channel", enabled: true });
-  });
-
-  it("leaves a single-channel dataset in single-channel mode", async () => {
-    const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
-    expect(scene.commands.some((cmd) => cmd.type === "set_multi_channel")).toBe(false);
+    expect(scene.commands.some((cmd) => cmd.type === "set_channel_solo")).toBe(false);
   });
 
   it("opens Add data from the layer panel's header", async () => {
@@ -789,7 +795,7 @@ describe("App wiring: the shell", () => {
     });
 
     await act(async () => {
-      bridge.handlers.onPresenceUpdate?.(7, peer.camera, { z_range: { start: 2, end: 3 }, t: 0, c: 0 }, peer.display);
+      bridge.handlers.onPresenceUpdate?.(7, peer.camera, { z_range: { start: 2, end: 3 }, t: 0 }, peer.display);
     });
 
     // The import wrote the scene alone; the scrubber reads it from there.

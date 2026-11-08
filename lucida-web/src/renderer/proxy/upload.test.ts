@@ -125,7 +125,6 @@ function makeColdState(
     datasetId: opts?.datasetId ?? "ds1",
     currentT: opts?.currentT ?? 0,
     currentZ: opts?.currentZ ?? 0,
-    multiChannel: opts?.multiChannel ?? false,
     visibleChannels: opts?.visibleChannels ?? [0],
     visibleRegion: opts?.visibleRegion ?? {
       xyBoundsVox: [0, 0, 128, 128],

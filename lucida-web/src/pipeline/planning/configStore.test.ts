@@ -259,7 +259,6 @@ describe("configStore — the envelope the trace driver writes", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",

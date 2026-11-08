@@ -133,14 +133,12 @@ function tile(entityId: string, target: number, coarseLevel: number | null = 5):
 
 function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStateMessage {
   const visibleChannels = opts.visibleChannels ?? [0];
-  const multiChannel = visibleChannels.length > 1 || opts.multiChannel === true;
   return {
     type: "coldState",
     epochs: EPOCHS,
     datasetId,
     currentT: 0,
     currentZ: 0,
-    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -151,7 +149,7 @@ function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStat
     },
     // The planner wants the one chunk `chunkAt` delivers, in every channel.
     wantedChunks: visibleChannels.map((c) => ({
-      memberId: multiChannel ? `${datasetId}-img:ch${c}` : `${datasetId}-img`,
+      memberId: `${datasetId}-img:ch${c}`,
       tier: "detail" as const,
       chunkKeys: ["2/0/0/0/0/0"],
     })),
@@ -231,8 +229,8 @@ describe("removing a dataset", () => {
     const gpu = trackingDevice();
     const { ctx } = makeCtx(gpu.device);
     await dispatchMessage(ctx, cold("ds1"));
-    await dispatchMessage(ctx, chunkAt("ds1-img"));
-    const poolKey = "ds1:32x32x32:detail";
+    await dispatchMessage(ctx, chunkAt("ds1-img:ch0"));
+    const poolKey = "ds1:ch0:32x32x32:detail";
     const first = ctx.state.volumeAtlases.get(poolKey)!;
     expect(first.slots.size).toBe(1);
 
@@ -304,11 +302,11 @@ describe("a cold state frees the pools it no longer routes to", () => {
     const { ctx } = makeCtx(gpu.device);
     // Target 2 keeps levels 2 to 5 resident, across both chunk shapes.
     await dispatchMessage(ctx, cold("ds1", { activeSet: [tile("ds1-img", 2, null)] }));
-    expect(poolKeysOf(ctx, "ds1")).toEqual(["ds1:16x16x16:detail", "ds1:32x32x32:detail"]);
+    expect(poolKeysOf(ctx, "ds1")).toEqual(["ds1:ch0:16x16x16:detail", "ds1:ch0:32x32x32:detail"]);
 
     // Target 0 keeps levels 0 to 3, all 32³.
     await dispatchMessage(ctx, cold("ds1", { activeSet: [tile("ds1-img", 0, null)] }));
-    expect(poolKeysOf(ctx, "ds1")).toEqual(["ds1:32x32x32:detail"]);
+    expect(poolKeysOf(ctx, "ds1")).toEqual(["ds1:ch0:32x32x32:detail"]);
   });
 
   it("leaves another dataset's pools alone", async () => {

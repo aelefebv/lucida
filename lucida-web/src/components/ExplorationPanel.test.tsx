@@ -297,15 +297,16 @@ describe("ExplorationPanel — breadcrumb trail (proof of navigation)", () => {
 });
 
 describe("ExplorationPanel — you-are-here readout reveals the axes", () => {
-  it("shows azimuth + Z, and surfaces T and C counted from 1 when the dataset has them", async () => {
-    // A 40-timepoint, 3-channel volume: the readout must show T and C exist.
+  it("shows azimuth + Z, T counted from 1, and the composite when the dataset has several channels", async () => {
+    // A 40-timepoint, 3-channel volume: the readout must show T and the
+    // channels exist. Home shows the composite.
     await renderPanel({ dims: [40, 3, 340, 512, 512] });
     const here = screen.getByTestId("explore-here").textContent ?? "";
     expect(here).toMatch(/3D/);
     expect(here).toMatch(/az \d+°/);
     expect(here).toMatch(/Z \d+\/340/);
     expect(here).toMatch(/T 1\/40/);
-    expect(here).toMatch(/C 1\/3/);
+    expect(here).toMatch(/composite/);
   });
 
   it("omits T and C when the dataset is single-timepoint, single-channel", async () => {

@@ -7,8 +7,7 @@
 
 import type { WasmScene } from "lucida-core";
 import type { ImageSpec, DatasetManifest } from "../../manifestTypes.ts";
-import type { DatasetSettings } from "../../tickCommon.ts";
-import { getActiveChannels } from "../../tickCommon.ts";
+import { shownChannels, type ResolvedLayer } from "../../resolvedLayers.ts";
 import type {
   AssetCatalogSnapshot,
   EntitySnapshot,
@@ -70,8 +69,8 @@ export interface BuildPlanningSnapshotArgs {
   datasetId: string;
   /** Manifest entry for `datasetId`; supplies image specs and parent edges. */
   dataset: SnapshotDatasetEntry;
-  /** Drives multi-channel selection. */
-  dsSettings: DatasetSettings | undefined;
+  /** The scene's resolved layer: the channels to plan, and the clamped t and z. */
+  layer: ResolvedLayer | undefined;
   assetCatalog: AssetCatalogSnapshot;
   /**
    * Forwarded verbatim into {@link PlanningSnapshot.minimapPending}. Pass
@@ -79,7 +78,6 @@ export interface BuildPlanningSnapshotArgs {
    */
   minimapPending: Map<string, MinimapChunkCoord[]>;
   mode: "slice" | "volume";
-  multiChannel: boolean;
   /** Passed through verbatim. */
   currentEpochs: SceneEpochs;
   requestEpoch: number;
@@ -133,11 +131,10 @@ export function buildPlanningSnapshot(
     scene,
     datasetId,
     dataset,
-    dsSettings,
+    layer,
     assetCatalog,
     minimapPending,
     mode,
-    multiChannel,
     currentEpochs,
   } = args;
   // Not read here: the caller already folded `requestEpoch` into
@@ -216,21 +213,12 @@ export function buildPlanningSnapshot(
       }
     : DEFAULT_VISIBLE_REGION;
 
-  // 6. Selection. Single-channel mode plans only the current channel: the
-  //    upload path sends one atlas config with one channel, and other
-  //    channels' data would contaminate the atlas. Multi-channel mode fans
-  //    out to every visible channel.
-  let visibleChannels: number[];
-  if (multiChannel && dsSettings?.channel_settings?.length) {
-    visibleChannels = getActiveChannels(dsSettings);
-  } else {
-    visibleChannels = [scene.c()];
-  }
+  // 6. Selection: the channels the layer shows, at the scene's t and z
+  //    clamped into the layer.
   const selection: SelectionState = {
-    t: scene.t(),
-    c: scene.c(),
-    z: scene.z(),
-    visibleChannels,
+    t: layer?.t ?? scene.t(),
+    z: layer?.z_range.start ?? scene.z(),
+    visibleChannels: shownChannels(layer),
     renderMode: mode,
     interactionState: "idle",
   };

@@ -1,7 +1,8 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { WasmScene } from "lucida-core";
-import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, readMemberRenderMatrices, readMinimapOverviewEpochs, resolveMinimapLayerContrast, resolveMinimapLayerColormap, tickMinimap, tickMinimapOverview } from "./minimapPath.ts";
+import { createMinimapState, identityModelMatrix, intersectSliceViewWithMember, minimapCoarseLevelIndex, overviewLayerParams, readMemberRenderMatrices, readMinimapOverviewEpochs, tickMinimap, tickMinimapOverview } from "./minimapPath.ts";
+import { resolvedLayer, resolvedLayers, shownChannel } from "./resolvedLayerFixtures.ts";
 import type { MinimapState } from "./minimapPath.ts";
 import type { MultiscaleInfo } from "./manifestTypes.ts";
 import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -53,49 +54,33 @@ describe("minimapCoarseLevelIndex", () => {
   });
 });
 
-describe("resolveMinimapLayerContrast", () => {
-  const dataset = { contrast_min: 0, contrast_max: 65535, gamma: 1 };
-
-  it("prefers the active channel's contrast/gamma over the dataset-level default", () => {
-    // Auto-contrast writes channel contrast and leaves the dataset level at full
-    // range, so the minimap must use the channel's values like the main view.
-    const settings = {
-      ...dataset,
-      channel_settings: [
-        { contrast_min: 0, contrast_max: 148, gamma: 0.8 },
-        { contrast_min: 10, contrast_max: 200, gamma: 1.2 },
-      ],
-    };
-    expect(resolveMinimapLayerContrast(settings, 0)).toEqual({ contrastMin: 0, contrastMax: 148, gamma: 0.8 });
-    expect(resolveMinimapLayerContrast(settings, 1)).toEqual({ contrastMin: 10, contrastMax: 200, gamma: 1.2 });
+describe("overviewLayerParams", () => {
+  const geometry = (channel: number) => ({
+    memberId: `m0:ch${channel}`,
+    ownerDatasetId: "ds",
+    channel,
+    modelMatrix: identityModelMatrix(),
+    invModelMatrix: identityModelMatrix(),
   });
 
-  it("falls back to dataset-level contrast when there are no channel settings", () => {
-    expect(resolveMinimapLayerContrast(dataset, 0)).toEqual({ contrastMin: 0, contrastMax: 65535, gamma: 1 });
+  it("draws every shown channel of a composite with the canvas's window, colormap and blend", () => {
+    const layers = resolvedLayers(resolvedLayer("ds", [
+      shownChannel(0, { colormap: "magenta", contrast_max: 148, gamma: 0.8 }),
+      shownChannel(1, { colormap: "green", contrast_min: 10, contrast_max: 200, gamma: 1.2 }),
+      shownChannel(2, { colormap: "cyan" }),
+    ]));
+    const params = overviewLayerParams([geometry(0), geometry(1), geometry(2)], layers);
+    expect(params.map((p) => [p.datasetId, p.colormap, p.contrastMin, p.contrastMax, p.gamma, p.blendMode])).toEqual([
+      ["m0:ch0", "magenta", 0, 148, 0.8, "additive"],
+      ["m0:ch1", "green", 10, 200, 1.2, "additive"],
+      ["m0:ch2", "cyan", 0, 65535, 1, "additive"],
+    ]);
   });
 
-  it("falls back to dataset-level when the active channel index is out of range", () => {
-    const settings = { ...dataset, channel_settings: [{ contrast_min: 0, contrast_max: 148, gamma: 0.8 }] };
-    expect(resolveMinimapLayerContrast(settings, 3)).toEqual({ contrastMin: 0, contrastMax: 65535, gamma: 1 });
-  });
-});
-
-describe("resolveMinimapLayerColormap", () => {
-  const ch = (colormap: string) => ({ contrast_min: 0, contrast_max: 1, gamma: 1, colormap });
-
-  it("uses the active channel's colormap (so 2D matches 3D, not gray)", () => {
-    const settings = { contrast_min: 0, contrast_max: 65535, gamma: 1, channel_settings: [ch("magenta"), ch("green")] };
-    expect(resolveMinimapLayerColormap(settings, 0)).toBe("magenta");
-    expect(resolveMinimapLayerColormap(settings, 1)).toBe("green");
-  });
-
-  it("falls back to gray when there are no channel settings", () => {
-    expect(resolveMinimapLayerColormap({ contrast_min: 0, contrast_max: 65535, gamma: 1 }, 0)).toBe("gray");
-  });
-
-  it("falls back to gray when the active channel index is out of range", () => {
-    const settings = { contrast_min: 0, contrast_max: 65535, gamma: 1, channel_settings: [ch("magenta")] };
-    expect(resolveMinimapLayerColormap(settings, 5)).toBe("gray");
+  it("skips a cached channel the layer no longer shows, as after a solo", () => {
+    const layers = resolvedLayers(resolvedLayer("ds", [shownChannel(1, { blend_mode: "alpha" })], { solo: 1, channel_count: 3 }));
+    const params = overviewLayerParams([geometry(0), geometry(1), geometry(2)], layers);
+    expect(params.map((p) => [p.datasetId, p.blendMode])).toEqual([["m0:ch1", "alpha"]]);
   });
 });
 
@@ -245,7 +230,6 @@ describe("tickMinimap overview/overlay split", () => {
   interface FakeScene {
     theta: number;
     phi: number;
-    activeC: number;
     z: number;
     zoom: number;
     center: [number, number];
@@ -264,20 +248,27 @@ describe("tickMinimap overview/overlay split", () => {
     wasm: WasmScene;
   }
 
+  /** `resolved_layers()` for the one layer `ds`, showing `channel` (default 0). */
+  function layersJson(layer: { visible: boolean; opacity: number; contrast_max: number; channel?: number }): string {
+    const channel = shownChannel(layer.channel ?? 0, { contrast_max: layer.contrast_max });
+    return JSON.stringify([
+      resolvedLayer("ds", [channel], { visible: layer.visible, opacity: layer.opacity }),
+    ]);
+  }
+
   function makeScene(): FakeScene {
     const s: FakeScene = {
       theta: 0.5,
       phi: 1.2,
-      activeC: 0,
       z: 0,
       zoom: 1,
       center: [0, 0],
       eye: [0, 0, 10],
       invViewProj: new Array<number>(16).fill(0),
       order: JSON.stringify(["ds"]),
-      settings: JSON.stringify({
-        ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 65535, gamma: 1 },
-      }),
+      settings: layersJson(
+        { visible: true, opacity: 1, contrast_max: 65535 },
+      ),
       contentEpoch: 0,
       layoutEpoch: 0,
       wasm: undefined as unknown as WasmScene,
@@ -285,16 +276,15 @@ describe("tickMinimap overview/overlay split", () => {
     s.wasm = {
       camera_theta: () => s.theta,
       camera_phi: () => s.phi,
-      all_dataset_settings: () => s.settings,
+      resolved_layers: () => s.settings,
       dataset_order: () => s.order,
-      c: () => s.activeC,
       z: () => s.z,
       t: () => 0,
       zoom: () => s.zoom,
       center: () => s.center,
       eye_position: () => new Float32Array(s.eye),
       epochs: () =>
-        JSON.stringify({ content: s.contentEpoch, layout: s.layoutEpoch, view: 0, selection: 0, asset: 0 }),
+        JSON.stringify({ content: s.contentEpoch, layout: s.layoutEpoch, view: 0, selection: s.settings, asset: 0 }),
       // 36 floats: [0..16) invViewProj, [16..19) eye, [19..35) viewProj, [35] topDown.
       minimap_camera: () => new Float32Array(36),
       member_positions: () => JSON.stringify({ m0: [0, 0] }),
@@ -418,7 +408,7 @@ describe("tickMinimap overview/overlay split", () => {
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(1);
 
-    scene.activeC = 1;
+    scene.settings = layersJson({ visible: true, opacity: 1, contrast_max: 65535, channel: 1 });
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(2);
 
@@ -426,9 +416,9 @@ describe("tickMinimap overview/overlay split", () => {
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(3);
 
-    scene.settings = JSON.stringify({
-      ds: { visible: true, opacity: 0.5, blend_mode: "normal", contrast_min: 0, contrast_max: 100, gamma: 1 },
-    });
+    scene.settings = layersJson(
+      { visible: true, opacity: 0.5, contrast_max: 100 },
+    );
     tickMinimap(ctx, state, 0);
     expect(renderCount.n).toBe(4);
   });
@@ -448,9 +438,9 @@ describe("tickMinimap overview/overlay split", () => {
     // but reuses cached member geometry.
     const readSpy = vi.spyOn(scene.wasm, "member_positions");
     const matSpy = vi.spyOn(scene.wasm, "member_render_matrices");
-    scene.settings = JSON.stringify({
-      ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 100, gamma: 1 },
-    });
+    scene.settings = layersJson(
+      { visible: true, opacity: 1, contrast_max: 100 },
+    );
     tickMinimap(ctx, state, 0);
 
     expect(renderCount.n).toBe(2);
@@ -462,9 +452,9 @@ describe("tickMinimap overview/overlay split", () => {
 
   it("rebuilds and re-reads members when a dataset's visibility changes", () => {
     const scene = makeScene();
-    scene.settings = JSON.stringify({
-      ds: { visible: false, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 65535, gamma: 1 },
-    });
+    scene.settings = layersJson(
+      { visible: false, opacity: 1, contrast_max: 65535 },
+    );
     const renderCount = { n: 0 };
     const overlay = vi.fn();
     const state = makeState(overlay);
@@ -477,9 +467,9 @@ describe("tickMinimap overview/overlay split", () => {
     // Showing it adds a drawn layer, a geometry change, so members are re-read
     // even though order, z, channel, upload, and epochs are unchanged.
     const readSpy = vi.spyOn(scene.wasm, "member_positions");
-    scene.settings = JSON.stringify({
-      ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 65535, gamma: 1 },
-    });
+    scene.settings = layersJson(
+      { visible: true, opacity: 1, contrast_max: 65535 },
+    );
     tickMinimap(ctx, state, 0);
 
     expect(readSpy).toHaveBeenCalled();
@@ -579,9 +569,9 @@ describe("tickMinimap overview/overlay split", () => {
     // display-only re-render at the stale 400 cached from the old DPR.
     globalThis.devicePixelRatio = 1;
     const readSpy = vi.spyOn(scene.wasm, "member_positions");
-    scene.settings = JSON.stringify({
-      ds: { visible: true, opacity: 1, blend_mode: "normal", contrast_min: 0, contrast_max: 100, gamma: 1 },
-    });
+    scene.settings = layersJson(
+      { visible: true, opacity: 1, contrast_max: 100 },
+    );
     tickMinimap(ctx, state, 0);
     expect(renderSizes).toEqual([400, 200]);
     expect(readSpy).toHaveBeenCalled();
@@ -793,13 +783,13 @@ describe("tickMinimap overview/overlay split", () => {
 describe("tickMinimapOverview throttle", () => {
   it("throttles the O(members) seed-scan to the scan interval", () => {
     // The seed-scan must run at most once per interval, not every rAF.
-    // scene.t() is read once per scan after the throttle gate, so its call count
-    // tracks scans that ran; empty `datasets` isolates the gate.
-    const tSpy = vi.fn(() => 0);
+    // The resolved layers are read once per scan after the throttle gate, so
+    // their call count tracks scans that ran; empty `datasets` isolates the gate.
+    const tSpy = vi.fn(() => "[]");
     const state = createMinimapState();
     state.enabled = true;
     const ctx = {
-      scene: { t: tSpy, c: () => 0 },
+      scene: { resolved_layers: tSpy },
       datasets: new Map(),
     } as unknown as TickContext;
 
@@ -822,7 +812,7 @@ describe("tickMinimapOverview throttle", () => {
     const state = createMinimapState();
     state.enabled = true;
     const ctx = {
-      scene: { t: () => 0, c: () => 0 },
+      scene: { t: () => 0, resolved_layers: () => "[]" },
       datasets: new Map(),
     } as unknown as TickContext;
 
@@ -843,7 +833,7 @@ describe("tickMinimapOverview throttle", () => {
     state.enabled = true;
     const cache = new Map<string, { data: ArrayBuffer; dataType: string }>();
     const ctx = {
-      scene: { t: () => 0, c: () => 0 },
+      scene: { t: () => 0, resolved_layers: () => "[]" },
       datasets: new Map(),
       cpuCache: { getCachedChunk: (memberId: string, key: string) => cache.get(`${memberId}/${key}`) ?? null },
     } as unknown as TickContext;

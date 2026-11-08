@@ -10,20 +10,37 @@ import type { SavedView } from "../savedView/types.ts";
 import {
   scriptControls,
   scrubIndex,
+  scrubSolo,
   selectDataset,
   setScriptControls,
   viewSignature,
   type SelectorState,
 } from "./steps.ts";
 
-const selectors: SelectorState = { z: 5, t: 0, c: 1, dimZ: 10, dimT: 4, dimC: 3, viewMode: "2d" };
+const selectors: SelectorState = { z: 5, t: 0, dimZ: 10, dimT: 4, viewMode: "2d" };
 
 describe("where a scrub lands", () => {
   it("moves the selector by the count, clamped to the axis", () => {
     expect(scrubIndex(selectors, "z", 2)).toEqual({ index: 7 });
     expect(scrubIndex(selectors, "z", -9)).toEqual({ index: 0 });
     expect(scrubIndex(selectors, "t", 40)).toEqual({ index: 3 });
-    expect(scrubIndex(selectors, "c", -1)).toEqual({ index: 0 });
+  });
+
+  it("moves a c scrub through the composite and then each channel alone", () => {
+    expect(scrubSolo(null, 3, 1)).toEqual({ solo: 0 });
+    expect(scrubSolo(null, 3, 2)).toEqual({ solo: 1 });
+    expect(scrubSolo(1, 3, 9)).toEqual({ solo: 2 });
+    expect(scrubSolo(0, 3, -1)).toEqual({ solo: null });
+    expect(scrubSolo(2, 3, -9)).toEqual({ solo: null });
+  });
+
+  it("refuses a c scrub with nowhere to go", () => {
+    expect(scrubSolo(null, 3, -1)).toEqual({ refused: "c is already at the composite" });
+    expect(scrubSolo(2, 3, 1)).toEqual({ refused: "c is already at its last channel (index 2 of 3)" });
+    expect(scrubSolo(null, 1, 1)).toEqual({
+      refused: "the layer has one channel, so there is nothing to solo",
+    });
+    expect(scrubSolo(null, 3, 0)).toEqual({ refused: "a scrub by 0 moves nothing" });
   });
 
   it("refuses a scrub the control itself would refuse", () => {

@@ -85,7 +85,6 @@ function snapshot(entities: EntitySnapshot[], catalog: AssetCatalogSnapshot): Pl
     },
     selection: {
       t: 0,
-      c: 0,
       z: 0,
       visibleChannels: [0],
       renderMode: "volume",

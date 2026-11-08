@@ -420,7 +420,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
   const addPoint = (at: AnnotationPlacement, openThread: boolean) => {
     const scene = wasmSceneRef.current;
     const view = scene ? buildAnnotationView(scene) : null;
-    editing.addPoint(at, { t: viewContext.t, c: viewContext.c, view, openThread });
+    editing.addPoint(at, { t: viewContext.t, c: viewContext.channels[0] ?? 0, view, openThread });
     onViewportChanged?.();
   };
 

@@ -1,8 +1,8 @@
 // @vitest-environment happy-dom
 //
 // Hook wiring: notifyChange forwards to UrlSync, apply-complete wakes the
-// render loop, and React reads the applied C/T/Z, viewMode, and multiChannel
-// back from the scene. `dataset_id_for_url` is mocked so the hook builds
+// render loop, and React reads the applied T/Z and viewMode back from the
+// scene. `dataset_id_for_url` is mocked so the hook builds
 // without a wasm init.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
@@ -26,17 +26,15 @@ import { useSceneView } from "./useSceneView.ts";
 
 interface MockScene {
   zVal: number;
-  cVal: number;
   tVal: number;
   cameraModeVal: string;
-  multiChannelVal: boolean;
   epochCounts: { view: number; selection: number };
   epochs: () => string;
   z: () => number;
-  c: () => number;
   t: () => number;
   camera_mode: () => string;
-  multi_channel: () => boolean;
+  resolved_layers: () => string;
+  importedViews: { c?: number; multi_channel?: boolean }[];
   apply_command: (json: string) => void;
   dataset_ids: () => string;
   available_layouts: (id: string) => string;
@@ -49,30 +47,26 @@ interface MockScene {
 function makeMockScene(): MockScene {
   const presence = {
     camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [800, 600] },
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0, multi_channel: false },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
   };
   const m: MockScene = {
     zVal: 0,
-    cVal: 0,
     tVal: 0,
     cameraModeVal: "slice",
-    multiChannelVal: false,
+    importedViews: [],
     epochCounts: { view: 0, selection: 0 },
     epochs: () => JSON.stringify({ content: 0, layout: 0, asset: 0, ...m.epochCounts }),
     z: () => m.zVal,
-    c: () => m.cVal,
     t: () => m.tVal,
     camera_mode: () => m.cameraModeVal,
-    multi_channel: () => m.multiChannelVal,
+    resolved_layers: () => "[]",
     apply_command(json: string) {
       try {
         const cmd = JSON.parse(json);
-        if (cmd.type === "set_c") m.cVal = cmd.c;
         if (cmd.type === "set_t") m.tVal = cmd.t;
         if (cmd.type === "set_z") m.zVal = cmd.z;
         if (cmd.type === "set_z_range") m.zVal = cmd.start;
-        if (cmd.type === "set_multi_channel") m.multiChannelVal = cmd.enabled;
         if (cmd.type === "pan") m.epochCounts.view++;
         else m.epochCounts.selection++;
       } catch { /* ignore */ }
@@ -84,6 +78,7 @@ function makeMockScene(): MockScene {
     export_dataset_presence: () => JSON.stringify({ dataset_order: [], dataset_settings: {} }),
     import_presence: (json: string) => {
       const obj = JSON.parse(json);
+      m.importedViews.push(obj.view);
       Object.assign(presence, obj);
       m.epochCounts.view++;
       m.epochCounts.selection++;
@@ -98,7 +93,7 @@ function emptyView(): SavedView {
     datasets: [],
     active_layouts: {},
     camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport: [800, 600] },
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0, multi_channel: false },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
     dataset_order: [],
     dataset_settings: {},
@@ -109,10 +104,8 @@ interface Captured {
   current: {
     handle: ReturnType<typeof useSavedViewSync>;
     z: number;
-    c: number;
     t: number;
     viewMode: "2d" | "3d";
-    multiChannel: boolean;
   } | null;
 }
 
@@ -135,7 +128,7 @@ function HookHarness({
   lastViewDebounceMs,
   captureSurface,
 }: HarnessProps) {
-  const { z, c, t, viewMode, multiChannel } = useSceneView(store);
+  const { z, t, viewMode } = useSceneView(store);
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
   // Mirror the latest map into a ref via useLayoutEffect — the hook reads
   // .current from event handlers and follow-on effects, all of which fire
@@ -163,7 +156,7 @@ function HookHarness({
     restoreLastViewEnabled: () => true,
   });
   useEffect(() => {
-    outRef.current = { handle, z, c, t, viewMode, multiChannel };
+    outRef.current = { handle, z, t, viewMode };
   });
   return null;
 }
@@ -419,15 +412,14 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     expect(loop.residencyCalls).toContain("savedview_apply");
   });
 
-  it("lets React read the applied C/T/Z back from the scene", async () => {
+  it("lets React read the applied T/Z back from the scene", async () => {
     const loop = makeMockLoop();
     await act(async () => {
       render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     });
-    expect(outRef.current?.c).toBe(0);
+    expect(outRef.current?.t).toBe(0);
 
     const v = emptyView();
-    v.view.c = 2;
     v.view.t = 5;
     v.view.z_range = { start: 7, end: 8 };
     await act(async () => {
@@ -438,11 +430,9 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     await act(async () => { /* flush pending effects */ });
 
     // Assert via the live scene first (sanity: apply landed at WASM).
-    expect(scene.cVal).toBe(2);
     expect(scene.tVal).toBe(5);
     expect(scene.zVal).toBe(7);
     // Then assert React reads it back.
-    expect(outRef.current?.c).toBe(2);
     expect(outRef.current?.t).toBe(5);
     expect(outRef.current?.z).toBe(7);
   });
@@ -463,46 +453,41 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     expect(outRef.current?.viewMode).toBe("3d");
   });
 
-  it("reads multiChannel from the post-apply scene", async () => {
+  // The scene decodes an older view's scene-wide channel mode into each
+  // layer's solo; the applier only has to hand it over.
+  it("hands a URL recorded with a scene-wide channel mode to the scene to decode", async () => {
     const loop = makeMockLoop();
     await act(async () => {
       render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     });
-    expect(outRef.current?.multiChannel).toBe(false);
 
-    const v = emptyView();
-    v.view.multi_channel = true;
-    await act(async () => {
-      await outRef.current!.handle.applier.apply(v);
-    });
-    await act(async () => { /* flush pending effects */ });
-
-    expect(scene.multiChannelVal).toBe(true);
-    expect(outRef.current?.multiChannel).toBe(true);
-  });
-
-  // The layer panel reads single-channel mode on `c` as that channel soloed.
-  it("restores a URL recorded in single-channel mode on its channel, from a composite", async () => {
-    const loop = makeMockLoop();
-    scene.multiChannelVal = true;
-    await act(async () => {
-      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
-    });
-
-    // Single-channel views were recorded without the flag.
+    // Single-channel views were recorded as version 1 without the flag, and
+    // stripping dropped `c: 0`.
     const recorded = emptyView();
-    recorded.view.c = 1;
-    delete recorded.view.multi_channel;
+    recorded.v = 1;
     const restored = await decode(await encode(recorded));
 
     await act(async () => {
       await outRef.current!.handle.applier.apply(restored);
     });
-    await act(async () => { /* flush pending effects */ });
 
-    expect(scene.multiChannelVal).toBe(false);
-    expect(scene.cVal).toBe(1);
-    expect(outRef.current?.multiChannel).toBe(false);
-    expect(outRef.current?.c).toBe(1);
+    expect(scene.importedViews.at(-1)).toMatchObject({ c: 0, multi_channel: false });
+  });
+
+  it("hands a current view's import no scene-wide channel mode", async () => {
+    const loop = makeMockLoop();
+    await act(async () => {
+      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
+    });
+
+    const restored = await decode(await encode(emptyView()));
+    await act(async () => {
+      await outRef.current!.handle.applier.apply(restored);
+    });
+
+    const imported = scene.importedViews.at(-1);
+    expect(imported).toBeDefined();
+    expect(imported).not.toHaveProperty("c");
+    expect(imported).not.toHaveProperty("multi_channel");
   });
 });

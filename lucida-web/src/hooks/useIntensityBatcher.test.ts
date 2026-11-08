@@ -12,12 +12,12 @@ const datasets = new Map<string, DatasetState>([
 
 describe("resolveIntensitySource", () => {
   it("reads the channel from a composite member id", () => {
-    expect(resolveIntensitySource("wds-single:ch2", datasets, 0)).toEqual({ datasetId: "wds-single", channel: 2 });
-    expect(resolveIntensitySource("tile-b:ch1", datasets, 0)).toEqual({ datasetId: "wds-collection", channel: 1 });
+    expect(resolveIntensitySource("wds-single:ch2", datasets)).toEqual({ datasetId: "wds-single", channel: 2 });
+    expect(resolveIntensitySource("tile-b:ch1", datasets)).toEqual({ datasetId: "wds-collection", channel: 1 });
   });
 
-  it("takes the current channel for a single-channel member id", () => {
-    expect(resolveIntensitySource("wds-single", datasets, 3)).toEqual({ datasetId: "wds-single", channel: 3 });
-    expect(resolveIntensitySource("tile-a", datasets, 1)).toEqual({ datasetId: "wds-collection", channel: 1 });
+  it("reads a bare member id as channel 0", () => {
+    expect(resolveIntensitySource("wds-single", datasets)).toEqual({ datasetId: "wds-single", channel: 0 });
+    expect(resolveIntensitySource("tile-a", datasets)).toEqual({ datasetId: "wds-collection", channel: 0 });
   });
 });

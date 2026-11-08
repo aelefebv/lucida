@@ -15,7 +15,7 @@ import type {
 } from "../../planning/index.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import type { VisibleRegion } from "../../viewport.ts";
-import type { DatasetSettings } from "../../../tickCommon.ts";
+import { resolvedLayer, shownChannel } from "../../../resolvedLayerFixtures.ts";
 import {
   buildColdState,
   buildColdActiveEntry,
@@ -61,7 +61,6 @@ function makeTile(
 function makeSelection(over: Partial<SelectionState> = {}): SelectionState {
   return {
     t: 0,
-    c: 0,
     z: 0,
     visibleChannels: [0],
     renderMode: "slice",
@@ -84,19 +83,6 @@ function makeEpochs(): SceneEpochs {
   return { content: 1, layout: 2, view: 3, selection: 4, asset: 5, request: 6 };
 }
 
-function makeDsSettings(over: Partial<DatasetSettings> = {}): DatasetSettings {
-  return {
-    visible: true,
-    opacity: 1,
-    contrast_min: 0,
-    contrast_max: 65535,
-    gamma: 1,
-    blend_mode: "alpha",
-    channel_settings: [],
-    channel_blend_mode: "additive",
-    ...over,
-  };
-}
 
 function makeMatrices(): Map<string, { model: Float32Array; inv: Float32Array }> {
   const m = new Map<string, { model: Float32Array; inv: Float32Array }>();
@@ -215,12 +201,11 @@ describe("buildColdState", () => {
       activeSet,
       entities,
       selection: makeSelection({ t: 7, z: 13, renderMode: "volume", visibleChannels: [0] }),
-      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
-      dsSettings: undefined,
+      layer: undefined,
       sampleFormat: "u16",
     });
 
@@ -228,7 +213,6 @@ describe("buildColdState", () => {
     expect(msg.datasetId).toBe("ds1");
     expect(msg.currentT).toBe(7);
     expect(msg.currentZ).toBe(13);
-    expect(msg.multiChannel).toBe(false);
     expect(msg.visibleChannels).toEqual([0]);
     expect(msg.viewMode).toBe("volume");
     expect(msg.desiredProxyKeys).toEqual([]);
@@ -258,7 +242,6 @@ describe("buildColdState", () => {
       activeSet,
       entities,
       selection: makeSelection(),
-      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       desiredProxyKeys: new Set([
         "ds1|ent-b|TileProxy3D|0|0",
@@ -267,7 +250,7 @@ describe("buildColdState", () => {
       epochs: makeEpochs(),
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
-      dsSettings: undefined,
+      layer: undefined,
       sampleFormat: "u16",
     });
 
@@ -277,7 +260,7 @@ describe("buildColdState", () => {
     ]);
   });
 
-  it("bakes display state per visible channel with dataset-level fallbacks", () => {
+  it("bakes the resolved display state per shown channel", () => {
     const entities = [makeTile("ent-a", "img-a", "group-0")];
     const activeSet: ActiveSetEntry[] = [
       {
@@ -291,33 +274,25 @@ describe("buildColdState", () => {
         groupProxyAvailable: false,
       } as ActiveSetEntry,
     ];
-    const dsSettings = makeDsSettings({
-      opacity: 0.4,
-      contrast_min: 50,
-      contrast_max: 1000,
-      gamma: 2,
-      // Channel 0 has its own colormap; channel 1 falls back to defaults.
-      channel_settings: [
-        { visible: true, colormap: "viridis", contrast_min: 5, contrast_max: 500, gamma: 1.2 },
-      ],
-    });
+    const layer = resolvedLayer("ds1", [
+      shownChannel(0, { colormap: "viridis", contrast_min: 5, contrast_max: 500, gamma: 1.2 }),
+      shownChannel(1, { contrast_min: 50, contrast_max: 1000, gamma: 2 }),
+    ], { opacity: 0.4 });
 
     const msg = buildColdState({
       datasetId: "ds1",
       activeSet,
       entities,
       selection: makeSelection({ visibleChannels: [0, 1] }),
-      multiChannel: true,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
-      dsSettings,
+      layer,
       sampleFormat: "u16",
     });
 
     expect(msg.visibleChannels).toEqual([0, 1]);
-    expect(msg.multiChannel).toBe(true);
     const ds0 = msg.activeSet[0].displayStateByChannel[0];
     expect(ds0.colormapName).toBe("viridis");
     expect(ds0.contrastMin).toBe(5);
@@ -326,8 +301,8 @@ describe("buildColdState", () => {
     expect(ds0.opacity).toBeCloseTo(0.4);
 
     const ds1 = msg.activeSet[0].displayStateByChannel[1];
-    expect(ds1.colormapName).toBe("gray"); // default
-    expect(ds1.contrastMin).toBe(50);       // dataset-level fallback
+    expect(ds1.colormapName).toBe("gray");
+    expect(ds1.contrastMin).toBe(50);
     expect(ds1.contrastMax).toBe(1000);
     expect(ds1.gamma).toBeCloseTo(2);
   });
@@ -363,12 +338,11 @@ describe("buildColdState", () => {
       activeSet,
       entities,
       selection: makeSelection(),
-      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       wantedChunks: [],
       matricesByEntity: matrices,
-      dsSettings: undefined,
+      layer: undefined,
       sampleFormat: "u16",
     });
 
@@ -387,12 +361,11 @@ describe("buildColdState", () => {
       activeSet: [],
       entities: [],
       selection: makeSelection(),
-      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
-      dsSettings: undefined,
+      layer: undefined,
       sampleFormat: "u16",
     });
 
@@ -420,12 +393,11 @@ describe("buildColdState", () => {
       activeSet: sharedActive,
       entities,
       selection: makeSelection(),
-      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
-      dsSettings: undefined,
+      layer: undefined,
       sampleFormat: "u16",
     });
     const msg2 = buildColdState({
@@ -433,12 +405,11 @@ describe("buildColdState", () => {
       activeSet: sharedActive,
       entities,
       selection: makeSelection(),
-      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
-      dsSettings: undefined,
+      layer: undefined,
       sampleFormat: "u16",
     });
 
@@ -501,26 +472,25 @@ describe("computeActiveSetIndexMap / iterateActiveSetMembers", () => {
       activeSet,
       entities: [...entities.values()],
       selection: makeSelection(),
-      multiChannel: false,
       visibleRegion: makeVisibleRegion(),
       epochs: makeEpochs(),
       wantedChunks: [],
       matricesByEntity: makeMatrices(),
-      dsSettings: makeDsSettings(),
+      layer: resolvedLayer("ds1"),
       sampleFormat: "u16",
     });
-    const fromActiveSet = computeActiveSetIndexMap(activeSet, [0], false);
-    // Single-channel member id is the imageId.
-    expect(fromActiveSet.get("img-a")).toBe(0);
-    expect(fromActiveSet.get("img-b")).toBe(1);
+    const fromActiveSet = computeActiveSetIndexMap(activeSet, [0]);
+    // Every member id names its channel, one shown or several.
+    expect(fromActiveSet.get("img-a:ch0")).toBe(0);
+    expect(fromActiveSet.get("img-b:ch0")).toBe(1);
     // Same ids + order the cold-state message would iterate.
-    expect([...iterateActiveSetMembers(activeSet, [0], false)]).toEqual(["img-a", "img-b"]);
+    expect([...iterateActiveSetMembers(activeSet, [0])]).toEqual(["img-a:ch0", "img-b:ch0"]);
     expect(cold.activeSet.map((e) => e.entityId)).toEqual(["a", "b"]);
   });
 
-  it("suffixes member ids per visible channel in multi-channel mode", () => {
+  it("suffixes member ids per visible channel", () => {
     const activeSet: ActiveSetEntry[] = [tileEntry({ entityId: "a", imageId: "img-a" })];
-    expect([...iterateActiveSetMembers(activeSet, [0, 2], true)]).toEqual([
+    expect([...iterateActiveSetMembers(activeSet, [0, 2])]).toEqual([
       "img-a:ch0",
       "img-a:ch2",
     ]);
@@ -538,7 +508,7 @@ describe("buildColdStateDelta", () => {
     epochs: makeEpochs(),
     wantedChunks: [],
     matricesByEntity: makeMatrices(),
-    dsSettings: makeDsSettings(),
+    layer: resolvedLayer("ds1"),
   });
 
   it("carries only changed/added descriptors, removed ids, and the full order", () => {

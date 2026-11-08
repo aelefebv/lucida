@@ -13,7 +13,7 @@ function emptySliceView(viewport: [number, number] = [800, 600]): SavedView {
     datasets: [],
     active_layouts: {},
     camera: { mode: "slice", center: [0, 0], zoom: 1.0, viewport },
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0, multi_channel: false },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 65535, gamma: 1.0 },
     dataset_order: [],
     dataset_settings: {},
@@ -60,7 +60,7 @@ describe("SavedView encoder", () => {
       v.active_layouts = { "ds-aaaa": "collection-3x3" };
       v.dataset_settings = { "ds-aaaa": defaultDatasetSettings(2) };
       v.view.t = 5;
-      v.view.c = 1;
+      v.dataset_settings["ds-aaaa"].solo = 1;
       v.display.gamma = 1.5;
       const back = await decode(await encode(v));
       expect(back).toEqual(v);
@@ -123,11 +123,26 @@ describe("SavedView encoder", () => {
       expect(back.view.z_range).toEqual({ start: 10, end: 25 });
     });
 
-    it("view with multi_channel round-trips", async () => {
+    it("a layer's solo round-trips, and its composite carries no key", async () => {
       const v = emptySliceView();
-      v.view.multi_channel = true;
+      v.dataset_settings = { a: { ...defaultDatasetSettings(3), solo: 2 }, b: defaultDatasetSettings(2) };
       const back = await decode(await encode(v));
-      expect(back.view.multi_channel).toBe(true);
+      expect(back.dataset_settings.a.solo).toBe(2);
+      expect(back.dataset_settings.b).not.toHaveProperty("solo");
+      expect(back.view).not.toHaveProperty("c");
+      expect(back.view).not.toHaveProperty("multi_channel");
+    });
+
+    it("a version 1 payload decodes with its scene-wide channel mode, defaults included", async () => {
+      // Version 1 stripped `c: 0` and `multi_channel: false`, which meant
+      // channel 0 alone; the scene decodes that into each layer's solo.
+      const single = { ...emptySliceView(), v: 1 };
+      const back = await decode(await encode(single));
+      expect(back.view).toMatchObject({ c: 0, multi_channel: false });
+
+      const composite = { ...emptySliceView(), v: 1, view: { z_range: { start: 0, end: 1 }, t: 0, c: 2, multi_channel: true } };
+      const again = await decode(await encode(composite));
+      expect(again.view).toMatchObject({ c: 2, multi_channel: true });
     });
 
     it("unicode in layout IDs round-trips", async () => {
@@ -325,7 +340,6 @@ describe("SavedView encoder", () => {
         viewport: [1280, 720],
       };
       v.view.t = 0;
-      v.view.c = 0;
       const s = await encode(v);
       expect(s.length, `encoded payload was ${s.length} chars`).toBeLessThan(1024);
     });

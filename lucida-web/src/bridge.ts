@@ -288,7 +288,7 @@ export interface PresenceState {
   client_id: ClientId;
   /** Camera, view and display arrive together in one `presence` message. */
   camera?: unknown;
-  view?: { z_range: { start: number; end: number }; t: number; c: number };
+  view?: { z_range: { start: number; end: number }; t: number };
   display?: { contrast_min: number; contrast_max: number; gamma: number };
   following: ClientId | null;
   cursor: [number, number] | null;

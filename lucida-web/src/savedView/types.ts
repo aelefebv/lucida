@@ -1,7 +1,8 @@
 // TypeScript mirror of `lucida_core::saved_view::SavedView`. The wire format
 // is the contract, so keep this in step with `lucida-core/src/saved_view.rs`.
 
-export const SAVED_VIEW_VERSION = 1;
+/** Version 2 moved solo onto each layer; see `SAVED_VIEW_VERSION` in Rust. */
+export const SAVED_VIEW_VERSION = 2;
 
 /** 2D slice camera. `serde(tag = "mode")` puts `mode: "slice"` at top level. */
 export interface SliceCamera {
@@ -50,7 +51,11 @@ export interface ZRange {
 export interface ViewState {
   z_range: ZRange;
   t: number;
-  c: number;
+  /** The scene-wide channel of a view recorded before solo was per layer.
+   *  Present only on such a view; the scene decodes it into each layer's
+   *  `solo` when the view is imported. */
+  c?: number;
+  /** The scene-wide composite flag of such a view, with `c`. */
   multi_channel?: boolean;
 }
 
@@ -102,6 +107,8 @@ export interface DatasetDisplaySettings {
    *  Omitted on the wire when empty. Lets a restore match per-label settings
    *  by name and occurrence when the current label list differs. */
   label_names?: string[];
+  /** The channel the layer shows alone; omitted for its composite. */
+  solo?: number | null;
 }
 
 export type DatasetId = string;

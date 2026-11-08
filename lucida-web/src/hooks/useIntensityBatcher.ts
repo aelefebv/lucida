@@ -18,19 +18,17 @@ declare global {
 }
 
 /**
- * The dataset and channel a reported range belongs to. In the composite the
- * worker reports per channel, as `<member>:ch<n>`; in single-channel mode it
- * reports the bare member, which is the scene's current channel. A
- * collection reports per tile, and ranges are kept per parent dataset.
+ * The dataset and channel a reported range belongs to. The worker reports per
+ * channel, as `<member>:ch<n>`. A collection reports per tile, and ranges are
+ * kept per parent dataset.
  */
 export function resolveIntensitySource(
   rawId: string,
   datasets: Map<string, DatasetState>,
-  currentChannel: number,
 ): { datasetId: string; channel: number } {
   const parsed = parseChannelRangeKey(rawId);
   const memberId = parsed?.datasetId ?? rawId;
-  const channel = parsed?.channel ?? currentChannel;
+  const channel = parsed?.channel ?? 0;
   if (datasets.has(memberId)) return { datasetId: memberId, channel };
   for (const [dsId, ds] of datasets) {
     if (ds.manifest.images.some((img) => img.image_id === memberId)) {
@@ -69,7 +67,7 @@ export function useIntensityBatcher({
     if (!client) return;
     client.onIntensityRange = (rawId, min, max) => {
       const scene = wasmSceneRef.current;
-      const { datasetId, channel } = resolveIntensitySource(rawId, datasetsRef.current, scene?.c() ?? 0);
+      const { datasetId, channel } = resolveIntensitySource(rawId, datasetsRef.current);
       const key = channelRangeKey(datasetId, channel);
 
       // Union across collection members.

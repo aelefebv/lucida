@@ -8,10 +8,8 @@
 import type { TickContext } from "../renderLoopTypes.ts";
 import type { DatasetSettings, SceneSettings } from "../tickCommon.ts";
 import type { DatasetManifest, ImageSpec } from "../manifestTypes.ts";
-import {
-  getActiveChannels,
-  getSceneSettings,
-} from "../tickCommon.ts";
+import { getSceneSettings } from "../tickCommon.ts";
+import { readResolvedLayers, shownChannels, type ResolvedLayer } from "../resolvedLayers.ts";
 import { buildDisplayStateByChannel } from "./upload/coldState/displayState.ts";
 import type { ColdStateDisplayState } from "../renderer/workerProtocol.ts";
 import { computeMemberIndexMap } from "../renderer/descriptorBuffer.ts";
@@ -103,7 +101,8 @@ export interface TickCoordinatorResult {
   /** Per-dataset roster of members that need render layers, keyed by dsId. */
   memberRoster: Map<string, MemberRosterEntry[]>;
   settings: SceneSettings;
-  multiChannel: boolean;
+  /** What each layer shows, as the scene resolved it for this plan. */
+  layers: ReadonlyMap<string, ResolvedLayer>;
   epochs: SceneEpochs;
   /**
    * Per-dataset memberId → entity index map. Both the worker (when
@@ -118,6 +117,7 @@ export interface TickCoordinatorResult {
 interface PlannedDataset {
   dsId: string;
   dsSettings: SceneSettings["allSettings"][string] | undefined;
+  layer: ResolvedLayer | undefined;
   snapshot: PlanningSnapshot;
   entities: EntitySnapshot[];
   visibleRegion: VisibleRegion;
@@ -173,22 +173,6 @@ interface DatasetRebuildSignature {
    * rebuild until proven display-only.
    */
   nonDisplayKey: string;
-}
-
-/**
- * Visible channels for a dataset, matching the assembly in
- * `buildPlanningSnapshot`: multi-channel fans out to every visible
- * channel; single-channel plans only the current channel.
- */
-function computeVisibleChannels(
-  multiChannel: boolean,
-  dsSettings: DatasetSettings | undefined,
-  sceneC: number,
-): number[] {
-  if (multiChannel && dsSettings?.channel_settings?.length) {
-    return getActiveChannels(dsSettings);
-  }
-  return [sceneC];
 }
 
 function numberArraysEqual(a: readonly number[], b: readonly number[]): boolean {
@@ -403,9 +387,7 @@ export class TickCoordinator {
    */
   private lastRebuildScalars: {
     t: number;
-    c: number;
     mode: "slice" | "volume";
-    multiChannel: boolean;
   } | null = null;
   /** Layer participation + order (JSON) at the last full rebuild. */
   private lastLayerOrderKey = "";
@@ -601,7 +583,7 @@ export class TickCoordinator {
     // Past the coalescing gate. Read the shared inputs once so all datasets
     // and the display-only fast path below see the same config.
     const settings = getSceneSettings(ctx.scene);
-    const multiChannel = ctx.scene.multi_channel();
+    const layers = readResolvedLayers(ctx.scene);
     const planningConfig = configStore.get();
 
     const structural = isStructural(causes);
@@ -622,7 +604,7 @@ export class TickCoordinator {
     // descriptor patch and reuse the cached roster instead of a full replan.
     if (
       selectionOnly &&
-      this.tryDisplayOnlyUpdate({ ctx, currentEpochs, settings, multiChannel, tickStart })
+      this.tryDisplayOnlyUpdate({ ctx, currentEpochs, settings, layers, tickStart })
     ) {
       this.serveCachedTelemetry(tickStart);
       return this.cachedResult;
@@ -635,7 +617,7 @@ export class TickCoordinator {
     if (
       requestsOnly &&
       this.tryScrubOnlyUpdate({
-        ctx, currentEpochs, settings, multiChannel, tickStart,
+        ctx, currentEpochs, settings, layers, tickStart,
         minimapPendingFetch, planningConfig,
         minimapChanged: causes.includes("minimap"),
       })
@@ -660,6 +642,7 @@ export class TickCoordinator {
     for (const [dsId, ds] of ctx.datasets) {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) continue;
+      const layer = layers.get(dsId);
 
       // See `snapshotInputCacheByDataset` for why both keys are checked.
       const snapshotInputEpochKey =
@@ -712,11 +695,10 @@ export class TickCoordinator {
         scene: ctx.scene,
         datasetId: dsId,
         dataset: ds,
-        dsSettings,
+        layer,
         assetCatalog: ctx.assetCatalog.snapshot(),
         minimapPending: minimapPendingFetch,
         mode: ctx.mode as "slice" | "volume",
-        multiChannel,
         currentEpochs,
         requestEpoch: this.requestEpoch,
         config: planningConfig,
@@ -758,6 +740,7 @@ export class TickCoordinator {
       plannedDatasets.push({
         dsId,
         dsSettings,
+        layer,
         snapshot,
         entities,
         visibleRegion,
@@ -796,7 +779,7 @@ export class TickCoordinator {
     }
 
     for (const planned of plannedDatasets) {
-      const { dsId, dsSettings, entities, visibleRegion, selection } = planned;
+      const { dsId, dsSettings, layer, entities, visibleRegion, selection } = planned;
       const result = planned.result;
       const budgetedProxyRequests = proxyRequestsByDataset.get(dsId) ?? [];
       const budgetedResult: RequestPlan = {
@@ -847,27 +830,25 @@ export class TickCoordinator {
           epochs: result.epochs,
           desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
           matricesByEntity,
-          dsSettings,
+          layer,
         });
         // The worker rebuilds its descriptor buffer from the reordered active
         // set in the same canonical order this walks, so the indices agree.
         entityIndexByDataset.set(
           dsId,
-          computeActiveSetIndexMap(result.activeSet, selection.visibleChannels, multiChannel),
+          computeActiveSetIndexMap(result.activeSet, selection.visibleChannels),
         );
         this.uploader.sendViewHotStateFromMembersIfAdvanced({
           ctx,
           datasetId: dsId,
-          memberIds: iterateActiveSetMembers(
-            result.activeSet, selection.visibleChannels, multiChannel,
-          ),
+          memberIds: iterateActiveSetMembers(result.activeSet, selection.visibleChannels),
           epochs: result.epochs,
         });
       } else {
         // Full send. Drives atlas creation/remap + wanted-set + descriptor
-        // buffer build; dsSettings bakes per-channel display state into
-        // descriptors. Marks the dataset synced so a later pure view move can
-        // take the delta path against this active set.
+        // buffer build; the resolved layer bakes per-channel display state
+        // into descriptors. Marks the dataset synced so a later pure view move
+        // can take the delta path against this active set.
         const coldMsg = this.uploader.sendColdState({
           ctx,
           datasetId: dsId,
@@ -875,7 +856,6 @@ export class TickCoordinator {
           requests: result.requests,
           entities,
           selection,
-          multiChannel,
           visibleRegion,
           renderRadiusView: {
             detail: planningConfig.detailRenderRadiusView,
@@ -884,7 +864,7 @@ export class TickCoordinator {
           epochs: result.epochs,
           desiredProxyKeys: desiredProxyKeysByDataset.get(dsId) ?? new Set(),
           matricesByEntity,
-          dsSettings,
+          layer,
         });
         // Same memberId → entityIndex map the worker builds from cold
         // state — both sides converge because they walk the same iteration order.
@@ -944,7 +924,7 @@ export class TickCoordinator {
       // channels, the full z-range, and the stripped settings fingerprint).
       this.lastRebuildByDataset.set(dsId, {
         visibleChannels: selection.visibleChannels,
-        displayState: buildDisplayStateByChannel(selection.visibleChannels, dsSettings),
+        displayState: buildDisplayStateByChannel(layer),
         zRangeVox: visibleRegion.zRangeVox,
         nonDisplayKey: nonDisplayKeyForDataset(dsSettings),
       });
@@ -953,7 +933,7 @@ export class TickCoordinator {
 
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
-    this.cachedResult = { memberRoster, settings, multiChannel, epochs: outputEpochs, entityIndexByDataset };
+    this.cachedResult = { memberRoster, settings, layers, epochs: outputEpochs, entityIndexByDataset };
     this.lastRebuildManifests = new Map(
       [...ctx.datasets].map(([dsId, ds]) => [dsId, ds.manifest]),
     );
@@ -965,9 +945,7 @@ export class TickCoordinator {
     // above (each carries its own z-range).
     this.lastRebuildScalars = {
       t: ctx.scene.t(),
-      c: ctx.scene.c(),
       mode: ctx.mode as "slice" | "volume",
-      multiChannel,
     };
     this.lastLayerOrderKey = JSON.stringify(settings.layerOrder);
     this.lastVisibleDatasetIds = new Set<string>();
@@ -1048,10 +1026,10 @@ export class TickCoordinator {
     ctx: TickContext;
     currentEpochs: SceneEpochs;
     settings: SceneSettings;
-    multiChannel: boolean;
+    layers: ReadonlyMap<string, ResolvedLayer>;
     tickStart: number;
   }): boolean {
-    const { ctx, currentEpochs, settings, multiChannel, tickStart } = args;
+    const { ctx, currentEpochs, settings, layers, tickStart } = args;
     if (
       this.cachedResult === null ||
       this.lastRebuildScalars === null ||
@@ -1060,19 +1038,16 @@ export class TickCoordinator {
       return false;
     }
 
-    // A T/C or mode change needs different chunks, and multi-channel mode
-    // changes the member shape. Z is proven per dataset below via the full
-    // z-range, which also catches a slab extension.
+    // A T or mode change needs different chunks. Z and the shown channels
+    // are proven per dataset below; the full z-range also catches a slab
+    // extension.
     const scalars = this.lastRebuildScalars;
     if (
       ctx.scene.t() !== scalars.t ||
-      ctx.scene.c() !== scalars.c ||
-      (ctx.mode as "slice" | "volume") !== scalars.mode ||
-      multiChannel !== scalars.multiChannel
+      (ctx.mode as "slice" | "volume") !== scalars.mode
     ) {
       return false;
     }
-    const sceneC = scalars.c;
 
     // A layer reorder changes the composite draw order, which comes from
     // the roster.
@@ -1106,9 +1081,9 @@ export class TickCoordinator {
       if (zRange[0] !== sig.zRangeVox[0] || zRange[1] !== sig.zRangeVox[1]) {
         return false;
       }
-      const visibleChannels = computeVisibleChannels(multiChannel, dsSettings, sceneC);
-      if (!numberArraysEqual(visibleChannels, sig.visibleChannels)) return false;
-      const displayState = buildDisplayStateByChannel(visibleChannels, dsSettings);
+      const layer = layers.get(dsId);
+      if (!numberArraysEqual(shownChannels(layer), sig.visibleChannels)) return false;
+      const displayState = buildDisplayStateByChannel(layer);
       const changed = !displayStatesEqual(displayState, sig.displayState);
       if (changed) anyDisplayChanged = true;
       updates.push({ dsId, displayState, changed });
@@ -1129,9 +1104,9 @@ export class TickCoordinator {
       if (sig) sig.displayState = u.displayState;
     }
 
-    // Refresh the cached settings so display readers such as the minimap see
-    // current values. The proof above pinned everything else.
-    this.cachedResult = { ...this.cachedResult, settings };
+    // Refresh the cached settings and layers so display readers such as the
+    // minimap see current values. The proof above pinned everything else.
+    this.cachedResult = { ...this.cachedResult, settings, layers };
 
     // Applied: advance the epoch anchor so the loop can idle, re-anchor
     // coalescing, and clear any owed deferral.
@@ -1160,13 +1135,13 @@ export class TickCoordinator {
     ctx: TickContext;
     currentEpochs: SceneEpochs;
     settings: SceneSettings;
-    multiChannel: boolean;
+    layers: ReadonlyMap<string, ResolvedLayer>;
     tickStart: number;
     minimapPendingFetch: Map<string, MinimapChunkCoord[]>;
     planningConfig: PlanningConfig;
     minimapChanged: boolean;
   }): boolean {
-    const { ctx, currentEpochs, settings, multiChannel, minimapPendingFetch, planningConfig } = args;
+    const { ctx, currentEpochs, settings, layers, minimapPendingFetch, planningConfig } = args;
     if (
       this.cachedResult === null ||
       this.lastRebuildScalars === null ||
@@ -1181,13 +1156,10 @@ export class TickCoordinator {
     const mode = ctx.mode as "slice" | "volume";
     if (mode !== "slice" || scalars.mode !== "slice") return false;
 
-    // C, multi-channel, layer order, and the visible-dataset set each change
-    // the member shape or roster. T is the scrub axis; Z is proven per
-    // dataset via the z-range.
-    if (ctx.scene.c() !== scalars.c) return false;
-    if (multiChannel !== scalars.multiChannel) return false;
+    // Layer order and the visible-dataset set each change the roster, and the
+    // shown channels the member shape, proven per dataset below. T is the
+    // scrub axis; Z is proven per dataset via the z-range.
     if (JSON.stringify(settings.layerOrder) !== this.lastLayerOrderKey) return false;
-    const sceneC = scalars.c;
 
     let visibleCount = 0;
     for (const [dsId, dsSettings] of Object.entries(settings.allSettings)) {
@@ -1198,7 +1170,6 @@ export class TickCoordinator {
     if (visibleCount !== this.lastVisibleDatasetIds.size) return false;
 
     const newT = ctx.scene.t();
-    const newZ = ctx.scene.z();
     let anyScrub = newT !== scalars.t;
 
     // Precheck with no side effects. Each planned dataset must still be
@@ -1210,6 +1181,7 @@ export class TickCoordinator {
     interface ScrubDataset {
       dsId: string;
       dsSettings: DatasetSettings | undefined;
+      layer: ResolvedLayer | undefined;
       visibleChannels: number[];
       planningState: PlanningState;
       entities: EntitySnapshot[];
@@ -1221,9 +1193,10 @@ export class TickCoordinator {
       const dsSettings = settings.allSettings[dsId];
       if (dsSettings && !dsSettings.visible) return false;
       if (nonDisplayKeyForDataset(dsSettings) !== sig.nonDisplayKey) return false;
-      const visibleChannels = computeVisibleChannels(multiChannel, dsSettings, sceneC);
+      const layer = layers.get(dsId);
+      const visibleChannels = shownChannels(layer);
       if (!numberArraysEqual(visibleChannels, sig.visibleChannels)) return false;
-      const displayState = buildDisplayStateByChannel(visibleChannels, dsSettings);
+      const displayState = buildDisplayStateByChannel(layer);
       if (!displayStatesEqual(displayState, sig.displayState)) return false;
       const zRange = readZRangeVox(ctx.scene, dsId);
       const oldWidth = sig.zRangeVox[1] - sig.zRangeVox[0];
@@ -1239,7 +1212,7 @@ export class TickCoordinator {
       if (!planningState || !entities || !cachedRegion) return false;
 
       perDataset.push({
-        dsId, dsSettings, visibleChannels, planningState, entities, cachedRegion,
+        dsId, dsSettings, layer, visibleChannels, planningState, entities, cachedRegion,
         newZRange: zRange,
       });
     }
@@ -1269,10 +1242,10 @@ export class TickCoordinator {
         ...pd.cachedRegion,
         zRangeVox: pd.newZRange,
       };
+      // Each layer scrubs to the scene's t and z clamped into it.
       const selection: SelectionState = {
-        t: newT,
-        c: sceneC,
-        z: newZ,
+        t: pd.layer?.t ?? newT,
+        z: pd.layer?.z_range.start ?? ctx.scene.z(),
         visibleChannels: pd.visibleChannels,
         renderMode: "slice",
         interactionState: "idle",
@@ -1398,7 +1371,7 @@ export class TickCoordinator {
     // state.
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;
-    this.cachedResult = { ...this.cachedResult, settings, epochs: outputEpochs };
+    this.cachedResult = { ...this.cachedResult, settings, layers, epochs: outputEpochs };
     this.plannedMinimap = new Map(minimapPendingFetch);
     this.lastRebuildScalars = { ...scalars, t: newT };
     this.lastRebuildAt = performance.now();
