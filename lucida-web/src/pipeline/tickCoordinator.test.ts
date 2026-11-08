@@ -31,7 +31,6 @@ afterEach(() => {
   if (typeof localStorage !== "undefined") localStorage.clear();
 });
 
-
 // ---------------------------------------------------------------------------
 // Mock factories
 // ---------------------------------------------------------------------------
@@ -210,7 +209,6 @@ function createMockContent(): DatasetManifest {
     default_layout_id: null,
   } as unknown as DatasetManifest;
 }
-
 
 /**
  * Manifest matching {@link createMockSceneWithTiles}: one group, `n` tiles,

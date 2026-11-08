@@ -535,7 +535,6 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage(msg);
   }
 
-
   volumeRenderMultiPass(
     layers: VolumeLayerParams[],
     invViewProj: Float32Array,

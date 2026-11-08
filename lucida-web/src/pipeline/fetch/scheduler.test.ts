@@ -612,7 +612,6 @@ describe("Scheduler backpressure log", () => {
   });
 });
 
-
 // dump
 
 describe("Scheduler.dump", () => {

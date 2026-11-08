@@ -63,7 +63,6 @@ export class Session {
     this.decodePool.terminate();
   }
 
-
   /**
    * Lazy-construct LayoutRegistry after WasmScene is available. Returns null
    * if scene is not yet set.

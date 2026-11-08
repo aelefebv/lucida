@@ -123,7 +123,6 @@ export class TelemetryCounters {
     this.lastError = message;
   }
 
-
   /**
    * Update the running average of decoded chunk sizes used for in-flight
    * byte estimation, and bump the count of completed fetches that fed it.

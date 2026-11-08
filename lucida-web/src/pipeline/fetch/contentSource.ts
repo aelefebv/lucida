@@ -217,7 +217,6 @@ export class ProxiedContentSource implements ContentSource {
     }
   }
 
-
   /** Treated as `abort` downstream; matches caller-driven cancellation. */
   rejectDataset(datasetId: string): void {
     const prefix = datasetId + "/";
@@ -287,7 +286,6 @@ export class ProxiedContentSource implements ContentSource {
       });
     });
   }
-
 
   /**
    * Attach to the in-flight fetch for `key`, or open one. Returns the label

@@ -169,7 +169,6 @@ describe("Suite D — removeLayerResources cleanup", () => {
     expect(state.currentSourcesByDataset.has("ds2")).toBe(true);
   });
 
-
   it("clears currentColdState when the dropped dataset is the active one", () => {
     const state = createInitialState();
     state.currentColdState = { datasetId: "ds1" } as never;

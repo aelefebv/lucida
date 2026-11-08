@@ -201,8 +201,6 @@ function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkD
   };
 }
 
-
-
 function makeCtx(args: {
   cpuCache?: CpuCache;
   scene?: unknown;
@@ -506,7 +504,6 @@ describe("Uploader worker feedback", () => {
     expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "detail", ["0/0/1/0/0/1"], "atlas-policy");
     expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "detail", ["0/0/1/0/0/2"], "stale");
   });
-
 
   it("checks a missing chunk against the residency mirror, and asks for a tick only on a disagreement", () => {
     const cpuCache = makeCpuCache();

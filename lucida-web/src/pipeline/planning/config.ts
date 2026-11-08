@@ -38,7 +38,6 @@ export const MINIMAP_SEED_BULK_LANE_OFFSET = 2600;
 /** Priority lane offset for detail requests (visible chunks). */
 export const DETAIL_LANE_OFFSET = 500;
 
-
 /**
  * Priority lane offset for prefetch requests: future timepoints, and the
  * next level in the direction of the last zoom change.

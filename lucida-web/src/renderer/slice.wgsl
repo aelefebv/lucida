@@ -112,8 +112,6 @@ fn vs(@builtin(vertex_index) vid: u32) -> VSOut {
   return out;
 }
 
-
-
 // The chunk-grid cell of one source under a member-local UV, and the
 // texel inside that chunk.
 struct Cell2D {

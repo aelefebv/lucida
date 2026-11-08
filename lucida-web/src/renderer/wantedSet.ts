@@ -45,7 +45,6 @@ export interface AtlasSnapshot {
   entityMetas?: Map<string, AtlasLevelMeta[]>;
 }
 
-
 /** A wanted chunk whose slot holds a plane the current Z no longer maps to. */
 export interface StalePlane {
   memberId: string;
@@ -180,7 +179,6 @@ export function computeWantedSet(
 
   return { missing, levels, stalePlanes };
 }
-
 
 /** The finest and coarsest serving level seen over one entity's wanted target-level chunks. */
 class LevelTally {

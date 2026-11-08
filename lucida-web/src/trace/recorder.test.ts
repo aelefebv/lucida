@@ -686,7 +686,6 @@ describe("TraceRecorder server rows", () => {
     expect(run.serverRowsDiscarded).toBe(1);
   });
 
-
   it("counts server rows that arrive after the run truncated into the unrecorded total", () => {
     const { recorder } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);

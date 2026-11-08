@@ -360,7 +360,6 @@ describe("ProxiedContentSource.fetch", () => {
   });
 });
 
-
 // handleBinary dispatch
 
 describe("ProxiedContentSource.handleBinary", () => {

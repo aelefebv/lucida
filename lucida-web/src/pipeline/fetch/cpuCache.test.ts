@@ -919,7 +919,6 @@ describe("CpuCache", () => {
       expect(cache.getCachedChunk("entity-1", "0/0/0/0/0/1")).toBeNull();
     });
 
-
     it("clears ready deliveries", async () => {
       const { cache, source } = createTestCache();
       source.autoResolveBytes = 64;

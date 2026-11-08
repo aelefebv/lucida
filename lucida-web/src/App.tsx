@@ -517,7 +517,6 @@ function Viewer({
     },
   };
 
-
   // The two sections of a bundle the trace does not record, the server's
   // dataset health and the frame on the canvas, come from the session socket
   // and the render worker, which both live here. The seam owns the rest, and

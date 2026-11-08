@@ -38,7 +38,6 @@ import type { VisibleRegion } from "./viewport.ts";
 import type { LevelGeometry } from "../manifestTypes.ts";
 import { sliceChunkZ } from "../renderer/slicePlane.ts";
 
-
 // ---------------------------------------------------------------------------
 // Active-set entry helper
 // ---------------------------------------------------------------------------

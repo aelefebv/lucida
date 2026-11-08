@@ -333,7 +333,6 @@ function isStructural(causes: readonly ColdStateCauseKey[]): boolean {
   );
 }
 
-
 export class TickCoordinator {
   private readonly uploader: Uploader;
 
@@ -722,7 +721,6 @@ export class TickCoordinator {
         ctx.client.datasetLevels(dsId)?.displayed ?? null,
       );
 
-
       plannedDatasets.push({
         dsId,
         dsSettings,
@@ -889,7 +887,6 @@ export class TickCoordinator {
         coarseLoanBytes: result.coarseLoanBytes,
       });
 
-
       // Capture this dataset's display-only fast-path signature: the
       // display state now on the worker, plus every non-display signal a
       // later intensity-display edit must prove unchanged (visible
@@ -901,7 +898,6 @@ export class TickCoordinator {
         nonDisplayKey: nonDisplayKeyForDataset(dsSettings),
       });
     }
-
 
     const outputEpochs: SceneEpochs = { ...currentEpochs, request: this.requestEpoch };
     this.lastEpochs = outputEpochs;

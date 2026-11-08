@@ -90,7 +90,6 @@ function makeChunkDelivery(
   };
 }
 
-
 function makeMockClient(): {
   client: RenderClient;
   sliceChunkData: ReturnType<typeof vi.fn>;
@@ -202,6 +201,4 @@ describe("dispatchChunk", () => {
     expect(volumeChunkData.mock.calls[0][4]).toBe(2); // c
   });
 });
-
-
 

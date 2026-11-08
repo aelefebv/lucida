@@ -154,7 +154,6 @@ export interface LabelVolumeChunkDataMessage {
   chunkZ: number;
 }
 
-
 export interface VolumeLayerParams {
   datasetId: string;
   blendMode: "alpha" | "additive" | "max";

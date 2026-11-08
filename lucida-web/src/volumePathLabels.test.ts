@@ -50,7 +50,6 @@ function makeScene(model = IDENTITY, inv = INV_MARK): LabelVolumeScene {
   };
 }
 
-
 /** Explicit all-visible settings of length `n`. Masks are opt-in (hidden by
  *  default), so a test that renders every eligible overlay must turn them on. */
 function allOn(n: number): { visible: boolean; opacity: number }[] {
@@ -98,7 +97,6 @@ describe("pushLabelVolumeLayers", () => {
     expect(scene.member_model_matrix).toHaveBeenCalledWith("ds-0", "img-0");
     expect(scene.inv_member_model_matrix).toHaveBeenCalledWith("ds-0", "img-0");
   });
-
 
   it("forwards declared image-label.colors to the layer", () => {
     const colors: LabelSpec["colors"] = [{ value: 2, rgba: [230, 25, 75, 255] }];

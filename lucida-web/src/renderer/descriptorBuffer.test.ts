@@ -228,7 +228,6 @@ function readSource(u32: Uint32Array, offsetBytes: number) {
   };
 }
 
-
 /** A four-level halving pyramid in [Z, Y, X] with one chunk shape. */
 const PYRAMID: ColdStateActiveEntry["levels"] = [
   { level: 0, chunkShape: [1, 64, 64], gridShape: [1, 8, 8], levelDims: [1, 512, 512] },
@@ -593,7 +592,6 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
     expect(f1[35]).toBe(2000);
     destroyDescriptorBuffer(result);
   });
-
 
   it("channel mask packs a single bit per descriptor entry", () => {
     const cold = makeCold(

@@ -173,7 +173,6 @@ interface InFlightChunkMeta {
   epochs: SceneEpochs;
 }
 
-
 /**
  * The residency tier a point event carries, read off the entry rather than
  * assumed from the store it came out of. Row identity includes the tier
@@ -718,7 +717,6 @@ export class CpuCache {
       this.forgetCancelledChunk(key);
     }
   }
-
 
   /**
    * Drop all state for a removed dataset. The orchestrator owns the
@@ -1881,7 +1879,6 @@ export class CpuCache {
       traceRow: entry.traceRow,
     };
   }
-
 
   private lookupCachedEntry(req: ChunkRequest): CacheEntry | undefined {
     // minimap/overview/coarse share the overview/coarse cache.

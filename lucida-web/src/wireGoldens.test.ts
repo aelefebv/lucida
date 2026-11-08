@@ -837,7 +837,6 @@ const expectedProgressDiagnostic: DatasetOpenProgressDiagnostic = {
   detail: "1 derived level over 2 source levels",
 };
 
-
 /** The interest hint exactly as `tickCoordinator.emitViewerInterestHint`
  *  assembles it, with all three lanes represented (`visible`/`background`
  *  entries land in `desired_keys`, `predicted` in `predicted_keys`). The
@@ -1219,7 +1218,6 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     deliver(ws, JSON.stringify({ ...envelope, request_id: sent.request_id }));
     await expect(pending).rejects.toThrow("the bundle carries no header");
   });
-
 
   it("generated_availability_update: delta reaches the handler intact", () => {
     const raw = fixtureRaw("session/server_generated_availability_update.json");

@@ -229,7 +229,6 @@ export class VolumeRenderer {
     // Bind group will be rebuilt on the next setTierAtlases call
   }
 
-
   /**
    * Bind the level pools a member's level sources name, in slot order
    * (index = the descriptor's `poolIndex`), plus the coarse pool. `null`

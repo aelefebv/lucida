@@ -63,7 +63,6 @@ export {
   type PlanningConfig,
 } from "./config.ts";
 
-
 export {
   createSyntheticEntity,
   createSyntheticSnapshot,

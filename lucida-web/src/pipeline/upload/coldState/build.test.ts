@@ -207,7 +207,6 @@ describe("buildColdState", () => {
     expect(msg.activeSet[0].entityId).toBe("ent-a");
   });
 
-
   it("bakes display state per visible channel with dataset-level fallbacks", () => {
     const entities = [makeTile("ent-a", "img-a", "group-0")];
     const activeSet: ActiveSetEntry[] = [

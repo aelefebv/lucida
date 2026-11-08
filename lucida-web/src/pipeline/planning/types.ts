@@ -101,7 +101,6 @@ export interface CacheStateSnapshot {
   inFlight: Map<string, Set<string>>;
 }
 
-
 /**
  * One missing minimap chunk in {@link PlanningSnapshot.minimapPending}.
  * `emitMinimapLane` turns each into a {@link ChunkRequest} at

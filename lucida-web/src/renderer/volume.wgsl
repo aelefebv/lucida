@@ -112,7 +112,6 @@ fn intersectAABB(ro: vec3f, rd: vec3f) -> vec2f {
   return vec2f(tNear, tFar);
 }
 
-
 // The chunk-grid cell of one source under a local [0,1]^3 position, and
 // the texel inside that chunk. Y is flipped for image convention.
 struct Cell3D {
