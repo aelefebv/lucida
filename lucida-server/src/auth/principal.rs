@@ -17,6 +17,7 @@ use tracing::{debug, error};
 
 use lucida_core::auth_principal::AuthPrincipal;
 
+use super::anonymous::{anonymous_sessions_enabled, is_anonymous_session_id};
 use super::bearer_token::{BearerTokenStore, hash_bearer_token};
 use super::config::AuthConfig;
 use super::cookie::read_session_cookie;
@@ -155,14 +156,34 @@ pub(crate) fn read_bearer_token(req: &Parts) -> Option<&str> {
 /// blocked on the write. Race-and-tolerate semantics: two parallel
 /// requests overwriting each other's bump is fine because the value
 /// only monotonically advances under normal use.
+///
+/// Each extractor honors one kind of session, signed-in or anonymous,
+/// and refuses the other before reading the store. Both kinds share the
+/// store, so a database that served disabled mode and later serves
+/// sign-in must not let an anonymous session through, nor the reverse.
 pub struct SessionCookieExtractor {
     config: Arc<AuthConfig>,
     store: Arc<dyn LoginSessionStore>,
+    anonymous: bool,
 }
 
 impl SessionCookieExtractor {
+    /// Honors sessions minted by a sign-in.
     pub fn new(config: Arc<AuthConfig>, store: Arc<dyn LoginSessionStore>) -> Self {
-        Self { config, store }
+        Self {
+            config,
+            store,
+            anonymous: false,
+        }
+    }
+
+    /// Honors only the anonymous sessions disabled mode mints.
+    pub fn anonymous(config: Arc<AuthConfig>, store: Arc<dyn LoginSessionStore>) -> Self {
+        Self {
+            config,
+            store,
+            anonymous: true,
+        }
     }
 
     /// Why a row failed activeness, for audit logging.
@@ -207,6 +228,15 @@ impl PrincipalExtractor for SessionCookieExtractor {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let ip = client_ip(req).unwrap_or_default();
+
+        if is_anonymous_session_id(&session_id) != self.anonymous {
+            debug!(
+                ip = %ip,
+                user_agent = %user_agent,
+                "auth.failure.wrong_session_kind",
+            );
+            return Err(AuthError::Unauthenticated);
+        }
 
         let row = match self.store.get(&session_id).await.map_err(|e| {
             error!(error = %e, "session_store.get.failed");
@@ -269,10 +299,14 @@ impl PrincipalExtractor for SessionCookieExtractor {
         // promote/demote is a config-change-and-restart, takes effect
         // on the principal's next request. Both sides lowercased so
         // casing drift between env var and JWT email never demotes.
-        let is_admin = self
-            .config
-            .admin_emails
-            .contains(&row.email.to_ascii_lowercase());
+        //
+        // An anonymous session goes to whoever loads the page, so it
+        // never carries admin rights, whatever the allowlist names.
+        let is_admin = !self.anonymous
+            && self
+                .config
+                .admin_emails
+                .contains(&row.email.to_ascii_lowercase());
         Ok(AuthPrincipal {
             email: row.email,
             display_name: row.display_name,
@@ -551,30 +585,44 @@ impl PrincipalExtractor for GoogleJwtPrincipalExtractor {
     }
 }
 
-/// Disabled-mode extractor: yields the browser's selected local-dev
-/// principal, falling back to `dev@local`. Touches no store.
+/// Disabled-mode extractor: the dev switcher's choice on a loopback bind,
+/// the browser's anonymous session on any other, and `dev@local` when
+/// neither names anyone.
 ///
 /// Disabled mode bypasses sign-in entirely, and this is what delivers
 /// that. Without it the cookie extractor would 401 every request and the
-/// SPA would loop into an unregistered `/auth/start`.
+/// SPA would loop into an unregistered `/auth/start`, so a caller nothing
+/// names, such as the command-line client, is `dev@local` rather than
+/// refused.
 ///
 /// The dev cookie is honored only where the switcher that writes it is
-/// offered, a loopback bind; elsewhere every caller is `dev@local`.
+/// offered, and an anonymous session only where one is minted
+/// ([`anonymous_sessions_enabled`]). The two never hold on the same bind.
 /// Admin rights come from `LUCIDA_ADMIN_EMAILS` alone, as in every other
 /// mode, so no cookie can grant them.
 pub struct StubPrincipalExtractor {
     config: Arc<AuthConfig>,
+    sessions: Option<SessionCookieExtractor>,
 }
 
 impl StubPrincipalExtractor {
-    pub fn new(config: Arc<AuthConfig>) -> Self {
-        Self { config }
+    pub fn new(config: Arc<AuthConfig>, store: Arc<dyn LoginSessionStore>) -> Self {
+        let sessions = anonymous_sessions_enabled(&config)
+            .then(|| SessionCookieExtractor::anonymous(Arc::clone(&config), store));
+        Self { config, sessions }
     }
 }
 
 #[async_trait]
 impl PrincipalExtractor for StubPrincipalExtractor {
     async fn extract(&self, req: &Parts) -> Result<AuthPrincipal, AuthError> {
+        if let Some(sessions) = &self.sessions {
+            match sessions.extract(req).await {
+                Ok(anonymous) => return Ok(anonymous),
+                Err(AuthError::Unauthenticated) => {}
+                Err(error) => return Err(error),
+            }
+        }
         let mut principal = dev_switcher_enabled(&self.config)
             .then(|| read_dev_principal_cookie(req))
             .flatten()
@@ -1157,7 +1205,14 @@ mod tests {
     // -- StubPrincipalExtractor ------------------------------------------
 
     fn stub_extractor() -> StubPrincipalExtractor {
-        StubPrincipalExtractor::new(Arc::new(AuthConfig::for_tests()))
+        stub_extractor_with(AuthConfig::for_tests())
+    }
+
+    fn stub_extractor_with(config: AuthConfig) -> StubPrincipalExtractor {
+        StubPrincipalExtractor::new(
+            Arc::new(config),
+            Arc::new(MemorySessionStore::new()) as Arc<dyn LoginSessionStore>,
+        )
     }
 
     fn dev_cookie_for(email: &str) -> String {
@@ -1184,8 +1239,7 @@ mod tests {
 
     #[tokio::test]
     async fn stub_extractor_returns_canned_principal_with_arbitrary_cookie() {
-        // Session-cookie garbage is ignored — disabled mode never
-        // touches the session store.
+        // A session cookie that names no anonymous session is ignored.
         let p = stub_extractor()
             .extract(&parts_with_cookie(Some("garbage-no-row-exists")))
             .await
@@ -1200,7 +1254,7 @@ mod tests {
     async fn stub_extractor_takes_admin_from_configuration_only() {
         let mut config = AuthConfig::for_tests();
         config.admin_emails = ["admin@example.com".to_string()].into_iter().collect();
-        let extractor = StubPrincipalExtractor::new(Arc::new(config));
+        let extractor = stub_extractor_with(config);
 
         let admin = extractor
             .extract(&parts_with_raw_cookie(&dev_cookie_for("Admin@Example.com")))
@@ -1223,7 +1277,7 @@ mod tests {
         let mut config = AuthConfig::for_tests();
         config.bind_addr = "0.0.0.0:9876".parse().unwrap();
         config.insecure_acknowledged = true;
-        let p = StubPrincipalExtractor::new(Arc::new(config))
+        let p = stub_extractor_with(config)
             .extract(&parts_with_raw_cookie(&dev_cookie_for("owner@example.com")))
             .await
             .unwrap();
