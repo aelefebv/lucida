@@ -8,7 +8,7 @@ import type { LabelSliceChunkDataMessage } from "../workerProtocol.ts";
 import { createInitialState } from "../worker/state.ts";
 import { handleLabelSliceChunkData } from "./upload.ts";
 import { destroyAllSliceResources, removeSliceResources } from "./index.ts";
-import { resetLabelSliceAllocWarnings } from "./atlas.ts";
+import { resetLabelSliceAllocWarnings, retireOtherLabelPlanes } from "./atlas.ts";
 import { clearGpuErrorReports } from "../worker/gpuErrors.ts";
 
 interface WriteTextureCall {
@@ -38,8 +38,8 @@ function makeCtx(writes: WriteTextureCall[], maxDim = 8192): WorkerCtx {
   return { device, state: createInitialState(), post: vi.fn() } as unknown as WorkerCtx;
 }
 
-/** A pre-sliced 2x2 Z-plane message (the delivery path extracts one plane). */
-function labelPlaneMsg(plane: Uint32Array): LabelSliceChunkDataMessage {
+/** A pre-sliced 2x2 Z-plane message (the delivery path extracts one plane), cut at `z`. */
+function labelPlaneMsg(plane: Uint32Array, z = 0): LabelSliceChunkDataMessage {
   return {
     type: "labelSliceChunkData",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
@@ -53,6 +53,7 @@ function labelPlaneMsg(plane: Uint32Array): LabelSliceChunkDataMessage {
     levelHeight: 2,
     chunkX: 2,
     chunkY: 2,
+    plane: z,
   };
 }
 
@@ -114,6 +115,31 @@ describe("handleLabelSliceChunkData", () => {
       { type: "chunkResidency", memberId: "img-0:label:region-b", tier: "detail", change: "held", keys: ["0/1/0/0/0/0"], reason: undefined },
       { type: "chunkResidency", memberId: "img-0:label:region-b", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced" },
     ]);
+  });
+
+  it("hands back a chunk whose cell holds another plane than the frame draws, once", () => {
+    const writes: WriteTextureCall[] = [];
+    const ctx = makeCtx(writes);
+    const post = ctx.post as unknown as ReturnType<typeof vi.fn>;
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4]), 5));
+    const pool = ctx.state.labelSlicePools.get("img-0:label:region-b")!;
+
+    // The plane it holds: nothing to send.
+    retireOtherLabelPlanes(ctx, "img-0:label:region-b", pool, 5);
+    expect(post).toHaveBeenCalledTimes(1);
+
+    // A Z move to plane 6 of the same chunk keeps its key.
+    retireOtherLabelPlanes(ctx, "img-0:label:region-b", pool, 6);
+    retireOtherLabelPlanes(ctx, "img-0:label:region-b", pool, 6);
+    expect(post.mock.calls.slice(1).map(([msg]) => msg)).toEqual([
+      { type: "chunkResidency", memberId: "img-0:label:region-b", tier: "detail", change: "lost", keys: ["0/0/0/0/0/0"], reason: "replaced" },
+    ]);
+    // The old plane stays drawn until the new one lands, which reports no loss.
+    expect(writes).toHaveLength(1);
+    handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([5, 6, 7, 8]), 6));
+    expect(post.mock.calls.at(-1)![0]).toMatchObject({ change: "held", keys: ["0/0/0/0/0/0"] });
+    retireOtherLabelPlanes(ctx, "img-0:label:region-b", pool, 6);
+    expect(post).toHaveBeenCalledTimes(3);
   });
 
   it("clamps the pool texture to the device's max 2D dimension", () => {

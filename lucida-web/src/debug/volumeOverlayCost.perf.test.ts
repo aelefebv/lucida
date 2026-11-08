@@ -173,12 +173,12 @@ describe("the volume overlay's cost contract", () => {
     const segments = list.items.reduce((n, item) => n + item.path.split("M").length - 1, 0);
 
     console.log(
-      `[#1063] volume overlay poll: ${list.items.length} boxes projected, listed and stroked | ` +
+      `[volume overlay cost] poll: ${list.items.length} boxes projected, listed and stroked | ` +
         `${describeTiming(polled, POLL_BUDGET_US)} | ceiling ${POLL_CEILING_US}µs | ${segments} edge segments in ` +
         `${list.batches.length} paths`,
     );
     console.log(
-      `[#1063] volume overlay hit test x10: p50=${hitTests.stepUs.toFixed(1)}µs against a hull walk at ` +
+      `[volume overlay cost] hit test x10: p50=${hitTests.stepUs.toFixed(1)}µs against a hull walk at ` +
         `${hitTests.baselineUs.toFixed(1)}µs | ratio ${hitTests.ratio.toFixed(2)}, budget ${HIT_TEST_RATIO_BUDGET} ` +
         `(${(hitTests.ratio / HIT_TEST_RATIO_BUDGET).toFixed(2)} of it) | ceiling ${HIT_TEST_CEILING_US}µs each`,
     );

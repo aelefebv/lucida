@@ -1,5 +1,5 @@
 /**
- * Two runs compared, in the dock (#1066): the seam's comparison document
+ * Two runs compared, in the dock: the seam's comparison document
  * as two timelines on one scale and three tables, with the text `lucida
  * trace diff` prints beneath them.
  *

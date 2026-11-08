@@ -5,8 +5,8 @@
  * geometry is percentages of the run's wall clock, so it is
  * resolution-independent and reads the same at device pixel ratio 1 and 2
  * without a redraw. The timeline is the one canvas, and it sizes its backing
- * store to the device pixel ratio for the same reason: #862 and #864 both
- * hid behind DPR-1-only verification.
+ * store to the device pixel ratio for the same reason. Verify both at ratio 2
+ * as well as 1: a sizing mistake hides from a ratio-1-only check.
  *
  * Colors are theme tokens only. Chart colors come from timelinePalette.ts,
  * which names the same tokens, so a series is one color in the DOM and on
@@ -203,7 +203,7 @@
 }
 
 /* Read mode offers every action at once, and at 1440 px they do not fit on
-   one line (#1093). Wrap rather than squeeze each control to its narrowest
+   one line. Wrap rather than squeeze each control to its narrowest
    word. Center so a control keeps its own height, not its tallest
    neighbor's. */
 .monitor-chrome-actions {
@@ -364,7 +364,7 @@
   font-family: var(--lc-font-mono);
 }
 
-/* The provisional reading (#1057): a statement over a moving window, marked
+/* The provisional reading: a statement over a moving window, marked
    as one wherever it appears, and never dressed as the verdict callout. */
 .monitor-chip-provisional {
   margin-left: 6px;
@@ -447,7 +447,7 @@
   font-weight: 600;
 }
 
-/* --- the run in progress (#937) -------------------------------------------- *
+/* --- the run in progress --------------------------------------------------- *
  * Counters big enough to read from across a desk while an open is happening,
  * and one bar for where the rows in flight are sitting. Percentages, like the
  * tracks above, so it reads the same at device pixel ratio 1 and 2.
@@ -662,7 +662,7 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* --- a dropped file, and two runs compared (#1066) ------------------------- *
+/* --- a dropped file, and two runs compared --------------------------------- *
  * The whole dock is the drop target, and says so while a file is over it.
  * A bundle's frame takes a column of its own beside the report, and is
  * sticky so it stays alongside as the report scrolls.

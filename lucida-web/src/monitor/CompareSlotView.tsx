@@ -1,5 +1,5 @@
 /**
- * One side of a comparison in the dock (#1066): what it holds, a drop
+ * One side of a comparison in the dock: what it holds, a drop
  * target of its own, a file picker, the run on screen when there is one,
  * and, for a document holding several runs, which of them stands on this
  * side.

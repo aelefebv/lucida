@@ -1,7 +1,7 @@
 //! Replaying a bundle in the trace driver.
 //!
 //! A field report becomes a reproducible run. A bundle's header carries what
-//! the driver needs to replay the view (#1055): the dataset, the view URL,
+//! the driver needs to replay the view: the dataset, the view URL,
 //! the viewport and device pixel ratio, the planning configuration, and the
 //! pins. [`ReplayPlan`] reads them and says, input by input, which the
 //! driver restores and which it cannot — the build is whatever the server
@@ -22,7 +22,7 @@
 //! read at the run's close. The replay starts instead from the view the
 //! first step recorded before it ran.
 //!
-//! The diff of the original and the replay is the page's (#1059). The
+//! The diff of the original and the replay is the page's. The
 //! header fields that break comparability, the adapter among them, are the
 //! page's to warn about, so a bundle replayed on a different adapter reads
 //! as not comparable without this module judging anything.

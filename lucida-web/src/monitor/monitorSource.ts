@@ -116,7 +116,7 @@ function readRunOf(document: TraceDocument, runId?: string): MonitorRead {
 }
 
 // ---------------------------------------------------------------------------
-// A dropped file, and two runs compared (#1066)
+// A dropped file, and two runs compared
 // ---------------------------------------------------------------------------
 
 /**
@@ -275,7 +275,7 @@ export function readWindow(
 }
 
 /**
- * The run in progress, or null when none is open (#937).
+ * The run in progress, or null when none is open.
  *
  * One of the two reads on this page that leave the recording alone. It is
  * polled while a run is open, where every other read here would conclude the
@@ -289,7 +289,7 @@ export function readProgress(seam = window.lucidaTrace): LiveProgress | null {
 
 /**
  * The provisional reading over the run in progress, or null when none is
- * open (#1057). The other read that leaves the recording alone: the same
+ * open. The other read that leaves the recording alone: the same
  * object the watch stream carries and an agent reads over the seam, so the
  * live view and the text an agent sees cannot disagree.
  */
@@ -396,7 +396,7 @@ export function downloadTraceFile(
 }
 
 /**
- * The bundle for the run on screen (#1055): the document, the settled frame,
+ * The bundle for the run on screen: the document, the settled frame,
  * the view URL, the planning configuration, the pins, the server's health
  * counters, and the replay header, in one file.
  *
@@ -417,7 +417,7 @@ export async function downloadBundle(runId?: string, seam = window.lucidaTrace):
 }
 
 /**
- * **Send report** (#1067): the bundle for the run on screen, posted to
+ * **Send report**: the bundle for the run on screen, posted to
  * the workspace inbox, and the entry it landed in.
  *
  * The same bundle **Save bundle** writes, through the same seam function
