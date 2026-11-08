@@ -903,12 +903,8 @@ export class TraceRecorder {
    * the previous frame has been drawn.
    */
   noteFrameDispatched(): void {
+    this.noteFramesDrawn();
     const drawn = this.awaitingDrawn;
-    for (let i = 0; i < drawn.length; i++) {
-      this.stamp(drawn[i], Boundary.PresentEnd);
-      this.finishRow(drawn[i], RowOutcome.Complete);
-    }
-    drawn.length = 0;
 
     const resident = this.awaitingResident;
     for (let i = 0; i < resident.length; i++) {
@@ -918,6 +914,21 @@ export class TraceRecorder {
     // frame's pending list.
     this.awaitingResident = drawn;
     this.awaitingDrawn = resident;
+  }
+
+  /**
+   * Every frame dispatched so far has been drawn, so the chunks they were
+   * the first to draw are on screen. Without this, a view's last frame would
+   * close no row until something drew again, and a settled view draws
+   * nothing more.
+   */
+  noteFramesDrawn(): void {
+    const drawn = this.awaitingDrawn;
+    for (let i = 0; i < drawn.length; i++) {
+      this.stamp(drawn[i], Boundary.PresentEnd);
+      this.finishRow(drawn[i], RowOutcome.Complete);
+    }
+    drawn.length = 0;
   }
 
   /**

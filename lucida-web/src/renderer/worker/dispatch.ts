@@ -79,9 +79,12 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleLabelSliceChunkData(ctx, msg);
       return;
     case "sliceRenderMultiPass":
-      await handleSliceRenderMultiPass(ctx, msg);
-      ctx.state.lastFrame = msg;
-      postFrameDone(ctx, msg.frameSeq);
+      try {
+        await handleSliceRenderMultiPass(ctx, msg);
+        ctx.state.lastFrame = msg;
+      } finally {
+        postFrameDone(ctx, msg.frameSeq);
+      }
       postGpuMemoryIfChanged(ctx);
       return;
 
@@ -103,9 +106,12 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       handleLabelVolumeChunkData(ctx, msg);
       return;
     case "volumeRenderMultiPass":
-      await handleVolumeRenderMultiPass(ctx, msg);
-      ctx.state.lastFrame = msg;
-      postFrameDone(ctx, msg.frameSeq);
+      try {
+        await handleVolumeRenderMultiPass(ctx, msg);
+        ctx.state.lastFrame = msg;
+      } finally {
+        postFrameDone(ctx, msg.frameSeq);
+      }
       postGpuMemoryIfChanged(ctx);
       return;
 
@@ -203,11 +209,13 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
 /**
  * Report a viewport frame done once the GPU has run everything submitted so
  * far, which includes the frame. Not awaited: the next message needn't wait.
+ *
+ * A frame that failed to draw, or whose device was lost, is reported too: the
+ * page holds its next frames until the ones before are done, so a frame that
+ * is never answered would stop it drawing.
  */
 function postFrameDone(ctx: WorkerCtx, frameSeq: number | undefined): void {
   if (frameSeq === undefined) return;
-  ctx.device.queue.onSubmittedWorkDone().then(
-    () => ctx.post({ type: "frameDone", frameSeq }),
-    () => {},
-  );
+  const done = () => ctx.post({ type: "frameDone", frameSeq });
+  ctx.device.queue.onSubmittedWorkDone().then(done, done);
 }

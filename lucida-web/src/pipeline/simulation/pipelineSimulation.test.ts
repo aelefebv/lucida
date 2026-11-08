@@ -20,6 +20,7 @@ import {
 } from "./harness.ts";
 import { collection, singleImage, type PyramidSpec } from "./fixtures.ts";
 import { rampSamples, type SourceChunk } from "./source.ts";
+import { MAX_INTERACTIVE_FRAMES_IN_FLIGHT } from "../../framePacing.ts";
 import type { ChannelFit } from "../autoContrast.ts";
 
 beforeAll(initSimulationWasm);
@@ -377,6 +378,31 @@ describe("a two-timepoint volume whose detail budget holds the view but not its 
         expect(phase.quiescence, phase.label).toBe("coverage_limited");
         expect(phase.detail.resident, phase.label).toBe(100);
       }
+    });
+  }
+});
+
+describe("a three-channel volume on a GPU slower than the frame clock", () => {
+  // 64³ chunks are 512 KiB, so one tick's upload budget delivers 16 of the
+  // view's 396, and each frame holds the stand-in GPU, and with it the frame
+  // clock, for 25 ticks. A frame every tick that delivers would be 25 frames.
+  const scenario = describeScenario({
+    name: "three-channel volume on a slow GPU",
+    mode: "volume",
+    dataset: singleImage({
+      id: "slow",
+      pyramid: { shape: [1, 3, 128, 512, 512], chunk: [64, 64, 64], levels: 3, downsampleZ: true },
+    }),
+    gpuFrameMs: 400,
+    steps: [{ orbit: [0.4, 0.2] }],
+    tickBound: 2_000,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles in a few frames, none queued behind more than one other, at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      expect(run.mostFramesDrawing).toBeLessThanOrEqual(MAX_INTERACTIVE_FRAMES_IN_FLIGHT);
+      expect(run.phases[0].framesDrawn, run.report).toBeLessThanOrEqual(4);
     });
   }
 });

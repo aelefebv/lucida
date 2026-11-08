@@ -93,6 +93,11 @@ export interface ScenarioSpec {
    * it as chunks arrive, so a small total bounds them.
    */
   gpuTotalBytes?: number;
+  /**
+   * How long the stand-in GPU takes over each viewport frame. Zero, the
+   * default, answers each frame as the worker handles it.
+   */
+  gpuFrameMs?: number;
   cache?: Partial<Pick<CpuCacheConfig, "mainBudgetBytes" | "overviewBudgetBytes">>;
   /** What happens after the open, each followed by its own settle. */
   steps?: ScenarioStep[];
@@ -111,6 +116,7 @@ export interface Scenario {
   readonly viewport: readonly [number, number];
   readonly source: SourceSpec;
   readonly gpuTotalBytes: number;
+  readonly gpuFrameMs: number;
   readonly cache: Partial<CpuCacheConfig>;
   readonly steps: readonly ScenarioStep[];
   readonly tickBound: number;
@@ -126,6 +132,7 @@ export function describeScenario(spec: ScenarioSpec): Scenario {
     viewport: spec.viewport ?? DEFAULT_VIEWPORT,
     source: spec.source ?? {},
     gpuTotalBytes: spec.gpuTotalBytes ?? CEILING_BUDGETS.gpuTotalBytes,
+    gpuFrameMs: spec.gpuFrameMs ?? 0,
     cache: { ...spec.cache },
     steps: spec.steps ?? [],
     tickBound: spec.tickBound ?? DEFAULT_TICK_BOUND,
@@ -155,6 +162,8 @@ export interface PhaseOutcome {
   why: string;
   /** Frames the render loop ran in this phase. */
   frames: number;
+  /** Viewport frames the page sent the worker to draw in this phase. */
+  framesDrawn: number;
   /** Chunks the page sent the worker in this phase, a chunk resident in both tiers once per tier. */
   chunksSent: number;
   /** Distinct chunks among them; equal to `chunksSent` when none went twice. */
@@ -206,6 +215,8 @@ export interface SimulationRun {
   settled: boolean;
   /** `${imageId}/${chunkKey}` of each chunk the source served, in order. */
   served: string[];
+  /** The most viewport frames the stand-in GPU ever had at once. */
+  mostFramesDrawing: number;
   /** Why the run did or did not settle, for a failure message. */
   report: string;
 }
@@ -235,6 +246,7 @@ export async function runScenario(scenario: Scenario, opts: { dpr: number }): Pr
       phases,
       settled,
       served: sim.served(),
+      mostFramesDrawing: sim.mostFramesDrawing(),
       report: formatReport(scenario.name, opts.dpr, phases),
     };
   } finally {
@@ -288,7 +300,7 @@ class Simulation {
   constructor(scenario: Scenario, dpr: number) {
     this.scenario = scenario;
     this.dpr = dpr;
-    this.worker = new SimulatedWorker(scenario.gpuTotalBytes);
+    this.worker = new SimulatedWorker(scenario.gpuTotalBytes, scenario.gpuFrameMs);
     this.worker.onPost = (msg) => {
       if (msg.type !== "chunkResidency" || msg.change === "held") return;
       const reason = `${msg.change} ${msg.reason ?? ""}`.trim();
@@ -481,10 +493,18 @@ class Simulation {
    * Advance one frame: fire the timers that fall due, run the frame the loop
    * asked for, then let the worker answer everything it was sent. Returns
    * whether the loop ran a frame.
+   *
+   * While the stand-in GPU is drawing, the frame the loop asked for waits, as
+   * a browser's frame callbacks wait on a compositor that waits on the GPU.
    */
   private async step(): Promise<boolean> {
     await vi.advanceTimersByTimeAsync(FRAME_MS);
     await flushMicrotasks();
+    if (this.worker.gpuBusy) {
+      await this.worker.drain();
+      await flushMicrotasks();
+      return false;
+    }
     const due = [...this.frames.values()];
     this.frames.clear();
     for (const frame of due) frame(performance.now());
@@ -497,6 +517,10 @@ class Simulation {
 
   served(): string[] {
     return [...this.source.served];
+  }
+
+  mostFramesDrawing(): number {
+    return this.worker.mostFramesDrawing;
   }
 
   /** Nothing queued, in flight or pending anywhere, and no frame requested. */
@@ -521,6 +545,7 @@ class Simulation {
    */
   async settle(label: string): Promise<PhaseOutcome> {
     const framesBefore = this.framesRun;
+    const drawnBefore = this.worker.framesDispatched;
     const fitsBefore = this.fits.length;
     const sentBefore = new Map([...this.worker.deliveries].map(([key, d]) => [key, { ...d }]));
     const heldBefore = this.held.length;
@@ -533,11 +558,11 @@ class Simulation {
       if (ranFrame || !this.atFixedPoint() || this.source.requestCount !== requestsAtFixed) {
         fixedSince = null;
         requestsAtFixed = this.source.requestCount;
-        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, fitsBefore, sentBefore, heldBefore);
+        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, drawnBefore, fitsBefore, sentBefore, heldBefore);
         continue;
       }
       fixedSince ??= i;
-      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, fitsBefore, sentBefore, heldBefore);
+      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, drawnBefore, fitsBefore, sentBefore, heldBefore);
     }
   }
 
@@ -546,6 +571,7 @@ class Simulation {
     ticks: number,
     fixed: boolean,
     framesBefore: number,
+    drawnBefore: number,
     fitsBefore: number,
     sentBefore: Map<string, ChunkDeliveries>,
     heldBefore: number,
@@ -590,6 +616,7 @@ class Simulation {
       ticks,
       why,
       frames: this.framesRun - framesBefore,
+      framesDrawn: this.worker.framesDispatched - drawnBefore,
       chunksSent,
       distinctChunksSent,
       bytesSent,
@@ -686,7 +713,7 @@ function formatReport(name: string, dpr: number, phases: PhaseOutcome[]): string
   for (const p of phases) {
     lines.push(
       `phase "${p.label}": ${p.why}.`,
-      `  ${p.frames} frames, ${p.chunksSent} chunks (${p.bytesSent} bytes) sent to the worker; ` +
+      `  ${p.frames} frames (${p.framesDrawn} drawn), ${p.chunksSent} chunks (${p.bytesSent} bytes) sent to the worker; ` +
         `CPU cache holds detail ${p.detail.resident}/${p.detail.desired}, ` +
         `coarse ${p.coarse.resident}/${p.coarse.desired}; ${p.queued} queued, ${p.inFlight} in flight; ` +
         `the page reports ${Math.round(p.coverage * 100)}% coverage.`,

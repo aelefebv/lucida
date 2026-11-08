@@ -350,6 +350,9 @@ export class RenderClient implements UploadClient {
       console.warn(`GPU ${msg.kind}${msg.count > 1 ? ` (x${msg.count})` : ""}: ${msg.message}`);
       this.noteGpuStatus(msg);
     } else if (msg.type === "gpuDeviceRestored") {
+      // Frames sent to the lost device may never be answered, and the page
+      // holds its next frame while one is outstanding.
+      this.frameDispatchedAt.clear();
       this.noteGpuStatus(msg);
     } else if (msg.type === "gpuFailed") {
       console.error(msg.message);
