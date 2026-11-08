@@ -1,6 +1,6 @@
 # Synthetic OME-Zarr fixtures
 
-Small OME-Zarr 0.5 datasets for offline tests, written by
+Small OME-Zarr datasets for offline tests, written by
 `extras/synthetic_ome_zarr.py`. None is larger than 20 KB. Generate anything
 larger on demand with the same script rather than committing it:
 
@@ -35,10 +35,17 @@ fixtures differ from what it writes.
 | `level-index.ome.zarr` | 3D, 32×64×64, four levels halving every axis, 16×16×16 chunks, one object per chunk; every sample at level L is L | Which level rendered, read straight off a screenshot or a decoded chunk. |
 | `collection-unsharded.ome.zarr` | Three 24×24 tiles on a 2×2 grid with one slot empty, two levels, the second shrinking y by 3 and x by 2 | The collection layout and an irregular per-axis factor through lucida's import. |
 | `collection-mixed.ome.zarr` | Three tiles on a 2×2 grid, two channels, two levels; the tiles are 14×12, 16×16, and 12×10; level 0 is chunked 8×8 and level 1 is one chunk the size of each tile's level (7×6, 8×8, or 6×5) | Tiles whose level shapes and chunk shapes differ, served at one declared geometry. |
+| `v2-twin.ome.zarr` | `twin-unsharded` as OME-NGFF 0.4 on Zarr v2, compressed with Blosc (lz4, byte shuffle) | The Zarr v2 reader and numcodecs' default compressor. |
+| `v3-codec-chain.ome.zarr` | `twin-unsharded` with the chain `transpose`, `bytes` (big-endian), `gzip`, `crc32c` | A Zarr v3 chain beyond `bytes` and one compressor. |
+| `v2-collection.ome.zarr` | `collection-unsharded` as OME-NGFF 0.4 on Zarr v2, in Fortran order, big-endian, with `.` between chunk coordinates | A Zarr v2 collection, and the v2 options that change how a chunk is laid out. |
+| `v3-level-paths.ome.zarr` | `twin-sharded` with its level arrays named `s0`, `s1`, `s2` | Levels found by their multiscale path, not their index, through shards. |
+| `v2-consolidated.ome.zarr` | `collection-unsharded` as OME-NGFF 0.4 on Zarr v2, with levels named `s0` and `s1` and every metadata document consolidated into `.zmetadata` | Named levels in a collection, and an open that reads only the root's metadata. |
 
-Sample values are `uint16` in every fixture, and the codec chain is `bytes`
+Sample values are `uint16` in every fixture. Unless the table says otherwise,
+the dataset is OME-Zarr 0.5 on Zarr v3 and its codec chain is `bytes`
 (little-endian) followed by `zstd`. A sharded fixture wraps that same chain in
-`sharding_indexed` with the index at the end of each shard.
+`sharding_indexed` with the index at the end of each shard. Each fixture in the
+last five rows holds the same samples as its twin.
 
 ## End-to-end checks
 
