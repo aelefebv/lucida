@@ -373,6 +373,7 @@ const REASONS: Record<string, string> = {
   pending_unclassified: "queue too deep to classify",
   chunks_in_flight: "chunks in flight",
   chunks_pending: "chunks pending",
+  uploads_unanswered: "renderer still placing chunks",
   detail_not_resident: "detail not yet resident",
   coarse_not_resident: "coarse not yet resident",
 };

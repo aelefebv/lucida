@@ -247,14 +247,24 @@ export class RenderClient implements UploadClient {
     return this.viewportFrameSeq;
   }
 
+  /** Viewport frames dispatched whose GPU work has not yet finished. */
+  framesAwaitingDone(): number {
+    return this.frameDispatchedAt.size;
+  }
+
+  /** Called after each finished viewport frame is noted. */
+  onFrameDone: (() => void) | null = null;
+
   private noteFrameDone(frameSeq: number): void {
     const dispatchedAt = this.frameDispatchedAt.get(frameSeq);
     for (const seq of this.frameDispatchedAt.keys()) {
       if (seq > frameSeq) break;
       this.frameDispatchedAt.delete(seq);
     }
-    if (dispatchedAt === undefined) return;
-    this.frameLatency = { frameSeq, ms: performance.now() - dispatchedAt };
+    if (dispatchedAt !== undefined) {
+      this.frameLatency = { frameSeq, ms: performance.now() - dispatchedAt };
+    }
+    this.onFrameDone?.();
   }
 
   private onMessage = (e: MessageEvent<WorkerToMainMessage>) => {
