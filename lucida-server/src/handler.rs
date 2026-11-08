@@ -875,7 +875,13 @@ async fn handle_client_inner(
                             // Clients should not send ChunkFetch — ignore.
                         }
                         ChunkMessage::ChunkCancel { rids } => {
-                            chunk_serves.cancel(&rids);
+                            let dropped = chunk_serves.cancel(&rids);
+                            tracing::debug!(
+                                client_id = %id,
+                                cancelled = rids.len(),
+                                dropped,
+                                "ws.chunk_cancel"
+                            );
                         }
                     }
                     continue;
