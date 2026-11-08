@@ -5,10 +5,13 @@
 // up the whole AuthGate provider tree (and the whoami fetch on mount
 // that comes with it).
 
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { act, render, screen, cleanup, fireEvent } from "@testing-library/react";
-import { ProfileMenu } from "./ProfileMenu.tsx";
+import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
+import { act, render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { ProfileMenu, ProfilePanel } from "./ProfileMenu.tsx";
 import type { AuthPrincipal } from "./types.ts";
+import { restoreLastViewPreference } from "../lastViewPreference.ts";
+import { __resetPreferencesForTesting, getPreference } from "../theme/preferences.ts";
 
 const PRINCIPAL: AuthPrincipal = {
   email: "dev@local",
@@ -42,6 +45,11 @@ vi.mock("./whoami.ts", () => ({
   postDevLogin: (body: unknown) => postDevLogin(body),
 }));
 
+beforeEach(() => {
+  localStorage.clear();
+  __resetPreferencesForTesting();
+});
+
 afterEach(() => {
   cleanup();
   session = { principal: PRINCIPAL, refresh: async () => {}, signOut: async () => {} };
@@ -54,11 +62,12 @@ afterEach(() => {
   postDevLogin.mockResolvedValue(PRINCIPAL);
 });
 
+const trigger = () => screen.getByRole("button", { name: /account menu/i });
+
 describe("ProfileMenu", () => {
   it("names the person on the trigger button", () => {
     render(<ProfileMenu />);
-    const trigger = screen.getByRole("button", { name: /account menu/i });
-    expect(trigger.getAttribute("title")).toBe("Local Dev");
+    expect(trigger().getAttribute("title")).toBe("Local Dev");
   });
 
   it("falls back to initials when picture_url is null", () => {
@@ -66,37 +75,67 @@ describe("ProfileMenu", () => {
     expect(screen.getByText("LD")).toBeTruthy();
   });
 
-  it("closes on Escape and returns focus to the trigger", () => {
+  it("opens, moves, and closes from the keyboard, returning focus to the trigger", async () => {
+    const user = userEvent.setup();
     render(<ProfileMenu />);
-    const trigger = screen.getByRole("button", { name: /account menu/i });
-    fireEvent.click(trigger);
-    expect(screen.getByRole("menu")).toBeTruthy();
-    fireEvent.keyDown(document, { key: "Escape" });
-    expect(screen.queryByRole("menu")).toBeNull();
-    expect(document.activeElement).toBe(trigger);
+    trigger().focus();
+
+    await user.keyboard("{ArrowDown}");
+    const menu = await screen.findByRole("menu");
+    const restore = screen.getByRole("menuitemcheckbox", { name: /restore my last view/i });
+    const signOut = screen.getByRole("menuitem", { name: "Sign out" });
+    // A browser focuses the first item as the menu opens; happy-dom never
+    // moves focus into it, so start there by hand.
+    act(() => restore.focus());
+
+    await user.keyboard("{ArrowDown}");
+    expect(document.activeElement).toBe(signOut);
+    await user.keyboard("{ArrowUp}");
+    expect(document.activeElement).toBe(restore);
+
+    await user.keyboard("{Escape}");
+    await waitFor(() => expect(menu.isConnected).toBe(false));
+    expect(document.activeElement).toBe(trigger());
   });
 
-  it("opens the dropdown and shows email + Sign out when the trigger is clicked", () => {
+  it("opens the menu and shows who is signed in and Sign out when the trigger is clicked", async () => {
+    const user = userEvent.setup();
     render(<ProfileMenu />);
-    fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
+    await user.click(trigger());
     expect(screen.getByText("dev@local")).toBeTruthy();
+    // The identity names the section that holds the setting.
+    expect(screen.getByRole("group", { name: /local dev/i })).toBeTruthy();
     expect(screen.getByRole("menuitem", { name: /sign out/i })).toBeTruthy();
   });
 
-  it("calls signOut when Sign out is clicked", async () => {
+  it("toggles Restore my last view in place, leaving the menu open", async () => {
+    const user = userEvent.setup();
+    render(<ProfileMenu />);
+    await user.click(trigger());
+    const restore = screen.getByRole("menuitemcheckbox", { name: /restore my last view/i });
+    expect(restore.getAttribute("aria-checked")).toBe("true");
+
+    await user.click(restore);
+
+    expect(getPreference(restoreLastViewPreference)).toBe(false);
+    expect(screen.getByRole("menu")).toBeTruthy();
+    expect(restore.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("calls signOut when Sign out is chosen", async () => {
+    const user = userEvent.setup();
     const signOut = vi.fn(async () => {});
     session = { principal: PRINCIPAL, refresh: async () => {}, signOut };
     render(<ProfileMenu />);
 
-    fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
-    await act(async () => {
-      fireEvent.click(screen.getByRole("menuitem", { name: /sign out/i }));
-    });
+    await user.click(trigger());
+    await user.click(screen.getByRole("menuitem", { name: /sign out/i }));
 
     expect(signOut).toHaveBeenCalledTimes(1);
   });
 
   it("disables Sign out while the call is in flight", async () => {
+    const user = userEvent.setup();
     let resolveSignOut!: () => void;
     const signOut = vi.fn(
       () =>
@@ -107,24 +146,25 @@ describe("ProfileMenu", () => {
     session = { principal: PRINCIPAL, refresh: async () => {}, signOut };
     render(<ProfileMenu />);
 
-    fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
-    await act(async () => {
-      fireEvent.click(screen.getByRole("menuitem", { name: /sign out/i }));
-    });
+    await user.click(trigger());
+    await user.click(screen.getByRole("menuitem", { name: /sign out/i }));
+    await waitFor(() => expect(screen.queryByRole("menu")).toBeNull());
 
-    const pending = screen.getByRole("menuitem", { name: /signing out/i }) as HTMLButtonElement;
-    expect(pending.disabled).toBe(true);
+    await user.click(trigger());
+    const pending = screen.getByRole("menuitem", { name: /signing out/i });
+    expect(pending.getAttribute("aria-disabled")).toBe("true");
 
     await act(async () => {
       resolveSignOut();
     });
   });
 
-  it("leaves Sign out out of the menu when the mode declares no sign-out URL", () => {
+  it("leaves Sign out out of the menu when the mode declares no sign-out URL", async () => {
     // Absent, not present-and-inert.
+    const user = userEvent.setup();
     session = { principal: PRINCIPAL, refresh: async () => {}, signOut: null };
     render(<ProfileMenu />);
-    fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
+    await user.click(trigger());
 
     expect(screen.getByText("dev@local")).toBeTruthy();
     expect(screen.queryByRole("menuitem", { name: /sign out/i })).toBeNull();
@@ -176,7 +216,8 @@ describe("ProfileMenu", () => {
     );
   });
 
-  it("switches the local dev user when dev auth is enabled", async () => {
+  it("switches the local dev user from a dialog when dev auth is enabled", async () => {
+    const user = userEvent.setup();
     fetchDevAuthStatus.mockResolvedValueOnce({
       enabled: true,
       default_principal: PRINCIPAL,
@@ -187,24 +228,44 @@ describe("ProfileMenu", () => {
     await act(async () => {
       render(<ProfileMenu />);
     });
-    fireEvent.click(screen.getByRole("button", { name: /account menu/i }));
+    await user.click(trigger());
+    await user.click(screen.getByRole("menuitem", { name: /switch dev user/i }));
+    const dialog = await screen.findByRole("dialog", { name: /switch dev user/i });
     // Admin comes from the server's configuration, so the switch offers none.
-    expect(screen.queryByText(/admin/i)).toBeNull();
-    fireEvent.change(screen.getByLabelText(/dev user email/i), {
-      target: { value: "viewer@example.com" },
-    });
-    fireEvent.change(screen.getByLabelText(/dev display name/i), {
-      target: { value: "Viewer" },
-    });
+    expect(dialog.textContent).not.toMatch(/admin/i);
 
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: /switch dev user/i }));
-    });
+    const email = screen.getByRole("textbox", { name: "Email" });
+    await user.clear(email);
+    await user.type(email, "viewer@example.com");
+    const name = screen.getByRole("textbox", { name: "Display name" });
+    await user.clear(name);
+    await user.type(name, "Viewer");
+
+    await user.click(screen.getByRole("button", { name: /switch dev user/i }));
 
     expect(postDevLogin).toHaveBeenCalledWith({
       email: "viewer@example.com",
       display_name: "Viewer",
     });
     expect(refresh).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+});
+
+describe("ProfilePanel", () => {
+  it("holds the same setting and Sign out, laid out for a dialog", async () => {
+    const user = userEvent.setup();
+    const signOut = vi.fn(async () => {});
+    const onDone = vi.fn();
+    session = { principal: PRINCIPAL, refresh: async () => {}, signOut };
+    render(<ProfilePanel devAuthEnabled={false} onDone={onDone} />);
+
+    expect(screen.getByText("dev@local")).toBeTruthy();
+    await user.click(screen.getByRole("switch", { name: /restore my last view/i }));
+    expect(getPreference(restoreLastViewPreference)).toBe(false);
+
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    expect(signOut).toHaveBeenCalledTimes(1);
+    expect(onDone).toHaveBeenCalledTimes(1);
   });
 });

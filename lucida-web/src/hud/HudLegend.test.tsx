@@ -26,8 +26,8 @@ afterEach(() => {
 describe("the phase and churn toggles", () => {
   it("are overlay toggles like the others, persisted in the same preference", () => {
     render(<HudLegend windowSource={{ openIntervalMs: null }} />);
-    const phase = screen.getByLabelText("phaseColor") as HTMLInputElement;
-    const churn = screen.getByLabelText("churnTint") as HTMLInputElement;
+    const phase = screen.getByRole("checkbox", { name: "phase" }) as HTMLInputElement;
+    const churn = screen.getByRole("checkbox", { name: /^churn/ }) as HTMLInputElement;
     expect(phase.checked).toBe(false);
     expect(churn.checked).toBe(false);
 

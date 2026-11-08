@@ -28,6 +28,8 @@ export interface SelectProps<V extends string> {
   description?: string;
   isDisabled?: boolean;
   className?: string;
+  /** Set on the trigger, for tests and scripted drivers that find it by id. */
+  "data-testid"?: string;
 }
 
 /** Pick one of a list. For two to four short options, use SegmentedControl. */
@@ -40,6 +42,7 @@ export function Select<V extends string>({
   description,
   isDisabled,
   className,
+  "data-testid": testId,
 }: SelectProps<V>) {
   return (
     <AriaSelect
@@ -51,7 +54,7 @@ export function Select<V extends string>({
       isDisabled={isDisabled}
     >
       <FieldText label={label} labelPosition={labelPosition} description={description} />
-      <AriaButton className="lc-input-group lc-field-control lc-select-trigger">
+      <AriaButton className="lc-input-group lc-field-control lc-select-trigger" data-testid={testId}>
         <SelectValue<SelectOption<V>> className="lc-select-value">
           {({ selectedItem }) => {
             const ItemIcon = selectedItem?.icon;

@@ -19,6 +19,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { Label, Radio, RadioGroup } from "react-aria-components";
 import { relativeTimeFromIso } from "../relativeTime.ts";
 import { Badge } from "../ui/Badge.tsx";
 import { Button, IconButton } from "../ui/Button.tsx";
@@ -27,6 +28,7 @@ import { Menu, MenuItem } from "../ui/Menu.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
 import { Switch } from "../ui/Switch.tsx";
 import { SearchField, TextField } from "../ui/TextField.tsx";
+import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import {
   defaultWorkspaceSavedViewName,
   useWorkspaceSavedViews,
@@ -687,7 +689,7 @@ function SavedViewRow({
         {isRenaming ? (
           <RenameField initial={view.name} onCommit={onRenameCommit} onCancel={onRenameCancel} />
         ) : (
-          <button type="button" className="lc-rail-row-open" onClick={onOpen} title={view.name}>
+          <UnstyledButton className="lc-rail-row-open" onPress={onOpen} title={view.name}>
             <span className="lc-rail-row-text">
               <span className="lc-rail-row-title">
                 <span className="lc-rail-row-name">{view.name}</span>
@@ -706,7 +708,7 @@ function SavedViewRow({
               </span>
               <span className="lc-rail-row-meta">{meta}</span>
             </span>
-          </button>
+          </UnstyledButton>
         )}
         <div className="lc-rail-row-trailing">{menu}</div>
       </div>
@@ -944,31 +946,28 @@ function SaveSavedViewDialog({
             }
           }}
         />
-        <fieldset className="lc-saved-view-visibility">
-          <legend className="lc-saved-view-visibility-legend">Who can see this</legend>
+        <RadioGroup
+          className="lc-saved-view-visibility"
+          value={visibility}
+          onChange={(next) => setVisibility(next as WorkspaceSavedViewVisibility)}
+        >
+          <Label className="lc-saved-view-visibility-legend">Who can see this</Label>
           {options.map((option) => (
-            <label
+            <Radio
               key={option.value}
+              value={option.value}
+              isDisabled={option.disabled}
               className="lc-saved-view-visibility-option"
-              data-selected={visibility === option.value || undefined}
-              data-disabled={option.disabled || undefined}
+              data-testid={`visibility-${option.value}`}
             >
-              <input
-                type="radio"
-                name="saved-view-visibility"
-                data-testid={`visibility-${option.value}`}
-                value={option.value}
-                checked={visibility === option.value}
-                disabled={option.disabled}
-                onChange={() => setVisibility(option.value)}
-              />
+              <span className="lc-saved-view-visibility-dot" aria-hidden />
               <span className="lc-saved-view-visibility-text">
                 <span className="lc-saved-view-visibility-title">{option.title}</span>
                 <span className="lc-saved-view-visibility-hint">{option.hint}</span>
               </span>
-            </label>
+            </Radio>
           ))}
-        </fieldset>
+        </RadioGroup>
       </div>
     </Dialog>
   );

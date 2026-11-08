@@ -217,8 +217,8 @@ describe("WorkspaceSavedViewsSidebar — save modal (editor)", () => {
 
     await userEvent.click(screen.getByRole("button", { name: /save view/i }));
 
-    const shared = screen.getByTestId("visibility-shared") as HTMLInputElement;
-    const personal = screen.getByTestId("visibility-personal") as HTMLInputElement;
+    const shared = screen.getByRole("radio", { name: /shared with the team/i }) as HTMLInputElement;
+    const personal = screen.getByRole("radio", { name: /^personal/i }) as HTMLInputElement;
     expect(shared.disabled).toBe(false);
     expect(personal.checked).toBe(true);
     expect(shared.checked).toBe(false);
@@ -251,8 +251,8 @@ describe("WorkspaceSavedViewsSidebar — save modal (viewer)", () => {
     const saveBtn = screen.getByRole("button", { name: /save view/i });
     await userEvent.click(saveBtn);
 
-    const shared = screen.getByTestId("visibility-shared") as HTMLInputElement;
-    const personal = screen.getByTestId("visibility-personal") as HTMLInputElement;
+    const shared = screen.getByRole("radio", { name: /shared with the team/i }) as HTMLInputElement;
+    const personal = screen.getByRole("radio", { name: /^personal/i }) as HTMLInputElement;
     expect(personal.checked).toBe(true);
     expect(shared.disabled).toBe(true);
     expect(shared.checked).toBe(false);

@@ -29,7 +29,9 @@ import {
   usePreference,
 } from "../theme/preferences.ts";
 import { Button, IconButton } from "../ui/Button.tsx";
-import { setRenderRadiusPreviewTier } from "./logging.ts";
+import { NumberField } from "../ui/NumberField.tsx";
+import { Slider } from "../ui/Slider.tsx";
+import { getRenderRadiusPreviewTier, setRenderRadiusPreviewTier } from "./logging.ts";
 import "./DevControls.css";
 
 // Per-field UI metadata. The panel renders from these arrays, so a new field
@@ -164,8 +166,9 @@ function usePlanningConfig(): PlanningConfig {
 }
 
 /**
- * One tunable row: label + slider + number input + reset arrow (visible
- * only when the value differs from the default) + optional warning line.
+ * One tunable row: a slider with its label and editable value, a reset arrow
+ * (visible only when the value differs from the default), and an optional
+ * warning line.
  *
  * The row is the same shape for all sections; per-section variation
  * lives entirely in the `TunableSpec` table above.
@@ -192,45 +195,40 @@ function TunableRow({
     configStore.set(spec.field, clamped);
   };
 
-  const startRadiusPreview = () => {
-    if (!spec.previewRadiusTier) return;
-    setRenderRadiusPreviewTier(spec.previewRadiusTier);
-    const clear = () => setRenderRadiusPreviewTier(null);
-    window.addEventListener("pointerup", clear, { once: true });
-    window.addEventListener("pointercancel", clear, { once: true });
+  // A radius previews while its value is being adjusted, until the press or
+  // key adjusting it lifts. The slider's own change end misses an edit that
+  // reaches its input directly.
+  const preview = () => {
+    const tier = spec.previewRadiusTier;
+    if (!tier || !editable || getRenderRadiusPreviewTier() === tier) return;
+    setRenderRadiusPreviewTier(tier);
+    const lifted = new AbortController();
+    const clear = () => {
+      setRenderRadiusPreviewTier(null);
+      lifted.abort();
+    };
+    for (const type of ["pointerup", "pointercancel", "keyup"]) {
+      window.addEventListener(type, clear, { signal: lifted.signal });
+    }
   };
-
-  const sliderId = `cfg-${spec.field}`;
 
   return (
     <div className="dev-controls-tunable-row">
-      <label htmlFor={sliderId} className="dev-controls-tunable-label">
-        {spec.label}
-      </label>
       <div className="dev-controls-tunable-controls">
-        <input
-          id={sliderId}
-          type="range"
-          min={spec.min}
-          max={spec.max}
-          step={spec.step}
-          value={value}
-          disabled={!editable}
-          onPointerDown={startRadiusPreview}
-          onChange={(e) => onChange(Number(e.target.value))}
+        <Slider
           className="dev-controls-tunable-slider"
-          aria-label={`${spec.label} slider`}
-        />
-        <input
-          type="number"
-          min={spec.min}
-          max={spec.max}
-          step={spec.step}
+          data-testid={`cfg-${spec.field}`}
+          label={spec.label}
           value={value}
-          disabled={!editable}
-          onChange={(e) => onChange(Number(e.target.value))}
-          className="dev-controls-input"
-          aria-label={`${spec.label} value`}
+          minValue={spec.min}
+          maxValue={spec.max}
+          step={spec.step}
+          valueDisplay="field"
+          isDisabled={!editable}
+          onChange={(next) => {
+            preview();
+            onChange(next);
+          }}
         />
         {editable && dirty ? (
           <IconButton
@@ -285,16 +283,15 @@ function CacheKnobRow({
     <div className="dev-controls-row">
       <span>{knob.label}</span>
       <div className="dev-controls-tunable-controls">
-        <input
+        <NumberField
           className="dev-controls-input"
-          type="number"
-          aria-label={knob.label}
+          label={knob.label}
+          labelPosition="hidden"
+          hideSteppers
           value={Math.round(values[knob.field] / divisor)}
-          disabled={!editable}
-          onChange={(e) => {
-            if (!editable) return;
-            const shown = Number(e.target.value);
-            if (!(shown > 0)) return;
+          isDisabled={!editable}
+          onChange={(shown) => {
+            if (!editable || !(shown > 0)) return;
             setStored(shown * divisor);
           }}
         />

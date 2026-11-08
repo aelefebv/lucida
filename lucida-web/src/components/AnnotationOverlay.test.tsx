@@ -2,10 +2,12 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { createRef } from "react";
 import type { WasmScene } from "lucida-core";
 import { AnnotationOverlay } from "./AnnotationOverlay.tsx";
 import type { Annotation } from "./annotationDocument.ts";
+import { deriveHandle } from "./annotationParticipants.ts";
 
 /**
  * Stand-in for the WASM scene covering only the 2D overlay's surface.
@@ -1316,7 +1318,7 @@ describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's 
 });
 
 describe("AnnotationOverlay — comment-count badge on the marker", () => {
-  it("a pin with comments carries the count badge (pluralized aria-label)", () => {
+  it("a pin with comments carries the count badge, and its marker's name says the count", () => {
     renderOverlay({
       pins: [
         ownPin({
@@ -1327,19 +1329,42 @@ describe("AnnotationOverlay — comment-count badge on the marker", () => {
         }),
       ],
     });
-    expect(screen.getByLabelText("2 comments").textContent).toBe("2");
+    expect(screen.getByRole("button", { name: "Pin by you, 2 comments" })).toBeTruthy();
+    expect(document.querySelector(".lc-annotation-count")?.textContent).toBe("2");
   });
 
   it("a pin with an empty thread carries no badge", () => {
     renderOverlay({ pins: [ownPin({ comments: [] })] });
-    expect(screen.queryByLabelText(/comment/)).toBeNull();
+    expect(screen.getByRole("button", { name: "Pin by you" })).toBeTruthy();
+    expect(document.querySelector(".lc-annotation-count")).toBeNull();
   });
 
   it("clicking the badge opens the pin's thread (same toggle as the dot)", () => {
     renderOverlay({
       pins: [ownPin({ comments: [{ id: "c1", author: String(MY_ID), text: "hi from 2d" }] })],
     });
-    fireEvent.click(screen.getByLabelText("1 comment"));
+    fireEvent.click(document.querySelector(".lc-annotation-count")!);
     expect(screen.getByText("hi from 2d")).toBeTruthy();
+  });
+});
+
+describe("AnnotationOverlay — the marker from the keyboard", () => {
+  it("is reached with Tab and opens its thread with Enter", async () => {
+    const user = userEvent.setup();
+    renderOverlay({
+      pins: [
+        ownPin({ comments: [{ id: "c1", author: String(MY_ID), text: "from the keyboard" }] }),
+        ownPin({ id: "pin-b", author: "peer" }),
+      ],
+    });
+    await user.tab();
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Pin by you, 1 comment" }));
+    await user.keyboard("{Enter}");
+    expect(screen.getByText("from the keyboard")).toBeTruthy();
+  });
+
+  it("names a peer's pin by the peer's handle", () => {
+    renderOverlay({ pins: [ownPin({ author: "peer" })] });
+    expect(screen.getByRole("button", { name: `Pin by ${deriveHandle("peer")}` })).toBeTruthy();
   });
 });
