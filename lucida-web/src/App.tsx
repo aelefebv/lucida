@@ -55,6 +55,7 @@ import {
   onRenderRadiusPreviewChanged,
 } from "./debug/logging.ts";
 import type { DatasetState } from "./types.ts";
+import { SceneStore } from "./sceneStore.ts";
 import { useWasmScene } from "./hooks/useWasmScene.ts";
 import { useRenderClient } from "./hooks/useRenderClient.ts";
 import { useDatasetSettings, type BridgeCallbacks, type DatasetCallbacks } from "./hooks/useDatasetSettings.ts";
@@ -162,6 +163,8 @@ function App({
   const annotationAuthor = useMemo(() => annotationAuthorId(), []);
 
   const scene = useWasmScene();
+  // React reads the scene's view state here and nowhere else.
+  const [sceneStore] = useState(() => new SceneStore(() => scene.wasmSceneRef.current));
   const render = useRenderClient();
   // `?render=1` is the chrome-free capture surface for `dataset montage`,
   // `dataset explore`, and the trace driver: no UI chrome and no persisted
@@ -195,7 +198,6 @@ function App({
   // they touch the document. Best-effort: sharing is owner-only and unavailable
   // offline, so this may stay `[]` and the picker uses document participants.
   const [workspaceMembers, setWorkspaceMembers] = useState<WorkspaceMember[]>([]);
-  const [cameraMode, setCameraMode] = useState<string>("arcball");
   // Set when `#a=<id>` doesn't resolve in the loaded document. A recipient
   // without access fails at the workspace gate first, so this never reveals
   // whether an annotation exists.
@@ -226,8 +228,8 @@ function App({
   // Domain hooks (order matters: earlier hooks use refs for later hooks' values).
 
   const dims = useDimensions({
+    sceneStore,
     wasmSceneRef: scene.wasmSceneRef,
-    wasmScene: scene.wasmScene,
     selectedDatasetId,
     datasetsRef,
     datasetsVersion,
@@ -270,16 +272,17 @@ function App({
       layers.initLayerMaps(id);
       dims.handleDatasetRegistered(id);
     },
-    setZ: dims.setZ,
-    setC: dims.setC,
-    setT: dims.setT,
-    setViewMode: dims.setViewMode,
-    setMultiChannel: dims.setMultiChannel,
     setSelectedDatasetId,
     bumpDatasetsVersion,
     bumpRemoteDocumentVersion,
     onWorkspaceArchived: onBackToDashboard,
   });
+
+  // A snapshot creates the scene, or replaces it, without a write the store
+  // would hear.
+  useEffect(() => {
+    sceneStore.sync();
+  }, [sceneStore, scene.wasmScene]);
 
   // On apply, re-target `selectedDatasetId` at the first
   // visible dataset so dimension/contrast controls land on something
@@ -324,33 +327,6 @@ function App({
     [workspaceId],
   );
 
-  // Live Z/T/C for "Save view" comes from React, because the scene's presence
-  // export can lag and report the default slab, which the encoder strips. Slab
-  // thickness comes from the scene, since React tracks only z_range.start.
-  const getLiveView = useCallback((): SavedView["view"] | null => {
-    const ws = scene.wasmSceneRef.current;
-    let slabThickness = 1;
-    if (ws) {
-      try {
-        const presence = JSON.parse(ws.export_presence()) as {
-          view?: { z_range?: { start: number; end: number } };
-        };
-        const r = presence.view?.z_range;
-        if (r && r.end > r.start) slabThickness = r.end - r.start;
-      } catch {
-        // Fall back to a single-plane slab if presence is unreadable.
-      }
-    }
-    return {
-      z_range: { start: dims.z, end: dims.z + slabThickness },
-      t: dims.t,
-      c: dims.c,
-      multi_channel: dims.multiChannel,
-    };
-    // wasmSceneRef is a stable ref; reading .current at call time is intended.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [dims.z, dims.t, dims.c, dims.multiChannel]);
-
   // Saved-view wiring. Must come after `useBridge`, whose functions the applier
   // needs, and before the savedViewHooksRef populate below.
   const savedViewSync = useSavedViewSync({
@@ -360,16 +336,11 @@ function App({
     // Any local or remote scene mutation bumps one of these. Viewport-only
     // changes bypass them and go through emitPresenceWithUrl.
     changeTick: datasetsVersion + remoteDocumentVersion,
+    sceneStore,
     onApplyResult: handleApplyResult,
     loopRef: render.loopRef,
-    getLiveView,
     dimensionExtentsFor: dims.dimensionExtentsFor,
     labelNamesFor: dims.labelNamesFor,
-    setC: dims.setC,
-    setT: dims.setT,
-    setZ: dims.setZ,
-    setViewMode: dims.setViewMode,
-    setMultiChannel: dims.setMultiChannel,
     autoContrastMapRef: layers.autoContrastMapRef,
     setAutoContrastMap: layers.setAutoContrastMap,
     datasetReferenceMode: "workspace-dataset-id",
@@ -513,31 +484,30 @@ function App({
   // follow, and emitting presence.
   const gentleOnContext = useCallback((pin: Annotation) => {
     const ws = scene.wasmSceneRef.current;
+    if (!ws) return;
     const targetZ = pin.z ?? 0;
     const targetT = pin.t ?? 0;
     const targetC = pin.c ?? 0;
     let contextChanged = false;
-    if (targetZ !== dims.z) {
-      dims.setZ(targetZ);
-      if (ws) applyViewportCommand(ws, { type: "set_z", z: targetZ });
+    if (targetZ !== ws.z()) {
+      applyViewportCommand(ws, { type: "set_z", z: targetZ });
       contextChanged = true;
     }
-    if (targetT !== dims.t) {
-      dims.setT(targetT);
-      if (ws) applyViewportCommand(ws, { type: "set_t", t: targetT });
+    if (targetT !== ws.t()) {
+      applyViewportCommand(ws, { type: "set_t", t: targetT });
       contextChanged = true;
     }
-    if (targetC !== dims.c) {
-      dims.setC(targetC);
-      if (ws) applyViewportCommand(ws, { type: "set_c", c: targetC });
+    if (targetC !== ws.c()) {
+      applyViewportCommand(ws, { type: "set_c", c: targetC });
       contextChanged = true;
     }
     if (contextChanged) {
+      requestRender(render.loopRef.current, "annotation_context");
       bridge.breakFollow();
       emitPresenceWithUrl();
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable setters/bridge/emit/scene ref; see note above.
-  }, [dims.z, dims.t, dims.c]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- stable bridge/emit/render refs/scene ref.
+  }, []);
 
   // Focus a pin in whichever overlay is mounted for a GIVEN view mode (2D vs
   // 3D). Pass the mode explicitly because a just-restored 3D camera may have
@@ -581,22 +551,6 @@ function App({
       labelNamesFor: dims.labelNamesFor,
     });
 
-    // The restore wrote only to WASM; mirror it into React so the sliders and
-    // mode toggles aren't stale.
-    dims.setZ(result.applied.zStart);
-    dims.setT(result.applied.t);
-    dims.setC(result.applied.c);
-    if (pin.view.view.multi_channel !== undefined) {
-      dims.setMultiChannel(pin.view.view.multi_channel);
-    }
-    if (result.cameraModeChanged) {
-      dims.setViewMode(result.viewMode);
-      try {
-        setCameraMode(ws.camera_mode());
-      } catch {
-        // best-effort mirror; the scene command already switched the mode.
-      }
-    }
     bridge.breakFollow();
     emitPresenceWithUrl();
     invalidateAfterViewRestore(render.loopRef.current, "annotation_view_restore");
@@ -861,14 +815,9 @@ function App({
     // canvasSize re-projects the labels after a panel moves the canvas edges.
   }, [bridge.peers, bridge.myId, bridge.followTarget, dims.viewMode, render.clientReady, scene.wasmReady, render.clientRef, scene.wasmSceneRef, render.loopRef, render.canvasRef, canvasSize]);
 
-  const handleCameraModeChange = useCallback((mode: string) => {
-    setCameraMode(mode);
-  }, []);
-
-  // The volume viewer owns the camera mode: it swaps its pointer handlers and
-  // the fly keys' scope and shows the fly hint, then reports the mode back
-  // through `onCameraModeChange`. Switching the scene here directly would
-  // leave it handling a fly camera as an orbit one.
+  // The volume viewer owns the fly toggle: entering fly mode also sets the fly
+  // speed from the volume's size and shows the fly hint, which a bare switch
+  // of the scene's camera here would skip.
   const handleCameraModeToggle = useCallback(() => {
     runCommand("camera.toggleFly");
   }, []);
@@ -1198,7 +1147,7 @@ function App({
       t={dims.t}
       dimT={dims.dimT}
       onTChange={dims.handleTChange}
-      cameraMode={cameraMode === "fly" ? "fly" : "arcball"}
+      cameraMode={dims.cameraMode === "fly" ? "fly" : "arcball"}
       onCameraModeToggle={handleCameraModeToggle}
       // Moves the same scene state the `[` and `]` keys do, and
       // shares and repaints it the same way.
@@ -1429,9 +1378,6 @@ function App({
           >
             {datasetsVersion > 0 && dims.viewMode === "2d" && scene.wasmScene && render.client && bridge.sessionRef.current && (
               <SliceViewer
-                z={dims.z}
-                t={dims.t}
-                c={dims.c}
                 session={bridge.sessionRef.current}
                 scene={scene.wasmScene}
                 datasets={datasetsRef.current}
@@ -1484,11 +1430,9 @@ function App({
                 emitPresence={emitPresenceWithUrl}
                 breakFollow={bridge.breakFollow}
                 sendCursor={bridge.sendCursor}
-                t={dims.t}
-                c={dims.c}
+                cameraMode={dims.cameraMode}
                 loopRef={render.loopRef}
                 onLoopChange={render.setActiveLoop}
-                onCameraModeChange={handleCameraModeChange}
                 annotationDatasetId={selectedDatasetId}
                 tool={tool}
                 myId={annotationAuthor}
