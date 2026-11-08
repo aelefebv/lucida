@@ -22,8 +22,8 @@ async fn rename_dataset_survives_evict_and_reopen() {
         "original.zarr"
     );
 
-    let (seq, _) = manager
-        .rename_dataset(&live, &owner, &wds_id, "Renamed Layer")
+    let seq = manager
+        .rename_dataset(&live, &owner, 1, &wds_id, "Renamed Layer")
         .await
         .unwrap();
     assert_eq!(seq, 2, "rename should advance the document seq");
@@ -69,7 +69,7 @@ async fn rename_dataset_trims_and_persists_trimmed_name() {
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
 
     manager
-        .rename_dataset(&live, &owner, &wds_id, "  Padded Name  ")
+        .rename_dataset(&live, &owner, 1, &wds_id, "  Padded Name  ")
         .await
         .unwrap();
     assert_eq!(
@@ -108,7 +108,7 @@ async fn rename_dataset_is_editor_only_and_never_leaks() {
 
     // A viewer cannot rename — Forbidden (role-first).
     let err = manager
-        .rename_dataset(&live, &viewer, &wds_id, "viewer rename")
+        .rename_dataset(&live, &viewer, 1, &wds_id, "viewer rename")
         .await
         .unwrap_err();
     assert!(matches!(err, WorkspaceError::Forbidden));
@@ -117,7 +117,7 @@ async fn rename_dataset_is_editor_only_and_never_leaks() {
     // membership is never confirmed.
     let stranger = principal("stranger@example.com", false);
     let err = manager
-        .rename_dataset(&live, &stranger, &wds_id, "stranger rename")
+        .rename_dataset(&live, &stranger, 1, &wds_id, "stranger rename")
         .await
         .unwrap_err();
     assert!(matches!(err, WorkspaceError::Forbidden));
@@ -146,6 +146,7 @@ async fn rename_dataset_missing_id_is_not_found() {
         .rename_dataset(
             &live,
             &owner,
+            1,
             &DatasetId("wds_ghost".into()),
             "ghost rename",
         )
@@ -165,7 +166,7 @@ async fn rename_dataset_validation_rejects_empty_whitespace_and_overlong() {
 
     for bad in ["", "   ", "\t\n"] {
         let err = manager
-            .rename_dataset(&live, &owner, &wds_id, bad)
+            .rename_dataset(&live, &owner, 1, &wds_id, bad)
             .await
             .unwrap_err();
         assert!(
@@ -176,7 +177,7 @@ async fn rename_dataset_validation_rejects_empty_whitespace_and_overlong() {
 
     let overlong = "x".repeat(MAX_DATASET_NAME_CHARS + 1);
     let err = manager
-        .rename_dataset(&live, &owner, &wds_id, &overlong)
+        .rename_dataset(&live, &owner, 1, &wds_id, &overlong)
         .await
         .unwrap_err();
     assert!(matches!(err, WorkspaceError::BadRequest(_)));
@@ -203,7 +204,7 @@ async fn rename_dataset_leaves_source_url_unchanged() {
         .canonical_url;
 
     manager
-        .rename_dataset(&live, &owner, &wds_id, "Renamed")
+        .rename_dataset(&live, &owner, 1, &wds_id, "Renamed")
         .await
         .unwrap();
 
@@ -241,7 +242,7 @@ async fn rename_dataset_leaves_existing_saved_view_name_unchanged() {
 
     let live = manager.live_workspace(&workspace_id, &owner).await.unwrap();
     manager
-        .rename_dataset(&live, &owner, &wds_id, "Renamed Dataset")
+        .rename_dataset(&live, &owner, 1, &wds_id, "Renamed Dataset")
         .await
         .unwrap();
 
@@ -263,45 +264,27 @@ async fn rename_dataset_broadcasts_command_to_peers() {
     // A co-present peer subscribes to the live broadcast channel.
     let mut rx = live.tx.subscribe();
 
-    manager
-        .rename_dataset(&live, &owner, &wds_id, "Live Rename")
+    let seq = manager
+        .rename_dataset(&live, &owner, 7, &wds_id, "Live Rename")
         .await
         .unwrap();
-    // The handler is what broadcasts in production; here we assert the
-    // rename produced the document the peer would converge on, then
-    // emulate the handler's broadcast and confirm the peer receives a
-    // CommandBroadcast carrying the rename.
-    let (seq, command) = {
-        // Re-derive what the handler sends: it forwards the same
-        // (seq, RenameDataset) returned by rename_dataset. We already
-        // applied; reconstruct the broadcast item exactly as the handler.
-        let sess = live.session.lock().await;
-        (
-            sess.seq,
-            DocumentCommand::RenameDataset {
-                id: wds_id.clone(),
-                name: "Live Rename".to_string(),
-            },
-        )
-    };
-    let broadcast_msg = ServerMessage::CommandBroadcast { seq, command };
-    let ack_msg = ServerMessage::Ack { seq };
-    // `BroadcastItem` is not `Debug`, so don't `.unwrap()` the send result
-    // (its error would need Debug); a failed send just means no receiver.
-    let _ = live.tx.send(BroadcastItem::CommandBroadcast {
-        sender: u64::MAX,
-        broadcast_json: serde_json::to_string(&broadcast_msg).unwrap(),
-        ack_json: serde_json::to_string(&ack_msg).unwrap(),
-    });
 
     let item = rx.recv().await.unwrap();
-    match item {
-        BroadcastItem::CommandBroadcast { broadcast_json, .. } => {
-            assert!(broadcast_json.contains("\"type\":\"rename_dataset\""));
-            assert!(broadcast_json.contains("Live Rename"));
-        }
-        _ => panic!("expected a CommandBroadcast broadcast item"),
-    }
+    let BroadcastItem::CommandBroadcast {
+        sender,
+        broadcast_json,
+        ack_json,
+    } = item
+    else {
+        panic!("expected a CommandBroadcast broadcast item");
+    };
+    assert_eq!(sender, 7, "the renamer is acked, not echoed");
+    assert!(broadcast_json.contains("\"type\":\"rename_dataset\""));
+    assert!(broadcast_json.contains("Live Rename"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&ack_json).unwrap(),
+        json!({ "type": "ack", "seq": seq }),
+    );
 }
 
 #[tokio::test]
@@ -387,6 +370,7 @@ async fn apply_document_command_is_editor_gated_and_never_mutates_on_deny() {
         .apply_document_command(
             &live,
             &viewer,
+            1,
             DocumentCommand::RemoveDataset { id: wds_id.clone() },
         )
         .await
@@ -399,6 +383,7 @@ async fn apply_document_command_is_editor_gated_and_never_mutates_on_deny() {
         .apply_document_command(
             &live,
             &stranger,
+            1,
             DocumentCommand::RemoveDataset { id: wds_id.clone() },
         )
         .await
@@ -414,16 +399,16 @@ async fn apply_document_command_is_editor_gated_and_never_mutates_on_deny() {
 
     // The owner's command applies AND persists (RemoveDataset routes
     // through the membership-row removal path).
-    let (seq, applied) = manager
+    let seq = manager
         .apply_document_command(
             &live,
             &owner,
+            1,
             DocumentCommand::RemoveDataset { id: wds_id.clone() },
         )
         .await
         .unwrap();
     assert_eq!(seq, 2);
-    assert!(matches!(applied, DocumentCommand::RemoveDataset { .. }));
     assert!(
         !live
             .session
@@ -519,6 +504,7 @@ async fn gate_store_failure_is_infrastructure_not_an_authorization_verdict() {
         .apply_document_command(
             &live,
             &owner,
+            1,
             DocumentCommand::RemoveDataset { id: wds_id.clone() },
         )
         .await
