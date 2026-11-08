@@ -56,6 +56,11 @@ export interface LabelSlicePool {
    */
   keys: Map<number, string>;
   /**
+   * Chunk cell → the plane of the label level its texels were cut from,
+   * which a cell keeps drawing after its chunk is handed back.
+   */
+  planes: Map<number, number>;
+  /**
    * Owning dataset id. The pool is keyed by the label image id, which dataset
    * removal never sees, so {@link removeLabelSlicePoolsForDataset} matches on
    * this instead.
@@ -156,7 +161,7 @@ export function getOrCreateLabelSlicePool(
   const pool: LabelSlicePool = {
     texture, indirectionBuf, indirection, markedFailed: new Set(),
     chunkX: cx, chunkY: cy, grid,
-    keys: new Map(), datasetId, width: w, height: h,
+    keys: new Map(), planes: new Map(), datasetId, width: w, height: h,
   };
   pools.set(memberId, pool);
   return pool;
@@ -196,6 +201,29 @@ export function markLabelSliceFailed(
   );
   if (changed) ctx.device.queue.writeBuffer(pool.indirectionBuf, 0, pool.indirection);
   return changed;
+}
+
+/**
+ * Report lost each chunk whose cell holds another plane than `plane`, the one
+ * the view draws now. A Z move inside one chunk along Z keeps the chunk key,
+ * and the page sends a key it holds as delivered only once it hears the key
+ * is gone. The cell draws its old plane until the new one lands, as on a T
+ * scrub.
+ */
+export function retireOtherLabelPlanes(
+  ctx: WorkerCtx,
+  memberId: string,
+  pool: LabelSlicePool,
+  plane: number,
+): void {
+  const lost: string[] = [];
+  for (const [cell, drawn] of pool.planes) {
+    const key = pool.keys.get(cell);
+    if (drawn === plane || key === undefined) continue;
+    lost.push(key);
+    pool.keys.delete(cell);
+  }
+  postChunkResidency(ctx, memberId, LABEL_TIER, "lost", lost, "replaced");
 }
 
 export function destroyLabelSlicePool(pool: LabelSlicePool): void {
