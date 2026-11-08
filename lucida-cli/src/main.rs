@@ -1662,8 +1662,24 @@ enum ConfigGetCommand {
     Workspace,
 }
 
+/// The stack the CLI runs on. An unoptimized build gives every arm of `run`
+/// and of the command functions it calls its own stack slots, so one poll of
+/// a socket command takes over 1 MiB, the stack Windows gives a main thread.
+const CLI_STACK_BYTES: usize = 8 * 1024 * 1024;
+
+fn main() {
+    let cli = std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(cli_main)
+        .expect("spawn the CLI thread");
+    if let Err(panic) = cli.join() {
+        std::panic::resume_unwind(panic);
+    }
+}
+
 #[tokio::main]
-async fn main() {
+async fn cli_main() {
     let cli = Cli::parse();
     let json_errors = cli.json;
     if let Err(error) = run(cli).await {
