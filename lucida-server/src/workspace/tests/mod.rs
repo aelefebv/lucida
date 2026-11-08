@@ -67,6 +67,7 @@ fn idle_eviction_config() -> WorkspaceRuntimeConfig {
     WorkspaceRuntimeConfig {
         idle_ttl: Duration::ZERO,
         idle_sweep_interval: Duration::from_secs(60),
+        ..WorkspaceRuntimeConfig::default()
     }
 }
 

@@ -3,49 +3,29 @@
 //! failure, and every message the server does not act on gets a rejection.
 //! A request that ends in silence fails here by timing out.
 
-use std::collections::HashMap;
+mod common;
+
 use std::fs;
-use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use axum::Router;
-use axum::extract::{State, WebSocketUpgrade};
-use axum::response::IntoResponse;
-use axum::routing::get;
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, broadcast, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
+use common::workspace_rig::WorkspaceRig;
 use lucida_core::protocol::{CommandRejection, MessageRejection, ServerMessage};
 use lucida_protocol::{ChunkFailureKind, SourceChunkStatus};
+use lucida_server::ProxyConfig;
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
-use lucida_server::session::Session;
-use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes, handler};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
-
-async fn ws_route(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
-    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    ws.on_upgrade(move |socket| async move {
-        handler::handle_client(
-            id,
-            socket,
-            state.session,
-            state.tx,
-            state.unicast_routes,
-            state.proxy_config,
-        )
-        .await;
-    })
-}
 
 fn proxy_config(root: &Path) -> ProxyConfig {
     ProxyConfig {
@@ -153,6 +133,7 @@ struct Rig {
     dataset_id: String,
     image_id: String,
     root: PathBuf,
+    _server: WorkspaceRig,
 }
 
 async fn start(name: &str) -> Rig {
@@ -160,18 +141,15 @@ async fn start(name: &str) -> Rig {
     let data = root.join("dataset.zarr");
     write_fixture(&data);
 
-    let session = Arc::new(Mutex::new(Session::new()));
-    let (tx, _rx) = broadcast::channel::<BroadcastItem>(256);
+    let server = WorkspaceRig::start(proxy_config(&root)).await;
     let (progress, _progress_rx) = mpsc::unbounded_channel();
     let opened = open_dataset(
         1,
         &data.to_str().unwrap().parse().unwrap(),
         &DatasetOpenContext {
-            session: Arc::clone(&session),
-            tx: tx.clone(),
             proxy_config: proxy_config(&root),
             source_policy: Arc::default(),
-            workspace: None,
+            workspace: server.scope(),
         },
         &progress,
     )
@@ -183,22 +161,7 @@ async fn start(name: &str) -> Rig {
     let dataset_id = opened.manifest.dataset_id.0.clone();
     let image_id = opened.manifest.images()[0].image_id.0.clone();
 
-    let state = AppState {
-        session,
-        tx,
-        next_id: Arc::new(AtomicU64::new(0)),
-        unicast_routes: UnicastRoutes::new(Mutex::new(HashMap::new())),
-        source_policy: Arc::default(),
-        proxy_config: proxy_config(&root),
-    };
-    let app = Router::new().route("/ws", get(ws_route)).with_state(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr: SocketAddr = listener.local_addr().unwrap();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-
-    let (mut ws, _) = connect_async(format!("ws://{addr}/ws"))
-        .await
-        .expect("ws connect");
+    let (mut ws, _) = connect_async(server.ws_url()).await.expect("ws connect");
     let ServerMessage::Snapshot { .. } = next_reply(&mut ws).await else {
         panic!("the first message is the snapshot");
     };
@@ -207,6 +170,7 @@ async fn start(name: &str) -> Rig {
         dataset_id,
         image_id,
         root,
+        _server: server,
     }
 }
 

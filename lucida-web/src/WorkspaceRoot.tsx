@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import App from "./App.tsx";
 import "./auth/auth.css";
 import { WatchStreamBanner } from "./monitor/WatchToggle.tsx";
+import { parseSavedViewHash } from "./savedView/urlSync.ts";
 import { Banner } from "./shell/Banner.tsx";
 import { Button } from "./ui/Button.tsx";
 import { WorkspaceDashboard } from "./WorkspaceDashboard.tsx";
@@ -103,6 +104,18 @@ export function WorkspaceRoot() {
 
   const workspaceId = useMemo(() => parseWorkspaceId(path), [path]);
 
+  // A saved-view link off any workspace (`/#b=<id>`) names a bookmark, and
+  // this server keeps none. It lands on the dashboard, which says so.
+  const [bookmarkLinkNotice, setBookmarkLinkNotice] = useState(
+    () => parseSavedViewHash(window.location.hash) !== null,
+  );
+  const dismissBookmarkLinkNotice = useCallback(() => {
+    setBookmarkLinkNotice(false);
+    const { pathname, search } = window.location;
+    window.history.replaceState(window.history.state, "", `${pathname}${search}`);
+  }, []);
+  const onDashboard = !workspaceId && !isOpenLinkPath(path);
+
   // Only forward the seed when it belongs to the workspace being opened.
   const seedForThisWorkspace =
     pendingSeed && workspaceId && pendingSeed.workspaceId === workspaceId
@@ -127,6 +140,14 @@ export function WorkspaceRoot() {
         />
       ) : (
         <WorkspaceDashboard onOpenWorkspace={openWorkspaceById} />
+      )}
+      {onDashboard && bookmarkLinkNotice && (
+        <div className="workspace-root-banner">
+          <Banner tone="info" onDismiss={dismissBookmarkLinkNotice} data-testid="bookmark-link-notice">
+            This link names a bookmark, and this server no longer keeps bookmarks. Saved views
+            belong to workspaces now: ask whoever shared the link for a link to the workspace.
+          </Banner>
+        </div>
       )}
       {/* Above the routes, because the stream is per session and outlives the
           dock the toggle lives in. */}
@@ -280,7 +301,7 @@ function WorkspaceViewerRoute({
   return (
     <>
       {createError && (
-        <div className="workspace-create-error">
+        <div className="workspace-root-banner">
           <Banner tone="danger" role="alert" onDismiss={() => setCreateError(null)} data-testid="workspace-create-error">
             Couldn&rsquo;t create the workspace: {createError}
           </Banner>

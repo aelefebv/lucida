@@ -30,7 +30,7 @@ import { ADD_DATA_SHORTCUT } from "./addData/shortcut.ts";
 import { SourceField } from "./addData/SourceField.tsx";
 import { ProfileMenu } from "./auth/ProfileMenu.tsx";
 import { isRemoteDatasetUrl, shortDatasetLocations } from "./datasetLocation.ts";
-import { relativeTimeFromIso } from "./savedView/useBookmarks.ts";
+import { relativeTimeFromIso } from "./relativeTime.ts";
 import { LucidaMark } from "./shell/LucidaMark.tsx";
 import { SettingsMenu } from "./shell/SettingsMenu.tsx";
 import { Badge } from "./ui/Badge.tsx";
