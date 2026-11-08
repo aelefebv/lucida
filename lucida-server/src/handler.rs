@@ -480,7 +480,7 @@ async fn handle_client_inner(
                         ClientMessage::OpenRemoteDataset { request_id, url } => {
                             // Adding a dataset takes the editor role, which
                             // nobody holds on the legacy `/ws` session.
-                            if workspace.is_none() {
+                            let Some(scope) = workspace.clone() else {
                                 send_open_failed(
                                     id,
                                     &request_id,
@@ -496,7 +496,7 @@ async fn handle_client_inner(
                                 )
                                 .await;
                                 continue;
-                            }
+                            };
                             tracing::info!(
                                 client_id = %id,
                                 request_id = %request_id,
@@ -507,7 +507,6 @@ async fn handle_client_inner(
                             let tx_clone = tx.clone();
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let proxy_config_clone = proxy_config.clone();
-                            let workspace_clone = workspace.clone();
                             let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest { request_id, url };
                             tokio::spawn(async move {
@@ -518,7 +517,7 @@ async fn handle_client_inner(
                                     tx_clone,
                                     unicast_routes_clone,
                                     proxy_config_clone,
-                                    workspace_clone,
+                                    scope,
                                     timings_clone,
                                 )
                                 .await;
@@ -619,7 +618,7 @@ async fn handle_client_inner(
                             let tx_clone = tx.clone();
                             let unicast_routes_clone = Arc::clone(&unicast_routes);
                             let proxy_config_clone = proxy_config.clone();
-                            let workspace_clone = workspace.clone();
+                            let workspace_clone = ctx.clone();
                             let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest {
                                 request_id,
@@ -1385,7 +1384,7 @@ async fn handle_open_remote_dataset(
     tx: broadcast::Sender<BroadcastItem>,
     unicast_routes: UnicastRoutes,
     proxy_config: ProxyConfig,
-    workspace: Option<WorkspaceScope>,
+    workspace: WorkspaceScope,
     timings: Arc<TimingBuffer>,
 ) {
     let OpenRemoteDatasetRequest { request_id, url } = request;
@@ -1434,7 +1433,8 @@ async fn handle_open_remote_dataset(
         session,
         tx,
         proxy_config,
-        workspace,
+        source_policy: workspace.manager.source_policy(),
+        workspace: Some(workspace),
     };
     // Every metadata object this open reads files a row against the open's
     // own `request_id`, on the requesting connection's buffer. Scoped
