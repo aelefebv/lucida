@@ -321,6 +321,7 @@ fn chunk_message_fixture_paths(msg: &ChunkMessage) -> &'static [&'static str] {
         // producer and no consumer there is nothing to lock; wire a fixture
         // here if a producer ever appears.
         ChunkMessage::ChunkFetch { .. } => &[],
+        ChunkMessage::ChunkCancel { .. } => &["session/chunk_cancel.json"],
     }
 }
 
@@ -2275,7 +2276,7 @@ const GENERATED_FILES: &[&str] = &[
     "generated/availability_delta.json",
 ];
 
-const REQUEST_FILES: &[&str] = &["session/chunk_request.json"];
+const REQUEST_FILES: &[&str] = &["session/chunk_request.json", "session/chunk_cancel.json"];
 
 const VOCAB_FILES: &[&str] = &["vocab/enum_vocabulary.json"];
 
@@ -2335,6 +2336,16 @@ fn request_envelopes_match_goldens() {
         "session/chunk_request.json",
         &chunk,
         &req("", &["/type", "/rid", "/dataset_id", "/image_id", "/key"]),
+        &mut failures,
+    );
+
+    // The cancel the page sends when it aborts the request above.
+    let cancel = ChunkMessage::ChunkCancel { rids: vec![0] };
+    assert!(chunk_message_fixture_paths(&cancel).contains(&"session/chunk_cancel.json"));
+    check(
+        "session/chunk_cancel.json",
+        &cancel,
+        &req("", &["/type", "/rids"]),
         &mut failures,
     );
 

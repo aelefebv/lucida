@@ -372,7 +372,7 @@ pub async fn open_dataset(
     let cached = CachedStore::shared_for_source(
         &dataset_source_id,
         store.clone(),
-        lucida_store::cache::DEFAULT_SOURCE_CACHE_BYTES,
+        lucida_store::cache::SourceCacheBudget::process(),
     );
     let reads_before = cached.stats();
     let result = match lucida_store::import::import_dataset(&cached, &dataset_id, &name).await {
@@ -515,11 +515,14 @@ pub async fn open_dataset(
     // Each dataset's generated chunks cache under a directory named by its
     // 16-byte URL hash, so one cache root hosts many datasets.
     let url_hash16 = location.hash16();
-    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
-        generated_config.generated_cache_dir.clone(),
-        url_hash16,
-        generated_config.generated_disk_budget_bytes,
-    ));
+    let derived_chunks = Arc::new(
+        DerivedChunkCache::new_on_disk_with_budget(
+            generated_config.generated_cache_dir.clone(),
+            url_hash16,
+            generated_config.generated_disk_budget_bytes,
+        )
+        .with_memory(Arc::clone(&generated_config.generated_memory)),
+    );
     let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
     for plan in &generated_plans {
         match derived_chunks.register_generated_plan(plan) {
@@ -1023,6 +1026,7 @@ mod tests {
             generated_chunk_long_axis: 32,
             generated_max_chunk_bytes: 1024 * 1024,
             generated_disk_budget_bytes: None,
+            generated_memory: crate::generated::GeneratedChunkMemory::new(1 << 20),
         }
     }
 

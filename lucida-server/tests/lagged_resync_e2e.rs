@@ -275,7 +275,12 @@ async fn request_snapshot_returns_fresh_snapshot() {
     let rig = start_server(256).await;
 
     let mut client = connect(&rig).await;
-    let ServerMessage::Snapshot { seq, .. } = next_server_message(&mut client).await else {
+    let ServerMessage::Snapshot {
+        seq,
+        your_id: joined_as,
+        ..
+    } = next_server_message(&mut client).await
+    else {
         panic!("join snapshot");
     };
     assert_eq!(seq, 0);
@@ -305,7 +310,7 @@ async fn request_snapshot_returns_fresh_snapshot() {
         panic!("expected snapshot in response to request_snapshot");
     };
     assert_eq!(seq, 3);
-    assert_eq!(your_id, 0);
+    assert_eq!(your_id, joined_as);
     let server_doc = rig.workspace.live.session.lock().await.document.clone();
     assert_eq!(
         serde_json::to_value(&document).unwrap(),
