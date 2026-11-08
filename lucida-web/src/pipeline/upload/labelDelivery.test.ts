@@ -156,10 +156,8 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
 
     // sliceZ=1 → the delivery path extracts the z=1 plane (last 4 ids).
     const result = dispatchLabelChunkDelivery(client, delivery, meta!, 1, EPOCHS);
-    expect(result).not.toBeNull();
-    expect(result!.memberId).toBe("img-0:label:region-b");
     // Only ONE 2x2 plane crosses (16 bytes), never the whole 8-id chunk (32).
-    expect(result!.bytes).toBe(16);
+    expect(result).toEqual({ memberId: "img-0:label:region-b", bytes: 16 });
     // The delivery stamped the owning dataset id (from the ManifestEntry key).
     expect(vi.mocked(client.labelSliceChunkData).mock.calls[0][1]).toBe("ds-0");
 
@@ -195,7 +193,7 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
     };
     const client = { labelSliceChunkData: vi.fn() } as unknown as UploadClient;
     const result = dispatchLabelChunkDelivery(client, delivery, meta!, 1, EPOCHS);
-    expect(result).toBeNull();
+    expect(result).toBe("other-plane");
     expect(client.labelSliceChunkData).not.toHaveBeenCalled();
   });
 });
@@ -254,10 +252,8 @@ describe("label chunk flow (3D): volume request → whole-chunk delivery → vol
     } as unknown as UploadClient;
 
     const result = dispatchLabelVolumeChunkDelivery(client, delivery, meta!, EPOCHS);
-    expect(result).not.toBeNull();
-    expect(result!.memberId).toBe("img-0:label:region-b");
     // The WHOLE chunk crosses (8 ids * 4 = 32 bytes) — never a single ~plane.
-    expect(result!.bytes).toBe(32);
+    expect(result).toEqual({ memberId: "img-0:label:region-b", bytes: 32 });
     // The delivery stamped the owning dataset id (from the ManifestEntry key).
     expect(vi.mocked(client.labelVolumeChunkData).mock.calls[0][1]).toBe("ds-0");
 

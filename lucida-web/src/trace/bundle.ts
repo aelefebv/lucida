@@ -51,6 +51,7 @@ export const REPLAY_HEADER_FIELDS = [
   "viewUrl",
   "viewport",
   "devicePixelRatio",
+  "deviceMemoryGib",
   "mode",
   "planning",
   "pins",
@@ -112,6 +113,12 @@ export interface BundleHeader {
   viewUrl: string | null;
   viewport: Viewport | null;
   devicePixelRatio: number | null;
+  /**
+   * The memory the page fitted its budgets to, in GiB: what the browser
+   * reported, or the trace driver's override of it. Null when the page read
+   * none and ran at the ceiling budgets.
+   */
+  deviceMemoryGib: number | null;
   mode: "slice" | "volume" | null;
   planning: PlanningConfig;
   pins: DatasetPins[];
@@ -277,6 +284,12 @@ export interface BundleContext {
   origin: string | null;
   /** The page's device pixel ratio now, which is what a frame the page takes is at. Null where there is no page. */
   devicePixelRatio: number | null;
+  /**
+   * The memory the page fitted its budgets to, in GiB, or null when it read
+   * none. The page reads it once at startup, so every run it recorded ran
+   * under this reading.
+   */
+  deviceMemoryGib: number | null;
   /**
    * The page's PNG decoder, through its 2D canvas, which the flat-colour
    * check on a fallback frame reads through. Null where there is no page,
@@ -518,6 +531,7 @@ function buildHeader(
     viewUrl: relative ? `${context.origin ?? ""}${relative}` : null,
     viewport: header?.viewport ?? null,
     devicePixelRatio: header?.devicePixelRatio ?? null,
+    deviceMemoryGib: context.deviceMemoryGib,
     mode: header?.composedView.mode ?? null,
     planning: context.planning,
     pins: datasetIds.map((datasetId) => pinsFor(datasetId, view)),

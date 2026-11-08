@@ -4292,7 +4292,7 @@ async fn run_replay(
             width: plan.width,
             height: plan.height,
             device_pixel_ratio: plan.device_pixel_ratio,
-            device_memory_gib: None,
+            device_memory_gib: plan.device_memory_gib,
             camera: None,
         },
         server_warmth: warmth,
@@ -6343,6 +6343,7 @@ mod tests {
             ("width", "viewport"),
             ("height", "viewport"),
             ("device_pixel_ratio", "devicePixelRatio"),
+            ("device_memory", "deviceMemoryGib"),
             ("camera", "viewUrl"),
             ("zoom", "viewUrl"),
             ("contrast", "pins"),
@@ -6353,9 +6354,8 @@ mod tests {
         ]);
         // The planning knobs replay through the header's planning
         // configuration. The cache knobs have no header field, so a replay
-        // runs the cache at its own values. Nor does the device memory: a
-        // replay runs at the memory of the machine it runs on.
-        let mut not_in_header = vec!["device_memory"];
+        // runs the cache at its own values.
+        let mut not_in_header = vec![];
         for knob in trace_knobs::KNOBS {
             match knob.store {
                 trace_knobs::KnobStore::Planning => {

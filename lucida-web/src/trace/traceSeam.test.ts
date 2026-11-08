@@ -317,6 +317,22 @@ describe("the trace seam", () => {
     expect(bundle.perfetto).toBeNull();
   });
 
+  it("records the device memory the trace driver told the page", async () => {
+    installTraceSeam();
+    setBundleServices(null);
+    // As the driver's pre-load script installs its override.
+    const own = Object.getOwnPropertyDescriptor(Navigator.prototype, "deviceMemory");
+    Object.defineProperty(Navigator.prototype, "deviceMemory", { get: () => 2, configurable: true });
+    try {
+      traceRecorder.openRun(OPEN_CAUSE);
+      const bundle = await window.lucidaTrace!.exportBundle();
+      expect(bundle.header.deviceMemoryGib).toBe(2);
+    } finally {
+      if (own) Object.defineProperty(Navigator.prototype, "deviceMemory", own);
+      else delete (Navigator.prototype as { deviceMemory?: unknown }).deviceMemory;
+    }
+  });
+
   it("carries the frame and the health the viewer registered, and the projection only when asked", async () => {
     installTraceSeam();
     setBundleServices({
