@@ -53,8 +53,7 @@ export interface TransientDescriptorParams {
   /**
    * The level's chunk grid, `[X, Y, Z]` like `volumeDims`, so the shader
    * walks a slot-grid atlas via its indirection buffer. When absent the level
-   * is one slot covering the whole volume, the layout the minimap and
-   * thumbnail path relies on.
+   * is one slot covering the whole volume.
    */
   chunkGrid?: {
     gridDims: [number, number, number];

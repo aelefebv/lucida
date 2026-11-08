@@ -18,6 +18,8 @@ import { grantGrowth, handleGpuOutOfMemory, reserveGpuBytes } from "../worker/gp
 import { setGpuLedgerLine } from "../worker/gpuLedger.ts";
 import { planCompaction, remapSlotEntries } from "../poolCompaction.ts";
 import type { ChunkFeedbackReason } from "../workerProtocol.ts";
+import { applyFailedMarks, failedCellsAt, failedKeysForImage } from "../failedCells.ts";
+import { INDIRECTION_MISS } from "../remap.ts";
 
 /** Bytes one label voxel occupies in the `r32uint` atlas. */
 const LABEL_VOLUME_BYTES_PER_VOXEL = 4;
@@ -96,6 +98,8 @@ export interface LabelVolumePool {
   indirectionBuf: GPUBuffer;
   /** CPU mirror of {@link indirectionBuf} (uploaded after each delivery). */
   indirectionData: Uint32Array<ArrayBuffer>;
+  /** Cells whose entry reads FAILED because their chunk failed for good. */
+  markedFailed: Set<number>;
   /** Level chunk-grid dims (cells per axis). */
   gridX: number; gridY: number; gridZ: number;
   /** Per-slot voxel dims (one brick). */
@@ -450,6 +454,7 @@ export function getOrCreateLabelVolumePool(
     texture,
     indirectionBuf,
     indirectionData,
+    markedFailed: new Set(),
     gridX: sizing.gridX, gridY: sizing.gridY, gridZ: sizing.gridZ,
     chunkX: cx, chunkY: cy, chunkZ: cz,
     slotsX: sizing.slotsX, slotsY: sizing.slotsY, slotsZ: sizing.slotsZ,
@@ -515,6 +520,31 @@ export function acquireLabelSlot(
     origin: [sx * pool.chunkX, sy * pool.chunkY, sz * pool.chunkZ],
     evictedKey,
   };
+}
+
+/**
+ * Mark the cells of the level and timepoint `at` whose chunk failed for
+ * good, unless a slot holds that very chunk. A ray that reaches one draws the
+ * hatch, where it would otherwise pass through as background, or stop at a
+ * cell still holding another timepoint. Returns whether the marks changed.
+ */
+export function markLabelVolumeFailed(
+  ctx: WorkerCtx,
+  memberId: string,
+  pool: LabelVolumePool,
+  at: { level: number; t: number },
+): boolean {
+  const grid = { x: pool.gridX, y: pool.gridY, z: pool.gridZ };
+  const failed = failedCellsAt(failedKeysForImage(ctx.state, memberId), grid, { ...at, c: 0 });
+  const changed = applyFailedMarks(
+    pool.indirectionData,
+    pool.markedFailed,
+    failed,
+    (cell, key) => pool.slots.has(cell) && pool.keys.get(cell) === key,
+    (cell) => pool.slots.get(cell) ?? INDIRECTION_MISS,
+  );
+  if (changed) ctx.device.queue.writeBuffer(pool.indirectionBuf, 0, pool.indirectionData);
+  return changed;
 }
 
 export function destroyLabelVolumePool(pool: LabelVolumePool): void {

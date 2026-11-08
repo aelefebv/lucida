@@ -477,14 +477,17 @@ export function computeLabelChunkRequests(args: LabelRequestArgs): ChunkRequest[
 }
 
 /**
- * Append one label's chunk requests to `requests`. The (t, z) mapping is per
- * label because labels carry their own geometry.
+ * The chunk a label draws from at source timepoint `t`: its chosen level, the
+ * label's own chunk-T, and, given a source `z`, the chunk-Z of the plane slice
+ * mode draws. The mapping is per label because labels carry their own
+ * geometry. Fetch and the failed-chunk marks share it, so both name the same
+ * chunks.
  */
-function appendLabelChunkRequests(
-  requests: ChunkRequest[],
+export function labelChunkAt(
   resolved: ResolvedLabel,
-  args: LabelRequestArgs,
-): void {
+  t: number,
+  z?: number,
+): { level: number; t: number; z: number | null } {
   const { label, source, levelIdx } = resolved;
   const labelLevels = label.image.multiscale.levels;
   const source0 = source.multiscale.levels[0];
@@ -496,9 +499,29 @@ function appendLabelChunkRequests(
 
   // Map source t to the label's own t (a T=1 label stays at t=0 for every
   // source timepoint) so scrubbing time never 404s the overlay away.
-  const labelT = labelTimeIndex(args.t, src0, lbl0);
+  const labelT = labelTimeIndex(t, src0, lbl0);
   const chunkT = lvl.chunk_shape[Axis.T] || 1;
   const targetChunkT = Math.floor(labelT / chunkT);
+  if (z === undefined) return { level: levelIdx, t: targetChunkT, z: null };
+
+  // Map the source Z to the label's own full-res Z, then to this level's grid.
+  const labelFullResZ = labelDepthZ(z, src0, lbl0);
+  const levelZ = sliceLevelZ(labelFullResZ, label0.shape[Axis.Z], lvl.shape[Axis.Z]);
+  const chunkZ = lvl.chunk_shape[Axis.Z] || 1;
+  return { level: levelIdx, t: targetChunkT, z: Math.floor(levelZ / chunkZ) };
+}
+
+/** Append one label's chunk requests to `requests`. */
+function appendLabelChunkRequests(
+  requests: ChunkRequest[],
+  resolved: ResolvedLabel,
+  args: LabelRequestArgs,
+): void {
+  const { label, levelIdx } = resolved;
+  const lvl = label.image.multiscale.levels[levelIdx];
+  const volume = (args.mode ?? "slice") === "volume";
+  const at = labelChunkAt(resolved, args.t, volume ? undefined : args.z);
+  const targetChunkT = at.t;
 
   const gy = grid1D(lvl.shape[Axis.Y], lvl.chunk_shape[Axis.Y]);
   const gx = grid1D(lvl.shape[Axis.X], lvl.chunk_shape[Axis.X]);
@@ -524,7 +547,7 @@ function appendLabelChunkRequests(
     });
   };
 
-  if ((args.mode ?? "slice") === "volume") {
+  if (volume) {
     // Volume: every z-chunk of the chosen level.
     const gz = grid1D(lvl.shape[Axis.Z], lvl.chunk_shape[Axis.Z]);
     for (let z = 0; z < gz; z++) {
@@ -537,15 +560,8 @@ function appendLabelChunkRequests(
     return;
   }
 
-  // Slice: the single Z-plane the current view needs. Map the source Z to
-  // the label's own full-res Z, then to this level's chunk grid.
-  const labelFullResZ = labelDepthZ(args.z, src0, lbl0);
-  const label0Depth = label0.shape[Axis.Z];
-  const levelDepth = lvl.shape[Axis.Z];
-  const levelZ = sliceLevelZ(labelFullResZ, label0Depth, levelDepth);
-  const chunkZ = lvl.chunk_shape[Axis.Z] || 1;
-  const targetChunkZ = Math.floor(levelZ / chunkZ);
-
+  // Slice: the single Z-plane the current view needs.
+  const targetChunkZ = at.z ?? 0;
   for (let y = 0; y < gy; y++) {
     for (let x = 0; x < gx; x++) {
       pushChunk(targetChunkZ, y, x);
