@@ -11,6 +11,7 @@ import {
   type WorkspaceSavedView,
   type WorkspaceSavedViewVisibility,
 } from "../workspaceApi.ts";
+import { positionLabel } from "../axes.ts";
 import type { SavedView, ViewState } from "./types.ts";
 
 export type {
@@ -256,8 +257,8 @@ export function defaultWorkspaceSavedViewName(
     base = `${base} - ${activeLayoutName}`;
   }
   // Two views of the same dataset and layout differ only by position, so
-  // append it. Z always appears; T and C only when non-zero, as in the URL
-  // encoder's defaults.
+  // append it. Z always appears; T and C only off their first position, as in
+  // the URL encoder's defaults.
   const position = positionSuffix(view);
   // Truncate the name, not the position that tells views apart.
   if (position.length > 0) {
@@ -270,10 +271,10 @@ function positionSuffix(
   view?: Pick<ViewState, "z_range" | "t" | "c"> | null,
 ): string {
   if (!view) return "";
-  const parts = [`Z${view.z_range.start}`];
-  if (view.t !== 0) parts.push(`T${view.t}`);
-  if (view.c !== 0) parts.push(`C${view.c}`);
-  return parts.join(" ");
+  const parts = [positionLabel("Z", view.z_range.start)];
+  if (view.t !== 0) parts.push(positionLabel("T", view.t));
+  if (view.c !== 0) parts.push(positionLabel("C", view.c));
+  return parts.join(" · ");
 }
 
 function truncate(s: string, max: number): string {
