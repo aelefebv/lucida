@@ -24,7 +24,7 @@ import { setBundleServices } from "./bundle.ts";
 import { setScriptControls } from "./steps.ts";
 import { installTraceSeam, resolveGpuIdentity } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
-import { createQuiescenceState, evaluateQuiescence } from "./quiescence.ts";
+import { createSettleState, evaluateSettle } from "../pipeline/settle.ts";
 import { TRACE_SCHEMA_VERSION } from "./types.ts";
 import { initialPlanningState } from "../pipeline/planning/index.ts";
 
@@ -131,7 +131,7 @@ function registerEnvironment(): void {
       devicePixelRatio: 2,
       viewport: { cssWidth: 800, cssHeight: 600, deviceWidth: 1600, deviceHeight: 1200 },
     }),
-    captureOutstanding: () => createQuiescenceState(),
+    captureOutstanding: () => createSettleState(),
   });
 }
 
@@ -726,7 +726,7 @@ describe("the trace seam", () => {
     await flush();
     traceRecorder.noteReading(0, 1, 2_000, 8);
     traceRecorder.noteQuiescence(
-      evaluateQuiescence(Object.assign(createQuiescenceState(), { inFlight: 1 }), performance.now()),
+      evaluateSettle(Object.assign(createSettleState(), { inFlight: 1 }), performance.now()),
     );
 
     const reading = seam.provisional()!;
@@ -838,7 +838,7 @@ describe("the cache's half of the quiescence predicate", () => {
     ]));
     await flush();
 
-    const inputs = cache.quiescenceInputs(createQuiescenceState());
+    const inputs = cache.settleInputs(createSettleState());
     expect(inputs.inFlight + inputs.speculativeInFlight).toBe(1);
     expect(inputs.pending + inputs.speculativePending).toBe(1);
     expect(inputs.speculativeInFlight + inputs.speculativePending).toBe(1);

@@ -13,11 +13,10 @@ what came back:
    its own run.
 2. Each pair's two frames are the size the viewport makes at device pixel
    ratio 2, are not blank, and are identical pixel for pixel, so how the
-   objects are laid out never changes what the viewer shows. Every run pins
-   the contrast window (``lucida trace --pin-contrast``). The default fit
-   samples whatever is resident when it runs, and two runs of one dataset
-   then draw the same data a level or two apart (issue #1037). The report
-   names the largest difference it saw.
+   objects are laid out never changes what the viewer shows. The contrast
+   limits are the page's own fit, which depends on the view alone, so a run
+   on a cold server and one on a warm server draw alike. The report names
+   the largest difference it saw.
 3. In the sharded runs, every backend read the trace recorded waited on the
    chunk read cap and moved exactly the inner chunks it carried, one shard
    index, or both. A read may carry one inner chunk, or a byte-contiguous
@@ -676,7 +675,6 @@ class Lucida:
             str(screenshot),
             "--device-pixel-ratio",
             str(DEVICE_PIXEL_RATIO),
-            "--pin-contrast",
             "--timeout-seconds",
             str(timeout_seconds),
             timeout=timeout_seconds + 120,

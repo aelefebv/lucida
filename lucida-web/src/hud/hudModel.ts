@@ -381,6 +381,9 @@ function quiescenceOf(quiescence: HudQuiescenceSample | null): HudStatusView {
   if (!quiescence) {
     return { label: "unpublished", detail: "the page has not published quiescence yet", tone: "absent" };
   }
+  if (quiescence.quiescent && quiescence.reason === "coverage_limited") {
+    return { label: "quiescent", detail: "settled covering what the memory budgets hold", tone: "ok" };
+  }
   if (quiescence.quiescent) {
     return { label: "quiescent", detail: "nothing pending, nothing in flight, the view resident", tone: "ok" };
   }

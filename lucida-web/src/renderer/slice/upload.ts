@@ -1,7 +1,7 @@
 /**
  * Slice chunk upload: staleness check, admission against the planner's
- * wanted keys, eviction, GPU write, intensity sampling, and the residency
- * report for every chunk.
+ * wanted keys, eviction, GPU write, and the residency report for every
+ * chunk.
  *
  * Re-cuts a resident chunk in place when the plane the current Z maps to is
  * not the one its slot holds. Pairs with `slice/zRetarget.ts`.
@@ -14,10 +14,9 @@ import type {
   SliceChunkDataMessage,
 } from "../workerProtocol.ts";
 import { writeSliceRegion } from "../gpuContext.ts";
-import { sampleIntensityRange } from "../../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { asUint32Slice, atlasTexels, atlasTextureFormat, decodedValues } from "../dataTypeUtil.ts";
+import { asUint32Slice, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.ts";
 import { makeCompositeKey } from "../chunkKeys.ts";
 import { LABEL_TIER, postChunkResidency, ResidencyBatch } from "../chunkUploadFeedback.ts";
 import { mayEvict } from "../eviction.ts";
@@ -30,7 +29,7 @@ import { getOrCreateLabelSlicePool, type SliceAtlasState } from "./atlas.ts";
  * Write pre-sliced uint32 label planes into the member's r32uint label pool.
  * The delivery path already extracted the current Z-plane, so each
  * `chunk.data` is `chunkY*chunkX` ids. Ids are categorical, so they keep full
- * 32-bit width and get no intensity sampling.
+ * 32-bit width.
  */
 export function handleLabelSliceChunkData(
   ctx: WorkerCtx,
@@ -127,8 +126,6 @@ export function handleSliceChunkData(
   const localZ = levelZ - targetChunkZ * chunkZ;
   const wanted = wantedChunksFor(ctx.state, memberId, tier);
 
-  let intensityChanged = false;
-  const perChunkSamples = Math.floor(10000 / Math.max(1, msg.chunks.length));
   const batch = new ResidencyBatch();
   let failure: unknown = null;
 
@@ -152,10 +149,6 @@ export function handleSliceChunkData(
         batch.refuse(chunk.key, "wrong-slice");
         continue;
       }
-
-      const r = sampleIntensityRange(decodedValues(chunk.data, chunk.dataType), perChunkSamples);
-      if (r.min < atlas.intensityMin) { atlas.intensityMin = r.min; intensityChanged = true; }
-      if (r.max > atlas.intensityMax) { atlas.intensityMax = r.max; intensityChanged = true; }
 
       let slotIndex: number;
       if (existingSlot !== undefined) {
@@ -216,9 +209,6 @@ export function handleSliceChunkData(
   batch.post(ctx, memberId, tier);
   if (batch.displacedAny) ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
 
-  if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
-  }
   if (failure !== null) throw failure;
 }
 
