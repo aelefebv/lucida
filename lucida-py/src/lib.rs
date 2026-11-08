@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use object_store::ObjectStore;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyLookupError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::wrap_pyfunction;
 
@@ -10,9 +10,10 @@ use lucida_core::camera::Camera;
 use lucida_core::command::{Command, ViewportCommand};
 use lucida_core::protocol::ClientMessage;
 use lucida_core::saved_view::SavedView;
-use lucida_core::scene::{DisplayState, Scene};
+use lucida_core::scene::{DisplayState, DocumentState, Scene};
 use lucida_core::view::ViewState;
 use lucida_core::view_transform::{ExplorationSidecar, ViewExtent, default_view};
+use lucida_core::viewer_profile::ProfileScene;
 
 #[pyclass]
 struct PyScene {
@@ -177,6 +178,58 @@ impl PyScene {
     }
 }
 
+/// A viewer profile's view opened over the workspace document, changed by the
+/// same commands the viewer's controls apply.
+///
+/// `document_json` is the workspace document from a snapshot, and `view_json`
+/// the profile's `SavedView`. Without `view_json` the view starts as a new
+/// profile does, with the visible datasets framed in 2D.
+#[pyclass(name = "ProfileScene")]
+struct PyProfileScene {
+    inner: ProfileScene,
+}
+
+#[pymethods]
+impl PyProfileScene {
+    #[new]
+    #[pyo3(signature = (document_json, view_json=None))]
+    fn new(document_json: &str, view_json: Option<&str>) -> PyResult<Self> {
+        let document: DocumentState = serde_json::from_str(document_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid workspace document: {e}")))?;
+        let inner = match view_json {
+            Some(json) => {
+                let view: SavedView = serde_json::from_str(json)
+                    .map_err(|e| PyValueError::new_err(format!("invalid saved view: {e}")))?;
+                ProfileScene::open(&document, &view)
+            }
+            None => ProfileScene::fitted(&document),
+        };
+        Ok(Self { inner })
+    }
+
+    /// Apply one viewport command, given as its tagged JSON. Raises
+    /// `LookupError` when it names a dataset, channel or label the workspace
+    /// lacks, and `ValueError` for any other refusal. A refused command
+    /// changes nothing.
+    fn apply(&mut self, command_json: &str) -> PyResult<()> {
+        let command: ViewportCommand = serde_json::from_str(command_json)
+            .map_err(|e| PyValueError::new_err(format!("invalid view command: {e}")))?;
+        self.inner.apply(command).map_err(|error| {
+            if error.is_missing_resource() {
+                PyLookupError::new_err(error.to_string())
+            } else {
+                PyValueError::new_err(error.to_string())
+            }
+        })
+    }
+
+    /// The view as the profile stores it, a `SavedView` JSON string.
+    fn saved_view_json(&self) -> PyResult<String> {
+        serde_json::to_string(&self.inner.saved_view())
+            .map_err(|e| PyValueError::new_err(e.to_string()))
+    }
+}
+
 #[pyclass]
 struct PyStore {
     store: Arc<dyn ObjectStore>,
@@ -270,6 +323,7 @@ fn explore(
 fn lucida(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyScene>()?;
     m.add_class::<PyStore>()?;
+    m.add_class::<PyProfileScene>()?;
     m.add_function(wrap_pyfunction!(explore, m)?)?;
     Ok(())
 }

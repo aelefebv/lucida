@@ -15,13 +15,14 @@ import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview, forgetMinimapOverviewUploads } from "./minimapPath.ts";
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
-import { createQuiescenceState, evaluateQuiescence, type QuiescenceState } from "./trace/quiescence.ts";
+import { createSettleState, evaluateSettle, settleSignal, type SettleOutcome, type SettleState } from "./pipeline/settle.ts";
 import { PointEvent, type CacheWarmth, type InputKind, type Outstanding, type RunConditions } from "./trace/types.ts";
 import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 import { readCanvasColors } from "./renderer/renderClient.ts";
 import { subscribeAppearance } from "./theme/appearance.ts";
 import { AdaptiveResolution, cappedPixelRatioScale } from "./renderResolution.ts";
 import { wakeFrames } from "./frameClock.ts";
+import { AutoContrastFitter, type AutoContrastListener } from "./pipeline/autoContrast.ts";
 
 // Re-exported so imports of these types from the render loop keep working.
 export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./renderLoopTypes.ts";
@@ -29,6 +30,8 @@ export type { DatasetEntry, RenderLoopOptions, MinimapOverlayData } from "./rend
 export interface LucidaCaptureReadyState {
   ready: boolean;
   reason: string;
+  /** What a capture waits for: a settled or stalled view, never one still settling. */
+  settle: SettleOutcome;
   frameCount: number;
   at: number;
   mode: "slice" | "volume";
@@ -92,7 +95,7 @@ export class RenderLoop implements TraceEnvironment {
    * Reused across every publication. The predicate is evaluated once per
    * tick, and steady-state allocation would show in the trace as GC stalls.
    */
-  private quiescenceState: QuiescenceState = createQuiescenceState();
+  private settleState: SettleState = createSettleState();
 
   private sliceState: SliceState = createSliceState();
   private volumeState: VolumeState = createVolumeState();
@@ -105,10 +108,13 @@ export class RenderLoop implements TraceEnvironment {
    */
   private uploader = new Uploader();
   private tickCoordinator = new TickCoordinator(this.uploader);
+  private readonly autoContrast = new AutoContrastFitter();
+  private autoContrastListener: AutoContrastListener | null = null;
   private cpuCacheUnsub: () => void;
   private gpuStatusUnsub: () => void = () => {};
   private configStoreUnsub: () => void;
   private appearanceUnsub: () => void;
+  private settleUnsub: () => void;
 
   private _renderScale = 1.0;
   /** Lowers the render resolution while a gesture's frames run long. */
@@ -148,6 +154,14 @@ export class RenderLoop implements TraceEnvironment {
       this.setDirty("interactive", "appearance_changed");
     });
     this.publishCaptureReady(false, "initializing");
+    // A capture reads the outcome off the capture-ready state, and a run that
+    // stops making progress ends as stalled, with what the page waits on.
+    this.settleUnsub = settleSignal.subscribe((outcome) => {
+      if (typeof window !== "undefined" && window.__lucidaCaptureReady) {
+        window.__lucidaCaptureReady.settle = outcome;
+      }
+      if (outcome === "stalled") traceRecorder.closeRun("stalled", settleSignal.stallReason);
+    });
     // The render loop is the one place that holds the canvas, the mode, the
     // dataset set and the CPU cache at once, so it is what the recorder asks
     // for a run's conditions.
@@ -156,7 +170,7 @@ export class RenderLoop implements TraceEnvironment {
     // through `addDataset`. That is the cold open the monitor exists to
     // explain, so it opens a run too, under its own cause.
     if (this.datasets.size > 0) this.openDatasetRun("loop_start");
-    this.publishQuiescence();
+    this.publishSettle();
   }
 
   /**
@@ -220,6 +234,7 @@ export class RenderLoop implements TraceEnvironment {
     this.cpuCacheUnsub();
     this.configStoreUnsub();
     this.appearanceUnsub();
+    this.settleUnsub();
     for (const unsub of this.unsubs.values()) {
       unsub();
     }
@@ -242,6 +257,7 @@ export class RenderLoop implements TraceEnvironment {
 
   addDataset(id: string, manifest: DatasetManifest): void {
     this.datasets.set(id, { manifest });
+    settleSignal.restart();
     this.publishCaptureReady(false, "dataset_added_waiting_for_render");
     this.openDatasetRun("dataset_added");
     this.setDirty("interactive", "dataset_added");
@@ -279,6 +295,7 @@ export class RenderLoop implements TraceEnvironment {
     clearVolumeForMembers(this.volumeState, memberIds);
     clearSliceForMembers(this.sliceState, memberIds);
     clearMinimapForDataset(this.minimapState, id);
+    this.autoContrast.forgetDataset(id);
 
     // Remove GPU + orchestrator + uploader resources for this dataset's
     // members. The orchestrator owns planner-side per-dataset state; the
@@ -316,6 +333,7 @@ export class RenderLoop implements TraceEnvironment {
     window.__lucidaCaptureReady = {
       ready,
       reason,
+      settle: settleSignal.outcome,
       frameCount: this.renderedFrameCount,
       at: performance.now(),
       mode: this.mode,
@@ -326,7 +344,7 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
-   * Publish the page's quiescence. Called at the end of every
+   * Publish the settle predicate. Called at the end of every
    * tick, which is also the only moment it can change: every arrival,
    * eviction and view change dirties a flag, and a dirty flag schedules a
    * tick. Nothing polls: an idle viewer publishes nothing because it does
@@ -335,13 +353,15 @@ export class RenderLoop implements TraceEnvironment {
    * `frameInFlight` reads the RAF handle after the tick has had its chance
    * to reschedule, so a loop with work left to do never looks settled.
    */
-  private publishQuiescence(): void {
-    const state = this.quiescenceState;
-    this.session.cpuCache.quiescenceInputs(state);
+  private publishSettle(): void {
+    const state = this.settleState;
+    this.session.cpuCache.settleInputs(state);
     state.interactiveDirty = this.interactiveDirty;
     state.residencyDirty = this.residencyDirty;
     state.frameInFlight = this.rafId !== null;
-    traceRecorder.noteQuiescence(evaluateQuiescence(state, performance.now()));
+    evaluateSettle(state, performance.now());
+    settleSignal.publish(state);
+    traceRecorder.noteQuiescence(state);
 
     // The reading tier rides the same moment. Queue depth and in-flight
     // come off the reading just taken rather than a second scan, and both
@@ -401,13 +421,21 @@ export class RenderLoop implements TraceEnvironment {
    * explicitly between ticks, and a stale reading would understate it.
    */
   captureOutstanding(): Outstanding {
-    const {
-      pendingUnclassified: _unclassified,
-      failedDetailChunks: _failedDetail,
-      failedCoarseChunks: _failedCoarse,
-      ...outstanding
-    } = this.session.cpuCache.quiescenceInputs(createQuiescenceState());
-    return outstanding;
+    const s = this.session.cpuCache.settleInputs(createSettleState());
+    return {
+      pending: s.pending,
+      inFlight: s.inFlight,
+      speculativePending: s.speculativePending,
+      speculativeInFlight: s.speculativeInFlight,
+      desiredDetailChunks: s.desiredDetailChunks,
+      residentDetailChunks: s.residentDetailChunks,
+      desiredCoarseChunks: s.desiredCoarseChunks,
+      residentCoarseChunks: s.residentCoarseChunks,
+      detailBytes: s.detailBytes,
+      detailBudgetBytes: s.detailBudgetBytes,
+      coarseBytes: s.coarseBytes,
+      coarseBudgetBytes: s.coarseBudgetBytes,
+    };
   }
 
   private publishRenderedCaptureReady(): void {
@@ -479,6 +507,7 @@ export class RenderLoop implements TraceEnvironment {
    */
   markInput(input: InputKind): void {
     if (this.datasets.size > 0) traceRecorder.noteInput(input);
+    settleSignal.restart();
     this.resolution.noteInput();
     this.setDirty("interactive", input);
   }
@@ -506,6 +535,18 @@ export class RenderLoop implements TraceEnvironment {
 
   resetVolumeCache(): void {
     resetVolumeState(this.volumeState);
+  }
+
+  /**
+   * Hand each channel's auto-contrast fit to `listener` as the view's chunks
+   * become resident. A new listener gets the current fits on the next tick:
+   * a loop that starts on a warm cache fits on its first tick, before its
+   * owner can attach.
+   */
+  setAutoContrastListener(listener: AutoContrastListener | null): void {
+    this.autoContrastListener = listener;
+    this.autoContrast.reset();
+    if (listener) this.setDirty("residency", "auto_contrast_listener");
   }
 
   setRenderScale(s: number): void {
@@ -561,6 +602,7 @@ export class RenderLoop implements TraceEnvironment {
       this.residencyDirty = true;
     }
     this.wake.note(source);
+    settleSignal.disturb();
     this.scheduleIfNeeded();
     // Whatever dirties the frame can move what the overlays show.
     wakeFrames();
@@ -690,9 +732,20 @@ export class RenderLoop implements TraceEnvironment {
     if (tickMinimapOverview(ctx, this.minimapState, now)) this.setDirty("residency", "minimap_overview_continuation");
     if (shouldRender) tickMinimap(ctx, this.minimapState, ctx.scene.z());
 
+    // Before quiescence is published: limits the listener sets dirty the
+    // loop, so a settled frame is never one drawn with the limits before.
+    if (this.autoContrastListener) {
+      this.autoContrast.update(
+        this.tickCoordinator.getLastPlans(),
+        this.datasets,
+        this.session.cpuCache,
+        this.autoContrastListener,
+      );
+    }
+
     // If work remains (budget exhausted or chunks pending), schedule another frame
     this.scheduleIfNeeded();
 
-    this.publishQuiescence();
+    this.publishSettle();
   };
 }

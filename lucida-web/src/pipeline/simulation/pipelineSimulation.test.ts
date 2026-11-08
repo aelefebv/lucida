@@ -12,10 +12,14 @@ import {
   expectSettled,
   initSimulationWasm,
   runScenario,
+  type PhaseOutcome,
   type Scenario,
+  type ScenarioSpec,
   type SimulationRun,
 } from "./harness.ts";
 import { collection, singleImage, type PyramidSpec } from "./fixtures.ts";
+import { rampSamples, type SourceChunk } from "./source.ts";
+import type { ChannelFit } from "../autoContrast.ts";
 
 beforeAll(initSimulationWasm);
 
@@ -75,24 +79,28 @@ describe("a static volume", () => {
 
 describe("a wide collection with more tiles than the coarse budget holds", () => {
   // 36 tiles, one coarse chunk each, against a coarse budget of 20 chunks.
-  settles(
-    describeScenario({
-      name: "wide collection",
-      dataset: collection({
-        id: "wide",
-        rows: 6,
-        columns: 6,
-        pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 2 },
-      }),
-      cache: { overviewBudgetBytes: 20 * CHUNK_64_BYTES },
-      // The view wants more than the budget holds, so covering less is the settled state.
-      gpuComplete: false,
+  const scenario = describeScenario({
+    name: "wide collection",
+    dataset: collection({
+      id: "wide",
+      rows: 6,
+      columns: 6,
+      pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 2 },
     }),
-    {
-      stallsAt: [1, 2],
-      because: "the wanted set ignores the coarse budget, and settle has no covering-less state",
-    },
-  );
+    cache: { overviewBudgetBytes: 20 * CHUNK_64_BYTES },
+    // The view wants more than the budget holds, so covering less is the settled state.
+    gpuComplete: false,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles covering less at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.quiescence).toBe("coverage_limited");
+      expect(open.coarse).toEqual({ resident: 20, desired: 36 });
+      expect(open.coverage).toBeLessThan(1);
+    });
+  }
 });
 
 describe("pending generated chunks that become available later", () => {
@@ -324,4 +332,116 @@ describe("a Z scrub on a level downsampled along Z", () => {
       steps: [{ scrub: { z: 15 } }, { scrub: { z: 16 } }],
     }),
   );
+});
+
+/** The last auto-contrast fit each channel got in a phase. */
+function lastFits(phase: PhaseOutcome): Map<string, ChannelFit> {
+  const out = new Map<string, ChannelFit>();
+  for (const { datasetId, channel, fit } of phase.fits) out.set(`${datasetId}:${channel}`, fit);
+  return out;
+}
+
+/** How many times each channel's limits moved in a phase. */
+function fitCounts(phase: PhaseOutcome): number[] {
+  const counts = new Map<string, number>();
+  for (const { datasetId, channel } of phase.fits) {
+    const key = `${datasetId}:${channel}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.values()];
+}
+
+/**
+ * A latency per chunk from a hash of its key, so chunks arrive out of plan
+ * order. `reversed` turns that order around.
+ */
+function scatteredLatency(reversed: boolean): (chunk: SourceChunk) => number {
+  return (chunk) => {
+    let h = 0;
+    for (const ch of `${chunk.imageId}/${chunk.chunkKey}`) h = (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0;
+    const spread = h % 60;
+    return 10 + (reversed ? 59 - spread : spread);
+  };
+}
+
+describe("auto-contrast limits", () => {
+  const views: Array<Omit<ScenarioSpec, "source">> = [
+    {
+      name: "single image over a generated coarse level",
+      dataset: singleImage({
+        id: "flat",
+        pyramid: { shape: [1, 1, 1, 1024, 1024], chunk: [1, 64, 64], levels: 2 },
+        generatedCoarse: { readyAtMs: 0 },
+      }),
+    },
+    { name: "single image over a source coarse level", dataset: singleImage({ id: "pyramid", pyramid: IMAGE_1024 }) },
+    {
+      name: "volume",
+      mode: "volume",
+      dataset: singleImage({ id: "cube", pyramid: { shape: [1, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 } }),
+    },
+    {
+      name: "two-channel collection",
+      dataset: collection({
+        id: "plate",
+        rows: 3,
+        columns: 4,
+        pyramid: { shape: [1, 2, 1, 256, 256], chunk: [1, 64, 64], levels: 2 },
+      }),
+    },
+  ];
+
+  for (const view of views) {
+    for (const dpr of DEVICE_PIXEL_RATIOS) {
+      it(`gives a ${view.name} one set of limits in any arrival order at device pixel ratio ${dpr}`, async () => {
+        const forward = await runScenario(
+          describeScenario({ ...view, source: { latencyMs: scatteredLatency(false) } }),
+          { dpr },
+        );
+        const reversed = await runScenario(
+          describeScenario({ ...view, source: { latencyMs: scatteredLatency(true) } }),
+          { dpr },
+        );
+        expectSettled(forward);
+        expectSettled(reversed);
+        // The same chunks, in another order.
+        expect([...reversed.served].sort()).toEqual([...forward.served].sort());
+        expect(reversed.served).not.toEqual(forward.served);
+
+        const limits = lastFits(forward.phases[0]);
+        expect(limits.size).toBeGreaterThan(0);
+        expect(lastFits(reversed.phases[0])).toEqual(limits);
+        for (const run of [forward, reversed]) {
+          // At most a stand-in and then the settled fit.
+          for (const count of fitCounts(run.phases[0])) expect(count).toBeLessThanOrEqual(2);
+          for (const fit of lastFits(run.phases[0]).values()) expect(fit.provisional).toBe(false);
+        }
+      });
+    }
+  }
+
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`leaves a generated level out of the settled limits at device pixel ratio ${dpr}`, async () => {
+      const dataset = singleImage({
+        id: "lifted",
+        pyramid: { shape: [1, 1, 1, 1024, 1024], chunk: [1, 64, 64], levels: 2 },
+        generatedCoarse: { readyAtMs: 0 },
+      });
+      const generatedLevel = dataset.generated!.levelIndex;
+      // Max-pooling lifts a generated level's values; these sit far above the source's.
+      const lifted = (chunk: SourceChunk, count: number): Uint16Array<ArrayBuffer> =>
+        Number(chunk.chunkKey.split("/")[0]) === generatedLevel
+          ? new Uint16Array(count).fill(60_000)
+          : rampSamples(chunk, count);
+      const plain = await runScenario(describeScenario({ name: "plain generated level", dataset }), { dpr });
+      const bright = await runScenario(
+        describeScenario({ name: "lifted generated level", dataset, source: { samples: lifted } }),
+        { dpr },
+      );
+      expectSettled(plain);
+      expectSettled(bright);
+      expect(lastFits(bright.phases[0])).toEqual(lastFits(plain.phases[0]));
+      for (const fit of lastFits(bright.phases[0]).values()) expect(fit.limits.max).toBeLessThan(60_000);
+    });
+  }
 });

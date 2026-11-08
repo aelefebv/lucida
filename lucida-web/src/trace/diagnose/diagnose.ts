@@ -900,17 +900,26 @@ function buildVerdict(
     if (run.header.endReason !== "quiescent" && run.header.endReason !== "explicit") {
       return {
         kind: "unsettled",
-        text: `no threshold crossed, but the run ended as ${run.header.endReason} rather than settling — every total below is a lower bound; ${tail}${caveat}`,
+        text: `no threshold crossed, but the run ended as ${endedAs(run.header)} rather than settling — every total below is a lower bound; ${tail}${caveat}`,
         confidence: attribution.confidence,
       };
     }
-    // A clear run can still carry a number over its ceiling. The verdict says
-    // why, rather than sending the reader to the findings to find out.
+    // A clear run can still carry a number over its ceiling, or have settled
+    // covering less than it wanted. The verdict says so, rather than sending
+    // the reader to the findings to find out.
     const firstPaint = findings.find((finding) => finding.rule === RULESET.firstPaint.id);
     if (firstPaint) {
       return {
         kind: "clear",
         text: `${describeFirstPaint(firstPaint)}${caveat}`,
+        confidence: attribution.confidence,
+      };
+    }
+    const budgetBound = findings.filter((finding) => finding.rule === RULESET.steadyState.budgetBound.id);
+    if (budgetBound.length > 0) {
+      return {
+        kind: "clear",
+        text: `no stall — ${budgetBound.map(describeSteadyStateFinding).join("; ")}${caveat}`,
         confidence: attribution.confidence,
       };
     }
@@ -1029,6 +1038,13 @@ function browserCacheCold(warmth: CacheWarmth): boolean {
   return warmth.detailChunks + warmth.coarseChunks === 0;
 }
 
+/** How a run ended, with what it waited on when it stalled. */
+function endedAs(header: TraceRun["header"]): string {
+  return header.endReason === "stalled" && header.stallReason
+    ? `stalled (${header.stallReason})`
+    : header.endReason;
+}
+
 function runIdentity(run: TraceRun): RunIdentity {
   const header = run.header;
   const warmth = header.cacheWarmth;
@@ -1036,6 +1052,7 @@ function runIdentity(run: TraceRun): RunIdentity {
     datasetIds: header.datasetIds,
     cause: header.cause,
     endReason: header.endReason,
+    endedAs: endedAs(header),
     wallMs: usToMs(header.durationUs),
     devicePixelRatio: header.devicePixelRatio,
     viewport: `${header.viewport.deviceWidth}x${header.viewport.deviceHeight}px`,
