@@ -1,7 +1,7 @@
 //! Golden-fixture lock tests for the JSON wire protocol.
 //!
 //! Every JSON payload family that crosses the WebSocket is pinned by a
-//! fixture under `wire-fixtures/`. This test serializes the same values and
+//! fixture under `wire-fixtures/`, as is a saved view's `#view=` payload. This test serializes the same values and
 //! asserts byte equality, and `lucida-web/src/wireGoldens.test.ts` parses
 //! the same files, so a schema change on either side fails a suite. Deleting
 //! a `required` key must fail deserialization, and a new wire variant is a
@@ -2548,6 +2548,114 @@ fn enum_vocabulary_matches_golden() {
     assert_no_failures(failures);
 }
 
+const SAVED_VIEW_PAYLOAD_FILES: &[&str] = &["saved-view/payload.json"];
+
+/// Payloads the web viewer wrote before one-channel images opened gray, each
+/// with the view its decoder then returned. Hand-frozen, never regenerated:
+/// they prove an old link still restores as it did, magenta included.
+const RECORDED_PAYLOAD_FILES: &[&str] =
+    &["saved-view/recorded_v1.json", "saved-view/recorded_v2.json"];
+
+/// A view and the `#view=` payload the codec writes for it. The web and the
+/// Python client must write the same payload for the same view.
+#[derive(Serialize, serde::Deserialize)]
+struct PayloadGolden {
+    view: SavedView,
+    payload: String,
+}
+
+/// A one-channel layer in gray, which the payload must carry because the
+/// frozen defaults say magenta, beside a three-channel layer in the default
+/// cycle, which it leaves out.
+fn payload_saved_view() -> SavedView {
+    let one = DatasetId(SINGLE_DATASET_ID.into());
+    let three = DatasetId("wds-7c21".into());
+    let mut view = SavedView::empty([1920, 1080]);
+    view.datasets = vec![
+        "gs://lucida-fixtures/sample-plane.zarr".into(),
+        "gs://lucida-fixtures/sample-volume.zarr".into(),
+    ];
+    view.camera = slice_camera();
+    view.view = shared_view_state();
+    view.dataset_order = vec![one.clone(), three.clone()];
+    view.dataset_settings.insert(
+        one.clone(),
+        DatasetDisplaySettings {
+            channel_settings: vec![ChannelSettings {
+                colormap: Colormap::default_for_channel(0, 1),
+                contrast_max: 4000.0,
+                ..Default::default()
+            }],
+            label_settings: vec![LabelSettings {
+                visible: true,
+                opacity: 0.35,
+            }],
+            label_names: vec!["region-a".into()],
+            ..Default::default()
+        },
+    );
+    view.dataset_settings.insert(
+        three,
+        DatasetDisplaySettings {
+            opacity: 0.8,
+            channel_settings: (0..3)
+                .map(|i| ChannelSettings {
+                    colormap: Colormap::default_for_channel(i, 3),
+                    name: (i == 1).then(|| "Region B".into()),
+                    ..Default::default()
+                })
+                .collect(),
+            solo: Some(1),
+            ..Default::default()
+        },
+    );
+    view.auto_contrast.insert(one, false);
+    view
+}
+
+#[test]
+fn saved_view_payloads_match_goldens() {
+    let mut failures = Vec::new();
+    let view = payload_saved_view();
+    let golden = PayloadGolden {
+        payload: view.to_payload(),
+        view,
+    };
+    let mut required = req("/view", SAVED_VIEW_REQUIRED);
+    required.push("/payload".into());
+    check(
+        SAVED_VIEW_PAYLOAD_FILES[0],
+        &golden,
+        &required,
+        &mut failures,
+    );
+    match lucida_core::saved_view::decode_payload(&golden.payload)
+        .map(serde_json::from_value::<SavedView>)
+    {
+        Ok(Ok(decoded)) if decoded == golden.view => {}
+        other => failures.push(format!(
+            "{}: the payload does not decode to its view: {other:?}",
+            SAVED_VIEW_PAYLOAD_FILES[0]
+        )),
+    }
+
+    for rel in RECORDED_PAYLOAD_FILES {
+        let recorded: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(fixture_root().join(rel))
+                .unwrap_or_else(|e| panic!("{rel}: cannot read fixture: {e}")),
+        )
+        .unwrap_or_else(|e| panic!("{rel}: not JSON: {e}"));
+        let payload = recorded["payload"].as_str().expect("a recorded payload");
+        match lucida_core::saved_view::decode_payload(payload) {
+            Ok(decoded) if decoded == recorded["view"] => {}
+            other => failures.push(format!(
+                "{rel}: a recorded payload no longer restores the view it did: {other:?}"
+            )),
+        }
+    }
+    assert_no_failures(failures);
+}
+
 /// The set of fixture files on disk must equal the set declared by the
 /// golden tables — a fixture without a Rust golden (stale file, or a path
 /// declared in an exhaustiveness arm without a golden entry) fails here,
@@ -2573,6 +2681,8 @@ fn fixture_directory_matches_declared_set() {
         .chain(GENERATED_FILES)
         .chain(REQUEST_FILES)
         .chain(VOCAB_FILES)
+        .chain(SAVED_VIEW_PAYLOAD_FILES)
+        .chain(RECORDED_PAYLOAD_FILES)
     {
         declared.insert((*rel).to_string());
     }

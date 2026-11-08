@@ -9,7 +9,7 @@
  * what the bundle carries, where each field comes from, and what it says when
  * a section could not be captured.
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 
 import { DEFAULT_PLANNING_CONFIG } from "../pipeline/planning/config.ts";
 import {
@@ -30,6 +30,10 @@ import {
 import { healthyLocalOpen, interactionRun } from "./diagnose/fixtures.ts";
 import type { DecodedImage } from "./flatFrame.ts";
 import { TRACE_SCHEMA_VERSION } from "./types.ts";
+import { loadWasm } from "../viewProperties.ts";
+
+// The view URL decodes through the core codec.
+beforeAll(() => loadWasm());
 
 describe("what the bundle carries", () => {
   it("holds every section the ticket names, from one export", async () => {

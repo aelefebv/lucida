@@ -156,7 +156,7 @@ export type LayoutMutationMode = "broadcast" | "local" | "refuse";
  * `PresenceState`.
  *
  * `v` is `number`, not the `1` literal, because decoders accept payloads from
- * newer senders best-effort (see `encoder.ts::validateAndRestore`).
+ * newer senders best-effort (see `encoder.ts::decode`).
  */
 export interface SavedView {
   v: number;

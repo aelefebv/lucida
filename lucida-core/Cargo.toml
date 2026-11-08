@@ -15,10 +15,14 @@ test-support = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Exact float parsing: a saved view decoded and encoded again must keep every
+# camera coordinate, and the default parser can land one ULP off.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 lucida-content = { path = "../lucida-content" }
 lucida-protocol = { path = "../lucida-protocol" }
 indexmap = { version = "2", features = ["serde"] }
+base64 = "0.23"
+flate2 = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
