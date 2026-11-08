@@ -50,7 +50,7 @@ export function handleLabelSliceChunkData(
     return;
   }
 
-  const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight);
+  const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY);
   if (!pool) {
     // Nothing of the batch is resident, so the page must not count it as sent.
     refuseAll("atlas-policy");
