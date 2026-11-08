@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
@@ -55,7 +55,6 @@ pub struct LiveWorkspace {
     /// session lock so a database write never stalls chunk serving or
     /// presence.
     document_turn: Mutex<()>,
-    next_id: AtomicU64,
     empty_since: Mutex<Option<Instant>>,
     background_cancelled: AtomicBool,
     connections: std::sync::Mutex<Connections>,
@@ -81,7 +80,6 @@ impl LiveWorkspace {
             tx,
             unicast_routes: Arc::new(Mutex::new(HashMap::new())),
             document_turn: Mutex::new(()),
-            next_id: AtomicU64::new(0),
             empty_since: Mutex::new(Some(Instant::now())),
             background_cancelled: AtomicBool::new(false),
             connections: std::sync::Mutex::default(),
@@ -148,10 +146,6 @@ impl LiveWorkspace {
         if let Some(sender) = sender {
             sender.request_close(request);
         }
-    }
-
-    pub fn next_client_id(&self) -> u64 {
-        self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
     pub fn cancel_background(&self) -> bool {

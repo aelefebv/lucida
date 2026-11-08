@@ -59,10 +59,15 @@ use crate::source_limiter::{ReaderId, RequestLabel, SourceReadLimiter};
 /// re-runs the sweep to find where their own knee is.
 const DEFAULT_SOURCE_READ_CONCURRENCY: usize = 16;
 
-/// Byte budget for one dataset's source cache. Every production caller sizes
-/// its `CachedStore` from this constant so the metadata reads an open performs
-/// and the chunk reads that follow share one budget of a known size.
+/// Default byte budget for the process's source caches, all of them together.
+/// A store built with [`CachedStore::new`] gets a budget of its own of the
+/// size it asks for instead.
 pub const DEFAULT_SOURCE_CACHE_BYTES: usize = 512 * 1024 * 1024;
+
+/// Environment variable an operator can set to override
+/// [`DEFAULT_SOURCE_CACHE_BYTES`] for the process budget. Read once, the first
+/// time the budget is used.
+pub const SOURCE_CACHE_BYTES_ENV: &str = "LUCIDA_SOURCE_CACHE_BYTES";
 
 /// Cap on concurrent backend reads of *metadata* objects, which are bounded
 /// separately from chunk reads. Not operator-tunable: unlike the chunk cap it
@@ -115,11 +120,156 @@ fn global_metadata_read_limiter() -> &'static Arc<Semaphore> {
 /// [`DEFAULT_SOURCE_READ_CONCURRENCY`]. A non-numeric or zero value is
 /// ignored in favour of the default so a typo can never wedge all reads.
 fn configured_source_read_limit() -> usize {
-    std::env::var(SOURCE_READ_CONCURRENCY_ENV)
+    positive_env(SOURCE_READ_CONCURRENCY_ENV).unwrap_or(DEFAULT_SOURCE_READ_CONCURRENCY)
+}
+
+fn positive_env(name: &str) -> Option<usize> {
+    std::env::var(name)
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|&limit| limit > 0)
-        .unwrap_or(DEFAULT_SOURCE_READ_CONCURRENCY)
+        .filter(|&value| value > 0)
+}
+
+/// One byte budget, and one LRU order, over every source cache that holds it.
+///
+/// There is one [`CachedStore`] per open source, so a budget per store would
+/// let resident bytes grow with the number of sources. Sharing one order means
+/// a newly opened source makes room by evicting the coldest bytes of any
+/// source, its own included, and the total never passes the budget.
+pub struct SourceCacheBudget {
+    state: Mutex<BudgetState>,
+    next_store: std::sync::atomic::AtomicU64,
+}
+
+struct BudgetState {
+    lru: LruCache<(StoreId, ReadKey), Bytes>,
+    max_bytes: usize,
+    current_bytes: usize,
+    stores: HashMap<StoreId, StoreUsage>,
+}
+
+/// Which store an entry belongs to, so two sources with the same object path
+/// keep apart.
+type StoreId = u64;
+
+#[derive(Default, Clone, Copy)]
+struct StoreUsage {
+    bytes: usize,
+    entries: usize,
+    /// Entries of this store evicted, by whichever store's insert.
+    evictions: u64,
+}
+
+impl SourceCacheBudget {
+    pub fn new(max_bytes: usize) -> Arc<Self> {
+        Arc::new(Self {
+            state: Mutex::new(BudgetState {
+                lru: LruCache::unbounded(),
+                max_bytes,
+                current_bytes: 0,
+                stores: HashMap::new(),
+            }),
+            next_store: std::sync::atomic::AtomicU64::new(0),
+        })
+    }
+
+    /// The budget every [`CachedStore::shared_for_source`] cache draws on,
+    /// sized by [`SOURCE_CACHE_BYTES_ENV`] or [`DEFAULT_SOURCE_CACHE_BYTES`].
+    pub fn process() -> &'static Arc<SourceCacheBudget> {
+        static BUDGET: OnceLock<Arc<SourceCacheBudget>> = OnceLock::new();
+        BUDGET.get_or_init(|| {
+            SourceCacheBudget::new(
+                positive_env(SOURCE_CACHE_BYTES_ENV).unwrap_or(DEFAULT_SOURCE_CACHE_BYTES),
+            )
+        })
+    }
+
+    pub fn max_bytes(&self) -> usize {
+        self.state.lock().unwrap().max_bytes
+    }
+
+    /// Resident bytes across every store on this budget.
+    pub fn current_bytes(&self) -> usize {
+        self.state.lock().unwrap().current_bytes
+    }
+
+    fn register(&self) -> StoreId {
+        self.next_store
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn usage(&self, store: StoreId) -> StoreUsage {
+        self.state
+            .lock()
+            .unwrap()
+            .stores
+            .get(&store)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn get(&self, store: StoreId, key: &ReadKey) -> Option<Bytes> {
+        self.state
+            .lock()
+            .unwrap()
+            .lru
+            .get(&(store, key.clone()))
+            .cloned()
+    }
+
+    /// Drop every entry of a store that is going away. Its bytes would age
+    /// out anyway, but holding them meanwhile spends budget on a source
+    /// nothing can read any more.
+    fn release(&self, store: StoreId) {
+        let mut state = self.state.lock().unwrap();
+        let keys: Vec<_> = state
+            .lru
+            .iter()
+            .filter(|((owner, _), _)| *owner == store)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            if let Some(bytes) = state.lru.pop(&key) {
+                state.current_bytes -= bytes.len();
+            }
+        }
+        state.stores.remove(&store);
+    }
+}
+
+impl BudgetState {
+    /// Make `bytes` resident under `key`, evicting from the LRU end to stay
+    /// within budget. A key that became resident meanwhile keeps what it
+    /// has, and that is what the caller gets back. Bytes larger than the
+    /// whole budget are handed back without being kept.
+    fn insert(&mut self, store: StoreId, key: &ReadKey, bytes: Bytes) -> Bytes {
+        let entry_key = (store, key.clone());
+        if let Some(existing) = self.lru.get(&entry_key) {
+            return existing.clone();
+        }
+        let new_size = bytes.len();
+        if new_size > self.max_bytes {
+            return bytes;
+        }
+        while self.current_bytes + new_size > self.max_bytes {
+            match self.lru.pop_lru() {
+                Some(((owner, _), evicted)) => {
+                    self.current_bytes -= evicted.len();
+                    let usage = self.stores.entry(owner).or_default();
+                    usage.bytes -= evicted.len();
+                    usage.entries -= 1;
+                    usage.evictions += 1;
+                }
+                None => break,
+            }
+        }
+        self.current_bytes += new_size;
+        let usage = self.stores.entry(store).or_default();
+        usage.bytes += new_size;
+        usage.entries += 1;
+        self.lru.put(entry_key, bytes.clone());
+        bytes
+    }
 }
 
 /// The classification-relevant shape of a captured backend error.
@@ -431,7 +581,10 @@ pub struct CacheStats {
 /// A memory-bounded LRU cache wrapping an ObjectStore.
 pub struct CachedStore {
     inner: Arc<dyn ObjectStore>,
-    cache: Mutex<LruState>,
+    /// Where this store's entries live, possibly alongside other stores'.
+    budget: Arc<SourceCacheBudget>,
+    store_id: StoreId,
+    counters: Mutex<ReadCounters>,
     /// In-flight backend reads, and the range reads queued for a permit that
     /// a neighbour's request can carry. See [`Flights`].
     in_flight: InFlight,
@@ -462,13 +615,10 @@ pub struct CachedStore {
     metadata_read: Arc<Semaphore>,
 }
 
-struct LruState {
-    lru: LruCache<ReadKey, Bytes>,
-    current_bytes: usize,
-    max_bytes: usize,
+#[derive(Default)]
+struct ReadCounters {
     hits: u64,
     misses: u64,
-    evictions: u64,
     backend_errors: u64,
     coalesced: u64,
     source_reads: u64,
@@ -779,24 +929,28 @@ fn source_cache_registry() -> &'static Mutex<HashMap<String, std::sync::Weak<Cac
 
 impl CachedStore {
     /// The cache for one source, shared with any live caller that asked for
-    /// the same `source_key`.
+    /// the same `source_key`, and drawing on `budget` with every other source.
     ///
     /// `source_key` must identify the *source* (lucida uses the canonical
     /// URL's dataset source id), not the workspace-local dataset: two
     /// workspaces viewing one URL are two datasets over one source, and the
     /// second open should be served from what the first already read.
-    /// `inner` and `max_bytes` are used only when no live cache exists for
-    /// the key.
+    /// `inner` and `budget` are used only when no live cache exists for the
+    /// key.
     pub fn shared_for_source(
         source_key: &str,
         inner: Arc<dyn ObjectStore>,
-        max_bytes: usize,
+        budget: &Arc<SourceCacheBudget>,
     ) -> Arc<Self> {
         let mut registry = source_cache_registry().lock().unwrap();
         if let Some(live) = registry.get(source_key).and_then(std::sync::Weak::upgrade) {
             return live;
         }
-        let created = Arc::new(Self::new(inner, max_bytes));
+        let created = Arc::new(Self::with_budget(
+            inner,
+            Arc::clone(budget),
+            global_source_read_limiter().clone(),
+        ));
         registry.insert(source_key.to_string(), Arc::downgrade(&created));
         // Drop the tombstones left by sources that have since closed. Bounded
         // work proportional to the registry, run only when a source is opened.
@@ -804,7 +958,7 @@ impl CachedStore {
         created
     }
 
-    /// Create a new CachedStore wrapping `inner` with a maximum cache size of
+    /// Create a new CachedStore wrapping `inner` with a budget of its own of
     /// `max_bytes`. Backend-read concurrency is bounded by the process-global
     /// limiter shared with every other `CachedStore` built this way.
     pub fn new(inner: Arc<dyn ObjectStore>, max_bytes: usize) -> Self {
@@ -820,20 +974,21 @@ impl CachedStore {
         max_bytes: usize,
         source_read: Arc<SourceReadLimiter>,
     ) -> Self {
+        Self::with_budget(inner, SourceCacheBudget::new(max_bytes), source_read)
+    }
+
+    /// A store whose entries share `budget`, and its LRU order, with every
+    /// other store on it.
+    pub fn with_budget(
+        inner: Arc<dyn ObjectStore>,
+        budget: Arc<SourceCacheBudget>,
+        source_read: Arc<SourceReadLimiter>,
+    ) -> Self {
         Self {
             inner,
-            cache: Mutex::new(LruState {
-                lru: LruCache::unbounded(),
-                current_bytes: 0,
-                max_bytes,
-                hits: 0,
-                misses: 0,
-                evictions: 0,
-                backend_errors: 0,
-                coalesced: 0,
-                source_reads: 0,
-                source_read_nanos: 0,
-            }),
+            store_id: budget.register(),
+            budget,
+            counters: Mutex::new(ReadCounters::default()),
             in_flight: Mutex::new(Flights::default()),
             absent: Mutex::new(LruCache::new(
                 std::num::NonZeroUsize::new(ABSENT_MEMO_CAPACITY).expect("capacity is non-zero"),
@@ -843,20 +998,28 @@ impl CachedStore {
         }
     }
 
+    /// `max_bytes` is the whole budget this store draws on, shared or not;
+    /// `current_bytes`, `entry_count` and `evictions` are this store's part.
     pub fn stats(&self) -> CacheStats {
-        let state = self.cache.lock().unwrap();
+        let usage = self.budget.usage(self.store_id);
+        let max_bytes = self.budget.max_bytes();
+        let counters = self.counters.lock().unwrap();
         CacheStats {
-            max_bytes: state.max_bytes,
-            current_bytes: state.current_bytes,
-            entry_count: state.lru.len(),
-            hits: state.hits,
-            misses: state.misses,
-            evictions: state.evictions,
-            backend_errors: state.backend_errors,
-            coalesced: state.coalesced,
-            source_reads: state.source_reads,
-            source_read_millis: (state.source_read_nanos / 1_000_000) as u64,
+            max_bytes,
+            current_bytes: usage.bytes,
+            entry_count: usage.entries,
+            hits: counters.hits,
+            misses: counters.misses,
+            evictions: usage.evictions,
+            backend_errors: counters.backend_errors,
+            coalesced: counters.coalesced,
+            source_reads: counters.source_reads,
+            source_read_millis: (counters.source_read_nanos / 1_000_000) as u64,
         }
+    }
+
+    fn cached(&self, key: &ReadKey) -> Option<Bytes> {
+        self.budget.get(self.store_id, key)
     }
 
     /// Get bytes by path, returning cached data on hit or fetching from the
@@ -986,23 +1149,17 @@ impl CachedStore {
             let mut absent = self.absent.lock().unwrap();
             if absent.get(&key).is_some() {
                 drop(absent);
-                let mut state = self.cache.lock().unwrap();
-                state.hits += 1;
-                drop(state);
+                self.counters.lock().unwrap().hits += 1;
                 metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
                 return Ok(false);
             }
         }
-        {
-            let mut state = self.cache.lock().unwrap();
-            if state.lru.get(&ReadKey::new(path, None)).is_some() {
-                state.hits += 1;
-                drop(state);
-                metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
-                return Ok(true);
-            }
-            state.misses += 1;
+        if self.cached(&ReadKey::new(path, None)).is_some() {
+            self.counters.lock().unwrap().hits += 1;
+            metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
+            return Ok(true);
         }
+        self.counters.lock().unwrap().misses += 1;
 
         // The cache's own read-cost counter times from the moment the read
         // starts queueing, which is where it has always started. The row
@@ -1029,11 +1186,11 @@ impl CachedStore {
         // The round trip happened whatever it answered, so it is counted once
         // here rather than in each arm below.
         {
-            let mut state = self.cache.lock().unwrap();
-            state.source_reads += 1;
-            state.source_read_nanos += elapsed_nanos;
+            let mut counters = self.counters.lock().unwrap();
+            counters.source_reads += 1;
+            counters.source_read_nanos += elapsed_nanos;
             if !matches!(head, Ok(_) | Err(object_store::Error::NotFound { .. })) {
-                state.backend_errors += 1;
+                counters.backend_errors += 1;
             }
         }
 
@@ -1070,25 +1227,20 @@ impl CachedStore {
             // and reporting neither. A hit that showed up as a fast backend
             // read would understate how often the store is not touched at
             // all. The miss is counted once per call, not once per attempt.
-            {
-                let mut state = self.cache.lock().unwrap();
-                if let Some(bytes) = state.lru.get(&key) {
-                    let bytes = bytes.clone();
-                    state.hits += 1;
-                    drop(state);
-                    if let Some(started) = started {
-                        metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
-                    }
-                    return TimedRead {
-                        result: Ok(bytes),
-                        timing: waited,
-                    };
+            if let Some(bytes) = self.cached(&key) {
+                self.counters.lock().unwrap().hits += 1;
+                if let Some(started) = started {
+                    metadata_reads::record(MetadataReadPhase::CacheHit, started, false);
                 }
-                if first_attempt {
-                    state.misses += 1;
-                }
-                first_attempt = false;
+                return TimedRead {
+                    result: Ok(bytes),
+                    timing: waited,
+                };
             }
+            if first_attempt {
+                self.counters.lock().unwrap().misses += 1;
+            }
+            first_attempt = false;
 
             let placement = {
                 let mut flights = self.in_flight.lock().unwrap();
@@ -1132,10 +1284,7 @@ impl CachedStore {
                 // The leader's outcome, with its error variant rebuilt so it
                 // triages identically. A shared failure is not cached.
                 Ok(Delivery::Done { result, leader }) => {
-                    {
-                        let mut state = self.cache.lock().unwrap();
-                        state.coalesced += 1;
-                    }
+                    self.counters.lock().unwrap().coalesced += 1;
                     // A follower's row owns its wait and nothing else. The
                     // round trip belongs to the leader's row, so a sum over
                     // the backend column counts each one exactly once
@@ -1253,23 +1402,29 @@ impl CachedStore {
 
         let result = match fetch {
             Ok(slices) => {
-                let mut state = self.cache.lock().unwrap();
-                state.count_round_trip(elapsed, false);
+                self.counters
+                    .lock()
+                    .unwrap()
+                    .count_round_trip(elapsed, false);
                 let mut own = None;
                 let mut outcomes = Vec::with_capacity(keys.len());
+                let mut budget = self.budget.state.lock().unwrap();
                 for (member, bytes) in keys.iter().zip(slices) {
-                    let bytes = state.insert(member, bytes);
+                    let bytes = budget.insert(self.store_id, member, bytes);
                     if member == key {
                         own = Some(bytes.clone());
                     }
                     outcomes.push((member.clone(), Ok(bytes)));
                 }
-                drop(state);
+                drop(budget);
                 guard.complete(outcomes);
                 Ok(own.expect("the leader's own range is in its group"))
             }
             Err(error) => {
-                self.cache.lock().unwrap().count_round_trip(elapsed, true);
+                self.counters
+                    .lock()
+                    .unwrap()
+                    .count_round_trip(elapsed, true);
                 let shared = SharedError::capture(&error);
                 guard.complete(
                     keys.iter()
@@ -1340,9 +1495,7 @@ impl CachedStore {
             let mut absent = self.absent.lock().unwrap();
             if absent.get(&key).is_some() {
                 drop(absent);
-                let mut state = self.cache.lock().unwrap();
-                state.hits += 1;
-                drop(state);
+                self.counters.lock().unwrap().hits += 1;
                 // Remembered absence is a read the open did not have to
                 // make. It files a row for the same reason a resident hit
                 // does: the shape of an open is how many of its reads cost
@@ -1438,12 +1591,24 @@ impl CachedStore {
             );
         }
 
-        let result = {
-            let mut state = self.cache.lock().unwrap();
-            state.count_round_trip(elapsed, fetch.is_err() && !absent_as_expected);
-            fetch.map(|bytes| state.insert(key, bytes))
-        };
+        self.counters
+            .lock()
+            .unwrap()
+            .count_round_trip(elapsed, fetch.is_err() && !absent_as_expected);
+        let result = fetch.map(|bytes| {
+            self.budget
+                .state
+                .lock()
+                .unwrap()
+                .insert(self.store_id, key, bytes)
+        });
         TimedRead { result, timing }
+    }
+}
+
+impl Drop for CachedStore {
+    fn drop(&mut self) {
+        self.budget.release(self.store_id);
     }
 }
 
@@ -1503,7 +1668,7 @@ fn share(result: &Result<Bytes, object_store::Error>) -> ShareResult {
     }
 }
 
-impl LruState {
+impl ReadCounters {
     /// Count one backend round trip, however it answered.
     fn count_round_trip(&mut self, elapsed: std::time::Duration, failed: bool) {
         self.source_reads += 1;
@@ -1511,28 +1676,6 @@ impl LruState {
         if failed {
             self.backend_errors += 1;
         }
-    }
-
-    /// Make `bytes` resident under `key`, evicting from the LRU end to stay
-    /// within budget. A key that became resident meanwhile keeps what it
-    /// has, and that is what the caller gets back.
-    fn insert(&mut self, key: &ReadKey, bytes: Bytes) -> Bytes {
-        if let Some(existing) = self.lru.get(key) {
-            return existing.clone();
-        }
-        let new_size = bytes.len();
-        while self.current_bytes + new_size > self.max_bytes {
-            match self.lru.pop_lru() {
-                Some((_, evicted)) => {
-                    self.current_bytes -= evicted.len();
-                    self.evictions += 1;
-                }
-                None => break,
-            }
-        }
-        self.current_bytes += new_size;
-        self.lru.put(key.clone(), bytes.clone());
-        bytes
     }
 }
 
@@ -1636,15 +1779,139 @@ mod tests {
         let _b = cached.get_bytes(&pb, READER, LABEL).await.result.unwrap();
 
         // "a" should have been evicted to make room for "b"
-        {
-            let state = cached.cache.lock().unwrap();
-            assert!(state.current_bytes <= 100);
-            assert_eq!(state.lru.len(), 1);
-        }
         let stats = cached.stats();
+        assert!(stats.current_bytes <= 100);
+        assert_eq!(stats.entry_count, 1);
         assert_eq!(stats.evictions, 1);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    async fn store_with(objects: &[(&str, usize)]) -> Arc<CountingStore> {
+        let store = Arc::new(CountingStore::new(0));
+        for (path, len) in objects {
+            store.seed(path, &vec![1u8; *len]).await;
+        }
+        store
+    }
+
+    #[tokio::test]
+    async fn two_sources_on_one_budget_stay_under_it_together() {
+        let budget = SourceCacheBudget::new(100);
+        let limiter = SourceReadLimiter::new(4);
+        let first = CachedStore::with_budget(
+            store_with(&[("a", 40), ("b", 40)]).await,
+            budget.clone(),
+            limiter.clone(),
+        );
+        let second = CachedStore::with_budget(
+            store_with(&[("a", 40), ("b", 40)]).await,
+            budget.clone(),
+            limiter,
+        );
+
+        for path in ["a", "b"] {
+            first
+                .get_bytes(&Path::from(path), READER, LABEL)
+                .await
+                .result
+                .unwrap();
+        }
+        assert_eq!(budget.current_bytes(), 80);
+
+        // Each store alone fits, together they do not. The second source's
+        // reads evict the first's coldest entries rather than adding a budget.
+        for path in ["a", "b"] {
+            second
+                .get_bytes(&Path::from(path), READER, LABEL)
+                .await
+                .result
+                .unwrap();
+        }
+        assert!(budget.current_bytes() <= 100);
+        let (one, two) = (first.stats(), second.stats());
+        assert_eq!(
+            one.current_bytes + two.current_bytes,
+            budget.current_bytes()
+        );
+        assert_eq!(two.entry_count, 2, "the newest reads are resident");
+        assert_eq!(one.entry_count, 0);
+        assert_eq!(one.evictions, 2, "the first source paid for the room");
+        assert_eq!(one.max_bytes, 100);
+        assert_eq!(two.max_bytes, 100);
+    }
+
+    #[tokio::test]
+    async fn a_shared_budget_evicts_the_coldest_entry_of_any_source() {
+        let budget = SourceCacheBudget::new(100);
+        let limiter = SourceReadLimiter::new(4);
+        let first = CachedStore::with_budget(
+            store_with(&[("a", 40), ("b", 40)]).await,
+            budget.clone(),
+            limiter.clone(),
+        );
+        let second =
+            CachedStore::with_budget(store_with(&[("c", 40)]).await, budget.clone(), limiter);
+        async fn read(store: &CachedStore, path: &str) {
+            store
+                .get_bytes(&Path::from(path), READER, LABEL)
+                .await
+                .result
+                .unwrap();
+        }
+
+        read(&first, "a").await;
+        read(&first, "b").await;
+        // Touch "a" so "b" is the coldest entry across both sources.
+        read(&first, "a").await;
+        read(&second, "c").await;
+
+        let one = first.stats();
+        assert_eq!(one.entry_count, 1);
+        assert_eq!(one.evictions, 1);
+        assert_eq!(second.stats().entry_count, 1);
+        let reads_before = one.source_reads;
+        read(&first, "a").await;
+        assert_eq!(
+            first.stats().source_reads,
+            reads_before,
+            "the recently used entry survived"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_store_returns_its_bytes_to_the_budget() {
+        let budget = SourceCacheBudget::new(100);
+        let store = CachedStore::with_budget(
+            store_with(&[("a", 40)]).await,
+            budget.clone(),
+            SourceReadLimiter::new(1),
+        );
+        store
+            .get_bytes(&Path::from("a"), READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(budget.current_bytes(), 40);
+        drop(store);
+        assert_eq!(budget.current_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn bytes_larger_than_the_budget_are_served_but_not_kept() {
+        let budget = SourceCacheBudget::new(10);
+        let store = CachedStore::with_budget(
+            store_with(&[("big", 40)]).await,
+            budget.clone(),
+            SourceReadLimiter::new(1),
+        );
+        let bytes = store
+            .get_bytes(&Path::from("big"), READER, LABEL)
+            .await
+            .result
+            .unwrap();
+        assert_eq!(bytes.len(), 40);
+        assert_eq!(budget.current_bytes(), 0);
     }
 
     #[tokio::test]
@@ -2284,8 +2551,9 @@ mod tests {
         let store = Arc::new(CountingStore::new(0));
         store.seed("zarr.json", b"{}").await;
         let get_count = store.get_count.clone();
+        let budget = SourceCacheBudget::new(1024);
 
-        let first = CachedStore::shared_for_source("src-a", store.clone(), 1024);
+        let first = CachedStore::shared_for_source("src-a", store.clone(), &budget);
         first
             .get_bytes(&Path::from("zarr.json"), READER, LABEL)
             .await
@@ -2293,7 +2561,7 @@ mod tests {
             .unwrap();
 
         // A second open of the same source reads what the first one cached.
-        let second = CachedStore::shared_for_source("src-a", store.clone(), 1024);
+        let second = CachedStore::shared_for_source("src-a", store.clone(), &budget);
         assert!(Arc::ptr_eq(&first, &second));
         second
             .get_bytes(&Path::from("zarr.json"), READER, LABEL)
@@ -2303,7 +2571,7 @@ mod tests {
         assert_eq!(get_count.load(Ordering::SeqCst), 1);
 
         // A different source is a different cache.
-        let other = CachedStore::shared_for_source("src-b", store.clone(), 1024);
+        let other = CachedStore::shared_for_source("src-b", store.clone(), &budget);
         assert!(!Arc::ptr_eq(&first, &other));
         other
             .get_bytes(&Path::from("zarr.json"), READER, LABEL)
@@ -2316,7 +2584,7 @@ mod tests {
         // rather than pinned for the life of the process.
         drop(first);
         drop(second);
-        let reopened = CachedStore::shared_for_source("src-a", store.clone(), 1024);
+        let reopened = CachedStore::shared_for_source("src-a", store.clone(), &budget);
         reopened
             .get_bytes(&Path::from("zarr.json"), READER, LABEL)
             .await
