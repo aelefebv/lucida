@@ -102,6 +102,16 @@ describe("RenderClient destroy", () => {
     expect(client.takeFrameLatency()).toBeNull();
   });
 
+  it("stops waiting on frames sent before the device was replaced", () => {
+    const { client, worker } = makeReadyClient();
+    const epochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
+    client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    expect(client.framesAwaitingDone()).toBe(2);
+    worker.emit({ type: "gpuDeviceRestored" });
+    expect(client.framesAwaitingDone()).toBe(0);
+  });
+
   it("sends the page's reading of device memory with init", () => {
     vi.stubGlobal("navigator", { deviceMemory: 4 });
     makeReadyClient();
