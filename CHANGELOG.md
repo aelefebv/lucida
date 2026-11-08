@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.24.0](https://github.com/aelefebv/lucida/compare/v0.23.0...v0.24.0) (2026-11-08)
+
+
+### Features
+
+* **perf:** compare runs against a per-adapter baseline and flag regressions ([#1393](https://github.com/aelefebv/lucida/issues/1393)) ([fdb8fd2](https://github.com/aelefebv/lucida/commit/fdb8fd2c3757d7da98f99591c3c10f6d5358da5a))
+* **perf:** run a trace matrix over named datasets and scenarios in one command ([#1387](https://github.com/aelefebv/lucida/issues/1387)) ([84bac22](https://github.com/aelefebv/lucida/commit/84bac223e3230410a87f573bc807ff5557f65470))
+* **server:** a dev-only source throttle makes local sources load like remote ones ([#1389](https://github.com/aelefebv/lucida/issues/1389)) ([3e91334](https://github.com/aelefebv/lucida/commit/3e913342826fe6565f17a4ebd00465bb0dd9fdb5))
+* **trace:** fail a run on page errors and a blank settled frame ([#1388](https://github.com/aelefebv/lucida/issues/1388)) ([4d0f9ef](https://github.com/aelefebv/lucida/commit/4d0f9ef1e807589333802fe901b91f9e80198de3))
+* **trace:** measure lag while the view moves ([#1386](https://github.com/aelefebv/lucida/issues/1386)) ([dec3963](https://github.com/aelefebv/lucida/commit/dec39637455fc9f86b766f98375bc5bf8380a1c1))
+* **trace:** script mode, fit, resize, contrast and dataset steps, and paced input ([#1391](https://github.com/aelefebv/lucida/issues/1391)) ([02c78f2](https://github.com/aelefebv/lucida/commit/02c78f2686eef6d8626129de1b4db81c1e873bd6))
+
 ## [0.23.0](https://github.com/aelefebv/lucida/compare/v0.22.0...v0.23.0) (2026-11-08)
 
 
