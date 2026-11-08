@@ -2745,7 +2745,15 @@ mod tests {
 
     #[test]
     fn a_step_carries_its_runs_lag_reading_and_the_text_states_it() {
-        let mut pan = record(ScriptStep::Pan { dx: 200.0, dy: 0.0 }, Some("run-5"), true);
+        let mut pan = record(
+            ScriptStep::Pan {
+                dx: 200.0,
+                dy: 0.0,
+                duration_ms: None,
+            },
+            Some("run-5"),
+            true,
+        );
         pan.lag = Some(json!({
             "inputs": 25,
             "inputToFrame": { "samples": 25, "p50Ms": 21.3, "p95Ms": 34.1, "maxMs": 40.0 },
