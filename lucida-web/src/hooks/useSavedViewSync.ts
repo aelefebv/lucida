@@ -3,7 +3,7 @@
 // name each dataset by its URL. Mounted after the bridge hook so the applier
 // gets `sendCommand` and `sendOpenRemoteDataset` directly.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
 import { dataset_id_for_url } from "lucida-core";
 import {
@@ -332,11 +332,11 @@ export function useSavedViewSync({
     [bundle.urlSync],
   );
 
-  return {
+  return useMemo(() => ({
     applier: bundle.applier,
     captureBuilder,
     trackedSendOpen,
     notifyChange,
     collapseDeepLinkHash,
-  };
+  }), [bundle.applier, captureBuilder, trackedSendOpen, notifyChange, collapseDeepLinkHash]);
 }

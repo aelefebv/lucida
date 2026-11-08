@@ -9,7 +9,7 @@
  * would churn the most delicate reliability code for no behavior change.
  */
 import { isDebugEnabled } from "./debug/logging.ts";
-import type { SourceChunkStatus } from "./pipeline/fetch/contentSource.ts";
+import type { ChunkFailureKind, SourceChunkStatus } from "./pipeline/fetch/contentSource.ts";
 import { traceRecorder } from "./trace/recorder.ts";
 import { classifyClientMessage, utf8ByteLength } from "./trace/sendAccounting.ts";
 import type { ServerTimingBatch } from "./trace/serverRowTable.ts";
@@ -112,6 +112,27 @@ export interface DatasetOpenProgressDiagnostic {
    *  unlike the transient progress line. Omitted on the wire when false; the
    *  bridge coerces it to a boolean for consumers. */
   warning?: boolean;
+}
+
+/**
+ * Why the server did not act on a client message. Mirror of
+ * `lucida_core::protocol::MessageRejection`.
+ */
+export type MessageRejection =
+  | "malformed"
+  | "unknown_type"
+  | "binary_frame"
+  | "throttled"
+  | "unknown_dataset";
+
+/** Mirror of `ServerMessage::MessageRejected`. */
+export interface MessageRejectedWire {
+  type: "message_rejected";
+  request_id?: string;
+  rid?: number;
+  message_type?: string;
+  reason: MessageRejection;
+  message: string;
 }
 
 interface PendingDatasetHealthRequest {
@@ -342,10 +363,9 @@ export interface BridgeHandlers {
     message?: string | null,
   ) => void;
   /**
-   * The server could not serve a source chunk because its store read
-   * failed with a non-not-found error (revoked access, backend fault,
-   * unreachable store). Routed into the fetch pipeline so the pending
-   * request fails permanently instead of timing out as a transient.
+   * The server answered a source chunk request without bytes, and `failure`
+   * says why. Routed into the fetch pipeline so the pending request fails
+   * with that reason instead of timing out as a transient.
    */
   onSourceChunkStatus?: (
     datasetId: string,
@@ -353,6 +373,7 @@ export interface BridgeHandlers {
     key: string,
     status: SourceChunkStatus,
     message?: string | null,
+    failure?: ChunkFailureKind | null,
   ) => void;
   onWorkspaceArchived?: (workspaceId: string) => void;
   /**
@@ -658,7 +679,11 @@ export class Bridge {
               msg.key,
               msg.status,
               msg.message ?? null,
+              msg.kind ?? null,
             );
+            break;
+          case "message_rejected":
+            this.handleMessageRejected(msg as MessageRejectedWire);
             break;
           case "workspace_archived":
             this.handlers.onWorkspaceArchived?.(msg.workspace_id ?? "");
@@ -720,6 +745,33 @@ export class Bridge {
     const key = new TextDecoder().decode(keyBytes);
     const payload = buffer.slice(6 + keyLen);
     this.handlers.onBinary?.(key, payload);
+  }
+
+  /**
+   * The server did not act on a message this page sent. The page sends only
+   * messages the server reads, so this is drift between the two and is
+   * logged whatever the debug setting. A request still waiting on its answer
+   * fails now with the server's reason instead of at its timeout.
+   */
+  private handleMessageRejected(msg: MessageRejectedWire) {
+    console.warn(
+      `[bridge] the server did not act on a ${msg.message_type ?? "message"} (${msg.reason}): ${msg.message}`,
+    );
+    const requestId = msg.request_id;
+    if (!requestId) return;
+    const error = new Error(`the server refused the request (${msg.reason}): ${msg.message}`);
+    const health = this.pendingDatasetHealth.get(requestId);
+    if (health) {
+      this.pendingDatasetHealth.delete(requestId);
+      clearTimeout(health.timer);
+      health.reject(error);
+    }
+    const report = this.pendingSendReports.get(requestId);
+    if (report) {
+      this.pendingSendReports.delete(requestId);
+      clearTimeout(report.timer);
+      report.reject(error);
+    }
   }
 
   private handleDatasetHealth(msg: unknown) {

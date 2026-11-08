@@ -133,7 +133,8 @@ _Avoid_: session (login or socket), capture (see capture surface)
 
 **Quiescent**:
 The page's published boolean that closes a run on its own: nothing left to draw,
-and every chunk the view asked for resident. Prefetch does not count.
+and every chunk the view asked for resident or failed for good. Prefetch does
+not count.
 _Avoid_: ready (`ready` means a frame was drawn)
 
 **Phase**:

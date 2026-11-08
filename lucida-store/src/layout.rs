@@ -92,7 +92,7 @@ pub fn compute_chunk_byte_layout(
     pinned: &[PinnedAxis],
 ) -> Result<ChunkByteLayout, StoreError> {
     if axes.len() != chunk_shape.len() {
-        return Err(StoreError::Metadata(format!(
+        return Err(StoreError::unsupported_layout(format!(
             "axes/chunk_shape length mismatch: axes has {} entries, chunk_shape has {}",
             axes.len(),
             chunk_shape.len(),
@@ -120,9 +120,10 @@ pub fn compute_chunk_byte_layout(
     }
 
     let on_disk_byte_size = usize::try_from(on_disk)
-        .map_err(|_| StoreError::Metadata("chunk byte size exceeds usize".to_string()))?;
-    let canonical_byte_size = usize::try_from(canonical)
-        .map_err(|_| StoreError::Metadata("canonical chunk byte size exceeds usize".to_string()))?;
+        .map_err(|_| StoreError::unsupported_layout("chunk byte size exceeds usize".to_string()))?;
+    let canonical_byte_size = usize::try_from(canonical).map_err(|_| {
+        StoreError::unsupported_layout("canonical chunk byte size exceeds usize".to_string())
+    })?;
 
     // Compute byte strides for the canonical-indexed axes (t, c) by
     // walking right-to-left and accumulating dtype_size × ∏ inner dims.
@@ -133,12 +134,14 @@ pub fn compute_chunk_byte_layout(
         let lower = axes[i].to_lowercase();
         match lower.as_str() {
             "t" => {
-                byte_stride_t = usize::try_from(current_stride)
-                    .map_err(|_| StoreError::Metadata("t byte stride exceeds usize".to_string()))?;
+                byte_stride_t = usize::try_from(current_stride).map_err(|_| {
+                    StoreError::unsupported_layout("t byte stride exceeds usize".to_string())
+                })?;
             }
             "c" => {
-                byte_stride_c = usize::try_from(current_stride)
-                    .map_err(|_| StoreError::Metadata("c byte stride exceeds usize".to_string()))?;
+                byte_stride_c = usize::try_from(current_stride).map_err(|_| {
+                    StoreError::unsupported_layout("c byte stride exceeds usize".to_string())
+                })?;
             }
             _ => {}
         }
@@ -180,7 +183,7 @@ pub fn compute_chunk_byte_layout(
                 } else {
                     "canonical-indexed (t/c)"
                 };
-                return Err(StoreError::Metadata(format!(
+                return Err(StoreError::unsupported_layout(format!(
                     "axis '{}' (chunk_size {}) is {} and falls in a non-prefix position; \
                      contiguous slicing requires all indexed and pinned axes to precede any \
                      kept canonical axis (z, y, x) with chunk_size > 1 (axes order: {:?})",

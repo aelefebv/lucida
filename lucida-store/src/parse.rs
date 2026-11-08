@@ -56,7 +56,7 @@ pub(crate) async fn read_zarr_json(
 ) -> Result<serde_json::Value, StoreError> {
     let bytes = store.get_metadata_bytes(&Path::from(path)).await?;
     serde_json::from_slice(&bytes)
-        .map_err(|e| StoreError::Metadata(format!("invalid JSON in {path}: {e}")))
+        .map_err(|e| StoreError::malformed_metadata(format!("invalid JSON in {path}: {e}")))
 }
 
 /// Upper bound on attribute keys echoed back in a missing-block error. Enough
@@ -187,15 +187,15 @@ pub(crate) fn parse_multiscales(
     let multiscales = resolve_ome_block(root_json, "multiscales")
         .and_then(|v| v.as_array())
         .ok_or_else(|| {
-            StoreError::Metadata(format!(
+            StoreError::missing_metadata(format!(
                 "{error_prefix}{}",
                 describe_missing_ome_block(root_json, "multiscales")
             ))
         })?;
 
-    let ms = multiscales
-        .first()
-        .ok_or_else(|| StoreError::Metadata(format!("{error_prefix}multiscales array is empty")))?;
+    let ms = multiscales.first().ok_or_else(|| {
+        StoreError::malformed_metadata(format!("{error_prefix}multiscales array is empty"))
+    })?;
 
     let axes_json: Vec<serde_json::Value> = ms
         .get("axes")
@@ -215,7 +215,9 @@ pub(crate) fn parse_multiscales(
     let datasets_arr = ms
         .get("datasets")
         .and_then(|v| v.as_array())
-        .ok_or_else(|| StoreError::Metadata(format!("{error_prefix}no datasets in multiscales")))?;
+        .ok_or_else(|| {
+            StoreError::malformed_metadata(format!("{error_prefix}no datasets in multiscales"))
+        })?;
 
     let mut level_entries: Vec<LevelEntry> = Vec::new();
     for ds in datasets_arr {
@@ -223,7 +225,7 @@ pub(crate) fn parse_multiscales(
             .get("path")
             .and_then(|v| v.as_str())
             .ok_or_else(|| {
-                StoreError::Metadata(format!("{error_prefix}dataset entry missing path"))
+                StoreError::malformed_metadata(format!("{error_prefix}dataset entry missing path"))
             })?
             .to_string();
 
@@ -246,7 +248,7 @@ pub(crate) fn parse_multiscales(
     }
 
     if level_entries.is_empty() {
-        return Err(StoreError::Metadata(format!(
+        return Err(StoreError::malformed_metadata(format!(
             "{error_prefix}no levels found"
         )));
     }
@@ -364,13 +366,13 @@ pub(crate) async fn read_optional_zarr_json(
         Ok(Some(bytes)) => match serde_json::from_slice(&bytes) {
             Ok(value) => OptionalZarrJson::Parsed(value),
             Err(e) => {
-                eprintln!("[lucida-store] ignoring malformed optional metadata {path}: {e}");
+                tracing::warn!(path = %path, error = %e, "import.optional_metadata.malformed");
                 OptionalZarrJson::Unusable
             }
         },
         Ok(None) => OptionalZarrJson::Absent,
         Err(e) => {
-            eprintln!("[lucida-store] ignoring optional metadata {path}: {e}");
+            tracing::warn!(path = %path, error = %e, "import.optional_metadata.unreadable");
             OptionalZarrJson::Unusable
         }
     }
@@ -508,7 +510,7 @@ pub(crate) async fn read_level_metas(
                 .get_metadata_bytes(&Path::from(format!("{level}/zarr.json")))
                 .await?;
             serde_json::from_slice::<ArrayMeta>(&level_bytes)
-                .map_err(|e| StoreError::Metadata(format!("{level}: {e}")))
+                .map_err(|e| StoreError::malformed_metadata(format!("{level}: {e}")))
         }
     });
     futures_util::future::try_join_all(reads).await

@@ -9,6 +9,7 @@ pub mod blosc;
 
 use std::io::Read;
 
+use lucida_protocol::ChunkFailureKind;
 pub use lucida_store::codec::StorageCompression;
 
 /// Errors decoding compressed storage bytes back to raw voxel bytes.
@@ -28,6 +29,36 @@ pub enum DecodeError {
     /// stored chunk shape holds. Decoding stops at the limit.
     #[error("the chunk decodes to more than the {limit} bytes its stored chunk shape holds")]
     TooLarge { limit: usize },
+}
+
+impl DecodeError {
+    /// Which of the stored bytes' failures this is, as a client is told it.
+    pub fn failure_kind(&self) -> ChunkFailureKind {
+        use blosc::BloscError;
+        match self {
+            DecodeError::WrongSize { .. }
+            | DecodeError::TooLarge { .. }
+            | DecodeError::Blosc(
+                BloscError::TooLarge { .. }
+                | BloscError::BlockTooLarge { .. }
+                | BloscError::BlockSizeMismatch { .. }
+                | BloscError::NotElementAligned { .. },
+            ) => ChunkFailureKind::WrongSize,
+            DecodeError::Blosc(
+                BloscError::UnsupportedVersion(_)
+                | BloscError::UnsupportedCompressor { .. }
+                | BloscError::TypesizeMismatch { .. }
+                | BloscError::ShuffleMismatch { .. },
+            ) => ChunkFailureKind::UnsupportedCodec,
+            DecodeError::Lz4(_)
+            | DecodeError::Zstd(_)
+            | DecodeError::Blosc(
+                BloscError::HeaderTruncated(_)
+                | BloscError::InputTruncated { .. }
+                | BloscError::ZstdDecode { .. },
+            ) => ChunkFailureKind::CorruptChunk,
+        }
+    }
 }
 
 /// Decode `storage_bytes` according to `compression`, returning the raw

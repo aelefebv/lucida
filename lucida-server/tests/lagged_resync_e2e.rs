@@ -26,7 +26,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_conf
 use common::workspace_rig::WorkspaceRig;
 use lucida_content::{DatasetId, DatasetKind, DatasetManifest};
 use lucida_core::command::DocumentCommand;
-use lucida_core::protocol::ServerMessage;
+use lucida_core::protocol::{MessageRejection, ServerMessage};
 use lucida_core::scene::DocumentState;
 use lucida_protocol::{AssetCatalog, DatasetOpened, FetchSource, ProxiedFetchDescriptor};
 use lucida_server::workspace::WorkspaceRuntimeConfig;
@@ -338,11 +338,21 @@ async fn request_snapshot_is_throttled_per_client() {
     let ServerMessage::Snapshot { .. } = next_server_message(&mut client).await else {
         panic!("first request must be served");
     };
+    let ServerMessage::MessageRejected {
+        reason,
+        message_type,
+        ..
+    } = next_server_message(&mut client).await
+    else {
+        panic!("second request inside the throttle window must be refused, not served");
+    };
+    assert_eq!(reason, MessageRejection::Throttled);
+    assert_eq!(message_type.as_deref(), Some("request_snapshot"));
     assert!(
         try_next_server_message(&mut client, Duration::from_millis(400))
             .await
             .is_none(),
-        "second request inside the throttle window must be ignored"
+        "the refused request must not also be served"
     );
 
     // Past the interval, requests are served again.

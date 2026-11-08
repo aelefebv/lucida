@@ -1,5 +1,5 @@
 /** 3D volume viewer. WebGPU rendering runs in a worker via RenderClient. */
-import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
+import { memo, useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { ORBIT_RADIANS_PER_PIXEL, VOLUME_ZOOM_PER_WHEEL_DELTA } from "./inputScale.ts";
 import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
@@ -64,7 +64,7 @@ const INTERACTION_RENDER_SCALE = 0.5;
 const FULL_RENDER_SCALE = 1.0;
 const SCALE_RESTORE_DELAY_MS = 50;
 
-export function VolumeViewer({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, cameraMode, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
+function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocumentVersion, emitPresence, breakFollow, sendCursor, cameraMode, loopRef: parentLoopRef, onLoopChange, annotationDatasetId, tool, myId, sendCommand, onDocumentChanged, annotationDraftRef, onLongPress }: Props) {
   const loopRef = useRef<RenderLoop | null>(null);
   const [showHint, setShowHint] = useState(false);
 
@@ -612,3 +612,7 @@ export function VolumeViewer({ session, scene, datasets, client, canvas, remoteD
     <FlyCameraHint visible={isFlyMode && showHint} onDismiss={dismissHint} />
   );
 }
+
+// Memoized so a viewer render that changes none of its props, such as one
+// for a peer's message, skips it; its props are stable for that reason.
+export const VolumeViewer = memo(VolumeViewerBody);
