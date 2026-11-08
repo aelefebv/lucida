@@ -5,7 +5,6 @@ import { applyViewportCommand } from "../applyAndSend.ts";
 import { invalidateSelection, requestRender } from "../invalidation.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import type { SceneStore } from "../sceneStore.ts";
-import { getViewportClass } from "../theme/viewport.ts";
 import type { DatasetState } from "../types.ts";
 import type { BridgeCallbacks } from "./useDatasetSettings.ts";
 import { useSceneView } from "./useSceneView.ts";
@@ -13,7 +12,6 @@ import { useSceneView } from "./useSceneView.ts";
 interface Params {
   sceneStore: SceneStore;
   wasmSceneRef: React.RefObject<WasmScene | null>;
-  selectedDatasetId: string | null;
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   datasetsVersion: number;
   bridgeCallbacksRef: React.RefObject<BridgeCallbacks>;
@@ -28,7 +26,6 @@ interface Params {
 export function useDimensions({
   sceneStore,
   wasmSceneRef,
-  selectedDatasetId,
   datasetsRef,
   datasetsVersion,
   bridgeCallbacksRef,
@@ -106,33 +103,14 @@ export function useDimensions({
     // render still alternate.
     const next = scene.camera_mode() === "slice" ? "3d" : "2d";
     bridgeCallbacksRef.current.breakFollow();
+    // The scene brings back the camera this mode last had, or fits a new one
+    // to the data, on any canvas.
     applyViewportCommand(scene, { type: next === "3d" ? "set_mode_arcball" : "set_mode_slice" });
-    if (next === "2d" && selectedDatasetId) {
-      const dsManifest = datasetsRef.current.get(selectedDatasetId)?.manifest;
-      if (dsManifest) {
-        const shapeX = dsManifest.images[0].multiscale.levels[0].shape[Axis.X];
-        const shapeY = dsManifest.images[0].multiscale.levels[0].shape[Axis.Y];
-        applyViewportCommand(scene, { type: "set_center", x: shapeX / 2, y: shapeY / 2 });
-      }
-    }
-    // Each mode starts from a fixed camera: 3D looks at the unit cube's
-    // middle from a set distance, and 2D shows one sample per device pixel.
-    // On a narrow or tall canvas at a phone's pixel ratio that is a corner
-    // of the volume or a small image, so below desktop widths the new mode
-    // frames the data instead.
-    const fitId = selectedDatasetId ?? datasetsRef.current.keys().next().value;
-    if (getViewportClass() !== "desktop" && fitId) {
-      try {
-        scene.fit_camera_to_dataset_bounds(fitId);
-      } catch {
-        // A dataset with nothing loaded yet has no bounds; the fixed camera stays.
-      }
-    }
     // The mode switch remounts the viewer, whose new loop draws the new
-    // camera; this tells the store about the fit as well.
+    // camera; this tells the store as well.
     requestRender(loopRef.current, "view_mode");
     bridgeCallbacksRef.current.emitPresence();
-  }, [wasmSceneRef, selectedDatasetId, datasetsRef, bridgeCallbacksRef, loopRef]);
+  }, [wasmSceneRef, bridgeCallbacksRef, loopRef]);
 
   // The recorder hears the scrub here, at the control, not where the value
   // reaches the render loop. A saved-view apply and a followed peer move the

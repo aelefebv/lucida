@@ -13,7 +13,8 @@ use std::time::Duration;
 
 use futures_util::StreamExt;
 use lucida_core::DatasetId;
-use lucida_core::camera::Camera;
+use lucida_core::camera::{Camera, Framing};
+use lucida_core::framing::WorldBox;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{Colormap, DatasetDisplaySettings, DocumentState, RenderMode, Scene};
 use lucida_core::transform::VolumeTransform;
@@ -1334,6 +1335,9 @@ pub fn compose_camera(
             _ => realize_volume_zoom(&mut scene, dataset_id, zoom)?,
         }
     }
+    // The driver records the level this exact camera targets, so the page
+    // must keep it rather than fit its own.
+    scene.camera.set_framing(Framing::Placed);
 
     let zoom = measure_zoom(&scene, dataset_id).ok_or_else(|| {
         CliError::new(
@@ -1440,7 +1444,7 @@ fn realize_volume_zoom(
     }
     let radius = scene
         .dataset_world_bounds(&dataset_id.0)
-        .map(|(min, max)| {
+        .map(|WorldBox { min, max }| {
             0.5 * ((max[0] - min[0]).powi(2)
                 + (max[1] - min[1]).powi(2)
                 + (max[2] - min[2]).powi(2))

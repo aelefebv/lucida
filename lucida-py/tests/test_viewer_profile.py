@@ -37,8 +37,9 @@ def test_a_new_profile_starts_framed_and_records_its_seed(tmp_path):
     camera = state["camera"]
     assert camera["mode"] == "slice"
     assert camera["viewport"] == [1440, 900]
-    # The 4096-sample-tall dataset fills 90% of the 900-pixel canvas height.
-    assert camera["zoom"] == pytest.approx(900 / 4096 * 0.9)
+    # The 4096-sample-tall dataset fills the 900-pixel canvas height less the
+    # core's 2D fit margin of 1.15.
+    assert camera["zoom"] == pytest.approx(900 / 4096 / 1.15)
     assert state["seed_source"] == "workspace_snapshot"
     assert stored_view(server)["camera"] == camera
     assert state["web_url"] == "http://127.0.0.1:9988/w/w1?viewer_profile=default"

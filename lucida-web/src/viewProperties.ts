@@ -95,7 +95,7 @@ export function openIn(scene: WasmScene, opened: DatasetOpenedJson): void {
 }
 
 /** A page that joined once the datasets were open: the document arrives in
- *  the workspace snapshot and nothing fits the camera. */
+ *  the workspace snapshot, and no client asked this page to fit anything. */
 export function joinedScene(vp: Viewport, dpr: number, opened: DatasetOpenedJson[]): WasmScene {
   const scene = newScene(vp, dpr);
   const manifests = Object.fromEntries(opened.map((o) => [o.manifest.dataset_id, o.manifest]));
@@ -103,7 +103,7 @@ export function joinedScene(vp: Viewport, dpr: number, opened: DatasetOpenedJson
   return scene;
 }
 
-/** The opener's page: the dataset opens and the camera fits it in `mode`. */
+/** The opener's page: the dataset opens on a page in `mode`. */
 export function openedScene(
   f: ViewFixture,
   vp: Viewport,
@@ -113,7 +113,6 @@ export function openedScene(
   const scene = newScene(vp, dpr);
   if (mode === "arcball") scene.apply_command(JSON.stringify({ type: "set_mode_arcball" }));
   openIn(scene, f.opened);
-  scene.fit_camera_to_dataset_bounds(datasetId(f));
   return scene;
 }
 

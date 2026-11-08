@@ -34,7 +34,7 @@ use flate2::write::GzEncoder;
 use lucida_core::command::ViewportCommand;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{BlendMode, Colormap, RenderMode};
-use lucida_core::view_transform::{ExplorationSidecar, ViewExtent, default_view};
+use lucida_core::view_transform::{self, ExplorationSidecar};
 use lucida_protocol::DatasetSourceHealth;
 use serde_json::Value;
 
@@ -2412,11 +2412,9 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     CliError::new(ErrorKind::Protocol, "dataset has no dimensions to montage")
                 })?;
                 let ds_id = info.summary.workspace_dataset_id.clone();
-                let full_x = dims[4];
-                let full_y = dims[3];
-                // MVP samples the Z / T / single axis with a whole-image fit.
-                // Per-tile collection montage (which needs member positions) is a
-                // follow-up slice, so plan as a single image here.
+                // Samples the Z / T / single axis, each cell fitting the whole
+                // dataset. A per-tile collection montage is not built yet, so
+                // plan as a single image here.
                 let plan = montage::plan_montage(dims, 1, *cells, *cols);
                 let viewport = [*cell_px, *cell_px];
 
@@ -2430,14 +2428,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 // and through-stack variation show. Best-effort: if the probe can't
                 // read a window, fall back to per-cell auto.
                 let mid = plan.cells.len() / 2;
-                let probe_saved = montage::build_cell_view(
-                    &ds_id,
-                    &plan.cells[mid],
-                    full_x,
-                    full_y,
-                    viewport,
-                    None,
-                );
+                let probe_saved =
+                    montage::build_cell_view(&ds_id, &plan.cells[mid], viewport, None);
                 let probe_url =
                     montage::with_render_param(&viewer_inline_view_web_url(&target, &probe_saved)?);
                 const BG_CLIP: f64 = 0.3;
@@ -2459,14 +2451,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 for (index, cell) in plan.cells.iter().enumerate() {
                     // Same shared window for the sidecar drill-in URL and the
                     // captured thumbnail, so drilling in matches the montage.
-                    let saved = montage::build_cell_view(
-                        &ds_id,
-                        cell,
-                        full_x,
-                        full_y,
-                        viewport,
-                        shared_contrast,
-                    );
+                    let saved = montage::build_cell_view(&ds_id, cell, viewport, shared_contrast);
                     let url = viewer_inline_view_web_url(&target, &saved)?;
                     cell_json.push(serde_json::json!({
                         "index": index,
@@ -2551,23 +2536,20 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 let wait = Duration::from_secs(*timeout_seconds);
                 let dataset_client =
                     DatasetWorkspaceClient::new(target.ws_url.clone(), token.clone());
-                let (_seq, info) = dataset_client.info(dataset, wait).await?;
-                let dims = info.summary.dimensions.ok_or_else(|| {
-                    CliError::new(ErrorKind::Protocol, "dataset has no dimensions to explore")
-                })?;
-                let ds_id = info.summary.workspace_dataset_id.clone();
-
-                let extent = ViewExtent::from_dims(dims);
                 let viewport = [*cell_px, *cell_px];
+                let (info, scene) = dataset_client
+                    .info_and_scene(dataset, viewport, wait)
+                    .await?;
+                let ds_id = info.summary.workspace_dataset_id.clone();
 
                 // Current view: parse the caller's `--view` (the "descend" path,
                 // accepting inline JSON / stdin `-` / `@file` so the loop closes
-                // hands-free), else synthesize the dataset's Home view (a 3D
+                // hands-free), else start from the dataset's Home view (a 3D
                 // Arcball for a volume so rotate cells appear; a 2D Slice for a
-                // flat image).
+                // flat image), the same Home the viewer's Explore panel builds.
                 let current = match view {
-                    Some(raw) => read_view_arg(raw)?,
-                    None => default_view(&ds_id, dims, viewport),
+                    Some(raw) => Some(read_view_arg(raw)?),
+                    None => None,
                 };
 
                 // depth/breadcrumb are agent-supplied passthrough: the command is
@@ -2579,8 +2561,17 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
                     .collect();
-                let mut sidecar =
-                    ExplorationSidecar::build(&current, &extent, *depth, breadcrumb_trail);
+                let mut sidecar = view_transform::explore(
+                    &scene,
+                    &lucida_core::DatasetId(ds_id.clone()),
+                    current.as_ref(),
+                    viewport,
+                    *depth,
+                    breadcrumb_trail,
+                )
+                .ok_or_else(|| {
+                    CliError::new(ErrorKind::MissingResource, "dataset has nothing to explore")
+                })?;
 
                 // Fill each cell's interactive drill-in URL (clean `#view=`, no
                 // render chrome) so an agent/human can open or re-explore it.
@@ -4793,8 +4784,6 @@ fn first_workspace_selector<'a>(
 mod tests {
     use super::*;
     use clap::CommandFactory;
-    use lucida_core::DatasetId;
-    use lucida_core::camera::Camera;
     use serde_json::json;
     use std::io::Read;
 
@@ -5451,31 +5440,18 @@ mod tests {
     }
 
     #[test]
-    fn explore_extent_from_dims() {
-        // The CLI explore handler derives its extent via the shared core fn.
-        let extent = ViewExtent::from_dims([1, 2, 340, 512, 512]);
-        assert_eq!(extent.z_count, 340);
-        assert_eq!(extent.t_count, 1);
-        assert_eq!(extent.c_count, 2);
-        assert_eq!(extent.max, [512.0, 512.0, 340.0]);
-        assert_eq!(extent.min, [0.0, 0.0, 0.0]);
-    }
-
-    #[test]
     fn explore_output_value_has_core_fields_plus_cli_additions() {
-        // The dedup contract: the core sidecar now carries `extent` + per-cell
+        // The dedup contract: the core sidecar carries `extent` + per-cell
         // `z`/`t`/`c`, so the CLI no longer injects them — it only fills each
         // cell's `url` and adds the top-level `dataset`. This mirrors the handler
-        // construction (build → fill urls → to_value → add dataset) and asserts
+        // construction (explore → fill urls → to_value → add dataset) and asserts
         // the printed JSON has all of: extent, per-cell z/t/c, dataset, url.
-        let dims = [5, 3, 40, 80, 100]; // [T, C, Z, Y, X], rich on every axis
-        let ds_id = "wds-explore";
-        let extent = ViewExtent::from_dims(dims);
-        let mut current = default_view(ds_id, dims, [320, 320]);
-        // Sit in the interior so steps in both directions are offered.
-        current.view.t = 2;
-        current.view.c = 1;
-        let mut sidecar = ExplorationSidecar::build(&current, &extent, 0, Vec::new());
+        use lucida_core::view_properties::{Fixture, Viewport, join};
+        let fixture = Fixture::volume(); // [T, C, Z, Y, X] = [2, 3, 128, 512, 512]
+        let scene = join(&fixture, Viewport::LANDSCAPE, 1).scene;
+        let ds_id = fixture.id();
+        let mut sidecar =
+            view_transform::explore(&scene, &ds_id, None, [320, 320], 0, Vec::new()).unwrap();
         assert!(!sidecar.cells.is_empty(), "expected some next-step cells");
 
         // Fill the per-cell URL exactly as the handler does.
@@ -5496,13 +5472,17 @@ mod tests {
         output_value
             .as_object_mut()
             .unwrap()
-            .insert("dataset".to_string(), serde_json::json!(ds_id));
+            .insert("dataset".to_string(), serde_json::json!(ds_id.0));
 
         // Top-level: CLI `dataset` + core `extent` (no double-add).
-        assert_eq!(output_value["dataset"], serde_json::json!(ds_id));
-        assert_eq!(output_value["extent"]["z_count"], serde_json::json!(40));
-        assert_eq!(output_value["extent"]["t_count"], serde_json::json!(5));
+        assert_eq!(output_value["dataset"], serde_json::json!(ds_id.0));
+        assert_eq!(output_value["extent"]["z_count"], serde_json::json!(128));
+        assert_eq!(output_value["extent"]["t_count"], serde_json::json!(2));
         assert_eq!(output_value["extent"]["c_count"], serde_json::json!(3));
+        assert_eq!(
+            output_value["extent"]["max"],
+            serde_json::json!([512.0, 512.0, 128.0])
+        );
 
         // Per-cell: core z/t/c + CLI url, matching the typed sidecar cells.
         let cells = output_value["cells"].as_array().unwrap();
@@ -5517,39 +5497,6 @@ mod tests {
                 "each cell carries a #view= drill-in URL"
             );
         }
-    }
-
-    #[test]
-    fn default_explore_view_is_3d_for_volume() {
-        // The CLI explore handler synthesizes its Home view via the shared core fn.
-        let view = default_view("wds-1", [1, 1, 340, 512, 512], [800, 600]);
-        assert!(
-            matches!(view.camera, Camera::Arcball(_)),
-            "a volume should open in a 3D Arcball Home"
-        );
-        assert_eq!(view.dataset_order, vec![DatasetId("wds-1".to_string())]);
-        // Mid-stack single slice (340 / 2 = 170).
-        assert_eq!(view.view.z_range, 170..171);
-        // Dataset is made visible (auto-contrast on, default settings present).
-        assert_eq!(
-            view.auto_contrast.get(&DatasetId("wds-1".to_string())),
-            Some(&true)
-        );
-        assert!(
-            view.dataset_settings
-                .contains_key(&DatasetId("wds-1".to_string()))
-        );
-    }
-
-    #[test]
-    fn default_explore_view_is_2d_for_flat() {
-        let view = default_view("wds-1", [1, 3, 1, 1024, 1024], [800, 600]);
-        assert!(
-            matches!(view.camera, Camera::Slice(_)),
-            "a flat image should open in a 2D Slice Home"
-        );
-        // A flat dataset has a single slice at z 0.
-        assert_eq!(view.view.z_range, 0..1);
     }
 
     #[test]

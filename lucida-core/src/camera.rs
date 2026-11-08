@@ -2,7 +2,9 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::framing::{Aabb, arcball_containment, arcball_view_containment, slice_framing};
+use crate::framing::{
+    Aabb, FitBounds, VoxBox, WorldBox, arcball_containment, arcball_view_containment, slice_framing,
+};
 use crate::mat4::{
     cross3, invert4_f32, invert4_f64, look_at, mul4, normalize3, perspective, transform_point,
     unproject,
@@ -84,6 +86,32 @@ pub enum ClipMode {
     Sphere,
 }
 
+/// What chose a camera's pose, which decides what a new canvas does to it.
+///
+/// It rides the wire with the camera, so a view means the same wherever it is
+/// shown. An absent field reads as placed, which every view written before
+/// the field existed was.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Framing {
+    /// Someone chose it: a person steering, a saved view, a followed peer. On
+    /// another canvas it keeps the region it showed.
+    #[default]
+    Placed,
+    /// The fit of everything visible. A new canvas or new content fits it
+    /// again, so it fills whatever canvas shows it.
+    Framed,
+    /// A stand-in pose nothing chose. The scene fits it as soon as there is
+    /// something to fit, and a client never persists it.
+    Unframed,
+}
+
+impl Framing {
+    pub fn is_placed(&self) -> bool {
+        *self == Framing::Placed
+    }
+}
+
 /// Unified camera: 2D slice viewing, 3D arcball, or free-fly.
 ///
 /// `PartialEq` (not `Eq` — the variants hold `f64`) so a type that embeds a
@@ -110,6 +138,8 @@ pub struct Slice {
     pub zoom: f64,
     /// The canvas in device pixels.
     pub viewport: [u32; 2],
+    #[serde(default, skip_serializing_if = "Framing::is_placed")]
+    pub framing: Framing,
 }
 
 /// 3D arcball camera for volume rendering.
@@ -130,6 +160,8 @@ pub struct Arcball {
     /// Whether clipping uses a plane or sphere.
     #[serde(default)]
     pub clip_mode: ClipMode,
+    #[serde(default, skip_serializing_if = "Framing::is_placed")]
+    pub framing: Framing,
 }
 
 /// Free-fly camera with position + quaternion orientation.
@@ -154,6 +186,8 @@ pub struct Fly {
     /// Whether clipping uses a plane or sphere.
     #[serde(default)]
     pub clip_mode: ClipMode,
+    #[serde(default, skip_serializing_if = "Framing::is_placed")]
+    pub framing: Framing,
 }
 
 fn default_base_speed() -> f64 {
@@ -195,6 +229,28 @@ impl Camera {
             Camera::Arcball(v) => v.viewport,
             Camera::Fly(v) => v.viewport,
         }
+    }
+
+    pub fn framing(&self) -> Framing {
+        match self {
+            Camera::Slice(v) => v.framing,
+            Camera::Arcball(v) => v.framing,
+            Camera::Fly(v) => v.framing,
+        }
+    }
+
+    pub fn set_framing(&mut self, framing: Framing) {
+        match self {
+            Camera::Slice(v) => v.framing = framing,
+            Camera::Arcball(v) => v.framing = framing,
+            Camera::Fly(v) => v.framing = framing,
+        }
+    }
+
+    /// Whether this is a volume camera (arcball or fly), as against the slice
+    /// camera. The two families work in different spaces.
+    pub fn is_volume(&self) -> bool {
+        !matches!(self, Camera::Slice(_))
     }
 
     /// Resize the canvas and keep the zoom, as a window resize does: the
@@ -404,6 +460,7 @@ impl Camera {
                     far: 100.0,
                     clip_distance: 0.0,
                     clip_mode: ClipMode::default(),
+                    framing: Framing::Placed,
                 };
                 (a.view_proj_f64(), a.eye_position())
             }
@@ -476,21 +533,19 @@ impl Camera {
         }
     }
 
-    /// Frame the world-space box `[min, max]` so the whole dataset lands
-    /// centered and fully in view.
+    /// Put `bounds` centered and fully in view, each camera taking the box in
+    /// its own space. Leaves the framing state to the caller.
     ///
-    /// Preserves the mode: a 2D `Slice` stays 2D ([`FIT_MARGIN_2D`], XY extent
-    /// only), a 3D `Arcball` stays 3D ([`FIT_MARGIN_3D`], bounding-sphere
-    /// containment plus a depth range that contains the box). `Fly` keeps its
-    /// orientation and backs off to a containing distance, best-effort. The
+    /// Preserves the mode: a `Slice` frames the voxel box's XY extent
+    /// ([`FIT_MARGIN_2D`]), an `Arcball` contains the world box's bounding
+    /// sphere ([`FIT_MARGIN_3D`]) with a depth range around it, and a `Fly`
+    /// keeps its orientation and backs off to a containing distance. The
     /// caller need not patch `near`/`far` afterward.
-    pub fn fit_to_bounds(&mut self, min: [f64; 3], max: [f64; 3]) {
+    pub fn fit(&mut self, bounds: &FitBounds) {
         match self {
-            Camera::Slice(s) => {
-                s.fit_to_bounds([min[0], min[1]], [max[0], max[1]], FIT_MARGIN_2D);
-            }
-            Camera::Arcball(a) => a.fit_to_bounds(min, max, FIT_MARGIN_3D),
-            Camera::Fly(f) => f.fit_to_bounds(min, max, FIT_MARGIN_3D),
+            Camera::Slice(s) => s.fit_to_bounds(bounds.vox, FIT_MARGIN_2D),
+            Camera::Arcball(a) => a.fit_to_bounds(bounds.world, FIT_MARGIN_3D),
+            Camera::Fly(f) => f.fit_to_bounds(bounds.world, FIT_MARGIN_3D),
         }
     }
 }
@@ -602,11 +657,13 @@ fn sanitize_projection(fov: &mut f64, near: &mut f64, far: &mut f64) {
 }
 
 impl Slice {
+    /// A stand-in camera, unframed, for the scene to fit.
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
             center: [0.0, 0.0],
             zoom: 1.0,
             viewport,
+            framing: Framing::Unframed,
         }
     }
 
@@ -657,7 +714,7 @@ impl Slice {
         ]
     }
 
-    /// Center on the world rect `[min, max]` and zoom so it is fully visible,
+    /// Center on the XY extent of `bounds` and zoom so it is fully visible,
     /// centered, and tight with `margin` slack in the limiting axis.
     ///
     /// With this camera's convention (`world_bounds` = `center ± viewport /
@@ -668,8 +725,10 @@ impl Slice {
     /// degenerate axis (single plane / line) is floored so `zoom` stays finite
     /// and positive — the camera then fits the non-degenerate axis. The shared
     /// math lives in [`crate::framing::slice_framing`].
-    pub fn fit_to_bounds(&mut self, min: [f64; 2], max: [f64; 2], margin: f64) {
-        let (center, zoom) = slice_framing(min, max, self.viewport, margin);
+    pub fn fit_to_bounds(&mut self, bounds: VoxBox, margin: f64) {
+        let (min, max) = (bounds.min, bounds.max);
+        let (center, zoom) =
+            slice_framing([min[0], min[1]], [max[0], max[1]], self.viewport, margin);
         // Positional write: same component bound as the pan path.
         self.set_center(center[0], center[1]);
         // `slice_framing` already guarantees a finite positive zoom; the clamp
@@ -723,6 +782,7 @@ fn pixels_per_sample_from_eye(
 }
 
 impl Arcball {
+    /// A stand-in camera, unframed, for the scene to fit.
     pub fn new(viewport: [u32; 2]) -> Self {
         Self {
             target: [0.5, 0.5, 0.5],
@@ -735,11 +795,12 @@ impl Arcball {
             far: 100.0,
             clip_distance: 0.0,
             clip_mode: ClipMode::default(),
+            framing: Framing::Unframed,
         }
     }
 
-    /// Frame the world-space box `[min, max]` so the whole box is in view at
-    /// the current orbit angle, with `margin` slack: true containment.
+    /// Frame `bounds` so the whole box is in view at the current orbit angle,
+    /// with `margin` slack: true containment.
     ///
     /// `target` is the midpoint and `distance = (R / sin(limiting)) · margin`,
     /// where `R` is the bounding-sphere radius, so containment holds at any
@@ -753,7 +814,8 @@ impl Arcball {
     /// ([`crate::framing::arcball_view_containment`]): there the sphere is fit
     /// into the narrow horizontal angle and leaves most of the height empty,
     /// so the data would sit small in the middle of a phone's canvas.
-    pub fn fit_to_bounds(&mut self, min: [f64; 3], max: [f64; 3], margin: f64) {
+    pub fn fit_to_bounds(&mut self, bounds: WorldBox, margin: f64) {
+        let (min, max) = (bounds.min, bounds.max);
         let (target, distance, near, far) = if self.viewport[0] < self.viewport[1] {
             arcball_view_containment(
                 min,
@@ -1177,16 +1239,18 @@ impl Fly {
             base_speed: 1.0,
             clip_distance: 0.0,
             clip_mode: ClipMode::default(),
+            framing: Framing::Unframed,
         }
     }
 
-    /// Frame the world-space box `[min, max]` best-effort: keep the
+    /// Frame `bounds` best-effort: keep the
     /// orientation and pull `position` back so the box center sits ahead at a
     /// containing distance ([`crate::framing::arcball_containment`]), with
     /// `near`/`far` bracketing the box. `base_speed` becomes
     /// `volume_diagonal · 0.3` so navigation stays scaled to the data. Never
     /// panics, and sanitizes inverted or non-finite input.
-    pub fn fit_to_bounds(&mut self, min: [f64; 3], max: [f64; 3], margin: f64) {
+    pub fn fit_to_bounds(&mut self, bounds: WorldBox, margin: f64) {
+        let (min, max) = (bounds.min, bounds.max);
         let (center, distance, near, far) =
             arcball_containment(min, max, self.viewport, self.fov, margin);
         // Same distance ceiling as the arcball fit; positional writes go
@@ -1531,6 +1595,7 @@ impl Fly {
             far: self.far,
             clip_distance: self.clip_distance,
             clip_mode: self.clip_mode,
+            framing: converted_framing(self.framing),
         }
     }
 }
@@ -1574,7 +1639,19 @@ impl Arcball {
             base_speed: 1.0,
             clip_distance: self.clip_distance,
             clip_mode: self.clip_mode,
+            framing: converted_framing(self.framing),
         }
+    }
+}
+
+/// The framing of a camera converted between arcball and fly. The converted
+/// pose is the old one seen another way, which only a stand-in shares with
+/// the fit; a fitted pose becomes a placed one, so a later canvas change
+/// keeps the eye where the switch put it.
+fn converted_framing(framing: Framing) -> Framing {
+    match framing {
+        Framing::Unframed => Framing::Unframed,
+        Framing::Placed | Framing::Framed => Framing::Placed,
     }
 }
 
@@ -1790,6 +1867,20 @@ pub(crate) fn ray_aabb_hit(
 mod tests {
     use super::*;
 
+    /// A slice fit box over a 2D rect.
+    fn vox2(min: [f64; 2], max: [f64; 2]) -> VoxBox {
+        VoxBox::new([min[0], min[1], 0.0], [max[0], max[1], 0.0])
+    }
+
+    /// The same box in both spaces, so a test of one camera's fit reads the
+    /// box it gave whichever camera it is.
+    fn both(min: [f64; 3], max: [f64; 3]) -> FitBounds {
+        FitBounds {
+            vox: VoxBox::new(min, max),
+            world: WorldBox::new(min, max),
+        }
+    }
+
     #[test]
     fn initial_camera_centered_at_origin() {
         let cam = Camera::new_2d([800, 600]);
@@ -1898,7 +1989,7 @@ mod tests {
         // A fit sets `near` at the data's front; zooming in carries it along
         // instead of stopping there, down to a fresh camera's share of `far`.
         let mut cam = Arcball::new([390, 608]);
-        cam.fit_to_bounds([0.0; 3], [1.0, 1.0, 0.25], FIT_MARGIN_3D);
+        cam.fit_to_bounds(WorldBox::new([0.0; 3], [1.0, 1.0, 0.25]), FIT_MARGIN_3D);
         let (fitted, near, far) = (cam.distance, cam.near, cam.far);
         let behind = far_behind_target(&cam);
         cam.zoom(-0.5);
@@ -1940,7 +2031,7 @@ mod tests {
         let (min, max) = ([0.0; 3], [1.0, 4.0, 4.0]);
         let radius = Aabb::sanitized(min, max).bounding_radius();
         let mut cam = Arcball::new([800, 600]);
-        cam.fit_to_bounds(min, max, FIT_MARGIN_3D);
+        cam.fit_to_bounds(WorldBox::new(min, max), FIT_MARGIN_3D);
         let (fitted, far) = (cam.distance, cam.far);
         let behind = far_behind_target(&cam);
         for multiple in [2.0, 8.0, 64.0] {
@@ -2074,6 +2165,7 @@ mod tests {
             center,
             zoom,
             viewport,
+            framing: Framing::Placed,
         }
     }
 
@@ -2425,6 +2517,7 @@ mod tests {
             base_speed: 1.0,
             clip_distance: 0.0,
             clip_mode: ClipMode::default(),
+            framing: Framing::Placed,
         };
         let arcball = fly.to_arcball();
         // Should have a positive distance
@@ -2461,6 +2554,7 @@ mod tests {
             far: 100.0,
             clip_distance: 0.0,
             clip_mode: ClipMode::default(),
+            framing: Framing::Placed,
         };
         let original_eye = arcball.eye_position();
         let original_dir = arcball.forward_direction();
@@ -2662,7 +2756,7 @@ mod tests {
     #[test]
     fn slice_fit_centers_on_midpoint() {
         let mut s = Slice::new([800, 600]);
-        s.fit_to_bounds([10.0, 20.0], [110.0, 220.0], FIT_MARGIN_2D);
+        s.fit_to_bounds(vox2([10.0, 20.0], [110.0, 220.0]), FIT_MARGIN_2D);
         assert!(
             (s.center[0] - 60.0).abs() < 1e-9,
             "center x: {}",
@@ -2680,7 +2774,7 @@ mod tests {
         let min = [0.0, 0.0];
         let max = [100.0, 40.0];
         let mut cam = Camera::new_2d([800, 600]);
-        cam.fit_to_bounds([min[0], min[1], 0.0], [max[0], max[1], 0.0]);
+        cam.fit(&both([min[0], min[1], 0.0], [max[0], max[1], 0.0]));
         assert_rect_corners_visible(&cam, min, max);
         if let Camera::Slice(s) = &cam {
             let [bx0, by0, bx1, by1] = s.world_bounds();
@@ -2704,7 +2798,7 @@ mod tests {
         let mut s = Slice::new([800, 600]);
         let min = [0.0, 0.0];
         let max = [200.0, 20.0];
-        s.fit_to_bounds(min, max, FIT_MARGIN_2D);
+        s.fit_to_bounds(vox2(min, max), FIT_MARGIN_2D);
         let data_w = max[0] - min[0];
         let fraction = (data_w * s.zoom) / s.viewport[0] as f64;
         assert!(
@@ -2725,7 +2819,7 @@ mod tests {
         let mut s = Slice::new([800, 600]);
         let min = [0.0, 0.0];
         let max = [10.0, 300.0];
-        s.fit_to_bounds(min, max, FIT_MARGIN_2D);
+        s.fit_to_bounds(vox2(min, max), FIT_MARGIN_2D);
         let data_h = max[1] - min[1];
         let fraction = (data_h * s.zoom) / s.viewport[1] as f64;
         assert!(
@@ -2741,7 +2835,7 @@ mod tests {
         let min = [100_000.0, 250_000.0];
         let max = [100_500.0, 250_300.0];
         let mut cam = Camera::new_2d([800, 600]);
-        cam.fit_to_bounds([min[0], min[1], 0.0], [max[0], max[1], 0.0]);
+        cam.fit(&both([min[0], min[1], 0.0], [max[0], max[1], 0.0]));
         if let Camera::Slice(s) = &cam {
             assert!((s.center[0] - 100_250.0).abs() < 1e-6);
             assert!((s.center[1] - 250_150.0).abs() < 1e-6);
@@ -2753,7 +2847,7 @@ mod tests {
     fn slice_fit_normalizes_inverted_bounds() {
         // min > max must be normalized, not collapse the fit.
         let mut s = Slice::new([800, 600]);
-        s.fit_to_bounds([110.0, 220.0], [10.0, 20.0], FIT_MARGIN_2D);
+        s.fit_to_bounds(vox2([110.0, 220.0], [10.0, 20.0]), FIT_MARGIN_2D);
         assert!(
             (s.center[0] - 60.0).abs() < 1e-9,
             "center x: {}",
@@ -2770,7 +2864,7 @@ mod tests {
     #[test]
     fn slice_fit_sanitizes_non_finite_inputs() {
         let mut s = Slice::new([800, 600]);
-        s.fit_to_bounds([f64::NAN, 0.0], [100.0, f64::INFINITY], FIT_MARGIN_2D);
+        s.fit_to_bounds(vox2([f64::NAN, 0.0], [100.0, f64::INFINITY]), FIT_MARGIN_2D);
         assert!(
             s.center[0].is_finite() && s.center[1].is_finite(),
             "center: {:?}",
@@ -2783,11 +2877,11 @@ mod tests {
     fn slice_fit_degenerate_axis_finite_positive_zoom() {
         // Zero-height (single Y plane / horizontal line).
         let mut s = Slice::new([800, 600]);
-        s.fit_to_bounds([0.0, 5.0], [100.0, 5.0], FIT_MARGIN_2D);
+        s.fit_to_bounds(vox2([0.0, 5.0], [100.0, 5.0]), FIT_MARGIN_2D);
         assert!(s.zoom.is_finite() && s.zoom > 0.0, "zoom: {}", s.zoom);
         // Fully degenerate (a point) must also stay sane.
         let mut s2 = Slice::new([800, 600]);
-        s2.fit_to_bounds([3.0, 3.0], [3.0, 3.0], FIT_MARGIN_2D);
+        s2.fit_to_bounds(vox2([3.0, 3.0], [3.0, 3.0]), FIT_MARGIN_2D);
         assert!(s2.zoom.is_finite() && s2.zoom > 0.0, "zoom: {}", s2.zoom);
         assert_eq!(s2.center, [3.0, 3.0]);
     }
@@ -2795,7 +2889,10 @@ mod tests {
     #[test]
     fn arcball_fit_centers_target_on_midpoint() {
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds([0.0, 0.0, 0.0], [4.0, 8.0, 2.0], FIT_MARGIN_3D);
+        a.fit_to_bounds(
+            WorldBox::new([0.0, 0.0, 0.0], [4.0, 8.0, 2.0]),
+            FIT_MARGIN_3D,
+        );
         assert_eq!(a.target, [2.0, 4.0, 1.0]);
     }
 
@@ -2803,7 +2900,10 @@ mod tests {
     fn arcball_fit_preserves_viewing_angle() {
         let mut a = Arcball::new([800, 600]);
         let (theta0, phi0, fov0) = (a.theta, a.phi, a.fov);
-        a.fit_to_bounds([0.0, 0.0, 0.0], [10.0, 10.0, 10.0], FIT_MARGIN_3D);
+        a.fit_to_bounds(
+            WorldBox::new([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]),
+            FIT_MARGIN_3D,
+        );
         assert_eq!(a.theta, theta0);
         assert_eq!(a.phi, phi0);
         assert_eq!(a.fov, fov0);
@@ -2815,7 +2915,7 @@ mod tests {
         let min = [0.0, 0.0, 0.0];
         let max = [3.0, 5.0, 2.0];
         let mut cam = Camera::new_3d([800, 600]);
-        cam.fit_to_bounds(min, max);
+        cam.fit(&both(min, max));
         assert_box_corners_visible(&cam, min, max);
         if let Camera::Arcball(a) = &cam {
             assert_box_within_depth_clip(a, min, max);
@@ -2829,7 +2929,7 @@ mod tests {
         let min = [0.0, 0.0, 0.0];
         let max = [10.0, 10.0, 10.0];
         let mut cam = Camera::new_3d([800, 600]);
-        cam.fit_to_bounds(min, max);
+        cam.fit(&both(min, max));
         assert_box_corners_visible(&cam, min, max);
         if let Camera::Arcball(a) = &cam {
             assert_box_within_depth_clip(a, min, max);
@@ -2844,7 +2944,7 @@ mod tests {
         let min = [10_000.0, 20_000.0, 5_000.0];
         let max = [10_300.0, 20_150.0, 5_080.0];
         let mut cam = Camera::new_3d([800, 600]);
-        cam.fit_to_bounds(min, max);
+        cam.fit(&both(min, max));
         if let Camera::Arcball(a) = &cam {
             assert_eq!(a.target, [10_150.0, 20_075.0, 5_040.0]);
             assert_box_within_depth_clip(a, min, max);
@@ -2860,7 +2960,7 @@ mod tests {
             let min = [0.0, 0.0, 0.0];
             let max = [4.0, 4.0, 4.0];
             let mut cam = Camera::new_3d(vp);
-            cam.fit_to_bounds(min, max);
+            cam.fit(&both(min, max));
             assert_box_corners_visible(&cam, min, max);
         }
     }
@@ -2893,7 +2993,7 @@ mod tests {
         // the binding axis, instead of sitting small inside its bounding sphere.
         let (min, max) = ([0.0, 0.0, 0.0], [1.0, 1.0, 0.25]);
         let mut cam = Camera::new_3d([1170, 1824]);
-        cam.fit_to_bounds(min, max);
+        cam.fit(&both(min, max));
         assert_box_corners_visible(&cam, min, max);
         if let Camera::Arcball(a) = &cam {
             assert_box_within_depth_clip(a, min, max);
@@ -2918,7 +3018,7 @@ mod tests {
         let (min, max) = ([0.0, 0.0, 0.0], [1.0, 1.0, 0.25]);
         for vp in [[1280, 800], [1000, 1000]] {
             let mut a = Arcball::new(vp);
-            a.fit_to_bounds(min, max, FIT_MARGIN_3D);
+            a.fit_to_bounds(WorldBox::new(min, max), FIT_MARGIN_3D);
             let (_, sphere, near, far) = arcball_containment(min, max, vp, a.fov, FIT_MARGIN_3D);
             assert_eq!((a.distance, a.near, a.far), (sphere, near, far));
         }
@@ -2942,7 +3042,7 @@ mod tests {
                 let mut a = Arcball::new([390, 608]);
                 a.theta = theta;
                 a.phi = phi;
-                a.fit_to_bounds(min, max, FIT_MARGIN_3D);
+                a.fit_to_bounds(WorldBox::new(min, max), FIT_MARGIN_3D);
                 assert_box_within_depth_clip(&a, min, max);
                 assert_box_corners_visible(&Camera::Arcball(a), min, max);
             }
@@ -2953,7 +3053,10 @@ mod tests {
     fn arcball_fit_normalizes_inverted_bounds() {
         // min > max must not collapse the camera onto the center.
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds([4.0, 8.0, 2.0], [0.0, 0.0, 0.0], FIT_MARGIN_3D);
+        a.fit_to_bounds(
+            WorldBox::new([4.0, 8.0, 2.0], [0.0, 0.0, 0.0]),
+            FIT_MARGIN_3D,
+        );
         assert_eq!(a.target, [2.0, 4.0, 1.0]);
         assert!(
             a.distance.is_finite() && a.distance > 0.0,
@@ -2973,8 +3076,10 @@ mod tests {
     fn arcball_fit_sanitizes_non_finite_inputs() {
         let mut a = Arcball::new([800, 600]);
         a.fit_to_bounds(
-            [f64::NAN, 0.0, 5.0],
-            [10.0, f64::INFINITY, f64::NEG_INFINITY],
+            WorldBox::new(
+                [f64::NAN, 0.0, 5.0],
+                [10.0, f64::INFINITY, f64::NEG_INFINITY],
+            ),
             FIT_MARGIN_3D,
         );
         for v in a.target {
@@ -2996,7 +3101,10 @@ mod tests {
     #[test]
     fn arcball_fit_degenerate_box_finite_positive_distance() {
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds([5.0, 5.0, 5.0], [5.0, 5.0, 5.0], FIT_MARGIN_3D);
+        a.fit_to_bounds(
+            WorldBox::new([5.0, 5.0, 5.0], [5.0, 5.0, 5.0]),
+            FIT_MARGIN_3D,
+        );
         assert!(
             a.distance.is_finite() && a.distance > 0.0,
             "distance: {}",
@@ -3017,7 +3125,7 @@ mod tests {
         let min = [0.0, 0.0, 0.0];
         let max = [6.0, 6.0, 6.0];
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds(min, max, FIT_MARGIN_3D);
+        a.fit_to_bounds(WorldBox::new(min, max), FIT_MARGIN_3D);
         let r = 0.5 * (6.0_f64 * 6.0 * 3.0).sqrt();
         assert!(a.near > 0.0, "near must be positive: {}", a.near);
         assert!(a.near <= a.distance - r + 1e-9 || a.near >= 1e-4);
@@ -3072,7 +3180,7 @@ mod tests {
             (tz + scale) as f64,
         ];
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds(min, max, FIT_MARGIN_3D);
+        a.fit_to_bounds(WorldBox::new(min, max), FIT_MARGIN_3D);
 
         // Centers agree (shared Aabb/center), distances do not (different fits).
         for (i, &c) in mm_center.iter().enumerate() {
@@ -3087,7 +3195,7 @@ mod tests {
     #[test]
     fn camera_fit_preserves_slice_mode() {
         let mut cam = Camera::new_2d([800, 600]);
-        cam.fit_to_bounds([0.0, 0.0, 0.0], [100.0, 50.0, 10.0]);
+        cam.fit(&both([0.0, 0.0, 0.0], [100.0, 50.0, 10.0]));
         assert!(matches!(cam, Camera::Slice(_)), "must stay 2D");
         if let Camera::Slice(s) = &cam {
             // Uses only XY; center is the XY midpoint.
@@ -3099,7 +3207,7 @@ mod tests {
     #[test]
     fn camera_fit_preserves_arcball_mode() {
         let mut cam = Camera::new_3d([800, 600]);
-        cam.fit_to_bounds([0.0, 0.0, 0.0], [10.0, 20.0, 5.0]);
+        cam.fit(&both([0.0, 0.0, 0.0], [10.0, 20.0, 5.0]));
         assert!(matches!(cam, Camera::Arcball(_)), "must stay 3D");
         if let Camera::Arcball(a) = &cam {
             assert_eq!(a.target, [5.0, 10.0, 2.5]);
@@ -3109,7 +3217,7 @@ mod tests {
     #[test]
     fn camera_fit_preserves_fly_mode_without_panic() {
         let mut cam = Camera::Fly(Fly::new([800, 600]));
-        cam.fit_to_bounds([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]);
+        cam.fit(&both([0.0, 0.0, 0.0], [10.0, 10.0, 10.0]));
         assert!(matches!(cam, Camera::Fly(_)), "must stay fly");
         if let Camera::Fly(f) = &cam {
             for v in f.position {
@@ -3127,10 +3235,10 @@ mod tests {
 
     #[test]
     fn camera_fit_uses_margin_2d_for_slice() {
-        // Camera::fit_to_bounds must use FIT_MARGIN_2D (not FIT_PADDING) for 2D.
+        // Camera::fit must use FIT_MARGIN_2D (not FIT_PADDING) for 2D.
         let mut cam = Camera::new_2d([800, 600]);
         let max = [200.0, 20.0];
-        cam.fit_to_bounds([0.0, 0.0, 0.0], [max[0], max[1], 0.0]);
+        cam.fit(&both([0.0, 0.0, 0.0], [max[0], max[1], 0.0]));
         if let Camera::Slice(s) = &cam {
             let fraction = (max[0] * s.zoom) / s.viewport[0] as f64;
             assert!(
@@ -3153,7 +3261,7 @@ mod tests {
         } else {
             0.0
         };
-        cam.fit_to_bounds(min, max);
+        cam.fit(&both(min, max));
         let (_, dist, near, far) =
             crate::framing::arcball_containment(min, max, [800, 600], fov, FIT_MARGIN_3D);
         if let Camera::Arcball(a) = &cam {
@@ -3173,7 +3281,7 @@ mod tests {
         let mut s = Slice::new([800, 400]);
         let min = [0.0, 0.0];
         let max = [100.0, 100.0];
-        s.fit_to_bounds(min, max, FIT_MARGIN_2D);
+        s.fit_to_bounds(vox2(min, max), FIT_MARGIN_2D);
         let frac_h = (100.0 * s.zoom) / 400.0;
         let frac_w = (100.0 * s.zoom) / 800.0;
         assert!(
@@ -3242,7 +3350,7 @@ mod tests {
     #[test]
     fn arcball_fit_caps_distance_and_keeps_bracket_consistent() {
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds([-1e15; 3], [1e15; 3], FIT_MARGIN_3D);
+        a.fit_to_bounds(WorldBox::new([-1e15; 3], [1e15; 3]), FIT_MARGIN_3D);
         assert_eq!(a.distance, ARCBALL_DISTANCE_MAX, "ceiling must engage");
         assert!(
             a.near.is_finite() && a.near > 0.0 && a.near < a.distance,
@@ -3257,7 +3365,7 @@ mod tests {
         // Normal-scale bounds are untouched by the cap: same bracket the
         // containment math computed.
         let mut b = Arcball::new([800, 600]);
-        b.fit_to_bounds([0.0; 3], [1.0; 3], FIT_MARGIN_3D);
+        b.fit_to_bounds(WorldBox::new([0.0; 3], [1.0; 3]), FIT_MARGIN_3D);
         assert!(b.distance < ARCBALL_DISTANCE_MAX);
         assert!(b.near > 0.0 && b.near < b.distance && b.far > b.near);
     }
@@ -3268,7 +3376,7 @@ mod tests {
         // same component bound as the pan path — one rule for the whole
         // positional-write family.
         let mut a = Arcball::new([800, 600]);
-        a.fit_to_bounds([1e300; 3], [1e300; 3], FIT_MARGIN_3D);
+        a.fit_to_bounds(WorldBox::new([1e300; 3], [1e300; 3]), FIT_MARGIN_3D);
         assert_eq!(a.target, [CAMERA_POSITION_MAX; 3]);
         assert!(a.distance.is_finite() && a.distance > 0.0);
         assert!(a.near > 0.0 && a.far > a.near);
@@ -3277,7 +3385,7 @@ mod tests {
     #[test]
     fn fly_fit_clamps_base_speed_and_position() {
         let mut f = Fly::new([800, 600]);
-        f.fit_to_bounds([-1e15; 3], [1e15; 3], FIT_MARGIN_3D);
+        f.fit_to_bounds(WorldBox::new([-1e15; 3], [1e15; 3]), FIT_MARGIN_3D);
         assert_eq!(
             f.base_speed, FLY_BASE_SPEED_MAX,
             "base speed must clamp like every other write"
@@ -3339,6 +3447,7 @@ mod tests {
             center: [1e300, -1e300],
             zoom: 1.0,
             viewport: [64, 64],
+            framing: Framing::Placed,
         });
         cam.sanitize();
         match &cam {
