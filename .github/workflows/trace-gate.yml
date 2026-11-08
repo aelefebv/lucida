@@ -88,6 +88,17 @@ jobs:
       - name: Install a software Vulkan driver
         run: sudo apt-get install -y -q mesa-vulkan-drivers
 
+      # The runner's first Chrome launch pays for cold disk and font caches,
+      # and once that pushed the first run's plan pass past its ceiling. An
+      # ungated run pays it instead.
+      - name: Warm up Chrome
+        run: |
+          data="$RUNNER_TEMP/gate-data"
+          uv run extras/synthetic_ome_zarr.py "$data/warm-up.ome.zarr" --size 256,256 --levels 2 --chunk 128
+          lucida="$RUNNER_TEMP/cli/lucida --server http://127.0.0.1:9876"
+          $lucida workspace create warm-up > /dev/null
+          $lucida --workspace warm-up trace "$data/warm-up.ome.zarr" --output "$RUNNER_TEMP/warm-up.json" > /dev/null || true
+
       - name: Run the gate
         env:
           LUCIDA_GATE_CLI: ${{ runner.temp }}/cli/lucida

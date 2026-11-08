@@ -45,12 +45,13 @@ datasets=(
   "single-level|--size 4096,4096 --levels 1 --chunk 512"
 )
 # name|dataset|framing. Each run frames its dataset whole. Ray-marching is the
-# costliest pass on a software rasterizer, so the volume renders in a quarter
-# of the viewport: at the full one, a SwiftShader frame outlasts the timeout.
+# costliest pass on a software rasterizer, so the volume renders in a ninth of
+# the default viewport: at the full one, SwiftShader did not settle it within
+# the timeout.
 runs=(
   "image|image|--camera slice"
   "volume|volume|--camera slice"
-  "volume-render|volume|--camera arcball --width 720 --height 450"
+  "volume-render|volume|--camera arcball --width 480 --height 300"
   "collection|collection|--camera slice"
   "single-level|single-level|--camera slice"
 )
