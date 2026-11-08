@@ -23,7 +23,12 @@ import { mayEvict } from "../eviction.ts";
 import { sliceLevelZ } from "../slicePlane.ts";
 import { wantedChunksFor } from "../wantedChunks.ts";
 import { cameraUVForMember, chunkDistSq2D, findEvictionSlot2D } from "./eviction.ts";
-import { getOrCreateLabelSlicePool, type SliceAtlasState } from "./atlas.ts";
+import {
+  getOrCreateLabelSlicePool,
+  growSlicePoolWithin,
+  labelCellKey,
+  type SliceAtlasState,
+} from "./atlas.ts";
 
 /**
  * Write pre-sliced uint32 label planes into the member's r32uint label pool.
@@ -35,26 +40,40 @@ export function handleLabelSliceChunkData(
   ctx: WorkerCtx,
   msg: LabelSliceChunkDataMessage,
 ): void {
-  // A previous timepoint's plane racing in must not overwrite the pool.
-  if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) return;
-
   const { memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY } = msg;
+  const refuseAll = (reason: ChunkFeedbackReason): void =>
+    postChunkResidency(ctx, memberId, LABEL_TIER, "refused", msg.chunks.map(c => c.key), reason);
+
+  // A previous timepoint's plane racing in must not overwrite the pool.
+  if (isStaleDelivery(msg.epochs, ctx.state.currentEpochs)) {
+    refuseAll("stale");
+    return;
+  }
 
   const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight);
   if (!pool) {
     // Nothing of the batch is resident, so the page must not count it as sent.
-    postChunkResidency(ctx, memberId, LABEL_TIER, "refused", msg.chunks.map(c => c.key), "atlas-policy");
+    refuseAll("atlas-policy");
     return;
   }
 
+  const batch = new ResidencyBatch();
+  const replaced: string[] = [];
   for (const chunk of msg.chunks) {
     const xOff = chunk.x * chunkX;
     const yOff = chunk.y * chunkY;
     // The texture may be device-limited below the level's dims.
-    if (xOff >= pool.width || yOff >= pool.height) continue;
     const chunkW = Math.min(chunkX, pool.width - xOff);
     const chunkH = Math.min(chunkY, pool.height - yOff);
-    if (chunkW <= 0 || chunkH <= 0) continue;
+    if (xOff >= pool.width || yOff >= pool.height || chunkW <= 0 || chunkH <= 0) {
+      batch.refuse(chunk.key, "atlas-policy");
+      continue;
+    }
+    const cell = labelCellKey(chunk.x, chunk.y);
+    const previous = pool.keys.get(cell);
+    if (previous !== undefined && previous !== chunk.key) replaced.push(previous);
+    pool.keys.set(cell, chunk.key);
+    batch.held.push(chunk.key);
     const plane = asUint32Slice(chunk.data, 0, chunkY * chunkX);
     writeSliceRegion(
       ctx.device,
@@ -68,6 +87,9 @@ export function handleLabelSliceChunkData(
       "r32uint",
     );
   }
+  batch.post(ctx, memberId, LABEL_TIER);
+  // After held, so a chunk this batch wrote and then overwrote ends lost.
+  postChunkResidency(ctx, memberId, LABEL_TIER, "lost", replaced, "replaced");
 }
 
 export function handleSliceChunkData(
@@ -150,6 +172,11 @@ export function handleSliceChunkData(
         continue;
       }
 
+      // A pool grows only once every slot it has holds a chunk, and freely
+      // only while the GPU total has room (`worker/gpuBudget.ts`).
+      if (existingSlot === undefined && atlas.freeSlots.length === 0 && atlas.slots.size >= atlas.totalSlots) {
+        growSlicePoolWithin(ctx, poolKey, atlas, false);
+      }
       let slotIndex: number;
       if (existingSlot !== undefined) {
         slotIndex = existingSlot;
@@ -157,17 +184,24 @@ export function handleSliceChunkData(
         slotIndex = atlas.freeSlots.pop()!;
       } else {
         const victim = findEvictionSlot2D(ctx.state, atlas, tier);
-        const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cameraUVForMember(ctx.state, memberId));
-        if (!victim || !mayEvict(victim, incomingDist)) {
-          batch.refuse(chunk.key, "atlas-policy");
-          continue;
-        }
-        slotIndex = atlas.slots.get(victim.key)!;
-        atlas.slots.delete(victim.key);
-        batch.evicted.push(victim.key);
-        const oldGridIdx = atlas.slotGridIdx[slotIndex];
-        if (oldGridIdx >= 0) {
-          atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
+        if (
+          victim?.class === "wanted" && atlas.slots.size >= atlas.totalSlots &&
+          growSlicePoolWithin(ctx, poolKey, atlas, true)
+        ) {
+          slotIndex = atlas.freeSlots.pop()!;
+        } else {
+          const incomingDist = chunkDistSq2D(lodMeta, chunk.x, chunk.y, cameraUVForMember(ctx.state, memberId));
+          if (!victim || !mayEvict(victim, incomingDist)) {
+            batch.refuse(chunk.key, "atlas-policy");
+            continue;
+          }
+          slotIndex = atlas.slots.get(victim.key)!;
+          atlas.slots.delete(victim.key);
+          batch.evicted.push(victim.key);
+          const oldGridIdx = atlas.slotGridIdx[slotIndex];
+          if (oldGridIdx >= 0) {
+            atlas.indirectionData[oldGridIdx] = 0xFFFFFFFF;
+          }
         }
       }
       if (existingSlot === undefined) claimed = slotIndex;

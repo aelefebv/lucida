@@ -11,7 +11,7 @@
  */
 
 import { dispatchMessage } from "../../renderer/worker/dispatch.ts";
-import { createInitialState, type AtlasBudgets } from "../../renderer/worker/state.ts";
+import { createInitialState } from "../../renderer/worker/state.ts";
 import { createWantedSetPoster } from "../../renderer/worker/bootstrap.ts";
 import { UNTIMED } from "../../renderer/passTiming.ts";
 import { proxyDescriptorKey, type WorkerCtx } from "../../renderer/workerContext.ts";
@@ -99,8 +99,8 @@ export class SimulatedWorker {
   /** `${memberId}/${chunkKey}` → how many times the page sent that chunk, and for which tier. */
   readonly deliveries = new Map<string, { tier: ResidencyTier; count: number }>();
 
-  constructor(atlasBudgets: AtlasBudgets) {
-    const state = createInitialState(atlasBudgets);
+  constructor(gpuTotalBytes: number) {
+    const state = createInitialState(gpuTotalBytes);
     const post = (msg: WorkerToMainMessage): void => {
       this.outbox.push(msg);
     };
