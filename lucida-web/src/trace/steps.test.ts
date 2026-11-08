@@ -5,9 +5,13 @@
  * to apply them to.
  */
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { SavedView } from "../savedView/types.ts";
 import {
+  awaitDatasetOpen,
+  datasetIdForSource,
+  noteDatasetOpened,
+  noteDatasetOpenFailed,
   scriptControls,
   scrubIndex,
   scrubSolo,
@@ -125,8 +129,54 @@ describe("what a step is judged by", () => {
     expect(viewSignature(base)!.camera).not.toHaveProperty("viewport");
   });
 
+  it("changes with a contrast window a hand set, which stops auto-contrast", () => {
+    const manual = (max: number) => {
+      const set = view(0.5, 0, true, max, [1440, 900]);
+      set.auto_contrast = { "ds-1": false };
+      return set;
+    };
+    expect(changed(manual(100))).toBe(true);
+    const handSet = JSON.stringify(viewSignature(manual(100)));
+    expect(JSON.stringify(viewSignature(manual(100)))).toBe(handSet);
+    expect(JSON.stringify(viewSignature(manual(250)))).not.toBe(handSet);
+  });
+
   it("is null before a scene exists", () => {
     expect(viewSignature(null)).toBeNull();
+  });
+});
+
+describe("a scripted add's answer", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("lands when a dataset that was not open opens, says why when its open fails, and gives up at the timeout", async () => {
+    const opened = awaitDatasetOpen("/data/b.zarr", new Set(["wds-a"]), 5000);
+    // A dataset that was open already, opened again, is not the one added.
+    noteDatasetOpened("wds-a");
+    noteDatasetOpened("wds-b");
+    await expect(opened).resolves.toEqual({ applied: true, reason: null });
+
+    const failed = awaitDatasetOpen("/data/c.zarr", new Set(), 5000);
+    noteDatasetOpenFailed("/data/other.zarr", "nope");
+    noteDatasetOpenFailed("/data/c.zarr", "not found");
+    await expect(failed).resolves.toEqual({ applied: false, reason: "/data/c.zarr did not open: not found" });
+
+    vi.useFakeTimers();
+    const late = awaitDatasetOpen("/data/d.zarr", new Set(), 3000);
+    vi.advanceTimersByTime(3000);
+    await expect(late).resolves.toEqual({ applied: false, reason: "/data/d.zarr did not open within 3 s" });
+    // A late open after the answer changes nothing.
+    noteDatasetOpened("wds-d");
+  });
+
+  it("finds a dataset's workspace id by its source URL in canonical form", () => {
+    const health = [
+      { workspace_dataset_id: "wds-a", source_url: "/data/a.zarr" },
+      { workspace_dataset_id: "wds-b", source_url: null },
+    ];
+    const canonical = (url: string) => url.toLowerCase();
+    expect(datasetIdForSource("/DATA/A.zarr", health, canonical)).toBe("wds-a");
+    expect(datasetIdForSource("/data/b.zarr", health, canonical)).toBeNull();
   });
 });
 
@@ -138,6 +188,9 @@ describe("the registration", () => {
       view: () => null,
       scrub: () => ({ applied: true, reason: null }),
       select: () => ({ applied: true, reason: null }),
+      contrast: () => ({ applied: true, reason: null }),
+      addDataset: () => Promise.resolve({ applied: true, reason: null }),
+      removeDataset: () => Promise.resolve({ applied: true, reason: null }),
     };
     expect(scriptControls()).toBeNull();
     setScriptControls(controls);

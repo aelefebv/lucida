@@ -40,7 +40,7 @@ use crate::trace::{
     TraceRunFile, describe_adapter, format_run_facts,
 };
 use crate::trace_knobs::KnobSettings;
-use crate::trace_script::{Script, ScriptRecord};
+use crate::trace_script::{Script, ScriptRecord, SentInput};
 
 /// One replay input the driver could not restore, and why.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,11 +121,29 @@ impl ReplayPlan {
     pub fn from_bundle(bundle: &TraceBundle, path: &Path) -> Result<Self, CliError> {
         let header = &bundle.header;
 
-        let mut named = header
+        let script = match &bundle.script {
+            None => Script::default(),
+            Some(record) => {
+                Script::from_steps(record.steps.iter().map(|step| step.step.clone()).collect())
+                    .map_err(|reason| {
+                        CliError::config(format!(
+                            "the script in {} could not be run again: {reason}",
+                            path.display()
+                        ))
+                    })?
+            }
+        };
+
+        // The header lists the datasets open at the run's close. A script
+        // that added or removed one started from others, and the replay
+        // starts where the run did.
+        let at_close: Vec<String> = header
             .datasets
             .iter()
             .filter_map(|dataset| dataset.source_url.as_deref())
-            .map(normalize_dataset_url);
+            .map(normalize_dataset_url)
+            .collect();
+        let mut named = script.datasets_before(&at_close).into_iter();
         let Some(dataset_url) = named.next() else {
             return Err(CliError::config(format!(
                 "{} names no dataset source URL, so there is nothing to open; a bundle of a \
@@ -148,19 +166,6 @@ impl ReplayPlan {
                  are opened",
                 unnamed.join(", ")
             ))
-        };
-
-        let script = match &bundle.script {
-            None => Script::default(),
-            Some(record) => {
-                Script::from_steps(record.steps.iter().map(|step| step.step.clone()).collect())
-                    .map_err(|reason| {
-                        CliError::config(format!(
-                            "the script in {} could not be run again: {reason}",
-                            path.display()
-                        ))
-                    })?
-            }
         };
 
         let (view, source) = match (&bundle.script, header.view_url.as_deref()) {
@@ -188,17 +193,28 @@ impl ReplayPlan {
         let mode = through_view("the mode");
         let pins = through_view("every pin");
 
-        let viewport = match header.viewport {
-            Some(viewport) if viewport.css_width >= 1.0 && viewport.css_height >= 1.0 => Ok((
-                viewport.css_width.round() as u32,
-                viewport.css_height.round() as u32,
-            )),
-            Some(viewport) => Err(format!(
+        // A resize step leaves the page, and so the header, at another
+        // size; the run started at the size its first resize changed from.
+        let resized_from = bundle.script.as_ref().and_then(|record| {
+            record.steps.iter().find_map(|step| match &step.input {
+                Some(SentInput::Resize { from, .. }) => Some(*from),
+                _ => None,
+            })
+        });
+        let viewport = match (resized_from, header.viewport) {
+            (Some([width, height]), _) => Ok((width, height)),
+            (None, Some(viewport)) if viewport.css_width >= 1.0 && viewport.css_height >= 1.0 => {
+                Ok((
+                    viewport.css_width.round() as u32,
+                    viewport.css_height.round() as u32,
+                ))
+            }
+            (None, Some(viewport)) => Err(format!(
                 "the header's viewport is {}x{} CSS pixels, which is not a window; the driver's \
                  default {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} runs",
                 viewport.css_width, viewport.css_height
             )),
-            None => Err(format!(
+            (None, None) => Err(format!(
                 "the header carries no viewport; the driver's default {DEFAULT_WIDTH}x{DEFAULT_HEIGHT} runs"
             )),
         };
@@ -642,11 +658,13 @@ mod tests {
                 ScriptStep::Wait,
                 ScriptStep::Orbit {
                     theta: 30.0,
-                    phi: 0.0
+                    phi: 0.0,
+                    duration_ms: None,
                 },
                 ScriptStep::Scrub {
                     axis: crate::trace_script::ScrubAxis::T,
-                    count: 3
+                    count: 3,
+                    interval_ms: None,
                 },
             ]
         );
@@ -856,6 +874,53 @@ mod tests {
         let why = reason(&plan.record.unrestored, "dataset");
         assert!(why.contains("b"), "{why}");
         assert!(!plan.record.restored.contains(&"dataset".to_string()));
+    }
+
+    /// A script that added and removed datasets and resized the page left
+    /// the header at its close. The replay starts where the run did: with
+    /// the datasets before the first step, at the size the first resize
+    /// changed from.
+    #[test]
+    fn a_bundle_that_changed_its_datasets_and_size_replays_from_its_start() {
+        let mut bundle = golden_bundle();
+        let source = |id: &str, url: &str| BundleDataset {
+            id: id.to_string(),
+            name: None,
+            source_url: Some(url.to_string()),
+        };
+        bundle.header.datasets = vec![
+            source("b", "gs://bucket/added.zarr"),
+            source("c", "gs://bucket/kept.zarr"),
+        ];
+        let mut resize = step(
+            json!({ "kind": "resize", "width": 800, "height": 600 }),
+            a_view(),
+        );
+        resize["input"] = json!({ "sent": "resize", "from": [1280, 720], "to": [800, 600] });
+        bundle.script = Some(scripted(json!([
+            step(
+                json!({ "kind": "add", "url": "gs://bucket/added.zarr" }),
+                a_view()
+            ),
+            step(
+                json!({ "kind": "remove", "url": "gs://bucket/sample.zarr" }),
+                a_view()
+            ),
+            resize,
+            step(
+                json!({ "kind": "resize", "width": 640, "height": 480 }),
+                a_view()
+            ),
+        ])));
+        let plan = ReplayPlan::from_bundle(&bundle, Path::new("b.json")).unwrap();
+        assert_eq!(plan.dataset_url, "gs://bucket/kept.zarr");
+        assert_eq!(
+            plan.other_dataset_urls,
+            vec!["gs://bucket/sample.zarr".to_string()]
+        );
+        assert_eq!((plan.width, plan.height), (1280, 720));
+        assert!(plan.record.restored.contains(&"viewport".to_string()));
+        assert_eq!(plan.script.steps.len(), 4);
     }
 
     /// The text leads with what was replayed and what could not be

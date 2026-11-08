@@ -501,9 +501,9 @@ export class RenderLoop implements TraceEnvironment {
   }
 
   /**
-   * One of the five inputs landed: pan, zoom, orbit, scrub, or select. The
-   * recorder hears it by name, so the run it opens or extends carries the
-   * input as its cause, and the loop is dirtied under the same name.
+   * One of the inputs in `INPUT_KINDS` landed. The recorder hears it by
+   * name, so the run it opens or extends carries the input as its cause,
+   * and the loop is dirtied under the same name.
    *
    * An input on a page with nothing open moves nothing through the pipeline
    * and opens no run. The next thing that happens on such a page is a

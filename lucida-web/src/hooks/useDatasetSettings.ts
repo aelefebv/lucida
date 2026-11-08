@@ -412,11 +412,13 @@ export function useDatasetSettings({
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
   // A hand-set limit stops continuous auto-contrast for the layer, or the next
-  // fit would replace it.
+  // fit would replace it. The recorder hears it here, at the control, and not
+  // where auto-contrast applies its fits, which are no one's input.
   const handleChannelSetContrast = useCallback((id: string, channel: number, min: number, max: number) => {
+    loopRef.current?.markInput("contrast");
     applyChannelContrast(id, channel, min, max);
     setAutoContrastMap((prev) => (prev.get(id) === false ? prev : new Map(prev).set(id, false)));
-  }, [applyChannelContrast]);
+  }, [applyChannelContrast, loopRef]);
 
   /** Set a channel's limits to its latest fit once. */
   const handleChannelAutoFit = useCallback((id: string, channel: number) => {
@@ -524,14 +526,12 @@ export function useDatasetSettings({
     setLayerSettingsVersion((v) => v + 1);
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  const handleRemoveLayer = useCallback((id: string) => {
-    if (
-      !confirm(
-        `Remove "${datasetsRef.current.get(id)?.name ?? id}" from this workspace? This only removes the workspace layer; it does not delete upstream storage or cached data.`,
-      )
-    ) return;
+  /** Remove a layer from the workspace, once a person has confirmed it. A
+   *  peer's removal arrives through `datasetCallbacksRef` and is no input. */
+  const removeLayer = useCallback((id: string) => {
     const scene = wasmSceneRef.current;
     if (!scene) return;
+    loopRef.current?.markInput("remove");
     applyDocumentCommand(
       scene,
       { type: "remove_dataset", id },
@@ -539,7 +539,16 @@ export function useDatasetSettings({
       loopRef.current,
     );
     datasetCallbacksRef.current.removeDataset(id);
-  }, [wasmSceneRef, datasetsRef, bridgeCallbacksRef, datasetCallbacksRef, loopRef]);
+  }, [wasmSceneRef, bridgeCallbacksRef, datasetCallbacksRef, loopRef]);
+
+  const handleRemoveLayer = useCallback((id: string) => {
+    if (
+      !confirm(
+        `Remove "${datasetsRef.current.get(id)?.name ?? id}" from this workspace? This only removes the workspace layer; it does not delete upstream storage or cached data.`,
+      )
+    ) return;
+    removeLayer(id);
+  }, [datasetsRef, removeLayer]);
 
   // A document command: the server authorizes it editor-only, broadcasts it,
   // and persists it. A blank name is ignored here; the server rejects it too.
@@ -610,6 +619,7 @@ export function useDatasetSettings({
     handleLayerSetLevelPin,
     handleLayerMove,
     handleRemoveLayer,
+    removeLayer,
     handleLayerRename,
   };
 }

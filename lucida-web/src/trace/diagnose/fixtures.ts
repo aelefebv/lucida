@@ -479,7 +479,7 @@ export interface InteractionRunSpec {
 }
 
 /**
- * An interaction run under one of the five inputs, with the cause the recorder
+ * An interaction run under one of the inputs, with the cause the recorder
  * gives it. One reading per frame, each frame most of its own interval: the
  * shape a gesture makes on the main thread.
  */
