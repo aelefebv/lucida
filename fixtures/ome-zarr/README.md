@@ -38,12 +38,14 @@ fixtures differ from what it writes.
 | `v2-twin.ome.zarr` | `twin-unsharded` as OME-NGFF 0.4 on Zarr v2, compressed with Blosc (lz4, byte shuffle) | The Zarr v2 reader and numcodecs' default compressor. |
 | `v3-codec-chain.ome.zarr` | `twin-unsharded` with the chain `transpose`, `bytes` (big-endian), `gzip`, `crc32c` | A Zarr v3 chain beyond `bytes` and one compressor. |
 | `v2-collection.ome.zarr` | `collection-unsharded` as OME-NGFF 0.4 on Zarr v2, in Fortran order, big-endian, with `.` between chunk coordinates | A Zarr v2 collection, and the v2 options that change how a chunk is laid out. |
+| `v3-level-paths.ome.zarr` | `twin-sharded` with its level arrays named `s0`, `s1`, `s2` | Levels found by their multiscale path, not their index, through shards. |
+| `v2-consolidated.ome.zarr` | `collection-unsharded` as OME-NGFF 0.4 on Zarr v2, with levels named `s0` and `s1` and every metadata document consolidated into `.zmetadata` | Named levels in a collection, and an open that reads only the root's metadata. |
 
 Sample values are `uint16` in every fixture. Unless the table says otherwise,
 the dataset is OME-Zarr 0.5 on Zarr v3 and its codec chain is `bytes`
 (little-endian) followed by `zstd`. A sharded fixture wraps that same chain in
 `sharding_indexed` with the index at the end of each shard. Each fixture in the
-last three rows holds the same samples as its Zarr v3 twin.
+last five rows holds the same samples as its twin.
 
 ## End-to-end checks
 
