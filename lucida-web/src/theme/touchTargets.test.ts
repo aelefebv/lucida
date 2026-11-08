@@ -23,7 +23,7 @@ const EXEMPT: Readonly<Record<string, string>> = {
 };
 
 /** Controls that fall short under a finger. Take one out once it is sized. */
-const SHORT: ReadonlySet<string> = new Set([".lc-browse-chip-remove", ".lc-presence-peer", ".lc-rail-row-open"]);
+const SHORT: ReadonlySet<string> = new Set<string>();
 
 const FOCUS = /:focus-visible|\[data-focus-visible\]/;
 const SIZED = /--lc-target-min|--lc-control-h/;

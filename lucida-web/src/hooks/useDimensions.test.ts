@@ -13,6 +13,7 @@ import { act, renderHook } from "@testing-library/react";
 import type { WasmScene } from "lucida-core";
 
 import { applyViewportCommand } from "../applyAndSend.ts";
+import { stepIndex } from "../axes.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { SceneStore } from "../sceneStore.ts";
 import { VIEWPORT_MEDIA, type ViewportClass } from "../theme/viewport.ts";
@@ -44,7 +45,7 @@ function dataset(id: string, channels: number): DatasetState {
 }
 
 function renderDimensions(datasets: DatasetState[] = []) {
-  const state = { multi: false, c: 0, selection: 0 };
+  const state = { multi: false, c: 0, z: 0, t: 0, selection: 0 };
   const commands: Array<Record<string, unknown>> = [];
   const scene = {
     apply_command: vi.fn((json: string) => {
@@ -52,13 +53,15 @@ function renderDimensions(datasets: DatasetState[] = []) {
       commands.push(cmd);
       if (cmd.type === "set_multi_channel") state.multi = cmd.enabled;
       if (cmd.type === "set_c") state.c = cmd.c;
+      if (cmd.type === "set_z") state.z = cmd.z;
+      if (cmd.type === "set_t") state.t = cmd.t;
       state.selection++;
     }),
     epochs: () => JSON.stringify({ content: 0, layout: 0, view: 0, selection: state.selection }),
     multi_channel: () => state.multi,
     c: () => state.c,
-    z: () => 0,
-    t: () => 0,
+    z: () => state.z,
+    t: () => state.t,
     camera_mode: () => "slice",
   } as unknown as WasmScene;
   const loop = {
@@ -98,6 +101,24 @@ describe("useDimensions as an input source", () => {
     act(() => result.current.handleCChange(1));
 
     expect(loop.markInput.mock.calls).toEqual([["scrub"], ["scrub"], ["scrub"]]);
+  });
+
+  it("steps from the scene's index at each press, not the last render's", () => {
+    const { result, commands } = renderDimensions();
+
+    act(() => {
+      result.current.handleZChange(stepIndex(1, 3));
+      result.current.handleZChange(stepIndex(1, 3));
+      result.current.handleZChange(stepIndex(1, 3));
+      result.current.handleTChange(stepIndex(1, 4));
+    });
+
+    expect(commands).toEqual([
+      { type: "set_z", z: 1 },
+      { type: "set_z", z: 2 },
+      { type: "set_z", z: 2 },
+      { type: "set_t", t: 1 },
+    ]);
   });
 
   it("reports solo as a select", () => {
