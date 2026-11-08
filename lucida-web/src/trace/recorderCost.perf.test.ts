@@ -87,14 +87,17 @@ const WORST_TICK_CEILING_US = 250;
 /** Per-event budgets in nominal nanoseconds, by burst size, about twice each typical figure. */
 const PER_EVENT_BUDGET_NS: Readonly<Record<number, number>> = {
   1: 590,
-  8: 300,
-  128: 250,
-  2943: 250,
+  8: 190,
+  128: 120,
+  2943: 100,
 };
 
+/** A row birth's budget in nominal nanoseconds, about twice the typical figure, at any burst size. */
+const ROW_BIRTH_BUDGET_NS = 370;
+
 /** Tick budgets in nominal microseconds, about twice each typical figure. */
-const WORST_TICK_BUDGET_US = 3_200;
-const MATCHED_TICK_BUDGET_US = 26;
+const WORST_TICK_BUDGET_US = 1_100;
+const MATCHED_TICK_BUDGET_US = 14;
 const LIVE_READ_BUDGET_US = 2.1;
 
 /**
@@ -351,6 +354,13 @@ function makeRig(chunks: number, calls?: { count: number }) {
   }
 
   const handles = new Int32Array(chunks);
+  // Read once, like the arguments above: the test runner's loader reads an
+  // import through a getter on every use, which would bill the recorder for
+  // the drive's own reads.
+  const DECODE_START = Boundary.DecodeStart;
+  const UPLOAD_START = Boundary.UploadStart;
+  const WORKER_DISPATCH = CountedPhaseIndex.WorkerDispatch;
+  const EVICTION = PointEvent.Eviction;
   const label: WireLabel = { rid: 0, connectionGeneration: 1 };
 
   /** One planning tick at this burst size, driven the way the pipeline drives it. */
@@ -376,9 +386,9 @@ function makeRig(chunks: number, calls?: { count: number }) {
       handles[i] = handle;
       label.rid = i;
       recorder.labelRow(handle, label);
-      recorder.stamp(handle, Boundary.DecodeStart);
-      recorder.countPhase(CountedPhaseIndex.WorkerDispatch);
-      recorder.stamp(handle, Boundary.UploadStart);
+      recorder.stamp(handle, DECODE_START);
+      recorder.countPhase(WORKER_DISPATCH);
+      recorder.stamp(handle, UPLOAD_START);
       recorder.noteHandedToRenderer(handle);
     }
 
@@ -386,7 +396,7 @@ function makeRig(chunks: number, calls?: { count: number }) {
     // the per-chunk cost, and the one that would go quadratic if either
     // pending list were pruned by search instead of swapped.
     recorder.noteFrameDispatched();
-    recorder.recordPointEvent(PointEvent.Eviction, "evicted", sources[0], 0);
+    recorder.recordPointEvent(EVICTION, "evicted", sources[0], 0);
     recorder.commitTick();
   }
 
@@ -467,20 +477,20 @@ function makeRig(chunks: number, calls?: { count: number }) {
     for (let i = 0; i < MATCHED_TICK.decodes; i++) {
       const handle = take(1);
       if (handle < 0) break;
-      recorder.stamp(handle, Boundary.DecodeStart);
-      recorder.countPhase(CountedPhaseIndex.WorkerDispatch);
+      recorder.stamp(handle, DECODE_START);
+      recorder.countPhase(WORKER_DISPATCH);
       push(2, handle);
     }
     for (let i = 0; i < MATCHED_TICK.uploads; i++) {
       const handle = take(2);
       if (handle < 0) break;
-      recorder.stamp(handle, Boundary.UploadStart);
+      recorder.stamp(handle, UPLOAD_START);
       recorder.noteHandedToRenderer(handle);
     }
 
     recorder.noteFrameDispatched();
     for (let i = 0; i < MATCHED_TICK.evictions; i++) {
-      recorder.recordPointEvent(PointEvent.Eviction, "evicted", sources[i], 0);
+      recorder.recordPointEvent(EVICTION, "evicted", sources[i], 0);
     }
     recorder.commitTick();
   }
@@ -660,14 +670,32 @@ describe("recorder cost contract", () => {
     );
   });
 
-  it("holds the largest measured burst inside its budget, logged against the 250 µs ceiling", () => {
+  it("holds a row birth and the largest measured burst inside their budgets, logged against the ceilings", () => {
     // This ceiling comes from one number: the largest burst measured is
     // 2,943 chunk requests inside one `cpuCache.submit()`, and at
     // 100 ns an event that is 294 µs. So the tick being measured is the
     // submit-and-dispatch burst — the rest of each chunk's lifecycle lands on
     // later ticks as its fetch settles, and the previous gate's whole-
     // lifecycle-in-one-tick figure is a pessimistic bound, not this one.
+    //
+    // A burst is row births and nothing else, so its cost over its rows is
+    // what one birth costs. A run holds 128 bursts of 128 rows and grows its
+    // table on four of them, and only five of 2,943, three of which grow it,
+    // so the two sizes read a birth into spare room and a birth that pays
+    // for the table's growth. Both are held to one budget.
+    const small = measure(128, "burst");
     const burst = measure(2943, "burst");
+    for (const r of [small, burst]) {
+      const perRowNs = (r.timing.nominalUs * 1000) / r.chunks;
+      console.log(
+        `[recorder cost] row birth: ${String(r.chunks).padStart(4)}-row bursts x${r.iterations} | ` +
+          `nominal ${perRowNs.toFixed(1)} ns/row (ceiling ${PER_EVENT_CEILING_NS}, budget ${ROW_BIRTH_BUDGET_NS})`,
+      );
+      expect(perRowNs, `a row birth in ${r.chunks}-row bursts, nominal ${perRowNs.toFixed(1)} ns`).toBeLessThan(
+        ROW_BIRTH_BUDGET_NS,
+      );
+    }
+
     const ratio = burst.timing.nominalUs / WORST_TICK_CEILING_US;
     const verdict = ratio <= 1
       ? `${(1 / ratio).toFixed(1)}x under the ceiling`
