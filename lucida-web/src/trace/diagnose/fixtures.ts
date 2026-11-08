@@ -970,10 +970,9 @@ export function sendHeavySteadyState(run: TraceRun): TraceRun {
 }
 
 /**
- * A run that can never settle: the coarse tier holds 60 MiB of a 64 MiB
+ * A run that settles covering less: the coarse tier holds 60 MiB of a 64 MiB
  * budget, wants 1,240 chunks and holds 800 of them, and has nothing queued
- * or in flight, so the run times out. The budget-bound rule exists to name
- * this as a coverage loss rather than as the timeout it causes.
+ * or in flight. The budget-bound rule names the coverage it goes without.
  */
 export function budgetBoundCoarseRun(): TraceRun {
   const rows = Array.from({ length: 40 }, (_, i) => ({
@@ -993,7 +992,7 @@ export function budgetBoundCoarseRun(): TraceRun {
     header: {
       runId: "coarse-budget-bound",
       durationUs: 20_000 * MS,
-      endReason: "timeout",
+      endReason: "quiescent",
       outstandingAtSettle: {
         pending: 0,
         inFlight: 0,

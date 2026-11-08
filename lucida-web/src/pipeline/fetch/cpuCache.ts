@@ -39,7 +39,7 @@ import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, PointEvent, RowOutcome } from "../../trace/types.ts";
 import { parseChunkKey } from "../../renderer/chunkKeys.ts";
 import type { ChunkFeedbackReason } from "../../renderer/workerProtocol.ts";
-import type { CacheQuiescenceInputs } from "../../trace/quiescence.ts";
+import type { CacheSettleInputs } from "../settle.ts";
 import {
   classifyFetchError,
   NeverRetry,
@@ -102,7 +102,7 @@ export const CHUNK_FAILURE_STREAK_THRESHOLD = 10;
 export const CHUNK_FAILURE_NOTIFY_INTERVAL_MS = 15_000;
 export const INTERACTION_MODE_WINDOW = 10;
 /**
- * How deep the pending queue may be before {@link CpuCache.quiescenceInputs}
+ * How deep the pending queue may be before {@link CpuCache.settleInputs}
  * stops classifying it by lane. The predicate runs on the tick path and an
  * oversubscribed remote collection queues tens of thousands of requests, so
  * the scan is bounded; past this depth the answer is "not quiescent",
@@ -1136,7 +1136,7 @@ export class CpuCache {
    * What is in flight and what is queued, by lane, written into `out`.
    *
    * In flight is bounded by the concurrency cap, so it is always counted.
-   * Pending is scanned under the same cap as {@link quiescenceInputs}, and
+   * Pending is scanned under the same cap as {@link settleInputs}, and
    * past it the per-lane counts stay at zero while `pendingUnclassified`
    * says so, so a reader shows the total and states that the split is
    * unknown rather than paying for a backlog tens of thousands deep.
@@ -1236,8 +1236,12 @@ export class CpuCache {
    * `pendingUnclassified` is set when the queue is deeper than
    * {@link QUIESCENCE_PENDING_SCAN_CAP}. That reads as not quiescent, so a
    * deep queue keeps a run open instead of closing it on a guess.
+   *
+   * With nothing queued or in flight and demand still unmet, it also says
+   * why each missing chunk is missing, which decides whether the view has
+   * settled covering less or is waiting on something.
    */
-  quiescenceInputs(out: CacheQuiescenceInputs): CacheQuiescenceInputs {
+  settleInputs(out: CacheSettleInputs): CacheSettleInputs {
     const demand = this.computeTierDemandTelemetry();
 
     let inFlight = this.proxyScheduler.inFlightSize;
@@ -1275,7 +1279,61 @@ export class CpuCache {
       if (this.desiredDetailKeysThisTick.has(key)) out.failedDetailChunks++;
       else out.failedCoarseChunks++;
     });
+
+    out.shortDetailChunks = 0;
+    out.shortCoarseChunks = 0;
+    out.serverPendingChunks = 0;
+    out.retryingChunks = 0;
+    out.unrequestedChunks = 0;
+    const unmet =
+      demand.resident.detailChunks < demand.desired.detailChunks ||
+      demand.resident.coarseChunks < demand.desired.coarseChunks;
+    if (unmet && out.pending === 0 && out.inFlight === 0 && !out.pendingUnclassified) {
+      this.countMissing(out, {
+        detail: tierFull(demand.resident.detailBytes, demand.resident.detailChunks, this.chunkStore.budgetBytes),
+        coarse: tierFull(demand.resident.coarseBytes, demand.resident.coarseChunks, this.overviewStore.budgetBytes),
+      });
+    }
     return out;
+  }
+
+  /**
+   * Sort each wanted chunk that is not resident by what it waits on. Walks
+   * the wanted set, so {@link settleInputs} asks only while nothing is
+   * queued or in flight, the one moment the answer can settle or stall the
+   * view.
+   *
+   * A chunk the renderer refused for want of a slot is short of room too,
+   * on the GPU rather than here.
+   */
+  private countMissing(out: CacheSettleInputs, full: Record<ResidencyTier, boolean>): void {
+    const seen = new Set<string>();
+    const short = (tier: ResidencyTier): void => {
+      if (tier === "detail") out.shortDetailChunks++;
+      else out.shortCoarseChunks++;
+    };
+    for (const requests of this.wantedRequests) {
+      for (const req of requests) {
+        const key = chunkSchedulerKey(req, req.tier);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        // Resident as the demand counts reckon it: held, and seen by this plan.
+        const entry = this.lookupCachedEntry(req);
+        if (entry && entry.lastSeenTick === this.currentSubmitTick) continue;
+        if (this.rejectionTracker.has(req.entityId, req.chunkKey)) {
+          short(req.tier);
+          continue;
+        }
+        if (entry || this.chunkScheduler.hasInFlight(key)) continue;
+        const record = this.getFailureRecord(key);
+        // A permanent failure is counted with the failed chunks above.
+        if (record?.kind === "permanent") continue;
+        if (record?.kind === "pending") out.serverPendingChunks++;
+        else if (record) out.retryingChunks++;
+        else if (full[req.tier]) short(req.tier);
+        else out.unrequestedChunks++;
+      }
+    }
   }
 
   /**
@@ -2194,6 +2252,16 @@ function orderChunkRequestsForTierAllocation(
   }
   ordered.push(...other);
   return ordered;
+}
+
+/**
+ * Whether the chunks a tier holds for the view leave no room for one more of
+ * their size. Counted over the wanted chunks rather than the whole store,
+ * because a chunk the view no longer wants gives its room up to one it does.
+ */
+function tierFull(wantedBytes: number, wantedChunks: number, budgetBytes: number): boolean {
+  if (wantedChunks === 0) return budgetBytes <= 0;
+  return wantedBytes + wantedBytes / wantedChunks > budgetBytes;
 }
 
 function isEpochStale(deliveryEpochs: SceneEpochs, currentEpochs: SceneEpochs): boolean {

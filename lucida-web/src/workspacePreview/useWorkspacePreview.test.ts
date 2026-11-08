@@ -2,25 +2,24 @@
 
 import { act, cleanup, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RunBoundary } from "../trace/liveProgress.ts";
+import type { SettleOutcome } from "../pipeline/settle.ts";
 import type { FrameCaptureResult } from "../renderer/workerProtocol.ts";
 import { __resetCommandsForTesting, runCommand } from "../ui/commands.ts";
 import { BlankFrameError, encodePreview } from "./encode.ts";
 import { PREVIEW_REFRESH_MS, previewWanted, useWorkspacePreview, type WorkspacePreviewOptions } from "./useWorkspacePreview.ts";
 
-const recorder = vi.hoisted(() => {
-  const listeners = new Set<(boundary: RunBoundary) => void>();
+const signal = vi.hoisted(() => {
+  const listeners = new Set<(outcome: SettleOutcome) => void>();
   return {
     listeners,
-    isRunOpen: false,
-    quiescence: null as { quiescent: boolean } | null,
-    onRunBoundary(listener: (boundary: RunBoundary) => void) {
+    outcome: "settling" as SettleOutcome,
+    subscribe(listener: (outcome: SettleOutcome) => void) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
   };
 });
-vi.mock("../trace/recorder.ts", () => ({ traceRecorder: recorder }));
+vi.mock("../pipeline/settle.ts", () => ({ settleSignal: signal }));
 
 const toasts = vi.hoisted(() => [] as { title: string; description?: string; tone?: string }[]);
 vi.mock("../ui/toastQueue.ts", () => ({
@@ -47,10 +46,9 @@ let calls: Call[];
 let stored: Date | null | number;
 let putStatus: number;
 
-function settle(endReason: RunBoundary["endReason"] = "quiescent") {
-  for (const listener of [...recorder.listeners]) {
-    listener({ runId: "r", cause: { epoch: "content", dirtyKind: "residency", source: "dataset_open" }, endReason, durationUs: 1 });
-  }
+function settle(outcome: SettleOutcome = "settled") {
+  signal.outcome = outcome;
+  for (const listener of [...signal.listeners]) listener(outcome);
 }
 
 const frame: FrameCaptureResult = { frame: { png: new ArrayBuffer(8), width: 2, height: 1 }, reason: null };
@@ -80,8 +78,7 @@ beforeEach(() => {
   stored = null;
   putStatus = 200;
   toasts.length = 0;
-  recorder.isRunOpen = false;
-  recorder.quiescence = null;
+  signal.outcome = "settling";
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string, init: RequestInit = {}) => {
@@ -159,33 +156,33 @@ describe("useWorkspacePreview, automatically", () => {
     expect(puts()).toHaveLength(1);
   });
 
-  it("waits for a run with data in it to end on its own", async () => {
+  it("waits for a view with data in it to settle", async () => {
     const hook = renderHook((props: WorkspacePreviewOptions) => useWorkspacePreview(props), {
       initialProps: options({ hasData: false }),
     });
     await flush();
     settle();
-    settle("timeout");
+    settle("stalled");
     await flush();
     expect(puts()).toHaveLength(0);
 
     hook.rerender(options({ hasData: true }));
-    settle(null);
-    settle("explicit");
+    settle("settling");
+    settle("stalled");
     await flush();
-    expect(puts(), "an opening edge or an export's close is not a settle").toHaveLength(0);
+    expect(puts(), "settling or stalling is not settling").toHaveLength(0);
 
     settle();
     await flush();
     expect(puts()).toHaveLength(1);
   });
 
-  it("takes a run that timed out, for a view that never goes quiet", async () => {
+  it("leaves a stalled view for the next open", async () => {
     renderHook(() => useWorkspacePreview(options()));
     await flush();
-    settle("timeout");
+    settle("stalled");
     await flush();
-    expect(puts()).toHaveLength(1);
+    expect(puts()).toHaveLength(0);
   });
 
   it("captures when data lands on a page that had already settled", async () => {
@@ -196,15 +193,14 @@ describe("useWorkspacePreview, automatically", () => {
     await flush();
     expect(puts()).toHaveLength(0);
 
-    recorder.quiescence = { quiescent: true };
+    signal.outcome = "settled";
     hook.rerender(options({ hasData: true }));
     await flush();
     expect(puts()).toHaveLength(1);
   });
 
-  it("does not count a page as settled while a run is open", async () => {
-    recorder.quiescence = { quiescent: true };
-    recorder.isRunOpen = true;
+  it("does not count a view as settled while it is settling", async () => {
+    signal.outcome = "settling";
     renderHook(() => useWorkspacePreview(options()));
     await flush();
     expect(puts()).toHaveLength(0);
@@ -213,12 +209,11 @@ describe("useWorkspacePreview, automatically", () => {
   it("skips a settle that a new gesture already overtook", async () => {
     renderHook(() => useWorkspacePreview(options()));
     await flush();
-    recorder.isRunOpen = true;
     settle();
+    signal.outcome = "settling";
     await flush();
     expect(puts()).toHaveLength(0);
 
-    recorder.isRunOpen = false;
     settle();
     await flush();
     expect(puts()).toHaveLength(1);
@@ -282,14 +277,13 @@ describe("useWorkspacePreview, by hand", () => {
     stored = new Date();
     renderHook(() => useWorkspacePreview(options()));
     await flush();
-    recorder.isRunOpen = true;
+    signal.outcome = "settling";
     runCommand("workspace.useViewAsPreview");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1000);
     });
     expect(puts()).toHaveLength(0);
 
-    recorder.isRunOpen = false;
     settle();
     await flush();
     expect(puts()).toHaveLength(1);

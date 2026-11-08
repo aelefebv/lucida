@@ -25,7 +25,7 @@ import { bumpSettingsGeneration } from "../../tickCommon.ts";
 import { AVAILABILITY_UPDATE_SOURCE } from "../../invalidation.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { PointEvent } from "../../trace/types.ts";
-import { createQuiescenceState } from "../../trace/quiescence.ts";
+import { createSettleState, settleSignal } from "../settle.ts";
 import type { AtlasBudgets } from "../../renderer/worker/state.ts";
 import type { MissingChunk } from "../../renderer/workerProtocol.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
@@ -163,6 +163,8 @@ export interface PhaseOutcome {
   /** Distinct chunks among them; equal to `chunksSent` when none went twice. */
   distinctChunksSent: number;
   quiescence: string;
+  /** The share of the wanted set the page says is resident. */
+  coverage: number;
   detail: TierCount;
   coarse: TierCount;
   queued: number;
@@ -238,12 +240,16 @@ export function expectSettled(run: SimulationRun): void {
 
 /**
  * Whether the page says its view settled, and if not, why. This is the
- * published quiescence every settle consumer waits on, read where they read
- * it, so a change to that predicate changes what the simulation accepts.
+ * settle signal every settle consumer waits on, read where they read it, so
+ * a change to that predicate changes what the simulation accepts.
  */
-function pageSettle(): { settled: boolean; reason: string } {
-  const published = traceRecorder.quiescence;
-  return { settled: published?.quiescent ?? false, reason: published?.reason ?? "unpublished" };
+function pageSettle(): { settled: boolean; reason: string; coverage: number } {
+  const published = settleSignal.state;
+  return {
+    settled: settleSignal.outcome === "settled",
+    reason: settleSignal.stallReason ?? published?.reason ?? "unpublished",
+    coverage: published?.coverage ?? 0,
+  };
 }
 
 /** Resolve every pending microtask, including those the resolved ones queue. */
@@ -329,6 +335,7 @@ class Simulation {
       return worker;
     });
     traceRecorder.reset();
+    settleSignal.reset();
     // The progress guard reports a held chunk only to the trace.
     const record = traceRecorder.recordPointEvent.bind(traceRecorder);
     vi.spyOn(traceRecorder, "recordPointEvent").mockImplementation((kind, reason, chunk, tier) => {
@@ -484,7 +491,7 @@ class Simulation {
   /** Nothing queued, in flight or pending anywhere, and no frame requested. */
   private atFixedPoint(): boolean {
     if (this.frames.size > 0 || !this.worker.idle) return false;
-    const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
+    const q = this.cpuCache.settleInputs(createSettleState());
     return (
       q.pending === 0 &&
       q.inFlight === 0 &&
@@ -532,7 +539,7 @@ class Simulation {
     sentBefore: Map<string, number>,
     heldBefore: number,
   ): PhaseOutcome {
-    const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
+    const q = this.cpuCache.settleInputs(createSettleState());
     const page = pageSettle();
     const missingCpu = this.missingFromCpu();
     const missingGpu = this.missingFromGpu();
@@ -570,6 +577,7 @@ class Simulation {
       chunksSent,
       distinctChunksSent,
       quiescence: page.reason,
+      coverage: page.coverage,
       detail: { resident: q.residentDetailChunks, desired: q.desiredDetailChunks },
       coarse: { resident: q.residentCoarseChunks, desired: q.desiredCoarseChunks },
       queued: q.pending + q.speculativePending,
@@ -589,7 +597,7 @@ class Simulation {
   private whatIsStillMoving(): string {
     const parts: string[] = [];
     if (this.frames.size > 0) parts.push(`a frame is requested (the page publishes ${pageSettle().reason})`);
-    const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
+    const q = this.cpuCache.settleInputs(createSettleState());
     if (q.pending + q.speculativePending > 0) parts.push(`${q.pending + q.speculativePending} chunks queued`);
     if (q.inFlight + q.speculativeInFlight > 0) parts.push(`${q.inFlight + q.speculativeInFlight} in flight`);
     return parts.join(", ") || "the worker is still busy";
@@ -635,6 +643,7 @@ class Simulation {
     this.loop?.stop();
     this.scene?.free();
     traceRecorder.reset();
+    settleSignal.reset();
     vi.useRealTimers();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
@@ -660,7 +669,8 @@ function formatReport(name: string, dpr: number, phases: PhaseOutcome[]): string
       `phase "${p.label}": ${p.why}.`,
       `  ${p.frames} frames, ${p.chunksSent} chunks sent to the worker; ` +
         `CPU cache holds detail ${p.detail.resident}/${p.detail.desired}, ` +
-        `coarse ${p.coarse.resident}/${p.coarse.desired}; ${p.queued} queued, ${p.inFlight} in flight.`,
+        `coarse ${p.coarse.resident}/${p.coarse.desired}; ${p.queued} queued, ${p.inFlight} in flight; ` +
+        `the page reports ${Math.round(p.coverage * 100)}% coverage.`,
       ...formatKeys("wanted by the plan, not in the CPU cache", p.missingCpu),
       ...formatKeys("wanted by the worker, not on the GPU", p.missingGpu),
       ...formatKeys(`sent to the worker ${RESENT_THRESHOLD} or more times`, p.resent),

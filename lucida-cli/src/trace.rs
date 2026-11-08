@@ -143,6 +143,7 @@ const RUN_EXPORT_EXPRESSION: &str = r#"(() => {
     runId,
     quiescenceHoldMs: seam.quiescenceHoldMs,
     endReason: run ? run.header.endReason : null,
+    stallReason: run ? (run.header.stallReason || null) : null,
     diagnostic,
     summary: runId ? render(() => seam.diagnoseText(runId)) : null,
     phases: runId ? render(() => seam.diagnoseText(runId, { depth: 'phases' })) : null,
@@ -435,6 +436,9 @@ pub struct TraceRunHeader {
     /// The run's own end reason, read back off the document rather than
     /// asserted here.
     pub end_reason: Option<String>,
+    /// What a stalled run waited on, such as `server_pending`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stall_reason: Option<String>,
     pub server_warmth: ServerWarmth,
     pub server_url: String,
     pub workspace_id: String,
@@ -539,6 +543,8 @@ struct SeamExport {
     run_id: Option<String>,
     quiescence_hold_ms: Option<f64>,
     end_reason: Option<String>,
+    #[serde(default)]
+    stall_reason: Option<String>,
     diagnostic: Option<Value>,
     summary: Option<String>,
     phases: Option<String>,
@@ -1585,10 +1591,11 @@ fn parse_run_file(text: &str, path: &Path) -> Result<TraceRunFile, CliError> {
 /// ceiling and its rationale live in the page's ruleset, not here.
 pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
     if !file.header.settled {
-        return Some(format!(
-            "the run never settled ({})",
-            file.header.end_reason.as_deref().unwrap_or("no end reason")
-        ));
+        let ended = file.header.end_reason.as_deref().unwrap_or("no end reason");
+        return Some(match file.header.stall_reason.as_deref() {
+            Some(reason) => format!("the run never settled ({ended}: {reason})"),
+            None => format!("the run never settled ({ended})"),
+        });
     }
     if let Some(kind) = file
         .diagnostic
@@ -2339,6 +2346,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
                 .unwrap_or(DEFAULT_QUIESCENCE_HOLD_MS),
             settled,
             end_reason: export.end_reason,
+            stall_reason: export.stall_reason,
             server_warmth: facts.server_warmth.clone(),
             server_url: facts.server_url.clone(),
             workspace_id: facts.workspace_id.clone(),
@@ -2403,8 +2411,12 @@ pub async fn write_run_file(
 async fn wait_for_settled_run(page: &mut browser::Page, wait: Duration) -> Result<bool, CliError> {
     let deadline = tokio::time::Instant::now() + wait;
     let concluded_before = read_run_state(page, wait).await?.concluded;
+    let mut timeout_set = false;
 
     loop {
+        if !timeout_set {
+            timeout_set = set_run_timeout(page, wait).await?;
+        }
         let state = read_run_state(page, wait).await?;
         if state.concluded > concluded_before {
             pin_run(page, state.last_concluded_run_id.as_deref(), wait).await?;
@@ -2415,6 +2427,22 @@ async fn wait_for_settled_run(page: &mut browser::Page, wait: Duration) -> Resul
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+/// Give the page the driver's own deadline as its run timeout, so a run the
+/// driver is still waiting on is not closed by the page's shorter default.
+/// False until the seam is there; a page too old to take it ignores the
+/// assignment and keeps its own.
+async fn set_run_timeout(page: &mut browser::Page, wait: Duration) -> Result<bool, CliError> {
+    let value = page.evaluate(&run_timeout_expression(wait), wait).await?;
+    Ok(value.as_bool().unwrap_or(false))
+}
+
+fn run_timeout_expression(wait: Duration) -> String {
+    format!(
+        "window.lucidaTrace ? (window.lucidaTrace.runTimeoutMs = {}, true) : false",
+        wait.as_millis()
+    )
 }
 
 /// Leave the waited-for run's id on the page for the export to read.
@@ -2594,7 +2622,11 @@ pub fn format_chrome_trace_human(output_path: &str, capture: &ChromeTraceCapture
          {} events, {} bytes. Open it at https://ui.perfetto.dev (File → Open trace file).",
         capture.events, capture.bytes
     );
-    if !capture.settled {
+    if capture.end_reason.as_deref() == Some("stalled") {
+        human.push_str(
+            "\nThe view stopped making progress without settling; the run was closed as stalled.",
+        );
+    } else if !capture.settled {
         human.push_str(
             "\nThe page never published quiescent before the deadline; the run was closed as a timeout.",
         );
@@ -2661,6 +2693,7 @@ mod tests {
                 quiescence_hold_ms: 500.0,
                 settled,
                 end_reason: Some(end_reason.to_string()),
+                stall_reason: None,
                 server_warmth: cold(),
                 server_url: "http://host".to_string(),
                 workspace_id: "ws".to_string(),
@@ -2861,8 +2894,7 @@ mod tests {
 
     /// "The view settled and the pipeline went on" is a regression a build
     /// should catch, so a steady-state verdict fails the gate as a stall
-    /// does — including the budget-bound reading, which is what a run that
-    /// could never settle says instead of reporting a timeout.
+    /// does.
     #[test]
     fn the_gate_fails_on_a_steady_state_verdict() {
         let refetching = run_file(
@@ -2878,21 +2910,38 @@ mod tests {
         let reason = gate_failure(&refetching).unwrap();
         assert!(reason.contains("steady-state"));
         assert!(reason.contains("fetched again after the view settled"));
+    }
 
+    /// A view whose budgets hold less than it wants settles covering less,
+    /// and that is the planned behavior, so it passes. A view that stopped
+    /// without settling fails, and says what it waited on.
+    #[test]
+    fn the_gate_passes_a_view_that_settled_covering_less_and_fails_a_stall() {
         let budget_bound = run_file(
             json!({
                 "verdict": {
-                    "kind": "steady-state",
-                    "text": "the coarse tier is budget-bound at 62,914,560 B of 67,108,864 B (93% full) with nothing pending and nothing in flight, so 440 of 1,240 wanted chunk(s) cannot fit — a coverage loss of 35%, not a timeout"
+                    "kind": "clear",
+                    "text": "no stall — the coarse tier is budget-bound at 62,914,560 B of 67,108,864 B (93% full) with nothing pending and nothing in flight, so 440 of 1,240 wanted chunk(s) cannot fit — the view settles covering less, a coverage loss of 35%"
                 }
             }),
             true,
             "quiescent",
         );
-        assert!(
-            gate_failure(&budget_bound)
-                .unwrap()
-                .contains("coverage loss of 35%")
+        assert_eq!(gate_failure(&budget_bound), None);
+
+        let mut stalled = run_file(json!({}), false, "stalled");
+        stalled.header.stall_reason = Some("server_pending".to_string());
+        assert_eq!(
+            gate_failure(&stalled).as_deref(),
+            Some("the run never settled (stalled: server_pending)")
+        );
+    }
+
+    #[test]
+    fn the_run_timeout_expression_hands_the_page_the_drivers_deadline() {
+        assert_eq!(
+            run_timeout_expression(Duration::from_secs(180)),
+            "window.lucidaTrace ? (window.lucidaTrace.runTimeoutMs = 180000, true) : false"
         );
     }
 
