@@ -15,6 +15,7 @@ import {
   type PhaseOutcome,
   type Scenario,
   type ScenarioSpec,
+  type ScenarioStep,
   type SimulationRun,
 } from "./harness.ts";
 import { collection, singleImage, type PyramidSpec } from "./fixtures.ts";
@@ -273,6 +274,52 @@ describe("a zoom, pan and orbit inside a volume with a full atlas", () => {
     gpuComplete: false,
     steps: [{ zoom: 4 }, { orbit: [0.6, 0.3] }, { pan: [120, 60] }, { orbit: [-1.2, -0.4] }],
   }));
+});
+
+describe("a two-timepoint volume whose detail budget holds the view but not its prefetch", () => {
+  // The view wants level 0 of the first timepoint, 128 chunks, and prefetch
+  // asks for the same 128 of the second. Prefetch chunks near the center rank
+  // above view chunks at the corners, but only what the view leaves is
+  // prefetch's, and an evicted prefetch chunk is no reason to wait.
+  const block = singleImage({
+    id: "block",
+    pyramid: { shape: [2, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
+  });
+  const CHUNK_32_CUBE_BYTES = 32 * 32 * 32 * 2;
+  const steps: ScenarioStep[] = [{ zoom: 2 }, { orbit: [0.5, 0.2] }, { zoom: 0.5 }];
+  const fits = describeScenario({
+    name: "volume prefetch beyond the detail budget",
+    mode: "volume",
+    dataset: block,
+    cache: { mainBudgetBytes: 140 * CHUNK_32_CUBE_BYTES },
+    steps,
+  });
+  const short = describeScenario({
+    name: "volume view beyond the detail budget",
+    mode: "volume",
+    dataset: block,
+    cache: { mainBudgetBytes: 100 * CHUNK_32_CUBE_BYTES },
+    gpuComplete: false,
+    steps,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles covering the whole view in every phase at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(fits, { dpr });
+      expectSettled(run);
+      for (const phase of run.phases) {
+        expect(phase.quiescence, phase.label).toBe("quiescent");
+        expect(phase.detail.resident, phase.label).toBe(phase.detail.desired);
+      }
+    });
+    it(`settles covering less in every phase when the view itself does not fit at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(short, { dpr });
+      expectSettled(run);
+      for (const phase of run.phases) {
+        expect(phase.quiescence, phase.label).toBe("coverage_limited");
+        expect(phase.detail.resident, phase.label).toBe(100);
+      }
+    });
+  }
 });
 
 describe("a zoom and pan across a collection", () => {

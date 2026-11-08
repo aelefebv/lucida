@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { DatasetManifest } from "../../manifestTypes.ts";
-import { admitRequests, chunkBytesFor } from "./admission.ts";
+import { admitPlans, chunkBytesFor, type GpuSlot, type PerTier } from "./admission.ts";
 import type { ChunkRequest } from "./types.ts";
 
 function request(x: number, overrides: Partial<ChunkRequest> = {}): ChunkRequest {
@@ -26,29 +26,57 @@ function request(x: number, overrides: Partial<ChunkRequest> = {}): ChunkRequest
 
 const TEN_BYTES = () => 10;
 
-describe("admitRequests", () => {
+/** One plan admitted alone. */
+function admitOne(
+  requests: ChunkRequest[],
+  capacity: PerTier,
+  slotOf?: (req: ChunkRequest) => GpuSlot | null,
+  gpuRoom?: number,
+) {
+  return admitPlans([{ requests, bytesOf: TEN_BYTES, slotOf }], capacity, gpuRoom)[0];
+}
+
+describe("admitPlans", () => {
   it("admits in priority order up to each tier's room and declares the rest", () => {
     const requests = [0, 1, 2, 3, 4].map((x) => request(x));
-    const admission = admitRequests(requests, { detail: 30, coarse: 0 }, TEN_BYTES);
+    const admission = admitOne(requests, { detail: 30, coarse: 0 });
     expect(admission.admitted.map((r) => r.x)).toEqual([0, 1, 2]);
     expect(admission.shortfall).toEqual({ detail: 2, coarse: 0 });
-    expect(admission.remaining).toEqual({ detail: 0, coarse: 0 });
   });
 
   it("drops prefetch that does not fit without counting it against coverage", () => {
     const requests = [request(0), request(1, { lane: "prefetch" }), request(2, { lane: "prefetch" })];
-    const admission = admitRequests(requests, { detail: 20, coarse: 0 }, TEN_BYTES);
+    const admission = admitOne(requests, { detail: 20, coarse: 0 });
     expect(admission.admitted.map((r) => r.x)).toEqual([0, 1]);
+    expect(admission.shortfall.detail).toBe(0);
+  });
+
+  it("admits the view's detail before prefetch that ranks above it", () => {
+    const requests = [
+      request(0, { lane: "prefetch" }),
+      request(1, { lane: "prefetch" }),
+      request(2),
+      request(3),
+    ];
+    const admission = admitOne(requests, { detail: 30, coarse: 0 });
+    expect(admission.admitted.map((r) => `${r.lane}:${r.x}`)).toEqual(["prefetch:0", "detail:2", "detail:3"]);
     expect(admission.shortfall.detail).toBe(0);
   });
 
   it("lets the coarse tier take the room detail leaves, and says how much it borrowed", () => {
     const requests = [request(0), ...[1, 2, 3, 4].map((x) => request(x, { lane: "coarse" }))];
-    const admission = admitRequests(requests, { detail: 30, coarse: 20 }, TEN_BYTES);
+    const admission = admitOne(requests, { detail: 30, coarse: 20 });
     expect(admission.admitted).toHaveLength(5);
     expect(admission.shortfall).toEqual({ detail: 0, coarse: 0 });
     expect(admission.borrowed).toBe(20);
-    expect(admission.remaining).toEqual({ detail: 0, coarse: 0 });
+  });
+
+  it("lends the coarse tier detail's room before prefetch takes it", () => {
+    const requests = [request(0, { lane: "prefetch" }), request(1), request(2, { lane: "coarse" })];
+    const admission = admitOne(requests, { detail: 20, coarse: 0 });
+    expect(admission.admitted.map((r) => `${r.lane}:${r.x}`)).toEqual(["detail:1", "coarse:2"]);
+    expect(admission.shortfall).toEqual({ detail: 0, coarse: 0 });
+    expect(admission.borrowed).toBe(10);
   });
 
   it("admits or refuses two lanes' demand for one chunk together, charged once", () => {
@@ -57,9 +85,24 @@ describe("admitRequests", () => {
       request(1, { lane: "coarse" }),
       request(0, { lane: "minimap", priority: 9 }),
     ];
-    const admission = admitRequests(requests, { detail: 0, coarse: 10 }, TEN_BYTES);
+    const admission = admitOne(requests, { detail: 0, coarse: 10 });
     expect(admission.admitted.map((r) => `${r.lane}:${r.x}`)).toEqual(["coarse:0", "minimap:0"]);
     expect(admission.shortfall.coarse).toBe(1);
+  });
+
+  it("admits every plan's view before any plan's prefetch, from one shared room", () => {
+    const first = [request(0), request(1, { lane: "prefetch" })];
+    const second = [request(2, { datasetId: "other" }), request(3, { datasetId: "other" })];
+    const [a, b] = admitPlans(
+      [
+        { requests: first, bytesOf: TEN_BYTES },
+        { requests: second, bytesOf: TEN_BYTES },
+      ],
+      { detail: 30, coarse: 0 },
+    );
+    expect(a.admitted.map((r) => `${r.lane}:${r.x}`)).toEqual(["detail:0"]);
+    expect(b.admitted.map((r) => r.x)).toEqual([2, 3]);
+    expect(a.shortfall.detail + b.shortfall.detail).toBe(0);
   });
 });
 
@@ -67,7 +110,7 @@ describe("admitting against GPU slot pools", () => {
   it("admits no more chunks into a pool than it has slots, and counts the rest short", () => {
     const requests = [0, 1, 2, 3].map((x) => request(x));
     const slotOf = () => ({ pool: "p", slots: 2, slotBytes: 10 });
-    const admission = admitRequests(requests, { detail: 1_000, coarse: 0 }, TEN_BYTES, slotOf);
+    const admission = admitOne(requests, { detail: 1_000, coarse: 0 }, slotOf);
     expect(admission.admitted.map((r) => r.x)).toEqual([0, 1]);
     expect(admission.shortfall.detail).toBe(2);
   });
@@ -79,19 +122,18 @@ describe("admitting against GPU slot pools", () => {
       request(1, { lane: "minimap", priority: 9 }),
     ];
     const slotOf = (req: ChunkRequest) => (req.lane === "coarse" ? { pool: "p", slots: 1, slotBytes: 10 } : null);
-    const admission = admitRequests(requests, { detail: 0, coarse: 100 }, TEN_BYTES, slotOf);
+    const admission = admitOne(requests, { detail: 0, coarse: 100 }, slotOf);
     expect(admission.admitted.map((r) => `${r.lane}:${r.x}`)).toEqual(["coarse:0", "minimap:1"]);
     expect(admission.shortfall.coarse).toBe(1);
   });
 
-  it("admits no more slots across every pool than the GPU room holds, and hands on what is left", () => {
+  it("admits no more slots across every pool than the GPU room holds", () => {
     // Two pools of ample slots, but room for three 10-byte slots between them.
     const requests = [0, 1, 2, 3].map((x) => request(x));
     const slotOf = (req: ChunkRequest) => ({ pool: req.x % 2 === 0 ? "even" : "odd", slots: 10, slotBytes: 10 });
-    const admission = admitRequests(requests, { detail: 1_000, coarse: 0 }, TEN_BYTES, slotOf, 35);
+    const admission = admitOne(requests, { detail: 1_000, coarse: 0 }, slotOf, 35);
     expect(admission.admitted.map((r) => r.x)).toEqual([0, 1, 2]);
     expect(admission.shortfall.detail).toBe(1);
-    expect(admission.gpuRoomLeft).toBe(5);
   });
 });
 
