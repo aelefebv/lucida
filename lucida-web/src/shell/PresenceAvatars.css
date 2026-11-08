@@ -10,9 +10,13 @@
   align-items: center;
 }
 
+/* Avatars overlap under a mouse. Under a finger each is spaced out to the
+   width of its hit area, so no two hit areas overlap. */
 .lc-presence-peer {
+  --spread: calc((var(--lc-target-min) - 24px) / 2);
+  position: relative;
   display: inline-flex;
-  margin: 0 0 0 -4px;
+  margin: 0 max(0px, var(--spread)) 0 max(-4px, var(--spread));
   padding: 0;
   border: none;
   border-radius: var(--lc-radius-full);
@@ -24,7 +28,13 @@
 }
 
 .lc-presence-peer:first-child {
-  margin-left: 0;
+  margin-left: max(0px, var(--spread));
+}
+
+.lc-presence-peer::before {
+  content: "";
+  position: absolute;
+  inset: min(0px, calc((24px - var(--lc-target-min)) / 2));
 }
 
 .lc-presence-peer:hover:not(:disabled) {

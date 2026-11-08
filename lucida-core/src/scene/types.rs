@@ -66,8 +66,9 @@ pub struct ChannelSettings {
     pub contrast_max: f64,
     pub gamma: f64,
     /// Display name override for this channel. `None` falls back to the
-    /// manifest's omero label, then `Ch {index}`. Like `colormap`, it rides
-    /// saved views and presence but is not durable document state.
+    /// manifest's omero label, then `Channel n`, counted from 1. Like
+    /// `colormap`, it rides saved views and presence but is not durable
+    /// document state.
     ///
     /// The serde attributes keep it additive: a blob without `name` loads as
     /// `None`, and a channel with no override serializes without the key.
