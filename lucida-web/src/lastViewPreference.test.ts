@@ -2,51 +2,36 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  RESTORE_LAST_VIEW_KEY,
   getRestoreLastViewEnabled,
   setRestoreLastViewEnabled,
   resolveInitialViewSource,
 } from "./lastViewPreference.ts";
+import { PREFERENCES_STORAGE_KEY, __resetPreferencesForTesting } from "./theme/preferences.ts";
+
+const LEGACY_KEY = "lucida.restoreLastView";
 
 beforeEach(() => {
   localStorage.clear();
+  __resetPreferencesForTesting();
 });
 
 afterEach(() => {
   localStorage.clear();
+  __resetPreferencesForTesting();
   vi.restoreAllMocks();
 });
 
 describe("getRestoreLastViewEnabled / setRestoreLastViewEnabled", () => {
   it("defaults to true when nothing is stored", () => {
-    expect(localStorage.getItem(RESTORE_LAST_VIEW_KEY)).toBeNull();
     expect(getRestoreLastViewEnabled()).toBe(true);
   });
 
-  it("round-trips an explicit off then on", () => {
+  it("round-trips an explicit off then on, as a preference", () => {
     setRestoreLastViewEnabled(false);
-    expect(localStorage.getItem(RESTORE_LAST_VIEW_KEY)).toBe("false");
     expect(getRestoreLastViewEnabled()).toBe(false);
+    expect(localStorage.getItem(PREFERENCES_STORAGE_KEY)).toContain('"viewer.restoreLastView":false');
 
     setRestoreLastViewEnabled(true);
-    expect(localStorage.getItem(RESTORE_LAST_VIEW_KEY)).toBe("true");
-    expect(getRestoreLastViewEnabled()).toBe(true);
-  });
-
-  it("treats '0' as off too", () => {
-    localStorage.setItem(RESTORE_LAST_VIEW_KEY, "0");
-    expect(getRestoreLastViewEnabled()).toBe(false);
-  });
-
-  it("treats an unrecognized / corrupt value as on (fail-safe default)", () => {
-    localStorage.setItem(RESTORE_LAST_VIEW_KEY, "garbage");
-    expect(getRestoreLastViewEnabled()).toBe(true);
-  });
-
-  it("degrades to the default-on when reading throws", () => {
-    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
-      throw new Error("blocked");
-    });
     expect(getRestoreLastViewEnabled()).toBe(true);
   });
 
@@ -55,6 +40,21 @@ describe("getRestoreLastViewEnabled / setRestoreLastViewEnabled", () => {
       throw new Error("quota");
     });
     expect(() => setRestoreLastViewEnabled(false)).not.toThrow();
+    expect(getRestoreLastViewEnabled()).toBe(false);
+  });
+});
+
+describe("the old storage key", () => {
+  it.each([
+    ["false", false],
+    ["0", false],
+    ["true", true],
+    ["garbage", true],
+  ])("reads %j as %s, once, and removes it", (raw, enabled) => {
+    localStorage.setItem(LEGACY_KEY, raw);
+    __resetPreferencesForTesting();
+    expect(getRestoreLastViewEnabled()).toBe(enabled);
+    expect(localStorage.getItem(LEGACY_KEY)).toBeNull();
   });
 });
 

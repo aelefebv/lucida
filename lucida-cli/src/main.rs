@@ -672,7 +672,7 @@ enum ViewCommand {
         #[arg(long, allow_hyphen_values = true)]
         y: f64,
     },
-    /// Set one selected dimension index
+    /// Set one selected dimension index. Channels are per layer: see `channel solo`
     Slice { axis: SliceAxis, index: u32 },
     /// Set the selected Z slab range
     ZRange { start: u32, end: u32 },
@@ -700,7 +700,6 @@ impl ViewCommand {
             ViewCommand::Slice { axis, index } => match axis {
                 SliceAxis::Z => ViewportCommand::SetZ { z: *index },
                 SliceAxis::T => ViewportCommand::SetT { t: *index },
-                SliceAxis::C => ViewportCommand::SetC { c: *index },
             },
             ViewCommand::ZRange { start, end } => {
                 if end <= start {
@@ -733,7 +732,6 @@ impl ViewCommand {
 enum SliceAxis {
     Z,
     T,
-    C,
 }
 
 #[derive(Subcommand, Debug)]
@@ -973,8 +971,12 @@ impl LayerCommand {
 
 #[derive(Subcommand, Debug)]
 enum ChannelCommand {
-    /// Switch single-channel or multichannel rendering mode
-    Mode { mode: ChannelMode },
+    /// Show one channel of a dataset alone, or its composite without CHANNEL.
+    /// Other datasets keep what they show
+    Solo {
+        dataset: String,
+        channel: Option<u32>,
+    },
     /// Show a dataset channel
     Show { dataset: String, channel: u32 },
     /// Hide a dataset channel
@@ -1010,16 +1012,16 @@ enum ChannelCommand {
 
 #[derive(Debug)]
 enum ChannelCommandAction {
-    Viewport(ViewportCommand),
     Dataset(DatasetDisplayCommand),
 }
 
 impl ChannelCommand {
     fn action(&self) -> Result<ChannelCommandAction, CliError> {
         Ok(match self {
-            ChannelCommand::Mode { mode } => {
-                ChannelCommandAction::Viewport(ViewportCommand::SetMultiChannel {
-                    enabled: *mode == ChannelMode::Multi,
+            ChannelCommand::Solo { dataset, channel } => {
+                ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelSolo {
+                    selector: dataset.clone(),
+                    channel: *channel,
                 })
             }
             ChannelCommand::Show { dataset, channel } => {
@@ -1183,9 +1185,10 @@ struct TraceRunArgs {
     /// its memory budgets to it, as `navigator.deviceMemory` does
     #[arg(long, value_name = "GIB", value_parser = trace::parse_device_memory)]
     device_memory: Option<f64>,
-    /// Show every visible channel at once, as the viewer opens a multichannel
-    /// image, instead of the current channel alone
-    #[arg(long)]
+    /// Accepted so older scripts still run. Every layer opens in its
+    /// composite, so it changes nothing.
+    #[arg(long, hide = true)]
+    #[allow(dead_code)]
     multi_channel: bool,
     /// Write the run here instead of the trace directory beside the config
     #[arg(long, short, value_name = "PATH")]
@@ -1427,12 +1430,6 @@ enum TraceInboxCommand {
 enum DebugCommand {
     /// Show read-only workspace snapshot and selected viewer state
     State,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-enum ChannelMode {
-    Single,
-    Multi,
 }
 
 #[derive(Subcommand, Debug)]
@@ -2438,7 +2435,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 // read a window, fall back to per-cell auto.
                 let mid = plan.cells.len() / 2;
                 let probe_saved =
-                    montage::build_cell_view(&ds_id, &plan.cells[mid], viewport, None);
+                    montage::build_cell_view(&ds_id, &plan.cells[mid], viewport, None, dims[1]);
                 let probe_url =
                     montage::with_render_param(&viewer_inline_view_web_url(&target, &probe_saved)?);
                 const BG_CLIP: f64 = 0.3;
@@ -2460,7 +2457,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 for (index, cell) in plan.cells.iter().enumerate() {
                     // Same shared window for the sidecar drill-in URL and the
                     // captured thumbnail, so drilling in matches the montage.
-                    let saved = montage::build_cell_view(&ds_id, cell, viewport, shared_contrast);
+                    let saved =
+                        montage::build_cell_view(&ds_id, cell, viewport, shared_contrast, dims[1]);
                     let url = viewer_inline_view_web_url(&target, &saved)?;
                     cell_json.push(serde_json::json!({
                         "index": index,
@@ -2469,7 +2467,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                         // no counting: cell at (row, col) == cells[row*cols + col].
                         "row": index as u32 / plan.cols.max(1),
                         "col": index as u32 % plan.cols.max(1),
-                        "z": cell.z, "t": cell.t, "c": cell.c, "tile": cell.tile,
+                        "z": cell.z, "t": cell.t, "tile": cell.tile,
                         "label": cell.label,
                         "url": url,
                     }));
@@ -2717,18 +2715,6 @@ async fn run(cli: Cli) -> Result<(), CliError> {
             timeout_seconds,
             command,
         } => match command.action()? {
-            ChannelCommandAction::Viewport(command) => {
-                emit_viewport_command(
-                    &cli,
-                    &config,
-                    output,
-                    command,
-                    viewer_profile,
-                    *from_peer,
-                    *timeout_seconds,
-                )
-                .await?;
-            }
             ChannelCommandAction::Dataset(command) => {
                 emit_dataset_presence_command(
                     &cli,
@@ -4135,7 +4121,6 @@ async fn run_trace(
     };
     let mut view =
         trace::compose_dataset_view(&dataset_url, args.width, args.height, pin_contrast_for);
-    view.view.multi_channel = args.multi_channel;
     let pins = trace::DisplayPins {
         contrast: args
             .contrast
@@ -5472,7 +5457,8 @@ mod tests {
         for (cell, src) in cells.iter().zip(sidecar.cells.iter()) {
             assert_eq!(cell["z"], serde_json::json!(src.view.view.z_range.start));
             assert_eq!(cell["t"], serde_json::json!(src.view.view.t));
-            assert_eq!(cell["c"], serde_json::json!(src.view.view.c));
+            let solo = src.view.dataset_settings.values().find_map(|s| s.solo);
+            assert_eq!(cell.get("c").and_then(|c| c.as_u64()), solo.map(u64::from));
             assert_eq!(cell["url"], serde_json::json!(src.url));
             assert!(
                 cell["url"].as_str().unwrap().contains("#view="),
@@ -5640,15 +5626,23 @@ mod tests {
 
     #[test]
     fn channel_commands_parse_and_map_to_presence_or_dataset_presence() {
-        let mode = parse(&["channel", "mode", "multi"]);
-        match mode.command {
-            Command::Channel { command, .. } => match command.action().unwrap() {
-                ChannelCommandAction::Viewport(ViewportCommand::SetMultiChannel { enabled }) => {
-                    assert!(enabled);
-                }
-                _ => panic!("expected multi-channel view command"),
-            },
-            _ => panic!("expected channel mode"),
+        for (args, expected) in [
+            (&["channel", "solo", "demo.zarr", "2"][..], Some(2)),
+            (&["channel", "solo", "demo.zarr"][..], None),
+        ] {
+            match parse(args).command {
+                Command::Channel { command, .. } => match command.action().unwrap() {
+                    ChannelCommandAction::Dataset(DatasetDisplayCommand::SetChannelSolo {
+                        selector,
+                        channel,
+                    }) => {
+                        assert_eq!(selector, "demo.zarr");
+                        assert_eq!(channel, expected);
+                    }
+                    _ => panic!("expected a channel solo"),
+                },
+                _ => panic!("expected channel solo"),
+            }
         }
 
         let colormap = parse(&["channel", "colormap", "demo.zarr", "1", "viridis"]);
@@ -6387,7 +6381,6 @@ mod tests {
             ("device_pixel_ratio", "devicePixelRatio"),
             ("camera", "viewUrl"),
             ("zoom", "viewUrl"),
-            ("multi_channel", "viewUrl"),
             ("contrast", "pins"),
             ("colormap", "pins"),
             ("render_mode", "pins"),
@@ -6395,17 +6388,16 @@ mod tests {
             ("pin_contrast", "pins"),
         ]);
         // The planning knobs replay through the header's planning
-        // configuration. The cache knobs have no header field: the panel's
-        // own edits to them die on reload, so a replay runs the cache at
-        // its defaults. Nor does the device memory: a replay runs at the
-        // memory of the machine it runs on.
-        let mut session_scoped = vec!["device_memory"];
+        // configuration. The cache knobs have no header field, so a replay
+        // runs the cache at its own values. Nor does the device memory: a
+        // replay runs at the memory of the machine it runs on.
+        let mut not_in_header = vec!["device_memory"];
         for knob in trace_knobs::KNOBS {
             match knob.store {
                 trace_knobs::KnobStore::Planning => {
                     replayed_by.insert(knob.field, "planning");
                 }
-                trace_knobs::KnobStore::Cache => session_scoped.push(knob.field),
+                trace_knobs::KnobStore::Cache => not_in_header.push(knob.field),
             }
         }
         let not_workload = [
@@ -6418,6 +6410,8 @@ mod tests {
             "timeout_seconds",
             "gate",
             "help",
+            // Accepted and ignored: every layer opens in its composite.
+            "multi_channel",
             // A second workload, replayed from its own run's header.
             trace_knobs::VERSUS,
         ];
@@ -6443,7 +6437,7 @@ mod tests {
                     "{id} replays through {field}, which the replay list does not name"
                 ),
                 None if carried_by_script.contains(&id) => {}
-                None if session_scoped.contains(&id) => {}
+                None if not_in_header.contains(&id) => {}
                 None => assert!(
                     not_workload.contains(&id),
                     "{id} is neither a workload argument with a header field nor a sidecar"

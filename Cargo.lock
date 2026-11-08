@@ -1651,6 +1651,7 @@ dependencies = [
  "futures-util",
  "http-body-util",
  "jsonwebtoken",
+ "lru",
  "lucida-content",
  "lucida-core",
  "lucida-protocol",

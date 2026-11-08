@@ -85,9 +85,9 @@ export interface TileSnapshot extends BaseEntitySnapshot {
 
 export type EntitySnapshot = ImageSnapshot | GroupSnapshot | TileSnapshot;
 
+/** One layer's selectors: the scene's t and z clamped into the layer, and the channels it shows. */
 export interface SelectionState {
   t: number;
-  c: number;
   z: number;
   visibleChannels: number[];
   renderMode: "slice" | "volume";

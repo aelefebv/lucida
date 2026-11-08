@@ -1,10 +1,8 @@
 /**
  * Channel naming, visibility, and solo for the layer panel.
  *
- * Solo is the scene's single-channel mode: `multi_channel` off with `c` on
- * the soloed channel. Saved views, URLs, and peers already carry that pair,
- * so a view recorded in single-channel mode reopens soloed and leaving solo
- * returns to the composite exactly as it was, because solo never touches the
+ * Solo is per layer, the layer's `solo` in the scene. Leaving it returns the
+ * layer to its composite exactly as it was, because solo never touches the
  * per-channel visibility flags.
  */
 import { positionLabel } from "../axes.ts";
@@ -77,7 +75,7 @@ export function applyChannelToggle(
   channel: number,
   handlers: {
     onChannelSetVisible: (id: string, channel: number, visible: boolean) => void;
-    onShowAllChannels: () => void;
+    onShowAllChannels: (id: string) => void;
   },
 ): void {
   const visible = layer.channels.map((c) => c.visible);
@@ -86,7 +84,7 @@ export function applyChannelToggle(
   change.visible.forEach((v, i) => {
     if (v !== visible[i]) handlers.onChannelSetVisible(layer.id, i, v);
   });
-  if (change.leaveSolo) handlers.onShowAllChannels();
+  if (change.leaveSolo) handlers.onShowAllChannels(layer.id);
 }
 
 /** Whether the channel is the only one shown in the composite, so it cannot be hidden. */

@@ -1,5 +1,5 @@
 // The light, in-session restore of an annotation's captured view: camera
-// (including 2D/3D mode), z-slab/t/c, and display, scoped to the pin's dataset.
+// (including 2D/3D mode), z-slab/t, and display, scoped to the pin's dataset.
 //
 // This is separate from `SavedViewApplier.apply` on purpose. The heavy applier
 // opens, hides, and reorders datasets and broadcasts layout changes, which suits
@@ -82,9 +82,9 @@ export interface RestoreResult {
   /** The caller mirrors this into React `viewMode` and uses it to pick which
    *  overlay to focus. */
   viewMode: "2d" | "3d";
-  /** The z-slab/t/c actually applied, after clamping. */
-  applied: { zStart: number; zEnd: number; t: number; c: number };
-  /** A non-blocking notice when the captured z/t/c had to be clamped to fit the
+  /** The z-slab/t actually applied, after clamping. */
+  applied: { zStart: number; zEnd: number; t: number };
+  /** A non-blocking notice when the captured z/t had to be clamped to fit the
    *  pin's dataset, naming the moved axes; null when nothing was adjusted. */
   notice: string | null;
 }
@@ -93,13 +93,13 @@ export interface RestoreAnnotationViewParams {
   scene: WasmScene;
   /** The author's captured view, from `annotation.view`. */
   view: SavedView;
-  /** The pin's dataset, whose extents z/t/c clamp against. Pass null when it
+  /** The pin's dataset, whose extents z/t clamp against. Pass null when it
    *  can't be resolved: the clamp is then skipped, because
    *  `dataset_volume_shape("")` returns a `[1,1,1]` sentinel that would collapse
-   *  the captured z/t/c. */
+   *  the captured z/t. */
   datasetId?: DatasetId | null;
   /** The recipient's per-dataset T/C extents (Z comes from the scene's volume
-   *  shape). Omit to leave t/c unclamped. */
+   *  shape). Omit to leave t unclamped. */
   dimensionExtentsFor?: DimensionExtentsResolver;
   /** Restores per-label display by label name and occurrence instead of raw
    *  index. Omit for positional restore. */
@@ -107,7 +107,7 @@ export interface RestoreAnnotationViewParams {
 }
 
 /**
- * Restore `view` against the live scene: camera mode, display, clamped z/t/c,
+ * Restore `view` against the live scene: camera mode, display, clamped z/t,
  * then camera shape. This mirrors the heavy applier's tail minus every document
  * step. Mode goes first so an arcball camera is never imported while the scene
  * is in slice mode. The caller focuses the pin afterward, since the author's
@@ -128,13 +128,11 @@ export function restoreAnnotationView({
     max: view.display.contrast_max,
   });
   applyLocal(scene, { type: "set_gamma", gamma: view.display.gamma });
-  if (view.view.multi_channel !== undefined) {
-    applyLocal(scene, { type: "set_multi_channel", enabled: view.view.multi_channel });
-  }
 
+  // Each layer's solo rides its display settings.
   restoreDatasetDisplay(scene, view, datasetId, labelNamesFor);
 
-  // Without a resolved dataset the captured z/t/c pass through (see `datasetId`).
+  // Without a resolved dataset the captured z/t pass through (see `datasetId`).
   const clamped = datasetId
     ? clampViewIndices(
         scene,
@@ -144,14 +142,12 @@ export function restoreAnnotationView({
       )
     : {
         t: view.view.t,
-        c: view.view.c,
         zStart: view.view.z_range.start,
         zEnd: view.view.z_range.end,
         clamped: false,
         adjustedAxes: [] as readonly string[],
       };
   applyLocal(scene, { type: "set_t", t: clamped.t });
-  applyLocal(scene, { type: "set_c", c: clamped.c });
   applyLocal(scene, {
     type: "set_z_range",
     start: clamped.zStart,
@@ -163,7 +159,7 @@ export function restoreAnnotationView({
   return {
     cameraModeChanged: mode.changed,
     viewMode: mode.viewMode,
-    applied: { zStart: clamped.zStart, zEnd: clamped.zEnd, t: clamped.t, c: clamped.c },
+    applied: { zStart: clamped.zStart, zEnd: clamped.zEnd, t: clamped.t },
     notice: clamped.clamped ? clampNotice(clamped.adjustedAxes) : null,
   };
 }

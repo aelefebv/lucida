@@ -247,7 +247,6 @@ function makeVisibleRegion(overrides?: Partial<VisibleRegion>): VisibleRegion {
 function makeSelection(overrides?: Partial<SelectionState>): SelectionState {
   return {
     t: 0,
-    c: 0,
     z: 0,
     visibleChannels: [0],
     renderMode: "slice",
@@ -583,7 +582,6 @@ describe("request scheduling", () => {
       },
       selection: {
         t: 10,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -659,7 +657,6 @@ describe("request scheduling", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -746,7 +743,6 @@ describe("plan()", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -791,7 +787,6 @@ describe("plan()", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -877,7 +872,6 @@ describe("plan()", () => {
       },
       selection: {
         t: 5,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -956,7 +950,6 @@ describe("plan() — depth-bias focal plane (#532)", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "volume",
@@ -1572,7 +1565,6 @@ describe("plan() edge cases", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -1606,7 +1598,6 @@ describe("plan() edge cases", () => {
       },
       selection: {
         t: 2,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -1978,7 +1969,6 @@ describe("plan() honors config tunables", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -2027,7 +2017,6 @@ describe("plan() honors config tunables", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -2074,7 +2063,6 @@ describe("plan() honors config tunables", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -2121,7 +2109,6 @@ describe("plan() honors config tunables", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",
@@ -2167,7 +2154,6 @@ describe("plan() honors config tunables", () => {
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",

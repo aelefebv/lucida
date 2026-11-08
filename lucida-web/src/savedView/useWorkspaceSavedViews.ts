@@ -248,7 +248,7 @@ export function useWorkspaceSavedViews({
 export function defaultWorkspaceSavedViewName(
   datasetNames: readonly string[],
   activeLayoutName: string | null,
-  view?: Pick<ViewState, "z_range" | "t" | "c"> | null,
+  view?: Pick<ViewState, "z_range" | "t"> | null,
 ): string {
   if (datasetNames.length === 0) return "Untitled";
   let base = datasetNames.filter((name) => name.trim().length > 0).join(", ");
@@ -268,12 +268,11 @@ export function defaultWorkspaceSavedViewName(
 }
 
 function positionSuffix(
-  view?: Pick<ViewState, "z_range" | "t" | "c"> | null,
+  view?: Pick<ViewState, "z_range" | "t"> | null,
 ): string {
   if (!view) return "";
   const parts = [positionLabel("Z", view.z_range.start)];
   if (view.t !== 0) parts.push(positionLabel("T", view.t));
-  if (view.c !== 0) parts.push(positionLabel("C", view.c));
   return parts.join(" · ");
 }
 

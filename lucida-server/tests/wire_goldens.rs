@@ -321,6 +321,7 @@ fn chunk_message_fixture_paths(msg: &ChunkMessage) -> &'static [&'static str] {
         // producer and no consumer there is nothing to lock; wire a fixture
         // here if a producer ever appears.
         ChunkMessage::ChunkFetch { .. } => &[],
+        ChunkMessage::ChunkCancel { .. } => &["session/chunk_cancel.json"],
     }
 }
 
@@ -804,6 +805,7 @@ fn peer_display_settings() -> DatasetDisplaySettings {
         // entry, matching `single_manifest()`'s sole `region-a` label so the
         // name-keyed reconcile has a real name to exercise on the wire.
         label_names: vec!["region-a".into()],
+        solo: Some(0),
     }
 }
 
@@ -838,8 +840,7 @@ fn shared_view_state() -> ViewState {
     ViewState {
         z_range: 10..14,
         t: 2,
-        c: 1,
-        multi_channel: true,
+        ..ViewState::new()
     }
 }
 
@@ -917,8 +918,7 @@ fn fly_peer_presence() -> PresenceState {
         view: Some(ViewState {
             z_range: 0..50,
             t: 0,
-            c: 0,
-            multi_channel: false,
+            ..ViewState::new()
         }),
         display: Some(DisplayState::default()),
         following: None,
@@ -1247,7 +1247,6 @@ fn presence_required() -> Vec<String> {
             "/camera/viewport",
             "/view/z_range",
             "/view/t",
-            "/view/c",
             "/view/z_range/start",
             "/view/z_range/end",
             "/display/contrast_min",
@@ -2277,7 +2276,7 @@ const GENERATED_FILES: &[&str] = &[
     "generated/availability_delta.json",
 ];
 
-const REQUEST_FILES: &[&str] = &["session/chunk_request.json"];
+const REQUEST_FILES: &[&str] = &["session/chunk_request.json", "session/chunk_cancel.json"];
 
 const VOCAB_FILES: &[&str] = &["vocab/enum_vocabulary.json"];
 
@@ -2337,6 +2336,16 @@ fn request_envelopes_match_goldens() {
         "session/chunk_request.json",
         &chunk,
         &req("", &["/type", "/rid", "/dataset_id", "/image_id", "/key"]),
+        &mut failures,
+    );
+
+    // The cancel the page sends when it aborts the request above.
+    let cancel = ChunkMessage::ChunkCancel { rids: vec![0] };
+    assert!(chunk_message_fixture_paths(&cancel).contains(&"session/chunk_cancel.json"));
+    check(
+        "session/chunk_cancel.json",
+        &cancel,
+        &req("", &["/type", "/rids"]),
         &mut failures,
     );
 

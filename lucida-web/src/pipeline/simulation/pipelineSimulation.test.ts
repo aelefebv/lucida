@@ -377,7 +377,7 @@ describe("a permanent source failure", () => {
       expect(open.missingGpu[0]).toContain("3/0/0/0/0/0");
       expect(open.missingGpu[0]).toContain("source answered corrupt_chunk (1 request)");
       // The renderer is told, so the chunk draws as failed rather than as nothing.
-      expect(open.drawnFailed).toEqual(["broken-image coarse level 3 cell 0,0"]);
+      expect(open.drawnFailed).toEqual(["broken-image:ch0 coarse level 3 cell 0,0"]);
     });
   }
 });
@@ -405,7 +405,7 @@ describe("a permanent source failure at the target level", () => {
       const target = dpr === 1 ? 1 : 0;
       const [open] = run.phases;
       expect(open.failed).toEqual([`broken/broken-image/${target}/0/0/0/0/0: wrong_size`]);
-      expect(open.drawnFailed).toEqual([`broken-image detail level ${target} cell 0,0`]);
+      expect(open.drawnFailed).toEqual([`broken-image:ch0 detail level ${target} cell 0,0`]);
     });
   }
 });
@@ -432,7 +432,7 @@ describe("a permanent source failure in a volume", () => {
       expectSettled(run);
       const [open] = run.phases;
       expect(open.failed).toEqual(["block/block-image/2/0/0/1/0/0: corrupt_chunk"]);
-      expect(open.drawnFailed).toEqual(["block-image coarse level 2 cell 0,0,1"]);
+      expect(open.drawnFailed).toEqual(["block-image:ch0 coarse level 2 cell 0,0,1"]);
     });
   }
 });

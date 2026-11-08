@@ -72,7 +72,7 @@ function renderOverlay(opts: {
   pins: Annotation[];
   myId?: string;
   /** The view's Z/T/C. Defaults to on-context for the standard pins (z=3). */
-  viewContext?: { z: number; t: number; c: number };
+  viewContext?: { z: number; t: number; channels: number[] };
 }) {
   const { scene, applied } = makeScene(opts.pins);
   const sent: Array<Record<string, unknown>> = [];
@@ -88,7 +88,7 @@ function renderOverlay(opts: {
       wasmSceneRef={sceneRef}
       canvas={canvas}
       version={0}
-      viewContext={opts.viewContext ?? { z: 3, t: 0, c: 0 }}
+      viewContext={opts.viewContext ?? { z: 3, t: 0, channels: [0] }}
       myId={opts.myId ?? MY_ID}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
       onDocumentChanged={() => {
@@ -100,7 +100,7 @@ function renderOverlay(opts: {
     />,
   );
   /** Re-render with a new view context, to navigate the view. */
-  const setViewContext = (viewContext: { z: number; t: number; c: number }) => {
+  const setViewContext = (viewContext: { z: number; t: number; channels: number[] }) => {
     rerender(
       <AnnotationOverlay
         datasetId="wds-1"
@@ -1007,7 +1007,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
   it("a pin whose z/t/c all match the view is on-context (no off-context marker)", () => {
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
-      viewContext: { z: 5, t: 2, c: 1 },
+      viewContext: { z: 5, t: 2, channels: [1] },
     });
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
@@ -1017,7 +1017,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 12, t: 3, c: 2 })],
       // Same t/c, different z → off-context purely on z.
-      viewContext: { z: 4, t: 3, c: 2 },
+      viewContext: { z: 4, t: 3, channels: [2] },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     // The label names the pin's own z/t/c.
@@ -1030,7 +1030,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 9, c: 1 })],
       // Same z/c, different t.
-      viewContext: { z: 5, t: 0, c: 1 },
+      viewContext: { z: 5, t: 0, channels: [1] },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     expect(marker.textContent).toBe("Z 6 · T 10 · Channel 2");
@@ -1040,7 +1040,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 7 })],
       // Same z/t, different c.
-      viewContext: { z: 5, t: 2, c: 0 },
+      viewContext: { z: 5, t: 2, channels: [0] },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     expect(marker.textContent).toBe("Z 6 · T 3 · Channel 8");
@@ -1049,11 +1049,11 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
   it("navigating the view to the pin's Z/T/C returns it to on-context", () => {
     const { setViewContext } = renderOverlay({
       pins: [elsewherePin()],
-      viewContext: { z: 3, t: 0, c: 0 },
+      viewContext: { z: 3, t: 0, channels: [0] },
     });
     expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
 
-    setViewContext({ z: 12, t: 3, c: 2 });
+    setViewContext({ z: 12, t: 3, channels: [2] });
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
   });
@@ -1061,11 +1061,11 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
   it("navigating AWAY from a matching pin makes it off-context", () => {
     const { setViewContext } = renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
-      viewContext: { z: 5, t: 2, c: 1 },
+      viewContext: { z: 5, t: 2, channels: [1] },
     });
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
 
-    setViewContext({ z: 6, t: 2, c: 1 });
+    setViewContext({ z: 6, t: 2, channels: [1] });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     expect(marker.textContent).toBe("Z 6 · T 3 · Channel 2");
   });
@@ -1082,7 +1082,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
           comments: [{ id: "c1", author: String(MY_ID), text: "still works" }],
         }),
       ],
-      viewContext: { z: 4, t: 0, c: 0 },
+      viewContext: { z: 4, t: 0, channels: [0] },
     });
     expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
     const dot = screen.getByTestId("annot-pin-pin-here");
@@ -1096,7 +1096,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
     // Absent t/c read as 0.
     renderOverlay({
       pins: [{ id: "old", position: [10, 20], z: 8, author: String(MY_ID), kind: "point" }],
-      viewContext: { z: 8, t: 0, c: 0 },
+      viewContext: { z: 8, t: 0, channels: [0] },
     });
     expect(screen.queryByTestId("annot-offcontext-old")).toBeNull();
   });
@@ -1107,7 +1107,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
         ownPin({ id: "pin-on", z: 3, t: 0, c: 0 }),
         ownPin({ id: "pin-off", z: 9, t: 0, c: 0 }),
       ],
-      viewContext: { z: 3, t: 0, c: 0 },
+      viewContext: { z: 3, t: 0, channels: [0] },
     });
     expect(screen.queryByTestId("annot-offcontext-pin-on")).toBeNull();
     expect(screen.getByTestId("annot-offcontext-pin-off")).toBeTruthy();
@@ -1174,7 +1174,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
       wasmSceneRef: sceneRef,
       canvas,
       version,
-      viewContext: { z: 0, t: 0, c: 0 },
+      viewContext: { z: 0, t: 0, channels: [0] },
       myId: MY_ID,
       sendCommand: () => {},
       onDocumentChanged: () => {},
@@ -1210,7 +1210,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
       wasmSceneRef: sceneRef,
       canvas,
       version,
-      viewContext: { z: 0, t: 0, c: 0 },
+      viewContext: { z: 0, t: 0, channels: [0] },
       myId: MY_ID,
       sendCommand: () => {},
       onDocumentChanged: () => {},
@@ -1263,7 +1263,7 @@ describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's 
         wasmSceneRef={sceneRef}
         canvas={canvas}
         version={0}
-        viewContext={{ z: 3, t: 0, c: 0 }}
+        viewContext={{ z: 3, t: 0, channels: [0] }}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}

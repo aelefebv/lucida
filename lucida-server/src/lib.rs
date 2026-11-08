@@ -9,6 +9,7 @@ pub mod binding;
 pub mod binding_restore;
 pub mod browse;
 pub mod chunk_read;
+pub mod chunk_serves;
 pub mod connection;
 pub mod dataset_open;
 pub mod decode;
@@ -93,6 +94,8 @@ pub struct GeneratedConfig {
     pub generated_chunk_long_axis: u64,
     pub generated_max_chunk_bytes: u64,
     pub generated_disk_budget_bytes: Option<u64>,
+    /// The one budget every dataset's in-memory generated chunks share.
+    pub generated_memory: Arc<generated::GeneratedChunkMemory>,
 }
 
 impl GeneratedConfig {
@@ -115,6 +118,9 @@ impl GeneratedConfig {
             generated_chunk_long_axis: 256,
             generated_max_chunk_bytes: 2 * 1024 * 1024,
             generated_disk_budget_bytes: None,
+            generated_memory: generated::GeneratedChunkMemory::new(
+                generated::DEFAULT_GENERATED_MEMORY_BYTES,
+            ),
         }
     }
 }

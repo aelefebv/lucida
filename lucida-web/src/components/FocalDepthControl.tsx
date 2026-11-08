@@ -3,8 +3,9 @@
  * near-far axis. Shown only in 3D, in the dimension bar's camera popover.
  *
  * Reads and writes {@link configStore} `depthBiasView` (-1..1, 0 = centered)
- * directly, so it persists like every other planning tunable. 0 leaves the
- * planner unchanged (see emit.ts `applyDepthBias`).
+ * directly. It persists as a preference and, unlike the Dev controls knobs,
+ * applies with developer tools off. 0 leaves the planner unchanged (see
+ * emit.ts `applyDepthBias`).
  */
 
 import { CrosshairSimpleIcon } from "@phosphor-icons/react";

@@ -20,9 +20,8 @@ import {
   type FetchSource,
   type FetchSourceWire,
 } from "./manifestTypes.ts";
-import type { ViewportCommand } from "./commands.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
-import { readCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
+import { readCacheKnobs, subscribeCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
 import { pageDeviceBudgets } from "./deviceBudget.ts";
 import type {
   WireGeneratedAvailabilityByDataset,
@@ -272,6 +271,7 @@ export class SessionController {
   private surfacedErrorKind: SurfacedErrorKind | null = null;
   /** Unsubscribes this controller from the scene-call guard on destroy. */
   private readonly stopObservingSceneCalls: () => void;
+  private readonly stopFollowingCacheKnobs: () => void;
   private readonly cpuCache: CpuCache;
 
   constructor(deps: SessionControllerDeps) {
@@ -285,9 +285,6 @@ export class SessionController {
       mainBudgetBytes: budgets.cpuMainBytes,
       overviewBudgetBytes: budgets.cpuOverviewBytes,
       maxBytesInFlight: budgets.cpuBytesInFlight,
-      // Knobs the trace driver left in browser storage, read once so the
-      // cache starts under them.
-      ...readCacheKnobs(),
       // Without this, failing deliveries present as a silently stalling
       // canvas. Store failures after a successful open (e.g. revoked access)
       // arrive as per-chunk `source_chunk_status` rejections; undecodable
@@ -306,6 +303,11 @@ export class SessionController {
         this.clearSurfacedError(["data"]);
       },
     });
+    // Applied after construction, so the cache keeps the values it was built
+    // with to return to when a knob clears. Before the bridge exists, so the
+    // first request already runs under them.
+    this.cpuCache.applyKnobs(readCacheKnobs());
+    this.stopFollowingCacheKnobs = subscribeCacheKnobs((knobs) => this.cpuCache.applyKnobs(knobs));
     const bridge = new Bridge(this.buildHandlers(), workspaceSocketUrl(deps.workspaceId));
     this.session = new Session({
       bridge,
@@ -346,6 +348,7 @@ export class SessionController {
     if (this.destroyed) return;
     this.destroyed = true;
     this.stopObservingSceneCalls();
+    this.stopFollowingCacheKnobs();
     // The stream's socket is going with the session, so the toggle goes off
     // rather than pointing a successor controller's watcher at a dead bridge.
     watchStream.detach();
@@ -855,25 +858,6 @@ export class SessionController {
     this.deps.initLayerMaps(datasetId);
     const t3 = performance.now();
 
-    // Ensure per-channel settings exist for all channels.
-    // DatasetOpened may only create 1 channel setting (layers.len() = 1),
-    // but the real channel count is in the data shape.
-    if (channelCount > 1) {
-      const scene = this.deps.getScene();
-      if (scene) {
-        // Touch the last channel to grow the vec via ensure_channel
-        const cmd: ViewportCommand = {
-          type: "set_channel_visible",
-          dataset_id: datasetId,
-          channel: channelCount - 1,
-          visible: true,
-        };
-        guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
-        invalidateDisplaySettings(this.deps.getLoop(), "channel_settings_grown");
-      }
-    }
-    const t4 = performance.now();
-
     const loop = this.deps.getLoop();
     if (loop) {
       loop.addDataset(datasetId, manifest);
@@ -897,8 +881,7 @@ export class SessionController {
         registerImages: +(t1 - t0).toFixed(2),
         datasetsRefSet: +(t2 - t1).toFixed(2),
         initLayerMaps: +(t3 - t2).toFixed(2),
-        setChannelVisible: +(t4 - t3).toFixed(2),
-        addDataset: +(t5 - t4).toFixed(2),
+        addDataset: +(t5 - t3).toFixed(2),
       },
     });
   }

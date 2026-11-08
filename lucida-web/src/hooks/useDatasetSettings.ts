@@ -15,6 +15,7 @@ import { eligibleLabelInfos, volumeBudgetPrefix } from "../pipeline/planning/lab
 import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
 import type { ChannelFit } from "../pipeline/autoContrast.ts";
 import { channelDisplayName, channelRangeKey, parseChannelRangeKey } from "../components/channels.ts";
+import { readResolvedLayers } from "../resolvedLayers.ts";
 
 /** A per-label overlay row for the layer panel, keyed by manifest index. */
 interface PanelLabelRow {
@@ -103,6 +104,7 @@ function applySettingsCommand(
   if (
     cmd.type === "set_dataset_visible" ||
     cmd.type === "set_channel_visible" ||
+    cmd.type === "set_channel_solo" ||
     cmd.type === "set_label_visible"
   ) {
     invalidateSelection(loop);
@@ -351,6 +353,31 @@ export function useDatasetSettings({
     }
   }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
+  /** Show one channel of a layer alone, or its composite with `null`. Other
+   *  layers keep what they show. */
+  const handleChannelSetSolo = useCallback((id: string, channel: number | null) => {
+    const scene = wasmSceneRef.current;
+    if (scene) {
+      bridgeCallbacksRef.current.breakFollow();
+      applySettingsCommand(scene, { type: "set_channel_solo", dataset_id: id, channel }, loopRef.current);
+      bridgeCallbacksRef.current.emitDatasetPresence();
+      setLayerSettingsVersion((v) => v + 1);
+    }
+  }, [wasmSceneRef, loopRef, bridgeCallbacksRef]);
+
+  /** Solo a channel of a layer, or return the layer to its composite when the
+   *  channel is already soloed. */
+  const handleSoloChannel = useCallback((id: string, channel: number) => {
+    const scene = wasmSceneRef.current;
+    if (!scene) return;
+    const solo = readResolvedLayers(scene).get(id)?.solo ?? null;
+    handleChannelSetSolo(id, solo === channel ? null : channel);
+  }, [wasmSceneRef, handleChannelSetSolo]);
+
+  const handleShowAllChannels = useCallback((id: string) => {
+    handleChannelSetSolo(id, null);
+  }, [handleChannelSetSolo]);
+
   const handleChannelSetColormap = useCallback((id: string, channel: number, colormap: Colormap) => {
     const scene = wasmSceneRef.current;
     if (scene) {
@@ -566,6 +593,9 @@ export function useDatasetSettings({
     handleLayerSetVisible,
     handleLayerSetOpacity,
     handleChannelSetVisible,
+    handleChannelSetSolo,
+    handleSoloChannel,
+    handleShowAllChannels,
     handleChannelSetColormap,
     handleChannelSetName,
     handleChannelSetContrast,

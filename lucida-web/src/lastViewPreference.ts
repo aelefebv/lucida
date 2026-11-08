@@ -5,41 +5,33 @@
  * precedence lives: a URL hash always beats the remembered last view.
  */
 
-/** localStorage key for the toggle. Persisted, so it must stay stable across
- *  releases. */
-export const RESTORE_LAST_VIEW_KEY = "lucida.restoreLastView";
+import {
+  booleanPreference,
+  getPreference,
+  migrateLegacyKeys,
+  setPreference,
+} from "./theme/preferences.ts";
+
+export const restoreLastViewPreference = booleanPreference("viewer.restoreLastView", true);
+
+migrateLegacyKeys(
+  (key) => key === "lucida.restoreLastView",
+  (old) => {
+    // Only "false" or "0" ever turned it off.
+    for (const raw of old.values()) setPreference(restoreLastViewPreference, raw !== "false" && raw !== "0");
+  },
+);
 
 /** The source the bootstrap should apply for a bare workspace open. */
 export type InitialViewSource = "url" | "last-view" | "default" | "none";
 
-/**
- * Whether the "restore my last view" toggle is on. Only a stored "false" or
- * "0" turns it off; a missing key, unreadable storage, or any other value reads
- * as on. Never throws.
- */
+/** Whether the "restore my last view" toggle is on. */
 export function getRestoreLastViewEnabled(): boolean {
-  if (typeof localStorage === "undefined") return true;
-  let raw: string | null;
-  try {
-    raw = localStorage.getItem(RESTORE_LAST_VIEW_KEY);
-  } catch {
-    return true;
-  }
-  if (raw === null) return true;
-  return raw !== "false" && raw !== "0";
+  return getPreference(restoreLastViewPreference);
 }
 
-/**
- * Persist the toggle. Storage failures are swallowed: the preference won't
- * survive a reload, which beats throwing out of a settings click.
- */
 export function setRestoreLastViewEnabled(enabled: boolean): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(RESTORE_LAST_VIEW_KEY, enabled ? "true" : "false");
-  } catch {
-    // Best effort.
-  }
+  setPreference(restoreLastViewPreference, enabled);
 }
 
 /**

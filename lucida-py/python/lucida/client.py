@@ -872,7 +872,11 @@ class ViewResource:
 
     def slice(self, axis: str, index: int, *, timeout: float = 30.0) -> dict[str, Any]:
         axis = axis.lower()
-        if axis not in {"z", "t", "c"}:
+        if axis == "c":
+            raise LucidaError(
+                "config", "channels are shown per layer; use channel.solo(dataset, channel)"
+            )
+        if axis not in {"z", "t"}:
             raise LucidaError("config", f"unknown slice axis: {axis}")
         return self._apply({"type": f"set_{axis}", axis: index}, timeout)
 
@@ -1001,8 +1005,9 @@ class LayerResource:
         channel: int | None = None,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        """Set the contrast window of ``channel``, or of the selected channel,
-        as the layer panel does. It also stops auto-contrast for the layer."""
+        """Set the contrast window of ``channel``, or of the channel the layer
+        shows first, as the layer panel does. It also stops auto-contrast for
+        the layer."""
         return self._apply(
             "set_channel_contrast", dataset, {"min": min, "max": max}, timeout, channel=channel
         )
@@ -1015,7 +1020,7 @@ class LayerResource:
         channel: int | None = None,
         timeout: float = 30.0,
     ) -> dict[str, Any]:
-        """Set the gamma of ``channel``, or of the selected channel."""
+        """Set the gamma of ``channel``, or of the channel the layer shows first."""
         return self._apply("set_channel_gamma", dataset, {"gamma": gamma}, timeout, channel=channel)
 
     def _apply(
@@ -1034,7 +1039,11 @@ class LayerResource:
                 **fields,
             }
             if command_type.startswith("set_channel_"):
-                built["channel"] = view["view"]["c"] if channel is None else channel
+                built["channel"] = (
+                    current_channel(snapshot, view, built["dataset_id"])
+                    if channel is None
+                    else channel
+                )
             return built
 
         return self._workspace.viewer.apply(command, timeout=timeout)
@@ -1046,12 +1055,26 @@ class ChannelResource:
     def __init__(self, workspace: WorkspaceResource):
         self._workspace = workspace
 
-    def mode(self, mode: str, *, timeout: float = 30.0) -> dict[str, Any]:
-        mode = mode.lower()
-        if mode not in {"single", "multi"}:
-            raise LucidaError("config", "channel.mode must be 'single' or 'multi'")
+    def solo(
+        self,
+        dataset: str,
+        channel: int | None = None,
+        *,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Show one channel of a layer alone, or its composite with `channel=None`.
+
+        Other layers keep what they show.
+        """
+        if channel is not None and channel < 0:
+            raise LucidaError("config", "channel index must be non-negative")
         return self._workspace.viewer.apply(
-            {"type": "set_multi_channel", "enabled": mode == "multi"}, timeout=timeout
+            lambda snapshot, _view: {
+                "type": "set_channel_solo",
+                "dataset_id": snapshot_dataset_id(snapshot, dataset),
+                "channel": channel,
+            },
+            timeout=timeout,
         )
 
     def visible(
@@ -1464,6 +1487,14 @@ def level_pin_label(settings: dict[str, Any]) -> str:
     if level is None:
         return "follows the screen"
     return f"pinned to level {level}"
+
+
+def current_channel(snapshot: dict[str, Any], view: dict[str, Any], dataset_id: str) -> int:
+    """The channel a change that names none acts on: the layer's solo, else
+    the first channel its composite shows."""
+    layers = json.loads(open_profile_scene(snapshot, view).resolved_layers())
+    layer = next((layer for layer in layers if layer["dataset_id"] == dataset_id), None)
+    return layer["channels"][0]["channel"] if layer else 0
 
 
 def snapshot_dataset_id(snapshot: dict[str, Any], selector: str) -> str:
