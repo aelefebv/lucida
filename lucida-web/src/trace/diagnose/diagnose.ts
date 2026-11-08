@@ -202,7 +202,8 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     // cold browser cache is the page's first paint.
     coldOpen: isDatasetOpenCause(run.header.cause) && browserCacheCold(run.header.cacheWarmth),
     steadyState: steady.findings,
-    held: heldEvents(run, window),
+    held: eventsOfKind(run, window, "held"),
+    gpuErrors: eventsOfKind(run, window, "gpu-error"),
     baseline: options.baseline ?? null,
   });
   const worst = worstRowSelector(run, phases, findings);
@@ -593,13 +594,32 @@ interface FindingsInput {
   steadyState: SteadyStateFinding[];
   /** The chunks the uploader stopped re-sending, inside the window. */
   held: TracePointEvent[];
+  /** The GPU's errors and device losses, inside the window. */
+  gpuErrors: TracePointEvent[];
   baseline: DiagnosticDocument | null;
 }
 
-function heldEvents(run: TraceRun, window: RunWindow): TracePointEvent[] {
+function eventsOfKind(run: TraceRun, window: RunWindow, kind: TracePointEvent["kind"]): TracePointEvent[] {
   return run.events.filter(
-    (event) => event.kind === "held" && (window.whole || inWindow(event.atUs, window)),
+    (event) => event.kind === kind && (window.whole || inWindow(event.atUs, window)),
   );
+}
+
+/**
+ * The GPU lost its device or reported an error. A stall that leads every
+ * other, because the frames around it are unproven whatever the phases say.
+ */
+function gpuErrorFinding(events: TracePointEvent[]): RawFinding | null {
+  if (events.length < RULESET.gpuError.minErrors) return null;
+  const breakdown: Record<string, number> = {};
+  for (const event of events) breakdown[event.reason] = (breakdown[event.reason] ?? 0) + 1;
+  return {
+    severity: "stall",
+    rule: RULESET.gpuError.id,
+    subject: "GPU device",
+    observed: { n: events.length, breakdown },
+    threshold: { kind: "count", value: RULESET.gpuError.minErrors, why: RULESET.gpuError.why },
+  };
 }
 
 /**
@@ -783,14 +803,18 @@ function rankFindings(input: FindingsInput): Finding[] {
   raw.push(...input.steadyState);
   const held = heldFinding(input.held);
   if (held) raw.push(held);
+  const gpuError = gpuErrorFinding(input.gpuErrors);
+  if (gpuError) raw.push(gpuError);
 
   const seen = new Set<string>();
   const ranked = raw
     .sort(
       (a, b) =>
         SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] ||
-        // A held chunk leads the stalls: a slow phase cost time, while a held
-        // chunk is data the view settled without.
+        // A GPU error leads the stalls, since it can explain the rest. A held
+        // chunk comes next: a slow phase cost time, while a held chunk is data
+        // the view settled without.
+        Number(b.rule === RULESET.gpuError.id) - Number(a.rule === RULESET.gpuError.id) ||
         Number(b.rule === RULESET.held.id) - Number(a.rule === RULESET.held.id) ||
         (b.observed.sharePct ?? 0) - (a.observed.sharePct ?? 0) ||
         (b.observed.ms ?? 0) - (a.observed.ms ?? 0),
@@ -805,10 +829,13 @@ function rankFindings(input: FindingsInput): Finding[] {
   // The attribution is the run's answer to "what was this waiting on", so it
   // rides the leading finding about the run. A steady-state finding is about
   // the interval after the run and carries the ruleset's rationale instead.
-  // A held finding is about the renderer's residency, not the critical path,
-  // so the attribution rides the first finding after it.
+  // A held or GPU error finding is about the renderer, not the critical path,
+  // so the attribution rides the first finding after them.
   const leader = ranked.findIndex(
-    (finding) => finding.severity !== "steady-state" && finding.rule !== RULESET.held.id,
+    (finding) =>
+      finding.severity !== "steady-state" &&
+      finding.rule !== RULESET.held.id &&
+      finding.rule !== RULESET.gpuError.id,
   );
   return ranked.map((finding, index) => ({
     ...finding,
@@ -926,6 +953,14 @@ function buildVerdict(
     };
   }
 
+  if (lead.rule === RULESET.gpuError.id) {
+    return {
+      kind: "stall",
+      text: `${describeGpuErrors(lead)}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
   if (lead.rule === RULESET.held.id) {
     return {
       kind: "stall",
@@ -975,6 +1010,17 @@ export function describeHeld(finding: Finding): string {
 }
 
 const HELD_NAMED = 4;
+
+/** The GPU's errors by kind, as one sentence. */
+export function describeGpuErrors(finding: Finding): string {
+  const kinds = Object.entries(finding.observed.breakdown ?? {})
+    .map(([kind, count]) => `${kind} ${count}`)
+    .join(", ");
+  return (
+    `the GPU reported ${finding.observed.n ?? 0} error(s) (${kinds}); ` +
+    `frames drawn around them may be missing data`
+  );
+}
 
 function describeFirstPaint(finding: Finding): string {
   const observed = finding.observed;

@@ -9,7 +9,7 @@
 
 import type { FetchErrorKind } from "../pipeline/fetch/retry.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
-import type { ChunkFeedbackReason, LevelRange } from "../renderer/workerProtocol.ts";
+import type { ChunkFeedbackReason, GpuErrorKind, LevelRange } from "../renderer/workerProtocol.ts";
 
 /**
  * Bumped whenever the document shape changes incompatibly. One integer for
@@ -911,17 +911,18 @@ export interface TraceRow extends WireLabel {
 }
 
 /**
- * The six rare things worth a point in time rather than a column: a chunk
+ * The seven rare things worth a point in time rather than a column: a chunk
  * left the cache, the renderer refused one, a fetch was retried, a fetch gave
  * up, a dataset's target level moved, the uploader stopped re-sending a chunk
- * the renderer kept handing back. The second to fourth are rare enough that
- * they share one shape, and their diagnostic value is that they appear at
- * all.
+ * the renderer kept handing back, the GPU reported an error or lost its
+ * device. The second to fourth are rare enough that they share one shape, and
+ * their diagnostic value is that they appear at all.
  *
- * `level-change` is the one that is not about a chunk. The target level
+ * `level-change` and `gpu-error` are not about a chunk. The target level
  * follows the screen, so a zoom moves the whole wanted set to
  * another level at one instant, and a stall that begins there is explained by
  * it. It names the dataset and the old and new level; see {@link LevelChange}.
+ * A GPU error names only its kind.
  */
 export const POINT_EVENT_KINDS = [
   "eviction",
@@ -930,6 +931,7 @@ export const POINT_EVENT_KINDS = [
   "failure",
   "level-change",
   "held",
+  "gpu-error",
 ] as const;
 export type PointEventKind = (typeof POINT_EVENT_KINDS)[number];
 
@@ -940,6 +942,7 @@ export const PointEvent = {
   Failure: 3,
   LevelChange: 4,
   Held: 5,
+  GpuError: 6,
 } as const;
 export type PointEventIndex = (typeof PointEvent)[keyof typeof PointEvent];
 
@@ -967,7 +970,16 @@ const CHUNK_FEEDBACK_REASONS = [
   "missing-lod-meta",
   "radius-filter",
   "atlas-policy",
+  "upload-failed",
+  "out-of-memory",
 ] as const satisfies readonly ChunkFeedbackReason[];
+
+/** The GPU's own error kinds. `out-of-memory` is shared with the chunk feedback above. */
+const GPU_ERROR_REASONS = [
+  "device-lost",
+  "validation",
+  "internal",
+] as const satisfies readonly GpuErrorKind[];
 
 /**
  * Why a target level moved: the screen chose another level, or the dataset's
@@ -990,13 +1002,16 @@ export const POINT_EVENT_REASONS = [
   ...CHUNK_FEEDBACK_REASONS,
   ...LEVEL_CHANGE_REASONS,
   "not-resident",
+  ...GPU_ERROR_REASONS,
 ] as const;
 export type PointEventReason = (typeof POINT_EVENT_REASONS)[number];
 
 const _coversFetchErrors: FetchErrorKind extends PointEventReason ? true : never = true;
 const _coversChunkFeedback: ChunkFeedbackReason extends PointEventReason ? true : never = true;
+const _coversGpuErrors: GpuErrorKind extends PointEventReason ? true : never = true;
 void _coversFetchErrors;
 void _coversChunkFeedback;
+void _coversGpuErrors;
 
 /**
  * The identity a point event copies off whatever it happened to: a planned

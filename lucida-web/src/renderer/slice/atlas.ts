@@ -11,6 +11,9 @@ import type { WorkerCtx } from "../workerContext.ts";
 import { createSliceTexture, getDeviceLimits } from "../gpuContext.ts";
 import { computeAtlasGeometry } from "../atlasSizing.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
+import { allocateWatched } from "../worker/gpuErrors.ts";
+import { postPoolChunksLost } from "../chunkUploadFeedback.ts";
+import { shrinkAtlasBudget } from "../../deviceBudget.ts";
 
 /**
  * A label overlay's slice pool: one `r32uint` texture holding the current
@@ -56,7 +59,8 @@ export function resetLabelSliceAllocWarnings(): void {
  * the dims are unchanged, so a Z/T scrub never blanks the overlay.
  *
  * Returns `null` when the texture or indirection buffer fails to allocate,
- * after unwinding any partial allocation, so the caller skips the label.
+ * after unwinding any partial allocation, so the caller skips the label, and
+ * for a size the device ran out of memory on.
  */
 export function getOrCreateLabelSlicePool(
   ctx: WorkerCtx,
@@ -77,10 +81,21 @@ export function getOrCreateLabelSlicePool(
   }
   if (existing) destroyLabelSlicePool(existing);
 
+  const sizeKey = `${memberId}|${w}x${h}`;
+  if (ctx.state.labelSizesOutOfMemory.has(sizeKey)) return null;
+
   let texture: GPUTexture | undefined;
   let indirectionBuf: GPUBuffer;
   try {
-    texture = createSliceTexture(ctx.device, w, h, null, "r32uint");
+    texture = allocateWatched(
+      ctx,
+      () => createSliceTexture(ctx.device, w, h, null, "r32uint"),
+      (lost) => {
+        // A size that ran out of memory once would again on every delivery.
+        ctx.state.labelSizesOutOfMemory.add(sizeKey);
+        if (pools.get(memberId)?.texture === lost) removeLabelSlicePool(ctx, memberId);
+      },
+    );
     indirectionBuf = ctx.device.createBuffer({
       size: 4,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -261,9 +276,49 @@ export function getOrCreateSlicePool(
     return existing;
   }
   if (existing) destroySliceAtlas(existing);
-  const newAtlas = createSliceAtlas(ctx.device, datasetId, ctx.state.atlasBudgets.sliceAtlasBytes, chunkX, chunkY, z, t, c);
+  const newAtlas = createWatchedSliceAtlas(ctx, poolKey, datasetId, chunkX, chunkY, z, t, c);
   atlases.set(poolKey, newAtlas);
   return newAtlas;
+}
+
+function createWatchedSliceAtlas(
+  ctx: WorkerCtx,
+  poolKey: string,
+  datasetId: string,
+  chunkX: number, chunkY: number,
+  z: number, t: number, c: number,
+): SliceAtlasState {
+  return allocateWatched(
+    ctx,
+    () => createSliceAtlas(ctx.device, datasetId, ctx.state.atlasBudgets.sliceAtlasBytes, chunkX, chunkY, z, t, c),
+    (lost) => replaceLostSliceAtlas(ctx, poolKey, lost),
+  );
+}
+
+/**
+ * A pool whose texture the device could not allocate holds nothing and can't
+ * be bound. Its chunks go back to the page, and a pool with the same sections
+ * takes its place under half the budget. At the floor budget the pool is
+ * dropped, and the next cold state tries again.
+ */
+export function replaceLostSliceAtlas(ctx: WorkerCtx, poolKey: string, lost: SliceAtlasState): void {
+  const atlases = ctx.state.sliceAtlases;
+  if (atlases.get(poolKey) !== lost) return;
+  postPoolChunksLost(ctx, lost.slots.keys(), "out-of-memory");
+  destroySliceAtlas(lost);
+  atlases.delete(poolKey);
+  if (shrinkAtlasBudget(ctx.state.atlasBudgets, "sliceAtlasBytes")) {
+    const atlas = createWatchedSliceAtlas(
+      ctx, poolKey, lost.datasetId, lost.chunkX, lost.chunkY, lost.z, lost.t, lost.c,
+    );
+    atlas.entityMetas = lost.entityMetas;
+    atlas.entityZInfo = lost.entityZInfo;
+    resizeSliceIndirection(ctx, atlas, lost.indirectionData.length);
+    atlas.indirectionData.fill(0xFFFFFFFF);
+    atlas.indirectionDirty = true;
+    atlases.set(poolKey, atlas);
+  }
+  ctx.postWantedSet(lost.datasetId);
 }
 
 /** Resize the slice pool's indirection to the new total size. */

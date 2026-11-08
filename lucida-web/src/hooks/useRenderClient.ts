@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from "react";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop } from "../renderLoop.ts";
 import { webGpuUnavailableReason, type WebGpuUnavailableReason } from "../renderer/gpuContext.ts";
+import type { GpuErrorKind } from "../renderer/workerProtocol.ts";
+import { toast } from "../ui/toastQueue.ts";
+import { gpuNotice } from "./gpuNotices.ts";
 
 /** A browser without `navigator.gpu` is known not to draw before any worker starts. */
 function lacksWebGpu(): boolean {
@@ -38,6 +41,21 @@ export function useRenderClient() {
     const client = new RenderClient(canvas);
     clientRef.current = client;
     let disposed = false;
+    const noticesShownAt = new Map<GpuErrorKind, number>();
+    const stopGpuStatus = client.onGpuStatus((status) => {
+      if (disposed) return;
+      if (status.type === "gpuFailed") {
+        setRenderError(`${status.message}. Reload the page to try again.`);
+        return;
+      }
+      const notice = gpuNotice(status, noticesShownAt, performance.now());
+      if (notice) toast(notice);
+    });
+    // A test hook in every build, like the capture globals: the trace driver
+    // and a headless browser reach the worker's device through it.
+    const hooks = window as unknown as { __lucidaLoseGpuDevice?: () => void };
+    const loseGpuDevice = () => client.loseDevice();
+    hooks.__lucidaLoseGpuDevice = loseGpuDevice;
     client.ready().then(() => {
       if (!disposed) setClientReady(true);
     }).catch(err => {
@@ -52,6 +70,8 @@ export function useRenderClient() {
     return () => {
       // `disposed` stops a late settle from flipping state for a dead client.
       disposed = true;
+      stopGpuStatus();
+      if (hooks.__lucidaLoseGpuDevice === loseGpuDevice) delete hooks.__lucidaLoseGpuDevice;
       client.destroy();
       if (clientRef.current === client) {
         clientRef.current = null;

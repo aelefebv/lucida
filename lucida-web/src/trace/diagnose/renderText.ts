@@ -12,6 +12,7 @@
 import type { RunCause } from "../types.ts";
 import { SPATIAL_AXES } from "./spatialSummary.ts";
 import { describeState } from "./rowState.ts";
+import { RULESET } from "./ruleset.ts";
 import type { LiveTimeline } from "./timeline.ts";
 import type {
   ChunkLookup,
@@ -673,6 +674,12 @@ function describeObservation(finding: Finding, p: PrintNumber): string {
       .join(", ");
     const more = observed.held.length > HELD_LISTED ? `, +${observed.held.length - HELD_LISTED} more` : "";
     return `${p(`${base}.chunks`, (observed.chunks ?? 0).toLocaleString())} chunk(s) held: ${named}${more}`;
+  }
+  if (finding.rule === RULESET.gpuError.id && observed.breakdown) {
+    const kinds = Object.entries(observed.breakdown)
+      .map(([kind, count]) => `${kind} ${p(`${base}.breakdown.${kind}`, count)}`)
+      .join(", ");
+    return `${p(`${base}.n`, observed.n ?? 0)} GPU error(s): ${kinds}`;
   }
   if (observed.backlogEtaS != null || observed.pending != null) {
     const parts = [

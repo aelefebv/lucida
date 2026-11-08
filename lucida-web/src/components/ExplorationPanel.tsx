@@ -21,6 +21,7 @@ import {
 } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { explore_view } from "lucida-core";
+import { positionLabel } from "../axes.ts";
 import type { SavedView } from "../savedView/types.ts";
 import { useAppearance } from "../theme/appearance.ts";
 import { Button, IconButton } from "../ui/Button.tsx";
@@ -724,7 +725,7 @@ function BookmarkDialog({
 }
 
 /** A "you are here" readout of the camera and the dataset's axes, e.g.
- *  `3D · az 45° · zoom 2.0x · Z 171/340 · T 0/40 · C 0/3`.
+ *  `3D · az 45° · zoom 2.0x · Z 171/340 · T 1/40 · C 1/3`.
  *
  *  The camera part is the only on-screen sign of an orbit or zoom when there are
  *  no thumbnails. T and C show when their count is above 1, so a time series
@@ -752,11 +753,11 @@ function describeView(view: SavedView, dims: Dims, homeDistance?: number): strin
   }
 
   const z = view.view?.z_range?.start ?? 0;
-  if (zCount > 1) parts.push(`Z ${z + 1}/${zCount}`);
+  if (zCount > 1) parts.push(positionLabel("Z", z, zCount));
   const t = view.view?.t ?? 0;
-  if (tCount > 1) parts.push(`T ${t}/${tCount}`);
+  if (tCount > 1) parts.push(positionLabel("T", t, tCount));
   const c = view.view?.c ?? 0;
-  if (cCount > 1) parts.push(`C ${c}/${cCount}`);
+  if (cCount > 1) parts.push(positionLabel("C", c, cCount));
 
   return parts.join(" · ");
 }

@@ -16,7 +16,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 5;
+export const RULESET_VERSION = 6;
 
 export interface AbsoluteRule {
   id: string;
@@ -116,6 +116,13 @@ export interface HeldRule {
   why: string;
 }
 
+/** The GPU lost its device or reported an error during the run. */
+export interface GpuErrorRule {
+  id: string;
+  minErrors: number;
+  why: string;
+}
+
 /** Planning passes woken by an availability update and nothing else. */
 export interface ReplanRule {
   id: string;
@@ -161,6 +168,8 @@ export interface Ruleset {
   interaction: AbsoluteRule;
   /** A feedback loop between the uploader and the renderer, cut by the uploader's bound. */
   held: HeldRule;
+  /** A lost device or a GPU error, which leaves the frame's pixels unproven. */
+  gpuError: GpuErrorRule;
   /**
    * What the run left behind: four rules over the interval that opened when
    * it closed, and one over its settle block. None of them judges the run.
@@ -355,6 +364,11 @@ export const RULESET: Ruleset = {
     minChunks: 1,
     guardTicks: RESEND_GUARD_TICKS,
     why: "Every chunk the renderer evicts, refuses, or still lists as missing comes back eligible to send, so a lasting disagreement between the uploader and the renderer re-sends the same chunks every tick and the view never settles. The uploader counts ticks whose every send repeats a chunk it already sent since the last cold state. A real delivery repeats a chunk once or twice after an eviction and moves on, so that many such ticks in a row is a loop: the uploader holds those chunks until the next cold state and names each with the reason the renderer last gave. One held chunk is enough to report, because the view settled without data it asked for.",
+  },
+  gpuError: {
+    id: "gpu.error",
+    minErrors: 1,
+    why: "WebGPU raises no exception for a lost device, a failed allocation, or an invalid command: the object comes back unusable and the draw that uses it does nothing. A frame drawn around one may be missing data or show none, while the pipeline's own phases look healthy. The renderer replaces a lost device and drops an atlas it could not allocate, and the page sends those chunks again, so the run carries that cost too. One error is enough to report, because a correct build reports none.",
   },
   steadyState: {
     received: {
