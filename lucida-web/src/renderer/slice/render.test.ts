@@ -121,6 +121,7 @@ interface MockRenderer {
   setProxyTextures: ReturnType<typeof vi.fn>;
   setTierAtlases: ReturnType<typeof vi.fn>;
   setTransform: ReturnType<typeof vi.fn>;
+  setPixelRatio: ReturnType<typeof vi.fn>;
   setLabelColorBuffer: ReturnType<typeof vi.fn>;
   setDescriptorBinding: ReturnType<typeof vi.fn>;
   renderTo: ReturnType<typeof vi.fn>;
@@ -134,6 +135,7 @@ function makeRenderer(): MockRenderer {
     setProxyTextures: vi.fn(),
     setTierAtlases: vi.fn(),
     setTransform: vi.fn(),
+    setPixelRatio: vi.fn(),
     setLabelColorBuffer: vi.fn(),
     setDescriptorBinding: vi.fn(),
     renderTo: vi.fn(),

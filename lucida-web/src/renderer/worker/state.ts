@@ -101,6 +101,8 @@ export interface RendererState {
   coldStateByDataset: Map<string, ColdStateMessage>;
   /** Per-dataset index of its latest cold state's wanted chunks. */
   wantedByDataset: Map<string, WantedChunkIndex>;
+  /** dataset → imageId → chunk keys the source failed for good, as the page last listed them. */
+  failedByDataset: Map<string, Map<string, ReadonlySet<string>>>;
 
   /**
    * Captures the trace bundle asked for that no frame has answered yet.
@@ -165,6 +167,7 @@ export function createInitialState(atlasBudgets: AtlasBudgets = CEILING_BUDGETS)
     currentColdState: null,
     coldStateByDataset: new Map(),
     wantedByDataset: new Map(),
+    failedByDataset: new Map(),
     frameCaptures: [],
     gpuAtlasesPosted: { atlases: 0, bytes: 0 },
     canvasColors: null,

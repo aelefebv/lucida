@@ -16,6 +16,7 @@ import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview, forgetMinimapOverviewUploads } from "./minimapPath.ts";
 import { traceRecorder, type TraceEnvironment } from "./trace/recorder.ts";
 import { createSettleState, evaluateSettle, settleSignal, type SettleOutcome, type SettleState } from "./pipeline/settle.ts";
+import { failedChunkReport, summarizeFailedChunks } from "./pipeline/failedChunks.ts";
 import { PointEvent, type CacheWarmth, type InputKind, type Outstanding, type RunConditions } from "./trace/types.ts";
 import type { FrameCaptureResult } from "./renderer/workerProtocol.ts";
 import { readCanvasColors } from "./renderer/renderClient.ts";
@@ -242,6 +243,7 @@ export class RenderLoop implements TraceEnvironment {
     this.configStoreUnsub();
     this.appearanceUnsub();
     this.settleUnsub();
+    failedChunkReport.publish(new Map());
     for (const unsub of this.unsubs.values()) {
       unsub();
     }
@@ -726,6 +728,10 @@ export class RenderLoop implements TraceEnvironment {
 
     // Detect multi-channel mode transitions and clean up stale resources
     this.handleMultiChannelTransition();
+
+    // Ahead of this tick's frame, so the frame draws the failures hatched.
+    const failed = this.uploader.syncFailedChunks(ctx);
+    if (failed) failedChunkReport.publish(summarizeFailedChunks(failed));
 
     // Tick always runs (drives chunk uploads). shouldRender gates the expensive render pass.
     if (this.mode === "slice") {

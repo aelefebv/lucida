@@ -14,6 +14,7 @@ import type {
   ColdStateDisplayMessage,
   ColdStateSelectionMessage,
   ColdStateDeltaMessage,
+  FailedChunksMessage,
   ViewHotStateMessage,
   RgbaColor,
   MinimapUploadOverviewChunksForLayerMessage,
@@ -527,6 +528,10 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage(msg);
   }
 
+  failedChunks(msg: FailedChunksMessage) {
+    this.worker.postMessage(msg);
+  }
+
   /**
    * Post a viewEpoch hot-state message. Sent before the corresponding
    * render message so chunk eviction has the latest ray-pick coords.
@@ -582,13 +587,14 @@ export class RenderClient implements UploadClient {
     camForward?: Float32Array,
     clipDistance?: number,
     clipMode?: number,
+    pixelRatio?: number,
   ) {
     this.worker.postMessage({
       type: "volumeRenderMultiPass",
       epochs,
       layers, invViewProj, eye,
       canvasW, canvasH, fullW, fullH, viewProj,
-      camForward, clipDistance, clipMode,
+      camForward, clipDistance, clipMode, pixelRatio,
       frameSeq: this.nextFrameSeq(),
     });
   }
@@ -601,6 +607,7 @@ export class RenderClient implements UploadClient {
     canvasW: number,
     canvasH: number,
     epochs: SceneEpochs,
+    pixelRatio?: number,
   ) {
     // Aggregate quad buffers are rebuilt per render tick on the main
     // thread; transferring them avoids structured-cloning what can be
@@ -613,7 +620,7 @@ export class RenderClient implements UploadClient {
       type: "sliceRenderMultiPass",
       epochs,
       layers, zoom, cx, cy,
-      canvasW, canvasH,
+      canvasW, canvasH, pixelRatio,
       frameSeq: this.nextFrameSeq(),
     }, transfer);
   }

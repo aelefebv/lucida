@@ -26,7 +26,7 @@ describe("worker dispatch and the pipeline compile", () => {
       device: { createCommandEncoder: () => ({ finish: () => ({}) }), queue: { submit } },
       context: { canvas: { width: 0, height: 0 }, getCurrentTexture: () => ({ createView: () => ({}) }) },
       passTimer: UNTIMED,
-      getSliceRenderer: () => ({ compiled }),
+      getSliceRenderer: () => ({ compiled, setPixelRatio: vi.fn() }),
       getCompositor: () => ({ compiled: Promise.resolve(), composite: vi.fn(), underlayBackground: vi.fn() }),
       getCursorRenderer: () => ({ compiled: Promise.resolve(), hasData: () => false }),
       ensureOffscreenPool: () => [],

@@ -48,6 +48,7 @@ export function removeDatasetResources(ctx: WorkerCtx, id: string): void {
   state.currentSourcesByDataset.delete(id);
   state.coldStateByDataset.delete(id);
   state.wantedByDataset.delete(id);
+  state.failedByDataset.delete(id);
 
   // These maps would otherwise grow for the worker's whole lifetime.
   for (const [memberId, dsId] of state.memberToDataset) {
@@ -90,6 +91,7 @@ export function handleDestroy(ctx: WorkerCtx): void {
   state.targetLevelByMember.clear();
   state.currentSourcesByDataset.clear();
   state.wantedByDataset.clear();
+  state.failedByDataset.clear();
   state.groupToTiles.clear();
   state.groupsByDataset.clear();
   releaseDeviceResources(ctx);

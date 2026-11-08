@@ -322,6 +322,7 @@ export async function handleSliceRenderMultiPass(
 
   const timing = ctx.passTimer;
   timing.beginFrame();
+  renderer.setPixelRatio(msg.pixelRatio ?? 1);
 
   const renderedLayers: CompositeLayer[] = [];
 

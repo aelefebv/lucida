@@ -188,6 +188,8 @@ export interface PhaseOutcome {
    * A view settles without them, and this is how the run names them.
    */
   failed: string[];
+  /** The worker's indirection cells the shader draws as failed (see `SimulatedWorker.failedCells`). */
+  drawnFailed: string[];
   /** The auto-contrast fits handed out in this phase, in order. */
   fits: ContrastFitRecord[];
 }
@@ -593,6 +595,7 @@ class Simulation {
         .failedWantedChunks()
         .map(({ chunk, failure }) => `${chunk}: ${failure ?? "failed with no reason given"}`)
         .sort(),
+      drawnFailed: this.worker.failedCells(this.scenario.dataset.datasetId),
       fits: this.fits.slice(fitsBefore),
     };
   }
