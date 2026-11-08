@@ -4,13 +4,16 @@
  * progress, and a live surface may not walk rows. So the read has to be flat
  * in rows, and its index must cost the write path nothing measurable.
  *
- * Flatness is gated as a ratio across a 20x row population, not in absolute
- * microseconds, because absolute timings on a CI runner measure the runner.
- * The real figures are logged. The write path stays under the recorder's
- * gates in `recorderCost.perf.test.ts`, which run with the index in place.
+ * Flatness is gated as a ratio across a 20x row population, and the tick at
+ * the larger one against a budget held on any host the way `perfBudget.ts`
+ * describes. The real figures are logged. The write path stays under the
+ * recorder's gates in `recorderCost.perf.test.ts`, which run with the index
+ * in place.
  */
 
 import { describe, expect, it } from "vitest";
+
+import { describeTiming, expectWithinBudget, timeStep, type StepTiming } from "../test/perfBudget.ts";
 
 import { buildChunkDrawList, type ChunkCell } from "../debug/overlayDrawList.ts";
 import { OVERLAY_TEST_COLORS } from "../debug/overlayFixtures.ts";
@@ -28,7 +31,8 @@ const CELLS_PER_TICK = 600;
 
 /** One tick's worth of reads and the draw list over them, in microseconds. Generous; the figure is logged. */
 const TICK_CEILING_US = 2_000;
-const CI_SLACK = 16;
+/** In nominal microseconds, about twice the typical figure. */
+const TICK_BUDGET_US = 2_000;
 
 function makeRecorder() {
   let clock = 1_000;
@@ -124,12 +128,10 @@ function halfSelected(grid: ChunkCell[]): ChunkSelection {
   };
 }
 
-function timeTick(recorder: TraceRecorder, grid: ChunkCell[], repeats: number): number {
+function timeTick(recorder: TraceRecorder, grid: ChunkCell[], repeats: number, warmup = 0): StepTiming {
   const modes = { chunkTier: false, cachedTier: false, plannedRank: false, phaseColor: true, churnTint: true };
   const selection = halfSelected(grid);
-  const samples: number[] = [];
-  for (let r = 0; r < repeats; r++) {
-    const start = performance.now();
+  return timeStep(() => {
     buildChunkDrawList({
       colors: OVERLAY_TEST_COLORS,
       cells: grid,
@@ -138,10 +140,7 @@ function timeTick(recorder: TraceRecorder, grid: ChunkCell[], repeats: number): 
       windowMs: recorder.openIntervalMs,
       selection,
     });
-    samples.push((performance.now() - start) * 1_000);
-  }
-  samples.sort((a, b) => a - b);
-  return samples[samples.length >> 1];
+  }, { samples: repeats, warmup });
 }
 
 describe("the per-chunk read's cost contract", () => {
@@ -152,17 +151,18 @@ describe("the per-chunk read's cost contract", () => {
     // Warm both, so the first-call cost of neither is what gets compared.
     timeTick(small, grid, 5);
     timeTick(large, grid, 5);
-    const smallUs = timeTick(small, grid, 41);
-    const largeUs = timeTick(large, grid, 41);
+    const smallTick = timeTick(small, grid, 41);
+    const largeTick = timeTick(large, grid, 41);
+    const ratio = largeTick.nominalUs / Math.max(1, smallTick.nominalUs);
 
     console.log(
-      `[#1062] overlay tick: ${CELLS_PER_TICK} cells read over 2,000 rows p50=${smallUs.toFixed(1)}µs | ` +
-        `over 40,000 rows p50=${largeUs.toFixed(1)}µs | ratio ${(largeUs / smallUs).toFixed(2)}x (gate ${ROW_INDEPENDENCE_GATE}x) | ` +
-        `ceiling ${TICK_CEILING_US}µs, gate ${TICK_CEILING_US * CI_SLACK}µs`,
+      `[#1062] overlay tick: ${CELLS_PER_TICK} cells read over 2,000 rows nominal p50=${smallTick.nominalUs.toFixed(1)}µs | ` +
+        `over 40,000 rows ${describeTiming(largeTick, TICK_BUDGET_US)} | ratio ${ratio.toFixed(2)}x (gate ${ROW_INDEPENDENCE_GATE}x) | ` +
+        `ceiling ${TICK_CEILING_US}µs`,
     );
 
-    expect(largeUs / Math.max(1, smallUs)).toBeLessThan(ROW_INDEPENDENCE_GATE);
-    expect(largeUs).toBeLessThan(TICK_CEILING_US * CI_SLACK);
+    expect(ratio).toBeLessThan(ROW_INDEPENDENCE_GATE);
+    expectWithinBudget("overlay tick over 40,000 rows", largeTick, TICK_BUDGET_US);
     small.reset();
     large.reset();
   });

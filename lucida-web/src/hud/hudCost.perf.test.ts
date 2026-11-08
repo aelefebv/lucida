@@ -17,12 +17,13 @@
  *   buffers, so a session that runs for hours draws the same picture at the
  *   same cost as one that ran for a minute.
  *
- * ## Tripwires, not benchmarks
+ * ## Ceilings and budgets
  *
- * As in the recorder's gates, every timing assertion is an absolute bound at
- * {@link CI_SLACK} times the ceiling, and the real figure is logged on a
- * `[#1061]` line. A slow runner moves the figure; only a change of complexity
- * class trips the gate.
+ * The ceilings are the design, and each logged line says where the figure
+ * stands against its ceiling. What fails the test is a budget at about twice
+ * the typical figure, timed against a reference so it holds on any host (see
+ * `perfBudget.ts`): a step three times slower trips it long before it would
+ * reach a ceiling.
  *
  * ## What this cannot measure
  *
@@ -37,6 +38,8 @@
  */
 
 import { describe, expect, it } from "vitest";
+
+import { describeTiming, expectWithinBudget, timeStep, type StepTiming } from "../test/perfBudget.ts";
 
 import { drawHud, hudHeight } from "./hudDraw.ts";
 import { fakeCache, HARDWARE, HUD_TEST_COLORS, makeRecorder, MIB, RecordingContext } from "./hudFixtures.ts";
@@ -55,8 +58,11 @@ const MODEL_CEILING_US = 200;
 /** Issuing the draw for a full-width strip with the history full. */
 const DRAW_CEILING_US = 500;
 
-/** Same width as the recorder's gates, for the same reason: the host, not the code, moves the figure. */
-const CI_SLACK = 16;
+/** Budgets in nominal microseconds, about twice each typical figure. */
+const MODEL_BUDGET_US = 12;
+const DRAW_BUDGET_US = 31;
+const SAMPLE_BUDGET_US = 2.8;
+const LANE_SCAN_BUDGET_US = 130;
 
 /** How much slower a sample may be over thirty thousand rows than over none. */
 const ROW_INDEPENDENCE_GATE = 4;
@@ -109,29 +115,13 @@ function sampleAt(tick: number): HudSample {
   };
 }
 
-function summarise(samples: number[]) {
-  const sorted = [...samples].sort((a, b) => a - b);
-  return {
-    p50: sorted[Math.floor(sorted.length * 0.5)],
-    p95: sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))],
-    max: sorted[sorted.length - 1],
-  };
+/** Time `step` per call, after a warmup, against the reference. */
+function measure(step: () => void, iterations: number, warmup = Math.min(iterations, 50)): StepTiming {
+  return timeStep(step, { samples: iterations, warmup });
 }
 
-/** Time `step` per call in microseconds, after a warmup. */
-function measure(step: () => void, iterations: number, warmup = Math.min(iterations, 50)) {
-  for (let i = 0; i < warmup; i++) step();
-  const samples: number[] = [];
-  for (let i = 0; i < iterations; i++) {
-    const t0 = performance.now();
-    step();
-    samples.push((performance.now() - t0) * 1000);
-  }
-  return summarise(samples);
-}
-
-function verdict(p50: number, ceiling: number): string {
-  const ratio = p50 / ceiling;
+function verdict(timing: StepTiming, ceiling: number): string {
+  const ratio = timing.nominalUs / ceiling;
   return ratio <= 1
     ? `${(1 / ratio).toFixed(1)}x under the ${ceiling}µs ceiling`
     : `OVER the ${ceiling}µs ceiling by ${ratio.toFixed(1)}x`;
@@ -151,10 +141,9 @@ describe("HUD cost contract", () => {
     }, 2_000);
     log(
       `model tick: push + build with ${HUD_HISTORY} ticks in the history | ` +
-        `p50=${model.p50.toFixed(1)}µs p95=${model.p95.toFixed(1)}µs max=${model.max.toFixed(1)}µs | ` +
-        `${verdict(model.p50, MODEL_CEILING_US)}, gate ${MODEL_CEILING_US * CI_SLACK}µs`,
+        `${describeTiming(model, MODEL_BUDGET_US)} | ${verdict(model, MODEL_CEILING_US)}`,
     );
-    expect(model.p50, `model tick p50 ${model.p50.toFixed(1)} µs`).toBeLessThan(MODEL_CEILING_US * CI_SLACK);
+    expectWithinBudget("model tick", model, MODEL_BUDGET_US);
   });
 
   it("issues the draw inside the per-tick ceiling, with a call count that does not grow with ticks", () => {
@@ -178,10 +167,9 @@ describe("HUD cost contract", () => {
     }, 500);
     log(
       `draw tick: ${WIDTH}px strip at ratio 2, ${late.calls} context calls (${late.texts.length} text) | ` +
-        `p50=${draw.p50.toFixed(1)}µs p95=${draw.p95.toFixed(1)}µs max=${draw.max.toFixed(1)}µs | ` +
-        `${verdict(draw.p50, DRAW_CEILING_US)}, gate ${DRAW_CEILING_US * CI_SLACK}µs`,
+        `${describeTiming(draw, DRAW_BUDGET_US)} | ${verdict(draw, DRAW_CEILING_US)}`,
     );
-    expect(draw.p50, `draw tick p50 ${draw.p50.toFixed(1)} µs`).toBeLessThan(DRAW_CEILING_US * CI_SLACK);
+    expectWithinBudget("draw tick", draw, DRAW_BUDGET_US);
     // The history is full both times, so a call count that grew would mean
     // the strip remembers more than its history.
     expect(late.calls).toBe(early.calls);
@@ -222,15 +210,15 @@ describe("HUD cost contract", () => {
     const full = measure(() => source.sample(), 1_000);
     source.dispose();
 
-    const ratio = full.p50 / Math.max(empty.p50, 0.01);
+    const ratio = full.nominalUs / Math.max(empty.nominalUs, 0.01);
     log(
-      `sample: 4 datasets | over 0 rows p50=${empty.p50.toFixed(1)}µs | over ${ROWS.toLocaleString("en-US")} rows ` +
-        `p50=${full.p50.toFixed(1)}µs p95=${full.p95.toFixed(1)}µs | ratio ${ratio.toFixed(2)}x, gate ${ROW_INDEPENDENCE_GATE}x | ` +
-        `${verdict(full.p50, SAMPLE_CEILING_US)}, gate ${SAMPLE_CEILING_US * CI_SLACK}µs`,
+      `sample: 4 datasets | over 0 rows nominal p50=${empty.nominalUs.toFixed(1)}µs | over ${ROWS.toLocaleString("en-US")} rows ` +
+        `${describeTiming(full, SAMPLE_BUDGET_US)} | ratio ${ratio.toFixed(2)}x, gate ${ROW_INDEPENDENCE_GATE}x | ` +
+        `${verdict(full, SAMPLE_CEILING_US)}`,
     );
-    expect(full.p50, `sample p50 ${full.p50.toFixed(1)} µs over ${ROWS} rows`).toBeLessThan(SAMPLE_CEILING_US * CI_SLACK);
-    // A sub-microsecond baseline makes the ratio noise, so only the absolute gate applies then.
-    if (empty.p50 >= 1) expect(ratio, `sample cost grew ${ratio.toFixed(2)}x with rows`).toBeLessThan(ROW_INDEPENDENCE_GATE);
+    expectWithinBudget(`sample over ${ROWS} rows`, full, SAMPLE_BUDGET_US);
+    // A sub-microsecond baseline makes the ratio noise, so only the budget applies then.
+    if (empty.nominalUs >= 1) expect(ratio, `sample cost grew ${ratio.toFixed(2)}x with rows`).toBeLessThan(ROW_INDEPENDENCE_GATE);
   });
 
   it("scans the pending queue by lane at the cap inside the sample ceiling", () => {
@@ -263,12 +251,11 @@ describe("HUD cost contract", () => {
     }, 1_000);
     log(
       `lane scan: ${PENDING_SCAN_CAP.toLocaleString("en-US")} pending entries, the cap | ` +
-        `p50=${scan.p50.toFixed(1)}µs p95=${scan.p95.toFixed(1)}µs max=${scan.max.toFixed(1)}µs | ` +
-        `${verdict(scan.p50, SAMPLE_CEILING_US)}, gate ${SAMPLE_CEILING_US * CI_SLACK}µs`,
+        `${describeTiming(scan, LANE_SCAN_BUDGET_US)} | ${verdict(scan, SAMPLE_CEILING_US)}`,
     );
     expect(classified).toBe(true);
     expect(Object.values(tally.pending).reduce((a, b) => a + b, 0)).toBe(PENDING_SCAN_CAP);
-    expect(scan.p50, `lane scan p50 ${scan.p50.toFixed(1)} µs`).toBeLessThan(SAMPLE_CEILING_US * CI_SLACK);
+    expectWithinBudget("lane scan", scan, LANE_SCAN_BUDGET_US);
   });
 
   it("keeps a fixed history whatever the session's length", () => {

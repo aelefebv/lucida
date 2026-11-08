@@ -6,12 +6,14 @@
  * A read at the per-run cap may cost at most {@link FLATNESS_GROWTH_GATE}×
  * a read at 2,000 rows, measured over a narrow window where fixed cost
  * dominates and a row walk shows. A read over a full five-second window,
- * with the ring wrapped or not, stays under 1 ms, gated at
- * {@link CI_SLACK}× because a microbenchmark on a CI runner measures the
- * runner. The real figures are logged on every run.
+ * with the ring wrapped or not, is designed to stay under 1 ms, and is held
+ * to a budget at about twice its typical figure on any host, the way
+ * `perfBudget.ts` describes. The real figures are logged on every run.
  */
 
 import { describe, expect, it } from "vitest";
+
+import { describeTiming, expectWithinBudget, timeStep, type StepTiming } from "../test/perfBudget.ts";
 
 import { TraceRecorder } from "./recorder.ts";
 import { TableTraceSink } from "./sink.ts";
@@ -20,8 +22,10 @@ import { Boundary, type ChunkRowSource, type RunConditions } from "./types.ts";
 /** The most one read may cost, for a reading polled a few times a second and never per tick. */
 const READ_CEILING_US = 1_000;
 
-/** The recorder's slack, for the recorder's reason: the same code measures 45× apart across hosts. */
-const CI_SLACK = 16;
+/** Budgets in nominal microseconds, about twice each typical figure. */
+const FULL_READ_BUDGET_US = 390;
+const WRAPPED_READ_BUDGET_US = 340;
+const SLID_READ_BUDGET_US = 12;
 
 /**
  * How much more a read may cost at the largest row population than at the
@@ -59,8 +63,7 @@ const OUTSTANDING = {
 };
 
 interface Timed {
-  p50Us: number;
-  p95Us: number;
+  timing: StepTiming;
   /** Readings inside the window, averaged over the reads. */
   inWindow: number;
 }
@@ -118,12 +121,6 @@ function makeRun(rows: number): { recorder: TraceRecorder; advance: (ms: number)
   return { recorder, advance: (ms: number) => { clock += ms; } };
 }
 
-function summarise(samples: number[]): { p50: number; p95: number } {
-  const sorted = [...samples].sort((a, b) => a - b);
-  const at = (fraction: number) => sorted[Math.min(sorted.length - 1, Math.floor(fraction * sorted.length))];
-  return { p50: at(0.5), p95: at(0.95) };
-}
-
 /** The totals are asserted so nothing here is dead code an optimiser is free to skip. */
 function timeReads(recorder: TraceRecorder, windowMs?: number): Timed {
   const rows = recorder.provisionalReading()!.rows.made;
@@ -134,16 +131,9 @@ function timeReads(recorder: TraceRecorder, windowMs?: number): Timed {
     made += reading.rows.made;
     inWindow += reading.readings.n;
   };
-  const samples: number[] = [];
-  for (let i = 0; i < 20; i++) read();
-  for (let i = 0; i < 200; i++) {
-    const t0 = performance.now();
-    read();
-    samples.push(performance.now() - t0);
-  }
+  const timing = timeStep(read, { samples: 200, warmup: 20 });
   expect(made).toBe(rows * 220);
-  const stats = summarise(samples);
-  return { p50Us: stats.p50 * 1_000, p95Us: stats.p95 * 1_000, inWindow: inWindow / 220 };
+  return { timing, inWindow: inWindow / 220 };
 }
 
 describe("provisional reading cost contract", () => {
@@ -167,22 +157,22 @@ describe("provisional reading cost contract", () => {
     for (const r of readings) {
       console.log(
         `[#1057] provisional read: rows=${String(r.rows).padStart(6)} | ` +
-          `${NARROW_WINDOW_MS} ms window (${r.narrow.inWindow.toFixed(0)} readings) p50=${r.narrow.p50Us.toFixed(1)}µs | ` +
-          `full window (${r.full.inWindow.toFixed(0)} readings) p50=${r.full.p50Us.toFixed(1)}µs p95=${r.full.p95Us.toFixed(1)}µs | ` +
-          `${(r.full.p50Us / READ_CEILING_US).toFixed(2)}x the ${READ_CEILING_US}µs ceiling, gate ${READ_CEILING_US * CI_SLACK}µs`,
+          `${NARROW_WINDOW_MS} ms window (${r.narrow.inWindow.toFixed(0)} readings) nominal p50=${r.narrow.timing.nominalUs.toFixed(1)}µs | ` +
+          `full window (${r.full.inWindow.toFixed(0)} readings) ${describeTiming(r.full.timing, FULL_READ_BUDGET_US)} | ` +
+          `${(r.full.timing.nominalUs / READ_CEILING_US).toFixed(2)}x the ${READ_CEILING_US}µs ceiling`,
       );
     }
 
     const [small, large] = readings;
     expect(large.rows).toBeGreaterThan(small.rows * 4);
+    const narrowLarge = large.narrow.timing.nominalUs;
+    const narrowSmall = small.narrow.timing.nominalUs;
     expect(
-      large.narrow.p50Us,
-      `${large.narrow.p50Us.toFixed(1)}µs at ${large.rows} rows against ${small.narrow.p50Us.toFixed(1)}µs at ${small.rows}`,
-    ).toBeLessThan(Math.max(small.narrow.p50Us, 1) * FLATNESS_GROWTH_GATE);
+      narrowLarge,
+      `${narrowLarge.toFixed(1)}µs at ${large.rows} rows against ${narrowSmall.toFixed(1)}µs at ${small.rows}`,
+    ).toBeLessThan(Math.max(narrowSmall, 1) * FLATNESS_GROWTH_GATE);
     for (const r of readings) {
-      expect(r.full.p50Us, `${r.full.p50Us.toFixed(1)}µs at ${r.rows} rows`).toBeLessThan(
-        READ_CEILING_US * CI_SLACK,
-      );
+      expectWithinBudget(`full-window read at ${r.rows} rows`, r.full.timing, FULL_READ_BUDGET_US);
     }
   });
 
@@ -198,11 +188,11 @@ describe("provisional reading cost contract", () => {
     expect(reading.readings.carried).toBe(true);
 
     console.log(
-      `[#1057] provisional read: ring wrapped 4x, full window p50=${wrapped.p50Us.toFixed(1)}µs | ` +
-        `window past the ring p50=${empty.p50Us.toFixed(1)}µs`,
+      `[#1057] provisional read: ring wrapped 4x, full window ${describeTiming(wrapped.timing, WRAPPED_READ_BUDGET_US)} | ` +
+        `window past the ring ${describeTiming(empty.timing, SLID_READ_BUDGET_US)}`,
     );
-    expect(wrapped.p50Us).toBeLessThan(READ_CEILING_US * CI_SLACK);
-    expect(empty.p50Us).toBeLessThan(READ_CEILING_US * CI_SLACK);
+    expectWithinBudget("read with the ring wrapped", wrapped.timing, WRAPPED_READ_BUDGET_US);
+    expectWithinBudget("read with the window past the ring", empty.timing, SLID_READ_BUDGET_US);
     recorder.reset();
   });
 });
