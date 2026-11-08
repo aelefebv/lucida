@@ -123,8 +123,18 @@ export class SimulatedWorker {
   readonly deliveries = new Map<string, ChunkDeliveries>();
   /** Label member id → the plane the last slice frame drew for it. */
   private readonly drawnLabelChunks = new Map<string, NonNullable<SliceLayerParams["labelChunk"]>>();
+  /** How long the stand-in GPU takes over each viewport frame, one after another. */
+  private readonly frameMs: number;
+  /** Viewport frames on the stand-in GPU, oldest first, with when each finishes. */
+  private readonly drawing: Array<{ frameSeq: number; doneAt: number }> = [];
+  /** Viewport frames the page dispatched. */
+  framesDispatched = 0;
+  /** The most viewport frames that were ever on the GPU at once. */
+  mostFramesDrawing = 0;
 
-  constructor(gpuTotalBytes: number) {
+  /** `frameMs` 0 answers each viewport frame the moment it is handled. */
+  constructor(gpuTotalBytes: number, frameMs = 0) {
+    this.frameMs = frameMs;
     const state = createInitialState(gpuTotalBytes);
     const post = (msg: WorkerToMainMessage): void => {
       this.outbox.push(msg);
@@ -187,18 +197,28 @@ export class SimulatedWorker {
   terminate(): void {}
 
   get idle(): boolean {
-    return this.inbox.length === 0 && this.outbox.length === 0;
+    return this.inbox.length === 0 && this.outbox.length === 0 && this.drawing.length === 0;
   }
 
-  /** Run every queued message, then hand the page what the worker posted, until both sides are quiet. */
+  /** Whether the stand-in GPU is still drawing a frame. */
+  get gpuBusy(): boolean {
+    return (this.drawing.at(-1)?.doneAt ?? 0) > performance.now();
+  }
+
+  /**
+   * Run every queued message, then hand the page what the worker posted,
+   * until both sides are quiet. A frame still on the stand-in GPU is answered
+   * by the first drain after it finishes.
+   */
   async drain(): Promise<void> {
-    while (!this.idle) {
+    this.finishDrawnFrames();
+    while (this.inbox.length > 0 || this.outbox.length > 0) {
       while (this.inbox.length > 0) {
         const msg = this.inbox.shift()!;
         if (DRAW_ONLY.has(msg.type)) {
           if (msg.type === "sliceRenderMultiPass") this.noteSliceFrame(msg);
           const frameSeq = (msg as { frameSeq?: number }).frameSeq;
-          if (frameSeq !== undefined) this.outbox.push({ type: "frameDone", frameSeq });
+          if (frameSeq !== undefined) this.drawFrame(frameSeq);
           continue;
         }
         await dispatchMessage(this.ctx, msg);
@@ -208,6 +228,25 @@ export class SimulatedWorker {
         this.onPost?.(msg);
         for (const listener of [...this.listeners]) listener({ data: msg });
       }
+    }
+  }
+
+  /** Put a viewport frame on the stand-in GPU, behind the frames already there. */
+  private drawFrame(frameSeq: number): void {
+    this.framesDispatched++;
+    if (this.frameMs <= 0) {
+      this.outbox.push({ type: "frameDone", frameSeq });
+      return;
+    }
+    const startAt = Math.max(performance.now(), this.drawing.at(-1)?.doneAt ?? 0);
+    this.drawing.push({ frameSeq, doneAt: startAt + this.frameMs });
+    this.mostFramesDrawing = Math.max(this.mostFramesDrawing, this.drawing.length);
+  }
+
+  private finishDrawnFrames(): void {
+    const now = performance.now();
+    while (this.drawing.length > 0 && this.drawing[0].doneAt <= now) {
+      this.outbox.push({ type: "frameDone", frameSeq: this.drawing.shift()!.frameSeq });
     }
   }
 

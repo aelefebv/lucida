@@ -611,6 +611,24 @@ describe("TraceRecorder upload and present", () => {
     expect(serialised.outcome).toBe("complete");
   });
 
+  it("closes present when the frame is drawn, with no frame after it", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    const row = recorder.beginChunkRow(CHUNK, 0);
+    recorder.stamp(row, Boundary.UploadStart);
+    advance(16);
+    recorder.noteHandedToRenderer(row);
+    recorder.noteFrameDispatched();              // resident at t = 16 ms
+    advance(900);
+    recorder.noteFramesDrawn();                  // the GPU finished it at t = 916 ms
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.present)
+      .toEqual({ startUs: 16_000, endUs: 916_000, durationUs: 900_000 });
+    expect(serialised.outcome).toBe("complete");
+  });
+
   it("leaves a chunk that never reached a frame in flight rather than complete", () => {
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);

@@ -56,6 +56,54 @@ describe("worker dispatch and the pipeline compile", () => {
   });
 });
 
+describe("worker dispatch frame done", () => {
+  // The page holds its next frames while one is unanswered.
+  const frame = {
+    type: "sliceRenderMultiPass" as const,
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
+    layers: [],
+    zoom: 1,
+    cx: 0,
+    cy: 0,
+    canvasW: 8,
+    canvasH: 8,
+    frameSeq: 7,
+  };
+
+  function frameCtx(workDone: () => Promise<undefined>, compiled: Promise<void>): { ctx: WorkerCtx; posts: WorkerToMainMessage[] } {
+    const posts: WorkerToMainMessage[] = [];
+    const ctx = {
+      state: createInitialState(),
+      device: {
+        createCommandEncoder: () => ({ finish: () => ({}) }),
+        queue: { submit: vi.fn(), onSubmittedWorkDone: workDone },
+      },
+      context: { canvas: { width: 0, height: 0 }, getCurrentTexture: () => ({ createView: () => ({}) }) },
+      passTimer: UNTIMED,
+      getSliceRenderer: () => ({ compiled, setPixelRatio: vi.fn() }),
+      getCompositor: () => ({ compiled: Promise.resolve(), composite: vi.fn(), underlayBackground: vi.fn() }),
+      getCursorRenderer: () => ({ compiled: Promise.resolve(), hasData: () => false }),
+      ensureOffscreenPool: () => [],
+      post(msg: WorkerToMainMessage) { posts.push(msg); },
+    } as unknown as WorkerCtx;
+    return { ctx, posts };
+  }
+
+  it("answers a frame that failed to draw", async () => {
+    const { ctx, posts } = frameCtx(() => Promise.resolve(undefined), Promise.reject(new Error("no pipeline")));
+    await expect(dispatchMessage(ctx, frame)).rejects.toThrow("no pipeline");
+    await flush();
+    expect(posts).toContainEqual({ type: "frameDone", frameSeq: 7 });
+  });
+
+  it("answers a frame whose device was lost before it finished", async () => {
+    const { ctx, posts } = frameCtx(() => Promise.reject(new Error("device lost")), Promise.resolve());
+    await dispatchMessage(ctx, frame);
+    await flush();
+    expect(posts).toContainEqual({ type: "frameDone", frameSeq: 7 });
+  });
+});
+
 function makeCtx(): {
   ctx: WorkerCtx;
   posts: WorkerToMainMessage[];
