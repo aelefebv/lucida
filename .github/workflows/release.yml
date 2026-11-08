@@ -68,7 +68,7 @@ jobs:
       # the merge job below.
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
 
@@ -79,7 +79,7 @@ jobs:
       # merge step is what makes them addressable as :vX.Y.Z + :latest.
       - name: Build and push by digest
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: ${{ matrix.platform }}
@@ -135,7 +135,7 @@ jobs:
       # (e.g. v0.2.0); type=raw,value=latest moves :latest to this tag.
       - name: Extract manifest metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |

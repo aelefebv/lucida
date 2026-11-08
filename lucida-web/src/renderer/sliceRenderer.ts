@@ -47,22 +47,54 @@ export interface AggregateBatch {
   count: number;
 }
 
-/** Inputs for {@link SliceRenderer.renderAggregateBatches}. */
+/** An aggregate layer's draw within a {@link LayerGroupDraw}. */
 export interface AggregateDrawParams {
   /** Per-dataset descriptor buffer, bound fresh every draw. */
   descriptorBuffer: GPUBuffer;
   /** Batch-ordered quad records (32 bytes each, shader `MemberQuad`). */
   quadData: ArrayBuffer;
   batches: AggregateBatch[];
-  blendMode: BlendMode;
+  colormap: GPUTexture;
   /** Layer transform inputs, as in {@link SliceRenderer.setTransform}. */
   zoom: number;
   cx: number;
   cy: number;
-  canvasW: number;
-  canvasH: number;
   dataW: number;
   dataH: number;
+}
+
+/** One member's draw within a {@link LayerGroupDraw}: what the per-member setters would have bound. */
+export interface MemberDraw {
+  /** Level pool bindings in slot order (index = the descriptor's `poolIndex`); at most four. */
+  levels: Array<SlicePoolBinding | null>;
+  coarse: SlicePoolBinding | null;
+  tileProxyTexture: GPUTexture | null;
+  groupProxyTexture: GPUTexture | null;
+  colormap: GPUTexture;
+  descriptorBuffer: GPUBuffer;
+  entityIndex: number;
+  /** Member-local transform inputs, as in {@link SliceRenderer.setTransform}. */
+  zoom: number;
+  cx: number;
+  cy: number;
+  dataW: number;
+  dataH: number;
+  /** The target pixels the member covers, `[x, y, width, height]`; the draw touches nothing else. */
+  scissor: [number, number, number, number];
+}
+
+/**
+ * Every layer of one (dataset, channel), drawn into one target in one render
+ * pass: the aggregate beneath, then the members in order. Draws blend with
+ * the layers' own mode, which is associative, so compositing the target once
+ * matches compositing each layer in turn.
+ */
+export interface LayerGroupDraw {
+  blendMode: BlendMode;
+  canvasW: number;
+  canvasH: number;
+  aggregate: AggregateDrawParams | null;
+  members: MemberDraw[];
 }
 
 /** Slot dims of each level pool binding, `[0, 0]` for an unbound slot. */
@@ -127,11 +159,11 @@ function buildSliceUniformData(
 
 export class SliceRenderer {
   private device: GPUDevice;
-  private pipeline: GPURenderPipeline | null = null;
+  private memberPipelines: Record<BlendMode, GPURenderPipeline> | null = null;
   private aggregatePipelines: Record<BlendMode, GPURenderPipeline> | null = null;
   /** Faint white until the page sends the theme's color. */
   private tileBorderColor: RgbaColor = [1, 1, 1, 0.3];
-  /** Resolves once the per-member and the three aggregate pipelines have compiled. See `pipelineCompile.ts`. */
+  /** Resolves once the three per-member and the three aggregate pipelines have compiled. See `pipelineCompile.ts`. */
   readonly compiled: Promise<void>;
   private uniformBuffer: GPUBuffer;
   private entityRefBuffer: GPUBuffer;
@@ -150,6 +182,9 @@ export class SliceRenderer {
   private aggregateQuadBuffer: GPUBuffer | null = null;
   private aggregateQuadCapacity = 0;
   private aggregateUniformBuffers: GPUBuffer[] = [];
+  // Per-draw member resources for a group pass, pooled by draw index the same way.
+  private memberUniformBuffers: GPUBuffer[] = [];
+  private memberEntityRefBuffers: GPUBuffer[] = [];
 
   private levelBindings: Array<SlicePoolBinding | null> = [];
   private coarseBinding: SlicePoolBinding | null = null;
@@ -166,7 +201,7 @@ export class SliceRenderer {
   private dummyProxyTexture: GPUTexture | null = null;
 
   get isCompiled(): boolean {
-    return this.pipeline !== null && this.aggregatePipelines !== null;
+    return this.memberPipelines !== null && this.aggregatePipelines !== null;
   }
 
   constructor(device: GPUDevice) {
@@ -276,62 +311,49 @@ export class SliceRenderer {
       ],
     });
 
-    const memberPipeline = device.createRenderPipelineAsync({
-      layout: device.createPipelineLayout({
-        bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout],
-      }),
-      vertex: {
-        module: shaderModule,
-        entryPoint: "vs",
-      },
-      fragment: {
-        module: shaderModule,
-        entryPoint: "fs",
-        targets: [{ format: OFFSCREEN_FORMAT }],
-      },
-      primitive: { topology: "triangle-list" },
-    }).then((pipeline) => {
-      this.pipeline = pipeline;
-    });
-
-    // One pipeline per blend mode, with the compositor's exact blend states
-    // (premultiplied output), so members overlapping within a batch combine
-    // like two layers of that mode. Overlapping members in different batches
-    // blend in batch order rather than roster order, and the aggregate layer
-    // sits beneath the individual layers.
-    const aggregateLayout = device.createPipelineLayout({
-      bindGroupLayouts: [this.bindGroupLayout, this.aggregateBindGroupLayout],
-    });
-    const makeAggregatePipeline = (blend: GPUBlendState) => device.createRenderPipelineAsync({
-      layout: aggregateLayout,
-      vertex: {
-        module: shaderModule,
-        entryPoint: "vsAggregate",
-      },
-      fragment: {
-        module: shaderModule,
-        entryPoint: "fsAggregate",
-        targets: [{ format: OFFSCREEN_FORMAT, blend }],
-      },
-      primitive: { topology: "triangle-list" },
-    });
-    const aggregatePipelines = Promise.all([
-      makeAggregatePipeline({
+    // One pipeline per blend mode for each entry point, with the compositor's
+    // exact blend states (premultiplied output), so draws sharing a target
+    // combine like separate layers of that mode. Outside its footprint a
+    // member writes transparent, which every mode leaves unchanged.
+    const blends: Record<BlendMode, GPUBlendState> = {
+      alpha: {
         color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
         alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
-      }),
-      makeAggregatePipeline({
+      },
+      additive: {
         color: { srcFactor: "one", dstFactor: "one", operation: "add" },
         alpha: { srcFactor: "one", dstFactor: "one", operation: "add" },
-      }),
-      makeAggregatePipeline({
+      },
+      max: {
         color: { srcFactor: "one", dstFactor: "one", operation: "max" },
         alpha: { srcFactor: "one", dstFactor: "one", operation: "max" },
-      }),
-    ]).then(([alpha, additive, max]) => {
-      this.aggregatePipelines = { alpha, additive, max };
+      },
+    };
+    const makePipelines = (layout: GPUPipelineLayout, vertex: string, fragment: string) =>
+      Promise.all((["alpha", "additive", "max"] as const).map((mode) => device.createRenderPipelineAsync({
+        layout,
+        vertex: { module: shaderModule, entryPoint: vertex },
+        fragment: { module: shaderModule, entryPoint: fragment, targets: [{ format: OFFSCREEN_FORMAT, blend: blends[mode] }] },
+        primitive: { topology: "triangle-list" },
+      }))).then(([alpha, additive, max]) => ({ alpha, additive, max }));
+
+    const memberPipelines = makePipelines(
+      device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout, this.descriptorBindGroupLayout] }),
+      "vs",
+      "fs",
+    ).then((pipelines) => {
+      this.memberPipelines = pipelines;
     });
-    this.compiled = Promise.all([memberPipeline, aggregatePipelines]).then(() => undefined);
+    // Overlapping members in different aggregate batches blend in batch order
+    // rather than roster order, and the aggregate sits beneath the members.
+    const aggregatePipelines = makePipelines(
+      device.createPipelineLayout({ bindGroupLayouts: [this.bindGroupLayout, this.aggregateBindGroupLayout] }),
+      "vsAggregate",
+      "fsAggregate",
+    ).then((pipelines) => {
+      this.aggregatePipelines = pipelines;
+    });
+    this.compiled = Promise.all([memberPipelines, aggregatePipelines]).then(() => undefined);
 
     this.uniformBuffer = device.createBuffer({
       size: SLICE_UNIFORM_SIZE,
@@ -473,11 +495,12 @@ export class SliceRenderer {
     coarse: SlicePoolBinding | null,
     tileProxyTexture: GPUTexture | null,
     groupProxyTexture: GPUTexture | null,
+    lut: GPUTexture = this.lutTexture,
   ): GPUBindGroupEntry[] {
     const dummyProxy = this.getDummyProxyTexture();
     const entries: GPUBindGroupEntry[] = [
       { binding: 0, resource: { buffer: uniformBuffer } },
-      { binding: 1, resource: this.lutTexture.createView() },
+      { binding: 1, resource: lut.createView() },
       { binding: 2, resource: this.lutSampler },
       { binding: 3, resource: (coarse?.texture ?? this.dummyTexture).createView() },
       { binding: 4, resource: { buffer: coarse?.indirectionBuf ?? this.dummyIndirectionBuffer } },
@@ -523,10 +546,15 @@ export class SliceRenderer {
     this.tileBorderColor = color;
   }
 
-  /** `timing` stamps the pass for the trace's GPU pass time; viewport frames pass it, the minimap does not. */
+  /**
+   * Draw the one member the setters bound into a cleared target. `timing`
+   * stamps the pass for the trace's GPU pass time; viewport frames pass it,
+   * the minimap does not.
+   */
   renderTo(target: GPUTextureView, encoder: GPUCommandEncoder, timing?: PassTiming) {
     if (!this.bindGroup || !this.descriptorBindGroup) return;
-    const pipeline = requireCompiled(this.pipeline, "slice renderer");
+    // Over a cleared target, alpha blending writes the draw unchanged.
+    const pipeline = requireCompiled(this.memberPipelines, "slice renderer").alpha;
 
     const pass = encoder.beginRenderPass({
       colorAttachments: [
@@ -548,20 +576,115 @@ export class SliceRenderer {
   }
 
   /**
-   * Draw an aggregate layer's member quads in one render pass, one instanced
-   * draw per pool-binding batch. Each batch binds its members' own pools, so
-   * every quad samples what the per-member pass would have bound for it.
+   * Draw one (dataset, channel)'s layers into a cleared target in one render
+   * pass: the aggregate's quads first, one instanced draw per pool-binding
+   * batch, then each member clipped to its footprint. Every draw binds its
+   * own pools, colormap, and entity, so each samples what a pass of its own
+   * would have.
    */
-  renderAggregateBatches(
+  renderLayerGroup(
     target: GPUTextureView,
     encoder: GPUCommandEncoder,
-    params: AggregateDrawParams,
+    group: LayerGroupDraw,
     timing?: PassTiming,
   ) {
-    const { batches, quadData } = params;
-    if (batches.length === 0 || quadData.byteLength === 0) return;
-    const pipelines = requireCompiled(this.aggregatePipelines, "slice renderer");
+    const aggregate = group.aggregate && group.aggregate.batches.length > 0 && group.aggregate.quadData.byteLength > 0
+      ? this.prepareAggregate(group.aggregate, group.canvasW, group.canvasH)
+      : null;
+    const members = group.members.map((draw, i) => this.prepareMember(draw, i, group.canvasW, group.canvasH));
+    if (!aggregate && members.length === 0) return;
+    const memberPipeline = requireCompiled(this.memberPipelines, "slice renderer")[group.blendMode];
+    const aggregatePipeline = requireCompiled(this.aggregatePipelines, "slice renderer")[group.blendMode];
 
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [
+        {
+          view: target,
+          loadOp: "clear",
+          storeOp: "store",
+          clearValue: { r: 0, g: 0, b: 0, a: 0 },
+        },
+      ],
+      timestampWrites: timing?.nextPass(),
+    });
+    if (aggregate) {
+      pass.setPipeline(aggregatePipeline);
+      pass.setBindGroup(1, aggregate.quadBindGroup);
+      aggregate.batches.forEach((batch, i) => {
+        if (batch.count <= 0) return;
+        pass.setBindGroup(0, aggregate.batchBindGroups[i]);
+        // `firstInstance` addresses the batch's contiguous run inside the
+        // shared quad buffer (instance_index includes the offset).
+        pass.draw(6, batch.count, 0, batch.firstInstance);
+      });
+    }
+    if (members.length > 0) pass.setPipeline(memberPipeline);
+    group.members.forEach((draw, i) => {
+      const [x, y, w, h] = draw.scissor;
+      pass.setScissorRect(x, y, w, h);
+      pass.setBindGroup(0, members[i].pools);
+      pass.setBindGroup(1, members[i].entity);
+      pass.draw(3);
+    });
+    pass.end();
+  }
+
+  /** The bind groups one member draw of a group pass binds, written into the `index`th pooled buffers. */
+  private prepareMember(
+    draw: MemberDraw,
+    index: number,
+    canvasW: number,
+    canvasH: number,
+  ): { pools: GPUBindGroup; entity: GPUBindGroup } {
+    while (this.memberUniformBuffers.length <= index) {
+      this.memberUniformBuffers.push(this.device.createBuffer({
+        size: SLICE_UNIFORM_SIZE,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      }));
+      this.memberEntityRefBuffers.push(this.device.createBuffer({
+        size: ENTITY_REF_SIZE,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      }));
+    }
+    const uniformBuffer = this.memberUniformBuffers[index];
+    const entityRefBuffer = this.memberEntityRefBuffers[index];
+    this.device.queue.writeBuffer(uniformBuffer, 0, buildSliceUniformData(
+      draw.zoom, draw.cx, draw.cy, canvasW, canvasH, draw.dataW, draw.dataH,
+      levelSlotDimsOf(draw.levels),
+      draw.coarse ? [draw.coarse.slotsX, draw.coarse.slotsY] : [0, 0],
+      this.tileBorderColor,
+    ));
+    // Intensity draws carry no declared palette: count 0 over the dummy.
+    this.device.queue.writeBuffer(entityRefBuffer, 0, new Uint32Array([draw.entityIndex >>> 0, 0, 0, 0]));
+    return {
+      pools: this.device.createBindGroup({
+        layout: this.bindGroupLayout,
+        entries: this.poolBindGroupEntries(
+          uniformBuffer, draw.levels, draw.coarse, draw.tileProxyTexture, draw.groupProxyTexture, draw.colormap,
+        ),
+      }),
+      entity: this.device.createBindGroup({
+        layout: this.descriptorBindGroupLayout,
+        entries: [
+          { binding: 0, resource: { buffer: draw.descriptorBuffer } },
+          { binding: 1, resource: { buffer: entityRefBuffer } },
+          { binding: 2, resource: { buffer: this.dummyLabelColorBuffer } },
+        ],
+      }),
+    };
+  }
+
+  /**
+   * The bind groups an aggregate's batches bind. Each batch binds its
+   * members' own pools, so every quad samples what the per-member draw would
+   * have bound for it.
+   */
+  private prepareAggregate(
+    params: AggregateDrawParams,
+    canvasW: number,
+    canvasH: number,
+  ): { quadBindGroup: GPUBindGroup; batchBindGroups: GPUBindGroup[]; batches: AggregateBatch[] } {
+    const { batches, quadData } = params;
     if (!this.aggregateQuadBuffer || this.aggregateQuadCapacity < quadData.byteLength) {
       this.aggregateQuadBuffer?.destroy();
       this.aggregateQuadBuffer = this.device.createBuffer({
@@ -595,7 +718,7 @@ export class SliceRenderer {
     const batchBindGroups = batches.map((batch, i) => {
       const uniformData = buildSliceUniformData(
         params.zoom, params.cx, params.cy,
-        params.canvasW, params.canvasH,
+        canvasW, canvasH,
         params.dataW, params.dataH,
         levelSlotDimsOf(batch.levels),
         batch.coarse ? [batch.coarse.slotsX, batch.coarse.slotsY] : [0, 0],
@@ -610,30 +733,10 @@ export class SliceRenderer {
           batch.coarse,
           batch.tileProxyTexture,
           batch.groupProxyTexture,
+          params.colormap,
         ),
       });
     });
-
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: target,
-          loadOp: "clear",
-          storeOp: "store",
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-        },
-      ],
-      timestampWrites: timing?.nextPass(),
-    });
-    pass.setPipeline(pipelines[params.blendMode]);
-    pass.setBindGroup(1, quadBindGroup);
-    batches.forEach((batch, i) => {
-      if (batch.count <= 0) return;
-      pass.setBindGroup(0, batchBindGroups[i]);
-      // `firstInstance` addresses the batch's contiguous run inside the
-      // shared quad buffer (instance_index includes the offset).
-      pass.draw(6, batch.count, 0, batch.firstInstance);
-    });
-    pass.end();
+    return { quadBindGroup, batchBindGroups, batches };
   }
 }
