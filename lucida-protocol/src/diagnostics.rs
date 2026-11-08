@@ -30,6 +30,7 @@ pub enum DatasetOpenFailureKind {
     WorkspaceLookup,
     UnsupportedScheme,
     InvalidLocation,
+    SourceNotAllowed,
     LocalPath,
     MissingObject,
     Permission,

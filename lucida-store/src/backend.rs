@@ -20,6 +20,8 @@ use object_store::local::LocalFileSystem;
 use object_store::prefix::PrefixStore;
 use object_store::{BackoffConfig, ClientOptions, ObjectStore, RetryConfig};
 
+use crate::source_policy::{GuardedHttpConnector, SourceDenied, SourcePolicy};
+
 /// The client's fetch timeout for a single remote read.
 ///
 /// This mirrors lucida-web `contentSource.ts` `DEFAULT_TIMEOUT_MS` and must be
@@ -88,6 +90,8 @@ pub enum StoreError {
     ObjectStore(object_store::Error),
     /// An error parsing metadata.
     Metadata(String),
+    /// The source policy does not allow the location.
+    Denied(SourceDenied),
     /// The array's data type, as its metadata names it, is one lucida can't
     /// show as its values.
     UnsupportedDataType(String),
@@ -98,6 +102,7 @@ impl fmt::Display for StoreError {
         match self {
             StoreError::ObjectStore(e) => write!(f, "storage error: {e}"),
             StoreError::Metadata(s) => write!(f, "metadata error: {s}"),
+            StoreError::Denied(denied) => write!(f, "{denied}"),
             StoreError::UnsupportedDataType(s) => write!(f, "unsupported data type: {s}"),
         }
     }
@@ -124,7 +129,28 @@ impl From<object_store::Error> for StoreError {
     }
 }
 
-/// Open a storage backend for a dataset location.
+/// Open a storage backend for `location` if `policy` allows it. Every HTTP
+/// connection of a store opened under a restricted policy is checked again
+/// as it is made.
+pub async fn open_permitted(
+    location: &DatasetLocation,
+    policy: &SourcePolicy,
+) -> Result<Arc<dyn ObjectStore>, StoreError> {
+    policy.check(location).await.map_err(StoreError::Denied)?;
+    match location.scheme() {
+        scheme @ (LocationScheme::Http | LocationScheme::Https) => {
+            let allow_http = scheme == LocationScheme::Http;
+            match policy.http_connector(allow_http, SOURCE_REQUEST_TIMEOUT) {
+                Some(connector) => http_store(location.as_str(), allow_http, Some(connector)),
+                None => open(location),
+            }
+        }
+        _ => open(location),
+    }
+}
+
+/// Open a storage backend for a dataset location, under no source policy:
+/// for local tools and tests. The server opens through [`open_permitted`].
 ///
 /// Schemes route as the module docs list. Plain `http://` is explicitly
 /// enabled on the client, whose default is https-only.
@@ -157,20 +183,28 @@ pub fn open(location: &DatasetLocation) -> Result<Arc<dyn ObjectStore>, StoreErr
             Ok(with_prefix(store, location.object_prefix()))
         }
         scheme @ (LocationScheme::Http | LocationScheme::Https) => {
-            // The underlying HTTP client defaults to https-only; a plain `http://`
-            // endpoint (a static file server on localhost or a LAN) must opt in
-            // explicitly or every request fails with a scheme error before it is
-            // even sent. `https://` URLs need no opt-in and keep the default.
-            let client_options =
-                source_client_options().with_allow_http(scheme == LocationScheme::Http);
-            let store = HttpBuilder::new()
-                .with_url(url)
-                .with_client_options(client_options)
-                .with_retry(source_retry_config())
-                .build()?;
-            Ok(Arc::new(store))
+            http_store(url, scheme == LocationScheme::Http, None)
         }
     }
+}
+
+pub(crate) fn http_store(
+    url: &str,
+    allow_http: bool,
+    connector: Option<GuardedHttpConnector>,
+) -> Result<Arc<dyn ObjectStore>, StoreError> {
+    // The underlying HTTP client defaults to https-only; a plain `http://`
+    // endpoint (a static file server on localhost or a LAN) must opt in
+    // explicitly or every request fails with a scheme error before it is
+    // even sent. `https://` URLs need no opt-in and keep the default.
+    let mut builder = HttpBuilder::new()
+        .with_url(url)
+        .with_client_options(source_client_options().with_allow_http(allow_http))
+        .with_retry(source_retry_config());
+    if let Some(connector) = connector {
+        builder = builder.with_http_connector(connector);
+    }
+    Ok(Arc::new(builder.build()?))
 }
 
 fn with_prefix<S: ObjectStore>(store: S, prefix: Option<&str>) -> Arc<dyn ObjectStore> {
