@@ -347,7 +347,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
   );
 
   const moveArcballPress = useCallback(
-    (e: ClientPoint) => {
+    (e: ClientPoint, atMs?: number) => {
       // Always broadcast cursor as normalized screen coordinates
       const rect = canvas.getBoundingClientRect();
       const nx = (e.clientX - rect.left) / canvas.clientWidth;
@@ -395,14 +395,14 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
         applyViewportCommand(scene, { type: "arcball_rotate", d_theta: dTheta, d_phi: dPhi });
       }
       emitPresence();
-      loopRef.current?.markInput(shiftDragRef.current ? "pan" : "orbit");
+      loopRef.current?.markInput(shiftDragRef.current ? "pan" : "orbit", atMs);
     },
     [dragging, scene, canvas, emitPresence, breakFollow, sendCursor, annotationDraftRef],
   );
 
   const onArcballPointerMove = useCallback(
     (e: PointerEvent) => {
-      if (e.pointerType !== "touch") moveArcballPress(e);
+      if (e.pointerType !== "touch") moveArcballPress(e, e.timeStamp);
     },
     [moveArcballPress],
   );
@@ -553,7 +553,7 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
       breakFollow();
       applyViewportCommand(scene, { type: "arcball_zoom", delta });
       emitPresence();
-      loopRef.current?.markInput("zoom");
+      loopRef.current?.markInput("zoom", e.timeStamp);
       setLowRes();
       scheduleFullRes();
     },

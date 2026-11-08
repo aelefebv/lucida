@@ -741,6 +741,11 @@ pub struct StepRecord {
     pub duration_us: Option<f64>,
     #[serde(default)]
     pub verdict: Option<StepVerdict>,
+    /// The lag reading of the run the step opened, as the page's diagnostic
+    /// states it: input to frame, long tasks and dropped frames. Absent when
+    /// the run took no input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lag: Option<Value>,
     /// Whether the driver's deadline passed while waiting for this step: for
     /// a wait, for quiescence; for a gesture, for its run to conclude.
     pub timed_out: bool,
@@ -921,6 +926,7 @@ async fn run_step(
         end_reason: None,
         duration_us: None,
         verdict: None,
+        lag: None,
         timed_out,
         view_changed: before.signature != after.signature,
         view_before: before.view,
@@ -1258,6 +1264,9 @@ pub fn format_script_human(script: &ScriptRecord) -> String {
             }
             .to_string(),
         );
+        if let Some(lag) = step.lag.as_ref().and_then(describe_lag) {
+            parts.push(lag);
+        }
         if let Some(verdict) = &step.verdict
             && verdict.kind != "clear"
         {
@@ -1271,6 +1280,23 @@ pub fn format_script_human(script: &ScriptRecord) -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// A step's lag reading in a few words, read off the page's fields: input to
+/// frame at p95 and max, and the frames dropped when any were.
+fn describe_lag(lag: &Value) -> Option<String> {
+    let timing = lag.get("inputToFrame")?;
+    let p95 = timing.get("p95Ms")?.as_f64()?;
+    let max = timing.get("maxMs")?.as_f64()?;
+    let mut text = format!("input to frame p95 {p95} ms, max {max} ms");
+    if let Some(dropped) = lag
+        .pointer("/frames/dropped")
+        .and_then(Value::as_u64)
+        .filter(|dropped| *dropped > 0)
+    {
+        text.push_str(&format!(", {dropped} frame(s) dropped"));
+    }
+    Some(text)
 }
 
 /// One line for a bundle's header block: how many steps and which kinds.
@@ -1750,6 +1776,7 @@ mod tests {
                 kind: "clear".to_string(),
                 text: "fine".to_string(),
             }),
+            lag: None,
             timed_out: false,
             view_before: Value::Null,
             view_after: Value::Null,
@@ -1879,6 +1906,35 @@ mod tests {
         assert_eq!(
             script_gate_failure(&script).as_deref(),
             Some("step 1 (wait) never settled")
+        );
+    }
+
+    #[test]
+    fn a_step_carries_its_runs_lag_reading_and_the_text_states_it() {
+        let mut pan = record(ScriptStep::Pan { dx: 200.0, dy: 0.0 }, Some("run-5"), true);
+        pan.lag = Some(json!({
+            "inputs": 25,
+            "inputToFrame": { "samples": 25, "p50Ms": 21.3, "p95Ms": 34.1, "maxMs": 40.0 },
+            "unanswered": 0,
+            "longTasks": { "count": 0, "longestMs": 0, "totalMs": 0 },
+            "frames": { "presented": 25, "dropped": 2, "displayIntervalMs": 16.7 },
+            "unrecorded": 0,
+            "statement": "measured"
+        }));
+        let json = serde_json::to_value(&pan).unwrap();
+        assert_eq!(json["lag"]["inputToFrame"]["p95Ms"], 34.1);
+        let back: StepRecord = serde_json::from_value(json).unwrap();
+        assert_eq!(back, pan);
+        // A step whose run took no input carries no key at all.
+        let wait = serde_json::to_value(record(ScriptStep::Wait, None, false)).unwrap();
+        assert!(wait.get("lag").is_none());
+
+        let text = format_script_human(&ScriptRecord { steps: vec![pan] });
+        assert!(
+            text.contains(
+                "view changed · input to frame p95 34.1 ms, max 40 ms, 2 frame(s) dropped"
+            ),
+            "{text}"
         );
     }
 
