@@ -617,14 +617,14 @@ async fn auth_start_without_marker_cookie_omits_prompt() {
 
 // -- hosted-domain + email_verified -----------------------------------
 
-/// `LUCIDA_ALLOWED_HOSTED_DOMAINS=allowedcorp.com` + a JWT with
-/// `hd: othercorp.com`: callback must not mint a session, must 302 to
+/// `LUCIDA_ALLOWED_HOSTED_DOMAINS=example.com` + a JWT with
+/// `hd: example.org`: callback must not mint a session, must 302 to
 /// `/auth/error?code=hd_mismatch&attempted_email=…&allowed_domains=…`.
 #[tokio::test]
 async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
     let keys = build_test_keys();
     let (mock_base, mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
-    let app = build_lucida_app_with_allowed_domains(&mock_base, &["allowedcorp.com"]).await;
+    let app = build_lucida_app_with_allowed_domains(&mock_base, &["example.com"]).await;
 
     // /auth/start to mint a state token.
     let start_req = Request::builder()
@@ -642,10 +642,10 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
     // Forge JWT with disallowed hd.
     let bad = mint_id_token(
         &keys.private_pem,
-        "alice@othercorp.com",
+        "alice@example.org",
         "Alice Other",
         "https://example.com/a.png",
-        Some("othercorp.com"),
+        Some("example.org"),
     );
     *mock_state.queued_id_token.lock().unwrap() = Some(bad);
 
@@ -671,11 +671,11 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
     assert!(location.contains("code=hd_mismatch"));
     // urlencoding encodes `@` as %40
     assert!(
-        location.contains("attempted_email=alice%40othercorp.com"),
+        location.contains("attempted_email=alice%40example.org"),
         "missing attempted_email in {location}",
     );
     assert!(
-        location.contains("allowed_domains=allowedcorp.com"),
+        location.contains("allowed_domains=example.com"),
         "missing allowed_domains in {location}",
     );
 
@@ -690,9 +690,9 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
     assert_eq!(err_res.status(), StatusCode::OK);
     let body_bytes = to_bytes(err_res.into_body(), 64 * 1024).await.unwrap();
     let body = std::str::from_utf8(&body_bytes).unwrap();
-    assert!(body.contains("alice@othercorp.com"), "page must echo email");
+    assert!(body.contains("alice@example.org"), "page must echo email");
     assert!(
-        body.contains("allowedcorp.com"),
+        body.contains("example.com"),
         "page must echo allowed domain"
     );
     assert!(
@@ -707,7 +707,7 @@ async fn callback_with_disallowed_hd_redirects_to_error_no_session() {
 async fn callback_with_allowed_hd_succeeds_and_mints_session() {
     let keys = build_test_keys();
     let (mock_base, mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
-    let app = build_lucida_app_with_allowed_domains(&mock_base, &["allowedcorp.com"]).await;
+    let app = build_lucida_app_with_allowed_domains(&mock_base, &["example.com"]).await;
 
     let start_req = Request::builder()
         .method("POST")
@@ -721,10 +721,10 @@ async fn callback_with_allowed_hd_succeeds_and_mints_session() {
 
     let good = mint_id_token(
         &keys.private_pem,
-        "bob@allowedcorp.com",
+        "bob@example.com",
         "Bob Allowed",
         "https://example.com/b.png",
-        Some("allowedcorp.com"),
+        Some("example.com"),
     );
     *mock_state.queued_id_token.lock().unwrap() = Some(good);
 
@@ -749,7 +749,7 @@ async fn callback_with_allowed_hd_succeeds_and_mints_session() {
 async fn callback_with_unverified_email_redirects_to_unverified() {
     let keys = build_test_keys();
     let (mock_base, mock_state) = spawn_mock_google(keys.jwks_json.clone()).await;
-    let app = build_lucida_app_with_allowed_domains(&mock_base, &["allowedcorp.com"]).await;
+    let app = build_lucida_app_with_allowed_domains(&mock_base, &["example.com"]).await;
 
     let start_req = Request::builder()
         .method("POST")
@@ -763,10 +763,10 @@ async fn callback_with_unverified_email_redirects_to_unverified() {
 
     let token = mint_id_token_full(
         &keys.private_pem,
-        "charlie@allowedcorp.com",
+        "charlie@example.com",
         "Charlie Unverified",
         "https://example.com/c.png",
-        Some("allowedcorp.com"),
+        Some("example.com"),
         false, // email_verified
     );
     *mock_state.queued_id_token.lock().unwrap() = Some(token);
@@ -785,7 +785,7 @@ async fn callback_with_unverified_email_redirects_to_unverified() {
     let location = res.headers().get(LOCATION).unwrap().to_str().unwrap();
     assert!(location.contains("code=unverified"), "got {location}");
     assert!(
-        location.contains("attempted_email=charlie%40allowedcorp.com"),
+        location.contains("attempted_email=charlie%40example.com"),
         "got {location}",
     );
 }
@@ -808,10 +808,10 @@ async fn empty_allowlist_accepts_any_verified_email() {
     let state_token =
         extract_state_param(start_res.headers().get(LOCATION).unwrap().to_str().unwrap());
 
-    // Personal Gmail (no hd): must succeed under the OSS-permissive default.
+    // Personal account (no hd): must succeed under the OSS-permissive default.
     let token = mint_id_token(
         &keys.private_pem,
-        "personal@gmail.com",
+        "personal@example.net",
         "Personal Account",
         "https://example.com/p.png",
         None,

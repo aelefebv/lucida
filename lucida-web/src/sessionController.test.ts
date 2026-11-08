@@ -1228,6 +1228,7 @@ describe("SessionController durable import warnings", () => {
 
 describe("SessionController import warnings from dataset health", () => {
   const shapeWarning = {
+    kind: "mismatched_tile_geometry" as const,
     target: "wds-1",
     message: "tiles differ in shape, and smaller tiles are padded with fill",
     degrades: true,

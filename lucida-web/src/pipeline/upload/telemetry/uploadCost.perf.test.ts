@@ -46,7 +46,7 @@ describe("UploadTelemetry publish cost", () => {
       tel.publish(now, makeTickStats());
     };
 
-    // The pre-fix shape: a plain array pruned with `shift()`, then scanned.
+    // The quadratic shape: a plain array pruned with `shift()`, then scanned.
     const events: Array<{ at: number; bytes: number }> = [];
     const shiftTick = (now: number): void => {
       for (let e = 0; e < perTick; e++) events.push({ at: now, bytes: 10 });

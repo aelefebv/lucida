@@ -546,7 +546,7 @@ describe("App wiring: channels", () => {
   });
 });
 
-describe("App wiring: layout switch (the #780 class)", () => {
+describe("App wiring: layout switch", () => {
   it("switching layouts fires the display-settings intent so the planner re-reads", async () => {
     const { scene } = await mountWithSnapshot(documentJson(["wds-1"]));
 
@@ -603,7 +603,7 @@ describe("App wiring: annotation-view restore fan-out", () => {
   });
 });
 
-describe("App wiring: the capture surface writes no user state (#923)", () => {
+describe("App wiring: the capture surface writes no user state", () => {
   // These two must mount the real App: the gate is
   // a prop threaded from a URL read at the top of App.tsx down into
   // useSavedViewSync, and a hook-level test cannot fail if that thread breaks.

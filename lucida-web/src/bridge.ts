@@ -84,11 +84,27 @@ export interface DatasetSourceHealth {
 }
 
 export interface DatasetImportWarning {
+  kind: DatasetImportWarningKind;
   target: string;
+  /** The importer's account, for developers and agents. People see the warning worded from `kind`. */
   message: string;
   /** The warning says the data is shown wrong, so it degrades `status`. */
   degrades: boolean;
 }
+
+/** Mirror of `lucida_protocol::DatasetImportWarningKind`. */
+export type DatasetImportWarningKind =
+  | "skipped_group"
+  | "unreadable_tile_geometry"
+  | "unusable_tile_geometry"
+  | "sampled_label_discovery"
+  | "unusable_label_index"
+  | "unwritten_level"
+  | "mismatched_tile_geometry"
+  | "duplicate_tile"
+  | "malformed_collection_layout"
+  | "pinned_axis"
+  | "invalid_scale";
 
 export type DatasetOpenStage =
   | "request_received"

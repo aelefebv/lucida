@@ -259,7 +259,7 @@ describe("AnnotationOverlay — move a pin (move_annotation)", () => {
   });
 });
 
-describe("AnnotationOverlay — Shift gates move; plain drag pans (issue #778)", () => {
+describe("AnnotationOverlay — Shift gates move; plain drag pans", () => {
   it("a plain drag on an own pin pans the view and emits NO move", () => {
     // A plain drag on an own marker pans like dragging the canvas. Pan is a
     // local-only viewport command, so it lands in `applied`, never in `sent`.
@@ -621,7 +621,7 @@ describe("AnnotationOverlay — delete a pin (remove_annotation, confirmed)", ()
   });
 });
 
-describe("AnnotationOverlay — open thread stacks above other pins (issue #772)", () => {
+describe("AnnotationOverlay — open thread stacks above other pins", () => {
   /** A pin wrapper's inline z-index, or NaN if it carries none. */
   function wrapperZ(pinId: string): number {
     const el = screen.getByTestId(`annot-pin-wrapper-${pinId}`);
@@ -936,7 +936,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     expect(moves[0].end).toBeUndefined(); // rigid move carries NO end (not a reshape)
   });
 
-  it("regression: a resize that releases OFF the box hides the handles after the linger (#789)", () => {
+  it("regression: a resize that releases OFF the box hides the handles after the linger", () => {
     // A captured handle drag fires no enter/leave on the box, so handle-up
     // re-arms the hide; otherwise an off-box release leaves the handles stuck.
     // Only the linger timers are faked so RAF is untouched.
@@ -972,7 +972,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
     }
   });
 
-  it("regression: a resize that releases back ON the box keeps the handles revealed (#789)", () => {
+  it("regression: a resize that releases back ON the box keeps the handles revealed", () => {
     // The re-armed hide must not fire under a cursor still over the box. A real
     // on-box release fires pointerenter as capture is released, which cancels
     // the pending hide.
@@ -1000,7 +1000,7 @@ describe("AnnotationOverlay — resize a box from its handles (move_annotation r
   });
 });
 
-describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", () => {
+describe("AnnotationOverlay — off-context vs the view's Z/T/C", () => {
   // Placed at (12, 3, 2), so off-context against the default view (3, 0, 0).
   function elsewherePin(overrides: Partial<Annotation> = {}): Annotation {
     return ownPin({ id: "pin-here", z: 12, t: 3, c: 2, ...overrides });
@@ -1116,7 +1116,7 @@ describe("AnnotationOverlay — off-context vs the view's Z/T/C (issue #779)", (
   });
 });
 
-describe("AnnotationOverlay — reflects re-anchored positions after a layout switch (issue #780)", () => {
+describe("AnnotationOverlay — reflects re-anchored positions after a layout switch", () => {
   // Core re-anchors pins on SetActiveLayout; the overlay only re-reads, keyed on
   // `version`. These show the new positions appear once `version` bumps and not
   // before, so the bump is load-bearing.
@@ -1227,7 +1227,7 @@ describe("AnnotationOverlay — reflects re-anchored positions after a layout sw
   });
 });
 
-describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's view (slice 2)", () => {
+describe("AnnotationOverlay — passive pin-select stays gentle; Go to author's view", () => {
   // A passive pin-select must never apply this captured view; only the explicit
   // "Go to author's view" restores it.
   const VIEW = {
