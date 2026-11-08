@@ -575,7 +575,7 @@ impl reqwest::dns::Resolve for GuardedResolver {
 mod tests {
     use super::*;
     use crate::backend::{StoreError, open_permitted};
-    use object_store::ObjectStore;
+    use object_store::{ObjectStore, ObjectStoreExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn location(raw: &str) -> DatasetLocation {

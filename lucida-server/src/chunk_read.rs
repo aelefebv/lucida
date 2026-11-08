@@ -431,8 +431,8 @@ mod tests {
     use lucida_protocol::{PHASE_UNSET, TimingRowFamily, TimingRowOutcome};
     use lucida_store::import_types::ServerBindingSeed;
     use lucida_store::shard::{IndexLocation, ShardLayout};
-    use object_store::ObjectStore;
     use object_store::path::Path;
+    use object_store::{ObjectStore, ObjectStoreExt};
 
     use super::*;
     use crate::decode::StorageCompression;
