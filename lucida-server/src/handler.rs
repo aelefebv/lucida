@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, Stream, StreamExt};
-use lucida_content::url::normalize_dataset_url;
+use lucida_content::url::{DatasetLocation, normalize_dataset_url};
 use lucida_content::{DatasetId, DatasetManifest, ImageId};
 use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
@@ -31,7 +31,7 @@ use crate::generated::{
 };
 use crate::inbox::{self, InboxStore, Report as InboxReport};
 use crate::open_diagnostics::{
-    backend_kind_for_url, open_failure, open_progress, store_error_status,
+    backend_kind_for_url, location_failure, open_failure, open_progress, store_error_status,
 };
 use crate::proxy::{PROXY_TARGET_LONG_AXIS, ProxyGenerator};
 use crate::session::Session;
@@ -1391,9 +1391,23 @@ async fn handle_open_remote_dataset(
     timings: Arc<TimingBuffer>,
 ) {
     let OpenRemoteDatasetRequest { request_id, url } = request;
-    // Wire envelopes carry the canonical URL — the same (idempotent)
-    // normalization the orchestration applies at its own entry.
-    let canonical_url = normalize_dataset_url(&url);
+    // A location that does not parse is refused here, echoing the input as
+    // given; past this point every envelope carries the canonical URL.
+    let location = match DatasetLocation::parse(&url) {
+        Ok(location) => location,
+        Err(error) => {
+            send_open_failed(
+                client_id,
+                &request_id,
+                &url,
+                location_failure(&error),
+                &unicast_routes,
+            )
+            .await;
+            return;
+        }
+    };
+    let canonical_url = location.as_str().to_string();
 
     // Forward per-stage progress to the requesting client as it happens.
     // The forwarder drains fully (its sender is dropped first) before the
@@ -1435,7 +1449,7 @@ async fn handle_open_remote_dataset(
     // having.
     let result = lucida_store::metadata_reads::observing(
         Arc::new(MetadataReadSink::new(&request_id, timings)),
-        dataset_open::open_dataset(client_id, &url, &ctx, &progress_tx),
+        dataset_open::open_dataset(client_id, &location, &ctx, &progress_tx),
     )
     .await;
     drop(progress_tx);

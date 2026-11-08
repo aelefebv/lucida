@@ -28,7 +28,7 @@ fn fixture_dir(name: &str) -> PathBuf {
 async fn import_fixture(name: &str, id: &str) -> (PathBuf, ImportResult) {
     let dir = fixture_dir(name);
     let store = Arc::new(CachedStore::new(
-        lucida_store::backend::open(dir.to_str().unwrap()).unwrap(),
+        lucida_store::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap(),
         DEFAULT_SOURCE_CACHE_BYTES,
     ));
     let result = import_dataset(&store, id, id).await.unwrap();

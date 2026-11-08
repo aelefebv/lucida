@@ -230,7 +230,7 @@ export function tickVolume(
   // by the render resolution, which drops while the camera moves.
   const fullW = Math.round(ctx.canvas.clientWidth * devicePixelRatio);
   const fullH = Math.round(ctx.canvas.clientHeight * devicePixelRatio);
-  scene.set_viewport(fullW, fullH);
+  scene.set_viewport(fullW, fullH, devicePixelRatio);
 
   const scale = ctx.renderScale * ctx.resolutionScale;
   const canvasW = Math.round(fullW * scale);

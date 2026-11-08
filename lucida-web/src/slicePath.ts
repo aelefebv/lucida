@@ -396,7 +396,7 @@ export function tickSlice(
   const dpr = devicePixelRatio;
   const canvasW = Math.round(canvas.clientWidth * dpr);
   const canvasH = Math.round(canvas.clientHeight * dpr);
-  scene.set_viewport(canvasW, canvasH);
+  scene.set_viewport(canvasW, canvasH, dpr);
 
   const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
   if (!orchResult) return false;
