@@ -44,7 +44,7 @@ function makeRecorder() {
     timeoutMs: 3_600_000,
   });
   recorder.setEnvironment({
-    captureWarmth: () => ({ detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0 }),
+    captureWarmth: () => ({ detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0 }),
     captureConditions: () => ({
       datasetIds: ["ds"],
       composedView: { url: "/w/ws-1", mode: "slice" },

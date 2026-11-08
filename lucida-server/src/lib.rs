@@ -4,7 +4,6 @@
 //! The binary entry point lives in [`main.rs`]; everything testable is
 //! exported here.
 
-pub mod admin;
 pub mod auth;
 pub mod binding;
 pub mod binding_restore;
@@ -20,8 +19,8 @@ pub mod health;
 pub mod inbox;
 pub mod open_diagnostics;
 pub mod origin;
-pub mod proxy;
 pub mod session;
+mod source_region;
 pub mod static_serve;
 pub mod status;
 pub mod storage;
@@ -77,38 +76,16 @@ pub struct AppState {
     /// Where datasets may be opened from, and the data roots that bound
     /// `/api/browse`.
     pub source_policy: Arc<SourcePolicy>,
-    /// Proxy infrastructure config, plumbed through to per-dataset
-    /// `ServerBinding`s when datasets are opened.
-    pub proxy_config: ProxyConfig,
 }
 
-impl AppState {
-    /// Convenience accessor for the configured proxy cache root, used by
-    /// the admin clear-cache endpoint so it doesn't have to reach into
-    /// `proxy_config` directly.
-    pub fn proxy_cache_dir(&self) -> PathBuf {
-        self.proxy_config.cache_dir.clone()
-    }
-}
-
-/// Server-wide proxy infrastructure configuration. Loaded once at boot
-/// from CLI args / env defaults; per-dataset `ProxyCache` and
-/// `ProxyGenerator` instances are derived from it as datasets open.
+/// Server-wide configuration for generated coarse levels. Loaded once at
+/// boot from CLI args and env defaults; each opened dataset's derived-chunk
+/// cache and generation service are built from it.
 #[derive(Clone, Debug)]
-pub struct ProxyConfig {
-    /// Root directory under which per-dataset proxy caches are written.
-    /// `{root}/{url_hash hex}/...` — see [`proxy::ProxyCache`].
-    pub cache_dir: PathBuf,
-    /// Temporary bridge flag for the retired proxy fallback path. The
-    /// default server path leaves this false so DatasetOpened carries no
-    /// proxy catalog and asset requests are ignored.
-    pub legacy_proxy_enabled: bool,
-    /// Maximum concurrent proxy generations across all datasets *per
-    /// `ProxyGenerator` instance*. Each opened dataset gets its own
-    /// generator with this many permits; total system concurrency scales
-    /// with the number of opened datasets, which is acceptable for now.
-    pub concurrency: usize,
+pub struct GeneratedConfig {
     pub generated_enabled: bool,
+    /// Root under which each dataset's generated chunks are cached, in a
+    /// directory named by its URL hash.
     pub generated_cache_dir: PathBuf,
     pub generated_concurrency: usize,
     pub generated_background_chunk_limit: usize,
@@ -118,33 +95,20 @@ pub struct ProxyConfig {
     pub generated_disk_budget_bytes: Option<u64>,
 }
 
-impl ProxyConfig {
-    /// Default cache directory: `{user_cache_dir}/lucida/proxies`, falling
-    /// back to `./.lucida-proxy-cache` if no platform cache dir is known.
+impl GeneratedConfig {
+    /// Default cache directory: `{user_cache_dir}/lucida/generated-coarse`,
+    /// under the working directory if no platform cache dir is known.
     pub fn default_cache_dir() -> PathBuf {
         dirs::cache_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join("lucida")
-            .join("proxies")
-    }
-
-    /// Default concurrency: half the logical CPU count, minimum 1.
-    pub fn default_concurrency() -> usize {
-        (num_cpus::get() / 2).max(1)
-    }
-
-    pub fn default_generated_cache_dir() -> PathBuf {
-        Self::default_cache_dir().join("generated-coarse")
+            .join("generated-coarse")
     }
 
     pub fn defaults() -> Self {
-        let cache_dir = Self::default_cache_dir();
         Self {
-            generated_cache_dir: cache_dir.join("generated-coarse"),
-            cache_dir,
-            legacy_proxy_enabled: false,
-            concurrency: Self::default_concurrency(),
             generated_enabled: true,
+            generated_cache_dir: Self::default_cache_dir(),
             generated_concurrency: 1,
             generated_background_chunk_limit: 32,
             generated_target_long_axis: 512,

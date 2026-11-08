@@ -17,19 +17,9 @@ export {
   UPLOAD_WINDOW_MS,
 } from "./constants.ts";
 
-export {
-  proxyKeyFromDelivery,
-  proxyKeyFromMissing,
-  proxyKeyFromRequest,
-} from "./proxyKeys.ts";
-
 export { identityMatrix } from "./coldState/identity.ts";
 export { buildDisplayStateByChannel } from "./coldState/displayState.ts";
-export {
-  buildRoster,
-  synthesizeGroupRosterEntry,
-  type BuildRosterResult,
-} from "./coldState/roster.ts";
+export { buildRoster, type BuildRosterResult } from "./coldState/roster.ts";
 export { buildColdState, buildColdActiveEntry } from "./coldState/build.ts";
 export { buildViewHotState } from "./coldState/hotState.ts";
 
@@ -43,7 +33,6 @@ export {
 export {
   dispatchChunk,
   dispatchChunkDelivery,
-  dispatchProxy,
   workerMemberIdForChunk,
   parseWorkerMemberId,
   channelFromChunkKey,

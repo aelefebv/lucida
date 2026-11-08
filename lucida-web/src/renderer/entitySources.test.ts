@@ -6,7 +6,7 @@ import {
   type EntitySource,
 } from "./entitySources.ts";
 import { DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descriptor/layout.ts";
-import type { ColdStateActiveEntry, ColdStateTileEntry } from "./workerProtocol.ts";
+import type { ColdStateActiveEntry } from "./workerProtocol.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 
 function identity(): Float32Array {
@@ -20,7 +20,7 @@ function tile(opts: {
   detailLevels: number[];
   coarseLevel?: number | null;
   levelCount?: number;
-  levels?: ColdStateTileEntry["levels"];
+  levels?: ColdStateActiveEntry["levels"];
 }): ColdStateActiveEntry {
   const levelCount = opts.levelCount ?? 6;
   const levels = opts.levels ?? Array.from({ length: levelCount }, (_, level) => ({
@@ -30,31 +30,25 @@ function tile(opts: {
     levelDims: [1, 64 << (levelCount - 1 - level), 64 << (levelCount - 1 - level)] as [number, number, number],
   }));
   return {
-    kind: "tile",
     entityId: "e",
     imageId: "img",
-    mode: "tiles-with-detail",
     detailLevels: opts.detailLevels,
     coarseLevel: opts.coarseLevel ?? null,
     levels,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
-    parentGroupId: null,
     modelMatrix: identity(),
     invModelMatrix: identity(),
     displayStateByChannel: {},
   };
 }
 
-function group(): ColdStateActiveEntry {
+/** An entry with no levels at all: nothing to hold or sample. */
+function empty(): ColdStateActiveEntry {
   return {
-    kind: "group-as-proxy",
     entityId: "g",
-    mode: "group-as-proxy",
+    imageId: "g",
+    detailLevels: [],
+    coarseLevel: null,
     levels: [],
-    proxyAvailable: true,
-    groupProxyAvailable: true,
-    parentGroupId: null,
     modelMatrix: identity(),
     invModelMatrix: identity(),
     displayStateByChannel: {},
@@ -74,8 +68,8 @@ describe("targetLevelOf", () => {
     expect(targetLevelOf(tile({ detailLevels: [2] }))).toBe(2);
   });
 
-  it("is undefined for a group-as-proxy entry and for a tile with no detail levels", () => {
-    expect(targetLevelOf(group())).toBeUndefined();
+  it("is undefined for an entry with no levels and for a tile with no detail levels", () => {
+    expect(targetLevelOf(empty())).toBeUndefined();
     expect(targetLevelOf(tile({ detailLevels: [] }))).toBeUndefined();
   });
 });
@@ -110,8 +104,8 @@ describe("detailTierLevels", () => {
     expect(detailTierLevels(entry)).toEqual([0, 1, 2]);
   });
 
-  it("is empty for a group-as-proxy entry", () => {
-    expect(detailTierLevels(group())).toEqual([]);
+  it("is empty for an entry with no levels", () => {
+    expect(detailTierLevels(empty())).toEqual([]);
   });
 });
 
@@ -176,8 +170,8 @@ describe("selectEntitySources", () => {
     expect(sel.coarse?.meta.offset).toBe(43);
   });
 
-  it("returns no sources for a group-as-proxy entry", () => {
-    expect(selectEntitySources(group(), [source("detail", 0, "pool-a")])).toEqual({
+  it("returns no sources for an entry with no levels", () => {
+    expect(selectEntitySources(empty(), [source("detail", 0, "pool-a")])).toEqual({
       levels: [],
       levelPoolKeys: [],
       coarse: null,

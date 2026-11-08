@@ -15,11 +15,9 @@ use lucida_core::auth_principal::AuthPrincipal;
 use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, ServerMessage};
 use lucida_protocol::{
-    AssetCatalog, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
-    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
-    GeneratedAvailabilityDelta,
+    DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
+    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, GeneratedAvailabilityDelta,
 };
-use lucida_proxy::ProxySpec;
 use lucida_store::cache::CachedStore;
 use lucida_store::source_policy::SourcePolicy;
 use tokio::sync::{Mutex, broadcast, mpsc};
@@ -33,12 +31,9 @@ use crate::open_diagnostics::{
     MetadataReadCost, backend_open_failure, import_failure, open_failure, open_progress,
     open_success, open_warning,
 };
-use crate::proxy::{
-    PROXY_TARGET_LONG_AXIS, ProxyCache, ProxyGenerator, proxy_catalog_entries_for_manifest,
-};
 use crate::session::Session;
 use crate::workspace::{LiveWorkspace, WorkspaceManager};
-use crate::{BroadcastItem, ProxyConfig};
+use crate::{BroadcastItem, GeneratedConfig};
 
 /// The workspace scope a connection acts under: the live runtime handles,
 /// the [`WorkspaceManager`] that owns authorization and persistence, and
@@ -50,13 +45,13 @@ pub struct WorkspaceScope {
     pub principal: AuthPrincipal,
 }
 
-/// Everything a dataset open runs against: the proxy/generated
+/// Everything a dataset open runs against: the generated-level
 /// configuration for the binding it builds, the source policy the location
 /// must pass, and the workspace that authorizes and persists the open and
 /// whose session and broadcast hub it mutates.
 #[derive(Clone)]
 pub struct DatasetOpenContext {
-    pub proxy_config: ProxyConfig,
+    pub generated_config: GeneratedConfig,
     pub source_policy: Arc<SourcePolicy>,
     pub workspace: WorkspaceScope,
 }
@@ -472,18 +467,18 @@ pub async fn open_dataset(
             )),
         ),
     );
-    let proxy_config = &ctx.proxy_config;
+    let generated_config = &ctx.generated_config;
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
-    let generated_config = GeneratedCoarseConfig {
-        target_long_axis: proxy_config.generated_target_long_axis,
-        chunk_long_axis: proxy_config.generated_chunk_long_axis,
-        max_chunk_bytes: proxy_config.generated_max_chunk_bytes,
+    let plan_config = GeneratedCoarseConfig {
+        target_long_axis: generated_config.generated_target_long_axis,
+        chunk_long_axis: generated_config.generated_chunk_long_axis,
+        max_chunk_bytes: generated_config.generated_max_chunk_bytes,
     };
     emit(
         progress,
         open_progress(
             DatasetOpenStage::GeneratedCoarsePlanning,
-            if proxy_config.generated_enabled {
+            if generated_config.generated_enabled {
                 "planning generated coarse levels"
             } else {
                 "generated coarse planning disabled"
@@ -493,8 +488,8 @@ pub async fn open_dataset(
             None,
         ),
     );
-    let generated_plans = if proxy_config.generated_enabled {
-        plan_generated_coarse_for_manifest(&result.manifest, generated_config)
+    let generated_plans = if generated_config.generated_enabled {
+        plan_generated_coarse_for_manifest(&result.manifest, plan_config)
     } else {
         vec![]
     };
@@ -509,31 +504,21 @@ pub async fn open_dataset(
         ),
     );
 
-    // Proxy fallback is opt-in. The default DatasetOpened catalog is empty,
-    // so fallback availability comes from chunk tier metadata instead.
-    let catalog_entries =
-        proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
-
     let dataset_opened = DatasetOpened {
         manifest: result.manifest.clone(),
         fetch: result.fetch,
-        catalog: AssetCatalog {
-            entries: catalog_entries.clone(),
-        },
         // Stamp the requesting client so the broadcast's recipients can tell
         // whether they are the opener; only the opener auto-fits its camera.
         opener_client_id: Some(opener),
     };
 
-    // Per-dataset proxy infrastructure. Cache root is keyed by the
-    // 16-byte URL hash so a single shared `cache_dir` can host many
-    // datasets without collision. The generator owns its own bounded
-    // semaphore + in-flight dedup map.
+    // Each dataset's generated chunks cache under a directory named by its
+    // 16-byte URL hash, so one cache root hosts many datasets.
     let url_hash16 = location.hash16();
     let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
-        proxy_config.generated_cache_dir.clone(),
+        generated_config.generated_cache_dir.clone(),
         url_hash16,
-        proxy_config.generated_disk_budget_bytes,
+        generated_config.generated_disk_budget_bytes,
     ));
     let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
     for plan in &generated_plans {
@@ -556,7 +541,6 @@ pub async fn open_dataset(
             }
         }
     }
-    let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
     let generated_manifest = Arc::new(result.manifest.clone());
     let generated_store = cached.clone();
     let generated_resolver = resolver.clone();
@@ -569,23 +553,11 @@ pub async fn open_dataset(
         ctx.session().clone(),
         ctx.tx().clone(),
         GeneratedSchedulingConfig {
-            concurrency: proxy_config.generated_concurrency,
-            background_chunk_limit: proxy_config.generated_background_chunk_limit,
+            concurrency: generated_config.generated_concurrency,
+            background_chunk_limit: generated_config.generated_background_chunk_limit,
             ..GeneratedSchedulingConfig::default()
         },
     ));
-    let proxy_generator = Arc::new(ProxyGenerator::new(
-        proxy_cache.clone(),
-        cached.clone(),
-        resolver.clone(),
-        Arc::new(result.manifest),
-        proxy_config.concurrency,
-    ));
-
-    // Clone for the (T=0, C=0) pre-generation task spawned below.
-    let prefetch_generator = proxy_generator.clone();
-    let prefetch_entries = catalog_entries.clone();
-    let prefetch_live = scope.live.clone();
 
     let binding = ServerBinding {
         source_url: canonical_url.to_string(),
@@ -595,9 +567,6 @@ pub async fn open_dataset(
         dataset_opened: dataset_opened.clone(),
         derived_chunks: derived_chunks.clone(),
         generated_service: generated_service.clone(),
-        legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
-        proxy_cache,
-        proxy_generator,
         import_warnings,
     };
 
@@ -789,50 +758,13 @@ pub async fn open_dataset(
         "open_remote_dataset.broadcast_sent"
     );
 
-    // Background warm-up is deliberately decoupled from the returned
-    // result: the caller can deliver success while coarse fill and proxy
-    // pre-generation proceed on their own tasks.
+    // Background fill is deliberately decoupled from the returned result:
+    // the caller can deliver success while coarse fill proceeds on its own
+    // task.
     if !generated_plans.is_empty() {
         let fill_service = generated_service.clone();
         tokio::spawn(async move {
             fill_service.enqueue_background_fill().await;
-        });
-    }
-
-    // Kick off background generation for the initial (T=0, C=0) view
-    // of every advertised entity at the lowest priority. Errors are logged
-    // but do not propagate — the open succeeds either way, and downstream
-    // requests will surface the failure with their own error path.
-    if !prefetch_entries.is_empty() {
-        let dataset_id_for_log = dataset_id.clone();
-        tokio::spawn(async move {
-            for availability in prefetch_entries {
-                for kind in availability.kinds {
-                    if prefetch_live.background_cancelled() {
-                        tracing::info!(
-                            dataset = %dataset_id_for_log,
-                            "background proxy pre-generation cancelled"
-                        );
-                        return;
-                    }
-                    let spec = ProxySpec {
-                        entity_id: availability.entity_id.clone(),
-                        kind,
-                        t: 0,
-                        c: 0,
-                        target_long_axis: PROXY_TARGET_LONG_AXIS,
-                    };
-                    if let Err(e) = prefetch_generator.request(spec, 0).await {
-                        tracing::warn!(
-                            dataset = %dataset_id_for_log,
-                            entity = %availability.entity_id.0,
-                            kind = ?kind,
-                            error = %e,
-                            "background proxy pre-generation failed"
-                        );
-                    }
-                }
-            }
         });
     }
 
@@ -894,14 +826,13 @@ mod tests {
                     },
                 }],
             }),
-            catalog: lucida_protocol::AssetCatalog::default(),
             opener_client_id: None,
         }
     }
 
     /// Construct a `ServerBinding` carrying `opened` as its cached, import-time
-    /// `dataset_opened`, with inert/stub proxy + generated infrastructure (none
-    /// of it is exercised here). Mirrors the helper in
+    /// `dataset_opened`, with inert generated infrastructure (none of it is
+    /// exercised here). Mirrors the helper in
     /// `tests/dataset_id_stable.rs`.
     fn make_test_binding(source_url: &str, opened: &DatasetOpened) -> ServerBinding {
         let store =
@@ -909,17 +840,6 @@ mod tests {
         let cache = Arc::new(CachedStore::new(store.clone(), 1024));
         let resolver = Arc::new(ChunkResolver::new(
             &lucida_store::import_types::ServerBindingSeed { images: vec![] },
-        ));
-        let url_hash = lucida_content::url::dataset_url_hash16(source_url);
-        let tmp = tempfile::tempdir().expect("tempdir");
-        let proxy_cache = Arc::new(ProxyCache::new(tmp.path().to_path_buf(), url_hash));
-        std::mem::forget(tmp); // keep the dir alive for the test process
-        let proxy_generator = Arc::new(ProxyGenerator::new(
-            proxy_cache.clone(),
-            cache.clone(),
-            resolver.clone(),
-            Arc::new(opened.manifest.clone()),
-            1,
         ));
         let derived_chunks = Arc::new(DerivedChunkCache::default());
         ServerBinding {
@@ -930,9 +850,6 @@ mod tests {
             dataset_opened: opened.clone(),
             derived_chunks: derived_chunks.clone(),
             generated_service: Arc::new(GeneratedCoarseService::inert(derived_chunks)),
-            legacy_proxy_enabled: false,
-            proxy_cache,
-            proxy_generator,
             import_warnings: Vec::new(),
         }
     }
@@ -1094,13 +1011,10 @@ mod tests {
         .unwrap();
     }
 
-    /// Proxy/generated caches under `root` with generated planning
-    /// disabled, so nothing writes outside the test sandbox.
-    fn test_proxy_config(root: &Path) -> ProxyConfig {
-        ProxyConfig {
-            cache_dir: root.join("proxies"),
-            legacy_proxy_enabled: false,
-            concurrency: 1,
+    /// Generated caches under `root` with generated planning disabled, so
+    /// nothing writes outside the test sandbox.
+    fn test_generated_config(root: &Path) -> GeneratedConfig {
+        GeneratedConfig {
             generated_enabled: false,
             generated_cache_dir: root.join("generated"),
             generated_concurrency: 1,
@@ -1322,11 +1236,11 @@ mod tests {
             is_admin: false,
         };
         let workspace = store.create_workspace(&owner, Some("Demo")).await.unwrap();
-        let proxy_config = test_proxy_config(root);
-        let manager = Arc::new(WorkspaceManager::new(store, proxy_config.clone()));
+        let generated_config = test_generated_config(root);
+        let manager = Arc::new(WorkspaceManager::new(store, generated_config.clone()));
         let live = manager.live_workspace(&workspace.id, &owner).await.unwrap();
         let ctx = DatasetOpenContext {
-            proxy_config,
+            generated_config,
             source_policy: Arc::default(),
             workspace: WorkspaceScope {
                 live,

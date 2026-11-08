@@ -1,9 +1,8 @@
 /**
  * TS <-> WGSL parity for the categorical label color hash.
  *
- * We can't run WGSL in vitest, so this mirrors the cross-check pattern in
- * `proxyShaderBinding.test.ts`: `wgslLabelGlasbey` below is a hand port of
- * the `labelGlasbey` function in `slice.wgsl`, and we assert it agrees
+ * We can't run WGSL in vitest, so `wgslLabelGlasbey` below is a hand port
+ * of the `labelGlasbey` function in `slice.wgsl`, and we assert it agrees
  * with the production {@link glasbeyRgb} across the full uint32 range. If
  * the shader's math and `labelColors.ts` ever drift, on-screen label
  * colors would stop matching `labelColor`, and this test fails.

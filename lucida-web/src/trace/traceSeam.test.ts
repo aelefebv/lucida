@@ -42,10 +42,6 @@ class ControlledSource implements ContentSource {
     });
   }
 
-  fetchProxy(): Promise<never> {
-    return new Promise<never>(() => {});
-  }
-
   handleBinary(): void {}
 
   deliver(chunkKey: string, byteLength = 8): void {
@@ -102,8 +98,7 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
   return {
     requests,
     activeSet: [],
-    proxyRequests: [],
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     stats: emptyPlanStats(),
     nextState: initialPlanningState(),
   };
@@ -123,7 +118,7 @@ const settle = async () => {
 function registerEnvironment(): void {
   traceRecorder.setEnvironment({
     captureWarmth: () => ({
-      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
     }),
     captureConditions: () => ({
       datasetIds: ["ds"],

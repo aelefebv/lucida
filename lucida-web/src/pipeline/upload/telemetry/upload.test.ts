@@ -41,14 +41,12 @@ describe("UploadTelemetry — recordEvent + counters", () => {
   it("publishes rolling bytesPerSec equal to bytes in the 1s window", () => {
     const tel = new UploadTelemetry();
     tel.recordEvent(10_000, 500);
-    tel.recordEvent(10_200, 700, "proxy");
+    tel.recordEvent(10_200, 700);
     tel.recordEvent(10_400, 800);
     const rolling = tel.publish(10_500, makeTickStats());
     // Window = UPLOAD_WINDOW_MS = 1000ms, so bytesInWindow == bytesPerSec.
     expect(rolling.bytesPerSec).toBe(2000);
     expect(rolling.uploadsPerSec).toBe(3);
-    expect(rolling.chunkUploadsPerSec).toBe(2);
-    expect(rolling.proxyUploadsPerSec).toBe(1);
   });
 
   it("prunes events older than UPLOAD_WINDOW_MS", () => {
@@ -259,9 +257,7 @@ describe("UploadTelemetry — shape regression", () => {
       10_200,
       makeTickStats({
         drainedChunks: 5,
-        drainedProxies: 1,
         uploadedChunks: 4,
-        uploadedProxies: 1,
         bytesUploaded: 1536,
         bytesBudget: 8192,
         budgetExhausted: false,
@@ -273,8 +269,6 @@ describe("UploadTelemetry — shape regression", () => {
       [
         "bytesPerSec",
         "uploadsPerSec",
-        "chunkUploadsPerSec",
-        "proxyUploadsPerSec",
         "filterRatio",
         "uploadSizeP50",
         "uploadSizeP95",

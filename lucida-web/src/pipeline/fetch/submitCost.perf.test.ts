@@ -31,9 +31,6 @@ function makeSource(): ContentSource {
       // Never settles: holds the scheduler slot like a real remote read.
       return new Promise<FetchResult>(() => {});
     },
-    fetchProxy(): Promise<never> {
-      return new Promise<never>(() => {});
-    },
   } as unknown as ContentSource;
 }
 
@@ -71,18 +68,13 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
     kind: "tile",
     entityId: r.entityId,
     imageId: r.imageId,
-    mode: "tiles-with-detail",
     detailLevels: [3],
     coarseLevel: null,
-    proxyKind: undefined,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
   }));
   return {
     requests,
     activeSet,
-    proxyRequests: [],
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     stats: emptyPlanStats(),
     nextState: createSyntheticState({ previousActiveSet: activeSet }),
   };

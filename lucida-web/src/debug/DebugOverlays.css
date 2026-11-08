@@ -97,17 +97,14 @@
   white-space: nowrap;
 }
 
-.debug-overlays-badge[data-mode="tiles-with-detail"],
 .debug-overlays-badge[data-mode="render-detail"] {
   color: var(--lc-success);
 }
 
-.debug-overlays-badge[data-mode="tiles-with-proxy-fallback"],
 .debug-overlays-badge[data-mode="render-waiting"] {
   color: var(--lc-warning);
 }
 
-.debug-overlays-badge[data-mode="group-as-proxy"],
 .debug-overlays-badge[data-mode="render-coarse"] {
   color: var(--lc-info);
 }

@@ -61,7 +61,7 @@ const CONDITIONS: RunConditions = {
   viewport: { cssWidth: 800, cssHeight: 600, deviceWidth: 1600, deviceHeight: 1200 },
 };
 
-const WARMTH = { detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0 };
+const WARMTH = { detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0 };
 
 const OUTSTANDING = {
   pending: 0, inFlight: 0, speculativePending: 0, speculativeInFlight: 0,

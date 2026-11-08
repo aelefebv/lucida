@@ -30,7 +30,7 @@ export interface EntitySource {
  * entry with no detail levels.
  */
 export function targetLevelOf(entry: ColdStateActiveEntry): number | undefined {
-  return entry.kind === "tile" ? entry.detailLevels[0] : undefined;
+  return entry.detailLevels[0];
 }
 
 /**

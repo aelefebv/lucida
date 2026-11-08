@@ -8,8 +8,7 @@
  *      the target, then coarser resident levels, then the coarse tier,
  *      then a miss. Every returned value is one level's sample, never a
  *      blend, which is what a level-index fixture makes visible.
- *   2. The WGSL sources visit the level sources before the coarse source
- *      and consult proxy assets only outside that chain.
+ *   2. The WGSL sources visit the level sources before the coarse source.
  *
  * WGSL cannot run under vitest; the live DPR2 check on the level-index
  * fixture is the end-to-end proof, this test pins the contract the
@@ -22,7 +21,6 @@ import volumeSrc from "./volume.wgsl?raw";
 import {
   DESCRIPTOR_ENTRY_SIZE,
   DESCRIPTOR_MAX_LEVEL_SOURCES,
-  DESCRIPTOR_SENTINEL_INDEX,
   OFFSET_COARSE_SOURCE,
   OFFSET_LEVEL_SOURCE_COUNT,
   SOURCE_OFFSET_CHUNK_DIMS,
@@ -39,7 +37,8 @@ import { selectEntitySources, type EntitySource } from "./entitySources.ts";
 import type { ColdStateActiveEntry } from "./workerProtocol.ts";
 import { INDIRECTION_FAILED, INDIRECTION_MISS } from "./remap.ts";
 
-const MISS = DESCRIPTOR_SENTINEL_INDEX;
+/** The shaders' `MISS`: an indirection cell with no resident slot. */
+const MISS = INDIRECTION_MISS;
 const FAILED = INDIRECTION_FAILED;
 
 // ---------------------------------------------------------------------------
@@ -146,16 +145,11 @@ const LEVELS = [
 
 function entryWithTarget(target: number): ColdStateActiveEntry {
   return {
-    kind: "tile",
     entityId: "e",
     imageId: "img",
-    mode: "tiles-with-detail",
     detailLevels: [target],
     coarseLevel: 3,
     levels: LEVELS,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
-    parentGroupId: null,
     modelMatrix: identity(),
     invModelMatrix: identity(),
     displayStateByChannel: {},
@@ -187,7 +181,7 @@ function serialize(entry: ColdStateActiveEntry): Uint32Array {
   serializeEntityDescriptor(
     buf, 0, entry, selectEntitySources(entry, sections()),
     { contrastMin: 0, contrastMax: 1, gamma: 1, opacity: 1, colormapName: "gray", channelMask: 1 },
-    new Map(), new Map(), [], new Map(),
+    new Map(),
   );
   return new Uint32Array(buf);
 }
@@ -327,14 +321,12 @@ describe("the shaders visit the chain in the same order", () => {
     return src.slice(start, end);
   }
 
-  it("slice.wgsl samples level sources, then coarse, and proxies only outside the chunk-tier branch", () => {
+  it("slice.wgsl samples level sources, then coarse", () => {
     const chain = body(sliceSrc, "sampleEntityValue");
     const level = chain.indexOf("sampleLevel2D(");
     const coarse = chain.indexOf("sampleCoarse2D(");
-    const proxy = chain.indexOf("sampleProxy2D(");
     expect(level).toBeGreaterThan(-1);
     expect(coarse).toBeGreaterThan(level);
-    expect(proxy).toBeGreaterThan(coarse);
     // The level loop iterates the descriptor's level sources in order.
     expect(chain).toMatch(/for \(var i = 0u; i < count; i\+\+\)/);
     expect(chain).toMatch(/levelSources\[i\]/);
@@ -344,10 +336,8 @@ describe("the shaders visit the chain in the same order", () => {
     const chain = body(volumeSrc, "sampleWithFallback");
     const level = chain.indexOf("sampleLevelVolume(");
     const coarse = chain.indexOf("sampleCoarseVolume(");
-    const proxy = chain.indexOf("sampleProxy(");
     expect(level).toBeGreaterThan(-1);
     expect(coarse).toBeGreaterThan(level);
-    expect(proxy).toBeGreaterThan(coarse);
     // The step follows the sampled source's own level dims.
     expect(chain).toMatch(/out\.step = stepForDims\(activeEntity\.levelSources\[i\]\.levelDims\)/);
     expect(chain).toMatch(/out\.step = stepForDims\(activeEntity\.coarseSource\.levelDims\)/);

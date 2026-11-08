@@ -19,7 +19,7 @@ use tower::ServiceExt as _;
 
 use super::test_support::postgres_schema;
 use super::{DatabaseUrl, StorageBackend};
-use crate::ProxyConfig;
+use crate::GeneratedConfig;
 use crate::auth::{
     AuthConfig, AuthMode, BearerToken, CliTokenAuthorization, DualCredentialExtractor,
     LoginSession, PendingAuth, PrincipalExtractor, hash_bearer_token,
@@ -48,7 +48,7 @@ fn app_over(storage: &Arc<dyn StorageBackend>) -> Router {
 
     let manager = Arc::new(WorkspaceManager::new(
         storage.workspaces(),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
 
     crate::workspace::router(manager).layer(axum::middleware::from_fn_with_state(

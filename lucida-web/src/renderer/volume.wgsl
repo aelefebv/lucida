@@ -43,17 +43,7 @@ struct EntityDescriptor {
   modelMatrix: mat4x4<f32>,
   invModelMatrix: mat4x4<f32>,
   channelMask: u32,
-  tileProxyPoolIndex: u32,
-  tileProxySlotIndex: u32,
-  groupProxyPoolIndex: u32,
-  groupProxySlotIndex: u32,
   sampleFormat: u32,
-  _pad_proxy1: u32,
-  _pad_proxy2: u32,
-  tileProxyDims: vec3<u32>,
-  _pad_tile: u32,
-  groupProxyDims: vec3<u32>,
-  _pad_group: u32,
   contrastMin: f32,
   contrastMax: f32,
   gamma: f32,
@@ -62,6 +52,8 @@ struct EntityDescriptor {
   levelSourceCount: u32,
   colormapMode: u32,
   labelOpacity: f32,
+  _pad0: u32,
+  _pad1: u32,
   levelSources: array<ChunkTierSource, 4>,
   coarseSource: ChunkTierSource,
 };
@@ -71,23 +63,17 @@ struct EntityDescriptor {
 @group(0) @binding(2) var lutSampler: sampler;
 @group(0) @binding(3) var coarseTex: texture_3d<u32>;
 @group(0) @binding(4) var<storage, read> coarseIndirection: array<u32>;
-// Proxy textures. Same r16uint format as the chunk atlas. Slots occupy
-// a 3-D grid in the texture; the grid shape is derived from
-// textureDimensions(tex) / slot dims, matching `proxySlotOrigin()` in
-// proxyAtlas.ts.
-@group(0) @binding(5) var tileProxyTex: texture_3d<u32>;
-@group(0) @binding(6) var groupProxyTex: texture_3d<u32>;
 // One level pool per resident-level slot. A level source's `poolIndex`
 // says which of these it reads; levels of one entity may live in
 // different pools when their chunk shapes differ.
-@group(0) @binding(7) var levelTex0: texture_3d<u32>;
-@group(0) @binding(8) var levelTex1: texture_3d<u32>;
-@group(0) @binding(9) var levelTex2: texture_3d<u32>;
-@group(0) @binding(10) var levelTex3: texture_3d<u32>;
-@group(0) @binding(11) var<storage, read> levelIndirection0: array<u32>;
-@group(0) @binding(12) var<storage, read> levelIndirection1: array<u32>;
-@group(0) @binding(13) var<storage, read> levelIndirection2: array<u32>;
-@group(0) @binding(14) var<storage, read> levelIndirection3: array<u32>;
+@group(0) @binding(5) var levelTex0: texture_3d<u32>;
+@group(0) @binding(6) var levelTex1: texture_3d<u32>;
+@group(0) @binding(7) var levelTex2: texture_3d<u32>;
+@group(0) @binding(8) var levelTex3: texture_3d<u32>;
+@group(0) @binding(9) var<storage, read> levelIndirection0: array<u32>;
+@group(0) @binding(10) var<storage, read> levelIndirection1: array<u32>;
+@group(0) @binding(11) var<storage, read> levelIndirection2: array<u32>;
+@group(0) @binding(12) var<storage, read> levelIndirection3: array<u32>;
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
@@ -128,38 +114,6 @@ fn intersectAABB(ro: vec3f, rd: vec3f) -> vec2f {
   let tNear = max(max(tmin.x, tmin.y), tmin.z);
   let tFar = min(min(tmax.x, tmax.y), tmax.z);
   return vec2f(tNear, tFar);
-}
-
-// Sample one voxel from a proxy atlas slot.
-//   - `dims.x` = slot Z, `dims.y` = slot Y, `dims.z` = slot X (matches
-//     `proxyAtlas.ts` `slotDims: [Z, Y, X]`).
-//   - Slot origin is derived from slot index over a 3-D atlas grid.
-//   - `frac` is in [0,1]³ over the slot's voxel cube; Y is flipped to
-//     match the chunk path's image-convention sampling.
-// Returns MISS if the slot index is the sentinel.
-fn sampleProxy(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, frac: vec3f) -> u32 {
-  if (slotIdx == MISS) {
-    return MISS;
-  }
-  let slotZ = dims.x;
-  let slotY = dims.y;
-  let slotX = dims.z;
-  let atlasDims = textureDimensions(tex);
-  let slotsX = max(1u, atlasDims.x / slotX);
-  let slotsY = max(1u, atlasDims.y / slotY);
-  let tileX = slotIdx % slotsX;
-  let tileY = (slotIdx / slotsX) % slotsY;
-  let tileZ = slotIdx / (slotsX * slotsY);
-  let origin = vec3u(tileX * slotX, tileY * slotY, tileZ * slotZ);
-  let voxX = clamp(u32(frac.x * f32(slotX)), 0u, slotX - 1u);
-  let voxY = clamp(u32((1.0 - frac.y) * f32(slotY)), 0u, slotY - 1u);
-  let voxZ = clamp(u32(frac.z * f32(slotZ)), 0u, slotZ - 1u);
-  let coord = vec3i(
-    i32(origin.x + voxX),
-    i32(origin.y + voxY),
-    i32(origin.z + voxZ),
-  );
-  return textureLoad(tex, coord, 0).r;
 }
 
 // The chunk-grid cell of one source under a local [0,1]^3 position, and
@@ -287,52 +241,35 @@ struct VolumeSample {
 // Every sample comes from exactly one level; there is no blending. A
 // failed chunk answers like a resident one, with FAILED as its value.
 //
-// Proxy assets are consulted only when the entity binds no chunk tier at
-// all (group-as-proxy entries). The group-proxy sample uses the tile's
-// local `pos` (no tile-to-group transform): spatially incorrect for tile
-// entries but non-blank while detail chunks load, and exact for
-// group-as-proxy entries, which sample their own proxy at group-local
-// coords.
+// An entity that binds no tier at all has no level dims to step by, so it
+// misses at the unit step.
 fn sampleWithFallback(pos: vec3f) -> VolumeSample {
   var out: VolumeSample;
   out.value = MISS;
   out.step = 1.0;
 
   let count = min(activeEntity.levelSourceCount, MAX_LEVEL_SOURCES);
-  if (count != 0u || activeEntity.coarseSource.valid != 0u) {
-    for (var i = 0u; i < count; i++) {
-      let v = sampleLevelVolume(activeEntity.levelSources[i], pos);
-      if (v != MISS) {
-        out.value = v;
-        out.step = stepForDims(activeEntity.levelSources[i].levelDims);
-        return out;
-      }
-    }
-    let c = sampleCoarseVolume(activeEntity.coarseSource, pos);
-    if (c != MISS) {
-      out.value = c;
-      out.step = stepForDims(activeEntity.coarseSource.levelDims);
-      return out;
-    }
-    if (count != 0u) {
-      out.step = stepForDims(activeEntity.levelSources[0].levelDims);
-    } else {
-      out.step = stepForDims(activeEntity.coarseSource.levelDims);
-    }
+  if (count == 0u && activeEntity.coarseSource.valid == 0u) {
     return out;
   }
-
-  let tileSlot = activeEntity.tileProxySlotIndex;
-  if (tileSlot != MISS) {
-    out.step = stepForDims(activeEntity.tileProxyDims);
-    let v = sampleProxy(tileProxyTex, tileSlot, activeEntity.tileProxyDims, pos);
-    if (v != MISS) { out.value = v; return out; }
+  for (var i = 0u; i < count; i++) {
+    let v = sampleLevelVolume(activeEntity.levelSources[i], pos);
+    if (v != MISS) {
+      out.value = v;
+      out.step = stepForDims(activeEntity.levelSources[i].levelDims);
+      return out;
+    }
   }
-  let groupSlot = activeEntity.groupProxySlotIndex;
-  if (groupSlot != MISS) {
-    out.step = stepForDims(activeEntity.groupProxyDims);
-    let v = sampleProxy(groupProxyTex, groupSlot, activeEntity.groupProxyDims, pos);
-    if (v != MISS) { out.value = v; return out; }
+  let c = sampleCoarseVolume(activeEntity.coarseSource, pos);
+  if (c != MISS) {
+    out.value = c;
+    out.step = stepForDims(activeEntity.coarseSource.levelDims);
+    return out;
+  }
+  if (count != 0u) {
+    out.step = stepForDims(activeEntity.levelSources[0].levelDims);
+  } else {
+    out.step = stepForDims(activeEntity.coarseSource.levelDims);
   }
   return out;
 }

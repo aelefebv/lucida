@@ -1,7 +1,7 @@
 /**
  * Lane emission helpers + priority computation. Translates active-set
- * entries and minimap-pending coords into {@link ChunkRequest} /
- * {@link ProxyRequest} streams, one per lane.
+ * entries and minimap-pending coords into {@link ChunkRequest} streams,
+ * one per lane.
  */
 
 import { Axis } from "../../axes.ts";
@@ -25,7 +25,6 @@ import type {
   MinimapChunkCoord,
   PlanningSnapshot,
   PlanStats,
-  ProxyRequest,
   SelectionState,
   TileEntry,
   ZoomDirection,
@@ -33,7 +32,7 @@ import type {
 
 /**
  * Numeric priority for a chunk request. Lower = more urgent. Lane
- * offset separates lanes (minimap < detail < proxy < prefetch < coarse);
+ * offset separates lanes (minimap < detail < prefetch < coarse);
  * importance and distance order within a lane.
  */
 function computePriority(
@@ -128,15 +127,8 @@ export function emitMinimapLane(
 }
 
 /**
- * Detail lane — for each active entry, push detail chunks (tile modes)
- * or a single proxy request per visible channel (`group-as-proxy`).
- *
- * Also emits the per-tile TileProxy3D fallback for tile-mode entries
- * whose proxy is advertised, and a parent `GroupProxy3D` (deduped per
- * `(groupId, t, c)`) when the entry is in `tiles-with-proxy-fallback`
- * and the parent group's proxy is advertised.
- *
- * Mutates `allRequests`, `proxyRequests`, and `groupProxyEmitted`.
+ * Detail lane — for each visible tile entry, push its detail chunks.
+ * Mutates `allRequests`.
  */
 export function emitDetailLane(
   activeSet: ActiveSetEntry[],
@@ -144,28 +136,10 @@ export function emitDetailLane(
   entityById: Map<string, EntitySnapshot>,
   stats: PlanStats,
   allRequests: ChunkRequest[],
-  proxyRequests: ProxyRequest[],
-  groupProxyEmitted: Set<string>,
   config: PlanningConfig,
 ): void {
   const datasetId = snapshot.datasetId;
   for (const entry of activeSet) {
-    if (entry.kind === "group-as-proxy") {
-      // Groups have no single owning image.
-      for (const c of snapshot.selection.visibleChannels) {
-        proxyRequests.push({
-          datasetId,
-          entityId: entry.entityId,
-          imageId: "",
-          kind: "GroupProxy3D",
-          t: snapshot.selection.t,
-          c,
-          priority: config.proxyLaneOffset + 0,
-        });
-      }
-      continue;
-    }
-
     if (entry.kind === "invisible") continue;
 
     const entity = entityById.get(entry.entityId);
@@ -185,47 +159,6 @@ export function emitDetailLane(
         "detail", "detail", config.detailLaneOffset, config.detailRenderRadiusView,
       );
       if (kept) allRequests.push(req);
-    }
-
-    if (entry.proxyAvailable && entry.proxyKind === "TileProxy3D") {
-      for (const c of snapshot.selection.visibleChannels) {
-        proxyRequests.push({
-          datasetId,
-          entityId: entry.entityId,
-          imageId: entry.imageId,
-          kind: "TileProxy3D",
-          t: snapshot.selection.t,
-          c,
-          priority: config.proxyLaneOffset + 1,
-        });
-      }
-    }
-
-    // Parent-group proxy (only for proxy-fallback mode; at
-    // `tiles-with-detail` zoom the chunk path keeps up). Dedup per
-    // (groupId, t, c). Narrow on `kind === "Tile"` because only
-    // `TileSnapshot` carries a `parentId`; a non-Tile here is a
-    // producer invariant violation we skip silently.
-    if (
-      entry.mode === "tiles-with-proxy-fallback" &&
-      entry.groupProxyAvailable &&
-      entity.kind === "Tile"
-    ) {
-      const groupId = entity.parentId;
-      for (const c of snapshot.selection.visibleChannels) {
-        const dedupKey = `${groupId}|${snapshot.selection.t}|${c}`;
-        if (groupProxyEmitted.has(dedupKey)) continue;
-        groupProxyEmitted.add(dedupKey);
-        proxyRequests.push({
-          datasetId,
-          entityId: groupId,
-          imageId: "",
-          kind: "GroupProxy3D",
-          t: snapshot.selection.t,
-          c,
-          priority: config.proxyLaneOffset + config.groupProxyPriorityBump,
-        });
-      }
     }
   }
 }

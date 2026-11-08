@@ -1,7 +1,7 @@
 /**
  * Selection-scrub cold-state update: re-point the dataset's retained cold
- * state at the new T, Z, visible region, and proxy keys, and re-ingest it
- * through {@link applyColdState}.
+ * state at the new T, Z, and visible region, and re-ingest it through
+ * {@link applyColdState}.
  *
  * T and Z are top-level scalars, never per-entity, so the result is
  * byte-identical to a full cold state at the new selection without resending
@@ -24,7 +24,6 @@ export function applyColdStateSelection(
   cold.currentT = msg.currentT;
   cold.currentZ = msg.currentZ;
   cold.visibleRegion = msg.visibleRegion;
-  cold.desiredProxyKeys = msg.desiredProxyKeys;
   cold.wantedChunks = msg.wantedChunks;
   cold.epochs = msg.epochs;
 

@@ -50,71 +50,20 @@ export function buildColdActiveEntry(
     return { level: idx, chunkShape, gridShape, levelDims };
   });
 
-  // `parentGroupId` lets the worker fan out a group-proxy upload to its
-  // child tiles' descriptors. Narrowing on `kind === "Tile"` gives a
-  // `TileSnapshot` whose `parentId` is non-null by construction.
-  const parentGroupId =
-    entity?.kind === "Tile" ? entity.parentId : null;
-
   // Identity fallback is defensive: a missing roster match renders at
   // the unit cube — a clear visual failure, not a silent off-screen one.
   const matrices = matricesByEntity.get(entry.entityId);
   const modelMatrix = matrices?.model ?? identityMatrix();
   const invModelMatrix = matrices?.inv ?? identityMatrix();
 
-  if (entry.kind === "group-as-proxy") {
-    return {
-      kind: "group-as-proxy",
-      entityId: entry.entityId,
-      layoutPositionVox: entity?.layoutPositionVox,
-      levels,
-      mode: "group-as-proxy",
-      proxyKind: "GroupProxy3D",
-      proxyAvailable: true,
-      groupProxyAvailable: true,
-      // Pinned here (vs reusing the computed value above) so the type
-      // checker narrows `kind: "group-as-proxy"` without re-deriving.
-      parentGroupId: null,
-      modelMatrix,
-      invModelMatrix,
-      displayStateByChannel,
-    };
-  }
-  if (entry.kind === "invisible") {
-    return {
-      kind: "tile",
-      entityId: entry.entityId,
-      layoutPositionVox: entity?.layoutPositionVox,
-      imageId: entry.imageId,
-      detailLevels: [entry.coarsestLod],
-      coarseLevel: null,
-      levels,
-      // Invisibles surface as `tiles-with-detail` so the wanted-set
-      // rules don't ask for proxies for an entity that won't render.
-      mode: "tiles-with-detail",
-      proxyKind: undefined,
-      proxyAvailable: false,
-      groupProxyAvailable: false,
-      parentGroupId,
-      modelMatrix,
-      invModelMatrix,
-      displayStateByChannel,
-    };
-  }
-  // Narrowed: entry is TileEntry.
   return {
-    kind: "tile",
     entityId: entry.entityId,
     layoutPositionVox: entity?.layoutPositionVox,
     imageId: entry.imageId,
-    detailLevels: entry.detailLevels,
-    coarseLevel: entry.coarseLevel,
+    // An invisible entity keeps only its coarsest level and no coarse tier.
+    detailLevels: entry.kind === "invisible" ? [entry.coarsestLod] : entry.detailLevels,
+    coarseLevel: entry.kind === "invisible" ? null : entry.coarseLevel,
     levels,
-    mode: entry.mode,
-    proxyKind: entry.proxyKind,
-    proxyAvailable: entry.proxyAvailable,
-    groupProxyAvailable: entry.groupProxyAvailable,
-    parentGroupId,
     modelMatrix,
     invModelMatrix,
     displayStateByChannel,
@@ -134,7 +83,6 @@ export function buildColdState(args: {
   multiChannel: boolean;
   visibleRegion: VisibleRegion;
   renderRadiusView?: { detail: number; coarse: number };
-  desiredProxyKeys?: Iterable<string>;
   wantedChunks: WantedMemberChunks[];
   epochs: SceneEpochs;
   matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
@@ -159,7 +107,6 @@ export function buildColdState(args: {
     visibleChannels: args.selection.visibleChannels,
     visibleRegion: args.visibleRegion,
     renderRadiusView: args.renderRadiusView,
-    desiredProxyKeys: Array.from(args.desiredProxyKeys ?? []).sort(),
     wantedChunks: args.wantedChunks,
     activeSet: coldActiveSet,
     viewMode: args.selection.renderMode,
@@ -169,10 +116,10 @@ export function buildColdState(args: {
 
 /**
  * Worker-side member id for a planner {@link ActiveSetEntry}, matching
- * `memberIdForColdEntry` (the cold-state-entry form) exactly: group-as-proxy
- * routes by `entityId`, everything else by `imageId`, suffixed `:ch${channel}`
- * in multi-channel mode. Both forms agree because a delta reconstructs the
- * worker's active set from the same planner entries this walks.
+ * `memberIdForColdEntry` (the cold-state-entry form) exactly: the `imageId`,
+ * suffixed `:ch${channel}` in multi-channel mode. Both forms agree because a
+ * delta reconstructs the worker's active set from the same planner entries
+ * this walks.
  */
 export function* iterateActiveSetMembers(
   activeSet: ActiveSetEntry[],
@@ -180,9 +127,8 @@ export function* iterateActiveSetMembers(
   multiChannel: boolean,
 ): Generator<string> {
   for (const entry of activeSet) {
-    const base = entry.kind === "group-as-proxy" ? entry.entityId : entry.imageId;
     for (const channel of visibleChannels) {
-      yield multiChannel ? `${base}:ch${channel}` : base;
+      yield multiChannel ? `${entry.imageId}:ch${channel}` : entry.imageId;
     }
   }
 }
@@ -212,26 +158,12 @@ export function computeActiveSetIndexMap(
  * reads from a planner entry, so equal keys mean a byte-identical descriptor
  * that can be reused across a view move. Fields left out cannot change when
  * only the camera moved, which is the only case the caller emits a delta for.
- *
- * Returns `null` for `group-as-proxy`: its model matrix comes from the
- * visible child-tile set (see `synthesizeGroupRosterEntry`), which a view
- * move changes, so it is always rebuilt.
  */
-export function activeEntryReuseKey(entry: ActiveSetEntry): string | null {
-  if (entry.kind === "group-as-proxy") return null;
+export function activeEntryReuseKey(entry: ActiveSetEntry): string {
   if (entry.kind === "invisible") {
     return `i|${entry.imageId}|${entry.coarsestLod}`;
   }
-  return [
-    "t",
-    entry.imageId,
-    entry.detailLevels.join(","),
-    entry.coarseLevel ?? "",
-    entry.mode,
-    entry.proxyKind ?? "",
-    entry.proxyAvailable ? 1 : 0,
-    entry.groupProxyAvailable ? 1 : 0,
-  ].join("|");
+  return ["t", entry.imageId, entry.detailLevels.join(","), entry.coarseLevel ?? ""].join("|");
 }
 
 /**
@@ -253,7 +185,6 @@ export function buildColdStateDelta(args: {
   selection: SelectionState;
   visibleRegion: VisibleRegion;
   renderRadiusView?: { detail: number; coarse: number };
-  desiredProxyKeys?: Iterable<string>;
   /** The changed entries; see `ColdStateDeltaMessage.wantedChunks`. */
   wantedChunks: WantedMemberChunks[];
   epochs: SceneEpochs;
@@ -266,10 +197,8 @@ export function buildColdStateDelta(args: {
     args.dsSettings,
   );
 
-  const oldByEntity = new Map<string, ActiveSetEntry>();
-  const oldKeyByEntity = new Map<string, string | null>();
+  const oldKeyByEntity = new Map<string, string>();
   for (const e of args.previousActiveSet) {
-    oldByEntity.set(e.entityId, e);
     oldKeyByEntity.set(e.entityId, activeEntryReuseKey(e));
   }
 
@@ -279,12 +208,7 @@ export function buildColdStateDelta(args: {
   for (const entry of args.activeSet) {
     activeSetOrder.push(entry.entityId);
     present.add(entry.entityId);
-    const newKey = activeEntryReuseKey(entry);
-    const reusable =
-      newKey !== null &&
-      oldByEntity.has(entry.entityId) &&
-      oldKeyByEntity.get(entry.entityId) === newKey;
-    if (!reusable) {
+    if (oldKeyByEntity.get(entry.entityId) !== activeEntryReuseKey(entry)) {
       upserts.push(
         buildColdActiveEntry(entry, entityById, args.matricesByEntity, displayStateByChannel),
       );
@@ -304,7 +228,6 @@ export function buildColdStateDelta(args: {
     currentZ: args.selection.z,
     visibleRegion: args.visibleRegion,
     renderRadiusView: args.renderRadiusView,
-    desiredProxyKeys: Array.from(args.desiredProxyKeys ?? []).sort(),
     wantedChunks: args.wantedChunks,
     removedEntityIds,
     upserts,
