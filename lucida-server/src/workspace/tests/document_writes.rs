@@ -241,8 +241,8 @@ async fn two_writers_on_one_workspace(
     owner: &AuthPrincipal,
 ) -> (WorkspaceManager, WorkspaceManager, String, DatasetId) {
     let (workspace_id, wds_id) = seed_workspace_with_dataset(store, owner, "layer.zarr").await;
-    let here = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
-    let elsewhere = WorkspaceManager::new(Arc::new(store.clone()), ProxyConfig::defaults());
+    let here = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
+    let elsewhere = WorkspaceManager::new(Arc::new(store.clone()), GeneratedConfig::defaults());
     (here, elsewhere, workspace_id, wds_id)
 }
 
@@ -345,7 +345,7 @@ async fn retiring_a_replaced_live_workspace_leaves_its_replacement_serving() {
     let (workspace_id, wds_id) = seed_workspace_with_dataset(&store, &owner, "layer.zarr").await;
     let manager = WorkspaceManager::new_with_runtime_config(
         Arc::new(store.clone()),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
         idle_eviction_config(),
     );
     let replaced = manager.live_workspace(&workspace_id, &owner).await.unwrap();
