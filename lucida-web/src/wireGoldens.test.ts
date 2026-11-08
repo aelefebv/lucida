@@ -113,13 +113,22 @@ function allFixtureFiles(): string[] {
   return out.sort();
 }
 
-/** Fixtures asserted somewhere in this suite; kept in sync by the inventory
- *  test so a new Rust-side fixture cannot land without web-side coverage. */
-const COVERED_FIXTURES = new Set<string>();
+/** Fixtures some test below asserts. A test claims its fixtures where it is
+ *  declared, so the set is whole once vitest has collected the file, before
+ *  any test runs and whatever order they run in. */
+const CLAIMED_FIXTURES = new Set<string>();
 
-function coveredFixture(rel: string): unknown {
-  COVERED_FIXTURES.add(rel);
-  return fixture(rel);
+interface ClaimedFixture {
+  raw(): string;
+  json(): unknown;
+}
+
+/** Claim `rel` for the test declared beside it, which reads it through the
+ *  handle. A handle nothing reads fails lint, so a claim can't outlive its
+ *  test. */
+function claimFixture(rel: string): ClaimedFixture {
+  CLAIMED_FIXTURES.add(rel);
+  return { raw: () => fixtureRaw(rel), json: () => fixture(rel) };
 }
 
 // Bridge harness (stand-in transport, real Bridge)
@@ -889,9 +898,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     vi.unstubAllGlobals();
   });
 
+  const serverSnapshot = claimFixture("session/server_snapshot.json");
   it("snapshot: document, peers, your_id, and generated availability all arrive", () => {
-    const raw = fixtureRaw("session/server_snapshot.json");
-    COVERED_FIXTURES.add("session/server_snapshot.json");
+    const raw = serverSnapshot.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "snapshot",
       seq: 42,
@@ -924,9 +933,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(viewModeForCamera(pinView!.camera)).toBe("3d");
   });
 
+  const serverCommandBroadcastDatasetOpened = claimFixture("session/server_command_broadcast_dataset_opened.json");
   it("command_broadcast(dataset_opened): the manifest/fetch payload", () => {
-    const raw = fixtureRaw("session/server_command_broadcast_dataset_opened.json");
-    COVERED_FIXTURES.add("session/server_command_broadcast_dataset_opened.json");
+    const raw = serverCommandBroadcastDatasetOpened.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "command_broadcast",
       seq: 43,
@@ -948,9 +957,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(command.opener_client_id).toBe(7);
   });
 
+  const serverAck = claimFixture("session/server_ack.json");
   it("ack", () => {
-    const raw = fixtureRaw("session/server_ack.json");
-    COVERED_FIXTURES.add("session/server_ack.json");
+    const raw = serverAck.raw();
     expect(JSON.parse(raw)).toStrictEqual({ type: "ack", seq: 44 });
 
     const { ws, handlers } = openBridge();
@@ -958,9 +967,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(handlers.onAck).toHaveBeenCalledWith(44);
   });
 
+  const serverCommandRejected = claimFixture("session/server_command_rejected.json");
   it("command_rejected names the reason and asks for a snapshot", () => {
-    const raw = fixtureRaw("session/server_command_rejected.json");
-    COVERED_FIXTURES.add("session/server_command_rejected.json");
+    const raw = serverCommandRejected.raw();
     expect(JSON.parse(raw)).toStrictEqual({ type: "command_rejected", reason: "unavailable" });
 
     const onCommandRejected = vi.fn();
@@ -970,9 +979,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(lastSent(ws)).toStrictEqual({ type: "request_snapshot" });
   });
 
+  const serverPeerJoined = claimFixture("session/server_peer_joined.json");
   it("peer_joined carries a presence with nothing reported", () => {
-    const raw = fixtureRaw("session/server_peer_joined.json");
-    COVERED_FIXTURES.add("session/server_peer_joined.json");
+    const raw = serverPeerJoined.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "peer_joined",
       client_id: 11,
@@ -985,9 +994,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(onPeerJoined).toHaveBeenCalledWith(11, expectedJoiningPresence);
   });
 
+  const serverPeerLeft = claimFixture("session/server_peer_left.json");
   it("peer_left", () => {
-    const raw = fixtureRaw("session/server_peer_left.json");
-    COVERED_FIXTURES.add("session/server_peer_left.json");
+    const raw = serverPeerLeft.raw();
     expect(JSON.parse(raw)).toStrictEqual({ type: "peer_left", client_id: 11 });
 
     const onPeerLeft = vi.fn();
@@ -996,9 +1005,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(onPeerLeft).toHaveBeenCalledWith(11);
   });
 
+  const serverPresenceUpdate = claimFixture("session/server_presence_update.json");
   it("presence_update carries camera/view/display (arcball with clipping)", () => {
-    const raw = fixtureRaw("session/server_presence_update.json");
-    COVERED_FIXTURES.add("session/server_presence_update.json");
+    const raw = serverPresenceUpdate.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "presence_update",
       client_id: 3,
@@ -1018,9 +1027,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     );
   });
 
+  const serverCursorUpdate = claimFixture("session/server_cursor_update.json");
   it("cursor_update", () => {
-    const raw = fixtureRaw("session/server_cursor_update.json");
-    COVERED_FIXTURES.add("session/server_cursor_update.json");
+    const raw = serverCursorUpdate.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "cursor_update",
       client_id: 3,
@@ -1033,9 +1042,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(onCursorUpdate).toHaveBeenCalledWith(3, [412, 233.5]);
   });
 
+  const serverFollowChanged = claimFixture("session/server_follow_changed.json");
   it("follow_changed", () => {
-    const raw = fixtureRaw("session/server_follow_changed.json");
-    COVERED_FIXTURES.add("session/server_follow_changed.json");
+    const raw = serverFollowChanged.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "follow_changed",
       client_id: 3,
@@ -1048,9 +1057,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(onFollowChanged).toHaveBeenCalledWith(3, 9);
   });
 
+  const serverDatasetPresenceUpdate = claimFixture("session/server_dataset_presence_update.json");
   it("dataset_presence_update carries order + full per-dataset settings", () => {
-    const raw = fixtureRaw("session/server_dataset_presence_update.json");
-    COVERED_FIXTURES.add("session/server_dataset_presence_update.json");
+    const raw = serverDatasetPresenceUpdate.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "dataset_presence_update",
       client_id: 3,
@@ -1066,9 +1075,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     });
   });
 
+  const serverDatasetOpenProgress = claimFixture("session/server_dataset_open_progress.json");
   it("dataset_open_progress carries the staged diagnostic", () => {
-    const raw = fixtureRaw("session/server_dataset_open_progress.json");
-    COVERED_FIXTURES.add("session/server_dataset_open_progress.json");
+    const raw = serverDatasetOpenProgress.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "dataset_open_progress",
       request_id: "web-7d2f45aa",
@@ -1088,9 +1097,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     );
   });
 
+  const serverDatasetOpenProgressWarning = claimFixture("session/server_dataset_open_progress_warning.json");
   it("dataset_open_progress carries a durable import-warning flag", () => {
-    const raw = fixtureRaw("session/server_dataset_open_progress_warning.json");
-    COVERED_FIXTURES.add("session/server_dataset_open_progress_warning.json");
+    const raw = serverDatasetOpenProgressWarning.raw();
     const expectedWarningDiagnostic: DatasetOpenProgressDiagnostic = {
       stage: "metadata_import",
       message:
@@ -1120,12 +1129,12 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(diagnostic).toStrictEqual(expectedWarningDiagnostic);
   });
 
+  const serverOpenDatasetSucceeded = claimFixture("session/server_open_dataset_succeeded.json");
   it("open_dataset_succeeded: requester-only success envelope", () => {
     // The web treats the broadcast `command_broadcast(dataset_opened)` as
     // authoritative and has no dispatch arm for this envelope, but it still
     // crosses the socket to the web session, so lock its shape.
-    const raw = fixtureRaw("session/server_open_dataset_succeeded.json");
-    COVERED_FIXTURES.add("session/server_open_dataset_succeeded.json");
+    const raw = serverOpenDatasetSucceeded.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "open_dataset_succeeded",
       request_id: "web-7d2f45aa",
@@ -1142,9 +1151,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     });
   });
 
+  const serverOpenDatasetFailed = claimFixture("session/server_open_dataset_failed.json");
   it("open_dataset_failed carries error + failure diagnostic", () => {
-    const raw = fixtureRaw("session/server_open_dataset_failed.json");
-    COVERED_FIXTURES.add("session/server_open_dataset_failed.json");
+    const raw = serverOpenDatasetFailed.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "open_dataset_failed",
       request_id: "web-81c09b",
@@ -1171,9 +1180,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     );
   });
 
+  const serverDatasetHealth = claimFixture("session/server_dataset_health.json");
   it("dataset_health resolves a pending requestDatasetHealth with full stats", async () => {
-    const raw = fixtureRaw("session/server_dataset_health.json");
-    COVERED_FIXTURES.add("session/server_dataset_health.json");
+    const raw = serverDatasetHealth.raw();
     const envelope = JSON.parse(raw) as {
       type: string;
       request_id: string;
@@ -1194,9 +1203,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     await expect(pending).resolves.toStrictEqual([expectedSourceHealth]);
   });
 
+  const serverReportSent = claimFixture("session/server_report_sent.json");
   it("report_sent resolves a pending sendReport with the inbox entry and its expiry", async () => {
-    const raw = fixtureRaw("session/server_report_sent.json");
-    COVERED_FIXTURES.add("session/server_report_sent.json");
+    const raw = serverReportSent.raw();
     const envelope = JSON.parse(raw) as {
       type: string;
       request_id: string;
@@ -1220,9 +1229,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     });
   });
 
+  const serverReportFailed = claimFixture("session/server_report_failed.json");
   it("report_failed rejects a pending sendReport with the server's reason", async () => {
-    const raw = fixtureRaw("session/server_report_failed.json");
-    COVERED_FIXTURES.add("session/server_report_failed.json");
+    const raw = serverReportFailed.raw();
     const envelope = JSON.parse(raw) as { type: string; request_id: string; error: string };
     expect(envelope).toStrictEqual({
       type: "report_failed",
@@ -1237,9 +1246,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     await expect(pending).rejects.toThrow("the bundle carries no header");
   });
 
+  const serverGeneratedAvailabilityUpdate = claimFixture("session/server_generated_availability_update.json");
   it("generated_availability_update: delta reaches the handler intact", () => {
-    const raw = fixtureRaw("session/server_generated_availability_update.json");
-    COVERED_FIXTURES.add("session/server_generated_availability_update.json");
+    const raw = serverGeneratedAvailabilityUpdate.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "generated_availability_update",
       dataset_id: "wds-0f3a",
@@ -1255,9 +1264,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(JSON.parse(deltaJson)).toStrictEqual(expectedGeneratedDelta);
   });
 
+  const serverGeneratedChunkStatus = claimFixture("session/server_generated_chunk_status.json");
   it("generated_chunk_status", () => {
-    const raw = fixtureRaw("session/server_generated_chunk_status.json");
-    COVERED_FIXTURES.add("session/server_generated_chunk_status.json");
+    const raw = serverGeneratedChunkStatus.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "generated_chunk_status",
       dataset_id: "wds-0f3a",
@@ -1279,9 +1288,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     );
   });
 
+  const serverSourceChunkStatus = claimFixture("session/server_source_chunk_status.json");
   it("source_chunk_status reaches the handler and rejects a pending fetch as permanent", async () => {
-    const raw = fixtureRaw("session/server_source_chunk_status.json");
-    COVERED_FIXTURES.add("session/server_source_chunk_status.json");
+    const raw = serverSourceChunkStatus.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "source_chunk_status",
       dataset_id: "wds-0f3a",
@@ -1324,9 +1333,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     });
   });
 
+  const serverSourceChunkStatusMalformedKey = claimFixture("session/server_source_chunk_status_malformed_key.json");
   it("source_chunk_status for a malformed key answers the request as the client spelled it", async () => {
-    const raw = fixtureRaw("session/server_source_chunk_status_malformed_key.json");
-    COVERED_FIXTURES.add("session/server_source_chunk_status_malformed_key.json");
+    const raw = serverSourceChunkStatusMalformedKey.raw();
     const envelope = JSON.parse(raw);
     expect(envelope).toStrictEqual({
       type: "source_chunk_status",
@@ -1356,9 +1365,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     });
   });
 
+  const serverMessageRejected = claimFixture("session/server_message_rejected.json");
   it("message_rejected fails the request it answers with the server's reason", async () => {
-    const raw = fixtureRaw("session/server_message_rejected.json");
-    COVERED_FIXTURES.add("session/server_message_rejected.json");
+    const raw = serverMessageRejected.raw();
     const envelope = JSON.parse(raw) as { request_id: string; reason: MessageRejection };
     expect(envelope).toStrictEqual({
       type: "message_rejected",
@@ -1379,9 +1388,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     warn.mockRestore();
   });
 
+  const serverTimingBatch = claimFixture("session/server_timing_batch.json");
   it("timing_batch reaches the recorder's table as columns", () => {
-    const raw = fixtureRaw("session/server_timing_batch.json");
-    COVERED_FIXTURES.add("session/server_timing_batch.json");
+    const raw = serverTimingBatch.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "timing_batch",
       batch: {
@@ -1447,9 +1456,9 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     ]);
   });
 
+  const serverWorkspaceArchived = claimFixture("session/server_workspace_archived.json");
   it("workspace_archived reaches the handler (and tears the bridge down)", () => {
-    const raw = fixtureRaw("session/server_workspace_archived.json");
-    COVERED_FIXTURES.add("session/server_workspace_archived.json");
+    const raw = serverWorkspaceArchived.raw();
     expect(JSON.parse(raw)).toStrictEqual({
       type: "workspace_archived",
       workspace_id: "workspace-2ac8",
@@ -1467,10 +1476,10 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
 /** Every web-live document command, authored as its production producer
  *  builds it (file references per entry), paired with its envelope fixture.
  *  `Bridge.sendCommand` wraps each in `{ type: "command", command }`. */
-const commandCases: [string, string, Record<string, unknown>][] = [
+const commandCases: [string, ClaimedFixture, Record<string, unknown>][] = [
   [
     "add_annotation",
-    "session/client_command_add_annotation.json",
+    claimFixture("session/client_command_add_annotation.json"),
     // SliceViewer.tsx / VolumeViewer.tsx draw path, with the captured view
     // from savedView/buildAnnotationView.ts.
     {
@@ -1489,7 +1498,7 @@ const commandCases: [string, string, Record<string, unknown>][] = [
   ],
   [
     "move_annotation (reshape)",
-    "session/client_command_move_annotation.json",
+    claimFixture("session/client_command_move_annotation.json"),
     // annotationInteraction.ts emitMoveAnnotation, the one construction site
     // for every overlay move or reshape; a reshape carries both vertices.
     {
@@ -1503,13 +1512,13 @@ const commandCases: [string, string, Record<string, unknown>][] = [
   ],
   [
     "remove_annotation",
-    "session/client_command_remove_annotation.json",
+    claimFixture("session/client_command_remove_annotation.json"),
     // ThreadPopover.tsx confirmDeletePin.
     { type: "remove_annotation", dataset_id: "wds-0f3a", id: "pin-4c1d" },
   ],
   [
     "add_comment",
-    "session/client_command_add_comment.json",
+    claimFixture("session/client_command_add_comment.json"),
     // ThreadPopover.tsx addComment (author is String(myId)).
     {
       type: "add_comment",
@@ -1522,7 +1531,7 @@ const commandCases: [string, string, Record<string, unknown>][] = [
   ],
   [
     "remove_comment",
-    "session/client_command_remove_comment.json",
+    claimFixture("session/client_command_remove_comment.json"),
     // ThreadPopover.tsx remove-own-comment.
     {
       type: "remove_comment",
@@ -1533,7 +1542,7 @@ const commandCases: [string, string, Record<string, unknown>][] = [
   ],
   [
     "edit_comment",
-    "session/client_command_edit_comment.json",
+    claimFixture("session/client_command_edit_comment.json"),
     // ThreadPopover.tsx saveEdit.
     {
       type: "edit_comment",
@@ -1545,7 +1554,7 @@ const commandCases: [string, string, Record<string, unknown>][] = [
   ],
   [
     "register_layout",
-    "session/client_command_register_layout.json",
+    claimFixture("session/client_command_register_layout.json"),
     // pipeline/layoutRegistry.ts register().
     {
       type: "register_layout",
@@ -1555,7 +1564,7 @@ const commandCases: [string, string, Record<string, unknown>][] = [
   ],
   [
     "set_active_layout",
-    "session/client_command_set_active_layout.json",
+    claimFixture("session/client_command_set_active_layout.json"),
     // pipeline/layoutRegistry.ts setActive() / savedView/applier.ts.
     {
       type: "set_active_layout",
@@ -1565,13 +1574,13 @@ const commandCases: [string, string, Record<string, unknown>][] = [
   ],
   [
     "remove_dataset",
-    "session/client_command_remove_dataset.json",
+    claimFixture("session/client_command_remove_dataset.json"),
     // hooks/useDatasetSettings.ts handleRemoveLayer.
     { type: "remove_dataset", id: "wds-0f3a" },
   ],
   [
     "rename_dataset",
-    "session/client_command_rename_dataset.json",
+    claimFixture("session/client_command_rename_dataset.json"),
     // hooks/useDatasetSettings.ts handleLayerRename.
     { type: "rename_dataset", id: "wds-0f3a", name: "kidney multiplex (deconvolved)" },
   ],
@@ -1591,13 +1600,14 @@ describe("wire goldens: client messages through Bridge senders", () => {
 
   it.each(commandCases)(
     "sendCommand wraps %s in the command envelope",
-    (_name, rel, command) => {
+    (_name, golden, command) => {
       const { bridge, ws } = openBridge();
       bridge.sendCommand(JSON.stringify(command));
-      expect(lastSent(ws)).toStrictEqual(coveredFixture(rel));
+      expect(lastSent(ws)).toStrictEqual(golden.json());
     },
   );
 
+  const clientPresence = claimFixture("session/client_presence.json");
   it("sendPresence merges the type tag into the presence body", () => {
     const { bridge, ws } = openBridge();
     bridge.sendPresence(
@@ -1607,22 +1617,25 @@ describe("wire goldens: client messages through Bridge senders", () => {
         display: expectedDisplay,
       }),
     );
-    expect(lastSent(ws)).toStrictEqual(coveredFixture("session/client_presence.json"));
+    expect(lastSent(ws)).toStrictEqual(clientPresence.json());
   });
 
+  const clientCursor = claimFixture("session/client_cursor.json");
   it("sendCursor emits the cursor envelope", () => {
     const { bridge, ws } = openBridge();
     bridge.sendCursor([412, 233.5]);
     vi.advanceTimersByTime(60); // trailing-edge throttle
-    expect(lastSent(ws)).toStrictEqual(coveredFixture("session/client_cursor.json"));
+    expect(lastSent(ws)).toStrictEqual(clientCursor.json());
   });
 
+  const clientFollow = claimFixture("session/client_follow.json");
   it("sendFollow emits the follow envelope", () => {
     const { bridge, ws } = openBridge();
     bridge.sendFollow(9);
-    expect(lastSent(ws)).toStrictEqual(coveredFixture("session/client_follow.json"));
+    expect(lastSent(ws)).toStrictEqual(clientFollow.json());
   });
 
+  const clientDatasetPresence = claimFixture("session/client_dataset_presence.json");
   it("sendDatasetPresence merges the type tag into the layer-presence body", () => {
     const { bridge, ws } = openBridge();
     bridge.sendDatasetPresence(
@@ -1633,56 +1646,61 @@ describe("wire goldens: client messages through Bridge senders", () => {
     );
     vi.advanceTimersByTime(250); // trailing-edge throttle
     expect(lastSent(ws)).toStrictEqual(
-      coveredFixture("session/client_dataset_presence.json"),
+      clientDatasetPresence.json(),
     );
   });
 
+  const clientSteer = claimFixture("session/client_steer.json");
   it("steer: envelope shape (no web sender today — other clients steer)", () => {
-    expect(coveredFixture("session/client_steer.json")).toStrictEqual({
+    expect(clientSteer.json()).toStrictEqual({
       type: "steer",
       client: 3,
     });
   });
 
+  const clientOpenRemoteDataset = claimFixture("session/client_open_remote_dataset.json");
   it("sendOpenRemoteDataset emits the open envelope with a fresh request id", () => {
     const { bridge, ws } = openBridge();
     bridge.sendOpenRemoteDataset("gs://lucida-fixtures/kidney-multiplex.zarr");
     const sent = lastSent(ws) as { request_id: string };
     expect(sent.request_id).toMatch(/^web-/);
-    const golden = coveredFixture("session/client_open_remote_dataset.json") as {
+    const golden = clientOpenRemoteDataset.json() as {
       request_id: string;
     };
     expect(sent).toStrictEqual({ ...golden, request_id: sent.request_id });
   });
 
+  const clientDatasetHealth = claimFixture("session/client_dataset_health.json");
   it("requestDatasetHealth emits the health request envelope", () => {
     const { bridge, ws } = openBridge();
     void bridge.requestDatasetHealth("wds-0f3a").catch(() => {});
     const sent = lastSent(ws) as { request_id: string };
     expect(sent.request_id).toMatch(/^web-health-/);
-    const golden = coveredFixture("session/client_dataset_health.json") as {
+    const golden = clientDatasetHealth.json() as {
       request_id: string;
     };
     expect(sent).toStrictEqual({ ...golden, request_id: sent.request_id });
   });
 
+  const clientDatasetRetry = claimFixture("session/client_dataset_retry.json");
   it("sendDatasetRetry emits the retry envelope", () => {
     const { bridge, ws } = openBridge();
     bridge.sendDatasetRetry("wds-0f3a");
     const sent = lastSent(ws) as { request_id: string };
     expect(sent.request_id).toMatch(/^web-retry-/);
-    const golden = coveredFixture("session/client_dataset_retry.json") as {
+    const golden = clientDatasetRetry.json() as {
       request_id: string;
     };
     expect(sent).toStrictEqual({ ...golden, request_id: sent.request_id });
   });
 
+  const clientSendReport = claimFixture("session/client_send_report.json");
   it("sendReport emits the send_report envelope with a fresh request id and the bundle as text", () => {
     const { bridge, ws } = openBridge();
     void bridge.sendReport(expectedSendReportBundle).catch(() => {});
     const sent = lastSent(ws) as { request_id: string; bundle: string };
     expect(sent.request_id).toMatch(/^web-report-/);
-    const golden = coveredFixture("session/client_send_report.json") as {
+    const golden = clientSendReport.json() as {
       request_id: string;
     };
     expect(sent).toStrictEqual({ ...golden, request_id: sent.request_id });
@@ -1692,6 +1710,7 @@ describe("wire goldens: client messages through Bridge senders", () => {
     expect(bundle.header.runId).toBe("remote-cold");
   });
 
+  const clientRequestSnapshot = claimFixture("session/client_request_snapshot.json");
   it("a persistent seq gap in the broadcast stream emits the request_snapshot envelope", () => {
     // Producer-level lock through the real production trigger: the Bridge
     // itself sends `request_snapshot` when a `command_broadcast` arrives
@@ -1713,10 +1732,11 @@ describe("wire goldens: client messages through Bridge senders", () => {
     );
     vi.advanceTimersByTime(250); // past the reorder-grace window
     expect(lastSent(ws)).toStrictEqual(
-      coveredFixture("session/client_request_snapshot.json"),
+      clientRequestSnapshot.json(),
     );
   });
 
+  const clientViewerInterest = claimFixture("session/client_viewer_interest.json");
   it("sendViewerInterest wraps the tick coordinator's hint verbatim", () => {
     const { bridge, ws } = openBridge();
     bridge.sendViewerInterest(expectedInterestHint);
@@ -1726,7 +1746,7 @@ describe("wire goldens: client messages through Bridge senders", () => {
     });
     // The Rust hint additionally carries an optional `client_id` (server
     // tolerates its absence via a serde default; the web never sends it).
-    expect(coveredFixture("session/client_viewer_interest.json")).toStrictEqual({
+    expect(clientViewerInterest.json()).toStrictEqual({
       type: "viewer_interest",
       interest: { client_id: null, ...expectedInterestHint },
     });
@@ -1736,6 +1756,8 @@ describe("wire goldens: client messages through Bridge senders", () => {
 // Request envelopes produced by the real ProxiedContentSource
 
 describe("wire goldens: content-source request envelopes", () => {
+  const chunkRequest = claimFixture("session/chunk_request.json");
+  const chunkCancel = claimFixture("session/chunk_cancel.json");
   it("fetch() sends the labelled chunk request envelope", async () => {
     const sent: string[] = [];
     const source = new ProxiedContentSource((json) => sent.push(json));
@@ -1749,7 +1771,7 @@ describe("wire goldens: content-source request envelopes", () => {
 
     expect(sent).toHaveLength(1);
     expect(JSON.parse(sent[0])).toStrictEqual(
-      coveredFixture("session/chunk_request.json"),
+      chunkRequest.json(),
     );
 
     chunkController.abort();
@@ -1758,7 +1780,7 @@ describe("wire goldens: content-source request envelopes", () => {
     // Aborting the chunk request takes it back from the server.
     expect(sent).toHaveLength(2);
     expect(JSON.parse(sent[1])).toStrictEqual(
-      coveredFixture("session/chunk_cancel.json"),
+      chunkCancel.json(),
     );
   });
 });
@@ -1766,10 +1788,9 @@ describe("wire goldens: content-source request envelopes", () => {
 // Dataset-open payloads through the manifest mirrors
 
 describe("wire goldens: dataset-open payloads", () => {
+  const datasetOpenedSingle = claimFixture("dataset-open/dataset_opened_single.json");
   it("single-image DatasetOpened matches the manifestTypes mirror", () => {
-    const opened = coveredFixture(
-      "dataset-open/dataset_opened_single.json",
-    ) as WireDatasetOpened;
+    const opened = datasetOpenedSingle.json() as WireDatasetOpened;
     expect(opened).toStrictEqual(expectedDatasetOpenedSingle);
 
     // The decode path the content source uses for every chunk response.
@@ -1780,10 +1801,9 @@ describe("wire goldens: dataset-open payloads", () => {
     expect(extractDataType(proxied!.images[1].wire_format)).toBe("Uint32");
   });
 
+  const datasetOpenedCollection = claimFixture("dataset-open/dataset_opened_collection.json");
   it("collection DatasetOpened matches the manifestTypes mirror", () => {
-    const opened = coveredFixture(
-      "dataset-open/dataset_opened_collection.json",
-    ) as WireDatasetOpenedCollection;
+    const opened = datasetOpenedCollection.json() as WireDatasetOpenedCollection;
     expect(opened).toStrictEqual(expectedDatasetOpenedCollection);
 
     // Resolution as sessionController performs it on every ingest: the
@@ -1835,12 +1855,13 @@ describe("wire goldens: dataset-open payloads", () => {
     expect(resolveFetchSource(opened.fetch)).toStrictEqual(expectedFetchSingle);
   });
 
+  const fetchSourceProxied = claimFixture("dataset-open/fetch_source_proxied.json");
+  const fetchSourceDirect = claimFixture("dataset-open/fetch_source_direct.json");
+  const fetchSourceLocal = claimFixture("dataset-open/fetch_source_local.json");
   it("FetchSource variants match the externally tagged mirror", () => {
-    expect(coveredFixture("dataset-open/fetch_source_proxied.json")).toStrictEqual(
-      expectedFetchSingle,
-    );
+    expect(fetchSourceProxied.json()).toStrictEqual(expectedFetchSingle);
 
-    const direct = coveredFixture("dataset-open/fetch_source_direct.json") as FetchSource;
+    const direct = fetchSourceDirect.json() as FetchSource;
     expect(direct).toStrictEqual({
       Direct: {
         images: [
@@ -1857,7 +1878,7 @@ describe("wire goldens: dataset-open payloads", () => {
       },
     });
 
-    const local = coveredFixture("dataset-open/fetch_source_local.json") as FetchSource;
+    const local = fetchSourceLocal.json() as FetchSource;
     expect(local).toStrictEqual({
       Local: {
         images: [
@@ -1879,10 +1900,9 @@ describe("wire goldens: dataset-open payloads", () => {
 // Generated-availability payloads through the real catalog
 
 describe("wire goldens: generated availability", () => {
+  const availabilitySnapshot = claimFixture("generated/availability_snapshot.json");
   it("snapshot fixture drives the catalog's counters and per-chunk lookups", () => {
-    const snapshot = coveredFixture(
-      "generated/availability_snapshot.json",
-    ) as WireGeneratedAvailabilitySnapshot;
+    const snapshot = availabilitySnapshot.json() as WireGeneratedAvailabilitySnapshot;
     expect(snapshot).toStrictEqual(expectedGeneratedSnapshot);
 
     const catalog = new GeneratedAvailabilityCatalog();
@@ -1910,10 +1930,9 @@ describe("wire goldens: generated availability", () => {
     expect(catalog.histogram("wds-0f3a", "multiscale-0", 2, 0, 0)).toBeUndefined();
   });
 
+  const availabilityDelta = claimFixture("generated/availability_delta.json");
   it("delta fixture upserts through the catalog", () => {
-    const delta = coveredFixture(
-      "generated/availability_delta.json",
-    ) as WireGeneratedAvailabilityDelta;
+    const delta = availabilityDelta.json() as WireGeneratedAvailabilityDelta;
     expect(delta).toStrictEqual(expectedGeneratedDelta);
 
     const catalog = new GeneratedAvailabilityCatalog();
@@ -1962,6 +1981,7 @@ describe("wire goldens: generated availability", () => {
 // Enum vocabulary against the production TS unions
 
 describe("wire goldens: enum vocabulary", () => {
+  const enumVocabulary = claimFixture("vocab/enum_vocabulary.json");
   it("every wire enum's variants match the web's string vocabulary", () => {
     // Where a production TS union or const exists, the expected list is
     // typed with it, so widening/renaming a variant requires touching the
@@ -2010,7 +2030,7 @@ describe("wire goldens: enum vocabulary", () => {
     ];
     const annotationKinds: WireAnnotation["kind"][] = ["point", "line", "box"];
 
-    expect(coveredFixture("vocab/enum_vocabulary.json")).toStrictEqual({
+    expect(enumVocabulary.json()).toStrictEqual({
       colormaps: [...COLORMAP_NAMES],
       blend_modes: blendModes,
       render_modes: renderModes,
@@ -2096,21 +2116,24 @@ describe("wire goldens: watch stream", () => {
       }),
     ) as { type: string; item: WatchAggregateItem };
 
+  const clientWatchSubscribe = claimFixture("session/client_watch_subscribe.json");
+  const clientWatchSubscribeHistory = claimFixture("session/client_watch_subscribe_history.json");
   it("watch_subscribe: the bare tag is live, and history is the one key", () => {
     // No web sender: the page publishes and the CLI subscribes. The fixtures
     // lock the tag the Rust client sends and the tag the Rust server routes
     // on to one spelling.
-    expect(coveredFixture("session/client_watch_subscribe.json")).toStrictEqual({
+    expect(clientWatchSubscribe.json()).toStrictEqual({
       type: "watch_subscribe",
     });
-    expect(coveredFixture("session/client_watch_subscribe_history.json")).toStrictEqual({
+    expect(clientWatchSubscribeHistory.json()).toStrictEqual({
       type: "watch_subscribe",
       history: true,
     });
   });
 
+  const clientWatchPublishAggregate = claimFixture("session/client_watch_publish_aggregate.json");
   it("watch_publish(aggregate): the page's item, field for field", () => {
-    const golden = coveredFixture("session/client_watch_publish_aggregate.json") as {
+    const golden = clientWatchPublishAggregate.json() as {
       type: string;
       item: WatchAggregateItem;
     };
@@ -2151,6 +2174,7 @@ describe("wire goldens: watch stream", () => {
     }
   });
 
+  const clientWatchPublishBoundary = claimFixture("session/client_watch_publish_boundary.json");
   it("watch_publish(boundary): a run's end, with the reason and the cause", () => {
     const item = runBoundaryItem(1_767_225_604_700, {
       runId: "run-3",
@@ -2159,12 +2183,13 @@ describe("wire goldens: watch stream", () => {
       durationUs: 4_700_000,
     });
     expect(JSON.parse(JSON.stringify({ type: "watch_publish", item }))).toStrictEqual(
-      coveredFixture("session/client_watch_publish_boundary.json"),
+      clientWatchPublishBoundary.json(),
     );
   });
 
+  const serverWatchUpdate = claimFixture("session/server_watch_update.json");
   it("watch_update: the relay names the publishing page and its sequence", () => {
-    const golden = coveredFixture("session/server_watch_update.json") as {
+    const golden = serverWatchUpdate.json() as {
       type: string;
       client_id: number;
       seq: number;
@@ -2178,8 +2203,9 @@ describe("wire goldens: watch stream", () => {
     );
   });
 
+  const serverWatchHistoryEnd = claimFixture("session/server_watch_history_end.json");
   it("watch_history_end: where a replay stops, outside the item sequence", () => {
-    expect(coveredFixture("session/server_watch_history_end.json")).toStrictEqual({
+    expect(serverWatchHistoryEnd.json()).toStrictEqual({
       type: "watch_history_end",
       through_seq: 42,
       replayed: 40,
@@ -2197,20 +2223,23 @@ describe("wire goldens: saved-view payloads", () => {
     payload: string;
   }
 
+  const savedViewPayload = claimFixture("saved-view/payload.json");
   it("the web writes the payload the core wrote for the same view, and reads it back", () => {
-    const golden = coveredFixture("saved-view/payload.json") as PayloadGolden;
+    const golden = savedViewPayload.json() as PayloadGolden;
     expect(encode(golden.view)).toBe(golden.payload);
     expect(decode(golden.payload)).toEqual(golden.view);
     // A one-channel layer opens gray, so its colormap rides the payload.
     expect(golden.view.dataset_settings["wds-0f3a"].channel_settings![0].colormap).toBe("gray");
   });
 
+  const recordedV1 = claimFixture("saved-view/recorded_v1.json");
+  const recordedV2 = claimFixture("saved-view/recorded_v2.json");
   it("a payload recorded before one-channel images opened gray restores as it did", () => {
-    for (const rel of ["saved-view/recorded_v1.json", "saved-view/recorded_v2.json"]) {
-      const recorded = coveredFixture(rel) as PayloadGolden;
+    for (const golden of [recordedV1, recordedV2]) {
+      const recorded = golden.json() as PayloadGolden;
       expect(decode(recorded.payload)).toEqual(recorded.view);
     }
-    const v2 = (fixture("saved-view/recorded_v2.json") as PayloadGolden).view;
+    const v2 = (recordedV2.json() as PayloadGolden).view;
     const one = v2.dataset_settings["ds-one"].channel_settings!;
     expect(one.map((c) => c.colormap)).toEqual(["magenta"]);
   });
@@ -2220,8 +2249,7 @@ describe("wire goldens: saved-view payloads", () => {
 
 describe("wire goldens: fixture inventory", () => {
   it("every fixture file has web-side coverage", () => {
-    // Runs last (vitest executes tests sequentially within a file):
-    // a fixture added on the Rust side without an assertion here fails.
-    expect([...COVERED_FIXTURES].sort()).toStrictEqual(allFixtureFiles());
+    // A fixture added on the Rust side that no test here claims fails.
+    expect([...CLAIMED_FIXTURES].sort()).toStrictEqual(allFixtureFiles());
   });
 });
