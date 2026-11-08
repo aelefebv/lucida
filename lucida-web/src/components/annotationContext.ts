@@ -4,6 +4,7 @@
  * it lives. This is a pure function of pin and view, so overlays keep no
  * off-context state and navigating back restores the pin on the next render.
  */
+import { positionLabel } from "../axes.ts";
 import type { Annotation } from "./annotationDocument.ts";
 
 /** The current view's Z/T/C selectors. */
@@ -37,9 +38,8 @@ export function isOffContext(pin: Annotation, view: ViewContext, opts?: OffConte
   return zOff || t !== Math.round(view.t) || c !== Math.round(view.c);
 }
 
-/** The off-context label naming the pin's own Z/T/C, counted from 1 as the
- * dimension bar and the channel names count them. */
+/** The off-context label naming the pin's own Z/T/C. */
 export function offContextLabel(pin: Annotation): string {
   const { z, t, c } = pinZTC(pin);
-  return `Z ${z + 1} · T ${t + 1} · Channel ${c + 1}`;
+  return [positionLabel("Z", z), positionLabel("T", t), positionLabel("Channel", c)].join(" · ");
 }

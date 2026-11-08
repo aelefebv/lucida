@@ -42,10 +42,12 @@ import { displayedLevelNotice, levelNumbers } from "./levelReadout.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import {
   applyChannelToggle,
+  channelDisplayName,
   channelShortcutTarget,
   isChannelShown,
   isLastShownChannel,
 } from "./channels.ts";
+import { positionLabel } from "../axes.ts";
 import "./LayerPanel.css";
 
 export interface LayerChannel {
@@ -191,7 +193,7 @@ export function LayerPanel(props: Props) {
         label: `Show or hide ${channel.name}`,
         group: "Channels",
         keys: [CHANNEL_KEYS[i]],
-        keywords: [`channel ${i + 1}`, "visibility"],
+        keywords: [positionLabel("channel", i), "visibility"],
         run: () => {
           if (shortcutTarget) toggleLayerChannel(shortcutTarget, i);
         },
@@ -201,7 +203,7 @@ export function LayerPanel(props: Props) {
         label: soloChannel === i ? "Show all channels" : `Solo ${channel.name}`,
         group: "Channels",
         keys: [SOLO_KEYS[i]],
-        keywords: [`channel ${i + 1}`, "solo", "composite"],
+        keywords: [positionLabel("channel", i), "solo", "composite"],
         run: () => props.onSoloChannel(i),
       },
     ]);
@@ -358,7 +360,7 @@ function LayerRow(props: LayerRowProps) {
       )}
       {hiddenBySolo && (
         <p className="lc-layer-note">
-          {`Not shown while channel ${(soloChannel ?? 0) + 1} is soloed.`}
+          {`Not shown while ${positionLabel("channel", soloChannel ?? 0)} is soloed.`}
         </p>
       )}
       {isExpanded && (
@@ -430,7 +432,7 @@ function ChannelList(props: LayerRowProps) {
       </ul>
       {soloChannel !== null && (
         <div className="lc-channels-solo">
-          <span>{`${layer.channels[soloChannel]?.name ?? `Channel ${soloChannel + 1}`} is soloed.`}</span>
+          <span>{`${layer.channels[soloChannel]?.name ?? channelDisplayName(soloChannel)} is soloed.`}</span>
           <Button size="sm" variant="ghost" onPress={props.onShowAllChannels}>
             Show all
           </Button>
