@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import type { WasmScene } from "lucida-core";
 import { Axis } from "../axes.ts";
 import { applyViewportCommand } from "../applyAndSend.ts";
@@ -211,7 +211,7 @@ export function useDimensions({
     bridgeCallbacksRef.current.emitPresence();
   }, [datasetsRef, wasmSceneRef, loopRef, bridgeCallbacksRef]);
 
-  return {
+  return useMemo(() => ({
     z, c, t,
     viewMode, cameraMode,
     multiChannel,
@@ -222,7 +222,12 @@ export function useDimensions({
     handleViewModeToggle,
     handleZChange, handleCChange, handleTChange,
     handleSoloChannel, handleShowAllChannels, handleDatasetRegistered,
-  };
+  }), [
+    z, c, t, viewMode, cameraMode, multiChannel, dimZ, dimC, dimT,
+    dimensionExtentsFor, labelNamesFor, soloChannel, handleViewModeToggle,
+    handleZChange, handleCChange, handleTChange,
+    handleSoloChannel, handleShowAllChannels, handleDatasetRegistered,
+  ]);
 }
 
 function channelCountOf(ds: DatasetState): number {
