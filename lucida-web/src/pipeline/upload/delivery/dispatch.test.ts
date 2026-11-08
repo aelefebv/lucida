@@ -97,12 +97,21 @@ function makeChunkDelivery(
   };
 }
 
+/**
+ * A client whose `sliceChunkData` transfers each plane, as the real post
+ * does, so a plane reads empty afterwards. `posted` keeps a copy of each.
+ */
 function makeMockClient(): {
   client: RenderClient;
   sliceChunkData: ReturnType<typeof vi.fn>;
   volumeChunkData: ReturnType<typeof vi.fn>;
+  posted: ArrayBuffer[];
 } {
-  const sliceChunkData = vi.fn();
+  const posted: ArrayBuffer[] = [];
+  const sliceChunkData = vi.fn((_memberId: string, chunks: { data: ArrayBuffer }[]) => {
+    for (const chunk of chunks) posted.push(chunk.data.slice(0));
+    structuredClone(chunks.map((chunk) => chunk.data), { transfer: chunks.map((chunk) => chunk.data) });
+  });
   const volumeChunkData = vi.fn();
   return {
     client: {
@@ -111,6 +120,7 @@ function makeMockClient(): {
     } as unknown as RenderClient,
     sliceChunkData,
     volumeChunkData,
+    posted,
   };
 }
 
@@ -118,7 +128,7 @@ describe("dispatchChunkDelivery", () => {
   it("sends the slice view only the plane its Z maps to, copied out of the cache's chunk", () => {
     const meta = makeMeta();
     const delivery = makeChunkDelivery();
-    const { client, sliceChunkData, volumeChunkData } = makeMockClient();
+    const { client, sliceChunkData, volumeChunkData, posted } = makeMockClient();
 
     // Level 0 is as deep as full resolution, so z 3 is plane 1 of chunk 1.
     const sent = dispatchChunkDelivery(client, delivery, meta, "slice", 3, EPOCHS);
@@ -132,12 +142,10 @@ describe("dispatchChunkDelivery", () => {
     //  fullResDepth, levelDepth, fullResZ, epochs, tier)
     expect(call[0]).toBe("img-0:ch0");
     expect(call[1]).toHaveLength(1);
-    const chunk = call[1][0];
-    expect(chunk).toMatchObject({ dataType: "uint16", x: 3, y: 2, z: 1, key: "0/0/0/1/2/3" });
-    expect(chunk.data.byteLength).toBe(PLANE * 2);
-    expect(new Uint16Array(chunk.data).every((v: number) => v === 2)).toBe(true);
+    expect(call[1][0]).toMatchObject({ dataType: "uint16", x: 3, y: 2, z: 1, key: "0/0/0/1/2/3" });
+    expect(posted[0].byteLength).toBe(PLANE * 2);
+    expect(new Uint16Array(posted[0]).every((v) => v === 2)).toBe(true);
     // The cache keeps its whole chunk for the next delivery.
-    expect(chunk.data).not.toBe(delivery.data);
     expect(delivery.data.byteLength).toBe(2 * PLANE * 2);
     expect(call[2]).toBe(0); // level
     expect(call[3]).toBe(3); // sliceZ argument

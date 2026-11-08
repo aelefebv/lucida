@@ -149,7 +149,8 @@ describe("label chunk flow: request → pre-sliced delivery → pool", () => {
           level, t, c,
           levelWidth, levelHeight, chunkX, chunkY, plane,
         };
-        handleLabelSliceChunkData(ctx, msg);
+        // As the real post does, the plane moves to the worker.
+        handleLabelSliceChunkData(ctx, structuredClone(msg, { transfer: chunks.map((chunk) => chunk.data) }));
       }),
     } as unknown as UploadClient;
 

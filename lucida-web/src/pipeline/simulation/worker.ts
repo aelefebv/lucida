@@ -149,7 +149,7 @@ export class SimulatedWorker {
 
   // The slice of the `Worker` interface `RenderClient` uses.
 
-  postMessage(msg: MainToWorkerMessage): void {
+  postMessage(msg: MainToWorkerMessage, transfer?: Transferable[]): void {
     if (msg.type === "init") {
       this.outbox.push({ type: "ready" });
       return;
@@ -171,8 +171,9 @@ export class SimulatedWorker {
         });
       }
     }
-    // A real postMessage copies, so neither side can see the other mutate.
-    this.inbox.push(structuredClone(msg));
+    // A real postMessage copies, so neither side can see the other mutate,
+    // and empties the sender's copy of whatever it transfers.
+    this.inbox.push(structuredClone(msg, { transfer }));
   }
 
   addEventListener(type: string, listener: Listener): void {

@@ -51,7 +51,8 @@ export interface Dispatched {
 /**
  * One Z plane of a decoded chunk, copied out of the cache's buffer, which the
  * cache keeps for later deliveries. `null` when the chunk is too short to
- * hold it.
+ * hold it. Posting transfers the copy and empties it, so its size is read
+ * before the post.
  */
 function cutPlane(data: ArrayBuffer, dataType: string, localZ: number, planeLen: number): ArrayBuffer | null {
   const planeBytes = planeLen * decodedSampleBytes(dataType);
@@ -115,6 +116,7 @@ export function dispatchChunkDelivery(
   if (delivery.z !== Math.floor(levelZ / cz)) return null;
   const plane = cutPlane(delivery.data, delivery.dataType, levelZ - delivery.z * cz, chunkY * chunkX);
   if (!plane) return null;
+  const bytes = plane.byteLength;
   client.sliceChunkData(
     memberId,
     [{ ...chunk, data: plane }],
@@ -133,7 +135,7 @@ export function dispatchChunkDelivery(
     epochs,
     delivery.residencyTier,
   );
-  return { memberId, bytes: plane.byteLength };
+  return { memberId, bytes };
 }
 
 /**
@@ -166,6 +168,7 @@ export function dispatchLabelChunkDelivery(
   const plane = cutPlane(delivery.data, delivery.dataType, levelZ - delivery.z * cz, chunkY * chunkX);
   if (!plane) return null;
   const memberId = delivery.imageId;
+  const bytes = plane.byteLength;
 
   client.labelSliceChunkData(
     memberId,
@@ -188,7 +191,7 @@ export function dispatchLabelChunkDelivery(
     levelZ,
     epochs,
   );
-  return { memberId, bytes: plane.byteLength };
+  return { memberId, bytes };
 }
 
 /**
