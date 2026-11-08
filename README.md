@@ -102,7 +102,11 @@ from lucida import LucidaClient
 client = LucidaClient("http://127.0.0.1:9876")
 workspace = client.workspaces.use("demo")
 workspace.datasets.open("/var/lib/lucida/data/sample.ome.zarr")
+workspace.view.pan(40, -20)
+print(workspace.viewer.web_url)             # a page showing that view
 ```
+
+View, camera, layer and channel changes from either client go to a viewer profile the server keeps, `default` unless you name another (`--viewer-profile` in the CLI, `workspace.viewer_profile` in Python), so they last after the call returns and a page opened at the profile's URL shows them. The Python client applies them through its compiled extension, so build it (below) before using them.
 
 From a checkout, run scripts with `uv run --project lucida-py python your_script.py`. The client takes a token from its constructor, `LUCIDA_TOKEN`, the macOS Keychain entry `lucida auth login` writes, or the CLI config file.
 
