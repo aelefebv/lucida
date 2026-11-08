@@ -16,6 +16,12 @@ export interface MinimapState {
   overviewSeeded: Set<string>;
   pendingFetch: Map<string, MinimapChunkCoord[]>;
   /**
+   * The entity that owns each member's image. The minimap keys its work by
+   * image, but the CPU cache keys chunks by entity, and in a collection the
+   * two ids differ.
+   */
+  memberOwner: Map<string, string>;
+  /**
    * The overviews, by `overviewKey` value, the worker was told to open before
    * any chunk arrived, because a chunk of theirs failed for good. The worker
    * draws those hatched, and it can't without an overview to draw.
@@ -133,6 +139,7 @@ export function createMinimapState(): MinimapState {
     overviewUploaded: new Map(),
     overviewSeeded: new Set(),
     pendingFetch: new Map(),
+    memberOwner: new Map(),
     overviewOpened: new Set(),
     failedKeys: new Set(),
     failedVersion: -1,
@@ -300,8 +307,10 @@ function refreshFailedKeys(ctx: TickContext, state: MinimapState): void {
 /** Whether any chunk a member awaits is now in the cache, with the scan's own test for usable data. */
 function awaitedChunkArrived(ctx: TickContext, state: MinimapState): boolean {
   for (const [memberId, coords] of state.pendingFetch) {
+    const owner = state.memberOwner.get(memberId);
+    if (owner === undefined) continue;
     for (const coord of coords) {
-      const cached = ctx.cpuCache.getCachedChunk(memberId, coord.key);
+      const cached = ctx.cpuCache.getCachedChunk(owner, coord.key);
       if (cached && cached.data.byteLength > 0) return true;
     }
   }
@@ -358,6 +367,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
       // The planner keys minimap demand by image, so every channel's missing
       // chunks travel in the member's one list.
       const missing: MinimapChunkCoord[] = [];
+      state.memberOwner.set(memberId, img.owner);
 
       for (const c of channels) {
         const key = overviewKeyFor(memberId, c);
@@ -379,7 +389,7 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
               const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
               if (uploaded.has(chunkKey)) continue;
 
-              const cached = ctx.cpuCache.getCachedChunk(memberId, chunkKey);
+              const cached = ctx.cpuCache.getCachedChunk(img.owner, chunkKey);
               if (cached && cached.data.byteLength > 0) {
                 available.push({
                   data: cached.data,
@@ -851,6 +861,7 @@ export function clearMinimapForDataset(state: MinimapState, dsId: string): void 
   state.overviewUploaded.delete(dsId);
   state.overviewSeeded.delete(dsId);
   state.pendingFetch.delete(dsId);
+  state.memberOwner.delete(dsId);
   for (const opened of [...state.overviewOpened]) {
     if (opened.startsWith(dsId)) state.overviewOpened.delete(opened);
   }
@@ -863,5 +874,8 @@ export function clearMinimapForDataset(state: MinimapState, dsId: string): void 
       state.overviewSeeded.delete(key);
       state.pendingFetch.delete(key);
     }
+  }
+  for (const memberId of [...state.memberOwner.keys()]) {
+    if (memberId.startsWith(prefix)) state.memberOwner.delete(memberId);
   }
 }

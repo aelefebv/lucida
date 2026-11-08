@@ -849,17 +849,74 @@ describe("tickMinimapOverview throttle", () => {
     tickMinimapOverview(ctx, state, 1000); // establishes lastOverviewScanMs
     expect(state.overviewBudgetPending).toBe(false); // empty scan → budget not exhausted
 
-    state.pendingFetch.set("m0", [{ level: 2, x: 0, y: 0, z: 0, t: 0, c: 0, key: "2/0/0/0/0/0" }]);
+    // A collection member: the cache holds its chunks under the owning entity.
+    state.pendingFetch.set("ds:image:m0", [{ level: 2, x: 0, y: 0, z: 0, t: 0, c: 0, key: "2/0/0/0/0/0" }]);
+    state.memberOwner.set("ds:image:m0", "ds:tile:m0");
     expect(tickMinimapOverview(ctx, state, 1010)).toBe(false); // awaited, not landed → idle
 
-    cache.set("m0/2/0/0/0/0/0", { data: new ArrayBuffer(0), dataType: "uint16" });
+    cache.set("ds:tile:m0/2/0/0/0/0/0", { data: new ArrayBuffer(0), dataType: "uint16" });
     expect(tickMinimapOverview(ctx, state, 1020)).toBe(false); // empty data is nothing to upload
 
-    cache.set("m0/2/0/0/0/0/0", { data: new ArrayBuffer(8), dataType: "uint16" });
+    cache.set("ds:tile:m0/2/0/0/0/0/0", { data: new ArrayBuffer(8), dataType: "uint16" });
     expect(tickMinimapOverview(ctx, state, 1030)).toBe(true); // landed → the next scan uploads it
 
     state.pendingFetch.clear(); // seeding complete
     expect(tickMinimapOverview(ctx, state, 1040)).toBe(false); // skipped → loop may quiesce
+  });
+});
+
+describe("tickMinimapOverview on a collection", () => {
+  it("finds a member's coarse chunk under its owning entity and uploads it under its image", () => {
+    // Collection members have an image id that differs from the entity id the
+    // CPU cache keys chunks by. Reading the cache by image id never found them,
+    // so the minimap of every collection stayed empty.
+    const state = createMinimapState();
+    state.enabled = true;
+    const cache = new Map<string, { data: ArrayBuffer; dataType: string }>();
+    cache.set("ds:tile:A/1/0/1/0/0/0/0/0", { data: new ArrayBuffer(8), dataType: "uint16" });
+    const uploads: { overview: string; keys: string[] }[] = [];
+    const ctx = {
+      scene: { t: () => 0, resolved_layers: () => "[]" },
+      datasets: new Map([
+        [
+          "ds",
+          {
+            manifest: {
+              images: [
+                {
+                  image_id: "ds:image:A/1/0",
+                  owner: "ds:tile:A/1/0",
+                  multiscale: {
+                    data_type: "Uint16",
+                    coarse_level_index: 1,
+                    levels: [
+                      { level_index: 0, shape: [1, 1, 1, 4, 4], chunk_shape: [1, 1, 1, 4, 4] },
+                      { level_index: 1, shape: [1, 1, 1, 2, 2], chunk_shape: [1, 1, 1, 2, 2] },
+                    ],
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      ]),
+      cpuCache: {
+        ...noFailures,
+        getCachedChunk: (entityId: string, key: string) => cache.get(`${entityId}/${key}`) ?? null,
+      },
+      client: {
+        minimapUploadOverviewChunksForLayer: (overview: string, chunks: { key: string }[]) => {
+          uploads.push({ overview, keys: chunks.map((chunk) => chunk.key) });
+        },
+      },
+    } as unknown as TickContext;
+
+    tickMinimapOverview(ctx, state, 1000);
+
+    const overview = overviewKeyFor("ds:image:A/1/0", 0);
+    expect(uploads).toEqual([{ overview, keys: ["1/0/0/0/0/0"] }]);
+    expect(state.overviewSeeded.has(overview)).toBe(true);
+    expect(state.pendingFetch.has("ds:image:A/1/0")).toBe(false);
   });
 });
 
