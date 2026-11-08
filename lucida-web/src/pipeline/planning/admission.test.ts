@@ -157,4 +157,16 @@ describe("chunkBytesFor", () => {
     expect(bytesOf(request(0))).toBe(8 * 64 * 64 * 2);
     expect(bytesOf(request(0, { level: 1 }))).toBe(4 * 32 * 32 * 2);
   });
+
+  it("charges every type that decodes to float32 four bytes a sample", () => {
+    for (const dataType of ["Int8", "Int16", "Float64", "Int64", "Uint64", "Float16"]) {
+      const manifest = {
+        images: [{
+          image_id: "image",
+          multiscale: { data_type: dataType, levels: [{ level_index: 0, chunk_shape: [1, 1, 1, 8, 8] }] },
+        }],
+      } as unknown as DatasetManifest;
+      expect(chunkBytesFor(manifest)(request(0)), dataType).toBe(8 * 8 * 4);
+    }
+  });
 });

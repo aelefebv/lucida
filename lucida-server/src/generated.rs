@@ -2762,6 +2762,9 @@ fn region_histogram(
         DataType::Int32 => histogram_as!(i32),
         DataType::Float32 => histogram_as!(f32),
         DataType::Float64 => histogram_as!(f64),
+        DataType::Uint64 => histogram_as!(u64),
+        DataType::Int64 => histogram_as!(i64),
+        DataType::Float16 => histogram_as!(Half),
     }
 }
 
@@ -2853,7 +2856,44 @@ macro_rules! pool_sample {
     )*};
 }
 
-pool_sample!(u8, u16, u32, i8, i16, i32, f32, f64);
+pool_sample!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64);
+
+/// A half-precision float sample, held as its bits: stable Rust has no `f16`.
+#[derive(Clone, Copy)]
+struct Half(u16);
+
+impl Half {
+    /// The sample's value. Every half is exactly a float32.
+    fn value(self) -> f32 {
+        let bits = u32::from(self.0);
+        let negative = bits & 0x8000 != 0;
+        let exponent = (bits >> 10) & 0x1f;
+        let mantissa = bits & 0x3ff;
+        let magnitude = match exponent {
+            0 => mantissa as f32 * 2f32.powi(-24),
+            0x1f => f32::from_bits(0x7f80_0000 | (mantissa << 13)),
+            _ => f32::from_bits(((exponent + 127 - 15) << 23) | (mantissa << 13)),
+        };
+        if negative { -magnitude } else { magnitude }
+    }
+}
+
+impl PoolSample for Half {
+    const SIZE: usize = 2;
+    fn read(bytes: &[u8]) -> Self {
+        Half(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+    fn write(self, out: &mut [u8]) {
+        out.copy_from_slice(&self.0.to_le_bytes());
+    }
+    fn pool_max(self, other: Self) -> Self {
+        let (a, b) = (self.value(), other.value());
+        if a.is_nan() || b > a { other } else { self }
+    }
+    fn to_f64(self) -> f64 {
+        f64::from(self.value())
+    }
+}
 
 /// Max-pool one generated chunk from a source region of `data_type`
 /// samples (little-endian bytes, as `fetch_volume_region` returns them) into
@@ -2894,6 +2934,9 @@ fn downsample_region_to_generated_chunk(
         DataType::Int32 => pool_as!(i32),
         DataType::Float32 => pool_as!(f32),
         DataType::Float64 => pool_as!(f64),
+        DataType::Uint64 => pool_as!(u64),
+        DataType::Int64 => pool_as!(i64),
+        DataType::Float16 => pool_as!(Half),
     }
 }
 
@@ -4014,6 +4057,82 @@ mod tests {
             u32::from_le_bytes(pooled.try_into().unwrap()),
             4_000_000_000
         );
+
+        let int64: Vec<u8> = [i64::MIN, -(1_i64 << 60), -3, -(1_i64 << 62)]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let pooled = pool_whole(&int64, DataType::Int64, [1, 2, 2], [1, 1, 1]);
+        assert_eq!(i64::from_le_bytes(pooled.try_into().unwrap()), -3);
+
+        let uint64: Vec<u8> = [u64::MAX - 1, 1, (1_u64 << 63) + 1, 0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let pooled = pool_whole(&uint64, DataType::Uint64, [1, 2, 2], [1, 1, 1]);
+        assert_eq!(u64::from_le_bytes(pooled.try_into().unwrap()), u64::MAX - 1);
+    }
+
+    /// A level's histogram counts 64-bit integers and halves in their own
+    /// units, as the values they hold.
+    #[test]
+    fn generated_histograms_count_wide_and_half_samples_as_their_values() {
+        let whole = VolumeRegion {
+            z0: 0,
+            z1: 1,
+            y0: 0,
+            y1: 2,
+            x0: 0,
+            x1: 2,
+        };
+        let int64 = [-6_000_000_000_i64, 3, 1 << 40, -1];
+        let bytes: Vec<u8> = int64.iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(
+            region_histogram(&bytes, DataType::Int64, whole, [1, 2, 2], whole).unwrap(),
+            SampleHistogram::of(int64.map(|v| v as f64)),
+        );
+        let uint64 = [u64::MAX, 0, 1 << 63, 7];
+        let bytes: Vec<u8> = uint64.iter().flat_map(|v| v.to_le_bytes()).collect();
+        assert_eq!(
+            region_histogram(&bytes, DataType::Uint64, whole, [1, 2, 2], whole).unwrap(),
+            SampleHistogram::of(uint64.map(|v| v as f64)),
+        );
+        // -2.0, 0.5, NaN (left out), 65504.
+        let halves: Vec<u8> = [0xc000_u16, 0x3800, 0x7e00, 0x7bff]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        assert_eq!(
+            region_histogram(&halves, DataType::Float16, whole, [1, 2, 2], whole).unwrap(),
+            SampleHistogram::of([-2.0, 0.5, 65504.0]),
+        );
+    }
+
+    /// Halves pool by value, not by bits: a negative half's bits are larger
+    /// than any positive one's, and NaN loses to any number.
+    #[test]
+    fn generated_float16_chunk_pools_by_value() {
+        // -2.0, 0.5, NaN, a subnormal.
+        let halves: Vec<u8> = [0xc000_u16, 0x3800, 0x7e00, 0x0001]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let pooled = pool_whole(&halves, DataType::Float16, [1, 2, 2], [1, 1, 1]);
+        assert_eq!(u16::from_le_bytes(pooled.try_into().unwrap()), 0x3800);
+
+        let negatives: Vec<u8> = [0xc000_u16, 0xbc00, 0x8001, 0xfc00]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let pooled = pool_whole(&negatives, DataType::Float16, [1, 2, 2], [1, 1, 1]);
+        assert_eq!(u16::from_le_bytes(pooled.try_into().unwrap()), 0x8001);
+
+        let all_nan: Vec<u8> = [0x7e00_u16; 4]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let pooled = pool_whole(&all_nan, DataType::Float16, [1, 2, 2], [1, 1, 1]);
+        assert_eq!(u16::from_le_bytes(pooled.try_into().unwrap()), 0x7e00);
     }
 
     #[test]

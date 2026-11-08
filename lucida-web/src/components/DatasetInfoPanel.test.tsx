@@ -122,4 +122,17 @@ describe("DatasetInfoPanel", () => {
     await within(healthSection()).findByText("Healthy");
     expect(getHealth).toHaveBeenCalledTimes(2);
   });
+
+  it("states the precision a type is drawn at when a float32 can't hold all of it", async () => {
+    const dataType = (data_type: string) => {
+      cleanup();
+      const wide = structuredClone(dataset);
+      wide.manifest.images[0].multiscale.data_type = data_type;
+      render(<DatasetInfoPanel visible workspaceId="ws" dataset={wide} getHealth={async () => health()} />);
+      return screen.getByText("Data type").closest(".lc-info-fact")!.textContent;
+    };
+    expect(dataType("Int64")).toBe("Data typeint64 drawn at float32 precision");
+    expect(dataType("Uint64")).toBe("Data typeuint64 drawn at float32 precision");
+    expect(dataType("Float16")).toBe("Data typefloat16");
+  });
 });

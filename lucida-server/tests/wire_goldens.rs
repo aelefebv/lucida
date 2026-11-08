@@ -381,7 +381,9 @@ fn enum_vocabulary() -> EnumVocabulary {
         annotation_kinds: vocab!(AnnotationKind::{ Point, Line, Box }),
         axis_kinds: vocab!(AxisKind::{ Time, Channel, Space }),
         entity_kinds: vocab!(EntityKind::{ Image, Group, Tile }),
-        data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Int8, Int16, Int32, Float32, Float64 }),
+        data_types: vocab!(DataType::{
+            Uint8, Uint16, Uint32, Int8, Int16, Int32, Float32, Float64, Uint64, Int64, Float16,
+        }),
         positioning_modes: vocab!(PositioningMode::{ Explicit, Derived }),
         dataset_open_stages: vocab!(DatasetOpenStage::{
             RequestReceived, Authorization, SourceLookup, BackendOpen, MetadataImport,

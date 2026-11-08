@@ -36,6 +36,7 @@ import {
 import { removeDatasetResources } from "./lifecycle.ts";
 import { postGpuMemoryIfChanged } from "./gpuBudget.ts";
 import { handleCaptureFrame } from "./captureFrame.ts";
+import { handleProbe } from "./probe.ts";
 import { postChunkResidency } from "../chunkUploadFeedback.ts";
 import { sourceKey } from "../poolKeys.ts";
 
@@ -79,6 +80,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "sliceRenderMultiPass":
       await handleSliceRenderMultiPass(ctx, msg);
+      ctx.state.lastFrame = msg;
       postFrameDone(ctx, msg.frameSeq);
       postGpuMemoryIfChanged(ctx);
       return;
@@ -102,6 +104,7 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "volumeRenderMultiPass":
       await handleVolumeRenderMultiPass(ctx, msg);
+      ctx.state.lastFrame = msg;
       postFrameDone(ctx, msg.frameSeq);
       postGpuMemoryIfChanged(ctx);
       return;
@@ -121,6 +124,9 @@ export async function dispatchMessage(ctx: WorkerCtx, msg: MainToWorkerMessage):
       return;
     case "captureFrame":
       handleCaptureFrame(ctx, msg);
+      return;
+    case "probe":
+      handleProbe(ctx, msg);
       return;
     case "minimapDestroy":
       handleMinimapDestroy();

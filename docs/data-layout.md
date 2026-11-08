@@ -138,7 +138,9 @@ and its Fortran order as a transpose. Any other codec fails the open with an
 error that names it. Under sharding, the sharding codec is the only outer
 codec, this chain goes inside it, and the index uses `bytes` optionally
 followed by `crc32c`. Sample types are `uint8`, `uint16`, `uint32`,
-`float32`, and `float64`.
+`uint64`, `int8`, `int16`, `int32`, `int64`, `float16`, `float32`, and
+`float64`; the viewer draws 32- and 64-bit integers and `float64` at float32
+precision.
 
 ## Write it with zarr-python
 

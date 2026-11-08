@@ -52,7 +52,10 @@
     "Int16",
     "Int32",
     "Float32",
-    "Float64"
+    "Float64",
+    "Uint64",
+    "Int64",
+    "Float16"
   ],
   "positioning_modes": [
     "Explicit",

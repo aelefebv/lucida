@@ -263,7 +263,7 @@ mod tests {
     /// holds a word another rule matches on.
     #[test]
     fn a_refused_data_type_is_an_unsupported_data_type() {
-        for name in ["complex64", "int64", "r16-chunked"] {
+        for name in ["complex64", "uint128", "r16-chunked"] {
             let error = lucida_store::backend::StoreError::UnsupportedDataType(name.to_string());
             let diagnostic = import_failure(&error);
             assert_eq!(

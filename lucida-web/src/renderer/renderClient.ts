@@ -24,6 +24,8 @@ import type {
   GpuErrorMessage,
   GpuDeviceRestoredMessage,
   GpuFailedMessage,
+  ProbeMessage,
+  ProbeSample,
 } from "./workerProtocol.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
 import { summarizeDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
@@ -104,6 +106,10 @@ export class RenderClient implements UploadClient {
    *  Resolved when the matching `frameCaptured` arrives. */
   private framePending = new Map<number, (capture: FrameCaptureResult) => void>();
   private frameSeq = 0;
+
+  /** Pending `probe` requests, keyed by the id sent to the worker. */
+  private probePending = new Map<number, (samples: ProbeSample[]) => void>();
+  private probeSeq = 0;
 
   onChunkResidency: ChunkResidencyHandler | null = null;
   /** Missing entries cover chunks and proxies; match on `kind`. */
@@ -326,6 +332,10 @@ export class RenderClient implements UploadClient {
         // No waiter, so release the GPU-backed bitmap rather than leak it.
         msg.bitmap.close();
       }
+    } else if (msg.type === "probeResult") {
+      const resolve = this.probePending.get(msg.id);
+      this.probePending.delete(msg.id);
+      resolve?.(msg.samples);
     } else if (msg.type === "frameCaptured") {
       const resolve = this.framePending.get(msg.id);
       if (resolve) {
@@ -723,6 +733,21 @@ export class RenderClient implements UploadClient {
     );
   }
 
+  /**
+   * The samples the last frame drew under a canvas point, given as fractions
+   * of the canvas: per visible channel of each entity there, the resident
+   * value and its level. Empty when nothing is drawn there, before the worker
+   * is ready, and after destroy.
+   */
+  probe(x: number, y: number): Promise<ProbeSample[]> {
+    if (this.destroyed || !this.workerReady) return Promise.resolve([]);
+    const id = this.probeSeq++;
+    return new Promise((resolve) => {
+      this.probePending.set(id, resolve);
+      this.worker.postMessage({ type: "probe", id, x, y } satisfies ProbeMessage);
+    });
+  }
+
   updateCursorData(data: Float32Array, count: number) {
     if (count === 0) {
       this.worker.postMessage({ type: "updateCursorData", data: new ArrayBuffer(0), count: 0 });
@@ -763,6 +788,8 @@ export class RenderClient implements UploadClient {
       resolve({ frame: null, reason: DESTROYED_BEFORE_ANSWER });
     }
     this.framePending.clear();
+    for (const resolve of this.probePending.values()) resolve([]);
+    this.probePending.clear();
     // Settle a still-pending init so `ready()` awaiters don't hang (no-op
     // once the worker has reported ready).
     this.readyReject(new Error("RenderClient destroyed"));
