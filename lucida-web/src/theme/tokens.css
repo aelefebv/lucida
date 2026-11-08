@@ -132,7 +132,8 @@
   /* Chart series: categorical slots, assigned in order and never cycled. The
      order keeps neighbors apart under red-green color-vision deficiency, so
      a chart takes slot 1, 2, 3... for its series in sequence. Each theme's
-     slots hold 3:1 against its background and surfaces. */
+     slots hold 3:1 against its background and surface-1, which the theme
+     canvas and the dock draw them on. */
   --lc-chart-1: #3987e5;
   --lc-chart-2: #d95926;
   --lc-chart-3: #199e70;
