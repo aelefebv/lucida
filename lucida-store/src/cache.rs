@@ -1830,7 +1830,10 @@ mod tests {
         }
         assert!(budget.current_bytes() <= 100);
         let (one, two) = (first.stats(), second.stats());
-        assert_eq!(one.current_bytes + two.current_bytes, budget.current_bytes());
+        assert_eq!(
+            one.current_bytes + two.current_bytes,
+            budget.current_bytes()
+        );
         assert_eq!(two.entry_count, 2, "the newest reads are resident");
         assert_eq!(one.entry_count, 0);
         assert_eq!(one.evictions, 2, "the first source paid for the room");
@@ -1847,11 +1850,8 @@ mod tests {
             budget.clone(),
             limiter.clone(),
         );
-        let second = CachedStore::with_budget(
-            store_with(&[("c", 40)]).await,
-            budget.clone(),
-            limiter,
-        );
+        let second =
+            CachedStore::with_budget(store_with(&[("c", 40)]).await, budget.clone(), limiter);
         async fn read(store: &CachedStore, path: &str) {
             store
                 .get_bytes(&Path::from(path), READER, LABEL)
