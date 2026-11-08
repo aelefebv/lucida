@@ -45,7 +45,7 @@ interface Props {
   /** The dataset the pin belongs to (commands are scoped per dataset). */
   datasetId: string;
   /** The browser-persisted author identity from `annotationAuthorId()`, not the
-   * per-connection `bridge.myId`, so authorship survives rejoining a workspace.
+   * per-connection `myId`, so authorship survives rejoining a workspace.
    * Gates the author-only controls and stamps new comments. */
   myId: string;
   /** Live scene handle for the apply-locally half of the seam. */
