@@ -85,5 +85,5 @@ rsa = { version = "0.9", features = ["sha2"] }
 # strict feature unification means listing it here lets the test
 # import it without a workspace round-trip.
 urlencoding = "2"
-tokio-tungstenite = "0.29"
+tokio-tungstenite = "0.30"
 p256 = { version = "0.13", features = ["pkcs8", "ecdsa"] }
