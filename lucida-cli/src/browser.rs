@@ -177,7 +177,8 @@ impl HeadlessBrowser {
         }
     }
 
-    /// Load `url` in a fresh target and return once the viewer has rendered.
+    /// Load `url` in a fresh target and return once the viewer has rendered
+    /// and its view has settled or stalled.
     ///
     /// Applies the launch viewport's device metrics, attaches `token` as a
     /// bearer header when present, then waits for the document and for the
@@ -530,7 +531,8 @@ impl Page {
     }
 
     /// Poll the viewer's capture-ready signal until it reports a rendered
-    /// frame, reporting the last probe in the timeout message.
+    /// frame of a settled or stalled view, reporting the last probe in the
+    /// timeout message.
     async fn wait_for_capture_ready(&mut self, wait: Duration) -> Result<(), CliError> {
         let deadline = tokio::time::Instant::now() + wait;
         loop {
@@ -544,7 +546,7 @@ impl Page {
                 return Err(CliError::new(
                     ErrorKind::SessionDisconnect,
                     format!(
-                        "timed out waiting for Lucida viewer render after {}s ({reason})",
+                        "timed out waiting for the Lucida viewer to render and settle after {}s ({reason})",
                         wait.as_secs()
                     ),
                 ));
@@ -682,10 +684,15 @@ const CAPTURE_READY_PROBE: &str = r#"(() => {
   }
   const frameCount = Number(state.frameCount || 0);
   const datasetCount = Number(state.datasetCount || 0);
-  const ready = Boolean(state.ready) && frameCount > 0 && datasetCount > 0;
+  const rendered = Boolean(state.ready) && frameCount > 0 && datasetCount > 0;
+  // A first frame shows whatever had arrived, so a capture waits for the view
+  // to settle, or to stall and say so. A page with no settle signal is taken
+  // at its first frame.
+  const settle = typeof state.settle === 'string' ? state.settle : 'settled';
+  const ready = rendered && settle !== 'settling';
   return {
     ready,
-    reason: ready ? 'rendered' : String(state.reason || 'not_ready'),
+    reason: ready ? settle : (rendered ? 'settling' : String(state.reason || 'not_ready')),
     frame_count: frameCount,
     dataset_count: datasetCount,
     canvas_width: canvasWidth,

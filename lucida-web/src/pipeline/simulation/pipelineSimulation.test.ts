@@ -75,24 +75,28 @@ describe("a static volume", () => {
 
 describe("a wide collection with more tiles than the coarse budget holds", () => {
   // 36 tiles, one coarse chunk each, against a coarse budget of 20 chunks.
-  settles(
-    describeScenario({
-      name: "wide collection",
-      dataset: collection({
-        id: "wide",
-        rows: 6,
-        columns: 6,
-        pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 2 },
-      }),
-      cache: { overviewBudgetBytes: 20 * CHUNK_64_BYTES },
-      // The view wants more than the budget holds, so covering less is the settled state.
-      gpuComplete: false,
+  const scenario = describeScenario({
+    name: "wide collection",
+    dataset: collection({
+      id: "wide",
+      rows: 6,
+      columns: 6,
+      pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 2 },
     }),
-    {
-      stallsAt: [1, 2],
-      because: "the wanted set ignores the coarse budget, and settle has no covering-less state",
-    },
-  );
+    cache: { overviewBudgetBytes: 20 * CHUNK_64_BYTES },
+    // The view wants more than the budget holds, so covering less is the settled state.
+    gpuComplete: false,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles covering less at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.quiescence).toBe("coverage_limited");
+      expect(open.coarse).toEqual({ resident: 20, desired: 36 });
+      expect(open.coverage).toBeLessThan(1);
+    });
+  }
 });
 
 describe("pending generated chunks that become available later", () => {

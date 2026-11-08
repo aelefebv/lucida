@@ -59,9 +59,10 @@ every one of those rows completed, the moment the last was presented.
 - One server per run is what makes the numbers cold. The server caches a source
   by path for the life of the process (#902), so a second run against the same
   server reads nothing from the object store. The harness never reuses a server.
-- The pinned run on a wide collection never reaches quiescence. That is the finding,
-  not a harness fault. The page closes its run at 60 s (#1043), and the report says
-  `no (timeout)` with what the page had planned and read by then.
+- A wide collection whose coarse tier exceeds its budget settles covering less,
+  and the run says how much. A run still filling when the driver's
+  `--timeout-seconds` runs out reports `no (timeout)` with what the page had
+  planned and read by then.
 - Verify device pixel ratio 2 from the frame, not the run's word. A 1440×900
   viewport writes a 2880×1800 `frame.png`.
 - A `gs://` dataset needs the operator's credentials. The harness drops

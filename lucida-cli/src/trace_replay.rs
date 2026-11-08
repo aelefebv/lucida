@@ -533,6 +533,7 @@ mod tests {
                 quiescence_hold_ms: 500.0,
                 settled: true,
                 end_reason: Some("quiescent".to_string()),
+                stall_reason: None,
                 server_warmth: ServerWarmth {
                     dataset_open_before_run: false,
                     opened_by_driver: false,

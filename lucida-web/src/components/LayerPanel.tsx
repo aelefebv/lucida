@@ -39,6 +39,7 @@ import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
 import type { LevelRange } from "../renderer/workerProtocol.ts";
 import type { DatasetImportWarning } from "../bridge.ts";
 import { displayedLevelNotice, levelNumbers } from "./levelReadout.ts";
+import { coverageNotice, useCoverageLoss } from "../hooks/useCoverageLoss.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import {
   applyChannelToggle,
@@ -176,6 +177,7 @@ const RENDER_OPTIONS = [
 
 export function LayerPanel(props: Props) {
   const { layers, selectedLayerId, soloChannel, onAddData } = props;
+  const coverage = useCoverageLoss();
 
   const toggleLayerChannel = (layer: LayerInfo, channel: number) =>
     applyChannelToggle(layer, soloChannel, channel, props);
@@ -236,6 +238,15 @@ export function LayerPanel(props: Props) {
           />
         ))}
       </div>
+      {coverage !== null && layers.length > 0 && (
+        <p
+          className="lc-coverage-notice"
+          role="status"
+          title="The view settled with what fits in memory. Zoom in or show fewer channels or datasets to cover more."
+        >
+          {coverageNotice(coverage)}
+        </p>
+      )}
     </div>
   );
 }
