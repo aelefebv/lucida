@@ -252,6 +252,7 @@ vi.mock("./pipeline/fetch/index.ts", () => {
   }
   class MockCpuCache {
     reset = vi.fn();
+    applyKnobs = vi.fn();
     subscribe = vi.fn(() => () => {});
     cancelDataset = vi.fn();
     // The HUD's two cache reads, so a shown HUD can tick over this double.

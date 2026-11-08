@@ -51,6 +51,7 @@ vi.mock("../pipeline/fetch/index.ts", () => {
   }
   class MockCpuCache {
     reset = vi.fn();
+    applyKnobs = vi.fn();
   }
   return {
     DecodePool: MockDecodePool,

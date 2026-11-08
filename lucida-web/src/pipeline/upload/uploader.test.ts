@@ -272,33 +272,26 @@ function makeCtx(args: {
 
 describe("Uploader unified delivery", () => {
   let Uploader: typeof import("./uploader.ts").Uploader;
-  let priorLocalStorage: unknown;
+  let setDebugCategories: typeof import("../../debug/logging.ts").setDebugCategories;
 
   /**
    * The per-tick stats are handed to `UploadTelemetry.publish`, which the
    * Uploader calls only while the `orch` log category is on. Open the
-   * category with an in-memory `localStorage` shim and read the stats off
-   * the spy.
+   * category and read the stats off the spy.
    */
   function captureTickStats(uploader: InstanceType<typeof Uploader>) {
     return vi.spyOn(uploader.uploadTelemetry, "publish");
   }
 
   beforeEach(async () => {
-    const store = new Map<string, string>();
-    priorLocalStorage = (globalThis as Record<string, unknown>).localStorage;
-    (globalThis as Record<string, unknown>).localStorage = {
-      getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => void store.set(k, v),
-      removeItem: (k: string) => void store.delete(k),
-    };
-    localStorage.setItem("debug", "orch");
     vi.resetModules();
     Uploader = (await import("./uploader.ts")).Uploader;
+    setDebugCategories = (await import("../../debug/logging.ts")).setDebugCategories;
+    setDebugCategories(["orch"]);
   });
 
   afterEach(() => {
-    (globalThis as Record<string, unknown>).localStorage = priorLocalStorage;
+    setDebugCategories([]);
   });
 
   it("dispatches deliverables from CpuCache and marks sent only after dispatch", () => {
@@ -481,12 +474,9 @@ describe("Uploader unified delivery", () => {
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
   });
 
-  it("skips telemetry aggregation when the orch category is off", async () => {
+  it("skips telemetry aggregation when the orch category is off", () => {
     // The `orch` log category is the only thing that turns the aggregators on.
-    localStorage.removeItem("debug");
-    // The category set is cached at module load; this is the documented
-    // same-tab refresh path.
-    (await import("../../debug/logging.ts")).refreshDebugCategories();
+    setDebugCategories([]);
     const chunk = makeChunkDelivery();
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();

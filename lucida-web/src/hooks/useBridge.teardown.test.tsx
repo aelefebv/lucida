@@ -55,6 +55,7 @@ vi.mock("../pipeline/fetch/index.ts", () => {
   class MockCpuCache {
     static instances: MockCpuCache[] = [];
     reset = vi.fn();
+    applyKnobs = vi.fn();
     constructor(_source: unknown, _pool: unknown) {
       MockCpuCache.instances.push(this);
     }

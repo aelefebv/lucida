@@ -49,6 +49,7 @@ import {
 } from "./retry.ts";
 import { RejectionTracker } from "./rejection.ts";
 import { DeliveryState } from "./deliveryState.ts";
+import type { CacheKnobField, CacheKnobs } from "./cacheKnobs.ts";
 import { debugLog } from "../../debug/logging.ts";
 import {
   LANES,
@@ -351,6 +352,9 @@ export class CpuCache {
 
   private listeners: (() => void)[] = [];
 
+  /** The knob fields as constructed, which a knob that clears returns to. */
+  private readonly ownKnobValues: Readonly<Pick<CpuCacheConfig, CacheKnobField>>;
+
   private currentEpochs: SceneEpochs = {
     content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
   };
@@ -368,6 +372,12 @@ export class CpuCache {
       onChunkFailureRecovered: config?.onChunkFailureRecovered,
       now: config?.now,
       random: config?.random,
+    };
+    this.ownKnobValues = {
+      mainBudgetBytes: this.config.mainBudgetBytes,
+      overviewBudgetBytes: this.config.overviewBudgetBytes,
+      maxConcurrentFetches: this.config.maxConcurrentFetches,
+      maxBytesInFlight: this.config.maxBytesInFlight,
     };
 
     this.now = config?.now ?? (() => performance.now());
@@ -1415,7 +1425,7 @@ export class CpuCache {
     }
   }
 
-  /** Live config, for surfaces that edit it (Dev controls) — read-only. */
+  /** Live config, for surfaces that show it (Dev controls) — read-only. */
   getConfig(): Readonly<CpuCacheConfig> {
     return this.config;
   }
@@ -1424,7 +1434,19 @@ export class CpuCache {
     Object.assign(this.config, partial);
     if (partial.now) this.now = partial.now;
     if (partial.random) this.random = partial.random;
+    // The schedulers hold their own caps, so a change has to reach them.
+    this.chunkScheduler.setCaps(this.config);
+    this.proxyScheduler.setCaps(this.config);
     this.applyElasticTierBudgets();
+    this.drainSchedulers();
+  }
+
+  /**
+   * Run under the Dev controls knobs: each field in `knobs` takes its value,
+   * and every knob field it leaves out returns to the value it was built with.
+   */
+  applyKnobs(knobs: CacheKnobs): void {
+    this.updateConfig({ ...this.ownKnobValues, ...knobs });
   }
 
   /** Searches detail then overview; proxies use {@link getCachedProxy}. */

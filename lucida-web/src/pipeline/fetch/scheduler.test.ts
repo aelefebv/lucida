@@ -820,3 +820,43 @@ describe("Scheduler admission window", () => {
     expect(scheduler.oldestPendingAgeMs(9999)).toBe(0);
   });
 });
+
+describe("Scheduler.setCaps", () => {
+  function manyReqs(n: number): TestRequest[] {
+    return Array.from({ length: n }, (_, i) => req({ chunkKey: `k${i}` }));
+  }
+
+  it("admits against the new caps from the next drain", () => {
+    const { scheduler, startCalls } = makeScheduler({ maxConcurrentFetches: 1 });
+    scheduler.enqueue(manyReqs(6));
+    scheduler.drain(() => 0);
+    expect(startCalls).toHaveLength(1);
+
+    scheduler.setCaps({ maxConcurrentFetches: 4, maxBytesInFlight: 1_000_000 });
+    scheduler.drain(() => 0);
+    expect(startCalls).toHaveLength(4);
+
+    scheduler.setCaps({ maxConcurrentFetches: 4, maxBytesInFlight: 0 });
+    scheduler.markInFlightDone(keyOf(req({ chunkKey: "k0" })));
+    scheduler.drain(() => 0);
+    expect(startCalls).toHaveLength(4);
+  });
+
+  it("resizes a derived admission window, keeping the stamps it holds", () => {
+    const { scheduler } = makeScheduler({ maxConcurrentFetches: 0 });
+    scheduler.enqueue(manyReqs(1000), 1000);
+    expect(scheduler.admittedSize).toBe(64);
+
+    scheduler.setCaps({ maxConcurrentFetches: 32, maxBytesInFlight: 1_000_000 }, 2000);
+    expect(scheduler.admittedSize).toBe(128);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k0" })))).toBe(1000);
+    expect(scheduler.enqueueTimeFor(keyOf(req({ chunkKey: "k100" })))).toBe(2000);
+  });
+
+  it("leaves an explicit admission window alone", () => {
+    const { scheduler } = makeScheduler({ maxConcurrentFetches: 0, admissionWindow: 8 });
+    scheduler.enqueue(manyReqs(100), 1000);
+    scheduler.setCaps({ maxConcurrentFetches: 32, maxBytesInFlight: 1_000_000 });
+    expect(scheduler.admittedSize).toBe(8);
+  });
+});

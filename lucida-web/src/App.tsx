@@ -621,7 +621,7 @@ function Viewer({
 
   const [addDataOpen, setAddDataOpen] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
-  // localStorage `debug.overlays`, independent of every panel). Drives the
+  // the `debug.overlays` preference, independent of every panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
   // there is nothing it could draw, so the chunk isn't fetched.
   const anyOverlayEnabled = useSyncExternalStore(

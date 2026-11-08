@@ -22,7 +22,7 @@ import {
 } from "./manifestTypes.ts";
 import type { ViewportCommand } from "./commands.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
-import { readCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
+import { readCacheKnobs, subscribeCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
 import { pageDeviceBudgets } from "./deviceBudget.ts";
 import type {
   WireGeneratedAvailabilityByDataset,
@@ -274,6 +274,7 @@ export class SessionController {
   private surfacedErrorKind: SurfacedErrorKind | null = null;
   /** Unsubscribes this controller from the scene-call guard on destroy. */
   private readonly stopObservingSceneCalls: () => void;
+  private readonly stopFollowingCacheKnobs: () => void;
   private readonly cpuCache: CpuCache;
 
   constructor(deps: SessionControllerDeps) {
@@ -288,9 +289,6 @@ export class SessionController {
       overviewBudgetBytes: budgets.cpuOverviewBytes,
       proxyBudgetBytes: budgets.cpuProxyBytes,
       maxBytesInFlight: budgets.cpuBytesInFlight,
-      // Knobs the trace driver left in browser storage, read once so the
-      // cache starts under them.
-      ...readCacheKnobs(),
       // Without this, failing deliveries present as a silently stalling
       // canvas. Store failures after a successful open (e.g. revoked access)
       // arrive as per-chunk `source_chunk_status` rejections; undecodable
@@ -309,6 +307,11 @@ export class SessionController {
         this.clearSurfacedError(["data"]);
       },
     });
+    // Applied after construction, so the cache keeps the values it was built
+    // with to return to when a knob clears. Before the bridge exists, so the
+    // first request already runs under them.
+    this.cpuCache.applyKnobs(readCacheKnobs());
+    this.stopFollowingCacheKnobs = subscribeCacheKnobs((knobs) => this.cpuCache.applyKnobs(knobs));
     const bridge = new Bridge(this.buildHandlers(), workspaceSocketUrl(deps.workspaceId));
     this.session = new Session({
       bridge,
@@ -349,6 +352,7 @@ export class SessionController {
     if (this.destroyed) return;
     this.destroyed = true;
     this.stopObservingSceneCalls();
+    this.stopFollowingCacheKnobs();
     // The stream's socket is going with the session, so the toggle goes off
     // rather than pointing a successor controller's watcher at a dead bridge.
     watchStream.detach();

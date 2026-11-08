@@ -253,10 +253,8 @@ function membershipDatasetId(
 }
 
 /**
- * Gated debug logger for bridge events. Toggle from the console via
- * `localStorage.setItem("debug", "bridge")`
- * followed by `refreshDebugCategories()` (the gate is cached at module
- * init; a raw same-tab setItem alone isn't seen until reload).
+ * Gated debug logger for bridge events. Toggle from the console with
+ * `localStorage.setItem("debug", "bridge")` and a reload (see debug/logging.ts).
  */
 export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsReadyState?: number) {
   if (!isDebugEnabled("bridge")) return;

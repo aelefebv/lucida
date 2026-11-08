@@ -29,9 +29,9 @@ export type {
 
 export {
   CACHE_KNOB_FIELDS,
-  CACHE_KNOBS_SCHEMA_VERSION,
-  CACHE_KNOBS_STORAGE_KEY,
+  CACHE_KNOB_PREFERENCES,
   readCacheKnobs,
+  subscribeCacheKnobs,
 } from "./cacheKnobs.ts";
 export type { CacheKnobField, CacheKnobs } from "./cacheKnobs.ts";
 
