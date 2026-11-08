@@ -2,7 +2,9 @@ use lucida_content::{DatasetManifest, ImageId};
 use lucida_protocol::FetchSource;
 use serde::{Deserialize, Serialize};
 
+use crate::ChunkKeyEncoding;
 use crate::codec::StorageCompression;
+use crate::fill::FillValue;
 use crate::layout::ChunkByteLayout;
 use crate::shard::ShardLayout;
 
@@ -148,8 +150,9 @@ pub struct ImageBindingSeed {
 
 /// What the chunk-fetch path needs to know about one level of one image:
 /// the on-disk compression, the on-disk chunk shape (parallels
-/// `ImageBindingSeed.axes_names`), the canonical-byte slice layout, and,
-/// for a sharded level, how an inner chunk is found in its shard.
+/// `ImageBindingSeed.axes_names`), the canonical-byte slice layout, how a
+/// chunk's object is named, what a chunk nobody wrote reads as, and, for a
+/// sharded level, how an inner chunk is found in its shard.
 ///
 /// On a sharded level every field describes the inner chunk, so bundled
 /// timepoints and channels compose with sharding: the server cuts the
@@ -162,6 +165,12 @@ pub struct LevelBindingInfo {
     pub compression: StorageCompression,
     pub chunk_shape: Vec<u64>,
     pub chunk_byte_layout: ChunkByteLayout,
+    /// How a chunk's grid coordinates name its object, or its shard's.
+    #[serde(default)]
+    pub chunk_key_encoding: ChunkKeyEncoding,
+    /// What a chunk the object store does not hold reads as.
+    #[serde(default)]
+    pub fill_value: FillValue,
     /// How this level's chunks are packed into shards, or `None` when each
     /// chunk is an object of its own.
     pub shard: Option<ShardLayout>,

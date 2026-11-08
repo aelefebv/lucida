@@ -12,17 +12,19 @@ use lucida_content::normalize::{classify_axes, normalize_to_5d};
 use lucida_content::*;
 use lucida_protocol::*;
 
+use crate::ChunkKeyEncoding;
 use crate::backend::StoreError;
 use crate::cache::CachedStore;
 use crate::coarse::{SourceCoarseConfig, select_source_coarse_level};
-use crate::codec::parse_codec_chain;
+use crate::codec::{ChunkSpec, parse_codec_chain};
 use crate::collection_checks;
 use crate::collection_geometry::{
     DeclaredLevels, StoredLevels, StoredTile, clamp_to_extent, describe_mismatches,
 };
+use crate::fill::FillValue;
 use crate::import_types::*;
 use crate::layout::compute_chunk_byte_layout;
-use crate::parse;
+use crate::parse::{self, ZarrFormat};
 use crate::shard::ShardLayout;
 use crate::unwritten;
 
@@ -50,11 +52,12 @@ async fn import_dataset_with_label_discovery(
     name: &str,
     force_exhaustive_label_discovery: bool,
 ) -> Result<ImportResult, StoreError> {
-    let root_json = parse::read_zarr_json(store, "zarr.json").await?;
+    let (format, root_json) = parse::read_root(store).await?;
 
     if parse::resolve_ome_block(&root_json, "plate").is_some() {
         import_collection(
             store,
+            format,
             id,
             name,
             &root_json,
@@ -62,12 +65,13 @@ async fn import_dataset_with_label_discovery(
         )
         .await
     } else {
-        import_single_image(store, id, name, &root_json).await
+        import_single_image(store, format, id, name, &root_json).await
     }
 }
 
 async fn import_single_image(
     store: &Arc<CachedStore>,
+    format: ZarrFormat,
     id: &str,
     name: &str,
     root_json: &serde_json::Value,
@@ -80,18 +84,13 @@ async fn import_single_image(
     // Channel display names from the OME omero block (generic; optional).
     let channel_infos = parse::parse_omero_channels(root_json);
 
-    let level_metas = parse::read_level_metas(store, "", &level_entries).await?;
+    let level_metas = parse::read_level_metas(store, format, "", &level_entries).await?;
 
     let data_type = parse_data_type(&level_metas[0].data_type)?;
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     let axes = build_axes(&layout.canonical_names);
     let level_bindings = clamp_chunks_to_levels(
-        build_level_binding_infos(
-            &axes_names,
-            &level_metas,
-            data_type_size(data_type),
-            &layout.pinned,
-        )?,
+        build_level_binding_infos(&axes_names, &level_metas, data_type, &layout.pinned)?,
         &level_metas,
         &axes_names,
         data_type_size(data_type),
@@ -147,7 +146,7 @@ async fn import_single_image(
     warnings.extend(unwritten::warn_unwritten_levels(store, "", id, &probe_targets).await);
 
     let mut label_budget = LabelBudget::new();
-    let probed = probe_labels_for_image(store, "").await;
+    let probed = probe_labels_for_image(store, format, "").await;
     if probed.index == LabelIndexState::Unusable {
         warnings.push(unusable_label_index_warning(
             id,
@@ -155,9 +154,16 @@ async fn import_single_image(
             &[probed.labels_prefix.as_str()],
         ));
     }
-    let labels =
-        build_labels_within_budget(&mut label_budget, store, id, &image_id, &entity_id, probed)
-            .await;
+    let labels = build_labels_within_budget(
+        &mut label_budget,
+        store,
+        format,
+        id,
+        &image_id,
+        &entity_id,
+        probed,
+    )
+    .await;
 
     let default_layout_id = LayoutId("source".to_string());
     let source_layout = LayoutSpec {
@@ -396,13 +402,15 @@ struct SharedTileGeometry {
 /// candidate tile instead of aborting the whole collection.
 async fn read_tile_geometry(
     store: &Arc<CachedStore>,
+    format: ZarrFormat,
     tile_prefix: &str,
 ) -> Result<SharedTileGeometry, StoreError> {
-    let tile_json = parse::read_zarr_json(store, &format!("{tile_prefix}/zarr.json")).await?;
+    let tile_json = parse::read_group(store, format, tile_prefix).await?;
     let parsed = parse::parse_multiscales(&tile_json, &format!("{tile_prefix}: "))?;
     // Channel display names from the tile's omero block (generic; optional).
     let channel_infos = parse::parse_omero_channels(&tile_json);
-    let level_metas = parse::read_level_metas(store, tile_prefix, &parsed.level_entries).await?;
+    let level_metas =
+        parse::read_level_metas(store, format, tile_prefix, &parsed.level_entries).await?;
     Ok(SharedTileGeometry {
         tile_prefix: tile_prefix.to_string(),
         axes_names: parsed.axes_names,
@@ -429,6 +437,7 @@ async fn read_tile_geometry(
 /// future borrows nothing and stays `Send`.
 async fn select_shared_tile_geometry(
     store: &Arc<CachedStore>,
+    format: ZarrFormat,
     candidate_prefixes: Vec<String>,
 ) -> (Option<SharedTileGeometry>, Vec<String>) {
     let mut unreadable: Vec<String> = Vec::new();
@@ -439,7 +448,7 @@ async fn select_shared_tile_geometry(
     let Some(first) = candidates.next() else {
         return (None, unreadable);
     };
-    match read_tile_geometry(store, &first).await {
+    match read_tile_geometry(store, format, &first).await {
         Ok(geometry) => return (Some(geometry), unreadable),
         Err(_) => unreadable.push(first),
     }
@@ -452,7 +461,7 @@ async fn select_shared_tile_geometry(
     let mut stream = futures_util::stream::iter(candidates.map(|prefix| {
         let store = store.clone();
         async move {
-            let outcome = read_tile_geometry(&store, &prefix).await;
+            let outcome = read_tile_geometry(&store, format, &prefix).await;
             (prefix, outcome)
         }
     }))
@@ -500,8 +509,10 @@ fn unusable_tile_geometry_warning(
 /// read is bound as if stored like another and its differences go unnamed.
 /// Reads fan out with bounded concurrency ([`METADATA_FETCH_CONCURRENCY`]).
 /// Each read owns its inputs so the future borrows nothing and stays `Send`.
+#[allow(clippy::too_many_arguments)]
 async fn read_stored_tiles(
     store: &Arc<CachedStore>,
+    format: ZarrFormat,
     tile_prefixes: &[String],
     representative_prefix: &str,
     representative: &StoredTile,
@@ -521,7 +532,7 @@ async fn read_stored_tiles(
                 if let Some(representative) = representative {
                     return Ok(representative);
                 }
-                let geometry = read_tile_geometry(&store, &prefix)
+                let geometry = read_tile_geometry(&store, format, &prefix)
                     .await
                     .map_err(|e| e.to_string())?;
                 stored_tile_of(&geometry, &axes_names, data_type, &pinned)
@@ -565,13 +576,8 @@ fn stored_tile_of(
     {
         return Err(format!("level {level} shape does not match its axes"));
     }
-    let bindings = build_level_binding_infos(
-        axes_names,
-        &geometry.level_metas,
-        data_type_size(data_type),
-        pinned,
-    )
-    .map_err(|e| e.to_string())?;
+    let bindings = build_level_binding_infos(axes_names, &geometry.level_metas, data_type, pinned)
+        .map_err(|e| e.to_string())?;
     if let Some(level) = bindings
         .iter()
         .position(|binding| binding.chunk_shape.contains(&0))
@@ -601,6 +607,7 @@ fn stored_tile_of(
 /// so this future owns all of its inputs.
 async fn parse_one_group(
     store: Arc<CachedStore>,
+    format: ZarrFormat,
     path: Option<String>,
     row_index: u32,
     column_index: u32,
@@ -613,8 +620,11 @@ async fn parse_one_group(
         ));
     };
 
-    let group_meta_path = Path::from(format!("{group_path}/zarr.json"));
-    let group_bytes = match store.get_metadata_bytes(&group_meta_path).await {
+    let group_meta_key = format.group_key(&group_path);
+    let group_bytes = match store
+        .get_metadata_bytes(&Path::from(group_meta_key.as_str()))
+        .await
+    {
         Ok(bytes) => bytes,
         Err(e) => {
             return Err(skipped_group_warning(
@@ -624,7 +634,7 @@ async fn parse_one_group(
         }
     };
 
-    let group_json: serde_json::Value = match serde_json::from_slice(&group_bytes) {
+    let group_json = match format.group_json(&group_meta_key, &group_bytes) {
         Ok(value) => value,
         Err(e) => {
             return Err(skipped_group_warning(
@@ -701,6 +711,7 @@ async fn parse_one_group(
 
 async fn import_collection(
     store: &Arc<CachedStore>,
+    format: ZarrFormat,
     id: &str,
     name: &str,
     root_json: &serde_json::Value,
@@ -792,6 +803,7 @@ async fn import_collection(
                 async move {
                     let outcome = parse_one_group(
                         store,
+                        format,
                         req.path,
                         req.row_index,
                         req.column_index,
@@ -866,7 +878,7 @@ async fn import_collection(
         .map(|tile| tile.store_prefix.clone())
         .collect();
     let (shared_geometry, unreadable_representatives) =
-        select_shared_tile_geometry(store, representative_prefixes).await;
+        select_shared_tile_geometry(store, format, representative_prefixes).await;
     let SharedTileGeometry {
         tile_prefix: geometry_tile_prefix,
         axes_names,
@@ -897,12 +909,8 @@ async fn import_collection(
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     warnings.extend(pinned_axes_warning(id, &layout.pinned));
     let axes = build_axes(&layout.canonical_names);
-    let level_bindings = build_level_binding_infos(
-        &axes_names,
-        &level_metas,
-        data_type_size(data_type),
-        &layout.pinned,
-    )?;
+    let level_bindings =
+        build_level_binding_infos(&axes_names, &level_metas, data_type, &layout.pinned)?;
     let representative_levels =
         build_level_geometries(&level_entries, &level_metas, &level_bindings, &axes_names)?;
 
@@ -944,6 +952,7 @@ async fn import_collection(
     };
     let stored_tiles = read_stored_tiles(
         store,
+        format,
         &tile_prefixes,
         &geometry_tile_prefix,
         &representative,
@@ -1077,9 +1086,9 @@ async fn import_collection(
         force_exhaustive_label_discovery,
     ) {
         let all: Vec<usize> = (0..tile_prefixes.len()).collect();
-        probe_labels_for_tiles(store, &tile_prefixes, all, &mut probed_labels).await;
+        probe_labels_for_tiles(store, format, &tile_prefixes, all, &mut probed_labels).await;
     } else {
-        probe_labels_for_tiles(store, &tile_prefixes, samples, &mut probed_labels).await;
+        probe_labels_for_tiles(store, format, &tile_prefixes, samples, &mut probed_labels).await;
 
         // Expand every tile of a group whose samples signal labels, so a
         // labeled group's discovery stays complete. Only a clean NotFound on
@@ -1126,7 +1135,8 @@ async fn import_collection(
             }
         }
         if !follow_up.is_empty() {
-            probe_labels_for_tiles(store, &tile_prefixes, follow_up, &mut probed_labels).await;
+            probe_labels_for_tiles(store, format, &tile_prefixes, follow_up, &mut probed_labels)
+                .await;
         }
 
         let unprobed = probed_labels.iter().filter(|slot| slot.is_none()).count();
@@ -1182,9 +1192,16 @@ async fn import_collection(
         });
         let image_id = ImageId(format!("{id}:image:{prefix}"));
         let owner = EntityId(format!("{id}:tile:{prefix}"));
-        let imported =
-            build_labels_within_budget(&mut label_budget, store, id, &image_id, &owner, probed)
-                .await;
+        let imported = build_labels_within_budget(
+            &mut label_budget,
+            store,
+            format,
+            id,
+            &image_id,
+            &owner,
+            probed,
+        )
+        .await;
         tile_labels.push(imported);
     }
     let mut tile_labels = tile_labels.into_iter();
@@ -1433,28 +1450,40 @@ fn data_type_size(dt: DataType) -> u8 {
 /// [`ShardLayout::from_codec_chain`] when the outer codec is the sharding
 /// codec) and [`compute_chunk_byte_layout`]; any error is wrapped with the
 /// offending level index so the user can locate it in their dataset (e.g.
-/// `"level 0: unsupported codec 'gzip' in storage chain"`). The first
+/// `"level 0: unsupported codec 'bz2' in storage chain"`). The first
 /// failing level short-circuits — we don't accumulate all failures.
+///
+/// Every level is read as `data_type`, the type level 0 declares.
 fn build_level_binding_infos(
     axes_names: &[String],
     level_metas: &[parse::ArrayMeta],
-    dtype_size: u8,
+    data_type: DataType,
     pinned: &[PinnedAxis],
 ) -> Result<Vec<LevelBindingInfo>, StoreError> {
+    let dtype_size = data_type_size(data_type);
     level_metas
         .iter()
         .enumerate()
         .map(|(i, meta)| {
             let at_level = |e: StoreError| e.in_context(format!("level {i}"));
             let grid_chunk_shape = &meta.chunk_grid.configuration.chunk_shape;
-            let shard =
-                ShardLayout::from_codec_chain(&meta.codecs, grid_chunk_shape).map_err(at_level)?;
+            let shard = ShardLayout::from_codec_chain(&meta.codecs, grid_chunk_shape, dtype_size)
+                .map_err(at_level)?;
             let (compression, chunk_shape) = match &shard {
-                Some(layout) => (layout.inner_compression, layout.inner_chunk_shape.clone()),
-                None => (
-                    parse_codec_chain(&meta.codecs).map_err(at_level)?,
-                    grid_chunk_shape.clone(),
+                Some(layout) => (
+                    layout.inner_compression.clone(),
+                    layout.inner_chunk_shape.clone(),
                 ),
+                None => {
+                    let spec = ChunkSpec {
+                        sample_size: dtype_size,
+                        ndim: grid_chunk_shape.len(),
+                    };
+                    (
+                        parse_codec_chain(&meta.codecs, spec).map_err(at_level)?,
+                        grid_chunk_shape.clone(),
+                    )
+                }
             };
             let chunk_byte_layout =
                 compute_chunk_byte_layout(axes_names, &chunk_shape, dtype_size, pinned)
@@ -1464,6 +1493,9 @@ fn build_level_binding_infos(
                 compression,
                 chunk_shape,
                 chunk_byte_layout,
+                chunk_key_encoding: ChunkKeyEncoding::parse(meta.chunk_key_encoding.as_ref())
+                    .map_err(at_level)?,
+                fill_value: FillValue::parse(&meta.fill_value, data_type).map_err(at_level)?,
                 shard,
                 regrid: None,
             })
@@ -1575,6 +1607,7 @@ fn build_probe_targets(
             unwritten::ProbeTarget {
                 path: entry.path.clone(),
                 axis_count: meta.shape.len(),
+                chunk_key_encoding: binding.chunk_key_encoding,
                 origin_footprint: std::array::from_fn(|d| stored[d] as f64 * geometry.scale[d]),
                 shard: binding.shard.clone(),
             }
@@ -1741,31 +1774,34 @@ fn unusable_label_index_warning(
 /// only per-tile label I/O safe to fan out concurrently: probing every tile of
 /// a wide collection at once costs no per-label memory. The expensive per-label reads
 /// happen later in [`build_labels_within_budget`], gated by the shared budget.
-async fn probe_labels_for_image(store: &Arc<CachedStore>, base_prefix: &str) -> ProbedLabels {
+async fn probe_labels_for_image(
+    store: &Arc<CachedStore>,
+    format: ZarrFormat,
+    base_prefix: &str,
+) -> ProbedLabels {
     let labels_prefix = if base_prefix.is_empty() {
         "labels".to_string()
     } else {
         format!("{base_prefix}/labels")
     };
 
-    let labels_json =
-        match parse::read_optional_zarr_json(store, &format!("{labels_prefix}/zarr.json")).await {
-            parse::OptionalZarrJson::Parsed(value) => value,
-            parse::OptionalZarrJson::Absent => {
-                return ProbedLabels {
-                    labels_prefix,
-                    names: Vec::new(),
-                    index: LabelIndexState::Absent,
-                };
-            }
-            parse::OptionalZarrJson::Unusable => {
-                return ProbedLabels {
-                    labels_prefix,
-                    names: Vec::new(),
-                    index: LabelIndexState::Unusable,
-                };
-            }
-        };
+    let labels_json = match parse::read_optional_group(store, format, &labels_prefix).await {
+        parse::OptionalZarrJson::Parsed(value) => value,
+        parse::OptionalZarrJson::Absent => {
+            return ProbedLabels {
+                labels_prefix,
+                names: Vec::new(),
+                index: LabelIndexState::Absent,
+            };
+        }
+        parse::OptionalZarrJson::Unusable => {
+            return ProbedLabels {
+                labels_prefix,
+                names: Vec::new(),
+                index: LabelIndexState::Unusable,
+            };
+        }
+    };
 
     let names = parse::parse_labels_names(&labels_json);
     let index = if names.is_empty() {
@@ -1786,6 +1822,7 @@ async fn probe_labels_for_image(store: &Arc<CachedStore>, base_prefix: &str) -> 
 /// callers can layer probe passes (sample first, then expand).
 async fn probe_labels_for_tiles(
     store: &Arc<CachedStore>,
+    format: ZarrFormat,
     tile_prefixes: &[String],
     indices: Vec<usize>,
     probed_labels: &mut [Option<ProbedLabels>],
@@ -1794,7 +1831,7 @@ async fn probe_labels_for_tiles(
         let store = store.clone();
         let prefix = tile_prefixes[index].clone();
         async move {
-            let probed = probe_labels_for_image(&store, &prefix).await;
+            let probed = probe_labels_for_image(&store, format, &prefix).await;
             (index, probed)
         }
     }))
@@ -1814,6 +1851,7 @@ async fn probe_labels_for_tiles(
 async fn build_labels_within_budget(
     budget: &mut LabelBudget,
     store: &Arc<CachedStore>,
+    format: ZarrFormat,
     dataset_id: &str,
     source_image_id: &ImageId,
     source_owner: &EntityId,
@@ -1836,7 +1874,16 @@ async fn build_labels_within_budget(
             );
             break;
         }
-        match build_label(store, &labels_prefix, &name, source_image_id, source_owner).await {
+        match build_label(
+            store,
+            format,
+            &labels_prefix,
+            &name,
+            source_image_id,
+            source_owner,
+        )
+        .await
+        {
             Ok(mut label) => {
                 // Clamp this label's colors to the remaining dataset-wide budget
                 // before retaining them, then charge both budgets.
@@ -1878,20 +1925,21 @@ struct BuiltLabel {
 /// foundation for later rendering.
 async fn build_label(
     store: &Arc<CachedStore>,
+    format: ZarrFormat,
     labels_prefix: &str,
     name: &str,
     source_image_id: &ImageId,
     source_owner: &EntityId,
 ) -> Result<BuiltLabel, StoreError> {
     let group_prefix = format!("{labels_prefix}/{name}");
-    let group_json = parse::read_zarr_json(store, &format!("{group_prefix}/zarr.json")).await?;
+    let group_json = parse::read_group(store, format, &group_prefix).await?;
 
     let error_prefix = format!("label {name:?}: ");
     let parsed = parse::parse_multiscales(&group_json, &error_prefix)?;
     let axes_names = parsed.axes_names;
     let level_entries = parsed.level_entries;
 
-    let level_metas = parse::read_level_metas(store, &group_prefix, &level_entries).await?;
+    let level_metas = parse::read_level_metas(store, format, &group_prefix, &level_entries).await?;
 
     // Preserve the label's integer dtype exactly (uint8/16/32) — a uint32 mask
     // whose ids exceed 65535 must never be narrowed.
@@ -1907,12 +1955,8 @@ async fn build_label(
         );
     }
     let axes = build_axes(&layout.canonical_names);
-    let level_bindings = build_level_binding_infos(
-        &axes_names,
-        &level_metas,
-        data_type_size(data_type),
-        &layout.pinned,
-    )?;
+    let level_bindings =
+        build_level_binding_infos(&axes_names, &level_metas, data_type, &layout.pinned)?;
     // A zero chunk dimension here returns Err, so the label is skipped by the
     // caller rather than panicking the whole import.
     let levels =
@@ -1976,6 +2020,11 @@ mod tests {
     /// Cache budget for import tests: far above any fixture's metadata, so a
     /// test never measures eviction it did not intend.
     const TEST_CACHE_BYTES: usize = 8 * 1024 * 1024;
+
+    /// The committed fixtures' chain: little-endian `uint16` behind zstd.
+    fn zstd_u16() -> crate::codec::StorageCompression {
+        crate::codec::StorageCompression::compressed(crate::codec::BytesCodec::Zstd, 2)
+    }
 
     /// The store an import reads through: a fixture directory behind a
     /// `CachedStore`, exactly as the server wires it.
@@ -2199,7 +2248,7 @@ mod tests {
         let seed = &result.binding_seed.images[0];
         assert_eq!(seed.levels.len(), 3);
         for level in &seed.levels {
-            assert_eq!(level.compression, crate::codec::StorageCompression::Zstd);
+            assert_eq!(level.compression, zstd_u16());
             assert_eq!(level.chunk_shape, vec![1, 8, 8]);
         }
     }
@@ -2225,7 +2274,7 @@ mod tests {
         let seed = &result.binding_seed.images[0];
         assert_eq!(seed.levels.len(), 3);
         for level in &seed.levels {
-            assert_eq!(level.compression, crate::codec::StorageCompression::Zstd);
+            assert_eq!(level.compression, zstd_u16());
             assert_eq!(level.chunk_shape, vec![1, 8, 8]);
             assert_eq!(level.chunk_byte_layout.canonical_byte_size, 8 * 8 * 2);
             let shard = level.shard.as_ref().expect("the level is sharded");
@@ -2272,7 +2321,7 @@ mod tests {
         assert_eq!(level.grid_shape, [1, 1, 1, 8, 8]);
         let binding = &result.binding_seed.images[0].levels[0];
         assert_eq!(binding.chunk_shape, [1, 1, 1, 8, 8]);
-        assert_eq!(binding.compression, crate::codec::StorageCompression::Zstd);
+        assert_eq!(binding.compression, zstd_u16());
         assert_eq!(
             binding.shard.as_ref().unwrap().chunks_per_shard,
             [1, 1, 1, 8, 8]
@@ -2299,12 +2348,12 @@ mod tests {
                 "nested",
             ),
             (
-                "sharded-inner-gzip",
+                "sharded-inner-bz2",
                 |config| {
                     config["chunk_shape"] = serde_json::json!([1, 1, 1, 8, 8]);
-                    config["codecs"][1] = serde_json::json!({"name": "gzip"});
+                    config["codecs"][1] = serde_json::json!({"name": "bz2"});
                 },
-                "gzip",
+                "bz2",
             ),
             (
                 "sharded-index-middle",
@@ -4364,7 +4413,10 @@ mod tests {
 
         // The lz4 codec should be recognized at parse time, before the
         // binding ever reaches the chunk-fetch path.
-        assert_eq!(level0.compression, crate::codec::StorageCompression::Lz4);
+        assert_eq!(
+            level0.compression,
+            crate::codec::StorageCompression::compressed(crate::codec::BytesCodec::Lz4, 2)
+        );
 
         // The pinned axis reaches the user as a warning, not only a log line.
         let pinned = warnings_of(&result, ImportWarningKind::PinnedAxis);
@@ -4406,12 +4458,15 @@ mod tests {
             .unwrap();
 
         let level0 = &result.binding_seed.images[0].levels[0];
-        match level0.compression {
-            crate::codec::StorageCompression::Blosc(cfg) => {
-                assert_eq!(cfg.cname, crate::codec::BloscCompressor::Zstd);
-                assert_eq!(cfg.shuffle, crate::codec::BloscShuffle::Bit);
-                assert_eq!(cfg.typesize, 2);
-            }
+        match &level0.compression {
+            crate::codec::StorageCompression::Codecs(chain) => match chain.bytes_to_bytes[..] {
+                [crate::codec::BytesCodec::Blosc(cfg)] => {
+                    assert_eq!(cfg.cname, crate::codec::BloscCompressor::Zstd);
+                    assert_eq!(cfg.shuffle, crate::codec::BloscShuffle::Bit);
+                    assert_eq!(cfg.typesize, 2);
+                }
+                ref other => panic!("expected Blosc compression, got {other:?}"),
+            },
             other => panic!("expected Blosc compression, got {other:?}"),
         }
 
@@ -4519,26 +4574,32 @@ mod tests {
         }
     }
 
-    /// An unknown codec name (`gzip`) at level 0 fails import with a
+    /// An unknown codec name (`bz2`) at level 0 fails import with a
     /// message that names both the offending codec and the level index.
     #[tokio::test]
     async fn import_rejects_unknown_codec_with_level_and_name() {
-        let dir = temp_dir("import_reject_gzip_l0");
+        let dir = temp_dir("import_reject_bz2_l0");
         create_5d_fixture_with_per_level_codecs(
             &dir,
             &[vec![
                 serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}}),
-                serde_json::json!({"name": "gzip"}),
+                serde_json::json!({"name": "bz2"}),
             ]],
         );
 
         let store = cached_store(dir.to_str().unwrap());
-        let err = import_dataset(&store, "gzip-bad", "gzip bad")
+        let err = import_dataset(&store, "bz2-bad", "bz2 bad")
             .await
             .unwrap_err();
-        assert!(matches!(err, StoreError::Metadata { .. }));
+        assert!(matches!(
+            err,
+            StoreError::Metadata {
+                fault: crate::backend::MetadataFault::UnsupportedCodec,
+                ..
+            }
+        ));
         let msg = err.to_string();
-        assert!(msg.contains("gzip"), "error should name 'gzip': {msg}");
+        assert!(msg.contains("bz2"), "error should name 'bz2': {msg}");
         assert!(
             msg.contains("level 0"),
             "error should mention 'level 0': {msg}"
@@ -4547,11 +4608,11 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A `bytes` codec with `endian: "big"` fails import with a
-    /// message that names the offending value.
+    /// A `bytes` codec with `endian: "big"` imports, and the binding says
+    /// the samples need swapping.
     #[tokio::test]
-    async fn import_rejects_big_endian_bytes_codec() {
-        let dir = temp_dir("import_reject_big_endian");
+    async fn import_records_a_big_endian_bytes_codec() {
+        let dir = temp_dir("import_big_endian");
         create_5d_fixture_with_per_level_codecs(
             &dir,
             &[vec![
@@ -4560,17 +4621,23 @@ mod tests {
         );
 
         let store = cached_store(dir.to_str().unwrap());
-        let err = import_dataset(&store, "big-endian-bad", "big endian bad")
+        let result = import_dataset(&store, "big-endian", "big endian")
             .await
-            .unwrap_err();
-        assert!(matches!(err, StoreError::Metadata { .. }));
-        let msg = err.to_string();
-        assert!(msg.contains("big"), "error should mention 'big': {msg}");
+            .unwrap();
+        assert_eq!(
+            result.binding_seed.images[0].levels[0].compression,
+            crate::codec::StorageCompression::Codecs(crate::codec::CodecChain {
+                array_to_array: Vec::new(),
+                byte_order: crate::codec::ByteOrder::Big,
+                sample_size: 2,
+                bytes_to_bytes: Vec::new(),
+            })
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// A mid-pyramid codec change (level 0 lz4, level 1 `gzip`) fails
+    /// A mid-pyramid codec change (level 0 lz4, level 1 `bz2`) fails
     /// import with a message that pinpoints level 1.
     #[tokio::test]
     async fn import_rejects_mid_pyramid_unknown_codec() {
@@ -4584,7 +4651,7 @@ mod tests {
                 ],
                 vec![
                     serde_json::json!({"name": "bytes", "configuration": {"endian": "little"}}),
-                    serde_json::json!({"name": "gzip"}),
+                    serde_json::json!({"name": "bz2"}),
                 ],
             ],
         );
@@ -4599,16 +4666,16 @@ mod tests {
             msg.contains("level 1"),
             "error should mention 'level 1': {msg}"
         );
-        assert!(msg.contains("gzip"), "error should name 'gzip': {msg}");
+        assert!(msg.contains("bz2"), "error should name 'bz2': {msg}");
 
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Blosc with an unsupported `cname` (`blosclz`) fails import with
+    /// Blosc with an unsupported `cname` (`snappy`) fails import with
     /// a message that names the offending value verbatim.
     #[tokio::test]
     async fn import_rejects_blosc_with_unsupported_cname() {
-        let dir = temp_dir("import_reject_blosc_blosclz");
+        let dir = temp_dir("import_reject_blosc_snappy");
         create_5d_fixture_with_per_level_codecs(
             &dir,
             &[vec![
@@ -4616,7 +4683,7 @@ mod tests {
                 serde_json::json!({
                     "name": "blosc",
                     "configuration": {
-                        "cname": "blosclz",
+                        "cname": "snappy",
                         "shuffle": "bitshuffle",
                         "typesize": 2
                     }
@@ -4625,15 +4692,12 @@ mod tests {
         );
 
         let store = cached_store(dir.to_str().unwrap());
-        let err = import_dataset(&store, "blosc-blosclz", "blosc blosclz")
+        let err = import_dataset(&store, "blosc-snappy", "blosc snappy")
             .await
             .unwrap_err();
         assert!(matches!(err, StoreError::Metadata { .. }));
         let msg = err.to_string();
-        assert!(
-            msg.contains("blosclz"),
-            "error should name 'blosclz': {msg}"
-        );
+        assert!(msg.contains("snappy"), "error should name 'snappy': {msg}");
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -5446,12 +5510,13 @@ mod tests {
         let source_owner = EntityId("owner".to_string());
 
         // The probe discovers all declared names — cheap, and expected.
-        let probed = probe_labels_for_image(&store, "").await;
+        let probed = probe_labels_for_image(&store, ZarrFormat::V3, "").await;
         assert_eq!(probed.names, vec!["keep0", "keep1", "over"]);
 
         let imported = build_labels_within_budget(
             &mut budget,
             &store,
+            ZarrFormat::V3,
             "ds",
             &source_image_id,
             &source_owner,
