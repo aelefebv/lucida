@@ -2207,6 +2207,7 @@ mod tests {
                 status: GeneratedChunkStatus::FailedTransient,
                 message: Some("temporary source error".into()),
             }],
+            histograms: vec![],
         };
         let health = generated_coarse_health(
             Some(&snapshot),

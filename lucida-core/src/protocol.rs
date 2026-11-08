@@ -1912,6 +1912,7 @@ mod tests {
                     status: GeneratedChunkStatus::Ready,
                     message: None,
                 }],
+                histograms: vec![],
             },
         };
         let json = serde_json::to_string(&msg).unwrap();
