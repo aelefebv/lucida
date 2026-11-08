@@ -2,7 +2,7 @@
 import { assertCanvasSize } from "./applyAndSend.ts";
 import { Axis } from "./axes.ts";
 import { labelFootprint } from "./renderer/labelLayout.ts";
-import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
+import { labelChunkAt, resolveVisibleLabels, type LabelViewSetting, type ResolvedLabel } from "./pipeline/planning/labelRequests.ts";
 import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
@@ -220,6 +220,12 @@ export function pushMemberLayers(
   }
 }
 
+/** The plane of a label that slice mode draws at source `t` and `z`, as its fetch names it. */
+function labelPlaneAt(resolved: ResolvedLabel, at: { t: number; z: number }): { level: number; t: number; z: number } {
+  const chunk = labelChunkAt(resolved, at.t, at.z);
+  return { level: chunk.level, t: chunk.t, z: chunk.z ?? 0 };
+}
+
 /**
  * Append an overlay layer for each visible label, over the intensity layers.
  *
@@ -234,6 +240,7 @@ export function pushLabelLayers(
   members: MemberRosterEntry[],
   labelSettings?: LabelViewSetting[],
   memberPositions?: Record<string, [number, number]>,
+  at?: { t: number; z: number },
 ): void {
   for (const resolved of resolveVisibleLabels(manifest, labelSettings)) {
     const { label, source, opacity } = resolved;
@@ -257,6 +264,7 @@ export function pushLabelLayers(
       isLabel: true,
       opacity,
       labelColors: label.colors,
+      labelChunk: at ? labelPlaneAt(resolved, at) : undefined,
     });
   }
 }
@@ -348,7 +356,10 @@ function uploadAndRenderSlice(
         labelMemberPositions = undefined;
       }
     }
-    pushLabelLayers(layers, ds.manifest, members, dsSettings.label_settings, labelMemberPositions);
+    pushLabelLayers(layers, ds.manifest, members, dsSettings.label_settings, labelMemberPositions, {
+      t: resolved.t,
+      z: resolved.z_range.start,
+    });
   }
 
   client.resize(canvasW, canvasH);
