@@ -117,7 +117,9 @@ async fn level_index_pyramid_serves_each_level_at_its_own_extent() {
             &resolver,
             &store,
             &image_id,
-            &format!("{level}/0/0/0/0/0"),
+            &format!("{level}/0/0/0/0/0")
+                .parse::<lucida_content::ChunkKey>()
+                .unwrap(),
             ReaderId(1),
             RequestLabel(1),
             None,
