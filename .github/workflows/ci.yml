@@ -136,7 +136,7 @@ jobs:
           version: 'v0.15.0'
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 
@@ -207,7 +207,7 @@ jobs:
           version: 'v0.15.0'
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 9
 
@@ -262,7 +262,7 @@ jobs:
       - name: Detect build-context changes
         id: filter
         if: github.event_name == 'pull_request'
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         with:
           filters: |
             build:
@@ -317,7 +317,7 @@ jobs:
       # cold; pushed fixup commits and rebases see warm caches.
       - name: Build image (single-arch, no push)
         if: steps.gate.outputs.build == 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           platforms: linux/amd64

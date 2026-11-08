@@ -146,6 +146,49 @@ async fn a_zarr_v2_collection_serves_the_same_chunks_as_its_v3_twin() {
     assert_eq!(present, 3 * (9 + 2));
 }
 
+/// Shards of levels whose arrays are `s0`, `s1`, and `s2`, not the level
+/// index.
+#[tokio::test]
+async fn level_arrays_named_other_than_their_index_serve_their_twin_s_chunks() {
+    let present =
+        assert_served_identically("v3-level-paths.ome.zarr", "twin-unsharded.ome.zarr").await;
+    assert_eq!(present, 2 * (25 + 9 + 4));
+}
+
+/// A Zarr v2 collection whose levels are named `s0` and `s1`, with every
+/// metadata document consolidated into its root `.zmetadata`.
+#[tokio::test]
+async fn a_consolidated_zarr_v2_collection_with_named_levels_serves_its_twin_s_chunks() {
+    let present =
+        assert_served_identically("v2-consolidated.ome.zarr", "collection-unsharded.ome.zarr")
+            .await;
+    assert_eq!(present, 3 * (9 + 2));
+}
+
+/// Opening a consolidated hierarchy reads its root and nothing else that
+/// metadata holds: the groups, tiles, levels, and absent label groups all
+/// come from `.zmetadata`. The same collection unconsolidated reads every
+/// one of them.
+#[tokio::test]
+async fn a_consolidated_zarr_v2_open_reads_only_its_root_metadata() {
+    let reads = |name: &'static str| async move {
+        import_dir(&fixture_dir(name))
+            .await
+            .store
+            .stats()
+            .source_reads
+    };
+    let consolidated = reads("v2-consolidated.ome.zarr").await;
+    let unconsolidated = reads("v2-collection.ome.zarr").await;
+    // zarr.json (absent), .zattrs, and .zmetadata, then one origin-chunk
+    // probe per level for the unwritten-level check.
+    assert_eq!(consolidated, 3 + 2, "consolidated open");
+    assert!(
+        unconsolidated > consolidated + 3 * 3,
+        "unconsolidated open read {unconsolidated} objects, consolidated {consolidated}"
+    );
+}
+
 /// `[transpose, bytes(big), gzip, crc32c]`.
 #[tokio::test]
 async fn a_zarr_v3_chain_of_transpose_big_endian_gzip_and_crc32c_serves_its_twin_s_chunks() {
@@ -193,8 +236,13 @@ async fn open(
 }
 
 #[tokio::test]
-async fn every_committed_zarr_v2_fixture_opens_through_the_server() {
-    for name in ["v2-twin.ome.zarr", "v2-collection.ome.zarr"] {
+async fn every_committed_fixture_of_another_format_or_layout_opens_through_the_server() {
+    for name in [
+        "v2-twin.ome.zarr",
+        "v2-collection.ome.zarr",
+        "v2-consolidated.ome.zarr",
+        "v3-level-paths.ome.zarr",
+    ] {
         let outcome = open(&fixture_dir(name))
             .await
             .unwrap_or_else(|failure| panic!("{name}: {failure:?}"));
@@ -301,21 +349,22 @@ async fn an_uncompressed_one_byte_zarr_v2_array_reads_its_chunk_as_stored() {
 }
 
 /// A label group under a Zarr v2 image is found through `labels/.zattrs`,
-/// and its own `.zarray` levels are read like the image's.
+/// and its own `.zarray` levels are read like the image's, under the path
+/// its own multiscale gives each one.
 #[tokio::test]
 async fn a_zarr_v2_label_attaches_to_its_image_and_serves_its_chunk() {
     let dir = temp_dir("label");
     write_v2_image(&dir, serde_json::json!({}), None);
     let labels = dir.join("labels");
     let mask = labels.join("mask");
-    fs::create_dir_all(mask.join("0")).unwrap();
+    fs::create_dir_all(mask.join("s0")).unwrap();
     fs::write(labels.join(".zattrs"), r#"{"labels": ["mask"]}"#).unwrap();
     let attributes = serde_json::json!({
         "multiscales": [{
             "version": "0.4",
             "axes": [{"name": "y", "type": "space"}, {"name": "x", "type": "space"}],
             "datasets": [{
-                "path": "0",
+                "path": "s0",
                 "coordinateTransformations": [{"type": "scale", "scale": [1.0, 1.0]}]
             }]
         }],
@@ -333,13 +382,13 @@ async fn a_zarr_v2_label_attaches_to_its_image_and_serves_its_chunk() {
         "filters": null,
         "dimension_separator": "/"
     });
-    fs::write(mask.join("0").join(".zarray"), zarray.to_string()).unwrap();
+    fs::write(mask.join("s0").join(".zarray"), zarray.to_string()).unwrap();
     let samples = [0u8, 1, 1, 0, 1, 0, 0, 1];
     let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::new(1));
     std::io::Write::write_all(&mut encoder, &samples).unwrap();
-    fs::create_dir_all(mask.join("0").join("0")).unwrap();
+    fs::create_dir_all(mask.join("s0").join("0")).unwrap();
     fs::write(
-        mask.join("0").join("0").join("0"),
+        mask.join("s0").join("0").join("0"),
         encoder.finish().unwrap(),
     )
     .unwrap();
