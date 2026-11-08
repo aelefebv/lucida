@@ -26,6 +26,7 @@ import {
   makeReading,
   makeRow,
   makeRun,
+  makeTick,
   quietRun,
   saturatedReopen,
   sendHeavyIdleRun,
@@ -41,8 +42,10 @@ import {
   interactionCause,
   TRACE_SCHEMA_VERSION,
   type GpuIdentity,
+  type RunCause,
   type TraceDocument,
   type TracePointEvent,
+  type TraceRun,
 } from "../types.ts";
 
 const MS = 1_000;
@@ -480,6 +483,71 @@ describe("first paint on a cold open", () => {
 
     expect(doc.verdict.kind).toBe("stall");
     expect(doc.findings.some((finding) => finding.rule === RULESET.firstPaint.id)).toBe(false);
+  });
+});
+
+describe("the plan ceiling on a cold open", () => {
+  const planCeiling = RULESET.absolute.find((rule) => rule.id === RULESET.coldPlan.widens)!;
+
+  /** One plan pass of `planMs` over an active set of `entities`, the shape a wide collection's first open has. */
+  function widePlanRun(planMs: number, entities: number, cause: RunCause, warm = false): TraceRun {
+    const tick = makeTick(10 * MS);
+    tick.counters.activeSetTotal = entities;
+    return makeRun({
+      header: {
+        runId: "wide-plan",
+        durationUs: 600 * MS,
+        cause,
+        ...(warm
+          ? { cacheWarmth: { detailChunks: 40, detailBytes: 40 * 8_192, coarseChunks: 0, coarseBytes: 0 } }
+          : {}),
+      },
+      rows: Array.from({ length: 40 }, (_, i) =>
+        makeRow({ startUs: 0, durations: { plan: planMs * MS, queue: 1 * MS, wire: 5 * MS } }, i),
+      ),
+      ticks: [tick],
+    });
+  }
+
+  const open: RunCause = { epoch: "content", dirtyKind: "interactive", source: "loop_start" };
+
+  it("allows the first pass of a wide collection a cost per entity it walks", () => {
+    const doc = diagnoseRun(widePlanRun(56, 700, open));
+
+    expect(doc.findings.some((finding) => finding.subject === "browser.plan")).toBe(false);
+    expect(doc.verdict.kind).toBe("clear");
+  });
+
+  it("still fails a pass far over the allowance, and names the widened ceiling", () => {
+    const doc = diagnoseRun(widePlanRun(400, 700, open));
+
+    const lead = doc.findings[0];
+    expect(lead.severity).toBe("stall");
+    expect(lead.rule).toBe(RULESET.coldPlan.id);
+    expect(lead.observed.entities).toBe(700);
+    expect(lead.threshold).toEqual({
+      kind: "absolute",
+      value: planCeiling.ceilMs + RULESET.coldPlan.perEntityMs * 700,
+      why: RULESET.coldPlan.why,
+    });
+  });
+
+  it("holds a narrow dataset to the flat ceiling, near enough", () => {
+    const doc = diagnoseRun(widePlanRun(56, 12, open));
+
+    expect(doc.findings[0].subject).toBe("browser.plan");
+    expect(doc.verdict.kind).toBe("stall");
+  });
+
+  it("keeps the flat ceiling on an interaction run and on a warm open", () => {
+    for (const run of [
+      widePlanRun(56, 700, interactionCause("scrub")),
+      widePlanRun(56, 700, open, true),
+    ]) {
+      const lead = diagnoseRun(run).findings[0];
+      expect(lead.rule).toBe(planCeiling.id);
+      expect(lead.threshold.value).toBe(planCeiling.ceilMs);
+    }
   });
 });
 

@@ -16,7 +16,7 @@ import { RESEND_GUARD_TICKS } from "../../pipeline/upload/delivery/resendGuard.t
  * Bumped whenever a threshold moves or a rule is added, so two diagnostics
  * are visibly comparable or visibly not.
  */
-export const RULESET_VERSION = 6;
+export const RULESET_VERSION = 7;
 
 export interface AbsoluteRule {
   id: string;
@@ -70,6 +70,19 @@ export interface FirstPaintRule {
   id: string;
   /** The phases bounded by a main-thread frame dispatch, which the first frame's compile holds. */
   phases: readonly string[];
+  why: string;
+}
+
+/**
+ * An allowance on one absolute ceiling during a run opened by content on a
+ * cold browser cache, per entity in the largest active set the run planned.
+ * Every other run is held to the ceiling as written.
+ */
+export interface ColdOpenAllowanceRule {
+  id: string;
+  /** The absolute rule whose ceiling this widens. */
+  widens: string;
+  perEntityMs: number;
   why: string;
 }
 
@@ -160,6 +173,8 @@ export interface Ruleset {
    * besides the interaction ceiling, and the only one that reads its warmth.
    */
   firstPaint: FirstPaintRule;
+  /** The plan ceiling on a cold open, widened by the size of the active set the first pass walks. */
+  coldPlan: ColdOpenAllowanceRule;
   /**
    * The one ceiling an interaction run is judged by, on the frame-time
    * reading rather than a phase. `phase` names the aggregate candidate,
@@ -351,6 +366,12 @@ export const RULESET: Ruleset = {
     id: "frame.first-paint",
     phases: ["browser.upload", "browser.present"],
     why: "Upload and present each run to a frame dispatch on the main thread, and on a cold open the frame after the first chunks land is the first frame that draws them. The render worker compiles its pipelines inside that frame, which held the GPU process for 150 to 200 ms in slice mode and about 750 ms in volume mode on a hardware adapter (#1094), and the page's frames wait behind it. The chunks were not slow; the first paint was. So an upload or present breach on a run opened by content on a cold browser cache is a note that names the cost, never a stall. A dataset added to a live page opens a content run too, but its caches hold chunks and its pipelines are compiled, so it keeps the stall. An interaction run once the page is quiescent draws through pipelines already compiled, keeps the stall, and is what confirms a regression.",
+  },
+  coldPlan: {
+    id: "compute.plan.cold-open",
+    widens: "compute.plan",
+    perEntityMs: 0.1,
+    why: "The first plan pass of a cold open walks every entity in the active set once: the view query, chunk enumeration, admission, the member roster and the descriptor build are each linear in it. On one workstation that pass took 27 ms at 200 entities, 56 ms at 700 and 96 ms at 1,600, about 16 ms plus 50 µs per entity, so a flat ceiling fails a wide collection on a pass that is healthy for its size. On a run opened by content on a cold browser cache the plan ceiling is compute.plan's 50 ms plus 0.1 ms per entity of the largest active set the run planned: twice the measured slope, so a pass doing several times the work per entity still fails. Every other run keeps the flat ceiling, which is the one an interaction run's frame time is held to.",
   },
   interaction: {
     id: "interaction.frame-time",
