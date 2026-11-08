@@ -280,6 +280,19 @@ describe("UrlSync", () => {
     expect(win.location.hash).toBe("");
   });
 
+  it("writes nothing once destroyed, even from a flush already encoding", async () => {
+    const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
+      window: win,
+    });
+    const spy = vi.spyOn(win.history, "replaceState");
+    const writing = sync.flush();
+    const collapsing = sync.collapseToLiveView();
+    sync.destroy();
+    await Promise.all([writing, collapsing]);
+    expect(spy).not.toHaveBeenCalled();
+    expect(win.location.hash).toBe("");
+  });
+
   it("re-arms after destroy + start (Strict-Mode mount→unmount→mount cycle)", async () => {
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       debounceMs: 30,
