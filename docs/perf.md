@@ -75,3 +75,23 @@ differ from what it last built. A failed build stops the invocation before any r
 The server stays up for the whole invocation, so only a dataset's first run meets a cold
 server. Every browser starts cold. Each run file's `header.serverWarmth` says which case it
 was.
+
+`--cli` runs a CLI that is already built, and `--server` drives a running server instead of
+starting one. With both, the runner builds nothing. The server opens datasets by the path
+the runner names, so it has to see `--data` at the same absolute path.
+
+## The trace gate
+
+The `gate` suite is what CI's "Trace gate" check runs under SwiftShader, through
+`scripts/trace_gate.sh`. It passes `--gate`, so a run that stalls, never settles, or ends on
+a failing verdict fails, and `--bundle`, so each run also leaves the bundle `lucida trace
+replay` reads. The runner names the failed runs and exits non-zero. The script's header
+lists the variables it reads; with none set, it builds and runs the whole suite locally:
+
+```bash
+scripts/trace_gate.sh
+LUCIDA_GATE_CLI=target/release/lucida LUCIDA_GATE_SERVER=http://127.0.0.1:9876 scripts/trace_gate.sh
+```
+
+In a GitHub Actions job the runner also groups each run's text in the log, annotates each
+failed run, and writes the table to the job summary.
