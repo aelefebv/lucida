@@ -107,6 +107,12 @@ export interface LabelColor {
   rgba: [number, number, number, number];
 }
 
+/** A label value and the name the `image-label` property table gives it (mirrors lucida-content's `LabelName`). */
+export interface LabelName {
+  value: number;
+  name: string;
+}
+
 /**
  * A segmentation-mask label attached to a source intensity image (mirrors
  * lucida-content's `LabelSpec`). It carries its own multiscale image, with its
@@ -119,6 +125,8 @@ export interface LabelSpec {
   image: ImageSpec;
   /** `image-label.colors`; absent on the wire when empty. */
   colors?: LabelColor[];
+  /** Names from `image-label.properties`; absent on the wire when empty. */
+  names?: LabelName[];
   source_declared?: boolean;
 }
 

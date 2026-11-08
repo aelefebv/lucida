@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { clipPlaneHit, levelZeroPosition, locateSample, sliceHits, texelValue, type ProbeAtlas } from "./probe.ts";
+import {
+  clipPlaneHit,
+  levelZeroPosition,
+  locateSample,
+  marchSamples,
+  marchSpan,
+  pickIntensitySample,
+  pickLabelSample,
+  sliceHits,
+  texelValue,
+  type MarchedValue,
+  type ProbeAtlas,
+} from "./probe.ts";
 import { INDIRECTION_FAILED, INDIRECTION_MISS } from "./remap.ts";
 import type { LodIndirectionMeta } from "./volume/atlas.ts";
 import type { SliceRenderMultiPassMessage, VolumeRenderMultiPassMessage } from "./workerProtocol.ts";
@@ -7,13 +19,12 @@ import type { SliceRenderMultiPassMessage, VolumeRenderMultiPassMessage } from "
 const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
 
 /** A pool with `cells` indirection entries, all missing until set. */
-function atlas(cells: number, slots: [number, number, number?], format: "u16" | "f32" = "u16"): ProbeAtlas & { indirectionData: Uint32Array } {
+function atlas(cells: number, slots: [number, number, number?]): ProbeAtlas & { indirectionData: Uint32Array } {
   return {
     indirectionData: new Uint32Array(cells).fill(INDIRECTION_MISS),
     slotsX: slots[0],
     slotsY: slots[1],
     slotsZ: slots[2],
-    format,
   };
 }
 
@@ -135,7 +146,6 @@ describe("sliceHits", () => {
       layers: [
         { datasetId: "img:ch0", dataW: 40, dataH: 40, blendMode: "additive", entityIndex: 0 },
         { datasetId: "img:ch1", dataW: 40, dataH: 40, blendMode: "additive", entityIndex: 1 },
-        { datasetId: "label", dataW: 40, dataH: 40, blendMode: "alpha", entityIndex: 0, isLabel: true },
       ],
     });
     // Canvas pixel (60, 30) has its center at (60.5, 30.5): data (25.25, 15.25) at zoom 2 about (20, 20).
@@ -143,6 +153,24 @@ describe("sliceHits", () => {
     expect(hits.map((h) => h.memberId)).toEqual(["img:ch0", "img:ch1"]);
     expect(hits[0].uv[0]).toBeCloseTo(25.25 / 40);
     expect(hits[0].uv[1]).toBeCloseTo(15.25 / 40);
+  });
+
+  it("finds a label overlay under the point across the extent its quad spans", () => {
+    const frame = sliceFrame({
+      layers: [
+        { datasetId: "img:ch0", dataW: 40, dataH: 40, blendMode: "additive", entityIndex: 0 },
+        // A label covering 20x20 level-0 samples of its source, placed at (10, 10).
+        { datasetId: "img:label:regions", dataW: 20, dataH: 20, offsetX: 10, offsetY: 10, blendMode: "alpha", entityIndex: 0, entityId: "e", isLabel: true },
+      ],
+    });
+    const [image, label] = sliceHits(frame, 60.2 / 100, 30.9 / 80, none);
+    expect(image.label).toBeUndefined();
+    expect(label.memberId).toBe("img:label:regions");
+    expect(label.label).toEqual({ entityId: "e", dataW: 20, dataH: 20 });
+    expect(label.uv[0]).toBeCloseTo((25.25 - 10) / 20);
+    expect(label.uv[1]).toBeCloseTo((15.25 - 10) / 20);
+    // At data (5.25, 5.25), off the label's footprint, only the image is under the point.
+    expect(sliceHits(frame, 20.2 / 100, 10.9 / 80, none).map((h) => h.memberId)).toEqual(["img:ch0"]);
   });
 
   it("is the same point at any render resolution of the same view", () => {
@@ -231,6 +259,105 @@ describe("clipPlaneHit", () => {
     expect(clipPlaneHit(volumeFrame(0.3), 0.5, 0.5, INV_MODEL)).toBeNull();
     // Behind it, nothing is drawn.
     expect(clipPlaneHit(volumeFrame(1.7), 0.5, 0.5, INV_MODEL)).toBeNull();
+  });
+});
+
+describe("marchSpan", () => {
+  it("runs from where the ray enters the cube, or leaves the clip, to where it leaves", () => {
+    // The center pixel's ray runs down +Z from local z -0.5: it enters at t 0.5 and leaves at 1.5.
+    const open = marchSpan(volumeFrame(0), 0.5, 0.5, INV_MODEL)!;
+    expect(open.tStart).toBeCloseTo(0.5, 5);
+    expect(open.tEnd).toBeCloseTo(1.5, 5);
+    expect(open.rd[2]).toBeCloseTo(1, 5);
+    // The clip plane 0.9 ahead of the eye and the sphere of that radius both start it at t 0.9.
+    expect(marchSpan(volumeFrame(0.9), 0.5, 0.5, INV_MODEL)!.tStart).toBeCloseTo(0.9, 5);
+    expect(marchSpan(volumeFrame(0.9, 1), 0.5, 0.5, INV_MODEL)!.tStart).toBeCloseTo(0.9, 3);
+    // A clip in front of the cube changes nothing.
+    expect(marchSpan(volumeFrame(0.3), 0.5, 0.5, INV_MODEL)!.tStart).toBeCloseTo(0.5, 5);
+  });
+
+  it("is nothing where the ray misses the cube or the clip leaves none of it", () => {
+    expect(marchSpan(volumeFrame(0), 0.99, 0.5, INV_MODEL)).toBeNull();
+    expect(marchSpan(volumeFrame(1.7), 0.5, 0.5, INV_MODEL)).toBeNull();
+  });
+});
+
+describe("marchSamples", () => {
+  /** A cubic level `size` samples on a side in 8-sample bricks, every brick resident in its own slot. */
+  function resident(level: number, size: number): { meta: LodIndirectionMeta; atlas: ReturnType<typeof atlas> } {
+    const grid = size / 8;
+    const pool = atlas(grid ** 3, [grid, grid, grid]);
+    pool.indirectionData.forEach((_, i) => (pool.indirectionData[i] = i));
+    return {
+      meta: { level, levelDims: [size, size, size], chunkDims: [8, 8, 8], gridDims: [grid, grid, grid], offset: 0 },
+      atlas: pool,
+    };
+  }
+  const span = () => marchSpan(volumeFrame(0), 0.5, 0.5, INV_MODEL)!;
+
+  it("steps by two thirds of a sample of the level that answers, as the shader marches", () => {
+    const steps = marchSamples([resident(0, 16)], null, span(), 512);
+    // 16 samples deep, stepped every 1/24 of the cube. In float32 the 24 steps
+    // fall just short of the exit, so a 25th reads the far face.
+    expect(steps).toHaveLength(25);
+    const depths = steps.map(({ pos, location }, k) => {
+      expect(pos[2]).toBeCloseTo(k / 24, 5);
+      expect(location).toMatchObject({ kind: "resident", level: 0 });
+      return location.kind === "resident" ? location.texel[2] : -1;
+    });
+    // Front to back, and no sample stepped over.
+    expect(depths).toEqual([...depths].sort((a, b) => a - b));
+    expect(new Set(depths)).toEqual(new Set(Array.from({ length: 16 }, (_, z) => z)));
+  });
+
+  it("steps by the coarse tier where it answers, and by the finest level where nothing does", () => {
+    const fine = resident(0, 32);
+    fine.atlas.indirectionData.fill(INDIRECTION_MISS);
+    const coarse = resident(2, 8);
+    expect(marchSamples([fine], coarse, span(), 512).map((s) => s.location.kind))
+      .toEqual(new Array(12).fill("resident"));
+    const nothing = marchSamples([fine], null, span(), 512);
+    expect(nothing).toHaveLength(48);
+    expect(nothing.every((s) => s.location.kind === "missing")).toBe(true);
+  });
+
+  it("never takes more steps than its budget, however fine the level", () => {
+    expect(marchSamples([resident(0, 512)], null, span(), 256)).toHaveLength(256);
+  });
+});
+
+describe("pickIntensitySample", () => {
+  const window = { contrastMin: 100, contrastMax: 1100, gamma: 1 };
+
+  it("names the first sample a translucent pixel counts as its surface", () => {
+    // 105 normalizes to 0.005, under the depth threshold; 120 to 0.02, over it.
+    const values: MarchedValue[] = ["missing", 0, "failed", 105, 120, 900];
+    expect(pickIntensitySample(values, window, "u16", "translucent")).toBe(4);
+    // Gamma 2 takes 120 to 0.0004, so the first past the threshold is 900.
+    expect(pickIntensitySample(values, { ...window, gamma: 2 }, "u16", "translucent")).toBe(5);
+    expect(pickIntensitySample([0, 50, 100], window, "u16", "translucent")).toBe(-1);
+  });
+
+  it("counts a float zero inside the window, and never a NaN", () => {
+    const below = { contrastMin: -1, contrastMax: 1, gamma: 1 };
+    expect(pickIntensitySample([Number.NaN, 0], below, "f32", "translucent")).toBe(1);
+    expect(pickIntensitySample([Number.NaN, 0], below, "u16", "translucent")).toBe(-1);
+  });
+
+  it("names a MIP pixel's brightest sample, the first to reach it, before the march stops early", () => {
+    expect(pickIntensitySample([200, 700, 300, 700], window, "u16", "max_intensity")).toBe(1);
+    // 1090 normalizes to 0.99, past the early stop, so the brighter 5000 behind it is never read.
+    expect(pickIntensitySample([200, 1090, 5000], window, "u16", "max_intensity")).toBe(1);
+    // Nothing above the window's floor draws.
+    expect(pickIntensitySample([50, 100, "missing"], window, "u16", "max_intensity")).toBe(-1);
+  });
+});
+
+describe("pickLabelSample", () => {
+  it("names the first id along the ray that isn't background, or the failed chunk it stops at", () => {
+    expect(pickLabelSample([0, "missing", 0, 5, 7])).toBe(3);
+    expect(pickLabelSample([0, "failed", 5])).toBe(1);
+    expect(pickLabelSample([0, "missing", 0])).toBe(-1);
   });
 });
 

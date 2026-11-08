@@ -2552,6 +2552,7 @@ pub(crate) mod test_helpers {
                     },
                 },
                 colors: vec![],
+                names: vec![],
                 source_declared: true,
             })
             .collect();

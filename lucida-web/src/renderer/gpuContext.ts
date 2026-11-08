@@ -135,7 +135,8 @@ export function createEmptyVolumeTexture(
     size: [width, height, depth],
     format,
     dimension: "3d",
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    // COPY_SRC so the pixel readout can copy a texel out.
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
   });
 }
 
@@ -195,7 +196,8 @@ export function createSliceTexture(
   const texture = device.createTexture({
     size: [width, height],
     format,
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    // COPY_SRC so the pixel readout can copy a texel out.
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
   });
 
   if (data) {
