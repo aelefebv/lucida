@@ -1,0 +1,8 @@
+{
+  "description": "volume-open in a ninth of the default viewport, small enough for a software rasterizer to ray-march at ratio 2 within the default timeout",
+  "requires": ["volume"],
+  "camera": "arcball",
+  "width": 480,
+  "height": 300,
+  "steps": []
+}
