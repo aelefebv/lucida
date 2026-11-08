@@ -9,7 +9,7 @@ import { configureCanvas } from "../gpuContext.ts";
 import { applyColdState } from "../coldState/index.ts";
 import { rebindMinimapCanvas } from "../minimapHandlers.ts";
 import { releaseDeviceResources } from "./lifecycle.ts";
-import { postGpuAtlasesIfChanged } from "./atlasReport.ts";
+import { postGpuMemoryIfChanged } from "./gpuBudget.ts";
 import { gpuErrorKind, reportGpuError } from "./gpuErrors.ts";
 
 /**
@@ -93,7 +93,7 @@ export async function recoverDevice(
   ctx.post({ type: "gpuDeviceRestored" });
   for (const cold of state.coldStateByDataset.values()) applyColdState(ctx, cold);
   for (const datasetId of state.coldStateByDataset.keys()) ctx.postWantedSet(datasetId);
-  postGpuAtlasesIfChanged(ctx);
+  postGpuMemoryIfChanged(ctx);
 }
 
 function giveUp(ctx: WorkerCtx, reason: string): void {

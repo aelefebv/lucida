@@ -26,7 +26,6 @@ import { AVAILABILITY_UPDATE_SOURCE } from "../../invalidation.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { PointEvent } from "../../trace/types.ts";
 import { createSettleState, settleSignal } from "../settle.ts";
-import type { AtlasBudgets } from "../../renderer/worker/state.ts";
 import type { MissingChunk } from "../../renderer/workerProtocol.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import type { ChannelFit } from "../autoContrast.ts";
@@ -89,10 +88,10 @@ export interface ScenarioSpec {
   viewport?: [number, number];
   source?: SourceSpec;
   /**
-   * The worker's atlas pool budgets. A slice pool holds
-   * `floor(sqrt(bytes / slotBytes))²` slots, so a small budget bounds them.
+   * The worker's GPU total, which every chunk pool shares. Pools grow toward
+   * it as chunks arrive, so a small total bounds them.
    */
-  atlas?: Partial<AtlasBudgets>;
+  gpuTotalBytes?: number;
   cache?: Partial<Pick<CpuCacheConfig, "mainBudgetBytes" | "overviewBudgetBytes">>;
   /** What happens after the open, each followed by its own settle. */
   steps?: ScenarioStep[];
@@ -110,7 +109,7 @@ export interface Scenario {
   readonly mode: "slice" | "volume";
   readonly viewport: readonly [number, number];
   readonly source: SourceSpec;
-  readonly atlas: AtlasBudgets;
+  readonly gpuTotalBytes: number;
   readonly cache: Partial<CpuCacheConfig>;
   readonly steps: readonly ScenarioStep[];
   readonly tickBound: number;
@@ -125,10 +124,7 @@ export function describeScenario(spec: ScenarioSpec): Scenario {
     mode: spec.mode ?? "slice",
     viewport: spec.viewport ?? DEFAULT_VIEWPORT,
     source: spec.source ?? {},
-    atlas: {
-      volumeAtlasBytes: spec.atlas?.volumeAtlasBytes ?? CEILING_BUDGETS.volumeAtlasBytes,
-      sliceAtlasBytes: spec.atlas?.sliceAtlasBytes ?? CEILING_BUDGETS.sliceAtlasBytes,
-    },
+    gpuTotalBytes: spec.gpuTotalBytes ?? CEILING_BUDGETS.gpuTotalBytes,
     cache: { ...spec.cache },
     steps: spec.steps ?? [],
     tickBound: spec.tickBound ?? DEFAULT_TICK_BOUND,
@@ -281,7 +277,7 @@ class Simulation {
   constructor(scenario: Scenario, dpr: number) {
     this.scenario = scenario;
     this.dpr = dpr;
-    this.worker = new SimulatedWorker(scenario.atlas);
+    this.worker = new SimulatedWorker(scenario.gpuTotalBytes);
     this.worker.onPost = (msg) => {
       if (msg.type !== "chunkResidency" || msg.change === "held") return;
       const reason = `${msg.change} ${msg.reason ?? ""}`.trim();

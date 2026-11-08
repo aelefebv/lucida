@@ -98,6 +98,9 @@ export function pushMemberLayers(
     members, indexByMember, channel, blendMode,
     fullResWidth, fullResHeight, zoom,
   } = input;
+  // Every layer this call emits shares one target. The index of the first is
+  // unique in the frame and needs no counter threaded through the callers.
+  const passGroup = layers.length;
 
   const candidates: MemberLayerCandidate[] = [];
   for (const m of members) {
@@ -193,6 +196,7 @@ export function pushMemberLayers(
           count: batched.length,
           quads,
         },
+        passGroup,
       });
     } else {
       // Unreachable while zero-extent members are culled above. Falls back to
@@ -212,6 +216,7 @@ export function pushMemberLayers(
       offsetY: c.member.position[1],
       entityId: c.member.entityId,
       entityIndex: c.entityIndex,
+      passGroup,
     });
   }
 }

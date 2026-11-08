@@ -99,8 +99,9 @@ impl ChunkKeyEncoding {
 }
 
 /// Convert a chunk key to the store path of its object: one coordinate per
-/// axis actually on disk, in raw axes order, named by `encoding`. The
-/// examples below are in the default encoding.
+/// axis actually on disk, in raw axes order, named by `encoding` under
+/// `level_path`, the level's array path. The examples below are in the
+/// default encoding, with `{level}` for the level's path.
 ///
 /// The key carries `t` and `c` as sample coordinates and `z`, `y`, `x` as
 /// chunk-grid coordinates, so `t` and `c` are divided by their on-disk
@@ -113,11 +114,12 @@ impl ChunkKeyEncoding {
 ///   to index 0; see `lucida-content::normalize` for the canonical set)
 pub fn chunk_key_to_store_path(
     key: &ChunkKey,
+    level_path: &str,
     axes: &[String],
     chunk_shape: &[u64],
     encoding: ChunkKeyEncoding,
 ) -> String {
-    encoding.store_path(key.level, &chunk_key_grid_coords(key, axes, chunk_shape))
+    encoding.store_path(level_path, &chunk_key_grid_coords(key, axes, chunk_shape))
 }
 
 /// The on-disk chunk-grid coordinate a chunk key names, one coordinate per
@@ -161,8 +163,23 @@ mod tests {
         ChunkKey::parse(key).unwrap()
     }
 
+    /// The path of `key`'s object in the default encoding, with the level
+    /// index as its array path.
     fn default_path(key: &ChunkKey, axes: &[String], chunk_shape: &[u64]) -> String {
-        chunk_key_to_store_path(key, axes, chunk_shape, ChunkKeyEncoding::default())
+        let level = key.level.to_string();
+        chunk_key_to_store_path(key, &level, axes, chunk_shape, ChunkKeyEncoding::default())
+    }
+
+    #[test]
+    fn a_chunk_s_object_is_named_under_its_level_s_path() {
+        let path = chunk_key_to_store_path(
+            &key("1/0/0/0/2/3"),
+            "scale1/image",
+            &axes(&["y", "x"]),
+            &[1, 1],
+            ChunkKeyEncoding::default(),
+        );
+        assert_eq!(path, "scale1/image/c/2/3");
     }
 
     #[test]
@@ -183,7 +200,8 @@ mod tests {
         ];
         let axes = axes(&["c", "y", "x"]);
         for (encoding, expected) in cases {
-            let path = chunk_key_to_store_path(&key("2/0/0/0/1/5"), &axes, &[1, 1, 1], encoding);
+            let path =
+                chunk_key_to_store_path(&key("2/0/0/0/1/5"), "2", &axes, &[1, 1, 1], encoding);
             assert_eq!(path, expected, "{encoding:?}");
         }
     }
