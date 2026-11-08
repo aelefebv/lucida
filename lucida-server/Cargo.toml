@@ -35,7 +35,7 @@ blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "7"
 rand = "0.8"
-thiserror = "1"
+thiserror = "2"
 async-trait = "0.1"
 # Storage backends. Pin runtime-tokio-rustls to match tokio's runtime;
 # macros for query helpers; chrono for the schema's timestamp columns;
@@ -64,7 +64,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # pulls the `rsa` crate (RUSTSEC-2023-0071 "Marvin", unpatched), which would add a
 # new advisory. 10.3 fixes the exp/nbf type-confusion authz bypass; APIs unchanged.
 jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
-base64 = "0.22"
+base64 = "0.23"
 urlencoding = "2"
 
 [dev-dependencies]
