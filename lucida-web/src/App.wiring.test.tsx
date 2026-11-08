@@ -164,7 +164,6 @@ const appRenders = vi.hoisted(() => ({ count: 0 }));
 
 vi.mock("./renderer/renderClient.ts", () => {
   class MockRenderClient {
-    onIntensityRange: unknown = null;
     onEntityLevels: unknown = null;
     pipelinesCompiled = false;
     ready() { return gpu.ready ? Promise.resolve() : new Promise(() => {}); }
@@ -193,6 +192,7 @@ vi.mock("./renderLoop.ts", async (importOriginal) => {
     updateDatasetManifest() {}
     setMinimap() {}
     setThumbnailOverview() {}
+    setAutoContrastListener() {}
     getTickCoordinator() { return {}; }
     captureFrame() { return Promise.resolve({ frame: null, reason: "stub" }); }
   }

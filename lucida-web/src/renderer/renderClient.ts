@@ -96,7 +96,6 @@ export class RenderClient implements UploadClient {
   private framePending = new Map<number, (capture: FrameCaptureResult) => void>();
   private frameSeq = 0;
 
-  onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
   onChunkResidency: ChunkResidencyHandler | null = null;
   /** Missing entries cover chunks and proxies; match on `kind`. */
   onWantedSetDelta: WantedSetHandler | null = null;
@@ -248,14 +247,24 @@ export class RenderClient implements UploadClient {
     return this.viewportFrameSeq;
   }
 
+  /** Viewport frames dispatched whose GPU work has not yet finished. */
+  framesAwaitingDone(): number {
+    return this.frameDispatchedAt.size;
+  }
+
+  /** Called after each finished viewport frame is noted. */
+  onFrameDone: (() => void) | null = null;
+
   private noteFrameDone(frameSeq: number): void {
     const dispatchedAt = this.frameDispatchedAt.get(frameSeq);
     for (const seq of this.frameDispatchedAt.keys()) {
       if (seq > frameSeq) break;
       this.frameDispatchedAt.delete(seq);
     }
-    if (dispatchedAt === undefined) return;
-    this.frameLatency = { frameSeq, ms: performance.now() - dispatchedAt };
+    if (dispatchedAt !== undefined) {
+      this.frameLatency = { frameSeq, ms: performance.now() - dispatchedAt };
+    }
+    this.onFrameDone?.();
   }
 
   private onMessage = (e: MessageEvent<WorkerToMainMessage>) => {
@@ -266,9 +275,7 @@ export class RenderClient implements UploadClient {
       if (msg.type === "thumbnailResult" && msg.bitmap) msg.bitmap.close();
       return;
     }
-    if (msg.type === "intensityRange" && this.onIntensityRange) {
-      this.onIntensityRange(msg.datasetId, msg.min, msg.max);
-    } else if (msg.type === "chunkResidency" && this.onChunkResidency) {
+    if (msg.type === "chunkResidency" && this.onChunkResidency) {
       this.onChunkResidency(msg);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);

@@ -18,6 +18,7 @@ pub mod view;
 #[cfg(any(test, feature = "test-support"))]
 pub mod view_properties;
 pub mod view_transform;
+pub mod viewer_profile;
 pub mod wasm_log;
 
 pub use epoch::SceneEpochs;

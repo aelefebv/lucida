@@ -668,6 +668,30 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_pixel_ratio_past_the_render_cap_plans_at_the_cap() {
+        // The same CSS framing at ratio 2 and ratio 3. The render target is
+        // capped at 2, so the 3x device draws, and plans, what the 2x does.
+        let (mut dpr2, ds) = slice_scene([800, 600], 4);
+        let (mut dpr3, _) = slice_scene([1200, 900], 4);
+        dpr2.inner_set_viewport(800, 600, Some(2.0));
+        dpr3.inner_set_viewport(1200, 900, Some(3.0));
+        for css_zoom in [0.5, 0.25, 0.12, 0.06] {
+            set_zoom(&mut dpr2, css_zoom * 2.0);
+            set_zoom(&mut dpr3, css_zoom * 3.0);
+            assert_eq!(
+                full_target(&dpr3, &ds),
+                full_target(&dpr2, &ds),
+                "zoom {css_zoom}"
+            );
+        }
+        // The camera itself is unchanged: the zoom still counts device pixels.
+        let Camera::Slice(s) = &dpr3.camera else {
+            unreachable!()
+        };
+        assert!((s.zoom - 0.06 * 3.0).abs() < 1e-12);
+    }
+
     /// A 256 × 1024 × 1024 volume with five regular levels, framed by the
     /// arcball camera at `viewport`. Returns the fitted orbit distance.
     fn volume_scene(viewport: [u32; 2]) -> (Scene, DatasetId, f64) {

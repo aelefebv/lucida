@@ -21,7 +21,7 @@ import {
 import type { DecodePool } from "./decodePool.ts";
 import type { ChunkRequest, RequestPlan, ActiveSetEntry } from "../planning/index.ts";
 import { emptyPlanStats } from "../planning/index.ts";
-import { createQuiescenceState } from "../../trace/quiescence.ts";
+import { createSettleState } from "../settle.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, type TracePointEvent } from "../../trace/types.ts";
 import { createSyntheticState } from "../planning/index.ts";
@@ -188,7 +188,7 @@ describe("cache point events", () => {
     cache.submit(makePlan([makeRequest()]));
     await flush();
 
-    const inputs = cache.quiescenceInputs(createQuiescenceState());
+    const inputs = cache.settleInputs(createSettleState());
     expect(inputs.desiredDetailChunks).toBe(1);
     expect(inputs.residentDetailChunks).toBe(0);
     expect(inputs.failedDetailChunks).toBe(1);

@@ -373,6 +373,7 @@ const REASONS: Record<string, string> = {
   pending_unclassified: "queue too deep to classify",
   chunks_in_flight: "chunks in flight",
   chunks_pending: "chunks pending",
+  uploads_unanswered: "renderer still placing chunks",
   detail_not_resident: "detail not yet resident",
   coarse_not_resident: "coarse not yet resident",
 };
@@ -380,6 +381,9 @@ const REASONS: Record<string, string> = {
 function quiescenceOf(quiescence: HudQuiescenceSample | null): HudStatusView {
   if (!quiescence) {
     return { label: "unpublished", detail: "the page has not published quiescence yet", tone: "absent" };
+  }
+  if (quiescence.quiescent && quiescence.reason === "coverage_limited") {
+    return { label: "quiescent", detail: "settled covering what the memory budgets hold", tone: "ok" };
   }
   if (quiescence.quiescent) {
     return { label: "quiescent", detail: "nothing pending, nothing in flight, the view resident", tone: "ok" };

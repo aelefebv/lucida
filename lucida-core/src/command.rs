@@ -480,7 +480,7 @@ impl ViewportCommand {
     ///
     /// `SetLabelOpacity` is exempt: its apply arm maps a non-finite opacity to
     /// the 0.5 default, matching the web's `normalizeLabelOpacity`.
-    fn inputs_finite(&self) -> bool {
+    pub(crate) fn inputs_finite(&self) -> bool {
         match self {
             ViewportCommand::SetMode2D
             | ViewportCommand::SetMode3D
