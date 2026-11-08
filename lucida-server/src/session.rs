@@ -423,6 +423,7 @@ mod tests {
                     status: GeneratedChunkStatus::Ready,
                     message: None,
                 }],
+                histograms: vec![],
             },
         );
 

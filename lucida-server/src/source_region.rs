@@ -98,12 +98,17 @@ pub(crate) async fn fetch_volume_region(
         .and_then(|v| v.checked_mul(region_x as usize))
         .ok_or(RegionReadError::TooLarge)?;
     let bytes_per_voxel = image.multiscale.data_type.size_bytes();
-    let mut out = vec![
-        0u8;
+    // Where no chunk was written the array holds its fill value, and that,
+    // not zero, is what a level generated from it must pool.
+    let fill = resolver
+        .level_info(&image.image_id, level as u32)
+        .map(|info| info.fill_value)
+        .unwrap_or_default();
+    let mut out = fill.bytes(
         total_voxels
             .checked_mul(bytes_per_voxel)
-            .ok_or(RegionReadError::TooLarge)?
-    ];
+            .ok_or(RegionReadError::TooLarge)?,
+    );
 
     for gz in grid_z0..=grid_z1 {
         for gy in grid_y0..=grid_y1 {
