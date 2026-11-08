@@ -55,6 +55,8 @@ function trackingDevice() {
       return buffer;
     },
     createCommandEncoder: () => ({ copyTextureToTexture() {}, finish: () => ({}) }),
+    pushErrorScope() {},
+    popErrorScope: () => Promise.resolve(null),
     queue: { writeBuffer() {}, writeTexture() {}, submit() {} },
   } as unknown as GPUDevice;
   return {

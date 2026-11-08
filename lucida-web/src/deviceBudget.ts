@@ -91,6 +91,20 @@ export function fitBudgets(memoryGiB: number | null, gpu?: GpuBudgetLimits): Dev
   return budgets;
 }
 
+/**
+ * Halve one GPU atlas budget, down to its floor, after the device ran out of
+ * memory at the current one. False when it was already at the floor.
+ */
+export function shrinkAtlasBudget(
+  budgets: Pick<DeviceBudgets, "volumeAtlasBytes" | "sliceAtlasBytes">,
+  key: "volumeAtlasBytes" | "sliceAtlasBytes",
+): boolean {
+  const floor = FLOOR_BUDGETS[key];
+  if (budgets[key] <= floor) return false;
+  budgets[key] = Math.max(floor, Math.floor(budgets[key] / 2 / MIB) * MIB);
+  return true;
+}
+
 /** The parts of the page {@link readDeviceMemoryGiB} reads, so a test can supply its own. */
 export interface DeviceMemorySource {
   deviceMemory?: unknown;

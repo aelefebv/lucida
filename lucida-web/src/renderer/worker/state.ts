@@ -8,7 +8,7 @@
  */
 
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
-import type { ColdStateMessage, GpuAtlasReport } from "../workerProtocol.ts";
+import type { CanvasColors, ColdStateMessage, GpuAtlasReport, GpuErrorKind } from "../workerProtocol.ts";
 import type { AtlasState, LabelVolumePool } from "../volume/atlas.ts";
 import type { SliceAtlasState, LabelSlicePool } from "../slice/atlas.ts";
 import type { ProxyAtlasState } from "../proxyAtlas.ts";
@@ -20,6 +20,13 @@ import { CEILING_BUDGETS, type DeviceBudgets } from "../../deviceBudget.ts";
 
 /** The GPU atlas budgets a pool is sized under. */
 export type AtlasBudgets = Pick<DeviceBudgets, "volumeAtlasBytes" | "sliceAtlasBytes">;
+
+/** GPU errors of one kind folded into the next report while the last one's spacing runs. */
+export interface GpuErrorReport {
+  timer: ReturnType<typeof setTimeout> | null;
+  folded: number;
+  message: string;
+}
 
 export interface RendererState {
   /** memberId → datasetId (canonical: imageId or imageId:chN; group-as-proxy resolves to entityId). */
@@ -105,6 +112,20 @@ export interface RendererState {
    */
   gpuAtlasesPosted: GpuAtlasReport;
 
+  /** The last canvas colors and cursors the page sent, which a replacement device's renderers start from. */
+  canvasColors: CanvasColors | null;
+  cursors: { data: Float32Array; count: number } | null;
+  /** Per kind, the GPU error reports waiting out their spacing. */
+  gpuErrorReports: Map<GpuErrorKind, GpuErrorReport>;
+  /** When each recent device loss happened, so a device that keeps failing is given up on. */
+  deviceLosses: number[];
+  /** No device could replace a lost one. */
+  gpuFailed: boolean;
+  /** The worker is tearing down, so a device lost now is not replaced. */
+  closing: boolean;
+  /** Label texture sizes, `${memberId}|${w}x${h}x${d}`, that ran out of memory and are not tried again. */
+  labelSizesOutOfMemory: Set<string>;
+
   /** Proxy upload/residency counters exposed via `self.__lucidaProxyStats`. */
   proxyStats: {
     uploaded: number;
@@ -142,6 +163,13 @@ export function createInitialState(atlasBudgets: AtlasBudgets = CEILING_BUDGETS)
     coldStateByDataset: new Map(),
     frameCaptures: [],
     gpuAtlasesPosted: { atlases: 0, bytes: 0 },
+    canvasColors: null,
+    cursors: null,
+    gpuErrorReports: new Map(),
+    deviceLosses: [],
+    gpuFailed: false,
+    closing: false,
+    labelSizesOutOfMemory: new Set(),
     proxyStats: {
       uploaded: 0,
       dropped: 0,
