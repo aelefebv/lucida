@@ -1,6 +1,6 @@
 //! Storage backend abstraction for reading from Zarr Stores.
 //!
-//! Routing by URL scheme, after [`lucida_content::url::normalize_dataset_url`]:
+//! Routing by the scheme of a parsed [`DatasetLocation`]:
 //! - Unix `/path/...`, drive-letter `c:/path/...`, UNC `//server/share/...`
 //!   → local filesystem.
 //! - `gs://bucket/...` → Google Cloud Storage, with credentials from the
@@ -12,13 +12,15 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use lucida_content::url::{is_local_dataset_url, normalize_dataset_url};
+use lucida_content::url::{DatasetLocation, LocationScheme};
 use object_store::aws::AmazonS3Builder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::http::HttpBuilder;
 use object_store::local::LocalFileSystem;
 use object_store::prefix::PrefixStore;
 use object_store::{BackoffConfig, ClientOptions, ObjectStore, RetryConfig};
+
+use crate::source_policy::{GuardedHttpConnector, SourceDenied, SourcePolicy};
 
 /// The client's fetch timeout for a single remote read.
 ///
@@ -84,20 +86,20 @@ pub fn max_source_read_budget() -> Duration {
 /// Errors from storage backend operations.
 #[derive(Debug)]
 pub enum StoreError {
-    /// The URL scheme is not supported.
-    UnsupportedScheme(String),
     /// An error from the underlying object store.
     ObjectStore(object_store::Error),
     /// An error parsing metadata.
     Metadata(String),
+    /// The source policy does not allow the location.
+    Denied(SourceDenied),
 }
 
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StoreError::UnsupportedScheme(s) => write!(f, "unsupported URL scheme: {s}"),
             StoreError::ObjectStore(e) => write!(f, "storage error: {e}"),
             StoreError::Metadata(s) => write!(f, "metadata error: {s}"),
+            StoreError::Denied(denied) => write!(f, "{denied}"),
         }
     }
 }
@@ -123,112 +125,88 @@ impl From<object_store::Error> for StoreError {
     }
 }
 
-/// Parse a `gs://bucket/prefix` URL into (bucket, optional prefix).
-fn parse_gs_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
-    let rest = url
-        .strip_prefix("gs://")
-        .ok_or_else(|| StoreError::UnsupportedScheme(url.into()))?;
-    if rest.is_empty() {
-        return Err(StoreError::Metadata("gs:// URL missing bucket name".into()));
-    }
-    match rest.find('/') {
-        Some(idx) => {
-            let bucket = &rest[..idx];
-            let prefix = &rest[idx + 1..];
-            if prefix.is_empty() {
-                Ok((bucket, None))
-            } else {
-                Ok((bucket, Some(prefix)))
+/// Open a storage backend for `location` if `policy` allows it. Every HTTP
+/// connection of a store opened under a restricted policy is checked again
+/// as it is made.
+pub async fn open_permitted(
+    location: &DatasetLocation,
+    policy: &SourcePolicy,
+) -> Result<Arc<dyn ObjectStore>, StoreError> {
+    policy.check(location).await.map_err(StoreError::Denied)?;
+    match location.scheme() {
+        scheme @ (LocationScheme::Http | LocationScheme::Https) => {
+            let allow_http = scheme == LocationScheme::Http;
+            match policy.http_connector(allow_http, SOURCE_REQUEST_TIMEOUT) {
+                Some(connector) => http_store(location.as_str(), allow_http, Some(connector)),
+                None => open(location),
             }
         }
-        None => Ok((rest, None)),
+        _ => open(location),
     }
 }
 
-/// Parse an `s3://bucket/prefix` URL into (bucket, optional prefix).
-fn parse_s3_url(url: &str) -> Result<(&str, Option<&str>), StoreError> {
-    let rest = url
-        .strip_prefix("s3://")
-        .ok_or_else(|| StoreError::UnsupportedScheme(url.into()))?;
-    if rest.is_empty() {
-        return Err(StoreError::Metadata("s3:// URL missing bucket name".into()));
-    }
-    match rest.find('/') {
-        Some(idx) => {
-            let bucket = &rest[..idx];
-            let prefix = &rest[idx + 1..];
-            if prefix.is_empty() {
-                Ok((bucket, None))
-            } else {
-                Ok((bucket, Some(prefix)))
-            }
-        }
-        None => Ok((rest, None)),
-    }
-}
-
-/// Open a storage backend from a URL.
-///
-/// The URL is normalized first, and all dispatch, including the value in
-/// any [`StoreError::UnsupportedScheme`], uses the canonical form.
-/// Normalization lowercases a leading scheme, so `HTTP://…` dispatches like
-/// `http://…` while bucket and object paths keep their case.
+/// Open a storage backend for a dataset location, under no source policy:
+/// for local tools and tests. The server opens through [`open_permitted`].
 ///
 /// Schemes route as the module docs list. Plain `http://` is explicitly
-/// enabled on the client, whose default is https-only. Anything else is
-/// [`StoreError::UnsupportedScheme`].
-pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
-    // Normalize once at entry: drive-letter case, slash direction, UNC
-    // backslashes, `file://` prefix. Idempotent, so it's safe even if the
-    // caller already normalized.
-    let canonical = normalize_dataset_url(url);
+/// enabled on the client, whose default is https-only.
+pub fn open(location: &DatasetLocation) -> Result<Arc<dyn ObjectStore>, StoreError> {
+    let url = location.as_str();
+    match location.scheme() {
+        LocationScheme::Local => {
+            let store = LocalFileSystem::new_with_prefix(url).map_err(StoreError::ObjectStore)?;
+            Ok(Arc::new(store))
+        }
+        LocationScheme::Gcs => {
+            // `from_env()` iterates `GOOGLE_*` env vars (incl.
+            // `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_SERVICE_ACCOUNT*`) — mirrors
+            // the S3 branch below. If none are set, falls back to
+            // `$HOME/.config/gcloud/application_default_credentials.json` and then
+            // the GCE metadata server (Workload Identity).
+            let store = GoogleCloudStorageBuilder::from_env()
+                .with_bucket_name(location.bucket_name().unwrap_or_default())
+                .with_client_options(source_client_options())
+                .with_retry(source_retry_config())
+                .build()?;
+            Ok(with_prefix(store, location.object_prefix()))
+        }
+        LocationScheme::S3 => {
+            let store = AmazonS3Builder::from_env()
+                .with_bucket_name(location.bucket_name().unwrap_or_default())
+                .with_client_options(source_client_options())
+                .with_retry(source_retry_config())
+                .build()?;
+            Ok(with_prefix(store, location.object_prefix()))
+        }
+        scheme @ (LocationScheme::Http | LocationScheme::Https) => {
+            http_store(url, scheme == LocationScheme::Http, None)
+        }
+    }
+}
 
-    if is_local_dataset_url(&canonical) {
-        let store =
-            LocalFileSystem::new_with_prefix(&canonical).map_err(StoreError::ObjectStore)?;
-        Ok(Arc::new(store))
-    } else if canonical.starts_with("gs://") {
-        let (bucket, prefix) = parse_gs_url(&canonical)?;
-        // `from_env()` iterates `GOOGLE_*` env vars (incl.
-        // `GOOGLE_APPLICATION_CREDENTIALS`, `GOOGLE_SERVICE_ACCOUNT*`) — mirrors
-        // the S3 line below. If none are set, falls back to
-        // `$HOME/.config/gcloud/application_default_credentials.json` and then
-        // the GCE metadata server (Workload Identity).
-        let store = GoogleCloudStorageBuilder::from_env()
-            .with_bucket_name(bucket)
-            .with_client_options(source_client_options())
-            .with_retry(source_retry_config())
-            .build()?;
-        match prefix {
-            Some(p) => Ok(Arc::new(PrefixStore::new(store, p))),
-            None => Ok(Arc::new(store)),
-        }
-    } else if canonical.starts_with("s3://") {
-        let (bucket, prefix) = parse_s3_url(&canonical)?;
-        let store = AmazonS3Builder::from_env()
-            .with_bucket_name(bucket)
-            .with_client_options(source_client_options())
-            .with_retry(source_retry_config())
-            .build()?;
-        match prefix {
-            Some(p) => Ok(Arc::new(PrefixStore::new(store, p))),
-            None => Ok(Arc::new(store)),
-        }
-    } else if canonical.starts_with("http://") || canonical.starts_with("https://") {
-        // The underlying HTTP client defaults to https-only; a plain `http://`
-        // endpoint (a static file server on localhost or a LAN) must opt in
-        // explicitly or every request fails with a scheme error before it is
-        // even sent. `https://` URLs need no opt-in and keep the default.
-        let client_options =
-            source_client_options().with_allow_http(canonical.starts_with("http://"));
-        let store = HttpBuilder::new()
-            .with_url(&canonical)
-            .with_client_options(client_options)
-            .with_retry(source_retry_config())
-            .build()?;
-        Ok(Arc::new(store))
-    } else {
-        Err(StoreError::UnsupportedScheme(canonical))
+pub(crate) fn http_store(
+    url: &str,
+    allow_http: bool,
+    connector: Option<GuardedHttpConnector>,
+) -> Result<Arc<dyn ObjectStore>, StoreError> {
+    // The underlying HTTP client defaults to https-only; a plain `http://`
+    // endpoint (a static file server on localhost or a LAN) must opt in
+    // explicitly or every request fails with a scheme error before it is
+    // even sent. `https://` URLs need no opt-in and keep the default.
+    let mut builder = HttpBuilder::new()
+        .with_url(url)
+        .with_client_options(source_client_options().with_allow_http(allow_http))
+        .with_retry(source_retry_config());
+    if let Some(connector) = connector {
+        builder = builder.with_http_connector(connector);
+    }
+    Ok(Arc::new(builder.build()?))
+}
+
+fn with_prefix<S: ObjectStore>(store: S, prefix: Option<&str>) -> Arc<dyn ObjectStore> {
+    match prefix {
+        Some(prefix) => Arc::new(PrefixStore::new(store, prefix)),
+        None => Arc::new(store),
     }
 }
 
@@ -236,181 +214,71 @@ pub fn open(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
 mod tests {
     use super::*;
 
+    fn open_url(url: &str) -> Result<Arc<dyn ObjectStore>, StoreError> {
+        open(&DatasetLocation::parse(url).unwrap())
+    }
+
     #[test]
     fn open_local_path() {
         let dir = std::env::temp_dir();
-        let store = open(dir.to_str().unwrap());
-        assert!(store.is_ok());
+        assert!(open_url(dir.to_str().unwrap()).is_ok());
     }
 
+    /// Every spelling of a local path reaches the filesystem. A missing path
+    /// fails there as `UnableToCanonicalize`, which is proof enough.
     #[test]
-    fn open_unsupported_scheme() {
-        let err = open("ftp://host/path").unwrap_err();
-        assert!(matches!(err, StoreError::UnsupportedScheme(_)));
-    }
-
-    // Each canonical-equivalent spelling of a local path must dispatch to
-    // the local-filesystem branch, not `StoreError::UnsupportedScheme`. A
-    // missing path surfaces as `ObjectStore(UnableToCanonicalize)`, a real
-    // local-storage error and so proof the URL was treated as local. See
-    // [`open_local_path`] for the existing-path case.
-
-    /// Helper: assert that `open(url)` did NOT bail with `UnsupportedScheme`.
-    /// Any other outcome (success, NotFound, UnableToCanonicalize) means
-    /// dispatch reached the local-filesystem branch — that's the property
-    /// we're verifying.
-    fn assert_dispatched_local(url: &str, result: Result<Arc<dyn ObjectStore>, StoreError>) {
-        if let Err(StoreError::UnsupportedScheme(scheme)) = &result {
-            panic!(
-                "open({url:?}) classified as UnsupportedScheme({scheme:?}) — expected local dispatch"
-            );
+    fn every_spelling_of_a_local_path_opens_the_filesystem() {
+        let dir = std::env::temp_dir().join("lucida-backend-missing");
+        let unix_file_url = format!(
+            "file://{}{}",
+            if cfg!(windows) { "/" } else { "" },
+            dir.to_str().unwrap().replace('\\', "/")
+        );
+        for url in [
+            "C:\\foo",
+            "c:/foo",
+            "file:///C:/foo",
+            "\\\\server\\share\\foo",
+            unix_file_url.as_str(),
+        ] {
+            match open_url(url) {
+                Ok(_) => {}
+                Err(StoreError::ObjectStore(e)) => {
+                    let message = e.to_string().to_ascii_lowercase();
+                    assert!(
+                        message.contains("canonical") || message.contains("not found"),
+                        "open({url:?}) failed outside the filesystem: {e}"
+                    );
+                }
+                Err(e) => panic!("open({url:?}) failed outside the filesystem: {e}"),
+            }
         }
-    }
-
-    #[test]
-    fn open_drive_letter_path_backslash_dispatches_local() {
-        assert_dispatched_local("C:\\foo", open("C:\\foo"));
-    }
-
-    #[test]
-    fn open_drive_letter_path_forward_slash_lowercase_dispatches_local() {
-        assert_dispatched_local("c:/foo", open("c:/foo"));
-    }
-
-    #[test]
-    fn open_file_uri_drive_letter_dispatches_local() {
-        assert_dispatched_local("file:///C:/foo", open("file:///C:/foo"));
-    }
-
-    #[test]
-    fn open_unc_path_dispatches_local() {
-        assert_dispatched_local("\\\\server\\share\\foo", open("\\\\server\\share\\foo"));
-    }
-
-    #[test]
-    fn parse_s3_bucket_only() {
-        let (bucket, prefix) = parse_s3_url("s3://my-bucket").unwrap();
-        assert_eq!(bucket, "my-bucket");
-        assert_eq!(prefix, None);
-    }
-
-    #[test]
-    fn parse_s3_bucket_trailing_slash() {
-        let (bucket, prefix) = parse_s3_url("s3://my-bucket/").unwrap();
-        assert_eq!(bucket, "my-bucket");
-        assert_eq!(prefix, None);
-    }
-
-    #[test]
-    fn parse_s3_bucket_with_prefix() {
-        let (bucket, prefix) = parse_s3_url("s3://my-bucket/path/to/store.zarr").unwrap();
-        assert_eq!(bucket, "my-bucket");
-        assert_eq!(prefix, Some("path/to/store.zarr"));
-    }
-
-    #[test]
-    fn parse_s3_empty_bucket_error() {
-        let err = parse_s3_url("s3://").unwrap_err();
-        assert!(matches!(err, StoreError::Metadata(_)));
-    }
-
-    #[test]
-    fn open_s3_constructs_store() {
-        let store = open("s3://test-bucket/some/prefix");
-        assert!(store.is_ok());
     }
 
     // Construction-path only: whether plain-http requests actually go through
     // is a property of the built client (https-only vs. allow-http) that only
-    // surfaces on a real request, so these tests pin down that every http(s)
-    // URL shape builds a store — including plain `http://`, which requires
-    // the explicit allow-http opt-in wired in `open`.
-
+    // surfaces on a real request, so this pins down that every remote URL
+    // shape builds a store, including plain `http://`, which requires the
+    // explicit allow-http opt-in wired in `open`. No credentials are needed
+    // until an actual read.
     #[test]
-    fn open_http_constructs_store() {
-        let store = open("http://localhost:8080/data/store.zarr");
-        assert!(store.is_ok());
-    }
-
-    #[test]
-    fn open_http_ip_and_port_constructs_store() {
-        let store = open("http://192.168.1.20:9000/shared/collection.zarr");
-        assert!(store.is_ok());
-    }
-
-    #[test]
-    fn open_http_bare_host_constructs_store() {
-        let store = open("http://fileserver.internal/store.zarr");
-        assert!(store.is_ok());
-    }
-
-    #[test]
-    fn open_https_constructs_store() {
-        let store = open("https://data.example.com/store.zarr");
-        assert!(store.is_ok());
-    }
-
-    // Scheme case-insensitivity (RFC 3986): uppercase and mixed-case scheme
-    // spellings must dispatch exactly like their lowercase forms instead of
-    // falling through to UnsupportedScheme.
-
-    #[test]
-    fn open_uppercase_http_scheme_constructs_store() {
-        let store = open("HTTP://localhost:8080/data/store.zarr");
-        assert!(store.is_ok(), "{:?}", store.err());
-    }
-
-    #[test]
-    fn open_mixed_case_https_scheme_constructs_store() {
-        let store = open("HtTpS://data.example.com/store.zarr");
-        assert!(store.is_ok(), "{:?}", store.err());
-    }
-
-    #[test]
-    fn open_uppercase_s3_scheme_constructs_store() {
-        let store = open("S3://test-bucket/some/prefix");
-        assert!(store.is_ok(), "{:?}", store.err());
-    }
-
-    #[test]
-    fn open_uppercase_gs_scheme_constructs_store() {
-        let store = open("GS://test-bucket/some/prefix");
-        assert!(store.is_ok(), "{:?}", store.err());
-    }
-
-    #[test]
-    fn parse_gs_bucket_only() {
-        let (bucket, prefix) = parse_gs_url("gs://my-bucket").unwrap();
-        assert_eq!(bucket, "my-bucket");
-        assert_eq!(prefix, None);
-    }
-
-    #[test]
-    fn parse_gs_bucket_trailing_slash() {
-        let (bucket, prefix) = parse_gs_url("gs://my-bucket/").unwrap();
-        assert_eq!(bucket, "my-bucket");
-        assert_eq!(prefix, None);
-    }
-
-    #[test]
-    fn parse_gs_bucket_with_prefix() {
-        let (bucket, prefix) = parse_gs_url("gs://my-bucket/path/to/store.zarr").unwrap();
-        assert_eq!(bucket, "my-bucket");
-        assert_eq!(prefix, Some("path/to/store.zarr"));
-    }
-
-    #[test]
-    fn parse_gs_empty_bucket_error() {
-        let err = parse_gs_url("gs://").unwrap_err();
-        assert!(matches!(err, StoreError::Metadata(_)));
-    }
-
-    #[test]
-    fn open_gs_constructs_store() {
-        // Verifies that GCS builder construction succeeds (no credentials needed
-        // until an actual I/O operation is performed).
-        let store = open("gs://test-bucket/some/prefix");
-        assert!(store.is_ok());
+    fn every_remote_url_shape_constructs_a_store() {
+        for url in [
+            "s3://test-bucket/some/prefix",
+            "S3://test-bucket/some/prefix",
+            "gs://test-bucket/some/prefix",
+            "GS://test-bucket/some/prefix",
+            "gs://test-bucket",
+            "http://localhost:8080/data/store.zarr",
+            "HTTP://localhost:8080/data/store.zarr",
+            "http://192.168.1.20:9000/shared/collection.zarr",
+            "http://fileserver.internal/store.zarr",
+            "https://data.example.com/store.zarr",
+            "HtTpS://data.example.com/store.zarr",
+        ] {
+            let store = open_url(url);
+            assert!(store.is_ok(), "{url}: {:?}", store.err());
+        }
     }
 
     #[test]

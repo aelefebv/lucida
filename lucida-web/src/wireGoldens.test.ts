@@ -2048,6 +2048,8 @@ describe("wire goldens: enum vocabulary", () => {
         "session_closed",
         "workspace_lookup",
         "unsupported_scheme",
+        "invalid_location",
+        "source_not_allowed",
         "local_path",
         "missing_object",
         "permission",

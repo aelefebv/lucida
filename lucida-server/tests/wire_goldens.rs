@@ -390,7 +390,9 @@ fn enum_vocabulary() -> EnumVocabulary {
             BindingBuild, GeneratedCoarsePlanning, WorkspacePersist, Broadcast, Complete,
         }),
         dataset_open_failure_kinds: vocab!(DatasetOpenFailureKind::{
-            Authorization, SessionClosed, WorkspaceLookup, UnsupportedScheme, LocalPath,
+            Authorization, SessionClosed, WorkspaceLookup, UnsupportedScheme, InvalidLocation,
+            SourceNotAllowed,
+            LocalPath,
             MissingObject, Permission, CloudConfiguration, Http, StorageBackend,
             UnsupportedCodec, UnsupportedLayout, MalformedMetadata, MissingMetadata, Import,
             Persistence, Internal,
