@@ -31,7 +31,6 @@ export {
   type ManifestEntry,
 } from "./delivery/manifestIndex.ts";
 export {
-  dispatchChunk,
   dispatchChunkDelivery,
   workerMemberIdForChunk,
   parseWorkerMemberId,

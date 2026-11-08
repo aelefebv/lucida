@@ -1623,6 +1623,10 @@ mod tests {
         );
         let warning = &health.import_warnings[0];
         assert!(warning.degrades);
+        assert_eq!(
+            warning.kind,
+            lucida_protocol::DatasetImportWarningKind::MismatchedTileGeometry
+        );
         assert!(
             warning.message.contains("\"A/1/0\" is 2×14×12"),
             "{}",

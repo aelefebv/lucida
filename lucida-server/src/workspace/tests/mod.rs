@@ -483,8 +483,8 @@ async fn seed_pin_with_view_urls(
         .unwrap()
         .unwrap()
         .document;
-    // Bypass `apply` (which now strips) to write a dirty pin straight into
-    // the document, exactly as a pre-fix persisted document would carry it.
+    // Bypass `apply` (which strips) to write a dirty pin straight into the
+    // document, exactly as an older persisted document can carry it.
     doc.add_annotation(
         dataset_id.clone(),
         lucida_core::scene::Annotation {

@@ -23,7 +23,12 @@ import type {
   SlicePoolBinding,
 } from "../sliceRenderer.ts";
 import { resolveMemberPools, type EntityDescriptorIndex } from "../descriptorBuffer.ts";
-import { markLabelSliceFailed, type SliceAtlasState, type LabelSlicePool } from "./atlas.ts";
+import {
+  markLabelSliceFailed,
+  retireOtherLabelPlanes,
+  type SliceAtlasState,
+  type LabelSlicePool,
+} from "./atlas.ts";
 import { setCameraUVForMember } from "./eviction.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
@@ -128,7 +133,10 @@ function renderLabelLayer(
   const pool = ctx.state.labelSlicePools.get(memberId);
   if (!pool) return null;
   const target = targetFor();
-  if (layer.labelChunk) markLabelSliceFailed(ctx, memberId, pool, layer.labelChunk);
+  if (layer.labelChunk) {
+    retireOtherLabelPlanes(ctx, memberId, pool, layer.labelChunk.plane);
+    markLabelSliceFailed(ctx, memberId, pool, layer.labelChunk);
+  }
 
   const descBuffer = ensureLabelDescriptor(ctx, pool, layer.opacity ?? DEFAULT_LABEL_OPACITY);
   const palette = ensureLabelPalette(ctx, pool, layer.labelColors);

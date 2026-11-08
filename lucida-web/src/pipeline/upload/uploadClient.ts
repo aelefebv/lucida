@@ -63,6 +63,11 @@ export interface UploadClient {
    */
   viewHotState(msg: ViewHotStateMessage): void;
 
+  /**
+   * Deliver one Z-plane of each chunk, the plane `fullResZ` maps to at
+   * `level`. Each `chunk.data` is transferred, so it must be a buffer cut for
+   * the worker, never the cache's own.
+   */
   sliceChunkData(
     memberId: string,
     chunks: {
@@ -94,8 +99,10 @@ export interface UploadClient {
    * (categorical overlay path). Distinct from {@link sliceChunkData}: routed
    * by the label image id; each `chunk.data` is a single 2D Z-plane already
    * extracted for the current view (so only ~64 KB crosses, not the ~8 MB
-   * 3D chunk). `datasetId` is stamped on the pool so dataset removal can free
-   * it — the pool is keyed by the label image id, which removal never sees.
+   * 3D chunk), and is transferred like {@link sliceChunkData}'s. `plane` is
+   * the label level's Z plane they were cut at. `datasetId` is stamped on
+   * the pool so dataset removal can free it — the pool is keyed by the label
+   * image id, which removal never sees.
    */
   labelSliceChunkData(
     memberId: string,
@@ -115,6 +122,7 @@ export interface UploadClient {
     levelHeight: number,
     chunkX: number,
     chunkY: number,
+    plane: number,
     epochs: SceneEpochs,
   ): void;
 

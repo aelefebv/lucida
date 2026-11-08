@@ -9,8 +9,7 @@
  */
 
 import { Axis } from "../../axes.ts";
-import { labelDepthZ, labelFootprint, labelTimeIndex } from "../../renderer/labelLayout.ts";
-import { sliceLevelZ } from "../../renderer/slicePlane.ts";
+import { labelFootprint, labelLevelZ, labelTimeIndex } from "../../renderer/labelLayout.ts";
 import { labelPaddedVolumeBytes } from "../../renderer/volume/atlas.ts";
 import { isUint32 } from "../../renderer/dataTypeUtil.ts";
 import { pageDeviceBudgets } from "../../deviceBudget.ts";
@@ -478,16 +477,16 @@ export function computeLabelChunkRequests(args: LabelRequestArgs): ChunkRequest[
 
 /**
  * The chunk a label draws from at source timepoint `t`: its chosen level, the
- * label's own chunk-T, and, given a source `z`, the chunk-Z of the plane slice
- * mode draws. The mapping is per label because labels carry their own
- * geometry. Fetch and the failed-chunk marks share it, so both name the same
- * chunks.
+ * label's own chunk-T, and, given a source `z`, the plane slice mode draws
+ * and the chunk-Z holding it. The mapping is per label because labels carry
+ * their own geometry. Fetch and the failed-chunk marks share it, so both name
+ * the same chunks.
  */
 export function labelChunkAt(
   resolved: ResolvedLabel,
   t: number,
   z?: number,
-): { level: number; t: number; z: number | null } {
+): { level: number; t: number; z: number | null; plane: number | null } {
   const { label, source, levelIdx } = resolved;
   const labelLevels = label.image.multiscale.levels;
   const source0 = source.multiscale.levels[0];
@@ -502,13 +501,11 @@ export function labelChunkAt(
   const labelT = labelTimeIndex(t, src0, lbl0);
   const chunkT = lvl.chunk_shape[Axis.T] || 1;
   const targetChunkT = Math.floor(labelT / chunkT);
-  if (z === undefined) return { level: levelIdx, t: targetChunkT, z: null };
+  if (z === undefined) return { level: levelIdx, t: targetChunkT, z: null, plane: null };
 
-  // Map the source Z to the label's own full-res Z, then to this level's grid.
-  const labelFullResZ = labelDepthZ(z, src0, lbl0);
-  const levelZ = sliceLevelZ(labelFullResZ, label0.shape[Axis.Z], lvl.shape[Axis.Z]);
+  const plane = labelLevelZ(z, src0, lbl0, lvl.shape[Axis.Z]);
   const chunkZ = lvl.chunk_shape[Axis.Z] || 1;
-  return { level: levelIdx, t: targetChunkT, z: Math.floor(levelZ / chunkZ) };
+  return { level: levelIdx, t: targetChunkT, z: Math.floor(plane / chunkZ), plane };
 }
 
 /** Append one label's chunk requests to `requests`. */

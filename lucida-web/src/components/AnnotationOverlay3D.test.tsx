@@ -157,7 +157,7 @@ afterEach(() => {
   cleanup();
 });
 
-describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #778)", () => {
+describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits", () => {
   it("a Shift+drag on an own marker emits one move_annotation that moves in-plane but preserves the pin's slice (z)", () => {
     // pick returns [50, 60, 7]: the move takes [50,60] in-plane but keeps the
     // pin's own z (3). A 3D drag moves a pin within its slice, never re-slices.
@@ -257,7 +257,7 @@ describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #77
   });
 });
 
-describe("AnnotationOverlay3D — comment thread, brought to 3D (issue #771)", () => {
+describe("AnnotationOverlay3D — comment thread, brought to 3D", () => {
   /** Open a pin's thread with a pure click (down and up at one point, then the
    * click) so drag suppression never interferes. */
   function openThread(pinId: string) {
@@ -468,7 +468,7 @@ describe("AnnotationOverlay3D — comment thread, brought to 3D (issue #771)", (
   });
 });
 
-describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)", () => {
+describe("AnnotationOverlay3D — off-context vs the view's Z/T/C", () => {
   it("a pin matching the view is on-context (no off-context marker)", () => {
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
@@ -507,7 +507,7 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
   });
 
-  it("a 3D Shift+drag keeps an on-context pin on-context — it can't push the pin off its own slice (#791)", () => {
+  it("a 3D Shift+drag keeps an on-context pin on-context — it can't push the pin off its own slice", () => {
     // The pick returns depth 99, but the move keeps the pin's own z, so the
     // re-read pin stays on-context on the unchanged view.
     const { sent, bumpVersion } = renderOverlay({
@@ -555,7 +555,7 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
   });
 });
 
-describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author's view (slice 2)", () => {
+describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author's view", () => {
   const VIEW = {
     v: 1,
     datasets: [],

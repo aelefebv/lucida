@@ -1143,7 +1143,7 @@ class DebugResource:
 
 
 class SavedViewsResource:
-    """Workspace saved views, including the #699/#702 sharing layer.
+    """Workspace saved views, including the sharing layer.
 
     Thin HTTP wrappers over the already-shipped, already-tested REST endpoints;
     the server owns every permission and never-leak invariant. ``visibility`` is

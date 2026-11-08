@@ -221,9 +221,12 @@ export function pushMemberLayers(
 }
 
 /** The plane of a label that slice mode draws at source `t` and `z`, as its fetch names it. */
-function labelPlaneAt(resolved: ResolvedLabel, at: { t: number; z: number }): { level: number; t: number; z: number } {
+function labelPlaneAt(
+  resolved: ResolvedLabel,
+  at: { t: number; z: number },
+): { level: number; t: number; z: number; plane: number } {
   const chunk = labelChunkAt(resolved, at.t, at.z);
-  return { level: chunk.level, t: chunk.t, z: chunk.z ?? 0 };
+  return { level: chunk.level, t: chunk.t, z: chunk.z ?? 0, plane: chunk.plane ?? 0 };
 }
 
 /**
