@@ -25,12 +25,12 @@
   min-width: 0;
 }
 
-.lc-phone-topbar-name > .lc-workspace-name {
+.lc-phone-topbar-name .lc-workspace-name {
   max-width: 100%;
 }
 
 /* Fields under 16px make iOS zoom the page into them. */
-.lc-phone-topbar-name > input.lc-workspace-name {
+.lc-phone-topbar-name input.lc-workspace-name {
   min-width: 0;
   font-size: max(var(--lc-text-lg), var(--lc-text-input));
 }

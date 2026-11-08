@@ -16,6 +16,7 @@ import {
   type KeyboardEvent,
 } from "react";
 import { Button } from "../ui/Button.tsx";
+import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import "./BrowsePane.css";
 
 interface BrowseEntry {
@@ -163,20 +164,19 @@ export function BrowsePane({ onOpen, onCreateWorkspace, className }: BrowsePaneP
   return (
     <div className={className ? `lc-browse ${className}` : "lc-browse"}>
       <nav ref={crumbsRef} className="lc-browse-crumbs" aria-label="Folder path">
-        <button type="button" className="lc-browse-crumb" onClick={() => void browse("")}>
+        <UnstyledButton className="lc-browse-crumb" onPress={() => void browse("")}>
           /
-        </button>
+        </UnstyledButton>
         {segments.map((segment, i) => (
           <Fragment key={i}>
             <CaretRightIcon className="lc-browse-crumb-sep" size={12} aria-hidden />
-            <button
-              type="button"
+            <UnstyledButton
               className="lc-browse-crumb"
               aria-current={i === segments.length - 1 ? "location" : undefined}
-              onClick={() => void browse(leadingSlash + segments.slice(0, i + 1).join("/"))}
+              onPress={() => void browse(leadingSlash + segments.slice(0, i + 1).join("/"))}
             >
               {segment}
-            </button>
+            </UnstyledButton>
           </Fragment>
         ))}
       </nav>
@@ -192,28 +192,19 @@ export function BrowsePane({ onOpen, onCreateWorkspace, className }: BrowsePaneP
           <ul className="lc-browse-entries">
             {!atRoot && (
               <li>
-                <button
-                  type="button"
-                  className="lc-browse-entry"
-                  aria-label="Up one folder"
-                  onClick={navigateUp}
-                >
+                <UnstyledButton className="lc-browse-entry" aria-label="Up one folder" onPress={navigateUp}>
                   <ArrowBendLeftUpIcon size={16} aria-hidden />
                   <span>..</span>
-                </button>
+                </UnstyledButton>
               </li>
             )}
             {entries.map((entry) =>
               entry.type === "directory" ? (
                 <li key={entry.name}>
-                  <button
-                    type="button"
-                    className="lc-browse-entry"
-                    onClick={() => navigateInto(entry.name)}
-                  >
+                  <UnstyledButton className="lc-browse-entry" onPress={() => navigateInto(entry.name)}>
                     <FolderIcon size={16} aria-hidden />
                     <span className="lc-browse-entry-name">{entry.name}</span>
-                  </button>
+                  </UnstyledButton>
                 </li>
               ) : (
                 <li key={entry.name} className="lc-browse-entry" data-kind="file">
@@ -234,14 +225,13 @@ export function BrowsePane({ onOpen, onCreateWorkspace, className }: BrowsePaneP
               <span className="lc-browse-chip-label" title={path}>
                 {path}
               </span>
-              <button
-                type="button"
+              <UnstyledButton
                 className="lc-browse-chip-remove"
                 aria-label={`Remove ${path} from selection`}
-                onClick={() => setSelected((prev) => prev.filter((p) => p !== path))}
+                onPress={() => setSelected((prev) => prev.filter((p) => p !== path))}
               >
                 <XIcon size={12} aria-hidden />
-              </button>
+              </UnstyledButton>
             </li>
           ))}
         </ul>

@@ -8,7 +8,8 @@ import { offContextLabel } from "./annotationContext.ts";
 import "./AnnotationOverlay.css";
 
 /** Comment-count pill, shown only when the pin has comments. Clicking toggles
- * the thread, like clicking the dot. */
+ * the thread, like clicking the dot. The marker's name carries the count, so
+ * the pill is a wider pointer target and hidden from assistive technology. */
 export function CommentCountBadge({
   count,
   onToggleThread,
@@ -18,11 +19,7 @@ export function CommentCountBadge({
 }) {
   if (count <= 0) return null;
   return (
-    <div
-      className="lc-annotation-count"
-      aria-label={`${count} comment${count === 1 ? "" : "s"}`}
-      onClick={onToggleThread}
-    >
+    <div className="lc-annotation-count" aria-hidden="true" onClick={onToggleThread}>
       {count}
     </div>
   );

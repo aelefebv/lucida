@@ -9,7 +9,8 @@ import {
   SquaresFourIcon,
   WrenchIcon,
 } from "@phosphor-icons/react";
-import { useState, type MouseEvent, type ReactNode } from "react";
+import { useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { Input, TextField as AriaTextField } from "react-aria-components";
 import { ProfileMenu } from "../auth/ProfileMenu.tsx";
 import { IconButton } from "../ui/Button.tsx";
 import { showKeyboardHelp } from "../ui/keyboardHelpState.ts";
@@ -150,6 +151,7 @@ export function WorkspaceName({ name, onRename }: { name: string; onRename?: (na
   // The draft follows a rename that lands from elsewhere, unless one is being typed.
   const [edit, setEdit] = useState({ source: name, value: name });
   const draft = edit.source === name ? edit.value : name;
+  const inputRef = useRef<HTMLInputElement>(null);
 
   if (!onRename) {
     return (
@@ -169,26 +171,33 @@ export function WorkspaceName({ name, onRename }: { name: string; onRename?: (na
     void onRename(next).catch(reset);
   };
 
+  // React Aria's field rather than TextField: this one reads as the title it
+  // edits, not as a boxed form field.
   return (
-    <input
-      className="lc-workspace-name"
-      data-editable=""
-      value={draft}
+    <AriaTextField
+      className="lc-workspace-name-field"
       aria-label="Workspace name"
-      title="Rename the workspace"
-      spellCheck={false}
-      onChange={(e) => setEdit({ source: name, value: e.target.value })}
+      value={draft}
+      onChange={(value) => setEdit({ source: name, value })}
       onBlur={commit}
       onKeyDown={(e) => {
-        if (e.key === "Enter") e.currentTarget.blur();
+        const input = inputRef.current;
+        if (e.key === "Enter") input?.blur();
         if (e.key === "Escape") {
-          const input = e.currentTarget;
           reset();
           // Blur after the reset renders, so the commit it runs sees the
           // saved name and does nothing.
-          setTimeout(() => input.blur(), 0);
+          setTimeout(() => input?.blur(), 0);
         }
       }}
-    />
+    >
+      <Input
+        ref={inputRef}
+        className="lc-workspace-name"
+        data-editable=""
+        title="Rename the workspace"
+        spellCheck={false}
+      />
+    </AriaTextField>
   );
 }

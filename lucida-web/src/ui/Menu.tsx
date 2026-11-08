@@ -10,7 +10,9 @@ import {
   MenuTrigger,
   Popover as AriaPopover,
   Separator,
+  Text,
 } from "react-aria-components";
+import { CheckBox } from "./Checkbox.tsx";
 import type { PopoverPlacement } from "./Popover.tsx";
 import { formatKeyCombo, isApplePlatform, type KeyCombo } from "./shortcuts.ts";
 import "./Overlay.css";
@@ -23,14 +25,21 @@ export interface MenuProps {
   /** Accessible name for the menu, when the trigger's text does not say it. */
   label?: string;
   placement?: PopoverPlacement;
+  /** On the popover, for layout only, e.g. a fixed width. */
+  className?: string;
 }
 
 /** A list of actions. Arrow keys move, Enter runs, Escape closes. */
-export function Menu({ trigger, children, label, placement = "bottom start" }: MenuProps) {
+export function Menu({ trigger, children, label, placement = "bottom start", className }: MenuProps) {
   return (
     <MenuTrigger>
       {trigger}
-      <AriaPopover className="lc-popover" placement={placement} offset={6} data-lc-overlay="">
+      <AriaPopover
+        className={className ? `lc-popover ${className}` : "lc-popover"}
+        placement={placement}
+        offset={6}
+        data-lc-overlay=""
+      >
         <AriaMenu className="lc-menu" aria-label={label}>
           {children}
         </AriaMenu>
@@ -90,7 +99,12 @@ export function ContextMenu({ at, onClose, label, children }: ContextMenuProps) 
 export interface MenuItemProps {
   /** The item's text; also what type-to-select matches. */
   children: string;
-  onAction: () => void;
+  /** A second line under the text. */
+  description?: string;
+  /** Names the item in a checkable MenuSection's `selectedKeys`. */
+  id?: string;
+  /** Optional only on a checkable item, which pressing toggles. */
+  onAction?: () => void;
   icon?: Icon;
   /** Shown at the right; pass the keys you registered with `useShortcut`. */
   shortcut?: KeyCombo;
@@ -100,6 +114,8 @@ export interface MenuItemProps {
 
 export function MenuItem({
   children,
+  description,
+  id,
   onAction,
   icon: ItemIcon,
   shortcut,
@@ -108,18 +124,35 @@ export function MenuItem({
 }: MenuItemProps) {
   return (
     <AriaMenuItem
+      id={id}
       className="lc-menu-item"
       data-variant={variant}
       textValue={children}
       onAction={onAction}
       isDisabled={isDisabled}
     >
-      {ItemIcon && <ItemIcon className="lc-menu-item-icon" size={16} aria-hidden />}
-      <span className="lc-menu-item-label">{children}</span>
-      {shortcut && (
-        <Keyboard className="lc-menu-item-shortcut">
-          {formatKeyCombo(shortcut).join(isApplePlatform() ? "" : "+")}
-        </Keyboard>
+      {({ isSelected, selectionMode }) => (
+        <>
+          {selectionMode === "multiple" && <CheckBox isSelected={isSelected} />}
+          {ItemIcon && <ItemIcon className="lc-menu-item-icon" size={16} aria-hidden />}
+          {description ? (
+            <span className="lc-menu-item-text">
+              <Text slot="label" className="lc-menu-item-label">
+                {children}
+              </Text>
+              <Text slot="description" className="lc-menu-item-description">
+                {description}
+              </Text>
+            </span>
+          ) : (
+            <span className="lc-menu-item-label">{children}</span>
+          )}
+          {shortcut && (
+            <Keyboard className="lc-menu-item-shortcut">
+              {formatKeyCombo(shortcut).join(isApplePlatform() ? "" : "+")}
+            </Keyboard>
+          )}
+        </>
       )}
     </AriaMenuItem>
   );
@@ -127,13 +160,38 @@ export function MenuItem({
 
 export interface MenuSectionProps {
   title?: string;
+  /** A richer heading than `title`, e.g. who is signed in. It names the section. */
+  header?: ReactNode;
+  /** Makes the section's items checkable, each by its `id`. Checking one leaves the menu open. */
+  selectionMode?: "multiple";
+  selectedKeys?: Iterable<string>;
+  onSelectionChange?: (keys: "all" | Set<string>) => void;
   children: ReactNode;
 }
 
-export function MenuSection({ title, children }: MenuSectionProps) {
+export function MenuSection({
+  title,
+  header,
+  selectionMode,
+  selectedKeys,
+  onSelectionChange,
+  children,
+}: MenuSectionProps) {
   return (
-    <AriaMenuSection className="lc-menu-section">
-      {title && <Header className="lc-menu-section-title">{title}</Header>}
+    <AriaMenuSection
+      className="lc-menu-section"
+      selectionMode={selectionMode}
+      selectedKeys={selectedKeys}
+      onSelectionChange={
+        onSelectionChange &&
+        ((keys) => onSelectionChange(keys === "all" ? "all" : new Set([...keys].map(String))))
+      }
+    >
+      {header ? (
+        <Header className="lc-menu-section-header">{header}</Header>
+      ) : (
+        title && <Header className="lc-menu-section-title">{title}</Header>
+      )}
       {children}
     </AriaMenuSection>
   );

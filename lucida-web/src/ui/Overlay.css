@@ -104,6 +104,32 @@
   white-space: nowrap;
 }
 
+/* A label with a description under it. The description wraps, so the row
+   grows taller rather than the menu wider. */
+.lc-menu-item-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: var(--lc-space-1) 0;
+}
+
+.lc-menu-item-text > .lc-menu-item-label {
+  flex: none;
+}
+
+.lc-menu-item-description {
+  color: var(--lc-text-subtle);
+  font-size: var(--lc-text-sm);
+}
+
+/* A checkable item's box stays on its label's line above a description. */
+.lc-menu-item:has(> .lc-menu-item-text) > .lc-checkbox-box {
+  align-self: flex-start;
+  margin-top: calc(var(--lc-space-1) + (1.4em - var(--lc-checkbox-size)) / 2);
+}
+
 .lc-menu-item-shortcut {
   margin-left: var(--lc-space-4);
   color: var(--lc-text-subtle);
@@ -135,4 +161,9 @@
   color: var(--lc-text-subtle);
   font-size: var(--lc-text-xs);
   font-weight: 600;
+}
+
+/* A heading with content of its own, which styles it. */
+.lc-menu-section-header {
+  padding: var(--lc-space-1) var(--lc-space-2);
 }

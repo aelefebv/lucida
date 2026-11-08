@@ -673,10 +673,6 @@
   outline-offset: -2px;
 }
 
-.monitor-file-input {
-  display: none;
-}
-
 .monitor-file-with-frame {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(220px, 360px);
