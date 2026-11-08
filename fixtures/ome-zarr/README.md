@@ -65,5 +65,9 @@ uv run extras/verify_trace_script.py
 uv run extras/verify_sharded_twins.py --generated-cache-dir /tmp/lucida-coarse
 ```
 
+`scripts/trace_gate.sh` runs `lucida trace --gate` over generated datasets at
+device pixel ratio 1 and 2, against the same kind of server. The `Trace gate`
+workflow runs it nightly in headless Chrome on SwiftShader.
+
 `docs/research/level-chain-harness/` measures the target level against level 0
 pinned.

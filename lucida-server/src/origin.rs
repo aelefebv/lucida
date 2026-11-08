@@ -313,7 +313,7 @@ mod tests {
 
     fn guarded(policy: OriginPolicy) -> Router {
         Router::new()
-            .route("/ws", get(|| async { "upgraded" }))
+            .route("/ws/workspaces/w", get(|| async { "upgraded" }))
             .layer(axum::middleware::from_fn_with_state(
                 Arc::new(policy),
                 reject_cross_origin_upgrade,
@@ -321,7 +321,7 @@ mod tests {
     }
 
     async fn status(router: Router, pairs: &[(&'static str, &str)]) -> StatusCode {
-        let mut req = HttpRequest::builder().uri("/ws");
+        let mut req = HttpRequest::builder().uri("/ws/workspaces/w");
         for (name, value) in pairs {
             req = req.header(*name, *value);
         }

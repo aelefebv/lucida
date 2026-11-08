@@ -125,6 +125,7 @@ function buildSliceUniformData(
   levelSlotDims: LevelSlotDims,
   coarseSlotDims: [number, number],
   borderColor: RgbaColor,
+  pixelRatio: number,
 ): Float32Array<ArrayBuffer> {
   const sx = canvasW / (dataW * zoom);
   const sy = canvasH / (dataH * zoom);
@@ -150,8 +151,9 @@ function buildSliceUniformData(
 
   // Layer screen-pixel size for border detection (per-member layers:
   // the member's own size; aggregate layers: the union extent, scaled
-  // to each member's fraction in the vertex stage).
-  uniformData.set([dataW * zoom, dataH * zoom, 0, 0], SLICE_UNIFORM_OFFSETS.memberScreenSize / 4);
+  // to each member's fraction in the vertex stage), and the pixel ratio
+  // that sizes the failed hatch.
+  uniformData.set([dataW * zoom, dataH * zoom, pixelRatio, 0], SLICE_UNIFORM_OFFSETS.memberScreenSize / 4);
   const [r, g, b, a] = borderColor;
   uniformData.set([r * a, g * a, b * a, a], SLICE_UNIFORM_OFFSETS.borderColor / 4);
   return uniformData;
@@ -163,6 +165,7 @@ export class SliceRenderer {
   private aggregatePipelines: Record<BlendMode, GPURenderPipeline> | null = null;
   /** Faint white until the page sends the theme's color. */
   private tileBorderColor: RgbaColor = [1, 1, 1, 0.3];
+  private pixelRatio = 1;
   /** Resolves once the three per-member and the three aggregate pipelines have compiled. See `pipelineCompile.ts`. */
   readonly compiled: Promise<void>;
   private uniformBuffer: GPUBuffer;
@@ -537,8 +540,14 @@ export class SliceRenderer {
       levelSlotDimsOf(this.levelBindings),
       this.coarseBinding ? [this.coarseBinding.slotsX, this.coarseBinding.slotsY] : [0, 0],
       this.tileBorderColor,
+      this.pixelRatio,
     );
     this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformData);
+  }
+
+  /** Render-target pixels per CSS pixel, from the next draw on. */
+  setPixelRatio(ratio: number) {
+    this.pixelRatio = ratio;
   }
 
   /** The member footprint border, from the next draw on. */
@@ -653,6 +662,7 @@ export class SliceRenderer {
       levelSlotDimsOf(draw.levels),
       draw.coarse ? [draw.coarse.slotsX, draw.coarse.slotsY] : [0, 0],
       this.tileBorderColor,
+      this.pixelRatio,
     ));
     // Intensity draws carry no declared palette: count 0 over the dummy.
     this.device.queue.writeBuffer(entityRefBuffer, 0, new Uint32Array([draw.entityIndex >>> 0, 0, 0, 0]));
@@ -723,6 +733,7 @@ export class SliceRenderer {
         levelSlotDimsOf(batch.levels),
         batch.coarse ? [batch.coarse.slotsX, batch.coarse.slotsY] : [0, 0],
         this.tileBorderColor,
+        this.pixelRatio,
       );
       this.device.queue.writeBuffer(this.aggregateUniformBuffers[i], 0, uniformData);
       return this.device.createBindGroup({

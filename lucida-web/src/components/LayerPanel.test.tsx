@@ -9,6 +9,7 @@ import { __resetCommandsForTesting, listCommands } from "../ui/commands.ts";
 import { resolvedLayer, resolvedLayers } from "../resolvedLayerFixtures.ts";
 import type { ResolvedLayers } from "../resolvedLayers.ts";
 import { createSettleState, evaluateSettle, settleSignal, type SettleState } from "../pipeline/settle.ts";
+import { failedChunkReport, summarizeFailedChunks } from "../pipeline/failedChunks.ts";
 
 /** The scene soloing `channel` of a three-channel layer `id`. */
 function soloOn(id: string, channel: number): ResolvedLayers {
@@ -496,6 +497,27 @@ describe("LayerPanel data problems", () => {
 
     expect(screen.queryByTestId("layer-degraded-wds-1")).toBeNull();
     expect(screen.queryByRole("list", { name: "original.zarr data problems" })).toBeNull();
+  });
+
+  it("names the chunks that could not be read, and drops the note once none are left", () => {
+    render(<LayerPanel {...baseProps()} />);
+    expect(screen.queryByTestId("layer-degraded-wds-1")).toBeNull();
+
+    act(() => {
+      failedChunkReport.publish(summarizeFailedChunks([
+        { datasetId: "wds-1", imageId: "img", chunkKey: "0/0/0/0/0/0", failure: "corrupt_chunk" },
+        { datasetId: "wds-1", imageId: "img", chunkKey: "0/0/0/0/0/1", failure: "corrupt_chunk" },
+        { datasetId: "other", imageId: "img", chunkKey: "0/0/0/0/0/0", failure: "permission" },
+      ]));
+    });
+    expect(screen.getByTestId("layer-degraded-wds-1").textContent).toBe("Degraded");
+    const list = screen.getByRole("list", { name: "original.zarr data problems" });
+    expect(within(list).getAllByRole("listitem").map((item) => item.textContent)).toEqual([
+      "2 chunks could not be read (corrupt), so their regions show hatched.",
+    ]);
+
+    act(() => failedChunkReport.publish(new Map()));
+    expect(screen.queryByTestId("layer-degraded-wds-1")).toBeNull();
   });
 });
 

@@ -8,7 +8,6 @@ pub mod admin;
 pub mod auth;
 pub mod binding;
 pub mod binding_restore;
-pub mod bookmarks;
 pub mod browse;
 pub mod chunk_read;
 pub mod connection;
@@ -35,14 +34,12 @@ pub mod workspace;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use lucida_core::protocol::ClientId;
 use lucida_store::source_policy::SourcePolicy;
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::Mutex;
 
 use connection::ClientSender;
-use session::Session;
 
 #[derive(Clone)]
 pub enum BroadcastItem {
@@ -79,10 +76,6 @@ pub type UnicastRoutes = Arc<Mutex<HashMap<ClientId, ClientSender>>>;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub session: Arc<Mutex<Session>>,
-    pub tx: broadcast::Sender<BroadcastItem>,
-    pub next_id: Arc<AtomicU64>,
-    pub unicast_routes: UnicastRoutes,
     /// Where datasets may be opened from, and the data roots that bound
     /// `/api/browse`.
     pub source_policy: Arc<SourcePolicy>,

@@ -224,7 +224,7 @@ vi.mock("./bridge.ts", () => {
   class MockBridge {
     static instances: MockBridge[] = [];
     handlers: unknown;
-    workspaceId: string | undefined;
+    url: string;
     destroy = vi.fn();
     send = vi.fn();
     sendCommand = vi.fn();
@@ -233,14 +233,17 @@ vi.mock("./bridge.ts", () => {
     sendCursor = vi.fn();
     sendFollow = vi.fn();
     sendOpenRemoteDataset = vi.fn();
-    subscribeBookmarkChanged = vi.fn(() => () => {});
-    constructor(handlers: unknown, _url?: string, workspaceId?: string) {
+    constructor(handlers: unknown, url: string) {
       this.handlers = handlers;
-      this.workspaceId = workspaceId;
+      this.url = url;
       MockBridge.instances.push(this);
     }
   }
-  return { Bridge: MockBridge, bridgeLog: vi.fn() };
+  return {
+    Bridge: MockBridge,
+    bridgeLog: vi.fn(),
+    workspaceSocketUrl: (id: string) => `ws://test/ws/workspaces/${id}`,
+  };
 });
 
 vi.mock("./pipeline/fetch/index.ts", () => {
