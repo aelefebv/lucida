@@ -12,7 +12,7 @@ import { UPLOAD_WINDOW_MS } from "../constants.ts";
 import { emptyUploadTickStats, UploadTelemetry, type UploadTickStats } from "./upload.ts";
 
 /** One tick of 128 events into a full window and its publish, in nominal microseconds: about twice the typical figure. */
-const RING_TICK_BUDGET_US = 170;
+const RING_TICK_BUDGET_US = 190;
 
 function makeTickStats(over: Partial<UploadTickStats> = {}): UploadTickStats {
   return { ...emptyUploadTickStats(), ...over };

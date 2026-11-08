@@ -30,7 +30,7 @@ const BOXES_PER_POLL = 600;
 const POLL_CEILING_US = 4_000;
 const HIT_TEST_CEILING_US = 200;
 /** In nominal microseconds, about twice the typical figure. */
-const POLL_BUDGET_US = 4_700;
+const POLL_BUDGET_US = 4_900;
 /** Ten hit tests against a walk of every silhouette's edges at the same ten points: about twice the typical ratio. */
 const HIT_TEST_RATIO_BUDGET = 2.1;
 

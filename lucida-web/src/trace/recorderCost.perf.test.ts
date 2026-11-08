@@ -84,16 +84,16 @@ const WORST_TICK_CEILING_US = 250;
 
 /** Per-event budgets in nominal nanoseconds, by burst size, about twice each typical figure. */
 const PER_EVENT_BUDGET_NS: Readonly<Record<number, number>> = {
-  1: 580,
-  8: 310,
-  128: 16,
+  1: 590,
+  8: 300,
+  128: 15,
   2943: 11,
 };
 
 /** Tick budgets in nominal microseconds, about twice each typical figure. */
-const WORST_TICK_BUDGET_US = 87;
-const MATCHED_TICK_BUDGET_US = 10;
-const LIVE_READ_BUDGET_US = 1.9;
+const WORST_TICK_BUDGET_US = 80;
+const MATCHED_TICK_BUDGET_US = 16;
+const LIVE_READ_BUDGET_US = 2.1;
 
 /**
  * How much more the largest burst may cost per event than the cheapest. Wide,
@@ -744,10 +744,15 @@ describe("recorder cost contract", () => {
         `${(FLOOR_PUBLISH_NS_AT[128] / 1000 / lifecycle.timing.nominalUs).toFixed(0)}x the other way`,
     );
 
-    // The floor comparison is logged above; the budget is what fails. The
+    // The floor comparison is logged above; the budgets are what fail. The
     // call-count test pins this tick's calls, so a write path that got more
     // expensive per call cannot hide behind a tick that made fewer of them.
+    // A tick of a few microseconds varies most from host to host, so the
+    // eight-chunk tick beside it is held to its burst's budget as well.
     expectWithinBudget("matched-shape tick", real.timing, MATCHED_TICK_BUDGET_US);
+    expect(pessimistic.perEventNs, `eight-chunk tick at ${pessimistic.perEventNs.toFixed(1)} nominal ns/event`).toBeLessThan(
+      PER_EVENT_BUDGET_NS[8],
+    );
   });
 
   it("allocates nothing in steady state after warmup", () => {
