@@ -140,6 +140,45 @@ fn open_plans_what_is_visible() {
     assert_plans("open plans what is visible", opened);
 }
 
+/// The opener's page once its canvas moved to `dpr` from the other pixel
+/// ratio, as dragging the window to another display or zooming the browser
+/// does. The render loop names the ratio with every size it asserts.
+fn ratio_changed(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
+    let from = other_ratio(dpr);
+    [Mode::Slice, Mode::Arcball]
+        .map(|mode| {
+            let mut shown = open(f, vp, from, mode);
+            for ratio in [from, dpr] {
+                let [width, height] = vp.device(ratio);
+                shown.scene.apply(
+                    ViewportCommand::SetViewport {
+                        width,
+                        height,
+                        pixel_ratio: Some(ratio.into()),
+                    }
+                    .into(),
+                );
+            }
+            shown.dpr = dpr;
+            Produced::framing(format!("{mode:?} after a ratio change"), shown)
+        })
+        .into()
+}
+
+#[test]
+fn a_pixel_ratio_change_keeps_the_dataset_framed() {
+    assert_on_screen(
+        "a pixel ratio change keeps the dataset framed",
+        &PIXEL_RATIOS,
+        ratio_changed,
+    );
+}
+
+#[test]
+fn a_pixel_ratio_change_keeps_the_css_size() {
+    assert_same_css_size("a pixel ratio change keeps the CSS size", ratio_changed);
+}
+
 fn joined(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
     vec![Produced::framing("joined", join(f, vp, dpr))]
 }
@@ -184,7 +223,6 @@ fn restore_frames_an_arcball_view_at_another_pixel_ratio() {
 }
 
 #[test]
-#[ignore = "a restored slice view keeps its zoom in device pixels, so it shows at half or double size at another pixel ratio"]
 fn restore_frames_a_slice_view_at_another_pixel_ratio() {
     assert_on_screen(
         "restore frames a slice view at another pixel ratio",
@@ -193,8 +231,26 @@ fn restore_frames_a_slice_view_at_another_pixel_ratio() {
     );
 }
 
+/// A view fitted to a canvas of another shape keeps the whole region it
+/// showed, so the dataset it framed stays in view however small that leaves it.
 #[test]
-#[ignore = "a restored view keeps the zoom or distance of the canvas it was saved on, so a landscape view clips on a portrait canvas and a portrait view shows small on a landscape one"]
+fn restore_keeps_a_view_in_view_on_another_canvas_shape() {
+    assert_on_screen(
+        "restore keeps a view in view on another canvas shape",
+        &PIXEL_RATIOS,
+        |f, vp, dpr| {
+            [Mode::Slice, Mode::Arcball]
+                .map(|mode| Produced {
+                    expect: Expect::Inside,
+                    ..restored(f, mode, other(vp), dpr, vp, dpr)
+                })
+                .into()
+        },
+    );
+}
+
+#[test]
+#[ignore = "a restored view keeps the whole region it showed, so a dataset that spans a portrait canvas's width shows small on a landscape one, and a tall one the other way round; filling the canvas needs the restore to know the view framed the dataset"]
 fn restore_frames_a_view_on_another_canvas_shape() {
     assert_on_screen(
         "restore frames a view on another canvas shape",
@@ -228,7 +284,6 @@ fn restore_shows_an_arcball_view_at_the_same_css_size_at_any_pixel_ratio() {
 }
 
 #[test]
-#[ignore = "a restored slice view keeps its zoom in device pixels"]
 fn restore_shows_a_slice_view_at_the_same_css_size_at_any_pixel_ratio() {
     assert_same_css_size(
         "restore shows a slice view at the same CSS size",
@@ -313,13 +368,12 @@ fn explore_home_frames_the_dataset_on_a_1x_canvas() {
 }
 
 #[test]
-#[ignore = "the synthesized explore Home breaks as it does at 1x, and is fitted to the viewport in CSS pixels, so a 2x canvas shows it at half size"]
+#[ignore = "the synthesized explore Home frames the first image's voxel box, as it does at 1x"]
 fn explore_home_frames_the_dataset_on_a_2x_canvas() {
     assert_on_screen("explore Home frames the dataset at 2x", &[2], explore_home);
 }
 
 #[test]
-#[ignore = "the synthesized explore Home is fitted to the viewport in CSS pixels and shown in device pixels"]
 fn explore_home_shows_the_same_css_size_at_any_pixel_ratio() {
     assert_same_css_size("explore Home shows the same CSS size", explore_home);
 }
