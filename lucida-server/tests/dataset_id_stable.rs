@@ -220,7 +220,7 @@ fn in_memory_store() -> Arc<dyn ObjectStore> {
     Arc::new(InMemory::new())
 }
 
-/// Build a `ServerBinding` with stub proxy infrastructure for tests.
+/// Build a `ServerBinding` with inert generated infrastructure for tests.
 fn make_binding(
     url: &str,
     register: &DatasetOpened,

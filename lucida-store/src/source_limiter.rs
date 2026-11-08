@@ -20,7 +20,7 @@ pub struct ReaderId(pub u64);
 
 impl ReaderId {
     /// Reads not made on behalf of a connected client — imports, CLI work, and
-    /// the proxy's own generation. They share one fairness class between them,
+    /// generated-level builds. They share one fairness class between them,
     /// which is what they are: one background population competing with the
     /// interactive ones, not many.
     pub const UNATTRIBUTED: ReaderId = ReaderId(u64::MAX);
@@ -37,7 +37,7 @@ pub struct RequestLabel(pub u32);
 
 impl RequestLabel {
     /// Reads with no requesting client behind them: metadata imports, CLI
-    /// work, and the proxy's own generation. Nothing joins these to a
+    /// work, and generated-level builds. Nothing joins these to a
     /// browser row, so they carry no label rather than a borrowed one.
     pub const UNATTRIBUTED: RequestLabel = RequestLabel(u32::MAX);
 }

@@ -48,8 +48,9 @@ Add these to any `docker run` above:
 # With sign-in on, local datasets open only from these directories.
 -v /path/on/host:/var/lib/lucida/data -e LUCIDA_DATA_DIR=/var/lib/lucida/data
 # Keep state across restarts. The default lucida.db lands in the working
-# directory, /var/lib/lucida. The proxy cache goes elsewhere unless moved.
--v lucida-data:/var/lib/lucida -e LUCIDA_PROXY_CACHE_DIR=/var/lib/lucida/proxy-cache
+# directory, /var/lib/lucida. The generated-level cache goes elsewhere unless
+# moved.
+-v lucida-data:/var/lib/lucida -e LUCIDA_GENERATED_COARSE_CACHE_DIR=/var/lib/lucida/generated-coarse
 ```
 
 ### Theme a deployment

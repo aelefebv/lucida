@@ -4551,7 +4551,7 @@ mod tests {
 
         scene.apply(add_annotation_cmd("ds1", "p1", [1.0, 2.0], "alice").into());
         assert_eq!(scene.epochs.annotation, 1);
-        // Adding a pin is not a content/layout/view/selection/asset change.
+        // Adding a pin is not a content/layout/view/selection change.
         assert_eq!(scene.epochs.content, baseline.content);
         assert_eq!(scene.epochs.layout, baseline.layout);
         assert_eq!(scene.epochs.view, baseline.view);
@@ -5777,8 +5777,8 @@ mod tests {
 
     #[test]
     fn add_comment_to_missing_pin_still_bumps_epoch_but_creates_nothing() {
-        // The epoch is the message-arrival counter (mirrors asset-delta
-        // semantics): it bumps per applied command even when the state-level
+        // The epoch is the message-arrival counter: it bumps per applied
+        // command even when the state-level
         // effect is a no-op. The no-op must not create a phantom pin.
         let mut scene = Scene::new([800, 600]);
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);

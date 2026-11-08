@@ -217,7 +217,7 @@ impl DatasetLocation {
         dataset_id_for_url(&self.canonical)
     }
 
-    /// The proxy cache's directory hash; see [`dataset_url_hash16`].
+    /// The generated-level cache's directory hash; see [`dataset_url_hash16`].
     pub fn hash16(&self) -> [u8; 16] {
         dataset_url_hash16(&self.canonical)
     }
@@ -271,7 +271,7 @@ pub fn dataset_id_for_url(canonical: &str) -> String {
     format!("ds-{:016x}", u64::from_le_bytes(prefix))
 }
 
-/// 16-byte URL hash used by the proxy cache for its per-dataset
+/// 16-byte URL hash used by the generated-level cache for its per-dataset
 /// directory name. Shares the underlying BLAKE3 digest with
 /// [`dataset_id_for_url`] so the two stay in lockstep — the cache
 /// directory's first 8 bytes (in BLAKE3 order) match the bytes from

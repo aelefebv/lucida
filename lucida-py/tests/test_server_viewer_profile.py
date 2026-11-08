@@ -65,7 +65,7 @@ def server_url(tmp_path):
     env.update(
         {
             "LUCIDA_BIND": f"127.0.0.1:{port}",
-            "LUCIDA_PROXY_CACHE_DIR": str(tmp_path / "proxy-cache"),
+            "LUCIDA_GENERATED_COARSE_CACHE_DIR": str(tmp_path / "generated-coarse"),
             "LUCIDA_GENERATED_COARSE_CACHE_DIR": str(tmp_path / "coarse-cache"),
         }
     )

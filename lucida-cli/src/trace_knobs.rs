@@ -579,7 +579,7 @@ mod tests {
     fn every_panel_knob_is_a_flag_named_by_its_label_and_nothing_else_is() {
         let panel = panel_knobs();
         assert!(
-            panel.len() >= 16,
+            panel.len() >= 13,
             "the panel declares {} knobs",
             panel.len()
         );

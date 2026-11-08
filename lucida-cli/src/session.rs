@@ -361,8 +361,7 @@ mod tests {
         serde_json::json!({
             "manifests": {},
             "registered_layouts": {},
-            "active_layout_ids": {},
-            "asset_catalogs": {}
+            "active_layout_ids": {}
         })
     }
 

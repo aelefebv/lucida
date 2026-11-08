@@ -788,8 +788,8 @@ pub enum ChunkMessage {
     ChunkRequest {
         /// Correlation label: the join key between this client's lifecycle
         /// row and the server's row for the same wire request.
-        /// Minted from one per-connection counter shared with
-        /// `AssetRequest`, so `(connection, rid)` is unique.
+        /// Minted from one per-connection counter, so `(connection, rid)` is
+        /// unique.
         ///
         /// Required, not `#[serde(default)]`: a client that stopped sending
         /// it would otherwise degrade silently to `rid: 0` on every row.

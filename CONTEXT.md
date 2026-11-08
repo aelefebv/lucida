@@ -65,11 +65,6 @@ A level the metadata declares but no chunks were written for. Every read returns
 the fill value, so it draws all zero. An empty region is real data that is zero.
 _Avoid_: empty level
 
-**Proxy asset**:
-A small low-resolution placeholder volume standing in for a tile or a group of
-tiles until detail chunks arrive. `lucida-proxy` generates them in the server.
-_Avoid_: proxy (unqualified, which reads as a network hop; see perimeter)
-
 ## Residency and delivery
 
 **Residency tier**:
@@ -236,7 +231,6 @@ established). One mode holds for the whole server.
 **Perimeter**:
 An authenticating layer in front of lucida that decides who reaches the server.
 A caller it admits holds only the rights their principal carries.
-_Avoid_: proxy (a proxy asset is a placeholder volume)
 
 **Administrator**:
 A principal who administers this server. Server-wide, and unrelated to any
