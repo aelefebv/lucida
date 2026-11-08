@@ -192,6 +192,69 @@ describe("ProxiedContentSource.fetch", () => {
     expect(labels).toEqual([0, 0, 0]);
   });
 
+  describe("chunk_cancel", () => {
+    const request = (n: number, datasetId = "ds-1") => ({
+      datasetId,
+      imageId: "image-1",
+      chunkKey: `0/0/0/0/0/${n}`,
+    });
+    const cancels = () =>
+      sentMessages.map((json) => JSON.parse(json)).filter((msg) => msg.type === "chunk_cancel");
+
+    it("tells the server once the last caller of a request aborts", async () => {
+      const first = new AbortController();
+      const second = new AbortController();
+      const a = source.fetch(request(0), first.signal);
+      const b = source.fetch(request(0), second.signal);
+
+      first.abort();
+      await expect(a).rejects.toThrow();
+      expect(cancels()).toEqual([]);
+
+      second.abort();
+      await expect(b).rejects.toThrow();
+      expect(cancels()).toEqual([{ type: "chunk_cancel", rids: [0] }]);
+    });
+
+    it("sends the aborts of one task as one message", async () => {
+      const controllers = [0, 1, 2].map(() => new AbortController());
+      const fetches = controllers.map((ctrl, n) => source.fetch(request(n), ctrl.signal));
+
+      for (const ctrl of controllers) ctrl.abort();
+      await Promise.allSettled(fetches);
+
+      expect(cancels()).toEqual([{ type: "chunk_cancel", rids: [0, 1, 2] }]);
+    });
+
+    it("does not cancel a request that timed out, because its retry rides the read", async () => {
+      const pending = source.fetch(request(0), new AbortController().signal);
+      vi.advanceTimersByTime(DEFAULT_TIMEOUT_MS + 1);
+      await expect(pending).rejects.toThrow(/timed out/);
+      expect(cancels()).toEqual([]);
+    });
+
+    it("drops cancels for a connection that has since been replaced", async () => {
+      const ctrl = new AbortController();
+      const pending = source.fetch(request(0), ctrl.signal);
+      ctrl.abort();
+      source.resetConnection(1);
+      await expect(pending).rejects.toThrow();
+      expect(cancels()).toEqual([]);
+    });
+
+    it("cancels a removed dataset's requests", async () => {
+      const removed = source.fetch(request(0, "ds-1"), new AbortController().signal);
+      const kept = source.fetch(request(0, "ds-2"), new AbortController().signal);
+
+      source.rejectDataset("ds-1");
+      await expect(removed).rejects.toThrow(/Dataset removed/);
+
+      expect(cancels()).toEqual([{ type: "chunk_cancel", rids: [0] }]);
+      source.handleChunkData("ds-2/image-1/0/0/0/0/0/0", new ArrayBuffer(8));
+      await expect(kept).resolves.toBeDefined();
+    });
+  });
+
   it("rejects synchronously when the image's wire format is not registered", async () => {
     const ctrl = new AbortController();
     await expect(

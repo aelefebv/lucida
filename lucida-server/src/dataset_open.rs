@@ -543,12 +543,14 @@ pub async fn open_dataset(
     // datasets without collision. The generator owns its own bounded
     // semaphore + in-flight dedup map.
     let url_hash16 = location.hash16();
-    let derived_chunks = Arc::new(DerivedChunkCache::new_on_disk_with_budget(
-        proxy_config.generated_cache_dir.clone(),
-        url_hash16,
-        proxy_config.generated_disk_budget_bytes,
-    )
-    .with_memory(Arc::clone(&proxy_config.generated_memory)));
+    let derived_chunks = Arc::new(
+        DerivedChunkCache::new_on_disk_with_budget(
+            proxy_config.generated_cache_dir.clone(),
+            url_hash16,
+            proxy_config.generated_disk_budget_bytes,
+        )
+        .with_memory(Arc::clone(&proxy_config.generated_memory)),
+    );
     let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
     for plan in &generated_plans {
         match derived_chunks.register_generated_plan(plan) {

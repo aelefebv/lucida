@@ -11,6 +11,7 @@ pub mod binding_restore;
 pub mod bookmarks;
 pub mod browse;
 pub mod chunk_read;
+pub mod chunk_serves;
 pub mod connection;
 pub mod dataset_open;
 pub mod decode;

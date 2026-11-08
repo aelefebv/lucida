@@ -770,6 +770,14 @@ pub enum ChunkMessage {
         image_id: ImageId,
         key: String,
     },
+    /// Viewer -> Server: the client no longer wants these requests, named by
+    /// their `rid`s. A request not yet read is never read, and one being
+    /// read gives up its source-read permit. Nothing is sent back, and a
+    /// label that already finished is ignored.
+    ///
+    /// Variant added at the end so the serde tag positions of older variants
+    /// don't shift.
+    ChunkCancel { rids: Vec<u32> },
 }
 
 #[cfg(test)]

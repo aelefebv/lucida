@@ -1798,6 +1798,12 @@ describe("wire goldens: content-source request envelopes", () => {
     assetController.abort();
     await expect(pendingChunk).rejects.toThrow(/aborted/i);
     await expect(pendingAsset).rejects.toThrow(/aborted/i);
+
+    // Aborting the chunk request takes it back from the server.
+    expect(sent).toHaveLength(3);
+    expect(JSON.parse(sent[2])).toStrictEqual(
+      coveredFixture("session/chunk_cancel.json"),
+    );
   });
 });
 

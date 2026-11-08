@@ -113,6 +113,12 @@ export class ProxiedContentSource implements ContentSource {
    */
   private nextRid = 0;
   private connectionGeneration = 0;
+  /**
+   * Labels of chunk requests no caller wants any more, sent as one
+   * `chunk_cancel` once the current task is done: a replan aborts many
+   * requests at once, and one message each would rival the requests.
+   */
+  private cancelledRids: number[] = [];
   private pendingProxy = new Map<string, PendingProxyRequest>();
   private imageWireFormats = new Map<string, WireFormat>();
 
@@ -138,6 +144,9 @@ export class ProxiedContentSource implements ContentSource {
   resetConnection(generation: number): void {
     this.connectionGeneration = generation;
     this.nextRid = 0;
+    // The old connection's labels mean nothing on the new one, and the
+    // server dropped that connection's requests when it closed.
+    this.cancelledRids = [];
   }
 
   registerImage(imageId: string, wireFormat: WireFormat): void {
@@ -242,6 +251,7 @@ export class ProxiedContentSource implements ContentSource {
     for (const [key, group] of this.pending) {
       if (key.startsWith(prefix)) {
         this.pending.delete(key);
+        this.cancel(group.label);
         for (const entry of group.entries) {
           clearTimeout(entry.timeoutId);
           entry.reject(new FetchError("Dataset removed", { kind: "abort" }));
@@ -305,7 +315,10 @@ export class ProxiedContentSource implements ContentSource {
 
       signal.addEventListener("abort", () => {
         clearTimeout(pendingEntry.timeoutId);
-        this.removePending(compositeKey, pendingEntry);
+        // Only an abort tells the server to stop. A timed-out request is
+        // retried at once, and the retry rides the read still in flight.
+        const emptied = this.removePending(compositeKey, pendingEntry);
+        if (emptied) this.cancel(emptied);
         // Keep the AbortError shape for downstream `instanceof DOMException`.
         reject(new DOMException("Aborted", "AbortError"));
       });
@@ -389,17 +402,34 @@ export class ProxiedContentSource implements ContentSource {
     return { label, send: true };
   }
 
-  private removePending(key: string, entry: PendingRequest): void {
+  /** Returns the group's label when this caller was the last one in it. */
+  private removePending(key: string, entry: PendingRequest): WireLabel | null {
     const group = this.pending.get(key);
-    if (!group) return;
+    if (!group || !group.entries.includes(entry)) return null;
     const next = group.entries.filter((candidate) => candidate !== entry);
     if (next.length === 0) {
       this.pending.delete(key);
-    } else {
-      // The label stays with the group: the wire request it names is still
-      // in flight even though this caller has left.
-      this.pending.set(key, { label: group.label, entries: next });
+      return group.label;
     }
+    // The label stays with the group: the wire request it names is still
+    // in flight even though this caller has left.
+    this.pending.set(key, { label: group.label, entries: next });
+    return null;
+  }
+
+  private cancel(label: WireLabel): void {
+    if (label.connectionGeneration !== this.connectionGeneration) return;
+    if (this.cancelledRids.length === 0) {
+      queueMicrotask(() => this.flushCancels());
+    }
+    this.cancelledRids.push(label.rid);
+  }
+
+  private flushCancels(): void {
+    if (this.cancelledRids.length === 0) return;
+    const rids = this.cancelledRids;
+    this.cancelledRids = [];
+    this.sendMessage(JSON.stringify({ type: "chunk_cancel", rids }));
   }
 
   private takePending(key: string): PendingRequest[] {

@@ -23,6 +23,7 @@ use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::binding::{ChunkResolver, parse_level_from_chunk_key};
 use crate::chunk_read::{ChunkReadError, read_chunk};
+use crate::chunk_serves::ChunkServes;
 use crate::connection::{CloseSignal, client_queue};
 use crate::dataset_open::{self, DatasetOpenContext, DatasetOpenOutcome, WorkspaceScope};
 use crate::generated::{
@@ -123,6 +124,7 @@ async fn handle_client_inner(
     // own requests produced — no queue depth, no peer rates, no
     // peer dataset identities.
     let timings = Arc::new(TimingBuffer::new());
+    let chunk_serves = ChunkServes::new();
 
     // Presentational identity for this peer's cursor, authored server-side
     // from the authenticated principal so it cannot be spoofed. The
@@ -818,7 +820,7 @@ async fn handle_client_inner(
                             match dispatch {
                                 Some(ChunkDispatch::Source { resolver, cache }) => {
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
-                                    tokio::spawn(async move {
+                                    chunk_serves.spawn(rid, async move {
                                         serve_chunk_from_store(
                                             id,
                                             &dataset_id,
@@ -838,7 +840,7 @@ async fn handle_client_inner(
                                     generated_service,
                                 }) => {
                                     let unicast_routes_clone = Arc::clone(&unicast_routes);
-                                    tokio::spawn(async move {
+                                    chunk_serves.spawn(rid, async move {
                                         generated_service
                                             .enqueue_chunk_request(id, &image_id, level, &key)
                                             .await;
@@ -871,6 +873,9 @@ async fn handle_client_inner(
                         }
                         ChunkMessage::ChunkFetch { .. } => {
                             // Clients should not send ChunkFetch — ignore.
+                        }
+                        ChunkMessage::ChunkCancel { rids } => {
+                            chunk_serves.cancel(&rids);
                         }
                     }
                     continue;
@@ -955,6 +960,7 @@ async fn handle_client_inner(
         .await;
     }
     outbound.abort();
+    chunk_serves.cancel_all();
     unicast_routes.lock().await.remove(&id);
     if let Some(ctx) = workspace.as_ref() {
         ctx.live.detach_connection(id);

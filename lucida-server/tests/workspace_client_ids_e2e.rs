@@ -61,12 +61,11 @@ async fn first_clients_of_two_workspaces_get_different_ids() {
     let extractor: Arc<dyn PrincipalExtractor> = Arc::new(StubPrincipalExtractor::new(Arc::new(
         AuthConfig::for_tests(),
     )));
-    let app = lucida_server::workspace::router(manager).layer(
-        axum::middleware::from_fn_with_state(
+    let app =
+        lucida_server::workspace::router(manager).layer(axum::middleware::from_fn_with_state(
             extractor,
             lucida_server::auth::middleware::auth_middleware,
-        ),
-    );
+        ));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server = tokio::spawn(async move {

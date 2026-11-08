@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
+use lru::LruCache;
 use lucida_content::{
     DataType, DatasetId, DatasetKind, DatasetManifest, GeneratedLevelInfo,
     GeneratedLevelProvenance, GeneratedLevelRole, ImageId, ImageSpec, LevelGeometry,
@@ -19,7 +20,6 @@ use lucida_protocol::{
     GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary,
 };
 use lucida_store::cache::CachedStore;
-use lru::LruCache;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 
@@ -223,15 +223,21 @@ struct BackgroundCursor {
     /// The cache's eviction count when the fill started. Once the cache
     /// evicts, filling further only churns it, so the fill stops.
     evictions_at_start: u64,
+    /// Bytes the fill may still queue for generation. A generated level can
+    /// run to hundreds of megabytes per timepoint and channel, and the disk
+    /// cache may have no budget, so the fill covers as much as the memory
+    /// budget holds and views ask for the rest.
+    bytes_left: u64,
 }
 
 impl BackgroundCursor {
-    fn new(evictions_at_start: u64) -> Self {
+    fn new(evictions_at_start: u64, bytes_left: u64) -> Self {
         Self {
             plan: 0,
             tc: 0,
             chunk: 0,
             evictions_at_start,
+            bytes_left,
         }
     }
 
@@ -662,9 +668,7 @@ impl DerivedChunkCache {
         bytes: Vec<u8>,
     ) {
         let chunk_key = self.mark_ready(None, image_id, level_index, key);
-        self.memory
-            .memory
-            .put(self.memory.owner, chunk_key, bytes);
+        self.memory.memory.put(self.memory.owner, chunk_key, bytes);
     }
 
     /// Record a chunk as ready without holding its bytes, and the level
@@ -723,9 +727,7 @@ impl DerivedChunkCache {
             None => vec![],
         };
         let chunk_key = self.mark_ready(Some(level_identity), image_id, level_index, key);
-        self.memory
-            .memory
-            .put(self.memory.owner, chunk_key, bytes);
+        self.memory.memory.put(self.memory.owner, chunk_key, bytes);
         Ok(self.withdraw_evicted(&evicted))
     }
 
@@ -868,6 +870,10 @@ impl DerivedChunkCache {
                 );
             }
         }
+    }
+
+    pub fn memory_budget_bytes(&self) -> u64 {
+        self.memory.memory.max_bytes()
     }
 
     /// How many times the lasting copy, the disk cache or without one the
@@ -1564,7 +1570,11 @@ impl GeneratedCoarseService {
         if state.shutdown_reason.is_some() {
             return;
         }
-        if self.inner.cache.needs_regeneration(image_id, level_index, key) {
+        if self
+            .inner
+            .cache
+            .needs_regeneration(image_id, level_index, key)
+        {
             state.completed_keys.remove(&work_key);
         }
         // Finished work has nothing left to wait on, so recording the request
@@ -1642,7 +1652,10 @@ impl GeneratedCoarseService {
         if state.shutdown_reason.is_some() || state.background.is_some() {
             return;
         }
-        state.background = Some(BackgroundCursor::new(self.inner.cache.evictions()));
+        state.background = Some(BackgroundCursor::new(
+            self.inner.cache.evictions(),
+            self.inner.cache.memory_budget_bytes(),
+        ));
         let queued = self.top_up_background_locked(&mut state);
         drop(state);
         if queued {
@@ -1683,6 +1696,16 @@ impl GeneratedCoarseService {
             {
                 continue;
             }
+            let bytes = self
+                .inner
+                .plans
+                .get(&(work_key.image_id.clone(), work_key.level_index))
+                .map_or(0, expected_generated_chunk_bytes);
+            if bytes > cursor.bytes_left {
+                tracing::info!("generated_coarse.background_fill_stopped_at_byte_cap");
+                return queued;
+            }
+            cursor.bytes_left -= bytes;
             enqueue_work_locked(state, work_key, GeneratedSchedulingLane::Background);
             waiting += 1;
             queued = true;
@@ -3956,8 +3979,8 @@ mod tests {
     fn an_evicted_generated_chunk_is_read_back_from_disk() {
         let dir = tempfile::tempdir().unwrap();
         let memory = GeneratedChunkMemory::new(4);
-        let cache =
-            DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [3; 16]).with_memory(memory.clone());
+        let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [3; 16])
+            .with_memory(memory.clone());
         let image = ImageId("img-1".into());
         cache
             .put_ready_chunk_atomic("identity", image.clone(), 1, chunk(0), vec![1, 2, 3, 4])
@@ -3994,7 +4017,8 @@ mod tests {
         )
         .pop()
         .expect("plan");
-        let cache = Arc::new(DerivedChunkCache::default().with_memory(GeneratedChunkMemory::new(4)));
+        let cache =
+            Arc::new(DerivedChunkCache::default().with_memory(GeneratedChunkMemory::new(4)));
         cache.upsert_level(plan.availability.clone());
         let service = service_with_cache(
             manifest,
@@ -4016,7 +4040,12 @@ mod tests {
             .await
             .completed_keys
             .insert(work_key);
-        cache.seed_ready_chunk(plan.image_id.clone(), plan.level_index, key.clone(), vec![1; 4]);
+        cache.seed_ready_chunk(
+            plan.image_id.clone(),
+            plan.level_index,
+            key.clone(),
+            vec![1; 4],
+        );
         cache.seed_ready_chunk(
             plan.image_id.clone(),
             plan.level_index,
@@ -4052,14 +4081,18 @@ mod tests {
     #[test]
     fn a_second_dataset_over_one_source_reuses_the_generated_level_on_disk() {
         let dir = tempfile::tempdir().unwrap();
-        let first_plan =
-            plan_generated_coarse_for_manifest(&manifest_as_dataset("ds-first"), GeneratedCoarseConfig::default())
-                .pop()
-                .unwrap();
-        let second_plan =
-            plan_generated_coarse_for_manifest(&manifest_as_dataset("ds-second"), GeneratedCoarseConfig::default())
-                .pop()
-                .unwrap();
+        let first_plan = plan_generated_coarse_for_manifest(
+            &manifest_as_dataset("ds-first"),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .unwrap();
+        let second_plan = plan_generated_coarse_for_manifest(
+            &manifest_as_dataset("ds-second"),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .unwrap();
         assert_ne!(first_plan.image_id, second_plan.image_id);
         assert_eq!(first_plan.cache_identity, second_plan.cache_identity);
 
@@ -4107,9 +4140,12 @@ mod tests {
     #[test]
     fn a_chunk_file_outranks_a_stale_status_in_the_index() {
         let dir = tempfile::tempdir().unwrap();
-        let plan = plan_generated_coarse_for_manifest(&source_manifest(), GeneratedCoarseConfig::default())
-            .pop()
-            .unwrap();
+        let plan = plan_generated_coarse_for_manifest(
+            &source_manifest(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .unwrap();
         let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [14; 16]);
         cache.register_generated_plan(&plan).unwrap();
         let key = chunk_key(plan.level_index, 0, 0, 0, 0, 0);
@@ -4141,9 +4177,12 @@ mod tests {
     #[test]
     fn storing_a_chunk_reads_nothing_about_the_chunks_before_it() {
         let dir = tempfile::tempdir().unwrap();
-        let plan = plan_generated_coarse_for_manifest(&source_manifest(), GeneratedCoarseConfig::default())
-            .pop()
-            .unwrap();
+        let plan = plan_generated_coarse_for_manifest(
+            &source_manifest(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .unwrap();
         let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [15; 16]);
         cache.register_generated_plan(&plan).unwrap();
         let put = |n: u64| {
@@ -4215,15 +4254,23 @@ mod tests {
         .expect("the whole level is generated");
 
         for key in plan.chunk_keys_for_all_tc() {
-            assert!(service.inner.cache.is_ready(&plan.image_id, plan.level_index, &key));
+            assert!(
+                service
+                    .inner
+                    .cache
+                    .is_ready(&plan.image_id, plan.level_index, &key)
+            );
         }
         let telemetry = service.telemetry().await;
         assert_eq!(telemetry.queued_background, 0);
         assert_eq!(telemetry.completed, 16);
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn background_fill_stops_once_the_cache_has_to_evict() {
+    /// Sixteen chunks of one level, filled in the background on `cache` until
+    /// the fill stops. Answers how many it generated.
+    async fn fill_until_stopped(
+        cache: impl FnOnce(&GeneratedCoarsePlan) -> DerivedChunkCache,
+    ) -> u64 {
         let manifest = source_manifest_with_levels(
             vec![level(0, [1, 1, 1, 256, 256], [1, 1, 1, 64, 64])],
             None,
@@ -4239,19 +4286,16 @@ mod tests {
         )
         .pop()
         .expect("plan");
-        // Room for two chunks of the sixteen.
-        let chunk_bytes = expected_generated_chunk_bytes(&plan);
-        let cache =
-            Arc::new(DerivedChunkCache::default().with_memory(GeneratedChunkMemory::new(2 * chunk_bytes)));
-        cache.upsert_level(plan.availability.clone());
+        let cache = Arc::new(cache(&plan));
+        cache.register_generated_plan(&plan).unwrap();
         let service = service_with_cache(
             manifest,
-            plan.clone(),
+            plan,
             GeneratedSchedulingConfig {
                 background_chunk_limit: 1,
                 ..GeneratedSchedulingConfig::default()
             },
-            cache.clone(),
+            cache,
         );
 
         service.enqueue_background_fill().await;
@@ -4267,10 +4311,29 @@ mod tests {
         })
         .await
         .expect("the fill stops");
+        service.telemetry().await.completed
+    }
 
-        let completed = service.telemetry().await.completed;
-        assert!(completed < 16, "the fill kept churning the budget");
-        assert!(cache.evictions() > 0);
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_fill_covers_what_the_memory_budget_holds() {
+        let completed = fill_until_stopped(|plan| {
+            let three_chunks = 3 * expected_generated_chunk_bytes(plan);
+            DerivedChunkCache::default().with_memory(GeneratedChunkMemory::new(three_chunks))
+        })
+        .await;
+        assert_eq!(completed, 3);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_fill_stops_once_the_disk_cache_evicts() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        // A budget smaller than one chunk: the first write evicts.
+        let completed = fill_until_stopped(move |_| {
+            DerivedChunkCache::new_on_disk_with_budget(root, [16; 16], Some(1))
+        })
+        .await;
+        assert_eq!(completed, 1);
     }
 
     /// A level of 35 by 35 chunks generated one at a time onto a real disk
