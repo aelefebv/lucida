@@ -17,7 +17,9 @@ use crate::cache::CachedStore;
 use crate::coarse::{SourceCoarseConfig, select_source_coarse_level};
 use crate::codec::parse_codec_chain;
 use crate::collection_checks;
-use crate::collection_geometry::{DeclaredLevels, StoredLevels, StoredTile, describe_mismatches};
+use crate::collection_geometry::{
+    DeclaredLevels, StoredLevels, StoredTile, clamp_to_extent, describe_mismatches,
+};
 use crate::import_types::*;
 use crate::layout::compute_chunk_byte_layout;
 use crate::parse;
@@ -84,15 +86,27 @@ async fn import_single_image(
     let layout = classify_axes(&axes_names, &level_metas[0].shape);
     warn_pinned_axes(id, &layout.pinned);
     let axes = build_axes(&layout.canonical_names);
-    let level_bindings = build_level_binding_infos(
-        &axes_names,
+    let level_bindings = clamp_chunks_to_levels(
+        build_level_binding_infos(
+            &axes_names,
+            &level_metas,
+            data_type_size(data_type),
+            &layout.pinned,
+        )?,
         &level_metas,
+        &axes_names,
         data_type_size(data_type),
         &layout.pinned,
     )?;
     let levels =
         build_level_geometries(&level_entries, &level_metas, &level_bindings, &axes_names)?;
-    let probe_targets = build_probe_targets(&level_entries, &level_metas, &level_bindings, &levels);
+    let probe_targets = build_probe_targets(
+        &level_entries,
+        &level_metas,
+        &level_bindings,
+        &levels,
+        &axes_names,
+    );
     let coarse_level_index =
         select_source_coarse_level(&levels, data_type, SourceCoarseConfig::default());
 
@@ -904,6 +918,7 @@ async fn import_collection(
                 &level_metas,
                 &level_bindings,
                 &representative_levels,
+                &axes_names,
             ),
         )
         .await,
@@ -1456,6 +1471,40 @@ fn build_level_binding_infos(
         .collect()
 }
 
+/// Serve each level at a chunk no larger than the level, through a regrid
+/// where the stored chunk overhangs it. See [`clamp_to_extent`].
+fn clamp_chunks_to_levels(
+    bindings: Vec<LevelBindingInfo>,
+    level_metas: &[parse::ArrayMeta],
+    axes_names: &[String],
+    dtype_size: u8,
+    pinned: &[PinnedAxis],
+) -> Result<Vec<LevelBindingInfo>, StoreError> {
+    bindings
+        .into_iter()
+        .zip(level_metas)
+        .enumerate()
+        .map(|(i, (binding, meta))| {
+            let mut chunk_shape = binding.chunk_shape.clone();
+            clamp_to_extent(&mut chunk_shape, &meta.shape);
+            if chunk_shape == binding.chunk_shape {
+                return Ok(binding);
+            }
+            let chunk_byte_layout =
+                compute_chunk_byte_layout(axes_names, &chunk_shape, dtype_size, pinned)
+                    .map_err(|e| e.in_context(format!("level {i}")))?;
+            Ok(LevelBindingInfo {
+                regrid: Some(Regrid {
+                    chunk_shape,
+                    chunk_byte_layout,
+                    stored_shape: meta.shape.clone(),
+                }),
+                ..binding
+            })
+        })
+        .collect()
+}
+
 fn warn_pinned_axes(dataset_id: &str, pinned: &[PinnedAxis]) {
     for axis in pinned {
         eprintln!(
@@ -1497,22 +1546,24 @@ fn build_probe_targets(
     level_metas: &[parse::ArrayMeta],
     level_bindings: &[LevelBindingInfo],
     levels: &[LevelGeometry],
+    axes_names: &[String],
 ) -> Vec<unwritten::ProbeTarget> {
     level_entries
         .iter()
         .zip(level_metas.iter())
         .zip(level_bindings.iter())
         .zip(levels.iter())
-        .map(
-            |(((entry, meta), binding), geometry)| unwritten::ProbeTarget {
+        .map(|(((entry, meta), binding), geometry)| {
+            // The probe reads the stored origin chunk, whatever chunk the
+            // level is served at.
+            let stored = normalize_to_5d(&binding.chunk_shape, axes_names, 1);
+            unwritten::ProbeTarget {
                 path: entry.path.clone(),
                 axis_count: meta.shape.len(),
-                origin_footprint: std::array::from_fn(|d| {
-                    geometry.chunk_shape[d] as f64 * geometry.scale[d]
-                }),
+                origin_footprint: std::array::from_fn(|d| stored[d] as f64 * geometry.scale[d]),
                 shard: binding.shard.clone(),
-            },
-        )
+            }
+        })
         .collect()
 }
 
@@ -1536,7 +1587,12 @@ fn build_level_geometries(
         .enumerate()
         .map(|(i, ((entry, meta), binding))| {
             let shape = normalize_to_5d(&meta.shape, axes_names, 1);
-            let chunk_shape = normalize_to_5d(&binding.chunk_shape, axes_names, 1);
+            // A key addresses the chunk the level is served at.
+            let served = binding
+                .regrid
+                .as_ref()
+                .map_or(&binding.chunk_shape, |regrid| &regrid.chunk_shape);
+            let chunk_shape = normalize_to_5d(served, axes_names, 1);
             if chunk_shape.contains(&0) {
                 return Err(StoreError::Metadata(format!(
                     "level {i}: chunk_shape {chunk_shape:?} has a zero dimension"
@@ -2260,7 +2316,13 @@ mod tests {
             let scale = (1u64 << index) as f64;
             assert_eq!(level.level_index, index as u32);
             assert_eq!(level.shape, [1, 1, 32 >> index, 64 >> index, 64 >> index]);
-            assert_eq!(level.chunk_shape, [1, 1, 16, 16, 16]);
+            // One 16-cubed chunk is stored on every level; each is served at
+            // no more than its level holds.
+            let extent = [32u64 >> index, 64 >> index, 64 >> index].map(|e| e.min(16));
+            assert_eq!(level.chunk_shape, [1, 1, extent[0], extent[1], extent[2]]);
+            // The grid is the stored one: an overhung axis has one chunk either way.
+            let grid = [32u64 >> index, 64 >> index, 64 >> index].map(|e| e.div_ceil(16));
+            assert_eq!(level.grid_shape, [1, 1, grid[0], grid[1], grid[2]]);
             assert_eq!(level.scale, [1.0, 1.0, scale, scale, scale]);
         }
     }

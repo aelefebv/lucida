@@ -55,6 +55,12 @@ rank in this order.
    scrub, because work that starts with the gesture arrives too late. The bound
    caps how far ahead, and within it the smoother path wins.
 
+Every view settles. With no input it reaches a settled state in bounded time,
+possibly covering less than it wants, and says so. Previews, captures, the
+idle frame loop and agents all wait on settling, so a view that can only end
+by timing out is a bug. One that stops making progress for any other reason
+ends as stalled and says why.
+
 Planning is a pure function of a snapshot: state carried between ticks is an
 explicit input and output, never a hidden cache, so two strategies can be
 compared on identical inputs. It does no view math of its own. What is visible,
