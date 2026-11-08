@@ -1,3 +1,10 @@
+/**
+ * The render radius for readers without the core: the render worker, which
+ * hides resident chunks outside it, and the debug overlays. The planner's
+ * radius is the core enumerator's (`lucida-core/src/chunk.rs`), and a test
+ * holds the two to the same answers.
+ */
+
 import type { VisibleRegion } from "./viewport.ts";
 
 export const RENDER_RADIUS_DISABLED = 2;
@@ -51,23 +58,6 @@ export function chunkWorldDimsForRadius(
     chunkY * (fullY / Math.max(1, levelY)),
     chunkZ * (fullZ / Math.max(1, levelZ)),
   ];
-}
-
-export function chunkCenterDistanceToVisibleCenterVox(args: {
-  region: VisibleRegion;
-  layoutPositionVox: [number, number];
-  geometry: ChunkRadiusGeometry;
-  chunk: { x: number; y: number; z: number };
-}): number {
-  const [centerX, centerY, centerZ] = visibleRegionCenterVox(args.region);
-  const [chunkWorldX, chunkWorldY, chunkWorldZ] = chunkWorldDimsForRadius(args.geometry);
-  const chunkCenterX = args.layoutPositionVox[0] + (args.chunk.x + 0.5) * chunkWorldX;
-  const chunkCenterY = args.layoutPositionVox[1] + (args.chunk.y + 0.5) * chunkWorldY;
-  const chunkCenterZ = (args.chunk.z + 0.5) * chunkWorldZ;
-  const dx = chunkCenterX - centerX;
-  const dy = chunkCenterY - centerY;
-  const dz = chunkCenterZ - centerZ;
-  return Math.sqrt(dx * dx + dy * dy + dz * dz);
 }
 
 export function chunkClosestDistanceToVisibleCenterVox(args: {
