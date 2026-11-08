@@ -1154,11 +1154,9 @@ pub fn format_versus_human(first: VersusSide<'_>, second: VersusSide<'_>, text: 
 /// default so the page's own fit-on-open decides the framing, exactly as it
 /// would for a person opening the same URL.
 ///
-/// `pin_contrast_for` names the dataset whose contrast window is to stay at
-/// its default rather than being fitted to the data as it arrives. The fit
-/// samples whatever is resident when it runs, so two runs of one dataset can
-/// draw the same data a level apart; a frame that is to be compared with
-/// another run's needs the window pinned.
+/// `pin_contrast_for` names the dataset whose contrast limits are to stay at
+/// their default rather than being fitted to the data. The fit depends only on
+/// the view, so two runs of one view draw alike without the pin.
 pub fn compose_dataset_view(
     dataset_url: &str,
     width: u32,
