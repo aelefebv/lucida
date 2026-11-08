@@ -27,11 +27,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Both builds read the cache the CI workflow's Docker job writes, so on
-      # a build context main has already built they rebuild nothing. Each
-      # also keeps a scope of its own, for runs whose context main has not
-      # built: writing the shared scope would replace the Docker job's
-      # entries, and one scope for both targets would keep only the last.
+      # Both builds read the cache the CI workflow's Docker job writes, so a
+      # stage it has built is not built again. Each also keeps its own final
+      # layers, which is all an unchanged build needs. Exporting every stage
+      # instead would copy the Docker job's largest layers into the
+      # repository's cache a second time, and writing its scope would replace
+      # that job's entries.
       - name: Build the lucida CLI
         uses: docker/build-push-action@v6
         with:
@@ -42,8 +43,7 @@ jobs:
           cache-from: |
             type=gha
             type=gha,scope=trace-gate-cli
-            type=gha,scope=trace-gate-server
-          cache-to: type=gha,mode=max,scope=trace-gate-cli
+          cache-to: type=gha,mode=min,scope=trace-gate-cli
 
       - name: Build the server image
         uses: docker/build-push-action@v6
@@ -55,8 +55,7 @@ jobs:
           cache-from: |
             type=gha
             type=gha,scope=trace-gate-server
-            type=gha,scope=trace-gate-cli
-          cache-to: type=gha,mode=max,scope=trace-gate-server
+          cache-to: type=gha,mode=min,scope=trace-gate-server
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
