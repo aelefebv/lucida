@@ -8,9 +8,11 @@ import type {
 import { createEmptyVolumeTexture, createOffscreenTarget, writeVolumeChunk } from "./gpuContext.ts";
 import type { CompositeLayer } from "./layerCompositor.ts";
 import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
+import { atlasTexels, atlasTextureFormat, texelValues, type SampleFormat } from "./dataTypeUtil.ts";
 
 interface MinimapOverviewEntry {
   texture: GPUTexture;
+  format: SampleFormat;
   uploaded: Set<string>;
   t: number;
   c: number;
@@ -149,7 +151,7 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
     renderer.setTransientDescriptor(
       layer.modelMatrix, layer.invModelMatrix,
       [overview.width, overview.height, overview.depth],
-      layer.contrastMin, layer.contrastMax, layer.gamma, 1.0,
+      layer.contrastMin, layer.contrastMax, layer.gamma, 1.0, overview.format,
     );
     const layerEncoder = ctx.device.createCommandEncoder();
     renderer.renderTo(minimapOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, msg.canvasW, msg.canvasH);
@@ -214,7 +216,7 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
     renderer.setTransientDescriptor(
       layer.modelMatrix, layer.invModelMatrix,
       [overview.width, overview.height, overview.depth],
-      layer.contrastMin, layer.contrastMax, layer.gamma, 1.0,
+      layer.contrastMin, layer.contrastMax, layer.gamma, 1.0, overview.format,
     );
     const layerEncoder = ctx.device.createCommandEncoder();
     renderer.renderTo(thumbnailOffscreenPool[idx].createView(), layerEncoder, undefined, undefined, size, size);
@@ -242,22 +244,24 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
 }
 
 export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUploadOverviewChunksForLayerMessage): void {
-  const { datasetId, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ } = msg;
+  const { datasetId, t, c, levelWidth, levelHeight, levelDepth, chunkX, chunkY, chunkZ, sampleFormat } = msg;
   let entry = minimapOverviewPerDataset.get(datasetId);
 
-  if (entry && (entry.t !== t || entry.c !== c)) {
+  if (entry && (entry.t !== t || entry.c !== c || entry.format !== sampleFormat)) {
     entry.texture.destroy();
     entry = undefined;
     minimapOverviewPerDataset.delete(datasetId);
   }
 
   if (!entry) {
-    const texture = createEmptyVolumeTexture(ctx.device, levelWidth, levelHeight, levelDepth);
+    const texture = createEmptyVolumeTexture(
+      ctx.device, levelWidth, levelHeight, levelDepth, atlasTextureFormat(sampleFormat),
+    );
     entry = {
-      texture, uploaded: new Set(),
+      texture, format: sampleFormat, uploaded: new Set(),
       t, c,
       width: levelWidth, height: levelHeight, depth: levelDepth,
-      intensityMin: 65535, intensityMax: 0,
+      intensityMin: Infinity, intensityMax: -Infinity,
     };
     minimapOverviewPerDataset.set(datasetId, entry);
   }
@@ -266,7 +270,7 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
   const totalChunks = msg.chunks.length;
   for (const chunk of msg.chunks) {
     if (entry.uploaded.has(chunk.key)) continue;
-    const data = new Uint16Array(chunk.data);
+    const data = atlasTexels(chunk.data, chunk.dataType, entry.format);
     const xOff = chunk.x * chunkX;
     const yOff = chunk.y * chunkY;
     const zOff = chunk.z * chunkZ;
@@ -274,11 +278,14 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
     const ch = Math.min(chunkY, levelHeight - yOff);
     const cd = Math.min(chunkZ, levelDepth - zOff);
 
-    writeVolumeChunk(ctx.device, entry.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff);
+    writeVolumeChunk(
+      ctx.device, entry.texture, data, chunkX, chunkY, cw, ch, cd, xOff, yOff, zOff,
+      atlasTextureFormat(entry.format),
+    );
     entry.uploaded.add(chunk.key);
 
     const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
-    const { min, max } = sampleIntensityRange(data, perChunkSamples);
+    const { min, max } = sampleIntensityRange(texelValues(data, entry.format), perChunkSamples);
     if (min < entry.intensityMin) { entry.intensityMin = min; intensityChanged = true; }
     if (max > entry.intensityMax) { entry.intensityMax = max; intensityChanged = true; }
   }

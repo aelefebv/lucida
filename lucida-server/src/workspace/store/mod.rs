@@ -42,10 +42,24 @@ pub enum StoreError {
     InvalidLinkAccess(String),
     #[error("workspace saved-view visibility is invalid: {0}")]
     InvalidSavedViewVisibility(String),
+    /// A document write found no workspace document older than its seq to
+    /// replace, so nothing was written.
+    #[error("no workspace document older than seq {0} to replace")]
+    StaleDocument(u64),
 }
 
 fn map_sql(e: sqlx::Error) -> StoreError {
     StoreError::Backend(e.to_string())
+}
+
+/// Check a seq-guarded document write: no row changed means a document at
+/// or past `seq` was already stored.
+fn document_written(rows_affected: u64, seq: u64) -> Result<(), StoreError> {
+    if rows_affected == 0 {
+        Err(StoreError::StaleDocument(seq))
+    } else {
+        Ok(())
+    }
 }
 
 fn map_json_in(e: serde_json::Error) -> StoreError {
@@ -176,6 +190,10 @@ pub trait WorkspaceStore: Send + Sync + 'static {
         workspace_id: &str,
     ) -> Result<Option<WorkspaceRecord>, StoreError>;
 
+    /// Store the document at `seq`, replacing only an older one: a document
+    /// already stored at `seq` or later refuses the write with
+    /// [`StoreError::StaleDocument`], here and in every `persist_dataset_*`
+    /// write, which then roll back their membership change too.
     async fn persist_document(
         &self,
         workspace_id: &str,

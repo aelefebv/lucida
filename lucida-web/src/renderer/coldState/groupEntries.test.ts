@@ -94,6 +94,7 @@ function makeCold(
     },
     activeSet,
     viewMode,
+    sampleFormat: "u16",
   };
 }
 

@@ -92,6 +92,9 @@ pub enum StoreError {
     Metadata(String),
     /// The source policy does not allow the location.
     Denied(SourceDenied),
+    /// The array's data type, as its metadata names it, is one lucida can't
+    /// show as its values.
+    UnsupportedDataType(String),
 }
 
 impl fmt::Display for StoreError {
@@ -100,6 +103,7 @@ impl fmt::Display for StoreError {
             StoreError::ObjectStore(e) => write!(f, "storage error: {e}"),
             StoreError::Metadata(s) => write!(f, "metadata error: {s}"),
             StoreError::Denied(denied) => write!(f, "{denied}"),
+            StoreError::UnsupportedDataType(s) => write!(f, "unsupported data type: {s}"),
         }
     }
 }

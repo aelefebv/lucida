@@ -39,6 +39,7 @@ pub enum DatasetOpenFailureKind {
     StorageBackend,
     UnsupportedCodec,
     UnsupportedLayout,
+    UnsupportedDataType,
     MalformedMetadata,
     MissingMetadata,
     Import,

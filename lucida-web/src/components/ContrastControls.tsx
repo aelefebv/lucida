@@ -15,8 +15,8 @@ interface Props {
   gamma: number;
   /** The range the loaded data spans, or `null` before any has loaded. */
   dataRange: { min: number; max: number } | null;
-  /** The data type's largest value. */
-  fullRangeMax: number;
+  /** Every value the data type holds, or `null` for a float type. */
+  valueRange: readonly [number, number] | null;
   /** Whole-number data steps by 1; other data by a thousandth of the span. */
   integer: boolean;
   /** Span the slider over the data type's whole range instead of the loaded data's. */
@@ -38,7 +38,7 @@ export function ContrastControls({
   contrastMax,
   gamma,
   dataRange,
-  fullRangeMax,
+  valueRange,
   integer,
   fullRange,
   onFullRangeChange,
@@ -48,7 +48,7 @@ export function ContrastControls({
   continuous,
   children,
 }: Props) {
-  const [minValue, maxValue] = contrastBounds(contrastMin, contrastMax, dataRange, fullRangeMax, fullRange);
+  const [minValue, maxValue] = contrastBounds(contrastMin, contrastMax, dataRange, valueRange, fullRange);
   const span = maxValue - minValue;
   const step = integer ? 1 : span > 0 ? span / 1000 : 0.001;
   const format: Intl.NumberFormatOptions = integer
