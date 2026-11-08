@@ -88,7 +88,9 @@ pub enum ScriptStep {
     },
     /// Orbit by two angles in degrees: around the vertical axis, then the horizontal.
     Orbit { theta: f64, phi: f64 },
-    /// Move a selector by a count of positions.
+    /// Move a selector by a count of positions. On `c` it moves the solo of
+    /// the dataset in hand, the composite counting as the position before
+    /// the first channel.
     Scrub { axis: ScrubAxis, count: i64 },
     /// Show or hide a channel of the dataset in hand, or a layer by dataset id.
     Select {
@@ -345,7 +347,12 @@ impl clap::Args for ScriptArgs {
                     .value_name("AXIS:COUNT")
                     .action(ArgAction::Append)
                     .allow_hyphen_values(true)
-                    .help("Move the z, t, or c selector by COUNT positions, for example t:1 or z:-5"),
+                    .help(
+                        "Move the z or t selector by COUNT positions, for example t:1 or z:-5. \
+                         c solos the channels of the dataset in hand in turn: the composite \
+                         counts as the position before channel 1, so c:1 from the composite \
+                         solos channel 1 and c:-1 from channel 1 returns to the composite",
+                    ),
             )
             .arg(
                 Arg::new("select")

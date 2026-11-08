@@ -12,16 +12,18 @@ import { Axis } from "../../../axes.ts";
 import { labelDepthZ } from "../../../renderer/labelLayout.ts";
 import { sliceLevelZ } from "../../../renderer/slicePlane.ts";
 
-/** The worker's member id for an image's channel; the cold state's wanted chunks use the same one. */
-export function workerMemberId(imageId: string, c: number, multiChannel: boolean): string {
-  return multiChannel ? `${imageId}:ch${c}` : imageId;
+/**
+ * The worker's member id for an image's channel; the cold state's wanted
+ * chunks use the same one. Every channel has its own id whatever a layer
+ * shows, so a solo or a return to the composite keeps the resources of the
+ * channels it still shows.
+ */
+export function workerMemberId(imageId: string, c: number): string {
+  return `${imageId}:ch${c}`;
 }
 
-export function workerMemberIdForChunk(
-  delivery: ReadyChunkDelivery,
-  multiChannel: boolean,
-): string {
-  return workerMemberId(delivery.imageId, delivery.c, multiChannel);
+export function workerMemberIdForChunk(delivery: ReadyChunkDelivery): string {
+  return workerMemberId(delivery.imageId, delivery.c);
 }
 
 export function parseWorkerMemberId(memberId: string): {
@@ -110,11 +112,10 @@ export function dispatchChunkDelivery(
   delivery: ReadyChunkDelivery,
   meta: ManifestEntry,
   viewMode: "slice" | "volume",
-  multiChannel: boolean,
   sliceZ: number | null,
   epochs: SceneEpochs,
 ): string {
-  const workerMemberId = workerMemberIdForChunk(delivery, multiChannel);
+  const workerMemberId = workerMemberIdForChunk(delivery);
   dispatchChunk(client, delivery, meta, viewMode, workerMemberId, sliceZ, epochs);
   return workerMemberId;
 }

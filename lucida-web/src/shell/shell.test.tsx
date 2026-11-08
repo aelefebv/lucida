@@ -137,7 +137,7 @@ function peer(id: number, following: ClientId | null = null): PresenceState {
   return {
     client_id: id,
     camera: {},
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
     following,
     cursor: null,

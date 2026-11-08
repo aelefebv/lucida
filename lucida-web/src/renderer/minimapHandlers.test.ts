@@ -115,6 +115,7 @@ function renderMsg(canvasW: number): MinimapRenderMessage {
       contrastMax: 1,
       gamma: 1,
       colormap: "gray",
+      blendMode: "alpha",
     }],
     invViewProj: IDENTITY,
     eye: new Float32Array(3),

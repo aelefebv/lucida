@@ -19,6 +19,7 @@ import { SliceViewer } from "../components/SliceViewer.tsx";
 import { VolumeViewer } from "../components/VolumeViewer.tsx";
 import { useEngine } from "../engine.ts";
 import { useSceneView } from "../hooks/useSceneView.ts";
+import { shownChannels } from "../resolvedLayers.ts";
 import { requestRender } from "../invalidation.ts";
 import type { CanvasSize } from "../shell/CanvasStage.tsx";
 import type { DatasetState } from "../types.ts";
@@ -84,7 +85,7 @@ export function CanvasLayers({
 }: Props) {
   const engine = useEngine();
   const { scene, render, sessionRef } = useEngineParts();
-  const { viewMode, cameraMode, z, t, c } = useSceneView(engine.store);
+  const { viewMode, cameraMode, z, t, layers } = useSceneView(engine.store);
 
   const openContextMenu2d = useCallback((at: ClientPoint) => overlay2dRef.current?.openContextMenu(at), [overlay2dRef]);
   const openContextMenu3d = useCallback((at: ClientPoint) => overlay3dRef.current?.openContextMenu(at), [overlay3dRef]);
@@ -103,7 +104,13 @@ export function CanvasLayers({
   const overlays = hasDatasets && selectedDatasetId && wasmScene && canvas
     ? { datasetId: selectedDatasetId, canvas }
     : null;
-  const viewContext = { z, t, c };
+  // The overlays draw the selected layer's pins, so its shown channels decide
+  // which pins are in context.
+  const viewContext = {
+    z,
+    t,
+    channels: shownChannels(selectedDatasetId ? layers.get(selectedDatasetId) : undefined),
+  };
   return (
     <>
       {viewers && viewMode === "2d" && (
@@ -200,7 +207,6 @@ export function CanvasLayers({
         viewMode={viewMode}
         z={z}
         t={t}
-        c={c}
         wasmSceneRef={scene.wasmSceneRef}
         clientReady={render.clientReady}
         wasmReady={scene.wasmReady}

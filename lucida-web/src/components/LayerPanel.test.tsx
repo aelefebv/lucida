@@ -6,8 +6,15 @@ import userEvent from "@testing-library/user-event";
 import { LayerPanel, type LayerChannel, type LayerInfo } from "./LayerPanel.tsx";
 import { __resetShortcutsForTesting, listShortcuts } from "../ui/shortcuts.ts";
 import { __resetCommandsForTesting, listCommands } from "../ui/commands.ts";
+import { resolvedLayer, resolvedLayers } from "../resolvedLayerFixtures.ts";
+import type { ResolvedLayers } from "../resolvedLayers.ts";
 import { createSettleState, evaluateSettle, settleSignal, type SettleState } from "../pipeline/settle.ts";
 import { failedChunkReport, summarizeFailedChunks } from "../pipeline/failedChunks.ts";
+
+/** The scene soloing `channel` of a three-channel layer `id`. */
+function soloOn(id: string, channel: number): ResolvedLayers {
+  return resolvedLayers(resolvedLayer(id, [channel], { solo: channel, channel_count: 3 }));
+}
 
 function channel(overrides: Partial<LayerChannel> = {}): LayerChannel {
   return {
@@ -59,7 +66,7 @@ function baseProps(overrides: Partial<Parameters<typeof LayerPanel>[0]> = {}) {
     layers: [layer()],
     selectedLayerId: null as string | null,
     expandedLayerId: null as string | null,
-    soloChannel: null as number | null,
+    resolvedLayers: resolvedLayers() as ResolvedLayers,
     canEdit: true,
     onSelectLayer: vi.fn(),
     onToggleExpand: vi.fn(),
@@ -285,7 +292,7 @@ describe("LayerPanel channels", () => {
     await user.keyboard("{Alt>}");
     await user.click(screen.getByRole("button", { name: "Hide Channel 2" }));
     await user.keyboard("{/Alt}");
-    expect(props.onSoloChannel).toHaveBeenCalledExactlyOnceWith(1);
+    expect(props.onSoloChannel).toHaveBeenCalledExactlyOnceWith("wds-1", 1);
     expect(props.onChannelSetVisible).not.toHaveBeenCalled();
   });
 
@@ -293,15 +300,15 @@ describe("LayerPanel channels", () => {
     const props = multichannelProps();
     const { rerender } = render(<LayerPanel {...props} />);
     await userEvent.click(within(await openMenu("More for Channel 3")).getByRole("menuitem", { name: /^Solo/ }));
-    expect(props.onSoloChannel).toHaveBeenLastCalledWith(2);
+    expect(props.onSoloChannel).toHaveBeenLastCalledWith("wds-1", 2);
 
-    rerender(<LayerPanel {...props} soloChannel={2} />);
+    rerender(<LayerPanel {...props} resolvedLayers={soloOn("wds-1", 2)} />);
     await userEvent.click(within(await openMenu("More for Channel 3")).getByRole("menuitem", { name: /^Show all channels/ }));
-    expect(props.onSoloChannel).toHaveBeenLastCalledWith(2);
+    expect(props.onSoloChannel).toHaveBeenLastCalledWith("wds-1", 2);
   });
 
   it("shows only the soloed channel as on, and returns to the composite from it", async () => {
-    const props = multichannelProps({ soloChannel: 1 });
+    const props = multichannelProps({ resolvedLayers: soloOn("wds-1", 1) });
     render(<LayerPanel {...props} />);
     expect(screen.getByText("Solo")).toBeTruthy();
     expect(screen.getByText("Channel 2 is soloed.")).toBeTruthy();
@@ -313,21 +320,41 @@ describe("LayerPanel channels", () => {
   });
 
   it("showing another channel while soloed leaves solo with the two shown", async () => {
-    const props = multichannelProps({ soloChannel: 1 });
+    const props = multichannelProps({ resolvedLayers: soloOn("wds-1", 1) });
     render(<LayerPanel {...props} />);
     await userEvent.click(screen.getByRole("button", { name: "Show Channel 3" }));
     expect(vi.mocked(props.onChannelSetVisible).mock.calls).toEqual([["wds-1", 0, false]]);
     expect(props.onShowAllChannels).toHaveBeenCalledTimes(1);
   });
 
-  it("says a layer without the soloed channel is not shown", () => {
+  it("solos per layer: another layer keeps its composite and says nothing", () => {
     const props = baseProps({
-      layers: [layer({ channels: channels(3) }), layer({ id: "wds-2", name: "plain.zarr" })],
-      soloChannel: 2,
+      layers: [layer({ channels: channels(3) }), layer({ id: "wds-2", name: "plain.zarr", channels: channels(2) })],
+      expandedLayerId: "wds-2",
+      resolvedLayers: soloOn("wds-1", 2),
     });
     render(<LayerPanel {...props} />);
     const plain = screen.getByRole("region", { name: "plain.zarr" });
-    expect(within(plain).getByText("Not shown while channel 3 is soloed.")).toBeTruthy();
+    expect(within(plain).queryByText(/soloed/)).toBeNull();
+    expect(within(plain).getByRole("button", { name: "Hide Channel 1" })).toBeTruthy();
+    expect(within(plain).getByRole("button", { name: "Hide Channel 2" })).toBeTruthy();
+  });
+
+  it("says when the scene's z or t reaches past a layer, and what it shows instead", () => {
+    const clamped = resolvedLayer("wds-2", [0], {
+      z_range: { start: 9, end: 10 }, t: 0, z_clamped: true, t_clamped: true,
+    });
+    const props = baseProps({
+      layers: [layer(), layer({ id: "wds-2", name: "plain.zarr" })],
+      resolvedLayers: resolvedLayers(resolvedLayer("wds-1"), clamped),
+    });
+    render(<LayerPanel {...props} />);
+    const plain = screen.getByRole("region", { name: "plain.zarr" });
+    expect(within(plain).getByTestId("layer-clamped-wds-2").textContent).toBe(
+      "Past this layer's extent; showing Z 10 · T 1.",
+    );
+    const original = screen.getByRole("region", { name: "original.zarr" });
+    expect(within(original).queryByText(/Past this layer/)).toBeNull();
   });
 
   it("opens a channel's contrast without touching its visibility", async () => {
@@ -370,7 +397,7 @@ describe("LayerPanel channel keys", () => {
     await act(async () => {
       fireEvent.keyDown(window, { key: "™", code: "Digit3", altKey: true });
     });
-    expect(props.onSoloChannel).toHaveBeenCalledExactlyOnceWith(2);
+    expect(props.onSoloChannel).toHaveBeenCalledExactlyOnceWith("wds-1", 2);
 
     await act(async () => {
       fireEvent.keyDown(window, { key: "9", code: "Digit9" });
@@ -390,7 +417,7 @@ describe("LayerPanel channel keys", () => {
     ]);
     expect(listShortcuts().find((s) => s.id === "channels.solo2")?.keys).toEqual(["Alt+2"]);
 
-    rerender(<LayerPanel {...multichannelProps({ layers: [layer({ channels: named })], soloChannel: 1 })} />);
+    rerender(<LayerPanel {...multichannelProps({ layers: [layer({ channels: named })], resolvedLayers: soloOn("wds-1", 1) })} />);
     expect(listCommands().map((c) => c.label)).toContain("Show all channels");
   });
 

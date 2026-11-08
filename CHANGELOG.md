@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.21.0](https://github.com/aelefebv/lucida/compare/v0.20.1...v0.21.0) (2026-11-08)
+
+
+### Features
+
+* read Zarr v2 / OME-NGFF 0.4 and any decodable codec chain through a codec registry ([#1264](https://github.com/aelefebv/lucida/issues/1264)) ([7282a32](https://github.com/aelefebv/lucida/commit/7282a3208ef55e0389dcfcef47ed497ce6cd0f3f))
+
+
+### Bug Fixes
+
+* one framing policy in core: fit any unframed camera, on every client ([#1279](https://github.com/aelefebv/lucida/issues/1279)) ([d9b3543](https://github.com/aelefebv/lucida/commit/d9b35435cdaacdb5463cfb7a664a16fa27b6e7ab))
+* **pipeline:** keep prefetch behind the view in admission, eviction and settle ([#1297](https://github.com/aelefebv/lucida/issues/1297)) ([7dea80d](https://github.com/aelefebv/lucida/commit/7dea80df8757c3173aea8a8eb9832ba62415eec1))
+* read each level under its multiscale path, and Zarr v2 metadata from .zmetadata ([#1291](https://github.com/aelefebv/lucida/issues/1291)) ([9801d74](https://github.com/aelefebv/lucida/commit/9801d74cd4bfb2d54d6e844d5a8453df64f1554a))
+* recover a live workspace after a stale write, close sockets on archive, stop reconnecting after access is removed ([#1299](https://github.com/aelefebv/lucida/issues/1299)) ([af019c3](https://github.com/aelefebv/lucida/commit/af019c32ea4cb8d948c137b03fa2544e97e67837))
+* remove the races and timing dependencies behind the flaky tests ([#1296](https://github.com/aelefebv/lucida/issues/1296)) ([cb9e211](https://github.com/aelefebv/lucida/commit/cb9e21151e52517dc91897ef0f94df21db93586c))
+* **server:** bound server memory per process and let the page cancel chunk requests ([#1258](https://github.com/aelefebv/lucida/issues/1258)) ([e974bd0](https://github.com/aelefebv/lucida/commit/e974bd0526fa59767ff7ec0632846c6744752c2b))
+* small web fixes: touch targets, light chart contrast, step presses, channel names, health, active layout ([#1301](https://github.com/aelefebv/lucida/issues/1301)) ([24f3095](https://github.com/aelefebv/lucida/commit/24f30956ff66a1eb147f8768bd75df4df5d4f966))
+* **trace:** charge backlog waits to queue, and run the trace gate nightly ([#1298](https://github.com/aelefebv/lucida/issues/1298)) ([929c781](https://github.com/aelefebv/lucida/commit/929c78101da16f972720d09421c9a51df20fcb12))
+* **web:** draw chunks that failed for good hatched, and name them per dataset ([#1293](https://github.com/aelefebv/lucida/issues/1293)) ([71ec3a5](https://github.com/aelefebv/lucida/commit/71ec3a51d244c5c3c5f8ede3f02fb71aeb88d3c1))
+* **web:** fit one GPU budget to the device across every holder ([#1278](https://github.com/aelefebv/lucida/issues/1278)) ([3e0629a](https://github.com/aelefebv/lucida/commit/3e0629afd2023d296d169b24f5f0d5e54eb8f7ce))
+
+
+### Refactors
+
+* remove proxy assets end to end ([#1292](https://github.com/aelefebv/lucida/issues/1292)) ([c7065a8](https://github.com/aelefebv/lucida/commit/c7065a883a23af84d91c5a123d447ca32768feb8))
+* remove the global /ws route and bookmarks ([#1262](https://github.com/aelefebv/lucida/issues/1262)) ([54a719d](https://github.com/aelefebv/lucida/commit/54a719d54c580ff4f2caff97a82106598675e8fd))
+
 ## [0.20.1](https://github.com/aelefebv/lucida/compare/v0.20.0...v0.20.1) (2026-11-08)
 
 

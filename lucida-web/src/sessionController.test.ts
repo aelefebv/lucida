@@ -61,6 +61,7 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     static instances: MockCpuCache[] = [];
     reset = vi.fn();
     resetChunkFailureStreak = vi.fn();
+    applyKnobs = vi.fn();
     config: unknown;
     constructor(_source: unknown, _pool: unknown, config?: unknown) {
       this.config = config;
@@ -204,7 +205,7 @@ function makePresence(clientId: number): PresenceState {
   return {
     client_id: clientId,
     camera: { position: [0, 0, 1] },
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
     following: null,
     cursor: null,

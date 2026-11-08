@@ -150,7 +150,6 @@ function cold(datasetId: string): ColdStateMessage {
     datasetId,
     currentT: 0,
     currentZ: 0,
-    multiChannel: false,
     visibleChannels: [0],
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -161,7 +160,7 @@ function cold(datasetId: string): ColdStateMessage {
     },
     // The planner wants the whole target level.
     wantedChunks: [{
-      memberId: `${datasetId}-img`,
+      memberId: `${datasetId}-img:ch0`,
       tier: "detail",
       chunkKeys: ["1/0/0/0/0/0", "1/0/0/0/0/1", "1/0/0/0/1/0", "1/0/0/0/1/1"],
     }],
@@ -209,7 +208,7 @@ function chunksAt(memberId: string, cells: Array<[number, number]>): VolumeChunk
   };
 }
 
-const DETAIL_POOL = "ds1:32x32x32:detail";
+const DETAIL_POOL = "ds1:ch0:32x32x32:detail";
 
 function residency(posts: WorkerToMainMessage[]): ChunkResidencyMessage[] {
   return posts.filter((msg): msg is ChunkResidencyMessage => msg.type === "chunkResidency");
@@ -227,7 +226,7 @@ describe("a lost device", () => {
     const recovery = recoveryFor(ctx, [second.device]);
     watchDevice(ctx, first.device, recovery);
     await dispatchMessage(ctx, cold("ds1"));
-    await dispatchMessage(ctx, chunksAt("ds1-img", [[0, 0]]));
+    await dispatchMessage(ctx, chunksAt("ds1-img:ch0", [[0, 0]]));
     expect(ctx.state.volumeAtlases.get(DETAIL_POOL)!.slots.size).toBe(1);
 
     first.lose();
@@ -252,7 +251,7 @@ describe("a lost device", () => {
     expect(restored).toBeGreaterThanOrEqual(0);
     expect(wanted).toBeGreaterThan(restored);
 
-    await dispatchMessage(ctx, chunksAt("ds1-img", [[0, 0]]));
+    await dispatchMessage(ctx, chunksAt("ds1-img:ch0", [[0, 0]]));
     expect(pool.slots.size).toBe(1);
     expect(second.writeTexture).toHaveBeenCalled();
     clearGpuErrorReports(ctx);
@@ -351,7 +350,7 @@ describe("GPU errors", () => {
     const gpu = mockDevice();
     const { ctx, posts } = makeCtx(gpu.device);
     await dispatchMessage(ctx, cold("ds1"));
-    await dispatchMessage(ctx, chunksAt("ds1-img", [[0, 0], [1, 0]]));
+    await dispatchMessage(ctx, chunksAt("ds1-img:ch0", [[0, 0], [1, 0]]));
     const lost = ctx.state.volumeAtlases.get(DETAIL_POOL)!;
     expect(lost.slots.size).toBe(2);
 
@@ -360,7 +359,7 @@ describe("GPU errors", () => {
 
     expect(residency(posts)).toContainEqual({
       type: "chunkResidency",
-      memberId: "ds1-img",
+      memberId: "ds1-img:ch0",
       tier: "detail",
       change: "lost",
       keys: ["1/0/0/0/0/0", "1/0/0/0/0/1"],
@@ -394,14 +393,14 @@ describe("a chunk that throws mid-batch", () => {
       });
 
     await expect(
-      dispatchMessage(ctx, chunksAt("ds1-img", [[0, 0], [1, 0], [0, 1]])),
+      dispatchMessage(ctx, chunksAt("ds1-img:ch0", [[0, 0], [1, 0], [0, 1]])),
     ).rejects.toThrow("detached buffer");
 
-    expect([...pool.slots.keys()].sort()).toEqual(["ds1-img|1/0/0/0/0/0", "ds1-img|1/0/0/0/1/0"]);
+    expect([...pool.slots.keys()].sort()).toEqual(["ds1-img:ch0|1/0/0/0/0/0", "ds1-img:ch0|1/0/0/0/1/0"]);
     expect(pool.freeSlots.length).toBe(free - 2);
     expect(residency(posts)).toEqual([
-      { type: "chunkResidency", memberId: "ds1-img", tier: "detail", change: "held", keys: ["1/0/0/0/0/0", "1/0/0/0/1/0"], reason: undefined },
-      { type: "chunkResidency", memberId: "ds1-img", tier: "detail", change: "refused", keys: ["1/0/0/0/0/1"], reason: "upload-failed" },
+      { type: "chunkResidency", memberId: "ds1-img:ch0", tier: "detail", change: "held", keys: ["1/0/0/0/0/0", "1/0/0/0/1/0"], reason: undefined },
+      { type: "chunkResidency", memberId: "ds1-img:ch0", tier: "detail", change: "refused", keys: ["1/0/0/0/0/1"], reason: "upload-failed" },
     ]);
     gpu.settleScopes();
   });

@@ -140,6 +140,7 @@ vi.mock("./monitorSource.ts", async (importOriginal) => ({
 }));
 
 const { MonitorDock } = await import("./MonitorDock.tsx");
+const { PREFERENCES_STORAGE_KEY, __resetPreferencesForTesting } = await import("../theme/preferences.ts");
 
 function showing(run: TraceRun) {
   read.value = { ok: true, document: diagnoseRun(run) };
@@ -194,7 +195,8 @@ beforeEach(() => {
   live.value = null;
   reading.value = null;
   charts.value = null;
-  window.localStorage.removeItem("monitor.dock.height");
+  window.localStorage.removeItem(PREFERENCES_STORAGE_KEY);
+  __resetPreferencesForTesting();
 });
 
 afterEach(() => {
@@ -675,13 +677,22 @@ describe("the dock in the viewer", () => {
     fireEvent.pointerUp(document, { clientY: 400 });
 
     expect(parseInt(dock.style.height, 10)).toBe(before + 100);
-    expect(window.localStorage.getItem("monitor.dock.height")).toBe(String(before + 100));
+    const stored = JSON.parse(window.localStorage.getItem(PREFERENCES_STORAGE_KEY) ?? "{}");
+    expect(stored.values["monitor.dockHeight"]).toBe(before + 100);
 
     // A later mount starts at the remembered height.
     cleanup();
     read.value = { ok: true, document: diagnoseRun(coldRemoteOpen()) };
     render(<MonitorDock onClose={() => {}} />);
     expect(parseInt(screen.getByTestId("monitor-dock").style.height, 10)).toBe(before + 100);
+  });
+
+  it("starts at a height an older build remembered under its own key, and drops that key", () => {
+    window.localStorage.setItem("monitor.dock.height", "333");
+    __resetPreferencesForTesting();
+    showing(coldRemoteOpen());
+    expect(parseInt(screen.getByTestId("monitor-dock").style.height, 10)).toBe(333);
+    expect(window.localStorage.getItem("monitor.dock.height")).toBeNull();
   });
 
   it("never drags below its minimum height", () => {

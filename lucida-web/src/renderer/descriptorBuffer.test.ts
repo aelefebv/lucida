@@ -128,7 +128,6 @@ function makeEntry(opts: MakeEntryOpts): ColdStateActiveEntry {
 function makeCold(
   activeSet: ColdStateActiveEntry[],
   visibleChannels: number[] = [0],
-  multiChannel = visibleChannels.length > 1,
 ): ColdStateMessage {
   return {
     type: "coldState",
@@ -136,7 +135,6 @@ function makeCold(
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
-    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -159,7 +157,7 @@ function makeCold(
  * mimic the worker's per-pool accumulation so tests that seed the
  * descriptor's sources see realistic absolute offsets.
  */
-function sourcesFromEntry(entry: ColdStateActiveEntry, detailPoolKey = "ds1:64x64:detail"): EntitySource[] {
+function sourcesFromEntry(entry: ColdStateActiveEntry, detailPoolKey = "ds1:ch0:64x64:detail"): EntitySource[] {
   const out: EntitySource[] = [];
   let offset = 0;
   const sectionFor = (lvl: number, offsetAt: number) => {
@@ -187,13 +185,13 @@ function sourcesFromEntry(entry: ColdStateActiveEntry, detailPoolKey = "ds1:64x6
   }
   if (entry.coarseLevel !== null) {
     const s = sectionFor(entry.coarseLevel, 0);
-    if (s) out.push({ tier: "coarse", poolKey: "ds1:64x64:coarse", meta: s.meta });
+    if (s) out.push({ tier: "coarse", poolKey: "ds1:ch0:64x64:coarse", meta: s.meta });
   }
   return out;
 }
 
 /** Build a per-dataset sources map for all entries in `cold.activeSet`
- *  (single-channel only — multi-channel tests can build their own map if
+ *  (channel 0 only; tests showing several channels build their own map if
  *  they need one). */
 function sourcesForCold(cold: ColdStateMessage): Map<string, EntitySource[]> {
   const out = new Map<string, EntitySource[]>();
@@ -239,16 +237,11 @@ const PYRAMID: ColdStateActiveEntry["levels"] = [
 // memberIdForColdEntry / iterateColdMembers
 
 describe("memberIdForColdEntry", () => {
-  it("uses imageId for fields (single-channel)", () => {
+  it("names an image's channel", () => {
     const e = makeEntry({ entityId: "e1", imageId: "img-0" });
-    expect(memberIdForColdEntry(e, 0, false)).toBe("img-0");
+    expect(memberIdForColdEntry(e, 0)).toBe("img-0:ch0");
+    expect(memberIdForColdEntry(e, 2)).toBe("img-0:ch2");
   });
-
-  it("appends :chN for multi-channel fields", () => {
-    const e = makeEntry({ entityId: "e1", imageId: "img-0" });
-    expect(memberIdForColdEntry(e, 2, true)).toBe("img-0:ch2");
-  });
-
 });
 
 describe("iterateColdMembers", () => {
@@ -264,11 +257,10 @@ describe("iterateColdMembers", () => {
     expect(seen).toEqual(["img-0:ch0", "img-0:ch1", "img-1:ch0", "img-1:ch1"]);
   });
 
-  it("uses cold-state multiChannel flag instead of visible channel count", () => {
+  it("keys a lone shown channel by that channel, as a solo does", () => {
     const cold = makeCold(
       [makeEntry({ entityId: "e1", imageId: "img-0" })],
       [2],
-      true,
     );
     const seen = Array.from(iterateColdMembers(cold)).map((m) => m.memberId);
     expect(seen).toEqual(["img-0:ch2"]);
@@ -416,9 +408,9 @@ describe("EntityDescriptor byte layout", () => {
       levels,
     });
     const sources: EntitySource[] = [
-      { tier: "detail", poolKey: "ds1:64x64:detail", meta: { level: 0, gridDims: [1, 4, 4], chunkDims: [1, 64, 64], levelDims: [1, 256, 256], offset: 0 } },
-      { tier: "detail", poolKey: "ds1:32x32:detail", meta: { level: 1, gridDims: [1, 4, 4], chunkDims: [1, 32, 32], levelDims: [1, 128, 128], offset: 0 } },
-      { tier: "detail", poolKey: "ds1:64x64:detail", meta: { level: 2, gridDims: [1, 1, 1], chunkDims: [1, 64, 64], levelDims: [1, 64, 64], offset: 16 } },
+      { tier: "detail", poolKey: "ds1:ch0:64x64:detail", meta: { level: 0, gridDims: [1, 4, 4], chunkDims: [1, 64, 64], levelDims: [1, 256, 256], offset: 0 } },
+      { tier: "detail", poolKey: "ds1:ch0:32x32:detail", meta: { level: 1, gridDims: [1, 4, 4], chunkDims: [1, 32, 32], levelDims: [1, 128, 128], offset: 0 } },
+      { tier: "detail", poolKey: "ds1:ch0:64x64:detail", meta: { level: 2, gridDims: [1, 1, 1], chunkDims: [1, 64, 64], levelDims: [1, 64, 64], offset: 16 } },
     ];
     const { u32 } = serialize(entry, sources);
     expect(readSource(u32, levelSourceOffset(0)).poolIndex).toBe(0);
@@ -536,9 +528,9 @@ describe("buildDescriptorBuffer colormap LUT assignment", () => {
     const result = buildDescriptorBuffer(device, cold, sourcesForCold(cold));
     expect(result.colormapLutIndices.get("magma")).toBe(0);
     expect(result.colormapLutIndices.get("viridis")).toBe(1);
-    expect(result.colormapNameByMember.get("img-0")).toBe("magma");
-    expect(result.colormapNameByMember.get("img-1")).toBe("viridis");
-    expect(result.colormapNameByMember.get("img-2")).toBe("magma");
+    expect(result.colormapNameByMember.get("img-0:ch0")).toBe("magma");
+    expect(result.colormapNameByMember.get("img-1:ch0")).toBe("viridis");
+    expect(result.colormapNameByMember.get("img-2:ch0")).toBe("magma");
     destroyDescriptorBuffer(result);
   });
 
@@ -686,8 +678,8 @@ describe("buildDescriptorBuffer GPU write", () => {
     ]);
     const meta = { level: 0, gridDims: [1, 4, 4] as [number, number, number], chunkDims: [1, 64, 64] as [number, number, number], levelDims: [1, 256, 256] as [number, number, number] };
     const sources = new Map<string, EntitySource[]>([
-      ["img-0", [{ tier: "detail", poolKey: "p", meta: { ...meta, offset: 0 } }]],
-      ["img-1", [{ tier: "detail", poolKey: "p", meta: { ...meta, offset: 16 } }]], // entity 0 occupied [0, 16)
+      ["img-0:ch0", [{ tier: "detail", poolKey: "p", meta: { ...meta, offset: 0 } }]],
+      ["img-1:ch0", [{ tier: "detail", poolKey: "p", meta: { ...meta, offset: 16 } }]], // entity 0 occupied [0, 16)
     ]);
     const { device, lastWrite } = makeMockDevice();
     const result = buildDescriptorBuffer(device, cold, sources);
@@ -713,20 +705,20 @@ describe("buildDescriptorBuffer GPU write", () => {
       makeEntry({ entityId: "e2", imageId: "img-1", levels: [] }),
     ]);
     const sources = new Map<string, EntitySource[]>([
-      ["img-0", [
-        { tier: "detail", poolKey: "ds1:64x64:detail", meta: { level: 0, gridDims: [1, 4, 4], chunkDims: [1, 64, 64], levelDims: [1, 256, 256], offset: 0 } },
-        { tier: "detail", poolKey: "ds1:32x32:detail", meta: { level: 1, gridDims: [1, 4, 4], chunkDims: [1, 32, 32], levelDims: [1, 128, 128], offset: 0 } },
-        { tier: "detail", poolKey: "ds1:64x64:detail", meta: { level: 2, gridDims: [1, 1, 1], chunkDims: [1, 64, 64], levelDims: [1, 64, 64], offset: 16 } },
-        { tier: "coarse", poolKey: "ds1:64x64:coarse", meta: { level: 2, gridDims: [1, 1, 1], chunkDims: [1, 64, 64], levelDims: [1, 64, 64], offset: 0 } },
+      ["img-0:ch0", [
+        { tier: "detail", poolKey: "ds1:ch0:64x64:detail", meta: { level: 0, gridDims: [1, 4, 4], chunkDims: [1, 64, 64], levelDims: [1, 256, 256], offset: 0 } },
+        { tier: "detail", poolKey: "ds1:ch0:32x32:detail", meta: { level: 1, gridDims: [1, 4, 4], chunkDims: [1, 32, 32], levelDims: [1, 128, 128], offset: 0 } },
+        { tier: "detail", poolKey: "ds1:ch0:64x64:detail", meta: { level: 2, gridDims: [1, 1, 1], chunkDims: [1, 64, 64], levelDims: [1, 64, 64], offset: 16 } },
+        { tier: "coarse", poolKey: "ds1:ch0:64x64:coarse", meta: { level: 2, gridDims: [1, 1, 1], chunkDims: [1, 64, 64], levelDims: [1, 64, 64], offset: 0 } },
       ]],
     ]);
     const { device } = makeMockDevice();
     const result = buildDescriptorBuffer(device, cold, sources);
-    expect(result.sourceBindingByMember.get("img-0")).toEqual({
-      levelPoolKeys: ["ds1:64x64:detail", "ds1:32x32:detail"],
-      coarsePoolKey: "ds1:64x64:coarse",
+    expect(result.sourceBindingByMember.get("img-0:ch0")).toEqual({
+      levelPoolKeys: ["ds1:ch0:64x64:detail", "ds1:ch0:32x32:detail"],
+      coarsePoolKey: "ds1:ch0:64x64:coarse",
     });
-    expect(result.sourceBindingByMember.get("img-1")).toEqual({
+    expect(result.sourceBindingByMember.get("img-1:ch0")).toEqual({
       levelPoolKeys: [],
       coarsePoolKey: null,
     });

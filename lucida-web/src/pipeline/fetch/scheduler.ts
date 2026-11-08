@@ -92,7 +92,7 @@ export class Scheduler<Req extends SchedulableRequest> {
    */
   private enqueuedAt = new Map<string, number>();
 
-  private readonly admissionWindow: number;
+  private admissionWindow: number;
 
   private readonly config: SchedulerConfig;
   private readonly keyFn: (req: Req) => string;
@@ -103,16 +103,37 @@ export class Scheduler<Req extends SchedulableRequest> {
     keyFn: (req: Req) => string,
     startFn: StartFn<Req>,
   ) {
-    this.config = config;
+    this.config = { ...config };
     this.keyFn = keyFn;
     this.startFn = startFn;
+    this.admissionWindow = this.windowFor(config.maxConcurrentFetches);
+  }
+
+  private windowFor(maxConcurrentFetches: number): number {
     // An explicit window is taken literally; only the derived default
     // gets the floor, so a caller can ask for a small window and a
     // small/local dataset never notices the split.
-    this.admissionWindow = config.admissionWindow ?? Math.max(
+    return this.config.admissionWindow ?? Math.max(
       MIN_ADMISSION_WINDOW,
-      config.maxConcurrentFetches * ADMISSION_WINDOW_CONCURRENCY_MULTIPLE,
+      maxConcurrentFetches * ADMISSION_WINDOW_CONCURRENCY_MULTIPLE,
     );
+  }
+
+  /**
+   * Change both caps. Fetches already in flight keep going; the next drain
+   * admits against the new caps. A derived admission window follows the
+   * concurrency cap, keeping the stamps it already holds.
+   */
+  setCaps(
+    caps: Pick<SchedulerConfig, "maxConcurrentFetches" | "maxBytesInFlight">,
+    now: number = performance.now(),
+  ): void {
+    this.config.maxConcurrentFetches = caps.maxConcurrentFetches;
+    this.config.maxBytesInFlight = caps.maxBytesInFlight;
+    const window = this.windowFor(caps.maxConcurrentFetches);
+    if (window === this.admissionWindow) return;
+    this.admissionWindow = window;
+    this.enqueue(this.pending, now);
   }
 
   get inFlightSize(): number {

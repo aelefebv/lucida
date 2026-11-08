@@ -55,7 +55,6 @@ function makeEntry(
 function makeCold(
   activeSet: ColdStateActiveEntry[],
   visibleChannels: number[] = [0],
-  multiChannel = visibleChannels.length > 1,
 ): ColdStateMessage {
   return {
     type: "coldState",
@@ -63,7 +62,6 @@ function makeCold(
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
-    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -82,17 +80,13 @@ function makeCold(
 // Construction matrix — locks the cases callers must agree on.
 
 describe("Suite D — memberIdForColdEntry matrix", () => {
-  it("single-channel tile → imageId", () => {
+  it("tile → imageId:chN", () => {
     const e = makeEntry({ entityId: "imgA", imageId: "imgA" });
-    expect(memberIdForColdEntry(e, 0, false)).toBe("imgA");
+    expect(memberIdForColdEntry(e, 0)).toBe("imgA:ch0");
+    expect(memberIdForColdEntry(e, 2)).toBe("imgA:ch2");
   });
 
-  it("multi-channel tile → imageId:chN", () => {
-    const e = makeEntry({ entityId: "imgA", imageId: "imgA" });
-    expect(memberIdForColdEntry(e, 2, true)).toBe("imgA:ch2");
-  });
-
-  it("multi-channel cold state → canonical order", () => {
+  it("cold state → canonical order", () => {
     // Canonical iteration order: activeSet outer, visibleChannels inner.
     const cold = makeCold(
       [
@@ -115,11 +109,10 @@ describe("Suite D — memberIdForColdEntry matrix", () => {
     }
   });
 
-  it("canonical iteration uses explicit multi-channel mode with one visible channel", () => {
+  it("canonical iteration keys a lone shown channel by that channel", () => {
     const cold = makeCold(
       [makeEntry({ entityId: "imgA", imageId: "imgA" })],
       [2],
-      true,
     );
 
     expect(Array.from(iterateColdMembers(cold)).map(x => x.memberId)).toEqual([

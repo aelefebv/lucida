@@ -15,6 +15,7 @@ import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { configStore } from "./planning/configStore.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import { initialPlanningState } from "./planning/index.ts";
+import { resolvedLayersJson } from "../resolvedLayerFixtures.ts";
 
 // Planner-only tests: epoch caching + multi-dataset planning state.
 // Upload-side describes live in `upload/uploader.test.ts`.
@@ -24,8 +25,8 @@ import { initialPlanningState } from "./planning/index.ts";
 // singleton races under `--sequence.shuffle`, inflating call counts.
 //
 // The describes share the real module singletons, so reset the ones tests
-// mutate after every test: configStore (which persists planning knobs to
-// happy-dom localStorage) and localStorage.
+// mutate after every test: configStore (whose planning knobs are
+// preferences in happy-dom localStorage) and localStorage.
 afterEach(() => {
   configStore.__resetForTesting();
   if (typeof localStorage !== "undefined") localStorage.clear();
@@ -79,9 +80,7 @@ interface MockSceneConfig {
     frustum_planes: [number, number, number, number][] | null;
   };
   t: number;
-  c: number;
   z: number;
-  multiChannel: boolean;
   datasetOrder: string[];
   allSettings: Record<string, unknown>;
 }
@@ -114,9 +113,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
       frustum_planes: null,
     },
     t: 0,
-    c: 0,
     z: 0,
-    multiChannel: false,
     datasetOrder: ["ds1"],
     allSettings: {
       ds1: {
@@ -140,16 +137,14 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     member_positions: (_dsId: string) => JSON.stringify(config.memberPositions),
     visible_region: (_dsId: string) => JSON.stringify(config.visibleRegion),
     t: () => config.t,
-    c: () => config.c,
     z: () => config.z,
-    multi_channel: () => config.multiChannel,
+    resolved_layers: () => resolvedLayersJson(config.datasetOrder, config.allSettings, config),
     camera_mode: () => "slice",
     dataset_order: () => JSON.stringify(config.datasetOrder),
     all_dataset_settings: () => JSON.stringify(config.allSettings),
     set_viewport: () => {},
     set_z: () => {},
     set_t: () => {},
-    set_c: () => {},
     center: () => new Float32Array([512, 512]),
     zoom: () => 1.0,
     member_model_matrix: () => {

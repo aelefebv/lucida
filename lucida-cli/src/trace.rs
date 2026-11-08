@@ -2163,7 +2163,7 @@ struct DriveRequest<'a> {
     script: Option<&'a Script>,
 }
 
-/// What runs in the page before its own scripts: the knobs' storage seed and
+/// What runs in the page before its own scripts: the knobs' preference seed and
 /// the device memory override, or None when the request has neither.
 fn new_document_script(request: &DriveRequest<'_>) -> Option<String> {
     let parts: Vec<String> = [
@@ -2194,10 +2194,10 @@ fn new_document_script(request: &DriveRequest<'_>) -> Option<String> {
 /// step by step, each gesture settling before the next. The frame is then
 /// the last step's, and the run the export reads is the last step's run.
 ///
-/// `request.knobs` are written into the page's browser storage before the
-/// page loads, through the stores the Dev controls panel writes, so the run
-/// starts under them. The profile is the launch's own and dies with it, so
-/// a knob set for one run cannot steer the next.
+/// `request.knobs` are handed to the page before it loads, as the preferences
+/// the Dev controls panel writes, so the run starts under them. They ride a
+/// page global rather than browser storage, so a knob set for one run cannot
+/// steer the next.
 async fn drive_and_export(
     url: &str,
     token: Option<&EffectiveToken>,
@@ -3531,7 +3531,7 @@ mod tests {
             ),
             "{script}"
         );
-        assert!(script.contains("localStorage.setItem"), "{script}");
+        assert!(script.contains("lucidaPreferenceSeed"), "{script}");
 
         let with = DriverFacts {
             composed_view: ComposedView {

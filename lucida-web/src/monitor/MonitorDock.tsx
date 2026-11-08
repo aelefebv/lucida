@@ -44,6 +44,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { subscribeAppearance } from "../theme/appearance.ts";
+import { definePreference, getPreference, migrateLegacyKeys, setPreference } from "../theme/preferences.ts";
 import { Button } from "../ui/Button.tsx";
 import "./MonitorDock.css";
 import { CompareSlotView, RunOption, type CompareSlot } from "./CompareSlotView.tsx";
@@ -100,7 +101,21 @@ export interface MonitorDockProps {
  */
 const LIVE_POLL_MS = 500;
 
-const HEIGHT_KEY = "monitor.dock.height";
+/** The dock's height in CSS pixels, or null for its default share of the viewport. */
+const dockHeightPreference = definePreference<number | null>("monitor.dockHeight", null, (raw) =>
+  typeof raw === "number" && Number.isFinite(raw) ? raw : undefined,
+);
+
+migrateLegacyKeys(
+  (key) => key === "monitor.dock.height",
+  (old) => {
+    for (const raw of old.values()) {
+      const height = Number(raw);
+      if (raw !== "" && Number.isFinite(height)) setPreference(dockHeightPreference, height);
+    }
+  },
+);
+
 const MIN_HEIGHT_PX = 160;
 /** Room left for the toolbar above a dock dragged to its tallest. */
 const TOP_MARGIN_PX = 96;
@@ -697,14 +712,7 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
 function initialHeight(): number {
   const view = typeof window === "undefined" ? null : window;
   const viewportHeight = view?.innerHeight || 800;
-  let stored: number | null = null;
-  try {
-    const raw = view?.localStorage?.getItem(HEIGHT_KEY);
-    stored = raw === null || raw === undefined ? null : Number(raw);
-  } catch {
-    stored = null;
-  }
-  const wanted = stored !== null && Number.isFinite(stored) ? stored : viewportHeight * DEFAULT_HEIGHT_SHARE;
+  const wanted = getPreference(dockHeightPreference) ?? viewportHeight * DEFAULT_HEIGHT_SHARE;
   return clampHeight(wanted, viewportHeight);
 }
 
@@ -716,11 +724,7 @@ function useDockHeight() {
   const [height, setHeight] = useState(initialHeight);
 
   useEffect(() => {
-    try {
-      window.localStorage?.setItem(HEIGHT_KEY, String(height));
-    } catch {
-      // Storage can be unavailable or full; the height then lasts the session.
-    }
+    setPreference(dockHeightPreference, height);
   }, [height]);
 
   const startResize = useCallback(

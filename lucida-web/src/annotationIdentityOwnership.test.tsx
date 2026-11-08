@@ -9,7 +9,9 @@ import type { Annotation } from "./components/annotationDocument.ts";
 import {
   annotationAuthorId,
   __resetAnnotationIdentityForTesting,
+  annotationAuthorPreference,
 } from "./annotationIdentity.ts";
+import { __resetPreferencesForTesting, setPreference } from "./theme/preferences.ts";
 
 // Minimal WasmScene stub: the overlay only reads annotations() (per dataset)
 // plus zoom()/center() each RAF frame for projection. Everything else the
@@ -24,12 +26,14 @@ function stubScene(annotations: Annotation[]): WasmScene {
 
 beforeEach(() => {
   localStorage.clear();
+  __resetPreferencesForTesting();
   __resetAnnotationIdentityForTesting();
 });
 
 afterEach(() => {
   cleanup();
   localStorage.clear();
+  __resetPreferencesForTesting();
   __resetAnnotationIdentityForTesting();
 });
 
@@ -54,7 +58,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
         wasmSceneRef={sceneRef}
         canvas={canvas}
         version={1}
-        viewContext={{ z: 0, t: 0, c: 0 }}
+        viewContext={{ z: 0, t: 0, channels: [0] }}
         myId={me}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -76,7 +80,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
   it("rejoin: a pin authored under a persisted id is still mine after a reconnect", async () => {
     // A prior session persisted this browser's id and authored a pin with it.
     const persisted = "persisted-author-xyz";
-    localStorage.setItem("lucida.annotation.author", persisted);
+    setPreference(annotationAuthorPreference, persisted);
 
     // "Rejoin": a fresh resolve (cold cache) reads the persisted id back.
     __resetAnnotationIdentityForTesting();
@@ -96,7 +100,7 @@ describe("ownership with a string identity (annotationAuthorId)", () => {
         wasmSceneRef={sceneRef}
         canvas={canvas}
         version={1}
-        viewContext={{ z: 0, t: 0, c: 0 }}
+        viewContext={{ z: 0, t: 0, channels: [0] }}
         myId={me}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}

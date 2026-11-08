@@ -99,25 +99,13 @@ export function computeWantedSet(
     return { missing, levels, stalePlanes };
   }
 
-  const isMultiChannel = coldState.multiChannel;
   const atlases = coldState.viewMode === "volume" ? volumeAtlases : sliceAtlases;
 
   for (const entry of coldState.activeSet) {
-    const members: Array<{ memberId: string; channel: number }> = [];
-    if (isMultiChannel) {
-      for (const c of coldState.visibleChannels) {
-        members.push({
-          memberId: memberIdForColdEntry(entry, c, true),
-          channel: c,
-        });
-      }
-    } else {
-      const channel = coldState.visibleChannels[0];
-      members.push({
-        memberId: memberIdForColdEntry(entry, channel, false),
-        channel,
-      });
-    }
+    const members = coldState.visibleChannels.map((channel) => ({
+      memberId: memberIdForColdEntry(entry, channel),
+      channel,
+    }));
 
     const targetLevel = targetLevelOf(entry);
     const tally = new LevelTally();

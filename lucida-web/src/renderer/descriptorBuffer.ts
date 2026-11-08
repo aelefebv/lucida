@@ -88,9 +88,8 @@ export interface EntityDescriptorIndex {
 export function memberIdForColdEntry(
   entry: ColdStateActiveEntry,
   channel: number,
-  multiChannel: boolean,
 ): string {
-  return multiChannel ? `${entry.imageId}:ch${channel}` : entry.imageId;
+  return `${entry.imageId}:ch${channel}`;
 }
 
 /**
@@ -105,7 +104,7 @@ export function* iterateColdMembers(
       yield {
         entry,
         channel,
-        memberId: memberIdForColdEntry(entry, channel, cold.multiChannel),
+        memberId: memberIdForColdEntry(entry, channel),
       };
     }
   }

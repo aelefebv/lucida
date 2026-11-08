@@ -257,10 +257,8 @@ function membershipDatasetId(
 }
 
 /**
- * Gated debug logger for bridge events. Toggle from the console via
- * `localStorage.setItem("debug", "bridge")`
- * followed by `refreshDebugCategories()` (the gate is cached at module
- * init; a raw same-tab setItem alone isn't seen until reload).
+ * Gated debug logger for bridge events. Toggle from the console with
+ * `localStorage.setItem("debug", "bridge")` and a reload (see debug/logging.ts).
  */
 export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsReadyState?: number) {
   if (!isDebugEnabled("bridge")) return;
@@ -292,7 +290,7 @@ export interface PresenceState {
   client_id: ClientId;
   /** Camera, view and display arrive together in one `presence` message. */
   camera?: unknown;
-  view?: { z_range: { start: number; end: number }; t: number; c: number };
+  view?: { z_range: { start: number; end: number }; t: number };
   display?: { contrast_min: number; contrast_max: number; gamma: number };
   following: ClientId | null;
   cursor: [number, number] | null;

@@ -4,6 +4,7 @@ import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
 import type { SampleFormat } from "./dataTypeUtil.ts";
+import type { BlendMode } from "./layerCompositor.ts";
 
 export interface InitMessage {
   type: "init";
@@ -60,9 +61,8 @@ export interface SliceChunkDataMessage {
   epochs: SceneEpochs;
   tier: ResidencyTier;
   /**
-   * Worker-side member id (the per-channel chunk owner). Format:
-   * `imageId` for single-channel layers, `imageId:chN` for
-   * multi-channel composites. Not a dataset id.
+   * Worker-side member id (the per-channel chunk owner), `imageId:chN`.
+   * Not a dataset id.
    */
   memberId: string;
   chunks: Chunk[];
@@ -323,15 +323,19 @@ export interface SliceRenderMultiPassMessage {
 }
 
 export interface MinimapLayerParams {
+  /** The overview texture: a member's id with its channel. */
   datasetId: string;
   modelMatrix: Float32Array;
   invModelMatrix: Float32Array;
   contrastMin: number;
   contrastMax: number;
   gamma: number;
-  /** Active channel's colormap name (snake_case, e.g. "magenta"); the minimap
+  /** The channel's colormap name (snake_case, e.g. "magenta"); the minimap
    * binds its own LUT so 2D matches 3D instead of rendering gray. */
   colormap: string;
+  /** How this channel combines with the overviews drawn before it, as the
+   * main view combines it. */
+  blendMode: BlendMode;
 }
 
 export interface MinimapInitMessage {
@@ -501,12 +505,7 @@ export interface ColdStateMessage {
   datasetId: string;
   currentT: number;
   currentZ: number;
-  /**
-   * Explicit scene mode. Do not infer this from `visibleChannels.length`:
-   * multi-channel mode can legitimately have one visible channel, and
-   * residency/member keys must still use the multi-channel shape.
-   */
-  multiChannel: boolean;
+  /** The channels the layer shows. Each has its own member ids and pools. */
   visibleChannels: number[];
   visibleRegion: VisibleRegion;
   /** Per-tier render radius as visible-region half-diagonal multipliers. */
@@ -774,8 +773,7 @@ export type MissingChunk = {
   tier: ResidencyTier;
   entityId: string;
   /**
-   * Worker-side member id that owns the missing chunk. Single-channel
-   * mode uses bare image ids; multi-channel mode uses `imageId:chN`.
+   * Worker-side member id that owns the missing chunk, `imageId:chN`.
    */
   memberId: string;
   /** The member's channel. */
@@ -879,7 +877,7 @@ export interface GpuMemoryMessage extends GpuMemoryReport {
 
 /** One chunk pool's capacity, as admission counts it. */
 export interface GpuPoolCapacity {
-  /** `chunkTierPoolKey(datasetId, tier, channel, chunkDims, multiChannel)`. */
+  /** `chunkTierPoolKey(datasetId, tier, channel, chunkDims)`. */
   poolKey: string;
   datasetId: string;
   tier: ResidencyTier;

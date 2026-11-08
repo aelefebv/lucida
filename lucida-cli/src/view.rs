@@ -127,7 +127,6 @@ pub struct ViewerProfileResult {
     pub camera: Camera,
     pub view: ViewState,
     pub display: DisplayState,
-    pub multi_channel: bool,
     pub layers: Vec<LayerState>,
 }
 
@@ -139,7 +138,6 @@ pub struct ViewerSourceResult {
     pub camera: Camera,
     pub view: ViewState,
     pub display: DisplayState,
-    pub multi_channel: bool,
     pub layers: Vec<LayerState>,
     #[serde(skip)]
     pub saved_view: SavedView,
@@ -152,7 +150,6 @@ pub struct DatasetPresenceResult {
     pub source: ViewPresenceSource,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<ViewportCommand>,
-    pub multi_channel: bool,
     pub layers: Vec<LayerState>,
     #[serde(skip)]
     pub dataset_order: Vec<DatasetId>,
@@ -227,7 +224,6 @@ pub struct DebugViewerState {
     pub camera: Camera,
     pub view: ViewState,
     pub display: DisplayState,
-    pub multi_channel: bool,
     pub dataset_order: Vec<String>,
 }
 
@@ -313,13 +309,26 @@ pub struct LayerState {
     pub detail_level_override: Option<u32>,
     pub channel_blend_mode: BlendMode,
     pub channel_count: u32,
+    /// The channel this layer shows alone, absent for its composite.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub solo: Option<u32>,
     pub channels: Vec<ChannelState>,
+    /// The scene's z slab and timepoint, clamped into this layer.
+    pub z_range: std::ops::Range<u32>,
+    pub t: u32,
+    /// Whether the scene's z or t reaches past this layer, which then shows
+    /// its nearest plane or last timepoint.
+    pub z_clamped: bool,
+    pub t_clamped: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelState {
     pub channel: u32,
     pub visible: bool,
+    /// Whether the layer draws this channel: the solo, or a visible channel
+    /// of the composite.
+    pub shown: bool,
     pub colormap: Colormap,
     pub contrast_min: f64,
     pub contrast_max: f64,
@@ -367,6 +376,10 @@ pub enum DatasetDisplayCommand {
     SetDatasetDetailLevelOverride {
         selector: String,
         level: Option<u32>,
+    },
+    SetChannelSolo {
+        selector: String,
+        channel: Option<u32>,
     },
     SetChannelVisible {
         selector: String,
@@ -982,21 +995,16 @@ pub fn format_dataset_presence_human(output: &DatasetPresenceOutput) -> String {
     } else {
         "Dataset layers".to_string()
     };
-    let multi = if output.result.multi_channel {
-        "enabled"
-    } else {
-        "disabled"
-    };
     if output.result.layers.is_empty() {
         return format!(
-            "{header}\nWorkspace: {} ({})\nSource: {}\nMulti-channel: {multi}\nNo datasets loaded",
+            "{header}\nWorkspace: {} ({})\nSource: {}\nNo datasets loaded",
             output.workspace.name,
             output.workspace.id,
             format_source(&output.result.source)
         );
     }
     format!(
-        "{header}\nWorkspace: {} ({})\nSource: {}\nMulti-channel: {multi}\n{}",
+        "{header}\nWorkspace: {} ({})\nSource: {}\n{}",
         output.workspace.name,
         output.workspace.id,
         format_source(&output.result.source),
@@ -1124,11 +1132,6 @@ pub fn format_viewer_profile_human(output: &ViewerProfileOutput) -> String {
     } else {
         "Viewer profile".to_string()
     };
-    let multi = if output.result.multi_channel {
-        "enabled"
-    } else {
-        "disabled"
-    };
     let seed = output
         .result
         .seed_source
@@ -1145,7 +1148,6 @@ pub fn format_viewer_profile_human(output: &ViewerProfileOutput) -> String {
         format!("Updated: {}", output.result.updated_at),
         format!("Camera: {}", format_camera(&output.result.camera)),
         format!("View: {}", format_view(&output.result.view)),
-        format!("Multi-channel: {multi}"),
     ];
     if output.result.layers.is_empty() {
         lines.push("No datasets loaded".to_string());
@@ -1156,11 +1158,6 @@ pub fn format_viewer_profile_human(output: &ViewerProfileOutput) -> String {
 }
 
 pub fn format_viewer_source_human(output: &ViewerSourceOutput) -> String {
-    let multi = if output.result.multi_channel {
-        "enabled"
-    } else {
-        "disabled"
-    };
     let mut lines = vec![
         "Viewer source".to_string(),
         format!(
@@ -1174,7 +1171,6 @@ pub fn format_viewer_source_human(output: &ViewerSourceOutput) -> String {
         ),
         format!("Camera: {}", format_camera(&output.result.camera)),
         format!("View: {}", format_view(&output.result.view)),
-        format!("Multi-channel: {multi}"),
     ];
     if output.result.layers.is_empty() {
         lines.push("No datasets loaded".to_string());
@@ -1203,9 +1199,10 @@ fn format_layers(layers: &[LayerState]) -> String {
                 .iter()
                 .map(|channel| {
                     format!(
-                        "  ch{} visible={} colormap={:?} contrast={:.3}..{:.3} gamma={:.3}",
+                        "  ch{} visible={} shown={} colormap={:?} contrast={:.3}..{:.3} gamma={:.3}",
                         channel.channel,
                         channel.visible,
+                        channel.shown,
                         channel.colormap,
                         channel.contrast_min,
                         channel.contrast_max,
@@ -1213,8 +1210,12 @@ fn format_layers(layers: &[LayerState]) -> String {
                     )
                 })
                 .collect::<Vec<_>>();
+            let solo = match layer.solo {
+                Some(channel) => format!("solo=ch{channel}"),
+                None => "composite".to_string(),
+            };
             let mut line = format!(
-                "{}  {}  visible={} opacity={:.3} blend={:?} render={:?} {} channels={}",
+                "{}  {}  visible={} opacity={:.3} blend={:?} render={:?} {} channels={} {solo}",
                 layer.workspace_dataset_id,
                 layer.name,
                 layer.visible,
@@ -1224,6 +1225,12 @@ fn format_layers(layers: &[LayerState]) -> String {
                 format_level_pin(layer.detail_level_override),
                 layer.channel_count
             );
+            if layer.z_clamped || layer.t_clamped {
+                line.push_str(&format!(
+                    " clamped to z={}..{} t={}",
+                    layer.z_range.start, layer.z_range.end, layer.t
+                ));
+            }
             if !channels.is_empty() {
                 line.push('\n');
                 line.push_str(&channels.join("\n"));
@@ -1360,7 +1367,6 @@ fn dataset_presence_result(
         own_client_id: snapshot.your_id,
         source,
         command,
-        multi_channel: scene.view.multi_channel,
         layers: layer_states(&scene),
         dataset_order: scene.dataset_order,
         dataset_settings: scene.dataset_settings,
@@ -1449,7 +1455,7 @@ fn display_viewport_command(
             max,
         } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = channel.unwrap_or(scene.view.c);
+            let channel = channel.unwrap_or_else(|| current_channel(scene, &dataset_id));
             ViewportCommand::SetChannelContrast {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1463,7 +1469,7 @@ fn display_viewport_command(
             gamma,
         } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = channel.unwrap_or(scene.view.c);
+            let channel = channel.unwrap_or_else(|| current_channel(scene, &dataset_id));
             ViewportCommand::SetChannelGamma {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1476,7 +1482,7 @@ fn display_viewport_command(
             colormap,
         } => {
             let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
-            let channel = channel.unwrap_or(scene.view.c);
+            let channel = channel.unwrap_or_else(|| current_channel(scene, &dataset_id));
             ViewportCommand::SetChannelColormap {
                 dataset_id: dataset_id.0,
                 channel,
@@ -1508,6 +1514,13 @@ fn display_viewport_command(
             ViewportCommand::SetDatasetDetailLevelOverride {
                 dataset_id: dataset_id.0,
                 level,
+            }
+        }
+        DatasetDisplayCommand::SetChannelSolo { selector, channel } => {
+            let dataset_id = resolve_dataset_id(&scene.document, &selector)?;
+            ViewportCommand::SetChannelSolo {
+                dataset_id: dataset_id.0,
+                channel,
             }
         }
         DatasetDisplayCommand::SetChannelVisible {
@@ -1618,55 +1631,60 @@ fn resolve_dataset_id(document: &DocumentState, selector: &str) -> Result<Datase
     }
 }
 
-fn channel_count(document: &DocumentState, dataset_id: &DatasetId) -> Option<u32> {
-    document
-        .manifests
-        .get(dataset_id)?
-        .images()
-        .first()?
-        .multiscale
-        .levels
-        .first()
-        .map(|level| level.shape[1] as u32)
+/// The channel a display command without `--channel` acts on: the layer's
+/// solo, else the first channel its composite shows.
+fn current_channel(scene: &Scene, dataset_id: &DatasetId) -> u32 {
+    scene
+        .resolved_layer(dataset_id)
+        .and_then(|layer| layer.channels.first().map(|c| c.channel))
+        .unwrap_or(0)
 }
 
+/// Every layer in panel order. What each shows comes from
+/// [`Scene::resolved_layers`], the same answer the viewer draws.
 fn layer_states(scene: &Scene) -> Vec<LayerState> {
     scene
-        .dataset_order
-        .iter()
-        .filter_map(|id| {
-            let manifest = scene.document.manifests.get(id)?;
+        .resolved_layers()
+        .into_iter()
+        .filter(|layer| scene.dataset_order.contains(&layer.dataset_id))
+        .filter_map(|layer| {
+            let manifest = scene.document.manifests.get(&layer.dataset_id)?;
             let default_settings;
-            let settings = if let Some(settings) = scene.dataset_settings.get(id) {
+            let settings = if let Some(settings) = scene.dataset_settings.get(&layer.dataset_id) {
                 settings
             } else {
                 default_settings = DatasetDisplaySettings::default();
                 &default_settings
             };
-            let channel_count = channel_count(&scene.document, id).unwrap_or(0);
-            let channels = (0..channel_count)
-                .map(|channel| channel_state(settings, channel))
+            let shown = layer.channel_indices();
+            let channels = (0..layer.channel_count)
+                .map(|channel| channel_state(settings, channel, shown.contains(&channel)))
                 .collect();
             Some(LayerState {
-                workspace_dataset_id: id.0.clone(),
+                workspace_dataset_id: layer.dataset_id.0.clone(),
                 name: manifest.name.clone(),
-                visible: settings.visible,
-                opacity: settings.opacity,
+                visible: layer.visible,
+                opacity: layer.opacity,
                 contrast_min: settings.contrast_min,
                 contrast_max: settings.contrast_max,
                 gamma: settings.gamma,
                 blend_mode: settings.blend_mode,
-                render_mode: settings.render_mode,
+                render_mode: layer.render_mode,
                 detail_level_override: settings.detail_level_override,
                 channel_blend_mode: settings.channel_blend_mode,
-                channel_count,
+                channel_count: layer.channel_count,
+                solo: layer.solo,
                 channels,
+                z_range: layer.z_range,
+                t: layer.t,
+                z_clamped: layer.z_clamped,
+                t_clamped: layer.t_clamped,
             })
         })
         .collect()
 }
 
-fn channel_state(settings: &DatasetDisplaySettings, channel: u32) -> ChannelState {
+fn channel_state(settings: &DatasetDisplaySettings, channel: u32, shown: bool) -> ChannelState {
     let default_settings;
     let settings = if let Some(settings) = settings.channel_settings.get(channel as usize) {
         settings
@@ -1680,6 +1698,7 @@ fn channel_state(settings: &DatasetDisplaySettings, channel: u32) -> ChannelStat
     ChannelState {
         channel,
         visible: settings.visible,
+        shown,
         colormap: settings.colormap,
         contrast_min: settings.contrast_min,
         contrast_max: settings.contrast_max,
@@ -1784,7 +1803,6 @@ fn debug_state_result(
             camera: scene.camera.clone(),
             view: scene.view.clone(),
             display: scene.display.clone(),
-            multi_channel: scene.view.multi_channel,
             dataset_order: scene
                 .dataset_order
                 .iter()
@@ -1923,7 +1941,6 @@ fn viewer_profile_result(
 ) -> ViewerProfileResult {
     let scene = ProfileScene::open(&snapshot.document, &record.view).scene;
     let layers = layer_states(&scene);
-    let multi_channel = scene.view.multi_channel;
     ViewerProfileResult {
         snapshot_seq: snapshot.seq,
         own_client_id: snapshot.your_id,
@@ -1936,7 +1953,6 @@ fn viewer_profile_result(
         camera: scene.camera,
         view: scene.view,
         display: scene.display,
-        multi_channel,
         layers,
     }
 }
@@ -1948,7 +1964,6 @@ fn viewer_source_result(
 ) -> ViewerSourceResult {
     let saved_view = ProfileScene::from(scene.clone()).saved_view();
     let layers = layer_states(&scene);
-    let multi_channel = scene.view.multi_channel;
     ViewerSourceResult {
         snapshot_seq: snapshot.seq,
         own_client_id: snapshot.your_id,
@@ -1956,7 +1971,6 @@ fn viewer_source_result(
         camera: scene.camera,
         view: scene.view,
         display: scene.display,
-        multi_channel,
         layers,
         saved_view,
     }
@@ -2162,10 +2176,7 @@ fn format_camera(camera: &Camera) -> String {
 }
 
 fn format_view(view: &ViewState) -> String {
-    format!(
-        "T{} C{} Z{}..{}",
-        view.t, view.c, view.z_range.start, view.z_range.end
-    )
+    format!("T{} Z{}..{}", view.t, view.z_range.start, view.z_range.end)
 }
 
 fn format_peer_summary(peer: &PeerSummary) -> String {
@@ -2236,7 +2247,6 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::SetZ { .. } => "view slice z",
         ViewportCommand::SetZRange { .. } => "view z-range",
         ViewportCommand::SetT { .. } => "view slice t",
-        ViewportCommand::SetC { .. } => "view slice c",
         ViewportCommand::SetContrast { .. } => "view contrast",
         ViewportCommand::SetGamma { .. } => "view gamma",
         ViewportCommand::SetDatasetOrder { .. } => "layer order",
@@ -2247,7 +2257,7 @@ fn viewport_command_label(command: &ViewportCommand) -> &'static str {
         ViewportCommand::SetDatasetBlendMode { .. } => "layer blend-mode",
         ViewportCommand::SetDatasetRenderMode { .. } => "layer render-mode",
         ViewportCommand::SetDatasetDetailLevelOverride { .. } => "layer level-pin",
-        ViewportCommand::SetMultiChannel { .. } => "channel mode",
+        ViewportCommand::SetChannelSolo { .. } => "channel solo",
         ViewportCommand::SetChannelVisible { .. } => "channel visibility",
         ViewportCommand::SetChannelColormap { .. } => "channel colormap",
         ViewportCommand::SetChannelName { .. } => "channel name",
@@ -2497,7 +2507,6 @@ mod tests {
                 }),
                 view: ViewState::new(),
                 display: DisplayState::default(),
-                multi_channel: false,
                 layers: Vec::new(),
             },
         };
@@ -2784,7 +2793,12 @@ mod tests {
             detail_level_override: level_pin,
             channel_blend_mode: BlendMode::Additive,
             channel_count: 0,
+            solo: None,
             channels: Vec::new(),
+            z_range: 0..1,
+            t: 0,
+            z_clamped: false,
+            t_clamped: false,
         }
     }
 
@@ -2994,9 +3008,16 @@ mod tests {
     }
 
     #[test]
-    fn layer_current_channel_commands_resolve_scene_channel() {
+    fn layer_current_channel_commands_resolve_the_layer_solo() {
         let mut peer = presence(7, [0.0, 0.0]);
-        peer.view.as_mut().unwrap().c = 2;
+        peer.dataset_order = Some(vec![DatasetId("wds-test".to_string())]);
+        peer.dataset_settings = Some(HashMap::from([(
+            DatasetId("wds-test".to_string()),
+            DatasetDisplaySettings {
+                solo: Some(2),
+                ..Default::default()
+            },
+        )]));
         let snapshot = WorkspaceSnapshot {
             peers: vec![peer],
             ..display_snapshot()
