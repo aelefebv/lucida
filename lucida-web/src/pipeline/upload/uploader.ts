@@ -4,7 +4,7 @@
  * eligibility and keeps the mirror of what the worker holds.
  */
 
-import type { CpuCache, ReadyDelivery } from "../fetch/index.ts";
+import type { CpuCache, ReadyChunkDelivery } from "../fetch/index.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type {
   ActiveSetEntry,
@@ -23,7 +23,6 @@ import type {
   ColdStateDisplayState,
   ColdStateMessage,
   MissingChunk,
-  MissingProxy,
 } from "../../renderer/workerProtocol.ts";
 import {
   emptyUploadTickStats,
@@ -49,7 +48,6 @@ import {
   dispatchChunkDelivery,
   dispatchLabelChunkDelivery,
   dispatchLabelVolumeChunkDelivery,
-  dispatchProxy,
 } from "./delivery/dispatch.ts";
 import { WorkerResourceTracker } from "./delivery/resources.ts";
 import { UploadTelemetry } from "./telemetry/upload.ts";
@@ -99,7 +97,6 @@ export class Uploader {
     multiChannel: boolean;
     visibleRegion: VisibleRegion;
     renderRadiusView?: { detail: number; coarse: number };
-    desiredProxyKeys?: Iterable<string>;
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     dsSettings: DatasetSettings | undefined;
@@ -114,7 +111,6 @@ export class Uploader {
       multiChannel: args.multiChannel,
       visibleRegion: args.visibleRegion,
       renderRadiusView: args.renderRadiusView,
-      desiredProxyKeys: args.desiredProxyKeys,
       wantedChunks: [...wanted.values()],
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
@@ -162,7 +158,6 @@ export class Uploader {
     /** The re-emitted plan's requests; see {@link sendColdState}. */
     requests: readonly ChunkRequest[];
     visibleRegion: VisibleRegion;
-    desiredProxyKeys: Iterable<string>;
     epochs: SceneEpochs;
   }): void {
     const wanted = wantedChunksFromPlan(args.requests, args.ctx.scene.multi_channel());
@@ -173,7 +168,6 @@ export class Uploader {
       currentT: args.currentT,
       currentZ: args.currentZ,
       visibleRegion: args.visibleRegion,
-      desiredProxyKeys: Array.from(args.desiredProxyKeys).sort(),
       wantedChunks: [...wanted.values()],
       epochs: args.epochs,
     });
@@ -198,7 +192,6 @@ export class Uploader {
     selection: SelectionState;
     visibleRegion: VisibleRegion;
     renderRadiusView?: { detail: number; coarse: number };
-    desiredProxyKeys?: Iterable<string>;
     epochs: SceneEpochs;
     matricesByEntity: Map<string, { model: Float32Array; inv: Float32Array }>;
     dsSettings: DatasetSettings | undefined;
@@ -214,7 +207,6 @@ export class Uploader {
       selection: args.selection,
       visibleRegion: args.visibleRegion,
       renderRadiusView: args.renderRadiusView,
-      desiredProxyKeys: args.desiredProxyKeys,
       wantedChunks: wantedChanges,
       epochs: args.epochs,
       matricesByEntity: args.matricesByEntity,
@@ -289,7 +281,7 @@ export class Uploader {
   // Per-tick upload (slicePath / volumePath)
 
   /**
-   * Deliver cached, wanted, not-yet-sent assets to the GPU worker in
+   * Deliver cached, wanted, not-yet-sent chunks to the GPU worker in
    * strict priority order. Budget is a one-item soft cap: the next
    * priority item is sent while `remaining > 0`, even if oversized, and
    * the loop stops after the send drives `remaining <= 0`.
@@ -305,7 +297,7 @@ export class Uploader {
 
     const multiChannel = ctx.scene.multi_channel();
     const epochs = this.lastEpochs ?? {
-      content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
+      content: 0, layout: 0, view: 0, selection: 0, request: 0,
     };
     const manifestByImage = buildManifestByImage(ctx.datasets);
 
@@ -314,9 +306,9 @@ export class Uploader {
     // is unaffected either way. Sampled once per tick so recordEvent and
     // publish agree within the tick.
     const telemetryActive = orchTelemetryActive();
-    const recordUpload = (bytes: number, kind: "chunk" | "proxy"): void => {
+    const recordUpload = (bytes: number): void => {
       if (!telemetryActive) return;
-      this.uploadTelemetry.recordEvent(tickStart, bytes, kind);
+      this.uploadTelemetry.recordEvent(tickStart, bytes);
     };
 
     const deliverables = Array.from(ctx.cpuCache.getDeliverable());
@@ -329,13 +321,13 @@ export class Uploader {
     let sentAny = false;
 
     for (const delivery of deliverables) {
-      if (delivery.kind === "chunk" && this.resendGuard.isHeld(delivery)) continue;
+      if (this.resendGuard.isHeld(delivery)) continue;
       if (remaining <= 0) {
         budgetExhausted = true;
         break;
       }
 
-      const chunkTier = this.deliveryResidencyTier(delivery);
+      const chunkTier = delivery.residencyTier;
       if (splitTierBudget && chunkTier === "detail" && detailRemaining <= 0) {
         budgetExhausted = true;
         continue;
@@ -345,8 +337,7 @@ export class Uploader {
         continue;
       }
 
-      if (delivery.kind === "proxy") this.currentUploadStats.drainedProxies++;
-      else this.currentUploadStats.drainedChunks++;
+      this.currentUploadStats.drainedChunks++;
 
       const sent = this.tryDispatchDelivery({
         delivery,
@@ -359,10 +350,10 @@ export class Uploader {
       if (sent === 0) continue;
 
       ctx.cpuCache.markSent(delivery);
-      if (delivery.kind === "chunk") this.resendGuard.noteSent(delivery);
+      this.resendGuard.noteSent(delivery);
       sentAny = true;
       this.currentUploadStats.bytesUploaded += sent;
-      recordUpload(sent, delivery.kind);
+      recordUpload(sent);
       remaining -= sent;
       if (splitTierBudget && chunkTier === "detail") detailRemaining -= sent;
       if (splitTierBudget && chunkTier === "coarse") coarseRemaining -= sent;
@@ -392,7 +383,7 @@ export class Uploader {
   }
 
   private tryDispatchDelivery(args: {
-    delivery: ReadyDelivery;
+    delivery: ReadyChunkDelivery;
     ctx: TickContext;
     manifestByImage: Map<string, ManifestEntry>;
     multiChannel: boolean;
@@ -400,12 +391,6 @@ export class Uploader {
     epochs: SceneEpochs;
   }): number {
     const { delivery, ctx, manifestByImage, multiChannel, sliceZ, epochs } = args;
-
-    if (delivery.kind === "proxy") {
-      dispatchProxy(ctx.client, delivery, epochs);
-      this.currentUploadStats.uploadedProxies++;
-      return delivery.data.byteLength;
-    }
 
     const meta = manifestByImage.get(delivery.imageId);
     if (!meta || !meta.levels[delivery.level]) {
@@ -449,15 +434,11 @@ export class Uploader {
     return delivery.data.byteLength;
   }
 
-  private computeChunkTierDemand(deliveries: ReadyDelivery[]): Record<ResidencyTier, boolean> {
+  private computeChunkTierDemand(deliveries: ReadyChunkDelivery[]): Record<ResidencyTier, boolean> {
     return {
-      detail: deliveries.some((d) => this.deliveryResidencyTier(d) === "detail"),
-      coarse: deliveries.some((d) => this.deliveryResidencyTier(d) === "coarse"),
+      detail: deliveries.some((d) => d.residencyTier === "detail"),
+      coarse: deliveries.some((d) => d.residencyTier === "coarse"),
     };
-  }
-
-  private deliveryResidencyTier(delivery: ReadyDelivery): ResidencyTier | null {
-    return delivery.kind === "chunk" ? delivery.residencyTier : null;
   }
 
   // Worker feedback (wired in renderLoop.start)
@@ -474,10 +455,10 @@ export class Uploader {
     return this.workerFeedback.handleChunkResidency(memberId, tier, change, keys, cpuCache, reason);
   }
 
-  /** Returns whether a chunk or proxy may now be sent again. */
+  /** Returns whether a chunk may now be sent again. */
   handleWantedSetDelta(
     datasetId: string,
-    missing: Array<MissingChunk | MissingProxy>,
+    missing: MissingChunk[],
     cpuCache: CpuCache,
   ): boolean {
     return this.workerFeedback.handleWantedSetDelta(datasetId, missing, cpuCache);

@@ -164,7 +164,7 @@ export interface ChunkRowSource {
  * input made it.
  */
 export interface RunCause {
-  epoch: "content" | "layout" | "view" | "selection" | "asset" | null;
+  epoch: "content" | "layout" | "view" | "selection" | null;
   dirtyKind: "interactive" | "residency";
   source: string;
 }
@@ -217,13 +217,17 @@ export function isDatasetOpenCause(cause: RunCause | null): boolean {
  * Why a run closed. Required on every run: a run that never settled is still
  * a run.
  *
+ * `quiescent` covers a view that settled covering less than it wanted.
+ * `stalled` is a view that stopped making progress without settling, and
+ * the header's `stallReason` says what it waited on.
+ *
  * The last two belong to the unlabelled steady-state interval alone.
  * `run-opened` means a labelled run began, which is not a settling event.
  * `rotated` means the interval reached the per-run cap: steady state has no
  * privileged start, so it hands over to a fresh interval rather than
  * truncating and losing the most recent work.
  */
-export type EndReason = "quiescent" | "timeout" | "explicit" | "run-opened" | "rotated";
+export type EndReason = "quiescent" | "stalled" | "timeout" | "explicit" | "run-opened" | "rotated";
 
 export interface Viewport {
   cssWidth: number;
@@ -238,7 +242,6 @@ export interface CacheWarmth {
   detailBytes: number;
   coarseChunks: number;
   coarseBytes: number;
-  proxyBytes: number;
 }
 
 export interface ComposedView {
@@ -399,6 +402,11 @@ export interface RunHeader extends RunConditions {
    */
   cause: RunCause | null;
   endReason: EndReason;
+  /**
+   * What a stalled run waited on, such as `server_pending`; null or absent
+   * for every other end reason.
+   */
+  stallReason?: string | null;
   /** Null on a run that recorded everything it saw. */
   truncation: TruncationRecord | null;
   build: BuildIdentity;
@@ -445,7 +453,6 @@ export const TICK_COUNTER_NAMES = [
   "laneCoarse",
   "lanePrefetch",
   "laneOverview",
-  "proxyRequests",
   "plannedChunks",
   "cullingConsidered",
   "cullingAfterXyBounds",
@@ -453,16 +460,14 @@ export const TICK_COUNTER_NAMES = [
   "cullingAfterFrustum",
   "catalogDegradations",
   "activeSetTotal",
-  "activeSetGroupAsProxy",
-  "activeSetTilesProxyFallback",
   "activeSetTilesDetail",
 ] as const;
 export type TickCounterName = (typeof TICK_COUNTER_NAMES)[number];
 
 /**
  * Column indices, derived from the names rather than written out beside them.
- * Sixteen hand-numbered constants next to sixteen strings is two lists that
- * must stay in the same order with nothing checking that they do.
+ * Hand-numbered constants next to the strings would be two lists that must
+ * stay in the same order with nothing checking that they do.
  */
 function counterIndex(name: TickCounterName): number {
   return TICK_COUNTER_NAMES.indexOf(name);
@@ -474,7 +479,6 @@ export const TickCounter = {
   LaneCoarse: counterIndex("laneCoarse"),
   LanePrefetch: counterIndex("lanePrefetch"),
   LaneOverview: counterIndex("laneOverview"),
-  ProxyRequests: counterIndex("proxyRequests"),
   PlannedChunks: counterIndex("plannedChunks"),
   CullingConsidered: counterIndex("cullingConsidered"),
   CullingAfterXyBounds: counterIndex("cullingAfterXyBounds"),
@@ -482,8 +486,6 @@ export const TickCounter = {
   CullingAfterFrustum: counterIndex("cullingAfterFrustum"),
   CatalogDegradations: counterIndex("catalogDegradations"),
   ActiveSetTotal: counterIndex("activeSetTotal"),
-  ActiveSetGroupAsProxy: counterIndex("activeSetGroupAsProxy"),
-  ActiveSetTilesProxyFallback: counterIndex("activeSetTilesProxyFallback"),
   ActiveSetTilesDetail: counterIndex("activeSetTilesDetail"),
 } as const;
 
@@ -508,7 +510,6 @@ export const TickCounter = {
  */
 export const CLIENT_MESSAGES = [
   { type: "chunkRequest", wire: "chunk_request", label: "chunk request" },
-  { type: "assetRequest", wire: "asset_request", label: "asset request" },
   { type: "viewerInterest", wire: "viewer_interest", label: "viewer interest" },
   { type: "presence", wire: "presence", label: "presence" },
   { type: "datasetPresence", wire: "dataset_presence", label: "dataset presence" },
@@ -526,7 +527,6 @@ export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = CLIENT_MESSAGE
 /** Indices derived from the names, as {@link TickCounter} derives its own. */
 export const ClientMessageTypeIndex = {
   ChunkRequest: CLIENT_MESSAGE_TYPES.indexOf("chunkRequest"),
-  AssetRequest: CLIENT_MESSAGE_TYPES.indexOf("assetRequest"),
   ViewerInterest: CLIENT_MESSAGE_TYPES.indexOf("viewerInterest"),
   Presence: CLIENT_MESSAGE_TYPES.indexOf("presence"),
   DatasetPresence: CLIENT_MESSAGE_TYPES.indexOf("datasetPresence"),
@@ -646,10 +646,9 @@ export const UNLABELLED: WireLabel = { rid: 0, connectionGeneration: 0 };
  * open's `request_id` rather than on a correlation label. Index order is
  * the wire order of the column and must not be reordered.
  */
-export type ServerRowFamily = "chunk" | "asset" | "metadata-read";
+export type ServerRowFamily = "chunk" | "metadata-read";
 export const SERVER_ROW_FAMILIES: readonly ServerRowFamily[] = [
   "chunk",
-  "asset",
   "metadata-read",
 ];
 
@@ -1152,7 +1151,7 @@ export interface TracePointEvent {
   atUs: number;
   kind: PointEventKind;
   reason: PointEventReason;
-  /** Null when the event is not about one chunk, a proxy asset eviction, say. */
+  /** Null when the event is not about one chunk. */
   chunk: {
     datasetId: string;
     entityId: string;

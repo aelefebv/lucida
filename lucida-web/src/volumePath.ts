@@ -35,7 +35,6 @@ export function pushLabelVolumeLayers(
   scene: LabelVolumeScene,
   datasetId: string,
   manifest: DatasetManifest,
-  members: MemberRosterEntry[],
   viewProj: Float32Array,
   canvasW: number,
   canvasH: number,
@@ -46,12 +45,8 @@ export function pushLabelVolumeLayers(
   for (const resolved of resolveVisibleLabels(manifest, labelSettings, { mode: "volume" })) {
     const { label, source, opacity } = resolved;
     const sourceImageId = label.source_image_id;
-    // Group-as-proxy roster entries carry their own matrices.
-    const sourceMember = members.find((m) => m.imageId === sourceImageId);
-    const sourceModel = sourceMember?.modelMatrix
-      ?? new Float32Array(scene.member_model_matrix(datasetId, sourceImageId));
-    const sourceInv = sourceMember?.invModelMatrix
-      ?? new Float32Array(scene.inv_member_model_matrix(datasetId, sourceImageId));
+    const sourceModel = new Float32Array(scene.member_model_matrix(datasetId, sourceImageId));
+    const sourceInv = new Float32Array(scene.inv_member_model_matrix(datasetId, sourceImageId));
     // Scale to the label's own extent so a differently scaled label stays
     // aligned (the 3D analog of `labelFootprint`).
     const { model, inv } = labelModelMatrices(
@@ -149,8 +144,7 @@ function uploadAndRenderVolume(
           const compKey = compositeKey(m.imageId, ch);
           // The descriptor holds the model matrix, but the CPU needs it too
           // for the scissor projection.
-          const model = m.modelMatrix
-            ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
+          const model = new Float32Array(scene.member_model_matrix(dsId, m.imageId));
 
           const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
           if (!scissorRect) continue; // group fully off-screen
@@ -172,8 +166,7 @@ function uploadAndRenderVolume(
       if (viewC >= dsShapeV[Axis.C] || viewT >= dsShapeV[Axis.T]) continue;
 
       for (const m of members) {
-        const model = m.modelMatrix
-          ?? new Float32Array(scene.member_model_matrix(dsId, m.imageId));
+        const model = new Float32Array(scene.member_model_matrix(dsId, m.imageId));
 
         const scissorRect = computeScissorRect(model, viewProj, canvasW, canvasH);
         if (!scissorRect) continue; // group fully off-screen
@@ -196,7 +189,6 @@ function uploadAndRenderVolume(
       scene,
       dsId,
       dsVol.manifest,
-      members,
       viewProj,
       canvasW,
       canvasH,

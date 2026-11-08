@@ -34,17 +34,7 @@ struct EntityDescriptor {
   modelMatrix: mat4x4<f32>,
   invModelMatrix: mat4x4<f32>,
   channelMask: u32,
-  tileProxyPoolIndex: u32,
-  tileProxySlotIndex: u32,
-  groupProxyPoolIndex: u32,
-  groupProxySlotIndex: u32,
   sampleFormat: u32,
-  _pad_proxy1: u32,
-  _pad_proxy2: u32,
-  tileProxyDims: vec3<u32>,
-  _pad_tile: u32,
-  groupProxyDims: vec3<u32>,
-  _pad_group: u32,
   contrastMin: f32,
   contrastMax: f32,
   gamma: f32,
@@ -53,6 +43,8 @@ struct EntityDescriptor {
   levelSourceCount: u32,
   colormapMode: u32,
   labelOpacity: f32,
+  _pad0: u32,
+  _pad1: u32,
   levelSources: array<ChunkTierSource, 4>,
   coarseSource: ChunkTierSource,
 };
@@ -62,21 +54,17 @@ struct EntityDescriptor {
 @group(0) @binding(2) var lutSampler: sampler;
 @group(0) @binding(3) var coarseTex: texture_2d<u32>;
 @group(0) @binding(4) var<storage, read> coarseIndirection: array<u32>;
-// Proxy textures are 3D (same as volume.wgsl); slice mode reads one Z
-// plane within the slot region.
-@group(0) @binding(5) var tileProxyTex: texture_3d<u32>;
-@group(0) @binding(6) var groupProxyTex: texture_3d<u32>;
 // One level pool per resident-level slot. A level source's `poolIndex`
 // says which of these it reads; levels of one entity may live in
 // different pools when their chunk shapes differ.
-@group(0) @binding(7) var levelTex0: texture_2d<u32>;
-@group(0) @binding(8) var levelTex1: texture_2d<u32>;
-@group(0) @binding(9) var levelTex2: texture_2d<u32>;
-@group(0) @binding(10) var levelTex3: texture_2d<u32>;
-@group(0) @binding(11) var<storage, read> levelIndirection0: array<u32>;
-@group(0) @binding(12) var<storage, read> levelIndirection1: array<u32>;
-@group(0) @binding(13) var<storage, read> levelIndirection2: array<u32>;
-@group(0) @binding(14) var<storage, read> levelIndirection3: array<u32>;
+@group(0) @binding(5) var levelTex0: texture_2d<u32>;
+@group(0) @binding(6) var levelTex1: texture_2d<u32>;
+@group(0) @binding(7) var levelTex2: texture_2d<u32>;
+@group(0) @binding(8) var levelTex3: texture_2d<u32>;
+@group(0) @binding(9) var<storage, read> levelIndirection0: array<u32>;
+@group(0) @binding(10) var<storage, read> levelIndirection1: array<u32>;
+@group(0) @binding(11) var<storage, read> levelIndirection2: array<u32>;
+@group(0) @binding(12) var<storage, read> levelIndirection3: array<u32>;
 
 @group(1) @binding(0) var<storage, read> entityDescriptors: array<EntityDescriptor>;
 @group(1) @binding(1) var<uniform> currentEntity: EntityRef;
@@ -124,40 +112,7 @@ fn vs(@builtin(vertex_index) vid: u32) -> VSOut {
   return out;
 }
 
-// Sample one voxel from a proxy slot using 2D UV. Reads at the slot's
-// Z midpoint. Slot grid layout and dim convention match `proxyAtlas.ts`
-// (`slotDims: [Z, Y, X]` → `dims.x=Z, dims.y=Y, dims.z=X`).
-fn sampleProxy2D(tex: texture_3d<u32>, slotIdx: u32, dims: vec3<u32>, uv: vec2f) -> u32 {
-  if (slotIdx == MISS) {
-    return MISS;
-  }
-  let slotZ = dims.x;
-  let slotY = dims.y;
-  let slotX = dims.z;
-  if (slotX == 0u || slotY == 0u || slotZ == 0u) {
-    return MISS;
-  }
-  let atlasDims = textureDimensions(tex);
-  let slotsX = max(1u, atlasDims.x / slotX);
-  let slotsY = max(1u, atlasDims.y / slotY);
-  let tileX = slotIdx % slotsX;
-  let tileY = (slotIdx / slotsX) % slotsY;
-  let tileZ = slotIdx / (slotsX * slotsY);
-  let origin = vec3u(tileX * slotX, tileY * slotY, tileZ * slotZ);
-  let voxX = clamp(u32(uv.x * f32(slotX)), 0u, slotX - 1u);
-  let voxY = clamp(u32(uv.y * f32(slotY)), 0u, slotY - 1u);
-  let voxZ = slotZ / 2u;
-  let coord = vec3u(origin.x + voxX, origin.y + voxY, origin.z + voxZ);
-  // A slot region that doesn't fit the bound texture (e.g. the 1×1×1
-  // dummy is bound while this member's proxy pool isn't attached to the
-  // draw) must read as a MISS — never as whatever an out-of-bounds
-  // textureLoad yields (typically 0, which shades as an opaque
-  // colormap-zero fill).
-  if (coord.x >= atlasDims.x || coord.y >= atlasDims.y || coord.z >= atlasDims.z) {
-    return MISS;
-  }
-  return textureLoad(tex, vec3i(coord), 0).r;
-}
+
 
 // The chunk-grid cell of one source under a member-local UV, and the
 // texel inside that chunk.
@@ -316,38 +271,17 @@ fn labelColorFor(id: u32, count: u32) -> vec4f {
 // the per-member pass (`fs`) and the aggregate batched pass
 // (`fsAggregate`). Sampling order: the level sources finest first (the
 // target level, then the coarser resident levels), then the coarse
-// tier, then blank. Every sample comes from exactly one level. Proxy
-// assets are consulted only when the entity binds no chunk tier at all.
+// tier, then blank. Every sample comes from exactly one level.
 // Returns the sampled value or MISS when nothing is resident at this UV.
 fn sampleEntityValue(entityIdx: u32, texUV: vec2f) -> u32 {
   let count = min(entityDescriptors[entityIdx].levelSourceCount, MAX_LEVEL_SOURCES);
-  let hasTierSources = count != 0u || entityDescriptors[entityIdx].coarseSource.valid != 0u;
-
-  if (hasTierSources) {
-    for (var i = 0u; i < count; i++) {
-      let v = sampleLevel2D(entityDescriptors[entityIdx].levelSources[i], texUV);
-      if (v != MISS) {
-        return v;
-      }
-    }
-    return sampleCoarse2D(entityDescriptors[entityIdx].coarseSource, texUV);
-  }
-
-  let entity = entityDescriptors[entityIdx];
-  var chunkVal = MISS;
-  let tileSlot = entity.tileProxySlotIndex;
-  if (tileSlot != MISS) {
-    let v = sampleProxy2D(tileProxyTex, tileSlot, entity.tileProxyDims, texUV);
-    if (v != MISS) { chunkVal = v; }
-  }
-  if (chunkVal == MISS) {
-    let groupSlot = entity.groupProxySlotIndex;
-    if (groupSlot != MISS) {
-      let v = sampleProxy2D(groupProxyTex, groupSlot, entity.groupProxyDims, texUV);
-      if (v != MISS) { chunkVal = v; }
+  for (var i = 0u; i < count; i++) {
+    let v = sampleLevel2D(entityDescriptors[entityIdx].levelSources[i], texUV);
+    if (v != MISS) {
+      return v;
     }
   }
-  return chunkVal;
+  return sampleCoarse2D(entityDescriptors[entityIdx].coarseSource, texUV);
 }
 
 @fragment

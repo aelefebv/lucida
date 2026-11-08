@@ -24,7 +24,7 @@ import { setBundleServices } from "./bundle.ts";
 import { setScriptControls } from "./steps.ts";
 import { installTraceSeam, resolveGpuIdentity } from "./seam.ts";
 import { traceRecorder } from "./recorder.ts";
-import { createQuiescenceState, evaluateQuiescence } from "./quiescence.ts";
+import { createSettleState, evaluateSettle } from "../pipeline/settle.ts";
 import { TRACE_SCHEMA_VERSION } from "./types.ts";
 import { initialPlanningState } from "../pipeline/planning/index.ts";
 
@@ -40,10 +40,6 @@ class ControlledSource implements ContentSource {
         resolve({ bytes, wireFormat: { Raw: { dtype: "uint8" } } as never, dataType: "uint8" }),
       );
     });
-  }
-
-  fetchProxy(): Promise<never> {
-    return new Promise<never>(() => {});
   }
 
   handleBinary(): void {}
@@ -102,8 +98,7 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
   return {
     requests,
     activeSet: [],
-    proxyRequests: [],
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     stats: emptyPlanStats(),
     nextState: initialPlanningState(),
   };
@@ -123,7 +118,7 @@ const settle = async () => {
 function registerEnvironment(): void {
   traceRecorder.setEnvironment({
     captureWarmth: () => ({
-      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
     }),
     captureConditions: () => ({
       datasetIds: ["ds"],
@@ -131,7 +126,7 @@ function registerEnvironment(): void {
       devicePixelRatio: 2,
       viewport: { cssWidth: 800, cssHeight: 600, deviceWidth: 1600, deviceHeight: 1200 },
     }),
-    captureOutstanding: () => createQuiescenceState(),
+    captureOutstanding: () => createSettleState(),
   });
 }
 
@@ -726,7 +721,7 @@ describe("the trace seam", () => {
     await flush();
     traceRecorder.noteReading(0, 1, 2_000, 8);
     traceRecorder.noteQuiescence(
-      evaluateQuiescence(Object.assign(createQuiescenceState(), { inFlight: 1 }), performance.now()),
+      evaluateSettle(Object.assign(createSettleState(), { inFlight: 1 }), performance.now()),
     );
 
     const reading = seam.provisional()!;
@@ -838,7 +833,7 @@ describe("the cache's half of the quiescence predicate", () => {
     ]));
     await flush();
 
-    const inputs = cache.quiescenceInputs(createQuiescenceState());
+    const inputs = cache.settleInputs(createSettleState());
     expect(inputs.inFlight + inputs.speculativeInFlight).toBe(1);
     expect(inputs.pending + inputs.speculativePending).toBe(1);
     expect(inputs.speculativeInFlight + inputs.speculativePending).toBe(1);

@@ -296,16 +296,13 @@ function lanesOf(last: HudSample | null): HudView["lanes"] {
     inFlight: lanes.inFlight[lane],
     pending: lanes.pending[lane],
   }));
-  // The historical lane and the laneless proxy scheduler appear only when
-  // they carry work, so a permanent zero is not read as a measurement.
+  // The historical lane appears only when it carries work, so a permanent
+  // zero is not read as a measurement.
   if (lanes.inFlight.overview > 0 || lanes.pending.overview > 0) {
     rows.push({ label: "overview", inFlight: lanes.inFlight.overview, pending: lanes.pending.overview });
   }
-  if (lanes.proxyInFlight > 0 || lanes.proxyPending > 0) {
-    rows.push({ label: "proxy assets", inFlight: lanes.proxyInFlight, pending: lanes.proxyPending });
-  }
 
-  let inFlightTotal = lanes.proxyInFlight + lanes.inFlight.overview;
+  let inFlightTotal = lanes.inFlight.overview;
   for (const lane of LANE_ROWS) inFlightTotal += lanes.inFlight[lane];
 
   return {
@@ -318,7 +315,7 @@ function lanesOf(last: HudSample | null): HudView["lanes"] {
   };
 }
 
-const POOL_KEYS = ["main", "overview", "proxy"] as const;
+const POOL_KEYS = ["main", "overview"] as const;
 
 function poolsOf(last: HudSample | null): HudPoolView[] {
   const pools = last?.pools ?? null;
@@ -373,6 +370,7 @@ const REASONS: Record<string, string> = {
   pending_unclassified: "queue too deep to classify",
   chunks_in_flight: "chunks in flight",
   chunks_pending: "chunks pending",
+  uploads_unanswered: "renderer still placing chunks",
   detail_not_resident: "detail not yet resident",
   coarse_not_resident: "coarse not yet resident",
 };
@@ -380,6 +378,9 @@ const REASONS: Record<string, string> = {
 function quiescenceOf(quiescence: HudQuiescenceSample | null): HudStatusView {
   if (!quiescence) {
     return { label: "unpublished", detail: "the page has not published quiescence yet", tone: "absent" };
+  }
+  if (quiescence.quiescent && quiescence.reason === "coverage_limited") {
+    return { label: "quiescent", detail: "settled covering what the memory budgets hold", tone: "ok" };
   }
   if (quiescence.quiescent) {
     return { label: "quiescent", detail: "nothing pending, nothing in flight, the view resident", tone: "ok" };

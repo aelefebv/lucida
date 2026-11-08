@@ -13,7 +13,7 @@ function batch(overrides: Partial<ServerTimingBatch> = {}): ServerTimingBatch {
     dropped: 0,
     rid: [1, 2],
     request_id: [null, null],
-    family: ["chunk", "asset"],
+    family: ["chunk", "chunk"],
     metadata_phase: [null, null],
     dispatch_offset_us: [0, 0],
     duration_us: [0, 0],
@@ -74,7 +74,7 @@ describe("ServerRowTable", () => {
       {
         rid: 2,
         connectionGeneration: 3,
-        family: "asset",
+        family: "chunk",
         outcome: "not-ready",
         coalescedOnto: null,
         // Unentered phases are absent, not zero: a stage that never ran and
@@ -92,9 +92,9 @@ describe("ServerRowTable", () => {
   it("sums only the phases a row entered", () => {
     const table = new ServerRowTable();
     ingest(table, batch(), 1);
-    const [chunk, asset] = table.serialise();
+    const [chunk, notReady] = table.serialise();
     expect(serverRowTotalUs(chunk.phases)).toBe(10 + 5 + 7 + 1 + 900 + 60 + 20 + 4 + 3);
-    expect(serverRowTotalUs(asset.phases)).toBe(20 + 6 + 8 + 2 + 9);
+    expect(serverRowTotalUs(notReady.phases)).toBe(20 + 6 + 8 + 2 + 9);
   });
 
   it("keeps a follower's wait apart from a backend read", () => {

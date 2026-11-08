@@ -48,7 +48,7 @@ class FakeWebSocket {
 
 const ENVIRONMENT: TraceEnvironment = {
   captureWarmth: () => ({
-    detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+    detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
   }),
   captureConditions: () => ({
     datasetIds: ["ds"],
@@ -133,7 +133,6 @@ describe("Bridge send accounting", () => {
       [() => bridge.sendDatasetRetry("ds-1"), "other"],
       [() => bridge.send(JSON.stringify({ type: "request_snapshot" })), "other"],
       [() => bridge.send(JSON.stringify({ type: "chunk_request", rid: 7, dataset_id: "d", image_id: "i", key: "0/0/0/0/0/0" })), "chunkRequest"],
-      [() => bridge.send(JSON.stringify({ type: "asset_request", rid: 8, dataset_id: "d", entity_id: "e", kind: "k", t: 0, c: 0 })), "assetRequest"],
     ];
 
     const frames: [string, ClientMessageType][] = [];

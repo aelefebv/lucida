@@ -84,7 +84,7 @@ describe("RenderClient destroy", () => {
 
   it("times each viewport frame from dispatch to the worker's frameDone", () => {
     const { client, worker } = makeReadyClient();
-    const epochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
+    const epochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
     client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
     vi.advanceTimersByTime(5);
     client.volumeRenderMultiPass(noLayers, invViewProj, eye, 10, 10, 10, 10, epochs);
@@ -264,15 +264,15 @@ describe("RenderClient destroy", () => {
 
   it("worker messages flushed after destroy reach no callback but still release bitmaps", () => {
     const { client, worker } = makeReadyClient();
-    const onIntensityRange = vi.fn();
-    client.onIntensityRange = onIntensityRange;
+    const onChunkResidency = vi.fn();
+    client.onChunkResidency = onChunkResidency;
     client.destroy();
 
-    worker.emit({ type: "intensityRange", datasetId: "ds", min: 0, max: 1 });
+    worker.emit({ type: "chunkResidency", memberId: "ds", tier: "detail", change: "held", keys: ["0/0/0/0/0/0"] });
     const close = vi.fn();
     worker.emit({ type: "thumbnailResult", id: 99, bitmap: { close } });
 
-    expect(onIntensityRange).not.toHaveBeenCalled();
+    expect(onChunkResidency).not.toHaveBeenCalled();
     expect(close).toHaveBeenCalledTimes(1);
   });
 });

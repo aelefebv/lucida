@@ -51,7 +51,7 @@ import { useDimensions } from "./hooks/useDimensions.ts";
 import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
-import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
+import { useAutoContrast } from "./hooks/useAutoContrast.ts";
 import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useScriptControls } from "./hooks/useScriptControls.ts";
@@ -517,37 +517,6 @@ function Viewer({
     },
   };
 
-  // Expose the tickCoordinator and cpuCache as `window.__orch` (alias
-  // `__lucidaOrch`) for `requestTestProxy` from the dev console. Dev builds
-  // only, since it issues real fetches. The capture globals
-  // (`__lucidaCaptureReady`, `__lucidaAutoContrast`) are a separate contract
-  // that the CLI reads in every build.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const loop = render.activeLoop;
-    const cache = bridge.sessionRef.current?.cpuCache;
-    if (!loop || !cache) return;
-    const coord = loop.getTickCoordinator();
-    const debug = {
-      tickCoordinator: coord,
-      cpuCache: cache,
-      requestTestProxy: (
-        datasetId: string,
-        entityId: string,
-        imageId: string,
-        kind: "GroupProxy3D" | "TileProxy3D",
-        t = 0,
-        c = 0,
-      ) => coord.requestTestProxy(cache, datasetId, entityId, imageId, kind, t, c),
-    };
-    const w = window as unknown as { __orch?: typeof debug; __lucidaOrch?: typeof debug };
-    w.__orch = debug;
-    w.__lucidaOrch = debug;
-    return () => {
-      delete w.__orch;
-      delete w.__lucidaOrch;
-    };
-  }, [render.activeLoop, bridge.sessionRef]);
 
   // The two sections of a bundle the trace does not record, the server's
   // dataset health and the frame on the canvas, come from the session socket
@@ -600,15 +569,16 @@ function Viewer({
     datasetsRef,
   });
 
-  useIntensityBatcher({
-    clientReady: render.clientReady,
-    clientRef: render.clientRef,
+  useAutoContrast({
+    activeLoop: render.activeLoop,
     autoContrastMapRef: layers.autoContrastMapRef,
+    contrastFitMapRef: layers.contrastFitMapRef,
+    setContrastFitMap: layers.setContrastFitMap,
     wasmSceneRef: scene.wasmSceneRef,
     loopRef: render.loopRef,
     sessionRef: bridge.sessionRef,
-    datasetsRef,
-    setDataRangeMap: layers.setDataRangeMap,
+    followTarget: bridge.followTarget,
+    followTargetRef: bridge.followTargetRef,
   });
 
   // The volume viewer owns the fly toggle: entering fly mode also sets the fly

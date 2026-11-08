@@ -1,23 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatasetManifest } from "../../manifestTypes.ts";
 import type { DatasetEntry, TickContext } from "../../renderLoopTypes.ts";
-import type {
-  CpuCache,
-  ReadyChunkDelivery,
-  ReadyDelivery,
-  ReadyProxyDelivery,
-} from "../fetch/index.ts";
-import type { ActiveSetEntry } from "../planning/index.ts";
-import { AssetCatalog } from "../assetCatalog.ts";
+import type { CpuCache, ReadyChunkDelivery } from "../fetch/index.ts";
 import type {
   ColdStateMessage,
   MissingChunk,
-  MissingProxy,
 } from "../../renderer/workerProtocol.ts";
-
-function createMockAssetCatalog(): AssetCatalog {
-  return new AssetCatalog({ apply_asset_catalog_delta: () => {} });
-}
 
 interface MockSceneConfig {
   epochs: { content: number; layout: number; view: number; selection: number };
@@ -165,10 +153,11 @@ function createMockContent(datasetId = "ds1"): DatasetManifest {
   } as unknown as DatasetManifest;
 }
 
-function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
+function makeCpuCache(deliveries: ReadyChunkDelivery[] = []): CpuCache {
   return {
     submit: vi.fn(),
     onPlanRebuildStart: vi.fn(),
+    tierCapacity: vi.fn(() => ({ detail: Infinity, coarse: Infinity })),
     getDeliverable: vi.fn(function* () {
       yield* deliveries;
     }),
@@ -178,11 +167,11 @@ function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
     markChunksRefused: vi.fn(),
     markChunksLost: vi.fn(),
     markChunkMissing: vi.fn(() => false),
-    markProxyMissing: vi.fn(),
+
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
     levelResidency: vi.fn(() => ({ cached: [], inFlight: [] })),
     getCachedChunk: vi.fn(() => null),
-    getCachedProxy: vi.fn(() => null),
+
     telemetry: vi.fn(),
     updateConfig: vi.fn(),
     subscribe: vi.fn(() => () => {}),
@@ -193,7 +182,6 @@ function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
 
 function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkDelivery {
   return {
-    kind: "chunk",
     entityId: "tile-0",
     imageId: "img-0",
     level: 0,
@@ -205,7 +193,7 @@ function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkD
     chunkKey: "0/0/0/0/0/0",
     data: new ArrayBuffer(1024),
     dataType: "uint16",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     lane: "detail",
     residencyTier: "detail",
     priority: 10,
@@ -213,27 +201,7 @@ function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkD
   };
 }
 
-function makeProxyDelivery(overrides?: Partial<ReadyProxyDelivery>): ReadyProxyDelivery {
-  return {
-    kind: "proxy",
-    datasetId: "ds1",
-    entityId: "tile-0",
-    imageId: "img-0",
-    proxyKind: "TileProxy3D",
-    t: 0,
-    c: 0,
-    header: {
-      algorithmVersion: 1,
-      sourceContentHash: new Uint8Array(32),
-      dims: [4, 4, 4],
-      dtype: "u16",
-    },
-    data: new ArrayBuffer(128),
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
-    priority: 5,
-    ...overrides,
-  };
-}
+
 
 function makeCtx(args: {
   cpuCache?: CpuCache;
@@ -250,7 +218,7 @@ function makeCtx(args: {
     client: {
       coldState: vi.fn(),
       viewHotState: vi.fn(),
-      proxyAssetData: vi.fn(),
+
       sliceChunkData: vi.fn(),
       volumeChunkData: vi.fn(),
       removeLayerResources: vi.fn(),
@@ -264,7 +232,6 @@ function makeCtx(args: {
     renderScale: 1,
     resolutionScale: 1,
     cpuCache: args.cpuCache ?? makeCpuCache(),
-    assetCatalog: createMockAssetCatalog(),
   } as TickContext;
 }
 
@@ -301,24 +268,20 @@ describe("Uploader unified delivery", () => {
 
   it("dispatches deliverables from CpuCache and marks sent only after dispatch", () => {
     const chunk = makeChunkDelivery();
-    const proxy = makeProxyDelivery();
-    const cpuCache = makeCpuCache([proxy, chunk]);
+    const cpuCache = makeCpuCache([chunk]);
     const markSent = cpuCache.markSent as ReturnType<typeof vi.fn>;
     const sliceChunkData = vi.fn();
-    const proxyAssetData = vi.fn();
     const ctx = makeCtx({
       cpuCache,
-      client: { sliceChunkData, proxyAssetData },
+      client: { sliceChunkData },
     });
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
     const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
 
-    expect(proxyAssetData).toHaveBeenCalledTimes(1);
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
-    expect(markSent.mock.calls.map(c => c[0])).toEqual([proxy, chunk]);
-    expect(publish.mock.calls[0][1].uploadedProxies).toBe(1);
+    expect(markSent.mock.calls.map(c => c[0])).toEqual([chunk]);
     expect(publish.mock.calls[0][1].uploadedChunks).toBe(1);
     expect(ret).toBe(true);
   });
@@ -379,8 +342,7 @@ describe("Uploader unified delivery", () => {
       currentZ: 1,
       requests: [],
       visibleRegion: { xyBoundsVox: [0, 0, 1, 1], zRangeVox: [1, 2], effectiveZoom: 1, sortCenterVox: null, frustumPlanes: null },
-      desiredProxyKeys: [],
-      epochs: { content: 1, layout: 1, view: 1, selection: 2, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 2, request: 1 },
     });
     uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 2);
@@ -545,28 +507,10 @@ describe("Uploader worker feedback", () => {
     expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "detail", ["0/0/1/0/0/2"], "stale");
   });
 
-  it("clears missing proxy sent state through CpuCache", () => {
-    const cpuCache = makeCpuCache();
-    const missing: MissingProxy = {
-      kind: "proxy",
-      datasetId: "ds1",
-      entityId: "tile-0",
-      proxyKind: "TileProxy3D",
-      t: 0,
-      c: 2,
-    };
-
-    new Uploader().handleWantedSetDelta("ds1", [missing], cpuCache);
-
-    expect(cpuCache.markProxyMissing).toHaveBeenCalledWith(
-      "ds1|tile-0|TileProxy3D|0|2",
-    );
-  });
 
   it("checks a missing chunk against the residency mirror, and asks for a tick only on a disagreement", () => {
     const cpuCache = makeCpuCache();
     const missing: MissingChunk = {
-      kind: "chunk",
       datasetId: "ds1",
       tier: "detail",
       entityId: "tile-0",
@@ -700,6 +644,6 @@ describe("Uploader cold and hot state", () => {
       new Map(),
     );
     const cold = coldState.mock.calls[0][0] as ColdStateMessage;
-    expect((cold.activeSet[0] as ActiveSetEntry).entityId).toBe("tile-0");
+    expect(cold.activeSet[0].entityId).toBe("tile-0");
   });
 });

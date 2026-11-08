@@ -29,7 +29,6 @@ import {
   resizeSliceIndirection,
   remapSliceIndirection,
 } from "../slice/index.ts";
-import { reconcileProxyResidency } from "../proxy/residency.ts";
 import { groupEntriesByPool } from "./groupEntries.ts";
 import { computeEntityTierMeta } from "./entityMetas.ts";
 import { sourceKey } from "../poolKeys.ts";
@@ -40,36 +39,6 @@ import { indexWantedChunks } from "../wantedChunks.ts";
 export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
   const state = ctx.state;
 
-  // 1. Rebuild this dataset's group→tiles entries so group-proxy uploads can
-  // fan out to child tiles. Other datasets' entries stay untouched.
-  const prevGroups = state.groupsByDataset.get(msg.datasetId);
-  if (prevGroups) {
-    for (const groupId of prevGroups) state.groupToTiles.delete(groupId);
-  }
-  const groupsForDataset = new Set<string>();
-  for (const entry of msg.activeSet) {
-    if (entry.parentGroupId) {
-      let set = state.groupToTiles.get(entry.parentGroupId);
-      if (!set) {
-        set = new Set();
-        state.groupToTiles.set(entry.parentGroupId, set);
-      }
-      set.add(entry.entityId);
-      groupsForDataset.add(entry.parentGroupId);
-    }
-  }
-  if (groupsForDataset.size > 0) {
-    state.groupsByDataset.set(msg.datasetId, groupsForDataset);
-  } else {
-    state.groupsByDataset.delete(msg.datasetId);
-  }
-
-  if (msg.desiredProxyKeys !== undefined) {
-    const evicted = reconcileProxyResidency(state, msg.datasetId, msg.desiredProxyKeys);
-    state.proxyStats.evicted += evicted;
-    state.proxyStats.evictedPolicy += evicted;
-  }
-
   state.wantedByDataset.set(msg.datasetId, indexWantedChunks(msg.wantedChunks));
 
   for (const [memberId, datasetId] of state.memberToDataset) {
@@ -77,7 +46,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     state.memberSourcePools.delete(memberId);
   }
 
-  // 2. Register member→dataset mappings and target levels. Canonical
+  // 1. Register member→dataset mappings and target levels. Canonical
   // iteration produces the same memberId scheme as the rest of the pipeline.
   for (const { entry, memberId } of iterateColdMembers(msg)) {
     state.memberToDataset.set(memberId, msg.datasetId);
@@ -86,7 +55,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     else state.targetLevelByMember.set(memberId, target);
   }
 
-  // 3. Partition activeSet by (tier, channel, chunkDims). Entries with no
+  // 2. Partition activeSet by (tier, channel, chunkDims). Entries with no
   // chunk levels are skipped here but stay in memberToDataset from step 2.
   const mode: "volume" | "slice" = msg.viewMode;
   const dimArity: 2 | 3 = mode === "volume" ? 3 : 2;
@@ -94,7 +63,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
   const currentSources = new Map<string, EntitySource[]>();
 
-  // 4. Per group: allocate the pool, lay out one section per (member,
+  // 3. Per group: allocate the pool, lay out one section per (member,
   // level) at sequential offsets, resize + remap its indirection.
   for (const group of groups.values()) {
     const [pcZ, pcY, pcX] = group.chunkDims;
@@ -165,7 +134,7 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     }
   }
 
-  // 5. Free this dataset's pools that no group above names: a hidden
+  // 4. Free this dataset's pools that no group above names: a hidden
   // channel, the other view mode, or a chunk shape no resident level uses.
   // Nothing routes to them now, so nothing would sample them again. Their
   // chunks are reported lost, so the page resends what a recreated pool needs.
@@ -176,17 +145,11 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
   state.currentSourcesByDataset.set(msg.datasetId, currentSources);
 
-  // 6. Rebuild the descriptor buffer from scratch, like the sections.
+  // 5. Rebuild the descriptor buffer from scratch, like the sections.
   const oldDesc = state.descriptorBuffersByDataset.get(msg.datasetId);
   if (oldDesc) destroyDescriptorBuffer(oldDesc);
   state.descriptorBuffersByDataset.set(
     msg.datasetId,
-    buildDescriptorBuffer(
-      ctx.device,
-      msg,
-      state.proxyDescriptorsByEntity,
-      state.proxyPoolsByDataset,
-      currentSources,
-    ),
+    buildDescriptorBuffer(ctx.device, msg, currentSources),
   );
 }

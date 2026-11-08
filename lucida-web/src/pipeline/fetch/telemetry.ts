@@ -11,13 +11,12 @@ import type { EvictionTier, TierCounters } from "./types.ts";
 
 /** Fresh per-tier eviction counter. Shared shape with cpuCache exports. */
 export function freshTierCounters(): TierCounters {
-  return { activeDetail: 0, demotedDetail: 0, prefetch: 0, overview: 0, proxy: 0 };
+  return { activeDetail: 0, demotedDetail: 0, prefetch: 0, overview: 0 };
 }
 
-/** Tier label used by `recordEviction`. Either an EvictionTier or one of the
- *  cache-side aggregates ("overview", "proxy") that don't map onto the
- *  three-tier detail enum. */
-export type EvictionRecordTier = EvictionTier | "overview" | "proxy";
+/** Tier label used by `recordEviction`: an EvictionTier, or the overview
+ *  store, which doesn't map onto the three-tier detail enum. */
+export type EvictionRecordTier = EvictionTier | "overview";
 
 /**
  * Result shape returned by {@link TelemetryCounters.snapshot}. Cpu cache
@@ -109,9 +108,6 @@ export class TelemetryCounters {
       case "overview":
         this.evictionsByTierSinceSnapshot.overview++;
         break;
-      case "proxy":
-        this.evictionsByTierSinceSnapshot.proxy++;
-        break;
     }
   }
 
@@ -127,11 +123,6 @@ export class TelemetryCounters {
     this.lastError = message;
   }
 
-  /** Standalone setter for `lastError` — proxy fetches and decode errors
-   *  surface a message but don't fit the permanent/transient classification. */
-  recordError(message: string): void {
-    this.lastError = message;
-  }
 
   /**
    * Update the running average of decoded chunk sizes used for in-flight

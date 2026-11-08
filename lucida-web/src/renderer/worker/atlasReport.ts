@@ -13,21 +13,18 @@ function textureBytes(texture: GPUTexture): number {
   return texture.width * texture.height * texture.depthOrArrayLayers * texel;
 }
 
-/** Count the live chunk, label, and proxy atlases and the bytes they hold. */
+/** Count the live chunk and label atlases and the bytes they hold. */
 export function measureGpuAtlases(state: RendererState): GpuAtlasReport {
   let atlases = 0;
   let bytes = 0;
-  const add = (texture: GPUTexture, indirection: GPUBuffer | null): void => {
+  const add = (texture: GPUTexture, indirection: GPUBuffer): void => {
     atlases++;
-    bytes += textureBytes(texture) + (indirection?.size ?? 0);
+    bytes += textureBytes(texture) + indirection.size;
   };
   for (const pool of state.volumeAtlases.values()) add(pool.texture, pool.indirectionBuf);
   for (const pool of state.sliceAtlases.values()) add(pool.texture, pool.indirectionBuf);
   for (const pool of state.labelVolumePools.values()) add(pool.texture, pool.indirectionBuf);
   for (const pool of state.labelSlicePools.values()) add(pool.texture, pool.indirectionBuf);
-  for (const pools of state.proxyPoolsByDataset.values()) {
-    for (const pool of pools.values()) add(pool.texture, null);
-  }
   return { atlases, bytes };
 }
 

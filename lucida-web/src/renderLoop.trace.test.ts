@@ -25,7 +25,6 @@ import { interactionCause } from "./trace/types.ts";
 function makeLoop() {
   const source = {
     fetch: () => new Promise(() => {}),
-    fetchProxy: () => new Promise(() => {}),
     handleBinary: () => {},
   } as unknown as ContentSource;
   const cpuCache = new CpuCache(source, { size: 1, decode: () => new Promise(() => {}) } as unknown as DecodePool);
@@ -39,6 +38,7 @@ function makeLoop() {
     datasets: new Map(),
     client: {
       takeGpuPassUs: () => null,
+      framesAwaitingDone: () => 0,
       takeFrameLatency: () => null,
       lastFrameSeq: () => 0,
       setCanvasColors: () => {},

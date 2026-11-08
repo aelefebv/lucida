@@ -42,7 +42,6 @@ function makeVolumeAtlas(overrides?: Partial<AtlasState> & { defaultMember?: str
     maxSlotsZ: 2,
     entityMetas,
     t: 0, c: 0,
-    intensityMin: 65535, intensityMax: 0,
     indirectionDirty: false,
     ...overrides,
   };
@@ -81,7 +80,6 @@ function makeSliceAtlas(overrides?: Partial<SliceAtlasState> & { defaultMember?:
     entityZInfo,
     z: 0, t: 0, c: 0,
     slotLevelZ: new Int32Array(totalSlots).fill(-1),
-    intensityMin: 65535, intensityMax: 0,
     indirectionDirty: false,
     ...overrides,
   };
@@ -292,7 +290,7 @@ describe("applyViewHotState", () => {
   ): ViewHotStateMessage {
     return {
       type: "viewHotState",
-      epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 0 },
       datasetId: "ds1",
       rayHitsByEntity,
     };

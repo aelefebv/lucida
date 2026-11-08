@@ -8,9 +8,6 @@
  * cold-state rebuild changes nothing here, and a chunk the worker holds is
  * never sent again until it reports the chunk lost.
  *
- * Proxies keep an optimistic sent fact that the worker's missing report
- * clears.
- *
  * Pure collaborator: no I/O, no clocks, no worker-member-id knowledge.
  */
 
@@ -28,18 +25,30 @@ function tierKeyFor(chunkKey: string, tier?: ResidencyTier): string {
 
 export class DeliveryState {
   private chunks = new Map<string, Map<string, ChunkDelivery>>();
-  private proxySent = new Set<string>();
+  /** Chunks `sent` and not yet answered, kept as a count so settling reads it for nothing. */
+  private unanswered = 0;
+
+  /** How many posted chunks the worker has not yet answered. */
+  get chunksUnanswered(): number {
+    return this.unanswered;
+  }
 
   /** Posted to the worker; awaits its answer. */
   markChunkSent(imageId: string, c: number, chunkKey: string, tier?: ResidencyTier): void {
     const byKey = this.channel(imageId, c, true)!;
     const key = tierKeyFor(chunkKey, tier);
-    if (byKey.get(key) !== "held") byKey.set(key, "sent");
+    const prior = byKey.get(key);
+    if (prior === "held") return;
+    if (prior === undefined) this.unanswered++;
+    byKey.set(key, "sent");
   }
 
   /** The worker wrote the chunk, or already held it. */
   markChunkHeld(imageId: string, c: number, chunkKey: string, tier?: ResidencyTier): void {
-    this.channel(imageId, c, true)!.set(tierKeyFor(chunkKey, tier), "held");
+    const byKey = this.channel(imageId, c, true)!;
+    const key = tierKeyFor(chunkKey, tier);
+    if (byKey.get(key) === "sent") this.unanswered--;
+    byKey.set(key, "held");
   }
 
   /** The worker did not place the chunk, so it may be sent again. */
@@ -79,33 +88,16 @@ export class DeliveryState {
 
   clearChunksForImage(imageId: string): void {
     const prefix = `${imageId}|`;
-    for (const key of this.chunks.keys()) {
-      if (key.startsWith(prefix)) this.chunks.delete(key);
-    }
-  }
-
-  markProxySent(key: string): void {
-    this.proxySent.add(key);
-  }
-
-  wasProxySent(key: string): boolean {
-    return this.proxySent.has(key);
-  }
-
-  clearProxySent(key: string): void {
-    this.proxySent.delete(key);
-  }
-
-  clearProxySentForDataset(datasetId: string): void {
-    const prefix = `${datasetId}|`;
-    for (const key of this.proxySent) {
-      if (key.startsWith(prefix)) this.proxySent.delete(key);
+    for (const [key, byKey] of this.chunks) {
+      if (!key.startsWith(prefix)) continue;
+      for (const delivery of byKey.values()) if (delivery === "sent") this.unanswered--;
+      this.chunks.delete(key);
     }
   }
 
   reset(): void {
     this.chunks.clear();
-    this.proxySent.clear();
+    this.unanswered = 0;
   }
 
   private channel(imageId: string, c: number, create: boolean): Map<string, ChunkDelivery> | undefined {
@@ -122,6 +114,7 @@ export class DeliveryState {
     const channelKey = channelKeyFor(imageId, c);
     const byKey = this.chunks.get(channelKey);
     if (!byKey) return;
+    if (byKey.get(tierKey) === "sent") this.unanswered--;
     byKey.delete(tierKey);
     if (byKey.size === 0) this.chunks.delete(channelKey);
   }

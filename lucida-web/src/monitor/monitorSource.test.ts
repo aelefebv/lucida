@@ -3,7 +3,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { installTraceSeam } from "../trace/seam.ts";
 import { traceRecorder } from "../trace/recorder.ts";
-import { createQuiescenceState } from "../trace/quiescence.ts";
+import { createSettleState } from "../pipeline/settle.ts";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,7 +37,6 @@ function registerEnvironment(): void {
       detailBytes: 0,
       coarseChunks: 0,
       coarseBytes: 0,
-      proxyBytes: 0,
     }),
     captureConditions: () => ({
       datasetIds: ["ds"],
@@ -45,7 +44,7 @@ function registerEnvironment(): void {
       devicePixelRatio: 2,
       viewport: { cssWidth: 800, cssHeight: 600, deviceWidth: 1600, deviceHeight: 1200 },
     }),
-    captureOutstanding: () => createQuiescenceState(),
+    captureOutstanding: () => createSettleState(),
   });
 }
 

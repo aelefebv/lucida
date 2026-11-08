@@ -1225,8 +1225,8 @@ struct TraceRunArgs {
     /// screen. Pinning to 0 asks for the finest level at every zoom
     #[arg(long, value_name = "LEVEL")]
     level_pin: Option<u32>,
-    /// Keep the dataset's contrast window at its default instead of fitting it
-    /// to the data as it arrives, so frames of two runs can be compared
+    /// Keep the dataset's contrast limits at their default instead of fitting
+    /// them to the data the view shows
     #[arg(long)]
     pin_contrast: bool,
     /// Seconds to wait for the page to load and settle

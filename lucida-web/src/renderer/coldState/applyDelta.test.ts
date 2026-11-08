@@ -61,8 +61,6 @@ function makeCtx(): WorkerCtx {
     getOrCreateLUT: () => ({} as GPUTexture),
     post: () => {},
     postWantedSet: () => {},
-    lookupProxyDescriptor: () => null,
-    lookupProxyPool: () => null,
     lookupEntityDescriptor: () => null,
   };
 }
@@ -75,19 +73,13 @@ function identityMatrix(): Float32Array {
 
 function tile(entityId: string, imageId: string, level = 0): ColdStateActiveEntry {
   return {
-    kind: "tile",
     entityId,
     imageId,
-    mode: "tiles-with-detail",
     detailLevels: [level],
     coarseLevel: null,
     levels: [
       { level: 0, chunkShape: [32, 64, 64], gridShape: [2, 4, 4], levelDims: [64, 256, 256] },
     ],
-    proxyKind: undefined,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
-    parentGroupId: null,
     modelMatrix: identityMatrix(),
     invModelMatrix: identityMatrix(),
     displayStateByChannel: {
@@ -99,7 +91,7 @@ function tile(entityId: string, imageId: string, level = 0): ColdStateActiveEntr
 function makeCold(activeSet: ColdStateActiveEntry[]): ColdStateMessage {
   return {
     type: "coldState",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 0 },
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
@@ -109,7 +101,6 @@ function makeCold(activeSet: ColdStateActiveEntry[]): ColdStateMessage {
       xyBoundsVox: [0, 0, 1024, 1024], zRangeVox: [0, 1], effectiveZoom: 1,
       sortCenterVox: null, frustumPlanes: null,
     },
-    desiredProxyKeys: [],
     wantedChunks: [],
     activeSet,
     viewMode: "volume",
@@ -132,14 +123,13 @@ describe("applyColdStateDelta", () => {
     const delta: ColdStateDeltaMessage = {
       type: "coldStateDelta",
       datasetId: "ds1",
-      epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
       currentZ: 0,
       visibleRegion: {
         xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 1], effectiveZoom: 2,
         sortCenterVox: null, frustumPlanes: null,
       },
-      desiredProxyKeys: [],
       wantedChunks: [],
       removedEntityIds: ["b"],
       upserts: [tile("a", "img-a", 2), tile("d", "img-d", 0)],
@@ -198,11 +188,10 @@ describe("applyColdStateDelta", () => {
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
       datasetId: "ds1",
-      epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
       currentZ: 0,
       visibleRegion: cold1.visibleRegion,
-      desiredProxyKeys: [],
       wantedChunks: [
         { memberId: "img-a", tier: "detail", chunkKeys: ["1/0/0/0/0/1"] },
         { memberId: "img-b", tier: "detail", chunkKeys: [] },
@@ -225,14 +214,13 @@ describe("applyColdStateDelta", () => {
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
       datasetId: "never-ingested",
-      epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
       currentZ: 0,
       visibleRegion: {
         xyBoundsVox: [0, 0, 1, 1], zRangeVox: [0, 1], effectiveZoom: 1,
         sortCenterVox: null, frustumPlanes: null,
       },
-      desiredProxyKeys: [],
       wantedChunks: [],
       removedEntityIds: [],
       upserts: [],
@@ -255,11 +243,10 @@ describe("applyColdStateDelta", () => {
       applyColdStateDelta(ctx, {
         type: "coldStateDelta",
         datasetId: "ds1",
-        epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+        epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
         currentT: 0,
         currentZ: 0,
         visibleRegion: cold.visibleRegion,
-        desiredProxyKeys: [],
         wantedChunks: [],
         removedEntityIds: [],
         upserts: [],
@@ -292,14 +279,13 @@ describe("applyColdStateDelta", () => {
     applyColdStateDelta(ctx, {
       type: "coldStateDelta",
       datasetId: "ds1",
-      epochs: { content: 1, layout: 1, view: 2, selection: 1, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 2, selection: 1, request: 1 },
       currentT: 0,
       currentZ: 0,
       visibleRegion: {
         xyBoundsVox: [0, 0, 512, 512], zRangeVox: [0, 1], effectiveZoom: 2,
         sortCenterVox: null, frustumPlanes: null,
       },
-      desiredProxyKeys: [],
       wantedChunks: [],
       removedEntityIds: [],
       upserts: [],

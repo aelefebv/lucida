@@ -47,7 +47,6 @@ function makeScheduler(opts?: {
   maxConcurrentFetches?: number;
   maxBytesInFlight?: number;
   burstLogger?: BurstLogger;
-  siblingInFlight?: () => { count: number; bytes: number };
   admissionWindow?: number;
 }) {
   const startCalls: StartCall[] = [];
@@ -65,7 +64,6 @@ function makeScheduler(opts?: {
       maxConcurrentFetches: opts?.maxConcurrentFetches ?? 4,
       maxBytesInFlight: opts?.maxBytesInFlight ?? 1_000_000,
       burstLogger: opts?.burstLogger,
-      siblingInFlight: opts?.siblingInFlight,
       admissionWindow: opts?.admissionWindow,
     },
     keyOf,
@@ -614,44 +612,6 @@ describe("Scheduler backpressure log", () => {
   });
 });
 
-// siblingInFlight (proxy <-> chunk shared caps)
-
-describe("Scheduler.siblingInFlight", () => {
-  it("counts sibling in-flight against the concurrency cap", () => {
-    const sibling = { count: 2, bytes: 0 };
-    const { scheduler, startCalls } = makeScheduler({
-      maxConcurrentFetches: 3,
-      siblingInFlight: () => sibling,
-    });
-    scheduler.enqueue([
-      req({ chunkKey: "a" }),
-      req({ chunkKey: "b" }),
-    ]);
-    scheduler.drain(() => 0);
-    // 2 sibling + cap 3 = room for 1; second one stays pending.
-    expect(startCalls).toHaveLength(1);
-    expect(scheduler.pendingSize).toBe(1);
-  });
-
-  it("counts sibling bytes against the bytes cap", () => {
-    const sibling = { count: 0, bytes: 100 };
-    const { scheduler, startCalls } = makeScheduler({
-      maxConcurrentFetches: 10,
-      maxBytesInFlight: 200,
-      siblingInFlight: () => sibling,
-    });
-    scheduler.enqueue([
-      req({ chunkKey: "a" }),
-      req({ chunkKey: "b" }),
-      req({ chunkKey: "c" }),
-    ]);
-    scheduler.drain(() => 80);
-    // sibling already at 100; cap 200 → room for one 80B start (180 < 200),
-    // a second 80B start (260 > 200) is blocked.
-    expect(startCalls).toHaveLength(2);
-    expect(scheduler.pendingSize).toBe(1);
-  });
-});
 
 // dump
 

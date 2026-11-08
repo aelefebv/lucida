@@ -1,7 +1,7 @@
 /**
  * Eviction policies for the CPU cache. {@link LRUPolicy} serves the
- * overview and proxy caches, whose entries are sacrificial;
- * {@link TieredPolicy} serves the main (detail) cache.
+ * overview cache, whose entries are sacrificial; {@link TieredPolicy}
+ * serves the main (detail) cache.
  *
  * Policies are pure: they take entries and return victims. The cache owns
  * removal, byte budgets, and the eviction-burst log.
@@ -13,9 +13,7 @@ import type { InteractionMode } from "./interactionMode.ts";
 /**
  * Minimal shape every eviction-eligible entry must expose: when it was
  * inserted (for LRU ordering) and how many bytes it claims (so the
- * caller can compute "freed enough"). {@link CacheEntry} satisfies this;
- * the proxy cache wraps its entries into the same shape at the call
- * site so {@link LRUPolicy} can serve both.
+ * caller can compute "freed enough"). {@link CacheEntry} satisfies this.
  */
 export interface EvictableEntry {
   insertedAt: number;
@@ -25,8 +23,7 @@ export interface EvictableEntry {
 /**
  * Picks victims from a flat list of evictable entries until enough
  * bytes are freed. Pure: must not mutate `entries` or hold state across
- * calls beyond the policy's own configuration. Generic in the entry shape
- * so the proxy store's adapter fits too.
+ * calls beyond the policy's own configuration.
  */
 export interface EvictionPolicy<T extends EvictableEntry = CacheEntry> {
   selectVictims(entries: readonly T[], bytesNeeded: number): T[];
@@ -41,6 +38,40 @@ export class LRUPolicy<T extends EvictableEntry = CacheEntry> implements Evictio
     if (bytesNeeded <= 0) return [];
     const sorted = [...entries].sort((a, b) => a.insertedAt - b.insertedAt);
     const victims: T[] = [];
+    let freed = 0;
+    for (const entry of sorted) {
+      if (freed >= bytesNeeded) break;
+      victims.push(entry);
+      freed += entry.sizeBytes;
+    }
+    return victims;
+  }
+}
+
+/**
+ * The coarse store's policy. What the latest plan did not ask for goes
+ * first, oldest first; then what it did, least urgent first, so the view's
+ * most important coarse chunks are the last to go. Insertion order alone
+ * evicts a priority-ordered fill from its most urgent end.
+ */
+export class WantedLastPolicy implements EvictionPolicy {
+  private readonly currentTick: () => number;
+
+  constructor(currentTick: () => number) {
+    this.currentTick = currentTick;
+  }
+
+  selectVictims(entries: readonly CacheEntry[], bytesNeeded: number): CacheEntry[] {
+    if (bytesNeeded <= 0) return [];
+    const tick = this.currentTick();
+    const wanted = (entry: CacheEntry): number => (entry.lastSeenTick === tick ? 1 : 0);
+    const sorted = [...entries].sort(
+      (a, b) =>
+        wanted(a) - wanted(b) ||
+        (wanted(a) === 1 ? b.priority - a.priority : 0) ||
+        a.insertedAt - b.insertedAt,
+    );
+    const victims: CacheEntry[] = [];
     let freed = 0;
     for (const entry of sorted) {
       if (freed >= bytesNeeded) break;

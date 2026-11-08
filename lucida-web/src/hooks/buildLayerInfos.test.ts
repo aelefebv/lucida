@@ -6,6 +6,7 @@ import { buildLayerInfos } from "./useDatasetSettings.ts";
 import type { DatasetState } from "../types.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "../manifestTypes.ts";
 import type { DatasetLevels } from "../pipeline/datasetLevels.ts";
+import type { ChannelFit } from "../pipeline/autoContrast.ts";
 
 // A single-level image with the given dtype + [Y, X] shape (chunked so a small
 // label's footprint fits the default caps).
@@ -79,7 +80,7 @@ function datasetsWith(labels: LabelSpec[]): Map<string, DatasetState> {
 
 const emptyMaps = {
   autoContrast: new Map<string, boolean>(),
-  dataRange: new Map<string, { min: number; max: number }>(),
+  contrastFit: new Map<string, ChannelFit>(),
   levels: new Map<string, DatasetLevels>(),
 };
 
@@ -458,7 +459,8 @@ describe("buildLayerInfos channels (scene → LayerInfo seam)", () => {
 
   it("lists every channel with its settings, name, and loaded range, whatever the scene's c", () => {
     const scene = stubScene(["ds-0"], settingsWithChannels(), 2);
-    const maps = { ...emptyMaps, dataRange: new Map([["ds-0:ch1", { min: 5, max: 700 }]]) };
+    const fit: ChannelFit = { limits: { min: 20, max: 650 }, range: { min: 5, max: 700 }, provisional: false };
+    const maps = { ...emptyMaps, contrastFit: new Map([["ds-0:ch1", fit]]) };
     const [info] = buildLayerInfos(scene, threeChannelDatasets(), maps);
 
     expect(info.channels.map((c) => c.name)).toEqual(["Signal", "Mine", "Channel 3"]);

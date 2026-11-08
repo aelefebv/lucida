@@ -59,7 +59,7 @@ function makeMockScene(): MockScene {
     cameraModeVal: "slice",
     multiChannelVal: false,
     epochCounts: { view: 0, selection: 0 },
-    epochs: () => JSON.stringify({ content: 0, layout: 0, asset: 0, ...m.epochCounts }),
+    epochs: () => JSON.stringify({ content: 0, layout: 0, ...m.epochCounts }),
     z: () => m.zVal,
     c: () => m.cVal,
     t: () => m.tVal,

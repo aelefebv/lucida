@@ -2,9 +2,8 @@
  * Volume render-multipass orchestration.
  *
  * Per layer: resolve member→dataset, look up the descriptor and the
- * pools its level sources and coarse source name, resolve proxy
- * textures, bind, draw to offscreen, composite. After the loop: cursor
- * draw.
+ * pools its level sources and coarse source name, bind, draw to
+ * offscreen, composite. After the loop: cursor draw.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -124,7 +123,6 @@ function renderLabelVolumeLayer(
   const palette = ensureLabelVolumePalette(ctx, pool, layer.labelColors);
 
   const renderer = ctx.getVolumeRenderer();
-  renderer.setProxyTextures(null, null);
   // Categorical shading computes color from the id in-shader; the LUT is
   // bound (a valid gray ramp) but unread on this path.
   renderer.setColormapTexture(ctx.getOrCreateLUT("gray"));
@@ -213,6 +211,9 @@ export async function handleVolumeRenderMultiPass(
     const pools = resolveMemberPools(atlasMap, descIndex, memberId);
     const hasDetail = pools.levels.some((atlas) => atlas !== null);
     const hasCoarse = pools.coarse !== null;
+    // Anything resident is enough to draw; the shader's sampling chain
+    // covers what this member lacks.
+    if (!hasDetail && !hasCoarse) continue;
 
     const colormapName = descIndex.colormapNameByMember.get(memberId) ?? "gray";
     const lutTex = ctx.getOrCreateLUT(colormapName);
@@ -225,38 +226,6 @@ export async function handleVolumeRenderMultiPass(
       }
     }
 
-    // Pool and slot indices live in the GPU descriptor. The CPU side only
-    // needs the texture handle to bind.
-    const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
-    let tileProxyTexture: GPUTexture | null = null;
-    let tileProxySlotResident = false;
-    let groupProxyTexture: GPUTexture | null = null;
-    let groupProxySlotResident = false;
-
-    if (desc) {
-      if (desc.tileProxyHandle) {
-        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.tileProxyHandle.poolKey);
-        if (poolIdx !== undefined) {
-          tileProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
-          tileProxySlotResident = true;
-        }
-      }
-      if (desc.groupProxyHandle) {
-        const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.groupProxyHandle.poolKey);
-        if (poolIdx !== undefined) {
-          groupProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
-          groupProxySlotResident = true;
-        }
-      }
-    }
-
-    // Anything resident is enough to draw; the shader's sampling chain
-    // covers what this member lacks.
-    if (!hasDetail && !hasCoarse && !tileProxySlotResident && !groupProxySlotResident) {
-      continue;
-    }
-
-    renderer.setProxyTextures(tileProxyTexture, groupProxyTexture);
     renderer.setTierAtlases(
       pools.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
       pools.coarse ? poolBinding(pools.coarse) : null,

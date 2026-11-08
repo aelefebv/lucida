@@ -1,7 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { pushLabelVolumeLayers, type LabelVolumeScene } from "./volumePath.ts";
 import type { VolumeLayerParams } from "./renderer/workerProtocol.ts";
-import type { MemberRosterEntry } from "./pipeline/tickCoordinator.ts";
 import type { DatasetManifest, ImageSpec, LabelSpec } from "./manifestTypes.ts";
 
 function image(id: string, yx: [number, number], scaleYX: [number, number], dtype = "Uint32"): ImageSpec {
@@ -51,7 +50,6 @@ function makeScene(model = IDENTITY, inv = INV_MARK): LabelVolumeScene {
   };
 }
 
-const members: MemberRosterEntry[] = [{ imageId: "img-0", position: [0, 0] }];
 
 /** Explicit all-visible settings of length `n`. Masks are opt-in (hidden by
  *  default), so a test that renders every eligible overlay must turn them on. */
@@ -71,7 +69,6 @@ describe("pushLabelVolumeLayers", () => {
         labelSpec("region-b", "img-0:label:region-b"),
         labelSpec("foreground", "img-0:label:fg"),
       ]),
-      members,
       IDENTITY,
       800,
       600,
@@ -94,7 +91,7 @@ describe("pushLabelVolumeLayers", () => {
   it("places the overlay at the SOURCE member's model matrix (+ inverse)", () => {
     const scene = makeScene();
     const layers: VolumeLayerParams[] = [];
-    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b")]), members, IDENTITY, 800, 600, allOn(1));
+    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b")]), IDENTITY, 800, 600, allOn(1));
     // Matrices are copied from the SOURCE image's placement, not the label's.
     expect(Array.from(layers[0].modelMatrix!)).toEqual(Array.from(IDENTITY));
     expect(Array.from(layers[0].invModelMatrix!)).toEqual(Array.from(INV_MARK));
@@ -102,27 +99,11 @@ describe("pushLabelVolumeLayers", () => {
     expect(scene.inv_member_model_matrix).toHaveBeenCalledWith("ds-0", "img-0");
   });
 
-  it("uses a synthesized member's own matrices when present (group-as-proxy path)", () => {
-    const scene = makeScene();
-    const ownModel = new Float32Array([3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 3, 0, 0, 0, 0, 1]);
-    const ownInv = new Float32Array([5, 0, 0, 0, 0, 5, 0, 0, 0, 0, 5, 0, 0, 0, 0, 1]);
-    const membersWithMatrices: MemberRosterEntry[] = [
-      { imageId: "img-0", position: [0, 0], modelMatrix: ownModel, invModelMatrix: ownInv },
-    ];
-    const layers: VolumeLayerParams[] = [];
-    pushLabelVolumeLayers(layers, scene, "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b")]), membersWithMatrices, IDENTITY, 800, 600, allOn(1));
-    // Same-extent label (85·4 == 340, 87·4 == 348) → the roster's matrices
-    // pass through by value (copied, then scaled by identity ratios).
-    expect(Array.from(layers[0].modelMatrix!)).toEqual(Array.from(ownModel));
-    expect(Array.from(layers[0].invModelMatrix!)).toEqual(Array.from(ownInv));
-    // The scene wasn't consulted; the roster carried the matrices.
-    expect(scene.member_model_matrix).not.toHaveBeenCalled();
-  });
 
   it("forwards declared image-label.colors to the layer", () => {
     const colors: LabelSpec["colors"] = [{ value: 2, rgba: [230, 25, 75, 255] }];
     const layers: VolumeLayerParams[] = [];
-    pushLabelVolumeLayers(layers, makeScene(), "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), members, IDENTITY, 800, 600, allOn(1));
+    pushLabelVolumeLayers(layers, makeScene(), "ds-0", manifest([labelSpec("region-b", "img-0:label:region-b", colors)]), IDENTITY, 800, 600, allOn(1));
     expect(layers[0].labelColors).toEqual(colors);
   });
 
@@ -133,7 +114,6 @@ describe("pushLabelVolumeLayers", () => {
       makeScene(),
       "ds-0",
       manifest([labelSpec("a", "img-0:label:a"), labelSpec("b", "img-0:label:b"), labelSpec("c", "img-0:label:c")]),
-      members,
       IDENTITY,
       800,
       600,
@@ -149,7 +129,7 @@ describe("pushLabelVolumeLayers", () => {
 
   it("emits nothing for a label-less manifest", () => {
     const layers: VolumeLayerParams[] = [];
-    pushLabelVolumeLayers(layers, makeScene(), "ds-0", manifest([]), members, IDENTITY, 800, 600);
+    pushLabelVolumeLayers(layers, makeScene(), "ds-0", manifest([]), IDENTITY, 800, 600);
     expect(layers).toHaveLength(0);
   });
 
@@ -163,7 +143,6 @@ describe("pushLabelVolumeLayers", () => {
         labelSpec("mask8", "img-0:label:mask8", undefined, "Uint8"),
         labelSpec("seg32", "img-0:label:seg32"),
       ]),
-      members,
       IDENTITY,
       800,
       600,

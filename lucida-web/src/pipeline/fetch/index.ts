@@ -9,7 +9,6 @@ export {
   CpuCache,
   DEFAULT_MAIN_BUDGET,
   DEFAULT_OVERVIEW_BUDGET,
-  DEFAULT_PROXY_BUDGET,
   DEFAULT_MAX_BYTES_IN_FLIGHT,
   FETCH_CONCURRENCY_MULTIPLIER,
   TRANSIENT_RETRY_DELAY_MS,
@@ -19,9 +18,7 @@ export {
 export type {
   CpuCacheConfig,
   EvictionTier,
-  ReadyDelivery,
   ReadyChunkDelivery,
-  ReadyProxyDelivery,
   CacheTelemetry,
   TierResidencyEntry,
   TierCounters,
@@ -40,15 +37,7 @@ export type {
   ContentSource,
   FetchRequest,
   FetchResult,
-  FetchProxyRequest,
-  FetchProxyResult,
 } from "./contentSource.ts";
-
-export {
-  parseProxyHeader,
-  proxyResponseKey,
-} from "./wireProtocol.ts";
-export type { ProxyHeaderJs } from "./wireProtocol.ts";
 
 export {
   DecodePool,
@@ -66,6 +55,5 @@ export {
   FetchError,
   classifyFetchError,
   OnceTransientRetry,
-  NeverRetry,
 } from "./retry.ts";
 export type { FetchErrorKind, RetryPolicy } from "./retry.ts";

@@ -5,7 +5,7 @@ import { CpuCache } from "./fetch/index.ts";
 import type { ContentSource } from "./fetch/contentSource.ts";
 import type { DecodePool } from "./fetch/decodePool.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
-import { AssetCatalog } from "./assetCatalog.ts";
+
 import type { ColdStateDeltaMessage, ColdStateMessage } from "../renderer/workerProtocol.ts";
 import type { RequestPlan } from "./planning/index.ts";
 import { TickCoordinator, type MinimapChunkCoord } from "./tickCoordinator.ts";
@@ -31,14 +31,6 @@ afterEach(() => {
   if (typeof localStorage !== "undefined") localStorage.clear();
 });
 
-/** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
-function createMockAssetCatalog(entries: Parameters<AssetCatalog["applyInitial"]>[1]["entries"] = []): AssetCatalog {
-  const catalog = new AssetCatalog({ apply_asset_catalog_delta: () => {} });
-  if (entries.length > 0) {
-    catalog.applyInitial("ds1", { entries });
-  }
-  return catalog;
-}
 
 // ---------------------------------------------------------------------------
 // Mock factories
@@ -48,6 +40,7 @@ function createMockCpuCache(): CpuCache {
   return {
     submit: vi.fn(),
     onPlanRebuildStart: vi.fn(),
+    tierCapacity: vi.fn(() => ({ detail: Infinity, coarse: Infinity })),
     getDeliverable: vi.fn(function* () {}),
     markSent: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
@@ -299,7 +292,6 @@ describe("epoch caching", () => {
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -336,7 +328,7 @@ describe("epoch caching", () => {
     traceRecorder.reset();
     traceRecorder.setEnvironment({
       captureWarmth: () => ({
-        detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+        detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
       }),
       captureConditions: () => ({
         datasetIds: ["ds"],
@@ -556,7 +548,7 @@ describe("epoch caching", () => {
   });
 
   it("never coalesces a structural change, even inside the coalescing window", () => {
-    // Structural changes (content/layout/asset) must render immediately —
+    // Structural changes (content/layout) must render immediately —
     // a newly-added dataset or layout change can't wait for a window.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
@@ -815,7 +807,6 @@ describe("display-only fast path", () => {
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: over?.cpuCache ?? createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -1501,7 +1492,6 @@ describe("multi-dataset planning", () => {
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -1654,7 +1644,6 @@ describe("incremental delta fold", () => {
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -1676,7 +1665,7 @@ describe("incremental delta fold", () => {
     };
   }
 
-  const deltaEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+  const deltaEpochs = { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
 
   function fullPayload(rows: FoldRow[]): string {
     return JSON.stringify({ Full: { epochs: deltaEpochs, visible_entities: rows } });
@@ -1917,7 +1906,7 @@ describe("incremental delta fold", () => {
       expect(client.coldStateDelta).toHaveBeenCalledTimes(1);
       const deltaMsg = client.coldStateDelta.mock.calls[0][0] as ColdStateDeltaMessage;
       expect(
-        deltaMsg.upserts.map((u) => [u.entityId, u.kind === "tile" ? u.detailLevels : null]),
+        deltaMsg.upserts.map((u) => [u.entityId, u.detailLevels]),
       ).toEqual([["tile-0", [1]]]);
 
       const second = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
@@ -1929,9 +1918,9 @@ describe("incremental delta fold", () => {
     }
   });
 
-  it("keeps the target level under memory pressure: a cache evicting past its budget never lowers it", async () => {
-    // A real CPU cache with a 1.5-chunk budget, so delivering the four
-    // level-1 chunks evicts. Pressure changes coverage, never the level.
+  it("keeps the target level under memory pressure: a budget that holds less never lowers it", async () => {
+    // A real CPU cache with a 1.5-chunk budget, smaller than the four
+    // level-1 chunks. Pressure changes coverage, never the level.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
       const chunkBytes = 100;
@@ -1942,7 +1931,6 @@ describe("incremental delta fold", () => {
             wireFormat: { Raw: { data_type: "uint16" } },
             dataType: "uint16",
           }),
-        fetchProxy: () => new Promise(() => {}),
         handleBinary: () => {},
       } as unknown as ContentSource;
       const decode = {
@@ -1980,21 +1968,24 @@ describe("incremental delta fold", () => {
       };
       const detailLevels = (p: RequestPlan) =>
         p.requests.filter((r) => r.lane === "detail").map((r) => r.level);
+      // What the plan asked for at level 1: what admission let through, and
+      // the shortfall it declared for the rest.
+      const asked = (p: RequestPlan) => detailLevels(p).length + (p.shortfall?.detail ?? 0);
 
       tick(1);
-      expect(detailLevels(submit.mock.calls[0][0])).toEqual([1, 1, 1, 1]);
+      const first = submit.mock.calls[0][0];
+      expect(asked(first)).toBe(4);
+      expect(first.shortfall?.detail).toBeGreaterThan(0);
+      expect(detailLevels(first).every((level) => level === 1)).toBe(true);
       await flush();
-
-      // Guard against a vacuous test: eviction happened.
-      expect(cache.telemetry().mainBytes).toBeLessThanOrEqual(chunkBytes + chunkBytes / 2);
-      expect(cache.snapshot().cached.get("tile-0")?.size ?? 0).toBeLessThan(4);
 
       submit.mockClear();
       vi.advanceTimersByTime(500);
       tick(2);
 
       const next = submit.mock.calls[0][0];
-      expect(detailLevels(next)).toEqual([1, 1, 1, 1]);
+      expect(asked(next)).toBe(4);
+      expect(detailLevels(next).every((level) => level === 1)).toBe(true);
       const entry = next.activeSet.find((e) => e.entityId === "tile-0");
       expect(entry?.kind === "tile" ? entry.detailLevels : null).toEqual([1]);
     } finally {

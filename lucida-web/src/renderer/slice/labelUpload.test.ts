@@ -42,7 +42,7 @@ function makeCtx(writes: WriteTextureCall[], maxDim = 8192): WorkerCtx {
 function labelPlaneMsg(plane: Uint32Array): LabelSliceChunkDataMessage {
   return {
     type: "labelSliceChunkData",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     memberId: "img-0:label:region-b",
     datasetId: "ds-0",
     chunks: [{ data: plane.buffer as ArrayBuffer, dataType: "Uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
@@ -128,7 +128,7 @@ describe("handleLabelSliceChunkData", () => {
     const writes: WriteTextureCall[] = [];
     const ctx = makeCtx(writes);
     // Worker has advanced to selection epoch 5; the delivery is from epoch 1.
-    ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, asset: 0, request: 1 };
+    ctx.state.currentEpochs = { content: 1, layout: 1, view: 1, selection: 5, request: 1 };
     handleLabelSliceChunkData(ctx, labelPlaneMsg(new Uint32Array([1, 2, 3, 4])));
     expect(writes).toHaveLength(0);
     expect(ctx.state.labelSlicePools.has("img-0:label:region-b")).toBe(false);

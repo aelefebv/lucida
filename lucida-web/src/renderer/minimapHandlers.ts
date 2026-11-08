@@ -7,8 +7,7 @@ import type {
 } from "./workerProtocol.ts";
 import { createEmptyVolumeTexture, createOffscreenTarget, writeVolumeChunk } from "./gpuContext.ts";
 import type { CompositeLayer } from "./layerCompositor.ts";
-import { sampleIntensityRange } from "../zarr/intensitySampler.ts";
-import { atlasTexels, atlasTextureFormat, texelValues, type SampleFormat } from "./dataTypeUtil.ts";
+import { atlasTexels, atlasTextureFormat, type SampleFormat } from "./dataTypeUtil.ts";
 
 interface MinimapOverviewEntry {
   texture: GPUTexture;
@@ -19,8 +18,6 @@ interface MinimapOverviewEntry {
   width: number;
   height: number;
   depth: number;
-  intensityMin: number;
-  intensityMax: number;
 }
 
 const minimapOverviewPerDataset = new Map<string, MinimapOverviewEntry>();
@@ -134,10 +131,6 @@ function drawMinimap(ctx: WorkerCtx, msg: MinimapRenderMessage): void {
     if (!overview) continue;
 
     const idx = renderedLayers.length;
-    // The transient descriptor sets proxy slot indices to the sentinel, so
-    // the draw falls through to the chunk path. Clear any proxy textures a
-    // main-view draw left bound.
-    renderer.setProxyTextures(null, null);
     // Bind the active channel's LUT for the minimap's own draw; otherwise it
     // keeps whatever the volume renderer last had, which stays gray in 2D mode.
     // Set it before setVolume, which rebuilds the bind group from the current LUT.
@@ -205,11 +198,10 @@ function drawThumbnail(ctx: WorkerCtx, msg: ThumbnailRenderMessage): void {
     if (!overview) continue;
 
     const idx = renderedLayers.length;
-    // Same single-LOD overview draw as the minimap: reset proxy textures, bind
-    // the active channel's LUT before setVolume (setVolume rebuilds the bind
-    // group from the current LUT), then a transient descriptor so the shader
-    // reads this layer's model matrix + contrast/gamma over the full overview.
-    renderer.setProxyTextures(null, null);
+    // Same single-LOD overview draw as the minimap: bind the active channel's
+    // LUT before setVolume (setVolume rebuilds the bind group from the
+    // current LUT), then a transient descriptor so the shader reads this
+    // layer's model matrix + contrast/gamma over the full overview.
     renderer.setColormapTexture(ctx.getOrCreateLUT(layer.colormap));
     renderer.setVolume(overview.texture);
     renderer.setMatrices(msg.invViewProj, msg.eye);
@@ -261,13 +253,10 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
       texture, format: sampleFormat, uploaded: new Set(),
       t, c,
       width: levelWidth, height: levelHeight, depth: levelDepth,
-      intensityMin: Infinity, intensityMax: -Infinity,
     };
     minimapOverviewPerDataset.set(datasetId, entry);
   }
 
-  let intensityChanged = false;
-  const totalChunks = msg.chunks.length;
   for (const chunk of msg.chunks) {
     if (entry.uploaded.has(chunk.key)) continue;
     const data = atlasTexels(chunk.data, chunk.dataType, entry.format);
@@ -283,15 +272,6 @@ export function handleMinimapUploadOverviewChunks(ctx: WorkerCtx, msg: MinimapUp
       atlasTextureFormat(entry.format),
     );
     entry.uploaded.add(chunk.key);
-
-    const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
-    const { min, max } = sampleIntensityRange(texelValues(data, entry.format), perChunkSamples);
-    if (min < entry.intensityMin) { entry.intensityMin = min; intensityChanged = true; }
-    if (max > entry.intensityMax) { entry.intensityMax = max; intensityChanged = true; }
-  }
-
-  if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId, min: entry.intensityMin, max: entry.intensityMax });
   }
 }
 

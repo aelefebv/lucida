@@ -304,15 +304,13 @@ function rectangleCorners(rect: { left: number; top: number; width: number; heig
  * sits behind the detail boxes it covers. The finest level wins, because it
  * is the most specific thing the pointer is over, and among boxes at one
  * level the one nearest the camera wins, because it is the one in front.
- * Proxy-asset rectangles are not chunks and are passed over. An item
- * without a silhouette is tested as its rectangle.
+ * An item without a silhouette is tested as its rectangle.
  */
 export function hitTestBox<T extends ChunkDrawItem>(items: readonly T[], x: number, y: number): T | null {
   let best: T | null = null;
   let bestLevel = Number.POSITIVE_INFINITY;
   let bestDepth = Number.POSITIVE_INFINITY;
   for (const item of items) {
-    if (item.cell.proxyAsset) continue;
     const inside =
       isVolumeDrawItem(item) && item.hull.length >= 3
         ? hullContains(item.hull, x, y)

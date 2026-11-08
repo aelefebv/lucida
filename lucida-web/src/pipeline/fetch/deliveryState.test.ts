@@ -3,6 +3,20 @@ import { describe, expect, it } from "vitest";
 import { DeliveryState } from "./deliveryState.ts";
 
 describe("DeliveryState", () => {
+  it("counts the chunks the worker has not yet answered", () => {
+    const state = new DeliveryState();
+    state.markChunkSent("img", 0, "0/0/0/0/0/0");
+    state.markChunkSent("img", 0, "0/0/0/0/0/1");
+    state.markChunkSent("img", 0, "0/0/0/0/0/1");
+    expect(state.chunksUnanswered).toBe(2);
+    state.markChunkHeld("img", 0, "0/0/0/0/0/0");
+    state.markChunkRefused("img", 0, "0/0/0/0/0/1");
+    expect(state.chunksUnanswered).toBe(0);
+    state.markChunkSent("img", 0, "0/0/0/0/0/2");
+    state.clearChunksForImage("img");
+    expect(state.chunksUnanswered).toBe(0);
+  });
+
   it("tracks chunk sent state by image, channel, and chunk key", () => {
     const state = new DeliveryState();
     state.markChunkSent("img-0", 1, "0/0/1/0/0/0");
@@ -79,18 +93,5 @@ describe("DeliveryState", () => {
     state.clearChunksForImage("img-0");
     expect(state.wasChunkSent("img-0", 0, "a")).toBe(false);
     expect(state.wasChunkSent("img-0", 1, "b")).toBe(false);
-  });
-
-  it("tracks proxy state by composite key and clears by key or dataset", () => {
-    const state = new DeliveryState();
-    state.markProxySent("ds1|tile-0|TileProxy3D|0|0");
-    state.markProxySent("ds2|tile-0|TileProxy3D|0|0");
-
-    state.clearProxySent("ds1|tile-0|TileProxy3D|0|0");
-    expect(state.wasProxySent("ds1|tile-0|TileProxy3D|0|0")).toBe(false);
-    expect(state.wasProxySent("ds2|tile-0|TileProxy3D|0|0")).toBe(true);
-
-    state.clearProxySentForDataset("ds2");
-    expect(state.wasProxySent("ds2|tile-0|TileProxy3D|0|0")).toBe(false);
   });
 });

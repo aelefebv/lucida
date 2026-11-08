@@ -3,7 +3,7 @@ import { isStaleDelivery } from "./epochCheck.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 
 function makeEpochs(overrides?: Partial<SceneEpochs>): SceneEpochs {
-  return { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0, ...overrides };
+  return { content: 1, layout: 1, view: 1, selection: 1, request: 0, ...overrides };
 }
 
 describe("isStaleDelivery", () => {

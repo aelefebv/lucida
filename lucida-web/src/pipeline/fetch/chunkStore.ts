@@ -38,6 +38,12 @@ export interface ChunkStoreOptions {
   recordEviction: (tier: EvictionRecordTier, entry: CacheEntry) => void;
   /** Eviction-burst log is main-cache only; overview leaves this unset. */
   onEvictionBurst?: (info: EvictionBurstInfo) => void;
+  /**
+   * Whether `resident` must stay to make room for `incoming`. A store with
+   * this set refuses an insert it could only make by evicting a protected
+   * entry, rather than evict it.
+   */
+  protects?: (resident: CacheEntry, incoming: CacheEntry) => boolean;
 }
 
 const EVICTION_BURST_THRESHOLD = 16;
@@ -56,6 +62,7 @@ export class ChunkStore {
    */
   private readonly levelCounts: number[] = [];
   private readonly onEvictionBurst?: (info: EvictionBurstInfo) => void;
+  private readonly protects?: (resident: CacheEntry, incoming: CacheEntry) => boolean;
   /** Exposed so tests can assert against the same constant. */
   static readonly evictionBurstThreshold = EVICTION_BURST_THRESHOLD;
 
@@ -65,6 +72,7 @@ export class ChunkStore {
     this.evictionTier = opts.evictionTier;
     this.recordEviction = opts.recordEviction;
     this.onEvictionBurst = opts.onEvictionBurst;
+    this.protects = opts.protects;
   }
 
   get bytes(): number {
@@ -80,9 +88,13 @@ export class ChunkStore {
     this.evictIfNeeded(0);
   }
 
-  /** Evicts via the policy if over budget; caller assembles the entry. */
-  insert(entry: CacheEntry): void {
-    this.evictIfNeeded(entry.sizeBytes);
+  /**
+   * Evicts via the policy if over budget; caller assembles the entry.
+   * Returns false, and changes nothing, when the room could only come from
+   * entries the store protects against this one.
+   */
+  insert(entry: CacheEntry): boolean {
+    if (!this.evictIfNeeded(entry.sizeBytes, entry)) return false;
 
     let entityMap = this.store.get(entry.entityId);
     if (!entityMap) {
@@ -94,6 +106,7 @@ export class ChunkStore {
     this.bytesCounter += entry.sizeBytes;
     if (replaced) this.countLevel(replaced.level, -1);
     this.countLevel(entry.level, 1);
+    return true;
   }
 
   /** Resident chunks per level, indexed by level. Sparse levels read as zero. */
@@ -107,10 +120,17 @@ export class ChunkStore {
     this.levelCounts[level] = Math.max(0, this.levelCounts[level] + delta);
   }
 
-  private evictIfNeeded(incomingBytes: number): void {
-    if (this.bytesCounter + incomingBytes <= this.budgetBytesCounter) return;
+  private evictIfNeeded(incomingBytes: number, incoming?: CacheEntry): boolean {
+    if (this.bytesCounter + incomingBytes <= this.budgetBytesCounter) return true;
     const bytesNeeded = this.bytesCounter + incomingBytes - this.budgetBytesCounter;
-    const entries = this.collectEntries();
+    const protects = this.protects;
+    let entries = this.collectEntries();
+    if (incoming && protects) {
+      entries = entries.filter((resident) => !protects(resident, incoming));
+      let available = 0;
+      for (const entry of entries) available += entry.sizeBytes;
+      if (available < bytesNeeded) return false;
+    }
     const victims = this.policy.selectVictims(entries, bytesNeeded);
 
     let freed = 0;
@@ -126,6 +146,7 @@ export class ChunkStore {
         bytesNeeded,
       });
     }
+    return true;
   }
 
   remove(entityId: string, chunkKey: string): boolean {

@@ -32,7 +32,6 @@ function makeVolumeRenderer() {
   const renderer = {
     isCompiled: false,
     compiled,
-    setProxyTextures: vi.fn(),
     setColormapTexture: vi.fn(),
     setVolume: vi.fn(),
     setMatrices: vi.fn(),
@@ -194,7 +193,7 @@ describe("the minimap's overview render", () => {
     await flush();
 
     expect(renderer.renderTo).not.toHaveBeenCalled();
-    expect(posts.filter((post) => post.type !== "intensityRange")).toEqual([
+    expect(posts).toEqual([
       { type: "error", message: "volume shader refused" },
     ]);
   });
@@ -259,7 +258,7 @@ describe("a thumbnail render", () => {
     await flush();
 
     expect(renderer.renderTo).not.toHaveBeenCalled();
-    expect(posts.filter((post) => post.type !== "intensityRange")).toEqual([
+    expect(posts).toEqual([
       { type: "thumbnailResult", id: 7, bitmap: null },
       { type: "error", message: "volume shader refused" },
     ]);

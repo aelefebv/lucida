@@ -13,7 +13,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { sendReport } from "../monitor/monitorSource.ts";
 import { setBundleServices } from "./bundle.ts";
-import { createQuiescenceState } from "./quiescence.ts";
+import { createSettleState } from "../pipeline/settle.ts";
 import { traceRecorder } from "./recorder.ts";
 import { MAX_BUNDLE_BYTES, sendBundle, setReportSender } from "./reportInbox.ts";
 import { installTraceSeam } from "./seam.ts";
@@ -33,7 +33,6 @@ function registerEnvironment(): void {
       detailBytes: 0,
       coarseChunks: 0,
       coarseBytes: 0,
-      proxyBytes: 0,
     }),
     captureConditions: () => ({
       datasetIds: ["ds"],
@@ -41,7 +40,7 @@ function registerEnvironment(): void {
       devicePixelRatio: 2,
       viewport: { cssWidth: 800, cssHeight: 600, deviceWidth: 1600, deviceHeight: 1200 },
     }),
-    captureOutstanding: () => createQuiescenceState(),
+    captureOutstanding: () => createSettleState(),
   });
 }
 

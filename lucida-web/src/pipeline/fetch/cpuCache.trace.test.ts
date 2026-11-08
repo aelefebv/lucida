@@ -21,7 +21,7 @@ import {
 import type { DecodePool } from "./decodePool.ts";
 import type { ChunkRequest, RequestPlan, ActiveSetEntry } from "../planning/index.ts";
 import { emptyPlanStats } from "../planning/index.ts";
-import { createQuiescenceState } from "../../trace/quiescence.ts";
+import { createSettleState } from "../settle.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { CountedPhaseIndex, type TracePointEvent } from "../../trace/types.ts";
 import { createSyntheticState } from "../planning/index.ts";
@@ -58,12 +58,8 @@ function tile(entityId: string, imageId: string, target: number): ActiveSetEntry
     kind: "tile",
     entityId,
     imageId,
-    mode: "tiles-with-detail",
     detailLevels: [target],
     coarseLevel: null,
-    proxyKind: undefined,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
   };
 }
 
@@ -74,8 +70,7 @@ function makePlan(
   return {
     requests,
     activeSet,
-    proxyRequests: [],
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     stats: emptyPlanStats(),
     nextState: createSyntheticState({ previousActiveSet: activeSet }),
   };
@@ -94,7 +89,6 @@ function createSource(bytes: number) {
         dataType: "uint8",
       } satisfies FetchResult;
     },
-    fetchProxy: async () => { throw new Error("unused"); },
   } as unknown as ContentSource;
   return { source, failures };
 }
@@ -123,7 +117,7 @@ function eventsOfKind(events: TracePointEvent[], kind: string): TracePointEvent[
 function openRun(): void {
   traceRecorder.setEnvironment({
     captureWarmth: () => ({
-      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
     }),
     captureConditions: () => ({
       datasetIds: ["ds-1"],
@@ -188,7 +182,7 @@ describe("cache point events", () => {
     cache.submit(makePlan([makeRequest()]));
     await flush();
 
-    const inputs = cache.quiescenceInputs(createQuiescenceState());
+    const inputs = cache.settleInputs(createSettleState());
     expect(inputs.desiredDetailChunks).toBe(1);
     expect(inputs.residentDetailChunks).toBe(0);
     expect(inputs.failedDetailChunks).toBe(1);

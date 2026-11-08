@@ -389,7 +389,6 @@ describe("the sent line", () => {
     const block = text.slice(text.indexOf("SENT"));
 
     expect(block).toMatch(/cursor\s+n=\s+400\s+16000 B\s+1600 B\/s/);
-    expect(block).toMatch(/asset request\s+n=\s+0\s+0 B\s+0 B\/s/);
   });
 });
 
