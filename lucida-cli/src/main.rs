@@ -6372,17 +6372,16 @@ mod tests {
             ("pin_contrast", "pins"),
         ]);
         // The planning knobs replay through the header's planning
-        // configuration. The cache knobs have no header field: the panel's
-        // own edits to them die on reload, so a replay runs the cache at
-        // its defaults. Nor does the device memory: a replay runs at the
-        // memory of the machine it runs on.
-        let mut session_scoped = vec!["device_memory"];
+        // configuration. The cache knobs have no header field, so a replay
+        // runs the cache at its own values. Nor does the device memory: a
+        // replay runs at the memory of the machine it runs on.
+        let mut not_in_header = vec!["device_memory"];
         for knob in trace_knobs::KNOBS {
             match knob.store {
                 trace_knobs::KnobStore::Planning => {
                     replayed_by.insert(knob.field, "planning");
                 }
-                trace_knobs::KnobStore::Cache => session_scoped.push(knob.field),
+                trace_knobs::KnobStore::Cache => not_in_header.push(knob.field),
             }
         }
         let not_workload = [
@@ -6422,7 +6421,7 @@ mod tests {
                     "{id} replays through {field}, which the replay list does not name"
                 ),
                 None if carried_by_script.contains(&id) => {}
-                None if session_scoped.contains(&id) => {}
+                None if not_in_header.contains(&id) => {}
                 None => assert!(
                     not_workload.contains(&id),
                     "{id} is neither a workload argument with a header field nor a sidecar"

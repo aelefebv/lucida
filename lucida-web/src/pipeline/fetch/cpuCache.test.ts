@@ -2556,6 +2556,32 @@ describe("CpuCache", () => {
 
   // Budget enforcement
 
+  describe("Dev controls knobs", () => {
+    it("runs under the knobs given and returns to its own values when a knob clears", () => {
+      const own = { mainBudgetBytes: 200, overviewBudgetBytes: 100, maxConcurrentFetches: 3, maxBytesInFlight: 1000 };
+      const { cache } = createTestCache(own);
+      cache.applyKnobs({ mainBudgetBytes: 400, maxConcurrentFetches: 1 });
+      expect(cache.getConfig()).toMatchObject({ ...own, mainBudgetBytes: 400, maxConcurrentFetches: 1 });
+      expect(cache.tierCapacity()).toEqual({ detail: 400, coarse: 100 });
+
+      cache.applyKnobs({});
+      expect(cache.getConfig()).toMatchObject(own);
+      expect(cache.tierCapacity()).toEqual({ detail: 200, coarse: 100 });
+    });
+
+    it("holds fetches to the concurrency knob, and starts waiting ones when it rises", async () => {
+      const { cache, source } = createTestCache({ maxConcurrentFetches: 4 });
+      cache.applyKnobs({ maxConcurrentFetches: 1 });
+      cache.submit(makePlan([0, 1, 2].map((x) => makeRequest({ x, chunkKey: `0/0/0/0/0/${x}` }))));
+      await flush();
+      expect(source.pendingFetches.size).toBe(1);
+
+      cache.applyKnobs({});
+      await flush();
+      expect(source.pendingFetches.size).toBe(3);
+    });
+  });
+
   describe("budget enforcement", () => {
     it("detail borrows unused coarse budget while coarse is idle, then evicts back to its protected budget", async () => {
       const { cache, source } = createTestCache({

@@ -61,6 +61,7 @@ vi.mock("./pipeline/fetch/index.ts", () => {
     static instances: MockCpuCache[] = [];
     reset = vi.fn();
     resetChunkFailureStreak = vi.fn();
+    applyKnobs = vi.fn();
     config: unknown;
     constructor(_source: unknown, _pool: unknown, config?: unknown) {
       this.config = config;

@@ -8,7 +8,7 @@ import type {
   FailedChunksMessage,
   MissingChunk,
 } from "../../renderer/workerProtocol.ts";
-import { refreshDebugCategories } from "../../debug/logging.ts";
+import { setDebugCategories } from "../../debug/logging.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { PointEvent } from "../../trace/types.ts";
 import { TickCoordinator } from "../tickCoordinator.ts";
@@ -237,36 +237,24 @@ function makeCtx(args: {
 }
 
 describe("Uploader unified delivery", () => {
-  let priorLocalStorage: unknown;
-
   /**
    * The per-tick stats are handed to `UploadTelemetry.publish`, which the
    * Uploader calls only while the `orch` log category is on. Open the
-   * category with an in-memory `localStorage` shim and read the stats off
-   * the spy.
+   * category and read the stats off the spy.
    */
   function captureTickStats(uploader: Uploader) {
     return vi.spyOn(uploader.uploadTelemetry, "publish");
   }
 
-  // The category set is cached at module load, so it is refreshed here
-  // rather than re-importing the module graph for every case, which on a
-  // loaded host can take longer than the hook may.
+  // Setting the category preference is live, so the module graph is not
+  // re-imported for every case, which on a loaded host can take longer than
+  // the hook may.
   beforeEach(() => {
-    const store = new Map<string, string>();
-    priorLocalStorage = (globalThis as Record<string, unknown>).localStorage;
-    (globalThis as Record<string, unknown>).localStorage = {
-      getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => void store.set(k, v),
-      removeItem: (k: string) => void store.delete(k),
-    };
-    localStorage.setItem("debug", "orch");
-    refreshDebugCategories();
+    setDebugCategories(["orch"]);
   });
 
   afterEach(() => {
-    (globalThis as Record<string, unknown>).localStorage = priorLocalStorage;
-    refreshDebugCategories();
+    setDebugCategories([]);
   });
 
   it("dispatches deliverables from CpuCache and marks sent only after dispatch", () => {
@@ -443,8 +431,7 @@ describe("Uploader unified delivery", () => {
 
   it("skips telemetry aggregation when the orch category is off", () => {
     // The `orch` log category is the only thing that turns the aggregators on.
-    localStorage.removeItem("debug");
-    refreshDebugCategories();
+    setDebugCategories([]);
     const chunk = makeChunkDelivery();
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();

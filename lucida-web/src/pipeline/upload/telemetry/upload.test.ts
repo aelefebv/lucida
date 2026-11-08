@@ -5,9 +5,7 @@ import {
   type UploadTickStats,
   type UploadRollingStats,
 } from "./upload.ts";
-// The `debug` category set lives in `localStorage`, which is undefined in the
-// default vitest node environment. The detector tests stub a minimal
-// in-memory `localStorage` shim before importing so the gate opens.
+import { setDebugCategories } from "../../../debug/logging.ts";
 import {
   UPLOAD_BUDGET_EXHAUSTED_STREAK_THRESHOLD,
   UPLOAD_FILTER_RATIO_THRESHOLD,
@@ -155,37 +153,21 @@ describe("UploadTelemetry — tick aggregation", () => {
 
 // Sustained-anomaly detectors
 //
-// debugLog only emits when its category is enabled (`localStorage.debug`
-// gates the call). We spy on `console.log`, enable the "orch" category
-// for the test, and assert that the right event names land. Each test
-// restores prior debug state in `afterEach` to avoid bleed.
+// debugLog only emits when its category is enabled. We spy on
+// `console.log`, enable the "orch" category for the test, and assert that
+// the right event names land. Each test restores prior debug state in
+// `afterEach` to avoid bleed.
 
 describe("UploadTelemetry — sustained anomaly detectors", () => {
   let consoleLogSpy: ReturnType<typeof vi.spyOn>;
-  let priorLocalStorage: unknown;
 
-  beforeEach(async () => {
-    // In-memory localStorage shim so the `debug` category write (and the
-    // subsequent `readEnabled()` inside `debugLog`) can persist a value.
-    const store = new Map<string, string>();
-    priorLocalStorage = (globalThis as Record<string, unknown>).localStorage;
-    (globalThis as Record<string, unknown>).localStorage = {
-      getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => store.set(k, v),
-      removeItem: (k: string) => store.delete(k),
-      clear: () => store.clear(),
-    };
+  beforeEach(() => {
     consoleLogSpy = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { refreshDebugCategories } = await import("../../../debug/logging.ts");
-    localStorage.setItem("debug", "orch");
-    refreshDebugCategories();
+    setDebugCategories(["orch"]);
   });
-  afterEach(async () => {
-    const { refreshDebugCategories } = await import("../../../debug/logging.ts");
-    localStorage.removeItem("debug");
-    refreshDebugCategories();
+  afterEach(() => {
+    setDebugCategories([]);
     consoleLogSpy.mockRestore();
-    (globalThis as Record<string, unknown>).localStorage = priorLocalStorage;
   });
 
   const findLogs = (eventName: string): Array<{ payload: object }> =>

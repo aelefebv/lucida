@@ -2,21 +2,36 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  ANNOTATION_AUTHOR_KEY,
   annotationAuthorId,
+  annotationAuthorPreference,
   __resetAnnotationIdentityForTesting,
 } from "./annotationIdentity.ts";
+import {
+  PREFERENCES_STORAGE_KEY,
+  __resetPreferencesForTesting,
+  getPreference,
+  setPreference,
+} from "./theme/preferences.ts";
+
+const LEGACY_KEY = "lucida.annotation.author";
+
+/** A new page load in the same browser: storage stays, memory goes. */
+function reload(): void {
+  __resetPreferencesForTesting();
+  __resetAnnotationIdentityForTesting();
+}
 
 // Each test starts from a clean slate: no persisted id and no in-memory cache,
 // so a call exercises the real read-or-generate path rather than a leftover.
 beforeEach(() => {
   localStorage.clear();
-  __resetAnnotationIdentityForTesting();
+  reload();
 });
 
 afterEach(() => {
   localStorage.clear();
-  __resetAnnotationIdentityForTesting();
+  window.history.replaceState({}, "", "/");
+  reload();
   vi.restoreAllMocks();
 });
 
@@ -29,96 +44,78 @@ describe("annotationAuthorId", () => {
     expect(a).toBe(b);
   });
 
-  it("rejoin: returns the exact id already held in localStorage, unchanged", () => {
-    // Simulate a returning browser: an id is already persisted (e.g. from a
-    // prior session) before the module resolves anything this session.
+  it("rejoin: returns the id already stored, unchanged", () => {
     const persisted = "existing-author-id-1234";
-    localStorage.setItem(ANNOTATION_AUTHOR_KEY, persisted);
-
-    const id = annotationAuthorId();
+    setPreference(annotationAuthorPreference, persisted);
+    reload();
 
     // Returned verbatim, so ownership of prior pins and comments is preserved.
-    expect(id).toBe(persisted);
-    // And it was not regenerated or overwritten in storage.
-    expect(localStorage.getItem(ANNOTATION_AUTHOR_KEY)).toBe(persisted);
+    expect(annotationAuthorId()).toBe(persisted);
+    expect(getPreference(annotationAuthorPreference)).toBe(persisted);
   });
 
-  it("generates AND persists an id when the key is absent", () => {
-    expect(localStorage.getItem(ANNOTATION_AUTHOR_KEY)).toBeNull();
-
+  it("generates AND persists an id when none is stored", () => {
     const id = annotationAuthorId();
-
     expect(id.length).toBeGreaterThan(0);
-    // Persisted under the contract key so the next visit reuses it.
-    expect(localStorage.getItem(ANNOTATION_AUTHOR_KEY)).toBe(id);
-  });
-
-  it("a fresh resolve after persist reuses the same stored id (next-visit reuse)", () => {
-    const first = annotationAuthorId();
-    // Drop only the in-memory cache, leaving localStorage intact. This models a
-    // brand-new page load (or rejoin) reading what the previous visit stored.
-    __resetAnnotationIdentityForTesting();
-
-    const second = annotationAuthorId();
-    expect(second).toBe(first);
+    expect(localStorage.getItem(PREFERENCES_STORAGE_KEY)).toContain(id);
+    reload();
+    expect(annotationAuthorId()).toBe(id);
   });
 
   it("two browsers (separate storage) get distinct ids", () => {
-    // First browser mints + persists its id.
     const browserA = annotationAuthorId();
-
-    // A different browser = different localStorage + a cold module cache.
     localStorage.clear();
-    __resetAnnotationIdentityForTesting();
-
+    reload();
     const browserB = annotationAuthorId();
     expect(browserB).not.toBe(browserA);
-    // …and so a pin authored by A (author === browserA) is not-mine to B.
-    expect(browserA === browserB).toBe(false);
-  });
-
-  it("treats an empty stored value as absent (mints + persists a usable id)", () => {
-    localStorage.setItem(ANNOTATION_AUTHOR_KEY, "");
-
-    const id = annotationAuthorId();
-
-    expect(id.length).toBeGreaterThan(0);
-    expect(localStorage.getItem(ANNOTATION_AUTHOR_KEY)).toBe(id);
   });
 
   it("falls back to a non-crypto id (still stable) when randomUUID is unavailable", () => {
     // Some locked-down/insecure contexts lack crypto.randomUUID. Identity
     // generation must degrade rather than throw, and stay stable in-session.
-    const spy = vi
-      .spyOn(globalThis.crypto, "randomUUID")
-      .mockImplementation(() => {
-        throw new Error("randomUUID unavailable");
-      });
-
+    vi.spyOn(globalThis.crypto, "randomUUID").mockImplementation(() => {
+      throw new Error("randomUUID unavailable");
+    });
     const a = annotationAuthorId();
-    const b = annotationAuthorId();
-
     expect(a.length).toBeGreaterThan(0);
-    expect(a).toBe(b);
-    expect(localStorage.getItem(ANNOTATION_AUTHOR_KEY)).toBe(a);
-    spy.mockRestore();
+    expect(annotationAuthorId()).toBe(a);
+    expect(getPreference(annotationAuthorPreference)).toBe(a);
   });
 
-  it("stays stable in-session even when localStorage writes throw (private browsing)", () => {
-    const setItem = vi
-      .spyOn(Storage.prototype, "setItem")
-      .mockImplementation(() => {
-        throw new Error("QuotaExceededError");
-      });
-
-    // First call can't persist, but must still return a usable id…
+  it("stays stable in-session even when storage writes throw (private browsing)", () => {
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new Error("QuotaExceededError");
+    });
     const a = annotationAuthorId();
     expect(a.length).toBeGreaterThan(0);
-    // …and a second call returns the same id (memoized), so ownership is
-    // consistent for the session despite storage being unwritable.
-    const b = annotationAuthorId();
-    expect(b).toBe(a);
+    expect(annotationAuthorId()).toBe(a);
+  });
 
-    setItem.mockRestore();
+  it("neither reads nor persists an id on the capture surface", () => {
+    setPreference(annotationAuthorPreference, "a-person's-id");
+    const before = localStorage.getItem(PREFERENCES_STORAGE_KEY);
+    window.history.replaceState({}, "", "/?render=1");
+    reload();
+
+    const id = annotationAuthorId();
+    expect(id).not.toBe("a-person's-id");
+    expect(localStorage.getItem(PREFERENCES_STORAGE_KEY)).toBe(before);
+  });
+});
+
+describe("the old storage key", () => {
+  it("moves a stored id into the preference once and removes the key", () => {
+    localStorage.setItem(LEGACY_KEY, "existing-author-id-1234");
+    reload();
+    expect(annotationAuthorId()).toBe("existing-author-id-1234");
+    expect(localStorage.getItem(LEGACY_KEY)).toBeNull();
+  });
+
+  it("treats an empty old value as absent", () => {
+    localStorage.setItem(LEGACY_KEY, "");
+    reload();
+    const id = annotationAuthorId();
+    expect(id.length).toBeGreaterThan(0);
+    expect(localStorage.getItem(LEGACY_KEY)).toBeNull();
   });
 });
