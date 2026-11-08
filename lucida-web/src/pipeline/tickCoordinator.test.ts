@@ -24,8 +24,8 @@ import { initialPlanningState } from "./planning/index.ts";
 // singleton races under `--sequence.shuffle`, inflating call counts.
 //
 // The describes share the real module singletons, so reset the ones tests
-// mutate after every test: configStore (which persists planning knobs to
-// happy-dom localStorage) and localStorage.
+// mutate after every test: configStore (whose planning knobs are
+// preferences in happy-dom localStorage) and localStorage.
 afterEach(() => {
   configStore.__resetForTesting();
   if (typeof localStorage !== "undefined") localStorage.clear();

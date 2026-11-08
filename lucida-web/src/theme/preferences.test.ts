@@ -3,15 +3,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import {
+  PREFERENCE_SEED_GLOBAL,
   PREFERENCES_STORAGE_KEY,
   PREFERENCES_VERSION,
   __resetPreferencesForTesting,
   booleanPreference,
   createPreferenceStore,
   definePreference,
+  getPreference,
+  migrateLegacyKeys,
   numberPreference,
   oneOfPreference,
   setPreference,
+  subscribePreferences,
   usePreference,
 } from "./preferences.ts";
 
@@ -150,6 +154,93 @@ describe("preference store", () => {
     } finally {
       window.history.replaceState({}, "", "/");
     }
+  });
+});
+
+describe("the capture surface's seed", () => {
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>)[PREFERENCE_SEED_GLOBAL];
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("starts the capture surface from the seed, parsed like any stored value", () => {
+    (globalThis as Record<string, unknown>)[PREFERENCE_SEED_GLOBAL] = { "test.tab": "info", "test.width": 9000 };
+    window.history.replaceState({}, "", "/?render=1");
+    __resetPreferencesForTesting();
+    expect(getPreference(tab)).toBe("info");
+    expect(getPreference(width)).toBe(480);
+    setPreference(tab, "comments");
+    expect(localStorage.getItem(PREFERENCES_STORAGE_KEY)).toBeNull();
+  });
+
+  it("is not read by any other page", () => {
+    (globalThis as Record<string, unknown>)[PREFERENCE_SEED_GLOBAL] = { "test.tab": "info" };
+    __resetPreferencesForTesting();
+    expect(getPreference(tab)).toBe("views");
+  });
+});
+
+describe("migrateLegacyKeys", () => {
+  const legacyFlag = booleanPreference("test.legacyFlag", true);
+  migrateLegacyKeys(
+    (key) => key === "test.old.flag",
+    (old) => {
+      for (const raw of old.values()) setPreference(legacyFlag, raw === "on");
+    },
+  );
+
+  it("moves an old key into its preference and removes it", () => {
+    localStorage.setItem("test.old.flag", "off");
+    __resetPreferencesForTesting();
+    expect(getPreference(legacyFlag)).toBe(false);
+    expect(localStorage.getItem("test.old.flag")).toBeNull();
+    expect(stored()).toMatchObject({ values: { "test.legacyFlag": false } });
+  });
+
+  it("runs at definition when the old key is already there", () => {
+    localStorage.setItem("test.old.other", "on");
+    __resetPreferencesForTesting();
+    const other = booleanPreference("test.otherFlag", false);
+    migrateLegacyKeys(
+      (key) => key === "test.old.other",
+      (old) => {
+        for (const raw of old.values()) setPreference(other, raw === "on");
+      },
+    );
+    expect(getPreference(other)).toBe(true);
+    expect(localStorage.getItem("test.old.other")).toBeNull();
+  });
+
+  it("lets an old key written after the last migration win over the stored preference", () => {
+    writeStored({ "test.legacyFlag": true });
+    localStorage.setItem("test.old.flag", "off");
+    __resetPreferencesForTesting();
+    expect(getPreference(legacyFlag)).toBe(false);
+  });
+
+  it("reads and removes nothing on the capture surface", () => {
+    localStorage.setItem("test.old.flag", "off");
+    window.history.replaceState({}, "", "/?render=1");
+    try {
+      __resetPreferencesForTesting();
+      expect(getPreference(legacyFlag)).toBe(true);
+      expect(localStorage.getItem("test.old.flag")).toBe("off");
+      expect(localStorage.getItem(PREFERENCES_STORAGE_KEY)).toBeNull();
+    } finally {
+      window.history.replaceState({}, "", "/");
+    }
+  });
+});
+
+describe("subscribePreferences", () => {
+  it("keeps its subscribers across a store reset and tells them", () => {
+    const listener = vi.fn();
+    const off = subscribePreferences(listener);
+    __resetPreferencesForTesting();
+    expect(listener).toHaveBeenCalledTimes(1);
+    setPreference(tab, "info");
+    expect(listener).toHaveBeenCalledTimes(2);
+    off();
   });
 });
 

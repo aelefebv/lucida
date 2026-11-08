@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { configStore } from "./configStore.ts";
+import { configStore, depthBiasPreference, PLANNING_KNOB_PREFERENCES } from "./configStore.ts";
 import { DEFAULT_PLANNING_CONFIG } from "./config.ts";
 import {
   createSyntheticEntity,
@@ -10,226 +10,163 @@ import {
   plan,
 } from "./index.ts";
 import type { LevelGeometry } from "../../manifestTypes.ts";
+import {
+  PREFERENCE_SEED_GLOBAL,
+  PREFERENCES_STORAGE_KEY,
+  __resetPreferencesForTesting,
+  developerToolsPreference,
+  getPreference,
+  setPreference,
+} from "../../theme/preferences.ts";
 
-const STORAGE_KEY = "lucida.planning.config";
+const LEGACY_KEY = "lucida.planning.config";
+
+function storedValues(): Record<string, unknown> {
+  return JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY) ?? '{"values":{}}').values;
+}
 
 beforeEach(() => {
-  // Each test starts from a clean store and an empty localStorage so
-  // values from prior tests don't leak in. The singleton's
-  // `__resetForTesting` rewinds in-memory state and listeners.
-  configStore.__resetForTesting();
   localStorage.clear();
+  __resetPreferencesForTesting();
 });
 
 afterEach(() => {
-  configStore.__resetForTesting();
   localStorage.clear();
+  __resetPreferencesForTesting();
 });
 
-describe("configStore — initial state", () => {
-  it("returns DEFAULT_PLANNING_CONFIG when localStorage is empty", () => {
+describe("configStore — developer tools gate", () => {
+  it("reads the defaults when nothing is stored", () => {
     expect(configStore.get()).toEqual(DEFAULT_PLANNING_CONFIG);
   });
+
+  it("applies a stored knob only while developer tools are on", () => {
+    configStore.set("prefetchDepth", 0);
+    expect(configStore.get().prefetchDepth).toBe(DEFAULT_PLANNING_CONFIG.prefetchDepth);
+
+    setPreference(developerToolsPreference, true);
+    expect(configStore.get().prefetchDepth).toBe(0);
+
+    setPreference(developerToolsPreference, false);
+    expect(configStore.get()).toEqual(DEFAULT_PLANNING_CONFIG);
+  });
+
+  it("applies focal depth whether or not developer tools are on", () => {
+    configStore.set("depthBiasView", -0.5);
+    expect(configStore.get().depthBiasView).toBe(-0.5);
+  });
+
+  it("tells subscribers when turning developer tools on changes the config, and only then", () => {
+    const listener = vi.fn();
+    configStore.subscribe(listener);
+    setPreference(developerToolsPreference, true);
+    expect(listener).not.toHaveBeenCalled();
+
+    configStore.set("importanceWeight", 120);
+    expect(listener).toHaveBeenCalledTimes(1);
+    setPreference(developerToolsPreference, false);
+    expect(listener).toHaveBeenCalledTimes(2);
+  });
 });
 
-describe("configStore — set", () => {
-  it("updates the field and reflects via get", () => {
-    configStore.set("prefetchDepth", 99);
-    expect(configStore.get().prefetchDepth).toBe(99);
-    // Other fields untouched.
-    expect(configStore.get().importanceWeight).toBe(
-      DEFAULT_PLANNING_CONFIG.importanceWeight,
-    );
+describe("configStore — set and reset", () => {
+  beforeEach(() => setPreference(developerToolsPreference, true));
+
+  it("stores one field as its preference and leaves the others at their defaults", () => {
+    configStore.set("prefetchDepth", 4);
+    expect(configStore.get()).toEqual({ ...DEFAULT_PLANNING_CONFIG, prefetchDepth: 4 });
+    expect(storedValues()["planning.prefetchDepth"]).toBe(4);
   });
 
-  it("persists to localStorage under the schema-versioned envelope", () => {
-    configStore.set("prefetchDepth", 99);
-    const raw = localStorage.getItem(STORAGE_KEY);
-    expect(raw).not.toBeNull();
-    const parsed = JSON.parse(raw!);
-    expect(parsed.schemaVersion).toBe(3);
-    expect(parsed.config.prefetchDepth).toBe(99);
+  it("returns the same reference until a field changes", () => {
+    const first = configStore.get();
+    expect(configStore.get()).toBe(first);
+    configStore.set("distanceWeight", 12);
+    expect(configStore.get()).not.toBe(first);
   });
 
-  it("notifies subscribers", () => {
-    const listener = vi.fn();
-    configStore.subscribe(listener);
-    configStore.set("prefetchDepth", 99);
-    expect(listener).toHaveBeenCalledTimes(1);
-  });
-
-  it("is a no-op when the field already has the new value", () => {
-    const listener = vi.fn();
-    configStore.subscribe(listener);
+  it("stores nothing for a field set back to its default", () => {
+    configStore.set("prefetchDepth", 4);
     configStore.set("prefetchDepth", DEFAULT_PLANNING_CONFIG.prefetchDepth);
-    expect(listener).not.toHaveBeenCalled();
-  });
-});
-
-describe("configStore — reset", () => {
-  it("reset(field) restores that field to default and notifies", () => {
-    configStore.set("prefetchDepth", 99);
-    const listener = vi.fn();
-    configStore.subscribe(listener);
-    configStore.reset("prefetchDepth");
-    expect(configStore.get().prefetchDepth).toBe(
-      DEFAULT_PLANNING_CONFIG.prefetchDepth,
-    );
-    expect(listener).toHaveBeenCalledTimes(1);
+    expect(storedValues()).not.toHaveProperty("planning.prefetchDepth");
   });
 
-  it("reset() with no arg restores every field to default", () => {
-    configStore.set("prefetchDepth", 99);
+  it("resets one field, or every field", () => {
+    configStore.set("prefetchDepth", 4);
     configStore.set("distanceWeight", 12);
+    configStore.set("depthBiasView", 0.5);
+    configStore.reset("prefetchDepth");
+    expect(configStore.get().prefetchDepth).toBe(DEFAULT_PLANNING_CONFIG.prefetchDepth);
+    expect(configStore.get().distanceWeight).toBe(12);
     configStore.reset();
     expect(configStore.get()).toEqual(DEFAULT_PLANNING_CONFIG);
   });
 
-  it("reset() clears localStorage when state matches defaults", () => {
-    configStore.set("prefetchDepth", 99);
-    expect(localStorage.getItem(STORAGE_KEY)).not.toBeNull();
-    configStore.reset();
-    expect(localStorage.getItem(STORAGE_KEY)).toBeNull();
-  });
-
-  it("reset(field) is a no-op when the field is already at default", () => {
-    const listener = vi.fn();
-    configStore.subscribe(listener);
-    configStore.reset("prefetchDepth");
-    expect(listener).not.toHaveBeenCalled();
-  });
-
-  it("reset(field) leaves other tweaks intact and keeps localStorage populated", () => {
-    configStore.set("prefetchDepth", 99);
-    configStore.set("distanceWeight", 12);
-    configStore.reset("prefetchDepth");
-    expect(configStore.get().prefetchDepth).toBe(
-      DEFAULT_PLANNING_CONFIG.prefetchDepth,
+  it("clamps a stored knob into the range Dev controls offers", () => {
+    localStorage.setItem(
+      PREFERENCES_STORAGE_KEY,
+      JSON.stringify({ version: 1, values: { "developer.tools": true, "planning.prefetchDepth": 99 } }),
     );
-    expect(configStore.get().distanceWeight).toBe(12);
-    // Storage still holds the remaining tweak.
-    const raw = localStorage.getItem(STORAGE_KEY);
-    expect(raw).not.toBeNull();
-    const parsed = JSON.parse(raw!);
-    expect(parsed.config.distanceWeight).toBe(12);
+    __resetPreferencesForTesting();
+    expect(configStore.get().prefetchDepth).toBe(5);
   });
-});
 
-describe("configStore — subscribe", () => {
-  it("returns an unsubscribe function that removes the listener", () => {
+  it("unsubscribes", () => {
     const listener = vi.fn();
-    const unsub = configStore.subscribe(listener);
-    configStore.set("prefetchDepth", 99);
-    expect(listener).toHaveBeenCalledTimes(1);
-    unsub();
-    configStore.set("prefetchDepth", 100);
+    const off = configStore.subscribe(listener);
+    configStore.set("prefetchDepth", 4);
+    off();
+    configStore.set("prefetchDepth", 3);
     expect(listener).toHaveBeenCalledTimes(1);
   });
+});
 
-  it("fires every subscriber on every change", () => {
-    const a = vi.fn();
-    const b = vi.fn();
-    configStore.subscribe(a);
-    configStore.subscribe(b);
-    configStore.set("prefetchDepth", 99);
-    configStore.set("distanceWeight", 12);
-    expect(a).toHaveBeenCalledTimes(2);
-    expect(b).toHaveBeenCalledTimes(2);
+describe("configStore — the old storage key", () => {
+  function writeLegacy(config: Record<string, unknown>, schemaVersion = 3): void {
+    localStorage.setItem(LEGACY_KEY, JSON.stringify({ schemaVersion, config }));
+  }
+
+  it("moves each knob into its preference once and removes the old key", () => {
+    writeLegacy({ ...DEFAULT_PLANNING_CONFIG, prefetchDepth: 4, depthBiasView: -0.25 });
+    __resetPreferencesForTesting();
+
+    expect(localStorage.getItem(LEGACY_KEY)).toBeNull();
+    expect(getPreference(PLANNING_KNOB_PREFERENCES.prefetchDepth)).toBe(4);
+    expect(getPreference(depthBiasPreference)).toBe(-0.25);
+    // The old envelope held every field; only the moved ones become preferences.
+    expect(Object.keys(storedValues()).sort()).toEqual(["planning.depthBiasView", "planning.prefetchDepth"]);
+    // A migrated knob still waits for developer tools.
+    expect(configStore.get().prefetchDepth).toBe(DEFAULT_PLANNING_CONFIG.prefetchDepth);
+  });
+
+  it("drops an envelope of another version, and still removes it", () => {
+    writeLegacy({ prefetchDepth: 4 }, 99);
+    __resetPreferencesForTesting();
+    expect(localStorage.getItem(LEGACY_KEY)).toBeNull();
+    expect(getPreference(PLANNING_KNOB_PREFERENCES.prefetchDepth)).toBe(DEFAULT_PLANNING_CONFIG.prefetchDepth);
   });
 });
 
-describe("configStore — localStorage round-trip on module load", () => {
-  it("hydrates from a previously-persisted envelope after reset", async () => {
-    // Simulate a prior session writing a tweak.
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        schemaVersion: 3,
-        config: { prefetchDepth: 42 },
-      }),
-    );
-    // Re-import to force module re-evaluation.
-    vi.resetModules();
-    const mod = await import("./configStore.ts");
-    expect(mod.configStore.get().prefetchDepth).toBe(42);
-    // Other fields default.
-    expect(mod.configStore.get().importanceWeight).toBe(
-      DEFAULT_PLANNING_CONFIG.importanceWeight,
-    );
-    mod.configStore.__resetForTesting();
+describe("configStore — the seed the trace driver hands the capture surface", () => {
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>)[PREFERENCE_SEED_GLOBAL];
+    window.history.replaceState({}, "", "/");
   });
 
-  it("falls back to defaults and logs once on schema-version mismatch", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        schemaVersion: 99,
-        config: { prefetchDepth: 42 },
-      }),
-    );
-    vi.resetModules();
-    const mod = await import("./configStore.ts");
-    expect(mod.configStore.get()).toEqual(DEFAULT_PLANNING_CONFIG);
-    expect(warn).toHaveBeenCalledTimes(1);
-    expect(warn.mock.calls[0][0]).toContain("schema mismatch");
-    mod.configStore.__resetForTesting();
-    warn.mockRestore();
-  });
-
-  it("falls back to defaults on unparseable JSON", async () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    localStorage.setItem(STORAGE_KEY, "{not json");
-    vi.resetModules();
-    const mod = await import("./configStore.ts");
-    expect(mod.configStore.get()).toEqual(DEFAULT_PLANNING_CONFIG);
-    expect(warn).toHaveBeenCalled();
-    mod.configStore.__resetForTesting();
-    warn.mockRestore();
-  });
-
-  it("returns defaults when no localStorage key is present", async () => {
-    localStorage.clear();
-    vi.resetModules();
-    const mod = await import("./configStore.ts");
-    expect(mod.configStore.get()).toEqual(DEFAULT_PLANNING_CONFIG);
-    mod.configStore.__resetForTesting();
-  });
-
-  it("merges partial persisted configs with defaults (forward-compatible)", async () => {
-    // Simulate an older snapshot that pre-dates a newly-added field.
-    localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({
-        schemaVersion: 3,
-        config: { prefetchDepth: 42 },
-      }),
-    );
-    vi.resetModules();
-    const mod = await import("./configStore.ts");
-    const cfg = mod.configStore.get();
-    expect(cfg.prefetchDepth).toBe(42);
-    // Every other field present and default.
-    for (const k of Object.keys(DEFAULT_PLANNING_CONFIG) as (keyof typeof DEFAULT_PLANNING_CONFIG)[]) {
-      if (k === "prefetchDepth") continue;
-      expect(cfg[k]).toBe(DEFAULT_PLANNING_CONFIG[k]);
-    }
-    mod.configStore.__resetForTesting();
-  });
-});
-
-describe("configStore — the envelope the trace driver writes", () => {
   /**
-   * The string is what `lucida trace --prefetch-depth 0` writes before the
-   * page loads, and the driver's own test holds its script to that shape.
+   * The seed is what `lucida trace --prefetch-depth 0` sets before the page
+   * loads, and the driver's own test holds its script to that shape.
    * Together they are the browser-free half of "prefetch depth zero from
    * the driver leaves the prefetch lane empty".
    */
-  it("hydrates prefetch depth zero from the driver's envelope, and the plan has no prefetch lane", async () => {
-    localStorage.setItem(STORAGE_KEY, '{"schemaVersion":3,"config":{"prefetchDepth":0}}');
-    vi.resetModules();
-    const mod = await import("./configStore.ts");
-    const config = mod.configStore.get();
+  it("starts from the seed, and the plan has no prefetch lane", () => {
+    (globalThis as Record<string, unknown>)[PREFERENCE_SEED_GLOBAL] = {
+      "developer.tools": true,
+      "planning.prefetchDepth": 0,
+    };
+    window.history.replaceState({}, "", "/?render=1");
+    __resetPreferencesForTesting();
+    const config = configStore.get();
     expect(config.prefetchDepth).toBe(0);
 
     // A timeseries with ten timepoints at one level, so the default depth
@@ -270,6 +207,14 @@ describe("configStore — the envelope the trace driver writes", () => {
     expect(driven.requests.some((request) => request.lane === "prefetch")).toBe(false);
     const defaults = plan(snapshot, createSyntheticState(), DEFAULT_PLANNING_CONFIG);
     expect(defaults.requests.some((request) => request.lane === "prefetch")).toBe(true);
-    mod.configStore.__resetForTesting();
+  });
+
+  it("ignores the seed off the capture surface", () => {
+    (globalThis as Record<string, unknown>)[PREFERENCE_SEED_GLOBAL] = {
+      "developer.tools": true,
+      "planning.prefetchDepth": 0,
+    };
+    __resetPreferencesForTesting();
+    expect(configStore.get()).toEqual(DEFAULT_PLANNING_CONFIG);
   });
 });

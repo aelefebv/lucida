@@ -4,8 +4,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { DevControls, type LiveCacheKnobs } from "./DevControls.tsx";
-import { configStore } from "../pipeline/planning/configStore.ts";
+import { configStore, PLANNING_KNOB_PREFERENCES } from "../pipeline/planning/configStore.ts";
 import { DEFAULT_PLANNING_CONFIG } from "../pipeline/planning/config.ts";
+import { CACHE_KNOB_PREFERENCES, readCacheKnobs } from "../pipeline/fetch/cacheKnobs.ts";
+import {
+  PREFERENCES_STORAGE_KEY,
+  __resetPreferencesForTesting,
+  developerToolsPreference,
+  getPreference,
+  setPreference,
+} from "../theme/preferences.ts";
 import {
   DEBUG_OVERLAYS,
   getRenderRadiusPreviewTier,
@@ -13,35 +21,34 @@ import {
   setOverlayEnabled,
 } from "./logging.ts";
 
+// The panel shows only while developer tools are on, and its knobs apply only then.
 beforeEach(() => {
-  configStore.__resetForTesting();
-  setRenderRadiusPreviewTier(null);
   localStorage.clear();
+  __resetPreferencesForTesting();
+  setPreference(developerToolsPreference, true);
+  setRenderRadiusPreviewTier(null);
 });
 
 afterEach(() => {
   cleanup();
-  configStore.__resetForTesting();
   setRenderRadiusPreviewTier(null);
-  for (const o of DEBUG_OVERLAYS) setOverlayEnabled(o, false);
   localStorage.clear();
+  __resetPreferencesForTesting();
 });
 
-/** Stand-in for the live `CpuCache`, which Dev controls only reads config from. */
-function fakeCache(overrides: Partial<ReturnType<LiveCacheKnobs["getConfig"]>> = {}) {
-  const config = {
+/**
+ * Stand-in for the live `CpuCache`, which Dev controls only reads config
+ * from. It runs under the knobs as the session's cache does.
+ */
+function fakeCache(overrides: Partial<ReturnType<LiveCacheKnobs["getConfig"]>> = {}): LiveCacheKnobs {
+  const own = {
     mainBudgetBytes: 512 * 1024 * 1024,
     overviewBudgetBytes: 128 * 1024 * 1024,
     maxConcurrentFetches: 12,
     maxBytesInFlight: 64 * 1024 * 1024,
     ...overrides,
   };
-  return {
-    getConfig: () => config,
-    // Faithful to CpuCache.updateConfig: an Object.assign onto the live
-    // config, which is what makes the edit read back.
-    updateConfig: vi.fn((partial: Record<string, number>) => Object.assign(config, partial)),
-  };
+  return { getConfig: () => ({ ...own, ...readCacheKnobs() }) };
 }
 
 describe("DevControls — planning config rendering", () => {
@@ -81,6 +88,28 @@ describe("DevControls — planning config rendering", () => {
     expect(screen.getByLabelText(/COARSE lane offset.*slider/i)).toBeTruthy();
     // Warning banner mentions the canonical priority order.
     expect(screen.getByText(/canonical order/i)).toBeTruthy();
+  });
+
+  it("offers each planning knob over exactly the range its preference clamps to", async () => {
+    const user = userEvent.setup();
+    const { container } = render(<DevControls />);
+    await user.click(screen.getByRole("button", { name: /show/i }));
+    for (const [field, pref] of Object.entries(PLANNING_KNOB_PREFERENCES)) {
+      const slider = container.querySelector(`#cfg-${field}`) as HTMLInputElement | null;
+      expect(slider, field).not.toBeNull();
+      expect(Number(slider!.min), field).toBe(pref.parse(-1e12));
+      expect(Number(slider!.max), field).toBe(pref.parse(1e12));
+    }
+  });
+});
+
+describe("DevControls — developer tools", () => {
+  it("edits knobs that apply only while developer tools are on", () => {
+    render(<DevControls />);
+    fireEvent.change(screen.getByLabelText(/Importance weight.*slider/i), { target: { value: "120" } });
+    expect(configStore.get().importanceWeight).toBe(120);
+    act(() => setPreference(developerToolsPreference, false));
+    expect(configStore.get().importanceWeight).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
   });
 });
 
@@ -223,8 +252,8 @@ describe("DevControls — read-only mode (production builds)", () => {
   });
 
   it("keeps Reset all enabled and working — the recovery path for persisted knobs", async () => {
-    // A previous session persisted non-default knobs; they still apply in
-    // this build, so the user must be able to clear them from the UI.
+    // A previous session persisted non-default knobs; with developer tools
+    // on they apply in this build, so the user must be able to clear them.
     const user = userEvent.setup();
     act(() => {
       configStore.set("distanceWeight", 50);
@@ -237,8 +266,9 @@ describe("DevControls — read-only mode (production builds)", () => {
 
     await user.click(resetAll);
     expect(configStore.get()).toEqual(DEFAULT_PLANNING_CONFIG);
-    // Persisted envelope cleared too — nothing stale left for next load.
-    expect(localStorage.getItem("lucida.planning.config")).toBeNull();
+    // The preferences are forgotten too, so nothing stale is left for the next load.
+    const stored = JSON.parse(localStorage.getItem(PREFERENCES_STORAGE_KEY) ?? '{"values":{}}').values;
+    expect(Object.keys(stored).filter((key) => key.startsWith("planning."))).toEqual([]);
   });
 
   it("disables Reset all when nothing differs from defaults", () => {
@@ -289,60 +319,76 @@ describe("DevControls — overlay toggles", () => {
   });
 });
 
-describe("DevControls — session-scoped cache knobs", () => {
-  it("shows the live cache config and marks the section as session-scoped", () => {
+describe("DevControls — cache knobs", () => {
+  it("shows the values the live cache runs under", () => {
     render(<DevControls getCpuCache={() => fakeCache()} />);
 
-    expect(screen.getAllByText(/session-scoped/i).length).toBeGreaterThan(0);
-    expect((screen.getByLabelText(/Main budget \(MB\)/i) as HTMLInputElement).value).toBe("512");
-    expect((screen.getByLabelText(/Overview budget \(MB\)/i) as HTMLInputElement).value).toBe("128");
-    expect((screen.getByLabelText(/Max fetches/i) as HTMLInputElement).value).toBe("12");
-    expect((screen.getByLabelText(/Max in-flight \(MB\)/i) as HTMLInputElement).value).toBe("64");
+    expect((screen.getByLabelText("Main budget (MB)") as HTMLInputElement).value).toBe("512");
+    expect((screen.getByLabelText("Overview budget (MB)") as HTMLInputElement).value).toBe("128");
+    expect((screen.getByLabelText("Max fetches") as HTMLInputElement).value).toBe("12");
+    expect((screen.getByLabelText("Max in-flight (MB)") as HTMLInputElement).value).toBe("64");
   });
 
-  it("writes each knob through to the live cache", () => {
-    const cache = fakeCache();
-    render(<DevControls getCpuCache={() => cache} />);
+  it("writes each knob to its preference, in the cache's units", () => {
+    render(<DevControls getCpuCache={() => fakeCache()} />);
 
-    fireEvent.change(screen.getByLabelText(/Main budget \(MB\)/i), { target: { value: "256" } });
-    fireEvent.change(screen.getByLabelText(/Overview budget \(MB\)/i), { target: { value: "64" } });
-    fireEvent.change(screen.getByLabelText(/Max fetches/i), { target: { value: "24" } });
-    fireEvent.change(screen.getByLabelText(/Max in-flight \(MB\)/i), { target: { value: "32" } });
+    fireEvent.change(screen.getByLabelText("Main budget (MB)"), { target: { value: "256" } });
+    fireEvent.change(screen.getByLabelText("Overview budget (MB)"), { target: { value: "64" } });
+    fireEvent.change(screen.getByLabelText("Max fetches"), { target: { value: "24" } });
+    fireEvent.change(screen.getByLabelText("Max in-flight (MB)"), { target: { value: "32" } });
 
-    expect(cache.updateConfig.mock.calls.map(([c]) => c)).toEqual([
-      { mainBudgetBytes: 256 * 1024 * 1024 },
-      { overviewBudgetBytes: 64 * 1024 * 1024 },
-      { maxConcurrentFetches: 24 },
-      { maxBytesInFlight: 32 * 1024 * 1024 },
-    ]);
+    expect(readCacheKnobs()).toEqual({
+      mainBudgetBytes: 256 * 1024 * 1024,
+      overviewBudgetBytes: 64 * 1024 * 1024,
+      maxConcurrentFetches: 24,
+      maxBytesInFlight: 32 * 1024 * 1024,
+    });
   });
 
   it("shows the edited value back without waiting for a telemetry poll", () => {
-    const cache = fakeCache();
-    render(<DevControls getCpuCache={() => cache} />);
-    fireEvent.change(screen.getByLabelText(/Main budget \(MB\)/i), { target: { value: "256" } });
-    expect((screen.getByLabelText(/Main budget \(MB\)/i) as HTMLInputElement).value).toBe("256");
+    render(<DevControls getCpuCache={() => fakeCache()} />);
+    fireEvent.change(screen.getByLabelText("Main budget (MB)"), { target: { value: "256" } });
+    expect((screen.getByLabelText("Main budget (MB)") as HTMLInputElement).value).toBe("256");
+  });
+
+  it("returns a knob to the cache's own value from its reset arrow", async () => {
+    const user = userEvent.setup();
+    render(<DevControls getCpuCache={() => fakeCache()} />);
+    expect(screen.queryByRole("button", { name: /Reset Max fetches/i })).toBeNull();
+
+    fireEvent.change(screen.getByLabelText("Max fetches"), { target: { value: "24" } });
+    await user.click(await screen.findByRole("button", { name: /Reset Max fetches/i }));
+    expect(getPreference(CACHE_KNOB_PREFERENCES.maxConcurrentFetches)).toBeNull();
+    expect((screen.getByLabelText("Max fetches") as HTMLInputElement).value).toBe("12");
   });
 
   it("ignores non-positive values rather than starving the cache", () => {
-    const cache = fakeCache();
-    render(<DevControls getCpuCache={() => cache} />);
-    fireEvent.change(screen.getByLabelText(/Max fetches/i), { target: { value: "0" } });
-    expect(cache.updateConfig).not.toHaveBeenCalled();
+    render(<DevControls getCpuCache={() => fakeCache()} />);
+    fireEvent.change(screen.getByLabelText("Max fetches"), { target: { value: "0" } });
+    expect(getPreference(CACHE_KNOB_PREFERENCES.maxConcurrentFetches)).toBeNull();
   });
 
   it("disables the knobs in read-only builds", () => {
-    const cache = fakeCache();
-    render(<DevControls getCpuCache={() => cache} editable={false} />);
-    const input = screen.getByLabelText(/Main budget \(MB\)/i) as HTMLInputElement;
+    render(<DevControls getCpuCache={() => fakeCache()} editable={false} />);
+    const input = screen.getByLabelText("Main budget (MB)") as HTMLInputElement;
     expect(input.disabled).toBe(true);
     fireEvent.change(input, { target: { value: "256" } });
-    expect(cache.updateConfig).not.toHaveBeenCalled();
+    expect(getPreference(CACHE_KNOB_PREFERENCES.mainBudgetBytes)).toBeNull();
+  });
+
+  it("are cleared by Reset all, which a cache knob alone enables", async () => {
+    const user = userEvent.setup();
+    act(() => setPreference(CACHE_KNOB_PREFERENCES.maxBytesInFlight, 8 * 1024 * 1024));
+    render(<DevControls getCpuCache={() => fakeCache()} />);
+    const resetAll = screen.getByRole("button", { name: /reset all to defaults/i }) as HTMLButtonElement;
+    expect(resetAll.disabled).toBe(false);
+    await user.click(resetAll);
+    expect(getPreference(CACHE_KNOB_PREFERENCES.maxBytesInFlight)).toBeNull();
   });
 
   it("explains the absence of the knobs when no session is connected", () => {
     render(<DevControls getCpuCache={() => null} />);
-    expect(screen.queryByLabelText(/Main budget \(MB\)/i)).toBeNull();
+    expect(screen.queryByLabelText("Main budget (MB)")).toBeNull();
     expect(screen.getByText(/no session/i)).toBeTruthy();
   });
 
@@ -353,13 +399,13 @@ describe("DevControls — session-scoped cache knobs", () => {
     try {
       let cache: ReturnType<typeof fakeCache> | null = null;
       render(<DevControls getCpuCache={() => cache} />);
-      expect(screen.queryByLabelText(/Main budget \(MB\)/i)).toBeNull();
+      expect(screen.queryByLabelText("Main budget (MB)")).toBeNull();
 
       cache = fakeCache({ mainBudgetBytes: 384 * 1024 * 1024 });
       await act(async () => {
         vi.advanceTimersByTime(1100);
       });
-      expect((screen.getByLabelText(/Main budget \(MB\)/i) as HTMLInputElement).value).toBe("384");
+      expect((screen.getByLabelText("Main budget (MB)") as HTMLInputElement).value).toBe("384");
     } finally {
       vi.useRealTimers();
     }
