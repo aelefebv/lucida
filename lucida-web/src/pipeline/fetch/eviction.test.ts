@@ -16,6 +16,9 @@ const ZERO_EPOCHS: SceneEpochs = {
   content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
 };
 
+/** A plan tick no entry was seen at, so nothing is wanted. */
+const NO_PLAN = () => -1;
+
 function makeEntry(overrides: Partial<CacheEntry> & {
   insertedAt: number;
   sizeBytes: number;
@@ -134,7 +137,7 @@ describe("getTierOrder", () => {
 
 describe("TieredPolicy", () => {
   function makePolicy(mode: InteractionMode): TieredPolicy {
-    return new TieredPolicy(() => mode, () => undefined);
+    return new TieredPolicy(() => mode, () => undefined, NO_PLAN);
   }
 
   it("returns empty when bytesNeeded is zero", () => {
@@ -318,7 +321,7 @@ describe("TieredPolicy", () => {
   it("reads the live interaction mode each call (modeProvider thunk)", () => {
     // Mode change between two eviction passes must be observed.
     let mode: InteractionMode = "panning";
-    const policy = new TieredPolicy(() => mode, () => undefined);
+    const policy = new TieredPolicy(() => mode, () => undefined, NO_PLAN);
     const prefetch = makeEntry({
       insertedAt: 0, sizeBytes: 50, tier: "prefetch", chunkKey: "p",
     });
@@ -336,10 +339,36 @@ describe("TieredPolicy", () => {
     ).toEqual(["d"]);
   });
 
+  describe("what the latest plan wants goes last", () => {
+    const TICK = 7;
+    const policyFor = (mode: InteractionMode) => new TieredPolicy(() => mode, () => undefined, () => TICK);
+    const entries = () => [
+      makeEntry({ insertedAt: 0, sizeBytes: 50, tier: "active-detail", chunkKey: "view", lastSeenTick: TICK, priority: 900 }),
+      makeEntry({
+        insertedAt: 1, sizeBytes: 50, tier: "prefetch", lane: "prefetch", chunkKey: "prefetch", lastSeenTick: TICK, priority: 10,
+      }),
+      makeEntry({ insertedAt: 2, sizeBytes: 50, tier: "active-detail", chunkKey: "stale-detail", lastSeenTick: TICK - 1 }),
+      makeEntry({ insertedAt: 3, sizeBytes: 50, tier: "prefetch", lane: "prefetch", chunkKey: "stale-prefetch", lastSeenTick: 2 }),
+    ];
+
+    for (const mode of ["idle", "panning", "scrubbing"] as const) {
+      it(`takes the unwanted, then the plan's prefetch, then its view, ${mode}`, () => {
+        const victims = policyFor(mode).selectVictims(entries(), 200).map((v) => v.chunkKey);
+        expect(victims.slice(0, 2).sort()).toEqual(["stale-detail", "stale-prefetch"]);
+        expect(victims.slice(2)).toEqual(["prefetch", "view"]);
+      });
+    }
+
+    it("keeps the scrubbing order among the unwanted", () => {
+      const victims = policyFor("scrubbing").selectVictims(entries(), 50).map((v) => v.chunkKey);
+      expect(victims).toEqual(["stale-detail"]);
+    });
+  });
+
   describe("finer than the entity's target goes first", () => {
     const targets = new Map<string, number>([["e-1", 2], ["e-2", 0]]);
     const policyFor = (mode: InteractionMode) =>
-      new TieredPolicy(() => mode, (entityId) => targets.get(entityId));
+      new TieredPolicy(() => mode, (entityId) => targets.get(entityId), NO_PLAN);
 
     it("takes a finer-than-target chunk before every tier, in every mode", () => {
       const prefetch = makeEntry({ insertedAt: 0, sizeBytes: 50, tier: "prefetch", chunkKey: "p", level: 2 });

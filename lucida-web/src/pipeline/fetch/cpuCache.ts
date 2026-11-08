@@ -333,6 +333,8 @@ export class CpuCache {
    * wanted chunk worth asking for again.
    */
   private plansAdmitted = false;
+  /** Whether a submit since the last rebuild started has replaced the queue. */
+  private queueHeldByRebuild = false;
   /** Wanted chunks asked for again after an eviction since the last rebuild. */
   private retriedThisPlan = new Set<string>();
 
@@ -358,6 +360,8 @@ export class CpuCache {
   /** Plan-rebuild generation stamped onto wanted cache entries. */
   private currentSubmitTick = 0;
   private desiredDetailKeysThisTick = new Set<string>();
+  /** The detail keys the view wants this tick, without prefetch: what settling waits on. */
+  private viewDetailKeysThisTick = new Set<string>();
   private desiredCoarseKeysThisTick = new Set<string>();
   /**
    * Keys demanded by the view's own coarse lane this tick (a strict
@@ -412,11 +416,19 @@ export class CpuCache {
     const mainPolicy = new TieredPolicy(
       () => this.interactionDetector.current(),
       (entityId) => this.targetLevelByEntity.get(entityId),
+      () => this.currentSubmitTick,
     );
     // A wanted chunk more urgent than the one arriving stays: an insert
-    // that could only make room by evicting one is refused instead.
-    const protects = (resident: CacheEntry, incoming: CacheEntry): boolean =>
-      resident.lastSeenTick === this.currentSubmitTick && resident.priority < incoming.priority;
+    // that could only make room by evicting one is refused instead. The
+    // view's chunks outrank prefetch whatever their priorities, which mix
+    // in distance and so rank a prefetch chunk near the center above a view
+    // chunk at the edge.
+    const protects = (resident: CacheEntry, incoming: CacheEntry): boolean => {
+      if (resident.lastSeenTick !== this.currentSubmitTick) return false;
+      const residentSpeculative = resident.lane === "prefetch";
+      if (residentSpeculative !== (incoming.lane === "prefetch")) return !residentSpeculative;
+      return resident.priority < incoming.priority;
+    };
     this.chunkStore = new ChunkStore({
       policy: mainPolicy,
       budgetBytes: this.config.mainBudgetBytes,
@@ -543,6 +555,7 @@ export class CpuCache {
       if (unwantedInFlightKeys.size > 0) unwantedInFlightKeys.delete(key);
       if (tier === "detail") {
         this.desiredDetailKeysThisTick.add(key);
+        if (req.lane !== "prefetch") this.viewDetailKeysThisTick.add(key);
       } else if (tier === "coarse") {
         this.desiredCoarseKeysThisTick.add(key);
         if (req.lane === "coarse") this.viewCoarseKeysThisTick.add(key);
@@ -559,9 +572,14 @@ export class CpuCache {
     this.cancelOmittedChunkWork(unwantedInFlightKeys);
     this.wantedRequests.push(requests);
 
+    // A plan rebuild submits once per dataset, and enqueueing replaces the
+    // queue, so what the rebuild's earlier submits queued is carried over.
+    // Dropped, it would be wanted and never asked for.
+    const carried = this.queueHeldByRebuild ? this.chunkScheduler.pendingSnapshot() : [];
+    this.queueHeldByRebuild = true;
     const pendingChunks: ChunkRequest[] = [];
     const pendingTiers: ResidencyTier[] = [];
-    const pendingKeys = new Set<string>();
+    const pendingKeys = new Set(carried.map((req) => chunkSchedulerKey(req, req.tier)));
     const enqueueNow = performance.now();
     let nextRetryAt = Infinity;
     for (let i = 0; i < requests.length; i++) {
@@ -639,7 +657,7 @@ export class CpuCache {
     // gap between them as plan time.
     if (pendingChunks.length > 0) traceRecorder.notePlanEnqueue(enqueueNow);
     this.chunkScheduler.enqueue(
-      orderChunkRequestsForTierAllocation(pendingChunks, pendingTiers),
+      [...carried, ...orderChunkRequestsForTierAllocation(pendingChunks, pendingTiers)],
       enqueueNow,
     );
 
@@ -971,6 +989,7 @@ export class CpuCache {
     this.activeEntityIdsThisRebuild = new Set();
     this.currentSubmitTick++;
     this.desiredDetailKeysThisTick.clear();
+    this.viewDetailKeysThisTick.clear();
     this.desiredCoarseKeysThisTick.clear();
     this.viewCoarseKeysThisTick.clear();
     this.rejectionTracker.clear();
@@ -979,6 +998,7 @@ export class CpuCache {
     this.refusedThisPlan.clear();
     this.retriedThisPlan.clear();
     this.plansAdmitted = false;
+    this.queueHeldByRebuild = false;
     this.shortfallThisPlan = { detail: 0, coarse: 0 };
     this.coarseLoanThisPlan = 0;
     this.disarmReconcile();
@@ -1309,8 +1329,9 @@ export class CpuCache {
    * Speculative prefetch is excluded from `pending` and `inFlight`, because
    * the prefetch lane keeps requesting future timepoints and a plain "queues
    * empty" test might never go true on a timeseries. It is reported beside
-   * them. Demand counts stay prefetch-inclusive: resident and desired must be
-   * counted the same way, and prefetch demand is finite per timepoint.
+   * them. Demand counts leave prefetch out too, resident and desired alike:
+   * a prefetch chunk can be evicted for room and is not asked for again, so
+   * waiting on one could never end.
    *
    * `pendingUnclassified` is set when the queue is deeper than
    * {@link QUIESCENCE_PENDING_SCAN_CAP}. That reads as not quiescent, so a
@@ -1357,7 +1378,7 @@ export class CpuCache {
     out.failedDetailChunks = 0;
     out.failedCoarseChunks = 0;
     this.forEachFailedWantedKey((key) => {
-      if (this.desiredDetailKeysThisTick.has(key)) out.failedDetailChunks++;
+      if (this.viewDetailKeysThisTick.has(key)) out.failedDetailChunks++;
       else out.failedCoarseChunks++;
     });
 
@@ -1396,6 +1417,7 @@ export class CpuCache {
     };
     for (const requests of this.wantedRequests) {
       for (const req of requests) {
+        if (req.lane === "prefetch") continue;
         const key = chunkSchedulerKey(req, req.tier);
         if (seen.has(key)) continue;
         seen.add(key);
@@ -1457,18 +1479,19 @@ export class CpuCache {
   }
 
   /**
-   * Visit each wanted key with a permanent failure record, walking whichever
-   * of the two sets is smaller: both are bounded, but this runs every tick.
+   * Visit each key the view wants with a permanent failure record, walking
+   * whichever of the two sets is smaller: both are bounded, but this runs
+   * every tick.
    */
   private forEachFailedWantedKey(visit: (key: string, record: FailureRecord) => void): void {
-    const wanted = this.desiredDetailKeysThisTick.size + this.desiredCoarseKeysThisTick.size;
+    const wanted = this.viewDetailKeysThisTick.size + this.desiredCoarseKeysThisTick.size;
     if (this.permanentFailures.size <= wanted) {
       for (const [key, record] of this.permanentFailures) {
-        if (this.isWanted(key)) visit(key, record);
+        if (this.viewDetailKeysThisTick.has(key) || this.desiredCoarseKeysThisTick.has(key)) visit(key, record);
       }
       return;
     }
-    for (const keys of [this.desiredDetailKeysThisTick, this.desiredCoarseKeysThisTick]) {
+    for (const keys of [this.viewDetailKeysThisTick, this.desiredCoarseKeysThisTick]) {
       for (const key of keys) {
         const record = this.permanentFailures.get(key);
         if (record) visit(key, record);
@@ -2303,10 +2326,10 @@ export class CpuCache {
 
     for (const entry of this.chunkStore.allEntries()) {
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
-      if (entry.residencyTier === "detail") {
-        residentDetailChunks++;
-        residentDetailBytes += entry.sizeBytes;
-      }
+      if (entry.residencyTier !== "detail") continue;
+      if (!this.viewDetailKeysThisTick.has(chunkSchedulerKey(entry, "detail"))) continue;
+      residentDetailChunks++;
+      residentDetailBytes += entry.sizeBytes;
     }
     for (const entry of this.overviewStore.allEntries()) {
       if (entry.lastSeenTick !== this.currentSubmitTick) continue;
@@ -2316,7 +2339,7 @@ export class CpuCache {
       }
     }
 
-    const desiredDetail = this.desiredDetailKeysThisTick.size;
+    const desiredDetail = this.viewDetailKeysThisTick.size;
     const detailCoverageRatio =
       desiredDetail > 0 ? residentDetailChunks / desiredDetail : 1;
 
