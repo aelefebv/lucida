@@ -109,7 +109,7 @@ function reports(posts: WorkerToMainMessage[], change?: ChunkResidencyChange): C
 }
 
 function epochs(): SceneEpochs {
-  return { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+  return { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
 }
 
 function chunkKey(level: number, t: number, c: number, z: number, y: number, x: number): string {
@@ -551,8 +551,8 @@ describe("handleVolumeChunkData — admission, eviction and the residency report
     const { ctx, posts } = makeMockCtx();
     const atlas = oneSlotVolume(ctx, [0, 0, 0]);
     // Current epoch.content is 5; the batch carries content=1 → stale.
-    const currentEpochs: SceneEpochs = { content: 5, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
-    const batchEpochs: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+    const currentEpochs: SceneEpochs = { content: 5, layout: 1, view: 1, selection: 1, request: 0 };
+    const batchEpochs: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
     const chunks = [makeChunk(0, 0, 0, 0, 0, 0), makeChunk(0, 0, 0, 0, 0, 1)];
 
     handleVolumeChunkData(ctx, makeVolumeMsg("imgA", chunks, { epochs: batchEpochs }), currentEpochs, "ds1", "imgA");

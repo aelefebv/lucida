@@ -34,6 +34,8 @@ export interface SliderProps<T extends SliderValue> {
   thumbLabels?: readonly [string, string];
   isDisabled?: boolean;
   className?: string;
+  /** Set on the slider, for tests and scripted drivers that find it by id. */
+  "data-testid"?: string;
 }
 
 function toArray(value: SliderValue): number[] {
@@ -58,6 +60,7 @@ export function Slider<T extends SliderValue>({
   thumbLabels = ["Minimum", "Maximum"],
   isDisabled,
   className,
+  "data-testid": testId,
 }: SliderProps<T>) {
   const values = toArray(value);
   const isRange = values.length === 2;
@@ -79,6 +82,7 @@ export function Slider<T extends SliderValue>({
   return (
     <AriaSlider<number[]>
       className={className ? `lc-slider ${className}` : "lc-slider"}
+      data-testid={testId}
       aria-label={labelPosition === "hidden" ? label : undefined}
       value={values}
       onChange={(next) => onChange(fromArray(next, value))}

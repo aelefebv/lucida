@@ -213,11 +213,6 @@ export interface SetTCommand {
   t: number;
 }
 
-export interface SetCCommand {
-  type: "set_c";
-  c: number;
-}
-
 export interface SetContrastCommand {
   type: "set_contrast";
   min: number;
@@ -278,9 +273,12 @@ export interface SetDatasetDetailLevelOverrideCommand {
   level: number | null;
 }
 
-export interface SetMultiChannelCommand {
-  type: "set_multi_channel";
-  enabled: boolean;
+/** Show one channel of a layer alone; `channel: null` returns it to the
+ *  composite. A channel past the layer's last is ignored. */
+export interface SetChannelSoloCommand {
+  type: "set_channel_solo";
+  dataset_id: string;
+  channel: number | null;
 }
 
 export interface SetChannelVisibleCommand {
@@ -356,7 +354,6 @@ export type ViewportCommand =
   | SetZCommand
   | SetZRangeCommand
   | SetTCommand
-  | SetCCommand
   | SetContrastCommand
   | SetGammaCommand
   | SetDatasetOrderCommand
@@ -367,7 +364,7 @@ export type ViewportCommand =
   | SetDatasetBlendModeCommand
   | SetDatasetRenderModeCommand
   | SetDatasetDetailLevelOverrideCommand
-  | SetMultiChannelCommand
+  | SetChannelSoloCommand
   | SetChannelVisibleCommand
   | SetChannelColormapCommand
   | SetChannelNameCommand

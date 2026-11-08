@@ -24,7 +24,7 @@ function makePeer(
   return {
     client_id: clientId,
     camera: null,
-    view: { z_range: { start: 0, end: 1 }, t: 0, c: 0 },
+    view: { z_range: { start: 0, end: 1 }, t: 0 },
     display: { contrast_min: 0, contrast_max: 1, gamma: 1 },
     following: null,
     cursor: [10, 20],
@@ -50,7 +50,6 @@ function peersElement(peers: Map<ClientId, PresenceState>) {
       viewMode="2d"
       z={0}
       t={0}
-      c={0}
       cursorLabels={cursorLabels}
     />
   );

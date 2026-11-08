@@ -1,5 +1,8 @@
+mod layers;
 mod types;
 
+pub(crate) use layers::LayerExtent;
+pub use layers::{ResolvedLayer, ShownChannel, in_channel_context};
 pub use types::{
     Annotation, AnnotationKind, BlendMode, ChannelSettings, Colormap, Comment,
     DatasetDisplaySettings, DisplayState, DocumentState, LabelSettings, MemberChunkPlan,
@@ -13,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use lucida_content::*;
 
 use crate::camera::{Camera, Framing};
-use crate::chunk::{self, ChunkRequestPlan};
+use crate::chunk::{self, ChunkCoord, ChunkQuery, ChunkView, CullCounts};
 use crate::epoch::SceneEpochs;
 use crate::framing::{FitBounds, VoxBox, WorldBox};
 use crate::query::{EntityQueryResult, ViewQueryDelta, ViewQueryResult};
@@ -238,7 +241,6 @@ pub(crate) struct ViewQueryCursor {
     /// membership base was rebuilt, so the query resyncs to a full snapshot.
     content: u64,
     layout: u64,
-    asset: u64,
     /// Camera geometry family at snapshot time. A change resyncs.
     mode: CameraModeKind,
     /// Quantized state per present record, keyed by the unique per-record
@@ -252,10 +254,7 @@ impl ViewQueryCursor {
     /// meaning the same membership base and the same camera family. A
     /// difference against any other snapshot means nothing.
     fn matches(&self, epochs: &SceneEpochs, mode: CameraModeKind) -> bool {
-        self.content == epochs.content
-            && self.layout == epochs.layout
-            && self.asset == epochs.asset
-            && self.mode == mode
+        self.content == epochs.content && self.layout == epochs.layout && self.mode == mode
     }
 }
 
@@ -759,35 +758,16 @@ impl Scene {
         }
     }
 
-    /// Compute the chunk request plan for all visible layers across all datasets.
-    /// Returns a flat `ChunkRequestPlan` (union of all members of the first dataset).
-    pub fn chunk_plan(&self) -> ChunkRequestPlan {
-        let ds_id = match self.document.manifests.keys().next() {
-            Some(id) => id.clone(),
-            None => {
-                return ChunkRequestPlan {
-                    needed: Vec::new(),
-                    prefetch: Vec::new(),
-                };
-            }
+    /// The chunks the first dataset's view needs, every member's in turn.
+    pub fn chunk_plan(&self) -> Vec<ChunkCoord> {
+        let Some(ds_id) = self.document.manifests.keys().next() else {
+            return Vec::new();
         };
-        let members = match self.chunk_plan_for(&ds_id) {
-            Some(m) => m,
-            None => {
-                return ChunkRequestPlan {
-                    needed: Vec::new(),
-                    prefetch: Vec::new(),
-                };
-            }
-        };
-        // Flatten all members into a single ChunkRequestPlan for backward compat.
-        let mut needed = Vec::new();
-        let mut prefetch = Vec::new();
-        for m in members {
-            needed.extend(m.needed);
-            prefetch.extend(m.prefetch);
-        }
-        ChunkRequestPlan { needed, prefetch }
+        self.chunk_plan_for(ds_id)
+            .into_iter()
+            .flatten()
+            .flat_map(|member| member.needed)
+            .collect()
     }
 
     /// Compute the chunk request plan for a specific dataset by ID.
@@ -809,10 +789,11 @@ impl Scene {
         let derived = self.derived.get(dataset_id)?;
         let manifest = self.document.manifests.get(dataset_id)?;
 
-        let is_2d = matches!(self.camera, Camera::Slice(_));
         let last_query = self.last_query_entries(dataset_id);
         let pin = self.level_pin(dataset_id);
         let multiscale_by_image = multiscale_by_image(manifest);
+        let layer = self.resolved_layer(dataset_id)?;
+        let channels = layer.channel_indices();
 
         let mut plans = Vec::new();
         for member in &derived.members {
@@ -831,7 +812,7 @@ impl Scene {
                 level0.shape[4] as u32,
             ];
             let region = self.camera.visible_region(
-                &self.view.z_range,
+                &layer.z_range,
                 Some(&member.volume_transform),
                 Some(&vol_shape),
             );
@@ -881,24 +862,35 @@ impl Scene {
             );
             let level_geo = &member.levels[level as usize];
 
-            let t = self.view.t;
-            let c = self.view.c;
-
-            let (needed, prefetch) = if !is_2d {
-                (
-                    chunk::visible_chunks(&local_region, level_geo, t, c, level0),
-                    vec![],
-                )
-            } else {
-                chunk::visible_and_prefetch_chunks(&local_region, level_geo, t, c, level0)
-            };
+            let query =
+                ChunkQuery::new(level_geo, level0, [0.0, 0.0], chunk::RENDER_RADIUS_DISABLED);
+            let mut cells = Vec::new();
+            chunk::enumerate_chunks(
+                &ChunkView::new(&local_region, 0.0),
+                &query,
+                &mut CullCounts::default(),
+                &mut cells,
+            );
+            cells.sort_by(|a, b| a.distance.total_cmp(&b.distance));
+            let needed = channels
+                .iter()
+                .flat_map(|&c| {
+                    cells.iter().map(move |cell| ChunkCoord {
+                        level,
+                        x: cell.x,
+                        y: cell.y,
+                        z: cell.z,
+                        t: layer.t,
+                        c,
+                    })
+                })
+                .collect();
 
             plans.push(MemberChunkPlan {
                 image_id: member.image_id.clone(),
                 position: member.position,
                 target_level: level,
                 needed,
-                prefetch,
             });
         }
 
@@ -1254,7 +1246,7 @@ impl Scene {
     ///   no channel or label entries for the layer panel to render. Existing
     ///   entries are kept; entries for removed datasets are pruned.
     ///
-    /// It bumps every document-scoped epoch (`content`, `layout`, `asset`,
+    /// It bumps every document-scoped epoch (`content`, `layout`,
     /// `annotation`) plus `selection`. `view` bumps only when the camera
     /// reframed: a placed camera is untouched, and a framed or unframed one
     /// fits the loaded content, so a page that joins an open dataset shows it
@@ -1311,7 +1303,6 @@ impl Scene {
 
         self.epochs.content += 1;
         self.epochs.layout += 1;
-        self.epochs.asset += 1;
         self.epochs.annotation += 1;
         self.epochs.selection += 1;
         self.content_changed();
@@ -1331,10 +1322,19 @@ impl Scene {
     /// The fit reads this scene's viewport, so a caller that has not ticked
     /// since the canvas last resized asserts its size first.
     ///
+    /// A view recorded before solo was per layer carries a scene-wide channel
+    /// mode, which lands here as each layer's solo.
+    ///
     /// `epochs.view` bumps iff the camera changed, and `epochs.selection` iff
-    /// view or display changed, so an unchanged presence heartbeat does not
-    /// invalidate consumers' caches but a real remote camera move does.
+    /// view, display or a solo changed, so an unchanged presence heartbeat does
+    /// not invalidate consumers' caches but a real remote camera move does.
     pub fn import_presence(&mut self, camera: Camera, view: ViewState, display: DisplayState) {
+        let mut view = view;
+        if let Some(legacy) = view.take_legacy_channels()
+            && self.adopt_legacy_channels(legacy)
+        {
+            self.epochs.selection += 1;
+        }
         let mut camera = camera;
         // A follow target must not hand this scene state its own mutators could
         // never produce, such as a `zoom: 0.0` that would NaN-poison the next
@@ -1448,6 +1448,40 @@ impl Scene {
             self.derived
                 .insert(id.clone(), build_derived_state(manifest, &layout));
         }
+    }
+
+    /// A dataset's layouts, source then registered, each marked with whether
+    /// the dataset shows it now. That is the layout [`resolve_layout`] picked,
+    /// so a fallback to the default counts, and a first match shadows a later
+    /// layout with the same id.
+    pub fn available_layouts(&self, dataset_id: &DatasetId) -> Vec<AvailableLayout> {
+        let shown = self.derived.get(dataset_id).map(|d| &d.active_layout.id);
+        let source = self
+            .document
+            .manifests
+            .get(dataset_id)
+            .map(|manifest| manifest.source_layouts())
+            .unwrap_or_default();
+        let registered = self
+            .document
+            .registered_layouts
+            .get(dataset_id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut marked = false;
+        source
+            .iter()
+            .chain(registered)
+            .map(|layout| {
+                let active = !marked && shown == Some(&layout.id);
+                marked |= active;
+                AvailableLayout {
+                    id: layout.id.clone(),
+                    name: layout.name.clone(),
+                    active,
+                }
+            })
+            .collect()
     }
 
     /// The box the renderer draws for `member`, as one transform with both
@@ -1749,7 +1783,7 @@ impl Scene {
     /// Incremental counterpart to [`Scene::view_query`].
     ///
     /// The first query for a dataset, a query after the membership base was
-    /// rebuilt (a move in the content, layout, or asset epoch), and a query
+    /// rebuilt (a move in the content or layout epoch), and a query
     /// after the camera changed geometry family all return
     /// [`ViewQueryDelta::Full`] — a complete snapshot that also (re)seeds this
     /// dataset's cursor. Any other query returns [`ViewQueryDelta::Delta`]
@@ -1780,7 +1814,6 @@ impl Scene {
 
         let content = self.epochs.content;
         let layout = self.epochs.layout;
-        let asset = self.epochs.asset;
         let mode = CameraModeKind::of(&self.camera);
 
         // A cursor whose structural epochs and camera family match the current
@@ -1806,7 +1839,6 @@ impl Scene {
                 ViewQueryCursor {
                     content,
                     layout,
-                    asset,
                     mode,
                     entries: new_entries,
                 },
@@ -1827,7 +1859,6 @@ impl Scene {
             ViewQueryCursor {
                 content,
                 layout,
-                asset,
                 mode,
                 entries: new_entries,
             },
@@ -1903,6 +1934,14 @@ fn view_query_diff(
     left.sort_by(|a, b| a.0.cmp(&b.0));
 
     (entered, left, changed)
+}
+
+/// One entry of [`Scene::available_layouts`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct AvailableLayout {
+    pub id: LayoutId,
+    pub name: String,
+    pub active: bool,
 }
 
 /// Resolve which layout to use for a dataset.
@@ -2231,7 +2270,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2377,7 +2415,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2609,7 +2646,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2738,7 +2774,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2873,7 +2908,6 @@ pub(crate) mod test_helpers {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -2887,8 +2921,59 @@ mod tests {
     #[test]
     fn empty_scene_produces_empty_plan() {
         let scene = Scene::new([800, 600]);
-        let plan = scene.chunk_plan();
-        assert!(plan.needed.is_empty());
+        assert!(scene.chunk_plan().is_empty());
+    }
+
+    #[test]
+    fn available_layouts_mark_the_one_shown() {
+        let mut scene = Scene::new([800, 600]);
+        let reg = test_helpers::make_collection_dataset_opened(
+            "c",
+            "c",
+            vec![("m1", [0.0, 0.0]), ("m2", [256.0, 0.0])],
+            [1, 1, 1, 256, 256],
+            [1, 1, 1, 256, 256],
+        );
+        scene.apply(DocumentCommand::DatasetOpened(reg).into());
+        let ds = DatasetId("c".into());
+        let active = |scene: &Scene| -> Vec<(String, bool)> {
+            scene
+                .available_layouts(&ds)
+                .into_iter()
+                .map(|l| (l.id.0, l.active))
+                .collect()
+        };
+
+        // Nothing chosen yet: the manifest's default is the one shown.
+        assert_eq!(active(&scene), [("default".into(), true)]);
+
+        scene.apply(
+            DocumentCommand::RegisterLayout {
+                dataset_id: ds.clone(),
+                layout: LayoutSpec {
+                    id: LayoutId("alt".into()),
+                    name: "Alt".into(),
+                    placements: vec![],
+                },
+            }
+            .into(),
+        );
+        scene.apply(
+            DocumentCommand::SetActiveLayout {
+                dataset_id: ds.clone(),
+                layout_id: LayoutId("alt".into()),
+            }
+            .into(),
+        );
+        assert_eq!(
+            active(&scene),
+            [("default".into(), false), ("alt".into(), true)]
+        );
+        assert!(
+            scene
+                .available_layouts(&DatasetId("missing".into()))
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2903,8 +2988,7 @@ mod tests {
             5,
         );
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
-        let plan = scene.chunk_plan();
-        assert!(!plan.needed.is_empty());
+        assert!(!scene.chunk_plan().is_empty());
     }
 
     #[test]
@@ -2924,8 +3008,8 @@ mod tests {
         scene.view.set_slice("z", 100).unwrap();
         let plan_z100 = scene.chunk_plan();
 
-        assert_eq!(plan_z0.needed[0].z, 0);
-        assert_eq!(plan_z100.needed[0].z, 1);
+        assert_eq!(plan_z0[0].z, 0);
+        assert_eq!(plan_z100[0].z, 1);
     }
 
     #[test]
@@ -2942,7 +3026,7 @@ mod tests {
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
         scene.view.set_z_range(0..128);
         let plan = scene.chunk_plan();
-        let z_values: Vec<u32> = plan.needed.iter().map(|c| c.z).collect();
+        let z_values: Vec<u32> = plan.iter().map(|c| c.z).collect();
         assert!(z_values.contains(&0));
         assert!(z_values.contains(&1));
     }
@@ -2966,7 +3050,6 @@ mod tests {
         let mut scene = Scene::new([800, 600]);
         scene.view.set_z(5);
         scene.view.t = 2;
-        scene.view.c = 1;
 
         let reg = test_helpers::make_dataset_opened("ds1", "test", 1);
         scene.apply(DocumentCommand::DatasetOpened(reg).into());
@@ -2978,7 +3061,6 @@ mod tests {
 
         assert_eq!(parsed.view.z_range, 5..6);
         assert_eq!(parsed.view.t, 2);
-        assert_eq!(parsed.view.c, 1);
         assert_eq!(parsed.document.manifests.len(), 1);
         assert!(
             parsed
@@ -3136,9 +3218,8 @@ mod tests {
         let ds_id = DatasetId("ds1".into());
         let member_plans = scene.chunk_plan_for(&ds_id).unwrap();
         assert_eq!(member_plans.len(), 1);
-        assert_eq!(flat.needed.len(), member_plans[0].needed.len());
-        assert_eq!(flat.prefetch.len(), member_plans[0].prefetch.len());
-        for (a, b) in flat.needed.iter().zip(member_plans[0].needed.iter()) {
+        assert_eq!(flat.len(), member_plans[0].needed.len());
+        for (a, b) in flat.iter().zip(member_plans[0].needed.iter()) {
             assert_eq!(a.key(), b.key());
         }
     }
@@ -3162,14 +3243,14 @@ mod tests {
         }
     }
 
-    /// The distinct levels across every planned chunk of `ds`, needed and
-    /// prefetch alike, in ascending order.
+    /// The distinct levels across every planned chunk of `ds`, in ascending
+    /// order.
     fn planned_levels(scene: &Scene, ds: &DatasetId) -> Vec<u32> {
         let mut levels: Vec<u32> = scene
             .chunk_plan_for(ds)
             .unwrap()
             .iter()
-            .flat_map(|plan| plan.needed.iter().chain(&plan.prefetch))
+            .flat_map(|plan| &plan.needed)
             .map(|chunk| chunk.level)
             .collect();
         levels.sort_unstable();
@@ -4903,7 +4984,6 @@ mod tests {
         // Every document-scoped epoch advances so consumers re-read...
         assert!(scene.epochs.content > baseline.content);
         assert!(scene.epochs.layout > baseline.layout);
-        assert!(scene.epochs.asset > baseline.asset);
         assert!(scene.epochs.annotation > baseline.annotation);
         assert!(scene.epochs.selection > baseline.selection);
         // ...but the local camera is placed and untouched, so view does not.

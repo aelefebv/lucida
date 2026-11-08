@@ -148,7 +148,7 @@ function Viewer({
   const authSession = useAuthSession();
 
   // Browser-persisted author identity, used only for annotation `author` and
-  // ownership checks; `bridge.myId` stays the presence/cursor/follow identity.
+  // ownership checks; the connection's `myId` stays the presence/cursor/follow identity.
   // Persisting it lets a returning user keep control of what they authored.
   const annotationAuthor = useMemo(() => annotationAuthorId(), []);
 
@@ -258,7 +258,6 @@ function Viewer({
     bumpLayerSettingsVersion: layers.bumpLayerSettingsVersion,
     initLayerMaps: (id) => {
       layers.initLayerMaps(id);
-      dims.handleDatasetRegistered(id);
     },
     setSelectedDatasetId,
     bumpDatasetsVersion,
@@ -325,6 +324,8 @@ function Viewer({
     getScene: engine.scene,
     sendOpenRemoteDataset: bridge.sendOpenRemoteDataset,
     sendCommand: bridge.sendCommand,
+    emitPresence: bridge.emitPresence,
+    emitDatasetPresence: bridge.emitDatasetPresence,
     // Any local or remote scene mutation bumps one of these. Viewport-only
     // changes bypass them and go through emitPresenceWithUrl.
     changeTick: datasetsVersion + remoteDocumentVersion,
@@ -365,7 +366,7 @@ function Viewer({
 
   const datasets = useDatasets({
     // Wrap so URL→DatasetId tracking is populated for every local open
-    // (FileBrowser-driven, URL-bar-driven, applier-driven).
+    // (browse-pane-driven, URL-bar-driven, applier-driven).
     sendOpenRemoteDataset: savedViewSync.trackedSendOpen,
   });
 
@@ -483,6 +484,7 @@ function Viewer({
     overlay3dRef,
     breakFollow,
     emitPresence: emitPresenceWithUrl,
+    emitDatasetPresence: emitDatasetPresenceWithUrl,
     collapseDeepLinkHash: savedViewSync.collapseDeepLinkHash,
     docVersion: remoteDocumentVersion,
     onDeepLinkNotFound: setDeepLinkNotFound,
@@ -515,38 +517,6 @@ function Viewer({
       bumpDatasetsVersion();
     },
   };
-
-  // Expose the tickCoordinator and cpuCache as `window.__orch` (alias
-  // `__lucidaOrch`) for `requestTestProxy` from the dev console. Dev builds
-  // only, since it issues real fetches. The capture globals
-  // (`__lucidaCaptureReady`, `__lucidaAutoContrast`) are a separate contract
-  // that the CLI reads in every build.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const loop = render.activeLoop;
-    const cache = bridge.sessionRef.current?.cpuCache;
-    if (!loop || !cache) return;
-    const coord = loop.getTickCoordinator();
-    const debug = {
-      tickCoordinator: coord,
-      cpuCache: cache,
-      requestTestProxy: (
-        datasetId: string,
-        entityId: string,
-        imageId: string,
-        kind: "GroupProxy3D" | "TileProxy3D",
-        t = 0,
-        c = 0,
-      ) => coord.requestTestProxy(cache, datasetId, entityId, imageId, kind, t, c),
-    };
-    const w = window as unknown as { __orch?: typeof debug; __lucidaOrch?: typeof debug };
-    w.__orch = debug;
-    w.__lucidaOrch = debug;
-    return () => {
-      delete w.__orch;
-      delete w.__lucidaOrch;
-    };
-  }, [render.activeLoop, bridge.sessionRef]);
 
   // The two sections of a bundle the trace does not record, the server's
   // dataset health and the frame on the canvas, come from the session socket
@@ -585,13 +555,14 @@ function Viewer({
 
   useScriptControls({
     selectors: {
-      z: dims.z, t: dims.t, c: dims.c,
-      dimZ: dims.dimZ, dimT: dims.dimT, dimC: dims.dimC,
+      z: dims.z, t: dims.t,
+      dimZ: dims.dimZ, dimT: dims.dimT,
       viewMode: dims.viewMode,
     },
+    resolvedLayers: dims.layers,
     setZ: dims.handleZChange,
     setT: dims.handleTChange,
-    setC: dims.handleCChange,
+    setSolo: layers.handleChannelSetSolo,
     setChannelVisible: layers.handleChannelSetVisible,
     setLayerVisible: layers.handleLayerSetVisible,
     captureView: savedViewSync.captureBuilder,
@@ -607,8 +578,7 @@ function Viewer({
     wasmSceneRef: scene.wasmSceneRef,
     loopRef: render.loopRef,
     sessionRef: bridge.sessionRef,
-    followTarget: bridge.followTarget,
-    followTargetRef: bridge.followTargetRef,
+    peerStore: bridge.peerStore,
   });
 
   // The volume viewer owns the fly toggle: entering fly mode also sets the fly
@@ -620,7 +590,7 @@ function Viewer({
 
   const [addDataOpen, setAddDataOpen] = useState(false);
   // Whether any on-canvas debug overlay is toggled on (persisted in
-  // localStorage `debug.overlays`, independent of every panel). Drives the
+  // the `debug.overlays` preference, independent of every panel). Drives the
   // mount of the code-split DebugOverlays layer: with every overlay off
   // there is nothing it could draw, so the chunk isn't fetched.
   const anyOverlayEnabled = useSyncExternalStore(
@@ -745,12 +715,12 @@ function Viewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [layers.layerInfos, selectedDatasetId, datasetsVersion]);
 
-  // The manifest has no source location; the server's dataset health does.
-  const getDatasetSource = useCallback(
+  // The manifest has no source location or health; the server's dataset health has both.
+  const getDatasetHealth = useCallback(
     async (datasetId: string) => {
       if (!liveBridge) return null;
       const health = await liveBridge.requestDatasetHealth(datasetId);
-      return health.find((h) => h.workspace_dataset_id === datasetId)?.source_url ?? null;
+      return health.find((h) => h.workspace_dataset_id === datasetId) ?? null;
     },
     [liveBridge],
   );
@@ -879,7 +849,7 @@ function Viewer({
       layers={layers.layerInfos}
       selectedLayerId={selectedDatasetId}
       expandedLayerId={layers.expandedLayerId}
-      soloChannel={dims.soloChannel}
+      resolvedLayers={dims.layers}
       importWarnings={bridge.datasetImportWarnings}
       onSelectLayer={layers.handleLayerSelect}
       onToggleExpand={layers.handleLayerToggleExpand}
@@ -900,8 +870,8 @@ function Viewer({
       onChannelSetGamma={layers.handleChannelSetGamma}
       onChannelAutoFit={layers.handleChannelAutoFit}
       onChannelSetBlendMode={layers.handleChannelSetBlendMode}
-      onSoloChannel={dims.handleSoloChannel}
-      onShowAllChannels={dims.handleShowAllChannels}
+      onSoloChannel={layers.handleSoloChannel}
+      onShowAllChannels={layers.handleShowAllChannels}
       onLabelSetVisible={layers.handleLabelSetVisible}
       onLabelSetOpacity={layers.handleLabelSetOpacity}
       onAddData={() => setAddDataOpen(true)}
@@ -1022,7 +992,7 @@ function Viewer({
           visible={active}
           workspaceId={workspaceId}
           dataset={infoDataset}
-          getSource={getDatasetSource}
+          getHealth={getDatasetHealth}
         />
       ),
     },
@@ -1034,8 +1004,7 @@ function Viewer({
     onBackToDashboard,
     onUseViewAsPreview: takeViewAsPreview,
     presence: {
-      peers: bridge.peers,
-      followTarget: bridge.followTarget,
+      peerStore: bridge.peerStore,
       onFollow: bridge.handleFollow,
     },
     share: {
@@ -1049,10 +1018,10 @@ function Viewer({
     channelChips: {
       layers: layers.layerInfos,
       selectedLayerId: selectedDatasetId,
-      soloChannel: dims.soloChannel,
+      resolvedLayers: dims.layers,
       onChannelSetVisible: layers.handleChannelSetVisible,
-      onSoloChannel: dims.handleSoloChannel,
-      onShowAllChannels: dims.handleShowAllChannels,
+      onSoloChannel: layers.handleSoloChannel,
+      onShowAllChannels: layers.handleShowAllChannels,
     },
     navigator: navigatorProps,
     railPanels,
@@ -1073,6 +1042,11 @@ function Viewer({
             pixelated={dims.viewMode === "2d"}
             onResize={handleCanvasResize}
             bare={captureSurface}
+            label={
+              hasData
+                ? `${dims.viewMode === "3d" ? "3D" : "2D"} view of ${loadedDatasetNames.join(", ")}`
+                : "Empty view"
+            }
             emptyState={
               render.gpuUnavailable ? (
                 <WebGpuUnavailable reason={render.gpuUnavailable} />
@@ -1171,9 +1145,7 @@ function Viewer({
               breakFollow={breakFollow}
               sendCursor={bridge.sendCursor}
               sendCommand={bridge.sendCommand}
-              peers={bridge.peers}
-              myId={bridge.myId}
-              followTarget={bridge.followTarget}
+              peerStore={bridge.peerStore}
               overlay2dRef={overlay2dRef}
               overlay3dRef={overlay3dRef}
               annotationDraftRef={annotationDraftRef}

@@ -3,8 +3,9 @@
  * wanted keys, eviction, GPU write, and the residency report for every
  * chunk.
  *
- * Re-cuts a resident chunk in place when the plane the current Z maps to is
- * not the one its slot holds. Pairs with `slice/zRetarget.ts`.
+ * Each delivery is the one plane the page cut for the current Z, written over
+ * a resident chunk's slot when the slot holds another plane. Pairs with
+ * `slice/zRetarget.ts`.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -34,7 +35,8 @@ import {
  * Write pre-sliced uint32 label planes into the member's r32uint label pool.
  * The delivery path already extracted the current Z-plane, so each
  * `chunk.data` is `chunkY*chunkX` ids. Ids are categorical, so they keep full
- * 32-bit width.
+ * 32-bit width. Each cell records the plane it holds, so a frame drawing
+ * another plane can hand the chunk back (`retireOtherLabelPlanes`).
  */
 export function handleLabelSliceChunkData(
   ctx: WorkerCtx,
@@ -50,7 +52,7 @@ export function handleLabelSliceChunkData(
     return;
   }
 
-  const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight);
+  const pool = getOrCreateLabelSlicePool(ctx, memberId, datasetId, levelWidth, levelHeight, chunkX, chunkY);
   if (!pool) {
     // Nothing of the batch is resident, so the page must not count it as sent.
     refuseAll("atlas-policy");
@@ -73,6 +75,7 @@ export function handleLabelSliceChunkData(
     const previous = pool.keys.get(cell);
     if (previous !== undefined && previous !== chunk.key) replaced.push(previous);
     pool.keys.set(cell, chunk.key);
+    pool.planes.set(cell, msg.plane);
     batch.held.push(chunk.key);
     const plane = asUint32Slice(chunk.data, 0, chunkY * chunkX);
     writeSliceRegion(
@@ -145,7 +148,6 @@ export function handleSliceChunkData(
 
   const levelZ = sliceLevelZ(fullResZ, fullResDepth, levelDepth);
   const targetChunkZ = Math.floor(levelZ / chunkZ);
-  const localZ = levelZ - targetChunkZ * chunkZ;
   const wanted = wantedChunksFor(ctx.state, memberId, tier);
 
   const batch = new ResidencyBatch();
@@ -210,8 +212,7 @@ export function handleSliceChunkData(
       const sy = Math.floor(slotIndex / atlas.slotsX);
       const chunkW = Math.min(chunkX, levelWidth - chunk.x * chunkX);
       const chunkH = Math.min(chunkY, levelHeight - chunk.y * chunkY);
-      const sliceOffset = localZ * chunkY * chunkX;
-      const sliceData = atlasTexels(chunk.data, chunk.dataType, atlas.format, sliceOffset, chunkY * chunkX);
+      const sliceData = atlasTexels(chunk.data, chunk.dataType, atlas.format, 0, chunkY * chunkX);
 
       const xOff = sx * chunkX;
       const yOff = sy * chunkY;

@@ -527,8 +527,7 @@ mod tests {
             },
             "active_layout_ids": {
                 "wds-test": "layout-registered"
-            },
-            "asset_catalogs": {}
+            }
         }))
         .unwrap()
     }

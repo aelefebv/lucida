@@ -4,12 +4,12 @@
  * (~21k requests, ~5 rebuilds/s), so its per-call cost is main-thread time
  * spent on pure bookkeeping.
  *
- * The 40 ms bound is about 4x a typical p50, loose because timings vary
- * across machines and CI runners. It is a tripwire for re-deriving
- * per-request state several times per submit, or for walking the pending
- * queue on every rebuild, not a benchmark. Read the logged p50.
+ * The budget is a tripwire for re-deriving per-request state several times
+ * per submit, or for walking the pending queue on every rebuild, and it is
+ * held on any host the way `perfBudget.ts` describes. Read the logged p50.
  */
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, vi } from "vitest";
+import { describeTiming, expectWithinBudget, timeStep } from "../../test/perfBudget.ts";
 
 vi.mock("../../debug/logging.ts", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../debug/logging.ts")>();
@@ -30,9 +30,6 @@ function makeSource(): ContentSource {
     fetch(_r: FetchRequest, _s: AbortSignal): Promise<FetchResult> {
       // Never settles: holds the scheduler slot like a real remote read.
       return new Promise<FetchResult>(() => {});
-    },
-    fetchProxy(): Promise<never> {
-      return new Promise<never>(() => {});
     },
   } as unknown as ContentSource;
 }
@@ -71,25 +68,20 @@ function makePlan(requests: ChunkRequest[]): RequestPlan {
     kind: "tile",
     entityId: r.entityId,
     imageId: r.imageId,
-    mode: "tiles-with-detail",
     detailLevels: [3],
     coarseLevel: null,
-    proxyKind: undefined,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
   }));
   return {
     requests,
     activeSet,
-    proxyRequests: [],
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     stats: emptyPlanStats(),
     nextState: createSyntheticState({ previousActiveSet: activeSet }),
   };
 }
 
-/** ~4x the measured 9.1-9.5 ms p50; a tripwire, not a benchmark. */
-const SUBMIT_P50_BUDGET_MS = 40;
+/** In nominal microseconds, about twice the typical figure. */
+const SUBMIT_BUDGET_US = 25_000;
 
 describe("submit cost at remote-fixture scale", () => {
   it("stays well under budget with a 21,400-request plan", () => {
@@ -97,28 +89,16 @@ describe("submit cost at remote-fixture scale", () => {
     const requests = makeRequests(MEMBERS);
     const plan = makePlan(requests);
 
-    // Warm up so we measure steady state, not first-call JIT.
-    for (let i = 0; i < 5; i++) {
-      cache.onPlanRebuildStart();
-      cache.submit(plan);
-    }
-
-    const samples: number[] = [];
-    for (let i = 0; i < 40; i++) {
-      cache.onPlanRebuildStart();
-      const t0 = performance.now();
-      cache.submit(plan);
-      samples.push(performance.now() - t0);
-    }
-    samples.sort((a, b) => a - b);
-    const p50 = samples[Math.floor(samples.length * 0.5)];
-    const p95 = samples[Math.floor(samples.length * 0.95)];
+    const submit = timeStep(() => cache.submit(plan), {
+      samples: 40,
+      warmup: 5,
+      before: () => cache.onPlanRebuildStart(),
+    });
     console.log(
-      `[#900] submit(${MEMBERS} reqs): p50=${p50.toFixed(2)}ms p95=${p95.toFixed(2)}ms ` +
-        `min=${samples[0].toFixed(2)}ms max=${samples[samples.length - 1].toFixed(2)}ms ` +
-        `| at 5 rebuilds/s => ${(p50 * 5).toFixed(1)}ms/s of main thread`,
+      `[submit cost] submit(${MEMBERS} reqs): ${describeTiming(submit, SUBMIT_BUDGET_US)} ` +
+        `| at 5 rebuilds/s => ${((submit.p50Us * 5) / 1_000).toFixed(1)}ms/s of main thread`,
     );
 
-    expect(p50).toBeLessThan(SUBMIT_P50_BUDGET_MS);
+    expectWithinBudget(`submit(${MEMBERS} reqs)`, submit, SUBMIT_BUDGET_US);
   });
 });

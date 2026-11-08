@@ -1,25 +1,22 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatasetManifest } from "../../manifestTypes.ts";
 import type { DatasetEntry, TickContext } from "../../renderLoopTypes.ts";
-import type {
-  CpuCache,
-  FailedChunk,
-  ReadyChunkDelivery,
-  ReadyDelivery,
-  ReadyProxyDelivery,
-} from "../fetch/index.ts";
-import type { ActiveSetEntry } from "../planning/index.ts";
-import { AssetCatalog } from "../assetCatalog.ts";
+import { resolvedLayersJson } from "../../resolvedLayerFixtures.ts";
+import type { CpuCache, FailedChunk, ReadyChunkDelivery } from "../fetch/index.ts";
 import type {
   ColdStateMessage,
   FailedChunksMessage,
   MissingChunk,
-  MissingProxy,
 } from "../../renderer/workerProtocol.ts";
+import { setDebugCategories } from "../../debug/logging.ts";
+import { traceRecorder } from "../../trace/recorder.ts";
+import { PointEvent } from "../../trace/types.ts";
+import { TickCoordinator } from "../tickCoordinator.ts";
+import { RESEND_GUARD_TICKS } from "./delivery/resendGuard.ts";
+import { Uploader } from "./uploader.ts";
+import { loadWasm } from "../../viewProperties.ts";
 
-function createMockAssetCatalog(): AssetCatalog {
-  return new AssetCatalog({ apply_asset_catalog_delta: () => {} });
-}
+beforeAll(loadWasm);
 
 interface MockSceneConfig {
   epochs: { content: number; layout: number; view: number; selection: number };
@@ -46,9 +43,7 @@ interface MockSceneConfig {
     frustum_planes: [number, number, number, number][] | null;
   };
   t: number;
-  c: number;
   z: number;
-  multiChannel: boolean;
   datasetOrder: string[];
   allSettings: Record<string, unknown>;
 }
@@ -81,9 +76,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
       frustum_planes: null,
     },
     t: 0,
-    c: 0,
     z: 0,
-    multiChannel: false,
     datasetOrder: ["ds1"],
     allSettings: {
       ds1: {
@@ -107,16 +100,14 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     member_positions: () => JSON.stringify(config.memberPositions),
     visible_region: () => JSON.stringify(config.visibleRegion),
     t: () => config.t,
-    c: () => config.c,
     z: () => config.z,
-    multi_channel: () => config.multiChannel,
+    resolved_layers: () => resolvedLayersJson(config.datasetOrder, config.allSettings, config),
     camera_mode: () => "slice",
     dataset_order: () => JSON.stringify(config.datasetOrder),
     all_dataset_settings: () => JSON.stringify(config.allSettings),
     set_viewport: () => {},
     set_z: () => {},
     set_t: () => {},
-    set_c: () => {},
     center: () => new Float32Array([512, 512]),
     zoom: () => 1,
     member_model_matrix: () => {
@@ -167,7 +158,7 @@ function createMockContent(datasetId = "ds1"): DatasetManifest {
   } as unknown as DatasetManifest;
 }
 
-function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
+function makeCpuCache(deliveries: ReadyChunkDelivery[] = []): CpuCache {
   return {
     submit: vi.fn(),
     onPlanRebuildStart: vi.fn(),
@@ -181,11 +172,11 @@ function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
     markChunksRefused: vi.fn(),
     markChunksLost: vi.fn(),
     markChunkMissing: vi.fn(() => false),
-    markProxyMissing: vi.fn(),
+
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
     levelResidency: vi.fn(() => ({ cached: [], inFlight: [] })),
     getCachedChunk: vi.fn(() => null),
-    getCachedProxy: vi.fn(() => null),
+
     telemetry: vi.fn(),
     updateConfig: vi.fn(),
     subscribe: vi.fn(() => () => {}),
@@ -194,9 +185,11 @@ function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
   } as unknown as CpuCache;
 }
 
+/** One 256 x 256 plane of uint16 samples, the mock level's whole chunk. */
+const PLANE_BYTES = 256 * 256 * 2;
+
 function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkDelivery {
   return {
-    kind: "chunk",
     entityId: "tile-0",
     imageId: "img-0",
     level: 0,
@@ -206,34 +199,12 @@ function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkD
     y: 0,
     x: 0,
     chunkKey: "0/0/0/0/0/0",
-    data: new ArrayBuffer(1024),
+    data: new ArrayBuffer(PLANE_BYTES),
     dataType: "uint16",
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     lane: "detail",
     residencyTier: "detail",
     priority: 10,
-    ...overrides,
-  };
-}
-
-function makeProxyDelivery(overrides?: Partial<ReadyProxyDelivery>): ReadyProxyDelivery {
-  return {
-    kind: "proxy",
-    datasetId: "ds1",
-    entityId: "tile-0",
-    imageId: "img-0",
-    proxyKind: "TileProxy3D",
-    t: 0,
-    c: 0,
-    header: {
-      algorithmVersion: 1,
-      sourceContentHash: new Uint8Array(32),
-      dims: [4, 4, 4],
-      dtype: "u16",
-    },
-    data: new ArrayBuffer(128),
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
-    priority: 5,
     ...overrides,
   };
 }
@@ -254,7 +225,7 @@ function makeCtx(args: {
       coldState: vi.fn(),
       gpuCapacity: () => null,
       viewHotState: vi.fn(),
-      proxyAssetData: vi.fn(),
+
       sliceChunkData: vi.fn(),
       volumeChunkData: vi.fn(),
       removeLayerResources: vi.fn(),
@@ -268,61 +239,46 @@ function makeCtx(args: {
     renderScale: 1,
     resolutionScale: 1,
     cpuCache: args.cpuCache ?? makeCpuCache(),
-    assetCatalog: createMockAssetCatalog(),
   } as TickContext;
 }
 
 describe("Uploader unified delivery", () => {
-  let Uploader: typeof import("./uploader.ts").Uploader;
-  let priorLocalStorage: unknown;
-
   /**
    * The per-tick stats are handed to `UploadTelemetry.publish`, which the
    * Uploader calls only while the `orch` log category is on. Open the
-   * category with an in-memory `localStorage` shim and read the stats off
-   * the spy.
+   * category and read the stats off the spy.
    */
-  function captureTickStats(uploader: InstanceType<typeof Uploader>) {
+  function captureTickStats(uploader: Uploader) {
     return vi.spyOn(uploader.uploadTelemetry, "publish");
   }
 
-  beforeEach(async () => {
-    const store = new Map<string, string>();
-    priorLocalStorage = (globalThis as Record<string, unknown>).localStorage;
-    (globalThis as Record<string, unknown>).localStorage = {
-      getItem: (k: string) => store.get(k) ?? null,
-      setItem: (k: string, v: string) => void store.set(k, v),
-      removeItem: (k: string) => void store.delete(k),
-    };
-    localStorage.setItem("debug", "orch");
-    vi.resetModules();
-    Uploader = (await import("./uploader.ts")).Uploader;
+  // Setting the category preference is live, so the module graph is not
+  // re-imported for every case, which on a loaded host can take longer than
+  // the hook may.
+  beforeEach(() => {
+    setDebugCategories(["orch"]);
   });
 
   afterEach(() => {
-    (globalThis as Record<string, unknown>).localStorage = priorLocalStorage;
+    setDebugCategories([]);
   });
 
   it("dispatches deliverables from CpuCache and marks sent only after dispatch", () => {
     const chunk = makeChunkDelivery();
-    const proxy = makeProxyDelivery();
-    const cpuCache = makeCpuCache([proxy, chunk]);
+    const cpuCache = makeCpuCache([chunk]);
     const markSent = cpuCache.markSent as ReturnType<typeof vi.fn>;
     const sliceChunkData = vi.fn();
-    const proxyAssetData = vi.fn();
     const ctx = makeCtx({
       cpuCache,
-      client: { sliceChunkData, proxyAssetData },
+      client: { sliceChunkData },
     });
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
 
-    expect(proxyAssetData).toHaveBeenCalledTimes(1);
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
-    expect(markSent.mock.calls.map(c => c[0])).toEqual([proxy, chunk]);
-    expect(publish.mock.calls[0][1].uploadedProxies).toBe(1);
+    expect(markSent.mock.calls.map(c => c[0])).toEqual([chunk]);
     expect(publish.mock.calls[0][1].uploadedChunks).toBe(1);
     expect(ret).toBe(true);
   });
@@ -335,17 +291,30 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(cpuCache.markSent).not.toHaveBeenCalled();
     expect(publish.mock.calls[0][1].skippedNoMeta).toBe(1);
   });
 
-  it("stops re-sending a chunk the worker keeps handing back, names it in the trace, and retries after a cold state", async () => {
-    const { traceRecorder } = await import("../../trace/recorder.ts");
-    const { PointEvent } = await import("../../trace/types.ts");
-    const { RESEND_GUARD_TICKS } = await import("./delivery/resendGuard.ts");
+  it("counts a chunk that does not hold the slice view's plane as a stale plan, not missing metadata", () => {
+    // The view's Z is in chunk 0 along Z, and the delivery is chunk 1.
+    const chunk = makeChunkDelivery({ z: 1, chunkKey: "0/0/0/1/0/0" });
+    const cpuCache = makeCpuCache([chunk]);
+    const sliceChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+
+    const uploader = new Uploader();
+    const publish = captureTickStats(uploader);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+
+    expect(sliceChunkData).not.toHaveBeenCalled();
+    expect(cpuCache.markSent).not.toHaveBeenCalled();
+    expect(publish.mock.calls[0][1]).toMatchObject({ skippedOtherPlane: 1, skippedNoMeta: 0 });
+  });
+
+  it("stops re-sending a chunk the worker keeps handing back, names it in the trace, and retries after a cold state", () => {
     const recordPointEvent = vi.spyOn(traceRecorder, "recordPointEvent");
     // The cache offers the chunk every tick, as it does when every delivery
     // comes back refused and clears its sent mark.
@@ -357,10 +326,10 @@ describe("Uploader unified delivery", () => {
     });
     const uploader = new Uploader();
 
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
     for (let i = 0; i < RESEND_GUARD_TICKS; i++) {
       uploader.handleChunkResidency("img-0", "detail", "refused", [chunk.chunkKey], ctx.cpuCache, "wrong-slice");
-      uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+      uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
     }
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
     const held = recordPointEvent.mock.calls.filter(([kind]) => kind === PointEvent.Held);
@@ -369,11 +338,11 @@ describe("Uploader unified delivery", () => {
     ]);
 
     // Held: the next ticks send nothing and ask for no further tick.
-    expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0)).toBe(false);
+    expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0)).toBe(false);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateDisplay({ ctx, datasetId: "ds1", displayStateByChannel: {} });
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateSelection({
@@ -383,10 +352,9 @@ describe("Uploader unified delivery", () => {
       currentZ: 1,
       requests: [],
       visibleRegion: { xyBoundsVox: [0, 0, 1, 1], zRangeVox: [1, 2], effectiveZoom: 1, sortCenterVox: null, frustumPlanes: null },
-      desiredProxyKeys: [],
-      epochs: { content: 1, layout: 1, view: 1, selection: 2, asset: 0, request: 1 },
+      epochs: { content: 1, layout: 1, view: 1, selection: 2, request: 1 },
     });
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 2);
     recordPointEvent.mockRestore();
   });
@@ -402,15 +370,15 @@ describe("Uploader unified delivery", () => {
       priority: 100,
     });
     const cpuCache = makeCpuCache([large, smallerLowerPriority]);
-    const sliceChunkData = vi.fn();
-    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+    const volumeChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { volumeChunkData }, mode: "volume" });
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 1 * 1024 * 1024, 0);
+    const ret = uploader.deliverToWorker(ctx, 1 * 1024 * 1024, null);
 
-    expect(sliceChunkData).toHaveBeenCalledTimes(1);
-    expect(sliceChunkData.mock.calls[0][1][0].key).toBe(large.chunkKey);
+    expect(volumeChunkData).toHaveBeenCalledTimes(1);
+    expect(volumeChunkData.mock.calls[0][1][0].key).toBe(large.chunkKey);
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(4 * 1024 * 1024);
     expect(ret).toBe(true);
@@ -438,13 +406,13 @@ describe("Uploader unified delivery", () => {
       lane: "coarse",
     });
     const cpuCache = makeCpuCache([largeDetail, secondDetail, coarse]);
-    const sliceChunkData = vi.fn();
-    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+    const volumeChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { volumeChunkData }, mode: "volume" });
 
-    new Uploader().deliverToWorker(ctx, 1000, 0);
+    new Uploader().deliverToWorker(ctx, 1000, null);
 
-    expect(sliceChunkData).toHaveBeenCalledTimes(2);
-    expect(sliceChunkData.mock.calls.map((call) => call[1][0].key)).toEqual([
+    expect(volumeChunkData).toHaveBeenCalledTimes(2);
+    expect(volumeChunkData.mock.calls.map((call) => call[1][0].key)).toEqual([
       largeDetail.chunkKey,
       coarse.chunkKey,
     ]);
@@ -454,17 +422,19 @@ describe("Uploader unified delivery", () => {
     ]);
   });
 
-  it("reports real posted bytes against the caller's budget", () => {
-    const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
+  it("reports the bytes it posts, one plane of a chunk in the slice view, against the caller's budget", () => {
+    // Twice a plane: what the slice view posts is the one plane it draws.
+    const chunk = makeChunkDelivery({ data: new ArrayBuffer(2 * PLANE_BYTES) });
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
 
-    expect(publish.mock.calls[0][1].bytesUploaded).toBe(2048);
+    expect(sliceChunkData.mock.calls[0][1][0].data.byteLength).toBe(PLANE_BYTES);
+    expect(publish.mock.calls[0][1].bytesUploaded).toBe(PLANE_BYTES);
     expect(publish.mock.calls[0][1].bytesBudget).toBe(8 * 1024 * 1024);
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(false);
   });
@@ -472,23 +442,19 @@ describe("Uploader unified delivery", () => {
   it("flags the tick when the upload budget is exhausted", () => {
     const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
     const cpuCache = makeCpuCache([chunk]);
-    const sliceChunkData = vi.fn();
-    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+    const ctx = makeCtx({ cpuCache, mode: "volume" });
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 1024, 0);
+    uploader.deliverToWorker(ctx, 1024, null);
 
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(2048);
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
   });
 
-  it("skips telemetry aggregation when the orch category is off", async () => {
+  it("skips telemetry aggregation when the orch category is off", () => {
     // The `orch` log category is the only thing that turns the aggregators on.
-    localStorage.removeItem("debug");
-    // The category set is cached at module load; this is the documented
-    // same-tab refresh path.
-    (await import("../../debug/logging.ts")).refreshDebugCategories();
+    setDebugCategories([]);
     const chunk = makeChunkDelivery();
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();
@@ -496,7 +462,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
 
     // The send loop itself is unaffected by the telemetry gate.
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
@@ -508,13 +474,13 @@ describe("Uploader unified delivery", () => {
   it("tracks worker member ids for lifecycle cleanup without using delivery state", () => {
     const cpuCache = makeCpuCache([makeChunkDelivery({ c: 2 })]);
     const sliceChunkData = vi.fn();
-    const scene = createMockScene({ multiChannel: true });
+    const scene = createMockScene();
     const uploader = new Uploader();
 
     uploader.deliverToWorker(
       makeCtx({ cpuCache, scene, client: { sliceChunkData } }),
       8 * 1024 * 1024,
-      0,
+      () => 0,
     );
 
     expect(sliceChunkData.mock.calls[0][0]).toBe("img-0:ch2");
@@ -525,13 +491,6 @@ describe("Uploader unified delivery", () => {
 });
 
 describe("Uploader worker feedback", () => {
-  let Uploader: typeof import("./uploader.ts").Uploader;
-
-  beforeEach(async () => {
-    vi.resetModules();
-    Uploader = (await import("./uploader.ts")).Uploader;
-  });
-
   it("forwards each residency report to CpuCache by image, channel and tier", () => {
     const cpuCache = makeCpuCache();
     const uploader = new Uploader();
@@ -549,28 +508,9 @@ describe("Uploader worker feedback", () => {
     expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "detail", ["0/0/1/0/0/2"], "stale");
   });
 
-  it("clears missing proxy sent state through CpuCache", () => {
-    const cpuCache = makeCpuCache();
-    const missing: MissingProxy = {
-      kind: "proxy",
-      datasetId: "ds1",
-      entityId: "tile-0",
-      proxyKind: "TileProxy3D",
-      t: 0,
-      c: 2,
-    };
-
-    new Uploader().handleWantedSetDelta("ds1", [missing], cpuCache);
-
-    expect(cpuCache.markProxyMissing).toHaveBeenCalledWith(
-      "ds1|tile-0|TileProxy3D|0|2",
-    );
-  });
-
   it("checks a missing chunk against the residency mirror, and asks for a tick only on a disagreement", () => {
     const cpuCache = makeCpuCache();
     const missing: MissingChunk = {
-      kind: "chunk",
       datasetId: "ds1",
       tier: "detail",
       entityId: "tile-0",
@@ -589,18 +529,8 @@ describe("Uploader worker feedback", () => {
 });
 
 describe("Uploader cold and hot state", () => {
-  let Uploader: typeof import("./uploader.ts").Uploader;
-  let TickCoordinator: typeof import("../tickCoordinator.ts").TickCoordinator;
-
-  beforeEach(async () => {
-    vi.resetModules();
-    Uploader = (await import("./uploader.ts")).Uploader;
-    TickCoordinator = (await import("../tickCoordinator.ts")).TickCoordinator;
-  });
-
   it("populates display state by channel from dataset settings", () => {
     const scene = createMockScene({
-      c: 1,
       allSettings: {
         ds1: {
           visible: true,
@@ -704,7 +634,7 @@ describe("Uploader cold and hot state", () => {
       new Map(),
     );
     const cold = coldState.mock.calls[0][0] as ColdStateMessage;
-    expect((cold.activeSet[0] as ActiveSetEntry).entityId).toBe("tile-0");
+    expect(cold.activeSet[0].entityId).toBe("tile-0");
   });
 });
 

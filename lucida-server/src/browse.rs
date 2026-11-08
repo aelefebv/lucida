@@ -213,29 +213,11 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::ProxyConfig;
     use lucida_store::source_policy::{SourcePolicy, SourcePolicyConfig};
 
-    /// Minimal `AppState`. Only the source policy is inspected by
-    /// `browse_handler`; the proxy cache paths are never touched in browse
-    /// tests, so we hand it stub paths.
     fn test_state(source_policy: SourcePolicy) -> AppState {
-        let proxy_config = ProxyConfig {
-            cache_dir: PathBuf::from("/tmp/lucida-browse-test-proxy"),
-            legacy_proxy_enabled: false,
-            concurrency: 1,
-            generated_enabled: false,
-            generated_cache_dir: PathBuf::from("/tmp/lucida-browse-test-generated"),
-            generated_concurrency: 1,
-            generated_background_chunk_limit: 1,
-            generated_target_long_axis: 512,
-            generated_chunk_long_axis: 256,
-            generated_max_chunk_bytes: 2 * 1024 * 1024,
-            generated_disk_budget_bytes: None,
-        };
         AppState {
             source_policy: Arc::new(source_policy),
-            proxy_config,
         }
     }
 

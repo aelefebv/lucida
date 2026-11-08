@@ -122,10 +122,10 @@ function readEnvelope(storage: Storage | null): Envelope {
 
 /**
  * A store over `storage`. Pass null for a memory-only store that starts from
- * the defaults.
+ * `seed`, and otherwise from the defaults.
  */
-export function createPreferenceStore(storage: Storage | null): PreferenceStore {
-  let envelope = readEnvelope(storage);
+export function createPreferenceStore(storage: Storage | null, seed: StoredValues = {}): PreferenceStore {
+  let envelope = storage ? readEnvelope(storage) : { version: PREFERENCES_VERSION, values: seed };
   let defaults: StoredValues = {};
   const listeners = new Set<() => void>();
   // get() must return the same value until something changes, or
@@ -190,9 +190,16 @@ export function createPreferenceStore(storage: Storage | null): PreferenceStore 
   };
 }
 
+/**
+ * The page global the trace driver sets before the page loads: preference
+ * values by key, which the capture surface starts from. No other page reads
+ * it, so a script can't reach a person's settings through it.
+ */
+export const PREFERENCE_SEED_GLOBAL = "lucidaPreferenceSeed";
+
 function browserStorage(): Storage | null {
   // The capture surface renders the same pixels whoever's browser runs it,
-  // so it reads defaults and persists nothing (see captureSurface.ts).
+  // so it reads no storage and persists nothing (see captureSurface.ts).
   if (isCaptureSurface()) return null;
   try {
     return typeof localStorage === "undefined" ? null : localStorage;
@@ -201,7 +208,71 @@ function browserStorage(): Storage | null {
   }
 }
 
-let store = createPreferenceStore(browserStorage());
+function captureSeed(): StoredValues {
+  if (!isCaptureSurface()) return {};
+  const seed: unknown = (globalThis as Record<string, unknown>)[PREFERENCE_SEED_GLOBAL];
+  return isRecord(seed) ? seed : {};
+}
+
+let storage = browserStorage();
+let store = createPreferenceStore(storage, captureSeed());
+
+// Subscribers attach here rather than to `store`, so they outlive a test's
+// store reset.
+const listeners = new Set<() => void>();
+const notifyListeners = () => {
+  for (const listener of [...listeners]) listener();
+};
+let detachStore = store.subscribe(notifyListeners);
+
+interface LegacyMigration {
+  isOld: (key: string) => boolean;
+  migrate: (old: ReadonlyMap<string, string>) => void;
+}
+
+const legacyMigrations: LegacyMigration[] = [];
+
+function runLegacyMigration({ isOld, migrate }: LegacyMigration): void {
+  if (!storage) return;
+  const old = new Map<string, string>();
+  try {
+    for (let i = 0; i < storage.length; i++) {
+      const key = storage.key(i);
+      if (key === null || key === PREFERENCES_STORAGE_KEY || !isOld(key)) continue;
+      const raw = storage.getItem(key);
+      if (raw !== null) old.set(key, raw);
+    }
+  } catch {
+    return;
+  }
+  if (old.size === 0) return;
+  migrate(old);
+  for (const key of old.keys()) {
+    try {
+      storage.removeItem(key);
+    } catch {
+      // The key is read again next load and lands on the same values.
+    }
+  }
+}
+
+/**
+ * Move values an older build kept under localStorage keys of its own into
+ * preferences, once: `migrate` gets each key `isOld` accepts with its raw value
+ * and sets the preferences they become, then those keys are removed. A key
+ * that is still there was written after the last migration removed it, so its
+ * value wins over the stored preference. Call it beside the preference's
+ * definition, so it runs before anything reads the preference. The capture
+ * surface has no storage, so there it reads and removes nothing.
+ */
+export function migrateLegacyKeys(
+  isOld: (key: string) => boolean,
+  migrate: (old: ReadonlyMap<string, string>) => void,
+): void {
+  const migration = { isOld, migrate };
+  legacyMigrations.push(migration);
+  runLegacyMigration(migration);
+}
 
 export function getPreference<T>(pref: Preference<T>): T {
   return store.get(pref);
@@ -220,7 +291,10 @@ export function setPreferenceDefaults(defaults: StoredValues): void {
 }
 
 export function subscribePreferences(listener: () => void): () => void {
-  return store.subscribe(listener);
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
 }
 
 /** Read and write one preference. Re-renders when it changes, in any tab. */
@@ -234,10 +308,21 @@ export function usePreference<T>(pref: Preference<T>): [T, (value: T) => void] {
   return [value, setValue];
 }
 
-/** Reload the shared store from localStorage. Tests only. */
+/**
+ * Reopen the shared store as a fresh page would: from localStorage, or the
+ * seed on the capture surface, then the legacy migrations. Tests only.
+ */
 export function __resetPreferencesForTesting(): void {
-  store = createPreferenceStore(browserStorage());
+  detachStore();
+  storage = browserStorage();
+  store = createPreferenceStore(storage, captureSeed());
+  detachStore = store.subscribe(notifyListeners);
+  for (const migration of legacyMigrations) runLegacyMigration(migration);
+  notifyListeners();
 }
 
-/** Developer surfaces (monitor, HUD, dev controls, FPS) show only when on. */
+/**
+ * Developer surfaces (monitor, HUD, dev controls, FPS) show only when on, and
+ * the Dev controls knobs apply only when on.
+ */
 export const developerToolsPreference = booleanPreference("developer.tools", false);

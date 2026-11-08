@@ -18,12 +18,11 @@ export type WantedChunksByMember = Map<string, WantedMemberChunks>;
  */
 export function wantedChunksFromPlan(
   requests: readonly ChunkRequest[],
-  multiChannel: boolean,
 ): WantedChunksByMember {
   const byMember: WantedChunksByMember = new Map();
   for (const req of requests) {
     if (req.lane !== "detail" && req.lane !== "coarse") continue;
-    const memberId = workerMemberId(req.imageId, req.c, multiChannel);
+    const memberId = workerMemberId(req.imageId, req.c);
     const key = wantedEntryKey(req.tier, memberId);
     const entry = byMember.get(key);
     if (entry) entry.chunkKeys.push(req.chunkKey);

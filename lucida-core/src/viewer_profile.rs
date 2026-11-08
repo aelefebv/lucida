@@ -230,13 +230,6 @@ impl ProfileScene {
                         count: bounds.t,
                     });
                 }
-                ViewportCommand::SetC { c } if *c >= bounds.c => {
-                    return Err(E::IndexOutOfRange {
-                        axis: 'C',
-                        requested: *c,
-                        count: bounds.c,
-                    });
-                }
                 _ => {}
             }
         }
@@ -256,6 +249,15 @@ impl ProfileScene {
             | ViewportCommand::SetChannelBlendMode { dataset_id, .. }
             | ViewportCommand::CenterOnVoxel3D { dataset_id, .. } => {
                 self.known_dataset(dataset_id)?;
+            }
+            ViewportCommand::SetChannelSolo {
+                dataset_id,
+                channel,
+            } => {
+                let manifest = self.known_dataset(dataset_id)?;
+                if let Some(channel) = channel {
+                    check_channel(manifest, dataset_id, *channel)?;
+                }
             }
             ViewportCommand::SetChannelVisible {
                 dataset_id,
@@ -283,19 +285,7 @@ impl ProfileScene {
                 ..
             } => {
                 let manifest = self.known_dataset(dataset_id)?;
-                let count = manifest
-                    .images()
-                    .first()
-                    .and_then(|image| image.multiscale.levels.first())
-                    .map(|level| saturating_count(level.shape[1]))
-                    .ok_or_else(|| E::NoChannels(dataset_id.clone()))?;
-                if *channel >= count {
-                    return Err(E::ChannelOutOfRange {
-                        dataset_id: dataset_id.clone(),
-                        requested: *channel,
-                        count,
-                    });
-                }
+                check_channel(manifest, dataset_id, *channel)?;
             }
             ViewportCommand::SetLabelVisible {
                 dataset_id, label, ..
@@ -350,7 +340,7 @@ pub enum ProfileCommandError {
     },
     /// A value the viewer's controls cannot produce.
     InvalidValue(String),
-    /// A Z, T or C index past the smallest count among the visible datasets.
+    /// A Z or T index past the largest count among the visible datasets.
     IndexOutOfRange {
         axis: char,
         requested: u32,
@@ -504,15 +494,36 @@ fn active_layouts(document: &DocumentState) -> IndexMap<DatasetId, LayoutId> {
         .collect()
 }
 
+fn check_channel(
+    manifest: &lucida_content::DatasetManifest,
+    dataset_id: &str,
+    channel: u32,
+) -> Result<(), ProfileCommandError> {
+    let count = manifest
+        .images()
+        .first()
+        .and_then(|image| image.multiscale.levels.first())
+        .map(|level| saturating_count(level.shape[1]))
+        .ok_or_else(|| ProfileCommandError::NoChannels(dataset_id.to_string()))?;
+    if channel >= count {
+        return Err(ProfileCommandError::ChannelOutOfRange {
+            dataset_id: dataset_id.to_string(),
+            requested: channel,
+            count,
+        });
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy)]
 struct IndexBounds {
     t: u32,
-    c: u32,
     z: u32,
 }
 
-/// The T, C and Z counts every visible dataset has, so an index below them
-/// shows data in all of them. `None` when nothing visible has image data.
+/// The deepest T and Z counts among the visible datasets. Each layer clamps
+/// the scene's index into its own extent and says so, so only an index no
+/// layer reaches is refused. `None` when nothing visible has image data.
 fn visible_index_bounds(scene: &Scene) -> Option<IndexBounds> {
     let mut bounds: Option<IndexBounds> = None;
     for id in &scene.dataset_order {
@@ -531,14 +542,12 @@ fn visible_index_bounds(scene: &Scene) -> Option<IndexBounds> {
         };
         let current = IndexBounds {
             t: saturating_count(level.shape[0]),
-            c: saturating_count(level.shape[1]),
             z: saturating_count(level.shape[2]),
         };
         bounds = Some(match bounds {
             Some(existing) => IndexBounds {
-                t: existing.t.min(current.t),
-                c: existing.c.min(current.c),
-                z: existing.z.min(current.z),
+                t: existing.t.max(current.t),
+                z: existing.z.max(current.z),
             },
             None => current,
         });
@@ -704,6 +713,44 @@ mod tests {
         assert!(error.is_missing_resource());
         let settings = &profile.scene.dataset_settings[&DatasetId("wds-a".into())];
         assert_eq!(settings.channel_settings.len(), 3);
+    }
+
+    #[test]
+    fn a_solo_past_the_layer_s_channels_is_a_missing_resource() {
+        let mut profile = opened();
+        let solo = |channel| ViewportCommand::SetChannelSolo {
+            dataset_id: "wds-a".into(),
+            channel,
+        };
+        assert!(
+            profile
+                .apply(solo(Some(3)))
+                .unwrap_err()
+                .is_missing_resource()
+        );
+        profile.apply(solo(Some(2))).unwrap();
+        profile.apply(solo(None)).unwrap();
+        let settings = &profile.scene.dataset_settings[&DatasetId("wds-a".into())];
+        assert_eq!(settings.solo, None);
+    }
+
+    #[test]
+    fn an_index_any_visible_layer_reaches_is_accepted() {
+        let mut document = document();
+        document.apply(DocumentCommand::DatasetOpened(
+            make_dataset_opened_with_shape(
+                "wds-b",
+                "b.zarr",
+                1,
+                [5, 1, 4, 64, 64],
+                [1, 1, 4, 64, 64],
+                1,
+            ),
+        ));
+        let mut profile = ProfileScene::fitted(&document);
+        assert!(profile.apply(ViewportCommand::SetZ { z: 39 }).is_ok());
+        assert!(profile.apply(ViewportCommand::SetT { t: 4 }).is_ok());
+        assert!(profile.apply(ViewportCommand::SetT { t: 5 }).is_err());
     }
 
     #[test]

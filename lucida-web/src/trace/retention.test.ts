@@ -37,7 +37,7 @@ function makeRecorder() {
   const recorder = new TraceRecorder({ now: () => clock, epochNow: () => 1_700_000_000_000 });
   recorder.setEnvironment({
     captureWarmth: () => ({
-      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
     }),
     captureConditions: () => ({
       datasetIds: ["ds"],

@@ -76,7 +76,6 @@ export function createSyntheticSnapshot(
       layout: 0,
       view: 0,
       selection: 0,
-      asset: 0,
       request: 0,
     },
     entities: [],
@@ -89,13 +88,11 @@ export function createSyntheticSnapshot(
     },
     selection: {
       t: 0,
-      c: 0,
       z: 0,
       visibleChannels: [0],
       renderMode: "slice",
       interactionState: "idle",
     },
-    assetCatalog: null,
     minimapPending: new Map<string, MinimapChunkCoord[]>(),
     ...overrides,
   };

@@ -20,9 +20,7 @@
         "start": 0,
         "end": 1
       },
-      "t": 0,
-      "c": 0,
-      "multi_channel": false
+      "t": 0
     },
     "display": {
       "contrast_min": 0.0,

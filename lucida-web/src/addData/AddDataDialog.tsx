@@ -4,6 +4,7 @@ import { useId } from "react";
 import { IconButton } from "../ui/Button.tsx";
 import { Dialog } from "../ui/Dialog.tsx";
 import { useCommand } from "../ui/commands.ts";
+import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import { BrowsePane } from "./BrowsePane.tsx";
 import {
   forgetRecentSource,
@@ -92,13 +93,13 @@ function RecentSources({ onOpen }: { onOpen: (url: string) => void }) {
           const SourceIcon = is_local_dataset_url(url) ? FolderIcon : CloudIcon;
           return (
             <li key={url} className="lc-add-data-recent-item">
-              <button type="button" className="lc-add-data-recent-open" title={url} onClick={() => onOpen(url)}>
+              <UnstyledButton className="lc-add-data-recent-open" title={url} onPress={() => onOpen(url)}>
                 <SourceIcon size={16} aria-hidden />
                 <span className="lc-add-data-recent-name">{name}</span>
                 <span className="lc-add-data-recent-url">
                   <span dir="ltr">{url}</span>
                 </span>
-              </button>
+              </UnstyledButton>
               <IconButton
                 icon={XIcon}
                 label={`Remove ${name} from recent`}

@@ -1,8 +1,8 @@
 /**
  * The view state React reads, held by the WASM scene alone.
  *
- * The scene owns the selectors (z, t, c, multi-channel) and the camera. React
- * keeps no copy of them: a control writes the scene, and a render reads the
+ * The scene owns the selectors (z, t), what each layer shows, and the camera.
+ * React keeps no copy of them: a control writes the scene, and a render reads the
  * scene back through this store. A copy would need every path that writes the
  * scene (a saved view, a followed peer, a restore) to update it too, and the
  * one that forgot would be reverted by the next write from the copy.
@@ -14,6 +14,7 @@
  * the selectors.
  */
 import type { WasmScene } from "lucida-core";
+import { parseResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
 import type { ViewMode } from "./types.ts";
 
 export type CameraMode = "slice" | "arcball" | "fly";
@@ -21,15 +22,15 @@ export type CameraMode = "slice" | "arcball" | "fly";
 export interface SceneView {
   readonly z: number;
   readonly t: number;
-  readonly c: number;
-  readonly multiChannel: boolean;
+  /** What each layer shows, by dataset id in panel order. */
+  readonly layers: ResolvedLayers;
   readonly cameraMode: CameraMode;
   /** `2d` for the slice camera, `3d` for either volume camera. */
   readonly viewMode: ViewMode;
 }
 
-/** The epochs that can move what a saved view records. Annotations and the
- *  asset catalog can't, so their epochs are left out. */
+/** The epochs that can move what a saved view records. Annotations can't,
+ *  so their epoch is left out. */
 export interface ViewEpochs {
   readonly content: number;
   readonly layout: number;
@@ -41,11 +42,14 @@ export interface ViewEpochs {
 const NO_SCENE_VIEW: SceneView = {
   z: 0,
   t: 0,
-  c: 0,
-  multiChannel: false,
+  layers: new Map(),
   cameraMode: "slice",
   viewMode: "2d",
 };
+
+/** The raw `resolved_layers()` answer each snapshot was parsed from, so an
+ *  unchanged answer keeps the snapshot's identity. */
+const layersJsonOf = new WeakMap<SceneView, string>();
 
 const writeListeners = new Set<() => void>();
 
@@ -93,12 +97,21 @@ export class SceneStore {
     const scene = this.getScene();
     const epochs = scene ? readEpochs(scene) : null;
     if (scene === this.scene && sameEpochs(epochs, this.epochs)) return;
+    // A camera move cannot change what the layers show, so it reuses them.
+    const layersJson = scene && scene === this.scene && sameLayerEpochs(epochs, this.epochs)
+      ? layersJsonOf.get(this.view) ?? null
+      : null;
     this.scene = scene;
     this.epochs = epochs;
-    const view = scene ? readView(scene) : NO_SCENE_VIEW;
+    const view = scene ? readView(scene, layersJson, this.view) : NO_SCENE_VIEW;
     if (!sameView(view, this.view)) this.view = view;
     for (const listener of [...this.listeners]) listener();
   };
+}
+
+function sameLayerEpochs(a: ViewEpochs | null, b: ViewEpochs | null): boolean {
+  if (a === null || b === null) return false;
+  return a.content === b.content && a.layout === b.layout && a.selection === b.selection;
 }
 
 function readEpochs(scene: WasmScene): ViewEpochs {
@@ -111,25 +124,31 @@ function sameEpochs(a: ViewEpochs | null, b: ViewEpochs | null): boolean {
   return a.content === b.content && a.layout === b.layout && a.view === b.view && a.selection === b.selection;
 }
 
-function readView(scene: WasmScene): SceneView {
+/** Read the view. `knownLayersJson` is the current answer when the caller
+ *  knows the layers are unchanged; then `previous`'s parsed layers are kept. */
+function readView(scene: WasmScene, knownLayersJson: string | null, previous: SceneView): SceneView {
   const mode = scene.camera_mode();
   const cameraMode: CameraMode = mode === "fly" ? "fly" : mode === "arcball" ? "arcball" : "slice";
-  return {
+  const layersJson = knownLayersJson ?? scene.resolved_layers();
+  const layers = layersJson === layersJsonOf.get(previous)
+    ? previous.layers
+    : parseResolvedLayers(layersJson);
+  const view: SceneView = {
     z: scene.z(),
     t: scene.t(),
-    c: scene.c(),
-    multiChannel: scene.multi_channel(),
+    layers,
     cameraMode,
     viewMode: cameraMode === "slice" ? "2d" : "3d",
   };
+  layersJsonOf.set(view, layersJson);
+  return view;
 }
 
 function sameView(a: SceneView, b: SceneView): boolean {
   return (
     a.z === b.z &&
     a.t === b.t &&
-    a.c === b.c &&
-    a.multiChannel === b.multiChannel &&
+    a.layers === b.layers &&
     a.cameraMode === b.cameraMode
   );
 }

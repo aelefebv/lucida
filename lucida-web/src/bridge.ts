@@ -84,11 +84,27 @@ export interface DatasetSourceHealth {
 }
 
 export interface DatasetImportWarning {
+  kind: DatasetImportWarningKind;
   target: string;
+  /** The importer's account, for developers and agents. People see the warning worded from `kind`. */
   message: string;
   /** The warning says the data is shown wrong, so it degrades `status`. */
   degrades: boolean;
 }
+
+/** Mirror of `lucida_protocol::DatasetImportWarningKind`. */
+export type DatasetImportWarningKind =
+  | "skipped_group"
+  | "unreadable_tile_geometry"
+  | "unusable_tile_geometry"
+  | "sampled_label_discovery"
+  | "unusable_label_index"
+  | "unwritten_level"
+  | "mismatched_tile_geometry"
+  | "duplicate_tile"
+  | "malformed_collection_layout"
+  | "pinned_axis"
+  | "invalid_scale";
 
 export type DatasetOpenStage =
   | "request_received"
@@ -257,10 +273,8 @@ function membershipDatasetId(
 }
 
 /**
- * Gated debug logger for bridge events. Toggle from the console via
- * `localStorage.setItem("debug", "bridge")`
- * followed by `refreshDebugCategories()` (the gate is cached at module
- * init; a raw same-tab setItem alone isn't seen until reload).
+ * Gated debug logger for bridge events. Toggle from the console with
+ * `localStorage.setItem("debug", "bridge")` and a reload (see debug/logging.ts).
  */
 export function bridgeLog(event: string, data: Record<string, unknown> = {}, wsReadyState?: number) {
   if (!isDebugEnabled("bridge")) return;
@@ -292,7 +306,7 @@ export interface PresenceState {
   client_id: ClientId;
   /** Camera, view and display arrive together in one `presence` message. */
   camera?: unknown;
-  view?: { z_range: { start: number; end: number }; t: number; c: number };
+  view?: { z_range: { start: number; end: number }; t: number };
   display?: { contrast_min: number; contrast_max: number; gamma: number };
   following: ClientId | null;
   cursor: [number, number] | null;
@@ -333,8 +347,8 @@ export interface BridgeHandlers {
   onAck: (seq: number) => void;
   /**
    * Binary frame, forwarded as (key, payload) after the bridge parses the
-   * envelope (client_id, keyLen, key, payload). Chunk-vs-proxy routing lives
-   * in the content source so the bridge stays a generic binary transport.
+   * envelope (client_id, keyLen, key, payload). Routing by key lives in the
+   * content source so the bridge stays a generic binary transport.
    */
   onBinary?: (key: string, payload: ArrayBuffer) => void;
   onPeerJoined?: (clientId: ClientId, presence: PresenceState) => void;
@@ -354,10 +368,6 @@ export interface BridgeHandlers {
    * successful one's.
    */
   onOpenDatasetFailed?: (requestId: string, url: string, error: string) => void;
-  /**
-   * The server may emit an empty `delta.added` as a sanity check (no-op).
-   */
-  onAssetCatalogUpdate?: (datasetId: string, deltaJson: string) => void;
   onGeneratedAvailabilityUpdate?: (datasetId: string, deltaJson: string) => void;
   onGeneratedChunkStatus?: (
     datasetId: string,
@@ -661,12 +671,7 @@ export class Bridge {
           case "report_failed":
             this.handleReportReceipt(msg);
             break;
-          case "asset_catalog_update":
-            this.handlers.onAssetCatalogUpdate?.(
-              msg.dataset_id,
-              JSON.stringify(msg.delta ?? { added: [] }),
-            );
-            break;
+
           case "generated_availability_update":
             this.handlers.onGeneratedAvailabilityUpdate?.(
               msg.dataset_id,
@@ -1286,7 +1291,7 @@ export class Bridge {
    *  bridge never transmits.
    *
    *  Every client message passes here, including the content source's chunk
-   *  and asset requests, so each frame that goes out is counted on the trace
+   *  requests, so each frame that goes out is counted on the trace
    *  once, at the bytes the socket carries. A frame dropped here was never a
    *  send. */
   send(json: string) {

@@ -38,6 +38,8 @@ export interface DatasetSettings {
   label_settings?: LabelSettingsJS[];
   channel_blend_mode: string;
   detail_level_override?: number | null;
+  /** The channel the layer shows alone; absent for its composite. */
+  solo?: number | null;
 }
 
 export interface SceneSettings {
@@ -54,16 +56,6 @@ export function getSceneSettings(scene: WasmScene): SceneSettings {
   cachedSettings = { layerOrder, allSettings };
   settingsGeneration = currentGeneration;
   return cachedSettings;
-}
-
-/** Visible channel indices; falls back to [0] when none visible. */
-export function getActiveChannels(dsSettings: DatasetSettings): number[] {
-  if (!dsSettings.channel_settings || dsSettings.channel_settings.length === 0) return [0];
-  const channels: number[] = [];
-  for (let i = 0; i < dsSettings.channel_settings.length; i++) {
-    if (dsSettings.channel_settings[i].visible) channels.push(i);
-  }
-  return channels.length > 0 ? channels : [0];
 }
 
 export function compositeKey(memberId: string, channel: number): string {

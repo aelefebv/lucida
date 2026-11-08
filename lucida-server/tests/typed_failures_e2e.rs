@@ -20,18 +20,15 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use common::workspace_rig::WorkspaceRig;
 use lucida_core::protocol::{CommandRejection, MessageRejection, ServerMessage};
 use lucida_protocol::{ChunkFailureKind, SourceChunkStatus};
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(20);
 
-fn proxy_config(root: &Path) -> ProxyConfig {
-    ProxyConfig {
-        cache_dir: root.join("proxies"),
-        legacy_proxy_enabled: false,
-        concurrency: 1,
+fn generated_config(root: &Path) -> GeneratedConfig {
+    GeneratedConfig {
         generated_enabled: false,
         generated_cache_dir: root.join("generated"),
         generated_concurrency: 1,
@@ -40,6 +37,7 @@ fn proxy_config(root: &Path) -> ProxyConfig {
         generated_chunk_long_axis: 32,
         generated_max_chunk_bytes: 1024 * 1024,
         generated_disk_budget_bytes: None,
+        generated_memory: lucida_server::generated::GeneratedChunkMemory::new(1 << 20),
     }
 }
 
@@ -141,13 +139,13 @@ async fn start(name: &str) -> Rig {
     let data = root.join("dataset.zarr");
     write_fixture(&data);
 
-    let server = WorkspaceRig::start(proxy_config(&root)).await;
+    let server = WorkspaceRig::start(generated_config(&root)).await;
     let (progress, _progress_rx) = mpsc::unbounded_channel();
     let opened = open_dataset(
         1,
         &data.to_str().unwrap().parse().unwrap(),
         &DatasetOpenContext {
-            proxy_config: proxy_config(&root),
+            generated_config: generated_config(&root),
             source_policy: Arc::default(),
             workspace: server.scope(),
         },

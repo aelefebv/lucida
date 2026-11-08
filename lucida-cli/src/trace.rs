@@ -635,6 +635,10 @@ pub struct BundleHeader {
     pub view_url: Option<String>,
     pub viewport: Option<BundleViewport>,
     pub device_pixel_ratio: Option<f64>,
+    /// The memory the page fitted its budgets to, in GiB: what the browser
+    /// reported, or the driver's override of it. None when the page read
+    /// none, or the bundle is older than the field.
+    pub device_memory_gib: Option<f64>,
     /// `slice` or `volume`.
     pub mode: Option<String>,
     /// The planning configuration, by the names the Dev controls panel shows.
@@ -814,6 +818,10 @@ pub const REPLAY_INPUTS: &[ReplayInput] = &[
     ReplayInput {
         input: "device pixel ratio",
         field: "devicePixelRatio",
+    },
+    ReplayInput {
+        input: "device memory",
+        field: "deviceMemoryGib",
     },
     ReplayInput {
         input: "slice or volume mode",
@@ -1270,11 +1278,12 @@ pub fn pin_display(
     }
     settings.detail_level_override = pins.level;
     if pins.contrast.is_some() || pins.colormap.is_some() {
-        for index in 0..channel_count.max(1) {
-            let channel = settings.ensure_channel(index);
+        let channel_count = channel_count.max(1);
+        for index in 0..channel_count {
+            let channel = settings.ensure_channel(index, channel_count);
             channel.colormap = pins
                 .colormap
-                .unwrap_or_else(|| Colormap::default_for_channel(index));
+                .unwrap_or_else(|| Colormap::default_for_channel(index, channel_count));
             if let Some((min, max)) = pins.contrast {
                 channel.contrast_min = min;
                 channel.contrast_max = max;
@@ -1764,12 +1773,16 @@ pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> Str
             .device_pixel_ratio
             .map(|dpr| format!(" DPR {dpr}"))
             .unwrap_or_default();
+        let memory = header
+            .device_memory_gib
+            .map(|gib| format!(" · device memory {gib} GiB"))
+            .unwrap_or_default();
         let mode = header
             .mode
             .as_deref()
             .map(|mode| format!(" · {mode}"))
             .unwrap_or_default();
-        lines.push(format!("view      {url}{viewport}{dpr}{mode}"));
+        lines.push(format!("view      {url}{viewport}{dpr}{memory}{mode}"));
     }
     for pins in &header.pins {
         lines.push(format!("pins      {}", format_pins(pins)));
@@ -2163,7 +2176,7 @@ struct DriveRequest<'a> {
     script: Option<&'a Script>,
 }
 
-/// What runs in the page before its own scripts: the knobs' storage seed and
+/// What runs in the page before its own scripts: the knobs' preference seed and
 /// the device memory override, or None when the request has neither.
 fn new_document_script(request: &DriveRequest<'_>) -> Option<String> {
     let parts: Vec<String> = [
@@ -2194,10 +2207,10 @@ fn new_document_script(request: &DriveRequest<'_>) -> Option<String> {
 /// step by step, each gesture settling before the next. The frame is then
 /// the last step's, and the run the export reads is the last step's run.
 ///
-/// `request.knobs` are written into the page's browser storage before the
-/// page loads, through the stores the Dev controls panel writes, so the run
-/// starts under them. The profile is the launch's own and dies with it, so
-/// a knob set for one run cannot steer the next.
+/// `request.knobs` are handed to the page before it loads, as the preferences
+/// the Dev controls panel writes, so the run starts under them. They ride a
+/// page global rather than browser storage, so a knob set for one run cannot
+/// steer the next.
 async fn drive_and_export(
     url: &str,
     token: Option<&EffectiveToken>,
@@ -3531,7 +3544,7 @@ mod tests {
             ),
             "{script}"
         );
-        assert!(script.contains("localStorage.setItem"), "{script}");
+        assert!(script.contains("lucidaPreferenceSeed"), "{script}");
 
         let with = DriverFacts {
             composed_view: ComposedView {
@@ -3860,7 +3873,10 @@ mod tests {
         assert!(human.contains("misses 12"), "{human}");
         assert!(human.contains("generated coarse ready 8"), "{human}");
         assert!(human.contains("gs://bucket/sample.zarr"), "{human}");
-        assert!(human.contains("@ 1440x900 DPR 2 · slice"), "{human}");
+        assert!(
+            human.contains("@ 1440x900 DPR 2 · device memory 4 GiB · slice"),
+            "{human}"
+        );
         assert!(human.contains("level 2 · max_intensity"), "{human}");
         assert!(human.contains("contrast 100..2000, 50..900"), "{human}");
         assert!(human.contains("hardware adapter"), "{human}");
@@ -4336,8 +4352,7 @@ mod tests {
                 }
             },
             "registered_layouts": {},
-            "active_layout_ids": {},
-            "asset_catalogs": {}
+            "active_layout_ids": {}
         }))
         .unwrap()
     }
@@ -4506,7 +4521,7 @@ mod tests {
         assert_eq!(settings.channel_settings.len(), 2);
         for (index, channel) in settings.channel_settings.iter().enumerate() {
             assert_eq!((channel.contrast_min, channel.contrast_max), (1.0, 3.0));
-            assert_eq!(channel.colormap, Colormap::default_for_channel(index));
+            assert_eq!(channel.colormap, Colormap::default_for_channel(index, 2));
         }
         assert!(settings.visible);
         assert_eq!(settings.render_mode, RenderMode::Translucent);

@@ -5,15 +5,14 @@
  * in `wire-fixtures/` from the real serde types. This suite drives the same
  * files through the web's real consumers and compares each to a literal
  * authored here, so a Rust field rename fails here instead of the web reading
- * `undefined`. Binary frames are locked in `pipeline/fetch/wireProtocol.test.ts`;
- * `ChunkMessage::ChunkFetch` has no producer and is excluded.
+ * `undefined`. `ChunkMessage::ChunkFetch` has no producer and is excluded.
  *
  * If the Rust change is intended, regenerate with
  * `REGEN_WIRE_GOLDENS=1 cargo test -p lucida-server --test wire_goldens`
  * and update the expectations and mirror types here.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -60,13 +59,9 @@ import {
   type WireGeneratedAvailabilityDelta,
   type WireGeneratedAvailabilitySnapshot,
   type WireGeneratedLevelAvailability,
+  type WireGeneratedLevelHistogram,
 } from "./pipeline/generatedAvailability.ts";
-import {
-  AssetCatalog,
-  type ProxyKind,
-  type WireAssetCatalog,
-  type WireAssetCatalogDelta,
-} from "./pipeline/assetCatalog.ts";
+
 import {
   ProxiedContentSource,
   type ChunkFailureKind,
@@ -86,6 +81,8 @@ import {
   type ViewState as WireViewState,
 } from "./savedView/types.ts";
 import { viewModeForCamera } from "./savedView/restoreAnnotationView.ts";
+import { decode, encode } from "./savedView/encoder.ts";
+import { loadWasm } from "./viewProperties.ts";
 import type { Annotation } from "./components/annotationDocument.ts";
 
 // Fixture loading
@@ -331,30 +328,16 @@ const expectedFetchSingle: FetchSource = {
   },
 };
 
-const expectedCatalogSingle: WireAssetCatalog = {
-  entries: [
-    {
-      entity_id: "img-0",
-      kinds: ["TileProxy3D"],
-      footprints: [
-        { kind: "TileProxy3D", dims: [50, 128, 128], bytes: 1638400 },
-      ],
-    },
-  ],
-};
-
 /** Wire shape of `lucida_protocol::DatasetOpened`. */
 interface WireDatasetOpened {
   manifest: DatasetManifest;
   fetch: FetchSource;
-  catalog: WireAssetCatalog;
   opener_client_id: number | null;
 }
 
 const expectedDatasetOpenedSingle: WireDatasetOpened = {
   manifest: expectedManifestSingle,
   fetch: expectedFetchSingle,
-  catalog: expectedCatalogSingle,
   opener_client_id: 7,
 };
 
@@ -467,14 +450,12 @@ const expectedFetchCollection: FetchSourceWire = {
 interface WireDatasetOpenedCollection {
   manifest: DatasetManifestWire;
   fetch: FetchSourceWire;
-  catalog: WireAssetCatalog;
   opener_client_id: number | null;
 }
 
 const expectedDatasetOpenedCollection: WireDatasetOpenedCollection = {
   manifest: expectedManifestCollection,
   fetch: expectedFetchCollection,
-  catalog: { entries: [] },
   opener_client_id: null,
 };
 
@@ -507,6 +488,7 @@ const expectedDisplaySettings: WireDatasetDisplaySettings = {
   channel_blend_mode: "additive",
   detail_level_override: 1,
   label_names: ["region-a"],
+  solo: 0,
 };
 
 const expectedSliceCamera: SliceCamera = {
@@ -547,8 +529,6 @@ const expectedFlyCamera: FlyCamera = {
 const expectedView: WireViewState = {
   z_range: { start: 10, end: 14 },
   t: 2,
-  c: 1,
-  multi_channel: true,
 };
 const expectedDisplay: WireDisplayState = {
   contrast_min: 120,
@@ -559,7 +539,7 @@ const expectedDisplay: WireDisplayState = {
 /** The pin-embedded author view in workspace-dataset-id form. `datasets` is
  *  empty by invariant, since no source URLs ride the document wire. */
 const expectedPinView: SavedView = {
-  v: 1,
+  v: 2,
   datasets: [],
   active_layouts: { "wds-0f3a": "layout-grid" },
   camera: expectedArcballCamera,
@@ -594,7 +574,7 @@ void presenceMirror;
 const expectedFlyPeerPresence = {
   client_id: 11,
   camera: expectedFlyCamera,
-  view: { z_range: { start: 0, end: 50 }, t: 0, c: 0, multi_channel: false },
+  view: { z_range: { start: 0, end: 50 }, t: 0 },
   display: { contrast_min: 0, contrast_max: 65535, gamma: 1 },
   following: null,
   cursor: null,
@@ -609,7 +589,7 @@ void flyPeerMirror;
 const expectedJoiningPresenceWire = {
   client_id: 11,
   camera: { mode: "slice", center: [0, 0], zoom: 1, viewport: [800, 600] },
-  view: { z_range: { start: 0, end: 1 }, t: 0, c: 0, multi_channel: false },
+  view: { z_range: { start: 0, end: 1 }, t: 0 },
   display: { contrast_min: 0, contrast_max: 65535, gamma: 1 },
   camera_reported: false,
   following: null,
@@ -699,7 +679,6 @@ interface WireDocumentState {
   manifests: Record<string, DatasetManifest>;
   registered_layouts: Record<string, LayoutSpec[]>;
   active_layout_ids: Record<string, string>;
-  asset_catalogs: Record<string, WireAssetCatalog>;
   annotations: Record<string, WireAnnotation[]>;
 }
 
@@ -707,7 +686,6 @@ const expectedDocument: WireDocumentState = {
   manifests: { "wds-0f3a": expectedManifestSingle },
   registered_layouts: { "wds-0f3a": [expectedGridLayout] },
   active_layout_ids: { "wds-0f3a": "layout-grid" },
-  asset_catalogs: { "wds-0f3a": expectedCatalogSingle },
   annotations: {
     "wds-0f3a": [expectedBoxAnnotation, expectedPointAnnotation, expectedLineAnnotation],
   },
@@ -732,6 +710,18 @@ const expectedGeneratedLevel: WireGeneratedLevelAvailability = {
     scale: [1, 1, 2, 2, 2],
   },
   summary: { total_chunks: 12, ready_chunks: 7, pending_chunks: 3, failed_chunks: 2 },
+};
+
+const expectedGeneratedHistogram: WireGeneratedLevelHistogram = {
+  image_id: "multiscale-0",
+  level_index: 2,
+  t: 0,
+  c: 1,
+  bins: [
+    [-3, -3, 2],
+    [12, 12, 4096],
+    [1024, 1039, 37],
+  ],
 };
 
 const expectedGeneratedSnapshot: WireGeneratedAvailabilitySnapshot = {
@@ -772,6 +762,7 @@ const expectedGeneratedSnapshot: WireGeneratedAvailabilitySnapshot = {
       message: "chunk exceeds generation budget",
     },
   ],
+  histograms: [expectedGeneratedHistogram],
 };
 
 const expectedGeneratedDelta: WireGeneratedAvailabilityDelta = {
@@ -779,6 +770,7 @@ const expectedGeneratedDelta: WireGeneratedAvailabilityDelta = {
   chunks: [
     { image_id: "multiscale-0", level_index: 2, key: "2/0/0/1/0/0", status: "ready" },
   ],
+  histograms: [expectedGeneratedHistogram],
 };
 
 /**
@@ -846,6 +838,7 @@ const expectedSourceHealth: DatasetSourceHealth = {
   ],
   import_warnings: [
     {
+      kind: "mismatched_tile_geometry",
       target: "wds-0f3a",
       message: "tiles differ in shape, and smaller tiles are padded with fill",
       degrades: true,
@@ -859,18 +852,6 @@ const expectedProgressDiagnostic: DatasetOpenProgressDiagnostic = {
   workspace_dataset_id: "wds-0f3a",
   dataset_source_id: "source-9b31",
   detail: "1 derived level over 2 source levels",
-};
-
-const expectedAssetCatalogDelta: WireAssetCatalogDelta = {
-  added: [
-    {
-      entity_id: "img-0",
-      kinds: ["GroupProxy3D", "TileProxy3D"],
-      footprints: [
-        { kind: "GroupProxy3D", dims: [50, 256, 256], bytes: 6553600 },
-      ],
-    },
-  ],
 };
 
 /** The interest hint exactly as `tickCoordinator.emitViewerInterestHint`
@@ -942,7 +923,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(viewModeForCamera(pinView!.camera)).toBe("3d");
   });
 
-  it("command_broadcast(dataset_opened): the manifest/fetch/catalog payload", () => {
+  it("command_broadcast(dataset_opened): the manifest/fetch payload", () => {
     const raw = fixtureRaw("session/server_command_broadcast_dataset_opened.json");
     COVERED_FIXTURES.add("session/server_command_broadcast_dataset_opened.json");
     expect(JSON.parse(raw)).toStrictEqual({
@@ -963,7 +944,6 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     expect(command.type).toBe("dataset_opened");
     expect(command.manifest).toStrictEqual(expectedManifestSingle);
     expect(command.fetch).toStrictEqual(expectedFetchSingle);
-    expect(command.catalog).toStrictEqual(expectedCatalogSingle);
     expect(command.opener_client_id).toBe(7);
   });
 
@@ -1256,41 +1236,6 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
     await expect(pending).rejects.toThrow("the bundle carries no header");
   });
 
-  it("asset_catalog_update: delta reaches the handler and the web AssetCatalog mirror", () => {
-    const raw = fixtureRaw("session/server_asset_catalog_update.json");
-    COVERED_FIXTURES.add("session/server_asset_catalog_update.json");
-    expect(JSON.parse(raw)).toStrictEqual({
-      type: "asset_catalog_update",
-      dataset_id: "wds-0f3a",
-      delta: expectedAssetCatalogDelta,
-    });
-
-    const onAssetCatalogUpdate = vi.fn();
-    const { ws } = openBridge({ onAssetCatalogUpdate });
-    deliver(ws, raw);
-    expect(onAssetCatalogUpdate).toHaveBeenCalledTimes(1);
-    const [datasetId, deltaJson] = onAssetCatalogUpdate.mock.calls[0];
-    expect(datasetId).toBe("wds-0f3a");
-    const delta: WireAssetCatalogDelta = JSON.parse(deltaJson);
-    expect(delta).toStrictEqual(expectedAssetCatalogDelta);
-
-    // Feed the delta through the real web mirror, as renderLoop does.
-    const wasm = { apply_asset_catalog_delta: vi.fn() };
-    const catalog = new AssetCatalog(wasm);
-    catalog.applyDelta(datasetId, delta);
-    expect(
-      JSON.parse(wasm.apply_asset_catalog_delta.mock.calls[0][0]),
-    ).toStrictEqual({ dataset_id: "wds-0f3a", delta: expectedAssetCatalogDelta });
-    const entity = catalog.snapshot().byEntity.get("img-0");
-    expect(entity).toBeDefined();
-    expect([...entity!.kinds].sort()).toStrictEqual(["GroupProxy3D", "TileProxy3D"]);
-    expect(entity!.footprints.get("GroupProxy3D")).toStrictEqual({
-      kind: "GroupProxy3D",
-      dims: [50, 256, 256],
-      bytes: 6553600,
-    });
-  });
-
   it("generated_availability_update: delta reaches the handler intact", () => {
     const raw = fixtureRaw("session/server_generated_availability_update.json");
     COVERED_FIXTURES.add("session/server_generated_availability_update.json");
@@ -1442,7 +1387,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
         dropped: 3,
         rid: [2558, 2559, 0],
         request_id: [null, null, "web-open-4c1a"],
-        family: ["chunk", "asset", "metadata_read"],
+        family: ["chunk", "chunk", "metadata_read"],
         metadata_phase: [null, null, "backend_read"],
         // A metadata read has no slot in the phase enum, so it states its
         // span here and leaves every phase column unset.
@@ -1494,7 +1439,7 @@ describe("wire goldens: server messages through Bridge dispatch", () => {
         ]),
     ).toEqual([
       [2558, "chunk", 142 + 37 + 88 + 2 + 3100000 + 211400 + 4512 + 903 + 61, 0, null, null, 131072],
-      [2559, "asset", 96 + 41 + 74 + 3 + 55, 0, null, null, null],
+      [2559, "chunk", 96 + 41 + 74 + 3 + 55, 0, null, null, null],
       // The metadata read keys on the open, not on a correlation label, and
       // its span is in its own column rather than in any phase.
       [0, "metadata-read", 0, 63441, "web-open-4c1a", "backend-read", null],
@@ -1628,15 +1573,6 @@ const commandCases: [string, string, Record<string, unknown>][] = [
     "session/client_command_rename_dataset.json",
     // hooks/useDatasetSettings.ts handleLayerRename.
     { type: "rename_dataset", id: "wds-0f3a", name: "kidney multiplex (deconvolved)" },
-  ],
-  [
-    "apply_asset_catalog_delta",
-    "session/client_command_apply_asset_catalog_delta.json",
-    {
-      type: "apply_asset_catalog_delta",
-      dataset_id: "wds-0f3a",
-      delta: expectedAssetCatalogDelta,
-    },
   ],
 ];
 
@@ -1799,13 +1735,7 @@ describe("wire goldens: client messages through Bridge senders", () => {
 // Request envelopes produced by the real ProxiedContentSource
 
 describe("wire goldens: content-source request envelopes", () => {
-  /**
-   * Both envelopes come off one source, in order, because the goldens carry
-   * consecutive correlation labels from one shared counter. Two sources
-   * would each mint `rid: 0` and the shared-counter half of the contract
-   * would go untested.
-   */
-  it("fetch() then fetchProxy() send the labelled request envelopes", async () => {
+  it("fetch() sends the labelled chunk request envelope", async () => {
     const sent: string[] = [];
     const source = new ProxiedContentSource((json) => sent.push(json));
     source.registerImage("multiscale-0", { Zstd: { data_type: "Uint16" } });
@@ -1821,27 +1751,14 @@ describe("wire goldens: content-source request envelopes", () => {
       coveredFixture("session/chunk_request.json"),
     );
 
-    const assetController = new AbortController();
-    const pendingAsset = source.fetchProxy(
-      {
-        datasetId: "wds-collection-77",
-        entityId: "tile-A1-f0",
-        kind: "TileProxy3D",
-        t: 0,
-        c: 2,
-      },
-      assetController.signal,
-    );
+    chunkController.abort();
+    await expect(pendingChunk).rejects.toThrow(/aborted/i);
 
+    // Aborting the chunk request takes it back from the server.
     expect(sent).toHaveLength(2);
     expect(JSON.parse(sent[1])).toStrictEqual(
-      coveredFixture("session/asset_request.json"),
+      coveredFixture("session/chunk_cancel.json"),
     );
-
-    chunkController.abort();
-    assetController.abort();
-    await expect(pendingChunk).rejects.toThrow(/aborted/i);
-    await expect(pendingAsset).rejects.toThrow(/aborted/i);
   });
 });
 
@@ -1988,6 +1905,8 @@ describe("wire goldens: generated availability", () => {
       status: "failed_transient",
       message: "source read timed out",
     });
+    expect(catalog.histogram("wds-0f3a", "multiscale-0", 2, 0, 1)).toStrictEqual(expectedGeneratedHistogram);
+    expect(catalog.histogram("wds-0f3a", "multiscale-0", 2, 0, 0)).toBeUndefined();
   });
 
   it("delta fixture upserts through the catalog", () => {
@@ -2050,7 +1969,6 @@ describe("wire goldens: enum vocabulary", () => {
     const blendModes: BlendMode[] = ["alpha", "additive", "max"];
     const renderModes: RenderMode[] = ["translucent", "max_intensity"];
     const entityKinds: Entity["kind"][] = ["Image", "Group", "Tile"];
-    const proxyKinds: ProxyKind[] = ["GroupProxy3D", "TileProxy3D"];
     const openStages: DatasetOpenStage[] = [
       "request_received",
       "authorization",
@@ -2099,9 +2017,10 @@ describe("wire goldens: enum vocabulary", () => {
       annotation_kinds: annotationKinds,
       axis_kinds: ["Time", "Channel", "Space"],
       entity_kinds: entityKinds,
-      data_types: ["Uint8", "Uint16", "Uint32", "Int8", "Int16", "Int32", "Float32", "Float64"],
+      data_types: [
+        "Uint8", "Uint16", "Uint32", "Int8", "Int16", "Int32", "Float32", "Float64", "Uint64", "Int64", "Float16",
+      ],
       positioning_modes: ["Explicit", "Derived"],
-      proxy_kinds: proxyKinds,
       dataset_open_stages: openStages,
       // No TS union today: the kind string is carried and rendered verbatim.
       dataset_open_failure_kinds: [
@@ -2264,6 +2183,35 @@ describe("wire goldens: watch stream", () => {
       through_seq: 42,
       replayed: 40,
     });
+  });
+});
+
+// Saved-view payloads, through the web's own encoder and decoder
+
+describe("wire goldens: saved-view payloads", () => {
+  beforeAll(() => loadWasm());
+
+  interface PayloadGolden {
+    view: SavedView;
+    payload: string;
+  }
+
+  it("the web writes the payload the core wrote for the same view, and reads it back", () => {
+    const golden = coveredFixture("saved-view/payload.json") as PayloadGolden;
+    expect(encode(golden.view)).toBe(golden.payload);
+    expect(decode(golden.payload)).toEqual(golden.view);
+    // A one-channel layer opens gray, so its colormap rides the payload.
+    expect(golden.view.dataset_settings["wds-0f3a"].channel_settings![0].colormap).toBe("gray");
+  });
+
+  it("a payload recorded before one-channel images opened gray restores as it did", () => {
+    for (const rel of ["saved-view/recorded_v1.json", "saved-view/recorded_v2.json"]) {
+      const recorded = coveredFixture(rel) as PayloadGolden;
+      expect(decode(recorded.payload)).toEqual(recorded.view);
+    }
+    const v2 = (fixture("saved-view/recorded_v2.json") as PayloadGolden).view;
+    const one = v2.dataset_settings["ds-one"].channel_settings!;
+    expect(one.map((c) => c.colormap)).toEqual(["magenta"]);
   });
 });
 

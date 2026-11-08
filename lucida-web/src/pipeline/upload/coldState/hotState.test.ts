@@ -6,43 +6,20 @@ import { describe, it, expect } from "vitest";
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
-  ColdStateTileEntry,
 } from "../../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../../epochs.ts";
 import { buildViewHotState } from "./hotState.ts";
 
-function makeEntry(
-  over: Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & { mode?: ColdStateActiveEntry["mode"] },
-): ColdStateActiveEntry {
-  const base = {
+function makeEntry(over: Partial<ColdStateActiveEntry>): ColdStateActiveEntry {
+  return {
     entityId: over.entityId ?? "ent",
     levels: over.levels ?? [],
-    proxyKind: over.proxyKind,
-    proxyAvailable: over.proxyAvailable ?? false,
-    groupProxyAvailable: over.groupProxyAvailable ?? false,
     modelMatrix: over.modelMatrix ?? new Float32Array(16),
     invModelMatrix: over.invModelMatrix ?? new Float32Array(16),
     displayStateByChannel: over.displayStateByChannel ?? {},
-  };
-  // Discriminate via `mode` so existing call sites that pass
-  // `mode: "group-as-proxy"` (with `imageId: ""`) keep working.
-  const mode = over.mode ?? "tiles-with-detail";
-  if (mode === "group-as-proxy") {
-    return {
-      ...base,
-      kind: "group-as-proxy",
-      mode: "group-as-proxy",
-      parentGroupId: null,
-    };
-  }
-  return {
-    ...base,
-    kind: "tile",
     imageId: over.imageId ?? "img",
-    mode,
     detailLevels: over.detailLevels ?? [0],
     coarseLevel: over.coarseLevel ?? null,
-    parentGroupId: over.parentGroupId ?? null,
   };
 }
 
@@ -50,14 +27,13 @@ function makeColdMsg(
   visibleChannels: number[],
   activeSet: ColdStateActiveEntry[],
 ): ColdStateMessage {
-  const epochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
+  const epochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
   return {
     type: "coldState",
     epochs,
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
-    multiChannel: visibleChannels.length > 1,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1, 1],
@@ -78,9 +54,8 @@ describe("buildViewHotState", () => {
     const cold = makeColdMsg(
       [0], // single channel
       [
-        makeEntry({ entityId: "ent-a", imageId: "img-a", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "ent-b", imageId: "img-b", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "group-c", imageId: "", mode: "group-as-proxy" }),
+        makeEntry({ entityId: "ent-a", imageId: "img-a" }),
+        makeEntry({ entityId: "ent-b", imageId: "img-b" }),
       ],
     );
     const rayHit: [number, number, number] = [10, 20, 30];
@@ -96,24 +71,24 @@ describe("buildViewHotState", () => {
     expect(msg.datasetId).toBe("ds1");
     expect(msg.epochs).toBe(cold.epochs);
 
-    // 3 members → 3 entries, each with the same rayHit.
-    expect(msg.rayHitsByEntity).toHaveLength(3);
+    // 2 members → 2 entries, each with the same rayHit.
+    expect(msg.rayHitsByEntity).toHaveLength(2);
     const memberIds = msg.rayHitsByEntity.map(([id]) => id);
-    expect(memberIds).toEqual(["img-a", "img-b", "group-c"]);
+    expect(memberIds).toEqual(["img-a:ch0", "img-b:ch0"]);
     for (const [, hit] of msg.rayHitsByEntity) {
       expect(hit).toEqual([10, 20, 30]);
     }
   });
 
   it("dedupes when two entries produce the same memberId", () => {
-    // group-as-proxy entityId="dup", tile imageId="dup" → both yield
-    // memberId "dup" in single-channel mode. Only the first one emits.
+    // Two entries share imageId "dup", so both yield memberId "dup:ch0".
+    // Only the first one emits.
     const cold = makeColdMsg(
       [0],
       [
-        makeEntry({ entityId: "dup", imageId: "", mode: "group-as-proxy" }),
-        makeEntry({ entityId: "other-ent", imageId: "dup", mode: "tiles-with-detail" }),
-        makeEntry({ entityId: "ent-c", imageId: "img-c", mode: "tiles-with-detail" }),
+        makeEntry({ entityId: "dup-ent", imageId: "dup" }),
+        makeEntry({ entityId: "other-ent", imageId: "dup" }),
+        makeEntry({ entityId: "ent-c", imageId: "img-c" }),
       ],
     );
 
@@ -126,7 +101,7 @@ describe("buildViewHotState", () => {
 
     // 2 unique memberIds → 2 entries (the second "dup" is deduped).
     expect(msg.rayHitsByEntity).toHaveLength(2);
-    expect(msg.rayHitsByEntity.map(([id]) => id)).toEqual(["dup", "img-c"]);
+    expect(msg.rayHitsByEntity.map(([id]) => id)).toEqual(["dup:ch0", "img-c:ch0"]);
   });
 
   it("empty cold msg → empty rayHitsByEntity", () => {

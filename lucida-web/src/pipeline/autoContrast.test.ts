@@ -3,10 +3,13 @@ import {
   AutoContrastFitter,
   CHUNK_SAMPLES,
   chunkSamples,
+  fitHistograms,
   fitValues,
   type ChannelFit,
   type FitCache,
+  type FitHistograms,
 } from "./autoContrast.ts";
+import type { HistogramBin } from "./generatedAvailability.ts";
 import type { DatasetManifest, LevelGeometry } from "../manifestTypes.ts";
 import type { ChunkRequest, RequestPlan } from "./planning/types.ts";
 import type { LaneOutstanding } from "./fetch/types.ts";
@@ -33,6 +36,47 @@ describe("chunkSamples", () => {
     const planes = new Set(Array.from(read, (v) => Math.floor(v / 4096)));
     expect(columns.size).toBeGreaterThan(1);
     expect(planes.size).toBeGreaterThan(1);
+  });
+});
+
+describe("fitHistograms", () => {
+  /** One bin per value, as the server bins every integer below 128. */
+  const exact = (values: number[]): { bins: HistogramBin[] } => {
+    const counts = new Map<number, number>();
+    for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+    return { bins: [...counts].sort((a, b) => a[0] - b[0]).map(([v, n]) => [v, v, n] as const) };
+  };
+
+  it("takes the percentiles fitValues takes", () => {
+    const values = Array.from({ length: 10_000 }, (_, i) => i % 120);
+    expect(fitHistograms([exact(values)])).toEqual(fitValues([Float32Array.from(values)]));
+  });
+
+  it("takes a bin's near edge, so a limit is a sample and clips no more than its percentile", () => {
+    const bins: HistogramBin[] = [
+      [0, 0, 20],
+      [1000, 1015, 9_960],
+      [4096, 4160, 20],
+    ];
+    expect(fitHistograms([{ bins }])).toEqual({ limits: { min: 0, max: 4160 }, range: { min: 0, max: 4160 } });
+    const wide: HistogramBin[] = [
+      [0, 0, 1],
+      [1000, 1015, 99_998],
+      [4096, 4160, 1],
+    ];
+    expect(fitHistograms([{ bins: wide }])?.limits).toEqual({ min: 1000, max: 1015 });
+  });
+
+  it("gives one answer whatever order the histograms come in", () => {
+    const a = exact([1, 2, 2, 3, 90]);
+    const b = { bins: [[2, 2, 7], [64, 65, 3]] as HistogramBin[] };
+    const c = exact(Array.from({ length: 3000 }, (_, i) => i % 127));
+    expect(fitHistograms([c, b, a])).toEqual(fitHistograms([a, b, c]));
+  });
+
+  it("widens to the range when the percentiles meet, and has nothing to fit without samples", () => {
+    expect(fitHistograms([{ bins: [[0, 0, 9_999], [300, 300, 1]] }])?.limits).toEqual({ min: 0, max: 300 });
+    expect(fitHistograms([{ bins: [] }])).toBeNull();
   });
 });
 
@@ -72,7 +116,10 @@ function level(index: number, size: number): LevelGeometry {
   };
 }
 
-function manifest(generatedCoarse: boolean): DatasetManifest {
+/** Whether level 1 is a coarse level the server generates, one the source holds, or neither. */
+type Coarse = "generated" | "source" | "none";
+
+function manifest(coarse: Coarse): DatasetManifest {
   return {
     dataset_id: "ds",
     images: [
@@ -82,8 +129,8 @@ function manifest(generatedCoarse: boolean): DatasetManifest {
         multiscale: {
           axes: [],
           levels: [level(0, 8), level(1, 4)],
-          coarse_level_index: 1,
-          generated_levels: generatedCoarse ? [{ level_index: 1, role: "coarse" }] : [],
+          coarse_level_index: coarse === "none" ? null : 1,
+          generated_levels: coarse === "generated" ? [{ level_index: 1, role: "coarse" }] : [],
           data_type: "uint16",
         },
       },
@@ -112,7 +159,7 @@ function request(lane: ChunkRequest["lane"], lvl: number, c: number, y: number, 
 const DETAIL = [request("detail", 0, 0, 0, 0), request("detail", 0, 0, 0, 1), request("detail", 0, 0, 1, 0), request("detail", 0, 0, 1, 1)];
 const COARSE = request("coarse", 1, 0, 0, 0);
 
-function plan(requests: ChunkRequest[]): RequestPlan {
+function plan(requests: ChunkRequest[], coarse: Coarse): RequestPlan {
   return {
     requests,
     activeSet: [
@@ -120,11 +167,8 @@ function plan(requests: ChunkRequest[]): RequestPlan {
         kind: "tile",
         entityId: "ent",
         imageId: "img",
-        mode: "tiles-with-detail",
         detailLevels: [0],
-        coarseLevel: 1,
-        proxyAvailable: false,
-        groupProxyAvailable: false,
+        coarseLevel: coarse === "none" ? null : 1,
       },
     ],
   } as unknown as RequestPlan;
@@ -133,7 +177,13 @@ function plan(requests: ChunkRequest[]): RequestPlan {
 /** A CPU cache stand-in: chunks become resident as a test makes them. */
 class Cache implements FitCache {
   readonly chunks = new Map<string, { data: ArrayBuffer; dataType: string }>();
+  /** Chunk keys the server is still generating. */
+  readonly generating = new Set<string>();
   fetching = true;
+
+  awaitsServer(req: ChunkRequest): boolean {
+    return this.generating.has(req.chunkKey);
+  }
 
   hold(req: ChunkRequest, values: number[]): void {
     this.chunks.set(`${req.entityId}/${req.chunkKey}`, { data: Uint16Array.from(values).buffer, dataType: "uint16" });
@@ -149,14 +199,39 @@ class Cache implements FitCache {
   }
 }
 
+/** The server's histograms of the generated level, as they arrive. */
+class Histograms implements FitHistograms {
+  readonly sent = new Map<string, { bins: HistogramBin[] }>();
+
+  send(c: number, bins: HistogramBin[]): void {
+    this.sent.set(`img|1|0|${c}`, { bins });
+  }
+
+  histogram(datasetId: string, imageId: string, level: number, t: number, c: number) {
+    return datasetId === "ds" ? this.sent.get(`${imageId}|${level}|${t}|${c}`) : undefined;
+  }
+}
+
 /** Sixteen samples from `base` up. */
 const block = (base: number) => Array.from({ length: 16 }, (_, i) => base + i * 3);
 
-function run(fitter: AutoContrastFitter, requests: ChunkRequest[], cache: Cache, generated = true): Array<[number, ChannelFit]> {
+function run(
+  fitter: AutoContrastFitter,
+  requests: ChunkRequest[],
+  cache: Cache,
+  coarse: Coarse = "generated",
+  histograms = new Histograms(),
+): Array<[number, ChannelFit]> {
   const fits: Array<[number, ChannelFit]> = [];
-  fitter.update(new Map([["ds", plan(requests)]]), new Map([["ds", { manifest: manifest(generated) }]]), cache, (_, c, fit) => {
-    fits.push([c, fit]);
-  });
+  fitter.update(
+    new Map([["ds", plan(requests, coarse)]]),
+    new Map([["ds", { manifest: manifest(coarse) }]]),
+    cache,
+    histograms,
+    (_, c, fit) => {
+      fits.push([c, fit]);
+    },
+  );
   return fits;
 }
 
@@ -169,7 +244,7 @@ describe("AutoContrastFitter", () => {
       let last: ChannelFit | null = null;
       for (const i of order) {
         cache.hold(DETAIL[i], block(100 * (i + 1)));
-        for (const [, fit] of run(fitter, requests, cache)) last = fit;
+        for (const [, fit] of run(fitter, requests, cache, "none")) last = fit;
       }
       return last;
     };
@@ -178,37 +253,88 @@ describe("AutoContrastFitter", () => {
     expect(settle([3, 1, 0, 2])).toEqual(forward);
   });
 
-  it("lets a generated coarse level stand in, then fits from the source level alone", () => {
+  it("lets a generated coarse level stand in, then fits from its histogram alone", () => {
     const fitter = new AutoContrastFitter();
     const cache = new Cache();
+    const histograms = new Histograms();
     // The minimap and prefetch lanes are never read, however extreme.
     const minimap = request("minimap", 1, 0, 0, 0);
     const prefetch = { ...request("prefetch", 0, 0, 0, 0), chunkKey: "0/0/0/0/9/9" };
     const requests = [...DETAIL, COARSE, minimap, prefetch];
     cache.hold(prefetch, block(50_000));
-    expect(run(fitter, requests, cache)).toEqual([]);
+    expect(run(fitter, requests, cache, "generated", histograms)).toEqual([]);
 
     cache.hold(COARSE, block(9000));
-    const [[, standIn]] = run(fitter, requests, cache);
+    const [[, standIn]] = run(fitter, requests, cache, "generated", histograms);
     expect(standIn).toMatchObject({ provisional: true, range: { min: 9000, max: 9045 } });
 
-    // Part of the fit's chunks, with more on the way: the stand-in holds.
-    cache.hold(DETAIL[0], block(100));
-    cache.hold(DETAIL[1], block(200));
-    expect(run(fitter, requests, cache)).toEqual([]);
+    // The view's own chunks, resident while the fetch goes on, change nothing.
+    DETAIL.forEach((req, i) => cache.hold(req, block(100 * (i + 1))));
+    expect(run(fitter, requests, cache, "generated", histograms)).toEqual([]);
 
-    cache.hold(DETAIL[2], block(300));
-    cache.hold(DETAIL[3], block(400));
-    const [[, settled]] = run(fitter, requests, cache);
-    expect(settled).toMatchObject({ provisional: false, range: { min: 100, max: 445 } });
-    expect(run(fitter, requests, cache)).toEqual([]);
+    histograms.send(0, [
+      [20, 20, 1],
+      [300, 304, 998],
+      [600, 609, 1],
+    ]);
+    const [[, settled]] = run(fitter, requests, cache, "generated", histograms);
+    expect(settled).toEqual({ provisional: false, limits: { min: 20, max: 609 }, range: { min: 20, max: 609 } });
+    expect(run(fitter, requests, cache, "generated", histograms)).toEqual([]);
+  });
+
+  it("keeps a generated level's limits through a pan or zoom, which changes the chunks but not the histogram", () => {
+    const fitter = new AutoContrastFitter();
+    const cache = new Cache();
+    const histograms = new Histograms();
+    histograms.send(0, [[100, 100, 10], [200, 203, 10]]);
+    const [[, fit]] = run(fitter, [...DETAIL, COARSE], cache, "generated", histograms);
+    expect(fit.provisional).toBe(false);
+    // Panned: other chunks of level 0. Zoomed out: level 1 alone.
+    const panned = [request("detail", 0, 0, 2, 0), request("detail", 0, 0, 2, 1), COARSE];
+    for (const requests of [panned, [request("detail", 1, 0, 0, 0)]]) {
+      for (const req of requests) cache.hold(req, block(40_000));
+      cache.fetching = false;
+      expect(run(fitter, requests, cache, "generated", histograms)).toEqual([]);
+    }
+  });
+
+  it("reads the source's chunks while no histogram comes, once nothing is left to fetch or generate", () => {
+    const fitter = new AutoContrastFitter();
+    const cache = new Cache();
+    const histograms = new Histograms();
+    DETAIL.forEach((req) => cache.hold(req, block(100)));
+    cache.fetching = false;
+    // The server is still making the coarse level, and its histogram with it.
+    cache.generating.add(COARSE.chunkKey);
+    expect(run(fitter, [...DETAIL, COARSE], cache, "generated", histograms)).toEqual([]);
+
+    cache.generating.clear();
+    const [[, fallback]] = run(fitter, [...DETAIL, COARSE], cache, "generated", histograms);
+    expect(fallback).toMatchObject({ provisional: true, range: { min: 100, max: 145 } });
+    // It holds through a pan until the histogram comes.
+    const panned = [request("detail", 0, 0, 2, 0), COARSE];
+    cache.hold(panned[0], block(7000));
+    expect(run(fitter, panned, cache, "generated", histograms)).toEqual([]);
+    histograms.send(0, [[50, 50, 4]]);
+    const [[, settled]] = run(fitter, panned, cache, "generated", histograms);
+    expect(settled).toMatchObject({ provisional: false, range: { min: 50, max: 50 } });
+  });
+
+  it("never reads a histogram for a source coarse level", () => {
+    const fitter = new AutoContrastFitter();
+    const cache = new Cache();
+    const histograms = new Histograms();
+    histograms.send(0, [[60_000, 60_000, 4]]);
+    cache.hold(COARSE, block(700));
+    const [[, fit]] = run(fitter, [...DETAIL, COARSE], cache, "source", histograms);
+    expect(fit.range).toEqual({ min: 700, max: 745 });
   });
 
   it("reads a source coarse level, which is resident before the detail", () => {
     const fitter = new AutoContrastFitter();
     const cache = new Cache();
     cache.hold(COARSE, block(700));
-    const [[, fit]] = run(fitter, [...DETAIL, COARSE], cache, false);
+    const [[, fit]] = run(fitter, [...DETAIL, COARSE], cache, "source");
     expect(fit).toMatchObject({ provisional: false, range: { min: 700, max: 745 } });
   });
 
@@ -217,9 +343,9 @@ describe("AutoContrastFitter", () => {
     const cache = new Cache();
     cache.hold(DETAIL[0], block(100));
     cache.hold(DETAIL[1], block(200));
-    expect(run(fitter, DETAIL, cache)).toEqual([]);
+    expect(run(fitter, DETAIL, cache, "none")).toEqual([]);
     cache.fetching = false;
-    const [[, fit]] = run(fitter, DETAIL, cache);
+    const [[, fit]] = run(fitter, DETAIL, cache, "none");
     expect(fit).toMatchObject({ provisional: false, range: { min: 100, max: 245 } });
   });
 
@@ -229,7 +355,7 @@ describe("AutoContrastFitter", () => {
     const second = DETAIL.map((req) => request("detail", 0, 1, req.y, req.x));
     DETAIL.forEach((req) => cache.hold(req, block(100)));
     second.forEach((req) => cache.hold(req, block(5000)));
-    const fits = run(fitter, [...DETAIL, ...second], cache);
+    const fits = run(fitter, [...DETAIL, ...second], cache, "none");
     expect(fits.map(([c, fit]) => [c, fit.range])).toEqual([
       [0, { min: 100, max: 145 }],
       [1, { min: 5000, max: 5045 }],
@@ -240,9 +366,9 @@ describe("AutoContrastFitter", () => {
     const fitter = new AutoContrastFitter();
     const cache = new Cache();
     DETAIL.forEach((req) => cache.hold(req, block(100)));
-    const first = run(fitter, DETAIL, cache);
-    expect(run(fitter, DETAIL, cache)).toEqual([]);
+    const first = run(fitter, DETAIL, cache, "none");
+    expect(run(fitter, DETAIL, cache, "none")).toEqual([]);
     fitter.reset();
-    expect(run(fitter, DETAIL, cache)).toEqual(first);
+    expect(run(fitter, DETAIL, cache, "none")).toEqual(first);
   });
 });

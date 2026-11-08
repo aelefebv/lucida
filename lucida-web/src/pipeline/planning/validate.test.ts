@@ -224,8 +224,8 @@ describe("checkPrevActiveSetUnique", () => {
   it("passes when every entry has a unique entityId", () => {
     const state: PlanningState = createSyntheticState({
       previousActiveSet: [
-        { kind: "group-as-proxy", entityId: "group-A" },
-        { kind: "group-as-proxy", entityId: "group-B" },
+        { kind: "invisible", entityId: "group-A", imageId: "img-group-A", coarsestLod: 0 },
+        { kind: "invisible", entityId: "group-B", imageId: "img-group-B", coarsestLod: 0 },
       ],
     });
     expect(() => checkPrevActiveSetUnique(state)).not.toThrow();
@@ -234,8 +234,8 @@ describe("checkPrevActiveSetUnique", () => {
   it("throws on duplicate entityId in previousActiveSet", () => {
     const state: PlanningState = createSyntheticState({
       previousActiveSet: [
-        { kind: "group-as-proxy", entityId: "group-A" },
-        { kind: "group-as-proxy", entityId: "group-A" }, // duplicate
+        { kind: "invisible", entityId: "group-A", imageId: "img-group-A", coarsestLod: 0 },
+        { kind: "invisible", entityId: "group-A", imageId: "img-group-A", coarsestLod: 0 }, // duplicate
       ],
     });
     expect(() => checkPrevActiveSetUnique(state)).toThrow(
@@ -249,16 +249,13 @@ describe("checkPrevActiveSetKindAgreement", () => {
     const snap = makeValidSnapshot();
     const state: PlanningState = createSyntheticState({
       previousActiveSet: [
-        { kind: "group-as-proxy", entityId: "group-A" },
+        { kind: "invisible", entityId: "group-A", imageId: "img-group-A", coarsestLod: 0 },
         {
           kind: "tile",
           entityId: "tile-A1",
           imageId: "img-tile-A1",
-          mode: "tiles-with-detail",
           detailLevels: [0],
           coarseLevel: null,
-          proxyAvailable: false,
-          groupProxyAvailable: false,
         },
       ],
     });
@@ -283,23 +280,10 @@ describe("checkPrevActiveSetKindAgreement", () => {
     const state: PlanningState = createSyntheticState({
       previousActiveSet: [
         // entityId not present in snapshot — disappeared, NOT a violation.
-        { kind: "group-as-proxy", entityId: "group-gone-last-tick" },
+        { kind: "invisible", entityId: "group-gone-last-tick", imageId: "img-group-gone-last-tick", coarsestLod: 0 },
       ],
     });
     expect(() => checkPrevActiveSetKindAgreement(snap, state)).not.toThrow();
-  });
-
-  it("throws when a group-as-proxy entry references a non-Group entity", () => {
-    const snap = makeValidSnapshot();
-    const state: PlanningState = createSyntheticState({
-      previousActiveSet: [
-        // tile-A1 is a Tile but the entry says it was a group-as-proxy.
-        { kind: "group-as-proxy", entityId: "tile-A1" },
-      ],
-    });
-    expect(() => checkPrevActiveSetKindAgreement(snap, state)).toThrow(
-      /disagrees with entity kind Tile \(expected Group\)/,
-    );
   });
 
   it("throws when a tile entry references a Group entity (only Tile/Image allowed)", () => {
@@ -310,11 +294,8 @@ describe("checkPrevActiveSetKindAgreement", () => {
           kind: "tile",
           entityId: "group-A", // Group, not Tile/Image
           imageId: "img-group-A",
-          mode: "tiles-with-detail",
           detailLevels: [0],
           coarseLevel: null,
-          proxyAvailable: false,
-          groupProxyAvailable: false,
         },
       ],
     });
@@ -343,11 +324,8 @@ describe("checkPrevActiveSetKindAgreement", () => {
           kind: "tile",
           entityId: "img-only",
           imageId: "img-only-image",
-          mode: "tiles-with-detail",
           detailLevels: [0],
           coarseLevel: null,
-          proxyAvailable: false,
-          groupProxyAvailable: false,
         },
       ],
     });
@@ -381,8 +359,8 @@ describe("validatePlanningInputs (composing)", () => {
   it("propagates a state-side violation (smoke)", () => {
     const state: PlanningState = createSyntheticState({
       previousActiveSet: [
-        { kind: "group-as-proxy", entityId: "group-X" },
-        { kind: "group-as-proxy", entityId: "group-X" },
+        { kind: "invisible", entityId: "group-X", imageId: "img-group-X", coarsestLod: 0 },
+        { kind: "invisible", entityId: "group-X", imageId: "img-group-X", coarsestLod: 0 },
       ],
     });
     expect(() => validatePlanningInputs(makeValidSnapshot(), state)).toThrow(

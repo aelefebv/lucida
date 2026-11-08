@@ -7,18 +7,28 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { renderHook } from "@testing-library/react";
 
+import { resolvedLayer, resolvedLayers } from "../resolvedLayerFixtures.ts";
 import { scriptControls } from "../trace/steps.ts";
 import type { DatasetState } from "../types.ts";
 import { useScriptControls, type ScriptControlInputs } from "./useScriptControls.ts";
 
+/** An open dataset with `channels` channels. */
+function dataset(id: string, channels = 2): DatasetState {
+  return {
+    id,
+    manifest: { images: [{ multiscale: { levels: [{ shape: [1, channels, 8, 64, 64] }] } }] },
+  } as unknown as DatasetState;
+}
+
 function inputs(overrides: Partial<ScriptControlInputs> = {}): ScriptControlInputs {
   const datasets = new Map<string, DatasetState>();
-  datasets.set("ds-1", { id: "ds-1" } as DatasetState);
+  datasets.set("ds-1", dataset("ds-1"));
   return {
-    selectors: { z: 2, t: 0, c: 0, dimZ: 8, dimT: 3, dimC: 2, viewMode: "2d" },
+    selectors: { z: 2, t: 0, dimZ: 8, dimT: 3, viewMode: "2d" },
+    resolvedLayers: resolvedLayers(resolvedLayer("ds-1", [0, 1])),
     setZ: vi.fn(),
     setT: vi.fn(),
-    setC: vi.fn(),
+    setSolo: vi.fn(),
     setChannelVisible: vi.fn(),
     setLayerVisible: vi.fn(),
     captureView: () => null,
@@ -47,11 +57,27 @@ describe("useScriptControls", () => {
     expect(given.setZ).toHaveBeenCalledWith(5);
     expect(scriptControls()!.scrub("t", 10)).toEqual({ applied: true, reason: null });
     expect(given.setT).toHaveBeenCalledWith(2);
+    unmount();
+  });
+
+  it("scrubs c in the composite by soloing the dataset's channels in turn", () => {
+    const given = inputs();
+    const { unmount, rerender } = renderHook((props: ScriptControlInputs) => useScriptControls(props), {
+      initialProps: given,
+    });
+    // The composite is the position before the first channel.
     expect(scriptControls()!.scrub("c", -1)).toEqual({
       applied: false,
-      reason: "c is already at the start of its axis (index 0 of 2)",
+      reason: "c is already at the composite",
     });
-    expect(given.setC).not.toHaveBeenCalled();
+    expect(scriptControls()!.scrub("c", 1)).toEqual({ applied: true, reason: null });
+    expect(given.setSolo).toHaveBeenLastCalledWith("ds-1", 0);
+
+    rerender({ ...given, resolvedLayers: resolvedLayers(resolvedLayer("ds-1", [0], { solo: 0, channel_count: 2 })) });
+    expect(scriptControls()!.scrub("c", 1)).toEqual({ applied: true, reason: null });
+    expect(given.setSolo).toHaveBeenLastCalledWith("ds-1", 1);
+    expect(scriptControls()!.scrub("c", -1)).toEqual({ applied: true, reason: null });
+    expect(given.setSolo).toHaveBeenLastCalledWith("ds-1", null);
     unmount();
   });
 
@@ -83,8 +109,8 @@ describe("useScriptControls", () => {
 
   it("needs a dataset in hand for a channel select when several are open", () => {
     const datasets = new Map<string, DatasetState>();
-    datasets.set("ds-1", { id: "ds-1" } as DatasetState);
-    datasets.set("ds-2", { id: "ds-2" } as DatasetState);
+    datasets.set("ds-1", dataset("ds-1"));
+    datasets.set("ds-2", dataset("ds-2"));
     const given = inputs({ datasetsRef: { current: datasets } });
     const { unmount, rerender } = renderHook((props: ScriptControlInputs) => useScriptControls(props), {
       initialProps: given,

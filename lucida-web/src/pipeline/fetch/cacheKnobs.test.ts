@@ -1,61 +1,64 @@
-import { describe, expect, it, vi } from "vitest";
+// @vitest-environment happy-dom
+
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
-  CACHE_KNOBS_SCHEMA_VERSION,
-  CACHE_KNOBS_STORAGE_KEY,
   CACHE_KNOB_FIELDS,
+  CACHE_KNOB_PREFERENCES,
   readCacheKnobs,
+  subscribeCacheKnobs,
 } from "./cacheKnobs.ts";
+import {
+  PREFERENCE_SEED_GLOBAL,
+  PREFERENCES_STORAGE_KEY,
+  __resetPreferencesForTesting,
+  developerToolsPreference,
+  resetPreference,
+  setPreference,
+} from "../../theme/preferences.ts";
 
-function storageWith(value: string | null): Pick<Storage, "getItem"> {
-  return { getItem: (key: string) => (key === CACHE_KNOBS_STORAGE_KEY ? value : null) };
-}
+const MIB = 1024 * 1024;
+
+beforeEach(() => {
+  localStorage.clear();
+  __resetPreferencesForTesting();
+});
+
+afterEach(() => {
+  localStorage.clear();
+  __resetPreferencesForTesting();
+});
 
 describe("readCacheKnobs", () => {
-  it("reads the four knobs out of the envelope the driver writes", () => {
-    const envelope = {
-      schemaVersion: CACHE_KNOBS_SCHEMA_VERSION,
-      config: {
-        mainBudgetBytes: 256 * 1024 * 1024,
-        overviewBudgetBytes: 32 * 1024 * 1024,
-        maxConcurrentFetches: 4,
-        maxBytesInFlight: 8 * 1024 * 1024,
-      },
-    };
-    expect(readCacheKnobs(storageWith(JSON.stringify(envelope)))).toEqual(envelope.config);
+  it("reads nothing while developer tools are off, whatever is stored", () => {
+    setPreference(CACHE_KNOB_PREFERENCES.maxConcurrentFetches, 2);
+    expect(readCacheKnobs()).toEqual({});
   });
 
-  it("reads a partial envelope as only the knobs it names", () => {
-    const envelope = { schemaVersion: CACHE_KNOBS_SCHEMA_VERSION, config: { maxConcurrentFetches: 2 } };
-    expect(readCacheKnobs(storageWith(JSON.stringify(envelope)))).toEqual({ maxConcurrentFetches: 2 });
+  it("reads the knobs that are set while developer tools are on", () => {
+    setPreference(developerToolsPreference, true);
+    expect(readCacheKnobs()).toEqual({});
+    setPreference(CACHE_KNOB_PREFERENCES.mainBudgetBytes, 256 * MIB);
+    setPreference(CACHE_KNOB_PREFERENCES.maxConcurrentFetches, 4);
+    expect(readCacheKnobs()).toEqual({ mainBudgetBytes: 256 * MIB, maxConcurrentFetches: 4 });
   });
 
-  it("drops fields that are not knobs and values that are not positive finite numbers", () => {
-    const envelope = {
-      schemaVersion: CACHE_KNOBS_SCHEMA_VERSION,
-      config: {
-        mainBudgetBytes: 0,
-        overviewBudgetBytes: -1,
-        maxConcurrentFetches: "4",
-        maxBytesInFlight: Number.NaN,
-        proxyBudgetBytes: 1024,
-        onChunkFailureStreak: "alert()",
-      },
-    };
-    expect(readCacheKnobs(storageWith(JSON.stringify(envelope)))).toEqual({});
-  });
-
-  it("reads nothing when the key is missing, unparseable, or of another version", () => {
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(readCacheKnobs(storageWith(null))).toEqual({});
-    expect(readCacheKnobs(storageWith("{not json"))).toEqual({});
-    expect(
-      readCacheKnobs(
-        storageWith(JSON.stringify({ schemaVersion: CACHE_KNOBS_SCHEMA_VERSION + 1, config: { maxConcurrentFetches: 2 } })),
-      ),
-    ).toEqual({});
-    expect(readCacheKnobs(null)).toEqual({});
-    warn.mockRestore();
+  it("reads a stored value that is not a positive number as unset, and lifts a tiny one to its floor", () => {
+    localStorage.setItem(
+      PREFERENCES_STORAGE_KEY,
+      JSON.stringify({
+        version: 1,
+        values: {
+          "developer.tools": true,
+          "cache.mainBudgetBytes": 0,
+          "cache.overviewBudgetBytes": -1,
+          "cache.maxConcurrentFetches": "4",
+          "cache.maxBytesInFlight": 10,
+        },
+      }),
+    );
+    __resetPreferencesForTesting();
+    expect(readCacheKnobs()).toEqual({ maxBytesInFlight: MIB });
   });
 
   it("names the same four fields Dev controls edits", () => {
@@ -65,5 +68,39 @@ describe("readCacheKnobs", () => {
       "maxConcurrentFetches",
       "maxBytesInFlight",
     ]);
+  });
+});
+
+describe("subscribeCacheKnobs", () => {
+  it("hands over the knobs each time they change, developer tools included, and not otherwise", () => {
+    const listener = vi.fn();
+    const off = subscribeCacheKnobs(listener);
+    setPreference(CACHE_KNOB_PREFERENCES.maxConcurrentFetches, 2);
+    expect(listener).not.toHaveBeenCalled();
+
+    setPreference(developerToolsPreference, true);
+    expect(listener).toHaveBeenLastCalledWith({ maxConcurrentFetches: 2 });
+    resetPreference(CACHE_KNOB_PREFERENCES.maxConcurrentFetches);
+    expect(listener).toHaveBeenLastCalledWith({});
+    expect(listener).toHaveBeenCalledTimes(2);
+    off();
+  });
+});
+
+describe("the trace driver's seed", () => {
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>)[PREFERENCE_SEED_GLOBAL];
+    window.history.replaceState({}, "", "/");
+  });
+
+  it("reaches the capture surface's cache knobs", () => {
+    (globalThis as Record<string, unknown>)[PREFERENCE_SEED_GLOBAL] = {
+      "developer.tools": true,
+      "cache.maxConcurrentFetches": 2,
+      "cache.mainBudgetBytes": 128 * MIB,
+    };
+    window.history.replaceState({}, "", "/?render=1");
+    __resetPreferencesForTesting();
+    expect(readCacheKnobs()).toEqual({ maxConcurrentFetches: 2, mainBudgetBytes: 128 * MIB });
   });
 });

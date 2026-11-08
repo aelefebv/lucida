@@ -112,7 +112,7 @@ function renderOverlay(opts: {
   myId?: string;
   pick?: (x: number, y: number) => number[];
   /** The view's Z/T/C. Defaults to on-context for the standard pins (z=3). */
-  viewContext?: { z: number; t: number; c: number };
+  viewContext?: { z: number; t: number; channels: number[] };
 }) {
   const { scene, applied } = makeScene(opts.pins, opts.pick);
   const sent: Array<Record<string, unknown>> = [];
@@ -120,7 +120,7 @@ function renderOverlay(opts: {
   sceneRef.current = scene;
   let changed = 0;
   let version = 0;
-  let viewContext = opts.viewContext ?? { z: 3, t: 0, c: 0 };
+  let viewContext = opts.viewContext ?? { z: 3, t: 0, channels: [0] };
   const { canvas, capturedPointers, forwardedDowns } = makeCanvas();
   const overlay = (v: number) => (
     <AnnotationOverlay3D
@@ -142,7 +142,7 @@ function renderOverlay(opts: {
     version += 1;
     rerender(overlay(version));
   };
-  const setViewContext = (next: { z: number; t: number; c: number }) => {
+  const setViewContext = (next: { z: number; t: number; channels: number[] }) => {
     viewContext = next;
     rerender(overlay(version));
   };
@@ -157,7 +157,7 @@ afterEach(() => {
   cleanup();
 });
 
-describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #778)", () => {
+describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits", () => {
   it("a Shift+drag on an own marker emits one move_annotation that moves in-plane but preserves the pin's slice (z)", () => {
     // pick returns [50, 60, 7]: the move takes [50,60] in-plane but keeps the
     // pin's own z (3). A 3D drag moves a pin within its slice, never re-slices.
@@ -257,7 +257,7 @@ describe("AnnotationOverlay3D — Shift+drag moves; plain drag orbits (issue #77
   });
 });
 
-describe("AnnotationOverlay3D — comment thread, brought to 3D (issue #771)", () => {
+describe("AnnotationOverlay3D — comment thread, brought to 3D", () => {
   /** Open a pin's thread with a pure click (down and up at one point, then the
    * click) so drag suppression never interferes. */
   function openThread(pinId: string) {
@@ -468,11 +468,11 @@ describe("AnnotationOverlay3D — comment thread, brought to 3D (issue #771)", (
   });
 });
 
-describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)", () => {
+describe("AnnotationOverlay3D — off-context vs the view's Z/T/C", () => {
   it("a pin matching the view is on-context (no off-context marker)", () => {
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 1 })],
-      viewContext: { z: 5, t: 2, c: 1 },
+      viewContext: { z: 5, t: 2, channels: [1] },
     });
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
@@ -481,7 +481,7 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
   it("a pin on a different t renders off-context with helptext naming its z/t/c", () => {
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 9, c: 1 })],
-      viewContext: { z: 5, t: 0, c: 1 },
+      viewContext: { z: 5, t: 0, channels: [1] },
     });
     const marker = screen.getByTestId("annot-offcontext-pin-here");
     expect(marker.textContent).toBe("Z 6 · T 10 · Channel 2");
@@ -491,7 +491,7 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
   it("a pin on a different channel (c) renders off-context", () => {
     renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 2, c: 7 })],
-      viewContext: { z: 5, t: 2, c: 0 },
+      viewContext: { z: 5, t: 2, channels: [0] },
     });
     expect(screen.getByTestId("annot-offcontext-pin-here").textContent).toBe("Z 6 · T 3 · Channel 8");
   });
@@ -499,20 +499,20 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
   it("navigating the view to the pin's Z/T/C returns it to on-context", () => {
     const { setViewContext } = renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 12, t: 3, c: 2 })],
-      viewContext: { z: 3, t: 0, c: 0 },
+      viewContext: { z: 3, t: 0, channels: [0] },
     });
     expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
-    setViewContext({ z: 12, t: 3, c: 2 });
+    setViewContext({ z: 12, t: 3, channels: [2] });
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
     expect(screen.getByTestId("annot-pin-pin-here")).toBeTruthy();
   });
 
-  it("a 3D Shift+drag keeps an on-context pin on-context — it can't push the pin off its own slice (#791)", () => {
+  it("a 3D Shift+drag keeps an on-context pin on-context — it can't push the pin off its own slice", () => {
     // The pick returns depth 99, but the move keeps the pin's own z, so the
     // re-read pin stays on-context on the unchanged view.
     const { sent, bumpVersion } = renderOverlay({
       pins: [ownPin({ id: "pin-here", z: 5, t: 0, c: 0 })],
-      viewContext: { z: 5, t: 0, c: 0 },
+      viewContext: { z: 5, t: 0, channels: [0] },
       pick: () => [42, 24, 99],
     });
     expect(screen.queryByTestId("annot-offcontext-pin-here")).toBeNull();
@@ -544,7 +544,7 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
           comments: [{ id: "c1", author: String(MY_ID), text: "still works" }],
         }),
       ],
-      viewContext: { z: 4, t: 0, c: 0 },
+      viewContext: { z: 4, t: 0, channels: [0] },
     });
     expect(screen.getByTestId("annot-offcontext-pin-here")).toBeTruthy();
     const marker = screen.getByTestId("annot-pin-pin-here");
@@ -555,7 +555,7 @@ describe("AnnotationOverlay3D — off-context vs the view's Z/T/C (issue #779)",
   });
 });
 
-describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author's view (slice 2)", () => {
+describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author's view", () => {
   const VIEW = {
     v: 1,
     datasets: [],
@@ -589,7 +589,7 @@ describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author'
         wasmSceneRef={sceneRef}
         canvas={canvas}
         version={0}
-        viewContext={{ z: 3, t: 0, c: 0 }}
+        viewContext={{ z: 3, t: 0, channels: [0] }}
         myId={MY_ID}
         sendCommand={() => {}}
         onDocumentChanged={() => {}}
@@ -629,7 +629,7 @@ describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author'
 });
 
 describe("AnnotationOverlay3D — comment-count badge on the marker", () => {
-  it("a pin with comments carries the count badge (pluralized aria-label)", () => {
+  it("a pin with comments carries the count badge, and its marker's name says the count", () => {
     renderOverlay({
       pins: [
         ownPin({
@@ -640,19 +640,22 @@ describe("AnnotationOverlay3D — comment-count badge on the marker", () => {
         }),
       ],
     });
-    expect(screen.getByLabelText("2 comments").textContent).toBe("2");
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    expect(marker.tagName).toBe("BUTTON");
+    expect(marker.getAttribute("aria-label")).toBe("Pin by you, 2 comments");
+    expect(document.querySelector(".lc-annotation-count")?.textContent).toBe("2");
   });
 
   it("a pin with an empty thread carries no badge", () => {
     renderOverlay({ pins: [ownPin({ comments: [] })] });
-    expect(screen.queryByLabelText(/comment/)).toBeNull();
+    expect(document.querySelector(".lc-annotation-count")).toBeNull();
   });
 
   it("clicking the badge opens the pin's thread (same toggle as the dot)", () => {
     renderOverlay({
       pins: [ownPin({ comments: [{ id: "c1", author: String(MY_ID), text: "hi from 3d" }] })],
     });
-    fireEvent.click(screen.getByLabelText("1 comment"));
+    fireEvent.click(document.querySelector(".lc-annotation-count")!);
     expect(screen.getByTestId("annot-thread-pin-a")).toBeTruthy();
     expect(screen.getByText("hi from 3d")).toBeTruthy();
   });

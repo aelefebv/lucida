@@ -4,10 +4,10 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 use lucida_content::{DatasetId, DatasetKind, DatasetManifest, EntityId, LayoutId, LayoutSpec};
-use lucida_protocol::AssetCatalog;
 
 use crate::chunk::ChunkCoord;
 use crate::command::DocumentCommand;
+use crate::view::LegacyChannels;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -51,9 +51,20 @@ pub enum Colormap {
 }
 
 impl Colormap {
-    pub fn default_for_channel(index: usize) -> Self {
+    /// The colormap channel `index` of `channel_count` opens with: gray for
+    /// an image with one channel, else magenta, green and cyan in turn, so
+    /// the channels of a composite stay apart.
+    ///
+    /// This seeds new views only. A saved view leaves out the colormaps of its
+    /// own frozen table, not these, so changing this never changes how a
+    /// stored view restores.
+    pub fn default_for_channel(index: usize, channel_count: usize) -> Self {
         const CYCLE: [Colormap; 3] = [Colormap::Magenta, Colormap::Green, Colormap::Cyan];
-        CYCLE[index % CYCLE.len()]
+        if channel_count == 1 {
+            Colormap::Gray
+        } else {
+            CYCLE[index % CYCLE.len()]
+        }
     }
 }
 
@@ -65,8 +76,9 @@ pub struct ChannelSettings {
     pub contrast_max: f64,
     pub gamma: f64,
     /// Display name override for this channel. `None` falls back to the
-    /// manifest's omero label, then `Ch {index}`. Like `colormap`, it rides
-    /// saved views and presence but is not durable document state.
+    /// manifest's omero label, then `Channel n`, counted from 1. Like
+    /// `colormap`, it rides saved views and presence but is not durable
+    /// document state.
     ///
     /// The serde attributes keep it additive: a blob without `name` loads as
     /// `None`, and a channel with no override serializes without the key.
@@ -145,16 +157,52 @@ pub struct DatasetDisplaySettings {
     /// labels serializes without the key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub label_names: Vec<String>,
+    /// The one channel this layer shows alone, or `None` for the composite of
+    /// its visible channels. Solo never touches the `visible` flags, so leaving
+    /// it returns the composite exactly as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub solo: Option<u32>,
 }
 
 impl DatasetDisplaySettings {
-    /// Get a mutable reference to channel settings at the given index,
-    /// growing the vec with defaults if needed.
-    pub fn ensure_channel(&mut self, index: usize) -> &mut ChannelSettings {
+    /// The channels this layer shows out of `channel_count`, ascending: the
+    /// solo when it names one of them, else every visible channel. A channel
+    /// with no settings entry is visible. When none is visible the first one
+    /// shows, since the layer panel never lets the last one go dark.
+    pub fn shown_channels(&self, channel_count: u32) -> Vec<u32> {
+        if let Some(solo) = self.solo
+            && solo < channel_count
+        {
+            return vec![solo];
+        }
+        let shown: Vec<u32> = (0..channel_count)
+            .filter(|&c| {
+                self.channel_settings
+                    .get(c as usize)
+                    .is_none_or(|s| s.visible)
+            })
+            .collect();
+        if shown.is_empty() { vec![0] } else { shown }
+    }
+
+    /// Set this layer's solo from the scene-wide mode of a view recorded
+    /// before solo was per layer. A solo lands only on a layer that has that
+    /// channel and others beside it; every other layer shows its composite.
+    pub fn adopt_legacy_channels(&mut self, legacy: LegacyChannels, channel_count: u32) {
+        self.solo = match legacy {
+            LegacyChannels::Solo(c) if channel_count > 1 && c < channel_count => Some(c),
+            _ => None,
+        };
+    }
+
+    /// Get a mutable reference to channel settings at the given index of a
+    /// layer with `channel_count` channels, growing the vec with defaults if
+    /// needed.
+    pub fn ensure_channel(&mut self, index: usize, channel_count: usize) -> &mut ChannelSettings {
         while self.channel_settings.len() <= index {
             let i = self.channel_settings.len();
             self.channel_settings.push(ChannelSettings {
-                colormap: Colormap::default_for_channel(i),
+                colormap: Colormap::default_for_channel(i, channel_count),
                 ..Default::default()
             });
         }
@@ -175,11 +223,12 @@ impl DatasetDisplaySettings {
     }
 
     /// Build the complete default display settings for a freshly opened or
-    /// restored dataset: one channel entry per channel (cycling the default
-    /// colormaps) and one label entry per attached label. Both the
-    /// `DatasetOpened` apply path and `load_document` seed from here, because
-    /// the layer panel and render path need full-length `channel_settings` and
-    /// `label_settings` however the dataset entered the scene.
+    /// restored dataset: one channel entry per channel (in
+    /// [`Colormap::default_for_channel`]) and one label entry per attached
+    /// label. Both the `DatasetOpened` apply path and `load_document` seed
+    /// from here, because the layer panel and render path need full-length
+    /// `channel_settings` and `label_settings` however the dataset entered
+    /// the scene.
     ///
     /// Every label seeds hidden at opacity 0.5, since masks are opt-in. This
     /// default is mode-agnostic: once the user turns masks on, the web
@@ -196,7 +245,7 @@ impl DatasetDisplaySettings {
         Self {
             channel_settings: (0..channel_count)
                 .map(|i| ChannelSettings {
-                    colormap: Colormap::default_for_channel(i),
+                    colormap: Colormap::default_for_channel(i, channel_count),
                     ..Default::default()
                 })
                 .collect(),
@@ -286,6 +335,7 @@ impl Default for DatasetDisplaySettings {
             channel_blend_mode: BlendMode::Additive,
             detail_level_override: None,
             label_names: Vec::new(),
+            solo: None,
         }
     }
 }
@@ -365,12 +415,14 @@ pub struct Annotation {
     #[serde(default)]
     pub z: f64,
     /// The timepoint (T) the pin was placed on, the view's `t` at creation.
-    /// Unlike `z`, `t` and `c` are discrete view selectors: the pin belongs to
-    /// the timepoint and channel it was dropped on, and the overlay dims it
-    /// off-context when the current view differs.
+    /// Unlike `z`, `t` is a discrete view selector: the pin belongs to the
+    /// timepoint it was dropped on, and the overlay dims it off-context when
+    /// the current view differs.
     #[serde(default)]
     pub t: i64,
-    /// The channel (C) the pin was placed on, the view's `c` at creation.
+    /// A channel the pin's layer showed when it was placed. A pin with a
+    /// [`Self::view`] takes every channel shown then from it instead; see
+    /// [`Self::placement_channels`].
     #[serde(default)]
     pub c: i64,
     pub author: String,
@@ -406,6 +458,21 @@ pub struct Annotation {
 }
 
 impl Annotation {
+    /// The channels the pin's layer showed when it was placed, read from the
+    /// layer's entry in the captured view. A pin without one, or whose entry
+    /// lists no channels, belongs to `c` alone.
+    pub fn placement_channels(&self, dataset_id: &DatasetId) -> Vec<u32> {
+        let settings = self
+            .view
+            .as_ref()
+            .and_then(|view| view.dataset_settings.get(dataset_id))
+            .filter(|settings| !settings.channel_settings.is_empty());
+        match settings {
+            Some(settings) => settings.shown_channels(settings.channel_settings.len() as u32),
+            None => vec![self.c.clamp(0, u32::MAX as i64) as u32],
+        }
+    }
+
     /// The in-plane world-space vertices of this annotation's shape, in draw
     /// order. The 2D and 3D overlays both project these per vertex, so the
     /// per-kind layout lives here rather than in each renderer.
@@ -521,11 +588,6 @@ pub struct DocumentState {
     pub registered_layouts: HashMap<DatasetId, Vec<LayoutSpec>>,
     #[serde(default)]
     pub active_layout_ids: HashMap<DatasetId, LayoutId>,
-    /// Per-dataset asset catalog (proxy availability). Populated via
-    /// `DatasetOpened.catalog` on open and incrementally via
-    /// `DocumentCommand::ApplyAssetCatalogDelta`.
-    #[serde(default)]
-    pub asset_catalogs: IndexMap<DatasetId, AssetCatalog>,
     /// Per-dataset collaborative annotations, keyed by dataset id. Populated
     /// via `DocumentCommand::AddAnnotation` / `RemoveAnnotation`.
     #[serde(default)]
@@ -586,7 +648,6 @@ impl DocumentState {
         });
         rekey(&mut self.registered_layouts, &fate, |_, _| {});
         rekey(&mut self.active_layout_ids, &fate, |_, _| {});
-        rekey(&mut self.asset_catalogs, &fate, |_, _| {});
         rekey(&mut self.annotations, &fate, |new_id, anns| {
             on_kept_annotations(new_id, anns);
         });
@@ -749,54 +810,6 @@ impl DocumentState {
         }
     }
 
-    /// Merge an [`AssetCatalogDelta`] into the catalog for `dataset_id`.
-    ///
-    /// Idempotent: re-applying the same delta is a no-op. Existing
-    /// `ProxyAvailability` entries for an entity are merged by union of
-    /// their `kinds` lists (preserving original order; new kinds appended
-    /// at the end).
-    pub fn apply_asset_catalog_delta(
-        &mut self,
-        dataset_id: DatasetId,
-        delta: lucida_protocol::AssetCatalogDelta,
-    ) {
-        let catalog = self.asset_catalogs.entry(dataset_id).or_default();
-        for mut incoming in delta.added {
-            for footprint in &incoming.footprints {
-                if !incoming.kinds.contains(&footprint.kind) {
-                    incoming.kinds.push(footprint.kind);
-                }
-            }
-            if let Some(existing) = catalog
-                .entries
-                .iter_mut()
-                .find(|e| e.entity_id == incoming.entity_id)
-            {
-                for kind in incoming.kinds {
-                    if !existing.kinds.contains(&kind) {
-                        existing.kinds.push(kind);
-                    }
-                }
-                for footprint in incoming.footprints {
-                    if !existing.kinds.contains(&footprint.kind) {
-                        existing.kinds.push(footprint.kind);
-                    }
-                    if let Some(existing_footprint) = existing
-                        .footprints
-                        .iter_mut()
-                        .find(|candidate| candidate.kind == footprint.kind)
-                    {
-                        *existing_footprint = footprint;
-                    } else {
-                        existing.footprints.push(footprint);
-                    }
-                }
-            } else {
-                catalog.entries.push(incoming);
-            }
-        }
-    }
-
     /// Pick the collection entity a freshly dropped pin is glued to: the entity
     /// nearest to `position` in the dataset's active layout.
     ///
@@ -914,10 +927,7 @@ impl DocumentState {
     pub fn apply(&mut self, cmd: DocumentCommand) {
         match cmd {
             DocumentCommand::DatasetOpened(event) => {
-                let dataset_id = event.manifest.dataset_id.clone();
                 self.register_dataset(event.manifest);
-                // Seed the catalog from the open event.
-                self.asset_catalogs.insert(dataset_id, event.catalog);
             }
             DocumentCommand::RemoveDataset { id } => {
                 self.remove_dataset(&id);
@@ -942,9 +952,6 @@ impl DocumentState {
                 // reach every peer.
                 self.reanchor_for_layout(&dataset_id, from_id.as_ref(), &layout_id);
                 self.active_layout_ids.insert(dataset_id, layout_id);
-            }
-            DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
-                self.apply_asset_catalog_delta(dataset_id, delta);
             }
             DocumentCommand::AddAnnotation {
                 dataset_id,
@@ -1039,8 +1046,8 @@ pub struct MemberChunkPlan {
     /// is the value the view query reports for it. A level pin, clamped to
     /// the member's source levels, wins over the level the screen calls for.
     pub target_level: u32,
+    /// Nearest the view's focus first, channel by channel.
     pub needed: Vec<ChunkCoord>,
-    pub prefetch: Vec<ChunkCoord>,
 }
 
 #[cfg(test)]
@@ -1059,11 +1066,66 @@ mod annotation_view_tests {
     fn workspace_view() -> SavedView {
         let mut v = SavedView::empty([1024, 768]);
         v.view.t = 7;
-        v.view.c = 2;
         v.view.set_z_range(10..15);
         v.display.contrast_min = 100.0;
         v.display.contrast_max = 5000.0;
         v
+    }
+
+    /// A view of layer `ds` with `visible` channel flags and `solo`.
+    fn layer_view(visible: &[bool], solo: Option<u32>) -> SavedView {
+        let mut v = workspace_view();
+        v.dataset_settings.insert(
+            DatasetId("ds".into()),
+            DatasetDisplaySettings {
+                channel_settings: visible
+                    .iter()
+                    .map(|&visible| ChannelSettings {
+                        visible,
+                        ..Default::default()
+                    })
+                    .collect(),
+                solo,
+                ..Default::default()
+            },
+        );
+        v
+    }
+
+    #[test]
+    fn a_pin_placed_in_the_composite_belongs_to_every_channel_shown_then() {
+        let ds = DatasetId("ds".into());
+        let pin = pin_with_view(Some(layer_view(&[true, false, true], None)));
+        let placed = pin.placement_channels(&ds);
+        assert_eq!(placed, vec![0, 2]);
+        // Soloing a channel visible at placement keeps the pin in context.
+        assert!(crate::scene::in_channel_context(&placed, &[0]));
+        assert!(crate::scene::in_channel_context(&placed, &[2]));
+        // The hidden one does not.
+        assert!(!crate::scene::in_channel_context(&placed, &[1]));
+    }
+
+    #[test]
+    fn a_pin_placed_on_a_solo_belongs_to_that_channel() {
+        let ds = DatasetId("ds".into());
+        let pin = pin_with_view(Some(layer_view(&[true, true, true], Some(1))));
+        let placed = pin.placement_channels(&ds);
+        assert_eq!(placed, vec![1]);
+        assert!(crate::scene::in_channel_context(&placed, &[0, 1, 2]));
+        assert!(!crate::scene::in_channel_context(&placed, &[2]));
+    }
+
+    #[test]
+    fn a_pin_without_a_view_belongs_to_its_channel() {
+        let pin = pin_with_view(None);
+        assert_eq!(pin.placement_channels(&DatasetId("ds".into())), vec![2]);
+    }
+
+    #[test]
+    fn a_legacy_pin_placed_in_single_channel_mode_belongs_to_its_channel() {
+        let json = r#"{"id":"p","position":[0.0,0.0],"author":"a","c":1,"view":{"v":1,"camera":{"mode":"slice","center":[0.0,0.0],"zoom":1.0,"viewport":[800,600]},"view":{"z_range":{"start":0,"end":1},"t":0,"c":1,"multi_channel":false},"display":{"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0},"dataset_settings":{"ds":{"visible":true,"opacity":1.0,"contrast_min":0.0,"contrast_max":65535.0,"gamma":1.0,"blend_mode":"alpha","channel_settings":[{"visible":true,"colormap":"magenta","contrast_min":0.0,"contrast_max":1.0,"gamma":1.0},{"visible":true,"colormap":"green","contrast_min":0.0,"contrast_max":1.0,"gamma":1.0}]}}}}"#;
+        let pin: Annotation = serde_json::from_str(json).unwrap();
+        assert_eq!(pin.placement_channels(&DatasetId("ds".into())), vec![1]);
     }
 
     /// A bare point pin carrying a captured view, for blob round-trip tests.
@@ -1257,8 +1319,6 @@ mod annotation_view_tests {
         );
         doc.active_layout_ids
             .insert(old.clone(), LayoutId("img".into()));
-        doc.asset_catalogs
-            .insert(old.clone(), AssetCatalog::empty());
         doc.add_annotation(old.clone(), pin_with_view(None));
 
         let mut remap = HashMap::new();
@@ -1271,8 +1331,6 @@ mod annotation_view_tests {
         assert!(!doc.registered_layouts.contains_key(&old));
         assert!(doc.active_layout_ids.contains_key(&new));
         assert!(!doc.active_layout_ids.contains_key(&old));
-        assert!(doc.asset_catalogs.contains_key(&new));
-        assert!(!doc.asset_catalogs.contains_key(&old));
         assert!(doc.annotations.contains_key(&new));
         assert!(!doc.annotations.contains_key(&old));
         assert_eq!(doc.manifests.get(&new).unwrap().dataset_id, new);
@@ -1357,7 +1415,6 @@ mod annotation_view_tests {
         );
         doc.active_layout_ids
             .insert(id.clone(), LayoutId("img".into()));
-        doc.asset_catalogs.insert(id.clone(), AssetCatalog::empty());
         doc.add_annotation(id.clone(), pin_with_view(None));
         doc
     }
@@ -1393,8 +1450,6 @@ mod annotation_view_tests {
         );
         doc.active_layout_ids
             .insert(kept.clone(), LayoutId("img".into()));
-        doc.asset_catalogs
-            .insert(kept.clone(), AssetCatalog::empty());
         doc.add_annotation(kept.clone(), pin_with_view(None));
 
         doc.remove_dataset(&gone);
@@ -1408,13 +1463,11 @@ mod annotation_view_tests {
             !doc.active_layout_ids.contains_key(&gone),
             "remove_dataset must clear active_layout_ids (was orphaned)"
         );
-        assert!(!doc.asset_catalogs.contains_key(&gone));
         assert!(!doc.annotations.contains_key(&gone));
 
         assert!(doc.manifests.contains_key(&kept));
         assert!(doc.registered_layouts.contains_key(&kept));
         assert!(doc.active_layout_ids.contains_key(&kept));
-        assert!(doc.asset_catalogs.contains_key(&kept));
         assert!(doc.annotations.contains_key(&kept));
     }
 
@@ -1431,7 +1484,6 @@ mod annotation_view_tests {
         assert!(doc.manifests.is_empty());
         assert!(doc.registered_layouts.is_empty());
         assert!(doc.active_layout_ids.is_empty());
-        assert!(doc.asset_catalogs.is_empty());
         assert!(doc.annotations.is_empty());
     }
 
@@ -1462,8 +1514,6 @@ mod annotation_view_tests {
                     Vec::new(),
                     None,
                 ));
-                doc.asset_catalogs
-                    .insert((*id).clone(), AssetCatalog::empty());
                 doc.add_annotation((*id).clone(), pin_with_view(None));
             }
             doc
@@ -1478,10 +1528,6 @@ mod annotation_view_tests {
         let expected = vec![a.clone(), b_prime.clone(), c.clone()];
         assert_eq!(doc.manifests.keys().cloned().collect::<Vec<_>>(), expected);
         assert_eq!(
-            doc.asset_catalogs.keys().cloned().collect::<Vec<_>>(),
-            expected
-        );
-        assert_eq!(
             doc.annotations.keys().cloned().collect::<Vec<_>>(),
             expected,
         );
@@ -1493,10 +1539,6 @@ mod annotation_view_tests {
 
         let expected = vec![a.clone(), c.clone()];
         assert_eq!(doc.manifests.keys().cloned().collect::<Vec<_>>(), expected);
-        assert_eq!(
-            doc.asset_catalogs.keys().cloned().collect::<Vec<_>>(),
-            expected
-        );
         assert_eq!(
             doc.annotations.keys().cloned().collect::<Vec<_>>(),
             expected

@@ -4,16 +4,17 @@
  * reaches the render loop. A saved-view apply and a followed peer move the
  * same selectors, and neither is an input.
  *
- * Channels: a multichannel image opens as a composite, and solo is the
- * scene's single-channel mode, so a view recorded in single-channel mode
- * reads back as that channel soloed.
+ * What each layer shows is the scene's to say; the hook passes its resolved
+ * layers through.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import type { WasmScene } from "lucida-core";
 
 import { applyViewportCommand } from "../applyAndSend.ts";
+import { stepIndex } from "../axes.ts";
 import type { RenderLoop } from "../renderLoop.ts";
+import { resolvedLayer } from "../resolvedLayerFixtures.ts";
 import { SceneStore } from "../sceneStore.ts";
 import { VIEWPORT_MEDIA, type ViewportClass } from "../theme/viewport.ts";
 import type { DatasetState } from "../types.ts";
@@ -44,21 +45,20 @@ function dataset(id: string, channels: number): DatasetState {
 }
 
 function renderDimensions(datasets: DatasetState[] = []) {
-  const state = { multi: false, c: 0, selection: 0 };
+  const state = { z: 0, t: 0, selection: 0, layers: [] as unknown[] };
   const commands: Array<Record<string, unknown>> = [];
   const scene = {
     apply_command: vi.fn((json: string) => {
       const cmd = JSON.parse(json);
       commands.push(cmd);
-      if (cmd.type === "set_multi_channel") state.multi = cmd.enabled;
-      if (cmd.type === "set_c") state.c = cmd.c;
+      if (cmd.type === "set_z") state.z = cmd.z;
+      if (cmd.type === "set_t") state.t = cmd.t;
       state.selection++;
     }),
     epochs: () => JSON.stringify({ content: 0, layout: 0, view: 0, selection: state.selection }),
-    multi_channel: () => state.multi,
-    c: () => state.c,
-    z: () => 0,
-    t: () => 0,
+    resolved_layers: () => JSON.stringify(state.layers),
+    z: () => state.z,
+    t: () => state.t,
     camera_mode: () => "slice",
   } as unknown as WasmScene;
   const loop = {
@@ -95,87 +95,40 @@ describe("useDimensions as an input source", () => {
 
     act(() => result.current.handleZChange(3));
     act(() => result.current.handleTChange(2));
-    act(() => result.current.handleCChange(1));
 
-    expect(loop.markInput.mock.calls).toEqual([["scrub"], ["scrub"], ["scrub"]]);
+    expect(loop.markInput.mock.calls).toEqual([["scrub"], ["scrub"]]);
   });
 
-  it("reports solo as a select", () => {
-    const { result, loop } = renderDimensions([dataset("ds", 3)]);
+  it("steps from the scene's index at each press, not the last render's", () => {
+    const { result, commands } = renderDimensions();
 
-    act(() => result.current.handleSoloChannel(1));
+    act(() => {
+      result.current.handleZChange(stepIndex(1, 3));
+      result.current.handleZChange(stepIndex(1, 3));
+      result.current.handleZChange(stepIndex(1, 3));
+      result.current.handleTChange(stepIndex(1, 4));
+    });
 
-    expect(loop.markInput).toHaveBeenCalledExactlyOnceWith("select");
+    expect(commands).toEqual([
+      { type: "set_z", z: 1 },
+      { type: "set_z", z: 2 },
+      { type: "set_z", z: 2 },
+      { type: "set_t", t: 1 },
+    ]);
   });
 });
 
-describe("useDimensions channels", () => {
-  it("opens the first multichannel image as a composite", () => {
-    const { result, state, datasetsRef } = renderDimensions();
-    datasetsRef.current.set("ds", dataset("ds", 3));
-
-    act(() => result.current.handleDatasetRegistered("ds"));
-
-    expect(state).toMatchObject({ multi: true });
-    expect(result.current.multiChannel).toBe(true);
-    expect(result.current.soloChannel).toBeNull();
-  });
-
-  it("leaves a single-channel image, and a solo, alone", () => {
-    const { result, state, commands, datasetsRef } = renderDimensions();
-    datasetsRef.current.set("plain", dataset("plain", 1));
-    act(() => result.current.handleDatasetRegistered("plain"));
-    expect(commands).toEqual([]);
-
-    datasetsRef.current.set("ds", dataset("ds", 3));
-    act(() => result.current.handleDatasetRegistered("ds"));
-    act(() => result.current.handleSoloChannel(2));
-    expect(result.current.soloChannel).toBe(2);
-
-    datasetsRef.current.set("other", dataset("other", 2));
-    act(() => result.current.handleDatasetRegistered("other"));
-    expect(state.multi).toBe(false);
-    expect(result.current.soloChannel).toBe(2);
-  });
-
-  it("solos a channel, and returns to the composite from it", () => {
-    const { result, state } = renderDimensions([dataset("ds", 3)]);
-
-    act(() => result.current.handleSoloChannel(1));
-    expect(state).toMatchObject({ multi: false, c: 1 });
-    expect(result.current.soloChannel).toBe(1);
-
-    act(() => result.current.handleSoloChannel(2));
-    expect(state).toMatchObject({ multi: false, c: 2 });
-    expect(result.current.soloChannel).toBe(2);
-
-    act(() => result.current.handleSoloChannel(2));
-    expect(state.multi).toBe(true);
-    expect(result.current.soloChannel).toBeNull();
-
-    act(() => result.current.handleSoloChannel(0));
-    act(() => result.current.handleShowAllChannels());
-    expect(result.current.soloChannel).toBeNull();
-  });
-
-  it("reads a restored single-channel view as that channel soloed", () => {
+describe("useDimensions layers", () => {
+  it("reads what each layer shows back from the scene after a write", () => {
     const { result, sceneStore, state } = renderDimensions([dataset("ds", 3)]);
-    act(() => result.current.handleDatasetRegistered("ds"));
-    expect(result.current.soloChannel).toBeNull();
+    expect(result.current.layers.size).toBe(0);
 
     // A saved view, URL, or followed peer writes the scene and announces it.
-    state.multi = false;
-    state.c = 1;
+    state.layers = [resolvedLayer("ds", [1], { solo: 1, channel_count: 3 })];
     state.selection++;
     act(() => sceneStore.sync());
 
-    expect(result.current.soloChannel).toBe(1);
-  });
-
-  it("never reports a solo for a single-channel scene", () => {
-    const { result } = renderDimensions([dataset("plain", 1)]);
-    expect(result.current.multiChannel).toBe(false);
-    expect(result.current.soloChannel).toBeNull();
+    expect(result.current.layers.get("ds")?.solo).toBe(1);
   });
 });
 

@@ -1,4 +1,4 @@
-# level-chain harness (issue #1003)
+# level-chain harness
 
 Measurement tooling, not part of the product and not wired into CI. It answers one
 question on a wide collection zoomed out to show every tile: what does the level-0
@@ -57,7 +57,7 @@ every one of those rows completed, the moment the last was presented.
 ## Gotchas
 
 - One server per run is what makes the numbers cold. The server caches a source
-  by path for the life of the process (#902), so a second run against the same
+  by path for the life of the process, so a second run against the same
   server reads nothing from the object store. The harness never reuses a server.
 - A wide collection whose coarse tier exceeds its budget settles covering less,
   and the run says how much. A run still filling when the driver's
@@ -72,7 +72,7 @@ every one of those rows completed, the moment the last was presented.
   only an interactive `gcloud auth application-default login` fixes it.
 - A twin must declare each level's own chunk shape. A twin that declared the
   level-0 chunk shape at level 1 made both modes plateau at the same chunk count,
-  because a slot costs the declared chunk (#1042). The second `--chunk` in the command
+  because a slot costs the declared chunk. The second `--chunk` in the command
   above is what corrects it.
 - The tryout harness owns the server process. `lc_run.py` imports
   `extras/tryout` for `ServerProcess` and writes each run's `server.log` beside its

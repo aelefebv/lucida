@@ -33,6 +33,7 @@ import { Badge } from "../ui/Badge.tsx";
 import { Button, IconButton } from "../ui/Button.tsx";
 import { useShortcut, useShortcutScope } from "../ui/shortcuts.ts";
 import { TextField } from "../ui/TextField.tsx";
+import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import { toast } from "../ui/toastQueue.ts";
 import "./ThreadPopover.css";
 
@@ -45,7 +46,7 @@ interface Props {
   /** The dataset the pin belongs to (commands are scoped per dataset). */
   datasetId: string;
   /** The browser-persisted author identity from `annotationAuthorId()`, not the
-   * per-connection `bridge.myId`, so authorship survives rejoining a workspace.
+   * per-connection `myId`, so authorship survives rejoining a workspace.
    * Gates the author-only controls and stamps new comments. */
   myId: string;
   /** Live scene handle for the apply-locally half of the seam. */
@@ -496,9 +497,8 @@ export function ThreadPopover({
 }
 
 /**
- * The @-mention picker above a composer. Options keep focus in the field
- * (mousedown is prevented), so typing continues and an edit field's blur never
- * cancels the edit.
+ * The @-mention picker above a composer. Pressing an option leaves focus in the
+ * field, so typing continues and an edit field's blur never cancels the edit.
  */
 function MentionPicker({
   testId,
@@ -510,22 +510,20 @@ function MentionPicker({
   onPick: (label: string) => void;
 }) {
   return (
-    <div className="lc-thread-picker" data-testid={testId} role="listbox" aria-label="Mention a collaborator">
+    <div className="lc-thread-picker" data-testid={testId} role="group" aria-label="Mention a collaborator">
       {matches.map((candidate, i) => (
-        <button
+        <UnstyledButton
           key={candidate.id}
-          type="button"
-          role="option"
-          // Enter picks the top match, so it reads as the selected one.
-          aria-selected={i === 0}
+          // Enter in the field picks the top match, so it reads as the current one.
+          aria-current={i === 0 ? "true" : undefined}
           className="lc-thread-picker-option"
           data-testid={`mention-option-${candidate.id}`}
-          onMouseDown={(e) => e.preventDefault()}
-          onClick={() => onPick(candidate.label)}
+          preventFocusOnPress
+          onPress={() => onPick(candidate.label)}
         >
           <span className="lc-thread-picker-at">@</span>
           {candidate.label}
-        </button>
+        </UnstyledButton>
       ))}
     </div>
   );

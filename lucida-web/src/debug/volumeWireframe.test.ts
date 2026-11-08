@@ -391,13 +391,12 @@ describe("the box under the pointer", () => {
     const near = box(project, 0, [-5, -5, 0], [5, 5, 10], { key: "near" });
     const far = box(project, 1, [-5, -5, 40], [5, 5, 50], { key: "far" });
     const coarse = box(project, 2, [-40, -40, -20], [40, 40, 60], { key: "coarse", level: 2, sourceTier: "coarse" });
-    const proxy = box(project, 3, [-80, -80, -20], [80, 80, 60], { key: "proxy", level: -1, proxyAsset: true });
     expect(near.depth!).toBeLessThan(far.depth!);
 
-    const items = buildVolumeDrawList(inputOver(healthyLocalOpen(), [far, coarse, proxy, near], {}).input).items;
+    const items = buildVolumeDrawList(inputOver(healthyLocalOpen(), [far, coarse, near], {}).input).items;
     expect(hitTestBox(items, 400, 300)?.key).toBe("near");
     expect(hitTestBox([...items].reverse(), 400, 300)?.key).toBe("near");
-    // Off the two detail boxes but inside the coarse one: the coarse box, never the proxy rectangle.
+    // Off the two detail boxes but inside the coarse one: the coarse box.
     const edge = project(-30, 0, 20)!;
     expect(hitTestBox(items, edge[0], edge[1])?.key).toBe("coarse");
     const outside = project(-70, 0, 20)!;

@@ -3,23 +3,9 @@ import type { VolumeRenderer } from "./volumeRenderer.ts";
 import type { LayerCompositor } from "./layerCompositor.ts";
 import type { CursorRenderer } from "./cursorRenderer.ts";
 import type { WorkerToMainMessage } from "./workerProtocol.ts";
-import type { ProxyAtlasState, ProxyHandle } from "./proxyAtlas.ts";
 import type { EntityDescriptorIndex } from "./descriptorBuffer.ts";
 import type { FrameTiming } from "./passTiming.ts";
 import type { RendererState } from "./worker/state.ts";
-
-/**
- * Handles into the GPU proxy atlases for one `(entity, t, c)`. Proxy pools
- * are channel-scoped, so one entity can have several live descriptors.
- */
-export interface EntityProxyDescriptor {
-  tileProxyHandle: ProxyHandle | null;
-  groupProxyHandle: ProxyHandle | null;
-}
-
-export function proxyDescriptorKey(entityId: string, t: number, c: number): string {
-  return `${entityId}|${t}|${c}`;
-}
 
 export interface WorkerCtx {
   /** Replaced when a lost device is (`worker/deviceLoss.ts`), so read it where it is used rather than keeping it. */
@@ -49,13 +35,6 @@ export interface WorkerCtx {
    * several datasets keeps each one's report current.
    */
   postWantedSet(datasetId?: string): void;
-  /**
-   * Look up the proxy descriptor for an entity/time/channel. Returns
-   * null if no proxy has been uploaded yet for that tuple.
-   */
-  lookupProxyDescriptor(entityId: string, t: number, c: number): EntityProxyDescriptor | null;
-  /** Resolve a dataset's proxy pool by its `proxyPoolKey()`, or null if there is none. */
-  lookupProxyPool(datasetId: string, poolKey: string): ProxyAtlasState | null;
   /** The dataset's entity descriptor buffer and index maps, or null before its first cold state. */
   lookupEntityDescriptor(datasetId: string): EntityDescriptorIndex | null;
 }

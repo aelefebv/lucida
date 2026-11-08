@@ -7,12 +7,29 @@ import type { TickContext, MinimapOverlayData } from "./renderLoopTypes.ts";
 import { MINIMAP_UPLOAD_BUDGET_BYTES, MINIMAP_OVERVIEW_SCAN_INTERVAL_MS } from "./renderLoopTypes.ts";
 import type { MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import { datasetSampleFormat } from "./renderer/dataTypeUtil.ts";
+import { readResolvedLayers, type ResolvedLayers } from "./resolvedLayers.ts";
+import { compositeKey } from "./tickCommon.ts";
 
 export interface MinimapState {
   overviewKey: Map<string, string>;
   overviewUploaded: Map<string, Set<string>>;
   overviewSeeded: Set<string>;
   pendingFetch: Map<string, MinimapChunkCoord[]>;
+  /**
+   * The entity that owns each member's image. The minimap keys its work by
+   * image, but the CPU cache keys chunks by entity, and in a collection the
+   * two ids differ.
+   */
+  memberOwner: Map<string, string>;
+  /**
+   * The overviews, by `overviewKey` value, the worker was told to open before
+   * any chunk arrived, because a chunk of theirs failed for good. The worker
+   * draws those hatched, and it can't without an overview to draw.
+   */
+  overviewOpened: Set<string>;
+  /** Every chunk the source failed for good, as `failedChunkId`, at {@link failedVersion}. */
+  failedKeys: Set<string>;
+  failedVersion: number;
   enabled: boolean;
   /**
    * Keeps the coarse overview textures uploading for Explore-panel thumbnails
@@ -82,8 +99,10 @@ export interface MinimapState {
  * this unchanged.
  */
 export interface MinimapRenderLayerGeometry {
+  /** The overview texture's key: the member's id with its channel. */
   memberId: string;
   ownerDatasetId: string;
+  channel: number;
   modelMatrix: Float32Array;
   invModelMatrix: Float32Array;
 }
@@ -120,6 +139,10 @@ export function createMinimapState(): MinimapState {
     overviewUploaded: new Map(),
     overviewSeeded: new Set(),
     pendingFetch: new Map(),
+    memberOwner: new Map(),
+    overviewOpened: new Set(),
+    failedKeys: new Set(),
+    failedVersion: -1,
     enabled: false,
     overviewActive: false,
     size: 200,
@@ -147,39 +170,40 @@ export function minimapCoarseLevelIndex(multiscale: Pick<MultiscaleInfo, "levels
   return null;
 }
 
-export interface MinimapDatasetSettings {
-  contrast_min: number;
-  contrast_max: number;
-  gamma: number;
-  channel_settings?: { contrast_min: number; contrast_max: number; gamma: number; colormap?: string }[];
+/**
+ * Overview render layers for the geometry cache, one per member and shown
+ * channel, in draw order, each with the display the scene resolved for it.
+ * Shared by the minimap and explore previews so both draw what the canvas
+ * does. A geometry entry whose layer no longer shows its channel is skipped.
+ */
+export function overviewLayerParams(
+  renderLayers: readonly MinimapRenderLayerGeometry[],
+  layers: ResolvedLayers,
+): MinimapLayerParams[] {
+  const out: MinimapLayerParams[] = [];
+  for (const geom of renderLayers) {
+    const layer = layers.get(geom.ownerDatasetId);
+    const ch = layer?.channels.find((c) => c.channel === geom.channel);
+    if (!ch) continue;
+    out.push({
+      datasetId: geom.memberId,
+      modelMatrix: geom.modelMatrix,
+      invModelMatrix: geom.invModelMatrix,
+      contrastMin: ch.contrast_min,
+      contrastMax: ch.contrast_max,
+      gamma: ch.gamma,
+      // The shared volume renderer's LUT is only set as a side effect of the
+      // 3D main view, so the minimap binds its own or 2D renders gray.
+      colormap: ch.colormap,
+      blendMode: ch.blend_mode,
+    });
+  }
+  return out;
 }
 
-/**
- * The active channel's colormap for a minimap layer. The shared volume
- * renderer's LUT is only set as a side effect of the 3D main view, so the
- * minimap binds its own or 2D renders gray. Mirrors
- * `useDatasetSettings.buildLayerInfos`.
- */
-export function resolveMinimapLayerColormap(settings: MinimapDatasetSettings, activeC: number): string {
-  return settings.channel_settings?.[activeC]?.colormap ?? "gray";
-}
-
-/**
- * The active channel's contrast/gamma for a minimap layer, falling back to the
- * dataset level. Auto-contrast writes channel settings and leaves the dataset
- * level at full range, which renders a low-valued volume invisibly dark.
- * Mirrors `useDatasetSettings.buildLayerInfos`.
- */
-export function resolveMinimapLayerContrast(
-  settings: MinimapDatasetSettings,
-  activeC: number,
-): { contrastMin: number; contrastMax: number; gamma: number } {
-  const ch = settings.channel_settings?.[activeC];
-  return {
-    contrastMin: ch?.contrast_min ?? settings.contrast_min,
-    contrastMax: ch?.contrast_max ?? settings.contrast_max,
-    gamma: ch?.gamma ?? settings.gamma,
-  };
+/** The overview texture key for one member's channel. */
+export function overviewKeyFor(memberId: string, channel: number): string {
+  return compositeKey(memberId, channel);
 }
 
 /** A member's forward/inverse placement matrices, as one bulk-read entry. */
@@ -263,48 +287,30 @@ export function intersectSliceViewWithMember(
   };
 }
 
-/**
- * Mark a dataset's explicit coarse level as fully seeded (all chunks already uploaded).
- * Called when overview data was bulk-uploaded externally.
- */
-export function markMinimapOverviewSeeded(
-  ctx: TickContext,
-  state: MinimapState,
-  datasetId: string,
-  t: number,
-  c: number,
-): void {
-  const ds = ctx.datasets.get(datasetId);
-  if (!ds) return;
-  const multiscale = ds.manifest.images[0].multiscale;
-  const coarsestIdx = minimapCoarseLevelIndex(multiscale);
-  if (coarsestIdx === null) return;
-  const key = `${datasetId}/${coarsestIdx}/${t}/${c}`;
-  state.overviewKey.set(datasetId, key);
-  state.overviewSeeded.add(datasetId);
-  // Mark every chunk uploaded so the progressive path skips this dataset.
-  const levelMeta = multiscale.levels[coarsestIdx];
-  const [, , levelDepth, levelHeight, levelWidth] = levelMeta.shape;
-  const [, , chunkZ, chunkY, chunkX] = levelMeta.chunk_shape;
-  const nz = Math.ceil(levelDepth / chunkZ);
-  const ny = Math.ceil(levelHeight / chunkY);
-  const nx = Math.ceil(levelWidth / chunkX);
-  const uploadedSet = new Set<string>();
-  for (let iz = 0; iz < nz; iz++) {
-    for (let iy = 0; iy < ny; iy++) {
-      for (let ix = 0; ix < nx; ix++) {
-        uploadedSet.add(`${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`);
-      }
-    }
+
+/** One failed chunk's id in {@link MinimapState.failedKeys}. */
+function failedChunkId(imageId: string, chunkKey: string): string {
+  return `${imageId}\n${chunkKey}`;
+}
+
+/** Re-read the chunks the source failed for good, when the cache says they changed. */
+function refreshFailedKeys(ctx: TickContext, state: MinimapState): void {
+  const version = ctx.cpuCache.failedChunksVersion();
+  if (version === state.failedVersion) return;
+  state.failedVersion = version;
+  state.failedKeys.clear();
+  for (const { imageId, chunkKey } of ctx.cpuCache.failedChunks()) {
+    state.failedKeys.add(failedChunkId(imageId, chunkKey));
   }
-  state.overviewUploaded.set(datasetId, uploadedSet);
 }
 
 /** Whether any chunk a member awaits is now in the cache, with the scan's own test for usable data. */
 function awaitedChunkArrived(ctx: TickContext, state: MinimapState): boolean {
   for (const [memberId, coords] of state.pendingFetch) {
+    const owner = state.memberOwner.get(memberId);
+    if (owner === undefined) continue;
     for (const coord of coords) {
-      const cached = ctx.cpuCache.getCachedChunk(memberId, coord.key);
+      const cached = ctx.cpuCache.getCachedChunk(owner, coord.key);
       if (cached && cached.data.byteLength > 0) return true;
     }
   }
@@ -312,7 +318,8 @@ function awaitedChunkArrived(ctx: TickContext, state: MinimapState): boolean {
 }
 
 /**
- * Upload explicit coarse-level overview chunks for the minimap.
+ * Upload explicit coarse-level overview chunks for the minimap: one overview
+ * texture per member and channel its layer shows, at the layer's timepoint.
  * Returns true if the next frame has overview work to do (caller should schedule it).
  */
 export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: number): boolean {
@@ -332,13 +339,15 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
   state.lastOverviewScanMs = now;
 
   const { scene, client, datasets } = ctx;
-  const t = scene.t();
-  const c = scene.c();
+  const layers = readResolvedLayers(scene);
+  refreshFailedKeys(ctx, state);
 
   let budgetRemaining = MINIMAP_UPLOAD_BUDGET_BYTES;
 
-  for (const [, ds] of datasets) {
-    // Each member gets its own overview texture.
+  for (const [dsId, ds] of datasets) {
+    const layer = layers.get(dsId);
+    const t = layer?.t ?? scene.t();
+    const channels = layer ? layer.channels.map((ch) => ch.channel) : [0];
     for (const img of ds.manifest.images) {
       const memberId = img.image_id;
       const multiscale = img.multiscale;
@@ -355,42 +364,69 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
       const ny = Math.ceil(levelHeight / chunkY);
       const nx = Math.ceil(levelWidth / chunkX);
       const totalChunks = nz * ny * nx;
-      const overviewKey = `${memberId}/${coarsestIdx}/${t}/${c}`;
+      // The planner keys minimap demand by image, so every channel's missing
+      // chunks travel in the member's one list.
+      const missing: MinimapChunkCoord[] = [];
+      state.memberOwner.set(memberId, img.owner);
 
-      if (state.overviewKey.get(memberId) !== overviewKey) {
-        state.overviewUploaded.set(memberId, new Set());
-        state.overviewSeeded.delete(memberId);
-        state.overviewKey.set(memberId, overviewKey);
-      }
+      for (const c of channels) {
+        const key = overviewKeyFor(memberId, c);
+        const overviewKey = `${key}/${coarsestIdx}/${t}`;
+        if (state.overviewKey.get(key) !== overviewKey) {
+          state.overviewUploaded.set(key, new Set());
+          state.overviewSeeded.delete(key);
+          state.overviewKey.set(key, overviewKey);
+        }
+        if (state.overviewSeeded.has(key)) continue;
 
-      if (state.overviewSeeded.has(memberId)) continue;
+        const uploaded = state.overviewUploaded.get(key)!;
+        const available: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[] = [];
+        let anyFailed = false;
 
-      const uploaded = state.overviewUploaded.get(memberId)!;
-      const missing: { level: number; x: number; y: number; z: number; t: number; c: number; key: string }[] = [];
-      const available: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[] = [];
+        for (let iz = 0; iz < nz; iz++) {
+          for (let iy = 0; iy < ny; iy++) {
+            for (let ix = 0; ix < nx; ix++) {
+              const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
+              if (uploaded.has(chunkKey)) continue;
 
-      for (let iz = 0; iz < nz; iz++) {
-        for (let iy = 0; iy < ny; iy++) {
-          for (let ix = 0; ix < nx; ix++) {
-            const chunkKey = `${coarsestIdx}/${t}/${c}/${iz}/${iy}/${ix}`;
-            if (uploaded.has(chunkKey)) continue;
-
-            const cached = ctx.cpuCache.getCachedChunk(memberId, chunkKey);
-            if (cached && cached.data.byteLength > 0) {
-              available.push({
-                data: cached.data,
-                dataType: cached.dataType,
-                x: ix, y: iy, z: iz, key: chunkKey,
-              });
-              uploaded.add(chunkKey);
-              budgetRemaining -= cached.data.byteLength;
-              if (budgetRemaining <= 0) break;
-            } else {
-              missing.push({ level: coarsestIdx, x: ix, y: iy, z: iz, t, c, key: chunkKey });
+              const cached = ctx.cpuCache.getCachedChunk(img.owner, chunkKey);
+              if (cached && cached.data.byteLength > 0) {
+                available.push({
+                  data: cached.data,
+                  dataType: cached.dataType,
+                  x: ix, y: iy, z: iz, key: chunkKey,
+                });
+                uploaded.add(chunkKey);
+                budgetRemaining -= cached.data.byteLength;
+                if (budgetRemaining <= 0) break;
+              } else {
+                missing.push({ level: coarsestIdx, x: ix, y: iy, z: iz, t, c, key: chunkKey });
+                anyFailed ||= state.failedKeys.has(failedChunkId(memberId, chunkKey));
+              }
             }
+            if (budgetRemaining <= 0) break;
           }
           if (budgetRemaining <= 0) break;
         }
+
+        // An overview whose chunks all failed still opens, so it draws them hatched.
+        const open = available.length === 0 && uploaded.size === 0 && anyFailed
+          && !state.overviewOpened.has(overviewKey);
+        if (available.length > 0 || open) {
+          client.minimapUploadOverviewChunksForLayer(
+            key, available, memberId, coarsestIdx, t, c,
+            levelWidth, levelHeight, levelDepth,
+            chunkX, chunkY, chunkZ,
+            datasetSampleFormat(ds.manifest),
+          );
+          state.overviewOpened.add(overviewKey);
+          state.uploadGeneration++;
+        }
+
+        if (uploaded.size >= totalChunks) {
+          state.overviewSeeded.add(key);
+        }
+
         if (budgetRemaining <= 0) break;
       }
 
@@ -398,20 +434,6 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
         state.pendingFetch.set(memberId, missing);
       } else {
         state.pendingFetch.delete(memberId);
-      }
-
-      if (available.length > 0) {
-        client.minimapUploadOverviewChunksForLayer(
-          memberId, available, t, c,
-          levelWidth, levelHeight, levelDepth,
-          chunkX, chunkY, chunkZ,
-          datasetSampleFormat(ds.manifest),
-        );
-        state.uploadGeneration++;
-      }
-
-      if (uploaded.size >= totalChunks) {
-        state.overviewSeeded.add(memberId);
       }
 
       if (budgetRemaining <= 0) break;
@@ -424,42 +446,22 @@ export function tickMinimapOverview(ctx: TickContext, state: MinimapState, now: 
   return state.overviewBudgetPending;
 }
 
-/** Parsed per-dataset settings, keyed by dataset id (from `all_dataset_settings`). */
-type MinimapAllSettings = Record<string, {
-  visible: boolean;
-  opacity: number;
-  blend_mode: string;
-} & MinimapDatasetSettings>;
 
 /**
- * Resolve per-layer display params from geometry and current settings, then
- * issue the overview render. The only place layer params are assembled, so a
- * full rebuild and a display-only re-render make the same render call.
+ * Resolve per-layer display params from geometry and the scene's resolved
+ * layers, then issue the overview render. The only place layer params are
+ * assembled, so a full rebuild and a display-only re-render make the same
+ * render call.
  */
 function issueMinimapRender(
   client: TickContext["client"],
   renderLayers: MinimapRenderLayerGeometry[],
-  allSettings: MinimapAllSettings,
-  activeC: number,
+  resolved: ResolvedLayers,
   invViewProj: Float32Array,
   eye: Float32Array,
   backingSize: number,
 ): void {
-  const layers: MinimapLayerParams[] = [];
-  for (const geom of renderLayers) {
-    const settings = allSettings[geom.ownerDatasetId];
-    if (!settings) continue;
-    const { contrastMin, contrastMax, gamma } = resolveMinimapLayerContrast(settings, activeC);
-    layers.push({
-      datasetId: geom.memberId,
-      modelMatrix: geom.modelMatrix,
-      invModelMatrix: geom.invModelMatrix,
-      contrastMin,
-      contrastMax,
-      gamma,
-      colormap: resolveMinimapLayerColormap(settings, activeC),
-    });
-  }
+  const layers = overviewLayerParams(renderLayers, resolved);
   if (layers.length > 0) {
     client.minimapRender(layers, invViewProj, eye, backingSize, backingSize);
   }
@@ -469,14 +471,12 @@ function issueMinimapRender(
 function updateMinimapDisplay(
   client: TickContext["client"],
   cache: MinimapOverviewCache,
-  allSettings: MinimapAllSettings,
-  activeC: number,
+  resolved: ResolvedLayers,
 ): void {
   issueMinimapRender(
     client,
     cache.renderLayers,
-    allSettings,
-    activeC,
+    resolved,
     cache.invViewProj,
     cache.eye,
     cache.backingSize,
@@ -484,16 +484,22 @@ function updateMinimapDisplay(
 }
 
 /**
- * Each drawn dataset's `visible` flag in draw order. The dataset set and order
- * are already in the geometry key, so only the flags are tracked here.
+ * Each drawn dataset's visibility, shown channels and timepoint in draw order:
+ * what decides which overview textures are drawn. The dataset set and order
+ * are already in the geometry key.
  */
-function minimapVisibilitySignature(layerOrder: string[], allSettings: MinimapAllSettings): string {
+function minimapVisibilitySignature(layerOrder: string[], resolved: ResolvedLayers): string {
   // JSON rather than a delimiter join, so an id containing the delimiter can't
   // alias two visibility states.
-  const entries: [string, 0 | 1][] = [];
+  const entries: [string, 0 | 1, number[], number][] = [];
   for (const dsId of layerOrder) {
-    const settings = allSettings[dsId];
-    entries.push([dsId, settings && settings.visible ? 1 : 0]);
+    const layer = resolved.get(dsId);
+    entries.push([
+      dsId,
+      layer && layer.visible ? 1 : 0,
+      layer ? layer.channels.map((c) => c.channel) : [],
+      layer?.t ?? 0,
+    ]);
   }
   return JSON.stringify(entries);
 }
@@ -538,8 +544,7 @@ function updateMinimapCamera(
   client: TickContext["client"],
   cache: MinimapOverviewCache,
   cssSize: number,
-  activeC: number,
-  allSettings: MinimapAllSettings,
+  resolved: ResolvedLayers,
   theta: number,
   phi: number,
 ): void {
@@ -549,7 +554,7 @@ function updateMinimapCamera(
   cache.eye = cam.eye;
   cache.backingSize = cam.backingSize;
   cache.topDown = cam.topDown;
-  issueMinimapRender(client, cache.renderLayers, allSettings, activeC, cache.invViewProj, cache.eye, cache.backingSize);
+  issueMinimapRender(client, cache.renderLayers, resolved, cache.invViewProj, cache.eye, cache.backingSize);
 }
 
 /**
@@ -559,9 +564,8 @@ function updateMinimapCamera(
 function buildMinimapOverview(
   ctx: TickContext,
   cssSize: number,
-  activeC: number,
   layerOrder: string[],
-  allSettings: MinimapAllSettings,
+  resolved: ResolvedLayers,
   theta: number,
   phi: number,
 ): MinimapOverviewCache {
@@ -577,8 +581,8 @@ function buildMinimapOverview(
   for (const dsId of layerOrder) {
     const ds = datasets.get(dsId);
     if (!ds) continue;
-    const settings = allSettings[dsId];
-    if (!settings || !settings.visible) continue;
+    const layer = resolved.get(dsId);
+    if (!layer || !layer.visible) continue;
 
     let memberPositions: Record<string, [number, number]> = {};
     try {
@@ -596,7 +600,17 @@ function buildMinimapOverview(
       const invModel = mats?.invModel ?? identityModelMatrix();
       const level0 = img.multiscale.levels[0];
 
-      renderLayers.push({ memberId, ownerDatasetId: dsId, modelMatrix: model, invModelMatrix: invModel });
+      // The minimap draws the composite the canvas draws: one overview per
+      // shown channel, blended as the layer blends them.
+      for (const ch of layer.channels) {
+        renderLayers.push({
+          memberId: overviewKeyFor(memberId, ch.channel),
+          ownerDatasetId: dsId,
+          channel: ch.channel,
+          modelMatrix: model,
+          invModelMatrix: invModel,
+        });
+      }
 
       overlayLayers.push({ datasetId: memberId, modelMatrix: model, invModelMatrix: invModel });
       if (level0) {
@@ -625,7 +639,7 @@ function buildMinimapOverview(
     });
   }
 
-  issueMinimapRender(client, renderLayers, allSettings, activeC, invViewProj, eye, backingSize);
+  issueMinimapRender(client, renderLayers, resolved, invViewProj, eye, backingSize);
 
   // All members of a dataset share one tile shape. One pass over the datasets
   // builds the lookup; scanning per overlay layer would be quadratic.
@@ -685,11 +699,13 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   const theta = scene.camera_theta();
   const phi = scene.camera_phi();
 
-  const settingsSnap = scene.all_dataset_settings();
+  const resolved = readResolvedLayers(scene);
+  // What the overview draws and how, less the z slab: the overview takes no
+  // Z, so a Z-scrub refreshes only the overlay.
+  const settingsSnap = JSON.stringify(
+    [...resolved.values()].map((l) => [l.dataset_id, l.visible, l.t, l.channels]),
+  );
   const orderSnap = scene.dataset_order();
-  // The active channel picks which channel_settings the contrast comes from, so
-  // it belongs in the overview key or a channel switch leaves the minimap stale.
-  const activeC = scene.c();
 
   const { content: contentEpoch, layout: layoutEpoch } = readMinimapOverviewEpochs(scene);
 
@@ -707,7 +723,7 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   // across monitors) or a resize must rebuild, or a later display-only edit
   // renders with the stale camera. Z is left out: the overview render takes no
   // Z, so a Z-scrub refreshes only the overlay.
-  const geometryKey = `${mode}|${activeC}|${contentEpoch}|${layoutEpoch}|${orderSnap}|${state.uploadGeneration}|${devicePixelRatio}|${state.size}`;
+  const geometryKey = `${mode}|${contentEpoch}|${layoutEpoch}|${orderSnap}|${state.uploadGeneration}|${devicePixelRatio}|${state.size}`;
   // Only slice mode draws a Z-dependent overlay element, so Z joins the overlay
   // key there alone. Volume mode keys on `inv_view_proj()`, the frustum's
   // source: `eye_position()` alone would miss a fly look-around, where the view
@@ -732,28 +748,26 @@ export function tickMinimap(ctx: TickContext, state: MinimapState, sliceZ: numbe
   let rebuilt = false;
   if (geometryChanged || !state.overviewCache) {
     const layerOrder: string[] = JSON.parse(orderSnap);
-    const allSettings: MinimapAllSettings = JSON.parse(settingsSnap);
-    state.overviewCache = buildMinimapOverview(ctx, state.size, activeC, layerOrder, allSettings, theta, phi);
-    state.overviewVisibilitySig = minimapVisibilitySignature(layerOrder, allSettings);
+    state.overviewCache = buildMinimapOverview(ctx, state.size, layerOrder, resolved, theta, phi);
+    state.overviewVisibilitySig = minimapVisibilitySignature(layerOrder, resolved);
     rebuilt = true;
   } else if (settingsChanged) {
-    // A visibility change rebuilds; a display-only edit re-renders from cache.
+    // A change in which overviews draw rebuilds; a display-only edit
+    // re-renders from cache.
     const layerOrder: string[] = JSON.parse(orderSnap);
-    const allSettings: MinimapAllSettings = JSON.parse(settingsSnap);
-    const visibilitySig = minimapVisibilitySignature(layerOrder, allSettings);
+    const visibilitySig = minimapVisibilitySignature(layerOrder, resolved);
     if (visibilitySig !== state.overviewVisibilitySig) {
-      state.overviewCache = buildMinimapOverview(ctx, state.size, activeC, layerOrder, allSettings, theta, phi);
+      state.overviewCache = buildMinimapOverview(ctx, state.size, layerOrder, resolved, theta, phi);
       state.overviewVisibilitySig = visibilitySig;
       rebuilt = true;
     } else if (orbited) {
-      updateMinimapCamera(scene, ctx.client, state.overviewCache, state.size, activeC, allSettings, theta, phi);
+      updateMinimapCamera(scene, ctx.client, state.overviewCache, state.size, resolved, theta, phi);
     } else {
-      updateMinimapDisplay(ctx.client, state.overviewCache, allSettings, activeC);
+      updateMinimapDisplay(ctx.client, state.overviewCache, resolved);
     }
   } else if (orbited) {
     // A rotated volume looks different, so the overview must still redraw.
-    const allSettings: MinimapAllSettings = JSON.parse(settingsSnap);
-    updateMinimapCamera(scene, ctx.client, state.overviewCache, state.size, activeC, allSettings, theta, phi);
+    updateMinimapCamera(scene, ctx.client, state.overviewCache, state.size, resolved, theta, phi);
   }
   // A dolly, pan, zoom, or Z-scrub falls through to the overlay alone.
   //
@@ -823,6 +837,7 @@ export function forgetMinimapOverviewUploads(state: MinimapState): void {
   state.overviewKey.clear();
   state.overviewUploaded.clear();
   state.overviewSeeded.clear();
+  state.overviewOpened.clear();
   state.lastOverviewScanMs = Number.NEGATIVE_INFINITY;
   invalidateMinimapOverview(state);
 }
@@ -830,6 +845,8 @@ export function forgetMinimapOverviewUploads(state: MinimapState): void {
 /** The worker lost these members' overview textures: upload them again, starting next tick. */
 export function forgetMinimapOverviewsOf(state: MinimapState, memberIds: readonly string[]): void {
   for (const memberId of memberIds) {
+    const opened = state.overviewKey.get(memberId);
+    if (opened !== undefined) state.overviewOpened.delete(opened);
     state.overviewKey.delete(memberId);
     state.overviewUploaded.delete(memberId);
     state.overviewSeeded.delete(memberId);
@@ -844,6 +861,10 @@ export function clearMinimapForDataset(state: MinimapState, dsId: string): void 
   state.overviewUploaded.delete(dsId);
   state.overviewSeeded.delete(dsId);
   state.pendingFetch.delete(dsId);
+  state.memberOwner.delete(dsId);
+  for (const opened of [...state.overviewOpened]) {
+    if (opened.startsWith(dsId)) state.overviewOpened.delete(opened);
+  }
   // Clear any member-keyed entries (collection case, e.g. "dsId:A/1/0").
   const prefix = dsId + ":";
   for (const key of [...state.overviewKey.keys()]) {
@@ -853,5 +874,8 @@ export function clearMinimapForDataset(state: MinimapState, dsId: string): void 
       state.overviewSeeded.delete(key);
       state.pendingFetch.delete(key);
     }
+  }
+  for (const memberId of [...state.memberOwner.keys()]) {
+    if (memberId.startsWith(prefix)) state.memberOwner.delete(memberId);
   }
 }

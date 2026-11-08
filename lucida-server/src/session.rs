@@ -356,7 +356,6 @@ mod tests {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -424,6 +423,7 @@ mod tests {
                     status: GeneratedChunkStatus::Ready,
                     message: None,
                 }],
+                histograms: vec![],
             },
         );
 

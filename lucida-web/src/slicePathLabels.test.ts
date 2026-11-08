@@ -114,7 +114,7 @@ describe("pushLabelLayers", () => {
 
   it("MAJOR (collection): places a label whose source tile is OFF the active roster at its scene position, not the origin", () => {
     // Labels on two tiles. The near tile (D/3/0) is in the active roster; the
-    // far tile (M/13/0) renders as a group proxy or is off-view, so it is not.
+    // far tile (M/13/0) is off-view, so it is not.
     const near = image("collection:image:D/3/0", [340, 348], [1, 1], "Uint32", "collection:tile:D/3/0");
     const far = image("collection:image:M/13/0", [340, 348], [1, 1], "Uint32", "collection:tile:M/13/0");
     const dsm: DatasetManifest = {

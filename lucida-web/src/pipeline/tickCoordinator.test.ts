@@ -1,11 +1,11 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import type { DatasetManifest } from "../manifestTypes.ts";
 import type { DatasetEntry } from "../renderLoopTypes.ts";
 import { CpuCache } from "./fetch/index.ts";
 import type { ContentSource } from "./fetch/contentSource.ts";
 import type { DecodePool } from "./fetch/decodePool.ts";
 import type { TickContext } from "../renderLoopTypes.ts";
-import { AssetCatalog } from "./assetCatalog.ts";
+
 import type { ColdStateDeltaMessage, ColdStateMessage } from "../renderer/workerProtocol.ts";
 import type { RequestPlan } from "./planning/index.ts";
 import { TickCoordinator, type MinimapChunkCoord } from "./tickCoordinator.ts";
@@ -15,6 +15,10 @@ import { bumpSettingsGeneration } from "../tickCommon.ts";
 import { configStore } from "./planning/configStore.ts";
 import { traceRecorder } from "../trace/recorder.ts";
 import { initialPlanningState } from "./planning/index.ts";
+import { resolvedLayersJson } from "../resolvedLayerFixtures.ts";
+import { loadWasm } from "../viewProperties.ts";
+
+beforeAll(loadWasm);
 
 // Planner-only tests: epoch caching + multi-dataset planning state.
 // Upload-side describes live in `upload/uploader.test.ts`.
@@ -24,21 +28,12 @@ import { initialPlanningState } from "./planning/index.ts";
 // singleton races under `--sequence.shuffle`, inflating call counts.
 //
 // The describes share the real module singletons, so reset the ones tests
-// mutate after every test: configStore (which persists planning knobs to
-// happy-dom localStorage) and localStorage.
+// mutate after every test: configStore (whose planning knobs are
+// preferences in happy-dom localStorage) and localStorage.
 afterEach(() => {
   configStore.__resetForTesting();
   if (typeof localStorage !== "undefined") localStorage.clear();
 });
-
-/** Stub WASM scene that satisfies AssetCatalog's narrow interface. */
-function createMockAssetCatalog(entries: Parameters<AssetCatalog["applyInitial"]>[1]["entries"] = []): AssetCatalog {
-  const catalog = new AssetCatalog({ apply_asset_catalog_delta: () => {} });
-  if (entries.length > 0) {
-    catalog.applyInitial("ds1", { entries });
-  }
-  return catalog;
-}
 
 // ---------------------------------------------------------------------------
 // Mock factories
@@ -88,9 +83,7 @@ interface MockSceneConfig {
     frustum_planes: [number, number, number, number][] | null;
   };
   t: number;
-  c: number;
   z: number;
-  multiChannel: boolean;
   datasetOrder: string[];
   allSettings: Record<string, unknown>;
 }
@@ -123,9 +116,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
       frustum_planes: null,
     },
     t: 0,
-    c: 0,
     z: 0,
-    multiChannel: false,
     datasetOrder: ["ds1"],
     allSettings: {
       ds1: {
@@ -149,16 +140,14 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     member_positions: (_dsId: string) => JSON.stringify(config.memberPositions),
     visible_region: (_dsId: string) => JSON.stringify(config.visibleRegion),
     t: () => config.t,
-    c: () => config.c,
     z: () => config.z,
-    multi_channel: () => config.multiChannel,
+    resolved_layers: () => resolvedLayersJson(config.datasetOrder, config.allSettings, config),
     camera_mode: () => "slice",
     dataset_order: () => JSON.stringify(config.datasetOrder),
     all_dataset_settings: () => JSON.stringify(config.allSettings),
     set_viewport: () => {},
     set_z: () => {},
     set_t: () => {},
-    set_c: () => {},
     center: () => new Float32Array([512, 512]),
     zoom: () => 1.0,
     member_model_matrix: () => {
@@ -218,7 +207,6 @@ function createMockContent(): DatasetManifest {
     default_layout_id: null,
   } as unknown as DatasetManifest;
 }
-
 
 /**
  * Manifest matching {@link createMockSceneWithTiles}: one group, `n` tiles,
@@ -301,7 +289,6 @@ describe("epoch caching", () => {
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -338,7 +325,7 @@ describe("epoch caching", () => {
     traceRecorder.reset();
     traceRecorder.setEnvironment({
       captureWarmth: () => ({
-        detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+        detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
       }),
       captureConditions: () => ({
         datasetIds: ["ds"],
@@ -558,7 +545,7 @@ describe("epoch caching", () => {
   });
 
   it("never coalesces a structural change, even inside the coalescing window", () => {
-    // Structural changes (content/layout/asset) must render immediately —
+    // Structural changes (content/layout) must render immediately —
     // a newly-added dataset or layout change can't wait for a window.
     vi.useFakeTimers({ toFake: ["performance"] });
     try {
@@ -818,7 +805,6 @@ describe("display-only fast path", () => {
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: over?.cpuCache ?? createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -1505,7 +1491,6 @@ describe("multi-dataset planning", () => {
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -1659,7 +1644,6 @@ describe("incremental delta fold", () => {
       renderScale: 1,
       resolutionScale: 1,
       cpuCache: createMockCpuCache(),
-      assetCatalog: createMockAssetCatalog(),
     } as unknown as TickContext;
   }
 
@@ -1681,7 +1665,7 @@ describe("incremental delta fold", () => {
     };
   }
 
-  const deltaEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+  const deltaEpochs = { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
 
   function fullPayload(rows: FoldRow[]): string {
     return JSON.stringify({ Full: { epochs: deltaEpochs, visible_entities: rows } });
@@ -1923,7 +1907,7 @@ describe("incremental delta fold", () => {
       expect(client.coldStateDelta).toHaveBeenCalledTimes(1);
       const deltaMsg = client.coldStateDelta.mock.calls[0][0] as ColdStateDeltaMessage;
       expect(
-        deltaMsg.upserts.map((u) => [u.entityId, u.kind === "tile" ? u.detailLevels : null]),
+        deltaMsg.upserts.map((u) => [u.entityId, u.detailLevels]),
       ).toEqual([["tile-0", [1]]]);
 
       const second = vi.mocked(cpuCache.submit).mock.calls[0][0] as RequestPlan;
@@ -1972,7 +1956,6 @@ describe("incremental delta fold", () => {
             wireFormat: { Raw: { data_type: "uint16" } },
             dataType: "uint16",
           }),
-        fetchProxy: () => new Promise(() => {}),
         handleBinary: () => {},
       } as unknown as ContentSource;
       const decode = {

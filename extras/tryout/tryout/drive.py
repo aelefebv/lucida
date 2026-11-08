@@ -1,8 +1,8 @@
 """The ``drive`` orchestration: bring up, exercise surfaces, capture, tear down.
 
-This is slice 2's counterpart to :mod:`tryout.bringup`. Where ``up`` boots and
+This is the counterpart to :mod:`tryout.bringup`. Where ``up`` boots and
 immediately tears down, ``drive`` keeps the server *alive* across a tour of one
-or more surfaces, then reaps it. It reuses slice 1's spine wholesale rather than
+or more surfaces, then reaps it. It reuses ``up``'s spine wholesale rather than
 re-implementing any lifecycle:
 
   * :class:`tryout.server.ServerProcess` — the same context-managed boot /
@@ -15,7 +15,7 @@ the surface :data:`tryout.surfaces.REGISTRY`, not a hand-maintained ladder)
 against the *one* opened workspace + dataset, writes ``DIR/drive.json`` (mirroring
 stdout), and returns a uniform record + exit code.
 
-Invariants (mirroring slice 1):
+Invariants (mirroring ``up``):
   * The server is reaped on every path — the ``with ServerProcess(...)`` block
     plus a defensive ``stop()`` in ``finally`` guarantee it.
   * ``drive.json`` is written on success *and* failure, so the human verifier
@@ -198,7 +198,7 @@ def drive(
                 db_path = handle.db_path
                 pid = handle.pid
 
-                # Reuse slice 1's bring-up surface: create the workspace and open
+                # Reuse ``up``'s bring-up surface: create the workspace and open
                 # the fixture read-only via the maintained Python client.
                 opened = create_workspace_and_open(
                     base_url=base_url,
@@ -317,7 +317,7 @@ def _build_record(
     teardown: str,
     extra: dict[str, Any],
 ) -> dict[str, Any]:
-    """Assemble the drive record. Reuses slice 1's record shape for the shared
+    """Assemble the drive record. Reuses ``up``'s record shape for the shared
     keys (so a reader who knows ``up.json`` already knows most of ``drive.json``)
     and layers the drive-specific keys (``surfaces``, ...) on top via ``extra``.
     """

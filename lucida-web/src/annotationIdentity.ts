@@ -2,15 +2,30 @@
  * Stable, browser-persisted author identity for annotations and comments.
  *
  * Author-only actions are gated in the UI by comparing an item's `author` to
- * this id. It is persisted in `localStorage` so ownership survives a rejoin;
- * the per-connection `bridge.myId` changes on every connect and stays the
- * presence, cursor, and follow identity. The server does no author check, so
- * this gate is UI-only.
+ * this id. It is a preference, so ownership survives a rejoin, and the capture
+ * surface neither reads nor persists one; the per-connection `myId` changes
+ * on every connect and stays the presence, cursor, and follow identity. The
+ * server does no author check, so this gate is UI-only.
  */
 
-/** localStorage key for the author id. Persisted, so it must stay stable
- * across releases. */
-export const ANNOTATION_AUTHOR_KEY = "lucida.annotation.author";
+import {
+  definePreference,
+  getPreference,
+  migrateLegacyKeys,
+  setPreference,
+} from "./theme/preferences.ts";
+
+/** Empty until this browser mints one; an empty author matches nothing. */
+export const annotationAuthorPreference = definePreference<string>("annotation.author", "", (raw) =>
+  typeof raw === "string" ? raw : undefined,
+);
+
+migrateLegacyKeys(
+  (key) => key === "lucida.annotation.author",
+  (old) => {
+    for (const raw of old.values()) if (raw.length > 0) setPreference(annotationAuthorPreference, raw);
+  },
+);
 
 /**
  * Held for the page's lifetime so the id stays stable within a session even
@@ -35,51 +50,25 @@ function generateAuthorId(): string {
 
 /**
  * This browser's annotation-author id: non-empty and stable within a session.
- * Reuses a stored id verbatim, else mints and persists one. Broken storage
- * degrades to an in-memory id rather than throwing.
+ * Reuses the stored id, else mints and stores one. Broken storage degrades to
+ * an in-memory id rather than throwing.
  */
 export function annotationAuthorId(): string {
   if (cachedAuthorId !== null) return cachedAuthorId;
-
-  // The rejoin path.
-  const existing = readStoredAuthorId();
-  if (existing) {
+  const existing = getPreference(annotationAuthorPreference);
+  if (existing.length > 0) {
     cachedAuthorId = existing;
     return existing;
   }
-
   const fresh = generateAuthorId();
-  writeStoredAuthorId(fresh);
+  setPreference(annotationAuthorPreference, fresh);
   cachedAuthorId = fresh;
   return fresh;
 }
 
-/** Read the persisted id, or null when absent/empty/unavailable. Never throws. */
-function readStoredAuthorId(): string | null {
-  if (typeof localStorage === "undefined") return null;
-  try {
-    const raw = localStorage.getItem(ANNOTATION_AUTHOR_KEY);
-    // An empty string counts as absent, since an empty author matches nothing.
-    return raw && raw.length > 0 ? raw : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Persist the id. Failures are swallowed; `cachedAuthorId` keeps the session
- * consistent. */
-function writeStoredAuthorId(id: string): void {
-  if (typeof localStorage === "undefined") return;
-  try {
-    localStorage.setItem(ANNOTATION_AUTHOR_KEY, id);
-  } catch {
-    // Best effort.
-  }
-}
-
 /**
- * Test-only: drop the in-memory cache so the next call re-reads storage. Does
- * not touch storage itself.
+ * Test-only: drop the in-memory cache so the next call re-reads the
+ * preference. Does not touch storage itself.
  */
 export function __resetAnnotationIdentityForTesting(): void {
   cachedAuthorId = null;

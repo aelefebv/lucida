@@ -38,6 +38,7 @@ export function AccentPicker({ value, onChange, className }: AccentPickerProps) 
         style={custom ? { background: value } : undefined}
         title="Custom color"
       >
+        {/* eslint-disable-next-line no-restricted-syntax -- the platform's color picker, which no primitive wraps */}
         <input
           type="color"
           aria-label="Custom accent color"

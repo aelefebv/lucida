@@ -1,11 +1,10 @@
 /**
  * What draws on and over the canvas: the 2D or 3D viewer, the annotation
- * overlays and draft, the peer cursors, and the debug overlays. The view mode
- * and selectors come from the scene store; the engine supplies the scene,
- * client, canvas, loop, and session.
+ * overlays and draft, the pixel readout, the peer cursors, and the debug
+ * overlays. The view mode and selectors come from the scene store; the engine
+ * supplies the scene, client, canvas, loop, and session.
  */
-import { lazy, Suspense, useCallback, type RefObject } from "react";
-import type { ClientId, PresenceState } from "../bridge.ts";
+import { lazy, Suspense, useCallback, useRef, type RefObject } from "react";
 import { AnnotationDraftOverlay } from "../components/AnnotationDraftOverlay.tsx";
 import { AnnotationOverlay } from "../components/AnnotationOverlay.tsx";
 import { AnnotationOverlay3D } from "../components/AnnotationOverlay3D.tsx";
@@ -15,10 +14,13 @@ import type { Tool } from "../components/annotationTool.ts";
 import type { ClientPoint } from "../components/cameraProjection.ts";
 import type { MentionCandidate } from "../components/annotationMentions.ts";
 import { PeerCursorLayer } from "../components/PeerCursorLayer.tsx";
+import { PixelReadout, type PixelReadoutHandle } from "../components/PixelReadout.tsx";
 import { SliceViewer } from "../components/SliceViewer.tsx";
 import { VolumeViewer } from "../components/VolumeViewer.tsx";
 import { useEngine } from "../engine.ts";
+import type { PeerStore } from "../peerStore.ts";
 import { useSceneView } from "../hooks/useSceneView.ts";
+import { shownChannels } from "../resolvedLayers.ts";
 import { requestRender } from "../invalidation.ts";
 import type { CanvasSize } from "../shell/CanvasStage.tsx";
 import type { DatasetState } from "../types.ts";
@@ -46,9 +48,7 @@ interface Props {
   breakFollow: () => void;
   sendCursor: (position: [number, number] | null) => void;
   sendCommand: (json: string) => void;
-  peers: Map<ClientId, PresenceState>;
-  myId: ClientId;
-  followTarget: ClientId | null;
+  peerStore: PeerStore;
   overlay2dRef: RefObject<AnnotationOverlayHandle | null>;
   overlay3dRef: RefObject<AnnotationOverlayHandle | null>;
   annotationDraftRef: RefObject<AnnotationDraft | null>;
@@ -71,9 +71,7 @@ export function CanvasLayers({
   breakFollow,
   sendCursor,
   sendCommand,
-  peers,
-  myId,
-  followTarget,
+  peerStore,
   overlay2dRef,
   overlay3dRef,
   annotationDraftRef,
@@ -84,10 +82,18 @@ export function CanvasLayers({
 }: Props) {
   const engine = useEngine();
   const { scene, render, sessionRef } = useEngineParts();
-  const { viewMode, cameraMode, z, t, c } = useSceneView(engine.store);
+  const { viewMode, cameraMode, z, t, layers } = useSceneView(engine.store);
 
-  const openContextMenu2d = useCallback((at: ClientPoint) => overlay2dRef.current?.openContextMenu(at), [overlay2dRef]);
-  const openContextMenu3d = useCallback((at: ClientPoint) => overlay3dRef.current?.openContextMenu(at), [overlay3dRef]);
+  // A finger's long press stands for both a right-click and a hover.
+  const readoutRef = useRef<PixelReadoutHandle>(null);
+  const openContextMenu2d = useCallback((at: ClientPoint) => {
+    overlay2dRef.current?.openContextMenu(at);
+    readoutRef.current?.pressAt(at);
+  }, [overlay2dRef]);
+  const openContextMenu3d = useCallback((at: ClientPoint) => {
+    overlay3dRef.current?.openContextMenu(at);
+    readoutRef.current?.pressAt(at);
+  }, [overlay3dRef]);
   const onViewportChanged = useCallback(() => requestRender(engine.loop(), "annotation_viewport"), [engine]);
 
   // The viewers take the live session, scene, and canvas as values. The
@@ -103,7 +109,13 @@ export function CanvasLayers({
   const overlays = hasDatasets && selectedDatasetId && wasmScene && canvas
     ? { datasetId: selectedDatasetId, canvas }
     : null;
-  const viewContext = { z, t, c };
+  // The overlays draw the selected layer's pins, so its shown channels decide
+  // which pins are in context.
+  const viewContext = {
+    z,
+    t,
+    channels: shownChannels(selectedDatasetId ? layers.get(selectedDatasetId) : undefined),
+  };
   return (
     <>
       {viewers && viewMode === "2d" && (
@@ -193,14 +205,21 @@ export function CanvasLayers({
           />
         </>
       )}
+      {viewers && (
+        <PixelReadout
+          ref={readoutRef}
+          canvas={viewers.canvas}
+          client={viewers.client}
+          scene={viewers.scene}
+          datasets={datasets}
+          layers={layers}
+        />
+      )}
       <PeerCursorLayer
-        peers={peers}
-        myId={myId}
-        followTarget={followTarget}
+        peerStore={peerStore}
         viewMode={viewMode}
         z={z}
         t={t}
-        c={c}
         wasmSceneRef={scene.wasmSceneRef}
         clientReady={render.clientReady}
         wasmReady={scene.wasmReady}

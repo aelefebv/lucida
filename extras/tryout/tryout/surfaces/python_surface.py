@@ -9,7 +9,7 @@ dataset info + health, read viewer/layer state, then make one real view mutation
 and re-read to confirm it landed — and captures a faithful, step-by-step
 transcript to ``DIR/python/session.log``.
 
-It reuses slice 1's proven *fast path* for running the maintained client
+It reuses ``up``'s proven *fast path* for running the maintained client
 (``uv run --no-project --with websockets python`` with ``PYTHONPATH`` pointed at
 the working-tree ``lucida-py/python`` source — no native build, works from a
 worktree), so this surface imports ``from lucida import LucidaClient`` exactly as
@@ -228,7 +228,7 @@ def main():
             summarize=lambda layers: {"count": len(layers)},
         )
 
-    # --- saved-view sharing lifecycle (#699 promote, #702 propose/approve/reject)
+    # --- saved-view sharing lifecycle (promote, propose/approve/reject)
     # The Python parity for the CLI's sharing verbs. Build a real SavedView
     # payload from this client's own presence in a live snapshot (so the `v`,
     # camera/view/display the server requires are genuine, not hand-faked), then

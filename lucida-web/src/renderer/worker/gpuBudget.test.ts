@@ -184,29 +184,31 @@ describe("holders outside the pools", () => {
   });
 
   it("leave a minimap overview out once the overviews' share is spent, until its selection changes", () => {
-    const { ctx } = makeCtx(16 * MIB);
+    // One overview is its 1 MiB texture and a one-cell indirection, and the
+    // share is exactly that.
+    const overview = 512 * 512 * 2 * 2 + 4;
+    const { ctx } = makeCtx(overview / MINIMAP_OVERVIEW_SHARE);
     const upload = (memberId: string, t: number) => handleMinimapUploadOverviewChunks(ctx, {
       type: "minimapUploadOverviewChunksForLayer",
       datasetId: memberId,
+      imageId: memberId,
+      level: 0,
       t, c: 0,
       levelWidth: 512, levelHeight: 512, levelDepth: 2,
       chunkX: 512, chunkY: 512, chunkZ: 2,
       sampleFormat: "u16",
       chunks: [],
     });
-    // One overview is 1 MiB, the share of 16 MiB exactly that.
-    expect(512 * 512 * 2 * 2).toBe(16 * MIB * MINIMAP_OVERVIEW_SHARE);
-
     upload("m0", 0);
     upload("m1", 0);
 
-    expect(measureGpuMemory(ctx.state)).toMatchObject({ minimapBytes: 1 * MIB, overviewsRefused: 1 });
+    expect(measureGpuMemory(ctx.state)).toMatchObject({ minimapBytes: overview, overviewsRefused: 1 });
     removeMinimapResources(ctx, "m0");
     upload("m1", 0);
     // Taking it now would draw only the chunks that arrive from here on.
     expect(measureGpuMemory(ctx.state).minimapBytes).toBe(0);
     upload("m1", 1);
-    expect(measureGpuMemory(ctx.state)).toMatchObject({ minimapBytes: 1 * MIB, overviewsRefused: 0 });
+    expect(measureGpuMemory(ctx.state)).toMatchObject({ minimapBytes: overview, overviewsRefused: 0 });
     removeMinimapResources(ctx, "m1");
   });
 });

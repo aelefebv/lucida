@@ -57,7 +57,7 @@ afterEach(() => {
   toastQueue.clear();
 });
 
-describe("ThreadPopover — Go to author's view affordance (slice 2)", () => {
+describe("ThreadPopover — Go to author's view affordance", () => {
   it("renders the affordance ONLY when the pin carries a captured view", () => {
     const withView: Annotation = {
       id: "pin-v",
@@ -122,7 +122,7 @@ describe("ThreadPopover — Go to author's view affordance (slice 2)", () => {
   });
 });
 
-describe("ThreadPopover — Copy link share affordance (slice 3)", () => {
+describe("ThreadPopover — Copy link share affordance", () => {
   it("builds <workspace-url>#a=<pinId> and copies it to the clipboard", async () => {
     const copied: string[] = [];
     Object.defineProperty(navigator, "clipboard", {

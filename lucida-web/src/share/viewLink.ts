@@ -15,7 +15,7 @@ const LONG_LINK_CHARS = 4096;
 export async function viewLink(view: SavedView | null): Promise<string> {
   const { origin, pathname, search, href } = window.location;
   if (view === null) return href;
-  return `${origin}${pathname}${search}#view=${await encode(view)}`;
+  return `${origin}${pathname}${search}#view=${encode(view)}`;
 }
 
 /** Why a copied view link might not open for someone else, if it might not. */

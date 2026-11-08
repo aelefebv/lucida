@@ -166,6 +166,24 @@ describe("DimensionBar", () => {
     expect(screen.getByRole("button", { name: "Play" }).getAttribute("aria-keyshortcuts")).toBe("Space");
   });
 
+  it("moves one position per press when several land before a render", () => {
+    render(<Harness dimZ={10} dimT={5} z={4} t={2} />);
+    const next = screen.getByRole("button", { name: "Next Z plane" });
+    act(() => {
+      fireEvent.click(next);
+      fireEvent.click(next);
+      fireEvent.click(next);
+    });
+    expect(state()).toContain("z=7");
+
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "," });
+      fireEvent.keyDown(document.body, { key: "," });
+      fireEvent.keyDown(document.body, { key: "," });
+    });
+    expect(state()).toContain("t=0");
+  });
+
   it("stops at the ends of Z rather than wrapping", () => {
     render(<Harness dimZ={3} z={2} />);
     press("PageDown");

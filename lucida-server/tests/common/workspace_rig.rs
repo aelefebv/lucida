@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use axum::Extension;
 use lucida_core::auth_principal::AuthPrincipal;
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::dataset_open::WorkspaceScope;
 use lucida_server::storage::{self, DatabaseUrl};
 use lucida_server::workspace::{LiveWorkspace, WorkspaceManager, WorkspaceRuntimeConfig};
@@ -23,11 +23,14 @@ pub struct WorkspaceRig {
 }
 
 impl WorkspaceRig {
-    pub async fn start(proxy_config: ProxyConfig) -> Self {
-        Self::start_with(proxy_config, WorkspaceRuntimeConfig::default()).await
+    pub async fn start(generated_config: GeneratedConfig) -> Self {
+        Self::start_with(generated_config, WorkspaceRuntimeConfig::default()).await
     }
 
-    pub async fn start_with(proxy_config: ProxyConfig, runtime: WorkspaceRuntimeConfig) -> Self {
+    pub async fn start_with(
+        generated_config: GeneratedConfig,
+        runtime: WorkspaceRuntimeConfig,
+    ) -> Self {
         let storage = storage::open(&DatabaseUrl::in_memory()).await.unwrap();
         let workspace = storage
             .workspaces()
@@ -36,7 +39,7 @@ impl WorkspaceRig {
             .unwrap();
         let manager = Arc::new(WorkspaceManager::new_with_runtime_config(
             storage.workspaces(),
-            proxy_config,
+            generated_config,
             runtime,
         ));
         let live = manager

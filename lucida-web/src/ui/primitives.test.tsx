@@ -6,13 +6,16 @@ import userEvent from "@testing-library/user-event";
 import { GearSixIcon } from "@phosphor-icons/react";
 import { useState } from "react";
 import { Button, IconButton } from "./Button.tsx";
+import { Checkbox } from "./Checkbox.tsx";
 import { Dialog } from "./Dialog.tsx";
 import { LONG_PRESS_MS, REVEAL_LINGER_MS } from "./longPress.ts";
 import { Popover } from "./Popover.tsx";
 import { __resetShortcutsForTesting, useShortcut } from "./shortcuts.ts";
 import { Slider } from "./Slider.tsx";
+import { TextField } from "./TextField.tsx";
 import { ToastRegion } from "./Toast.tsx";
 import { dismissToast, toast, toastQueue } from "./toastQueue.ts";
+import { UnstyledButton } from "./UnstyledButton.tsx";
 
 afterEach(() => {
   cleanup();
@@ -207,6 +210,75 @@ describe("Slider", () => {
     await user.clear(low);
     await user.type(low, "500{Enter}");
     expect(onChange).toHaveBeenLastCalledWith([200, 200]);
+  });
+});
+
+describe("UnstyledButton", () => {
+  it("presses from the keyboard and keeps the title React Aria's button would drop", async () => {
+    const user = userEvent.setup();
+    const onPress = vi.fn();
+    render(
+      <UnstyledButton className="row" title="The whole name" onPress={onPress}>
+        Row
+      </UnstyledButton>,
+    );
+    const button = screen.getByRole("button", { name: "Row" });
+    expect(button.getAttribute("title")).toBe("The whole name");
+    await user.tab();
+    expect(document.activeElement).toBe(button);
+    await user.keyboard("{Enter}");
+    await user.keyboard(" ");
+    expect(onPress).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves focus in the text field its options belong to, when asked", async () => {
+    const user = userEvent.setup();
+    const onPress = vi.fn();
+    render(
+      <>
+        <TextField label="Draft" />
+        <UnstyledButton preventFocusOnPress onPress={onPress}>
+          @someone
+        </UnstyledButton>
+      </>,
+    );
+    const field = screen.getByRole("textbox", { name: "Draft" });
+    await user.click(field);
+    await user.click(screen.getByRole("button", { name: "@someone" }));
+    expect(onPress).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(field);
+  });
+
+  it("does nothing while disabled", async () => {
+    const user = userEvent.setup();
+    const onPress = vi.fn();
+    render(
+      <UnstyledButton isDisabled onPress={onPress}>
+        Row
+      </UnstyledButton>,
+    );
+    await user.click(screen.getByRole("button", { name: "Row" }));
+    expect(onPress).not.toHaveBeenCalled();
+  });
+});
+
+describe("Checkbox", () => {
+  it("toggles from a click and from Space, named by its label", async () => {
+    const user = userEvent.setup();
+    function Harness() {
+      const [on, setOn] = useState(false);
+      return (
+        <Checkbox isSelected={on} onChange={setOn}>
+          chunk grid
+        </Checkbox>
+      );
+    }
+    render(<Harness />);
+    const box = screen.getByRole("checkbox", { name: "chunk grid" }) as HTMLInputElement;
+    await user.click(box);
+    expect(box.checked).toBe(true);
+    await user.keyboard(" ");
+    expect(box.checked).toBe(false);
   });
 });
 

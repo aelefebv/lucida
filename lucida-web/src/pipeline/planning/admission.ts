@@ -10,6 +10,7 @@
  */
 
 import type { DatasetManifest } from "../../manifestTypes.ts";
+import { decodedBytesPerSample } from "../../renderer/dataTypeUtil.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { ChunkRequest } from "./types.ts";
 
@@ -48,9 +49,8 @@ export interface Admission {
  * goes next: it is a fallback and takes only the room detail leaves, so the
  * coarse floor grows with the layout instead of stopping at a fixed size
  * while detail room sits empty. Prefetch goes last, into what the view
- * leaves. Priority alone cannot keep that order, because its distance term
- * outweighs the gaps between lane offsets: a prefetch chunk near the center
- * ranks above a view chunk at the edge.
+ * leaves, because the coarse tier borrows from the detail tier's room
+ * before prefetch may. Each pass takes requests in priority order.
  *
  * Two requests for one chunk of one tier, such as the coarse and minimap
  * lanes asking for the same chunk, are admitted or refused together and
@@ -143,24 +143,17 @@ export interface GpuSlot {
   slotBytes: number;
 }
 
-const SAMPLE_BYTES: Record<string, number> = {
-  uint8: 1,
-  uint16: 2,
-  uint32: 4,
-  float32: 4,
-  float64: 8,
-};
-
 /**
  * What one resident chunk of a request costs, from the manifest: the level's
- * chunk shape, one timepoint and one channel, at the image's sample size.
+ * chunk shape, one timepoint and one channel, at the image's decoded sample
+ * size, which is float32 for every type that draws as one.
  * The server serves every chunk whole at that shape, edge chunks included,
  * so this is what the cache and the GPU hold for it.
  */
 export function chunkBytesFor(manifest: DatasetManifest): (req: ChunkRequest) => number {
   const byImage = new Map<string, { levels: number[]; fallback: number }>();
   for (const image of manifest.images) {
-    const sample = SAMPLE_BYTES[image.multiscale.data_type.toLowerCase()] ?? 2;
+    const sample = decodedBytesPerSample(image.multiscale.data_type);
     const levels: number[] = [];
     for (const level of image.multiscale.levels) {
       const [, , z, y, x] = level.chunk_shape;

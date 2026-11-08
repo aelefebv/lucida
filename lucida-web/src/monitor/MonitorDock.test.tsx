@@ -140,6 +140,7 @@ vi.mock("./monitorSource.ts", async (importOriginal) => ({
 }));
 
 const { MonitorDock } = await import("./MonitorDock.tsx");
+const { PREFERENCES_STORAGE_KEY, __resetPreferencesForTesting } = await import("../theme/preferences.ts");
 
 function showing(run: TraceRun) {
   read.value = { ok: true, document: diagnoseRun(run) };
@@ -194,7 +195,8 @@ beforeEach(() => {
   live.value = null;
   reading.value = null;
   charts.value = null;
-  window.localStorage.removeItem("monitor.dock.height");
+  window.localStorage.removeItem(PREFERENCES_STORAGE_KEY);
+  __resetPreferencesForTesting();
 });
 
 afterEach(() => {
@@ -358,7 +360,7 @@ describe("saving a run", () => {
   /**
    * The report goes somewhere the person who sent it cannot see, so the
    * page hands back the one thing that reaches it again: the entry, and
-   * the command that fetches it (#1067).
+   * the command that fetches it.
    */
   it("sends the run to the workspace inbox and names the entry it landed in", async () => {
     showing(coldRemoteOpen());
@@ -675,13 +677,22 @@ describe("the dock in the viewer", () => {
     fireEvent.pointerUp(document, { clientY: 400 });
 
     expect(parseInt(dock.style.height, 10)).toBe(before + 100);
-    expect(window.localStorage.getItem("monitor.dock.height")).toBe(String(before + 100));
+    const stored = JSON.parse(window.localStorage.getItem(PREFERENCES_STORAGE_KEY) ?? "{}");
+    expect(stored.values["monitor.dockHeight"]).toBe(before + 100);
 
     // A later mount starts at the remembered height.
     cleanup();
     read.value = { ok: true, document: diagnoseRun(coldRemoteOpen()) };
     render(<MonitorDock onClose={() => {}} />);
     expect(parseInt(screen.getByTestId("monitor-dock").style.height, 10)).toBe(before + 100);
+  });
+
+  it("starts at a height an older build remembered under its own key, and drops that key", () => {
+    window.localStorage.setItem("monitor.dock.height", "333");
+    __resetPreferencesForTesting();
+    showing(coldRemoteOpen());
+    expect(parseInt(screen.getByTestId("monitor-dock").style.height, 10)).toBe(333);
+    expect(window.localStorage.getItem("monitor.dock.height")).toBeNull();
   });
 
   it("never drags below its minimum height", () => {
@@ -806,7 +817,7 @@ describe("popping out", () => {
   });
 });
 
-describe("a run that is still open (#937)", () => {
+describe("a run that is still open", () => {
   it("shows the four progress counters and the phase bar", () => {
     live.value = progress();
     render(<MonitorDock onClose={() => {}} />);
@@ -898,7 +909,7 @@ describe("a run that is still open (#937)", () => {
     }
   });
 
-  it("shows a provisional reading, labelled provisional, with its top finding and its window (#1057)", () => {
+  it("shows a provisional reading, labelled provisional, with its top finding and its window", () => {
     live.value = progress();
     reading.value = provisional();
     render(<MonitorDock onClose={() => {}} />);
@@ -1012,7 +1023,7 @@ describe("choosing which run to read", () => {
   });
 });
 
-describe("a dropped file (#1066)", () => {
+describe("a dropped file", () => {
   it("reads a dropped bundle at every depth a live run is read, with its settled frame beside the report", async () => {
     showing(coldRemoteOpen());
     readMonitor.mockClear();
@@ -1050,7 +1061,7 @@ describe("a dropped file (#1066)", () => {
     expect(readMonitor).not.toHaveBeenCalled();
   });
 
-  it("says why a frame is the driver's screenshot when the page's capture failed (#1098)", async () => {
+  it("says why a frame is the driver's screenshot when the page's capture failed", async () => {
     showing(coldRemoteOpen());
     const bundle = JSON.parse(readFileSync(`${process.cwd()}/../trace-fixtures/bundle-v1.json`, "utf8"));
     bundle.frame.capturedBy = "driver";
@@ -1126,7 +1137,7 @@ describe("a dropped file (#1066)", () => {
   });
 });
 
-describe("compare mode (#1066)", () => {
+describe("compare mode", () => {
   /** A run at ratio 1 on a 1440 by 900 window, which the golden bundle's retina header is incomparable with. */
   function lowRatioDocument(): TraceDocument {
     return makeDocument([

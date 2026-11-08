@@ -18,7 +18,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_conf
 
 use common::workspace_rig::WorkspaceRig;
 use lucida_core::protocol::{ClientMessage, ServerMessage, WatchItem};
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::connection::{
     CLOSE_TOO_FAR_BEHIND, MAX_INBOUND_MESSAGE_BYTES, OUTBOUND_BUDGET_BYTES,
 };
@@ -34,11 +34,10 @@ struct Rig {
 
 async fn start_server() -> Rig {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let mut proxy_config = ProxyConfig::defaults();
-    proxy_config.cache_dir = tmp.path().join("proxies");
-    proxy_config.generated_cache_dir = tmp.path().join("generated-coarse");
+    let mut generated_config = GeneratedConfig::defaults();
+    generated_config.generated_cache_dir = tmp.path().join("generated-coarse");
     Rig {
-        workspace: WorkspaceRig::start(proxy_config).await,
+        workspace: WorkspaceRig::start(generated_config).await,
         _tmp: tmp,
     }
 }
@@ -112,16 +111,19 @@ async fn assert_still_open(ws: &mut WsClient) {
 async fn a_binary_frame_from_a_client_goes_nowhere() {
     let rig = start_server().await;
     let mut sender = connect(&rig).await;
-    let ServerMessage::Snapshot { your_id: 0, .. } = next_message(&mut sender).await else {
-        panic!("first client is id 0");
+    let ServerMessage::Snapshot { .. } = next_message(&mut sender).await else {
+        panic!("first client's snapshot");
     };
     let mut target = connect(&rig).await;
-    let ServerMessage::Snapshot { your_id: 1, .. } = next_message(&mut target).await else {
-        panic!("second client is id 1");
+    let ServerMessage::Snapshot {
+        your_id: target_id, ..
+    } = next_message(&mut target).await
+    else {
+        panic!("second client's snapshot");
     };
 
-    // The envelope the server uses for chunk frames, addressed to client 1.
-    let mut frame = 1u32.to_le_bytes().to_vec();
+    // The envelope the server uses for chunk frames, addressed to the target.
+    let mut frame = u32::try_from(target_id).unwrap().to_le_bytes().to_vec();
     frame.extend_from_slice(&3u16.to_le_bytes());
     frame.extend_from_slice(b"key");
     frame.extend_from_slice(&[7u8; 64]);
@@ -179,7 +181,18 @@ async fn a_message_over_the_cap_ends_the_connection_and_one_under_it_does_not() 
 async fn a_client_that_stops_reading_is_closed_with_a_reason() {
     let rig = start_server().await;
     let mut client = connect(&rig).await;
-    next_message(&mut client).await;
+    let ServerMessage::Snapshot { your_id, .. } = next_message(&mut client).await else {
+        panic!("the first message is the snapshot");
+    };
+    let queue = rig
+        .workspace
+        .live
+        .unicast_routes
+        .lock()
+        .await
+        .get(&your_id)
+        .cloned()
+        .expect("the connection's queue");
     send(
         &mut client,
         &ClientMessage::WatchSubscribe { history: false },
@@ -190,7 +203,7 @@ async fn a_client_that_stops_reading_is_closed_with_a_reason() {
     // client's own queue. Twice the budget is far past what the socket
     // buffers can absorb.
     const ITEM_BYTES: usize = 1024 * 1024;
-    let items = 2 * OUTBOUND_BUDGET_BYTES / ITEM_BYTES;
+    let most_items = 2 * OUTBOUND_BUDGET_BYTES / ITEM_BYTES;
     let item = WatchItem::Aggregate {
         at_epoch_ms: 0,
         run_id: Some("r".repeat(ITEM_BYTES)),
@@ -202,7 +215,13 @@ async fn a_client_that_stops_reading_is_closed_with_a_reason() {
     let publish = serde_json::to_string(&ClientMessage::WatchPublish { item }).unwrap();
     let (mut sink, mut stream) = client.split();
     let publisher = tokio::spawn(async move {
-        for _ in 0..items {
+        // Stop once the server gives up. It waits a bounded time for the
+        // close to get through, and on a loaded host a client still pushing
+        // the rest of a fixed backlog starts reading after that window.
+        for _ in 0..most_items {
+            if queue.close_requested() {
+                break;
+            }
             if sink
                 .send(WsMessage::Text(publish.clone().into()))
                 .await
@@ -211,9 +230,13 @@ async fn a_client_that_stops_reading_is_closed_with_a_reason() {
                 break;
             }
         }
+        assert!(
+            queue.close_requested(),
+            "the server kept twice its budget queued for a client that never read"
+        );
         sink
     });
-    // Read only once everything is sent, so the backlog builds first.
+    // Read only once the server has given up, so the backlog builds first.
     let _sink = publisher.await.expect("publisher");
 
     let close = loop {

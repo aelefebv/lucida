@@ -34,17 +34,13 @@ function makeRequest(overrides?: Partial<ChunkRequest>): ChunkRequest {
   };
 }
 
-function tileEntry(entityId: string, mode: "tiles-with-detail" | "tiles-with-proxy-fallback"): ActiveSetEntry {
+function tileEntry(entityId: string): ActiveSetEntry {
   return {
     kind: "tile",
     entityId,
     imageId: "image-1",
-    mode,
     detailLevels: [0],
     coarseLevel: null,
-    proxyKind: undefined,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
   };
 }
 
@@ -77,8 +73,7 @@ function makePlan(overrides: Partial<RequestPlan> = {}): RequestPlan {
   return {
     requests: [],
     activeSet,
-    proxyRequests: [],
-    epochs: { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 },
+    epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     stats: emptyPlanStats(),
     nextState: createSyntheticState({ previousActiveSet: activeSet }),
     ...overrides,
@@ -89,7 +84,7 @@ function makeRecorder(): TraceRecorder {
   const recorder = new TraceRecorder({ now: () => 0, epochNow: () => 0 });
   recorder.setEnvironment({
     captureWarmth: () => ({
-      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0, proxyBytes: 0,
+      detailChunks: 0, detailBytes: 0, coarseChunks: 0, coarseBytes: 0,
     }),
     captureConditions: () => ({
       datasetIds: ["ds-1"],
@@ -170,12 +165,11 @@ describe("recordPlanningTick", () => {
     expect(tick.counters.cullingAfterFrustum).toBe(30);
   });
 
-  it("tallies the active set by mode over the whole set", () => {
+  it("tallies the active set over the whole set", () => {
     const plan = makePlan({
       activeSet: [
-        tileEntry("a", "tiles-with-detail"),
-        tileEntry("b", "tiles-with-proxy-fallback"),
-        { kind: "group-as-proxy", entityId: "g", proxyKind: "group" } as unknown as ActiveSetEntry,
+        tileEntry("a"),
+        tileEntry("b"),
         { kind: "invisible", entityId: "i", coarsestLod: 3 } as unknown as ActiveSetEntry,
       ],
     });
@@ -183,10 +177,8 @@ describe("recordPlanningTick", () => {
     recordPlanningTick("ds-1", plan, NO_RESIDENCY, NO_ENTITIES, null, recorder);
 
     const tick = firstTick();
-    expect(tick.counters.activeSetTotal).toBe(4);
-    expect(tick.counters.activeSetTilesDetail).toBe(1);
-    expect(tick.counters.activeSetTilesProxyFallback).toBe(1);
-    expect(tick.counters.activeSetGroupAsProxy).toBe(1);
+    expect(tick.counters.activeSetTotal).toBe(3);
+    expect(tick.counters.activeSetTilesDetail).toBe(2);
   });
 
   it("carries planned against cached and in-flight, per level", () => {

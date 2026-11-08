@@ -17,13 +17,13 @@ const EXEMPT: Readonly<Record<string, string>> = {
   ".lc-select-trigger": "also an .lc-input-group",
   ".lc-slider-thumb": "the slider's track takes the press",
   ".lc-navigator-cell": "a panel sizes its cells to the target (CollectionSelector.tsx); over the canvas they shrink to fit",
-  ".lc-saved-view-visibility-option input": "its whole label takes the press",
+  ".lc-saved-view-visibility-option": "a whole card with a title and a hint line",
   ".lc-toast": "a whole toast",
   ".lc-ws-card-link": "a whole dashboard card",
 };
 
 /** Controls that fall short under a finger. Take one out once it is sized. */
-const SHORT: ReadonlySet<string> = new Set([".lc-browse-chip-remove", ".lc-presence-peer", ".lc-rail-row-open"]);
+const SHORT: ReadonlySet<string> = new Set<string>();
 
 const FOCUS = /:focus-visible|\[data-focus-visible\]/;
 const SIZED = /--lc-target-min|--lc-control-h/;

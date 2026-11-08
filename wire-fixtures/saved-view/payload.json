@@ -1,0 +1,108 @@
+{
+  "view": {
+    "v": 2,
+    "datasets": [
+      "gs://lucida-fixtures/sample-plane.zarr",
+      "gs://lucida-fixtures/sample-volume.zarr"
+    ],
+    "active_layouts": {},
+    "camera": {
+      "mode": "slice",
+      "center": [
+        1024.5,
+        -512.25
+      ],
+      "zoom": 1.5,
+      "viewport": [
+        1920,
+        1080
+      ]
+    },
+    "view": {
+      "z_range": {
+        "start": 10,
+        "end": 14
+      },
+      "t": 2
+    },
+    "display": {
+      "contrast_min": 0.0,
+      "contrast_max": 65535.0,
+      "gamma": 1.0
+    },
+    "dataset_order": [
+      "wds-0f3a",
+      "wds-7c21"
+    ],
+    "dataset_settings": {
+      "wds-0f3a": {
+        "visible": true,
+        "opacity": 1.0,
+        "contrast_min": 0.0,
+        "contrast_max": 65535.0,
+        "gamma": 1.0,
+        "blend_mode": "alpha",
+        "render_mode": "translucent",
+        "channel_settings": [
+          {
+            "visible": true,
+            "colormap": "gray",
+            "contrast_min": 0.0,
+            "contrast_max": 4000.0,
+            "gamma": 1.0
+          }
+        ],
+        "label_settings": [
+          {
+            "visible": true,
+            "opacity": 0.35
+          }
+        ],
+        "channel_blend_mode": "additive",
+        "label_names": [
+          "region-a"
+        ]
+      },
+      "wds-7c21": {
+        "visible": true,
+        "opacity": 0.8,
+        "contrast_min": 0.0,
+        "contrast_max": 65535.0,
+        "gamma": 1.0,
+        "blend_mode": "alpha",
+        "render_mode": "translucent",
+        "channel_settings": [
+          {
+            "visible": true,
+            "colormap": "magenta",
+            "contrast_min": 0.0,
+            "contrast_max": 65535.0,
+            "gamma": 1.0
+          },
+          {
+            "visible": true,
+            "colormap": "green",
+            "contrast_min": 0.0,
+            "contrast_max": 65535.0,
+            "gamma": 1.0,
+            "name": "Region B"
+          },
+          {
+            "visible": true,
+            "colormap": "cyan",
+            "contrast_min": 0.0,
+            "contrast_max": 65535.0,
+            "gamma": 1.0
+          }
+        ],
+        "label_settings": [],
+        "channel_blend_mode": "additive",
+        "solo": 1
+      }
+    },
+    "auto_contrast": {
+      "wds-0f3a": false
+    }
+  },
+  "payload": "H4sIAAAAAAAA_31R227DIAz9lcnPSUrSRut43CfstaoiN3EzJAIRkF7Fv89kl7bStgcksA_nYl8Bp2Cb1prg0AeQVzh2Phf7JYLco_YUM2hxIIep15IJ5EBuSlGtijrL67IqqnqbwWA7Agleq5Ygg4Oi42hdSNCXSmSlWAtGXawdQJZFzawdBvQUGuu6mfImnM3X57YqYXvD8QnK9P7RI3t6R2NI3_U3XLTaugFHttQ7PDPld8RmwBPIlRAiMrnGHX81HDD9A0e9siZH-Gk9sNoRWxXOIEWxrFNIr3aaYwc3UdzGO99_-IrZFZIY23qbpZ5egWvxNzmu3emtM_CciYcXb7ObPfdeLhZ6alWH-V6dwuTILzwOo6Z81GiouKBzPIH_gAerp-ELycIHkNXnElOSML8ujUPTUyqQ6djIii0FTDsuRYzxA0GqVTRLAgAA"
+}

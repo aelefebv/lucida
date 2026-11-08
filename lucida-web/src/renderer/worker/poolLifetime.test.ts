@@ -8,7 +8,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { WorkerCtx } from "../workerContext.ts";
-import { proxyDescriptorKey } from "../workerContext.ts";
+
 import type {
   ColdStateActiveEntry,
   ColdStateMessage,
@@ -17,7 +17,7 @@ import type {
   VolumeChunkDataMessage,
   WorkerToMainMessage,
 } from "../workerProtocol.ts";
-import { allocateProxySlot, createProxyAtlas, proxyPoolKey, proxySlotKey } from "../proxyAtlas.ts";
+
 import { getOrCreateLabelSlicePool } from "../slice/index.ts";
 import { getOrCreateLabelVolumePool } from "../volume/index.ts";
 import type { SliceAtlasState } from "../slice/index.ts";
@@ -85,14 +85,12 @@ function makeCtx(device: GPUDevice): { ctx: WorkerCtx; posts: WorkerToMainMessag
     getOrCreateLUT: () => ({} as GPUTexture),
     post: (msg) => { posts.push(msg); },
     postWantedSet: () => {},
-    lookupProxyDescriptor: () => null,
-    lookupProxyPool: () => null,
     lookupEntityDescriptor: () => null,
   };
   return { ctx, posts };
 }
 
-const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
+const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, request: 0 };
 
 function identity(): Float32Array {
   const m = new Float32Array(16);
@@ -116,16 +114,11 @@ const TWO_SHAPES: Levels = [
 
 function tile(entityId: string, target: number, coarseLevel: number | null = 5): ColdStateActiveEntry {
   return {
-    kind: "tile",
     entityId,
     imageId: entityId,
-    mode: "tiles-with-detail",
     levels: TWO_SHAPES,
     detailLevels: [target],
     coarseLevel,
-    parentGroupId: null,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
     modelMatrix: identity(),
     invModelMatrix: identity(),
     displayStateByChannel: { 0: display, 1: display, 2: display },
@@ -134,14 +127,12 @@ function tile(entityId: string, target: number, coarseLevel: number | null = 5):
 
 function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStateMessage {
   const visibleChannels = opts.visibleChannels ?? [0];
-  const multiChannel = visibleChannels.length > 1 || opts.multiChannel === true;
   return {
     type: "coldState",
     epochs: EPOCHS,
     datasetId,
     currentT: 0,
     currentZ: 0,
-    multiChannel,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1024, 1024],
@@ -152,7 +143,7 @@ function cold(datasetId: string, opts: Partial<ColdStateMessage> = {}): ColdStat
     },
     // The planner wants the one chunk `chunkAt` delivers, in every channel.
     wantedChunks: visibleChannels.map((c) => ({
-      memberId: multiChannel ? `${datasetId}-img:ch${c}` : `${datasetId}-img`,
+      memberId: `${datasetId}-img:ch${c}`,
       tier: "detail" as const,
       chunkKeys: ["2/0/0/0/0/0"],
     })),
@@ -202,10 +193,8 @@ describe("removing a dataset", () => {
     await dispatchMessage(ctx, cold("ds1", { visibleChannels: [0, 1] }));
     await dispatchMessage(ctx, chunkAt(`ds1-img:ch0`));
     expect(ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!.slots.size).toBe(1);
-    getOrCreateLabelSlicePool(ctx, "label", "ds1", 64, 64);
+    getOrCreateLabelSlicePool(ctx, "label", "ds1", 64, 64, 32, 32);
     getOrCreateLabelVolumePool(ctx, "label", "ds1", 64, 64, 32, 32, 32, 32);
-    const proxyKey = proxyPoolKey("ds1", "TileProxy3D", [8, 8, 8], 0);
-    ctx.state.proxyPoolsByDataset.set("ds1", new Map([[proxyKey, createProxyAtlas(gpu.device, "TileProxy3D", [8, 8, 8], 0, 4)]]));
     expect(gpu.live().textures).toBeGreaterThan(baseline.textures);
 
     await dispatchMessage(ctx, { type: "removeLayerResources", datasetId: "ds1" });
@@ -228,23 +217,14 @@ describe("removing a dataset", () => {
     expect(gpu.live()).toEqual(before);
   });
 
-  it("starts a reopened dataset from empty pools and no proxy handles", async () => {
+  it("starts a reopened dataset from empty pools", async () => {
     const gpu = trackingDevice();
     const { ctx } = makeCtx(gpu.device);
     await dispatchMessage(ctx, cold("ds1"));
-    await dispatchMessage(ctx, chunkAt("ds1-img"));
-    const poolKey = "ds1:32x32x32:detail";
+    await dispatchMessage(ctx, chunkAt("ds1-img:ch0"));
+    const poolKey = "ds1:ch0:32x32x32:detail";
     const first = ctx.state.volumeAtlases.get(poolKey)!;
     expect(first.slots.size).toBe(1);
-
-    const proxyKey = proxyPoolKey("ds1", "TileProxy3D", [8, 8, 8], 0);
-    const proxyPool = createProxyAtlas(gpu.device, "TileProxy3D", [8, 8, 8], 0, 4);
-    const slotIndex = allocateProxySlot(proxyPool, proxySlotKey("ds1-img", 0, 0));
-    ctx.state.proxyPoolsByDataset.set("ds1", new Map([[proxyKey, proxyPool]]));
-    ctx.state.proxyDescriptorsByEntity.set(proxyDescriptorKey("ds1-img", 0, 0), {
-      tileProxyHandle: { poolKey: proxyKey, slotIndex },
-      groupProxyHandle: null,
-    });
 
     await dispatchMessage(ctx, { type: "removeLayerResources", datasetId: "ds1" });
     await dispatchMessage(ctx, cold("ds1"));
@@ -252,7 +232,6 @@ describe("removing a dataset", () => {
     const reopened = ctx.state.volumeAtlases.get(poolKey)!;
     expect(reopened).not.toBe(first);
     expect(reopened.slots.size).toBe(0);
-    expect(ctx.state.proxyDescriptorsByEntity.has(proxyDescriptorKey("ds1-img", 0, 0))).toBe(false);
   });
 });
 
@@ -305,11 +284,11 @@ describe("a cold state frees the pools it no longer routes to", () => {
     const { ctx } = makeCtx(gpu.device);
     // Target 2 keeps levels 2 to 5 resident, across both chunk shapes.
     await dispatchMessage(ctx, cold("ds1", { activeSet: [tile("ds1-img", 2, null)] }));
-    expect(poolKeysOf(ctx, "ds1")).toEqual(["ds1:16x16x16:detail", "ds1:32x32x32:detail"]);
+    expect(poolKeysOf(ctx, "ds1")).toEqual(["ds1:ch0:16x16x16:detail", "ds1:ch0:32x32x32:detail"]);
 
     // Target 0 keeps levels 0 to 3, all 32³.
     await dispatchMessage(ctx, cold("ds1", { activeSet: [tile("ds1-img", 0, null)] }));
-    expect(poolKeysOf(ctx, "ds1")).toEqual(["ds1:32x32x32:detail"]);
+    expect(poolKeysOf(ctx, "ds1")).toEqual(["ds1:ch0:32x32x32:detail"]);
   });
 
   it("leaves another dataset's pools alone", async () => {
@@ -336,7 +315,7 @@ describe("label pools live as long as the view mode that draws them", () => {
       datasetId: "ds1",
       chunks: [{ data: new Uint32Array(32 * 32).buffer, dataType: "uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
       level: 0, t: 0, c: 0,
-      levelWidth: 64, levelHeight: 64, chunkX: 32, chunkY: 32,
+      levelWidth: 64, levelHeight: 64, chunkX: 32, chunkY: 32, plane: 0,
     });
     const labelTexture = ctx.state.labelSlicePools.get("label")!.texture as unknown as MockTexture;
     expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(
@@ -362,17 +341,17 @@ describe("the GPU memory report", () => {
       slots: new Map([["m|k", 0]]), indirectionData: new Uint32Array(16),
     } as unknown as SliceAtlasState);
     state.labelSlicePools.set("b", { width: 100, height: 50 } as never);
-    state.proxyPoolsByDataset.set("ds1", new Map([["c", { slotDims: [8, 8, 8], slotsX: 1, slotsY: 1, slotsZ: 1 } as never]]));
+
 
     expect(measureGpuMemory(state)).toEqual({
       budgetBytes: 256 * 1024 * 1024,
-      bytes: 4 * 64 * 2 * 32 * 2 + 16 * 4 + 100 * 50 * 4 + 8 * 8 * 8 * 2,
+      bytes: 4 * 64 * 2 * 32 * 2 + 16 * 4 + 100 * 50 * 4,
       chunkBytes: 4 * 64 * 2 * 32 * 2 + 16 * 4,
       labelBytes: 100 * 50 * 4,
-      proxyBytes: 8 * 8 * 8 * 2,
+
       targetBytes: 0,
       minimapBytes: 0,
-      atlases: 3,
+      atlases: 2,
       slotsHeld: 1,
       slots: 8,
       overviewsRefused: 0,
@@ -402,9 +381,9 @@ describe("the GPU memory report", () => {
 
     expect(capacity.budgetBytes).toBe(ctx.state.gpuTotalBytes);
     expect(capacity.reservedBytes).toBe(0);
-    const detail = capacity.pools.find((pool) => pool.poolKey === "ds1:32x32x32:detail")!;
+    const detail = capacity.pools.find((pool) => pool.poolKey === "ds1:ch0:32x32x32:detail")!;
     expect(detail).toMatchObject({ datasetId: "ds1", tier: "detail", slotBytes: 32 * 32 * 32 * 2 });
-    const atlas = ctx.state.volumeAtlases.get("ds1:32x32x32:detail")!;
+    const atlas = ctx.state.volumeAtlases.get("ds1:ch0:32x32x32:detail")!;
     expect(detail.slots).toBe(atlas.totalSlots);
     expect(detail.maxSlots).toBe(atlas.slotsX * atlas.slotsY * atlas.maxSlotsZ);
   });

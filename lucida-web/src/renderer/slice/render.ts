@@ -3,9 +3,9 @@
  *
  * Per pass group, one (dataset, channel): for each layer resolve
  * member→dataset, look up the descriptor and the pools its level sources
- * and coarse source name, update per-entity camera UV, and resolve proxy
- * textures; then draw the group into one offscreen target in one pass.
- * After the loop: composite + cursor.
+ * and coarse source name, and update per-entity camera UV; then draw the
+ * group into one offscreen target in one pass. After the loop: composite +
+ * cursor.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -23,7 +23,12 @@ import type {
   SlicePoolBinding,
 } from "../sliceRenderer.ts";
 import { resolveMemberPools, type EntityDescriptorIndex } from "../descriptorBuffer.ts";
-import { type SliceAtlasState, type LabelSlicePool } from "./atlas.ts";
+import {
+  markLabelSliceFailed,
+  retireOtherLabelPlanes,
+  type SliceAtlasState,
+  type LabelSlicePool,
+} from "./atlas.ts";
 import { setCameraUVForMember } from "./eviction.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
@@ -43,8 +48,9 @@ const AGGREGATE_QUAD_STRIDE_BYTES = 32;
 
 /**
  * The persistent categorical descriptor for a label pool: one level source
- * (grid 1×1) covering the whole tile. Rebuilt only when the opacity changes,
- * so scrubbing doesn't allocate per frame.
+ * whose chunk grid is the plane's, each cell at its place in the texture.
+ * Rebuilt only when the opacity changes, so scrubbing doesn't allocate per
+ * frame.
  */
 function ensureLabelDescriptor(
   ctx: WorkerCtx,
@@ -64,6 +70,10 @@ function ensureLabelDescriptor(
     opacity: 1,
     colormapMode: 1,
     labelOpacity: opacity,
+    chunkGrid: {
+      gridDims: [pool.grid.x, pool.grid.y, 1],
+      chunkDims: [pool.chunkX, pool.chunkY, 1],
+    },
   });
   if (!pool.descBuffer) {
     pool.descBuffer = ctx.device.createBuffer({
@@ -123,6 +133,10 @@ function renderLabelLayer(
   const pool = ctx.state.labelSlicePools.get(memberId);
   if (!pool) return null;
   const target = targetFor();
+  if (layer.labelChunk) {
+    retireOtherLabelPlanes(ctx, memberId, pool, layer.labelChunk.plane);
+    markLabelSliceFailed(ctx, memberId, pool, layer.labelChunk);
+  }
 
   const descBuffer = ensureLabelDescriptor(ctx, pool, layer.opacity ?? DEFAULT_LABEL_OPACITY);
   const palette = ensureLabelPalette(ctx, pool, layer.labelColors);
@@ -130,9 +144,8 @@ function renderLabelLayer(
   const renderer = ctx.getSliceRenderer();
   const ox = layer.offsetX ?? 0;
   const oy = layer.offsetY ?? 0;
-  renderer.setProxyTextures(null, null);
   renderer.setTierAtlases(
-    [{ texture: pool.texture, indirectionBuf: pool.indirectionBuf, slotsX: 1, slotsY: 1 }],
+    [{ texture: pool.texture, indirectionBuf: pool.indirectionBuf, slotsX: pool.grid.x, slotsY: pool.grid.y }],
     null,
   );
   // Categorical shading computes color from the id in-shader; the LUT is
@@ -197,8 +210,6 @@ function buildAggregateBatches(
   interface PendingBatch {
     levels: Array<SliceAtlasState | null>;
     coarse: SliceAtlasState | null;
-    tileProxyTexture: GPUTexture | null;
-    groupProxyTexture: GPUTexture | null;
     records: number[];
   }
   const batchesByKey = new Map<string, PendingBatch>();
@@ -216,43 +227,21 @@ function buildAggregateBatches(
     const hasDetail = pools.levels.some((atlas) => atlas !== null);
     const hasCoarse = pools.coarse !== null;
 
-    const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
-    let tileProxyTexture: GPUTexture | null = null;
-    let tileProxyPoolKey: string | null = null;
-    let groupProxyTexture: GPUTexture | null = null;
-    let groupProxyPoolKey: string | null = null;
-    if (desc?.tileProxyHandle) {
-      const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.tileProxyHandle.poolKey);
-      if (poolIdx !== undefined) {
-        tileProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
-        tileProxyPoolKey = desc.tileProxyHandle.poolKey;
-      }
-    }
-    if (desc?.groupProxyHandle) {
-      const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.groupProxyHandle.poolKey);
-      if (poolIdx !== undefined) {
-        groupProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
-        groupProxyPoolKey = desc.groupProxyHandle.poolKey;
-      }
-    }
-
     // Residency guard — identical to the per-member skip rule.
-    if (!hasDetail && !hasCoarse && !tileProxyTexture && !groupProxyTexture) continue;
+    if (!hasDetail && !hasCoarse) continue;
 
-    // Camera-UV recency, chunk-backed members only (per-member parity).
-    // The member-local UV of the view center follows from the quad rect:
-    // rect origin/size are fractions of the layer extent.
-    if (hasDetail || hasCoarse) {
-      const rx = srcF32[r * wordsPerRecord + 0];
-      const ry = srcF32[r * wordsPerRecord + 1];
-      const rw = srcF32[r * wordsPerRecord + 2];
-      const rh = srcF32[r * wordsPerRecord + 3];
-      if (rw > 0 && rh > 0) {
-        setCameraUVForMember(ctx.state, memberId, [
-          (msg.cx - (aggOx + rx * layer.dataW)) / (rw * layer.dataW),
-          (msg.cy - (aggOy + ry * layer.dataH)) / (rh * layer.dataH),
-        ]);
-      }
+    // Camera-UV recency, as the per-member path keeps it. The member-local
+    // UV of the view center follows from the quad rect: rect origin/size are
+    // fractions of the layer extent.
+    const rx = srcF32[r * wordsPerRecord + 0];
+    const ry = srcF32[r * wordsPerRecord + 1];
+    const rw = srcF32[r * wordsPerRecord + 2];
+    const rh = srcF32[r * wordsPerRecord + 3];
+    if (rw > 0 && rh > 0) {
+      setCameraUVForMember(ctx.state, memberId, [
+        (msg.cx - (aggOx + rx * layer.dataW)) / (rw * layer.dataW),
+        (msg.cy - (aggOy + ry * layer.dataH)) / (rh * layer.dataH),
+      ]);
     }
 
     for (const atlas of pools.levels) if (atlas) atlases.add(atlas);
@@ -260,16 +249,12 @@ function buildAggregateBatches(
     const key = [
       pools.levels.map((atlas, i) => (atlas ? pools.levelPoolKeys[i] : "")).join(","),
       pools.coarse ? pools.coarsePoolKey : "",
-      tileProxyPoolKey ?? "",
-      groupProxyPoolKey ?? "",
     ].join("|");
     let batch = batchesByKey.get(key);
     if (!batch) {
       batch = {
         levels: pools.levels,
         coarse: pools.coarse,
-        tileProxyTexture,
-        groupProxyTexture,
         records: [],
       };
       batchesByKey.set(key, batch);
@@ -292,8 +277,6 @@ function buildAggregateBatches(
     batches.push({
       levels: b.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
       coarse: b.coarse ? poolBinding(b.coarse) : null,
-      tileProxyTexture: b.tileProxyTexture,
-      groupProxyTexture: b.groupProxyTexture,
       firstInstance,
       count: write - firstInstance,
     });
@@ -487,22 +470,9 @@ function buildMemberDraw(
     }
   }
 
-  // Slot indices and dims come from the GPU descriptor.
-  const desc = descIndex.proxyDescriptorByMember.get(memberId) ?? null;
-  let tileProxyTexture: GPUTexture | null = null;
-  let groupProxyTexture: GPUTexture | null = null;
-  if (desc?.tileProxyHandle) {
-    const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.tileProxyHandle.poolKey);
-    if (poolIdx !== undefined) tileProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
-  }
-  if (desc?.groupProxyHandle) {
-    const poolIdx = descIndex.proxyPoolIndexByKey.get(desc.groupProxyHandle.poolKey);
-    if (poolIdx !== undefined) groupProxyTexture = descIndex.proxyPoolsByIndex[poolIdx].texture;
-  }
-
   // Anything resident is enough to draw; the shader's sampling chain
   // covers what this member lacks.
-  if (!hasDetail && !hasCoarse && !tileProxyTexture && !groupProxyTexture) return null;
+  if (!hasDetail && !hasCoarse) return null;
   const scissor = memberScissor(msg, layer);
   if (!scissor) return null;
 
@@ -512,8 +482,6 @@ function buildMemberDraw(
   return {
     levels: pools.levels.map((atlas) => (atlas ? poolBinding(atlas) : null)),
     coarse: pools.coarse ? poolBinding(pools.coarse) : null,
-    tileProxyTexture,
-    groupProxyTexture,
     colormap: ctx.getOrCreateLUT(colormapName),
     descriptorBuffer: descIndex.buffer,
     entityIndex: layer.entityIndex,

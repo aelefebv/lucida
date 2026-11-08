@@ -15,19 +15,23 @@ test-support = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# Exact float parsing: a saved view decoded and encoded again must keep every
+# camera coordinate, and the default parser can land one ULP off. The viewer
+# parses its payloads in the WASM module, so it stays on there despite its size.
+serde_json = { version = "1", features = ["float_roundtrip"] }
 lucida-content = { path = "../lucida-content" }
 lucida-protocol = { path = "../lucida-protocol" }
 indexmap = { version = "2", features = ["serde"] }
+base64 = "0.23"
+miniz_oxide = "0.9"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
+
+[dev-dependencies]
+flate2 = "1"
 
 [package.metadata.wasm-pack.profile.release]
 # wasm-pack's bundled wasm-opt can lag current Rust WASM output; CI and
 # Docker should build the package without invoking that optimizer.
 wasm-opt = false
-
-[profile.release]
-opt-level = "s"
-lto = true
