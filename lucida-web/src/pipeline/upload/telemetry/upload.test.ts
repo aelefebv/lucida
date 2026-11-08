@@ -123,15 +123,16 @@ describe("UploadTelemetry — tick aggregation", () => {
       10_000,
       makeTickStats({
         drainedChunks: 10,
-        skippedWrongLod: 4,
+        skippedWrongLod: 3,
         skippedAlreadySent: 1,
+        skippedOtherPlane: 1,
         skippedNoMeta: 0,
         skippedPrefetch: 2,
         skippedOverview: 0,
       }),
     );
     // drainedUploadBound = drainedChunks - prefetch - overview = 10 - 2 - 0 = 8
-    // skippedUploadBound = wrongLod + alreadySent + noMeta = 4 + 1 + 0 = 5
+    // skippedUploadBound = wrongLod + alreadySent + otherPlane + noMeta = 3 + 1 + 1 + 0 = 5
     // filterRatio = 5 / 8 = 0.625
     expect(rolling.filterRatio).toBeCloseTo(0.625);
   });

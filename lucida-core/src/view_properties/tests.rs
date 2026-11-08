@@ -4,6 +4,7 @@
 //! the behavior is fixed.
 
 use super::*;
+use crate::camera::Camera;
 use crate::command::{Command, DocumentCommand, ViewportCommand};
 use crate::view_transform::{ExplorationSidecar, ViewExtent, children, home_view};
 
@@ -433,4 +434,54 @@ fn arcball_zoomed(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
 #[test]
 fn arcball_zoom_plans_what_is_visible_from_a_tenth_to_64x_the_fit() {
     assert_plans("arcball zoom plans what is visible", arcball_zoomed);
+}
+
+/// The fitted fly camera flown along its view axis, by the interactive tick,
+/// to each multiple of the fit distance from the data's center: in to the
+/// middle of the data and back out past it.
+fn fly_flown(f: &Fixture, vp: Viewport, dpr: u32) -> Vec<Produced> {
+    const TICKS: u32 = 8;
+    const DT: f64 = 0.1;
+    [0.1, 0.25, 0.5, 0.75, 1.0, 2.0, 4.0, 8.0, 64.0]
+        .into_iter()
+        .map(|multiple: f64| {
+            let mut shown = open(f, vp, dpr, Mode::Arcball);
+            shown.scene.apply(ViewportCommand::SetModeFly.into());
+            let world = shown.scene.visible_bounds().unwrap().world;
+            let Camera::Fly(fly) = &shown.scene.camera else {
+                panic!("the scene is not in fly mode");
+            };
+            let fitted = (0..3)
+                .map(|i| (fly.position[i] - (world.min[i] + world.max[i]) / 2.0).powi(2))
+                .sum::<f64>()
+                .sqrt();
+            let travel = (multiple - 1.0) * fitted;
+            shown.scene.apply(
+                ViewportCommand::FlySetBaseSpeed {
+                    speed: travel.abs() / (DT * f64::from(TICKS)),
+                }
+                .into(),
+            );
+            for _ in 0..TICKS {
+                shown.scene.apply(
+                    ViewportCommand::FlyTick {
+                        dt: DT,
+                        forward: -travel.signum(),
+                        right: 0.0,
+                        up: 0.0,
+                        yaw: 0.0,
+                        pitch: 0.0,
+                        roll: 0.0,
+                    }
+                    .into(),
+                );
+            }
+            Produced::framing(format!("{multiple} times the fit distance"), shown)
+        })
+        .collect()
+}
+
+#[test]
+fn fly_plans_what_is_visible_from_a_tenth_to_64x_the_fit() {
+    assert_plans("fly plans what is visible", fly_flown);
 }
