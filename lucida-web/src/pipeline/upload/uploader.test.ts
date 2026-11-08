@@ -182,6 +182,9 @@ function makeCpuCache(deliveries: ReadyChunkDelivery[] = []): CpuCache {
   } as unknown as CpuCache;
 }
 
+/** One 256 x 256 plane of uint16 samples, the mock level's whole chunk. */
+const PLANE_BYTES = 256 * 256 * 2;
+
 function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkDelivery {
   return {
     entityId: "tile-0",
@@ -193,7 +196,7 @@ function makeChunkDelivery(overrides?: Partial<ReadyChunkDelivery>): ReadyChunkD
     y: 0,
     x: 0,
     chunkKey: "0/0/0/0/0/0",
-    data: new ArrayBuffer(1024),
+    data: new ArrayBuffer(PLANE_BYTES),
     dataType: "uint16",
     epochs: { content: 1, layout: 1, view: 1, selection: 1, request: 1 },
     lane: "detail",
@@ -348,15 +351,15 @@ describe("Uploader unified delivery", () => {
       priority: 100,
     });
     const cpuCache = makeCpuCache([large, smallerLowerPriority]);
-    const sliceChunkData = vi.fn();
-    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+    const volumeChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { volumeChunkData }, mode: "volume" });
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 1 * 1024 * 1024, () => 0);
+    const ret = uploader.deliverToWorker(ctx, 1 * 1024 * 1024, null);
 
-    expect(sliceChunkData).toHaveBeenCalledTimes(1);
-    expect(sliceChunkData.mock.calls[0][1][0].key).toBe(large.chunkKey);
+    expect(volumeChunkData).toHaveBeenCalledTimes(1);
+    expect(volumeChunkData.mock.calls[0][1][0].key).toBe(large.chunkKey);
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(4 * 1024 * 1024);
     expect(ret).toBe(true);
@@ -384,13 +387,13 @@ describe("Uploader unified delivery", () => {
       lane: "coarse",
     });
     const cpuCache = makeCpuCache([largeDetail, secondDetail, coarse]);
-    const sliceChunkData = vi.fn();
-    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+    const volumeChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { volumeChunkData }, mode: "volume" });
 
-    new Uploader().deliverToWorker(ctx, 1000, () => 0);
+    new Uploader().deliverToWorker(ctx, 1000, null);
 
-    expect(sliceChunkData).toHaveBeenCalledTimes(2);
-    expect(sliceChunkData.mock.calls.map((call) => call[1][0].key)).toEqual([
+    expect(volumeChunkData).toHaveBeenCalledTimes(2);
+    expect(volumeChunkData.mock.calls.map((call) => call[1][0].key)).toEqual([
       largeDetail.chunkKey,
       coarse.chunkKey,
     ]);
@@ -400,8 +403,9 @@ describe("Uploader unified delivery", () => {
     ]);
   });
 
-  it("reports real posted bytes against the caller's budget", () => {
-    const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
+  it("reports the bytes it posts, one plane of a chunk in the slice view, against the caller's budget", () => {
+    // Twice a plane: what the slice view posts is the one plane it draws.
+    const chunk = makeChunkDelivery({ data: new ArrayBuffer(2 * PLANE_BYTES) });
     const cpuCache = makeCpuCache([chunk]);
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
@@ -410,7 +414,8 @@ describe("Uploader unified delivery", () => {
     const publish = captureTickStats(uploader);
     uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
 
-    expect(publish.mock.calls[0][1].bytesUploaded).toBe(2048);
+    expect(sliceChunkData.mock.calls[0][1][0].data.byteLength).toBe(PLANE_BYTES);
+    expect(publish.mock.calls[0][1].bytesUploaded).toBe(PLANE_BYTES);
     expect(publish.mock.calls[0][1].bytesBudget).toBe(8 * 1024 * 1024);
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(false);
   });
@@ -418,12 +423,11 @@ describe("Uploader unified delivery", () => {
   it("flags the tick when the upload budget is exhausted", () => {
     const chunk = makeChunkDelivery({ data: new ArrayBuffer(2048) });
     const cpuCache = makeCpuCache([chunk]);
-    const sliceChunkData = vi.fn();
-    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+    const ctx = makeCtx({ cpuCache, mode: "volume" });
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 1024, () => 0);
+    uploader.deliverToWorker(ctx, 1024, null);
 
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(2048);
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);

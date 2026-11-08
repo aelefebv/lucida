@@ -315,7 +315,7 @@ describe("label pools live as long as the view mode that draws them", () => {
       datasetId: "ds1",
       chunks: [{ data: new Uint32Array(32 * 32).buffer, dataType: "uint32", x: 0, y: 0, z: 0, key: "0/0/0/0/0/0" }],
       level: 0, t: 0, c: 0,
-      levelWidth: 64, levelHeight: 64, chunkX: 32, chunkY: 32,
+      levelWidth: 64, levelHeight: 64, chunkX: 32, chunkY: 32, plane: 0,
     });
     const labelTexture = ctx.state.labelSlicePools.get("label")!.texture as unknown as MockTexture;
     expect(posts.filter((m) => m.type === "chunkResidency")).toContainEqual(

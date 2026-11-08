@@ -474,13 +474,12 @@ export class RenderClient implements UploadClient {
     epochs: SceneEpochs,
     tier: ResidencyTier,
   ) {
-    const transferList: ArrayBuffer[] = [];
-    const workerChunks: Chunk[] = chunks.map(chunk => {
-      // Copy before transfer, as in `volumeChunkData`.
-      const buf = chunk.data.slice(0);
-      transferList.push(buf);
-      return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
-    });
+    // Each buffer is a plane the caller cut for the worker, so it moves
+    // without a second copy.
+    const transferList = chunks.map(chunk => chunk.data);
+    const workerChunks: Chunk[] = chunks.map(chunk => (
+      { data: chunk.data, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key }
+    ));
     this.worker.postMessage(
       {
         type: "sliceChunkData",
@@ -508,16 +507,14 @@ export class RenderClient implements UploadClient {
     levelHeight: number,
     chunkX: number,
     chunkY: number,
+    plane: number,
     epochs: SceneEpochs,
   ) {
-    const transferList: ArrayBuffer[] = [];
-    const workerChunks: Chunk[] = chunks.map(chunk => {
-      // The delivery path extracted a fresh per-plane buffer, but copy +
-      // transfer keeps the API uniform with the other chunk senders.
-      const buf = chunk.data.slice(0);
-      transferList.push(buf);
-      return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
-    });
+    // As in `sliceChunkData`, each buffer is a plane cut for the worker.
+    const transferList = chunks.map(chunk => chunk.data);
+    const workerChunks: Chunk[] = chunks.map(chunk => (
+      { data: chunk.data, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key }
+    ));
     this.worker.postMessage(
       {
         type: "labelSliceChunkData",
@@ -529,6 +526,7 @@ export class RenderClient implements UploadClient {
         t, c,
         levelWidth, levelHeight,
         chunkX, chunkY,
+        plane,
       },
       transferList,
     );

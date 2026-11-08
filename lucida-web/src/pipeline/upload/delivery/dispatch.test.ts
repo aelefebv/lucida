@@ -1,16 +1,13 @@
 /**
- * Tests for `dispatchChunk`.
- *
- * The helper thinly wraps RenderClient methods; the test surface is
- * "given a delivery + meta, the right client method is called with the
- * right positional arguments." No counter accounting / tracker writes
- * happen here — those live at the caller (the run*Pass helpers).
+ * Tests for `dispatchChunkDelivery`: given a delivery and its level meta, the
+ * right client method is called with the right positional arguments and the
+ * bytes it carries. Counter accounting lives at the caller.
  */
 import { describe, it, expect, vi } from "vitest";
 import type { ReadyChunkDelivery } from "../../fetch/index.ts";
 import type { RenderClient } from "../../../renderer/renderClient.ts";
 import type { SceneEpochs } from "../../epochs.ts";
-import { dispatchChunk } from "./dispatch.ts";
+import { dispatchChunkDelivery } from "./dispatch.ts";
 import type { ManifestEntry } from "./manifestIndex.ts";
 import type { ImageSpec } from "../../../manifestTypes.ts";
 
@@ -21,6 +18,8 @@ const EPOCHS: SceneEpochs = {
   selection: 1,
   request: 1,
 };
+
+const PLANE = 256 * 256;
 
 function makeImage(): ImageSpec {
   return {
@@ -68,20 +67,28 @@ function makeMeta(): ManifestEntry {
   };
 }
 
+/** A level-0 chunk two planes deep, each plane filled with its index plus one. */
+function twoPlaneChunk(): ArrayBuffer {
+  const samples = new Uint16Array(2 * PLANE);
+  samples.fill(1, 0, PLANE);
+  samples.fill(2, PLANE);
+  return samples.buffer;
+}
+
 function makeChunkDelivery(
   overrides: Partial<ReadyChunkDelivery> = {},
 ): ReadyChunkDelivery {
   return {
     entityId: "tile-0",
     imageId: "img-0",
-    level: 1,
+    level: 0,
     t: 0,
     c: 0,
     z: 1,
     y: 2,
     x: 3,
-    chunkKey: "1/0/0/1/2/3",
-    data: new ArrayBuffer(128),
+    chunkKey: "0/0/0/1/2/3",
+    data: twoPlaneChunk(),
     dataType: "uint16",
     epochs: EPOCHS,
     lane: "detail",
@@ -107,15 +114,14 @@ function makeMockClient(): {
   };
 }
 
-// dispatchChunk
-
-describe("dispatchChunk", () => {
-  it("slice mode calls sliceChunkData with derived level / chunk shape", () => {
+describe("dispatchChunkDelivery", () => {
+  it("sends the slice view only the plane its Z maps to, copied out of the cache's chunk", () => {
     const meta = makeMeta();
-    const delivery = makeChunkDelivery({ level: 1 });
+    const delivery = makeChunkDelivery();
     const { client, sliceChunkData, volumeChunkData } = makeMockClient();
 
-    dispatchChunk(client, delivery, meta, "slice", "img-0", 7, EPOCHS);
+    // Level 0 is as deep as full resolution, so z 3 is plane 1 of chunk 1.
+    const sent = dispatchChunkDelivery(client, delivery, meta, "slice", 3, EPOCHS);
 
     expect(volumeChunkData).not.toHaveBeenCalled();
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
@@ -123,82 +129,110 @@ describe("dispatchChunk", () => {
     // Positional layout:
     // (workerMemberId, [chunkData], level, z, t, c,
     //  levelWidth, levelHeight, chunkX, chunkY, chunkZ,
-    //  fullResDepth, levelDepth, fullResZ, epochs)
-    expect(call[0]).toBe("img-0");
+    //  fullResDepth, levelDepth, fullResZ, epochs, tier)
+    expect(call[0]).toBe("img-0:ch0");
     expect(call[1]).toHaveLength(1);
-    expect(call[1][0]).toEqual({
-      data: delivery.data,
-      dataType: delivery.dataType,
-      x: 3, y: 2, z: 1,
-      key: "1/0/0/1/2/3",
-    });
-    expect(call[2]).toBe(1); // level
-    expect(call[3]).toBe(7); // sliceZ argument
+    const chunk = call[1][0];
+    expect(chunk).toMatchObject({ dataType: "uint16", x: 3, y: 2, z: 1, key: "0/0/0/1/2/3" });
+    expect(chunk.data.byteLength).toBe(PLANE * 2);
+    expect(new Uint16Array(chunk.data).every((v: number) => v === 2)).toBe(true);
+    // The cache keeps its whole chunk for the next delivery.
+    expect(chunk.data).not.toBe(delivery.data);
+    expect(delivery.data.byteLength).toBe(2 * PLANE * 2);
+    expect(call[2]).toBe(0); // level
+    expect(call[3]).toBe(3); // sliceZ argument
     expect(call[4]).toBe(0); // t
     expect(call[5]).toBe(0); // c
-    // Level 1 shape = [1,1,2,512,512]; width=512, height=512
-    expect(call[6]).toBe(512);
-    expect(call[7]).toBe(512);
-    // Level 1 chunk_shape = [1,1,1,256,256]; chunkX=256, chunkY=256, chunkZ=1
-    expect(call[8]).toBe(256);
-    expect(call[9]).toBe(256);
-    expect(call[10]).toBe(1);
-    // fullResDepth = level 0 shape[Z] = 4
-    expect(call[11]).toBe(4);
-    // levelDepth = level 1 shape[Z] = 2
-    expect(call[12]).toBe(2);
-    expect(call[13]).toBe(7); // fullResZ === sliceZ
+    expect(call[6]).toBe(1024); // levelWidth
+    expect(call[7]).toBe(1024); // levelHeight
+    expect(call[8]).toBe(256); // chunkX
+    expect(call[9]).toBe(256); // chunkY
+    expect(call[10]).toBe(2); // chunkZ
+    expect(call[11]).toBe(4); // fullResDepth
+    expect(call[12]).toBe(4); // levelDepth
+    expect(call[13]).toBe(3); // fullResZ === sliceZ
     expect(call[14]).toBe(EPOCHS);
+    expect(call[15]).toBe("detail");
+    expect(sent).toEqual({ memberId: "img-0:ch0", bytes: PLANE * 2 });
   });
 
-  it("volume mode calls volumeChunkData with the right positional args", () => {
+  it("maps a full-resolution Z onto a level downsampled along Z", () => {
     const meta = makeMeta();
-    const delivery = makeChunkDelivery({ level: 0 });
+    const delivery = makeChunkDelivery({ level: 1, data: new Uint16Array(PLANE).fill(5).buffer });
+    const { client, sliceChunkData } = makeMockClient();
+
+    // Level 1 is 2 planes deep: z 3 lands on its plane 1, chunk 1.
+    const sent = dispatchChunkDelivery(client, delivery, meta, "slice", 3, EPOCHS);
+
+    expect(sent?.bytes).toBe(PLANE * 2);
+    expect(sliceChunkData.mock.calls[0][12]).toBe(2); // levelDepth
+  });
+
+  it("posts nothing for a chunk that does not hold the plane", () => {
+    const meta = makeMeta();
+    const { client, sliceChunkData } = makeMockClient();
+
+    // z 1 is in chunk 0; the delivery is chunk 1.
+    expect(dispatchChunkDelivery(client, makeChunkDelivery(), meta, "slice", 1, EPOCHS)).toBeNull();
+    expect(sliceChunkData).not.toHaveBeenCalled();
+  });
+
+  it("posts nothing for a chunk too short to hold the plane", () => {
+    const meta = makeMeta();
+    const delivery = makeChunkDelivery({ data: new ArrayBuffer(PLANE * 2) });
+    const { client, sliceChunkData } = makeMockClient();
+
+    expect(dispatchChunkDelivery(client, delivery, meta, "slice", 3, EPOCHS)).toBeNull();
+    expect(sliceChunkData).not.toHaveBeenCalled();
+  });
+
+  it("sends the volume view the whole chunk", () => {
+    const meta = makeMeta();
+    const delivery = makeChunkDelivery();
     const { client, sliceChunkData, volumeChunkData } = makeMockClient();
 
-    dispatchChunk(client, delivery, meta, "volume", "img-0", null, EPOCHS);
+    const sent = dispatchChunkDelivery(client, delivery, meta, "volume", null, EPOCHS);
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(volumeChunkData).toHaveBeenCalledTimes(1);
     const call = volumeChunkData.mock.calls[0];
     // (workerMemberId, [chunkData], level, t, c,
     //  levelWidth, levelHeight, levelDepth,
-    //  chunkX, chunkY, chunkZ, epochs)
-    expect(call[0]).toBe("img-0");
+    //  chunkX, chunkY, chunkZ, epochs, tier)
+    expect(call[0]).toBe("img-0:ch0");
+    expect(call[1][0].data).toBe(delivery.data);
     expect(call[2]).toBe(0); // level
     expect(call[3]).toBe(0); // t
     expect(call[4]).toBe(0); // c
-    // Level 0 shape = [1,1,4,1024,1024]
     expect(call[5]).toBe(1024); // levelWidth
     expect(call[6]).toBe(1024); // levelHeight
     expect(call[7]).toBe(4);    // levelDepth
-    // Level 0 chunk_shape = [1,1,2,256,256]
     expect(call[8]).toBe(256);  // chunkX
     expect(call[9]).toBe(256);  // chunkY
     expect(call[10]).toBe(2);   // chunkZ
     expect(call[11]).toBe(EPOCHS);
+    expect(sent).toEqual({ memberId: "img-0:ch0", bytes: delivery.data.byteLength });
   });
 
-  it("missing level meta is a no-op (defensive — caller should pre-filter)", () => {
+  it("missing level meta posts nothing (defensive — caller should pre-filter)", () => {
     const meta = makeMeta();
     const delivery = makeChunkDelivery({ level: 99 });
     const { client, sliceChunkData, volumeChunkData } = makeMockClient();
 
-    dispatchChunk(client, delivery, meta, "slice", "img-0", 0, EPOCHS);
+    expect(dispatchChunkDelivery(client, delivery, meta, "slice", 0, EPOCHS)).toBeNull();
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(volumeChunkData).not.toHaveBeenCalled();
   });
 
-  it("multi-channel composite workerMemberId is passed through verbatim", () => {
+  it("names each channel its own worker member", () => {
     const meta = makeMeta();
     const delivery = makeChunkDelivery({ c: 2 });
     const { client, volumeChunkData } = makeMockClient();
 
-    dispatchChunk(client, delivery, meta, "volume", "img-0:ch2", null, EPOCHS);
+    dispatchChunkDelivery(client, delivery, meta, "volume", null, EPOCHS);
 
     expect(volumeChunkData.mock.calls[0][0]).toBe("img-0:ch2");
     expect(volumeChunkData.mock.calls[0][4]).toBe(2); // c
   });
 });
-

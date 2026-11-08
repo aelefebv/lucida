@@ -934,6 +934,28 @@ describe("CpuCache", () => {
       expect(consumeDeliverables(cache)).toHaveLength(0);
     });
 
+    it("clears what the worker was sent of the images its entities own, under the images' own ids", async () => {
+      const { cache, source } = createTestCache();
+      source.autoResolveBytes = 64;
+      // Entity and image ids differ, as in a collection.
+      const gone = makeRequest({ entityId: "entity-1", imageId: "image-1" });
+      const kept = makeRequest({ entityId: "entity-2", imageId: "image-2" });
+      cache.submit(makePlan([gone, kept], [makeActiveEntry("entity-1"), makeActiveEntry("entity-2")]));
+      await flush();
+      expect(consumeDeliverables(cache)).toHaveLength(2);
+      cache.markChunksHeld("image-1", 0, "detail", [gone.chunkKey]);
+      cache.markChunksHeld("image-2", 0, "detail", [kept.chunkKey]);
+
+      cache.cancelDataset("ds-1", ["entity-1"]);
+
+      expect(cache.deliveryState.wasChunkSent("image-1", 0, gone.chunkKey, "detail")).toBe(false);
+      expect(cache.deliveryState.isChunkHeld("image-2", 0, kept.chunkKey, "detail")).toBe(true);
+      // A reopened dataset keeps its ids, and its chunk goes to the worker again.
+      cache.submit(makePlan([gone, kept], [makeActiveEntry("entity-1"), makeActiveEntry("entity-2")]));
+      await flush();
+      expect(consumeDeliverables(cache).map((d) => d.imageId)).toEqual(["image-1"]);
+    });
+
     it("clears failures map entries for entityIds", async () => {
       const { cache, source } = createTestCache();
       const req = makeRequest({ entityId: "entity-1" });

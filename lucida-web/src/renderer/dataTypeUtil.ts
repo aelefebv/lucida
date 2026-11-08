@@ -74,13 +74,19 @@ export function bytesPerTexel(format: SampleFormat): number {
   return format === "f32" ? 4 : 2;
 }
 
+/** The bytes one sample of a decoded chunk buffer takes. */
+export function decodedSampleBytes(dataType: string): number {
+  const layout = decodedLayout(dataType);
+  return layout === "u8" ? 1 : layout === "u16" ? 2 : 4;
+}
+
 /** View a decoded chunk buffer as its values, one array element per sample. */
 export function decodedValues(
   buf: ArrayBuffer,
   dataType: string,
 ): Uint8Array | Uint16Array | Uint32Array | Float32Array {
   const layout = decodedLayout(dataType);
-  const width = layout === "u8" ? 1 : layout === "u16" ? 2 : 4;
+  const width = decodedSampleBytes(dataType);
   if (buf.byteLength % width !== 0) {
     throw new Error(
       `${dataType} chunk byteLength ${buf.byteLength} is not a multiple of ${width} ` +

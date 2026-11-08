@@ -169,7 +169,7 @@ describe("a generated level published after the open", () => {
 });
 
 describe("a Z and T scrub", () => {
-  settles(describeScenario({
+  const scenario = describeScenario({
     name: "Z and T scrub",
     dataset: singleImage({
       id: "stack",
@@ -177,7 +177,66 @@ describe("a Z and T scrub", () => {
     }),
     // z 20 → 22 stays inside one chunk along Z; z 3 leaves it.
     steps: [{ scrub: { z: 20 } }, { scrub: { z: 22 } }, { scrub: { t: 1 } }, { scrub: { z: 3 } }],
-  }));
+  });
+  /** One plane of a chunk, an eighth of its bytes. */
+  const PLANE_BYTES = 128 * 128 * 2;
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles at device pixel ratio ${dpr}, sending the plane it draws of each chunk, once`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      for (const phase of run.phases) {
+        expect(phase.bytesSent, phase.label).toBe(phase.chunksSent * PLANE_BYTES);
+        expect(phase.chunksSent, phase.label).toBe(phase.distinctChunksSent);
+      }
+    });
+  }
+});
+
+describe("a Z scrub under a label", () => {
+  // Label chunks 8 planes deep: z 20 → 22 keeps every label chunk's key and
+  // moves the plane each one draws.
+  const scenario = describeScenario({
+    name: "Z scrub under a label",
+    dataset: singleImage({
+      id: "marked",
+      pyramid: { shape: [1, 1, 32, 256, 256], chunk: [8, 64, 64], levels: 2 },
+      label: { shape: [1, 1, 32, 256, 256], chunk: [8, 128, 128], levels: 1 },
+    }),
+    steps: [{ scrub: { z: 20 } }, { scrub: { z: 22 } }],
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`sends the label's new planes and settles drawing them at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      // Settling includes no label cell drawing another plane.
+      expectSettled(run);
+      const step = run.phases[2];
+      // Every image chunk and the label's four, each once.
+      expect(step.chunksSent).toBe(step.detail.desired + step.coarse.desired);
+      expect(step.chunksSent).toBe(step.distinctChunksSent);
+      expect(step.staleLabelCells).toEqual([]);
+    });
+  }
+});
+
+describe("a view whose target level is the coarse level", () => {
+  // One level, so the detail and coarse tiers want the same four chunks
+  // under the same keys.
+  const scenario = describeScenario({
+    name: "target level is the coarse level",
+    dataset: singleImage({ id: "flat", pyramid: { shape: [1, 1, 1, 128, 128], chunk: [1, 64, 64], levels: 1 } }),
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`counts a chunk sent to both tiers once per tier at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.detail.desired).toBe(4);
+      expect(open.coarse.desired).toBe(4);
+      expect(open.chunksSent).toBe(8);
+      expect(open.distinctChunksSent).toBe(8);
+      expect(open.resent).toEqual([]);
+    });
+  }
 });
 
 describe("a full atlas with more wanted chunks than worker slots", () => {
@@ -456,16 +515,25 @@ describe("a Z scrub on a level downsampled along Z", () => {
   // 100 planes at level 0 and 50 at level 1, in chunks 8 planes deep. Plane
   // 16 is the first plane of level 1's chunk 1, where a proportional mapping
   // lands one plane short, in chunk 0; plane 15 is in chunk 0 either way.
-  settles(
-    describeScenario({
-      name: "Z scrub on a Z-downsampled level",
-      dataset: singleImage({
-        id: "deep",
-        pyramid: { shape: [1, 1, 100, 256, 256], chunk: [8, 64, 64], levels: 2, downsampleZ: true },
-      }),
-      steps: [{ scrub: { z: 15 } }, { scrub: { z: 16 } }],
+  // Plane 17 shares level 1's plane 8 with plane 16.
+  const scenario = describeScenario({
+    name: "Z scrub on a Z-downsampled level",
+    dataset: singleImage({
+      id: "deep",
+      pyramid: { shape: [1, 1, 100, 256, 256], chunk: [8, 64, 64], levels: 2, downsampleZ: true },
     }),
-  );
+    steps: [{ scrub: { z: 15 } }, { scrub: { z: 16 } }, { scrub: { z: 17 } }],
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles at device pixel ratio ${dpr}, resending only the chunks whose plane moved`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const last = run.phases[run.phases.length - 1];
+      // Level 0, the detail tier, moved a plane; level 1, the coarse tier, did not.
+      expect(last.chunksSent).toBe(last.detail.desired);
+      expect(last.chunksSent).toBe(last.distinctChunksSent);
+    });
+  }
 });
 
 /** The last auto-contrast fit each channel got in a phase. */

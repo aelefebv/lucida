@@ -87,7 +87,7 @@ function levelGeometry(spec: PyramidSpec, level: number): LevelGeometry {
   };
 }
 
-function multiscale(spec: PyramidSpec): MultiscaleInfo {
+function multiscale(spec: PyramidSpec, dataType = "Uint16"): MultiscaleInfo {
   const levels = Array.from({ length: spec.levels }, (_, i) => levelGeometry(spec, i));
   const coarse = spec.coarseLevel === undefined ? spec.levels - 1 : spec.coarseLevel;
   return {
@@ -100,7 +100,7 @@ function multiscale(spec: PyramidSpec): MultiscaleInfo {
     ],
     levels,
     coarse_level_index: coarse,
-    data_type: "Uint16",
+    data_type: dataType,
   };
 }
 
@@ -132,10 +132,16 @@ function fixture(
     manifest: wire,
     fetch: {
       Proxied: {
-        images: wire.images.map((image) => ({
-          image_id: image.image_id,
-          wire_format: { Raw: { data_type: "Uint16" } },
-        })),
+        images: [
+          ...wire.images.map((image) => ({
+            image_id: image.image_id,
+            wire_format: { Raw: { data_type: "Uint16" } },
+          })),
+          ...(wire.labels ?? []).map((label) => ({
+            image_id: label.image.image_id,
+            wire_format: { Raw: { data_type: "Uint32" } },
+          })),
+        ],
       },
     },
     opener_client_id: null,
@@ -170,14 +176,19 @@ function fixture(
   };
 }
 
-/** One image in a single-image dataset. */
+/**
+ * One image in a single-image dataset. `label` lays a uint32 label of that
+ * geometry over it, and the simulation shows it.
+ */
 export function singleImage(args: {
   id: string;
   pyramid: PyramidSpec;
   generatedCoarse?: GeneratedCoarseSpec;
+  label?: PyramidSpec;
 }): DatasetFixture {
   const { id, pyramid } = args;
   const entityId = `${id}-entity`;
+  const imageId = `${id}-image`;
   // A generated coarse level replaces any declared one.
   const spec = args.generatedCoarse ? { ...pyramid, coarseLevel: null } : pyramid;
   const wire: DatasetManifestWire = {
@@ -186,7 +197,13 @@ export function singleImage(args: {
     kind: "Single",
     entities: [{ id: entityId, kind: "Image", parent: null, labels: {} }],
     transforms: [],
-    images: [{ image_id: `${id}-image`, owner: entityId, multiscale: multiscale(spec) }],
+    images: [{ image_id: imageId, owner: entityId, multiscale: multiscale(spec) }],
+    labels: args.label && [{
+      name: "regions",
+      source_image_id: imageId,
+      image: { image_id: `${id}-label`, owner: entityId, multiscale: multiscale(args.label, "Uint32") },
+      source_declared: true,
+    }],
     source_layouts: [
       {
         id: "layout-source",

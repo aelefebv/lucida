@@ -7,6 +7,8 @@
  * Axis order is `[T, C, Z, Y, X]`.
  */
 
+import { sliceLevelZ } from "./slicePlane.ts";
+
 /** Level-0 geometry: 5D `shape` and `scale`, canonical `[T, C, Z, Y, X]`. */
 export interface Level0 {
   shape: number[];
@@ -85,6 +87,16 @@ function labelAxisIndex(sourceIdx: number, source: Level0, label: Level0, axis: 
  */
 export function labelDepthZ(sourceZ: number, source: Level0, label: Level0): number {
   return labelAxisIndex(sourceZ, source, label, AXIS_Z);
+}
+
+/**
+ * The plane of a label level `levelDepth` planes deep that the slice view
+ * draws at source full-res Z `sourceZ`. The fetch, the plane cut sent to the
+ * worker, and the plane the worker checks its cells against all use it, so a
+ * cell holding another plane is always one to send again.
+ */
+export function labelLevelZ(sourceZ: number, source: Level0, label: Level0, levelDepth: number): number {
+  return sliceLevelZ(labelDepthZ(sourceZ, source, label), safeCount(label.shape, AXIS_Z), levelDepth);
 }
 
 /**
