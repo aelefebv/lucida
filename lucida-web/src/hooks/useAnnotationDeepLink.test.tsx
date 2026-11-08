@@ -29,7 +29,7 @@ function makeScene(byDataset: Record<string, Annotation[]>): AnnotationDocScene 
 
 afterEach(() => cleanup());
 
-describe("useAnnotationDeepLink — TIMING (slice 3, the #802 class)", () => {
+describe("useAnnotationDeepLink — TIMING", () => {
   it("does NOT resolve before annotations are available, and DOES once the doc loads", () => {
     // Like the host, run the collapse in the restore's tail.
     const collapse = vi.fn();

@@ -34,8 +34,8 @@ what came back:
 
 The second pair is one image whose source grid holds fewer than the 32
 chunks the server generates on its own after an open. A generated level has
-one chunk per source chunk, and a static view does not ask for the rest
-(issue #1034). The check opens each of the pair's datasets first and waits
+one chunk per source chunk, and a static view does not ask for the rest.
+The check opens each of the pair's datasets first and waits
 for that fill to finish, so the run measures a complete tier and not the
 fill. The fill reads the whole source through the object store, so the
 server answers the view's own requests from its cache and this pair's read
@@ -913,7 +913,7 @@ def twin_pairs(args: argparse.Namespace) -> list[TwinPair]:
         raise SystemExit(
             f"--coarse-size {args.coarse_size} in {args.coarse_chunk}-sample chunks is {source_chunks} chunks; "
             f"keep it under {GENERATED_BACKGROUND_CHUNK_LIMIT}, or the server's own fill stops short of the "
-            "generated level and a static view never asks for the rest (issue #1034)"
+            "generated level and a static view never asks for the rest"
         )
     coarse = TwinPair(
         name="coarse",

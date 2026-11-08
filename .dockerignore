@@ -1,6 +1,5 @@
 # Trim the docker build context so `docker build` ships only what the
-# image actually needs to compile from. Per PRD #486 slice 5 / issue
-# #491, this file exists to:
+# image actually needs to compile from. This file exists to:
 #   - keep the build fast (small context = small upload to the daemon)
 #   - keep the build deterministic (rebuild artifacts inside the image
 #     instead of importing host-built ones)

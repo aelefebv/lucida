@@ -105,6 +105,22 @@ describe("SavedView encoder", () => {
       expect(decode(encode(v)).camera).toEqual(v.camera);
     });
 
+    it("a camera's floats survive to the last bit", () => {
+      const v = emptySliceView();
+      v.camera = {
+        mode: "arcball",
+        target: [0.1 + 0.2, -1e-300, 123456.78901234567],
+        theta: 1.2853981633974483,
+        phi: Math.PI / 7,
+        distance: 2.8834740896113678,
+        fov: 45,
+        viewport: [1024, 768],
+        near: 0.1,
+        far: 1000,
+      };
+      expect(decode(encode(v)).camera).toEqual(v.camera);
+    });
+
     it("a layer's solo round-trips, and its composite carries no key", () => {
       const v = emptySliceView();
       v.dataset_settings = {

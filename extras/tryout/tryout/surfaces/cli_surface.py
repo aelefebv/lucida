@@ -217,7 +217,7 @@ def plan_cli_tour(
         CliStep("viewer-state-after", ("viewer", "state"), as_json=True),
     ]
 
-    # --- saved-view sharing lifecycle (#699 promote, #702 propose/approve/reject)
+    # --- saved-view sharing lifecycle (promote, propose/approve/reject)
     # Capture the current state into views at each visibility, then exercise the
     # CLI's sharing verbs end-to-end against the live server. The single dev user
     # is the workspace owner here, so they can both propose and approve/reject —

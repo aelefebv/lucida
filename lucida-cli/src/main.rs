@@ -5390,7 +5390,7 @@ mod tests {
     #[test]
     fn explore_output_value_has_core_fields_plus_cli_additions() {
         // The dedup contract: the core sidecar carries `extent` + per-cell
-        // `z`/`t`/`c`, so the CLI no longer injects them — it only fills each
+        // `z`/`t`/`c`, so the CLI does not inject them — it only fills each
         // cell's `url` and adds the top-level `dataset`. This mirrors the handler
         // construction (explore → fill urls → to_value → add dataset) and asserts
         // the printed JSON has all of: extent, per-cell z/t/c, dataset, url.
@@ -5838,8 +5838,8 @@ mod tests {
             _ => panic!("expected saved-view link"),
         }
 
-        // Promote defaults to shared (the #699 happy path) and accepts an
-        // explicit target visibility.
+        // Promote defaults to shared and accepts an explicit target
+        // visibility.
         let promote = parse(&["saved-view", "promote", "sv-1"]);
         match promote.command {
             Command::SavedView {
@@ -6233,7 +6233,7 @@ mod tests {
     }
 
     /// The bundle is opt-in like the other sidecars, and its Perfetto
-    /// projection is a second opt-in on top of it (#1055).
+    /// projection is a second opt-in on top of it.
     #[test]
     fn trace_writes_a_bundle_only_when_asked_and_its_projection_only_on_top_of_that() {
         match parse(&[
@@ -6330,7 +6330,7 @@ mod tests {
         assert!(try_parse(&["trace", "inbox", "fetch"]).is_err());
     }
 
-    /// The bundle header lists every field the replay needs (#1055): each
+    /// The bundle header lists every field the replay needs: each
     /// argument of `trace` that shapes the workload maps onto a header field
     /// the replay list names, and the rest are the sidecars and the deadline.
     /// An argument added to the command lands in one list or fails here.
