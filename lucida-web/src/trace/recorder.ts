@@ -67,6 +67,7 @@ import {
   type EndReason,
   type CacheWarmth,
   type GpuIdentity,
+  type GpuMemoryReading,
   type InputKind,
   type Outstanding,
   type Phase,
@@ -1239,7 +1240,8 @@ export class TraceRecorder {
    * commit: the planner's epoch cache means a run can fetch for seconds
    * without re-planning, so readings on that cadence would cluster at run
    * start. `gpuPassUs` is null when nothing arrived since the previous
-   * reading, because a zero would read as a fast GPU.
+   * reading, because a zero would read as a fast GPU. `gpuMemory` is the
+   * render worker's latest report, null before its first.
    */
   noteReading(
     queueDepth: number,
@@ -1247,6 +1249,7 @@ export class TraceRecorder {
     frameTimeUs: number,
     residentBytes: number,
     gpuPassUs: number | null = null,
+    gpuMemory: GpuMemoryReading | null = null,
   ): void {
     // Ahead of the run check: the latest reading is read with no run open.
     const latest = this.latest;
@@ -1263,7 +1266,7 @@ export class TraceRecorder {
     this.readingColumns[ReadingColumn.InFlight] = inFlight;
     this.readingColumns[ReadingColumn.FrameTimeUs] = frameTimeUs;
     this.readingColumns[ReadingColumn.ResidentBytes] = residentBytes;
-    run.sink.appendReading(this.offsetUs(run, this.now()), this.readingColumns, gpuPassUs);
+    run.sink.appendReading(this.offsetUs(run, this.now()), this.readingColumns, gpuPassUs, gpuMemory);
   }
 
   /**

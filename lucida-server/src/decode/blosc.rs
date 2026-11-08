@@ -1,18 +1,21 @@
-//! Minimal Blosc1 decoder for the subset of configurations Lucida supports.
-//!
-//! Only `cname: zstd` with `shuffle ∈ {none, byte, bit}` and `typesize ∈ {1, 2, 4}`
-//! is recognized; codec-chain parsing rejects anything else. Blosc2 frames are
-//! not supported. Format: <https://github.com/Blosc/c-blosc/blob/main/README_HEADER.rst>.
+//! Blosc1 decoder for every compressor lucida reads: blosclz, lz4 (which
+//! lz4hc also writes), zlib, and zstd, under no shuffle, byte shuffle, or bit
+//! shuffle, at any typesize. Snappy and Blosc2 frames are refused. Format:
+//! <https://github.com/Blosc/c-blosc/blob/main/README_HEADER.rst>.
 //!
 //! A shuffle filter applies to a whole block, and only to a filter-aligned one
 //! (see [`unshuffle_block`]). The encoder stores a non-aligned block, in
 //! practice the trailing one, raw, so the decoder must pass it through verbatim.
+//!
+//! A block may be compressed as one stream or split into `typesize` streams,
+//! one per byte of the sample. The header's don't-split flag decides, the way
+//! c-blosc's own decoder reads it (see [`split_count`]).
 
 use std::borrow::Cow;
 
-use lucida_store::codec::{BloscConfig, BloscShuffle};
+use lucida_store::codec::{BloscCompressor, BloscConfig, BloscShuffle};
 
-use super::{BoundedError, decode_zstd_bounded};
+use super::{BoundedError, blosclz, decode_zlib_bounded, decode_zstd_bounded};
 
 /// Errors decoding a Blosc-compressed buffer.
 #[derive(thiserror::Error, Debug)]
@@ -25,16 +28,24 @@ pub enum BloscError {
     TypesizeMismatch { header: u8, config: u8 },
     #[error("blosc: header shuffle flags 0x{flags:02x} do not match config {expected:?}")]
     ShuffleMismatch { flags: u8, expected: BloscShuffle },
-    #[error("blosc: header compressor code {code} not supported (expected 4 = zstd)")]
+    #[error(
+        "blosc: header compressor code {code} not supported (0 blosclz, 1 lz4, 3 zlib, 4 zstd)"
+    )]
     UnsupportedCompressor { code: u8 },
+    #[error("blosc: header compressor code {code} does not match config cname {expected:?}")]
+    CompressorMismatch { code: u8, expected: BloscCompressor },
     #[error("blosc: input truncated reading {what} (need {need}, have {have})")]
     InputTruncated {
         what: &'static str,
         need: usize,
         have: usize,
     },
-    #[error("blosc: zstd decode failed at block {block}: {msg}")]
-    ZstdDecode { block: usize, msg: String },
+    #[error("blosc: {compressor:?} decode failed at block {block}: {msg}")]
+    Decompress {
+        compressor: BloscCompressor,
+        block: usize,
+        msg: String,
+    },
     #[error("blosc: block {block} decoded to {got} bytes, expected {expected}")]
     BlockSizeMismatch {
         block: usize,
@@ -52,7 +63,12 @@ pub enum BloscError {
 const FLAG_BYTE_SHUFFLE: u8 = 0x01;
 const FLAG_MEMCPYED: u8 = 0x02;
 const FLAG_BIT_SHUFFLE: u8 = 0x04;
-const COMPRESSOR_CODE_ZSTD: u8 = 4;
+const FLAG_DONT_SPLIT: u8 = 0x10;
+
+/// c-blosc never splits a block into more streams than this.
+const MAX_SPLITS: usize = 16;
+/// c-blosc never splits a block whose streams would be shorter than this.
+const MIN_BUFFERSIZE: usize = 128;
 
 /// Decode a Blosc1-compressed buffer, returning the raw uncompressed bytes.
 ///
@@ -113,10 +129,18 @@ pub fn decode_blosc(
         });
     }
 
-    let compressor_code = (flags & 0xE0) >> 5;
-    if compressor_code != COMPRESSOR_CODE_ZSTD {
-        return Err(BloscError::UnsupportedCompressor {
-            code: compressor_code,
+    let code = (flags & 0xE0) >> 5;
+    let compressor = match code {
+        0 => BloscCompressor::BloscLz,
+        1 => BloscCompressor::Lz4,
+        3 => BloscCompressor::Zlib,
+        4 => BloscCompressor::Zstd,
+        _ => return Err(BloscError::UnsupportedCompressor { code }),
+    };
+    if code != config.cname.format_code() {
+        return Err(BloscError::CompressorMismatch {
+            code,
+            expected: config.cname,
         });
     }
 
@@ -161,53 +185,55 @@ pub fn decode_blosc(
         });
     }
 
+    let dont_split = (flags & FLAG_DONT_SPLIT) != 0;
     let mut decompressed = Vec::with_capacity(nbytes);
     for b in 0..nblocks {
         let off_start = 16 + b * 4;
-        let block_offset =
+        let mut cursor =
             u32::from_le_bytes(input[off_start..off_start + 4].try_into().unwrap()) as usize;
 
-        if input.len() < block_offset + 4 {
-            return Err(BloscError::InputTruncated {
-                what: "block compressed-length",
-                need: block_offset + 4,
-                have: input.len(),
-            });
-        }
-        let compressed_len =
-            u32::from_le_bytes(input[block_offset..block_offset + 4].try_into().unwrap()) as usize;
-
-        let payload_start = block_offset + 4;
-        let payload_end = payload_start + compressed_len;
-        if input.len() < payload_end {
-            return Err(BloscError::InputTruncated {
-                what: "block payload",
-                need: payload_end,
-                have: input.len(),
-            });
-        }
-
         let block_uncompressed_size = blocksize.min(nbytes - decompressed.len());
-        // c-blosc stores an individual block raw when it did not compress
-        // smaller, signaled by cbytes equal to the block's uncompressed size.
-        // This differs from the whole-buffer MEMCPYED flag above. The shuffle
-        // ran before the compress-or-store decision, so a raw block still
-        // holds shuffled bytes: send it to the unshuffle below, not to zstd.
-        let block_bytes = if compressed_len == block_uncompressed_size {
-            input[payload_start..payload_end].to_vec()
-        } else {
-            decode_zstd_bounded(&input[payload_start..payload_end], block_uncompressed_size)
-                .map_err(|e| match e {
-                    BoundedError::TooLarge => BloscError::BlockTooLarge {
-                        block: b,
-                        expected: block_uncompressed_size,
-                    },
-                    BoundedError::Io(e) => BloscError::ZstdDecode {
-                        block: b,
-                        msg: e.to_string(),
-                    },
-                })?
-        };
+        let leftover = block_uncompressed_size < blocksize;
+        let splits = split_count(
+            dont_split,
+            typesize as usize,
+            block_uncompressed_size,
+            leftover,
+        );
+        let split_size = block_uncompressed_size / splits;
+        let mut block_bytes = Vec::with_capacity(block_uncompressed_size);
+        for _ in 0..splits {
+            if input.len() < cursor + 4 {
+                return Err(BloscError::InputTruncated {
+                    what: "block compressed-length",
+                    need: cursor + 4,
+                    have: input.len(),
+                });
+            }
+            let compressed_len =
+                u32::from_le_bytes(input[cursor..cursor + 4].try_into().unwrap()) as usize;
+            let payload_start = cursor + 4;
+            let payload_end = payload_start + compressed_len;
+            if input.len() < payload_end {
+                return Err(BloscError::InputTruncated {
+                    what: "block payload",
+                    need: payload_end,
+                    have: input.len(),
+                });
+            }
+            let payload = &input[payload_start..payload_end];
+            // c-blosc stores a stream raw when it did not compress smaller,
+            // signaled by its length equal to its uncompressed size. This
+            // differs from the whole-buffer MEMCPYED flag above. The shuffle
+            // ran before the compress-or-store decision, so a raw stream
+            // still holds shuffled bytes: send it to the unshuffle below.
+            if compressed_len == split_size {
+                block_bytes.extend_from_slice(payload);
+            } else {
+                block_bytes.extend(decompress(compressor, payload, split_size, b)?);
+            }
+            cursor = payload_end;
+        }
         if block_bytes.len() != block_uncompressed_size {
             return Err(BloscError::BlockSizeMismatch {
                 block: b,
@@ -224,6 +250,58 @@ pub fn decode_blosc(
     }
 
     Ok(decompressed)
+}
+
+/// How many streams one block was compressed as. c-blosc splits a block
+/// into one stream per byte of the sample unless the header says not to,
+/// and never for the trailing short block, a typesize past [`MAX_SPLITS`],
+/// or streams shorter than [`MIN_BUFFERSIZE`]. The last two hold for
+/// buffers written before the flag existed, which split by those rules
+/// alone.
+fn split_count(dont_split: bool, typesize: usize, block_len: usize, leftover: bool) -> usize {
+    let splits = !dont_split
+        && !leftover
+        && (1..=MAX_SPLITS).contains(&typesize)
+        && block_len / typesize >= MIN_BUFFERSIZE
+        && block_len.is_multiple_of(typesize);
+    if splits { typesize } else { 1 }
+}
+
+/// Decompress one stream of a block to exactly `len` bytes, refusing one
+/// that decodes longer.
+fn decompress(
+    compressor: BloscCompressor,
+    payload: &[u8],
+    len: usize,
+    block: usize,
+) -> Result<Vec<u8>, BloscError> {
+    let failed = |msg: String| BloscError::Decompress {
+        compressor,
+        block,
+        msg,
+    };
+    let bounded = |result: Result<Vec<u8>, BoundedError>| {
+        result.map_err(|e| match e {
+            BoundedError::TooLarge => BloscError::BlockTooLarge {
+                block,
+                expected: len,
+            },
+            BoundedError::Io(e) => failed(e.to_string()),
+        })
+    };
+    match compressor {
+        BloscCompressor::Zstd => bounded(decode_zstd_bounded(payload, len)),
+        BloscCompressor::Zlib => bounded(decode_zlib_bounded(payload, len)),
+        BloscCompressor::Lz4 | BloscCompressor::Lz4hc => {
+            let mut out = vec![0u8; len];
+            let written = lz4_flex::block::decompress_into(payload, &mut out)
+                .map_err(|e| failed(e.to_string()))?;
+            out.truncate(written);
+            Ok(out)
+        }
+        BloscCompressor::BloscLz => blosclz::decompress(payload, len)
+            .ok_or_else(|| failed("the stream does not decode to its block".to_string())),
+    }
 }
 
 /// Reverse one block's Blosc filter, keeping the filter choice and c-blosc's
@@ -535,10 +613,25 @@ mod tests {
     #[test]
     fn rejects_unsupported_compressor() {
         let mut bad = ENC_BIT_TS2.to_vec();
-        // Wipe the compressor bits (bits 5-7) to encode lz4 (=1)
+        // Rewrite the compressor bits (bits 5-7) to snappy (=2).
+        bad[2] = (bad[2] & 0x1F) | (2 << 5);
+        let err = decode_blosc(&bad, &cfg(2, BloscShuffle::Bit), NO_LIMIT).unwrap_err();
+        assert!(matches!(err, BloscError::UnsupportedCompressor { code: 2 }));
+    }
+
+    #[test]
+    fn rejects_a_compressor_other_than_the_configured_one() {
+        let mut bad = ENC_BIT_TS2.to_vec();
+        // Rewrite the compressor bits (bits 5-7) to lz4 (=1).
         bad[2] = (bad[2] & 0x1F) | (1 << 5);
         let err = decode_blosc(&bad, &cfg(2, BloscShuffle::Bit), NO_LIMIT).unwrap_err();
-        assert!(matches!(err, BloscError::UnsupportedCompressor { code: 1 }));
+        assert!(matches!(
+            err,
+            BloscError::CompressorMismatch {
+                code: 1,
+                expected: BloscCompressor::Zstd
+            }
+        ));
     }
 
     #[test]
@@ -552,7 +645,7 @@ mod tests {
     /// `nbytes` and whose payload is `payload` compressed.
     fn one_block(nbytes: u32, payload: &[u8]) -> Vec<u8> {
         let compressed = zstd::encode_all(std::io::Cursor::new(payload), 19).unwrap();
-        let mut out = vec![2, 1, COMPRESSOR_CODE_ZSTD << 5, 1];
+        let mut out = vec![2, 1, 4 << 5, 1];
         out.extend_from_slice(&nbytes.to_le_bytes());
         out.extend_from_slice(&nbytes.to_le_bytes());
         let cbytes = 16 + 4 + 4 + compressed.len() as u32;
@@ -3889,5 +3982,118 @@ mod raw_block_oracle {
             got, PLAIN_RAWBLK_BIT_TS2_PLUS_PARTIAL,
             "rawblk_bit_ts2_plus_partial: raw-stored block must match upstream blosc"
         );
+    }
+}
+
+/// Buffers numcodecs 0.17 wrote with
+/// `numcodecs.Blosc(cname, clevel=5, shuffle, blocksize).encode(samples)`,
+/// where sample `i` of the type is `i // 3 % 200 * 37` (wrapping for one
+/// byte) and the buffer holds 4200 bytes, or 600000 for the last case.
+/// c-blosc splits each full block of every compressor but zstd into one
+/// stream per byte of the sample, so these cover split blocks, raw streams,
+/// and a leftover block that is not split.
+#[cfg(test)]
+mod numcodecs_vectors {
+    use super::*;
+
+    fn samples(nbytes: usize, size: usize, to_bytes: impl Fn(u64) -> Vec<u8>) -> Vec<u8> {
+        (0..(nbytes / size) as u64)
+            .flat_map(|i| to_bytes(i / 3 % 200 * 37))
+            .collect()
+    }
+
+    fn decode(
+        vector: &[u8],
+        cname: BloscCompressor,
+        shuffle: BloscShuffle,
+        typesize: u8,
+    ) -> Vec<u8> {
+        let config = BloscConfig {
+            typesize,
+            cname,
+            shuffle,
+        };
+        decode_blosc(vector, &config, usize::MAX).unwrap()
+    }
+
+    #[test]
+    fn every_compressor_decodes_what_numcodecs_wrote() {
+        let u2 = samples(4200, 2, |v| (v as u16).to_le_bytes().to_vec());
+        for (vector, cname) in [
+            (
+                &include_bytes!("blosc_vectors/blosclz-byte-u2.blosc")[..],
+                BloscCompressor::BloscLz,
+            ),
+            (
+                &include_bytes!("blosc_vectors/lz4-byte-u2.blosc")[..],
+                BloscCompressor::Lz4,
+            ),
+            (
+                &include_bytes!("blosc_vectors/zlib-byte-u2.blosc")[..],
+                BloscCompressor::Zlib,
+            ),
+            (
+                &include_bytes!("blosc_vectors/zstd-byte-u2.blosc")[..],
+                BloscCompressor::Zstd,
+            ),
+        ] {
+            assert_eq!(
+                decode(vector, cname, BloscShuffle::Byte, 2),
+                u2,
+                "{cname:?}"
+            );
+        }
+
+        let u4 = samples(4200, 4, |v| (v as u32).to_le_bytes().to_vec());
+        let vector = include_bytes!("blosc_vectors/lz4hc-noshuffle-u4.blosc");
+        assert_eq!(
+            decode(vector, BloscCompressor::Lz4hc, BloscShuffle::None, 4),
+            u4
+        );
+
+        let f8 = samples(4200, 8, |v| (v as f64).to_le_bytes().to_vec());
+        let vector = include_bytes!("blosc_vectors/lz4-bit-f8.blosc");
+        assert_eq!(
+            decode(vector, BloscCompressor::Lz4, BloscShuffle::Bit, 8),
+            f8
+        );
+
+        let u1 = samples(4200, 1, |v| vec![v as u8]);
+        let vector = include_bytes!("blosc_vectors/blosclz-bit-u1.blosc");
+        assert_eq!(
+            decode(vector, BloscCompressor::BloscLz, BloscShuffle::Bit, 1),
+            u1
+        );
+    }
+
+    #[test]
+    fn split_full_blocks_and_an_unsplit_leftover_block_decode() {
+        let vector = include_bytes!("blosc_vectors/lz4-byte-u2-blocks.blosc");
+        let blocksize = u32::from_le_bytes(vector[8..12].try_into().unwrap()) as usize;
+        assert!(
+            600000 > 2 * blocksize,
+            "the vector holds more than two blocks"
+        );
+        assert_eq!(
+            vector[2] & FLAG_DONT_SPLIT,
+            0,
+            "the vector's blocks are split"
+        );
+        let u2 = samples(600000, 2, |v| (v as u16).to_le_bytes().to_vec());
+        assert_eq!(
+            decode(vector, BloscCompressor::Lz4, BloscShuffle::Byte, 2),
+            u2
+        );
+    }
+
+    #[test]
+    fn a_truncated_stream_is_refused() {
+        let vector = include_bytes!("blosc_vectors/blosclz-bit-u1.blosc");
+        let config = BloscConfig {
+            typesize: 1,
+            cname: BloscCompressor::BloscLz,
+            shuffle: BloscShuffle::Bit,
+        };
+        assert!(decode_blosc(&vector[..vector.len() - 20], &config, usize::MAX).is_err());
     }
 }

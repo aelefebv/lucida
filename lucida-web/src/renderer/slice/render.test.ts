@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { EntityDescriptorIndex, MemberSourceBinding } from "../descriptorBuffer.ts";
 import type { WorkerCtx } from "../workerContext.ts";
 import { UNTIMED } from "../passTiming.ts";
-import type { AggregateDrawParams, SlicePoolBinding } from "../sliceRenderer.ts";
+import type { LayerGroupDraw, MemberDraw, SlicePoolBinding } from "../sliceRenderer.ts";
 import type { SliceRenderMultiPassMessage } from "../workerProtocol.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import { createInitialState, type RendererState } from "../worker/state.ts";
@@ -47,6 +47,7 @@ function makeAtlas(entityMetas: SliceAtlasState["entityMetas"]): SliceAtlasState
     chunkY: 64,
     slotsX: 1,
     slotsY: 1,
+    maxSlotsY: 1,
     entityMetas,
     entityZInfo: new Map(),
     z: 0,
@@ -124,7 +125,7 @@ interface MockRenderer {
   setLabelColorBuffer: ReturnType<typeof vi.fn>;
   setDescriptorBinding: ReturnType<typeof vi.fn>;
   renderTo: ReturnType<typeof vi.fn>;
-  renderAggregateBatches: ReturnType<typeof vi.fn>;
+  renderLayerGroup: ReturnType<typeof vi.fn>;
   compiled: Promise<void>;
 }
 
@@ -137,9 +138,19 @@ function makeRenderer(): MockRenderer {
     setLabelColorBuffer: vi.fn(),
     setDescriptorBinding: vi.fn(),
     renderTo: vi.fn(),
-    renderAggregateBatches: vi.fn(),
+    renderLayerGroup: vi.fn(),
     compiled: Promise.resolve(),
   };
+}
+
+/** The group the `call`th group pass drew. */
+function groupOf(renderer: MockRenderer, call = 0): LayerGroupDraw {
+  return renderer.renderLayerGroup.mock.calls[call][2] as LayerGroupDraw;
+}
+
+/** The `index`th member draw of the `call`th group pass. */
+function memberOf(renderer: MockRenderer, call = 0, index = 0): MemberDraw {
+  return groupOf(renderer, call).members[index];
 }
 
 /** A compile the test finishes by hand. */
@@ -231,13 +242,13 @@ describe("handleSliceRenderMultiPass — the compile", () => {
 
     const frame = handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
     await flush();
-    expect(renderer.renderTo).not.toHaveBeenCalled();
+    expect(renderer.renderLayerGroup).not.toHaveBeenCalled();
     expect(composite).not.toHaveBeenCalled();
     expect(device.queue.submit).not.toHaveBeenCalled();
 
     gate.finish();
     await frame;
-    expect(renderer.renderTo).toHaveBeenCalledOnce();
+    expect(renderer.renderLayerGroup).toHaveBeenCalledOnce();
     expect(composite).toHaveBeenCalledOnce();
   });
 });
@@ -282,8 +293,9 @@ describe("handleSliceRenderMultiPass", () => {
 
     await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
 
-    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
-    expect(renderer.setTierAtlases).toHaveBeenCalledWith([], bindingOf(coarseAtlas));
+    expect(renderer.renderLayerGroup).toHaveBeenCalledTimes(1);
+    expect(memberOf(renderer).levels).toEqual([]);
+    expect(memberOf(renderer).coarse).toEqual(bindingOf(coarseAtlas));
     expect(composite.mock.calls[0][1]).toHaveLength(1);
   });
 
@@ -309,11 +321,9 @@ describe("handleSliceRenderMultiPass", () => {
 
     await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
 
-    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
-    expect(renderer.setTierAtlases).toHaveBeenCalledWith(
-      [bindingOf(finePool), bindingOf(smallChunkPool)],
-      null,
-    );
+    expect(renderer.renderLayerGroup).toHaveBeenCalledTimes(1);
+    expect(memberOf(renderer).levels).toEqual([bindingOf(finePool), bindingOf(smallChunkPool)]);
+    expect(memberOf(renderer).coarse).toBeNull();
     // Both pools' indirections are flushed before the draw.
     finePool.indirectionDirty = true;
     smallChunkPool.indirectionDirty = true;
@@ -343,8 +353,9 @@ describe("handleSliceRenderMultiPass", () => {
 
     await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
 
-    expect(renderer.setTierAtlases).toHaveBeenCalledWith([bindingOf(finePool), null], null);
-    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
+    expect(memberOf(renderer).levels).toEqual([bindingOf(finePool), null]);
+    expect(memberOf(renderer).coarse).toBeNull();
+    expect(renderer.renderLayerGroup).toHaveBeenCalledTimes(1);
   });
 
   it("renders a layer backed only by a resident tile proxy", async () => {
@@ -393,9 +404,11 @@ describe("handleSliceRenderMultiPass", () => {
       canvasH: 64,
     });
 
-    expect(renderer.renderTo).toHaveBeenCalledTimes(1);
-    expect(renderer.setProxyTextures).toHaveBeenCalledWith(tileProxyTexture, null);
-    expect(renderer.setTierAtlases).toHaveBeenCalledWith([], null);
+    expect(renderer.renderLayerGroup).toHaveBeenCalledTimes(1);
+    expect(memberOf(renderer).tileProxyTexture).toBe(tileProxyTexture);
+    expect(memberOf(renderer).groupProxyTexture).toBeNull();
+    expect(memberOf(renderer).levels).toEqual([]);
+    expect(memberOf(renderer).coarse).toBeNull();
     expect(composite).toHaveBeenCalledTimes(1);
   });
 
@@ -409,7 +422,7 @@ describe("handleSliceRenderMultiPass", () => {
 
     await handleSliceRenderMultiPass(ctx, memberMsg("img-a"));
 
-    expect(renderer.renderTo).not.toHaveBeenCalled();
+    expect(renderer.renderLayerGroup).not.toHaveBeenCalled();
     expect(composite.mock.calls[0][1]).toHaveLength(0);
   });
 });
@@ -469,13 +482,14 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
     await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
-    expect(renderer.renderAggregateBatches).toHaveBeenCalledTimes(1);
+    expect(renderer.renderLayerGroup).toHaveBeenCalledTimes(1);
     expect(renderer.renderTo).not.toHaveBeenCalled();
-    const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
+    const params = groupOf(renderer).aggregate!;
     // The descriptor buffer is passed per draw (bound fresh inside the
     // renderer), so appearance edits that rebuild it repaint the batch.
     expect(params.descriptorBuffer).toBe(descIndex.buffer);
-    expect(params.blendMode).toBe("additive");
+    expect(groupOf(renderer).blendMode).toBe("additive");
+    expect(groupOf(renderer).members).toEqual([]);
     // Both members share one pool-binding set → a single instanced draw.
     expect(params.batches).toHaveLength(1);
     expect(params.batches[0].firstInstance).toBe(0);
@@ -532,7 +546,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
     await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
-    expect(renderer.renderAggregateBatches).not.toHaveBeenCalled();
+    expect(renderer.renderLayerGroup).not.toHaveBeenCalled();
     expect(renderer.renderTo).not.toHaveBeenCalled();
     expect(composite.mock.calls[0][1]).toHaveLength(0);
   });
@@ -555,7 +569,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
     await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
-    const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
+    const params = groupOf(renderer).aggregate!;
     expect(params.batches).toHaveLength(1);
     expect(params.batches[0].count).toBe(1);
     expect(params.quadData.byteLength).toBe(32);
@@ -583,7 +597,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
     await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
-    const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
+    const params = groupOf(renderer).aggregate!;
     // Two binding sets → two instanced draws in one pass, roster order.
     expect(params.batches).toHaveLength(2);
     expect(params.batches[0].coarse?.texture).toBe(atlasA.texture);
@@ -618,7 +632,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
     await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
-    const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
+    const params = groupOf(renderer).aggregate!;
     expect(params.batches).toHaveLength(2);
     expect(params.batches[0].levels).toEqual([bindingOf(finePool)]);
     expect(params.batches[0].count).toBe(1);
@@ -660,7 +674,7 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
 
     await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
 
-    const params = renderer.renderAggregateBatches.mock.calls[0][2] as AggregateDrawParams;
+    const params = groupOf(renderer).aggregate!;
     // img-0 rides its proxy pool; img-1 (nothing resident) is dropped.
     expect(params.batches).toHaveLength(1);
     expect(params.batches[0].count).toBe(1);
@@ -669,5 +683,83 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(params.batches[0].coarse).toBeNull();
     // Proxy-only members carry no chunk residency → no camera-UV update.
     expect(state.cameraUVPerEntity.size).toBe(0);
+  });
+});
+
+describe("handleSliceRenderMultiPass — one target per (dataset, channel)", () => {
+  /** A 4×3 grid of 128-voxel tiles in two channels, posted as the slice path posts them. */
+  function collectionMsg(): SliceRenderMultiPassMessage {
+    const layers: SliceRenderMultiPassMessage["layers"] = [];
+    for (const channel of [0, 1]) {
+      const passGroup = layers.length;
+      for (let i = 0; i < 12; i++) {
+        layers.push({
+          datasetId: `img-${i}:ch${channel}`,
+          entityIndex: channel * 12 + i,
+          blendMode: "additive",
+          dataW: 128,
+          dataH: 128,
+          offsetX: (i % 4) * 128,
+          offsetY: Math.floor(i / 4) * 128,
+          passGroup,
+        });
+      }
+    }
+    return { type: "sliceRenderMultiPass", epochs: EPOCHS, layers, zoom: 1, cx: 256, cy: 192, canvasW: 512, canvasH: 384 };
+  }
+
+  function collectionCtx() {
+    const device = makeDevice();
+    const renderer = makeRenderer();
+    const composite = vi.fn();
+    const state = createInitialState();
+    const members = [0, 1].flatMap((c) => Array.from({ length: 12 }, (_, i) => `img-${i}:ch${c}`));
+    state.sliceAtlases.set("coarse-pool", makeAtlas(new Map(members.map((id) => [id, residentMetas()]))));
+    const descIndex = makeDescIndex(members, {
+      sourceBindingByMember: bindings(Object.fromEntries(
+        members.map((id) => [id, { levelPoolKeys: [], coarsePoolKey: "coarse-pool" }]),
+      )),
+    });
+    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
+    const targets = vi.fn((n: number) => Array.from({ length: n }, () => ({ createView: () => ({}) })));
+    ctx.ensureOffscreenPool = targets as unknown as WorkerCtx["ensureOffscreenPool"];
+    return { ctx, renderer, composite, targets };
+  }
+
+  it("draws each channel's twelve tiles into one target in one pass", async () => {
+    const { ctx, renderer, composite, targets } = collectionCtx();
+
+    await handleSliceRenderMultiPass(ctx, collectionMsg());
+
+    expect(renderer.renderLayerGroup).toHaveBeenCalledTimes(2);
+    expect(groupOf(renderer, 0).members).toHaveLength(12);
+    expect(groupOf(renderer, 1).members).toHaveLength(12);
+    expect(groupOf(renderer, 1).blendMode).toBe("additive");
+    expect(Math.max(...targets.mock.calls.map(([n]) => n))).toBe(2);
+    expect(composite.mock.calls[0][1]).toHaveLength(2);
+  });
+
+  it("clips each tile's draw to the target pixels it covers", async () => {
+    const { ctx, renderer } = collectionCtx();
+
+    await handleSliceRenderMultiPass(ctx, collectionMsg());
+
+    expect(memberOf(renderer, 0, 0).scissor).toEqual([0, 0, 128, 128]);
+    expect(memberOf(renderer, 0, 5).scissor).toEqual([128, 128, 128, 128]);
+    expect(memberOf(renderer, 1, 11).scissor).toEqual([384, 256, 128, 128]);
+    expect(memberOf(renderer, 1, 11).entityIndex).toBe(23);
+    // Each draw keeps its own member-local view center.
+    expect([memberOf(renderer, 0, 5).cx, memberOf(renderer, 0, 5).cy]).toEqual([128, 64]);
+  });
+
+  it("leaves out a tile off the target, and still updates its eviction reference", async () => {
+    const { ctx, renderer } = collectionCtx();
+    const msg = collectionMsg();
+    msg.cx = 2000;
+
+    await handleSliceRenderMultiPass(ctx, msg);
+
+    expect(renderer.renderLayerGroup).not.toHaveBeenCalled();
+    expect(ctx.state.cameraUVPerEntity.has("img-0:ch0")).toBe(true);
   });
 });
