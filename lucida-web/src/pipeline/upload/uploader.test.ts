@@ -298,6 +298,22 @@ describe("Uploader unified delivery", () => {
     expect(publish.mock.calls[0][1].skippedNoMeta).toBe(1);
   });
 
+  it("counts a chunk that does not hold the slice view's plane as a stale plan, not missing metadata", () => {
+    // The view's Z is in chunk 0 along Z, and the delivery is chunk 1.
+    const chunk = makeChunkDelivery({ z: 1, chunkKey: "0/0/0/1/0/0" });
+    const cpuCache = makeCpuCache([chunk]);
+    const sliceChunkData = vi.fn();
+    const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
+
+    const uploader = new Uploader();
+    const publish = captureTickStats(uploader);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
+
+    expect(sliceChunkData).not.toHaveBeenCalled();
+    expect(cpuCache.markSent).not.toHaveBeenCalled();
+    expect(publish.mock.calls[0][1]).toMatchObject({ skippedOtherPlane: 1, skippedNoMeta: 0 });
+  });
+
   it("stops re-sending a chunk the worker keeps handing back, names it in the trace, and retries after a cold state", () => {
     const recordPointEvent = vi.spyOn(traceRecorder, "recordPointEvent");
     // The cache offers the chunk every tick, as it does when every delivery

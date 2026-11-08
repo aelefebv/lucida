@@ -38,6 +38,7 @@ import { LayoutSwitcher } from "./LayoutSwitcher.tsx";
 import type { LayoutRegistry } from "../pipeline/layoutRegistry.ts";
 import type { LevelRange } from "../renderer/workerProtocol.ts";
 import type { DatasetImportWarning } from "../bridge.ts";
+import { importWarningText } from "./healthText.ts";
 import { displayedLevelNotice, levelNumbers } from "./levelReadout.ts";
 import { coverageNotice, useCoverageLoss } from "../hooks/useCoverageLoss.ts";
 import { useFailedChunks } from "../hooks/useFailedChunks.ts";
@@ -286,7 +287,7 @@ function LayerRow(props: LayerRowProps) {
   const failedChunks = useFailedChunks(layer.id);
   const problems = (props.importWarnings?.get(layer.id) ?? [])
     .filter((warning) => warning.degrades)
-    .map((warning) => warning.message);
+    .map(importWarningText);
   if (failedChunks) problems.push(failedChunksNotice(failedChunks));
   const problemsId = useId();
 
