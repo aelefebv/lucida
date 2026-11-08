@@ -176,6 +176,7 @@ async fn a_served_chunk_reports_every_phase_it_passed_through() {
             session: Arc::clone(&session),
             tx: tx.clone(),
             proxy_config: proxy_config(&root),
+            source_policy: Arc::default(),
             workspace: None,
         },
         &progress,
@@ -199,7 +200,7 @@ async fn a_served_chunk_reports_every_phase_it_passed_through() {
         tx,
         next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes,
-        data_dir: None,
+        source_policy: Arc::default(),
         proxy_config: proxy_config(&root),
     };
     let app = Router::new().route("/ws", get(ws_route)).with_state(state);

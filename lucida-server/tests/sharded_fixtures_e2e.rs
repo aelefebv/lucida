@@ -294,6 +294,7 @@ async fn the_server_frames_the_same_bytes_for_the_sharded_and_the_unsharded_twin
         session: Arc::clone(&session),
         tx: tx.clone(),
         proxy_config: proxy_config(&root),
+        source_policy: Arc::default(),
         workspace: None,
     };
 
@@ -330,7 +331,7 @@ async fn the_server_frames_the_same_bytes_for_the_sharded_and_the_unsharded_twin
         tx,
         next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes,
-        data_dir: None,
+        source_policy: Arc::default(),
         proxy_config: proxy_config(&root),
     };
     let app = Router::new().route("/ws", get(ws_route)).with_state(state);
