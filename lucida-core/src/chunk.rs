@@ -371,10 +371,10 @@ pub const CHUNK_STRIDE: usize = 4;
 /// numeric layout the strides above describe, so a client crosses into the
 /// core once per plan. Chunks follow the headers query by query.
 pub fn enumerate_batch(view: &ChunkView, queries: &[f64]) -> Vec<f64> {
-    let count = queries.len() / QUERY_STRIDE;
-    let mut out = vec![0.0; count * QUERY_HEADER];
+    let (queries, _) = queries.as_chunks::<QUERY_STRIDE>();
+    let mut out = vec![0.0; queries.len() * QUERY_HEADER];
     let mut found = Vec::new();
-    for (index, q) in queries.chunks_exact(QUERY_STRIDE).enumerate() {
+    for (index, q) in queries.iter().enumerate() {
         let grid = |v: f64| {
             if v.is_finite() && v > 0.0 {
                 v.min(u32::MAX as f64) as u32
