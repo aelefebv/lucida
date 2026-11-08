@@ -102,6 +102,32 @@ describe("RenderClient destroy", () => {
     expect(client.takeFrameLatency()).toBeNull();
   });
 
+  it("reports when the worker finished a frame on this thread's clock, held between its dispatch and the report", () => {
+    const { client, worker } = makeReadyClient();
+    const epochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
+    const done: Array<[number, number]> = [];
+    client.onFrameDone = (frameSeq, doneAtMs) => done.push([frameSeq, doneAtMs]);
+    const origin = performance.timeOrigin;
+
+    const first = client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    const dispatchedAt = performance.now();
+    vi.advanceTimersByTime(50);
+    // Finished 20 ms after dispatch, heard 30 ms later on a busy thread.
+    worker.emit({ type: "frameDone", frameSeq: first, doneAtMs: origin + dispatchedAt + 20 });
+    // A skewed stamp from before the dispatch, and one with no stamp at all.
+    const second = client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    const secondAt = performance.now();
+    worker.emit({ type: "frameDone", frameSeq: second, doneAtMs: origin + secondAt - 500 });
+    const third = client.sliceRenderMultiPass(noLayers, 1, 0, 0, 10, 10, epochs);
+    vi.advanceTimersByTime(7);
+    worker.emit({ type: "frameDone", frameSeq: third });
+
+    expect(done.map(([seq]) => seq)).toEqual([first, second, third]);
+    expect(done[0][1]).toBeCloseTo(dispatchedAt + 20, 6);
+    expect(done[1][1]).toBe(secondAt);
+    expect(done[2][1]).toBe(performance.now());
+  });
+
   it("stops waiting on frames sent before the device was replaced", () => {
     const { client, worker } = makeReadyClient();
     const epochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };

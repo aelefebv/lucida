@@ -168,6 +168,11 @@ One per-tick sample of the timeline's counters: queue depth, in-flight,
 main-thread frame time, resident bytes, and GPU pass time where the adapter has
 timestamp queries. Not the per-tick aggregate, the planner's per-dataset sample.
 
+**Input to frame**:
+The time from an input event to the GPU finishing the first frame drawn after
+it. A run that took input reports it per input, beside the main thread's long
+tasks and the frames dropped while input waited: the run's lag.
+
 **Bundle**, **run file**, **saved run**:
 The three files that carry a trace document. A bundle adds the settled frame and
 what a replay needs. The dock's **Save bundle** and `lucida trace --bundle`

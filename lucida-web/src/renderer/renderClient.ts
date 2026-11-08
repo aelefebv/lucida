@@ -275,19 +275,30 @@ export class RenderClient implements UploadClient {
     return this.frameDispatchedAt.size;
   }
 
-  /** Called after each finished viewport frame is noted. */
-  onFrameDone: (() => void) | null = null;
+  /**
+   * Called after each finished viewport frame is noted, with when its GPU
+   * work finished on this thread's clock.
+   */
+  onFrameDone: ((frameSeq: number, doneAtMs: number) => void) | null = null;
 
-  private noteFrameDone(frameSeq: number): void {
+  private noteFrameDone(frameSeq: number, workerDoneAtMs: number | undefined): void {
+    const now = performance.now();
     const dispatchedAt = this.frameDispatchedAt.get(frameSeq);
     for (const seq of this.frameDispatchedAt.keys()) {
       if (seq > frameSeq) break;
       this.frameDispatchedAt.delete(seq);
     }
     if (dispatchedAt !== undefined) {
-      this.frameLatency = { frameSeq, ms: performance.now() - dispatchedAt };
+      this.frameLatency = { frameSeq, ms: now - dispatchedAt };
     }
-    this.onFrameDone?.();
+    // Held between the dispatch and the report, so a skew between the two
+    // contexts' time origins can never put the frame outside what this
+    // thread saw.
+    const doneAtMs =
+      workerDoneAtMs === undefined
+        ? now
+        : Math.min(now, Math.max(dispatchedAt ?? -Infinity, workerDoneAtMs - performance.timeOrigin));
+    this.onFrameDone?.(frameSeq, doneAtMs);
   }
 
   private onMessage = (e: MessageEvent<WorkerToMainMessage>) => {
@@ -320,7 +331,7 @@ export class RenderClient implements UploadClient {
     } else if (msg.type === "minimapOverviewsLost") {
       this.onMinimapOverviewsLost?.(msg.memberIds);
     } else if (msg.type === "frameDone") {
-      this.noteFrameDone(msg.frameSeq);
+      this.noteFrameDone(msg.frameSeq, msg.doneAtMs);
     } else if (msg.type === "pipelinesCompiled") {
       this.notePipelinesCompiled();
     } else if (msg.type === "thumbnailResult") {
@@ -587,15 +598,17 @@ export class RenderClient implements UploadClient {
     clipDistance?: number,
     clipMode?: number,
     pixelRatio?: number,
-  ) {
+  ): number {
+    const frameSeq = this.nextFrameSeq();
     this.worker.postMessage({
       type: "volumeRenderMultiPass",
       epochs,
       layers, invViewProj, eye,
       canvasW, canvasH, fullW, fullH, viewProj,
       camForward, clipDistance, clipMode, pixelRatio,
-      frameSeq: this.nextFrameSeq(),
+      frameSeq,
     });
+    return frameSeq;
   }
 
   sliceRenderMultiPass(
@@ -607,7 +620,7 @@ export class RenderClient implements UploadClient {
     canvasH: number,
     epochs: SceneEpochs,
     pixelRatio?: number,
-  ) {
+  ): number {
     // Aggregate quad buffers are rebuilt per render tick on the main
     // thread; transferring them avoids structured-cloning what can be
     // hundreds of KB on a wide collection.
@@ -615,13 +628,15 @@ export class RenderClient implements UploadClient {
     for (const layer of layers) {
       if (layer.aggregate) transfer.push(layer.aggregate.quads);
     }
+    const frameSeq = this.nextFrameSeq();
     this.worker.postMessage({
       type: "sliceRenderMultiPass",
       epochs,
       layers, zoom, cx, cy,
       canvasW, canvasH, pixelRatio,
-      frameSeq: this.nextFrameSeq(),
+      frameSeq,
     }, transfer);
+    return frameSeq;
   }
 
   minimapInit(canvas: HTMLCanvasElement) {
