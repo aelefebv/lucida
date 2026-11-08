@@ -501,9 +501,14 @@ export function useDatasetSettings({
     ) return;
     const scene = wasmSceneRef.current;
     if (!scene) return;
-    applyDocumentCommand(scene, { type: "remove_dataset", id }, bridgeCallbacksRef.current.sendCommand);
+    applyDocumentCommand(
+      scene,
+      { type: "remove_dataset", id },
+      bridgeCallbacksRef.current.sendCommand,
+      loopRef.current,
+    );
     datasetCallbacksRef.current.removeDataset(id);
-  }, [wasmSceneRef, datasetsRef, bridgeCallbacksRef, datasetCallbacksRef]);
+  }, [wasmSceneRef, datasetsRef, bridgeCallbacksRef, datasetCallbacksRef, loopRef]);
 
   // A document command: the server authorizes it editor-only, broadcasts it,
   // and persists it. A blank name is ignored here; the server rejects it too.

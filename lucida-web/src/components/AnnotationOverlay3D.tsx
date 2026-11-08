@@ -30,7 +30,7 @@ import { CommentCountBadge, OffContextHelptext } from "./AnnotationPinBadges.tsx
 import { AnnotationContextMenu, type CanvasMenuRequest } from "./AnnotationContextMenu.tsx";
 import { applyViewportCommand } from "../applyAndSend.ts";
 import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
-import { buildAnnotationView, liveViewWithLiveTC } from "../savedView/buildAnnotationView.ts";
+import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import { annotationVertices, hitTestShapes, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
 import { isOffContext, type ViewContext } from "./annotationContext.ts";
 import type { Tool } from "./annotationTool.ts";
@@ -419,7 +419,7 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
 
   const addPoint = (at: AnnotationPlacement, openThread: boolean) => {
     const scene = wasmSceneRef.current;
-    const view = scene ? buildAnnotationView(scene, liveViewWithLiveTC(scene, viewContext.t, viewContext.c)) : null;
+    const view = scene ? buildAnnotationView(scene) : null;
     editing.addPoint(at, { t: viewContext.t, c: viewContext.c, view, openThread });
     onViewportChanged?.();
   };

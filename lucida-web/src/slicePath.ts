@@ -381,18 +381,16 @@ export function tickSlice(
   ctx: TickContext,
   tickCoordinator: TickCoordinator,
   uploader: Uploader,
-  sliceZ: number,
-  sliceT: number,
-  sliceC: number,
   minimapPendingFetch: Map<string, MinimapChunkCoord[]>,
   shouldRender: boolean = true,
 ): boolean {
   const { scene, canvas } = ctx;
 
-  // Set scene params before tickCoordinator queries WASM state
-  scene.set_z(sliceZ);
-  scene.set_t(sliceT);
-  scene.set_c(sliceC);
+  // The scene owns the selectors, as it does for the volume path, so this
+  // reads them and never writes them back.
+  const sliceZ = scene.z();
+  const sliceT = scene.t();
+  const sliceC = scene.c();
   const dpr = devicePixelRatio;
   const canvasW = Math.round(canvas.clientWidth * dpr);
   const canvasH = Math.round(canvas.clientHeight * dpr);

@@ -258,13 +258,6 @@ function makeHarness() {
     bumpLayerSettingsVersion: vi.fn(),
     initLayerMaps: vi.fn(),
     setSelectedDatasetId: vi.fn(),
-    viewState: {
-      setZ: vi.fn(),
-      setC: vi.fn(),
-      setT: vi.fn(),
-      setViewMode: vi.fn(),
-      setMultiChannel: vi.fn(),
-    },
     events,
   } satisfies SessionControllerDeps;
   const controller = new SessionController(deps);
