@@ -131,7 +131,6 @@ vi.mock("lucida-core", () => {
 
 vi.mock("./renderer/renderClient.ts", () => {
   class MockRenderClient {
-    onIntensityRange: unknown = null;
     // Never settles: the GPU worker never comes up here, so no RenderLoop
     // exists and the intents run with a null loop, which their contract covers.
     ready() { return new Promise(() => {}); }

@@ -1,6 +1,6 @@
 /**
- * Volume chunk upload: staleness check, eviction, GPU write, intensity
- * sampling, and per-member feedback messages.
+ * Volume chunk upload: staleness check, eviction, GPU write, and per-member
+ * feedback messages.
  */
 
 import type { WorkerCtx } from "../workerContext.ts";
@@ -9,10 +9,9 @@ import type {
   VolumeChunkDataMessage,
 } from "../workerProtocol.ts";
 import { writeVolumeChunk } from "../gpuContext.ts";
-import { sampleIntensityRange } from "../../zarr/intensitySampler.ts";
 import type { SceneEpochs } from "../../pipeline/epochs.ts";
 import { isStaleDelivery } from "../epochCheck.ts";
-import { asUint32, atlasTexels, atlasTextureFormat, texelValues } from "../dataTypeUtil.ts";
+import { asUint32, atlasTexels, atlasTextureFormat } from "../dataTypeUtil.ts";
 import {
   parseCompositeKey,
   makeCompositeKey,
@@ -29,9 +28,9 @@ import {
 
 /**
  * Write whole 3D uint32 label chunks into the member's bricked r32uint
- * volume atlas. Ids keep their full 32-bit width and get no intensity
- * sampling, because they are categorical. Brick placement and edge clamping
- * mirror `handleVolumeChunkData`.
+ * volume atlas. Ids keep their full 32-bit width, because they are
+ * categorical. Brick placement and edge clamping mirror
+ * `handleVolumeChunkData`.
  */
 export function handleLabelVolumeChunkData(
   ctx: WorkerCtx,
@@ -132,8 +131,6 @@ export function handleVolumeChunkData(
     return;
   }
 
-  let intensityChanged = false;
-  const totalChunks = msg.chunks.length;
   const evictedKeys: string[] = [];
   const insertedKeys: string[] = []; // composite keys we successfully inserted
   const radiusFilteredKeys: string[] = [];
@@ -215,11 +212,6 @@ export function handleVolumeChunkData(
       claimed = -1;
       insertedKeys.push(compositeKey);
       atlas.indirectionDirty = true;
-
-      const perChunkSamples = Math.floor(100000 / Math.max(1, totalChunks));
-      const { min, max } = sampleIntensityRange(texelValues(data, atlas.format), perChunkSamples);
-      if (min < atlas.intensityMin) { atlas.intensityMin = min; intensityChanged = true; }
-      if (max > atlas.intensityMax) { atlas.intensityMax = max; intensityChanged = true; }
     } catch (err) {
       failure ??= err;
       failedKeys.push(chunk.key);
@@ -271,9 +263,6 @@ export function handleVolumeChunkData(
     ctx.postWantedSet(ctx.state.memberToDataset.get(memberId));
   }
 
-  if (intensityChanged) {
-    ctx.post({ type: "intensityRange", datasetId: memberId, min: atlas.intensityMin, max: atlas.intensityMax });
-  }
   if (failure !== null) throw failure;
 }
 

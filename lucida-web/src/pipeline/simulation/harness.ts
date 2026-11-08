@@ -28,6 +28,7 @@ import { createQuiescenceState } from "../../trace/quiescence.ts";
 import type { AtlasBudgets } from "../../renderer/worker/state.ts";
 import type { MissingChunk } from "../../renderer/workerProtocol.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
+import type { ChannelFit } from "../autoContrast.ts";
 import { AssetCatalog } from "../assetCatalog.ts";
 import {
   GeneratedAvailabilityCatalog,
@@ -128,6 +129,13 @@ export function describeScenario(spec: ScenarioSpec): Scenario {
   });
 }
 
+/** An auto-contrast fit the render loop handed out. */
+export interface ContrastFitRecord {
+  datasetId: string;
+  channel: number;
+  fit: ChannelFit;
+}
+
 /** One residency tier's wanted-and-resident count in the CPU cache. */
 interface TierCount {
   resident: number;
@@ -156,6 +164,8 @@ export interface PhaseOutcome {
   missingGpu: string[];
   /** Chunks the page sent the worker again and again in this phase, most often first. */
   resent: string[];
+  /** The auto-contrast fits handed out in this phase, in order. */
+  fits: ContrastFitRecord[];
 }
 
 export interface SimulationRun {
@@ -163,6 +173,8 @@ export interface SimulationRun {
   dpr: number;
   phases: PhaseOutcome[];
   settled: boolean;
+  /** `${imageId}/${chunkKey}` of each chunk the source served, in order. */
+  served: string[];
   /** Why the run did or did not settle, for a failure message. */
   report: string;
 }
@@ -191,6 +203,7 @@ export async function runScenario(scenario: Scenario, opts: { dpr: number }): Pr
       dpr: opts.dpr,
       phases,
       settled,
+      served: sim.served(),
       report: formatReport(scenario.name, opts.dpr, phases),
     };
   } finally {
@@ -233,6 +246,7 @@ class Simulation {
   /** `${memberId}/${chunkKey}` → the worker's last feedback reason and how often it was given. */
   private readonly feedback = new Map<string, { reason: string; count: number }>();
   private framesRun = 0;
+  private readonly fits: ContrastFitRecord[] = [];
 
   constructor(scenario: Scenario, dpr: number) {
     this.scenario = scenario;
@@ -249,7 +263,7 @@ class Simulation {
       for (const key of msg.skipped ?? []) note(key, "atlas-policy");
     };
     this.source = new SimulatedSource(
-      { latencyMs: scenario.source.latencyMs, answer: (req) => this.answer(req) },
+      { ...scenario.source, answer: (req) => this.answer(req) },
       (datasetId) => this.datasets.get(datasetId),
     );
     this.cpuCache = new CpuCache(this.source, passThroughDecodePool(), {
@@ -339,6 +353,7 @@ class Simulation {
     this.loop = loop;
     loop.start();
     loop.addDataset(dataset.datasetId, manifest);
+    loop.setAutoContrastListener((datasetId, channel, fit) => this.fits.push({ datasetId, channel, fit }));
 
     scene.set_viewport(deviceW, deviceH, this.dpr);
     scene.fit_camera_to_dataset_bounds(dataset.datasetId);
@@ -410,6 +425,10 @@ class Simulation {
     return due.length > 0;
   }
 
+  served(): string[] {
+    return [...this.source.served];
+  }
+
   /** Nothing queued, in flight or pending anywhere, and no frame requested. */
   private atFixedPoint(): boolean {
     if (this.frames.size > 0 || !this.worker.idle) return false;
@@ -432,6 +451,7 @@ class Simulation {
    */
   async settle(label: string): Promise<PhaseOutcome> {
     const framesBefore = this.framesRun;
+    const fitsBefore = this.fits.length;
     const sentBefore = new Map([...this.worker.deliveries].map(([key, d]) => [key, d.count]));
     const quietSteps = Math.ceil(QUIET_MS / FRAME_MS);
     let fixedSince: number | null = null;
@@ -442,11 +462,11 @@ class Simulation {
       if (ranFrame || !this.atFixedPoint() || this.source.requestCount !== requestsAtFixed) {
         fixedSince = null;
         requestsAtFixed = this.source.requestCount;
-        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, sentBefore);
+        if (i >= this.scenario.tickBound) return this.outcome(label, i, false, framesBefore, fitsBefore, sentBefore);
         continue;
       }
       fixedSince ??= i;
-      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, sentBefore);
+      if (i - fixedSince >= quietSteps) return this.outcome(label, fixedSince, true, framesBefore, fitsBefore, sentBefore);
     }
   }
 
@@ -455,6 +475,7 @@ class Simulation {
     ticks: number,
     fixed: boolean,
     framesBefore: number,
+    fitsBefore: number,
     sentBefore: Map<string, number>,
   ): PhaseOutcome {
     const q = this.cpuCache.quiescenceInputs(createQuiescenceState());
@@ -497,6 +518,7 @@ class Simulation {
       missingCpu,
       missingGpu,
       resent: resent.map((r) => r.text),
+      fits: this.fits.slice(fitsBefore),
     };
   }
 

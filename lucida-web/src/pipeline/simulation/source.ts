@@ -33,11 +33,19 @@ export interface SourceRequest {
   nowMs: number;
 }
 
+/** The chunk a request names. */
+export interface SourceChunk {
+  imageId: string;
+  chunkKey: string;
+}
+
 export interface SourceSpec {
-  /** Time from request to answer, in ms of the simulation clock. */
-  latencyMs?: number;
+  /** Time from request to answer, in ms of the simulation clock, for every chunk or per chunk. */
+  latencyMs?: number | ((chunk: SourceChunk) => number);
   /** Defaults to serving every chunk. */
   answer?: (request: SourceRequest) => SourceAnswer;
+  /** A chunk's `count` uint16 samples. Defaults to {@link rampSamples}. */
+  samples?: (chunk: SourceChunk, count: number) => Uint16Array<ArrayBuffer>;
 }
 
 export interface SourceRecord {
@@ -52,8 +60,11 @@ export class SimulatedSource implements ContentSource {
   readonly records = new Map<string, SourceRecord>();
   /** Every chunk request ever made, for the "requests nothing further" check. */
   requestCount = 0;
+  /** `${imageId}/${chunkKey}` of each chunk served, in the order the bytes went out. */
+  readonly served: string[] = [];
   private nextRid = 0;
-  private readonly latencyMs: number;
+  private readonly latencyMs: (chunk: SourceChunk) => number;
+  private readonly samples: (chunk: SourceChunk, count: number) => Uint16Array<ArrayBuffer>;
   private readonly answer: (request: SourceRequest) => SourceAnswer;
   private readonly manifestFor: (datasetId: string) => DatasetManifest | undefined;
 
@@ -61,7 +72,9 @@ export class SimulatedSource implements ContentSource {
     spec: SourceSpec,
     manifestFor: (datasetId: string) => DatasetManifest | undefined,
   ) {
-    this.latencyMs = spec.latencyMs ?? DEFAULT_SOURCE_LATENCY_MS;
+    const latency = spec.latencyMs ?? DEFAULT_SOURCE_LATENCY_MS;
+    this.latencyMs = typeof latency === "number" ? () => latency : latency;
+    this.samples = spec.samples ?? rampSamples;
     this.answer = spec.answer ?? (() => "ready");
     this.manifestFor = manifestFor;
   }
@@ -88,6 +101,7 @@ export class SimulatedSource implements ContentSource {
         record.last = answer;
         switch (answer) {
           case "ready":
+            this.served.push(key);
             resolve(this.bytesFor(request));
             return;
           case "pending":
@@ -106,7 +120,7 @@ export class SimulatedSource implements ContentSource {
             }));
             return;
         }
-      }, this.latencyMs);
+      }, this.latencyMs(request));
       if (signal.aborted) onAbort();
       else signal.addEventListener("abort", onAbort, { once: true });
     });
@@ -119,11 +133,7 @@ export class SimulatedSource implements ContentSource {
 
   handleBinary(): void {}
 
-  /**
-   * A full chunk of uint16 samples, as the raw wire format carries an edge
-   * chunk. Each answer fills with a different value, so the worker's
-   * intensity sampling sees a range.
-   */
+  /** A full chunk of uint16 samples, as the raw wire format carries an edge chunk. */
   private bytesFor(request: FetchRequest): FetchResult {
     const image = this.manifestFor(request.datasetId)?.images.find(
       (img) => img.image_id === request.imageId,
@@ -133,15 +143,27 @@ export class SimulatedSource implements ContentSource {
     if (!chunkShape) {
       throw new Error(`simulated source: no level ${level} for ${request.imageId}`);
     }
-    const samples = chunkShape.reduce((a, b) => a * b, 1);
-    const data = new Uint16Array(samples);
-    data.fill(100 + (this.requestCount % 900));
+    const data = this.samples(request, chunkShape.reduce((a, b) => a * b, 1));
     return {
       bytes: data.buffer,
       wireFormat: { Raw: { data_type: "Uint16" } },
       dataType: "Uint16",
     };
   }
+}
+
+/**
+ * Samples that depend on the chunk alone, never on when it was asked for,
+ * so two runs that fetch in different orders see the same data. Each chunk
+ * is a ramp from its own base, so chunks differ and so do samples within one.
+ */
+export function rampSamples(chunk: SourceChunk, count: number): Uint16Array<ArrayBuffer> {
+  let h = 0x811c9dc5;
+  for (const ch of `${chunk.imageId}/${chunk.chunkKey}`) h = Math.imul(h ^ ch.charCodeAt(0), 0x01000193);
+  const base = 100 + ((h >>> 0) % 900);
+  const data = new Uint16Array(count);
+  for (let i = 0; i < count; i++) data[i] = base + (i % 251);
+  return data;
 }
 
 /** A decode pool for raw bytes: the wire bytes are already the samples. */

@@ -62,7 +62,7 @@ import { useDimensions } from "./hooks/useDimensions.ts";
 import { useBridge } from "./hooks/useBridge.ts";
 import { useDatasets } from "./hooks/useDatasets.ts";
 import { useSeedDatasetOpens } from "./hooks/useSeedDatasetOpens.ts";
-import { useIntensityBatcher } from "./hooks/useIntensityBatcher.ts";
+import { useAutoContrast } from "./hooks/useAutoContrast.ts";
 import { useDatasetLevels } from "./hooks/useDatasetLevels.ts";
 import { useSavedViewSync } from "./hooks/useSavedViewSync.ts";
 import { useScriptControls } from "./hooks/useScriptControls.ts";
@@ -792,15 +792,16 @@ function App({
     datasetsRef,
   });
 
-  useIntensityBatcher({
-    clientReady: render.clientReady,
-    clientRef: render.clientRef,
+  useAutoContrast({
+    activeLoop: render.activeLoop,
     autoContrastMapRef: layers.autoContrastMapRef,
+    contrastFitMapRef: layers.contrastFitMapRef,
+    setContrastFitMap: layers.setContrastFitMap,
     wasmSceneRef: scene.wasmSceneRef,
     loopRef: render.loopRef,
     sessionRef: bridge.sessionRef,
-    datasetsRef,
-    setDataRangeMap: layers.setDataRangeMap,
+    followTarget: bridge.followTarget,
+    followTargetRef: bridge.followTargetRef,
   });
 
   const [cursorLabels, setCursorLabels] = useState<CursorLabel[]>([]);

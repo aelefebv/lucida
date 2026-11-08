@@ -65,7 +65,6 @@ export interface AtlasState {
   entityMetas: Map<string, LodIndirectionMeta[]>;
   /** Current T and C — shared across all entities in this pool (one cold state per dataset). */
   t: number; c: number;
-  intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
 }
 
@@ -530,7 +529,6 @@ function createVolumeAtlas(
     maxSlotsZ,
     entityMetas: new Map(),
     t, c,
-    intensityMin: Infinity, intensityMax: -Infinity,
     indirectionDirty: true,
   };
 }

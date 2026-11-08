@@ -96,7 +96,6 @@ export class RenderClient implements UploadClient {
   private framePending = new Map<number, (capture: FrameCaptureResult) => void>();
   private frameSeq = 0;
 
-  onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
   onChunksEvicted: ChunksEvictedHandler | null = null;
   /** Missing entries cover chunks and proxies; match on `kind`. */
   onWantedSetDelta: WantedSetHandler | null = null;
@@ -266,9 +265,7 @@ export class RenderClient implements UploadClient {
       if (msg.type === "thumbnailResult" && msg.bitmap) msg.bitmap.close();
       return;
     }
-    if (msg.type === "intensityRange" && this.onIntensityRange) {
-      this.onIntensityRange(msg.datasetId, msg.min, msg.max);
-    } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
+    if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
       this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);

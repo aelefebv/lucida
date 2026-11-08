@@ -203,7 +203,6 @@ describe("worker dispatch upload feedback", () => {
       texture: {} as GPUTexture,
       entityMetas: new Map([["img-0", [{ level: 2, gridDims: [1, 1, 1], chunkDims: [8, 8, 8], levelDims: [8, 8, 8], offset: 0 }]]]),
       t: 0, c: 0,
-      intensityMin: 65535, intensityMax: 0,
       indirectionDirty: false,
     };
     ctx.state.volumeAtlases.set("small-chunk-pool", smallChunkPool as never);

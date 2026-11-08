@@ -202,7 +202,6 @@ export interface SliceAtlasState {
    * leaves it unmapped and the wanted set reports it missing.
    */
   slotLevelZ: Int32Array<ArrayBuffer>;
-  intensityMin: number; intensityMax: number;
   indirectionDirty: boolean;
 }
 
@@ -251,7 +250,6 @@ function createSliceAtlas(
     entityZInfo: new Map(),
     z, t, c,
     slotLevelZ: new Int32Array(totalSlots).fill(-1),
-    intensityMin: Infinity, intensityMax: -Infinity,
     indirectionDirty: true,
   };
 }
