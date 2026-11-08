@@ -34,8 +34,14 @@ export interface CacheSettleInputs extends Outstanding {
   serverPendingChunks: number;
   /** Wanted chunks waiting out a backoff after a transient failure. */
   retryingChunks: number;
-  /** Wanted chunks the source refused for good. */
-  failedChunks: number;
+  /**
+   * Wanted chunks of each tier that the source failed for good. Nothing asks
+   * for them again until the dataset is reopened, so waiting on them would
+   * never end: the view settles without them, and the failure says why.
+   * Counted every tick, unlike the reasons above.
+   */
+  failedDetailChunks: number;
+  failedCoarseChunks: number;
   /** Wanted chunks absent for none of the reasons above, with room for them. */
   unrequestedChunks: number;
 }
@@ -91,7 +97,8 @@ export function createSettleState(): SettleState {
     shortCoarseChunks: 0,
     serverPendingChunks: 0,
     retryingChunks: 0,
-    failedChunks: 0,
+    failedDetailChunks: 0,
+    failedCoarseChunks: 0,
     unrequestedChunks: 0,
     quiescent: false,
     reason: "unpublished",
@@ -125,14 +132,15 @@ function settleReason(i: SettleInputs): string {
   if (i.pendingUnclassified) return "pending_unclassified";
   if (i.inFlight > 0) return "chunks_in_flight";
   if (i.pending > 0) return "chunks_pending";
-  const missing =
-    Math.max(0, i.desiredDetailChunks - i.residentDetailChunks) +
-    Math.max(0, i.desiredCoarseChunks - i.residentCoarseChunks);
+  // A chunk the source failed for good is not waited on.
+  const missingDetail = Math.max(0, i.desiredDetailChunks - i.residentDetailChunks - i.failedDetailChunks);
+  const missingCoarse = Math.max(0, i.desiredCoarseChunks - i.residentCoarseChunks - i.failedCoarseChunks);
+  const missing = missingDetail + missingCoarse;
   if (missing === 0) return "quiescent";
   // Every missing chunk is one its tier has no room for: the view covers
   // what the budgets hold, and asking again would only evict another.
   if (i.shortDetailChunks + i.shortCoarseChunks >= missing) return "coverage_limited";
-  if (i.residentDetailChunks < i.desiredDetailChunks) return "detail_not_resident";
+  if (missingDetail > 0) return "detail_not_resident";
   return "coarse_not_resident";
 }
 
@@ -143,7 +151,6 @@ function settleReason(i: SettleInputs): string {
 export function stallReasonOf(state: SettleState): string {
   if (state.serverPendingChunks > 0) return "server_pending";
   if (state.retryingChunks > 0) return "source_retrying";
-  if (state.failedChunks > 0) return "chunk_failed";
   if (state.unrequestedChunks > 0) return "not_requested";
   return state.reason;
 }

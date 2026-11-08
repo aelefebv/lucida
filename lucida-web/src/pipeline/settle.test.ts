@@ -48,6 +48,25 @@ describe("evaluateSettle", () => {
     expect(state.speculativeInFlight).toBe(4);
   });
 
+  it("settles without a wanted chunk the source failed for good", () => {
+    const state = evaluateSettle(
+      settled({
+        residentDetailChunks: 11,
+        failedDetailChunks: 1,
+        residentCoarseChunks: 1,
+        failedCoarseChunks: 2,
+      }),
+      0,
+    );
+    expect(state.quiescent).toBe(true);
+  });
+
+  it("still waits on a wanted chunk that has not failed", () => {
+    const state = evaluateSettle(settled({ residentDetailChunks: 10, failedDetailChunks: 1 }), 0);
+    expect(state.quiescent).toBe(false);
+    expect(state.reason).toBe("detail_not_resident");
+  });
+
   it("refuses to call a queue it could not classify settled", () => {
     const state = evaluateSettle(settled({ pendingUnclassified: true }), 0);
     expect(state.quiescent).toBe(false);
@@ -81,7 +100,6 @@ describe("evaluateSettle", () => {
 
   it.each([
     [{ retryingChunks: 1 }, "source_retrying"],
-    [{ failedChunks: 1 }, "chunk_failed"],
     [{ unrequestedChunks: 1 }, "not_requested"],
     [{}, "detail_not_resident"],
   ])("names what a waiting view waits on: %o", (overrides, reason) => {

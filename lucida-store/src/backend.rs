@@ -83,13 +83,22 @@ pub fn max_source_read_budget() -> Duration {
     source_retry_config().retry_timeout + SOURCE_REQUEST_TIMEOUT
 }
 
-/// Errors from storage backend operations.
+/// Errors from storage backend operations. Each is typed where it happens,
+/// so a caller acts on the variant and never on the message.
 #[derive(Debug)]
 pub enum StoreError {
-    /// An error from the underlying object store.
+    /// A read from the object store failed.
     ObjectStore(object_store::Error),
-    /// An error parsing metadata.
-    Metadata(String),
+    /// The location is a local path the filesystem would not open.
+    LocalPath(object_store::Error),
+    /// A remote backend could not be configured for the location, such as
+    /// for want of credentials or a usable bucket name.
+    BackendConfiguration(object_store::Error),
+    /// The metadata read, but says something lucida cannot open.
+    Metadata {
+        fault: MetadataFault,
+        message: String,
+    },
     /// The source policy does not allow the location.
     Denied(SourceDenied),
     /// The array's data type, as its metadata names it, is one lucida can't
@@ -97,11 +106,28 @@ pub enum StoreError {
     UnsupportedDataType(String),
 }
 
+/// What is wrong with metadata that a [`StoreError::Metadata`] reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MetadataFault {
+    /// A block the format requires is not there.
+    Missing,
+    /// The metadata is there and is not valid: not JSON, a field of the
+    /// wrong type, or values that contradict each other.
+    Malformed,
+    /// The storage codec chain names a codec or a configuration that
+    /// lucida does not decode.
+    UnsupportedCodec,
+    /// The array's chunk layout is one lucida cannot slice into wire chunks.
+    UnsupportedLayout,
+}
+
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StoreError::ObjectStore(e) => write!(f, "storage error: {e}"),
-            StoreError::Metadata(s) => write!(f, "metadata error: {s}"),
+            StoreError::ObjectStore(e)
+            | StoreError::LocalPath(e)
+            | StoreError::BackendConfiguration(e) => write!(f, "storage error: {e}"),
+            StoreError::Metadata { message, .. } => write!(f, "metadata error: {message}"),
             StoreError::Denied(denied) => write!(f, "{denied}"),
             StoreError::UnsupportedDataType(s) => write!(f, "unsupported data type: {s}"),
         }
@@ -111,13 +137,39 @@ impl fmt::Display for StoreError {
 impl std::error::Error for StoreError {}
 
 impl StoreError {
+    pub fn missing_metadata(message: impl Into<String>) -> Self {
+        Self::metadata(MetadataFault::Missing, message)
+    }
+
+    pub fn malformed_metadata(message: impl Into<String>) -> Self {
+        Self::metadata(MetadataFault::Malformed, message)
+    }
+
+    pub fn unsupported_codec(message: impl Into<String>) -> Self {
+        Self::metadata(MetadataFault::UnsupportedCodec, message)
+    }
+
+    pub fn unsupported_layout(message: impl Into<String>) -> Self {
+        Self::metadata(MetadataFault::UnsupportedLayout, message)
+    }
+
+    fn metadata(fault: MetadataFault, message: impl Into<String>) -> Self {
+        StoreError::Metadata {
+            fault,
+            message: message.into(),
+        }
+    }
+
     /// This error with `context` in front of its metadata message, so a
     /// failure names where it was found: the level, or the codec whose
     /// configuration held it. An error that is not about metadata passes
     /// through unchanged.
     pub fn in_context(self, context: impl fmt::Display) -> Self {
         match self {
-            StoreError::Metadata(message) => StoreError::Metadata(format!("{context}: {message}")),
+            StoreError::Metadata { fault, message } => StoreError::Metadata {
+                fault,
+                message: format!("{context}: {message}"),
+            },
             other => other,
         }
     }
@@ -158,7 +210,7 @@ pub fn open(location: &DatasetLocation) -> Result<Arc<dyn ObjectStore>, StoreErr
     let url = location.as_str();
     match location.scheme() {
         LocationScheme::Local => {
-            let store = LocalFileSystem::new_with_prefix(url).map_err(StoreError::ObjectStore)?;
+            let store = LocalFileSystem::new_with_prefix(url).map_err(StoreError::LocalPath)?;
             Ok(Arc::new(store))
         }
         LocationScheme::Gcs => {
@@ -171,7 +223,8 @@ pub fn open(location: &DatasetLocation) -> Result<Arc<dyn ObjectStore>, StoreErr
                 .with_bucket_name(location.bucket_name().unwrap_or_default())
                 .with_client_options(source_client_options())
                 .with_retry(source_retry_config())
-                .build()?;
+                .build()
+                .map_err(StoreError::BackendConfiguration)?;
             Ok(with_prefix(store, location.object_prefix()))
         }
         LocationScheme::S3 => {
@@ -179,7 +232,8 @@ pub fn open(location: &DatasetLocation) -> Result<Arc<dyn ObjectStore>, StoreErr
                 .with_bucket_name(location.bucket_name().unwrap_or_default())
                 .with_client_options(source_client_options())
                 .with_retry(source_retry_config())
-                .build()?;
+                .build()
+                .map_err(StoreError::BackendConfiguration)?;
             Ok(with_prefix(store, location.object_prefix()))
         }
         scheme @ (LocationScheme::Http | LocationScheme::Https) => {
@@ -204,7 +258,9 @@ pub(crate) fn http_store(
     if let Some(connector) = connector {
         builder = builder.with_http_connector(connector);
     }
-    Ok(Arc::new(builder.build()?))
+    Ok(Arc::new(
+        builder.build().map_err(StoreError::BackendConfiguration)?,
+    ))
 }
 
 fn with_prefix<S: ObjectStore>(store: S, prefix: Option<&str>) -> Arc<dyn ObjectStore> {
@@ -247,7 +303,7 @@ mod tests {
         ] {
             match open_url(url) {
                 Ok(_) => {}
-                Err(StoreError::ObjectStore(e)) => {
+                Err(StoreError::LocalPath(e)) => {
                     let message = e.to_string().to_ascii_lowercase();
                     assert!(
                         message.contains("canonical") || message.contains("not found"),
