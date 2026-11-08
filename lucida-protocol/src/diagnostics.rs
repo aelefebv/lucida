@@ -456,9 +456,30 @@ pub struct DatasetSourceHealth {
 /// One import warning, as dataset health reports it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatasetImportWarning {
+    pub kind: DatasetImportWarningKind,
     /// What the warning is about, such as a group's collection path.
     pub target: String,
+    /// The importer's account, with the paths, causes and settings a
+    /// developer or agent needs. A client showing the warning to people
+    /// words it from `kind`.
     pub message: String,
     /// The warning says the data is shown wrong, so it degrades `status`.
     pub degrades: bool,
+}
+
+/// What an import warning is about. The importer's own kinds, one for one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DatasetImportWarningKind {
+    SkippedGroup,
+    UnreadableTileGeometry,
+    UnusableTileGeometry,
+    SampledLabelDiscovery,
+    UnusableLabelIndex,
+    UnwrittenLevel,
+    MismatchedTileGeometry,
+    DuplicateTile,
+    MalformedCollectionLayout,
+    PinnedAxis,
+    InvalidScale,
 }
