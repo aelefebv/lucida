@@ -6,7 +6,8 @@
 // cache. The old `debug` and `debug.overlays` keys still set them on the
 // next load, which is how a person turns a category on from the console.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { countingStorage } from "../theme/storageFixtures.ts";
 
 type LoggingModule = typeof import("./logging.ts");
 type PreferencesModule = typeof import("../theme/preferences.ts");
@@ -21,6 +22,10 @@ async function load(): Promise<{ logging: LoggingModule; preferences: Preference
 
 beforeEach(() => {
   localStorage.clear();
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });
 
 describe("debug category gate", () => {
@@ -50,15 +55,18 @@ describe("debug category gate", () => {
   });
 
   it("isDebugEnabled performs no storage reads per call", async () => {
-    localStorage.setItem("debug", "cache");
+    const storage = countingStorage();
+    storage.setItem("debug", "cache");
+    vi.stubGlobal("localStorage", storage);
     const { logging } = await load();
-    const getItem = vi.spyOn(Storage.prototype, "getItem");
+    // The gate came from the stub, so a read per call would be counted.
+    expect(logging.isDebugEnabled("cache")).toBe(true);
+    const readsBefore = storage.reads;
     for (let i = 0; i < 100; i++) {
       logging.isDebugEnabled("cache");
       logging.isDebugEnabled("bridge");
     }
-    expect(getItem).not.toHaveBeenCalled();
-    getItem.mockRestore();
+    expect(storage.reads).toBe(readsBefore);
   });
 
   it("setDebugCategories updates the gate and notifies subscribers with the enabled list", async () => {
