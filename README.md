@@ -125,12 +125,12 @@ Then visit <http://localhost:5173>. The script rebuilds the `lucida-core` wasm p
 By hand:
 
 ```bash
-(cd lucida-web && pnpm run build:wasm && pnpm install)   # the wasm package must exist before install
+(cd lucida-web && pnpm run build:wasm && pnpm install)
 cargo run -p lucida-server                                # terminal 1
 (cd lucida-web && pnpm run dev)                           # terminal 2
 ```
 
-`lucida-web` depends on `file:../lucida-core/pkg`, and pnpm installs a copy of it. After a Rust change, rerun `pnpm run build:wasm && pnpm install --force` in `lucida-web`, and start Vite with `pnpm run dev -- --force` so it drops its cached dependencies. Rebuild the Python bindings with `(cd lucida-py && maturin develop)`.
+`lucida-web` links `lucida-core/pkg` rather than copying it, so after a Rust change, rerun `pnpm run build:wasm` in `lucida-web` and reload the page. Rebuild the Python bindings with `(cd lucida-py && maturin develop)`.
 
 ```bash
 # tests and type check
