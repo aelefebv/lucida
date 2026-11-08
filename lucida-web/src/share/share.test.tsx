@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { decode } from "../savedView/encoder.ts";
@@ -10,11 +10,20 @@ import { toastQueue } from "../ui/toastQueue.ts";
 import type { WorkspaceSharingSettings } from "../workspaceApi.ts";
 import { ShareButton } from "./ShareButton.tsx";
 import { viewLinkCaveats } from "./viewLink.ts";
+import { loadWasm } from "../viewProperties.ts";
 
-// The local-path classifier lives in wasm, which these tests never load.
-vi.mock("lucida-core", () => ({
-  is_local_dataset_url: (url: string) => url.startsWith("/"),
-}));
+// The local-path classifier is stubbed; the URL codec is the real one.
+vi.mock("lucida-core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("lucida-core")>();
+  return {
+    initSync: actual.initSync,
+    encode_view_payload: actual.encode_view_payload,
+    decode_view_payload: actual.decode_view_payload,
+    is_local_dataset_url: (url: string) => url.startsWith("/"),
+  };
+});
+
+beforeAll(() => loadWasm());
 
 function viewOf(datasets: string[]): SavedView {
   return {

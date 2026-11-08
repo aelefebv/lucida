@@ -148,3 +148,28 @@ def test_the_core_opens_every_camera_the_fixtures_carry():
         assert stored["camera"]["mode"] == view["camera"]["mode"]
         assert stored["dataset_order"] == ["wds-0f3a"]
         assert len(stored["dataset_settings"]["wds-0f3a"]["channel_settings"]) >= 2
+
+
+def test_the_extension_writes_the_payload_the_viewer_writes_for_a_view():
+    extension = pytest.importorskip("lucida.lucida")
+    golden = wire_fixture("saved-view", "payload")
+
+    assert extension.encode_view_payload(json.dumps(golden["view"])) == golden["payload"]
+    assert json.loads(extension.decode_view_payload(golden["payload"])) == golden["view"]
+    for name in ("recorded_v1", "recorded_v2"):
+        recorded = wire_fixture("saved-view", name)
+        assert json.loads(extension.decode_view_payload(recorded["payload"])) == recorded["view"]
+
+
+def test_each_explored_cell_carries_a_url_that_opens_its_view(tmp_path):
+    extension = pytest.importorskip("lucida.lucida")
+    ws, _ = workspace(tmp_path)
+
+    sidecar = ws.datasets.explore("wds-0f3a")
+
+    assert sidecar["cells"]
+    prefix = f"{ws.web_url}#view="
+    for cell in sidecar["cells"]:
+        assert cell["url"].startswith(prefix)
+        view = json.loads(extension.decode_view_payload(cell["url"][len(prefix) :]))
+        assert view["camera"] == cell["view"]["camera"]

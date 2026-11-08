@@ -27,15 +27,12 @@
 //! page's to warn about, so a bundle replayed on a different adapter reads
 //! as not comparable without this module judging anything.
 
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
-use lucida_core::saved_view::normalize_dataset_url;
+use lucida_core::saved_view::{decode_payload, encode_payload, normalize_dataset_url};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::encode_saved_view_url_payload;
 use crate::error::CliError;
 use crate::montage::with_render_param;
 use crate::trace::{
@@ -322,66 +319,25 @@ fn readable_view_fragment(url: &str) -> Result<String, String> {
     else {
         return Err(NO_VIEW.to_string());
     };
-    let view = read_view_payload(payload).map_err(|reason| {
+    decode_payload(payload).map_err(|reason| {
         format!(
             "the view in the header's URL could not be read, so the page frames the dataset \
              itself: {reason}"
         )
     })?;
-    if !is_saved_view(&view) {
-        return Err(
-            "the view in the header's URL could not be read, so the page frames the dataset \
-             itself: not a saved view"
-                .to_string(),
-        );
-    }
     Ok(fragment.to_string())
 }
 
 /// A view fragment for the view the script's first step recorded before it
-/// ran, encoded as the page encodes one.
+/// ran. The view stays JSON, as the page handed it over, so a field this
+/// build does not know still reaches the page.
 fn first_step_view(record: &ScriptRecord) -> Result<String, String> {
-    let before = &record.steps[0].view_before;
-    if !is_saved_view(before) {
-        return Err(
-            "the first step of the bundle's script recorded no view before it, and the \
-                    header's view URL is the view after the script, so the page frames the \
-                    dataset itself"
-                .to_string(),
-        );
-    }
-    let payload = encode_saved_view_url_payload(before).map_err(|error| {
-        format!(
-            "the view before the script's first step could not be encoded, so the page frames \
-             the dataset itself: {error}"
-        )
+    let payload = encode_payload(&record.steps[0].view_before).map_err(|_| {
+        "the first step of the bundle's script recorded no view before it, and the header's \
+         view URL is the view after the script, so the page frames the dataset itself"
+            .to_string()
     })?;
     Ok(format!("view={payload}"))
-}
-
-/// Read a view payload as the page does: base64url without padding, then
-/// gzip, then JSON.
-fn read_view_payload(payload: &str) -> Result<Value, String> {
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
-        .map_err(|error| format!("not base64url: {error}"))?;
-    let mut json = String::new();
-    flate2::read::GzDecoder::new(bytes.as_slice())
-        .read_to_string(&mut json)
-        .map_err(|error| format!("not gzip: {error}"))?;
-    serde_json::from_str(&json).map_err(|error| format!("not JSON: {error}"))
-}
-
-/// The page's own test of a view payload: an object with a positive
-/// version. No stricter than that, because the page's encoder strips every
-/// default field and its decoder fills them back, so a payload the page
-/// reads must never be refused here for lacking one.
-fn is_saved_view(value: &Value) -> bool {
-    value.is_object()
-        && value
-            .get("v")
-            .and_then(Value::as_f64)
-            .is_some_and(|version| version.is_finite() && version > 0.0)
 }
 
 /// Whether a fresh browser profile, which is cold, matches what the run's
@@ -704,7 +660,10 @@ mod tests {
         let fragment = plan.view_fragment.as_deref().unwrap();
         assert_ne!(fragment, header_fragment);
         let payload = fragment.strip_prefix("view=").unwrap();
-        assert_eq!(read_view_payload(payload).unwrap(), a_view());
+        let view = decode_payload(payload).unwrap();
+        assert_eq!(view["datasets"], a_view()["datasets"]);
+        assert_eq!(view["camera"]["mode"], a_view()["camera"]["mode"]);
+        assert_eq!(view["camera"]["theta"], a_view()["camera"]["theta"]);
         assert_eq!(plan.record.view, Some(ViewSource::FirstStep));
         assert!(plan.record.restored.contains(&"view URL".to_string()));
         assert!(

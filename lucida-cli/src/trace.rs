@@ -1270,11 +1270,12 @@ pub fn pin_display(
     }
     settings.detail_level_override = pins.level;
     if pins.contrast.is_some() || pins.colormap.is_some() {
-        for index in 0..channel_count.max(1) {
-            let channel = settings.ensure_channel(index);
+        let channel_count = channel_count.max(1);
+        for index in 0..channel_count {
+            let channel = settings.ensure_channel(index, channel_count);
             channel.colormap = pins
                 .colormap
-                .unwrap_or_else(|| Colormap::default_for_channel(index));
+                .unwrap_or_else(|| Colormap::default_for_channel(index, channel_count));
             if let Some((min, max)) = pins.contrast {
                 channel.contrast_min = min;
                 channel.contrast_max = max;
@@ -4505,7 +4506,7 @@ mod tests {
         assert_eq!(settings.channel_settings.len(), 2);
         for (index, channel) in settings.channel_settings.iter().enumerate() {
             assert_eq!((channel.contrast_min, channel.contrast_max), (1.0, 3.0));
-            assert_eq!(channel.colormap, Colormap::default_for_channel(index));
+            assert_eq!(channel.colormap, Colormap::default_for_channel(index, 2));
         }
         assert!(settings.visible);
         assert_eq!(settings.render_mode, RenderMode::Translucent);

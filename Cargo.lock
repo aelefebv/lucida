@@ -1572,7 +1572,6 @@ dependencies = [
  "base64 0.23.1",
  "blake3",
  "clap",
- "flate2",
  "font8x8",
  "futures-util",
  "image",
@@ -1600,6 +1599,8 @@ dependencies = [
 name = "lucida-core"
 version = "0.2.0"
 dependencies = [
+ "base64 0.23.1",
+ "flate2",
  "indexmap",
  "lucida-content",
  "lucida-protocol",
