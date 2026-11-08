@@ -1,4 +1,4 @@
-import { useRef, useEffect, useCallback } from "react";
+import { useRef, useEffect, useCallback, useMemo } from "react";
 import type { WasmScene } from "lucida-core";
 import type { HeldAction } from "../config/keyBindings.ts";
 import type { ViewportCommand } from "../commands.ts";
@@ -139,5 +139,5 @@ export function useFlyCameraInput(
     draggingRef.current = false;
   }, []);
 
-  return { onPointerDown, onPointerMove, onPointerUp };
+  return useMemo(() => ({ onPointerDown, onPointerMove, onPointerUp }), [onPointerDown, onPointerMove, onPointerUp]);
 }
