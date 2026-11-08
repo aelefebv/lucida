@@ -3743,6 +3743,30 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// A zero scale cannot convert translations, so they are read as samples,
+    /// and the user is told the tile positions may be wrong.
+    #[tokio::test]
+    async fn an_unusable_scale_under_translations_is_a_warning() {
+        let dir = temp_dir("explicit_translations_zero_scale");
+        let translations = vec![
+            Some([0.0, 0.0, 0.0, 0.0, 0.0]),
+            Some([0.0, 0.0, 0.0, 200.0, 100.0]),
+        ];
+        create_explicit_collection_fixture(&dir, &translations, Some([1.0, 1.0, 1.0, 0.0, 0.0]));
+
+        let store = cached_store(dir.to_str().unwrap());
+        let result = import_dataset(&store, "zero-scale", "Zero scale")
+            .await
+            .unwrap();
+
+        let warnings = warnings_of(&result, ImportWarningKind::InvalidScale);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("x 0, y 0"), "{}", warnings[0]);
+        assert!(ImportWarningKind::InvalidScale.degrades_health());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     /// Derived-positioned collections (no translations) must be unaffected by the
     /// scale-conversion code path.
     #[tokio::test]
@@ -4278,6 +4302,15 @@ mod tests {
         // The lz4 codec should be recognized at parse time, before the
         // binding ever reaches the chunk-fetch path.
         assert_eq!(level0.compression, crate::codec::StorageCompression::Lz4);
+
+        // The pinned axis reaches the user as a warning, not only a log line.
+        let pinned = warnings_of(&result, ImportWarningKind::PinnedAxis);
+        assert_eq!(pinned.len(), 1, "{pinned:?}");
+        assert!(
+            pinned[0].contains("'m' (size 4) at index 0"),
+            "{}",
+            pinned[0]
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }
