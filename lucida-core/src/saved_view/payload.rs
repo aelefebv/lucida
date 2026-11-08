@@ -15,18 +15,15 @@
 //! channel count.
 
 use std::fmt;
-use std::io::{Read, Write};
 
 use base64::Engine;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-use flate2::Compression;
-use flate2::read::GzDecoder;
-use flate2::write::GzEncoder;
 use serde_json::{Map, Number, Value};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
+use super::gzip::{self, GunzipError};
 use super::{SAVED_VIEW_VERSION, SavedView};
 
 /// Why a payload could not be encoded or decoded.
@@ -147,18 +144,12 @@ pub fn encode_payload(view: &Value) -> Result<String, PayloadError> {
     canonicalize_numbers(&mut view);
 
     let json = serde_json::to_vec(&view).map_err(|e| PayloadError(e.to_string()))?;
-    let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-    gz.write_all(&json)
-        .map_err(|e| PayloadError(format!("gzip failed: {e}")))?;
-    let bytes = gz
-        .finish()
-        .map_err(|e| PayloadError(format!("gzip failed: {e}")))?;
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
+    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(gzip::compress(&json)))
 }
 
 /// Past this a payload is refused rather than inflated: no view comes near
 /// it, and a small payload can otherwise inflate without bound.
-const MAX_JSON_BYTES: u64 = 8 << 20;
+const MAX_JSON_BYTES: usize = 8 << 20;
 
 /// Decode a `#view=` payload into a [`SavedView`] as JSON, with every default
 /// it left out filled back in under its own version's defaults.
@@ -174,16 +165,12 @@ pub fn decode_payload(payload: &str) -> Result<Value, PayloadError> {
     let bytes = URL_SAFE_ANY_PAD
         .decode(payload)
         .map_err(|e| PayloadError(format!("base64url decode failed: {e}")))?;
-    let mut json = Vec::new();
-    GzDecoder::new(bytes.as_slice())
-        .take(MAX_JSON_BYTES + 1)
-        .read_to_end(&mut json)
-        .map_err(|e| PayloadError(format!("gunzip failed: {e}")))?;
-    if json.len() as u64 > MAX_JSON_BYTES {
-        return Err(PayloadError(format!(
-            "payload inflates past {MAX_JSON_BYTES} bytes"
-        )));
-    }
+    let json = gzip::decompress(&bytes, MAX_JSON_BYTES).map_err(|e| match e {
+        GunzipError::TooLarge => {
+            PayloadError(format!("payload inflates past {MAX_JSON_BYTES} bytes"))
+        }
+        GunzipError::Corrupt(why) => PayloadError(format!("gunzip failed: {why}")),
+    })?;
     let mut view: Value = serde_json::from_slice(&json)
         .map_err(|e| PayloadError(format!("JSON parse failed: {e}")))?;
     let object = view
@@ -433,20 +420,14 @@ mod tests {
     use serde_json::json;
 
     fn gzip_base64(json: &str) -> String {
-        let mut gz = GzEncoder::new(Vec::new(), Compression::default());
-        gz.write_all(json.as_bytes()).unwrap();
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(gz.finish().unwrap())
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(gzip::compress(json.as_bytes()))
     }
 
     fn inflate(payload: &str) -> Value {
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .decode(payload)
             .unwrap();
-        let mut json = String::new();
-        GzDecoder::new(bytes.as_slice())
-            .read_to_string(&mut json)
-            .unwrap();
-        serde_json::from_str(&json).unwrap()
+        serde_json::from_slice(&gzip::decompress(&bytes, usize::MAX).unwrap()).unwrap()
     }
 
     fn layer(channels: Vec<ChannelSettings>) -> DatasetDisplaySettings {
@@ -638,11 +619,11 @@ mod tests {
 
     #[test]
     fn a_payload_that_inflates_too_far_is_refused() {
-        let mut gz = GzEncoder::new(Vec::new(), Compression::best());
-        gz.write_all(b"[").unwrap();
-        gz.write_all(&vec![b' '; MAX_JSON_BYTES as usize]).unwrap();
-        gz.write_all(b"]").unwrap();
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(gz.finish().unwrap());
+        let mut json = vec![b' '; MAX_JSON_BYTES + 2];
+        json[0] = b'[';
+        json[MAX_JSON_BYTES + 1] = b']';
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(gzip::compress(&json));
         let error = decode_payload(&payload).unwrap_err();
         assert!(error.to_string().contains("inflates"), "{error}");
     }

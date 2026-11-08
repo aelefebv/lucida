@@ -1,3 +1,11 @@
 [workspace]
 members = ["lucida-core", "lucida-server", "lucida-store", "lucida-cli", "lucida-content", "lucida-protocol", "lucida-py"]
 resolver = "3"
+
+# lucida-core's release build is the WASM module every viewer downloads. One
+# codegen unit and no name section take about a fifth off it. Stripping touches
+# only lucida-core's own cdylib, never the binaries that link it as an rlib.
+# A profile in a member's manifest is ignored, so this has to live here.
+[profile.release.package.lucida-core]
+codegen-units = 1
+strip = true

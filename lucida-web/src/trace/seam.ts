@@ -9,6 +9,7 @@
  * type: versioned, and not reshaped casually.
  */
 
+import { readDeviceMemoryGiB } from "../deviceBudget.ts";
 import { configStore } from "../pipeline/planning/configStore.ts";
 import { bundleServices, exportBundle, type BundleOptions, type TraceBundle } from "./bundle.ts";
 import { toChromeTraceJson } from "./chromeTrace.ts";
@@ -343,6 +344,7 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
           planning: configStore.get(),
           origin: target.location?.origin ?? null,
           devicePixelRatio: target.devicePixelRatio ?? null,
+          deviceMemoryGib: readDeviceMemoryGiB(),
           decodePng: pageDecodesPng() ? decodePngOnPage : null,
           now: Date.now(),
         },

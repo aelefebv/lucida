@@ -1043,6 +1043,7 @@ pub(crate) fn dataset_health_for_manifest(
             }
             messages.push(warning.message.clone());
             import_warnings.push(DatasetImportWarning {
+                kind: warning.kind.into(),
                 target: warning.target.clone(),
                 message: warning.message.clone(),
                 degrades,

@@ -864,8 +864,12 @@ impl Scene {
                 pitch,
                 roll,
             } => {
+                let shown = self.visible_bounds().map(|bounds| bounds.world);
                 if let Camera::Fly(ref mut v) = self.camera {
                     v.fly_tick(dt, forward, right, up, yaw, pitch, roll);
+                    if let Some(world) = shown {
+                        v.bracket_depth(world);
+                    }
                 }
             }
             ViewportCommand::FlySetBaseSpeed { speed } => {
