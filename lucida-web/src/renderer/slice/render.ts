@@ -23,7 +23,7 @@ import type {
   SlicePoolBinding,
 } from "../sliceRenderer.ts";
 import { resolveMemberPools, type EntityDescriptorIndex } from "../descriptorBuffer.ts";
-import { type SliceAtlasState, type LabelSlicePool } from "./atlas.ts";
+import { markLabelSliceFailed, type SliceAtlasState, type LabelSlicePool } from "./atlas.ts";
 import { setCameraUVForMember } from "./eviction.ts";
 import { serializeTransientDescriptor } from "../descriptor/transient.ts";
 import { DESCRIPTOR_ENTRY_SIZE } from "../descriptor/layout.ts";
@@ -43,8 +43,9 @@ const AGGREGATE_QUAD_STRIDE_BYTES = 32;
 
 /**
  * The persistent categorical descriptor for a label pool: one level source
- * (grid 1×1) covering the whole tile. Rebuilt only when the opacity changes,
- * so scrubbing doesn't allocate per frame.
+ * whose chunk grid is the plane's, each cell at its place in the texture.
+ * Rebuilt only when the opacity changes, so scrubbing doesn't allocate per
+ * frame.
  */
 function ensureLabelDescriptor(
   ctx: WorkerCtx,
@@ -64,6 +65,10 @@ function ensureLabelDescriptor(
     opacity: 1,
     colormapMode: 1,
     labelOpacity: opacity,
+    chunkGrid: {
+      gridDims: [pool.grid.x, pool.grid.y, 1],
+      chunkDims: [pool.chunkX, pool.chunkY, 1],
+    },
   });
   if (!pool.descBuffer) {
     pool.descBuffer = ctx.device.createBuffer({
@@ -123,6 +128,7 @@ function renderLabelLayer(
   const pool = ctx.state.labelSlicePools.get(memberId);
   if (!pool) return null;
   const target = targetFor();
+  if (layer.labelChunk) markLabelSliceFailed(ctx, memberId, pool, layer.labelChunk);
 
   const descBuffer = ensureLabelDescriptor(ctx, pool, layer.opacity ?? DEFAULT_LABEL_OPACITY);
   const palette = ensureLabelPalette(ctx, pool, layer.labelColors);
@@ -131,7 +137,7 @@ function renderLabelLayer(
   const ox = layer.offsetX ?? 0;
   const oy = layer.offsetY ?? 0;
   renderer.setTierAtlases(
-    [{ texture: pool.texture, indirectionBuf: pool.indirectionBuf, slotsX: 1, slotsY: 1 }],
+    [{ texture: pool.texture, indirectionBuf: pool.indirectionBuf, slotsX: pool.grid.x, slotsY: pool.grid.y }],
     null,
   );
   // Categorical shading computes color from the id in-shader; the LUT is

@@ -466,6 +466,16 @@ fn fs(input: VSOut) -> FsOut {
       if (lt >= tEnd) { break; }
       let pos = ro + rd * lt;
       let s = sampleWithFallback(pos);
+      // FAILED is no label id: the ray stops at the failed cell and draws the
+      // hatch there, so missing labels never read as background.
+      if (s.value == FAILED) {
+        let worldHit = entity.modelMatrix * vec4f(pos, 1.0);
+        let clipHit = u.viewProj * worldHit;
+        var failedHit: FsOut;
+        failedHit.depth = clipHit.z / clipHit.w * 0.5 + 0.5;
+        failedHit.color = failedHatch(input.pos.xy, u.stepInfo.z) * entity.labelOpacity;
+        return failedHit;
+      }
       if (s.value != MISS && s.value != 0u) {
         let labelRgba = labelColorFor(s.value, currentEntity.index.y);
         let labelOp = entity.labelOpacity * labelRgba.a;

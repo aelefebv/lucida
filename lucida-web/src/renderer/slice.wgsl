@@ -353,6 +353,11 @@ fn fs(input: VSOut) -> @location(0) vec4f {
   // Declared OME colors win; the glasbey hash covers the rest. The final
   // opacity folds in the declared alpha (hash alpha is 1).
   if (entity.colormapMode == 1u) {
+    // Before the id lookup: FAILED is no label id, and a cell that failed
+    // must not show as background either.
+    if (chunkVal == FAILED) {
+      return failedHatch(texUV * u.memberScreenSize.xy, u.memberScreenSize.z) * entity.labelOpacity;
+    }
     if (chunkVal == MISS || chunkVal == 0u) {
       return vec4f(0.0, 0.0, 0.0, 0.0);
     }
