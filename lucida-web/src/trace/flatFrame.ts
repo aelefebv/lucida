@@ -9,6 +9,9 @@
  * already has a PNG decoder and the CLI should not gain one.
  */
 
+import type { FrameCaptureResult } from "../renderer/workerProtocol.ts";
+import type { FrameReading } from "./types.ts";
+
 /** The pixels of a decoded image: RGBA, row-major, as a 2D context reads them back. */
 export interface DecodedImage {
   width: number;
@@ -129,4 +132,26 @@ export async function decodePngOnPage(png: Uint8Array): Promise<DecodedImage> {
 /** Whether this page can decode a PNG at all. False in a document with no image bitmaps or offscreen canvases. */
 export function pageDecodesPng(): boolean {
   return typeof createImageBitmap === "function" && typeof OffscreenCanvas === "function";
+}
+
+/**
+ * Read the frame on the canvas through the page's own capture, and say
+ * whether it is one flat colour. The capture is the canvas alone, so the
+ * whole image is read, with no region and no inset.
+ */
+export async function readFrame(
+  capture: (() => Promise<FrameCaptureResult>) | null,
+  decodePng: PngDecoder | null,
+): Promise<FrameReading> {
+  const unread = (reason: string): FrameReading => ({ width: 0, height: 0, flatColour: null, unread: reason });
+  if (!capture) return unread("the viewer was not registered with the seam, so there was no canvas to read");
+  if (!decodePng) return unread("this page cannot decode a PNG");
+  try {
+    const captured = await capture();
+    if (!captured.frame) return unread(captured.reason);
+    const image = await decodePng(new Uint8Array(captured.frame.png));
+    return { width: image.width, height: image.height, flatColour: flatColourOf(image), unread: null };
+  } catch (error) {
+    return unread(`the frame could not be read: ${error instanceof Error ? error.message : String(error)}`);
+  }
 }

@@ -537,6 +537,7 @@ mod tests {
                 script,
                 knobs: None,
                 replay: Some(record),
+                errors: Vec::new(),
             },
             renderings: TraceRenderings {
                 summary: "lucida trace run-2 — VERDICT: clear".to_string(),

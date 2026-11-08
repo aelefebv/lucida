@@ -3,6 +3,9 @@
 // (see `dataTypeUtil.ts`).
 
 import { extractDataType, type WireFormat } from "../../manifestTypes.ts";
+import { reportWorkerErrors } from "../../pageErrors.ts";
+
+reportWorkerErrors();
 
 interface DecodeRequest {
   id: number;

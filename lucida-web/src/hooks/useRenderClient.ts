@@ -53,9 +53,16 @@ export function useRenderClient() {
     });
     // A test hook in every build, like the capture globals: the trace driver
     // and a headless browser reach the worker's device through it.
-    const hooks = window as unknown as { __lucidaLoseGpuDevice?: () => void };
+    const hooks = window as unknown as {
+      __lucidaLoseGpuDevice?: () => void;
+      __lucidaRaiseGpuValidationError?: () => void;
+    };
     const loseGpuDevice = () => client.loseDevice();
     hooks.__lucidaLoseGpuDevice = loseGpuDevice;
+    // Development builds only: it exists to prove how a GPU error is
+    // reported, and production has no reason to make its device fail.
+    const raiseGpuValidationError = () => client.raiseValidationError();
+    if (import.meta.env.DEV) hooks.__lucidaRaiseGpuValidationError = raiseGpuValidationError;
     client.ready().then(() => {
       if (!disposed) setClientReady(true);
     }).catch(err => {
@@ -72,6 +79,9 @@ export function useRenderClient() {
       disposed = true;
       stopGpuStatus();
       if (hooks.__lucidaLoseGpuDevice === loseGpuDevice) delete hooks.__lucidaLoseGpuDevice;
+      if (hooks.__lucidaRaiseGpuValidationError === raiseGpuValidationError) {
+        delete hooks.__lucidaRaiseGpuValidationError;
+      }
       client.destroy();
       if (clientRef.current === client) {
         clientRef.current = null;

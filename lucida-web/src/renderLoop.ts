@@ -222,6 +222,12 @@ export class RenderLoop implements TraceEnvironment {
           traceRecorder.openRun({ epoch: null, dirtyKind: "residency", source: "gpu_device_lost" });
         }
         traceRecorder.recordPointEvent(PointEvent.GpuError, status.kind);
+        // The point event marks the error on the timeline; this carries what
+        // the GPU said, and how many errors the worker folded into it.
+        traceRecorder.recordError(
+          { source: "gpu", message: `${status.kind}: ${status.message}`, location: null },
+          status.count,
+        );
       } else if (status.type === "gpuDeviceRestored") {
         // A replaced device holds nothing the old one did, so everything is
         // sent again and the frame redrawn.

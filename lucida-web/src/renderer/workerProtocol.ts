@@ -440,6 +440,15 @@ export interface LoseDeviceMessage {
 }
 
 /**
+ * Issue a command WebGPU rejects, outside any error scope, so the device
+ * raises an uncaptured validation error. A development-build test hook: a
+ * production worker ignores it.
+ */
+export interface RaiseValidationErrorMessage {
+  type: "raiseValidationError";
+}
+
+/**
  * Ask the worker for the frame on its canvas as a PNG, for the trace
  * bundle. `id` correlates the {@link FrameCapturedMessage} reply. The
  * worker takes the frame from inside the next frame it renders, because
@@ -692,7 +701,8 @@ export type MainToWorkerMessage =
   | ViewHotStateMessage
   | CaptureFrameMessage
   | ProbeMessage
-  | LoseDeviceMessage;
+  | LoseDeviceMessage
+  | RaiseValidationErrorMessage;
 
 export interface ReadyMessage {
   type: "ready";

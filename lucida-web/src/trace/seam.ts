@@ -15,7 +15,7 @@ import { bundleServices, exportBundle, type BundleOptions, type TraceBundle } fr
 import { toChromeTraceJson } from "./chromeTrace.ts";
 import { compareTraces, renderComparison, type CompareSide, type RunComparison } from "./diagnose/compare.ts";
 import { diagnoseDocument } from "./diagnose/diagnose.ts";
-import { decodePngOnPage, pageDecodesPng } from "./flatFrame.ts";
+import { decodePngOnPage, pageDecodesPng, readFrame } from "./flatFrame.ts";
 import {
   renderProvisional,
   type ProvisionalOptions,
@@ -39,7 +39,7 @@ import {
 import { INPUT_SCALE, type InputScale } from "../components/inputScale.ts";
 import { requestAdapterWithRetry, type AdapterRetry } from "../renderer/requestAdapter.ts";
 import type { SavedView } from "../savedView/types.ts";
-import { TRACE_SCHEMA_VERSION, type GpuIdentity, type TraceDocument } from "./types.ts";
+import { TRACE_SCHEMA_VERSION, type FrameReading, type GpuIdentity, type TraceDocument } from "./types.ts";
 
 /**
  * What a reading of a trace can be scoped to: one run, and one interval of
@@ -173,6 +173,14 @@ export interface LucidaTraceSeam {
    * The Perfetto projection is included only when `perfetto` is set.
    */
   exportBundle(options?: BundleOptions): Promise<TraceBundle>;
+  /**
+   * Read the frame on the canvas through the page's own capture and record
+   * it on run `runId`, the newest concluded run when absent, where the
+   * diagnostic reads it: a frame of one flat colour is a finding. A driver
+   * calls this once the run it waited for has closed, before it exports, so
+   * the frame is the one the run settled on. Closes nothing.
+   */
+  readFrame(runId?: string): Promise<FrameReading>;
   /**
    * The trace read as a diagnostic: thresholds, the attribution back-walk,
    * the coverage block and the verdict. Defaults to the newest run.
@@ -370,6 +378,16 @@ export function installTraceSeam(target: Window = window): LucidaTraceSeam {
         },
         options,
       ),
+    readFrame: async (runId?: string) => {
+      const services = bundleServices();
+      const reading = await readFrame(
+        services ? () => services.captureFrame() : null,
+        pageDecodesPng() ? decodePngOnPage : null,
+      );
+      const run = runId ?? traceRecorder.concludedRuns.lastId;
+      if (run) traceRecorder.noteFrame(run, reading);
+      return reading;
+    },
     diagnose: (runId?: string, scope?: Omit<DiagnoseScope, "runId">) =>
       diagnoseTrace(traceRecorder.exportDocument(), { ...scope, runId }),
     diagnoseText: (runId?: string, options?: Omit<DiagnoseTextScope, "runId">) =>

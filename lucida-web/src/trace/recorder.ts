@@ -43,6 +43,8 @@ import type {
   WatchSample,
 } from "./liveProgress.ts";
 import { SETTLE_HOLD_MS, type SettleState } from "../pipeline/settle.ts";
+import type { ErrorReport } from "../pageErrors.ts";
+import { RULESET } from "./diagnose/ruleset.ts";
 import { addSend, SEND_COLUMN_COUNT, sendTalliesFrom } from "./sendAccounting.ts";
 import { tableSinkFactory, type TraceSink, type TraceSinkFactory } from "./sink.ts";
 import { TickScratch } from "./tickRing.ts";
@@ -68,10 +70,13 @@ import {
   type DatasetOpenBracket,
   type EndReason,
   type CacheWarmth,
+  type FrameReading,
   type GpuIdentity,
   type GpuMemoryReading,
   type InputKind,
   type Outstanding,
+  type PageError,
+  type PageErrorSource,
   type Phase,
   type PointEventIndex,
   type PointEventReason,
@@ -145,6 +150,16 @@ const FRAME_GAP_SAMPLES = 64;
 const MIN_FRAME_GAP_SAMPLES = 8;
 /** Longer than a 20 Hz refresh: a gap this long is the loop idling or stalled, not one refresh. */
 const MAX_FRAME_GAP_MS = 50;
+
+/**
+ * How many distinct errors one interval keeps. Repeats fold into a count, so
+ * this is only reached by a page raising many different errors, and the
+ * first ones are the ones that explain the rest.
+ */
+export const MAX_ERRORS_PER_INTERVAL = 32;
+
+/** A message longer than this is cut, so one runaway string cannot fill a document. */
+export const MAX_ERROR_MESSAGE_CHARS = 1000;
 
 /**
  * What the page can tell the recorder about the conditions a run ran under.
@@ -245,6 +260,8 @@ interface OpenInterval {
    * 63,412".
    */
   truncation: TruncationRecord | null;
+  errors: PageError[];
+  errorsDropped: number;
 }
 
 interface ClosedInterval {
@@ -264,6 +281,10 @@ interface ClosedInterval {
   lag: LagRecord | null;
   /** Frozen at close, so the resident total is a running sum rather than a walk. */
   byteLength: number;
+  errors: PageError[];
+  errorsDropped: number;
+  /** Read after the interval closed, which is when its frame is the settled one. */
+  frame: FrameReading | null;
 }
 
 /** Row indices are packed with the run generation so a stale handle is inert. */
@@ -301,6 +322,7 @@ export class TraceRecorder {
   private runSeq = 0;
   private rowsOutsideRun = 0;
   private serverRowsOutsideRun = 0;
+  private readonly errorsOutsideRun: PageError[] = [];
 
   /**
    * The socket the page is on, and when it lost the previous one. Held across
@@ -1494,6 +1516,49 @@ export class TraceRecorder {
   }
 
   /**
+   * Record an error the page or a worker raised, or `count` folded repeats
+   * of it, in the interval open now, or outside every interval when none is.
+   * Not subject to the per-run cap. A repeat of an error the interval already
+   * holds adds to its count.
+   */
+  recordError(report: ErrorReport, count = 1): void {
+    const run = this.open;
+    const errors = run ? run.errors : this.errorsOutsideRun;
+    const message = oneLine(report.message);
+    const same = errors.find(
+      (error) => error.source === report.source && error.message === message && error.location === report.location,
+    );
+    if (same) {
+      same.count += count;
+      return;
+    }
+    if (errors.length >= MAX_ERRORS_PER_INTERVAL) {
+      if (run) run.errorsDropped++;
+      return;
+    }
+    const nowMs = this.now();
+    errors.push({
+      atUs: run ? this.offsetUs(run, nowMs) : null,
+      pageMs: Math.round(nowMs * 10) / 10,
+      source: report.source,
+      message,
+      location: report.location,
+      count,
+      allowed: allowedBecause(report.source, message),
+    });
+  }
+
+  /**
+   * Record what the frame showed once run `runId` closed. A run the recorder
+   * no longer holds, or one still open, takes nothing: only a closed run's
+   * frame is the one it settled on.
+   */
+  noteFrame(runId: string, reading: FrameReading): void {
+    const interval = this.closed.find((candidate) => candidate.header.runId === runId);
+    if (interval) interval.frame = reading;
+  }
+
+  /**
    * The trace seam's payload. Exporting closes the run in progress: end
    * reason is required on every run, and asking for the document is an
    * explicit close rather than a peek at a run that has not concluded.
@@ -1518,6 +1583,7 @@ export class TraceRecorder {
       steadyState: intervals.filter(interval => interval.header.cause === null),
       rowsOutsideRun: this.rowsOutsideRun,
       serverRowsOutsideRun: this.serverRowsOutsideRun,
+      errorsOutsideRun: this.errorsOutsideRun.map((error) => ({ ...error })),
     };
   }
 
@@ -1534,6 +1600,7 @@ export class TraceRecorder {
     this.intervalsEvicted = 0;
     this.rowsOutsideRun = 0;
     this.serverRowsOutsideRun = 0;
+    this.errorsOutsideRun.length = 0;
     this.lastQuiescence = null;
     this.planSpanCount = 0;
     this.planSpanVersion++;
@@ -1574,6 +1641,8 @@ export class TraceRecorder {
       lag: null,
       generation: this.generation,
       truncation: null,
+      errors: [],
+      errorsDropped: 0,
     };
     // A fresh interval preallocates its buffers, so opening one spends from
     // the resident budget before it has recorded anything. Evict here as well
@@ -1628,7 +1697,7 @@ export class TraceRecorder {
     // An unlabelled interval that recorded nothing is not an artifact. A
     // labelled run that recorded nothing is — a run that saw no work is
     // exactly the news somebody is looking for.
-    if (run.cause === null && run.sink.isEmpty && run.serverRows.length === 0) return;
+    if (run.cause === null && run.sink.isEmpty && run.serverRows.length === 0 && run.errors.length === 0) return;
 
     run.lag?.close(this.displayIntervalMs());
     const byteLength = intervalBytes(run);
@@ -1644,6 +1713,9 @@ export class TraceRecorder {
       sent: sendTalliesFrom(run.sent),
       lag: run.lag,
       byteLength,
+      errors: run.errors,
+      errorsDropped: run.errorsDropped,
+      frame: null,
       header: {
         ...run.environment.captureConditions(),
         cacheWarmth: run.cacheWarmth,
@@ -1763,6 +1835,9 @@ export class TraceRecorder {
       datasetOpensDropped: interval.datasetOpensDropped,
       serverRowsDropped,
       serverRowsDiscarded: interval.serverRowsDiscarded,
+      errors: interval.errors.map((error) => ({ ...error })),
+      errorsDropped: interval.errorsDropped,
+      ...(interval.frame ? { frame: interval.frame } : {}),
       ...(interval.lag ? { lag: interval.lag.serialise(interval.startedAtMs) } : {}),
     };
   }
@@ -1835,6 +1910,24 @@ function sentBytes(sent: Float64Array): number {
 /** Every tier an interval holds. Allocated bytes, because the cap is on memory. */
 function intervalBytes(interval: Pick<OpenInterval, "sink" | "serverRows" | "lag">): number {
   return interval.sink.byteLength + interval.serverRows.byteLength + (interval.lag?.byteLength ?? 0);
+}
+
+/**
+ * One line, cut to length: a record is read on one line of a verdict or a
+ * gate's reason, and the GPU's messages run over several.
+ */
+function oneLine(message: string): string {
+  const line = message.replace(/\s+/g, " ").trim();
+  return line.length > MAX_ERROR_MESSAGE_CHARS ? `${line.slice(0, MAX_ERROR_MESSAGE_CHARS)}…` : line;
+}
+
+/** The allow list's reason for an error, or null when nothing on it matches. */
+function allowedBecause(source: PageErrorSource, message: string): string | null {
+  for (const entry of RULESET.pageError.allow) {
+    if (entry.source && entry.source !== source) continue;
+    if (message.includes(entry.match)) return entry.why;
+  }
+  return null;
 }
 
 /**

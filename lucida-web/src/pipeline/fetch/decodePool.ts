@@ -6,6 +6,7 @@
  */
 
 import type { WireFormat } from "../../manifestTypes.ts";
+import { takeWorkerError } from "../../pageErrors.ts";
 import { traceRecorder } from "../../trace/recorder.ts";
 import { Boundary, CountedPhaseIndex } from "../../trace/types.ts";
 
@@ -47,6 +48,7 @@ export class DecodePool {
       const pending = new Map<number, PendingEntry>();
       const entry: PoolWorker = { worker: w, pending, activeCount: 0 };
       w.onmessage = (e: MessageEvent<{ id: number; data?: ArrayBuffer; error?: string }>) => {
+        if (takeWorkerError(e.data)) return;
         const { id, data, error } = e.data;
         const p = pending.get(id);
         if (p) {
