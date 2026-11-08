@@ -41,18 +41,20 @@ export LUCIDA_TRACE_DIR="${output_dir}"
 datasets=(
   "image|--size 2048,2048 --channels 2 --levels 4 --chunk 256"
   "volume|--size 128,512,512 --channels 3 --levels 3 --chunk 64"
+  "volume-one-channel|--size 128,512,512 --channels 1 --levels 3 --chunk 64"
   "collection|--tiles 12 --size 512,512 --channels 2 --levels 3 --chunk 128"
   "single-level|--size 4096,4096 --levels 1 --chunk 512"
 )
 # name|dataset|timeout|framing. Each run frames its dataset whole, and an
 # empty timeout is LUCIDA_GATE_TIMEOUT. Ray-marching is the costliest pass on
-# a software rasterizer: in a ninth of the default viewport, SwiftShader
-# settles the volume at ratio 1 in about 15 s and at ratio 2, where the view
-# asks for level 0, in about 95 s.
+# a software rasterizer, so it gets a ninth of the default viewport and one
+# channel: a view draws every channel by default, and at ratio 2, where the
+# view asks for level 0, SwiftShader did not settle three channels inside
+# 300 s. One channel settles in about 80 s.
 runs=(
   "image|image||--camera slice"
   "volume|volume||--camera slice"
-  "volume-render|volume|300|--camera arcball --width 480 --height 300"
+  "volume-render|volume-one-channel|300|--camera arcball --width 480 --height 300"
   "collection|collection||--camera slice"
   "single-level|single-level||--camera slice"
 )
