@@ -25,7 +25,7 @@ serde = { version = "1", features = ["derive"] }
 # text the page wrote, rather than as something re-serialized.
 serde_json = { version = "1", features = ["raw_value"] }
 lz4_flex = "0.11"
-zstd = "0.13"
+zstd = "0.14"
 # The gzip and zlib storage codecs, and Blosc's zlib compressor.
 flate2 = "1"
 crc32c = "0.6"
