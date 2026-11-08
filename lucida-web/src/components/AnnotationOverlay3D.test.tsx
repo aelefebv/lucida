@@ -629,7 +629,7 @@ describe("AnnotationOverlay3D — passive pin-select stays gentle; Go to author'
 });
 
 describe("AnnotationOverlay3D — comment-count badge on the marker", () => {
-  it("a pin with comments carries the count badge (pluralized aria-label)", () => {
+  it("a pin with comments carries the count badge, and its marker's name says the count", () => {
     renderOverlay({
       pins: [
         ownPin({
@@ -640,19 +640,22 @@ describe("AnnotationOverlay3D — comment-count badge on the marker", () => {
         }),
       ],
     });
-    expect(screen.getByLabelText("2 comments").textContent).toBe("2");
+    const marker = screen.getByTestId("annot-pin-pin-a");
+    expect(marker.tagName).toBe("BUTTON");
+    expect(marker.getAttribute("aria-label")).toBe("Pin by you, 2 comments");
+    expect(document.querySelector(".lc-annotation-count")?.textContent).toBe("2");
   });
 
   it("a pin with an empty thread carries no badge", () => {
     renderOverlay({ pins: [ownPin({ comments: [] })] });
-    expect(screen.queryByLabelText(/comment/)).toBeNull();
+    expect(document.querySelector(".lc-annotation-count")).toBeNull();
   });
 
   it("clicking the badge opens the pin's thread (same toggle as the dot)", () => {
     renderOverlay({
       pins: [ownPin({ comments: [{ id: "c1", author: String(MY_ID), text: "hi from 3d" }] })],
     });
-    fireEvent.click(screen.getByLabelText("1 comment"));
+    fireEvent.click(document.querySelector(".lc-annotation-count")!);
     expect(screen.getByTestId("annot-thread-pin-a")).toBeTruthy();
     expect(screen.getByText("hi from 3d")).toBeTruthy();
   });

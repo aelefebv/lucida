@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { Annotation } from "./annotationDocument.ts";
-import { isOffContext, offContextLabel } from "./annotationContext.ts";
+import { isOffContext, offContextLabel, pinLabel } from "./annotationContext.ts";
+import { deriveHandle } from "./annotationParticipants.ts";
 
 /** A point pin at the given z/t/c (other fields irrelevant to the context calc). */
 function pin(
@@ -82,5 +83,18 @@ describe("annotationContext — offContextLabel (exact contract form)", () => {
 
   it("a float z is rendered as a rounded integer (no decimals leak)", () => {
     expect(offContextLabel(pin(7.0, 1, 0))).toBe("Z 8 · T 2 · Channel 1");
+  });
+});
+
+describe("annotationContext — pinLabel (the marker's accessible name)", () => {
+  it("says whose pin it is and how many comments it has", () => {
+    expect(pinLabel(pin(0, 0, 0), true, false)).toBe("Pin by you");
+    const commented = { ...pin(0, 0, 0), comments: [{ id: "c", author: "a", text: "x" }] };
+    expect(pinLabel(commented, true, false)).toBe("Pin by you, 1 comment");
+    expect(pinLabel(pin(0, 0, 0), false, false)).toBe(`Pin by ${deriveHandle("a")}`);
+  });
+
+  it("names where a pin off the view lives", () => {
+    expect(pinLabel(pin(4, 0, 0), true, true)).toBe("Pin by you, Z 5 · T 1 · Channel 1");
   });
 });

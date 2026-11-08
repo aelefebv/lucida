@@ -45,6 +45,8 @@ export interface CanvasStageProps {
    * slots stay mounted, so the frame is the one a person would see.
    */
   bare?: boolean;
+  /** The canvas's accessible name: what it shows. */
+  label: string;
 }
 
 /**
@@ -60,6 +62,7 @@ export function CanvasStage({
   slots = {},
   emptyState,
   bare,
+  label,
 }: CanvasStageProps) {
   const stageRef = useRef<HTMLDivElement>(null);
   const onResizeRef = useRef(onResize);
@@ -115,6 +118,8 @@ export function CanvasStage({
         key={canvasKey}
         ref={canvasRef}
         className="lc-canvas-stage-canvas"
+        role="img"
+        aria-label={label}
         style={{ imageRendering: pixelated ? "pixelated" : "auto" }}
       />
       <div className="lc-canvas-stage-layers">{children}</div>

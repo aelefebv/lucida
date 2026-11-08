@@ -8,7 +8,7 @@ import {
   render,
   screen,
 } from "@testing-library/react";
-import { FileBrowser } from "./FileBrowser.tsx";
+import { BrowsePane } from "./BrowsePane.tsx";
 
 interface BrowseResponse {
   path: string;
@@ -56,10 +56,10 @@ afterEach(() => {
   cleanup();
 });
 
-describe("FileBrowser — empty-root initial fetch", () => {
+describe("BrowsePane — empty-root initial fetch", () => {
   it("issues exactly one fetch on mount with no `path=` query param", async () => {
     await act(async () => {
-      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+      render(<BrowsePane onOpen={() => {}} />);
     });
     expect(fetchSpy.urls.length).toBe(1);
     const url = fetchSpy.urls[0];
@@ -78,14 +78,14 @@ describe("FileBrowser — empty-root initial fetch", () => {
       ],
     });
     await act(async () => {
-      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+      render(<BrowsePane onOpen={() => {}} />);
     });
     expect(screen.getByText("c:")).toBeTruthy();
     expect(screen.getByText("d:")).toBeTruthy();
   });
 });
 
-describe("FileBrowser — navigation", () => {
+describe("BrowsePane — navigation", () => {
   it(
     "joins the entry name onto the current path with `/` when navigating " +
       "into a non-empty path",
@@ -108,7 +108,7 @@ describe("FileBrowser — navigation", () => {
       window.sessionStorage.setItem("lucida-browse-path", "/home/me");
 
       await act(async () => {
-        render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+        render(<BrowsePane onOpen={() => {}} />);
       });
       // Initial fetch hit the seeded path.
       expect(fetchSpy.urls[0]).toContain(
@@ -145,7 +145,7 @@ describe("FileBrowser — navigation", () => {
       };
 
       await act(async () => {
-        render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+        render(<BrowsePane onOpen={() => {}} />);
       });
       // Initial fetch: no path param.
       expect(fetchSpy.urls[0]).toBe("/api/browse");
@@ -164,7 +164,7 @@ describe("FileBrowser — navigation", () => {
   );
 });
 
-describe("FileBrowser — create workspace from selection (multi-select)", () => {
+describe("BrowsePane — create workspace from selection (multi-select)", () => {
   it("shows create-workspace affordances only when onCreateWorkspace is given", async () => {
     // Land on a zarr directory so the dataset is detectable.
     fetchSpy.responder = () => ({
@@ -175,7 +175,7 @@ describe("FileBrowser — create workspace from selection (multi-select)", () =>
 
     // Without onCreateWorkspace: classic single Open, no create button.
     await act(async () => {
-      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+      render(<BrowsePane onOpen={() => {}} />);
     });
     expect(screen.getByRole("button", { name: "Open" })).toBeTruthy();
     expect(
@@ -185,12 +185,12 @@ describe("FileBrowser — create workspace from selection (multi-select)", () =>
 
     // With onCreateWorkspace: create affordance present.
     await act(async () => {
-      render(<FileBrowser onCreateWorkspace={() => {}} onClose={() => {}} />);
+      render(<BrowsePane onCreateWorkspace={() => {}} />);
     });
     expect(
       screen.getByRole("button", { name: /create workspace from selection/i }),
     ).toBeTruthy();
-    // No single-Open button when onSelect is absent.
+    // No single-Open button when onOpen is absent.
     expect(screen.queryByRole("button", { name: "Open" })).toBeNull();
   });
 
@@ -204,7 +204,7 @@ describe("FileBrowser — create workspace from selection (multi-select)", () =>
     const onCreateWorkspace = vi.fn();
     await act(async () => {
       render(
-        <FileBrowser onCreateWorkspace={onCreateWorkspace} onClose={() => {}} />,
+        <BrowsePane onCreateWorkspace={onCreateWorkspace} />,
       );
     });
 
@@ -235,7 +235,7 @@ describe("FileBrowser — create workspace from selection (multi-select)", () =>
     const onCreateWorkspace = vi.fn();
     await act(async () => {
       render(
-        <FileBrowser onCreateWorkspace={onCreateWorkspace} onClose={() => {}} />,
+        <BrowsePane onCreateWorkspace={onCreateWorkspace} />,
       );
     });
 
@@ -272,7 +272,7 @@ describe("FileBrowser — create workspace from selection (multi-select)", () =>
     const onCreateWorkspace = vi.fn();
     await act(async () => {
       render(
-        <FileBrowser onCreateWorkspace={onCreateWorkspace} onClose={() => {}} />,
+        <BrowsePane onCreateWorkspace={onCreateWorkspace} />,
       );
     });
 
@@ -286,7 +286,7 @@ describe("FileBrowser — create workspace from selection (multi-select)", () =>
   });
 });
 
-describe("FileBrowser — root breadcrumb", () => {
+describe("BrowsePane — root breadcrumb", () => {
   it("clicking the leading `/` breadcrumb issues a fetch with no `path=` param", async () => {
     // Start at a deep Windows-style path so the home breadcrumb is
     // meaningfully different from the current path.
@@ -305,7 +305,7 @@ describe("FileBrowser — root breadcrumb", () => {
     window.sessionStorage.setItem("lucida-browse-path", "c:/Users/me");
 
     await act(async () => {
-      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+      render(<BrowsePane onOpen={() => {}} />);
     });
     expect(fetchSpy.urls[0]).toContain(
       `path=${encodeURIComponent("c:/Users/me")}`,
@@ -322,7 +322,7 @@ describe("FileBrowser — root breadcrumb", () => {
   });
 });
 
-describe("FileBrowser — remembered folder", () => {
+describe("BrowsePane — remembered folder", () => {
   it("falls back to the root when the remembered folder can't be listed", async () => {
     window.sessionStorage.setItem("lucida-browse-path", "/gone");
     globalThis.fetch = (async (url: string) => {
@@ -332,7 +332,7 @@ describe("FileBrowser — remembered folder", () => {
     }) as typeof globalThis.fetch;
 
     await act(async () => {
-      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+      render(<BrowsePane onOpen={() => {}} />);
     });
     expect(fetchSpy.urls).toEqual([`/api/browse?path=${encodeURIComponent("/gone")}`, "/api/browse"]);
     expect(await screen.findByText("data")).toBeTruthy();
@@ -341,7 +341,7 @@ describe("FileBrowser — remembered folder", () => {
   it("joins an entry onto the Unix root without doubling the slash", async () => {
     fetchSpy.responder = () => ({ path: "/", entries: [{ name: "data", type: "directory" }] });
     await act(async () => {
-      render(<FileBrowser onSelect={() => {}} onClose={() => {}} />);
+      render(<BrowsePane onOpen={() => {}} />);
     });
     await act(async () => {
       fireEvent.click(screen.getByText("data"));

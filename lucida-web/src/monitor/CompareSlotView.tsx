@@ -5,6 +5,8 @@
  * side.
  */
 
+import type { ReactNode } from "react";
+import { FileTrigger } from "react-aria-components";
 import { Button } from "../ui/Button.tsx";
 import { formatMs } from "./monitorModel.ts";
 import {
@@ -22,12 +24,12 @@ export interface CompareSlotViewProps {
   loaded: LoadedArtifact | null;
   /** The run on screen, when this page has read one, offered to the slot. */
   pageRun: LoadedArtifact | null;
-  onPick: () => void;
+  /** Files dropped on the slot or chosen in its picker. */
   onDrop: (files: ArrayLike<File> | null | undefined) => void;
   onFill: (loaded: LoadedArtifact) => void;
 }
 
-export function CompareSlotView({ side, loaded, pageRun, onPick, onDrop, onFill }: CompareSlotViewProps) {
+export function CompareSlotView({ side, loaded, pageRun, onDrop, onFill }: CompareSlotViewProps) {
   return (
     <div
       className="monitor-compare-slot"
@@ -48,6 +50,7 @@ export function CompareSlotView({ side, loaded, pageRun, onPick, onDrop, onFill 
         <p className="monitor-note">Empty. Drop a saved run, a run file, or a bundle here.</p>
       )}
       {loaded && loaded.runs.length > 1 && (
+        // eslint-disable-next-line no-restricted-syntax -- native, so it opens in a popped-out dock (see RunOption)
         <select
           className="monitor-select"
           aria-label={`Run on the ${side}`}
@@ -61,9 +64,11 @@ export function CompareSlotView({ side, loaded, pageRun, onPick, onDrop, onFill 
         </select>
       )}
       <div className="monitor-compare-slot-actions">
-        <Button size="sm" onPress={onPick} data-testid={`monitor-compare-pick-${side}`}>
-          Choose a file
-        </Button>
+        <RunFileTrigger onSelect={onDrop} data-testid={`monitor-compare-file-${side}`}>
+          <Button size="sm" data-testid={`monitor-compare-pick-${side}`}>
+            Choose a file
+          </Button>
+        </RunFileTrigger>
         {pageRun && (
           <Button size="sm" onPress={() => onFill(pageRun)} data-testid={`monitor-compare-use-page-${side}`}>
             Use the run on screen
@@ -74,11 +79,38 @@ export function CompareSlotView({ side, loaded, pageRun, onPick, onDrop, onFill 
   );
 }
 
-/** One run as a select offers it: enough to tell an open from the quiet tail after it. */
+/**
+ * One run as a select offers it: enough to tell an open from the quiet tail
+ * after it. The selects stay native because the dock can pop out into a window
+ * of its own, and a React Aria overlay would open in the opener's page instead.
+ */
 export function RunOption({ run }: { run: MonitorRunSummary }) {
   return (
     <option value={run.runId}>
       {run.cause} · {run.datasetCount} dataset(s) · {formatMs(run.wallMs)} · {run.endReason}
     </option>
+  );
+}
+
+/** The file picker for saved runs, run files, and bundles, opened by the button it wraps. */
+export function RunFileTrigger({
+  children,
+  onSelect,
+  "data-testid": testId,
+}: {
+  children: ReactNode;
+  onSelect: (files: FileList | null) => void;
+  /** Set on the hidden file input. */
+  "data-testid"?: string;
+}) {
+  return (
+    <FileTrigger
+      acceptedFileTypes={[".json", "application/json"]}
+      allowsMultiple
+      onSelect={onSelect}
+      data-testid={testId}
+    >
+      {children}
+    </FileTrigger>
   );
 }

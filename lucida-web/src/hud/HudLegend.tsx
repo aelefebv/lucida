@@ -21,6 +21,7 @@ import {
 } from "../debug/logging.ts";
 import { churnWindowLabel } from "../debug/overlayDrawList.ts";
 import { traceRecorder } from "../trace/recorder.ts";
+import { Checkbox } from "../ui/Checkbox.tsx";
 
 const OVERLAY_LABELS: Record<DebugOverlay, string> = {
   groupModes: "group modes",
@@ -88,20 +89,20 @@ export function HudLegend({ windowSource = traceRecorder }: HudLegendProps) {
     <div className="hud-legend" role="group" aria-label="Overlays" data-testid="hud-legend">
       <span className="hud-legend-title">overlays</span>
       {DEBUG_OVERLAYS.map((name) => (
-        <label key={name} className="hud-legend-toggle" title={OVERLAY_DESCRIPTIONS[name]}>
-          <input
-            type="checkbox"
-            aria-label={name}
-            checked={isOverlayEnabled(name)}
-            onChange={() => setOverlayEnabled(name, !isOverlayEnabled(name))}
-          />
-          {OVERLAY_LABELS[name]}
-          {name === "churnTint" && (
-            <span className="hud-legend-window" data-testid="hud-legend-churn-window">
-              {churnWindowLabel(windowMs)}
-            </span>
-          )}
-        </label>
+        <span key={name} title={OVERLAY_DESCRIPTIONS[name]}>
+          <Checkbox
+            className="hud-legend-toggle"
+            isSelected={isOverlayEnabled(name)}
+            onChange={(on) => setOverlayEnabled(name, on)}
+          >
+            {OVERLAY_LABELS[name]}
+            {name === "churnTint" && (
+              <span className="hud-legend-window" data-testid="hud-legend-churn-window">
+                {churnWindowLabel(windowMs)}
+              </span>
+            )}
+          </Checkbox>
+        </span>
       ))}
     </div>
   );

@@ -41,13 +41,13 @@
  * the diff `lucida trace diff` prints, from the same function.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { subscribeAppearance } from "../theme/appearance.ts";
 import { definePreference, getPreference, migrateLegacyKeys, setPreference } from "../theme/preferences.ts";
 import { Button } from "../ui/Button.tsx";
 import "./MonitorDock.css";
-import { CompareSlotView, RunOption, type CompareSlot } from "./CompareSlotView.tsx";
+import { CompareSlotView, RunFileTrigger, RunOption, type CompareSlot } from "./CompareSlotView.tsx";
 import { CompareView } from "./CompareView.tsx";
 import { LiveReport } from "./LiveReport.tsx";
 import { buildLiveView, buildProvisionalView } from "./liveModel.ts";
@@ -168,9 +168,6 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
   // mode returns to it.
   const [compare, setCompare] = useState<CompareSlots | null>(null);
   const [dropping, setDropping] = useState(false);
-  const fileInput = useRef<HTMLInputElement | null>(null);
-  /** Which compare slot the next chosen file is for, or null for the report. */
-  const pickTarget = useRef<CompareSlot | null>(null);
   const read = snapshot?.read;
   const runs = snapshot?.runs ?? [];
   const runId = read?.ok ? read.document.runId : undefined;
@@ -341,20 +338,6 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
     [compare, fillSlot, showFile, stopWatching],
   );
 
-  const pick = useCallback((slot: CompareSlot | null) => {
-    pickTarget.current = slot;
-    fileInput.current?.click();
-  }, []);
-
-  const onPicked = useCallback(
-    (event: React.ChangeEvent<HTMLInputElement>) => {
-      openFiles(event.target.files, pickTarget.current ?? undefined);
-      // Cleared so choosing the same file again fires change again.
-      event.target.value = "";
-    },
-    [openFiles],
-  );
-
   const chooseFileRun = useCallback(
     (next: string) => {
       if (!file) return;
@@ -471,6 +454,7 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
             </Button>
           )}
           {(mode === "read" || mode === "file") && shownRuns.length > 0 && (
+            // eslint-disable-next-line no-restricted-syntax -- native, so it opens in a popped-out dock (see RunOption)
             <select
               className="monitor-select"
               aria-label="Run"
@@ -532,9 +516,11 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
               className="monitor-hint"
               title="Or drop a saved run, a run file, or a bundle anywhere on the dock"
             >
-              <Button size="sm" onPress={() => pick(null)} data-testid="monitor-open-file">
-                Open a run or bundle
-              </Button>
+              <RunFileTrigger onSelect={(files) => openFiles(files)} data-testid="monitor-file-input">
+                <Button size="sm" data-testid="monitor-open-file">
+                  Open a run or bundle
+                </Button>
+              </RunFileTrigger>
             </span>
           )}
           {mode === "file" && (
@@ -570,17 +556,6 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
       <p className="monitor-observation-only">
         Observation only — nothing in the dock changes what the pipeline does. {explanation[mode]}
       </p>
-
-      <input
-        ref={fileInput}
-        type="file"
-        accept=".json,application/json"
-        multiple
-        className="monitor-file-input"
-        aria-label="Open a run or bundle"
-        data-testid="monitor-file-input"
-        onChange={onPicked}
-      />
 
       {fileFailed && (
         <p className="monitor-save-failed" data-testid="monitor-file-failed">
@@ -634,7 +609,6 @@ export function MonitorDock({ onClose, insetLeft = 0 }: MonitorDockProps) {
                 side={slot}
                 loaded={compare[slot]}
                 pageRun={pageRun}
-                onPick={() => pick(slot)}
                 onDrop={(files) => openFiles(files, slot)}
                 onFill={(loaded) => fillSlot(slot, loaded)}
               />
