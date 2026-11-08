@@ -1579,7 +1579,7 @@ dependencies = [
  "num_cpus",
  "object_store",
  "p256",
- "rand 0.9.4",
+ "rand 0.8.8",
  "reqwest",
  "rsa",
  "serde",
