@@ -212,6 +212,18 @@ describe("drill-down", () => {
     expect(aggregate.numbers.some((number) => number.label === "per-item rows")).toBe(true);
   });
 
+  it("heads an error finding with what the page said, and a blank frame with its colour", () => {
+    const run = healthyLocalOpen();
+    run.errors = [{
+      atUs: 1_000, pageMs: 900, source: "rejection", message: "Error: lost", location: null, count: 1, allowed: null,
+    }];
+    run.frame = { width: 8, height: 4, flatColour: "#000000", unread: null };
+    const headlines = buildMonitorView(diagnoseRun(run)).callouts.map((callout) => callout.headline);
+
+    expect(headlines).toContain("page errors — Error: lost");
+    expect(headlines).toContain("settled frame — one flat colour, #000000");
+  });
+
   it("gives a steady-state finding a tone, a sentence and its numbers", () => {
     // The interval after the run is not a phase, so this callout has no
     // duration, no share and nothing to drill into. What it does have is the
