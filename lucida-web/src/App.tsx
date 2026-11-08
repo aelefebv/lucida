@@ -112,6 +112,8 @@ interface AppProps {
    *  banner and leaves the workspace in place. */
   initialDatasetUrls?: readonly string[];
   onBackToDashboard: () => void;
+  /** The server removed this person's access while the viewer was open. */
+  onAccessRevoked?: () => void;
   onRenameWorkspace: (name: string) => Promise<void>;
   onSetDefaultSavedView: (savedViewId: string | null) => Promise<void>;
   /** Create a new workspace from file-browser selections and navigate into
@@ -136,6 +138,7 @@ function Viewer({
   canRenameWorkspace,
   initialDatasetUrls,
   onBackToDashboard,
+  onAccessRevoked,
   onRenameWorkspace,
   onSetDefaultSavedView,
   onCreateWorkspaceFromDatasets,
@@ -263,6 +266,7 @@ function Viewer({
     bumpDatasetsVersion,
     bumpRemoteDocumentVersion,
     onWorkspaceArchived: onBackToDashboard,
+    onAccessRevoked,
   });
 
   // On apply, re-target `selectedDatasetId` at the first
