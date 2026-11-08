@@ -137,7 +137,7 @@ jobs:
       # release: release downloads can return 504s for long stretches.
       - name: Cache wasm-pack
         id: wasm-pack-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/wasm-pack*
           key: wasm-pack-${{ env.WASM_PACK_VERSION }}-${{ runner.os }}-${{ runner.arch }}
@@ -217,7 +217,7 @@ jobs:
       # As in the web job.
       - name: Cache wasm-pack
         id: wasm-pack-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin/wasm-pack*
           key: wasm-pack-${{ env.WASM_PACK_VERSION }}-${{ runner.os }}-${{ runner.arch }}
