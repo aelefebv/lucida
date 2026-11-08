@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { WasmScene } from "lucida-core";
@@ -16,25 +16,31 @@ import {
   cssSizesDiffer,
   datasetId,
   dims as fixtureDims,
+  fixture,
   loadWasm,
+  newScene,
   notFramed,
+  openIn,
   openedScene,
+  renamed,
   type ViewFixture,
   type Viewport,
 } from "../viewProperties.ts";
-
-// The real generator runs; the spy only records its arguments.
-const exploreView = vi.hoisted(() => ({ spy: undefined as unknown as Mock }));
-
-vi.mock("lucida-core", async (importOriginal) => {
-  const real = await importOriginal<typeof import("lucida-core")>();
-  exploreView.spy = vi.fn(real.explore_view);
-  return { ...real, explore_view: exploreView.spy };
-});
-
 import { ExplorationPanel, type ExplorationPanelProps } from "./ExplorationPanel.tsx";
 
 beforeAll(loadWasm);
+
+/** A page holding the volume fixture as `ds-1`, the dataset the views name. */
+function pageScene(mode: "slice" | "arcball" = "arcball"): WasmScene {
+  const scene = newScene(VIEWPORTS[0], 1);
+  if (mode === "arcball") scene.apply_command(JSON.stringify({ type: "set_mode_arcball" }));
+  openIn(scene, renamed(fixture("volume"), "ds-1"));
+  return scene;
+}
+
+// The real generator runs on the panel's scene; the spy only records its
+// arguments.
+let explore: MockInstance<WasmScene["explore"]>;
 
 const QUARTER_TURN = Math.PI / 4;
 
@@ -73,6 +79,8 @@ function cameraOf(view: SavedView): Record<string, number> {
 }
 
 function baseProps(over: Partial<ExplorationPanelProps> = {}): ExplorationPanelProps {
+  const scene = pageScene();
+  explore = vi.spyOn(scene, "explore");
   return {
     visible: true,
     captureBuilder: () => arcballView(),
@@ -82,13 +90,13 @@ function baseProps(over: Partial<ExplorationPanelProps> = {}): ExplorationPanelP
     datasetName: "sample.ome.zarr",
     dims: [1, 1, 40, 256, 256],
     viewport: [800, 600],
+    getScene: () => scene,
     ...over,
   };
 }
 
 afterEach(() => {
   cleanup();
-  exploreView.spy.mockClear();
   vi.restoreAllMocks();
   // The thumbnail tests stub IntersectionObserver; don't leak it to later files.
   vi.unstubAllGlobals();
@@ -128,9 +136,9 @@ describe("ExplorationPanel — candidates", () => {
     expect(within(cell).getByText("azimuth:+45")).toBeTruthy();
   });
 
-  it("calls explore_view when it becomes visible (refresh on open)", async () => {
+  it("explores when it becomes visible (refresh on open)", async () => {
     await renderPanel();
-    expect(exploreView.spy).toHaveBeenCalled();
+    expect(explore).toHaveBeenCalled();
   });
 
   it("clicking a candidate descends via applyView with that cell's view", async () => {
@@ -280,19 +288,18 @@ describe("ExplorationPanel — breadcrumb trail (proof of navigation)", () => {
     );
   });
 
-  it("passes the breadcrumb depth into explore_view", async () => {
+  it("passes the breadcrumb depth into the generator", async () => {
     await renderPanel();
     // Initial refresh: depth 0.
-    const depthArg = (call: unknown[]) => call[9] as number;
-    expect(depthArg(exploreView.spy.mock.calls[0])).toBe(0);
-    exploreView.spy.mockClear();
+    const depthArg = (call: unknown[]) => call[4] as number;
+    expect(depthArg(explore.mock.calls[0])).toBe(0);
+    explore.mockClear();
 
     // After one descend the trail has length 1 → the next generate uses depth 1.
     await act(async () => {
       await userEvent.click(cellByLabel("Rotate right 45°"));
     });
-    const lastCall = exploreView.spy.mock.calls[exploreView.spy.mock.calls.length - 1];
-    expect(depthArg(lastCall)).toBe(1);
+    expect(depthArg(explore.mock.calls.at(-1)!)).toBe(1);
   });
 });
 
@@ -368,32 +375,27 @@ describe("ExplorationPanel — bookmark", () => {
 });
 
 describe("ExplorationPanel — Home", () => {
-  it("hands the generator the live camera's bounds", async () => {
-    const bounds = new Float64Array([0, 0, 0, 1, 1, 0.25]);
-    const getHomeBounds = vi.fn(() => bounds);
-    await renderPanel({ getHomeBounds });
-    expect(getHomeBounds).toHaveBeenCalledWith("ds-1");
-    const args = exploreView.spy.mock.calls.at(-1) as unknown[];
-    expect(args[10]).toBe(bounds);
+  it("explores the live view of the panel's dataset on its canvas", async () => {
+    await renderPanel();
+    const [viewJson, id, width, height] = explore.mock.calls.at(-1)!;
+    expect(JSON.parse(viewJson!)).toEqual(arcballView());
+    expect([id, width, height]).toEqual(["ds-1", 800, 600]);
   });
 
-  it("applies the generator's Home move from the live view, not a synthesized one", async () => {
-    const props = await renderPanel({
-      getHomeBounds: () => new Float64Array([0, 0, 0, 1, 1, 0.25]),
-    });
+  it("applies the generator's Home move from the live view, framing the world box", async () => {
+    const props = await renderPanel();
     await act(async () => {
       await userEvent.click(screen.getByTestId("explore-home"));
     });
     // The live view went in, so the Home move keeps its camera mode and
-    // frames the box it was handed.
-    const args = exploreView.spy.mock.calls.at(-1) as unknown[];
-    expect(args[0]).toBeTypeOf("string");
+    // frames the dataset in the space that camera works in.
     const [home] = appliedViews(props);
     expect(home.camera.mode).toBe("arcball");
+    const b = pageScene("arcball").dataset_fit_bounds("ds-1");
     const target = (home.camera as { target: number[] }).target;
-    expect(target[0]).toBeCloseTo(0.5);
-    expect(target[1]).toBeCloseTo(0.5);
-    expect(target[2]).toBeCloseTo(0.125);
+    for (let axis = 0; axis < 3; axis++) {
+      expect(target[axis]).toBeCloseTo((b[axis] + b[axis + 3]) / 2);
+    }
   });
 });
 
@@ -426,7 +428,7 @@ describe("ExplorationPanel — Home on a page", () => {
       dims: fixtureDims(f),
       // The viewer passes the canvas's client size, in CSS pixels.
       viewport: vp.css,
-      getHomeBounds: (id) => page.dataset_fit_bounds(id),
+      getScene: () => page,
     });
     await act(async () => {
       await userEvent.click(screen.getByTestId("explore-home"));
@@ -474,9 +476,7 @@ describe("ExplorationPanel — Home on a page", () => {
     (await homeReports(false)).sized.assertHolds();
   });
 
-  // Fails while the synthesized Home frames the first image's voxel box: a
-  // volume's 3D Home points at empty space and a collection's frames one tile.
-  it.fails("frames the dataset when the generator synthesizes Home", async () => {
+  it("frames the dataset when the generator synthesizes Home", async () => {
     (await homeReports(false)).framed.assertHolds();
   });
 });

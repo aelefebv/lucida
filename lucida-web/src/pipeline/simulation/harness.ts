@@ -393,10 +393,10 @@ class Simulation {
     loop.setAutoContrastListener((datasetId, channel, fit) => this.fits.push({ datasetId, channel, fit }));
 
     scene.set_viewport(deviceW, deviceH, this.dpr);
-    // The 3-D view's camera, as switching the dimension control sets it.
+    // The 3-D view's camera, as switching the dimension control sets it. The
+    // scene fitted the open, and fits the new mode's camera.
     if (mode === "volume") applyViewportCommand(scene, { type: "set_mode_arcball" });
-    scene.fit_camera_to_dataset_bounds(dataset.datasetId);
-    loop.markInteractiveDirty("auto_fit_on_open");
+    loop.markInteractiveDirty("dataset_opened");
 
     if (dataset.generated) {
       const generated = dataset.generated;

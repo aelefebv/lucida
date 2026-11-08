@@ -5,7 +5,7 @@ import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
-import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
+import { applyDocumentCommand, applyViewportCommand, frameOnCanvas } from "../applyAndSend.ts";
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import { useHeldKeys } from "../hooks/useHeldKeys.ts";
 import { CLIP_BINDINGS, FLY_BINDINGS, TOGGLE_FLY_KEYS } from "../config/keyBindings.ts";
@@ -531,18 +531,9 @@ function VolumeViewerBody({ session, scene, datasets, client, canvas, remoteDocu
           });
           sendTouchCursor(g);
           break;
-        case "doubleTap": {
-          const datasetId = annotationDatasetIdRef.current ?? datasets.keys().next().value;
-          if (!datasetId) break;
-          navigate("zoom", () => {
-            try {
-              scene.fit_camera_to_dataset_bounds(datasetId);
-            } catch {
-              // A dataset with nothing loaded yet has no bounds; the view stays.
-            }
-          });
+        case "doubleTap":
+          navigate("zoom", () => frameOnCanvas(scene, canvas));
           break;
-        }
         case "longPress":
           onLongPressRef.current?.(clientPoint(g));
           break;

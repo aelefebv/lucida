@@ -5,7 +5,7 @@ import type { WasmScene } from "lucida-core";
 import { RenderClient } from "../renderer/renderClient.ts";
 import { RenderLoop, type DatasetEntry } from "../renderLoop.ts";
 import type { Session } from "../session.ts";
-import { applyDocumentCommand, applyViewportCommand } from "../applyAndSend.ts";
+import { applyDocumentCommand, applyViewportCommand, frameOnCanvas } from "../applyAndSend.ts";
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import type { AnnotationDraft } from "./annotationDraft.ts";
 import { exceedsClickSlop } from "./annotationInteraction.ts";
@@ -423,17 +423,7 @@ function SliceViewerBody({ session, scene, datasets, client, canvas, remoteDocum
     group: "View",
     keys: ["0"],
     keywords: ["reset", "frame", "home"],
-    run: () => {
-      const datasetId = annotationDatasetIdRef.current ?? datasets.keys().next().value;
-      if (!datasetId) return;
-      moveView(() => {
-        try {
-          scene.fit_camera_to_dataset_bounds(datasetId);
-        } catch {
-          // A dataset with nothing loaded yet has no bounds; the view stays.
-        }
-      }, "zoom");
-    },
+    run: () => moveView(() => frameOnCanvas(scene, canvas), "zoom"),
   });
 
   useEffect(() => {

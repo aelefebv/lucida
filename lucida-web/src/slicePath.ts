@@ -1,4 +1,5 @@
 /** Slice render path: upload chunks + render multi-pass. */
+import { assertCanvasSize } from "./applyAndSend.ts";
 import { Axis } from "./axes.ts";
 import { labelFootprint } from "./renderer/labelLayout.ts";
 import { resolveVisibleLabels, type LabelViewSetting } from "./pipeline/planning/labelRequests.ts";
@@ -380,7 +381,7 @@ export function tickSlice(
   const dpr = devicePixelRatio;
   const canvasW = Math.round(canvas.clientWidth * dpr);
   const canvasH = Math.round(canvas.clientHeight * dpr);
-  scene.set_viewport(canvasW, canvasH, dpr);
+  assertCanvasSize(scene, canvasW, canvasH, dpr);
 
   const orchResult = tickCoordinator.planAndFetch(ctx, minimapPendingFetch);
   if (!orchResult) return false;

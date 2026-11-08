@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 import type { WasmScene } from "lucida-core";
 
+import { applyViewportCommand } from "../applyAndSend.ts";
 import type { RenderLoop } from "../renderLoop.ts";
 import { resolvedLayer } from "../resolvedLayerFixtures.ts";
 import { SceneStore } from "../sceneStore.ts";
@@ -55,7 +56,6 @@ function renderDimensions(datasets: DatasetState[] = []) {
     z: () => 0,
     t: () => 0,
     camera_mode: () => "slice",
-    fit_camera_to_dataset_bounds: vi.fn(),
   } as unknown as WasmScene;
   const loop = {
     markInput: vi.fn(),
@@ -75,7 +75,6 @@ function renderDimensions(datasets: DatasetState[] = []) {
       useDimensions({
         sceneStore,
         wasmSceneRef: { current: scene },
-        selectedDatasetId: null,
         datasetsRef,
         datasetsVersion: version,
         bridgeCallbacksRef: { current: bridge },
@@ -132,7 +131,6 @@ describe("useDimensions view mode", () => {
       useDimensions({
         sceneStore,
         wasmSceneRef: { current: scene },
-        selectedDatasetId: ds.id,
         datasetsRef: { current: new Map([[ds.id, ds]]) },
         datasetsVersion: 0,
         bridgeCallbacksRef: {
@@ -175,11 +173,38 @@ describe("useDimensions view mode", () => {
     assertSwitchFrames(VIEWPORTS[1], "phone");
   });
 
-  // Fails while a desktop switch starts each mode from a fixed camera: a 3D
-  // arcball that clips the data or leaves it small, and a 2D slice camera at
-  // one sample per device pixel.
-  it.fails("frames the data in the new mode on a desktop", () => {
+  it("frames the data in the new mode on a desktop", () => {
     loadWasm();
     assertSwitchFrames(VIEWPORTS[0], "desktop");
+  });
+
+  it("brings back the view a mode had when switching back to it", () => {
+    loadWasm();
+    const scene = openedScene(FIXTURES[1], VIEWPORTS[0], 2, "slice");
+    applyViewportCommand(scene, { type: "pan", dx: 40, dy: -25 });
+    const camera = () => JSON.parse(scene.export_presence()).camera;
+    const placed = camera();
+    const ds = { id: datasetId(FIXTURES[1]), manifest: manifest(FIXTURES[1]) } as unknown as DatasetState;
+    const { result } = renderHook(() =>
+      useDimensions({
+        sceneStore: new SceneStore(() => scene),
+        wasmSceneRef: { current: scene },
+        datasetsRef: { current: new Map([[ds.id, ds]]) },
+        datasetsVersion: 0,
+        bridgeCallbacksRef: {
+          current: {
+            sendCommand: vi.fn(),
+            emitPresence: vi.fn(),
+            emitDatasetPresence: vi.fn(),
+            breakFollow: vi.fn(),
+          },
+        },
+        loopRef: { current: null },
+      }),
+    );
+    act(() => result.current.handleViewModeToggle());
+    expect(camera().mode).toBe("arcball");
+    act(() => result.current.handleViewModeToggle());
+    expect(camera()).toEqual(placed);
   });
 });

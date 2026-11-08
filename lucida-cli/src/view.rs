@@ -2297,6 +2297,7 @@ mod tests {
                 center,
                 zoom: 1.0,
                 viewport: [800, 600],
+                framing: lucida_core::camera::Framing::Placed,
             })),
             view: Some(ViewState::new()),
             display: Some(DisplayState::default()),
@@ -2503,6 +2504,7 @@ mod tests {
                     center: [0.0, 0.0],
                     zoom: 1.0,
                     viewport: [800, 600],
+                    framing: lucida_core::camera::Framing::Placed,
                 }),
                 view: ViewState::new(),
                 display: DisplayState::default(),
@@ -2908,7 +2910,10 @@ mod tests {
                 assert_eq!(slice.viewport, FITTED_VIEWPORT);
                 assert_eq!(slice.center, [2048.0, 2048.0]);
                 let limiting = FITTED_VIEWPORT[1] as f64 / 4096.0;
-                assert!((slice.zoom - limiting * 0.9).abs() < 1e-12);
+                assert!(
+                    (slice.zoom - limiting / lucida_core::framing::FIT_MARGIN_2D).abs() < 1e-12
+                );
+                assert_eq!(slice.framing, lucida_core::camera::Framing::Framed);
             }
             other => panic!("expected slice camera, got {other:?}"),
         }
@@ -2939,7 +2944,7 @@ mod tests {
             Camera::Slice(slice) => {
                 assert_eq!(slice.viewport, [320, 320]);
                 assert_eq!(slice.center, [16.0, 32.0]);
-                assert!((slice.zoom - 4.5).abs() < f64::EPSILON);
+                assert!((slice.zoom - 5.0 / lucida_core::framing::FIT_MARGIN_2D).abs() < 1e-12);
             }
             _ => panic!("expected slice camera"),
         }
