@@ -6,8 +6,8 @@
 #   2. WASM      — rebuild lucida-core's wasm pkg ONLY when a lucida-* Rust
 #                  source actually changed (content-hashed, so a `git checkout`
 #                  that bumps mtimes does not trigger a needless rebuild).
-#   3. Web deps  — `pnpm install` in lucida-web when node_modules is absent
-#                  (or `--force` after a wasm rebuild, to refresh the pkg copy).
+#   3. Web deps  — `pnpm install` in lucida-web. It links the wasm pkg, so a
+#                  rebuilt pkg needs no reinstall.
 #   4. Server    — `cargo build -p lucida-server` (cargo tracks staleness itself).
 #   5. Run       — start the server + Vite, stream both logs, reap both on Ctrl-C.
 #
@@ -73,7 +73,6 @@ current_hash="$(
 stored_hash=""
 [ -f "${hash_file}" ] && stored_hash="$(cat "${hash_file}" 2>/dev/null || true)"
 
-wasm_rebuilt=0
 if [ "${force_wasm}" -eq 1 ] || [ ! -f lucida-core/pkg/lucida_core_bg.wasm ] || [ "${current_hash}" != "${stored_hash}" ]; then
   if   [ "${force_wasm}" -eq 1 ];                       then say "Building wasm (forced)"
   elif [ ! -f lucida-core/pkg/lucida_core_bg.wasm ];    then say "Building wasm (no pkg yet)"
@@ -81,21 +80,15 @@ if [ "${force_wasm}" -eq 1 ] || [ ! -f lucida-core/pkg/lucida_core_bg.wasm ] || 
   fi
   ( cd lucida-core && wasm-pack build --target web --out-dir pkg )
   printf '%s\n' "${current_hash}" > "${hash_file}"
-  wasm_rebuilt=1
 else
   say "wasm up to date — skipping rebuild"
 fi
 
 # --- 3. web deps ------------------------------------------------------------
-if [ ! -d lucida-web/node_modules ]; then
-  say "Installing web deps (node_modules missing)"
-  ( cd lucida-web && pnpm install )
-elif [ "${wasm_rebuilt}" -eq 1 ]; then
-  say "Refreshing web deps (wasm rebuilt → re-link pkg)"
-  ( cd lucida-web && pnpm install --force )
-else
-  say "web deps present — skipping install"
-fi
+# A no-op when node_modules already matches the lockfile, and it picks up
+# whatever dependency changes a pull brought in.
+say "Installing web deps"
+( cd lucida-web && pnpm install )
 
 # --- 4. server --------------------------------------------------------------
 say "Building lucida-server"
@@ -128,14 +121,7 @@ RUST_LOG="${RUST_LOG:-info}" "${server_bin}" &
 pids+=("$!")
 
 say "Starting SPA   → http://localhost:${web_port}"
-# After a wasm rebuild, pass Vite --force to clear its stale optimized-dep cache.
-# (Written as an if/else rather than an array to stay safe on macOS bash 3.2,
-# where expanding an empty array under `set -u` aborts the script.)
-if [ "${wasm_rebuilt}" -eq 1 ]; then
-  ( cd lucida-web && pnpm run dev -- --force ) &
-else
-  ( cd lucida-web && pnpm run dev ) &
-fi
+( cd lucida-web && pnpm run dev ) &
 pids+=("$!")
 
 printf '\n\033[1;32m✓ lucida dev is up — open http://localhost:%s\033[0m   (Ctrl-C stops both)\n\n' "${web_port}"

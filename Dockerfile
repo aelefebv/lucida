@@ -98,7 +98,7 @@ RUN cargo build --locked --release -p lucida-server
 
 # Build the WASM artifact lucida-web depends on. The output directory
 # (lucida-core/pkg) is exactly what lucida-web's
-# `"lucida-core": "file:../lucida-core/pkg"` dependency resolves to.
+# `"lucida-core": "link:../lucida-core/pkg"` dependency resolves to.
 # Everything after `--` is forwarded to the underlying `cargo build`.
 # Best-effort only: wasm-pack's own pre-build `cargo metadata` runs
 # unlocked and would silently repair a desynced Cargo.lock before the
@@ -112,16 +112,15 @@ RUN cd lucida-core && wasm-pack build --target web --out-dir pkg -- --locked
 # shares a libc family with the build layers.
 FROM node:22-slim AS web-builder
 
-# Corepack ships with node and shims pnpm/yarn/etc. lucida-web doesn't
-# pin a pnpm version via `packageManager`, so we follow CI's choice
-# (pnpm/action-setup@v4 with `version: 9`) for parity.
-RUN corepack enable && corepack prepare pnpm@9 --activate
+# Corepack ships with node, and its pnpm shim runs the version
+# lucida-web pins in `packageManager`, the one CI runs.
+RUN corepack enable
 
 WORKDIR /web
 
 # The SPA package files. We need lucida-web/ AND the lucida-core/pkg/
 # artifact from stage 1 (the package.json's
-# `"lucida-core": "file:../lucida-core/pkg"` is a relative path).
+# `"lucida-core": "link:../lucida-core/pkg"` is a relative path).
 COPY lucida-web/ ./lucida-web/
 COPY --from=rust-builder /workspace/lucida-core/pkg ./lucida-core/pkg
 # The release version, which `vite.config.ts` reads and stamps into every
