@@ -16,6 +16,7 @@ import type {
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type { VisibleRegion } from "../pipeline/viewport.ts";
+import { indexWantedChunks, type WantedChunkIndex } from "./wantedChunks.ts";
 
 /** Type-narrowing helper: only chunk-kind entries from a wanted-set. */
 function chunks(missing: Array<MissingChunk | MissingProxy>): MissingChunk[] {
@@ -54,9 +55,8 @@ function makeVisibleRegion(
 /**
  * Fixture builder for `ColdStateActiveEntry`. The type is a
  * discriminated union (`kind: "tile" | "group-as-proxy"`); this helper
- * inspects `overrides.mode` to pick the right variant so existing call
- * sites keep working unchanged (`mode: "group-as-proxy"` with
- * `imageId: ""` yields the group-as-proxy variant).
+ * inspects `overrides.mode` to pick the right variant (`mode:
+ * "group-as-proxy"` with `imageId: ""` yields the group-as-proxy variant).
  */
 type WantedSetEntryOverrides = Partial<Omit<ColdStateTileEntry, "kind" | "mode">> & {
   mode?: ColdStateActiveEntry["mode"];
@@ -94,8 +94,6 @@ function makeActiveEntry(
       },
     },
   };
-  // Default to `tiles-with-detail` so existing tests keep their
-  // chunk-only expectations when no mode override is provided.
   const mode = overrides?.mode ?? "tiles-with-detail";
   if (mode === "group-as-proxy") {
     return {
@@ -129,12 +127,20 @@ function makeColdState(
     multiChannel: overrides?.multiChannel ?? visibleChannels.length > 1,
     visibleChannels,
     visibleRegion: makeVisibleRegion(),
+    wantedChunks: [],
     activeSet: [makeActiveEntry()],
     viewMode: "volume",
     sampleFormat: "u16",
     ...overrides,
   };
 }
+
+/** The planner's wanted chunks, per (member, tier). */
+function wanted(...entries: Array<[memberId: string, tier: ResidencyTier, chunkKeys: string[]]>): WantedChunkIndex {
+  return indexWantedChunks(entries.map(([memberId, tier, chunkKeys]) => ({ memberId, tier, chunkKeys })));
+}
+
+const NO_WANTED: WantedChunkIndex = new Map();
 
 /** Shared volume pool atlas with one entity. Slot keys are composite "memberId|chunkKey". */
 function makeVolumePool(
@@ -176,248 +182,141 @@ function tierPool(entries: Array<[memberId: string, tier: ResidencyTier, poolKey
 /** Resolver for a worker that has allocated no sections at all. */
 const noPools: SourcePoolResolver = () => undefined;
 
+const LEVEL0_SECTION: AtlasLevelMeta = { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 };
+const FOUR = ["0/0/0/0/0/0", "0/0/0/0/0/1", "0/0/0/0/1/0", "0/0/0/0/1/1"];
+
 describe("computeWantedSet", () => {
-  it("empty atlas -> all visible chunks missing", () => {
-    // Visible region covers [0,0,64,64] -> 2x2 in XY, zRangeVox [0,32] -> 1 in Z
-    const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 64, 64],
-        zRangeVox: [0, 32],
-      }),
-    });
-    // Shared pool keyed by datasetId, with "img" as the only entity
-    const atlas = makeVolumePool("img", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ]);
-    const volumeAtlases = new Map([["ds-0", atlas]]);
+  it("reports every wanted chunk the atlas lacks", () => {
+    const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [LEVEL0_SECTION])]]);
 
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
+    const result = computeWantedSet(
+      makeColdState(), wanted(["img", "detail", FOUR]), volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases),
+    );
 
-    expect(result.missing).toHaveLength(4); // 2x2x1 = 4 chunks
-    // Verify chunk keys follow the correct format
-    for (const entry of chunks(result.missing)) {
-      expect(entry.entityId).toBe("entity-0");
-      expect(entry.memberId).toBe("img");
-      expect(entry.c).toBe(0);
-      expect(entry.chunkKey).toMatch(/^0\/0\/0\/\d+\/\d+\/\d+$/);
-    }
+    expect(chunks(result.missing)).toEqual(FOUR.map((chunkKey) => ({
+      kind: "chunk", datasetId: "ds-0", tier: "detail", entityId: "entity-0", memberId: "img", c: 0, chunkKey,
+    })));
   });
 
-  it("full atlas -> empty wanted-set", () => {
-    const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 64, 64],
-        zRangeVox: [0, 32],
-      }),
-    });
-    // Pre-populate shared pool with all expected chunks (composite keys)
-    const slots = new Map<string, number>();
-    slots.set(vk("img", "0/0/0/0/0/0"), 0);
-    slots.set(vk("img", "0/0/0/0/0/1"), 1);
-    slots.set(vk("img", "0/0/0/0/1/0"), 2);
-    slots.set(vk("img", "0/0/0/0/1/1"), 3);
-    const atlas = makeVolumePool("img", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ], slots);
-    const volumeAtlases = new Map([["ds-0", atlas]]);
+  it("reports nothing once the atlas holds every wanted chunk", () => {
+    const slots = new Map(FOUR.map((key, slot) => [vk("img", key), slot]));
+    const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [LEVEL0_SECTION], slots)]]);
 
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
+    const result = computeWantedSet(
+      makeColdState(), wanted(["img", "detail", FOUR]), volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases),
+    );
 
     expect(result.missing).toHaveLength(0);
   });
 
-  it("partial atlas -> only missing chunks reported", () => {
-    const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 64, 64],
-        zRangeVox: [0, 32],
-      }),
-    });
-    // 2 of 4 chunks present
-    const slots = new Map<string, number>();
-    slots.set(vk("img", "0/0/0/0/0/0"), 0);
-    slots.set(vk("img", "0/0/0/0/1/1"), 1);
-    const atlas = makeVolumePool("img", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ], slots);
-    const volumeAtlases = new Map([["ds-0", atlas]]);
+  it("reports only the wanted chunks the atlas lacks", () => {
+    const slots = new Map([[vk("img", FOUR[0]), 0], [vk("img", FOUR[3]), 1]]);
+    const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [LEVEL0_SECTION], slots)]]);
 
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
+    const result = computeWantedSet(
+      makeColdState(), wanted(["img", "detail", FOUR]), volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases),
+    );
 
-    expect(result.missing).toHaveLength(2);
-    const keys = chunks(result.missing).map((m) => m.chunkKey).sort();
-    expect(keys).toEqual(["0/0/0/0/0/1", "0/0/0/0/1/0"]);
+    expect(chunks(result.missing).map((m) => m.chunkKey)).toEqual([FOUR[1], FOUR[2]]);
   });
 
-  it("spatial culling - only visible region chunks", () => {
-    // Grid is 4x4, but visible region only covers first 2x2
-    const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 64, 64], // 64/32=2 chunks in each axis
-        zRangeVox: [0, 32],
-      }),
-    });
-    const atlas = makeVolumePool("img", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ]);
-    const volumeAtlases = new Map([["ds-0", atlas]]);
+  it("wants only the planner's chunks, whatever the view geometry covers", () => {
+    // The region covers the whole 4 × 4 × 2 grid; the planner wants two chunks.
+    const coldState = makeColdState({ visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 1024, 1024] }) });
+    const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [LEVEL0_SECTION])]]);
 
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
+    const result = computeWantedSet(
+      coldState, wanted(["img", "detail", ["0/0/0/1/3/3", "0/0/0/0/0/0"]]), volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases),
+    );
 
-    // Should be 2x2x1 = 4, not 4x4x2 = 32
-    expect(result.missing).toHaveLength(4);
-    // Verify no chunk index exceeds the visible bounds
-    for (const entry of chunks(result.missing)) {
-      const parts = entry.chunkKey.split("/").map(Number);
-      const [, , , iz, iy, ix] = parts;
-      expect(ix).toBeLessThan(2);
-      expect(iy).toBeLessThan(2);
-      expect(iz).toBeLessThan(1);
-    }
+    expect(chunks(result.missing).map((m) => m.chunkKey)).toEqual(["0/0/0/1/3/3", "0/0/0/0/0/0"]);
   });
 
-  it("multi-channel - per-channel pool keying", () => {
-    const coldState = makeColdState({
-      visibleChannels: [0, 2],
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 32, 32], // 1x1 in XY
-        zRangeVox: [0, 32], // 1 in Z
-      }),
-    });
-    // Separate shared pools for each channel: poolKey = "ds-0:chN"
-    const ch0Pool = makeVolumePool("img:ch0", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ]);
-    const ch2Pool = makeVolumePool("img:ch2", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ]);
+  it("ignores wanted chunks of a member outside the active set", () => {
+    const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [LEVEL0_SECTION])]]);
+
+    const result = computeWantedSet(
+      makeColdState(), wanted(["other", "detail", FOUR]), volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases),
+    );
+
+    expect(result.missing).toHaveLength(0);
+  });
+
+  it("multi-channel - per-channel members and pools", () => {
+    const coldState = makeColdState({ visibleChannels: [0, 2] });
     const volumeAtlases = new Map<string, AtlasSnapshot>([
-      ["ds-0:ch0", ch0Pool],
-      ["ds-0:ch2", ch2Pool],
+      ["ds-0:ch0", makeVolumePool("img:ch0", [LEVEL0_SECTION])],
+      ["ds-0:ch2", makeVolumePool("img:ch2", [LEVEL0_SECTION])],
     ]);
 
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
+    const result = computeWantedSet(
+      coldState,
+      wanted(["img:ch0", "detail", ["0/0/0/0/0/0"]], ["img:ch2", "detail", ["0/0/2/0/0/0"]]),
+      volumeAtlases,
+      new Map(),
+      poolsFromAtlases(volumeAtlases),
+    );
 
-    // 1 chunk per channel, 2 channels = 2 missing
-    expect(result.missing).toHaveLength(2);
-
-    const keys = chunks(result.missing).map((m) => m.chunkKey).sort();
-    // channel 0 and channel 2
-    expect(keys).toEqual(["0/0/0/0/0/0", "0/0/2/0/0/0"]);
-    expect(chunks(result.missing).map((m) => m.memberId).sort()).toEqual([
-      "img:ch0",
-      "img:ch2",
+    expect(chunks(result.missing).map((m) => [m.memberId, m.c, m.chunkKey])).toEqual([
+      ["img:ch0", 0, "0/0/0/0/0/0"],
+      ["img:ch2", 2, "0/0/2/0/0/0"],
     ]);
   });
 
   it("multi-channel mode with one visible channel still uses channel-qualified member ids", () => {
-    const coldState = makeColdState({
-      multiChannel: true,
-      visibleChannels: [2],
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 32, 32],
-        zRangeVox: [0, 32],
-      }),
-    });
-    const ch2Pool = makeVolumePool("img:ch2", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ]);
+    const coldState = makeColdState({ multiChannel: true, visibleChannels: [2] });
     const volumeAtlases = new Map<string, AtlasSnapshot>([
-      ["ds-0:ch2", ch2Pool],
+      ["ds-0:ch2", makeVolumePool("img:ch2", [LEVEL0_SECTION])],
     ]);
 
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
-
-    expect(chunks(result.missing)).toEqual([
-      expect.objectContaining({
-        memberId: "img:ch2",
-        c: 2,
-        chunkKey: "0/0/2/0/0/0",
-      }),
-    ]);
-  });
-
-  it("slice mode - only current Z slice", () => {
-    const coldState = makeColdState({
-      viewMode: "slice",
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 64, 64],
-        zRangeVox: [0, 64], // full Z range in visible region (ignored for slice)
-      }),
-    });
-    // Slice now uses shared pools too. Pool keyed by datasetId+chunkdims, with "img" as the only entity.
-    const atlas: AtlasSnapshot = {
-      slots: new Map(),
-      entityMetas: new Map([
-        ["img", [{ level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 }]],
-      ]),
-      z: 10,
-    };
-    const sliceAtlases = new Map([["ds-0:32x32", atlas]]);
-
-    const result = computeWantedSet(coldState, new Map(), sliceAtlases, poolsFromAtlases(sliceAtlases));
-
-    // Only Z chunk 0 (containing slice z=10), 2x2 in XY = 4 chunks
-    expect(result.missing).toHaveLength(4);
-    for (const entry of chunks(result.missing)) {
-      const parts = entry.chunkKey.split("/").map(Number);
-      expect(parts[3]).toBe(0); // z chunk index
-    }
-  });
-
-  it("slice mode - a resident chunk cut from another plane of it counts as missing", () => {
-    const coldState = makeColdState({
-      viewMode: "slice",
-      visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 64, 64] }),
-    });
-    const keys = ["0/0/0/0/0/0", "0/0/0/0/0/1", "0/0/0/0/1/0", "0/0/0/0/1/1"];
-    const atlas: AtlasSnapshot = {
-      slots: new Map(keys.map((key, slot) => [vk("img", key), slot])),
-      slotLevelZ: [10, 10, 10, 10],
-      entityMetas: new Map([
-        ["img", [{ level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 }]],
-      ]),
-      z: 10,
-    };
-    const sliceAtlases = new Map([["ds-0:32x32", atlas]]);
-    const wanted = () =>
-      chunks(computeWantedSet(coldState, new Map(), sliceAtlases, poolsFromAtlases(sliceAtlases)).missing)
-        .map((m) => m.chunkKey);
-
-    expect(wanted()).toEqual([]);
-    // Plane 11 is in the same chunk along Z, so every key still matches.
-    atlas.z = 11;
-    expect(wanted()).toEqual(keys);
-    atlas.slotLevelZ = [11, 11, 10, 10];
-    expect(wanted()).toEqual(keys.slice(2));
-  });
-
-  it("volume mode - asks for no chunk outside the view frustum, as the planner requests none", () => {
-    // One half-plane keeps x ≤ 64 voxels: the last column of 32-voxel chunks lies past it.
-    const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 128, 128],
-        frustumPlanes: [[-1, 0, 0, 64]],
-      }),
-    });
-    const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ])]]);
-
-    const missing = chunks(
-      computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases)).missing,
+    const result = computeWantedSet(
+      coldState, wanted(["img:ch2", "detail", ["0/0/2/0/0/0"]]), volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases),
     );
 
-    expect(missing).toHaveLength(2 * 4 * 3);
-    expect(missing.every((m) => Number(m.chunkKey.split("/")[5]) < 3)).toBe(true);
+    expect(chunks(result.missing)).toEqual([
+      expect.objectContaining({ memberId: "img:ch2", c: 2, chunkKey: "0/0/2/0/0/0" }),
+    ]);
   });
 
-  it("source-backed detail/coarse wanted-set uses separate tier pools", () => {
+  it("slice mode - a resident chunk cut from another plane of it is missing, and a stale plane", () => {
+    const coldState = makeColdState({ viewMode: "slice" });
+    const atlas: AtlasSnapshot = {
+      slots: new Map(FOUR.map((key, slot) => [vk("img", key), slot])),
+      slotLevelZ: [10, 10, 10, 10],
+      entityMetas: new Map([["img", [LEVEL0_SECTION]]]),
+      z: 10,
+    };
+    const sliceAtlases = new Map([["ds-0:32x32", atlas]]);
+    const run = () => computeWantedSet(
+      coldState, wanted(["img", "detail", FOUR]), new Map(), sliceAtlases, poolsFromAtlases(sliceAtlases),
+    );
+
+    expect(run().missing).toEqual([]);
+    expect(run().stalePlanes).toEqual([]);
+    // Plane 11 is in the same chunk along Z, so every key still matches.
+    atlas.z = 11;
+    expect(chunks(run().missing).map((m) => m.chunkKey)).toEqual(FOUR);
+    atlas.slotLevelZ = [11, 11, 10, 10];
+    expect(chunks(run().missing).map((m) => m.chunkKey)).toEqual(FOUR.slice(2));
+    expect(run().stalePlanes).toEqual(FOUR.slice(2).map((chunkKey) => ({ memberId: "img", tier: "detail", chunkKey })));
+  });
+
+  it("names no stale plane for a wanted chunk with no slot", () => {
+    const coldState = makeColdState({ viewMode: "slice" });
+    const sliceAtlases = new Map<string, AtlasSnapshot>([["ds-0:32x32", {
+      slots: new Map(), slotLevelZ: [], entityMetas: new Map([["img", [LEVEL0_SECTION]]]), z: 0,
+    }]]);
+
+    const result = computeWantedSet(
+      coldState, wanted(["img", "detail", FOUR]), new Map(), sliceAtlases, poolsFromAtlases(sliceAtlases),
+    );
+
+    expect(chunks(result.missing)).toHaveLength(4);
+    expect(result.stalePlanes).toEqual([]);
+  });
+
+  it("reports detail and coarse chunks against their own tier's pool", () => {
     const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 32, 32],
-        zRangeVox: [0, 32],
-      }),
       activeSet: [
         makeActiveEntry({
           detailLevels: [0],
@@ -429,19 +328,14 @@ describe("computeWantedSet", () => {
         }),
       ],
     });
-    const detailAtlas = makeVolumePool("img", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ]);
-    const coarseAtlas = makeVolumePool("img", [
-      { level: 2, gridDims: [2, 2, 2], chunkDims: [32, 64, 64], offset: 0 },
-    ]);
     const volumeAtlases = new Map<string, AtlasSnapshot>([
-      ["ds-0:32x32x32:detail", detailAtlas],
-      ["ds-0:64x64x32:coarse", coarseAtlas],
+      ["ds-0:32x32x32:detail", makeVolumePool("img", [LEVEL0_SECTION])],
+      ["ds-0:64x64x32:coarse", makeVolumePool("img", [{ level: 2, gridDims: [2, 2, 2], chunkDims: [32, 64, 64], offset: 0 }])],
     ]);
 
     const result = computeWantedSet(
       coldState,
+      wanted(["img", "detail", ["0/0/0/0/0/0"]], ["img", "coarse", ["2/0/0/0/0/0"]]),
       volumeAtlases,
       new Map(),
       tierPool([
@@ -456,36 +350,26 @@ describe("computeWantedSet", () => {
     ]);
   });
 
-  it("same-level detail/coarse wanted-set keeps the coarse tier missing independently", () => {
+  it("keeps one key's residency apart in the two tiers", () => {
+    const chunkKey = "1/0/0/0/0/0";
     const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 32, 32],
-        zRangeVox: [0, 32],
-      }),
       activeSet: [
         makeActiveEntry({
           detailLevels: [1],
           coarseLevel: 1,
-          levels: [
-            { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
-          ],
+          levels: [{ level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] }],
         }),
       ],
     });
-    const chunkKey = "1/0/0/0/0/0";
-    const detailAtlas = makeVolumePool("img", [
-      { level: 1, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ], new Map([[vk("img", chunkKey), 0]]));
-    const coarseAtlas = makeVolumePool("img", [
-      { level: 1, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ]);
+    const section = { level: 1, gridDims: [2, 4, 4] as [number, number, number], chunkDims: [32, 32, 32] as [number, number, number], offset: 0 };
     const volumeAtlases = new Map<string, AtlasSnapshot>([
-      ["ds-0:32x32x32:detail", detailAtlas],
-      ["ds-0:32x32x32:coarse", coarseAtlas],
+      ["ds-0:32x32x32:detail", makeVolumePool("img", [section], new Map([[vk("img", chunkKey), 0]]))],
+      ["ds-0:32x32x32:coarse", makeVolumePool("img", [section])],
     ]);
 
     const result = computeWantedSet(
       coldState,
+      wanted(["img", "detail", [chunkKey]], ["img", "coarse", [chunkKey]]),
       volumeAtlases,
       new Map(),
       tierPool([
@@ -494,142 +378,27 @@ describe("computeWantedSet", () => {
       ]),
     );
 
-    expect(chunks(result.missing)).toEqual([
-      expect.objectContaining({ tier: "coarse", chunkKey }),
-    ]);
-  });
-
-  it("applies independent render radii to detail and coarse wanted-set lanes", () => {
-    const coldState = makeColdState({
-      renderRadiusView: { detail: 0.26, coarse: 0 },
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 1024, 1024],
-        zRangeVox: [0, 1],
-      }),
-      activeSet: [
-        makeActiveEntry({
-          detailLevels: [0],
-          coarseLevel: 1,
-          levels: [
-            { level: 0, chunkShape: [1, 256, 256], gridShape: [1, 4, 4], levelDims: [1, 1024, 1024] },
-            { level: 1, chunkShape: [1, 256, 256], gridShape: [1, 2, 2], levelDims: [1, 512, 512] },
-          ],
-        }),
-      ],
-    });
-    const detailAtlas = makeVolumePool("img", [
-      { level: 0, gridDims: [1, 4, 4], chunkDims: [1, 256, 256], offset: 0 },
-    ]);
-    const coarseAtlas = makeVolumePool("img", [
-      { level: 1, gridDims: [1, 2, 2], chunkDims: [1, 256, 256], offset: 0 },
-    ]);
-    const volumeAtlases = new Map<string, AtlasSnapshot>([
-      ["ds-0:256x256x1:detail", detailAtlas],
-      ["ds-0:256x256x1:coarse", coarseAtlas],
-    ]);
-
-    const result = computeWantedSet(
-      coldState,
-      volumeAtlases,
-      new Map(),
-      tierPool([
-        ["img", "detail", "ds-0:256x256x1:detail"],
-        ["img", "coarse", "ds-0:256x256x1:coarse"],
-      ]),
-    );
-
-    const detail = chunks(result.missing).filter((m) => m.tier === "detail");
-    const coarse = chunks(result.missing).filter((m) => m.tier === "coarse");
-    expect(detail.map((m) => m.chunkKey).sort()).toEqual([
-      "0/0/0/0/1/1",
-      "0/0/0/0/1/2",
-      "0/0/0/0/2/1",
-      "0/0/0/0/2/2",
-    ]);
-    expect(detail.every((m) => m.datasetId === "ds-0")).toBe(true);
-    expect(coarse.map((m) => m.chunkKey).sort()).toEqual([
-      "1/0/0/0/0/0",
-      "1/0/0/0/0/1",
-      "1/0/0/0/1/0",
-      "1/0/0/0/1/1",
-    ]);
-  });
-
-  it("slice mode maps full-res Z independently for detail and coarse tier chunk shapes", () => {
-    const coldState = makeColdState({
-      viewMode: "slice",
-      activeSet: [
-        makeActiveEntry({
-          detailLevels: [0],
-          coarseLevel: 2,
-          levels: [
-            { level: 0, chunkShape: [8, 32, 32], gridShape: [4, 4, 4], levelDims: [32, 128, 128] },
-            { level: 2, chunkShape: [16, 64, 64], gridShape: [2, 2, 2], levelDims: [32, 128, 128] },
-          ],
-        }),
-      ],
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 32, 32],
-        zRangeVox: [0, 32],
-      }),
-    });
-    const detailAtlas: AtlasSnapshot = {
-      slots: new Map(),
-      entityMetas: new Map([["img", [{ level: 0, gridDims: [4, 4, 4], chunkDims: [8, 32, 32], offset: 0 }]]]),
-      z: 18,
-    };
-    const coarseAtlas: AtlasSnapshot = {
-      slots: new Map(),
-      entityMetas: new Map([["img", [{ level: 2, gridDims: [2, 2, 2], chunkDims: [16, 64, 64], offset: 0 }]]]),
-      z: 18,
-    };
-    const sliceAtlases = new Map<string, AtlasSnapshot>([
-      ["ds-0:32x32:detail", detailAtlas],
-      ["ds-0:64x64:coarse", coarseAtlas],
-    ]);
-
-    const result = computeWantedSet(
-      coldState,
-      new Map(),
-      sliceAtlases,
-      tierPool([
-        ["img", "detail", "ds-0:32x32:detail"],
-        ["img", "coarse", "ds-0:64x64:coarse"],
-      ]),
-    );
-
-    expect(chunks(result.missing).map((m) => [m.tier, m.chunkKey]).sort()).toEqual([
-      ["coarse", "2/0/0/1/0/0"],
-      ["detail", "0/0/0/2/0/0"],
-    ]);
+    expect(chunks(result.missing)).toEqual([expect.objectContaining({ tier: "coarse", chunkKey })]);
   });
 
   it("no active set -> empty wanted-set", () => {
-    const coldState = makeColdState({ activeSet: [] });
-    const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ])]]);
+    const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [LEVEL0_SECTION])]]);
 
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
-
-    expect(result.missing).toHaveLength(0);
-  });
-
-  it("entity with no matching atlas -> skipped", () => {
-    const coldState = makeColdState();
-    // No atlas for "ds-0" — both maps are empty
-    const result = computeWantedSet(coldState, new Map(), new Map(), noPools);
+    const result = computeWantedSet(
+      makeColdState({ activeSet: [] }), wanted(["img", "detail", FOUR]), volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases),
+    );
 
     expect(result.missing).toHaveLength(0);
   });
 
-  it("multi-level wanted-set: missing chunks across levels 0, 1, 2", () => {
-    // Visible region covers 1x1 in XY, 1 in Z at each level
+  it("skips a wanted chunk the worker allocated no section for", () => {
+    const result = computeWantedSet(makeColdState(), wanted(["img", "detail", FOUR]), new Map(), new Map(), noPools);
+
+    expect(result.missing).toHaveLength(0);
+  });
+
+  it("reports a missing chunk at each wanted level", () => {
     const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 32, 32],
-        zRangeVox: [0, 32],
-      }),
       activeSet: [
         makeActiveEntry({
           detailLevels: [0, 1, 2],
@@ -641,11 +410,7 @@ describe("computeWantedSet", () => {
         }),
       ],
     });
-    // Pool covers all 3 LODs for "img"; has some LOD 0, some LOD 1, no LOD 2
-    const slots = new Map<string, number>();
-    slots.set(vk("img", "0/0/0/0/0/0"), 0); // LOD 0 present
-    slots.set(vk("img", "1/0/0/0/0/0"), 1); // LOD 1 present
-    // LOD 2: nothing present
+    const slots = new Map([[vk("img", "0/0/0/0/0/0"), 0], [vk("img", "1/0/0/0/0/0"), 1]]);
     const atlas = makeVolumePool("img", [
       { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
       { level: 1, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 32 },
@@ -653,85 +418,19 @@ describe("computeWantedSet", () => {
     ], slots);
     const volumeAtlases = new Map([["ds-0", atlas]]);
 
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
+    const result = computeWantedSet(
+      coldState,
+      wanted(["img", "detail", ["0/0/0/0/0/0", "1/0/0/0/0/0", "2/0/0/0/0/0"]]),
+      volumeAtlases,
+      new Map(),
+      poolsFromAtlases(volumeAtlases),
+    );
 
-    // LOD 0 chunk "0/0/0/0/0/0" present, LOD 1 chunk "1/0/0/0/0/0" present, LOD 2 missing => 1 missing
-    expect(result.missing).toHaveLength(1);
-    const onlyChunks = chunks(result.missing);
-    expect(onlyChunks).toHaveLength(1);
-    expect(onlyChunks[0].chunkKey).toBe("2/0/0/0/0/0");
+    expect(chunks(result.missing).map((m) => m.chunkKey)).toEqual(["2/0/0/0/0/0"]);
   });
 
-  it("asks only for the levels in detailLevels, not the levels between them", () => {
+  it("routes each wanted level to its own pool when chunk shapes differ", () => {
     const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 32, 32],
-        zRangeVox: [0, 32],
-      }),
-      activeSet: [
-        makeActiveEntry({
-          detailLevels: [0, 2],
-          levels: [
-            { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
-            { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
-            { level: 2, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
-          ],
-        }),
-      ],
-    });
-    const atlas = makeVolumePool("img", [
-      { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-      { level: 1, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 32 },
-      { level: 2, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 64 },
-    ]);
-    const volumeAtlases = new Map([["ds-0", atlas]]);
-
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
-
-    const keys = chunks(result.missing).map((m) => m.chunkKey).sort();
-    expect(keys).toEqual(["0/0/0/0/0/0", "2/0/0/0/0/0"]);
-  });
-
-  it("never requests the coarser sections the worker keeps under the target", () => {
-    // The worker allocates sections for the target (0) and the coarser
-    // levels 1 and 2 so their resident chunks stay mapped, but planning
-    // only asks for `detailLevels`: the wanted set names level 0 alone.
-    const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 256, 256],
-        zRangeVox: [0, 32],
-      }),
-      activeSet: [
-        makeActiveEntry({
-          detailLevels: [0],
-          levels: [
-            { level: 0, chunkShape: [32, 32, 32], gridShape: [1, 8, 8], levelDims: [32, 256, 256] },
-            { level: 1, chunkShape: [32, 32, 32], gridShape: [1, 4, 4], levelDims: [32, 128, 128] },
-            { level: 2, chunkShape: [32, 32, 32], gridShape: [1, 2, 2], levelDims: [32, 64, 64] },
-          ],
-        }),
-      ],
-    });
-    const atlas = makeVolumePool("img", [
-      { level: 0, gridDims: [1, 8, 8], chunkDims: [32, 32, 32], offset: 0 },
-      { level: 1, gridDims: [1, 4, 4], chunkDims: [32, 32, 32], offset: 64 },
-      { level: 2, gridDims: [1, 2, 2], chunkDims: [32, 32, 32], offset: 80 },
-    ]);
-    const volumeAtlases = new Map([["ds-0:32x32x32:detail", atlas]]);
-
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
-
-    const keys = chunks(result.missing).map((m) => m.chunkKey);
-    expect(keys).toHaveLength(64);
-    expect(keys.every((k) => k.startsWith("0/"))).toBe(true);
-  });
-
-  it("routes each requested level to its own pool when chunk shapes differ", () => {
-    const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 64, 64],
-        zRangeVox: [0, 32],
-      }),
       activeSet: [
         makeActiveEntry({
           detailLevels: [0, 1],
@@ -742,9 +441,7 @@ describe("computeWantedSet", () => {
         }),
       ],
     });
-    const finePool = makeVolumePool("img", [
-      { level: 0, gridDims: [1, 2, 2], chunkDims: [32, 32, 32], offset: 0 },
-    ]);
+    const finePool = makeVolumePool("img", [{ level: 0, gridDims: [1, 2, 2], chunkDims: [32, 32, 32], offset: 0 }]);
     const smallChunkPool = makeVolumePool("img", [
       { level: 1, gridDims: [1, 2, 2], chunkDims: [32, 16, 16], offset: 0 },
     ], new Map([[vk("img", "1/0/0/0/0/0"), 3]]));
@@ -753,83 +450,43 @@ describe("computeWantedSet", () => {
       ["ds-0:16x16x32:detail", smallChunkPool],
     ]);
 
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
+    const result = computeWantedSet(
+      coldState,
+      wanted(["img", "detail", ["0/0/0/0/0/0", "1/0/0/0/0/0", "1/0/0/0/0/1"]]),
+      volumeAtlases,
+      new Map(),
+      poolsFromAtlases(volumeAtlases),
+    );
 
-    const keys = chunks(result.missing).map((m) => m.chunkKey).sort();
-    // Level 0: all four cells missing from the fine pool. Level 1: one of
-    // its four cells is resident in the small-chunk pool.
-    expect(keys.filter((k) => k.startsWith("0/"))).toHaveLength(4);
-    expect(keys.filter((k) => k.startsWith("1/"))).toEqual([
-      "1/0/0/0/0/1",
-      "1/0/0/0/1/0",
-      "1/0/0/0/1/1",
-    ]);
+    expect(chunks(result.missing).map((m) => m.chunkKey)).toEqual(["0/0/0/0/0/0", "1/0/0/0/0/1"]);
   });
 
-  it("levels absent from the pool's entity metas are skipped", () => {
+  it("skips wanted levels absent from the pool's entity metas", () => {
     const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 32, 32],
-        zRangeVox: [0, 32],
-      }),
-      activeSet: [
-        makeActiveEntry({
-          detailLevels: [0, 1, 2],
-          levels: [
-            { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
-            { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
-            { level: 2, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
-          ],
-        }),
-      ],
-    });
-    // Pool's entityMeta for "img" only covers level 1 (chunk dims don't match across levels)
-    const atlas = makeVolumePool("img", [
-      { level: 1, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-    ]);
-    const volumeAtlases = new Map([["ds-0", atlas]]);
-
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
-
-    // Only level 1 is in entityMetas, so only level 1 chunks appear in wanted-set
-    expect(result.missing).toHaveLength(1);
-    const onlyChunks = chunks(result.missing);
-    expect(onlyChunks).toHaveLength(1);
-    expect(onlyChunks[0].chunkKey).toMatch(/^1\//);
-  });
-
-  it("coarser levels have smaller grids: fewer chunks in wanted-set", () => {
-    // Large visible region to cover full grids
-    const coldState = makeColdState({
-      visibleRegion: makeVisibleRegion({
-        xyBoundsVox: [0, 0, 256, 256],
-        zRangeVox: [0, 32],
-      }),
       activeSet: [
         makeActiveEntry({
           detailLevels: [0, 1],
           levels: [
-            { level: 0, chunkShape: [32, 32, 32], gridShape: [1, 8, 8], levelDims: [32, 256, 256] },
-            { level: 1, chunkShape: [32, 32, 32], gridShape: [1, 4, 4], levelDims: [32, 128, 128] },
+            { level: 0, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
+            { level: 1, chunkShape: [32, 32, 32], gridShape: [2, 4, 4], levelDims: [64, 128, 128] },
           ],
         }),
       ],
     });
-    const atlas = makeVolumePool("img", [
-      { level: 0, gridDims: [1, 8, 8], chunkDims: [32, 32, 32], offset: 0 },
-      { level: 1, gridDims: [1, 4, 4], chunkDims: [32, 32, 32], offset: 64 },
-    ]);
-    const volumeAtlases = new Map([["ds-0", atlas]]);
+    const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [
+      { level: 1, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
+    ])]]);
 
-    const result = computeWantedSet(coldState, volumeAtlases, new Map(), poolsFromAtlases(volumeAtlases));
+    const result = computeWantedSet(
+      coldState,
+      wanted(["img", "detail", ["0/0/0/0/0/0", "1/0/0/0/0/0"]]),
+      volumeAtlases,
+      new Map(),
+      // Level 0 routes to the pool, which has no section for it.
+      () => "ds-0",
+    );
 
-    // LOD 0: 8x8x1 = 64 chunks, LOD 1: 4x4x1 = 16 chunks => 80 total
-    const allChunks = chunks(result.missing);
-    const lod0 = allChunks.filter((m) => m.chunkKey.startsWith("0/"));
-    const lod1 = allChunks.filter((m) => m.chunkKey.startsWith("1/"));
-    expect(lod0).toHaveLength(64);
-    expect(lod1).toHaveLength(16);
-    expect(result.missing).toHaveLength(80);
+    expect(chunks(result.missing).map((m) => m.chunkKey)).toEqual(["1/0/0/0/0/0"]);
   });
 
   // proxy wanted-set
@@ -858,7 +515,7 @@ describe("computeWantedSet", () => {
           }),
         ],
       });
-      const result = computeWantedSet(coldState, new Map(), new Map(), noPools, new Map());
+      const result = computeWantedSet(coldState, NO_WANTED, new Map(), new Map(), noPools, new Map());
 
       const ps = proxies(result.missing);
       expect(ps).toHaveLength(1);
@@ -889,16 +546,12 @@ describe("computeWantedSet", () => {
       const proxyAtlases = new Map<string, ProxyAtlasSnapshot>([
         ["any-pool", makeProxyPool("GroupProxy3D", ["group-1|0|0"])],
       ]);
-      const result = computeWantedSet(coldState, new Map(), new Map(), noPools, proxyAtlases);
+      const result = computeWantedSet(coldState, NO_WANTED, new Map(), new Map(), noPools, proxyAtlases);
       expect(result.missing).toHaveLength(0);
     });
 
     it("tiles-with-detail + present tile-proxy -> no proxy ask, chunk wanted-set unchanged", () => {
       const coldState = makeColdState({
-        visibleRegion: makeVisibleRegion({
-          xyBoundsVox: [0, 0, 32, 32],
-          zRangeVox: [0, 32],
-        }),
         activeSet: [
           makeActiveEntry({
             entityId: "tile-1",
@@ -910,31 +563,24 @@ describe("computeWantedSet", () => {
           }),
         ],
       });
-      const atlas = makeVolumePool("img", [
-        { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-      ]);
-      const volumeAtlases = new Map([["ds-0", atlas]]);
+      const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [LEVEL0_SECTION])]]);
       const proxyAtlases = new Map<string, ProxyAtlasSnapshot>([
         ["pool-A", makeProxyPool("TileProxy3D", ["tile-1|0|0"])],
       ]);
       const result = computeWantedSet(
         coldState,
+        wanted(["img", "detail", ["0/0/0/0/0/0"]]),
         volumeAtlases,
         new Map(),
         poolsFromAtlases(volumeAtlases),
         proxyAtlases,
       );
-      // 1 chunk should be missing (visible region 1x1x1), no proxy asks
       expect(proxies(result.missing)).toHaveLength(0);
       expect(chunks(result.missing)).toHaveLength(1);
     });
 
     it("tiles-with-detail + missing advertised tile-proxy -> emits MissingProxy { TileProxy3D }", () => {
       const coldState = makeColdState({
-        visibleRegion: makeVisibleRegion({
-          xyBoundsVox: [0, 0, 32, 32],
-          zRangeVox: [0, 32],
-        }),
         activeSet: [
           makeActiveEntry({
             entityId: "tile-1",
@@ -945,12 +591,10 @@ describe("computeWantedSet", () => {
           }),
         ],
       });
-      const atlas = makeVolumePool("img", [
-        { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-      ]);
-      const volumeAtlases = new Map([["ds-0", atlas]]);
+      const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [LEVEL0_SECTION])]]);
       const result = computeWantedSet(
         coldState,
+        NO_WANTED,
         volumeAtlases,
         new Map(),
         poolsFromAtlases(volumeAtlases),
@@ -976,7 +620,7 @@ describe("computeWantedSet", () => {
           }),
         ],
       });
-      const result = computeWantedSet(coldState, new Map(), new Map(), noPools, new Map());
+      const result = computeWantedSet(coldState, NO_WANTED, new Map(), new Map(), noPools, new Map());
       expect(result.missing).toHaveLength(0);
     });
 
@@ -995,7 +639,7 @@ describe("computeWantedSet", () => {
           }),
         ],
       });
-      const result = computeWantedSet(coldState, new Map(), new Map(), noPools, new Map());
+      const result = computeWantedSet(coldState, NO_WANTED, new Map(), new Map(), noPools, new Map());
       const ps = proxies(result.missing);
       expect(ps).toHaveLength(1);
       expect(ps[0]).toMatchObject({
@@ -1006,10 +650,6 @@ describe("computeWantedSet", () => {
 
     it("tiles-with-detail + proxyAvailable=false -> no MissingProxy", () => {
       const coldState = makeColdState({
-        visibleRegion: makeVisibleRegion({
-          xyBoundsVox: [0, 0, 32, 32],
-          zRangeVox: [0, 32],
-        }),
         activeSet: [
           makeActiveEntry({
             entityId: "tile-1",
@@ -1021,12 +661,10 @@ describe("computeWantedSet", () => {
           }),
         ],
       });
-      const atlas = makeVolumePool("img", [
-        { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-      ]);
-      const volumeAtlases = new Map([["ds-0", atlas]]);
+      const volumeAtlases = new Map([["ds-0", makeVolumePool("img", [LEVEL0_SECTION])]]);
       const result = computeWantedSet(
         coldState,
+        NO_WANTED,
         volumeAtlases,
         new Map(),
         poolsFromAtlases(volumeAtlases),
@@ -1037,10 +675,6 @@ describe("computeWantedSet", () => {
 
     it("tiles-with-proxy-fallback emits both tile-proxy and parent-group-proxy (deduped per group)", () => {
       const coldState = makeColdState({
-        visibleRegion: makeVisibleRegion({
-          xyBoundsVox: [0, 0, 32, 32],
-          zRangeVox: [0, 32],
-        }),
         activeSet: [
           makeActiveEntry({
             entityId: "tile-A",
@@ -1062,7 +696,7 @@ describe("computeWantedSet", () => {
           }),
         ],
       });
-      const result = computeWantedSet(coldState, new Map(), new Map(), noPools, new Map());
+      const result = computeWantedSet(coldState, NO_WANTED, new Map(), new Map(), noPools, new Map());
       const ps = proxies(result.missing);
       // 2 tile proxies + 1 deduped group proxy = 3
       const tileProxies = ps.filter((p) => p.proxyKind === "TileProxy3D");
@@ -1074,10 +708,6 @@ describe("computeWantedSet", () => {
 
     it("mixed modes: group-as-proxy + tiles-with-detail -> both reported correctly", () => {
       const coldState = makeColdState({
-        visibleRegion: makeVisibleRegion({
-          xyBoundsVox: [0, 0, 32, 32],
-          zRangeVox: [0, 32],
-        }),
         activeSet: [
           makeActiveEntry({
             entityId: "group-X",
@@ -1096,12 +726,10 @@ describe("computeWantedSet", () => {
           }),
         ],
       });
-      const atlas = makeVolumePool("imgY", [
-        { level: 0, gridDims: [2, 4, 4], chunkDims: [32, 32, 32], offset: 0 },
-      ]);
-      const volumeAtlases = new Map([["ds-0", atlas]]);
+      const volumeAtlases = new Map([["ds-0", makeVolumePool("imgY", [LEVEL0_SECTION])]]);
       const result = computeWantedSet(
         coldState,
+        wanted(["imgY", "detail", ["0/0/0/0/0/0"]]),
         volumeAtlases,
         new Map(),
         poolsFromAtlases(volumeAtlases),
@@ -1113,13 +741,12 @@ describe("computeWantedSet", () => {
       expect(groupMissing).toHaveLength(1);
       expect(tileMissing).toHaveLength(1);
       // Tile-Y also has chunk wanted-set entries.
-      expect(chunks(result.missing).length).toBeGreaterThan(0);
+      expect(chunks(result.missing)).toHaveLength(1);
     });
   });
 
   describe("displayed levels", () => {
-    // Halving pyramid with one chunk shape at every level (so one pool);
-    // every level-0 cell lies inside the default visible region.
+    // Halving pyramid with one chunk shape at every level (so one pool).
     const pyramid = [
       { level: 0, chunkShape: [32, 32, 32] as [number, number, number], gridShape: [2, 4, 4] as [number, number, number], levelDims: [64, 128, 128] as [number, number, number] },
       { level: 1, chunkShape: [32, 32, 32] as [number, number, number], gridShape: [1, 2, 2] as [number, number, number], levelDims: [32, 64, 64] as [number, number, number] },
@@ -1131,34 +758,43 @@ describe("computeWantedSet", () => {
       { level: 2, gridDims: [1, 1, 1], chunkDims: [32, 32, 32], offset: 36 },
     ];
 
-    function everyChunk(memberId: string, level: number, c = 0): string[] {
+    /** Every chunk key of one level, channel `c`. */
+    function levelKeys(level: number, c = 0): string[] {
       const grid = pyramid[level].gridShape;
       const keys: string[] = [];
       for (let z = 0; z < grid[0]; z++) {
         for (let y = 0; y < grid[1]; y++) {
-          for (let x = 0; x < grid[2]; x++) keys.push(vk(memberId, `${level}/0/${c}/${z}/${y}/${x}`));
+          for (let x = 0; x < grid[2]; x++) keys.push(`${level}/0/${c}/${z}/${y}/${x}`);
         }
       }
       return keys;
+    }
+
+    function everyChunk(memberId: string, level: number, c = 0): string[] {
+      return levelKeys(level, c).map((key) => vk(memberId, key));
     }
 
     function slotsOf(keys: string[]): Map<string, number> {
       return new Map(keys.map((key, i) => [key, i]));
     }
 
+    /** The planner wants every target-level chunk of `img`. */
+    const wantTarget = (target: number) => wanted(["img", "detail", levelKeys(target)]);
+
     function levelsFor(
       coldState: ColdStateMessage,
+      wantedChunks: WantedChunkIndex,
       volumeAtlases: Map<string, AtlasSnapshot>,
       poolFor: SourcePoolResolver = poolsFromAtlases(volumeAtlases),
     ) {
-      return computeWantedSet(coldState, volumeAtlases, new Map(), poolFor).levels;
+      return computeWantedSet(coldState, wantedChunks, volumeAtlases, new Map(), poolFor).levels;
     }
 
-    it("reports the target level as displayed once every visible target cell is resident", () => {
+    it("reports the target level as displayed once every wanted target chunk is resident", () => {
       const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0] })] });
       const atlases = new Map([["pool", makeVolumePool("img", sections, slotsOf(everyChunk("img", 0)))]]);
 
-      expect(levelsFor(coldState, atlases)).toEqual([
+      expect(levelsFor(coldState, wantTarget(0), atlases)).toEqual([
         { entityId: "entity-0", targetLevel: 0, visible: true, displayed: { min: 0, max: 0 } },
       ]);
     });
@@ -1167,31 +803,42 @@ describe("computeWantedSet", () => {
       const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0] })] });
       const atlases = new Map([["pool", makeVolumePool("img", sections, slotsOf(everyChunk("img", 1)))]]);
 
-      const result = computeWantedSet(coldState, atlases, new Map(), poolsFromAtlases(atlases));
+      const result = computeWantedSet(coldState, wantTarget(0), atlases, new Map(), poolsFromAtlases(atlases));
       expect(result.levels).toEqual([
         { entityId: "entity-0", targetLevel: 0, visible: true, displayed: { min: 1, max: 1 } },
       ]);
       expect(chunks(result.missing).map((m) => m.chunkKey.split("/")[0])).toEqual(Array(32).fill("0"));
     });
 
-    it("spans the finest and coarsest level when cells come from more than one", () => {
+    it("spans the finest and coarsest level when positions come from more than one", () => {
       const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0] })] });
       const leftHalfOfLevel0 = everyChunk("img", 0).filter((key) => key.endsWith("/0") || key.endsWith("/1"));
       const atlases = new Map([["pool", makeVolumePool("img", sections, slotsOf([...everyChunk("img", 1), ...leftHalfOfLevel0]))]]);
 
-      expect(levelsFor(coldState, atlases)[0].displayed).toEqual({ min: 0, max: 1 });
+      expect(levelsFor(coldState, wantTarget(0), atlases)[0].displayed).toEqual({ min: 0, max: 1 });
+    });
+
+    it("reads only the wanted target positions", () => {
+      // The planner wants the left half; level 0 is resident there and absent elsewhere.
+      const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0] })] });
+      const leftHalf = levelKeys(0).filter((key) => key.endsWith("/0") || key.endsWith("/1"));
+      const atlases = new Map([["pool", makeVolumePool("img", sections, slotsOf([
+        ...everyChunk("img", 1), ...leftHalf.map((key) => vk("img", key)),
+      ]))]]);
+
+      expect(levelsFor(coldState, wanted(["img", "detail", leftHalf]), atlases)[0].displayed).toEqual({ min: 0, max: 0 });
     });
 
     it("never reports a level finer than the target", () => {
       const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [1] })] });
       const atlases = new Map([["pool", makeVolumePool("img", sections, slotsOf([...everyChunk("img", 0), ...everyChunk("img", 2)]))]]);
 
-      expect(levelsFor(coldState, atlases)[0]).toEqual({
+      expect(levelsFor(coldState, wantTarget(1), atlases)[0]).toEqual({
         entityId: "entity-0", targetLevel: 1, visible: true, displayed: { min: 2, max: 2 },
       });
     });
 
-    it("falls to the coarse tier when no detail section covers a cell", () => {
+    it("falls to the coarse tier when no detail section covers a position", () => {
       const coldState = makeColdState({
         activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0], coarseLevel: 2 })],
       });
@@ -1201,27 +848,40 @@ describe("computeWantedSet", () => {
       ]);
       const poolFor = tierPool([["img", "detail", "detail-pool"], ["img", "coarse", "coarse-pool"]]);
 
-      expect(levelsFor(coldState, atlases, poolFor)[0].displayed).toEqual({ min: 2, max: 2 });
+      expect(levelsFor(coldState, wantTarget(0), atlases, poolFor)[0].displayed).toEqual({ min: 2, max: 2 });
     });
 
     it("reports no displayed level while nothing is resident", () => {
       const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0] })] });
       const atlases = new Map([["pool", makeVolumePool("img", sections)]]);
 
-      expect(levelsFor(coldState, atlases)).toEqual([
+      expect(levelsFor(coldState, wantTarget(0), atlases)).toEqual([
         { entityId: "entity-0", targetLevel: 0, visible: true, displayed: null },
       ]);
     });
 
-    it("reports an entity outside the visible region as not visible, with its target level", () => {
-      const coldState = makeColdState({
-        activeSet: [{ ...makeActiveEntry({ levels: pyramid, detailLevels: [1] }), layoutPositionVox: [10_000, 10_000] }],
-      });
+    it("reports an entity the planner wants no target chunk of as not visible, with its target level", () => {
+      const coldState = makeColdState({ activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [1] })] });
       const atlases = new Map([["pool", makeVolumePool("img", sections, slotsOf(everyChunk("img", 1)))]]);
 
-      expect(levelsFor(coldState, atlases)).toEqual([
+      expect(levelsFor(coldState, NO_WANTED, atlases)).toEqual([
         { entityId: "entity-0", targetLevel: 1, visible: false, displayed: null },
       ]);
+    });
+
+    it("counts only target-level chunks toward the displayed level", () => {
+      // A wanted coarse-tier chunk is not a target position.
+      const coldState = makeColdState({
+        activeSet: [makeActiveEntry({ levels: pyramid, detailLevels: [0], coarseLevel: 2 })],
+      });
+      const atlases = new Map([
+        ["detail-pool", makeVolumePool("img", sections.slice(0, 2))],
+        ["coarse-pool", makeVolumePool("img", [sections[2]], slotsOf(everyChunk("img", 2)))],
+      ]);
+      const poolFor = tierPool([["img", "detail", "detail-pool"], ["img", "coarse", "coarse-pool"]]);
+
+      expect(levelsFor(coldState, wanted(["img", "coarse", levelKeys(2)]), atlases, poolFor)[0])
+        .toEqual({ entityId: "entity-0", targetLevel: 0, visible: false, displayed: null });
     });
 
     it("takes the finest and coarsest level across the visible channels", () => {
@@ -1236,7 +896,11 @@ describe("computeWantedSet", () => {
         }],
       ]);
 
-      expect(levelsFor(coldState, atlases)[0].displayed).toEqual({ min: 0, max: 1 });
+      expect(levelsFor(
+        coldState,
+        wanted(["img:ch0", "detail", levelKeys(0, 0)], ["img:ch1", "detail", levelKeys(0, 1)]),
+        atlases,
+      )[0].displayed).toEqual({ min: 0, max: 1 });
     });
 
     it("leaves out entries that have no target level", () => {
@@ -1244,19 +908,18 @@ describe("computeWantedSet", () => {
         activeSet: [makeActiveEntry({ mode: "group-as-proxy", imageId: "" })],
       });
 
-      expect(levelsFor(coldState, new Map())).toEqual([]);
+      expect(levelsFor(coldState, NO_WANTED, new Map())).toEqual([]);
     });
 
     it("maps the slice plane onto a shallower level by proportion of its depth", () => {
-      // Full-resolution plane 20 maps to plane 9 of the 16-deep level 1, so
-      // chunk 1 of its 8-plane chunks; only that chunk covers the cell.
+      // Full-resolution plane 20 maps to plane 10 of the 16-deep level 1, so
+      // chunk 1 of its 8-plane chunks; only that chunk covers the position.
       const levels = [
         { level: 0, chunkShape: [8, 32, 32] as [number, number, number], gridShape: [4, 1, 1] as [number, number, number], levelDims: [32, 32, 32] as [number, number, number] },
         { level: 1, chunkShape: [8, 16, 16] as [number, number, number], gridShape: [2, 1, 1] as [number, number, number], levelDims: [16, 16, 16] as [number, number, number] },
       ];
       const coldState = makeColdState({
         viewMode: "slice",
-        visibleRegion: makeVisibleRegion({ xyBoundsVox: [0, 0, 32, 32], zRangeVox: [0, 32] }),
         activeSet: [makeActiveEntry({ levels, detailLevels: [0] })],
       });
       const pools = (level1ChunkZ: number) => new Map<string, AtlasSnapshot>([
@@ -1267,12 +930,14 @@ describe("computeWantedSet", () => {
           entityMetas: new Map([["img", [{ level: 1, gridDims: [2, 1, 1], chunkDims: [8, 16, 16], offset: 0 }]]]),
         }],
       ]);
+      // Plane 20 of level 0 is in its chunk 2.
+      const wantPlane = wanted(["img", "detail", ["0/0/0/2/0/0"]]);
 
       const rightPlane = pools(1);
-      expect(computeWantedSet(coldState, new Map(), rightPlane, poolsFromAtlases(rightPlane)).levels[0].displayed)
+      expect(computeWantedSet(coldState, wantPlane, new Map(), rightPlane, poolsFromAtlases(rightPlane)).levels[0].displayed)
         .toEqual({ min: 1, max: 1 });
       const wrongPlane = pools(0);
-      expect(computeWantedSet(coldState, new Map(), wrongPlane, poolsFromAtlases(wrongPlane)).levels[0].displayed)
+      expect(computeWantedSet(coldState, wantPlane, new Map(), wrongPlane, poolsFromAtlases(wrongPlane)).levels[0].displayed)
         .toBeNull();
     });
   });

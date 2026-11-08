@@ -40,6 +40,11 @@ export function chunkTierPoolKey(
   return `${base}:${tier}`;
 }
 
+/** The tier a {@link chunkTierPoolKey} names. */
+export function chunkPoolTier(poolKey: string): ResidencyTier {
+  return poolKey.endsWith(":coarse") ? "coarse" : "detail";
+}
+
 /**
  * Key of one indirection section within a member's routing map
  * (`RendererState.memberSourcePools`): the tier and level it serves.

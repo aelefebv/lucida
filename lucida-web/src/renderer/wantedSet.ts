@@ -1,7 +1,10 @@
 /**
- * Diffs the chunks and proxies the cold state expects against what the
- * atlases hold, and reads off from the same chunk positions which level
- * serves each entity's visible pixels. Pure and GPU-free.
+ * Diffs the planner's wanted chunks and the cold state's desired proxies
+ * against what the atlases hold, and reads off from the wanted target-level
+ * chunks which level serves each entity's visible pixels. Pure and GPU-free.
+ *
+ * The chunks come from the cold state, never from view geometry, so this
+ * wants exactly what the page delivers.
  */
 
 import type {
@@ -13,16 +16,13 @@ import type {
   MissingProxy,
 } from "./workerProtocol.ts";
 import type { ProxyKind } from "../pipeline/assetCatalog.ts";
-import {
-  RENDER_RADIUS_DISABLED,
-  chunkWithinRenderRadius,
-} from "../pipeline/renderRadius.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
-import { makeCompositeKey } from "./chunkKeys.ts";
+import { RESIDENCY_TIERS } from "../pipeline/residencyTier.ts";
+import { makeCompositeKey, parseChunkKey } from "./chunkKeys.ts";
 import { memberIdForColdEntry } from "./descriptorBuffer.ts";
 import { detailTierLevels, targetLevelOf } from "./entitySources.ts";
-import { chunkOutsideFrustum } from "../pipeline/planning/chunks.ts";
 import { sliceChunkZ, sliceLevelZ } from "./slicePlane.ts";
+import { wantedEntryKey, type WantedChunkIndex } from "./wantedChunks.ts";
 
 /** One level's section metadata for a member in a shared pool. */
 export interface AtlasLevelMeta {
@@ -58,10 +58,22 @@ export interface ProxyAtlasSnapshot {
   slots: Map<string, number>;
 }
 
+/** A wanted chunk whose slot holds a plane the current Z no longer maps to. */
+export interface StalePlane {
+  memberId: string;
+  tier: ResidencyTier;
+  chunkKey: string;
+}
+
 export interface WantedSetResult {
   missing: Array<MissingChunk | MissingProxy>;
   /** One report per tile entry with a target level, in active-set order. */
   levels: EntityLevelReport[];
+  /**
+   * The missing chunks that still have a slot, cut from another plane. The
+   * page was told they were held, so the worker reports them lost.
+   */
+  stalePlanes: StalePlane[];
 }
 
 /**
@@ -76,17 +88,18 @@ export type SourcePoolResolver = (
 ) => string | undefined;
 
 /**
- * Compute which chunks and proxies the GPU worker is missing, and which
- * level serves each entity's visible pixels.
+ * Compute which wanted chunks and desired proxies the GPU worker is missing,
+ * and which level serves each entity's visible pixels.
  *
- * The detail tier requests `detailLevels` only. The coarser levels kept
- * under the target are sampled when resident but never requested here.
- * A position's serving level is the first in sampling order whose covering
+ * Only the planner's wanted keys are reported missing. The coarser levels
+ * kept under the target are sampled when resident but never wanted. A
+ * position's serving level is the first in sampling order whose covering
  * chunks are all resident; a position no level covers is blank and counts
  * toward neither end of the entity's range.
  */
 export function computeWantedSet(
   coldState: ColdStateMessage,
+  wanted: WantedChunkIndex,
   volumeAtlases: Map<string, AtlasSnapshot>,
   sliceAtlases: Map<string, AtlasSnapshot>,
   poolFor: SourcePoolResolver,
@@ -94,13 +107,14 @@ export function computeWantedSet(
 ): WantedSetResult {
   const missing: Array<MissingChunk | MissingProxy> = [];
   const levels: EntityLevelReport[] = [];
+  const stalePlanes: StalePlane[] = [];
   const desiredProxyKeys =
     coldState.desiredProxyKeys === undefined
       ? null
       : new Set(coldState.desiredProxyKeys);
 
   if (coldState.activeSet.length === 0) {
-    return { missing, levels };
+    return { missing, levels, stalePlanes };
   }
 
   const isMultiChannel = coldState.multiChannel;
@@ -223,17 +237,19 @@ export function computeWantedSet(
         ? []
         : resolveSampledLevels(entry, memberId, atlases, poolFor);
 
-      for (const source of chunkSourcesForEntry(entry)) {
-        for (const lvl of source.levels) {
-          const poolKey = poolFor(memberId, source.tier, lvl);
+      for (const tier of RESIDENCY_TIERS) {
+        const keys = wanted.get(wantedEntryKey(tier, memberId));
+        if (keys === undefined) continue;
+        for (const chunkKey of keys) {
+          const chunk = parseChunkKey(chunkKey);
+          if (chunk === null) continue;
+          const poolKey = poolFor(memberId, tier, chunk.level);
           if (!poolKey) continue;
           const atlas = atlases.get(poolKey);
-          if (atlas === undefined || !hasSection(atlas, memberId, lvl)) continue;
-
-          const grid = levelGrid(entry, lvl);
+          if (atlas === undefined || !hasSection(atlas, memberId, chunk.level)) continue;
+          const grid = levelGrid(entry, chunk.level);
           if (grid === undefined) continue;
 
-          const layoutPositionVox = entry.layoutPositionVox ?? ([0, 0] as [number, number]);
           const context: SampleContext = {
             memberId,
             channel,
@@ -241,51 +257,22 @@ export function computeWantedSet(
             viewMode: coldState.viewMode,
             sliceZ: atlas.z ?? 0,
           };
-          const range = visibleChunkRange(coldState, grid, layoutPositionVox, context);
-          const isTarget = source.tier === "detail" && lvl === targetLevel;
-
-          const radiusView = renderRadiusForTier(coldState, source.tier);
-          for (let iz = range.zStart; iz < range.zEnd; iz++) {
-            for (let iy = range.rowStart; iy < range.rowEnd; iy++) {
-              for (let ix = range.colStart; ix < range.colEnd; ix++) {
-                if (
-                  !chunkWithinRenderRadius({
-                    region: coldState.visibleRegion,
-                    radiusView,
-                    layoutPositionVox,
-                    geometry: {
-                      fullDims: grid.fullDims,
-                      levelDims: grid.levelDims,
-                      chunkDims: grid.chunkDims,
-                    },
-                    chunk: { x: ix, y: iy, z: iz },
-                  })
-                ) {
-                  continue;
-                }
-                if (
-                  context.viewMode === "volume" &&
-                  !chunkInFrustum(coldState, grid, layoutPositionVox, ix, iy, iz)
-                ) {
-                  continue;
-                }
-                const chunkKey = `${lvl}/${coldState.currentT}/${channel}/${iz}/${iy}/${ix}`;
-                if (!holdsCurrentData(atlas, grid, context, chunkKey)) {
-                  missing.push({
-                    kind: "chunk",
-                    datasetId: coldState.datasetId,
-                    tier: source.tier,
-                    entityId: entry.entityId,
-                    memberId,
-                    c: channel,
-                    chunkKey,
-                  });
-                }
-                if (isTarget) {
-                  tally.record(servingLevel(sampled, grid, [ix, iy, iz], context));
-                }
-              }
+          if (!holdsCurrentData(atlas, grid, context, chunkKey)) {
+            missing.push({
+              kind: "chunk",
+              datasetId: coldState.datasetId,
+              tier,
+              entityId: entry.entityId,
+              memberId,
+              c: channel,
+              chunkKey,
+            });
+            if (atlas.slots.has(makeCompositeKey(memberId, chunkKey))) {
+              stalePlanes.push({ memberId, tier, chunkKey });
             }
+          }
+          if (tier === "detail" && chunk.level === targetLevel) {
+            tally.record(servingLevel(sampled, grid, [chunk.x, chunk.y, chunk.z], context));
           }
         }
       }
@@ -301,16 +288,17 @@ export function computeWantedSet(
     }
   }
 
-  return { missing, levels };
+  return { missing, levels, stalePlanes };
 }
 
-/** The finest and coarsest serving level seen over one entity's visible chunks. */
+
+/** The finest and coarsest serving level seen over one entity's wanted target-level chunks. */
 class LevelTally {
   visible = false;
   private finest = Infinity;
   private coarsest = -Infinity;
 
-  /** Record one visible chunk position: `null` for one no level covers. */
+  /** Record one wanted chunk position: `null` for one no level covers. */
   record(level: number | null): void {
     this.visible = true;
     if (level === null) return;
@@ -409,69 +397,6 @@ function holdsCurrentData(
   return atlas.slotLevelZ[slot] === sliceLevelZ(context.sliceZ, grid.fullDims[2], grid.levelDims[2]);
 }
 
-/**
- * The planner's frustum test on the same level-0 chunk box, so the wanted
- * set never lists a chunk the planner will not request. A chunk listed and
- * never delivered keeps residency dirty.
- */
-function chunkInFrustum(
-  coldState: ColdStateMessage,
-  grid: LevelGrid,
-  layoutPositionVox: [number, number],
-  ix: number,
-  iy: number,
-  iz: number,
-): boolean {
-  const planes = coldState.visibleRegion.frustumPlanes;
-  if (planes === null) return true;
-  const [cwX, cwY, cwZ] = grid.chunkWorld;
-  return !chunkOutsideFrustum(
-    [ix * cwX + layoutPositionVox[0], iy * cwY + layoutPositionVox[1], iz * cwZ],
-    [(ix + 1) * cwX + layoutPositionVox[0], (iy + 1) * cwY + layoutPositionVox[1], (iz + 1) * cwZ],
-    planes,
-  );
-}
-
-interface ChunkRange {
-  colStart: number;
-  colEnd: number;
-  rowStart: number;
-  rowEnd: number;
-  zStart: number;
-  zEnd: number;
-}
-
-/** The half-open chunk index ranges of one level's grid that touch the visible region. */
-function visibleChunkRange(
-  coldState: ColdStateMessage,
-  grid: LevelGrid,
-  layoutPositionVox: [number, number],
-  context: SampleContext,
-): ChunkRange {
-  const [minVoxX, minVoxY, maxVoxX, maxVoxY] = coldState.visibleRegion.xyBoundsVox;
-  const localMinVoxX = minVoxX - layoutPositionVox[0];
-  const localMinVoxY = minVoxY - layoutPositionVox[1];
-  const localMaxVoxX = maxVoxX - layoutPositionVox[0];
-  const localMaxVoxY = maxVoxY - layoutPositionVox[1];
-  const [chunkWorldX, chunkWorldY, chunkWorldZ] = grid.chunkWorld;
-  const [gridX, gridY, gridZ] = grid.grid;
-
-  const colStart = Math.max(0, Math.floor(localMinVoxX / chunkWorldX));
-  const colEnd = Math.min(gridX, Math.ceil(localMaxVoxX / chunkWorldX));
-  const rowStart = Math.max(0, Math.floor(localMinVoxY / chunkWorldY));
-  const rowEnd = Math.min(gridY, Math.ceil(localMaxVoxY / chunkWorldY));
-
-  let zStart: number;
-  let zEnd: number;
-  if (context.viewMode === "slice") {
-    [zStart, zEnd] = sliceChunkRange(grid, context.sliceZ);
-  } else {
-    zStart = Math.max(0, Math.floor(coldState.visibleRegion.zRangeVox[0] / chunkWorldZ));
-    zEnd = Math.min(gridZ, Math.ceil(coldState.visibleRegion.zRangeVox[1] / chunkWorldZ));
-  }
-  return { colStart, colEnd, rowStart, rowEnd, zStart, zEnd };
-}
-
 /** One section the shader may sample for a member, with the pool it reads. */
 interface SampledLevel {
   grid: LevelGrid;
@@ -565,26 +490,6 @@ function coveringRange(
   const start = Math.max(0, Math.floor((index * targetWorld) / candidateWorld));
   const end = Math.min(candidateGrid, Math.ceil(((index + 1) * targetWorld) / candidateWorld));
   return [start, end];
-}
-
-function renderRadiusForTier(
-  coldState: ColdStateMessage,
-  tier: ResidencyTier,
-): number {
-  return coldState.renderRadiusView?.[tier] ?? RENDER_RADIUS_DISABLED;
-}
-
-/** The levels each tier requests for a tile entry, detail first. */
-function chunkSourcesForEntry(
-  entry: ColdStateTileEntry,
-): Array<{ tier: ResidencyTier; levels: number[] }> {
-  const sources: Array<{ tier: ResidencyTier; levels: number[] }> = [
-    { tier: "detail", levels: entry.detailLevels },
-  ];
-  if (entry.coarseLevel !== null) {
-    sources.push({ tier: "coarse", levels: [entry.coarseLevel] });
-  }
-  return sources;
 }
 
 /**

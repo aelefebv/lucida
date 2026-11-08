@@ -363,7 +363,7 @@ export const RULESET: Ruleset = {
     id: "upload.held",
     minChunks: 1,
     guardTicks: RESEND_GUARD_TICKS,
-    why: "Every chunk the renderer evicts, refuses, or still lists as missing comes back eligible to send, so a lasting disagreement between the uploader and the renderer re-sends the same chunks every tick and the view never settles. The uploader counts ticks whose every send repeats a chunk it already sent since the last cold state. A real delivery repeats a chunk once or twice after an eviction and moves on, so that many such ticks in a row is a loop: the uploader holds those chunks until the next cold state and names each with the reason the renderer last gave. One held chunk is enough to report, because the view settled without data it asked for.",
+    why: "Every chunk the renderer refuses or reports lost, and every chunk its wanted set lists as missing while the page's residency mirror holds it, comes back eligible to send, so a lasting disagreement between the uploader and the renderer re-sends the same chunks every tick and the view never settles. The uploader counts ticks whose every send repeats a chunk it already sent since the last cold state. A real delivery repeats a chunk once or twice after an eviction and moves on, so that many such ticks in a row is a loop: the uploader holds those chunks until the next cold state and names each with the reason the renderer last gave. One held chunk is enough to report, because the view settled without data it asked for.",
   },
   gpuError: {
     id: "gpu.error",

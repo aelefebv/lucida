@@ -33,6 +33,8 @@ import { reconcileProxyResidency } from "../proxy/residency.ts";
 import { groupEntriesByPool } from "./groupEntries.ts";
 import { computeEntityTierMeta } from "./entityMetas.ts";
 import { sourceKey } from "../poolKeys.ts";
+import { postFreedPools } from "../chunkUploadFeedback.ts";
+import { indexWantedChunks } from "../wantedChunks.ts";
 
 /** Apply a cold-state message. The caller posts the wanted-set afterward. */
 export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
@@ -67,6 +69,8 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
     state.proxyStats.evicted += evicted;
     state.proxyStats.evictedPolicy += evicted;
   }
+
+  state.wantedByDataset.set(msg.datasetId, indexWantedChunks(msg.wantedChunks));
 
   for (const [memberId, datasetId] of state.memberToDataset) {
     if (datasetId !== msg.datasetId) continue;
@@ -163,10 +167,10 @@ export function applyColdState(ctx: WorkerCtx, msg: ColdStateMessage): void {
 
   // 5. Free this dataset's pools that no group above names: a hidden
   // channel, the other view mode, or a chunk shape no resident level uses.
-  // Nothing routes to them now, so nothing would sample them again. The
-  // wanted set posted after every cold state reports a recreated pool as
-  // empty, so the page resends what it needs.
+  // Nothing routes to them now, so nothing would sample them again. Their
+  // chunks are reported lost, so the page resends what a recreated pool needs.
   const referenced = new Set(groups.keys());
+  postFreedPools(ctx, msg.datasetId, referenced);
   removeVolumeAtlasesForDataset(ctx, msg.datasetId, referenced);
   removeSliceAtlasesForDataset(ctx, msg.datasetId, referenced);
 

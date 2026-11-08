@@ -13,7 +13,8 @@ import { computeAtlasGeometry } from "../atlasSizing.ts";
 import type { LodIndirectionMeta } from "../volume/atlas.ts";
 import { atlasTextureFormat, bytesPerTexel, type SampleFormat } from "../dataTypeUtil.ts";
 import { allocateWatched } from "../worker/gpuErrors.ts";
-import { postPoolChunksLost } from "../chunkUploadFeedback.ts";
+import { postSlotsLost } from "../chunkUploadFeedback.ts";
+import { chunkPoolTier } from "../poolKeys.ts";
 import { shrinkAtlasBudget } from "../../deviceBudget.ts";
 
 /**
@@ -313,7 +314,7 @@ function createWatchedSliceAtlas(
 export function replaceLostSliceAtlas(ctx: WorkerCtx, poolKey: string, lost: SliceAtlasState): void {
   const atlases = ctx.state.sliceAtlases;
   if (atlases.get(poolKey) !== lost) return;
-  postPoolChunksLost(ctx, lost.slots.keys(), "out-of-memory");
+  postSlotsLost(ctx, chunkPoolTier(poolKey), lost.slots.keys(), "out-of-memory");
   destroySliceAtlas(lost);
   atlases.delete(poolKey);
   if (shrinkAtlasBudget(ctx.state.atlasBudgets, "sliceAtlasBytes")) {

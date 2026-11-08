@@ -1,15 +1,18 @@
 /**
- * Chunk-upload eviction policy and multi-member demux, through
- * `handleVolumeChunkData` / `handleSliceChunkData` on mock-device atlases.
+ * Chunk admission, eviction and the residency report, through
+ * `handleVolumeChunkData` / `handleSliceChunkData` on mock-device atlases,
+ * and the eviction kernel on its own.
  *
- * Evicting member A's chunk during an upload for B must report A's memberId,
- * because the orchestrator tracks delivery per member. Chunks no nearer than
- * the farthest cached are `skipped`, not evictions, so two chunks at one
- * distance never trade a slot. A T/C scrub still refreshes without a pan,
- * because the remap leaves the old selection's slots stale.
+ * The worker writes only chunks the planner wants, and answers every chunk
+ * it is sent, held or refused. Evicting member A's chunk during an upload
+ * for B reports A's chunk lost, because the page mirrors residency per
+ * member. Slots the planner does not want go before any it does. A wanted
+ * chunk no nearer than the farthest wanted resident is refused, so two
+ * chunks at one distance never trade a slot. A T/C scrub still refreshes
+ * without a pan, because the remap leaves the old selection's slots unsampled.
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 
 (globalThis as Record<string, unknown>).GPUTextureUsage = {
   COPY_SRC: 0x01,
@@ -42,11 +45,16 @@ import type { WorkerCtx } from "./workerContext.ts";
 import { createInitialState } from "./worker/state.ts";
 import type {
   Chunk,
+  ChunkResidencyChange,
+  ChunkResidencyMessage,
   SliceChunkDataMessage,
   VolumeChunkDataMessage,
   WorkerToMainMessage,
 } from "./workerProtocol.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
+import type { ResidencyTier } from "../pipeline/residencyTier.ts";
+import { wantedEntryKey } from "./wantedChunks.ts";
+import { chunkDistSq, findEvictionSlot, mayEvict, type FindEvictionParams } from "./eviction.ts";
 
 // Mock device + ctx
 
@@ -73,26 +81,30 @@ function makeMockDevice(): GPUDevice {
   } as unknown as GPUDevice;
 }
 
-interface TestCtx {
-  ctx: WorkerCtx;
-  posts: WorkerToMainMessage[];
-  postWantedSetCalls: number;
-}
-
-function makeMockCtx(): TestCtx {
+function makeMockCtx(): { ctx: WorkerCtx; posts: WorkerToMainMessage[] } {
   const posts: WorkerToMainMessage[] = [];
-  let postWantedSetCalls = 0;
   const ctx = {
     device: makeMockDevice(),
     state: createInitialState(),
     post(msg: WorkerToMainMessage) { posts.push(msg); },
-    postWantedSet() { postWantedSetCalls++; },
+    postWantedSet() {},
   } as unknown as WorkerCtx;
-  return {
-    ctx,
-    posts,
-    get postWantedSetCalls() { return postWantedSetCalls; },
-  } as TestCtx;
+  return { ctx, posts };
+}
+
+/** Add chunks to the wanted set of the member's dataset, as a cold state from the planner would. */
+function want(ctx: WorkerCtx, memberId: string, keys: string[], tier: ResidencyTier = "detail"): void {
+  ctx.state.memberToDataset.set(memberId, "ds1");
+  const index = new Map(ctx.state.wantedByDataset.get("ds1") ?? []);
+  const entry = wantedEntryKey(tier, memberId);
+  index.set(entry, new Set([...(index.get(entry) ?? []), ...keys]));
+  ctx.state.wantedByDataset.set("ds1", index);
+}
+
+/** The residency reports posted, optionally of one kind. */
+function reports(posts: WorkerToMainMessage[], change?: ChunkResidencyChange): ChunkResidencyMessage[] {
+  return posts.filter((m): m is ChunkResidencyMessage =>
+    m.type === "chunkResidency" && (change === undefined || m.change === change));
 }
 
 function epochs(): SceneEpochs {
@@ -195,11 +207,20 @@ function makeSliceMeta(gridY: number, gridX: number): LodIndirectionMeta {
   };
 }
 
-// Every atlas / eviction Map lives on `ctx.state` via `RendererState`.
-// Each test creates its own ctx via `makeMockCtx`, so no cross-test
-// cleanup is required. `beforeEach` is retained as a hook surface in
-// case future tests need to re-spy mocks.
-beforeEach(() => {});
+/** A one-slot level-0 volume pool for member A, its camera reference at `rayHit`. */
+function oneSlotVolume(ctx: WorkerCtx, rayHit: [number, number, number]): AtlasState {
+  const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
+  atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
+  atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
+  atlas.freeSlots = [0];
+  applyViewHotState(ctx, {
+    type: "viewHotState",
+    epochs: epochs(),
+    datasetId: "ds1",
+    rayHitsByEntity: [["imgA", rayHit]],
+  });
+  return atlas;
+}
 
 // Volume pool growth
 
@@ -255,6 +276,7 @@ describe("volume pool growth", () => {
     expect(create.mock.calls.at(-1)![0].format).toBe("r32uint");
     atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
     atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
+    want(ctx, "imgA", [chunkKey(0, 0, 0, 0, 0, 0)]);
 
     const values = new Float32Array(32 * 32 * 32).fill(100);
     values[0] = -5;
@@ -280,6 +302,7 @@ describe("volume pool growth", () => {
     atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
     const firstTexture = atlas.texture as unknown as { destroyed: boolean };
     fill(atlas);
+    want(ctx, "imgA", [chunkKey(0, 0, 0, 0, 0, 0)]);
 
     handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), "ds1", "imgA");
 
@@ -292,7 +315,7 @@ describe("volume pool growth", () => {
     const slot = atlas.slots.get("imgA|0/0/0/0/0/0");
     expect(slot).toBeGreaterThanOrEqual(400);
     expect(atlas.indirectionData[0]).toBe(slot);
-    expect(posts.filter((m) => m.type === "chunksEvicted")).toEqual([]);
+    expect(reports(posts, "lost")).toEqual([]);
   });
 
   it("evicts rather than grows once it holds the whole budget", () => {
@@ -309,153 +332,149 @@ describe("volume pool growth", () => {
   });
 });
 
-// Volume eviction
+// Volume admission and eviction
 
-describe("handleVolumeChunkData — eviction policy", () => {
-  it("evicts farthest-from-rayHit chunk; reports chunksEvicted keyed by A", () => {
+describe("handleVolumeChunkData — admission, eviction and the residency report", () => {
+  it("acknowledges a written chunk as held", () => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
+    const atlas = oneSlotVolume(ctx, [0, 0, 0]);
+    const chunk = makeChunk(0, 0, 0, 0, 0, 0);
+    want(ctx, "imgA", [chunk.key]);
 
-    // Allocate the pool then narrow it to a single slot so the next
-    // upload must evict.
-    const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0, "u16");
-    atlas.entityMetas.set(memberA, [makeVolumeMeta(2, 4, 4)]);
-    atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
-    atlas.freeSlots = [0]; // exactly one free slot
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [chunk]), epochs(), "ds1", "imgA");
 
-    // Member A is interested in the upper-left corner (rayHit near 0,0,0).
-    applyViewHotState(ctx, {
-      type: "viewHotState",
-      epochs: epochs(),
-      datasetId: poolKey,
-      rayHitsByEntity: [[memberA, [0.0, 0.0, 0.0]]],
-    });
-
-    // First upload: a chunk at (3,3,1) — far from rayHit. Fills the slot.
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [makeChunk(0, 0, 0, 1, 3, 3)]), epochs(), poolKey, memberA);
-    expect(atlas.slots.size).toBe(1);
-
-    // Second upload: a chunk at (0,0,0) — much closer to rayHit.
-    // Pool full → the (3,3,1) chunk must be evicted to make room.
-    posts.length = 0;
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), poolKey, memberA);
-
-    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-    // Exactly one eviction post + one (empty) skipped post, both keyed by A.
-    const withKeys = evictions.find(e => e.keys.length > 0);
-    expect(withKeys).toBeDefined();
-    expect(withKeys!.memberId).toBe(memberA);
-    expect(withKeys!.keys).toEqual([chunkKey(0, 0, 0, 1, 3, 3)]);
+    expect(atlas.slots.has(`imgA|${chunk.key}`)).toBe(true);
+    expect(reports(posts)).toEqual([
+      { type: "chunkResidency", memberId: "imgA", tier: "detail", change: "held", keys: [chunk.key], reason: undefined },
+    ]);
   });
 
-  it("multi-member demux: B's upload evicts A's chunk → eviction is keyed by A, not B", () => {
+  it("acknowledges a chunk it already holds as held, without writing it again", () => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-    const memberB = "imgB";
+    oneSlotVolume(ctx, [0, 0, 0]);
+    const chunk = makeChunk(0, 0, 0, 0, 0, 0);
+    want(ctx, "imgA", [chunk.key]);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [chunk]), epochs(), "ds1", "imgA");
+    const writes = (ctx.device.queue.writeTexture as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+    posts.length = 0;
 
-    const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0, "u16");
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [chunk]), epochs(), "ds1", "imgA");
+
+    expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["held", [chunk.key]]]);
+    expect((ctx.device.queue.writeTexture as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(writes);
+  });
+
+  it("refuses a chunk the planner does not want, even into a free slot", () => {
+    const { ctx, posts } = makeMockCtx();
+    const atlas = oneSlotVolume(ctx, [0, 0, 0]);
+    const chunk = makeChunk(0, 0, 0, 0, 0, 0);
+    want(ctx, "imgA", [chunkKey(0, 0, 0, 1, 1, 1)]);
+
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [chunk]), epochs(), "ds1", "imgA");
+
+    expect(atlas.slots.size).toBe(0);
+    expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([["refused", "unwanted", [chunk.key]]]);
+  });
+
+  it("evicts the farthest wanted chunk for a nearer wanted one, and reports it lost", () => {
+    const { ctx, posts } = makeMockCtx();
+    const atlas = oneSlotVolume(ctx, [0, 0, 0]);
+    const far = makeChunk(0, 0, 0, 1, 3, 3);
+    const near = makeChunk(0, 0, 0, 0, 0, 0);
+    want(ctx, "imgA", [far.key, near.key]);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [far]), epochs(), "ds1", "imgA");
+    posts.length = 0;
+
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [near]), epochs(), "ds1", "imgA");
+
+    expect([...atlas.slots.keys()]).toEqual([`imgA|${near.key}`]);
+    expect(reports(posts).map((r) => [r.memberId, r.change, r.reason, r.keys])).toEqual([
+      ["imgA", "held", undefined, [near.key]],
+      ["imgA", "lost", "evicted", [far.key]],
+    ]);
+  });
+
+  it("multi-member demux: B's upload evicts A's chunk → the loss is keyed by A, not B", () => {
+    const { ctx, posts } = makeMockCtx();
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
     // Two members share the pool; each owns its own LOD section.
-    atlas.entityMetas.set(memberA, [makeVolumeMeta(2, 4, 4)]);
-    atlas.entityMetas.set(memberB, [{ ...makeVolumeMeta(2, 4, 4), offset: 2 * 4 * 4 }]);
+    atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
+    atlas.entityMetas.set("imgB", [{ ...makeVolumeMeta(2, 4, 4), offset: 2 * 4 * 4 }]);
     atlas.indirectionData = new Uint32Array(2 * 4 * 4 * 2).fill(0xFFFFFFFF);
     atlas.freeSlots = [0];
-
-    // A's ray-hit far from its chunk; B's near its chunk → A's cached
-    // chunk should be the farthest and thus the eviction target.
     applyViewHotState(ctx, {
       type: "viewHotState",
       epochs: epochs(),
-      datasetId: poolKey,
-      rayHitsByEntity: [
-        [memberA, [0.0, 0.0, 0.0]],
-        [memberB, [0.0, 0.0, 0.0]],
-      ],
+      datasetId: "ds1",
+      rayHitsByEntity: [["imgA", [0, 0, 0]], ["imgB", [0, 0, 0]]],
     });
-
-    // Seed: A uploads a chunk far from A's rayHit.
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [makeChunk(0, 0, 0, 1, 3, 3)]), epochs(), poolKey, memberA);
-    expect(atlas.slots.size).toBe(1);
-
-    // Now B uploads a chunk close to B's rayHit. Pool full → must evict.
+    const farA = makeChunk(0, 0, 0, 1, 3, 3);
+    const nearB = makeChunk(0, 0, 0, 0, 0, 0);
+    want(ctx, "imgA", [farA.key]);
+    want(ctx, "imgB", [nearB.key]);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [farA]), epochs(), "ds1", "imgA");
     posts.length = 0;
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberB, [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), poolKey, memberB);
 
-    const evictions = (posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>)
-      .filter(e => e.keys.length > 0);
-    expect(evictions.length).toBe(1);
-    // Demux invariant: report is keyed by the OWNER of the evicted
-    // chunk (A), not the uploader (B).
-    expect(evictions[0].memberId).toBe(memberA);
-    expect(evictions[0].keys).toEqual([chunkKey(0, 0, 0, 1, 3, 3)]);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgB", [nearB]), epochs(), "ds1", "imgB");
+
+    // Reported under the owner of the evicted chunk, not the uploader.
+    expect(reports(posts, "lost").map((r) => [r.memberId, r.keys])).toEqual([["imgA", [farA.key]]]);
+    expect(reports(posts, "held").map((r) => [r.memberId, r.keys])).toEqual([["imgB", [nearB.key]]]);
   });
 
-  it("incoming chunk farther than farthest cached → rejected and reported as skipped", () => {
+  it("refuses a wanted chunk farther than every wanted resident, and keeps the resident", () => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-
-    const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0, "u16");
-    atlas.entityMetas.set(memberA, [makeVolumeMeta(2, 4, 4)]);
-    atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
-    atlas.freeSlots = [0];
-
-    applyViewHotState(ctx, {
-      type: "viewHotState",
-      epochs: epochs(),
-      datasetId: poolKey,
-      rayHitsByEntity: [[memberA, [0.0, 0.0, 0.0]]],
-    });
-
-    // Seed: a near chunk fills the only slot.
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), poolKey, memberA);
-    expect(atlas.slots.size).toBe(1);
-
-    // Now an upload arrives that is farther than what's cached → reject.
+    const atlas = oneSlotVolume(ctx, [0, 0, 0]);
+    const near = makeChunk(0, 0, 0, 0, 0, 0);
+    const far = makeChunk(0, 0, 0, 1, 3, 3);
+    want(ctx, "imgA", [near.key, far.key]);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [near]), epochs(), "ds1", "imgA");
     posts.length = 0;
-    const farChunk = makeChunk(0, 0, 0, 1, 3, 3);
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [farChunk]), epochs(), poolKey, memberA);
 
-    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-    const skipped = evictions.find(e => (e.skipped?.length ?? 0) > 0);
-    expect(skipped).toBeDefined();
-    expect(skipped!.memberId).toBe(memberA);
-    expect(skipped!.skipped).toEqual([farChunk.key]);
-    expect(skipped!.keys).toEqual([]);
-    // The cached chunk is still in the slot.
-    expect(atlas.slots.size).toBe(1);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [far]), epochs(), "ds1", "imgA");
+
+    expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([["refused", "atlas-policy", [far.key]]]);
+    expect([...atlas.slots.keys()]).toEqual([`imgA|${near.key}`]);
   });
 
-  it("an equal-distance chunk never displaces a mapped resident: it is refused, and the resident stays", () => {
+  it("an equal-distance chunk never displaces a wanted resident: it is refused, and the resident stays", () => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-
-    const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0, "u16");
-    atlas.entityMetas.set(memberA, [makeVolumeMeta(2, 4, 4)]);
-    atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
-    atlas.freeSlots = [0];
-    applyViewHotState(ctx, {
-      type: "viewHotState",
-      epochs: epochs(),
-      datasetId: poolKey,
-      rayHitsByEntity: [[memberA, [0.5, 0.5, 0.5]]],
-    });
-
+    const atlas = oneSlotVolume(ctx, [0.5, 0.5, 0.5]);
     // Columns 1 and 2 mirror each other about the ray hit.
     const left = makeChunk(0, 0, 0, 0, 1, 1);
     const right = makeChunk(0, 0, 0, 0, 1, 2);
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [left]), epochs(), poolKey, memberA);
+    want(ctx, "imgA", [left.key, right.key]);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [left]), epochs(), "ds1", "imgA");
 
     for (let round = 0; round < 3; round++) {
       posts.length = 0;
-      handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [right]), epochs(), poolKey, memberA);
-      const feedback = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-      expect(feedback.flatMap(e => e.keys)).toEqual([]);
-      expect(feedback.flatMap(e => e.skipped)).toEqual([right.key]);
-      expect([...atlas.slots.keys()]).toEqual([`${memberA}|${left.key}`]);
+      handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [right]), epochs(), "ds1", "imgA");
+      expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["refused", [right.key]]]);
+      expect([...atlas.slots.keys()]).toEqual([`imgA|${left.key}`]);
     }
+  });
+
+  it("a resident the planner no longer wants goes before any wanted one, even a farther one", () => {
+    const { ctx, posts } = makeMockCtx();
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
+    atlas.entityMetas.set("imgA", [makeVolumeMeta(2, 4, 4)]);
+    atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
+    atlas.freeSlots = [1, 0];
+    applyViewHotState(ctx, { type: "viewHotState", epochs: epochs(), datasetId: "ds1", rayHitsByEntity: [["imgA", [0, 0, 0]]] });
+    const nearOld = makeChunk(0, 0, 0, 0, 0, 0);
+    const farWanted = makeChunk(0, 0, 0, 1, 3, 3);
+    const incoming = makeChunk(0, 0, 0, 1, 3, 2);
+    want(ctx, "imgA", [nearOld.key, farWanted.key]);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [nearOld, farWanted]), epochs(), "ds1", "imgA");
+
+    // A new plan wants the far chunk and the incoming one, not the near one.
+    ctx.state.wantedByDataset.delete("ds1");
+    want(ctx, "imgA", [farWanted.key, incoming.key]);
+    posts.length = 0;
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [incoming]), epochs(), "ds1", "imgA");
+
+    expect([...atlas.slots.keys()].sort()).toEqual([`imgA|${incoming.key}`, `imgA|${farWanted.key}`].sort());
+    expect(reports(posts, "lost").map((r) => r.keys)).toEqual([[nearOld.key]]);
   });
 
   it.each([
@@ -463,215 +482,153 @@ describe("handleVolumeChunkData — eviction policy", () => {
     { scrub: "C", next: makeChunk(0, 0, 1, 0, 0, 0), t: 0, c: 1 },
   ])("a $scrub scrub on a full atlas replaces the old selection's chunk at the same position", ({ next, t, c }) => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-
-    const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0, "u16");
-    atlas.entityMetas.set(memberA, [makeVolumeMeta(2, 4, 4)]);
-    atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
-    atlas.freeSlots = [0];
-    applyViewHotState(ctx, {
-      type: "viewHotState",
-      epochs: epochs(),
-      datasetId: poolKey,
-      rayHitsByEntity: [[memberA, [0.0, 0.0, 0.0]]],
-    });
-
+    const atlas = oneSlotVolume(ctx, [0, 0, 0]);
     const old = makeChunk(0, 0, 0, 0, 0, 0);
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [old]), epochs(), poolKey, memberA);
-    expect(atlas.slots.has(`${memberA}|${old.key}`)).toBe(true);
+    want(ctx, "imgA", [old.key, next.key]);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [old]), epochs(), "ds1", "imgA");
+    expect(atlas.slots.has(`imgA|${old.key}`)).toBe(true);
 
-    // The cold state at the new selection unmaps the old chunk, so it ranks
-    // stale, at infinite distance, ahead of the incoming chunk at its position.
+    // The cold state at the new selection unmaps the old chunk, so it is
+    // never sampled and goes ahead of the incoming chunk at its position.
     remapIndirection(atlas, t, c);
     posts.length = 0;
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [next], { t, c }), epochs(), poolKey, memberA);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [next], { t, c }), epochs(), "ds1", "imgA");
 
-    expect([...atlas.slots.keys()]).toEqual([`${memberA}|${next.key}`]);
-    const feedback = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-    expect(feedback.flatMap(e => e.keys)).toEqual([old.key]);
-    expect(feedback.flatMap(e => e.skipped)).toEqual([]);
+    expect([...atlas.slots.keys()]).toEqual([`imgA|${next.key}`]);
+    expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([
+      ["held", [next.key]],
+      ["lost", [old.key]],
+    ]);
   });
 
-  it("stale-epoch batch → entire batch reported as re-eligible, no work done", () => {
+  it("refuses a stale-epoch batch whole, doing no work", () => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-
-    const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0, "u16");
-    atlas.entityMetas.set(memberA, [makeVolumeMeta(2, 4, 4)]);
-    atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
-
+    const atlas = oneSlotVolume(ctx, [0, 0, 0]);
     // Current epoch.content is 5; the batch carries content=1 → stale.
     const currentEpochs: SceneEpochs = { content: 5, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
     const batchEpochs: SceneEpochs = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 0 };
     const chunks = [makeChunk(0, 0, 0, 0, 0, 0), makeChunk(0, 0, 0, 0, 0, 1)];
 
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, chunks, { epochs: batchEpochs }), currentEpochs, poolKey, memberA);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", chunks, { epochs: batchEpochs }), currentEpochs, "ds1", "imgA");
 
     expect(atlas.slots.size).toBe(0);
-    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-    expect(evictions.length).toBe(1);
-    expect(evictions[0].memberId).toBe(memberA);
-    expect(evictions[0].keys).toEqual(chunks.map(c => c.key));
-    expect(evictions[0].skipped).toEqual([]);
+    expect(reports(posts).map((r) => [r.memberId, r.change, r.reason, r.keys])).toEqual([
+      ["imgA", "refused", "stale", chunks.map((c) => c.key)],
+    ]);
   });
 
   it("empty chunks array → no posts, no work", () => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
+    oneSlotVolume(ctx, [0, 0, 0]);
+    posts.length = 0;
 
-    const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0, "u16");
-    atlas.entityMetas.set(memberA, [makeVolumeMeta(2, 4, 4)]);
-    atlas.indirectionData = new Uint32Array(2 * 4 * 4).fill(0xFFFFFFFF);
-
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, []), epochs(), poolKey, memberA);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", []), epochs(), "ds1", "imgA");
 
     expect(posts.length).toBe(0);
-    expect(ctx.state.volumeAtlases.get(poolKey)?.slots.size).toBe(0);
+    expect(ctx.state.volumeAtlases.get("ds1")?.slots.size).toBe(0);
   });
 
-  it("missing volume atlas → batch reported as re-eligible", () => {
+  it("refuses a batch with no atlas, or no section for its member", () => {
     const { ctx, posts } = makeMockCtx();
-    const memberA = "imgA";
     const chunk = makeChunk(0, 0, 0, 0, 0, 0);
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [chunk]), epochs(), "missing-pool", "imgA");
+    getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [chunk]), epochs(), "ds1", "imgA");
 
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [chunk]), epochs(), "missing-pool", memberA);
-
-    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-    expect(evictions).toHaveLength(1);
-    expect(evictions[0].memberId).toBe(memberA);
-    expect(evictions[0].keys).toEqual([chunk.key]);
-    expect(evictions[0].skipped).toEqual([]);
+    expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([
+      ["refused", "missing-pool", [chunk.key]],
+      ["refused", "missing-entity-meta", [chunk.key]],
+    ]);
   });
 
-  it("missing volume entity metadata → batch reported as re-eligible", () => {
+  it("after the target moves coarser, the slots never sampled go first, the greatest key among them", () => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-    const chunk = makeChunk(0, 0, 0, 0, 0, 0);
-
-    getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0, "u16");
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [chunk]), epochs(), poolKey, memberA);
-
-    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-    expect(evictions).toHaveLength(1);
-    expect(evictions[0].memberId).toBe(memberA);
-    expect(evictions[0].keys).toEqual([chunk.key]);
-    expect(evictions[0].skipped).toEqual([]);
-  });
-
-  it("after the target moves coarser, the old target's chunk goes first, ahead of an older stale chunk and the farthest mapped one", () => {
-    const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-
-    const atlas = getOrCreateVolumePool(ctx, poolKey, "ds1", 32, 32, 32, 0, 0, "u16");
+    const atlas = getOrCreateVolumePool(ctx, "ds1", "ds1", 32, 32, 32, 0, 0, "u16");
     const level0 = makeVolumeMeta(2, 4, 4);
     const level1: LodIndirectionMeta = {
       level: 1, gridDims: [1, 2, 2], chunkDims: [32, 32, 32], levelDims: [32, 64, 64], offset: 2 * 4 * 4,
     };
-    atlas.entityMetas.set(memberA, [level0, level1]);
+    atlas.entityMetas.set("imgA", [level0, level1]);
     atlas.indirectionData = new Uint32Array(2 * 4 * 4 + 2 * 2).fill(0xFFFFFFFF);
     atlas.freeSlots = [2, 1, 0];
-    ctx.state.targetLevelByMember.set(memberA, 0);
-    applyViewHotState(ctx, {
-      type: "viewHotState",
-      epochs: epochs(),
-      datasetId: poolKey,
-      rayHitsByEntity: [[memberA, [0.0, 0.0, 0.0]]],
-    });
+    ctx.state.targetLevelByMember.set("imgA", 0);
+    applyViewHotState(ctx, { type: "viewHotState", epochs: epochs(), datasetId: "ds1", rayHitsByEntity: [["imgA", [0, 0, 0]]] });
     const level1Msg = (chunks: Chunk[], t = 0) =>
-      makeVolumeMsg(memberA, chunks, { level: 1, t, levelWidth: 64, levelHeight: 64, levelDepth: 32 });
+      makeVolumeMsg("imgA", chunks, { level: 1, t, levelWidth: 64, levelHeight: 64, levelDepth: 32 });
+    const otherT = makeChunk(1, 1, 0, 0, 0, 0);
+    const finer = makeChunk(0, 0, 0, 0, 0, 0);
+    const far = makeChunk(1, 0, 0, 0, 1, 1);
+    const incoming = makeChunk(1, 0, 0, 0, 0, 1);
+    want(ctx, "imgA", [otherT.key, finer.key, far.key, incoming.key]);
 
-    // Residents in slot order: a level-1 chunk at t=1 (stale at view T 0),
-    // the level-0 chunk at the ray hit, and a far level-1 chunk.
-    handleVolumeChunkData(ctx, level1Msg([makeChunk(1, 1, 0, 0, 0, 0)], 1), epochs(), poolKey, memberA);
-    handleVolumeChunkData(ctx, makeVolumeMsg(memberA, [makeChunk(0, 0, 0, 0, 0, 0)]), epochs(), poolKey, memberA);
-    handleVolumeChunkData(ctx, level1Msg([makeChunk(1, 0, 0, 0, 1, 1)]), epochs(), poolKey, memberA);
+    // Residents: a level-1 chunk at t=1 (unmapped at view T 0), the level-0
+    // chunk at the ray hit, and a far level-1 chunk.
+    handleVolumeChunkData(ctx, level1Msg([otherT], 1), epochs(), "ds1", "imgA");
+    handleVolumeChunkData(ctx, makeVolumeMsg("imgA", [finer]), epochs(), "ds1", "imgA");
+    handleVolumeChunkData(ctx, level1Msg([far]), epochs(), "ds1", "imgA");
     expect(atlas.slots.size).toBe(3);
 
     // The target moves to level 1: level 0 loses its section and the remap
     // unmaps its chunk, as a cold state would.
-    atlas.entityMetas.set(memberA, [{ ...level1, offset: 0 }]);
+    atlas.entityMetas.set("imgA", [{ ...level1, offset: 0 }]);
     atlas.indirectionData = new Uint32Array(2 * 2).fill(0xFFFFFFFF);
     remapIndirection(atlas, 0, 0);
-    ctx.state.targetLevelByMember.set(memberA, 1);
-    expect(atlas.slotGridIdx[atlas.slots.get(`${memberA}|0/0/0/0/0/0`)!]).toBe(-1);
+    ctx.state.targetLevelByMember.set("imgA", 1);
+    expect(atlas.slotGridIdx[atlas.slots.get(`imgA|${finer.key}`)!]).toBe(-1);
 
     posts.length = 0;
-    handleVolumeChunkData(ctx, level1Msg([makeChunk(1, 0, 0, 0, 0, 1)]), epochs(), poolKey, memberA);
+    handleVolumeChunkData(ctx, level1Msg([incoming]), epochs(), "ds1", "imgA");
 
-    const evictions = (posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>)
-      .filter(e => e.keys.length > 0);
-    expect(evictions).toHaveLength(1);
-    expect(evictions[0].keys).toEqual([chunkKey(0, 0, 0, 0, 0, 0)]);
-    expect([...atlas.slots.keys()].sort()).toEqual([
-      `${memberA}|1/0/0/0/0/1`,
-      `${memberA}|1/0/0/0/1/1`,
-      `${memberA}|1/1/0/0/0/0`,
-    ]);
+    expect(reports(posts, "lost").map((r) => r.keys)).toEqual([[otherT.key]]);
+    expect([...atlas.slots.keys()].sort()).toEqual([`imgA|${finer.key}`, `imgA|${incoming.key}`, `imgA|${far.key}`].sort());
   });
 });
 
-// Slice Z-retargeting
+// Slice admission and Z retargeting
 
-describe("handleSliceChunkData — Z-slice retargeting", () => {
-  it("upload for Z=0 when currentZ targets Z=1 → chunks with z !== targetChunkZ re-eligible", () => {
-    const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-
-    // Pool's z bookkeeping is irrelevant for the handler's Z-filter
-    // decision — the handler recomputes targetChunkZ from
-    // `fullResZ / fullResDepth → levelZ / chunkZ`. Set up so target=1.
-    const atlas = getOrCreateSlicePool(ctx, poolKey, "ds1", 32, 32, 0, 0, 0, "u16");
-    atlas.entityMetas.set(memberA, [makeSliceMeta(4, 4)]);
+describe("handleSliceChunkData — admission, eviction and Z retargeting", () => {
+  /** A level-0 slice pool for member A over a 4 × 4 grid. */
+  function slicePool(ctx: WorkerCtx, z = 0) {
+    const atlas = getOrCreateSlicePool(ctx, "ds1", "ds1", 32, 32, z, 0, 0, "u16");
+    atlas.entityMetas.set("imgA", [makeSliceMeta(4, 4)]);
     atlas.indirectionData = new Uint32Array(4 * 4).fill(0xFFFFFFFF);
+    return atlas;
+  }
 
+  it("refuses a wanted chunk that does not hold the plane the sender's Z maps to", () => {
+    const { ctx, posts } = makeMockCtx();
+    const atlas = slicePool(ctx);
     // fullResDepth=64, levelDepth=64 keeps the plane: fullResZ=4, chunkZ=4 →
-    // levelZ = 4, targetChunkZ = floor(4/4) = 1.
-    const chunkAtZ0 = makeSliceChunk(0, 0, 0, 0, 0, 0); // wrong Z
-    const chunkAtZ1 = makeSliceChunk(0, 0, 0, 1, 0, 0); // right Z
+    // levelZ = 4, target chunk = 1.
+    const chunkAtZ0 = makeSliceChunk(0, 0, 0, 0, 0, 0);
+    const chunkAtZ1 = makeSliceChunk(0, 0, 0, 1, 0, 0);
+    want(ctx, "imgA", [chunkAtZ0.key, chunkAtZ1.key]);
 
-    handleSliceChunkData(ctx, makeSliceMsg(memberA, [chunkAtZ0, chunkAtZ1], { fullResZ: 4 }), epochs(), poolKey, memberA);
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunkAtZ0, chunkAtZ1], { fullResZ: 4 }), epochs(), "ds1", "imgA");
 
-    // Only the Z=1 chunk landed in the atlas; Z=0 was filtered before
-    // slot allocation.
-    expect(atlas.slots.size).toBe(1);
-    const [[compositeKey]] = [...atlas.slots.entries()];
-    expect(compositeKey).toBe(`${memberA}|${chunkAtZ1.key}`);
-    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-    expect(evictions).toHaveLength(1);
-    expect(evictions[0].memberId).toBe(memberA);
-    expect(evictions[0].keys).toEqual([chunkAtZ0.key]);
-    expect(evictions[0].skipped).toEqual([]);
+    expect([...atlas.slots.keys()]).toEqual([`imgA|${chunkAtZ1.key}`]);
+    expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([
+      ["held", undefined, [chunkAtZ1.key]],
+      ["refused", "wrong-slice", [chunkAtZ0.key]],
+    ]);
   });
 
-  it("an equal-distance slice chunk never displaces a mapped resident: it is refused, and the resident stays", () => {
+  it("an equal-distance slice chunk never displaces a wanted resident: it is refused, and the resident stays", () => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-
-    const atlas = getOrCreateSlicePool(ctx, poolKey, "ds1", 32, 32, 0, 0, 0, "u16");
-    atlas.entityMetas.set(memberA, [makeSliceMeta(4, 4)]);
-    atlas.indirectionData = new Uint32Array(4 * 4).fill(0xFFFFFFFF);
+    const atlas = slicePool(ctx);
     atlas.freeSlots = [0];
-    ctx.state.cameraUVPerEntity.set(memberA, [0.5, 0.5]);
-
+    ctx.state.cameraUVPerEntity.set("imgA", [0.5, 0.5]);
     // Columns 1 and 2 mirror each other about the camera.
     const left = makeSliceChunk(0, 0, 0, 0, 1, 1);
     const right = makeSliceChunk(0, 0, 0, 0, 1, 2);
-    handleSliceChunkData(ctx, makeSliceMsg(memberA, [left]), epochs(), poolKey, memberA);
+    want(ctx, "imgA", [left.key, right.key]);
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [left]), epochs(), "ds1", "imgA");
 
     for (let round = 0; round < 3; round++) {
       posts.length = 0;
-      handleSliceChunkData(ctx, makeSliceMsg(memberA, [right]), epochs(), poolKey, memberA);
-      const feedback = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-      expect(feedback.flatMap(e => e.keys)).toEqual([]);
-      expect(feedback.flatMap(e => e.skipped)).toEqual([right.key]);
-      expect([...atlas.slots.keys()]).toEqual([`${memberA}|${left.key}`]);
+      handleSliceChunkData(ctx, makeSliceMsg("imgA", [right]), epochs(), "ds1", "imgA");
+      expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([["refused", "atlas-policy", [right.key]]]);
+      expect([...atlas.slots.keys()]).toEqual([`imgA|${left.key}`]);
     }
   });
 
@@ -680,123 +637,106 @@ describe("handleSliceChunkData — Z-slice retargeting", () => {
     { scrub: "C", next: makeSliceChunk(0, 0, 1, 0, 0, 0), t: 0, c: 1 },
   ])("a $scrub scrub on a full slice atlas replaces the old selection's chunk at the same position", ({ next, t, c }) => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-
-    const atlas = getOrCreateSlicePool(ctx, poolKey, "ds1", 32, 32, 0, 0, 0, "u16");
-    atlas.entityMetas.set(memberA, [makeSliceMeta(4, 4)]);
-    atlas.indirectionData = new Uint32Array(4 * 4).fill(0xFFFFFFFF);
+    const atlas = slicePool(ctx);
     atlas.freeSlots = [0];
-
     const old = makeSliceChunk(0, 0, 0, 0, 0, 0);
-    handleSliceChunkData(ctx, makeSliceMsg(memberA, [old]), epochs(), poolKey, memberA);
-    expect(atlas.slots.has(`${memberA}|${old.key}`)).toBe(true);
+    want(ctx, "imgA", [old.key, next.key]);
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [old]), epochs(), "ds1", "imgA");
+    expect(atlas.slots.has(`imgA|${old.key}`)).toBe(true);
 
     remapSliceIndirection(atlas, t, c, 0);
     posts.length = 0;
-    handleSliceChunkData(ctx, makeSliceMsg(memberA, [next], { t, c }), epochs(), poolKey, memberA);
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [next], { t, c }), epochs(), "ds1", "imgA");
 
-    expect([...atlas.slots.keys()]).toEqual([`${memberA}|${next.key}`]);
-    const feedback = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-    expect(feedback.flatMap(e => e.keys)).toEqual([old.key]);
-    expect(feedback.flatMap(e => e.skipped)).toEqual([]);
+    expect([...atlas.slots.keys()]).toEqual([`imgA|${next.key}`]);
+    expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([
+      ["held", [next.key]],
+      ["lost", [old.key]],
+    ]);
   });
 
   it("a Z step inside one chunk never draws the old plane, and the re-sent chunk is re-cut in place", () => {
-    const { ctx } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-
-    const atlas = getOrCreateSlicePool(ctx, poolKey, "ds1", 32, 32, 4, 0, 0, "u16");
-    atlas.entityMetas.set(memberA, [makeSliceMeta(4, 4)]);
-    atlas.indirectionData = new Uint32Array(4 * 4).fill(0xFFFFFFFF);
-
+    const { ctx, posts } = makeMockCtx();
+    const atlas = slicePool(ctx, 4);
     // Planes 4 and 5 are both in chunk 1 along Z (chunks are 4 planes deep).
     const chunk = makeSliceChunk(0, 0, 0, 1, 0, 0);
-    handleSliceChunkData(ctx, makeSliceMsg(memberA, [chunk], { fullResZ: 4 }), epochs(), poolKey, memberA);
-    const slot = atlas.slots.get(`${memberA}|${chunk.key}`)!;
+    want(ctx, "imgA", [chunk.key]);
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 4 }), epochs(), "ds1", "imgA");
+    const slot = atlas.slots.get(`imgA|${chunk.key}`)!;
     expect(atlas.indirectionData[0]).toBe(slot);
     expect(atlas.slotLevelZ[slot]).toBe(4);
 
     // The cold state at Z 5 keeps the chunk's key but must not show plane 4.
     remapSliceIndirection(atlas, 0, 0, 5);
-    expect(atlas.slots.has(`${memberA}|${chunk.key}`)).toBe(true);
+    expect(atlas.slots.has(`imgA|${chunk.key}`)).toBe(true);
     expect(atlas.indirectionData[0]).toBe(0xFFFFFFFF);
 
-    const writes = (ctx.device.queue.writeTexture as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
-    handleSliceChunkData(ctx, makeSliceMsg(memberA, [chunk], { fullResZ: 5 }), epochs(), poolKey, memberA);
-    expect(atlas.slots.get(`${memberA}|${chunk.key}`)).toBe(slot);
+    const writeCount = () => (ctx.device.queue.writeTexture as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+    const writes = writeCount();
+    posts.length = 0;
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 5 }), epochs(), "ds1", "imgA");
+    expect(atlas.slots.get(`imgA|${chunk.key}`)).toBe(slot);
     expect(atlas.slotLevelZ[slot]).toBe(5);
     expect(atlas.indirectionData[0]).toBe(slot);
-    expect((ctx.device.queue.writeTexture as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(writes + 1);
+    expect(writeCount()).toBe(writes + 1);
+    expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["held", [chunk.key]]]);
 
-    // The same plane again is already resident and writes nothing.
-    handleSliceChunkData(ctx, makeSliceMsg(memberA, [chunk], { fullResZ: 5 }), epochs(), poolKey, memberA);
-    expect((ctx.device.queue.writeTexture as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(writes + 1);
+    // The same plane again is already resident: held, and nothing written.
+    posts.length = 0;
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk], { fullResZ: 5 }), epochs(), "ds1", "imgA");
+    expect(writeCount()).toBe(writes + 1);
+    expect(reports(posts).map((r) => [r.change, r.keys])).toEqual([["held", [chunk.key]]]);
   });
 
-  it("missing slice atlas → batch reported as re-eligible", () => {
+  it("refuses a batch with no slice atlas", () => {
     const { ctx, posts } = makeMockCtx();
-    const memberA = "imgA";
     const chunk = makeSliceChunk(0, 0, 0, 0, 0, 0);
 
-    handleSliceChunkData(ctx, makeSliceMsg(memberA, [chunk]), epochs(), "missing-pool", memberA);
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [chunk]), epochs(), "missing-pool", "imgA");
 
-    const evictions = posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>;
-    expect(evictions).toHaveLength(1);
-    expect(evictions[0].memberId).toBe(memberA);
-    expect(evictions[0].keys).toEqual([chunk.key]);
-    expect(evictions[0].skipped).toEqual([]);
+    expect(reports(posts).map((r) => [r.change, r.reason, r.keys])).toEqual([["refused", "missing-pool", [chunk.key]]]);
   });
 
-  it("after the target moves coarser, the old target's plane goes first, ahead of an older stale plane and the farthest mapped one", () => {
+  it("after the target moves coarser, the planes never sampled go first, the greatest key among them", () => {
     const { ctx, posts } = makeMockCtx();
-    const poolKey = "ds1";
-    const memberA = "imgA";
-
-    const atlas = getOrCreateSlicePool(ctx, poolKey, "ds1", 32, 32, 0, 0, 0, "u16");
+    const atlas = getOrCreateSlicePool(ctx, "ds1", "ds1", 32, 32, 0, 0, 0, "u16");
     const level0 = makeSliceMeta(4, 4);
     const level1: LodIndirectionMeta = {
       level: 1, gridDims: [1, 2, 2], chunkDims: [4, 32, 32], levelDims: [64, 64, 64], offset: 4 * 4,
     };
-    atlas.entityMetas.set(memberA, [level0, level1]);
+    atlas.entityMetas.set("imgA", [level0, level1]);
     atlas.indirectionData = new Uint32Array(4 * 4 + 2 * 2).fill(0xFFFFFFFF);
     atlas.freeSlots = [2, 1, 0];
-    ctx.state.targetLevelByMember.set(memberA, 0);
-    ctx.state.cameraUVPerEntity.set(memberA, [0.0, 0.0]);
+    ctx.state.targetLevelByMember.set("imgA", 0);
+    ctx.state.cameraUVPerEntity.set("imgA", [0.0, 0.0]);
     const level1Msg = (chunks: Chunk[], t = 0) =>
-      makeSliceMsg(memberA, chunks, { level: 1, t, levelWidth: 64, levelHeight: 64 });
+      makeSliceMsg("imgA", chunks, { level: 1, t, levelWidth: 64, levelHeight: 64 });
+    const otherT = makeSliceChunk(1, 1, 0, 0, 0, 0);
+    const finer = makeSliceChunk(0, 0, 0, 0, 0, 0);
+    const far = makeSliceChunk(1, 0, 0, 0, 1, 1);
+    const incoming = makeSliceChunk(1, 0, 0, 0, 0, 1);
+    want(ctx, "imgA", [otherT.key, finer.key, far.key, incoming.key]);
 
-    handleSliceChunkData(ctx, level1Msg([makeSliceChunk(1, 1, 0, 0, 0, 0)], 1), epochs(), poolKey, memberA);
-    handleSliceChunkData(ctx, makeSliceMsg(memberA, [makeSliceChunk(0, 0, 0, 0, 0, 0)]), epochs(), poolKey, memberA);
-    handleSliceChunkData(ctx, level1Msg([makeSliceChunk(1, 0, 0, 0, 1, 1)]), epochs(), poolKey, memberA);
+    handleSliceChunkData(ctx, level1Msg([otherT], 1), epochs(), "ds1", "imgA");
+    handleSliceChunkData(ctx, makeSliceMsg("imgA", [finer]), epochs(), "ds1", "imgA");
+    handleSliceChunkData(ctx, level1Msg([far]), epochs(), "ds1", "imgA");
     expect(atlas.slots.size).toBe(3);
 
-    atlas.entityMetas.set(memberA, [{ ...level1, offset: 0 }]);
+    atlas.entityMetas.set("imgA", [{ ...level1, offset: 0 }]);
     atlas.indirectionData = new Uint32Array(2 * 2).fill(0xFFFFFFFF);
     remapSliceIndirection(atlas, 0, 0, 0);
-    ctx.state.targetLevelByMember.set(memberA, 1);
-    expect(atlas.slotGridIdx[atlas.slots.get(`${memberA}|0/0/0/0/0/0`)!]).toBe(-1);
+    ctx.state.targetLevelByMember.set("imgA", 1);
+    expect(atlas.slotGridIdx[atlas.slots.get(`imgA|${finer.key}`)!]).toBe(-1);
 
     posts.length = 0;
-    handleSliceChunkData(ctx, level1Msg([makeSliceChunk(1, 0, 0, 0, 0, 1)]), epochs(), poolKey, memberA);
+    handleSliceChunkData(ctx, level1Msg([incoming]), epochs(), "ds1", "imgA");
 
-    const evictions = (posts.filter(m => m.type === "chunksEvicted") as Array<Extract<WorkerToMainMessage, { type: "chunksEvicted" }>>)
-      .filter(e => e.keys.length > 0);
-    expect(evictions).toHaveLength(1);
-    expect(evictions[0].keys).toEqual([chunkKey(0, 0, 0, 0, 0, 0)]);
-    expect([...atlas.slots.keys()].sort()).toEqual([
-      `${memberA}|1/0/0/0/0/1`,
-      `${memberA}|1/0/0/0/1/1`,
-      `${memberA}|1/1/0/0/0/0`,
-    ]);
+    expect(reports(posts, "lost").map((r) => r.keys)).toEqual([[otherT.key]]);
+    expect([...atlas.slots.keys()].sort()).toEqual([`imgA|${finer.key}`, `imgA|${incoming.key}`, `imgA|${far.key}`].sort());
   });
 });
 
-// Eviction kernel unit tests: 2D vs 3D distance, prefer-stale-slot, and
-// farthest-mapped fallback.
-
-import { chunkDistSq, findFarthestSlot } from "./eviction.ts";
+// The eviction kernel on its own
 
 describe("eviction kernel — chunkDistSq", () => {
   it("2D distance: cz=null strips Z entirely", () => {
@@ -822,119 +762,7 @@ describe("eviction kernel — chunkDistSq", () => {
   });
 });
 
-describe("eviction kernel — findFarthestSlot", () => {
-  it("prefers a stale slot (slotGridIdx[idx] < 0) over any mapped slot", () => {
-    // Two slots: slot 0 mapped (gridIdx >= 0), slot 1 stale (gridIdx < 0).
-    const slots = new Map<string, number>([
-      [`memA|0/0/0/0/0/0`, 0],
-      [`memA|0/0/0/0/0/1`, 1],
-    ]);
-    const slotGridIdx = new Int32Array([0, -1]);
-    const entityMetas = new Map<string, LodIndirectionMeta[]>([
-      ["memA", [makeVolumeMeta(2, 4, 4)]],
-    ]);
-    const result = findFarthestSlot({
-      slots,
-      slotGridIdx,
-      entityMetas,
-      cameraFor: () => [0.5, 0.5, 0.5] as [number, number, number],
-      targetLevelFor: () => 0,
-      is3D: true,
-    });
-    expect(result.key).toBe(`memA|0/0/0/0/0/1`);
-    expect(result.dist).toBe(Infinity);
-  });
-
-  it("missing entityMeta → slot treated as stale (returned with Infinity)", () => {
-    const slots = new Map<string, number>([
-      [`memGone|0/0/0/0/0/0`, 0],
-    ]);
-    const slotGridIdx = new Int32Array([0]);
-    const entityMetas = new Map<string, LodIndirectionMeta[]>();
-    const result = findFarthestSlot({
-      slots,
-      slotGridIdx,
-      entityMetas,
-      cameraFor: () => [0.5, 0.5, 0.5] as [number, number, number],
-      targetLevelFor: () => 0,
-      is3D: true,
-    });
-    expect(result.key).toBe(`memGone|0/0/0/0/0/0`);
-    expect(result.dist).toBe(Infinity);
-  });
-
-  it("no stale slots → picks the farthest mapped slot from cameraFor", () => {
-    // 3D: chunks at grid (0,0,0) and (1,3,3). Camera at corner (0,0,0)
-    // → (1,3,3) is farther.
-    const slots = new Map<string, number>([
-      [`memA|0/0/0/0/0/0`, 0],
-      [`memA|0/0/0/1/3/3`, 1],
-    ]);
-    const slotGridIdx = new Int32Array([0, 1]);
-    const entityMetas = new Map<string, LodIndirectionMeta[]>([
-      ["memA", [makeVolumeMeta(2, 4, 4)]],
-    ]);
-    const result = findFarthestSlot({
-      slots,
-      slotGridIdx,
-      entityMetas,
-      cameraFor: () => [0.0, 0.0, 0.0] as [number, number, number],
-      targetLevelFor: () => 0,
-      is3D: true,
-    });
-    expect(result.key).toBe(`memA|0/0/0/1/3/3`);
-    expect(result.dist).toBeGreaterThan(0);
-  });
-
-  it("2D mode (is3D=false): Z is stripped from distance computation", () => {
-    // Two chunks differing only in Z; in 2D they should tie on distance.
-    const slots = new Map<string, number>([
-      [`memA|0/0/0/0/2/2`, 0],
-      [`memA|0/0/0/1/2/2`, 1],
-    ]);
-    const slotGridIdx = new Int32Array([0, 1]);
-    const entityMetas = new Map<string, LodIndirectionMeta[]>([
-      ["memA", [makeSliceMeta(4, 4)]],
-    ]);
-    const result = findFarthestSlot({
-      slots,
-      slotGridIdx,
-      entityMetas,
-      cameraFor: () => [0.0, 0.0] as [number, number],
-      targetLevelFor: () => 0,
-      is3D: false,
-    });
-    // Both distances are equal in 2D mode, so the greater key goes.
-    expect(result.key).toBe(`memA|0/0/0/1/2/2`);
-  });
-
-  it("breaks a distance tie by key, whatever order the chunks arrived in", () => {
-    const entityMetas = new Map<string, LodIndirectionMeta[]>([
-      ["memA", [makeSliceMeta(4, 4)]],
-    ]);
-    const pick = (order: string[]) =>
-      findFarthestSlot({
-        slots: new Map(order.map((key, i) => [key, i])),
-        slotGridIdx: new Int32Array([0, 1]),
-        entityMetas,
-        // Columns 1 and 2 of the 4 × 4 grid mirror each other about the camera.
-        cameraFor: () => [0.5, 0.5] as [number, number],
-        targetLevelFor: () => 0,
-        is3D: false,
-      }).key;
-    const left = `memA|0/0/0/0/1/1`;
-    const right = `memA|0/0/0/0/1/2`;
-    expect(pick([left, right])).toBe(right);
-    expect(pick([right, left])).toBe(right);
-  });
-});
-
-/**
- * A finer-than-target chunk is always unmapped, because the pool has
- * sections for the target and coarser levels only. Among unmapped chunks,
- * finer than the target goes first.
- */
-describe("eviction kernel — finer-than-target first, then farthest", () => {
+describe("eviction kernel — findEvictionSlot", () => {
   const level2: LodIndirectionMeta = {
     level: 2, gridDims: [1, 2, 2], chunkDims: [32, 32, 32], levelDims: [32, 64, 64], offset: 0,
   };
@@ -942,83 +770,120 @@ describe("eviction kernel — finer-than-target first, then farthest", () => {
     level: 3, gridDims: [1, 1, 1], chunkDims: [32, 32, 32], levelDims: [32, 32, 32], offset: 4,
   };
   const corner = () => [0.0, 0.0, 0.0] as [number, number, number];
+  const all = () => true;
 
-  it("a chunk finer than the target goes first, ahead of every other stale chunk and the farthest mapped one", () => {
-    // Two other stale chunks and a far mapped one precede the finer chunk in
-    // slot order, so a first-stale-wins scan picks the wrong slot.
-    const slots = new Map<string, number>([
-      [`memA|2/1/0/0/0/0`, 0], // target level, another timepoint: unmapped
-      [`memA|5/0/0/0/0/0`, 1], // coarser than every resident level: unmapped
-      [`memA|2/0/0/0/1/1`, 2], // target level, mapped, far corner
-      [`memA|0/0/0/0/0/0`, 3], // finer than the target: unmapped
-    ]);
-    const slotGridIdx = new Int32Array([-1, -1, 3, -1]);
-    const entityMetas = new Map([["memA", [level2]]]);
-    const result = findFarthestSlot({
-      slots, slotGridIdx, entityMetas, cameraFor: corner, targetLevelFor: () => 2, is3D: true,
+  /** Pick from slots in the order given, slot i at index i. */
+  function pick(
+    keys: string[],
+    gridIdx: number[],
+    overrides: Partial<FindEvictionParams> = {},
+  ) {
+    return findEvictionSlot({
+      slots: new Map(keys.map((key, i) => [key, i])),
+      slotGridIdx: new Int32Array(gridIdx),
+      entityMetas: new Map([["memA", [makeVolumeMeta(2, 4, 4)]]]),
+      cameraFor: corner,
+      targetLevelFor: () => 0,
+      isWanted: all,
+      is3D: true,
+      ...overrides,
     });
-    expect(result).toEqual({ key: `memA|0/0/0/0/0/0`, dist: Infinity });
+  }
+
+  it("holds nothing to evict in an empty pool", () => {
+    expect(pick([], [])).toBeNull();
   });
 
-  it("among finer chunks, the finest level goes first", () => {
-    const slots = new Map<string, number>([
-      [`memA|1/0/0/0/0/0`, 0],
-      [`memA|0/0/0/0/0/0`, 1],
-    ]);
-    const slotGridIdx = new Int32Array([-1, -1]);
-    const entityMetas = new Map([["memA", [level2]]]);
-    const result = findFarthestSlot({
-      slots, slotGridIdx, entityMetas, cameraFor: corner, targetLevelFor: () => 2, is3D: true,
+  it("takes an unmapped slot before any mapped one", () => {
+    expect(pick([`memA|0/0/0/0/0/0`, `memA|0/0/0/0/0/1`], [0, -1])).toEqual({
+      key: `memA|0/0/0/0/0/1`, class: "unsampled", dist: Infinity,
     });
-    expect(result.key).toBe(`memA|0/0/0/0/0/0`);
   });
 
-  it("a member with no known target has nothing finer: its unmapped chunks are stale in slot order", () => {
-    const slots = new Map<string, number>([
-      [`memA|2/1/0/0/0/0`, 0],
-      [`memA|0/0/0/0/0/0`, 1],
-    ]);
-    const slotGridIdx = new Int32Array([-1, -1]);
-    const entityMetas = new Map([["memA", [level2]]]);
-    const result = findFarthestSlot({
-      slots, slotGridIdx, entityMetas, cameraFor: corner, targetLevelFor: () => undefined, is3D: true,
+  it("counts a slot whose member has no section as never sampled", () => {
+    expect(pick([`memGone|0/0/0/0/0/0`], [0])).toEqual({
+      key: `memGone|0/0/0/0/0/0`, class: "unsampled", dist: Infinity,
     });
-    expect(result).toEqual({ key: `memA|2/1/0/0/0/0`, dist: Infinity });
   });
 
-  it("an unmapped chunk coarser than every resident level is stale, not finer, and still goes before a mapped one", () => {
-    const slots = new Map<string, number>([
-      [`memA|2/0/0/0/1/1`, 0],
-      [`memA|5/0/0/0/0/0`, 1],
-    ]);
-    const slotGridIdx = new Int32Array([3, -1]);
-    const entityMetas = new Map([["memA", [level2]]]);
-    const result = findFarthestSlot({
-      slots, slotGridIdx, entityMetas, cameraFor: corner, targetLevelFor: () => 2, is3D: true,
-    });
-    expect(result).toEqual({ key: `memA|5/0/0/0/0/0`, dist: Infinity });
+  it("among wanted chunks, takes the farthest from the camera reference", () => {
+    const result = pick([`memA|0/0/0/0/0/0`, `memA|0/0/0/1/3/3`], [0, 1])!;
+    expect(result.key).toBe(`memA|0/0/0/1/3/3`);
+    expect(result.class).toBe("wanted");
+    expect(result.dist).toBeGreaterThan(0);
   });
 
-  it("among mapped chunks at or coarser than the target, the farthest goes first whatever its level", () => {
+  it("drops Z from the distance in 2D, and breaks the tie by key", () => {
+    const result = pick([`memA|0/0/0/0/2/2`, `memA|0/0/0/1/2/2`], [0, 1], {
+      entityMetas: new Map([["memA", [makeSliceMeta(4, 4)]]]),
+      cameraFor: () => [0.0, 0.0] as [number, number],
+      is3D: false,
+    })!;
+    expect(result.key).toBe(`memA|0/0/0/1/2/2`);
+  });
+
+  it("breaks a distance tie by key, whatever order the chunks arrived in", () => {
+    const left = `memA|0/0/0/0/1/1`;
+    const right = `memA|0/0/0/0/1/2`;
+    const options: Partial<FindEvictionParams> = {
+      entityMetas: new Map([["memA", [makeSliceMeta(4, 4)]]]),
+      // Columns 1 and 2 of the 4 × 4 grid mirror each other about the camera.
+      cameraFor: () => [0.5, 0.5] as [number, number],
+      is3D: false,
+    };
+    expect(pick([left, right], [0, 1], options)!.key).toBe(right);
+    expect(pick([right, left], [0, 1], options)!.key).toBe(right);
+  });
+
+  it("takes any chunk finer than the target, or unmapped, before a mapped one, the greatest key first whatever the slot order", () => {
+    const keys = [
+      `memA|2/1/0/0/0/0`, // target level, another timepoint: unmapped
+      `memA|5/0/0/0/0/0`, // coarser than every resident level: unmapped
+      `memA|2/0/0/0/1/1`, // target level, mapped, far corner
+      `memA|0/0/0/0/0/0`, // finer than the target
+    ];
+    const options: Partial<FindEvictionParams> = {
+      entityMetas: new Map([["memA", [level2]]]),
+      targetLevelFor: () => 2,
+    };
+    expect(pick(keys, [-1, -1, 3, -1], options)).toEqual({ key: `memA|5/0/0/0/0/0`, class: "unsampled", dist: Infinity });
+    expect(pick([...keys].reverse(), [-1, 3, -1, -1], options)).toEqual({ key: `memA|5/0/0/0/0/0`, class: "unsampled", dist: Infinity });
+  });
+
+  it("counts a chunk finer than the target as never sampled, even while still mapped", () => {
+    const options: Partial<FindEvictionParams> = {
+      entityMetas: new Map([["memA", [level2, { ...level2, level: 1 }]]]),
+      targetLevelFor: () => 2,
+    };
+    expect(pick([`memA|2/0/0/0/1/1`, `memA|1/0/0/0/0/0`], [3, 0], options)).toEqual({
+      key: `memA|1/0/0/0/0/0`, class: "unsampled", dist: Infinity,
+    });
+  });
+
+  it("takes a mapped chunk the planner no longer wants before any wanted one, the farthest first", () => {
     // From the corner: the level-2 chunk at (0,0) is 0.375 away, the level-3
     // chunk 0.75, the level-2 chunk at (1,1) 1.375 (squared, normalized).
-    const entityMetas = new Map([["memA", [level2, level3]]]);
-    const targetLevelFor = () => 2;
+    const options: Partial<FindEvictionParams> = {
+      entityMetas: new Map([["memA", [level2, level3]]]),
+      targetLevelFor: () => 2,
+      isWanted: (_member, chunkKey) => chunkKey.startsWith("2/"),
+    };
+    const fallback = pick([`memA|2/0/0/0/0/0`, `memA|3/0/0/0/0/0`, `memA|2/0/0/0/1/1`], [0, 4, 3], options)!;
+    expect(fallback.key).toBe(`memA|3/0/0/0/0/0`);
+    expect(fallback.class).toBe("unwanted");
+    expect(fallback.dist).toBeCloseTo(0.75, 6);
 
-    const coarserIsFarther = findFarthestSlot({
-      slots: new Map([[`memA|2/0/0/0/0/0`, 0], [`memA|3/0/0/0/0/0`, 1]]),
-      slotGridIdx: new Int32Array([0, 4]),
-      entityMetas, cameraFor: corner, targetLevelFor, is3D: true,
-    });
-    expect(coarserIsFarther.key).toBe(`memA|3/0/0/0/0/0`);
-    expect(coarserIsFarther.dist).toBeCloseTo(0.75, 6);
+    // With nothing unwanted, the farthest wanted chunk, whatever its level.
+    const wanted = pick([`memA|2/0/0/0/0/0`, `memA|3/0/0/0/0/0`, `memA|2/0/0/0/1/1`], [0, 4, 3], { ...options, isWanted: all })!;
+    expect(wanted.key).toBe(`memA|2/0/0/0/1/1`);
+    expect(wanted.class).toBe("wanted");
+    expect(wanted.dist).toBeCloseTo(1.375, 6);
+  });
 
-    const targetIsFarther = findFarthestSlot({
-      slots: new Map([[`memA|2/0/0/0/0/0`, 0], [`memA|3/0/0/0/0/0`, 1], [`memA|2/0/0/0/1/1`, 2]]),
-      slotGridIdx: new Int32Array([0, 4, 3]),
-      entityMetas, cameraFor: corner, targetLevelFor, is3D: true,
-    });
-    expect(targetIsFarther.key).toBe(`memA|2/0/0/0/1/1`);
-    expect(targetIsFarther.dist).toBeCloseTo(1.375, 6);
+  it("lets a wanted chunk take an unwanted slot at any distance, and a wanted slot only when strictly nearer", () => {
+    expect(mayEvict({ key: "k", class: "unsampled", dist: Infinity }, 10)).toBe(true);
+    expect(mayEvict({ key: "k", class: "unwanted", dist: 0.1 }, 10)).toBe(true);
+    expect(mayEvict({ key: "k", class: "wanted", dist: 0.5 }, 0.4)).toBe(true);
+    expect(mayEvict({ key: "k", class: "wanted", dist: 0.5 }, 0.5)).toBe(false);
   });
 });

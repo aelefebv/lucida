@@ -185,7 +185,7 @@ export function buildGroupTierCoverage(
     if (cacheSnap?.inFlight.get(req.entityId)?.has(req.chunkKey)) {
       counts.inFlight++;
     }
-    if (ready || cpuCache?.deliveryState.wasChunkSent(req.imageId, req.c, req.chunkKey, tier)) {
+    if (ready || cpuCache?.deliveryState.isChunkHeld(req.imageId, req.c, req.chunkKey, tier)) {
       counts.shown++;
     }
   }
@@ -1010,10 +1010,7 @@ export function DebugOverlays({
               })) {
                 return false;
               }
-              const worker = renderLoopRef.current?.workerChunkResidency(dsId, entry.imageId, c, key) ?? "unknown";
-              if (worker === "resident") return true;
-              if (worker === "missing") return false;
-              return cpuCache.deliveryState.wasChunkSent(entry.imageId, c, key, tier);
+              return cpuCache.deliveryState.isChunkHeld(entry.imageId, c, key, tier);
             };
 
             const statusFor = (key: string): Pick<ChunkCell, "status" | "priorityRank" | "tier"> => {

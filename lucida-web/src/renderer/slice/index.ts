@@ -25,7 +25,7 @@ export {
   chunkDistSq2D,
   clearAllCameraUVs,
   clearCameraUVForMember,
-  findFarthestSlot2D,
+  findEvictionSlot2D,
   setCameraUVForMember,
 } from "./eviction.ts";
 
