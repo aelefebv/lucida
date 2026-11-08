@@ -52,6 +52,7 @@ interface Params {
   bumpDatasetsVersion: () => void;
   bumpRemoteDocumentVersion: () => void;
   onWorkspaceArchived?: () => void;
+  onAccessRevoked?: () => void;
 }
 
 /**
@@ -141,6 +142,7 @@ export function useBridge(params: Params) {
         onDatasetsChanged: () => portsRef.current.bumpDatasetsVersion(),
         onRemoteDocumentChanged: () => portsRef.current.bumpRemoteDocumentVersion(),
         onWorkspaceArchived: () => portsRef.current.onWorkspaceArchived?.(),
+        onAccessRevoked: () => portsRef.current.onAccessRevoked?.(),
         onCommandRejected: (reason) => {
           const now = Date.now();
           if (now - lastRejectionToastAt < COMMAND_REJECTION_TOAST_INTERVAL_MS) return;

@@ -44,6 +44,15 @@ pub const CLOSE_TOO_FAR_BEHIND: u16 = 1013;
 /// what it joined. 1008 is "policy violation".
 pub const CLOSE_ACCESS_REVOKED: u16 = 1008;
 
+/// Close code for a connection to a live workspace the server stopped
+/// serving because the database holds a newer document. 1012 is "service
+/// restart": the reconnect loads the workspace fresh.
+pub const CLOSE_WORKSPACE_RELOADED: u16 = 1012;
+
+/// Close code for a connection to a workspace that was archived. Private
+/// use, numbered after the HTTP 410 its routes answer from then on.
+pub const CLOSE_WORKSPACE_ARCHIVED: u16 = 4410;
+
 /// Apply the inbound caps to an upgrade. Every WebSocket route goes
 /// through this, so no route accepts a larger message than another.
 pub fn limit_inbound(ws: WebSocketUpgrade) -> WebSocketUpgrade {
@@ -58,7 +67,34 @@ pub struct NotQueued;
 struct Shared {
     queued_bytes: AtomicUsize,
     budget: usize,
-    close: watch::Sender<Option<CloseFrame>>,
+    close: watch::Sender<Option<CloseRequest>>,
+}
+
+/// How a connection is asked to close: the close frame, and optionally a
+/// message written just ahead of it. A close skips the queue, so the
+/// notice is the only message sure to reach the client before it.
+#[derive(Debug, Clone)]
+pub struct CloseRequest {
+    pub frame: CloseFrame,
+    pub notice: Option<String>,
+}
+
+impl CloseRequest {
+    pub fn new(code: u16, reason: &str) -> Self {
+        Self {
+            frame: CloseFrame {
+                code,
+                reason: reason.into(),
+            },
+            notice: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_notice(mut self, notice: String) -> Self {
+        self.notice = Some(notice);
+        self
+    }
 }
 
 /// The sending half of one client's queue. Cheap to clone; every clone
@@ -76,7 +112,7 @@ pub struct ClientReceiver {
 }
 
 /// Resolves once somebody asks to close the connection.
-pub struct CloseSignal(watch::Receiver<Option<CloseFrame>>);
+pub struct CloseSignal(watch::Receiver<Option<CloseRequest>>);
 
 /// A queue with the standard budget.
 pub fn client_queue() -> (ClientSender, ClientReceiver) {
@@ -146,14 +182,17 @@ impl ClientSender {
     /// Ask the connection to close with `code` and `reason`. The first
     /// request wins; later ones are ignored.
     pub fn close(&self, code: u16, reason: &str) {
+        self.request_close(CloseRequest::new(code, reason));
+    }
+
+    /// Ask the connection to close as `request` says. The first request
+    /// wins; later ones are ignored.
+    pub fn request_close(&self, request: CloseRequest) {
         self.shared.close.send_if_modified(|current| {
             if current.is_some() {
                 return false;
             }
-            *current = Some(CloseFrame {
-                code,
-                reason: reason.into(),
-            });
+            *current = Some(request);
             true
         });
     }
@@ -193,8 +232,8 @@ impl ClientReceiver {
 }
 
 impl CloseSignal {
-    /// The close frame, if one has been requested.
-    pub fn current(&self) -> Option<CloseFrame> {
+    /// The close request, if one has been made.
+    pub fn current(&self) -> Option<CloseRequest> {
         self.0.borrow().clone()
     }
 
@@ -203,12 +242,12 @@ impl CloseSignal {
     pub async fn requested(&mut self) -> CloseFrame {
         // Clone out of the borrow before any further await: the borrow
         // holds the channel's lock and is not `Send`.
-        let frame = match self.0.wait_for(Option::is_some).await {
-            Ok(frame) => frame.clone(),
+        let request = match self.0.wait_for(Option::is_some).await {
+            Ok(request) => request.clone(),
             Err(_) => None,
         };
-        match frame {
-            Some(frame) => frame,
+        match request {
+            Some(request) => request.frame,
             None => std::future::pending().await,
         }
     }
