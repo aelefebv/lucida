@@ -7,6 +7,7 @@
  */
 import { positionLabel } from "../axes.ts";
 import type { Annotation } from "./annotationDocument.ts";
+import { deriveHandle } from "./annotationParticipants.ts";
 
 /** The current view's selectors, and the channels the pin's layer shows now. */
 export interface ViewContext {
@@ -60,4 +61,16 @@ export function offContextLabel(pin: Annotation): string {
     ? positionLabel("Channel", channels[0])
     : `Channels ${channels.map((c) => c + 1).join(", ")}`;
   return [positionLabel("Z", z), positionLabel("T", t), channelPart].join(" · ");
+}
+
+/** A pin marker's accessible name: whose it is, its comment count, and, off the view, where it lives. */
+export function pinLabel(pin: Annotation, mine: boolean, offContext: boolean): string {
+  const count = pin.comments?.length ?? 0;
+  return [
+    `Pin by ${mine ? "you" : deriveHandle(pin.author)}`,
+    count > 0 ? `${count} comment${count === 1 ? "" : "s"}` : null,
+    offContext ? offContextLabel(pin) : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
 }

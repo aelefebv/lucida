@@ -6,6 +6,7 @@ import { usePeerState, type PeerStore } from "../peerStore.ts";
 import { Avatar } from "../ui/Avatar.tsx";
 import { Button } from "../ui/Button.tsx";
 import { Menu, MenuItem } from "../ui/Menu.tsx";
+import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import "./PresenceAvatars.css";
 
 /** Avatars shown before the rest collapse into a "+N" menu. */
@@ -119,18 +120,17 @@ export function PresenceAvatars({ peerStore, onFollow }: PresenceAvatarsProps) {
       )}
       <div className="lc-presence-stack">
         {shown.map((peer) => (
-          <button
+          <UnstyledButton
             key={peer.id}
-            type="button"
             className="lc-presence-peer"
             aria-label={actionLabel(peer)}
             aria-pressed={peer.following}
-            disabled={!peer.followable && !peer.following}
+            isDisabled={!peer.followable && !peer.following}
             data-following={peer.following || undefined}
-            onClick={() => press(peer)}
+            onPress={() => press(peer)}
           >
             <Avatar name={peer.name} src={peer.pictureUrl} color={peer.color} />
-          </button>
+          </UnstyledButton>
         ))}
         {rest.length > 0 && (
           <Menu label="Everyone here" placement="bottom end" trigger={<Button size="sm" variant="ghost">{`+${rest.length}`}</Button>}>
