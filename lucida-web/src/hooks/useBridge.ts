@@ -1,6 +1,12 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WasmScene } from "lucida-core";
-import type { Bridge, ClientId, DatasetImportWarning, PresenceState } from "../bridge.ts";
+import type {
+  Bridge,
+  ClientId,
+  CommandRejection,
+  DatasetImportWarning,
+  PresenceState,
+} from "../bridge.ts";
 export type { Bridge } from "../bridge.ts";
 import type { DatasetState } from "../types.ts";
 import type { RenderLoop } from "../renderLoop.ts";
@@ -9,6 +15,17 @@ import { SessionController } from "../sessionController.ts";
 export type { SavedViewBridgeHooks } from "../sessionController.ts";
 import type { SavedViewBridgeHooks, ViewportSize } from "../sessionController.ts";
 import type { DatasetCallbacks } from "./useDatasetSettings.ts";
+import { toast } from "../ui/toastQueue.ts";
+
+const COMMAND_REJECTION_TEXT: Record<CommandRejection, string> = {
+  forbidden: "Your role in this workspace can't make this change.",
+  invalid: "It refers to something the workspace no longer has.",
+  unavailable: "The server couldn't save it. Try again.",
+};
+
+/** One toast covers a run of refusals, such as every step of a drag while
+ *  the server can't save. Matches the toast's own minimum timeout. */
+const COMMAND_REJECTION_TOAST_INTERVAL_MS = 5000;
 
 interface Params {
   workspaceId: string;
@@ -27,12 +44,6 @@ interface Params {
   // From useDatasetSettings (called before)
   bumpLayerSettingsVersion: () => void;
   initLayerMaps: (id: string) => void;
-  // From useDimensions (called before)
-  setZ: React.Dispatch<React.SetStateAction<number>>;
-  setC: React.Dispatch<React.SetStateAction<number>>;
-  setT: React.Dispatch<React.SetStateAction<number>>;
-  setViewMode: React.Dispatch<React.SetStateAction<"2d" | "3d">>;
-  setMultiChannel: React.Dispatch<React.SetStateAction<boolean>>;
   // Lifted state (from App)
   setSelectedDatasetId: React.Dispatch<React.SetStateAction<string | null>>;
   bumpDatasetsVersion: () => void;
@@ -91,6 +102,7 @@ export function useBridge(params: Params) {
   useEffect(() => {
     if (!wasmReady || controllerRef.current) return;
 
+    let lastRejectionToastAt = -Infinity;
     const controller = new SessionController({
       workspaceId,
       ensureScene: () => portsRef.current.ensureScene(),
@@ -106,13 +118,6 @@ export function useBridge(params: Params) {
       bumpLayerSettingsVersion: () => portsRef.current.bumpLayerSettingsVersion(),
       initLayerMaps: (id) => portsRef.current.initLayerMaps(id),
       setSelectedDatasetId: (id) => portsRef.current.setSelectedDatasetId(id),
-      viewState: {
-        setZ: (v) => portsRef.current.setZ(v),
-        setC: (v) => portsRef.current.setC(v),
-        setT: (v) => portsRef.current.setT(v),
-        setViewMode: (mode) => portsRef.current.setViewMode(mode),
-        setMultiChannel: (multi) => portsRef.current.setMultiChannel(multi),
-      },
       events: {
         onConnectedChanged: setConnected,
         onSessionReadyChanged: setSessionReady,
@@ -133,6 +138,16 @@ export function useBridge(params: Params) {
         onDatasetsChanged: () => portsRef.current.bumpDatasetsVersion(),
         onRemoteDocumentChanged: () => portsRef.current.bumpRemoteDocumentVersion(),
         onWorkspaceArchived: () => portsRef.current.onWorkspaceArchived?.(),
+        onCommandRejected: (reason) => {
+          const now = Date.now();
+          if (now - lastRejectionToastAt < COMMAND_REJECTION_TOAST_INTERVAL_MS) return;
+          lastRejectionToastAt = now;
+          toast({
+            title: "Change not saved",
+            description: COMMAND_REJECTION_TEXT[reason],
+            tone: "warning",
+          });
+        },
         onDatasetImportWarnings: setDatasetImportWarnings,
       },
     });
@@ -201,10 +216,14 @@ export function useBridge(params: Params) {
     controllerRef.current?.dismissOpenWarnings();
   }, []);
 
-  const followablePeers = Array.from(peers.entries())
-    .filter(([, p]) => p.following === null || p.following === undefined);
+  const followablePeers = useMemo(
+    () => Array.from(peers.entries()).filter(([, p]) => p.following === null || p.following === undefined),
+    [peers],
+  );
 
-  return {
+  // One object per change of the state in it, so a consumer keyed on it
+  // re-runs only when that state moved. The callbacks never change.
+  return useMemo(() => ({
     sessionRef,
     /** Non-null while the WebSocket may still be CONNECTING, so it is not a
      *  readiness signal. Use `connected` or `sessionReady` for that. */
@@ -240,7 +259,13 @@ export function useBridge(params: Params) {
     breakFollow,
     handleFollow,
     followablePeers,
-  };
+  }), [
+    bridge, connected, sessionReady, peers, myId, followTarget,
+    sendCommand, sendCursor, emitPresence, emitDatasetPresence, sendOpenRemoteDataset,
+    remoteDatasetLoading, remoteDatasetError, remoteDatasetProgress,
+    remoteDatasetWarnings, remoteDatasetWarningsOverflow, dismissRemoteDatasetWarnings,
+    datasetImportWarnings, breakFollow, handleFollow, followablePeers,
+  ]);
 }
 
 /**

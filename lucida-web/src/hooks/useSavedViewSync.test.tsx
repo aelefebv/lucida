@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 //
-// Hook wiring: notifyChange forwards to UrlSync, and apply-complete wakes the
-// render loop and pushes C/T/Z, viewMode, and multiChannel back to React.
-// `dataset_id_for_url` is mocked so the hook builds without a wasm init.
+// Hook wiring: notifyChange forwards to UrlSync, apply-complete wakes the
+// render loop, and React reads the applied C/T/Z, viewMode, and multiChannel
+// back from the scene. `dataset_id_for_url` is mocked so the hook builds
+// without a wasm init.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -19,6 +20,9 @@ import type { SavedView } from "../savedView/types.ts";
 import { SAVED_VIEW_VERSION } from "../savedView/types.ts";
 import { decode, encode } from "../savedView/encoder.ts";
 import type { RenderLoop } from "../renderLoop.ts";
+import type { WasmScene } from "lucida-core";
+import { SceneStore } from "../sceneStore.ts";
+import { useSceneView } from "./useSceneView.ts";
 
 interface MockScene {
   zVal: number;
@@ -26,6 +30,8 @@ interface MockScene {
   tVal: number;
   cameraModeVal: string;
   multiChannelVal: boolean;
+  epochCounts: { view: number; selection: number };
+  epochs: () => string;
   z: () => number;
   c: () => number;
   t: () => number;
@@ -52,6 +58,8 @@ function makeMockScene(): MockScene {
     tVal: 0,
     cameraModeVal: "slice",
     multiChannelVal: false,
+    epochCounts: { view: 0, selection: 0 },
+    epochs: () => JSON.stringify({ content: 0, layout: 0, asset: 0, ...m.epochCounts }),
     z: () => m.zVal,
     c: () => m.cVal,
     t: () => m.tVal,
@@ -65,6 +73,8 @@ function makeMockScene(): MockScene {
         if (cmd.type === "set_z") m.zVal = cmd.z;
         if (cmd.type === "set_z_range") m.zVal = cmd.start;
         if (cmd.type === "set_multi_channel") m.multiChannelVal = cmd.enabled;
+        if (cmd.type === "pan") m.epochCounts.view++;
+        else m.epochCounts.selection++;
       } catch { /* ignore */ }
     },
     dataset_ids: () => "[]",
@@ -75,6 +85,8 @@ function makeMockScene(): MockScene {
     import_presence: (json: string) => {
       const obj = JSON.parse(json);
       Object.assign(presence, obj);
+      m.epochCounts.view++;
+      m.epochCounts.selection++;
     },
   };
   return m;
@@ -106,9 +118,9 @@ interface Captured {
 
 interface HarnessProps {
   scene: MockScene;
+  store: SceneStore;
   outRef: Captured;
   loopRef: React.RefObject<RenderLoop | null>;
-  initial?: { z?: number; c?: number; t?: number; viewMode?: "2d" | "3d" };
   persistLastView?: (view: SavedView) => Promise<unknown>;
   lastViewDebounceMs?: number;
   captureSurface?: boolean;
@@ -116,18 +128,14 @@ interface HarnessProps {
 
 function HookHarness({
   scene,
+  store,
   outRef,
   loopRef,
-  initial,
   persistLastView,
   lastViewDebounceMs,
   captureSurface,
 }: HarnessProps) {
-  const [z, setZ] = useState(initial?.z ?? 0);
-  const [c, setC] = useState(initial?.c ?? 0);
-  const [t, setT] = useState(initial?.t ?? 0);
-  const [viewMode, setViewMode] = useState<"2d" | "3d">(initial?.viewMode ?? "2d");
-  const [multiChannel, setMultiChannel] = useState(false);
+  const { z, c, t, viewMode, multiChannel } = useSceneView(store);
   const [autoContrastMap, setAutoContrastMap] = useState<Map<string, boolean>>(new Map());
   // Mirror the latest map into a ref via useLayoutEffect — the hook reads
   // .current from event handlers and follow-on effects, all of which fire
@@ -141,13 +149,9 @@ function HookHarness({
     sendOpenRemoteDataset: () => {},
     sendCommand: () => {},
     changeTick: 0,
+    sceneStore: store,
     debounceMs: 1,
     loopRef,
-    setC,
-    setT,
-    setZ,
-    setViewMode,
-    setMultiChannel,
     autoContrastMapRef,
     setAutoContrastMap,
     persistLastView,
@@ -183,10 +187,12 @@ function makeMockLoop(): {
 
 describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
   let scene: MockScene;
+  let store: SceneStore;
   let outRef: Captured;
 
   beforeEach(() => {
     scene = makeMockScene();
+    store = new SceneStore(() => scene as unknown as WasmScene);
     outRef = { current: null };
     // Reset the location hash so each test mounts with no pre-existing
     // bootstrap payload (otherwise a prior test's URL write triggers
@@ -196,10 +202,10 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
 
   it("returns a stable notifyChange callback", async () => {
     const loop = makeMockLoop();
-    const { rerender } = render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+    const { rerender } = render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     await act(async () => { /* flush mount */ });
     const first = outRef.current?.handle.notifyChange;
-    rerender(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+    rerender(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     await act(async () => { /* flush rerender */ });
     expect(outRef.current?.handle.notifyChange).toBe(first);
   });
@@ -215,7 +221,7 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
 
     try {
       await act(async () => {
-        render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+        render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
       });
       await act(async () => {
         outRef.current?.handle.notifyChange();
@@ -233,6 +239,7 @@ describe("useSavedViewSync — exposes notifyChange (Bug #1)", () => {
 
 describe("useSavedViewSync — capture surface writes no user state (#923)", () => {
   let scene: MockScene;
+  let store: SceneStore;
   let outRef: Captured;
 
   // Fake timers here on purpose: these assert about a 3-second debounce, and
@@ -240,6 +247,7 @@ describe("useSavedViewSync — capture surface writes no user state (#923)", () 
   // the kind of test that flakes on a loaded CI runner.
   beforeEach(() => {
     scene = makeMockScene();
+    store = new SceneStore(() => scene as unknown as WasmScene);
     outRef = { current: null };
     window.history.replaceState(null, "", "/");
     vi.useFakeTimers();
@@ -256,12 +264,75 @@ describe("useSavedViewSync — capture surface writes no user state (#923)", () 
       render(
         <HookHarness
           scene={scene}
+          store={store}
           outRef={outRef}
           loopRef={loop.ref}
           persistLastView={async (v) => { persisted.push(v); }}
           lastViewDebounceMs={3000}
         />,
       );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    expect(persisted.length).toBe(1);
+  });
+
+  it("persists a pan with no other change as the last view", async () => {
+    const loop = makeMockLoop();
+    const persisted: SavedView[] = [];
+    await act(async () => {
+      render(
+        <HookHarness
+          scene={scene}
+          store={store}
+          outRef={outRef}
+          loopRef={loop.ref}
+          persistLastView={async (v) => { persisted.push(v); }}
+          lastViewDebounceMs={3000}
+        />,
+      );
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    expect(persisted.length).toBe(1);
+
+    await act(async () => {
+      scene.apply_command(JSON.stringify({ type: "pan", dx: 10, dy: 0 }));
+      store.sync();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    expect(persisted.length).toBe(2);
+  });
+
+  it("sends no last view for a render that changed nothing", async () => {
+    const loop = makeMockLoop();
+    const persisted: SavedView[] = [];
+    const persist = async (v: SavedView) => { persisted.push(v); };
+    const harness = () => (
+      <HookHarness
+        scene={scene}
+        store={store}
+        outRef={outRef}
+        loopRef={loop.ref}
+        persistLastView={persist}
+        lastViewDebounceMs={3000}
+      />
+    );
+    let rerender: (ui: React.ReactElement) => void = () => {};
+    await act(async () => {
+      rerender = render(harness()).rerender;
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    expect(persisted.length).toBe(1);
+
+    await act(async () => {
+      rerender(harness());
     });
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3100);
@@ -276,6 +347,7 @@ describe("useSavedViewSync — capture surface writes no user state (#923)", () 
       render(
         <HookHarness
           scene={scene}
+          store={store}
           outRef={outRef}
           loopRef={loop.ref}
           captureSurface
@@ -303,6 +375,7 @@ describe("useSavedViewSync — capture surface writes no user state (#923)", () 
         render(
           <HookHarness
             scene={scene}
+            store={store}
             outRef={outRef}
             loopRef={loop.ref}
             captureSurface
@@ -320,10 +393,12 @@ describe("useSavedViewSync — capture surface writes no user state (#923)", () 
 
 describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
   let scene: MockScene;
+  let store: SceneStore;
   let outRef: Captured;
 
   beforeEach(() => {
     scene = makeMockScene();
+    store = new SceneStore(() => scene as unknown as WasmScene);
     outRef = { current: null };
     window.history.replaceState(null, "", "/");
   });
@@ -331,7 +406,7 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
   it("marks loop interactive + residency dirty after apply (Bug #2)", async () => {
     const loop = makeMockLoop();
     await act(async () => {
-      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     });
     expect(loop.interactiveCalls).toEqual([]);
     expect(loop.residencyCalls).toEqual([]);
@@ -344,10 +419,10 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     expect(loop.residencyCalls).toContain("savedview_apply");
   });
 
-  it("pushes post-apply C/T/Z back to React state (Bug #3)", async () => {
+  it("lets React read the applied C/T/Z back from the scene", async () => {
     const loop = makeMockLoop();
     await act(async () => {
-      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     });
     expect(outRef.current?.c).toBe(0);
 
@@ -366,16 +441,16 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     expect(scene.cVal).toBe(2);
     expect(scene.tVal).toBe(5);
     expect(scene.zVal).toBe(7);
-    // Then assert React mirrors caught up.
+    // Then assert React reads it back.
     expect(outRef.current?.c).toBe(2);
     expect(outRef.current?.t).toBe(5);
     expect(outRef.current?.z).toBe(7);
   });
 
-  it("syncs viewMode from post-apply scene state", async () => {
+  it("reads viewMode from the post-apply scene", async () => {
     const loop = makeMockLoop();
     await act(async () => {
-      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     });
     expect(outRef.current?.viewMode).toBe("2d");
 
@@ -388,10 +463,10 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     expect(outRef.current?.viewMode).toBe("3d");
   });
 
-  it("syncs multiChannel from post-apply scene state", async () => {
+  it("reads multiChannel from the post-apply scene", async () => {
     const loop = makeMockLoop();
     await act(async () => {
-      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     });
     expect(outRef.current?.multiChannel).toBe(false);
 
@@ -411,7 +486,7 @@ describe("useSavedViewSync — apply-complete wiring (Bug #2 / #3)", () => {
     const loop = makeMockLoop();
     scene.multiChannelVal = true;
     await act(async () => {
-      render(<HookHarness scene={scene} outRef={outRef} loopRef={loop.ref} />);
+      render(<HookHarness scene={scene} store={store} outRef={outRef} loopRef={loop.ref} />);
     });
 
     // Single-channel views were recorded without the flag.

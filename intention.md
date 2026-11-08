@@ -22,9 +22,9 @@ full scale.
   seconds and stream as you move. Scale is the normal case: never assume a
   dataset fits in memory or lives locally.
 - Fluid to navigate. It stays smooth at scale.
-- Trustworthy. A viewer must never silently show data that is wrong, stale, or
-  from the wrong level. A user or agent who misreads the screen is the real
-  failure, so correctness outranks smoothness, always.
+- Trustworthy. A viewer must never show a value, level, or time as something
+  it isn't. A user or agent who misreads the screen is the real failure, so
+  correctness outranks smoothness, always.
 
 ## Who it's for
 

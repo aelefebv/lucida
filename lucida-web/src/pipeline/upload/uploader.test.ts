@@ -175,8 +175,10 @@ function makeCpuCache(deliveries: ReadyDelivery[] = []): CpuCache {
     }),
     markSent: vi.fn(),
     markRejected: vi.fn(),
-    markChunkEvicted: vi.fn(),
-    markChunkMissing: vi.fn(),
+    markChunksHeld: vi.fn(),
+    markChunksRefused: vi.fn(),
+    markChunksLost: vi.fn(),
+    markChunkMissing: vi.fn(() => false),
     markProxyMissing: vi.fn(),
     snapshot: vi.fn(() => ({ cached: new Map(), inFlight: new Map() })),
     levelResidency: vi.fn(() => ({ cached: [], inFlight: [] })),
@@ -254,7 +256,7 @@ function makeCtx(args: {
       volumeChunkData: vi.fn(),
       removeLayerResources: vi.fn(),
       datasetLevels: vi.fn(() => null),
-      onChunksEvicted: null,
+      onChunkResidency: null,
       onWantedSetDelta: null,
       ...args.client,
     } as TickContext["client"],
@@ -343,7 +345,7 @@ describe("Uploader unified delivery", () => {
     const { RESEND_GUARD_TICKS } = await import("./delivery/resendGuard.ts");
     const recordPointEvent = vi.spyOn(traceRecorder, "recordPointEvent");
     // The cache offers the chunk every tick, as it does when every delivery
-    // comes back evicted and clears its sent mark.
+    // comes back refused and clears its sent mark.
     const chunk = makeChunkDelivery({ chunkKey: "0/0/0/0/1/1", y: 1, x: 1 });
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({
@@ -354,7 +356,7 @@ describe("Uploader unified delivery", () => {
 
     uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
     for (let i = 0; i < RESEND_GUARD_TICKS; i++) {
-      uploader.handleChunksEvicted("img-0", [chunk.chunkKey], [], ctx.cpuCache, "wrong-slice");
+      uploader.handleChunkResidency("img-0", "detail", "refused", [chunk.chunkKey], ctx.cpuCache, "wrong-slice");
       uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
     }
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
@@ -376,6 +378,7 @@ describe("Uploader unified delivery", () => {
       datasetId: "ds1",
       currentT: 0,
       currentZ: 1,
+      requests: [],
       visibleRegion: { xyBoundsVox: [0, 0, 1, 1], zRangeVox: [1, 2], effectiveZoom: 1, sortCenterVox: null, frustumPlanes: null },
       desiredProxyKeys: [],
       epochs: { content: 1, layout: 1, view: 1, selection: 2, asset: 0, request: 1 },
@@ -526,24 +529,21 @@ describe("Uploader worker feedback", () => {
     Uploader = (await import("./uploader.ts")).Uploader;
   });
 
-  it("forwards chunk eviction feedback to CpuCache by image/channel", () => {
+  it("forwards each residency report to CpuCache by image, channel and tier", () => {
     const cpuCache = makeCpuCache();
-    new Uploader().handleChunksEvicted(
-      "img-0:ch1",
-      ["0/0/1/0/0/0"],
-      ["0/0/1/0/0/1"],
-      cpuCache,
-    );
+    const uploader = new Uploader();
 
-    expect(cpuCache.markChunkEvicted).toHaveBeenCalledWith(
-      "img-0",
-      1,
-      ["0/0/1/0/0/0"],
-      ["0/0/1/0/0/1"],
-      // The renderer's reason, forwarded rather than re-derived; the worker
-      // left it unset on this message.
-      undefined,
-    );
+    expect(uploader.handleChunkResidency("img-0:ch1", "detail", "held", ["0/0/1/0/0/0"], cpuCache)).toBe(false);
+    expect(cpuCache.markChunksHeld).toHaveBeenCalledWith("img-0", 1, "detail", ["0/0/1/0/0/0"]);
+
+    expect(uploader.handleChunkResidency("img-0:ch1", "coarse", "lost", ["2/0/1/0/0/0"], cpuCache, "evicted")).toBe(true);
+    expect(cpuCache.markChunksLost).toHaveBeenCalledWith("img-0", 1, "coarse", ["2/0/1/0/0/0"], "evicted");
+
+    // A full atlas waits for the next plan; any other refusal may go again now.
+    expect(uploader.handleChunkResidency("img-0:ch1", "detail", "refused", ["0/0/1/0/0/1"], cpuCache, "atlas-policy")).toBe(false);
+    expect(uploader.handleChunkResidency("img-0:ch1", "detail", "refused", ["0/0/1/0/0/2"], cpuCache, "stale")).toBe(true);
+    expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "detail", ["0/0/1/0/0/1"], "atlas-policy");
+    expect(cpuCache.markChunksRefused).toHaveBeenCalledWith("img-0", 1, "detail", ["0/0/1/0/0/2"], "stale");
   });
 
   it("clears missing proxy sent state through CpuCache", () => {
@@ -564,7 +564,7 @@ describe("Uploader worker feedback", () => {
     );
   });
 
-  it("clears missing chunk sent state through CpuCache", () => {
+  it("checks a missing chunk against the residency mirror, and asks for a tick only on a disagreement", () => {
     const cpuCache = makeCpuCache();
     const missing: MissingChunk = {
       kind: "chunk",
@@ -575,15 +575,13 @@ describe("Uploader worker feedback", () => {
       c: 2,
       chunkKey: "0/0/2/0/0/0",
     };
+    const uploader = new Uploader();
 
-    new Uploader().handleWantedSetDelta("ds1", [missing], cpuCache);
+    expect(uploader.handleWantedSetDelta("ds1", [missing], cpuCache)).toBe(false);
+    expect(cpuCache.markChunkMissing).toHaveBeenCalledWith("img-0", 2, "0/0/2/0/0/0", "detail");
 
-    expect(cpuCache.markChunkMissing).toHaveBeenCalledWith(
-      "img-0",
-      2,
-      "0/0/2/0/0/0",
-      "detail",
-    );
+    vi.mocked(cpuCache.markChunkMissing).mockReturnValue(true);
+    expect(uploader.handleWantedSetDelta("ds1", [missing], cpuCache)).toBe(true);
   });
 });
 

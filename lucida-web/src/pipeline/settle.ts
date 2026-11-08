@@ -38,6 +38,11 @@ export interface CacheSettleInputs extends Outstanding {
   failedChunks: number;
   /** Wanted chunks absent for none of the reasons above, with room for them. */
   unrequestedChunks: number;
+  /**
+   * Chunks posted to the render worker that it has not yet answered as held
+   * or refused. Until it does, what the canvas shows is still changing.
+   */
+  uploadsUnanswered: number;
 }
 
 /** The cache's half plus the render loop's own three flags. */
@@ -93,6 +98,7 @@ export function createSettleState(): SettleState {
     retryingChunks: 0,
     failedChunks: 0,
     unrequestedChunks: 0,
+    uploadsUnanswered: 0,
     quiescent: false,
     reason: "unpublished",
     coverage: 0,
@@ -125,6 +131,7 @@ function settleReason(i: SettleInputs): string {
   if (i.pendingUnclassified) return "pending_unclassified";
   if (i.inFlight > 0) return "chunks_in_flight";
   if (i.pending > 0) return "chunks_pending";
+  if (i.uploadsUnanswered > 0) return "uploads_unanswered";
   const missing =
     Math.max(0, i.desiredDetailChunks - i.residentDetailChunks) +
     Math.max(0, i.desiredCoarseChunks - i.residentCoarseChunks);
@@ -141,6 +148,7 @@ function settleReason(i: SettleInputs): string {
  * named for what it waits on.
  */
 export function stallReasonOf(state: SettleState): string {
+  if (state.uploadsUnanswered > 0) return "worker_unanswered";
   if (state.serverPendingChunks > 0) return "server_pending";
   if (state.retryingChunks > 0) return "source_retrying";
   if (state.failedChunks > 0) return "chunk_failed";
@@ -149,11 +157,16 @@ export function stallReasonOf(state: SettleState): string {
 }
 
 /**
- * Whether the page is waiting on something outside it: the predicate fails
- * only on demand, with nothing dirty, drawing, queued or in flight.
+ * Whether the page is waiting on something outside it: the server, the
+ * source, or the render worker's answer, with nothing dirty, drawing,
+ * queued or in flight.
  */
 function atRest(state: SettleState): boolean {
-  return state.reason === "detail_not_resident" || state.reason === "coarse_not_resident";
+  return (
+    state.reason === "detail_not_resident" ||
+    state.reason === "coarse_not_resident" ||
+    state.reason === "uploads_unanswered"
+  );
 }
 
 /**

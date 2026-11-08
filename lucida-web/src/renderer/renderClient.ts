@@ -16,16 +16,18 @@ import type {
   ColdStateDeltaMessage,
   ViewHotStateMessage,
   RgbaColor,
+  MinimapUploadOverviewChunksForLayerMessage,
   GpuErrorMessage,
   GpuDeviceRestoredMessage,
   GpuFailedMessage,
 } from "./workerProtocol.ts";
+import type { SampleFormat } from "./dataTypeUtil.ts";
 import { summarizeDatasetLevels, type DatasetLevels } from "../pipeline/datasetLevels.ts";
 import type { SceneEpochs } from "../pipeline/epochs.ts";
 import type { ResidencyTier } from "../pipeline/residencyTier.ts";
 import type {
   UploadClient,
-  ChunksEvictedHandler,
+  ChunkResidencyHandler,
   WantedSetHandler,
 } from "../pipeline/upload/uploadClient.ts";
 import { tokenColor } from "../theme/tokenColors.ts";
@@ -95,7 +97,7 @@ export class RenderClient implements UploadClient {
   private frameSeq = 0;
 
   onIntensityRange: ((datasetId: string, min: number, max: number) => void) | null = null;
-  onChunksEvicted: ChunksEvictedHandler | null = null;
+  onChunkResidency: ChunkResidencyHandler | null = null;
   /** Missing entries cover chunks and proxies; match on `kind`. */
   onWantedSetDelta: WantedSetHandler | null = null;
   /**
@@ -266,8 +268,8 @@ export class RenderClient implements UploadClient {
     }
     if (msg.type === "intensityRange" && this.onIntensityRange) {
       this.onIntensityRange(msg.datasetId, msg.min, msg.max);
-    } else if (msg.type === "chunksEvicted" && this.onChunksEvicted) {
-      this.onChunksEvicted(msg.memberId, msg.keys, msg.skipped ?? [], msg.reason);
+    } else if (msg.type === "chunkResidency" && this.onChunkResidency) {
+      this.onChunkResidency(msg);
     } else if (msg.type === "wantedSetDelta" && this.onWantedSetDelta) {
       this.onWantedSetDelta(msg.datasetId, msg.epochs, msg.missing);
     } else if (msg.type === "entityLevels") {
@@ -680,7 +682,7 @@ export class RenderClient implements UploadClient {
 
   minimapUploadOverviewChunksForLayer(
     datasetId: string,
-    chunks: { data: Uint16Array; x: number; y: number; z: number; key: string }[],
+    chunks: { data: ArrayBuffer; dataType: string; x: number; y: number; z: number; key: string }[],
     t: number,
     c: number,
     levelWidth: number,
@@ -689,14 +691,14 @@ export class RenderClient implements UploadClient {
     chunkX: number,
     chunkY: number,
     chunkZ: number,
+    sampleFormat: SampleFormat,
   ) {
     const transferList: ArrayBuffer[] = [];
     const workerChunks: Chunk[] = chunks.map(chunk => {
-      // Cast: typed-array .buffer is ArrayBufferLike under TS5.4+ lib defs;
-      // runtime is always ArrayBuffer here (no SharedArrayBuffer in this app).
-      const buf = chunk.data.buffer.slice(chunk.data.byteOffset, chunk.data.byteOffset + chunk.data.byteLength) as ArrayBuffer;
+      // A copy: the cache keeps the decoded chunk, so it can't be transferred.
+      const buf = chunk.data.slice(0);
       transferList.push(buf);
-      return { data: buf, dataType: "uint16", x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
+      return { data: buf, dataType: chunk.dataType, x: chunk.x, y: chunk.y, z: chunk.z, key: chunk.key };
     });
     this.worker.postMessage(
       {
@@ -706,7 +708,8 @@ export class RenderClient implements UploadClient {
         t, c,
         levelWidth, levelHeight, levelDepth,
         chunkX, chunkY, chunkZ,
-      },
+        sampleFormat,
+      } satisfies MinimapUploadOverviewChunksForLayerMessage,
       transferList,
     );
   }

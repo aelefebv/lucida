@@ -863,6 +863,7 @@ export class TickCoordinator {
           datasetId: dsId,
           activeSet: result.activeSet,
           previousActiveSet: planned.previousActiveSet,
+          requests: result.requests,
           entities,
           selection,
           visibleRegion,
@@ -898,6 +899,7 @@ export class TickCoordinator {
           ctx,
           datasetId: dsId,
           activeSet: result.activeSet,
+          requests: result.requests,
           entities,
           selection,
           multiChannel,
@@ -1357,9 +1359,9 @@ export class TickCoordinator {
       desiredProxyKeysByDataset.set(datasetId, set);
     }
 
-    // Advance the fetch lifecycle once. This clears the delivery ledger,
-    // which is needed because the worker repacks its atlas indirection for
-    // the new T/Z. The active set is unchanged, so `planningState` stays.
+    // Advance the fetch lifecycle once. The delivery ledger stays: the worker
+    // reports any slot the new T/Z leaves stale. The active set is unchanged,
+    // so `planningState` stays.
     ctx.cpuCache.onPlanRebuildStart();
     let capacity = ctx.cpuCache.tierCapacity();
     for (const scrubbed of planned) {
@@ -1418,6 +1420,7 @@ export class TickCoordinator {
         datasetId: p.dsId,
         currentT: p.selection.t,
         currentZ: p.selection.z,
+        requests: p.requests,
         visibleRegion: p.visibleRegion,
         desiredProxyKeys: desiredProxyKeysByDataset.get(p.dsId) ?? new Set(),
         epochs: scrubEpochs,

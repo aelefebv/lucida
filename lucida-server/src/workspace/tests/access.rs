@@ -1379,7 +1379,7 @@ async fn lowering_a_role_keeps_the_socket_and_refuses_the_next_edit() {
         name: "x".into(),
     };
     manager
-        .apply_document_command(&live, &member, edit())
+        .apply_document_command(&live, &member, 1, edit())
         .await
         .expect("an editor's command applies");
 
@@ -1390,7 +1390,9 @@ async fn lowering_a_role_keeps_the_socket_and_refuses_the_next_edit() {
 
     assert!(!member_socket.close_requested(), "a viewer may still watch");
     assert!(matches!(
-        manager.apply_document_command(&live, &member, edit()).await,
+        manager
+            .apply_document_command(&live, &member, 1, edit())
+            .await,
         Err(CommandApplyError::Forbidden)
     ));
 }
