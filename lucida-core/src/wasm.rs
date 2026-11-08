@@ -182,11 +182,19 @@ impl WasmScene {
         }
     }
 
-    /// Assert the canvas size. Called every render tick, so it relies on
-    /// `Scene::apply`'s no-change guard: a same-size re-assert bumps nothing.
-    pub fn set_viewport(&mut self, width: u32, height: u32) {
-        self.inner
-            .apply(ViewportCommand::SetViewport { width, height }.into());
+    /// Assert the canvas size in device pixels and the pixel ratio behind it.
+    /// Called every render tick, so it relies on `Scene::apply`'s no-change
+    /// guard: a same-size re-assert bumps nothing. A caller that knows the
+    /// ratio passes it every time, so a ratio change keeps the view's CSS size.
+    pub fn set_viewport(&mut self, width: u32, height: u32, pixel_ratio: Option<f64>) {
+        self.inner.apply(
+            ViewportCommand::SetViewport {
+                width,
+                height,
+                pixel_ratio,
+            }
+            .into(),
+        );
     }
 
     pub fn center(&self) -> Vec<f64> {

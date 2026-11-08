@@ -29,7 +29,10 @@ import type { AtlasBudgets } from "../../renderer/worker/state.ts";
 import type { MissingChunk } from "../../renderer/workerProtocol.ts";
 import { CEILING_BUDGETS } from "../../deviceBudget.ts";
 import { AssetCatalog } from "../assetCatalog.ts";
-import { GeneratedAvailabilityCatalog } from "../generatedAvailability.ts";
+import {
+  GeneratedAvailabilityCatalog,
+  type WireGeneratedAvailabilityDelta,
+} from "../generatedAvailability.ts";
 import { CpuCache, type CpuCacheConfig } from "../fetch/index.ts";
 import type { DatasetFixture } from "./fixtures.ts";
 import {
@@ -337,36 +340,42 @@ class Simulation {
     loop.start();
     loop.addDataset(dataset.datasetId, manifest);
 
-    scene.set_viewport(deviceW, deviceH);
+    scene.set_viewport(deviceW, deviceH, this.dpr);
     scene.fit_camera_to_dataset_bounds(dataset.datasetId);
     loop.markInteractiveDirty("auto_fit_on_open");
     if (mode === "slice") loop.setSliceParams(scene.z(), scene.t(), scene.c());
 
     if (dataset.generated) {
       const generated = dataset.generated;
-      setTimeout(() => this.publishGeneratedReady(generated), generated.readyAtMs);
+      if (generated.publishedAtMs > 0) {
+        setTimeout(() => this.applyAvailability({ levels: generated.levels }), generated.publishedAtMs);
+      }
+      const chunks = [...generated.chunkKeys].flatMap(([imageId, keys]) =>
+        keys.map((key) => ({
+          image_id: imageId,
+          level_index: generated.levelIndex,
+          key,
+          status: "ready" as const,
+        })),
+      );
+      setTimeout(() => this.applyAvailability({ chunks }), generated.readyAtMs);
     }
   }
 
   /**
-   * The server's availability update once the generated level is made,
-   * applied as the session controller applies one: merge it into the
-   * manifest, hand the loop the new manifest, and mark residency dirty.
+   * A server availability update, applied as the session controller applies
+   * one: level geometry replaces the manifest the loop holds, chunk statuses
+   * go to the CPU cache, and residency is marked dirty.
    */
-  private publishGeneratedReady(generated: NonNullable<DatasetFixture["generated"]>): void {
+  private applyAvailability(delta: WireGeneratedAvailabilityDelta): void {
     const datasetId = this.scenario.dataset.datasetId;
-    const chunks = [...generated.chunkKeys].flatMap(([imageId, keys]) =>
-      keys.map((key) => ({
-        image_id: imageId,
-        level_index: generated.levelIndex,
-        key,
-        status: "ready" as const,
-      })),
-    );
-    this.availability.applyDelta(datasetId, { chunks });
-    const merged = this.availability.mergeManifest(datasetId, this.datasets.get(datasetId)!);
-    this.datasets.set(datasetId, merged);
-    this.loop!.updateDatasetManifest(datasetId, merged);
+    this.availability.applyDelta(datasetId, delta);
+    if (delta.levels?.length) {
+      const merged = this.availability.mergeManifest(datasetId, this.datasets.get(datasetId)!);
+      this.datasets.set(datasetId, merged);
+      this.loop!.updateDatasetManifest(datasetId, merged);
+    }
+    this.cpuCache.noteGeneratedAvailability(datasetId, delta.chunks ?? []);
     this.loop!.markResidencyDirty(AVAILABILITY_UPDATE_SOURCE);
   }
 

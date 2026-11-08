@@ -4,6 +4,7 @@
  */
 import { CopyIcon } from "@phosphor-icons/react";
 import { useEffect, useState, type ReactNode } from "react";
+import { positionLabel } from "../axes.ts";
 import type { DatasetManifest, MultiscaleInfo } from "../manifestTypes.ts";
 import { channelDisplayName } from "./channels.ts";
 import { IconButton } from "../ui/Button.tsx";
@@ -139,7 +140,7 @@ function DatasetFacts({ dataset, source }: { dataset: InfoDataset; source: Sourc
         {multiscale?.pinned_axes && multiscale.pinned_axes.length > 0 && (
           <Fact label="Fixed axes">
             {multiscale.pinned_axes
-              .map((p) => `${p.name} ${p.pinned_index + 1} of ${p.size}`)
+              .map((p) => positionLabel(p.name, p.pinned_index, p.size))
               .join(", ")}
           </Fact>
         )}

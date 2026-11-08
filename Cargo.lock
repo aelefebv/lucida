@@ -1597,6 +1597,7 @@ dependencies = [
  "clap",
  "crc32c",
  "futures-util",
+ "ipnet",
  "lru",
  "lucida-content",
  "lucida-protocol",
@@ -1605,11 +1606,14 @@ dependencies = [
  "object_store",
  "rayon",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "tiff",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]

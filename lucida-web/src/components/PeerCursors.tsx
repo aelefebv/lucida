@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import type { WasmScene } from "lucida-core";
+import { positionLabel } from "../axes.ts";
 import type { ClientId, PeerIdentity, PresenceState } from "../bridge.ts";
 import { projectToCanvas } from "./minimapMath.ts";
 import { makeWorldToScreen } from "./cameraProjection.ts";
@@ -32,6 +33,7 @@ function peerInitial(identity?: PeerIdentity | null): string {
 
 export interface CursorLabel {
   id: number;
+  /** Screen position in device pixels. */
   sx: number;
   sy: number;
   world?: [number, number, number];
@@ -76,7 +78,7 @@ function dimBadge(peer: PresenceState, localZ: number, localT: number, localC: n
   const peerC = view.c;
   if (peerC !== undefined && peerC !== localC) {
     dim = true;
-    parts.push(`C${peerC}`);
+    parts.push(positionLabel("C", peerC));
   }
 
   return { dim, badge: parts.join(" ") };
@@ -163,8 +165,9 @@ export function PeerCursors({ peers, myId, followTarget, wasmSceneRef, canvas, v
               if (!proj) { el.style.display = "none"; continue; }
               [screenX, screenY] = proj;
             } else {
-              screenX = lbl.sx;
-              screenY = lbl.sy;
+              const dpr = window.devicePixelRatio || 1;
+              screenX = lbl.sx / dpr;
+              screenY = lbl.sy / dpr;
             }
           } else {
             if (lbl.voxel) {
