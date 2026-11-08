@@ -3,7 +3,7 @@
  *
  * Author-only actions are gated in the UI by comparing an item's `author` to
  * this id. It is a preference, so ownership survives a rejoin, and the capture
- * surface neither reads nor persists one; the per-connection `bridge.myId` changes
+ * surface neither reads nor persists one; the per-connection `myId` changes
  * on every connect and stays the presence, cursor, and follow identity. The
  * server does no author check, so this gate is UI-only.
  */
