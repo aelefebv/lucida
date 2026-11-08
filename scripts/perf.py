@@ -922,7 +922,7 @@ def _bytes(value: Any) -> str:
     for unit, size in (("GB", 1e9), ("MB", 1e6), ("kB", 1e3)):
         if value >= size:
             return f"{value / size:.1f} {unit}"
-    return f"{value} B"
+    return f"{value:.0f} B"
 
 
 def _count(value: Any) -> str:

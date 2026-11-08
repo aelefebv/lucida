@@ -324,10 +324,14 @@ def test_repeats_make_one_row_of_medians_with_their_spread(tmp_path: Path) -> No
     rows = [measured(tmp_path, "image.cold-open", repeat=n, settleMs=s) for n, s in enumerate([1000, 1400, 1100], 1)]
     [cell] = perf.group_cells(rows)
     assert cell.stats("settleMs") == perf.Stats(3, 1100, 1000, 1400)
+    # An even count's median is a mean, and still prints as a whole count.
+    [pair] = perf.group_cells([measured(tmp_path, "image.cold-open", repeat=n, bytesFetched=0) for n in (1, 2)])
+    assert perf.table_cells(pair, tmp_path)[perf.COLUMNS.index("fetched")] == "0 B"
     cells = dict(zip(perf.COLUMNS, perf.table_cells(cell, tmp_path)))
     assert cells["scenario"] == "cold-open ×3"
     assert cells["settle"] == "1,100 ms ±200 ms"
     assert cells["chunks"] == "80"
+    assert cells["evicted"] == "0"
     assert cells["verdict"] == "clear"
     assert cells["run"] == "image.cold-open.dpr1.txt +2"
 
