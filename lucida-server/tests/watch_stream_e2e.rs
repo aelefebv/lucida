@@ -3,8 +3,9 @@
 //!
 //! Only the live path routes `watch_subscribe` and `watch_publish` and
 //! replays the ring into the per-connection channel, so this drives real
-//! sockets and asserts that a late joiner reads the recent past before the
-//! live items, and neither twice.
+//! sockets and asserts that a subscriber reads live items only unless it asks
+//! for history, and that history arrives ahead of a marker and the live items,
+//! with nothing twice.
 
 use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
@@ -122,21 +123,58 @@ async fn next_server_message(ws: &mut WsClient) -> ServerMessage {
     }
 }
 
-/// The next relayed item, with the publisher and the sequence it arrived
-/// under.
-async fn next_watch_update(ws: &mut WsClient) -> (ClientId, u64, WatchItem) {
+/// The next frame of the watch stream: a relayed item or the history marker.
+async fn next_watch_frame(ws: &mut WsClient) -> ServerMessage {
     loop {
         match next_server_message(ws).await {
-            ServerMessage::WatchUpdate {
-                client_id,
-                seq,
-                item,
-            } => return (client_id, seq, item),
+            message @ (ServerMessage::WatchUpdate { .. }
+            | ServerMessage::WatchHistoryEnd { .. }) => return message,
             // Peer joins and leaves share this socket; they are not the
             // stream.
             _ => continue,
         }
     }
+}
+
+/// The next relayed item, with the publisher and the sequence it arrived
+/// under. Skips a history marker.
+async fn next_watch_update(ws: &mut WsClient) -> (ClientId, u64, WatchItem) {
+    loop {
+        if let ServerMessage::WatchUpdate {
+            client_id,
+            seq,
+            item,
+        } = next_watch_frame(ws).await
+        {
+            return (client_id, seq, item);
+        }
+    }
+}
+
+/// Subscribe live, and return once the server has registered it.
+///
+/// A live subscribe has no reply, but a socket's messages are handled in
+/// order, so the snapshot answering a request sent behind it says the
+/// subscription is in place. Without it, a publish on another socket can
+/// beat the subscribe and never reach this one.
+async fn subscribe_live(ws: &mut WsClient) {
+    send(ws, &ClientMessage::WatchSubscribe { history: false }).await;
+    send(ws, &ClientMessage::RequestSnapshot).await;
+    while !matches!(
+        next_server_message(ws).await,
+        ServerMessage::Snapshot { .. }
+    ) {}
+}
+
+/// Publish on `page` and read every item back off its own stream, so the
+/// items are known to be in the ring before anyone else subscribes.
+async fn publish_and_settle(page: &mut WsClient, epochs: std::ops::RangeInclusive<u64>) {
+    subscribe_live(page).await;
+    let last = *epochs.end();
+    for at in epochs {
+        send(page, &aggregate(at)).await;
+    }
+    while epoch_of(&next_watch_update(page).await.2) != last {}
 }
 
 fn aggregate(at_epoch_ms: u64) -> ClientMessage {
@@ -164,7 +202,7 @@ fn epoch_of(item: &WatchItem) -> u64 {
 async fn a_subscriber_reads_what_a_publishing_page_sends() {
     let addr = serve().await;
     let mut subscriber = join(addr).await;
-    send(&mut subscriber, &ClientMessage::WatchSubscribe).await;
+    subscribe_live(&mut subscriber).await;
     let mut page = join(addr).await;
 
     send(&mut page, &aggregate(1)).await;
@@ -201,60 +239,71 @@ async fn a_subscriber_reads_what_a_publishing_page_sends() {
 }
 
 #[tokio::test]
-async fn a_late_subscriber_reads_the_ring_and_then_the_live_items() {
+async fn a_late_subscriber_reads_only_what_is_published_after_it_joined() {
     let addr = serve().await;
     let mut page = join(addr).await;
-
-    for at in 1..=3 {
-        send(&mut page, &aggregate(at)).await;
-    }
-    // The publishes are relayed on the page's inbound loop; give it the
-    // chance to drain them before anyone subscribes, so this test is about
-    // the ring rather than about a race with it.
-    let mut early = join(addr).await;
-    send(&mut early, &ClientMessage::WatchSubscribe).await;
-    for expected in 1..=3 {
-        assert_eq!(epoch_of(&next_watch_update(&mut early).await.2), expected);
-    }
+    publish_and_settle(&mut page, 1..=3).await;
 
     let mut late = join(addr).await;
-    send(&mut late, &ClientMessage::WatchSubscribe).await;
-    send(&mut page, &aggregate(4)).await;
+    send(&mut late, &ClientMessage::WatchSubscribe { history: false }).await;
+    // Published from the subscribing socket, so it lands after the subscribe.
+    // A replay would arrive ahead of it.
+    send(&mut late, &aggregate(100)).await;
 
-    let mut seen = Vec::new();
-    for _ in 0..4 {
-        let (_, seq, item) = next_watch_update(&mut late).await;
-        seen.push((seq, epoch_of(&item)));
-    }
-    assert_eq!(seen, vec![(1, 1), (2, 2), (3, 3), (4, 4)]);
+    let (_, seq, item) = next_watch_update(&mut late).await;
+    assert_eq!((seq, epoch_of(&item)), (4, 100));
 }
 
 #[tokio::test]
-async fn a_wrapped_ring_replays_its_tail_and_says_where_it_starts() {
+async fn history_is_the_ring_then_a_marker_then_the_live_items() {
     let addr = serve().await;
     let mut page = join(addr).await;
-
-    let published = WATCH_RING_CAPACITY as u64 + 3;
-    for at in 1..=published {
-        send(&mut page, &aggregate(at)).await;
-    }
-    // Wait for the last publish to be relayed before subscribing, so the ring
-    // is known to hold the whole run of them.
-    let mut early = join(addr).await;
-    send(&mut early, &ClientMessage::WatchSubscribe).await;
-    send(&mut page, &aggregate(published + 1)).await;
-    loop {
-        let (_, _, item) = next_watch_update(&mut early).await;
-        if epoch_of(&item) == published + 1 {
-            break;
-        }
-    }
+    publish_and_settle(&mut page, 1..=3).await;
 
     let mut late = join(addr).await;
-    send(&mut late, &ClientMessage::WatchSubscribe).await;
+    send(&mut late, &ClientMessage::WatchSubscribe { history: true }).await;
+    send(&mut late, &aggregate(100)).await;
+
+    let mut seen = Vec::new();
+    for _ in 0..5 {
+        seen.push(match next_watch_frame(&mut late).await {
+            ServerMessage::WatchUpdate { seq, item, .. } => format!("{seq}:{}", epoch_of(&item)),
+            ServerMessage::WatchHistoryEnd {
+                through_seq,
+                replayed,
+            } => format!("end through {through_seq}, {replayed} replayed"),
+            other => unreachable!("{other:?}"),
+        });
+    }
+    assert_eq!(
+        seen,
+        ["1:1", "2:2", "3:3", "end through 3, 3 replayed", "4:100"]
+    );
+}
+
+#[tokio::test]
+async fn a_wrapped_ring_replays_its_tail_and_the_marker_shows_the_gap() {
+    let addr = serve().await;
+    let mut page = join(addr).await;
+    let published = WATCH_RING_CAPACITY as u64 + 3;
+    publish_and_settle(&mut page, 1..=published).await;
+
+    let mut late = join(addr).await;
+    send(&mut late, &ClientMessage::WatchSubscribe { history: true }).await;
     let (_, seq, item) = next_watch_update(&mut late).await;
-    assert_eq!(seq, published + 1 - WATCH_RING_CAPACITY as u64 + 1);
+    assert_eq!(seq, published - WATCH_RING_CAPACITY as u64 + 1);
     assert_eq!(epoch_of(&item), seq);
+
+    let marker = loop {
+        if let ServerMessage::WatchHistoryEnd {
+            through_seq,
+            replayed,
+        } = next_watch_frame(&mut late).await
+        {
+            break (through_seq, replayed);
+        }
+    };
+    assert_eq!(marker, (published, WATCH_RING_CAPACITY as u64));
 }
 
 /// The stream is opt-in on the reading side as well as on the publishing one.
@@ -263,7 +312,7 @@ async fn a_connection_that_never_subscribed_receives_nothing() {
     let addr = serve().await;
     let mut bystander = join(addr).await;
     let mut subscriber = join(addr).await;
-    send(&mut subscriber, &ClientMessage::WatchSubscribe).await;
+    subscribe_live(&mut subscriber).await;
     let mut page = join(addr).await;
 
     send(&mut page, &aggregate(1)).await;
