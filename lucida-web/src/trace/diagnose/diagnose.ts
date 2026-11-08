@@ -25,7 +25,7 @@ import {
 import { emptyChunkLookup, lookupChunk, worstRowSelector, type WorstRow } from "./chunkLookup.ts";
 import { buildCriticalPath, UNRECORDED_PREFIX } from "./criticalPath.ts";
 import { backlogExceeded, isPinned, summariseLimiters } from "./limiters.ts";
-import { RULESET, type AbsoluteRule } from "./ruleset.ts";
+import { RULESET, type AbsoluteRule, type ColdOpenAllowanceRule } from "./ruleset.ts";
 import {
   aggregateCandidates,
   metadataReadRows,
@@ -179,7 +179,12 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
   const path = buildCriticalPath(run, window);
   const coverage = deriveCoverage(run, window, rollup);
   const interaction = isInteractionCause(run.header.cause);
-  const attribution = attribute({ run, path, phases, limiters, aggregates, coverage, interaction });
+  // A dataset added to a live page also opens a content run, but its
+  // pipelines are compiled and its caches hold chunks: only an open on a
+  // cold browser cache is the page's first paint.
+  const coldOpen = isDatasetOpenCause(run.header.cause) && browserCacheCold(run.header.cacheWarmth);
+  const breaches = ceilingBreaches(phases, { coldOpen, entities: plannedEntities(run) });
+  const attribution = attribute({ run, path, limiters, aggregates, breaches, coverage, interaction });
   // A window is an interval of the run's clock, and the steady state begins
   // where that clock ends, so a narrower window cannot reach it and says so
   // rather than reporting the whole interval as if the window had scoped it.
@@ -193,14 +198,12 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
   const findings = rankFindings({
     path,
     phases,
+    breaches,
     limiters,
     aggregates,
     attribution,
     interaction,
-    // A dataset added to a live page also opens a content run, but its
-    // pipelines are compiled and its caches hold chunks: only an open on a
-    // cold browser cache is the page's first paint.
-    coldOpen: isDatasetOpenCause(run.header.cause) && browserCacheCold(run.header.cacheWarmth),
+    coldOpen,
     steadyState: steady.findings,
     held: eventsOfKind(run, window, "held"),
     gpuErrors: eventsOfKind(run, window, "gpu-error"),
@@ -385,9 +388,9 @@ function countedWithin(run: TraceRun, window: RunWindow): Record<CountedPhase, n
 interface AttributionInput {
   run: TraceRun;
   path: CriticalPath;
-  phases: PhaseRollup[];
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
+  breaches: CeilingBreach[];
   coverage: DiagnosticCoverage;
   interaction: boolean;
 }
@@ -416,7 +419,7 @@ function passesShare(ms: number, sharePct: number): boolean {
 }
 
 function attribute(input: AttributionInput): Attribution {
-  const { path, phases, limiters, aggregates, coverage, interaction } = input;
+  const { path, limiters, aggregates, breaches, coverage, interaction } = input;
   const saturated = limiters.find((limiter) => backlogExceeded(limiter));
   const frameTime = frameTimeOf(aggregates, interaction);
   const aggregate = aggregates.find(
@@ -454,12 +457,12 @@ function attribute(input: AttributionInput): Attribution {
         runnerUp: null,
       };
     }
-    const breach = ceilingBreaches(phases)[0];
+    const breach = breaches[0];
     if (breach) {
       return {
         confidence: "rollup-only",
         cause: breach.phase.id,
-        why: `${breach.phase.id} p95 ${breach.phase.p95Ms} ms over its ${breach.rule.ceilMs} ms ceiling across ${breach.phase.n.toLocaleString()} rows`,
+        why: `${breach.phase.id} p95 ${breach.phase.p95Ms} ms over its ${breach.ceilMs} ms ceiling across ${breach.phase.n.toLocaleString()} rows`,
         degraded: `${reason} — this is ranked by percentile, which is evidence the phase was slow and not evidence it was on the run's path`,
         runnerUp: null,
       };
@@ -561,7 +564,17 @@ function attribute(input: AttributionInput): Attribution {
 interface CeilingBreach {
   phase: PhaseRollup;
   rule: AbsoluteRule;
+  /** The ceiling the phase was held to: the rule's own, or that plus a cold-open allowance. */
+  ceilMs: number;
+  /** The allowance that widened the ceiling, and the entities it was counted over. */
+  widened: { rule: ColdOpenAllowanceRule; entities: number } | null;
   ratio: number;
+}
+
+/** What a run's ceilings depend on besides its phases. */
+interface CeilingScope {
+  coldOpen: boolean;
+  entities: number;
 }
 
 /**
@@ -569,14 +582,35 @@ interface CeilingBreach {
  * findings list and the non-path attribution: two copies of "is this phase over
  * its ceiling" is two places for the comparison to drift.
  */
-function ceilingBreaches(phases: PhaseRollup[]): CeilingBreach[] {
+function ceilingBreaches(phases: PhaseRollup[], scope: CeilingScope): CeilingBreach[] {
   const breaches: CeilingBreach[] = [];
   for (const rule of RULESET.absolute) {
     const phase = phases.find((candidate) => candidate.id === rule.phase);
-    if (!phase || phase.p95Ms <= rule.ceilMs) continue;
-    breaches.push({ phase, rule, ratio: phase.p95Ms / rule.ceilMs });
+    if (!phase) continue;
+    const allowance = scope.coldOpen && RULESET.coldPlan.widens === rule.id ? RULESET.coldPlan : null;
+    const ceilMs = allowance
+      ? Math.round((rule.ceilMs + allowance.perEntityMs * scope.entities) * 10) / 10
+      : rule.ceilMs;
+    if (phase.p95Ms <= ceilMs) continue;
+    const widened = allowance ? { rule: allowance, entities: scope.entities } : null;
+    breaches.push({ phase, rule, ceilMs, widened, ratio: phase.p95Ms / ceilMs });
   }
   return breaches.sort((a, b) => b.ratio - a.ratio);
+}
+
+/**
+ * The largest active set each dataset planned during the run, summed across
+ * datasets: the most entities any one plan pass can have walked.
+ */
+function plannedEntities(run: TraceRun): number {
+  const largest = new Map<string, number>();
+  for (const tick of run.ticks) {
+    const total = tick.counters.activeSetTotal ?? 0;
+    if (total > (largest.get(tick.datasetId) ?? 0)) largest.set(tick.datasetId, total);
+  }
+  let entities = 0;
+  for (const total of largest.values()) entities += total;
+  return entities;
 }
 
 /** A finding before it is ranked: rank is what assigns an id and a confidence. */
@@ -585,6 +619,7 @@ type RawFinding = Omit<Finding, "id" | "confidence" | "attribution">;
 interface FindingsInput {
   path: CriticalPath;
   phases: PhaseRollup[];
+  breaches: CeilingBreach[];
   limiters: LimiterSummary[];
   aggregates: AggregateCandidate[];
   attribution: Attribution;
@@ -675,14 +710,19 @@ const SEVERITY_RANK: Record<Finding["severity"], number> = {
 function rankFindings(input: FindingsInput): Finding[] {
   const raw: RawFinding[] = [];
 
-  for (const breach of ceilingBreaches(input.phases)) {
-    const reading = readBreach(input, breach.phase.id, breach.rule);
+  for (const breach of input.breaches) {
+    const reading = readBreach(input, breach.phase.id, breach.widened?.rule ?? breach.rule);
     raw.push({
       severity: reading.severity,
       rule: reading.rule,
       subject: breach.phase.id,
-      observed: { stat: breach.rule.stat, ms: breach.phase.p95Ms, n: breach.phase.n },
-      threshold: { kind: "absolute", value: breach.rule.ceilMs, why: reading.why },
+      observed: {
+        stat: breach.rule.stat,
+        ms: breach.phase.p95Ms,
+        n: breach.phase.n,
+        ...(breach.widened ? { entities: breach.widened.entities } : {}),
+      },
+      threshold: { kind: "absolute", value: breach.ceilMs, why: reading.why },
     });
   }
 
