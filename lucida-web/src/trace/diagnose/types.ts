@@ -16,6 +16,7 @@ import type {
   EndReason,
   GpuIdentity,
   LaneName,
+  PageErrorSource,
   Phase,
   PointEventKind,
   PointEventReason,
@@ -267,6 +268,23 @@ export interface FindingObservation {
   held?: Array<{ entityId: string; chunkKey: string; reason: string }>;
   /** The entities a cold-open allowance widened the ceiling by. */
   entities?: number;
+  /** The errors behind an error finding, oldest first. */
+  errors?: ObservedError[];
+  /** A blank frame's one colour, as `#rrggbb[aa]`, and its size in device pixels. */
+  colour?: string;
+  width?: number;
+  height?: number;
+}
+
+/** One recorded error as a finding carries it. */
+export interface ObservedError {
+  /** Milliseconds from run start, or null for an error raised outside every interval. */
+  atMs: number | null;
+  source: PageErrorSource;
+  message: string;
+  location: string | null;
+  /** How many times it was raised: repeats fold into one record. */
+  count: number;
 }
 
 export interface Finding {

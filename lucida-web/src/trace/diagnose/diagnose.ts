@@ -17,6 +17,8 @@ import {
   type CacheWarmth,
   type CountedPhase,
   type CoverageGap,
+  type FrameReading,
+  type PageError,
   type TraceCoverage,
   type TraceDocument,
   type TracePointEvent,
@@ -52,6 +54,7 @@ import {
   type DiagnosticDocument,
   type Finding,
   type LimiterSummary,
+  type ObservedError,
   type RunIdentity,
   type PhaseRollup,
   type Verdict,
@@ -207,6 +210,10 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     steadyState: steady.findings,
     held: eventsOfKind(run, window, "held"),
     gpuErrors: eventsOfKind(run, window, "gpu-error"),
+    errors: errorsIn(run, window),
+    // The frame is read once the run has closed, so it is about the run's
+    // end, which only a reading of the whole run reaches.
+    frame: window.whole ? (run.frame ?? null) : null,
     baseline: options.baseline ?? null,
   });
   const worst = worstRowSelector(run, phases, findings);
@@ -632,6 +639,10 @@ interface FindingsInput {
   held: TracePointEvent[];
   /** The GPU's errors and device losses, inside the window. */
   gpuErrors: TracePointEvent[];
+  /** Every error the page recorded inside the window that the allow list does not name. */
+  errors: PageError[];
+  /** The frame the run settled on, when someone read it. */
+  frame: FrameReading | null;
   baseline: DiagnosticDocument | null;
 }
 
@@ -641,20 +652,70 @@ function eventsOfKind(run: TraceRun, window: RunWindow, kind: TracePointEvent["k
   );
 }
 
+/** The window's errors the allow list does not name. A document from before errors were recorded has none. */
+function errorsIn(run: TraceRun, window: RunWindow): PageError[] {
+  return (run.errors ?? []).filter(
+    (error) =>
+      error.allowed === null && (window.whole || (error.atUs !== null && inWindow(error.atUs, window))),
+  );
+}
+
+/** Errors as a finding lists them: in the diagnostic's milliseconds, oldest first. */
+function observedErrors(errors: PageError[]): ObservedError[] {
+  return errors.map((error) => ({
+    atMs: error.atUs === null ? null : usToMs(error.atUs),
+    source: error.source,
+    message: error.message,
+    location: error.location,
+    count: error.count,
+  }));
+}
+
 /**
  * The GPU lost its device or reported an error. A stall that leads every
  * other, because the frames around it are unproven whatever the phases say.
+ * The point events count them, and the recorded errors say what the GPU said.
  */
-function gpuErrorFinding(events: TracePointEvent[]): RawFinding | null {
+function gpuErrorFinding(events: TracePointEvent[], errors: PageError[]): RawFinding | null {
   if (events.length < RULESET.gpuError.minErrors) return null;
   const breakdown: Record<string, number> = {};
   for (const event of events) breakdown[event.reason] = (breakdown[event.reason] ?? 0) + 1;
+  const said = errors.filter((error) => error.source === "gpu");
   return {
     severity: "stall",
     rule: RULESET.gpuError.id,
     subject: "GPU device",
-    observed: { n: events.length, breakdown },
+    observed: { n: events.length, breakdown, ...(said.length > 0 ? { errors: observedErrors(said) } : {}) },
     threshold: { kind: "count", value: RULESET.gpuError.minErrors, why: RULESET.gpuError.why },
+  };
+}
+
+/**
+ * The page or a worker threw, left a rejection unhandled, or logged an
+ * error. A stall like a GPU error: the handler that threw dropped its work,
+ * and the view can settle without it. GPU errors are the rule above's.
+ */
+function pageErrorFinding(errors: PageError[]): RawFinding | null {
+  const raised = errors.filter((error) => error.source !== "gpu");
+  if (raised.length < RULESET.pageError.minErrors) return null;
+  return {
+    severity: "stall",
+    rule: RULESET.pageError.id,
+    subject: "page errors",
+    observed: { n: raised.reduce((sum, error) => sum + error.count, 0), errors: observedErrors(raised) },
+    threshold: { kind: "count", value: RULESET.pageError.minErrors, why: RULESET.pageError.why },
+  };
+}
+
+/** The settled frame was one flat colour across the canvas. */
+function blankFrameFinding(frame: FrameReading | null): RawFinding | null {
+  if (!frame?.flatColour) return null;
+  return {
+    severity: "stall",
+    rule: RULESET.blankFrame.id,
+    subject: "settled frame",
+    observed: { colour: frame.flatColour, width: frame.width, height: frame.height },
+    threshold: { kind: "colours", value: 1, why: RULESET.blankFrame.why },
   };
 }
 
@@ -706,6 +767,14 @@ const SEVERITY_RANK: Record<Finding["severity"], number> = {
   "steady-state": 1,
   note: 0,
 };
+
+/** The stalls that are not about the critical path, so never carry its attribution. */
+const OFF_PATH_RULES = new Set([
+  RULESET.held.id,
+  RULESET.gpuError.id,
+  RULESET.pageError.id,
+  RULESET.blankFrame.id,
+]);
 
 function rankFindings(input: FindingsInput): Finding[] {
   const raw: RawFinding[] = [];
@@ -844,18 +913,25 @@ function rankFindings(input: FindingsInput): Finding[] {
   raw.push(...input.steadyState);
   const held = heldFinding(input.held);
   if (held) raw.push(held);
-  const gpuError = gpuErrorFinding(input.gpuErrors);
+  const gpuError = gpuErrorFinding(input.gpuErrors, input.errors);
   if (gpuError) raw.push(gpuError);
+  const pageError = pageErrorFinding(input.errors);
+  if (pageError) raw.push(pageError);
+  const blankFrame = blankFrameFinding(input.frame);
+  if (blankFrame) raw.push(blankFrame);
 
   const seen = new Set<string>();
   const ranked = raw
     .sort(
       (a, b) =>
         SEVERITY_RANK[b.severity] - SEVERITY_RANK[a.severity] ||
-        // A GPU error leads the stalls, since it can explain the rest. A held
-        // chunk comes next: a slow phase cost time, while a held chunk is data
-        // the view settled without.
+        // A GPU error leads the stalls, since it can explain the rest, and a
+        // page error can explain all but that. A blank frame follows them,
+        // since either can be its cause. A held chunk comes next: a slow phase
+        // cost time, while a held chunk is data the view settled without.
         Number(b.rule === RULESET.gpuError.id) - Number(a.rule === RULESET.gpuError.id) ||
+        Number(b.rule === RULESET.pageError.id) - Number(a.rule === RULESET.pageError.id) ||
+        Number(b.rule === RULESET.blankFrame.id) - Number(a.rule === RULESET.blankFrame.id) ||
         Number(b.rule === RULESET.held.id) - Number(a.rule === RULESET.held.id) ||
         (b.observed.sharePct ?? 0) - (a.observed.sharePct ?? 0) ||
         (b.observed.ms ?? 0) - (a.observed.ms ?? 0),
@@ -870,13 +946,10 @@ function rankFindings(input: FindingsInput): Finding[] {
   // The attribution is the run's answer to "what was this waiting on", so it
   // rides the leading finding about the run. A steady-state finding is about
   // the interval after the run and carries the ruleset's rationale instead.
-  // A held or GPU error finding is about the renderer, not the critical path,
+  // A held chunk, an error or a blank frame is not about the critical path,
   // so the attribution rides the first finding after them.
   const leader = ranked.findIndex(
-    (finding) =>
-      finding.severity !== "steady-state" &&
-      finding.rule !== RULESET.held.id &&
-      finding.rule !== RULESET.gpuError.id,
+    (finding) => finding.severity !== "steady-state" && !OFF_PATH_RULES.has(finding.rule),
   );
   return ranked.map((finding, index) => ({
     ...finding,
@@ -1002,6 +1075,22 @@ function buildVerdict(
     };
   }
 
+  if (lead.rule === RULESET.pageError.id) {
+    return {
+      kind: "stall",
+      text: `${describePageErrors(lead)}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
+  if (lead.rule === RULESET.blankFrame.id) {
+    return {
+      kind: "stall",
+      text: `${describeBlankFrame(lead)}${caveat}`,
+      confidence: attribution.confidence,
+    };
+  }
+
   if (lead.rule === RULESET.held.id) {
     return {
       kind: "stall",
@@ -1057,10 +1146,33 @@ export function describeGpuErrors(finding: Finding): string {
   const kinds = Object.entries(finding.observed.breakdown ?? {})
     .map(([kind, count]) => `${kind} ${count}`)
     .join(", ");
+  const first = finding.observed.errors?.[0];
   return (
     `the GPU reported ${finding.observed.n ?? 0} error(s) (${kinds}); ` +
-    `frames drawn around them may be missing data`
+    `frames drawn around them may be missing data` +
+    (first ? `; the first said ${first.message}` : "")
   );
+}
+
+const ERROR_NOUNS: Record<ObservedError["source"], string> = {
+  exception: "an uncaught exception",
+  rejection: "an unhandled rejection",
+  console: "a console error",
+  gpu: "a GPU error",
+};
+
+export function describePageErrors(finding: Finding): string {
+  const first = finding.observed.errors?.[0];
+  const lead = `the page raised ${finding.observed.n ?? 0} error(s)`;
+  if (!first) return lead;
+  const at = first.atMs === null ? "" : ` at ${first.atMs} ms`;
+  const where = first.location ? ` (${first.location})` : "";
+  return `${lead}; the first${at}, ${ERROR_NOUNS[first.source]}: ${first.message}${where}`;
+}
+
+export function describeBlankFrame(finding: Finding): string {
+  const { colour, width, height } = finding.observed;
+  return `the settled frame was one flat colour, ${colour}, across all ${width}x${height} pixels of the canvas`;
 }
 
 function describeFirstPaint(finding: Finding): string {

@@ -65,6 +65,17 @@ const CHROME_TRACE_EXPORT_EXPRESSION: &str =
 pub(crate) const CLOSE_AS_TIMEOUT: &str =
     "window.lucidaTrace ? (window.lucidaTrace.closeRun('timeout'), true) : false";
 
+/// Read the frame the waited-for run settled on through the page's own
+/// capture, and record it on that run, where its diagnostic reads it. Done
+/// before the export, which is where the diagnostic is derived. A page too
+/// old to read its frame is left alone.
+const FRAME_READ_EXPRESSION: &str = r#"(async () => {
+  const seam = window.lucidaTrace;
+  if (!seam || typeof seam.readFrame !== 'function') return null;
+  const waited = window.__lucidaTraceRunId || seam.runState.lastConcludedRunId || undefined;
+  return JSON.stringify(await seam.readFrame(waited));
+})()"#;
+
 /// Whether a labelled run is open, and how many have closed. Read every poll,
 /// and never by exporting — an export closes the run being asked about.
 const RUN_STATE_PROBE: &str =
@@ -482,6 +493,183 @@ pub struct TraceRunHeader {
     /// the driver composed from the command line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replay: Option<ReplayRecord>,
+    /// Every error the page and its workers raised during the trace, from
+    /// every interval of the document, oldest first, each with the step it
+    /// fell in. Absent when there were none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<RunError>,
+}
+
+/// One error the page or a worker raised, as the run file lists it. The page
+/// recorded it, allow list and all. The driver adds only the step, because it
+/// alone timed the steps.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunError {
+    /// The interval it was raised in, a run or a steady-state interval, or
+    /// None when the page had none open.
+    pub interval: Option<String>,
+    /// Milliseconds from that interval's start.
+    pub at_ms: Option<f64>,
+    /// The script step it fell in, counted from 1: the last step that had
+    /// begun when it was raised. None when it came before the first step, or
+    /// the run had no script.
+    pub step: Option<usize>,
+    pub source: String,
+    pub message: String,
+    #[serde(default)]
+    pub location: Option<String>,
+    /// How many times it was raised: the page folds repeats into one record.
+    pub count: u64,
+    /// The allow list's reason, when the error is known benign output.
+    #[serde(default)]
+    pub allowed: Option<String>,
+}
+
+/// An error as the trace document records it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecordedError {
+    at_us: Option<f64>,
+    page_ms: f64,
+    source: String,
+    message: String,
+    #[serde(default)]
+    location: Option<String>,
+    count: u64,
+    #[serde(default)]
+    allowed: Option<String>,
+}
+
+/// Every error in `trace`, from each run, each steady-state interval and
+/// outside them all, oldest first. A step's start is on the page's clock, as
+/// each error's `pageMs` is, so the step an error fell in is read off the two.
+pub fn collect_errors(trace: &Value, script: Option<&ScriptRecord>) -> Vec<RunError> {
+    let starts: Vec<f64> = script
+        .map(|script| script.steps.iter().map(|step| step.started_at_ms).collect())
+        .unwrap_or_default();
+    let intervals = ["runs", "steadyState"]
+        .into_iter()
+        .filter_map(|key| trace.get(key).and_then(Value::as_array))
+        .flatten()
+        .map(|interval| {
+            let id = interval.pointer("/header/runId").and_then(Value::as_str);
+            (id.map(str::to_string), interval.get("errors"))
+        });
+    let outside = std::iter::once((None, trace.get("errorsOutsideRun")));
+    let mut errors: Vec<(f64, RunError)> = Vec::new();
+    for (interval, recorded) in intervals.chain(outside) {
+        for value in recorded.and_then(Value::as_array).into_iter().flatten() {
+            let Ok(error) = RecordedError::deserialize(value) else {
+                continue;
+            };
+            let step = starts
+                .iter()
+                .rposition(|started| *started <= error.page_ms)
+                .map(|index| index + 1);
+            errors.push((
+                error.page_ms,
+                RunError {
+                    interval: interval.clone(),
+                    at_ms: error.at_us.map(|us| (us / 100.0).round() / 10.0),
+                    step,
+                    source: error.source,
+                    message: error.message,
+                    location: error.location,
+                    count: error.count,
+                    allowed: error.allowed,
+                },
+            ));
+        }
+    }
+    errors.sort_by(|a, b| a.0.total_cmp(&b.0));
+    errors.into_iter().map(|(_, error)| error).collect()
+}
+
+/// One error on one line: when, what raised it, and what it said.
+fn describe_error(error: &RunError) -> String {
+    let when = match (error.step, error.at_ms) {
+        (Some(step), Some(ms)) => format!("step {step}, {ms} ms into its interval"),
+        (Some(step), None) => format!("step {step}"),
+        (None, Some(ms)) => format!("before any step, {ms} ms into its interval"),
+        (None, None) => "outside every interval".to_string(),
+    };
+    let times = if error.count > 1 {
+        format!(" (x{})", error.count)
+    } else {
+        String::new()
+    };
+    let location = error
+        .location
+        .as_deref()
+        .map(|location| format!(" at {location}"))
+        .unwrap_or_default();
+    format!(
+        "{when}: {}: {}{location}{times}",
+        error.source, error.message
+    )
+}
+
+/// Why the page's errors fail the gate, or None when every one it raised is
+/// on the allow list. Errors from every interval count, not only the run's:
+/// a page that throws while it exports still threw.
+fn error_failure(errors: &[RunError]) -> Option<String> {
+    const LISTED: usize = 3;
+    let failing: Vec<&RunError> = errors
+        .iter()
+        .filter(|error| error.allowed.is_none())
+        .collect();
+    if failing.is_empty() {
+        return None;
+    }
+    let total: u64 = failing.iter().map(|error| error.count).sum();
+    let listed: Vec<String> = failing
+        .iter()
+        .take(LISTED)
+        .map(|error| describe_error(error))
+        .collect();
+    let more = if failing.len() > LISTED {
+        format!("; +{} more in the run file", failing.len() - LISTED)
+    } else {
+        String::new()
+    };
+    Some(format!(
+        "the page raised {total} error(s): {}{more}",
+        listed.join("; ")
+    ))
+}
+
+/// The errors block of the default rendering, or nothing when there were none.
+fn format_errors(errors: &[RunError]) -> String {
+    const LISTED: usize = 5;
+    if errors.is_empty() {
+        return String::new();
+    }
+    let allowed = errors
+        .iter()
+        .filter(|error| error.allowed.is_some())
+        .count();
+    let allowed = if allowed > 0 {
+        format!(", {allowed} on the allow list")
+    } else {
+        String::new()
+    };
+    let mut lines = vec![format!("errors    {} raised{allowed}", errors.len())];
+    for error in errors.iter().take(LISTED) {
+        let reason = error
+            .allowed
+            .as_deref()
+            .map(|why| format!(" [allowed: {why}]"))
+            .unwrap_or_default();
+        lines.push(format!("          {}{reason}", describe_error(error)));
+    }
+    if errors.len() > LISTED {
+        lines.push(format!(
+            "          +{} more in the run file",
+            errors.len() - LISTED
+        ));
+    }
+    format!("{}\n", lines.join("\n"))
 }
 
 /// Both renderings, taken at export time from the page's one renderer. The
@@ -1525,12 +1713,13 @@ fn parse_run_file(text: &str, path: &Path) -> Result<TraceRunFile, CliError> {
 /// pipeline went on, and a regression there is as much a build failure as a
 /// stall.
 ///
-/// The gate reads three things: the header's settled flag, the socket outages
-/// the document records, and the closed run's verdict. A run that closed
-/// without going quiescent fails before its verdict is consulted, and a
-/// provisional reading over an open run carries no verdict, so nothing read
-/// while a run was still open can fail a build. Every ceiling and its
-/// rationale live in the page's ruleset, not here.
+/// The gate reads four things: the header's settled flag, the socket outages
+/// the document records, the errors the page raised, and the closed run's
+/// verdict, which carries a blank settled frame. A run that closed without
+/// going quiescent fails before its verdict is consulted, and a provisional
+/// reading over an open run carries no verdict, so nothing read while a run
+/// was still open can fail a build. Every ceiling, and the allow list of
+/// benign errors, live in the page's ruleset, not here.
 pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
     if !file.header.settled {
         let ended = file.header.end_reason.as_deref().unwrap_or("no end reason");
@@ -1540,6 +1729,9 @@ pub fn gate_failure(file: &TraceRunFile) -> Option<String> {
         });
     }
     if let Some(reason) = socket_outage_failure(&file.trace) {
+        return Some(reason);
+    }
+    if let Some(reason) = error_failure(&file.header.errors) {
         return Some(reason);
     }
     if let Some(kind) = file
@@ -1687,6 +1879,7 @@ pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         .device_memory_gib
         .map(|gib| format!(" · device memory {gib} GiB"))
         .unwrap_or_default();
+    let errors = format_errors(&header.errors);
     format!(
         "{replay}\
          view      {} @ {}x{} DPR {}{memory}\n\
@@ -1695,6 +1888,7 @@ pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
          hold      quiescent had to hold {} ms; every duration below is measured against that\n\
          {knobs}\
          {steps}\
+         {errors}\
          run file  {}\n\
          {bundle}\
          {screenshot}",
@@ -2215,6 +2409,7 @@ async fn drive_and_export(
         if let Some(script) = request.script {
             run_script(&mut page, script, wait).await?;
         }
+        page.evaluate(FRAME_READ_EXPRESSION, wait).await?;
         let mut fallback_frame = None;
         if screenshot.is_some() || bundle.is_some() {
             let png = page.screenshot_png(wait).await?;
@@ -2368,6 +2563,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
     // own "quiescent held" observation would call a page that never opened a
     // run settled, because an idle page trivially satisfies the predicate.
     let settled = export.end_reason.as_deref() == Some("quiescent");
+    let errors = collect_errors(&export.trace, export.script.as_ref());
     TraceRunFile {
         file_version: RUN_FILE_VERSION,
         header: TraceRunHeader {
@@ -2386,6 +2582,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             script: export.script,
             knobs: (!facts.knobs.is_empty()).then(|| facts.knobs.clone()),
             replay: facts.replay.clone(),
+            errors,
         },
         renderings: TraceRenderings::from_export(
             export.summary,
@@ -2734,6 +2931,7 @@ mod tests {
                 script: None,
                 knobs: None,
                 replay: None,
+                errors: Vec::new(),
             },
             renderings: TraceRenderings {
                 summary: "lucida trace run-1-1 — VERDICT: clear".to_string(),
@@ -4682,5 +4880,135 @@ mod tests {
         let json = serde_json::to_value(&without).unwrap();
         assert!(json["header"].get("screenshot").is_none());
         assert!(json["header"]["composedView"].get("camera").is_none());
+    }
+
+    fn recorded_error(source: &str, message: &str, page_ms: f64, at_us: Option<f64>) -> Value {
+        json!({
+            "atUs": at_us, "pageMs": page_ms, "source": source, "message": message,
+            "location": "/assets/index.js:1:2", "count": 1, "allowed": null
+        })
+    }
+
+    fn export_with_errors(trace: Value, steps: Option<Value>) -> SeamExport {
+        let mut export = json!({
+            "runId": "run-1-2",
+            "endReason": "quiescent",
+            "diagnostic": { "verdict": { "kind": "clear", "text": "fine" } },
+            "summary": "s", "phases": "p", "spatial": "x",
+            "trace": trace
+        });
+        if let Some(steps) = steps {
+            export["script"] = json!({ "steps": steps });
+        }
+        serde_json::from_value(export).unwrap()
+    }
+
+    fn pan_step(started_at_ms: f64, run_id: &str) -> Value {
+        json!({
+            "kind": "pan", "dx": 120, "dy": 60,
+            "startedAtMs": started_at_ms, "endedAtMs": started_at_ms + 900.0,
+            "runId": run_id, "endReason": "quiescent",
+            "verdict": { "kind": "clear", "text": "fine" },
+            "timedOut": false, "viewBefore": {}, "viewAfter": {}, "viewChanged": true
+        })
+    }
+
+    /// The run file lists every interval's errors, and the errors raised
+    /// with none open, oldest first, each with the step whose start came
+    /// before it on the page's clock.
+    #[test]
+    fn the_run_file_lists_every_intervals_errors_with_the_step_each_fell_in() {
+        let trace = json!({
+            "runs": [
+                { "header": { "runId": "run-1-1" }, "errors": [recorded_error("console", "late in the open", 900.0, Some(400_000.0))] },
+                { "header": { "runId": "run-1-2" }, "errors": [recorded_error("exception", "during the pan", 2_100.0, Some(60_000.0))] }
+            ],
+            "steadyState": [
+                { "header": { "runId": "steady-1-3" }, "errors": [recorded_error("rejection", "between", 2_000.0, Some(12_345.0))] }
+            ],
+            "errorsOutsideRun": [recorded_error("console", "at startup", 10.0, None)]
+        });
+        let file = assemble_run_file(
+            export_with_errors(trace, Some(json!([pan_step(1_950.0, "run-1-2")]))),
+            &facts(),
+        );
+        let listed: Vec<_> = file
+            .header
+            .errors
+            .iter()
+            .map(|error| {
+                (
+                    error.interval.as_deref(),
+                    error.at_ms,
+                    error.step,
+                    error.message.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            listed,
+            vec![
+                (None, None, None, "at startup"),
+                (Some("run-1-1"), Some(400.0), None, "late in the open"),
+                (Some("steady-1-3"), Some(12.3), Some(1), "between"),
+                (Some("run-1-2"), Some(60.0), Some(1), "during the pan"),
+            ]
+        );
+
+        let json = serde_json::to_string(&file).unwrap();
+        let back = parse_run_file(&json, Path::new("run.json")).unwrap();
+        assert_eq!(back.header.errors, file.header.errors);
+    }
+
+    /// Any error the allow list does not name fails the gate, wherever it
+    /// fell, and the reason lists them. An allowed one fails nothing, and a
+    /// run file without errors carries no key for them.
+    #[test]
+    fn the_gate_fails_on_an_error_the_allow_list_does_not_name() {
+        let mut allowed = recorded_error("console", "known noise", 500.0, Some(1_000.0));
+        allowed["allowed"] = json!("a library logs it on every start");
+        let trace = json!({
+            "runs": [{ "header": { "runId": "run-1-2" }, "errors": [allowed] }],
+            "steadyState": [{ "header": { "runId": "steady-1-3" }, "errors": [
+                recorded_error("exception", "Uncaught Error: boom", 2_000.0, Some(5_000.0))
+            ] }]
+        });
+        let file = assemble_run_file(export_with_errors(trace.clone(), None), &facts());
+        assert_eq!(
+            gate_failure(&file).as_deref(),
+            Some(
+                "the page raised 1 error(s): before any step, 5 ms into its interval: \
+                 exception: Uncaught Error: boom at /assets/index.js:1:2"
+            )
+        );
+        let text = format_run_human(&file, Path::new("run.json"), None);
+        assert!(
+            text.contains("errors    2 raised, 1 on the allow list\n"),
+            "{text}"
+        );
+        assert!(
+            text.contains("console: known noise at /assets/index.js:1:2 [allowed: a library logs it on every start]"),
+            "{text}"
+        );
+
+        let mut only_allowed = trace;
+        only_allowed["steadyState"] = json!([]);
+        let file = assemble_run_file(export_with_errors(only_allowed, None), &facts());
+        assert_eq!(gate_failure(&file), None);
+
+        let clean = assemble_run_file(minimal_export(), &facts());
+        assert!(clean.header.errors.is_empty());
+        let json = serde_json::to_value(&clean).unwrap();
+        assert!(json["header"].get("errors").is_none());
+    }
+
+    /// The driver reads the settled frame through the page's own capture
+    /// before the export derives the diagnostic, and a page too old to read
+    /// it is left alone.
+    #[test]
+    fn the_frame_read_asks_the_page_for_the_run_the_driver_waited_for() {
+        assert!(FRAME_READ_EXPRESSION.contains("seam.readFrame(waited)"));
+        assert!(FRAME_READ_EXPRESSION.contains("__lucidaTraceRunId"));
+        assert!(FRAME_READ_EXPRESSION.contains("typeof seam.readFrame !== 'function'"));
     }
 }

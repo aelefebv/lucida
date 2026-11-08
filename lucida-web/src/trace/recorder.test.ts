@@ -2,7 +2,8 @@ import { describe, it, expect, vi } from "vitest";
 
 import { lookupChunk } from "./diagnose/chunkLookup.ts";
 import { diagnoseRun } from "./diagnose/diagnose.ts";
-import { TraceRecorder } from "./recorder.ts";
+import { MAX_ERRORS_PER_INTERVAL, TraceRecorder } from "./recorder.ts";
+import { RULESET, type AllowedError } from "./diagnose/ruleset.ts";
 import { noopSinkFactory } from "./sink.ts";
 import { createSettleState, evaluateSettle, type SettleState } from "../pipeline/settle.ts";
 import {
@@ -1507,5 +1508,100 @@ describe("the live timeline over an open run", () => {
     const timeline = diagnoseRun(run).timeline;
     expect(timeline.rowsWalked).toBe(true);
     expect(timeline.charts.map(chart => chart.id)).toEqual(live.timeline.charts.map(chart => chart.id));
+  });
+});
+
+describe("errors the page raised", () => {
+  const thrown = { source: "exception", message: "TypeError: x is undefined", location: "/a.js:1:2" } as const;
+
+  it("records an error in the run open at the time, on the run's clock and the page's", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    advance(40);
+    recorder.recordError(thrown);
+    recorder.closeRun("quiescent");
+    const run = recorder.exportDocument().runs[0];
+    expect(run.errors).toEqual([
+      { atUs: 40_000, pageMs: 1_040, ...thrown, count: 1, allowed: null },
+    ]);
+    expect(run.errorsDropped).toBe(0);
+  });
+
+  it("folds a repeat into the first record's count, and a GPU report's folded count with it", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.recordError(thrown);
+    advance(10);
+    recorder.recordError(thrown);
+    recorder.recordError({ source: "gpu", message: "validation: bad buffer", location: null });
+    recorder.recordError({ source: "gpu", message: "validation: bad buffer", location: null }, 7);
+    const run = recorder.exportDocument().runs[0];
+    expect(run.errors?.map((error) => [error.source, error.count, error.atUs])).toEqual([
+      ["exception", 2, 0],
+      ["gpu", 8, 10_000],
+    ]);
+  });
+
+  it("keeps each message on one line", () => {
+    const { recorder } = makeRecorder();
+    recorder.recordError({ source: "gpu", message: "validation: bad usage.\n - While calling CreateBuffer.\n", location: null });
+    const document = recorder.exportDocument();
+    expect(document.steadyState[0].errors?.[0].message).toBe(
+      "validation: bad usage. - While calling CreateBuffer.",
+    );
+  });
+
+  it("keeps a steady-state interval that recorded nothing but an error", () => {
+    const { recorder } = makeRecorder();
+    recorder.recordError(thrown);
+    const document = recorder.exportDocument();
+    expect(document.steadyState).toHaveLength(1);
+    expect(document.steadyState[0].errors).toHaveLength(1);
+  });
+
+  it("keeps an error raised with no interval open outside every interval", () => {
+    const recorder = new TraceRecorder({ now: () => 25, epochNow: () => 1_700_000_000_000 });
+    recorder.recordError(thrown);
+    expect(recorder.exportDocument().errorsOutsideRun).toEqual([
+      { atUs: null, pageMs: 25, ...thrown, count: 1, allowed: null },
+    ]);
+  });
+
+  it("counts distinct errors past the per-interval limit rather than keeping them", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    for (let index = 0; index < MAX_ERRORS_PER_INTERVAL + 3; index += 1) {
+      recorder.recordError({ ...thrown, message: `error ${index}` });
+    }
+    const run = recorder.exportDocument().runs[0];
+    expect(run.errors).toHaveLength(MAX_ERRORS_PER_INTERVAL);
+    expect(run.errorsDropped).toBe(3);
+  });
+
+  it("marks an error the allow list names with its reason", () => {
+    const allow = RULESET.pageError.allow as AllowedError[];
+    allow.push({ source: "console", match: "known noise", why: "a library logs it on every start" });
+    try {
+      const { recorder } = makeRecorder();
+      recorder.recordError({ source: "console", message: "some known noise here", location: null });
+      recorder.recordError({ source: "exception", message: "known noise", location: null });
+      const errors = recorder.exportDocument().steadyState[0].errors ?? [];
+      expect(errors.map((error) => error.allowed)).toEqual(["a library logs it on every start", null]);
+    } finally {
+      allow.pop();
+    }
+  });
+
+  it("puts the frame a closed run settled on onto that run, and nothing onto one it no longer holds", () => {
+    const { recorder } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.closeRun("quiescent");
+    const runId = recorder.concludedRuns.lastId ?? "";
+    const reading = { width: 4, height: 2, flatColour: "#000000", unread: null };
+    recorder.noteFrame(runId, reading);
+    recorder.noteFrame("run-that-never-was", { ...reading, flatColour: null });
+    const document = recorder.exportDocument();
+    expect(document.runs[0].frame).toEqual(reading);
+    expect(document.steadyState.every((interval) => interval.frame === undefined)).toBe(true);
   });
 });

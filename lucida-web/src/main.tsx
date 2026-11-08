@@ -8,10 +8,15 @@ import { traceRecorder } from './trace/recorder.ts'
 import { installAppearance } from './theme/appearance.ts'
 import { installDeploymentTheme } from './theme/deployment.ts'
 import { isCaptureSurface } from './captureSurface.ts'
+import { reportPageError, setPageErrorSink, watchErrors } from './pageErrors.ts'
 
 // The trace seam is public interface in every build: a diagnostic that only
 // exists in development cannot explain a field report.
 installTraceSeam()
+// Every build, like the seam: an error a field report carries is worth more
+// than one only a developer's console saw.
+setPageErrorSink((report, count) => traceRecorder.recordError(report, count))
+watchErrors(window, (report) => reportPageError(report))
 void resolveGpuIdentity().then(gpu => traceRecorder.setGpu(gpu))
 
 // index.html already applied the stored appearance before first paint; this

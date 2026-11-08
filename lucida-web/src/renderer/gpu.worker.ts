@@ -5,6 +5,9 @@ import { bootstrapWorker } from "./worker/bootstrap.ts";
 import { dispatchMessage } from "./worker/dispatch.ts";
 import { handleDestroy } from "./worker/lifecycle.ts";
 import { inOrder } from "./worker/inOrder.ts";
+import { reportWorkerErrors } from "../pageErrors.ts";
+
+reportWorkerErrors();
 
 let ctx: WorkerCtx | null = null;
 

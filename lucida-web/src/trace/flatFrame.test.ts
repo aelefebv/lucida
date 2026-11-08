@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { type DecodedImage, flatColourOf, visibleRectOf } from "./flatFrame.ts";
+import { type DecodedImage, flatColourOf, readFrame, visibleRectOf } from "./flatFrame.ts";
 
 function image(width: number, height: number, fill: [number, number, number, number]): DecodedImage {
   const data = new Uint8ClampedArray(width * height * 4);
@@ -120,5 +120,34 @@ describe("visibleRectOf", () => {
     expect(visibleRectOf(null)).toBeNull();
     expect(visibleRectOf(element({ left: 0, top: 0, right: 0, bottom: 0 }, [1440, 900]))).toBeNull();
     expect(visibleRectOf(element({ left: -200, top: 0, right: -10, bottom: 100 }, [1440, 900]))).toBeNull();
+  });
+});
+
+describe("readFrame", () => {
+  const captured = () =>
+    Promise.resolve({ frame: { png: new ArrayBuffer(8), width: 4, height: 3 }, reason: null } as const);
+
+  it("reads the whole capture, since the page's capture is the canvas alone", async () => {
+    const dark = image(4, 3, [0, 0, 0, 255]);
+    expect(await readFrame(captured, () => Promise.resolve(dark))).toEqual({
+      width: 4, height: 3, flatColour: "#000000", unread: null,
+    });
+    // One differing pixel is a picture, however dark: a dim view is not blank.
+    paint(dark, 3, 2, [1, 0, 0, 255]);
+    expect(await readFrame(captured, () => Promise.resolve(dark))).toEqual({
+      width: 4, height: 3, flatColour: null, unread: null,
+    });
+  });
+
+  it("says why when there was no frame to read", async () => {
+    const decode = () => Promise.resolve(image(1, 1, [0, 0, 0, 255]));
+    expect((await readFrame(null, decode)).unread).toMatch(/not registered/);
+    expect((await readFrame(captured, null)).unread).toMatch(/cannot decode/);
+    const refused = () => Promise.resolve({ frame: null, reason: "the render worker could not read its canvas" } as const);
+    expect(await readFrame(refused, decode)).toEqual({
+      width: 0, height: 0, flatColour: null, unread: "the render worker could not read its canvas",
+    });
+    const broken = () => Promise.reject(new Error("worker gone"));
+    expect((await readFrame(broken, decode)).unread).toBe("the frame could not be read: worker gone");
   });
 });
