@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 /// Expand one `#[tokio::test]` per case-and-implementation pair.
 ///
 /// The implementation name doubles as the module the tests land in, so a
-/// failure reads `bookmarks::sqlite::delete_hands_back_the_row_it_removed`:
+/// failure reads `inbox::sqlite::a_listing_puts_the_newest_first`:
 /// the behavior and the store that broke it. A `when_available:`
 /// implementation's factory returns `Option<_>`, and `None` skips the case
 /// rather than failing it, with the reason on stderr.
@@ -74,7 +74,6 @@ macro_rules! conformance_cases_when_available {
 }
 
 mod bearer_tokens;
-mod bookmarks;
 mod cli_token_authorizations;
 mod inbox;
 mod login_sessions;

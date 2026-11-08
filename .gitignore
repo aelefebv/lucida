@@ -209,7 +209,7 @@ lucida-core/pkg/
 .claude/
 /.claude
 
-# Lucida SQLite database (auth sessions, bookmarks)
+# Lucida SQLite database (auth sessions, workspaces)
 /lucida.db
 /lucida.db-shm
 /lucida.db-wal

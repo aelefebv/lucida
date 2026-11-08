@@ -4,10 +4,9 @@
 //! empty admin set makes everyone 403. The router uses the pieces `main.rs`
 //! wires, with a `MemorySessionStore` instead of SQLite.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 use axum::Router;
 use axum::body::Body;
@@ -17,7 +16,6 @@ use axum::routing::post;
 use chrono::{Duration as ChronoDuration, Utc};
 use http_body_util::BodyExt;
 use serde_json::Value;
-use tokio::sync::{Mutex, broadcast};
 use tower::ServiceExt;
 
 use lucida_content::url::dataset_url_hash16;
@@ -26,8 +24,7 @@ use lucida_server::auth::middleware::auth_middleware;
 use lucida_server::auth::principal::SessionCookieExtractor;
 use lucida_server::auth::session_store::{LoginSession, LoginSessionStore};
 use lucida_server::auth::{AuthConfig, MemorySessionStore};
-use lucida_server::session::Session;
-use lucida_server::{AppState, BroadcastItem, ProxyConfig, UnicastRoutes};
+use lucida_server::{AppState, ProxyConfig};
 
 const URL_A: &str = "gs://lucida-test/datasets/dataset-a.zarr";
 const URL_B: &str = "gs://lucida-test/datasets/dataset-b.zarr";
@@ -57,10 +54,6 @@ fn build_router(
         ));
 
     let app_state = AppState {
-        session: Arc::new(Mutex::new(Session::new())),
-        tx: broadcast::channel::<BroadcastItem>(8).0,
-        next_id: Arc::new(AtomicU64::new(0)),
-        unicast_routes: Arc::new(Mutex::new(HashMap::new())) as UnicastRoutes,
         source_policy: Arc::default(),
         proxy_config: ProxyConfig {
             cache_dir: cache_dir.to_path_buf(),
