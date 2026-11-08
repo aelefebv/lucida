@@ -24,7 +24,7 @@ serde = { version = "1", features = ["derive"] }
 # `raw_value` lets the inbox lift a bundle's header out as the slice of
 # text the page wrote, rather than as something re-serialized.
 serde_json = { version = "1", features = ["raw_value"] }
-lz4_flex = "0.11"
+lz4_flex = "0.14"
 zstd = "0.14"
 # The gzip and zlib storage codecs, and Blosc's zlib compressor.
 flate2 = "1"

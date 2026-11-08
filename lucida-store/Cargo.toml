@@ -12,7 +12,7 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 rayon = "1"
 memmap2 = "0.9"
-lz4_flex = "0.11"
+lz4_flex = "0.14"
 crc32c = "0.6"
 object_store = { version = "0.14", features = ["gcp", "aws", "http"] }
 # The HTTP client of a restricted source policy, built to resolve names
