@@ -256,6 +256,12 @@ export class CpuCache {
   private chunkScheduler!: Scheduler<ChunkRequest>;
 
   readonly deliveryState = new DeliveryState();
+  /**
+   * The images each entity has had chunks sent for. The delivery ledger keys
+   * by image and a dataset leaves by entity, and the two share an id only in
+   * a single-image dataset.
+   */
+  private readonly sentImagesByEntity = new Map<string, Set<string>>();
 
   private activeEntityIds = new Set<string>();
   private activeEntityIdsThisRebuild = new Set<string>();
@@ -807,7 +813,10 @@ export class CpuCache {
       this.activeEntityIds.delete(entityId);
       this.activeEntityIdsThisRebuild.delete(entityId);
       this.targetLevelByEntity.delete(entityId);
-      this.deliveryState.clearChunksForImage(entityId);
+      for (const imageId of this.sentImagesByEntity.get(entityId) ?? []) {
+        this.deliveryState.clearChunksForImage(imageId);
+      }
+      this.sentImagesByEntity.delete(entityId);
     }
     // A reconcile due before the next plan must not fetch for a dataset
     // that is gone.
@@ -953,6 +962,12 @@ export class CpuCache {
     this.deliveryState.markChunkSent(
       delivery.imageId, delivery.c, delivery.chunkKey, delivery.residencyTier,
     );
+    let images = this.sentImagesByEntity.get(delivery.entityId);
+    if (!images) {
+      images = new Set();
+      this.sentImagesByEntity.set(delivery.entityId, images);
+    }
+    images.add(delivery.imageId);
   }
 
   /** The render worker wrote these chunks, or already held them. */
@@ -1467,6 +1482,7 @@ export class CpuCache {
     this.chunkFailureSurfaced = false;
     this.rejectionTracker.clear();
     this.deliveryState.reset();
+    this.sentImagesByEntity.clear();
     this.inFlightChunkMeta.clear();
     this.wantedRequests = [];
     this.disarmReconcile();

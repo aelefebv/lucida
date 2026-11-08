@@ -56,6 +56,11 @@ export interface Chunk {
   key: string;
 }
 
+/**
+ * One Z-plane of each of a member's chunks: each `chunk.data` is the
+ * `chunkY*chunkX` samples of the plane `fullResZ` maps to at `level`, cut
+ * from the 3D chunk the page keeps.
+ */
 export interface SliceChunkDataMessage {
   type: "sliceChunkData";
   epochs: SceneEpochs;
@@ -107,6 +112,8 @@ export interface LabelSliceChunkDataMessage {
   levelHeight: number;
   chunkX: number;
   chunkY: number;
+  /** The label level's Z plane every chunk was cut at. */
+  plane: number;
 }
 
 export interface VolumeChunkDataMessage {
@@ -286,8 +293,11 @@ export interface SliceLayerParams {
   opacity?: number;
   /** See {@link VolumeLayerParams.labelColors}. */
   labelColors?: { value: number; rgba: [number, number, number, number] }[];
-  /** The plane a label layer draws: its level, chunk-T and chunk-Z. See {@link VolumeLayerParams.labelChunk}. */
-  labelChunk?: { level: number; t: number; z: number };
+  /**
+   * The plane a label layer draws: its level, chunk-T, chunk-Z, and the
+   * plane within the level. See {@link VolumeLayerParams.labelChunk}.
+   */
+  labelChunk?: { level: number; t: number; z: number; plane: number };
   /**
    * Batched member quads for an aggregate layer. When present the
    * worker renders the whole batch in one pass (one instanced draw)

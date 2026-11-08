@@ -125,7 +125,7 @@ function verdict(timing: StepTiming, ceiling: number): string {
 }
 
 function log(line: string): void {
-  console.log(`[#1061] ${line}`);
+  console.log(`[hud cost] ${line}`);
 }
 
 describe("HUD cost contract", () => {

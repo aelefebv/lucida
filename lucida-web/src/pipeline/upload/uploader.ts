@@ -48,6 +48,7 @@ import {
   dispatchChunkDelivery,
   dispatchLabelChunkDelivery,
   dispatchLabelVolumeChunkDelivery,
+  type Dispatched,
 } from "./delivery/dispatch.ts";
 import { WorkerResourceTracker } from "./delivery/resources.ts";
 import { UploadTelemetry } from "./telemetry/upload.ts";
@@ -438,39 +439,29 @@ export class Uploader {
     }
     const sliceZ = sliceZFor ? sliceZFor(meta.datasetId) : null;
 
-    // Label overlays go to the r32uint label pool. The slice view pre-slices
-    // to one Z-plane (~64 KB); the volume view sends the whole ~8 MB chunk.
-    // Both report the real bytes sent so the frame budget throttles uploads,
-    // and at least one always goes so labels never starve.
+    // Label overlays go to the r32uint label pool. The slice view sends one
+    // Z-plane of each chunk and the volume view the whole chunk. Every
+    // dispatch reports the real bytes sent so the frame budget throttles
+    // uploads, and at least one always goes so labels never starve.
+    let sent: Dispatched | null;
     if (meta.isLabel) {
-      const label = ctx.mode === "slice"
+      sent = ctx.mode === "slice"
         ? dispatchLabelChunkDelivery(ctx.client, delivery, meta, sliceZ, epochs)
         : dispatchLabelVolumeChunkDelivery(ctx.client, delivery, meta, epochs);
-      if (!label) {
-        this.currentUploadStats.skippedNoMeta++;
-        return 0;
-      }
-      this.workerResources.recordMember(label.memberId);
-      this.currentUploadStats.uploadedChunks++;
-      traceRecorder.countPhase(CountedPhaseIndex.WorkerDispatch);
-      return label.bytes;
+    } else {
+      sent = dispatchChunkDelivery(ctx.client, delivery, meta, ctx.mode, sliceZ, epochs);
     }
-
-    const memberId = dispatchChunkDelivery(
-      ctx.client,
-      delivery,
-      meta,
-      ctx.mode,
-      sliceZ,
-      epochs,
-    );
-    this.workerResources.recordMember(memberId);
+    if (!sent) {
+      this.currentUploadStats.skippedNoMeta++;
+      return 0;
+    }
+    this.workerResources.recordMember(sent.memberId);
     this.currentUploadStats.uploadedChunks++;
     // Worker dispatch: chunk bytes handed to the GPU worker. Counted, not
     // timed — the post itself is below the platform's clock floor, and what
     // happens after it belongs to the `upload` phase.
     traceRecorder.countPhase(CountedPhaseIndex.WorkerDispatch);
-    return delivery.data.byteLength;
+    return sent.bytes;
   }
 
   private computeChunkTierDemand(deliveries: ReadyChunkDelivery[]): Record<ResidencyTier, boolean> {

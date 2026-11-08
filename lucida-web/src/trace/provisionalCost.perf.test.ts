@@ -156,7 +156,7 @@ describe("provisional reading cost contract", () => {
 
     for (const r of readings) {
       console.log(
-        `[#1057] provisional read: rows=${String(r.rows).padStart(6)} | ` +
+        `[provisional cost] provisional read: rows=${String(r.rows).padStart(6)} | ` +
           `${NARROW_WINDOW_MS} ms window (${r.narrow.inWindow.toFixed(0)} readings) nominal p50=${r.narrow.timing.nominalUs.toFixed(1)}µs | ` +
           `full window (${r.full.inWindow.toFixed(0)} readings) ${describeTiming(r.full.timing, FULL_READ_BUDGET_US)} | ` +
           `${(r.full.timing.nominalUs / READ_CEILING_US).toFixed(2)}x the ${READ_CEILING_US}µs ceiling`,
@@ -188,7 +188,7 @@ describe("provisional reading cost contract", () => {
     expect(reading.readings.carried).toBe(true);
 
     console.log(
-      `[#1057] provisional read: ring wrapped 4x, full window ${describeTiming(wrapped.timing, WRAPPED_READ_BUDGET_US)} | ` +
+      `[provisional cost] provisional read: ring wrapped 4x, full window ${describeTiming(wrapped.timing, WRAPPED_READ_BUDGET_US)} | ` +
         `window past the ring ${describeTiming(empty.timing, SLID_READ_BUDGET_US)}`,
     );
     expectWithinBudget("read with the ring wrapped", wrapped.timing, WRAPPED_READ_BUDGET_US);

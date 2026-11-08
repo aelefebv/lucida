@@ -246,7 +246,7 @@ describe("workspace saved view API", () => {
     });
   });
 
-  it("POSTs to duplicate a workspace and returns the new copy (#698)", async () => {
+  it("POSTs to duplicate a workspace and returns the new copy", async () => {
     responder = () => jsonResponse(201, {
       id: "workspace-copy",
       name: "Copy of Project",
@@ -270,7 +270,7 @@ describe("workspace saved view API", () => {
     expect(copy.role).toBe("owner");
   });
 
-  it("POSTs duplicate with an explicit name override (#698)", async () => {
+  it("POSTs duplicate with an explicit name override", async () => {
     responder = () => jsonResponse(201, {
       id: "workspace-copy",
       name: "My Experiment",
@@ -322,7 +322,7 @@ describe("workspace saved view API", () => {
     expect(JSON.parse(calls[0].init?.body as string)).toEqual({ pinned: true });
   });
 
-  it("PATCHes the per-user last view with a {view} body (#700)", async () => {
+  it("PATCHes the per-user last view with a {view} body", async () => {
     responder = () => jsonResponse(200, {
       workspace_id: "workspace/a b",
       last_opened_at: "2026-06-19T01:00:00Z",
@@ -339,7 +339,7 @@ describe("workspace saved view API", () => {
     expect(state.last_view).toMatchObject({ v: SAVED_VIEW_VERSION });
   });
 
-  it("GETs the principal-scoped user state incl. last_view (#700)", async () => {
+  it("GETs the principal-scoped user state incl. last_view", async () => {
     responder = () => jsonResponse(200, {
       workspace_id: "workspace-1",
       last_opened_at: "2026-06-19T01:00:00Z",
@@ -353,7 +353,7 @@ describe("workspace saved view API", () => {
     expect(state.last_view).toMatchObject({ v: SAVED_VIEW_VERSION });
   });
 
-  it("tolerates a user state with no remembered last view (#700)", async () => {
+  it("tolerates a user state with no remembered last view", async () => {
     responder = () => jsonResponse(200, {
       workspace_id: "workspace-1",
       last_opened_at: null,

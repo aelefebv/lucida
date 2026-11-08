@@ -67,13 +67,11 @@ jobs:
         run: cargo test --locked --workspace --all-features
 
       # Format check: enforces `cargo fmt --all` consistency across the
-      # workspace. The format sweep landed alongside the lint debt cleanup
-      # in #498 (slice A+B); this gate prevents drift from creeping back.
+      # workspace.
       - name: cargo fmt --check
         run: cargo fmt --all -- --check
 
-      # Hard gate as of #498 (slices A–C). All pre-existing clippy errors
-      # have been resolved; new ones must be fixed before merge.
+      # Hard gate: a clippy warning must be fixed before merge.
       - name: cargo clippy
         run: cargo clippy --locked --workspace --all-features --all-targets -- -D warnings
 
@@ -174,9 +172,8 @@ jobs:
         working-directory: lucida-web
         run: pnpm exec tsc --noEmit -p tsconfig.app.json
 
-      # Hard gate as of #498 (slices A–C). All pre-existing lint errors have
-      # been resolved (with documented per-site eslint-disable directives for
-      # load-bearing patterns the strict eslint-plugin-react-hooks@7 flags).
+      # Hard gate. Load-bearing patterns the strict eslint-plugin-react-hooks@7
+      # flags carry a documented per-site eslint-disable directive.
       - name: Lint
         working-directory: lucida-web
         run: pnpm run lint
