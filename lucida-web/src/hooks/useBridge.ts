@@ -34,7 +34,7 @@ interface Params {
   setWasmScene: React.Dispatch<React.SetStateAction<WasmScene | null>>;
   ensureScene: () => WasmScene;
   loopRef: React.RefObject<RenderLoop | null>;
-  /** The viewer canvas, measured for the auto-fit on open. */
+  /** The viewer canvas, measured so a fit on open or join frames it. */
   canvasRef: React.RefObject<HTMLCanvasElement | null>;
   datasetsRef: React.RefObject<Map<string, DatasetState>>;
   datasetCallbacksRef: React.RefObject<DatasetCallbacks>;

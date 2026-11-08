@@ -27,3 +27,48 @@ export function applyViewportCommand(scene: WasmScene, cmd: ViewportCommand) {
   guardedSceneCall("apply_command", scene, () => scene.apply_command(json));
   noteSceneWrite();
 }
+
+/** Fit everything visible on `canvas`, as the fit key and double tap do. The
+ *  canvas's size goes with the call, so the fit frames the canvas the user
+ *  sees rather than the last size a render tick told the scene. */
+export function frameOnCanvas(scene: WasmScene, canvas: HTMLCanvasElement): void {
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.round(canvas.clientWidth * dpr);
+  const height = Math.round(canvas.clientHeight * dpr);
+  guardedSceneCall("frame", scene, () => scene.frame(width, height));
+  noteSceneWrite();
+}
+
+/** Fit the slice camera to the voxel rect `region` on `canvas`, as a click on
+ *  a collection's group does. */
+export function frameRegionOnCanvas(
+  scene: WasmScene,
+  canvas: HTMLCanvasElement,
+  region: { min: [number, number]; max: [number, number] },
+): void {
+  const dpr = window.devicePixelRatio || 1;
+  assertCanvasSize(scene, Math.round(canvas.clientWidth * dpr), Math.round(canvas.clientHeight * dpr), dpr);
+  guardedSceneCall("frame_region", scene, () =>
+    scene.frame_region(region.min[0], region.min[1], region.max[0], region.max[1]),
+  );
+  noteSceneWrite();
+}
+
+const assertedSizes = new WeakMap<WasmScene, string>();
+
+/** Tell the scene the canvas's size in device pixels and the pixel ratio
+ *  behind it. Every render tick asserts it, and the stores hear of it only
+ *  when it changed: a new size can refit a framed camera, and the URL and the
+ *  last view must follow the view that leaves. */
+export function assertCanvasSize(
+  scene: WasmScene,
+  width: number,
+  height: number,
+  pixelRatio: number,
+): void {
+  scene.set_viewport(width, height, pixelRatio);
+  const size = `${width}x${height}@${pixelRatio}`;
+  if (assertedSizes.get(scene) === size) return;
+  assertedSizes.set(scene, size);
+  noteSceneWrite();
+}

@@ -272,6 +272,25 @@ impl DatasetWorkspaceClient {
         Ok((snapshot.seq, dataset))
     }
 
+    /// The dataset `selector` names and a scene holding the workspace's
+    /// document on a canvas of `viewport`, for a command that frames it with
+    /// the core's own fit.
+    pub async fn info_and_scene(
+        &self,
+        selector: &str,
+        viewport: [u32; 2],
+        wait: Duration,
+    ) -> Result<(DatasetInfo, lucida_core::scene::Scene), CliError> {
+        let socket = connect_workspace_socket(&self.ws_url, self.token.as_deref()).await?;
+        let (_write, read) = socket.split();
+        let mut incoming = incoming_messages(read);
+        let snapshot = wait_for_workspace_snapshot(&mut incoming, wait).await?;
+        let dataset = dataset_info_from_document(&snapshot.document, selector)?;
+        let mut scene = lucida_core::scene::Scene::new(viewport);
+        scene.load_document(snapshot.document);
+        Ok((dataset, scene))
+    }
+
     pub async fn health(
         &self,
         selector: Option<&str>,

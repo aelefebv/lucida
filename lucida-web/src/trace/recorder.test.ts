@@ -532,6 +532,44 @@ describe("TraceRecorder plan and queue", () => {
     expect(serialised.phases.queue).toEqual({ startUs: 30_000, endUs: 30_000, durationUs: 0 });
   });
 
+  it("charges a row promoted into the admission window its backlog wait as queue, not plan", () => {
+    // The scheduler stamps a backlog entry when it is promoted into the
+    // window, long after the pass that enqueued it ended.
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.markPlanStart();          // t = 1_000
+    advance(8);
+    recorder.notePlanEnqueue(1_008);
+    advance(300);
+
+    recorder.beginChunkRow(CHUNK, 0, 1_300);
+    recorder.closeRun("explicit");
+
+    const [serialised] = recorder.exportDocument().runs[0].rows;
+    expect(serialised.phases.plan).toEqual({ startUs: 0, endUs: 8_000, durationUs: 8_000 });
+    expect(serialised.phases.queue)
+      .toEqual({ startUs: 8_000, endUs: 308_000, durationUs: 300_000 });
+  });
+
+  it("ends a pass that enqueues once per dataset at each dataset's own enqueue", () => {
+    const { recorder, advance } = makeRecorder();
+    recorder.openRun(OPEN_CAUSE);
+    recorder.markPlanStart();          // t = 1_000
+    advance(5);
+    recorder.notePlanEnqueue(1_005);   // the first dataset's submit
+    advance(15);
+    recorder.notePlanEnqueue(1_020);   // the second dataset's submit
+    advance(10);
+
+    recorder.beginChunkRow(CHUNK, 0, 1_005);
+    recorder.beginChunkRow(CHUNK, 0, 1_020);
+    recorder.closeRun("explicit");
+
+    const [first, second] = recorder.exportDocument().runs[0].rows;
+    expect(first.phases.plan).toEqual({ startUs: 0, endUs: 5_000, durationUs: 5_000 });
+    expect(second.phases.plan).toEqual({ startUs: 0, endUs: 20_000, durationUs: 20_000 });
+  });
+
   it("falls back to the last enqueue for a row admitted straight off the backlog", () => {
     const { recorder, advance } = makeRecorder();
     recorder.openRun(OPEN_CAUSE);

@@ -886,8 +886,8 @@ export class Bridge {
    * - `seq <= last`: stale or duplicate, dropped, except a `dataset_opened`
    *   for a dataset the document still contains. The server rebroadcasts an
    *   applied open at the current seq when it dedups onto an existing
-   *   binding, carrying the re-stamped opener for auto-fit; the apply is an
-   *   idempotent full-replace.
+   *   binding, carrying the re-stamped opener; the apply is an idempotent
+   *   full-replace.
    * - `seq > last + 1`: a hole, which is not proof of loss (see
    *   [`RESYNC_GRACE_MS`]). The message is buffered; only a hole that
    *   outlives the grace sends `request_snapshot`, at most one in flight.

@@ -19,6 +19,7 @@ export function remapSliceIndirection(
     visibleRegion?: VisibleRegion;
     renderRadiusView?: number;
     entryByMember?: Map<string, RemapEntryInfo>;
+    failed?: ReadonlyMap<string, ReadonlySet<string>>;
   } = {},
 ): void {
   remapSharedIndirection({
@@ -31,6 +32,7 @@ export function remapSliceIndirection(
     visibleRegion: options.visibleRegion,
     renderRadiusView: options.renderRadiusView,
     entryByMember: options.entryByMember,
+    failed: options.failed,
     targetChunkZFor: (memberId, level) =>
       computeTargetChunkZ(atlas.entityZInfo.get(memberId)?.get(level), currentZ),
     holdsCurrentPlane: (memberId, level, slotIndex) => {

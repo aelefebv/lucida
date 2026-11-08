@@ -269,6 +269,27 @@ describe("UrlSync", () => {
     sync.destroy();
   });
 
+  it("never writes a view whose camera is unframed", async () => {
+    const unframed = (): SavedView => ({
+      ...emptyView(),
+      camera: { ...emptyView().camera, framing: "unframed" } as SavedView["camera"],
+    });
+    const sync = new UrlSync(unframed, applier as unknown as SavedViewApplier, { window: win });
+    await sync.flush();
+    expect(win.location.hash).toBe("");
+
+    // Once the scene has fitted it, the view is written.
+    const framed = (): SavedView => ({
+      ...emptyView(),
+      camera: { ...emptyView().camera, framing: "framed" } as SavedView["camera"],
+    });
+    const next = new UrlSync(framed, applier as unknown as SavedViewApplier, { window: win });
+    await next.flush();
+    expect(win.location.hash).toMatch(/^#view=/);
+    sync.destroy();
+    next.destroy();
+  });
+
   it("destroy cancels pending debounce", async () => {
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       debounceMs: 30,
