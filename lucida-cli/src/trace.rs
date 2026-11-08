@@ -1290,8 +1290,7 @@ pub fn compose_camera(
     }
 
     let mut scene = Scene::new(device_viewport);
-    scene.document = document.clone();
-    crate::view::hydrate_scene_document_defaults(&mut scene);
+    scene.load_document(document.clone());
     match request.kind {
         CameraKind::Slice => scene.set_mode_2d(),
         CameraKind::Arcball => scene.set_mode_3d(),
