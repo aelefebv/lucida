@@ -1,0 +1,97 @@
+{
+  "payload": "H4sIAAAAAAAACm2P3W7CMAyF3-VcGwgVRZNfpaoqq_UAKY1REmCjyrtPQbBxMckX_jn2-bzgCm4Io8waBbxgtknBSP40KgijhqwR3DXtnpp23xPuZjN4u24J15PezhYzuPtwjvbO9YUwSZakOYE7bGqxsaBrm3V9lxhBz2Y-Rn1r97-Lg8Xp4YkprSxUjCmtHvKqqqaV9D5ECQetacpSIXYEDRO4LYQM3v6xDElzPoVDqurnVV4wHiUE9W_TbsFoIUdJeZjlC7xzzpXHVy-E6mfewFv690ChGhjNW5zlDMa3em83lL4UglyyDS-Pd5xP8UlL-QEqMp2PkwEAAA",
+  "view": {
+    "v": 2,
+    "datasets": [
+      "/data/one.ome.zarr",
+      "/data/three.ome.zarr"
+    ],
+    "active_layouts": {},
+    "camera": {
+      "mode": "slice",
+      "center": [
+        256,
+        256
+      ],
+      "zoom": 1.5,
+      "viewport": [
+        800,
+        600
+      ]
+    },
+    "view": {
+      "z_range": {
+        "start": 4,
+        "end": 5
+      },
+      "t": 1
+    },
+    "display": {
+      "contrast_min": 0,
+      "contrast_max": 65535,
+      "gamma": 1
+    },
+    "dataset_order": [
+      "ds-one",
+      "ds-three"
+    ],
+    "dataset_settings": {
+      "ds-one": {
+        "visible": true,
+        "opacity": 1,
+        "contrast_min": 0,
+        "contrast_max": 65535,
+        "gamma": 1,
+        "blend_mode": "alpha",
+        "render_mode": "translucent",
+        "channel_blend_mode": "additive",
+        "channel_settings": [
+          {
+            "visible": true,
+            "colormap": "magenta",
+            "contrast_min": 0,
+            "contrast_max": 4000,
+            "gamma": 1
+          }
+        ]
+      },
+      "ds-three": {
+        "visible": true,
+        "opacity": 1,
+        "contrast_min": 0,
+        "contrast_max": 65535,
+        "gamma": 1,
+        "blend_mode": "alpha",
+        "render_mode": "translucent",
+        "channel_blend_mode": "additive",
+        "channel_settings": [
+          {
+            "visible": true,
+            "colormap": "magenta",
+            "contrast_min": 0,
+            "contrast_max": 65535,
+            "gamma": 1
+          },
+          {
+            "visible": true,
+            "colormap": "green",
+            "contrast_min": 0,
+            "contrast_max": 65535,
+            "gamma": 1
+          },
+          {
+            "visible": true,
+            "colormap": "yellow",
+            "contrast_min": 0,
+            "contrast_max": 65535,
+            "gamma": 1
+          }
+        ],
+        "solo": 1
+      }
+    },
+    "auto_contrast": {
+      "ds-one": false
+    }
+  }
+}

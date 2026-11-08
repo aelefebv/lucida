@@ -1658,7 +1658,14 @@ fn layer_states(scene: &Scene) -> Vec<LayerState> {
             };
             let shown = layer.channel_indices();
             let channels = (0..layer.channel_count)
-                .map(|channel| channel_state(settings, channel, shown.contains(&channel)))
+                .map(|channel| {
+                    channel_state(
+                        settings,
+                        channel,
+                        layer.channel_count,
+                        shown.contains(&channel),
+                    )
+                })
                 .collect();
             Some(LayerState {
                 workspace_dataset_id: layer.dataset_id.0.clone(),
@@ -1684,13 +1691,18 @@ fn layer_states(scene: &Scene) -> Vec<LayerState> {
         .collect()
 }
 
-fn channel_state(settings: &DatasetDisplaySettings, channel: u32, shown: bool) -> ChannelState {
+fn channel_state(
+    settings: &DatasetDisplaySettings,
+    channel: u32,
+    channel_count: u32,
+    shown: bool,
+) -> ChannelState {
     let default_settings;
     let settings = if let Some(settings) = settings.channel_settings.get(channel as usize) {
         settings
     } else {
         default_settings = ChannelSettings {
-            colormap: Colormap::default_for_channel(channel as usize),
+            colormap: Colormap::default_for_channel(channel as usize, channel_count as usize),
             ..Default::default()
         };
         &default_settings

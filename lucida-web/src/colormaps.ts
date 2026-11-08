@@ -23,12 +23,6 @@ export const COLORMAP_NAMES: readonly string[] = [
   "jet",
 ] as const;
 
-export const DEFAULT_CHANNEL_COLORMAPS: readonly string[] = [
-  "magenta",
-  "green",
-  "cyan",
-] as const;
-
 type RGB = [number, number, number];
 
 const VIRIDIS_SAMPLES: RGB[] = [

@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import {
   UrlSync,
   parseViewHash,
@@ -11,6 +11,9 @@ import {
 import { encode } from "./encoder.ts";
 import { SavedViewApplier } from "./applier.ts";
 import { SAVED_VIEW_VERSION, type SavedView } from "./types.ts";
+import { loadWasm } from "../viewProperties.ts";
+
+beforeAll(() => loadWasm());
 
 function emptyView(): SavedView {
   return {
@@ -126,11 +129,7 @@ describe("UrlSync", () => {
     vi.useRealTimers();
   });
 
-  /**
-   * Fake only the debounce's timers, then let the flushes it fired finish on
-   * real ones: the encode runs through CompressionStream, which does not
-   * round-trip under fake timers.
-   */
+  /** Fake only the debounce's timers, then let the flushes it fired finish. */
   function debounceTimers() {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
   }
@@ -245,7 +244,7 @@ describe("UrlSync", () => {
     sync.start();
     const bootstrap = vi.spyOn(sync, "bootstrap");
     (win as unknown as { _popstate: (s: unknown) => void })._popstate(null);
-    // popstate fires a `bootstrap()` whose decode awaits CompressionStream.
+    // popstate fires a `bootstrap()`, which applies asynchronously.
     expect(bootstrap).toHaveBeenCalledTimes(1);
     await bootstrap.mock.results[0].value;
     expect(applier.apply).toHaveBeenCalledTimes(1);
@@ -333,15 +332,13 @@ describe("UrlSync", () => {
     expect(win.location.hash).toBe("");
   });
 
-  it("writes nothing once destroyed, even from a flush already encoding", async () => {
+  it("writes nothing once destroyed", async () => {
     const sync = new UrlSync(captureBuilder, applier as unknown as SavedViewApplier, {
       window: win,
     });
     const spy = vi.spyOn(win.history, "replaceState");
-    const writing = sync.flush();
-    const collapsing = sync.collapseToLiveView();
     sync.destroy();
-    await Promise.all([writing, collapsing]);
+    await Promise.all([sync.flush(), sync.collapseToLiveView()]);
     expect(spy).not.toHaveBeenCalled();
     expect(win.location.hash).toBe("");
   });

@@ -5,15 +5,22 @@
 // scene. `dataset_id_for_url` is mocked so the hook builds
 // without a wasm init.
 
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { act, render } from "@testing-library/react";
 
 // Mock lucida-core before importing the hook so the import-time
-// `dataset_id_for_url` reference picks up the stub.
-vi.mock("lucida-core", () => ({
-  dataset_id_for_url: (url: string) => `ds-stub-${url.length.toString(16)}`,
-}));
+// `dataset_id_for_url` reference picks up the stub. The URL codec is the real
+// one, loaded below.
+vi.mock("lucida-core", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("lucida-core")>();
+  return {
+    initSync: actual.initSync,
+    encode_view_payload: actual.encode_view_payload,
+    decode_view_payload: actual.decode_view_payload,
+    dataset_id_for_url: (url: string) => `ds-stub-${url.length.toString(16)}`,
+  };
+});
 
 import { useSavedViewSync } from "./useSavedViewSync.ts";
 import type { SavedView } from "../savedView/types.ts";
@@ -23,6 +30,9 @@ import type { RenderLoop } from "../renderLoop.ts";
 import type { WasmScene } from "lucida-core";
 import { SceneStore } from "../sceneStore.ts";
 import { useSceneView } from "./useSceneView.ts";
+import { loadWasm } from "../viewProperties.ts";
+
+beforeAll(() => loadWasm());
 
 interface MockScene {
   zVal: number;
@@ -388,7 +398,7 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
   let scene: MockScene;
   let store: SceneStore;
   let outRef: Captured;
-  let written: Promise<SavedView["camera"]>[];
+  let written: SavedView["camera"][];
   let originalReplace: History["replaceState"];
 
   // Real timers: the URL write waits on an encode the fake clock can't drive.
@@ -403,7 +413,7 @@ describe("useSavedViewSync — the URL and the last view follow the camera", () 
     originalReplace = window.history.replaceState;
     window.history.replaceState = ((s: unknown, t: string, url?: string | URL | null) => {
       const payload = /view=([^&]+)/.exec(String(url ?? ""))?.[1];
-      if (payload) written.push(decode(payload).then((v) => v.camera));
+      if (payload) written.push(decode(payload).camera);
       return originalReplace.call(window.history, s, t, url);
     }) as History["replaceState"];
   });

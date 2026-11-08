@@ -23,14 +23,10 @@ mod view_properties;
 mod watch;
 mod workspace;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use base64::Engine as _;
 use clap::{Parser, Subcommand, ValueEnum};
-use flate2::Compression;
-use flate2::write::GzEncoder;
 use lucida_core::command::ViewportCommand;
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{BlendMode, Colormap, RenderMode};
@@ -4447,25 +4443,11 @@ fn viewer_inline_view_web_url(
     target: &WorkspaceTarget,
     saved_view: &SavedView,
 ) -> Result<String, CliError> {
-    let payload = encode_saved_view_url_payload(saved_view)?;
+    let payload = saved_view.to_payload();
     let mut url = reqwest::Url::parse(&target.web_url)
         .map_err(|error| CliError::invalid_server(format!("invalid workspace URL: {error}")))?;
     url.set_fragment(Some(&format!("view={payload}")));
     Ok(url.to_string())
-}
-
-/// A view as the page carries one in a URL fragment: gzip, then base64url
-/// without padding. Generic so the trace driver can encode a view it holds
-/// as JSON, as the page handed it over, without reading it into a `SavedView`
-/// first and losing whatever fields this build does not know.
-pub(crate) fn encode_saved_view_url_payload<T: serde::Serialize + ?Sized>(
-    saved_view: &T,
-) -> Result<String, CliError> {
-    let json = serde_json::to_vec(saved_view)?;
-    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-    encoder.write_all(&json)?;
-    let gz = encoder.finish()?;
-    Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(gz))
 }
 
 async fn capture_viewer_screenshot(
@@ -4749,7 +4731,6 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
     use serde_json::json;
-    use std::io::Read;
 
     fn parse(args: &[&str]) -> Cli {
         Cli::parse_from(std::iter::once("lucida").chain(args.iter().copied()))
@@ -5976,23 +5957,6 @@ mod tests {
             }
             _ => panic!("expected viewer overview"),
         }
-    }
-
-    #[test]
-    fn saved_view_url_payload_is_gzip_base64url_json() {
-        let view = SavedView::empty([640, 480]);
-        let payload = encode_saved_view_url_payload(&view).unwrap();
-        assert!(!payload.contains(['+', '/', '=']));
-
-        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .decode(payload)
-            .unwrap();
-        let mut decoder = flate2::read::GzDecoder::new(bytes.as_slice());
-        let mut json = String::new();
-        decoder.read_to_string(&mut json).unwrap();
-        let parsed: Value = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed["v"].as_u64(), Some(view.v as u64));
-        assert!(parsed["camera"].is_object());
     }
 
     #[test]

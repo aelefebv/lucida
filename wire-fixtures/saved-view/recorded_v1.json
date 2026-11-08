@@ -1,0 +1,60 @@
+{
+  "payload": "H4sIAAAAAAAACk3NUQrCMBCE4bvMc2xjoUX2KiFISBctNFlJQoWG3F0qKj4OH8NfsYHOCrMrLnPJIIP-GL1E7iRwt7uUYBW8C5wcqCLIzCDkdfEMBc-xcAKZYZzUME5WYRcJoHM3KmwLPx-SCshctFaT1rb9cldJ8_uKOZ8k8tH5UuZSlnjLR_GjVOHvLkZe_9TUZltrL3j7GmvJAAAA",
+  "view": {
+    "v": 1,
+    "datasets": [
+      "/data/one.ome.zarr"
+    ],
+    "active_layouts": {},
+    "camera": {
+      "mode": "slice",
+      "center": [
+        256,
+        256
+      ],
+      "zoom": 1.5,
+      "viewport": [
+        800,
+        600
+      ]
+    },
+    "view": {
+      "z_range": {
+        "start": 0,
+        "end": 1
+      },
+      "t": 0,
+      "c": 0,
+      "multi_channel": false
+    },
+    "display": {
+      "contrast_min": 0,
+      "contrast_max": 65535,
+      "gamma": 1
+    },
+    "dataset_order": [
+      "ds-one"
+    ],
+    "dataset_settings": {
+      "ds-one": {
+        "visible": true,
+        "opacity": 1,
+        "contrast_min": 0,
+        "contrast_max": 65535,
+        "gamma": 1,
+        "blend_mode": "alpha",
+        "render_mode": "translucent",
+        "channel_blend_mode": "additive",
+        "channel_settings": [
+          {
+            "visible": true,
+            "colormap": "magenta",
+            "contrast_min": 0,
+            "contrast_max": 65535,
+            "gamma": 1
+          }
+        ]
+      }
+    }
+  }
+}

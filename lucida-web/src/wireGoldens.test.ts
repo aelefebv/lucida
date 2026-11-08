@@ -12,7 +12,7 @@
  * and update the expectations and mirror types here.
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from "vitest";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -80,6 +80,8 @@ import {
   type ViewState as WireViewState,
 } from "./savedView/types.ts";
 import { viewModeForCamera } from "./savedView/restoreAnnotationView.ts";
+import { decode, encode } from "./savedView/encoder.ts";
+import { loadWasm } from "./viewProperties.ts";
 import type { Annotation } from "./components/annotationDocument.ts";
 
 // Fixture loading
@@ -2161,6 +2163,35 @@ describe("wire goldens: watch stream", () => {
       through_seq: 42,
       replayed: 40,
     });
+  });
+});
+
+// Saved-view payloads, through the web's own encoder and decoder
+
+describe("wire goldens: saved-view payloads", () => {
+  beforeAll(() => loadWasm());
+
+  interface PayloadGolden {
+    view: SavedView;
+    payload: string;
+  }
+
+  it("the web writes the payload the core wrote for the same view, and reads it back", () => {
+    const golden = coveredFixture("saved-view/payload.json") as PayloadGolden;
+    expect(encode(golden.view)).toBe(golden.payload);
+    expect(decode(golden.payload)).toEqual(golden.view);
+    // A one-channel layer opens gray, so its colormap rides the payload.
+    expect(golden.view.dataset_settings["wds-0f3a"].channel_settings![0].colormap).toBe("gray");
+  });
+
+  it("a payload recorded before one-channel images opened gray restores as it did", () => {
+    for (const rel of ["saved-view/recorded_v1.json", "saved-view/recorded_v2.json"]) {
+      const recorded = coveredFixture(rel) as PayloadGolden;
+      expect(decode(recorded.payload)).toEqual(recorded.view);
+    }
+    const v2 = (fixture("saved-view/recorded_v2.json") as PayloadGolden).view;
+    const one = v2.dataset_settings["ds-one"].channel_settings!;
+    expect(one.map((c) => c.colormap)).toEqual(["magenta"]);
   });
 });
 

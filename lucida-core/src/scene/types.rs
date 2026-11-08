@@ -51,9 +51,20 @@ pub enum Colormap {
 }
 
 impl Colormap {
-    pub fn default_for_channel(index: usize) -> Self {
+    /// The colormap channel `index` of `channel_count` opens with: gray for
+    /// an image with one channel, else magenta, green and cyan in turn, so
+    /// the channels of a composite stay apart.
+    ///
+    /// This seeds new views only. A saved view leaves out the colormaps of its
+    /// own frozen table, not these, so changing this never changes how a
+    /// stored view restores.
+    pub fn default_for_channel(index: usize, channel_count: usize) -> Self {
         const CYCLE: [Colormap; 3] = [Colormap::Magenta, Colormap::Green, Colormap::Cyan];
-        CYCLE[index % CYCLE.len()]
+        if channel_count == 1 {
+            Colormap::Gray
+        } else {
+            CYCLE[index % CYCLE.len()]
+        }
     }
 }
 
@@ -184,13 +195,14 @@ impl DatasetDisplaySettings {
         };
     }
 
-    /// Get a mutable reference to channel settings at the given index,
-    /// growing the vec with defaults if needed.
-    pub fn ensure_channel(&mut self, index: usize) -> &mut ChannelSettings {
+    /// Get a mutable reference to channel settings at the given index of a
+    /// layer with `channel_count` channels, growing the vec with defaults if
+    /// needed.
+    pub fn ensure_channel(&mut self, index: usize, channel_count: usize) -> &mut ChannelSettings {
         while self.channel_settings.len() <= index {
             let i = self.channel_settings.len();
             self.channel_settings.push(ChannelSettings {
-                colormap: Colormap::default_for_channel(i),
+                colormap: Colormap::default_for_channel(i, channel_count),
                 ..Default::default()
             });
         }
@@ -211,11 +223,12 @@ impl DatasetDisplaySettings {
     }
 
     /// Build the complete default display settings for a freshly opened or
-    /// restored dataset: one channel entry per channel (cycling the default
-    /// colormaps) and one label entry per attached label. Both the
-    /// `DatasetOpened` apply path and `load_document` seed from here, because
-    /// the layer panel and render path need full-length `channel_settings` and
-    /// `label_settings` however the dataset entered the scene.
+    /// restored dataset: one channel entry per channel (in
+    /// [`Colormap::default_for_channel`]) and one label entry per attached
+    /// label. Both the `DatasetOpened` apply path and `load_document` seed
+    /// from here, because the layer panel and render path need full-length
+    /// `channel_settings` and `label_settings` however the dataset entered
+    /// the scene.
     ///
     /// Every label seeds hidden at opacity 0.5, since masks are opt-in. This
     /// default is mode-agnostic: once the user turns masks on, the web
@@ -232,7 +245,7 @@ impl DatasetDisplaySettings {
         Self {
             channel_settings: (0..channel_count)
                 .map(|i| ChannelSettings {
-                    colormap: Colormap::default_for_channel(i),
+                    colormap: Colormap::default_for_channel(i, channel_count),
                     ..Default::default()
                 })
                 .collect(),

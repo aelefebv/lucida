@@ -992,8 +992,8 @@ impl Scene {
                 channel,
                 visible,
             } => {
-                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
-                    s.ensure_channel(channel as usize).visible = visible;
+                if let Some(ch) = self.channel_settings_mut(&DatasetId(dataset_id), channel) {
+                    ch.visible = visible;
                 }
             }
             ViewportCommand::SetChannelColormap {
@@ -1001,8 +1001,8 @@ impl Scene {
                 channel,
                 colormap,
             } => {
-                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
-                    s.ensure_channel(channel as usize).colormap = colormap;
+                if let Some(ch) = self.channel_settings_mut(&DatasetId(dataset_id), channel) {
+                    ch.colormap = colormap;
                 }
             }
             ViewportCommand::SetChannelName {
@@ -1010,8 +1010,8 @@ impl Scene {
                 channel,
                 name,
             } => {
-                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
-                    s.ensure_channel(channel as usize).name = name;
+                if let Some(ch) = self.channel_settings_mut(&DatasetId(dataset_id), channel) {
+                    ch.name = name;
                 }
             }
             ViewportCommand::SetChannelContrast {
@@ -1020,8 +1020,7 @@ impl Scene {
                 min,
                 max,
             } => {
-                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
-                    let ch = s.ensure_channel(channel as usize);
+                if let Some(ch) = self.channel_settings_mut(&DatasetId(dataset_id), channel) {
                     ch.contrast_min = min;
                     ch.contrast_max = max;
                 }
@@ -1031,8 +1030,8 @@ impl Scene {
                 channel,
                 gamma,
             } => {
-                if let Some(s) = self.dataset_settings.get_mut(&DatasetId(dataset_id)) {
-                    s.ensure_channel(channel as usize).gamma = gamma;
+                if let Some(ch) = self.channel_settings_mut(&DatasetId(dataset_id), channel) {
+                    ch.gamma = gamma;
                 }
             }
             ViewportCommand::SetChannelBlendMode {
@@ -1088,6 +1087,24 @@ impl Scene {
             .manifests
             .get(dataset_id)
             .is_some_and(|m| (label as usize) < m.label_specs().len())
+    }
+
+    /// Channel `channel` of `dataset_id`'s settings, its entry made if the
+    /// settings lack one, or `None` for a dataset without settings.
+    fn channel_settings_mut(
+        &mut self,
+        dataset_id: &DatasetId,
+        channel: u32,
+    ) -> Option<&mut crate::scene::ChannelSettings> {
+        let channel_count = self
+            .document
+            .manifests
+            .get(dataset_id)
+            .map(|m| crate::scene::LayerExtent::of(m).c as usize);
+        let settings = self.dataset_settings.get_mut(dataset_id)?;
+        let channel_count = channel_count
+            .unwrap_or_else(|| settings.channel_settings.len().max(channel as usize + 1));
+        Some(settings.ensure_channel(channel as usize, channel_count))
     }
 
     fn clamp_detail_level_override(&self, dataset_id: &DatasetId, requested: u32) -> Option<u32> {
