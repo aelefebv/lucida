@@ -1,0 +1,122 @@
+name: Trace gate
+
+# Opens generated datasets in headless Chrome on SwiftShader's WebGPU and runs
+# `lucida trace --gate` on each: a view that never settles, stalls, or leaves
+# a failing verdict fails the job. No GPU is needed, so a hosted runner can
+# catch what the unit tests cannot see.
+on:
+  schedule:
+    - cron: '23 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: trace-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: lucida trace --gate (SwiftShader)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Both builds read the cache the CI workflow's Docker job writes, so a
+      # stage it has built is not built again. Each also keeps its own final
+      # layers, which is all an unchanged build needs. Exporting every stage
+      # instead would copy the Docker job's largest layers into the
+      # repository's cache a second time, and writing its scope would replace
+      # that job's entries.
+      - name: Build the lucida CLI
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: cli
+          platforms: linux/amd64
+          outputs: type=local,dest=${{ runner.temp }}/cli
+          cache-from: |
+            type=gha
+            type=gha,scope=trace-gate-cli
+          cache-to: type=gha,mode=min,scope=trace-gate-cli
+
+      - name: Build the server image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          load: true
+          tags: lucida:ci-smoke
+          cache-from: |
+            type=gha
+            type=gha,scope=trace-gate-server
+          cache-to: type=gha,mode=min,scope=trace-gate-server
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      # The server opens each dataset by the path the CLI names, so the data
+      # directory is mounted at the same path inside the container. Auth is
+      # off for the reason the CI smoke gives: an ephemeral runner.
+      - name: Start the server
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/gate-data"
+          docker run -d --name lucida-gate -p 9876:9876 \
+            -e LUCIDA_AUTH=disabled \
+            -e LUCIDA_INSECURE=1 \
+            -v "$RUNNER_TEMP/gate-data:$RUNNER_TEMP/gate-data:ro" \
+            lucida:ci-smoke
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:9876/healthz > /dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::healthz never responded within 30s"
+          exit 1
+
+      # Without a Vulkan driver on the runner, Chrome destroys the page's
+      # WebGPU device within seconds of creating it, whatever GPU flags it is
+      # given. Mesa's lavapipe supplies one. The page's adapter is still
+      # SwiftShader, which the run's client line reports.
+      - name: Install a software Vulkan driver
+        run: sudo apt-get install -y -q mesa-vulkan-drivers
+
+      # The runner's first Chrome launch pays for cold disk and font caches,
+      # and once that pushed the first run's plan pass past its ceiling. An
+      # ungated run pays it instead.
+      - name: Warm up Chrome
+        run: |
+          data="$RUNNER_TEMP/gate-data"
+          uv run extras/synthetic_ome_zarr.py "$data/warm-up.ome.zarr" --size 256,256 --levels 2 --chunk 128
+          lucida="$RUNNER_TEMP/cli/lucida --server http://127.0.0.1:9876"
+          $lucida workspace create warm-up > /dev/null
+          $lucida --workspace warm-up trace "$data/warm-up.ome.zarr" --output "$RUNNER_TEMP/warm-up.json" > /dev/null || true
+
+      - name: Run the gate
+        env:
+          LUCIDA_GATE_CLI: ${{ runner.temp }}/cli/lucida
+          LUCIDA_GATE_DATA: ${{ runner.temp }}/gate-data
+          LUCIDA_GATE_OUTPUT: ${{ runner.temp }}/gate-out
+        run: scripts/trace_gate.sh
+
+      - name: Server logs
+        if: failure()
+        run: docker logs lucida-gate || true
+
+      # The bundles carry each run's trace, settled frame, view URL and
+      # header, which is what `lucida trace show` and `trace replay` read.
+      - name: Upload runs and bundles
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trace-gate-runs
+          path: ${{ runner.temp }}/gate-out
+          if-no-files-found: ignore
+          retention-days: 14
