@@ -8,8 +8,8 @@ use bytes::Bytes;
 use futures_util::stream::BoxStream;
 use object_store::path::Path;
 use object_store::{
-    GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
-    PutMultipartOptions, PutOptions, PutPayload, PutResult,
+    CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
+    ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
 
 /// An in-memory `ObjectStore` that counts what reaches the backend: reads,
@@ -78,12 +78,13 @@ impl ObjectStore for CountingStore {
         location: &Path,
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
-        // A HEAD phrased as a bodiless GET is still a HEAD.
+        // Every HEAD arrives as a bodiless GET. The delay, the injected
+        // failure and the overlap count model reads, so a HEAD skips them.
         if options.head {
             self.head_count.fetch_add(1, Ordering::SeqCst);
-        } else {
-            self.get_count.fetch_add(1, Ordering::SeqCst);
+            return self.inner.get_opts(location, options).await;
         }
+        self.get_count.fetch_add(1, Ordering::SeqCst);
         let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max_active.fetch_max(active, Ordering::SeqCst);
         if self.delay_ms > 0 {
@@ -101,13 +102,11 @@ impl ObjectStore for CountingStore {
         result
     }
 
-    async fn head(&self, location: &Path) -> object_store::Result<ObjectMeta> {
-        self.head_count.fetch_add(1, Ordering::SeqCst);
-        self.inner.head(location).await
-    }
-
-    async fn delete(&self, location: &Path) -> object_store::Result<()> {
-        self.inner.delete(location).await
+    fn delete_stream(
+        &self,
+        locations: BoxStream<'static, object_store::Result<Path>>,
+    ) -> BoxStream<'static, object_store::Result<Path>> {
+        self.inner.delete_stream(locations)
     }
 
     fn list(&self, prefix: Option<&Path>) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
@@ -118,11 +117,12 @@ impl ObjectStore for CountingStore {
         self.inner.list_with_delimiter(prefix).await
     }
 
-    async fn copy(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.copy(from, to).await
-    }
-
-    async fn copy_if_not_exists(&self, from: &Path, to: &Path) -> object_store::Result<()> {
-        self.inner.copy_if_not_exists(from, to).await
+    async fn copy_opts(
+        &self,
+        from: &Path,
+        to: &Path,
+        options: CopyOptions,
+    ) -> object_store::Result<()> {
+        self.inner.copy_opts(from, to, options).await
     }
 }

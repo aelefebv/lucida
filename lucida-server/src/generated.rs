@@ -2804,6 +2804,7 @@ mod tests {
     use lucida_store::codec::StorageCompression;
     use lucida_store::import_types::{ImageBindingSeed, LevelBindingInfo, ServerBindingSeed};
     use lucida_store::layout::ChunkByteLayout;
+    use object_store::ObjectStoreExt;
     use tokio::sync::broadcast;
 
     fn generated_level() -> GeneratedLevelAvailability {

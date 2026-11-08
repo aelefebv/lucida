@@ -8,9 +8,6 @@ all-features = true
 ignore = [
     { id = "RUSTSEC-2023-0071", reason = "rsa is a dev-dependency of lucida-server, used only to sign test tokens; no fixed release exists" },
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint comes from p256, a dev-dependency of lucida-server used only to sign test tokens" },
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml comes from object_store 0.12, which parses only responses from the store a deployment configures; the fix needs object_store 0.14" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml comes from object_store 0.12, which parses only responses from the store a deployment configures; the fix needs object_store 0.14" },
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is unmaintained but has no known vulnerability; object_store 0.12 needs it and 0.13 drops it" },
 ]
 
 [licenses]

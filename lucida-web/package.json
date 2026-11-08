@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.2.0",
   "type": "module",
+  "packageManager": "pnpm@9.15.9",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
@@ -15,7 +16,7 @@
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
     "fzstd": "^0.1.1",
-    "lucida-core": "file:../lucida-core/pkg",
+    "lucida-core": "link:../lucida-core/pkg",
     "react": "^19.2.0",
     "react-aria-components": "^1.22.1",
     "react-dom": "^19.2.0"
