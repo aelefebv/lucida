@@ -94,7 +94,7 @@ function makeWorkerCtx(writes: WriteTextureCall[]): WorkerCtx {
       submit: vi.fn(),
     },
   } as unknown as GPUDevice;
-  return { device, state: createInitialState() } as unknown as WorkerCtx;
+  return { device, state: createInitialState(), post: vi.fn() } as unknown as WorkerCtx;
 }
 
 describe("label chunk flow: request → pre-sliced delivery → pool", () => {

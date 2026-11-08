@@ -95,7 +95,7 @@ interface Compiles {
 }
 
 describe.each<[string, (device: GPUDevice) => Compiles, number]>([
-  ["slice renderer", (device) => new SliceRenderer(device), 4],
+  ["slice renderer", (device) => new SliceRenderer(device), 6],
   ["layer compositor", (device) => new LayerCompositor(device, "bgra8unorm"), 4],
   ["cursor renderer", (device) => new CursorRenderer(device, "bgra8unorm"), 2],
   ["volume renderer", (device) => new VolumeRenderer(device), 1],

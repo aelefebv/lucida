@@ -33,7 +33,7 @@ import {
   usToMs,
   type WindowRollup,
 } from "./phaseRollup.ts";
-import { adapterKindOf, adapterName, deriveRenderTiming } from "./renderTiming.ts";
+import { adapterKindOf, adapterName, deriveGpuMemory, deriveRenderTiming } from "./renderTiming.ts";
 import { summariseSent } from "./sent.ts";
 import { summariseSpace } from "./spatialSummary.ts";
 import { deriveTimeline, type TimelineRecording } from "./timeline.ts";
@@ -229,6 +229,7 @@ export function diagnoseRun(run: TraceRun, options: DiagnoseOptions = {}): Diagn
     limiters,
     aggregates,
     renderTiming: deriveRenderTiming(run),
+    gpuMemory: deriveGpuMemory(run.readings),
     sent: summariseSent(run.sent, run.header.durationUs),
     steadyState: steady.reading,
     counts: {

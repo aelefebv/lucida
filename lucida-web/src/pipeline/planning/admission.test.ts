@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { DatasetManifest } from "../../manifestTypes.ts";
-import { admitRequests, chunkBytesFor, sliceSlotsFor } from "./admission.ts";
+import { admitRequests, chunkBytesFor } from "./admission.ts";
 import type { ChunkRequest } from "./types.ts";
 
 function request(x: number, overrides: Partial<ChunkRequest> = {}): ChunkRequest {
@@ -66,7 +66,7 @@ describe("admitRequests", () => {
 describe("admitting against GPU slot pools", () => {
   it("admits no more chunks into a pool than it has slots, and counts the rest short", () => {
     const requests = [0, 1, 2, 3].map((x) => request(x));
-    const slotOf = () => ({ pool: "p", slots: 2 });
+    const slotOf = () => ({ pool: "p", slots: 2, slotBytes: 10 });
     const admission = admitRequests(requests, { detail: 1_000, coarse: 0 }, TEN_BYTES, slotOf);
     expect(admission.admitted.map((r) => r.x)).toEqual([0, 1]);
     expect(admission.shortfall.detail).toBe(2);
@@ -78,25 +78,20 @@ describe("admitting against GPU slot pools", () => {
       request(1, { lane: "coarse" }),
       request(1, { lane: "minimap", priority: 9 }),
     ];
-    const slotOf = (req: ChunkRequest) => (req.lane === "coarse" ? { pool: "p", slots: 1 } : null);
+    const slotOf = (req: ChunkRequest) => (req.lane === "coarse" ? { pool: "p", slots: 1, slotBytes: 10 } : null);
     const admission = admitRequests(requests, { detail: 0, coarse: 100 }, TEN_BYTES, slotOf);
     expect(admission.admitted.map((r) => `${r.lane}:${r.x}`)).toEqual(["coarse:0", "minimap:1"]);
     expect(admission.shortfall.coarse).toBe(1);
   });
 
-  it("sizes a slice pool from the atlas budget and the level's chunk plane", () => {
-    const manifest = {
-      images: [
-        {
-          image_id: "image",
-          multiscale: { data_type: "Uint16", levels: [{ level_index: 0, chunk_shape: [1, 1, 1, 256, 256] }] },
-        },
-      ],
-    } as unknown as DatasetManifest;
-    // 64 MiB of 128 KiB slots is 512, laid out 22 by 22.
-    const slot = sliceSlotsFor(manifest, 64 * 1024 * 1024)(request(0));
-    expect(slot?.slots).toBe(22 * 22);
-    expect(sliceSlotsFor(manifest, 64 * 1024 * 1024)(request(0, { lane: "prefetch" }))).toBeNull();
+  it("admits no more slots across every pool than the GPU room holds, and hands on what is left", () => {
+    // Two pools of ample slots, but room for three 10-byte slots between them.
+    const requests = [0, 1, 2, 3].map((x) => request(x));
+    const slotOf = (req: ChunkRequest) => ({ pool: req.x % 2 === 0 ? "even" : "odd", slots: 10, slotBytes: 10 });
+    const admission = admitRequests(requests, { detail: 1_000, coarse: 0 }, TEN_BYTES, slotOf, 35);
+    expect(admission.admitted.map((r) => r.x)).toEqual([0, 1, 2]);
+    expect(admission.shortfall.detail).toBe(1);
+    expect(admission.gpuRoomLeft).toBe(5);
   });
 });
 

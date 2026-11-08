@@ -450,6 +450,7 @@ mod tests {
     fn channel_bundled_level() -> LevelInfo {
         LevelInfo {
             level_index: 0,
+            path: "0".to_string(),
             compression: StorageCompression::None,
             chunk_shape: vec![1, 2, 1, 1, 2],
             chunk_byte_layout: ChunkByteLayout {
@@ -917,6 +918,7 @@ mod tests {
         };
         LevelInfo {
             level_index: 0,
+            path: "0".to_string(),
             compression: StorageCompression::None,
             chunk_shape: vec![1, 1, 1, 2, 2],
             chunk_byte_layout: layout(4),
