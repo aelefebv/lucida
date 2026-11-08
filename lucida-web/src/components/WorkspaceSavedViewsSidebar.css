@@ -23,16 +23,15 @@
 .lc-saved-view-visibility {
   display: flex;
   flex-direction: column;
-  gap: var(--lc-space-2);
   min-width: 0;
-  margin: 0;
-  padding: 0;
-  border: none;
+}
+
+.lc-saved-view-visibility-option + .lc-saved-view-visibility-option {
+  margin-top: var(--lc-space-2);
 }
 
 .lc-saved-view-visibility-legend {
   margin-bottom: var(--lc-space-1);
-  padding: 0;
   color: var(--lc-text-muted);
   font-size: var(--lc-text-sm);
   font-weight: 500;
