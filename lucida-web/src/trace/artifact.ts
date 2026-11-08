@@ -10,6 +10,7 @@
  * the one compare function the same input.
  */
 
+import type { SourceThrottleReport } from "../bridge.ts";
 import type { CacheKnobs } from "../pipeline/fetch/cacheKnobs.ts";
 import type { PlanningConfig } from "../pipeline/planning/config.ts";
 import { BUNDLE_FORMAT, BUNDLE_VERSION, type TraceBundle } from "./bundle.ts";
@@ -45,6 +46,12 @@ export interface TraceRunFileHeader {
   serverWarmth: { summary: string; [field: string]: unknown };
   /** The Dev controls knobs the driver set before the page loaded. Absent when it set none. */
   knobs?: { planning?: Partial<PlanningConfig>; cache?: CacheKnobs } | null;
+  /**
+   * The throttle the server put on its source reads, with no settings when
+   * it read them unthrottled. Absent from a file written before the driver
+   * recorded it.
+   */
+  sourceThrottle?: { settings?: SourceThrottleReport | null; summary: string } | null;
   [field: string]: unknown;
 }
 
@@ -120,11 +127,15 @@ export function compareSideOf(artifact: TraceArtifact, label: string): CompareSi
         planning: artifact.bundle.header.planning,
         cache: null,
         conditions: {},
+        sourceThrottle: artifact.bundle.health
+          ? { settings: artifact.bundle.health.sourceThrottle ?? null }
+          : null,
       };
     case "run-file": {
       // A run file that set no knob ran at the page's defaults, and an empty
       // object says so, where null would say the side could not tell.
       const knobs = artifact.file.header.knobs ?? {};
+      const throttle = artifact.file.header.sourceThrottle;
       return {
         trace: artifact.file.trace,
         runId: artifact.file.header.runId ?? undefined,
@@ -132,10 +143,19 @@ export function compareSideOf(artifact: TraceArtifact, label: string): CompareSi
         planning: knobs.planning ?? {},
         cache: knobs.cache ?? {},
         conditions: { "server warmth": artifact.file.header.serverWarmth.summary },
+        sourceThrottle: throttle ? { settings: throttle.settings ?? null } : null,
       };
     }
     case "saved-run":
-      return { trace: artifact.trace, runId: undefined, label, planning: null, cache: null, conditions: null };
+      return {
+        trace: artifact.trace,
+        runId: undefined,
+        label,
+        planning: null,
+        cache: null,
+        conditions: null,
+        sourceThrottle: null,
+      };
   }
 }
 

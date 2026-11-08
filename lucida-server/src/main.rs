@@ -16,6 +16,7 @@ use lucida_server::status;
 use lucida_server::storage;
 use lucida_server::{AppState, GeneratedConfig, browse, workspace};
 use lucida_store::source_policy::{SourcePolicy, SourcePolicyConfig};
+use lucida_store::source_throttle::{SourceThrottleConfig, SourceThrottleProfile};
 
 // CLI supports legacy `lucida-server --data-dir /path` (no subcommand,
 // treated as `serve`) alongside an explicit `serve` subcommand.
@@ -44,6 +45,8 @@ enum Commands {
 struct ServeArgs {
     #[command(flatten)]
     sources: SourceArgs,
+    #[command(flatten)]
+    source_throttle: SourceThrottleArgs,
     /// Enable server-generated coarse chunks.
     #[arg(long, env = "LUCIDA_GENERATED_COARSE_ENABLED", default_value_t = true)]
     generated_coarse_enabled: bool,
@@ -99,6 +102,37 @@ struct SourceArgs {
     /// Also readable from `LUCIDA_SOURCE_ALLOW_BUCKETS`, comma-separated.
     #[arg(long, env = "LUCIDA_SOURCE_ALLOW_BUCKETS", value_delimiter = ',')]
     source_allow_bucket: Vec<String>,
+}
+
+/// A dev-only delay on every source read, so a dataset on local disk loads
+/// the way one in object storage does. Off unless one of these is set.
+#[derive(Args, Debug, Default)]
+struct SourceThrottleArgs {
+    /// Start from a named profile: `local` (off), `object-store`, or
+    /// `remote`. A value set below replaces the profile's.
+    #[arg(long = "source-throttle", env = "LUCIDA_SOURCE_THROTTLE", value_enum)]
+    profile: Option<SourceThrottleProfile>,
+    /// Milliseconds added to every source request.
+    #[arg(long, env = "LUCIDA_SOURCE_THROTTLE_LATENCY_MS")]
+    source_throttle_latency_ms: Option<u64>,
+    /// The most milliseconds drawn per request on top of the latency.
+    #[arg(long, env = "LUCIDA_SOURCE_THROTTLE_JITTER_MS")]
+    source_throttle_jitter_ms: Option<u64>,
+    /// The cap on all source reads together, in bytes per second. Zero
+    /// lifts the cap.
+    #[arg(long, env = "LUCIDA_SOURCE_THROTTLE_BYTES_PER_SEC")]
+    source_throttle_bytes_per_sec: Option<u64>,
+}
+
+impl SourceThrottleArgs {
+    fn config(&self) -> SourceThrottleConfig {
+        SourceThrottleConfig {
+            profile: self.profile,
+            latency_ms: self.source_throttle_latency_ms,
+            jitter_ms: self.source_throttle_jitter_ms,
+            bytes_per_sec: self.source_throttle_bytes_per_sec,
+        }
+    }
 }
 
 /// What separates several directories in `LUCIDA_DATA_DIR`, as in `PATH`.
@@ -362,6 +396,27 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
         allowed_buckets = args.sources.source_allow_bucket.len(),
         "source_policy.config",
     );
+    // Installed before anything opens a source, so no read escapes it, and
+    // announced the way an insecure bind is, because every timing the server
+    // reports from here on includes a wait it added on purpose.
+    match args.source_throttle.config().resolve() {
+        Ok(None) => {}
+        Ok(Some(throttle)) => {
+            let label = throttle.report().label();
+            tracing::warn!(throttle = %label, "source_throttle.enabled");
+            eprintln!("============================================================");
+            eprintln!("WARNING: source reads are throttled");
+            eprintln!("{label}");
+            eprintln!("Every source read waits on purpose to model a remote store.");
+            eprintln!("A development setting. Do not use in production.");
+            eprintln!("============================================================");
+            lucida_store::source_throttle::install(throttle);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "source_throttle.startup.config_error");
+            return Err(std::io::Error::other(e.to_string()));
+        }
+    }
     let state = AppState {
         source_policy: Arc::clone(&source_policy),
     };
@@ -638,6 +693,39 @@ mod cli_tests {
         assert!(cli.command.is_none(), "bare invocation has no subcommand");
         assert!(cli.serve_args.sources.data_dir.is_empty());
         assert!(cli.serve_args.generated_coarse_cache_dir.is_none());
+        assert!(
+            cli.serve_args
+                .source_throttle
+                .config()
+                .resolve()
+                .unwrap()
+                .is_none(),
+            "sources read unthrottled unless a throttle is set"
+        );
+    }
+
+    #[test]
+    fn source_throttle_takes_a_profile_and_values_that_replace_its_own() {
+        let cli = parse(&[
+            "serve",
+            "--source-throttle",
+            "object-store",
+            "--source-throttle-latency-ms",
+            "40",
+        ]);
+        let Some(Commands::Serve(args)) = cli.command else {
+            panic!("serve subcommand");
+        };
+        let report = args
+            .source_throttle
+            .config()
+            .resolve()
+            .unwrap()
+            .unwrap()
+            .report();
+        assert_eq!(report.profile, None);
+        assert_eq!((report.latency_ms, report.jitter_ms), (40, 100));
+        assert!(Cli::try_parse_from(["lucida-server", "--source-throttle", "fast"]).is_err());
     }
 
     #[test]

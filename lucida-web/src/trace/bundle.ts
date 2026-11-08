@@ -9,7 +9,7 @@
  * the trace and are read when the bundle is made.
  */
 
-import type { DatasetSourceHealth } from "../bridge.ts";
+import type { DatasetHealthReply, DatasetSourceHealth, SourceThrottleReport } from "../bridge.ts";
 import type { PlanningConfig } from "../pipeline/planning/config.ts";
 import type { FrameCaptureResult } from "../renderer/workerProtocol.ts";
 import { decode } from "../savedView/encoder.ts";
@@ -176,6 +176,12 @@ export interface BundleHealth {
    * generated-coarse counts.
    */
   datasets: DatasetSourceHealth[];
+  /**
+   * The throttle the server put on every source read, null when it read
+   * sources unthrottled. Carried so a throttled run never reads as an
+   * unthrottled one.
+   */
+  sourceThrottle: SourceThrottleReport | null;
 }
 
 /** A section the bundle could not capture, with the reason, so an absence is a statement and not a gap. */
@@ -240,7 +246,7 @@ export interface BundleScript {
  * services, not state, which is why they are registered and not recorded.
  */
 export interface BundleServices {
-  requestDatasetHealth(): Promise<DatasetSourceHealth[]>;
+  requestHealth(): Promise<DatasetHealthReply>;
   /** The frame on the canvas, or the reason the render worker could not read one. */
   captureFrame(): Promise<FrameCaptureResult>;
   /**
@@ -353,7 +359,7 @@ export async function exportBundle(
     format: BUNDLE_FORMAT,
     bundleVersion: BUNDLE_VERSION,
     schemaVersion: trace.schemaVersion,
-    header: buildHeader(run, view, health, context),
+    header: buildHeader(run, view, health?.datasets ?? null, context),
     renderings: render(diagnostic),
     diagnostic: diagnostic?.document ?? null,
     trace,
@@ -363,8 +369,9 @@ export async function exportBundle(
           fetchedAtEpochMs: context.now,
           datasets:
             datasetIds.length > 0
-              ? health.filter((entry) => datasetIds.includes(entry.workspace_dataset_id))
-              : health,
+              ? health.datasets.filter((entry) => datasetIds.includes(entry.workspace_dataset_id))
+              : health.datasets,
+          sourceThrottle: health.sourceThrottle,
         }
       : null,
     absent,
@@ -468,7 +475,7 @@ async function captureFrame(
 
 async function fetchHealth(
   services: BundleServices | null,
-): Promise<Captured<DatasetSourceHealth[]>> {
+): Promise<Captured<DatasetHealthReply>> {
   if (!services) {
     return {
       value: null,
@@ -476,7 +483,7 @@ async function fetchHealth(
     };
   }
   try {
-    return { value: await services.requestDatasetHealth(), reason: null };
+    return { value: await services.requestHealth(), reason: null };
   } catch (error) {
     return { value: null, reason: `the dataset health request failed: ${message(error)}` };
   }

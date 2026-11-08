@@ -530,6 +530,7 @@ mod tests {
                     source_cache: None,
                     summary: "server cold for this dataset (not open before the run)".to_string(),
                 },
+                source_throttle: None,
                 server_url: "https://lucida.example".to_string(),
                 workspace_id: "ws-1".to_string(),
                 screenshot: None,

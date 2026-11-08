@@ -220,7 +220,7 @@ describe("what could not be captured", () => {
     const bundle = await exportBundle(
       context({
         services: services({
-          requestDatasetHealth: () => Promise.reject(new Error("WebSocket is not connected")),
+          requestHealth: () => Promise.reject(new Error("WebSocket is not connected")),
           captureFrame: () => Promise.reject(new Error("worker gone")),
         }),
       }),
@@ -323,7 +323,7 @@ describe("the callers", () => {
     const bundle = await exportBundle(
       context({
         services: services({
-          requestDatasetHealth: () => Promise.resolve([health("other"), health("ds")]),
+          requestHealth: () => Promise.resolve({ datasets: [health("other"), health("ds")], sourceThrottle: null }),
         }),
       }),
     );
@@ -333,7 +333,7 @@ describe("the callers", () => {
       context({
         exportTrace: () => document(),
         services: services({
-          requestDatasetHealth: () => Promise.resolve([health("other"), health("ds")]),
+          requestHealth: () => Promise.resolve({ datasets: [health("other"), health("ds")], sourceThrottle: null }),
         }),
       }),
     );

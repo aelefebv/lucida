@@ -26,13 +26,13 @@ bytes = "1"
 lru = "0.19"
 regex = "1"
 tracing = "0.1"
+async-trait = "0.1"
 lucida-content = { path = "../lucida-content" }
 lucida-protocol = { path = "../lucida-protocol" }
 
 [dev-dependencies]
 tempfile = "3"
 tokio = { version = "1", features = ["io-util"] }
-async-trait = "0.1"
 
 [profile.dev.package."*"]
 opt-level = 2

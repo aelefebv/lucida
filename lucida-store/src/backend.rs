@@ -60,7 +60,7 @@ pub fn source_retry_config() -> RetryConfig {
 /// rather than a prompt, retryable failure. Bounding each attempt well under
 /// the client's timeout makes such a stall fail fast so the client can move
 /// on or self-heal.
-const SOURCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+pub(crate) const SOURCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `ClientOptions` shared by the remote source backends, pinning the
 /// per-attempt request timeout. HTTP layers its plain-`http` opt-in on top.
@@ -183,13 +183,14 @@ impl From<object_store::Error> for StoreError {
 
 /// Open a storage backend for `location` if `policy` allows it. Every HTTP
 /// connection of a store opened under a restricted policy is checked again
-/// as it is made.
+/// as it is made, and every read waits on the source throttle when one is
+/// installed.
 pub async fn open_permitted(
     location: &DatasetLocation,
     policy: &SourcePolicy,
 ) -> Result<Arc<dyn ObjectStore>, StoreError> {
     policy.check(location).await.map_err(StoreError::Denied)?;
-    match location.scheme() {
+    let store = match location.scheme() {
         scheme @ (LocationScheme::Http | LocationScheme::Https) => {
             let allow_http = scheme == LocationScheme::Http;
             match policy.http_connector(allow_http, SOURCE_REQUEST_TIMEOUT) {
@@ -198,7 +199,8 @@ pub async fn open_permitted(
             }
         }
         _ => open(location),
-    }
+    }?;
+    Ok(crate::source_throttle::throttled(store))
 }
 
 /// Open a storage backend for a dataset location, under no source policy:

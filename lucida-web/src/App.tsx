@@ -532,9 +532,9 @@ function Viewer({
   const liveBridge = bridge.bridge;
   useEffect(() => {
     setBundleServices({
-      requestDatasetHealth: () =>
+      requestHealth: () =>
         liveBridge
-          ? liveBridge.requestDatasetHealth()
+          ? liveBridge.requestDatasetHealthReply()
           : Promise.reject(new Error("the session socket is not connected")),
       // The loop asks the worker for a frame along with the capture. A
       // client with no loop still answers, from the canvas as presented.

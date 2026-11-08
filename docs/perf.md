@@ -21,6 +21,10 @@ and `summary.json` go to `target/perf/runs/<time>/` beside the run files, and
 Speed numbers need a GPU. CI renders with SwiftShader, which shows whether a view settles
 but not how fast. The table's first line names the adapter.
 
+The runner passes `LUCIDA_SOURCE_THROTTLE` and its companions through to its server, so a
+local dataset can load like a remote one. A throttled table says so on its second line, and
+`summary.json` records the throttle as `sourceThrottle`.
+
 ## The table
 
 One row per dataset, scenario and ratio. Each column is a field of the run file's

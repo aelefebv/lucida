@@ -16,7 +16,7 @@ use lucida_core::DatasetId;
 use lucida_core::camera::{Camera, Framing};
 use lucida_core::saved_view::{SavedView, normalize_dataset_url};
 use lucida_core::scene::{Colormap, DatasetDisplaySettings, DocumentState, RenderMode, Scene};
-use lucida_protocol::{DatasetSourceCacheStats, DatasetSourceHealth};
+use lucida_protocol::{DatasetSourceCacheStats, DatasetSourceHealth, SourceThrottleReport};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -454,6 +454,37 @@ impl ServerWarmth {
     }
 }
 
+/// The throttle the server put on its source reads during the run.
+///
+/// A throttled server makes every source read wait on purpose, so a run
+/// measured under one must never read as a run measured without.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceThrottleRecord {
+    /// The server's settings, absent when it read sources unthrottled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<SourceThrottleReport>,
+    /// One line a reader can put beside a duration.
+    pub summary: String,
+}
+
+impl SourceThrottleRecord {
+    pub fn from_report(settings: Option<SourceThrottleReport>) -> Self {
+        let summary = match &settings {
+            Some(report) => format!("source reads throttled on the server: {}", report.label()),
+            None => "source reads unthrottled".to_string(),
+        };
+        Self { settings, summary }
+    }
+}
+
+/// A side's source throttle as the page's comparison reads it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CompareThrottle {
+    /// The server's settings, null when it read sources unthrottled.
+    pub settings: Option<SourceThrottleReport>,
+}
+
 /// What only the driver knows. The page's own header carries everything it can
 /// observe from inside; this is the rest.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -472,6 +503,10 @@ pub struct TraceRunHeader {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stall_reason: Option<String>,
     pub server_warmth: ServerWarmth,
+    /// The throttle the server put on every source read. Absent from a run
+    /// file written before the driver recorded it, which then cannot say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_throttle: Option<SourceThrottleRecord>,
     pub server_url: String,
     pub workspace_id: String,
     /// The settled frame, when the caller asked for one: a PNG of the page
@@ -968,6 +1003,9 @@ impl BundleFrame {
 pub struct BundleHealth {
     pub fetched_at_epoch_ms: f64,
     pub datasets: Vec<DatasetSourceHealth>,
+    /// The throttle the server put on every source read, null when none.
+    #[serde(default)]
+    pub source_throttle: Option<SourceThrottleReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1208,6 +1246,9 @@ pub struct CompareSideFacts {
     pub cache: Value,
     /// Conditions only the driver knows, listed by the diff and never judged.
     pub conditions: Value,
+    /// The server's source throttle, or null when the file does not say.
+    /// Unlike a condition, a difference here makes the two runs incomparable.
+    pub source_throttle: Option<CompareThrottle>,
 }
 
 /// One side as the page is handed it: the document, and the side around it.
@@ -1237,6 +1278,11 @@ impl<'a> CompareSide<'a> {
                 conditions: serde_json::json!({
                     "server warmth": file.header.server_warmth.summary,
                 }),
+                source_throttle: file.header.source_throttle.as_ref().map(|record| {
+                    CompareThrottle {
+                        settings: record.settings.clone(),
+                    }
+                }),
             },
         }
     }
@@ -1250,6 +1296,9 @@ impl<'a> CompareSide<'a> {
                 planning: bundle.header.planning.clone(),
                 cache: Value::Null,
                 conditions: serde_json::json!({}),
+                source_throttle: bundle.health.as_ref().map(|health| CompareThrottle {
+                    settings: health.source_throttle.clone(),
+                }),
             },
         }
     }
@@ -1872,6 +1921,12 @@ pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
         .as_ref()
         .map(|script| format!("{}\n", format_script_human(script)))
         .unwrap_or_default();
+    let throttle = header
+        .source_throttle
+        .as_ref()
+        .filter(|record| record.settings.is_some())
+        .map(|record| format!("throttle  {}\n", record.summary))
+        .unwrap_or_default();
     let knobs = header
         .knobs
         .as_ref()
@@ -1887,6 +1942,7 @@ pub fn format_run_facts(file: &TraceRunFile, path: &Path, bundle: Option<&Path>)
          view      {} @ {}x{} DPR {}{memory}\n\
          {camera}\
          server    {}\n\
+         {throttle}\
          hold      quiescent had to hold {} ms; every duration below is measured against that\n\
          {knobs}\
          {steps}\
@@ -1979,6 +2035,12 @@ pub fn format_bundle_human(bundle: &TraceBundle, path: &Path, text: &str) -> Str
     }
     match &bundle.health {
         Some(health) => {
+            if let Some(throttle) = &health.source_throttle {
+                lines.push(format!(
+                    "throttle  source reads throttled on the server: {}",
+                    throttle.label()
+                ));
+            }
             for entry in &health.datasets {
                 lines.push(format!("health    {}", format_health(entry)));
             }
@@ -2548,6 +2610,7 @@ async fn wait_for_seam_entry(
 pub struct DriverFacts {
     pub composed_view: ComposedView,
     pub server_warmth: ServerWarmth,
+    pub source_throttle: SourceThrottleRecord,
     pub server_url: String,
     pub workspace_id: String,
     /// Where to write the settled frame, when the caller wants one.
@@ -2581,6 +2644,7 @@ fn assemble_run_file(export: SeamExport, facts: &DriverFacts) -> TraceRunFile {
             end_reason: export.end_reason,
             stall_reason: export.stall_reason,
             server_warmth: facts.server_warmth.clone(),
+            source_throttle: Some(facts.source_throttle.clone()),
             server_url: facts.server_url.clone(),
             workspace_id: facts.workspace_id.clone(),
             screenshot: facts.screenshot.clone(),
@@ -2910,6 +2974,7 @@ mod tests {
         DriverFacts {
             composed_view: composed(),
             server_warmth: cold(),
+            source_throttle: SourceThrottleRecord::from_report(None),
             server_url: "http://host".to_string(),
             workspace_id: "ws".to_string(),
             screenshot: None,
@@ -2930,6 +2995,7 @@ mod tests {
                 end_reason: Some(end_reason.to_string()),
                 stall_reason: None,
                 server_warmth: cold(),
+                source_throttle: Some(SourceThrottleRecord::from_report(None)),
                 server_url: "http://host".to_string(),
                 workspace_id: "ws".to_string(),
                 screenshot: None,
@@ -3822,6 +3888,71 @@ mod tests {
         );
     }
 
+    /// A throttled server's run says so in its header, in its text, and in
+    /// the side it hands a comparison, so it can never read as an
+    /// unthrottled one. A run file from before the record says nothing.
+    #[test]
+    fn a_run_under_a_source_throttle_says_so_everywhere_it_is_read() {
+        let report = SourceThrottleReport {
+            profile: Some("remote".into()),
+            latency_ms: 180,
+            jitter_ms: 100,
+            bytes_per_sec: Some(18 * 1024 * 1024),
+        };
+        let throttled = DriverFacts {
+            source_throttle: SourceThrottleRecord::from_report(Some(report.clone())),
+            ..facts()
+        };
+        let file = assemble_run_file(minimal_export(), &throttled);
+        let header = serde_json::to_value(&file.header).unwrap();
+        assert_eq!(
+            header["sourceThrottle"]["settings"]["latency_ms"],
+            json!(180)
+        );
+        let text = format_run_human(&file, Path::new("/runs/run-1-1.json"), None);
+        assert!(
+            text.contains(
+                "throttle  source reads throttled on the server: remote: 180-280 ms per request, 18 MiB/s across all reads\n"
+            ),
+            "{text}"
+        );
+        let side = CompareSide::from_run_file(&file, Path::new("runs/on.json"));
+        assert_eq!(
+            side.side.source_throttle,
+            Some(CompareThrottle {
+                settings: Some(report)
+            })
+        );
+
+        let plain = assemble_run_file(minimal_export(), &facts());
+        assert_eq!(
+            serde_json::to_value(&plain.header).unwrap()["sourceThrottle"],
+            json!({ "summary": "source reads unthrottled" })
+        );
+        let text = format_run_human(&plain, Path::new("/runs/run-1-1.json"), None);
+        assert!(!text.contains("throttle"), "{text}");
+        let side = CompareSide::from_run_file(&plain, Path::new("runs/off.json"));
+        assert_eq!(
+            side.side.source_throttle,
+            Some(CompareThrottle { settings: None })
+        );
+
+        let mut older = serde_json::to_value(&plain).unwrap();
+        older["header"]
+            .as_object_mut()
+            .unwrap()
+            .remove("sourceThrottle");
+        let older: TraceRunFile = serde_json::from_value(older).unwrap();
+        let side = CompareSide::from_run_file(&older, Path::new("runs/old.json"));
+        assert_eq!(side.side.source_throttle, None);
+
+        let mut no_health = golden_bundle();
+        no_health.health = None;
+        let artifact = TraceArtifact::Bundle(Box::new(no_health));
+        let side = CompareSide::from_artifact(&artifact, Path::new("field.bundle.json"));
+        assert_eq!(side.side.source_throttle, None);
+    }
+
     /// A run file's side carries the knobs the driver set and the server's
     /// warmth; a bundle's carries its header's whole planning configuration
     /// and cannot say what the cache knobs were.
@@ -4118,6 +4249,10 @@ mod tests {
         assert!(human.contains("hardware adapter"), "{human}");
         assert!(human.contains("build     0.2.0 production"), "{human}");
         assert!(human.contains("prefetchDepth 2"), "{human}");
+        assert!(
+            human.contains("throttle  source reads throttled on the server: remote: 180-280 ms"),
+            "{human}"
+        );
         assert!(
             human.contains("2880x1800 PNG at DPR 2 (captured by page)"),
             "{human}"

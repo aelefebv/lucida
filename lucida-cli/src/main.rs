@@ -2307,7 +2307,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                 .await?;
                 let target = target_for(&server.url, &workspace)?;
                 let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token);
-                let (seq, datasets) = dataset_client
+                let (seq, health) = dataset_client
                     .health(dataset.as_deref(), Duration::from_secs(*timeout_seconds))
                     .await?;
                 let output_payload = DatasetHealthOutput {
@@ -2315,7 +2315,8 @@ async fn run(cli: Cli) -> Result<(), CliError> {
                     workspace,
                     target,
                     seq,
-                    datasets,
+                    datasets: health.datasets,
+                    source_throttle: health.source_throttle,
                 };
                 output.print_either(&output_payload, || {
                     format_dataset_health_human(&output_payload)
@@ -4096,7 +4097,9 @@ async fn run_trace(
     let screenshot = args.screenshot.as_deref().map(sidecar);
     let bundle_path = args.bundle.as_deref().map(sidecar);
     let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
-    let (_seq, health) = dataset_client.health(None, wait).await?;
+    let (_seq, server_health) = dataset_client.health(None, wait).await?;
+    let source_throttle = trace::SourceThrottleRecord::from_report(server_health.source_throttle);
+    let health = server_health.datasets;
     let dataset_url = dataset_source_url(dataset, &health)?;
     let mut warmth = trace::summarise_server_warmth(&dataset_url, &health);
 
@@ -4188,6 +4191,7 @@ async fn run_trace(
     let facts = trace::DriverFacts {
         composed_view: composed,
         server_warmth: warmth,
+        source_throttle,
         server_url: server.url.clone(),
         workspace_id: workspace.id.clone(),
         screenshot,
@@ -4280,7 +4284,9 @@ async fn run_replay(
     wait: Duration,
 ) -> Result<TraceRunOutcome, CliError> {
     let dataset_client = DatasetWorkspaceClient::new(target.ws_url.clone(), token.cloned());
-    let (_seq, health) = dataset_client.health(None, wait).await?;
+    let (_seq, server_health) = dataset_client.health(None, wait).await?;
+    let source_throttle = trace::SourceThrottleRecord::from_report(server_health.source_throttle);
+    let health = server_health.datasets;
     let mut warmth = trace::summarise_server_warmth(&plan.dataset_url, &health);
     for dataset_url in std::iter::once(&plan.dataset_url).chain(&plan.other_dataset_urls) {
         if trace::dataset_id_for_source(dataset_url, &health).is_some() {
@@ -4322,6 +4328,7 @@ async fn run_replay(
             camera: None,
         },
         server_warmth: warmth,
+        source_throttle,
         server_url: server.url.clone(),
         workspace_id: workspace.id.clone(),
         screenshot: screenshot.map(Path::to_path_buf),

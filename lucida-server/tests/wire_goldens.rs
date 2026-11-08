@@ -58,7 +58,7 @@ use lucida_protocol::{
     GeneratedLevelAvailability, GeneratedLevelHistogram, GeneratedLevelSummary, HistogramBin,
     LABEL_NONE, LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET,
     ProxiedFetchDescriptor, ProxiedImageSpec, ServerTimingBatch, SourceChunkStatus,
-    TimingRowFamily, TimingRowOutcome, WireFormat,
+    SourceThrottleReport, TimingRowFamily, TimingRowOutcome, WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -1654,9 +1654,24 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             ServerMessage::DatasetHealth {
                 request_id: "web-health-55e0".into(),
                 datasets: vec![source_health()],
+                source_throttle: Some(SourceThrottleReport {
+                    profile: Some("remote".into()),
+                    latency_ms: 180,
+                    jitter_ms: 100,
+                    bytes_per_sec: Some(18 * 1024 * 1024),
+                }),
             },
             {
-                let mut keys = req("", &["/type", "/request_id", "/datasets"]);
+                let mut keys = req(
+                    "",
+                    &[
+                        "/type",
+                        "/request_id",
+                        "/datasets",
+                        "/source_throttle/latency_ms",
+                        "/source_throttle/jitter_ms",
+                    ],
+                );
                 keys.extend(req("/datasets/0", SOURCE_HEALTH_REQUIRED));
                 keys
             },

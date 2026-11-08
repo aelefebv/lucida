@@ -205,6 +205,43 @@ describe("compareTraces", () => {
     });
   });
 
+  it("warns when the two runs ran under different source throttles, and lists a side that does not say as unknown", () => {
+    const off = { settings: null };
+    const objectStore = {
+      settings: { profile: "object-store", latency_ms: 100, jitter_ms: 100, bytes_per_sec: 1_250_000_000 },
+    };
+    const differ = compareTraces(
+      { trace: healthyDocument(), sourceThrottle: off },
+      { trace: healthyDocument(), sourceThrottle: objectStore },
+    );
+    expect(differ.comparable).toBe(false);
+    expect(differ.warnings).toEqual([
+      "source throttle off vs object-store: 100-200 ms per request, 1192.1 MiB/s across all reads",
+    ]);
+    expect(renderComparison(differ)).toContain("NOT COMPARABLE  source throttle off vs object-store");
+
+    const unknown = compareTraces(
+      { trace: healthyDocument() },
+      { trace: healthyDocument(), sourceThrottle: { settings: { latency_ms: 50, jitter_ms: 0 } } },
+    );
+    expect(unknown.comparable).toBe(true);
+    expect(unknown.header.find((field) => field.field === "sourceThrottle")).toEqual({
+      field: "sourceThrottle",
+      group: "condition",
+      left: null,
+      right: "custom: 50 ms per request, no bandwidth cap",
+      same: false,
+      breaksComparability: false,
+    });
+    expect(renderComparison(unknown)).toContain("sourceThrottle unknown → custom: 50 ms per request");
+
+    const same = compareTraces(
+      { trace: healthyDocument(), sourceThrottle: objectStore },
+      { trace: healthyDocument(), sourceThrottle: { settings: { ...objectStore.settings } } },
+    );
+    expect(same.comparable).toBe(true);
+  });
+
   it("reads the run a side names out of a document holding several, and labels sides by run id unless told otherwise", () => {
     const both = makeDocument([healthyLocalOpen(), coldRemoteOpen()]);
     const comparison = compareTraces(
