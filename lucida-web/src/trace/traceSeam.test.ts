@@ -838,9 +838,9 @@ describe("the cache's half of the quiescence predicate", () => {
     expect(inputs.pending + inputs.speculativePending).toBe(1);
     expect(inputs.speculativeInFlight + inputs.speculativePending).toBe(1);
     expect(inputs.pendingUnclassified).toBe(false);
-    // Demand stays on the cache's own prefetch-inclusive basis, so resident
-    // and desired are counted the same way; the exclusion is in the queues.
-    expect(inputs.desiredDetailChunks).toBe(2);
+    // Demand is the view's own: prefetch is neither desired nor resident, so
+    // an evicted prefetch chunk never leaves the view waiting.
+    expect(inputs.desiredDetailChunks).toBe(1);
   });
 });
 

@@ -55,7 +55,7 @@ function makeMainStore(opts?: {
 }) {
   const evictionLog: EvictionRecordTier[] = [];
   const store = new ChunkStore({
-    policy: new TieredPolicy(() => "idle", () => undefined),
+    policy: new TieredPolicy(() => "idle", () => undefined, () => -1),
     budgetBytes: opts?.budgetBytes ?? Infinity,
     evictionTier: (entry) => entry.tier,
     recordEviction: (tier) => { evictionLog.push(tier); },
