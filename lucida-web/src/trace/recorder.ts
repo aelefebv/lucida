@@ -79,6 +79,7 @@ import {
   type RunConditions,
   type RunHeader,
   type SendTallies,
+  type SocketClose,
   type TraceDocument,
   type TraceRun,
   type TruncationRecord,
@@ -1086,9 +1087,11 @@ export class TraceRecorder {
    * The socket dropped. The browser declares this because it is the side
    * holding the facts: the server cannot tell a reconnecting client from a
    * new one, and the rows it had buffered for the dead connection are
-   * discarded rather than replayed.
+   * discarded rather than replayed. The close code is kept because it is the
+   * only record of why: the server closes a client that fell too far behind
+   * with one code and a reloaded workspace with another.
    */
-  noteDisconnected(): void {
+  noteDisconnected(close?: SocketClose): void {
     const atMs = this.now();
     if (this.disconnectedAtMs === null) this.disconnectedAtMs = atMs;
     const run = this.open;
@@ -1097,7 +1100,10 @@ export class TraceRecorder {
     // position: the list is only ordered by when this interval first heard of
     // each connection, which is not always the order they opened in.
     const current = this.connectionRecord(run, this.connectionGeneration);
-    if (current && current.closedAtUs === null) current.closedAtUs = this.offsetUs(run, atMs);
+    if (current && current.closedAtUs === null) {
+      current.closedAtUs = this.offsetUs(run, atMs);
+      if (close) current.close = { code: close.code, reason: close.reason };
+    }
   }
 
   /**

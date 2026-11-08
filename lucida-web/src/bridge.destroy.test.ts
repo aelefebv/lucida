@@ -227,7 +227,10 @@ describe("Bridge close codes", () => {
     vi.advanceTimersByTime(2500);
 
     expect(handlers.onAccessRevoked).not.toHaveBeenCalled();
-    expect(handlers.onDisconnect).toHaveBeenCalledTimes(1);
+    expect(handlers.onDisconnect).toHaveBeenCalledWith({
+      code: 1012,
+      reason: "workspace changed elsewhere",
+    });
     expect(FakeWebSocket.instances).toHaveLength(2);
   });
 });

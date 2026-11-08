@@ -52,8 +52,14 @@ jobs:
         with:
           components: clippy
 
+      # Saved from main only. A pull request restores main's entry, and an
+      # entry saved per pull request serves only that pull request while
+      # counting against the repository's 10 GB cache, past which the
+      # entries main's runs depend on are evicted.
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # --locked: fail if Cargo.lock is out of sync with the manifests
       # instead of silently re-resolving deps on the runner. Keeps CI
@@ -98,9 +104,7 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Saved from main only. A pull request restores main's cache, and
-      # one entry per branch would push the Linux caches out of the
-      # repository's quota.
+      # Saved from main only, as in the rust job.
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
         with:
@@ -123,8 +127,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
-      - name: Cache cargo build (shared with rust job)
+      # Saved from main only, as in the rust job.
+      - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # Built from crates.io and cached, not downloaded from the GitHub
       # release: release downloads can return 504s for long stretches.
@@ -149,7 +156,7 @@ jobs:
           package_json_file: lucida-web/package.json
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 'lts/*'
           cache: pnpm
@@ -225,7 +232,7 @@ jobs:
           package_json_file: lucida-web/package.json
 
       - name: Install Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 'lts/*'
           cache: pnpm
@@ -343,10 +350,13 @@ jobs:
       # image available for the run-and-probe step on release-please
       # PRs (and for any later local inspection).
       #
-      # GHA buildx cache (mode=max) exports every intermediate stage so
-      # subsequent CI runs reuse the cargo + pnpm build layers when the
-      # COPY inputs haven't changed. First-build-on-branch is still
-      # cold; pushed fixup commits and rebases see warm caches.
+      # The GHA buildx cache (mode=max) exports every intermediate stage, so
+      # a later build reuses the cargo and pnpm layers when their COPY
+      # inputs have not changed. Only a push to main writes it, for the
+      # reason the rust job's cargo cache is saved from main only: a pull
+      # request's entries run to a gigabyte or more, serve only that pull
+      # request, and push main's layers out of the repository's 10 GB.
+      # The trace gate builds on main's layers.
       - name: Build image (single-arch, no push)
         if: steps.gate.outputs.build == 'true'
         uses: docker/build-push-action@v7
@@ -357,7 +367,7 @@ jobs:
           load: true
           tags: lucida:ci-smoke
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,mode=max' || '' }}
 
       # True smoke (release-please PRs only): start the image and prove
       # the binary actually serves /healthz, /readyz, /version. This is
@@ -479,8 +489,11 @@ jobs:
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo build (shared with rust job)
+      # Saved from main only, as in the rust job.
+      - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # From PyPI rather than astral-sh/setup-uv, which fetches uv from its
       # GitHub release: release downloads can return 504s for long stretches.

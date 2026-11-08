@@ -35,6 +35,10 @@ pub const GENERATED_COARSE_GENERATOR_VERSION: &str = "generated-coarse-v3";
 const DEFAULT_TARGET_LONG_AXIS: u64 = 512;
 const DEFAULT_CHUNK_LONG_AXIS: u64 = 256;
 const DEFAULT_MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
+/// A generated chunk costs a file, a request and a GPU slot whatever its
+/// size. Pooled far down, a source with small chunks would otherwise make
+/// thousands of chunks a few samples across.
+const DEFAULT_MIN_CHUNK_AXIS: u64 = 64;
 const DOWNSAMPLE_ALGORITHM_VERSION: &str = "max-pool-v2";
 
 /// Default budget for generated chunk bytes held in memory, across every
@@ -47,6 +51,9 @@ pub struct GeneratedCoarseConfig {
     pub target_long_axis: u64,
     pub chunk_long_axis: u64,
     pub max_chunk_bytes: u64,
+    /// The fewest samples a generated chunk spans along y and x, short of
+    /// the whole level or `chunk_long_axis`.
+    pub min_chunk_axis: u64,
 }
 
 impl Default for GeneratedCoarseConfig {
@@ -55,6 +62,7 @@ impl Default for GeneratedCoarseConfig {
             target_long_axis: DEFAULT_TARGET_LONG_AXIS,
             chunk_long_axis: DEFAULT_CHUNK_LONG_AXIS,
             max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+            min_chunk_axis: DEFAULT_MIN_CHUNK_AXIS,
         }
     }
 }
@@ -177,6 +185,8 @@ struct GeneratedCoarseServiceInner {
     plans: HashMap<(ImageId, u32), GeneratedCoarsePlan>,
     /// The plans in a fixed order for background fill to walk.
     plan_order: Vec<(ImageId, u32)>,
+    /// Each image's generated level. An image has at most one.
+    generated_level_of: HashMap<ImageId, u32>,
     manifest: Arc<DatasetManifest>,
     store: Arc<CachedStore>,
     resolver: Arc<ChunkResolver>,
@@ -200,6 +210,15 @@ struct GeneratedSchedulerState {
     /// because a client asks for a chunk once and then waits for the update
     /// that says it is ready.
     requested: HashMap<GeneratedWorkKey, HashSet<ClientId>>,
+    /// The timepoints and channels of generated levels each client's latest
+    /// view of a dataset shows. Held until that client's next hint for the
+    /// dataset or its disconnect, not for a hint's lifetime: a still view
+    /// stops sending hints, and a histogram needs every chunk of its
+    /// timepoint and channel.
+    shown: HashMap<(ClientId, DatasetId), HashSet<HistogramKey>>,
+    /// How far background work has walked each shown timepoint and
+    /// channel's chunks.
+    shown_cursor: HashMap<HistogramKey, u64>,
     queued: VecDeque<GeneratedWorkItem>,
     queued_keys: HashMap<GeneratedWorkKey, GeneratedSchedulingLane>,
     running: HashSet<GeneratedWorkKey>,
@@ -252,8 +271,7 @@ impl BackgroundCursor {
         loop {
             let plan = plans.get(plan_order.get(self.plan)?)?;
             let level = &plan.availability.level;
-            let grid = level.grid_shape;
-            let per_tc = grid[2].saturating_mul(grid[3]).saturating_mul(grid[4]);
+            let per_tc = plan.chunks_per_tc();
             let tcs = level.shape[0].saturating_mul(level.shape[1]);
             if self.tc >= tcs || per_tc == 0 {
                 self.plan += 1;
@@ -267,22 +285,12 @@ impl BackgroundCursor {
                 continue;
             }
             let (t, c) = (self.tc / level.shape[1], self.tc % level.shape[1]);
-            let plane = grid[3] * grid[4];
-            let (z, y, x) = (
-                self.chunk / plane,
-                self.chunk % plane / grid[4],
-                self.chunk % grid[4],
-            );
+            let chunk = self.chunk;
             self.chunk += 1;
             let (Ok(t), Ok(c)) = (u32::try_from(t), u32::try_from(c)) else {
                 continue;
             };
-            return Some(GeneratedWorkKey {
-                dataset_id: plan.dataset_id.clone(),
-                image_id: plan.image_id.clone(),
-                level_index: plan.level_index,
-                key: chunk_key(plan.level_index, t, c, z, y, x),
-            });
+            return Some(plan.work_key_at(t, c, chunk));
         }
     }
 }
@@ -1506,30 +1514,48 @@ fn sanitize_segment(s: &str) -> String {
     out
 }
 
+/// A generated coarse level for every image with no source coarse level.
+/// `resolver` is the dataset's binding, which holds what the manifest does
+/// not: the fill value an unwritten source chunk reads as.
 pub fn plan_generated_coarse_for_manifest(
     manifest: &DatasetManifest,
+    resolver: &ChunkResolver,
     config: GeneratedCoarseConfig,
 ) -> Vec<GeneratedCoarsePlan> {
     manifest
         .images()
         .iter()
-        .filter_map(|image| plan_generated_coarse_for_image(manifest, image, config.clone()))
+        .filter_map(|image| {
+            plan_generated_coarse_for_image(manifest, image, resolver, config.clone())
+        })
         .collect()
 }
 
 fn plan_generated_coarse_for_image(
     manifest: &DatasetManifest,
     image: &ImageSpec,
+    resolver: &ChunkResolver,
     config: GeneratedCoarseConfig,
 ) -> Option<GeneratedCoarsePlan> {
     if image.multiscale.coarse_level_index.is_some() || image.multiscale.levels.is_empty() {
         return None;
     }
 
-    let source_content_id = source_content_id_for_image(manifest, image);
     let output_long_axis =
         generated_output_long_axis(image.multiscale.levels[0].shape, config.target_long_axis);
     let candidates = input_level_candidates(image, output_long_axis);
+    // Unwritten source chunks pool as the fill value, so a level generated
+    // under one fill value is not the level another would generate.
+    let fills: Vec<FillValue> = candidates
+        .iter()
+        .map(|&level| {
+            resolver
+                .level_info(&image.image_id, level as u32)
+                .map(|info| info.fill_value)
+                .unwrap_or_default()
+        })
+        .collect();
+    let source_content_id = source_content_id_for_image(manifest, image, &fills);
     let selected_input = candidates.first().copied().unwrap_or(0);
     let selected_level = &image.multiscale.levels[selected_input];
     let source_level0 = &image.multiscale.levels[0];
@@ -1612,6 +1638,29 @@ impl GeneratedCoarsePlan {
         }
     }
 
+    fn chunks_per_tc(&self) -> u64 {
+        let grid = self.availability.level.grid_shape;
+        grid[2].saturating_mul(grid[3]).saturating_mul(grid[4])
+    }
+
+    /// The work for chunk `index` of `(t, c)`, counting through the chunk
+    /// grid with x fastest.
+    fn work_key_at(&self, t: u32, c: u32, index: u64) -> GeneratedWorkKey {
+        let grid = self.availability.level.grid_shape;
+        let plane = grid[3].saturating_mul(grid[4]).max(1);
+        let (z, y, x) = (
+            index / plane,
+            index % plane / grid[4].max(1),
+            index % grid[4].max(1),
+        );
+        GeneratedWorkKey {
+            dataset_id: self.dataset_id.clone(),
+            image_id: self.image_id.clone(),
+            level_index: self.level_index,
+            key: chunk_key(self.level_index, t, c, z, y, x),
+        }
+    }
+
     pub fn chunk_keys_for_tc(&self, t: u32, c: u32) -> Vec<String> {
         let grid = self.availability.level.grid_shape;
         let mut keys = Vec::with_capacity(
@@ -1660,10 +1709,12 @@ impl GeneratedCoarseService {
             .collect();
         let mut plan_order: Vec<_> = plan_map.keys().cloned().collect();
         plan_order.sort_by(|a, b| (&a.0.0, a.1).cmp(&(&b.0.0, b.1)));
+        let generated_level_of = plan_map.keys().cloned().collect();
         Self {
             inner: Arc::new(GeneratedCoarseServiceInner {
                 plans: plan_map,
                 plan_order,
+                generated_level_of,
                 manifest,
                 store,
                 resolver,
@@ -1730,6 +1781,8 @@ impl GeneratedCoarseService {
                 state.shutdown_reason = Some(reason.to_string());
                 state.canceled = state.canceled.saturating_add(canceled_queued);
                 state.interests.clear();
+                state.shown.clear();
+                state.shown_cursor.clear();
                 state.requested.clear();
                 state.queued.clear();
                 state.queued_keys.clear();
@@ -1812,6 +1865,9 @@ impl GeneratedCoarseService {
             return;
         }
         expire_interests_locked(&mut state, now_ms);
+        let shown = self.shown_by(&interest);
+        state.shown.insert((client_id, dataset_id.clone()), shown);
+        forget_unshown_locked(&mut state);
         state
             .interests
             .insert((client_id, dataset_id), interest.clone());
@@ -1822,8 +1878,29 @@ impl GeneratedCoarseService {
             self.inner.config.per_client_key_cap,
         );
         prune_stale_queued_locked(&mut state, &self.inner.plans, now_ms);
+        self.top_up_background_locked(&mut state);
         drop(state);
         self.inner.notify.notify_waiters();
+    }
+
+    /// The timepoints and channels of generated levels a hint's view shows:
+    /// those of every chunk it wants of an image with a generated level, at
+    /// whatever level it wants it.
+    fn shown_by(&self, interest: &ViewerInterestHint) -> HashSet<HistogramKey> {
+        interest
+            .desired_keys
+            .iter()
+            .filter_map(|key| {
+                let level_index = *self.inner.generated_level_of.get(&key.image_id)?;
+                let plan = self.inner.plans.get(&(key.image_id.clone(), level_index))?;
+                let coords = parse_generated_chunk_key(&key.key)?;
+                let shape = plan.availability.level.shape;
+                (plan.dataset_id == interest.dataset_id
+                    && u64::from(coords.t) < shape[0]
+                    && u64::from(coords.c) < shape[1])
+                    .then(|| (key.image_id.clone(), level_index, coords.t, coords.c))
+            })
+            .collect()
     }
 
     pub async fn remove_client_interest(&self, client_id: ClientId) {
@@ -1832,6 +1909,8 @@ impl GeneratedCoarseService {
             return;
         }
         state.interests.retain(|(cid, _), _| *cid != client_id);
+        state.shown.retain(|(cid, _), _| *cid != client_id);
+        forget_unshown_locked(&mut state);
         state.requested.retain(|_, clients| {
             clients.remove(&client_id);
             !clients.is_empty()
@@ -1871,11 +1950,19 @@ impl GeneratedCoarseService {
         }
     }
 
-    /// Queue background work until `background_chunk_limit` items wait.
-    /// Answers whether anything was queued.
+    /// Queue background work until `background_chunk_limit` items wait:
+    /// first what views show, then the walk over every plan. Answers whether
+    /// anything was queued.
     fn top_up_background_locked(&self, state: &mut GeneratedSchedulerState) -> bool {
+        let limit = self.inner.config.background_chunk_limit;
+        let mut waiting = state
+            .queued
+            .iter()
+            .filter(|item| item.lane == GeneratedSchedulingLane::Background)
+            .count();
+        let mut queued = self.top_up_shown_locked(state, limit, &mut waiting);
         let Some(mut cursor) = state.background.take() else {
-            return false;
+            return queued;
         };
         let cache = &self.inner.cache;
         if cache.evictions() > cursor.evictions_at_start {
@@ -1883,25 +1970,14 @@ impl GeneratedCoarseService {
                 evictions = cache.evictions() - cursor.evictions_at_start,
                 "generated_coarse.background_fill_stopped_at_budget"
             );
-            return false;
+            return queued;
         }
-        let limit = self.inner.config.background_chunk_limit;
-        let mut waiting = state
-            .queued
-            .iter()
-            .filter(|item| item.lane == GeneratedSchedulingLane::Background)
-            .count();
-        let mut queued = false;
         while waiting < limit {
             let Some(work_key) = cursor.next(&self.inner.plans, &self.inner.plan_order) else {
                 tracing::debug!("generated_coarse.background_fill_walked");
                 return queued;
             };
-            if state.completed_keys.contains(&work_key)
-                || state.running.contains(&work_key)
-                || state.queued_keys.contains_key(&work_key)
-                || cache.is_ready(&work_key.image_id, work_key.level_index, &work_key.key)
-            {
+            if !self.needs_work_locked(state, &work_key) {
                 continue;
             }
             let bytes = self
@@ -1920,6 +1996,70 @@ impl GeneratedCoarseService {
         }
         state.background = Some(cursor);
         queued
+    }
+
+    /// Queue the chunks still missing from each timepoint and channel a view
+    /// shows, so its histogram completes: clients fit contrast limits from
+    /// it. Unlike the walk this ignores the byte cap and evictions, since a
+    /// histogram needs every chunk of its timepoint and channel, and what
+    /// views show bounds the work.
+    fn top_up_shown_locked(
+        &self,
+        state: &mut GeneratedSchedulerState,
+        limit: usize,
+        waiting: &mut usize,
+    ) -> bool {
+        let mut shown: Vec<HistogramKey> = state
+            .shown
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        shown.sort_by(|a, b| (&a.0.0, a.1, a.2, a.3).cmp(&(&b.0.0, b.1, b.2, b.3)));
+        let mut queued = false;
+        for tc in shown {
+            if *waiting >= limit {
+                break;
+            }
+            let (image_id, level_index, t, c) = &tc;
+            let Some(plan) = self.inner.plans.get(&(image_id.clone(), *level_index)) else {
+                continue;
+            };
+            if self
+                .inner
+                .cache
+                .histogram_complete(image_id, *level_index, *t, *c)
+            {
+                continue;
+            }
+            let per_tc = plan.chunks_per_tc();
+            let mut next = state.shown_cursor.get(&tc).copied().unwrap_or(0);
+            while next < per_tc && *waiting < limit {
+                let work_key = plan.work_key_at(*t, *c, next);
+                next += 1;
+                if self.needs_work_locked(state, &work_key) {
+                    enqueue_work_locked(state, work_key, GeneratedSchedulingLane::Background);
+                    *waiting += 1;
+                    queued = true;
+                }
+            }
+            state.shown_cursor.insert(tc, next);
+        }
+        queued
+    }
+
+    /// Whether a chunk is neither generated, nor being generated, nor
+    /// waiting to be.
+    fn needs_work_locked(&self, state: &GeneratedSchedulerState, key: &GeneratedWorkKey) -> bool {
+        !(state.completed_keys.contains(key)
+            || state.running.contains(key)
+            || state.queued_keys.contains_key(key)
+            || self
+                .inner
+                .cache
+                .is_ready(&key.image_id, key.level_index, &key.key))
     }
 
     async fn worker_loop(self) {
@@ -2198,6 +2338,14 @@ fn prune_stale_queued_locked(
         }
     }
     state.queued = retained;
+}
+
+/// Forget how far the walk of each timepoint and channel no view shows any
+/// more got. One shown again is walked from its start, skipping what was
+/// generated meanwhile.
+fn forget_unshown_locked(state: &mut GeneratedSchedulerState) {
+    let shown: HashSet<&HistogramKey> = state.shown.values().flatten().collect();
+    state.shown_cursor.retain(|tc, _| shown.contains(tc));
 }
 
 fn expire_interests_locked(state: &mut GeneratedSchedulerState, now_ms: u64) {
@@ -3221,10 +3369,15 @@ fn source_relative_image_id<'a>(dataset_id: &DatasetId, image_id: &'a ImageId) -
         .unwrap_or(&image_id.0)
 }
 
-fn source_content_id_for_image(manifest: &DatasetManifest, image: &ImageSpec) -> String {
+fn source_content_id_for_image(
+    manifest: &DatasetManifest,
+    image: &ImageSpec,
+    input_fills: &[FillValue],
+) -> String {
     let value = serde_json::json!({
         "image": source_relative_image_id(&manifest.dataset_id, &image.image_id),
         "multiscale": &image.multiscale,
+        "input_fill_values": input_fills,
         "generator": GENERATED_COARSE_GENERATOR_VERSION,
     });
     hex32(blake3::hash(value.to_string().as_bytes()).as_bytes())
@@ -3337,18 +3490,21 @@ fn generated_chunk_shape(
         source_shape[2],
         source_chunk_shape[2],
         config.chunk_long_axis,
+        1,
     );
     let mut chunk_y = output_chunk_axis_for_source_chunk(
         output_shape[3],
         source_shape[3],
         source_chunk_shape[3],
         config.chunk_long_axis,
+        config.min_chunk_axis,
     );
     let mut chunk_x = output_chunk_axis_for_source_chunk(
         output_shape[4],
         source_shape[4],
         source_chunk_shape[4],
         config.chunk_long_axis,
+        config.min_chunk_axis,
     );
     while checked_product(&[chunk_z, chunk_y, chunk_x, bytes_per_voxel])
         .is_some_and(|bytes| bytes > config.max_chunk_bytes)
@@ -3365,20 +3521,25 @@ fn generated_chunk_shape(
     [1, 1, chunk_z, chunk_y, chunk_x]
 }
 
+/// One axis of a generated chunk: the output span of one source chunk, or
+/// of as many as it takes to reach `floor`, so chunk edges keep following
+/// source chunk edges.
 fn output_chunk_axis_for_source_chunk(
     output_axis: u64,
     source_axis: u64,
     source_chunk_axis: u64,
     chunk_axis_cap: u64,
+    floor: u64,
 ) -> u64 {
     let output_axis = output_axis.max(1);
     let source_axis = source_axis.max(1);
     let source_chunk_axis = source_chunk_axis.max(1);
     let cap = chunk_axis_cap.max(1);
-    let axis = output_axis
+    let footprint = output_axis
         .saturating_mul(source_chunk_axis)
         .div_ceil(source_axis)
         .max(1);
+    let axis = footprint.saturating_mul(floor.div_ceil(footprint).max(1));
     axis.min(output_axis).min(cap)
 }
 
@@ -3630,6 +3791,11 @@ mod tests {
         binding_seed_for_data_type(levels, DataType::Uint16)
     }
 
+    /// A binding that knows no image, so every fill value reads as zero.
+    fn no_binding() -> ChunkResolver {
+        ChunkResolver::new(&ServerBindingSeed { images: vec![] })
+    }
+
     fn source_path(resolver: &ChunkResolver, key: &str) -> object_store::path::Path {
         resolver
             .resolve(
@@ -3818,7 +3984,11 @@ mod tests {
             DataType::Uint16,
         );
 
-        let plans = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default());
+        let plans = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        );
 
         assert!(plans.is_empty());
     }
@@ -3838,9 +4008,10 @@ mod tests {
             target_long_axis: 512,
             chunk_long_axis: 512,
             max_chunk_bytes: 128,
+            min_chunk_axis: 1,
         };
 
-        let plans = plan_generated_coarse_for_manifest(&manifest, config);
+        let plans = plan_generated_coarse_for_manifest(&manifest, &no_binding(), config);
 
         assert_eq!(plans.len(), 1);
         let plan = &plans[0];
@@ -3874,9 +4045,13 @@ mod tests {
             DataType::Float32,
         );
 
-        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
-            .pop()
-            .expect("plan");
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .expect("plan");
 
         assert_eq!(plan.availability.level.shape, [1, 1, 158, 512, 490]);
         assert_eq!(plan.availability.level.chunk_shape, [1, 1, 3, 66, 66]);
@@ -3884,11 +4059,63 @@ mod tests {
     }
 
     #[test]
+    fn small_source_chunks_are_batched_into_generated_chunks_at_least_the_floor_across() {
+        // Pooled to 512 across, one 64-sample source chunk spans 11 samples:
+        // 2209 generated chunks if each held one.
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 1, 3000, 3000], [1, 1, 1, 64, 64])],
+            None,
+            DataType::Uint16,
+        );
+
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .expect("plan");
+
+        let level = &plan.availability.level;
+        assert_eq!(level.shape, [1, 1, 1, 512, 512]);
+        assert_eq!(
+            level.chunk_shape,
+            [1, 1, 1, 66, 66],
+            "six source chunks a side"
+        );
+        assert_eq!(level.grid_shape, [1, 1, 1, 8, 8]);
+    }
+
+    #[test]
+    fn a_generated_level_smaller_than_the_floor_is_one_chunk_across() {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 1, 1, 40, 3000], [1, 1, 1, 8, 64])],
+            None,
+            DataType::Uint16,
+        );
+
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .expect("plan");
+
+        assert_eq!(plan.availability.level.shape, [1, 1, 1, 7, 512]);
+        assert_eq!(plan.availability.level.chunk_shape, [1, 1, 1, 7, 66]);
+    }
+
+    #[test]
     fn generated_chunk_job_key_carries_identity_scope() {
         let manifest = source_manifest();
-        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
-            .pop()
-            .expect("plan");
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .expect("plan");
 
         let key = plan.job_key(2, 3, "1/2/3/0/0/0".into());
 
@@ -4187,9 +4414,13 @@ mod tests {
     fn register_generated_plan_recovers_ready_chunks_from_readiness_index() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = source_manifest();
-        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
-            .pop()
-            .expect("plan");
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .expect("plan");
         let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [9; 16]);
         cache.register_generated_plan(&plan).unwrap();
         let bytes = vec![1_u8; expected_generated_chunk_bytes(&plan) as usize];
@@ -4229,9 +4460,13 @@ mod tests {
     fn register_generated_plan_scans_when_readiness_index_is_missing() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = source_manifest();
-        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
-            .pop()
-            .expect("plan");
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .expect("plan");
         let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [10; 16]);
         cache.register_generated_plan(&plan).unwrap();
         let bytes = vec![0_u8; expected_generated_chunk_bytes(&plan) as usize];
@@ -4265,9 +4500,13 @@ mod tests {
     fn corrupted_generated_chunk_is_not_recovered_as_ready() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = source_manifest();
-        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
-            .pop()
-            .expect("plan");
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .expect("plan");
         let cache = DerivedChunkCache::new_on_disk(dir.path().to_path_buf(), [11; 16]);
         cache.register_generated_plan(&plan).unwrap();
         let path = cache.disk.as_ref().unwrap().chunk_path(
@@ -4288,9 +4527,13 @@ mod tests {
     fn disk_budget_eviction_withdraws_missing_ready_chunks() {
         let dir = tempfile::tempdir().unwrap();
         let manifest = source_manifest();
-        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
-            .pop()
-            .expect("plan");
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .expect("plan");
         let cache =
             DerivedChunkCache::new_on_disk_with_budget(dir.path().to_path_buf(), [12; 16], Some(1));
         cache.register_generated_plan(&plan).unwrap();
@@ -4328,10 +4571,12 @@ mod tests {
             source_manifest_with_levels(vec![source_level.clone()], None, DataType::Uint16);
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 2,
                 chunk_long_axis: 2,
                 max_chunk_bytes: 64,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -4404,10 +4649,12 @@ mod tests {
             source_manifest_with_levels(vec![source_level.clone()], None, DataType::Uint16);
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 4,
                 chunk_long_axis: 2,
                 max_chunk_bytes: 64,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -4549,10 +4796,12 @@ mod tests {
         );
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 512,
                 chunk_long_axis: 256,
                 max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -4623,12 +4872,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let first_plan = plan_generated_coarse_for_manifest(
             &manifest_as_dataset("ds-first"),
+            &no_binding(),
             GeneratedCoarseConfig::default(),
         )
         .pop()
         .unwrap();
         let second_plan = plan_generated_coarse_for_manifest(
             &manifest_as_dataset("ds-second"),
+            &no_binding(),
             GeneratedCoarseConfig::default(),
         )
         .pop()
@@ -4690,6 +4941,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let plan = plan_generated_coarse_for_manifest(
             &source_manifest(),
+            &no_binding(),
             GeneratedCoarseConfig::default(),
         )
         .pop()
@@ -4728,6 +4980,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let plan = plan_generated_coarse_for_manifest(
             &source_manifest(),
+            &no_binding(),
             GeneratedCoarseConfig::default(),
         )
         .pop()
@@ -4773,10 +5026,12 @@ mod tests {
         );
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 256,
                 chunk_long_axis: 64,
                 max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -4827,10 +5082,12 @@ mod tests {
         );
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 256,
                 chunk_long_axis: 64,
                 max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -4885,6 +5142,151 @@ mod tests {
         assert_eq!(completed, 1);
     }
 
+    /// A two-channel level of 16 chunks per channel, on a disk cache whose
+    /// memory budget holds three of them.
+    fn two_channel_service(dir: &std::path::Path) -> (GeneratedCoarseService, GeneratedCoarsePlan) {
+        let manifest = source_manifest_with_levels(
+            vec![level(0, [1, 2, 1, 256, 256], [1, 1, 1, 64, 64])],
+            None,
+            DataType::Uint16,
+        );
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig {
+                target_long_axis: 256,
+                chunk_long_axis: 64,
+                max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+                min_chunk_axis: 1,
+            },
+        )
+        .pop()
+        .expect("plan");
+        assert_eq!(plan.chunk_keys_for_tc(0, 1).len(), 16);
+        let cache = Arc::new(
+            DerivedChunkCache::new_on_disk(dir.to_path_buf(), [17; 16]).with_memory(
+                GeneratedChunkMemory::new(3 * expected_generated_chunk_bytes(&plan)),
+            ),
+        );
+        cache.register_generated_plan(&plan).unwrap();
+        let service = service_with_cache(
+            manifest,
+            plan.clone(),
+            GeneratedSchedulingConfig {
+                background_chunk_limit: 2,
+                ..GeneratedSchedulingConfig::default()
+            },
+            cache,
+        );
+        (service, plan)
+    }
+
+    async fn until_idle(service: &GeneratedCoarseService) {
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let telemetry = service.telemetry().await;
+                if telemetry.queued_background == 0 && telemetry.running == 0 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the service goes idle");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn background_work_completes_the_channels_a_view_shows_past_the_byte_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, plan) = two_channel_service(dir.path());
+        service.enqueue_background_fill().await;
+        service.start();
+        until_idle(&service).await;
+        assert_eq!(
+            service.telemetry().await.completed,
+            3,
+            "the walk stops at the byte cap"
+        );
+
+        // A view of channel 1 wants a chunk of the source level, not the
+        // generated one: it shows the channel all the same.
+        service
+            .apply_viewer_interest(
+                1,
+                interest(
+                    plan.dataset_id.clone(),
+                    plan.image_id.clone(),
+                    "0/0/1/0/0/0",
+                    ViewerInterestLane::Visible,
+                    current_unix_millis(),
+                ),
+            )
+            .await;
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            while !service
+                .inner
+                .cache
+                .histogram_complete(&plan.image_id, plan.level_index, 0, 1)
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the shown channel's histogram completes");
+        until_idle(&service).await;
+
+        let cache = &service.inner.cache;
+        for key in plan.chunk_keys_for_tc(0, 1) {
+            assert!(cache.is_ready(&plan.image_id, plan.level_index, &key));
+        }
+        assert!(
+            !cache.histogram_complete(&plan.image_id, plan.level_index, 0, 0),
+            "no view shows channel 0"
+        );
+        assert_eq!(service.telemetry().await.completed, 3 + 16);
+    }
+
+    #[tokio::test]
+    async fn what_a_view_shows_follows_the_clients_latest_hint_until_it_leaves() {
+        let dir = tempfile::tempdir().unwrap();
+        let (service, plan) = two_channel_service(dir.path());
+        let shows = |channel: u32| {
+            interest(
+                plan.dataset_id.clone(),
+                plan.image_id.clone(),
+                &format!("0/0/{channel}/0/0/0"),
+                ViewerInterestLane::Visible,
+                current_unix_millis(),
+            )
+        };
+        let tc = |channel: u32| (plan.image_id.clone(), plan.level_index, 0, channel);
+
+        service.apply_viewer_interest(1, shows(1)).await;
+        {
+            let state = service.inner.state.lock().await;
+            let shown: Vec<_> = state.shown.values().flatten().cloned().collect();
+            assert_eq!(shown, vec![tc(1)]);
+            assert_eq!(
+                state.shown_cursor.get(&tc(1)),
+                Some(&2),
+                "two chunks queued"
+            );
+        }
+
+        service.apply_viewer_interest(1, shows(0)).await;
+        {
+            let state = service.inner.state.lock().await;
+            let shown: Vec<_> = state.shown.values().flatten().cloned().collect();
+            assert_eq!(shown, vec![tc(0)]);
+            assert!(!state.shown_cursor.contains_key(&tc(1)));
+        }
+
+        service.remove_client_interest(1).await;
+        let state = service.inner.state.lock().await;
+        assert!(state.shown.is_empty());
+        assert!(state.shown_cursor.is_empty());
+    }
+
     /// A level of 35 by 35 chunks generated one at a time onto a real disk
     /// cache, with each chunk's ready status published as the service does.
     async fn generate_level_timed(root: &std::path::Path) -> Vec<std::time::Duration> {
@@ -4898,10 +5300,12 @@ mod tests {
             source_manifest_with_levels(vec![source_level.clone()], None, DataType::Uint16);
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: side,
                 chunk_long_axis: 64,
                 max_chunk_bytes: 64 * 64 * 2,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -4974,10 +5378,12 @@ mod tests {
             source_manifest_with_levels(vec![source_level.clone()], None, DataType::Float32);
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 2,
                 chunk_long_axis: 2,
                 max_chunk_bytes: 64,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -5044,19 +5450,21 @@ mod tests {
         let source_level = level(0, [1, 1, 1, 2, 2], [1, 1, 1, 1, 1]);
         let manifest =
             source_manifest_with_levels(vec![source_level.clone()], None, DataType::Uint16);
+        let fill = FillValue::parse(&serde_json::json!(5), DataType::Uint16).unwrap();
+        let seed = binding_seed_with_fill(&[source_level], DataType::Uint16, fill);
+        let resolver = Arc::new(ChunkResolver::new(&seed));
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &resolver,
             GeneratedCoarseConfig {
                 target_long_axis: 2,
                 chunk_long_axis: 2,
                 max_chunk_bytes: 64,
+                min_chunk_axis: 1,
             },
         )
         .pop()
         .expect("plan");
-        let fill = FillValue::parse(&serde_json::json!(5), DataType::Uint16).unwrap();
-        let seed = binding_seed_with_fill(&[source_level], DataType::Uint16, fill);
-        let resolver = Arc::new(ChunkResolver::new(&seed));
         let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
         let source_path = source_path(&resolver, "0/0/0/0/0/1");
         store
@@ -5104,6 +5512,84 @@ mod tests {
         }
     }
 
+    /// One source sample of 7 among three unwritten ones, pooled to one
+    /// sample, opened three times over one disk cache: under a fill value of
+    /// 5, then 9, then 9 again.
+    #[tokio::test]
+    async fn a_changed_fill_value_regenerates_the_level() {
+        use object_store::PutPayload;
+        use object_store::memory::InMemory;
+
+        let source_level = level(0, [1, 1, 1, 2, 2], [1, 1, 1, 1, 1]);
+        let manifest = Arc::new(source_manifest_with_levels(
+            vec![source_level.clone()],
+            None,
+            DataType::Uint16,
+        ));
+        let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
+        let dir = tempfile::tempdir().unwrap();
+        let mut identities = Vec::new();
+        let mut recovered = Vec::new();
+        let mut pooled = Vec::new();
+        for fill in [5, 9, 9] {
+            let fill = FillValue::parse(&serde_json::json!(fill), DataType::Uint16).unwrap();
+            let resolver = Arc::new(ChunkResolver::new(&binding_seed_with_fill(
+                std::slice::from_ref(&source_level),
+                DataType::Uint16,
+                fill,
+            )));
+            store
+                .put(
+                    &source_path(&resolver, "0/0/0/0/0/1"),
+                    PutPayload::from(7_u16.to_le_bytes().to_vec()),
+                )
+                .await
+                .unwrap();
+            let plan = plan_generated_coarse_for_manifest(
+                &manifest,
+                &resolver,
+                GeneratedCoarseConfig {
+                    target_long_axis: 1,
+                    chunk_long_axis: 1,
+                    max_chunk_bytes: 64,
+                    min_chunk_axis: 1,
+                },
+            )
+            .pop()
+            .expect("plan");
+            identities.push(plan.cache_identity.clone());
+            let cache = Arc::new(DerivedChunkCache::new_on_disk(
+                dir.path().to_path_buf(),
+                [12; 16],
+            ));
+            recovered.push(cache.register_generated_plan(&plan).unwrap().chunks.len());
+            let (tx, _rx) = broadcast::channel(16);
+            materialize_generated_coarse_plan(
+                plan.clone(),
+                manifest.clone(),
+                Arc::new(CachedStore::new(store.clone(), 1024 * 1024)),
+                resolver,
+                cache.clone(),
+                Arc::new(AsyncMutex::new(Session::new())),
+                tx,
+            )
+            .await;
+            match cache.lookup(&plan.image_id, plan.level_index, "1/0/0/0/0/0") {
+                DerivedChunkLookup::Ready(bytes) => {
+                    pooled.push(u16::from_le_bytes([bytes[0], bytes[1]]));
+                }
+                DerivedChunkLookup::Status { status, message } => {
+                    panic!("expected generated bytes, got {status:?}: {message:?}");
+                }
+            }
+        }
+
+        assert_ne!(identities[0], identities[1]);
+        assert_eq!(identities[1], identities[2]);
+        assert_eq!(recovered, vec![0, 0, 1], "only the same fill value reuses");
+        assert_eq!(pooled, vec![7, 9, 9]);
+    }
+
     /// Every availability delta sent on `rx` so far.
     fn sent_deltas(rx: &mut broadcast::Receiver<BroadcastItem>) -> Vec<GeneratedAvailabilityDelta> {
         let mut out = Vec::new();
@@ -5136,10 +5622,12 @@ mod tests {
             source_manifest_with_levels(vec![source_level.clone()], None, DataType::Uint16);
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 2,
                 chunk_long_axis: 2,
                 max_chunk_bytes: 64,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -5285,9 +5773,13 @@ mod tests {
     #[tokio::test]
     async fn viewer_interest_dedupes_duplicate_chunks_to_highest_lane() {
         let manifest = source_manifest();
-        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
-            .pop()
-            .expect("plan");
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .expect("plan");
         let key = "1/0/0/0/0/0";
         let service =
             service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
@@ -5332,10 +5824,12 @@ mod tests {
         );
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 512,
                 chunk_long_axis: 256,
                 max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -5378,9 +5872,13 @@ mod tests {
     #[tokio::test]
     async fn expired_viewer_interest_drops_queued_jobs() {
         let manifest = source_manifest();
-        let plan = plan_generated_coarse_for_manifest(&manifest, GeneratedCoarseConfig::default())
-            .pop()
-            .expect("plan");
+        let plan = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        )
+        .pop()
+        .expect("plan");
         let service =
             service_for_plan(manifest, plan.clone(), GeneratedSchedulingConfig::default());
         let mut hint = interest(
@@ -5408,10 +5906,12 @@ mod tests {
         );
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 512,
                 chunk_long_axis: 256,
                 max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -5506,10 +6006,12 @@ mod tests {
         );
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 512,
                 chunk_long_axis: 256,
                 max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -5545,10 +6047,12 @@ mod tests {
         );
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 512,
                 chunk_long_axis: 256,
                 max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -5594,10 +6098,12 @@ mod tests {
         );
         let plan = plan_generated_coarse_for_manifest(
             &manifest,
+            &no_binding(),
             GeneratedCoarseConfig {
                 target_long_axis: 512,
                 chunk_long_axis: 256,
                 max_chunk_bytes: DEFAULT_MAX_CHUNK_BYTES,
+                min_chunk_axis: 1,
             },
         )
         .pop()
@@ -5673,6 +6179,74 @@ mod tests {
                 DerivedChunkLookup::Status { status: got, .. } => assert_eq!(got, status),
                 DerivedChunkLookup::Ready(_) => panic!("expected status"),
             }
+        }
+    }
+
+    /// The minimap draws each tile of a collection from its coarse level, so
+    /// a tile without a source coarse level needs a generated one of its own.
+    #[test]
+    fn every_collection_tile_without_a_source_coarse_level_gets_a_generated_one() {
+        let single = source_manifest_with_levels(
+            vec![level(0, [1, 2, 1, 3000, 3000], [1, 1, 1, 64, 64])],
+            None,
+            DataType::Uint16,
+        );
+        let template = &single.images()[0];
+        let (entities, images): (Vec<_>, Vec<_>) = ["A/1/0", "A/2/0", "B/1/0"]
+            .iter()
+            .map(|tile| {
+                let owner = EntityId(format!("plate:tile:{tile}"));
+                let entity = Entity {
+                    id: owner.clone(),
+                    kind: EntityKind::Tile,
+                    parent: None,
+                    labels: EntityLabels::default(),
+                };
+                let image = lucida_content::ImageSpec {
+                    image_id: ImageId(format!("plate:image:{tile}")),
+                    owner,
+                    multiscale: template.multiscale.clone(),
+                };
+                (entity, image)
+            })
+            .unzip();
+        let mut manifest = DatasetManifest::new(
+            DatasetId("plate".into()),
+            "plate".into(),
+            DatasetKind::Collection {
+                rows: vec!["A".into(), "B".into()],
+                columns: vec!["1".into(), "2".into()],
+                positioning_mode: lucida_content::PositioningMode::Derived,
+                has_explicit_positions: false,
+            },
+            entities,
+            vec![],
+            images,
+            vec![],
+            None,
+        );
+
+        let plans = plan_generated_coarse_for_manifest(
+            &manifest,
+            &no_binding(),
+            GeneratedCoarseConfig::default(),
+        );
+        assert_eq!(plans.len(), 3);
+        let identities: HashSet<_> = plans.iter().map(|p| p.cache_identity.clone()).collect();
+        assert_eq!(identities.len(), 3, "each tile caches its own level");
+
+        let cache = DerivedChunkCache::default();
+        for plan in &plans {
+            cache.register_generated_plan(plan).unwrap();
+        }
+        merge_generated_availability_into_manifest(&mut manifest, &cache.snapshot());
+        for (image, plan) in manifest.images().iter().zip(&plans) {
+            assert_eq!(
+                image.multiscale.coarse_level_index,
+                Some(plan.level_index),
+                "{} has a coarse level",
+                image.image_id.0
+            );
         }
     }
 
