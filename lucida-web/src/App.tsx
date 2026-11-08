@@ -25,6 +25,7 @@ import { ExplorationPanel, type Dims } from "./components/ExplorationPanel.tsx";
 import { DatasetInfoPanel } from "./components/DatasetInfoPanel.tsx";
 import { makeThumbnailRequester } from "./exploreThumbnails.ts";
 import { runCommand } from "./ui/commands.ts";
+import { toast } from "./ui/toastQueue.ts";
 import { invalidateDisplaySettings, requestRender } from "./invalidation.ts";
 import { annotationAuthorId } from "./annotationIdentity.ts";
 import { deriveMentionCandidates } from "./components/annotationParticipants.ts";
@@ -278,6 +279,15 @@ function Viewer({
     return { id: savedView.id, view: savedView.view };
   }, [workspaceId]);
 
+  const notifySavedViewMissing = useCallback(() => {
+    toast({
+      title: "Saved view not found",
+      description:
+        "The view this link names isn't in this workspace. It may have been deleted, or the link may name a bookmark, which this server no longer keeps.",
+      tone: "warning",
+    });
+  }, []);
+
   const fetchDefaultWorkspaceSavedView = useCallback(async () => {
     if (!defaultSavedViewId) return null;
     const savedView = await getWorkspaceSavedView(workspaceId, defaultSavedViewId);
@@ -325,6 +335,7 @@ function Viewer({
     setAutoContrastMap: layers.setAutoContrastMap,
     datasetReferenceMode: "workspace-dataset-id",
     fetchSavedViewById: fetchWorkspaceSavedViewById,
+    onSavedViewMissing: notifySavedViewMissing,
     fetchDefaultSavedView: fetchDefaultWorkspaceSavedView,
     fetchViewerProfile: fetchWorkspaceViewerProfile,
     fetchLastView: fetchWorkspaceLastView,
