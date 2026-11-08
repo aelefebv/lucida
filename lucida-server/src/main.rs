@@ -177,6 +177,7 @@ async fn main() -> std::io::Result<()> {
 }
 
 async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
+    let generated_cache_dir_set = args.generated_coarse_cache_dir.is_some();
     let generated_config = GeneratedConfig {
         generated_cache_dir: args
             .generated_coarse_cache_dir
@@ -198,9 +199,9 @@ async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     // so RUST_LOG filtering applies.
     //
     // Generated levels used to default to a directory under this variable.
-    // A deployment still setting it would otherwise lose its persistent
-    // cache without a word.
-    if std::env::var_os("LUCIDA_PROXY_CACHE_DIR").is_some() {
+    // A deployment still setting it, and nothing newer, would otherwise lose
+    // its persistent cache without a word.
+    if !generated_cache_dir_set && std::env::var_os("LUCIDA_PROXY_CACHE_DIR").is_some() {
         tracing::warn!(
             generated_cache_dir = %generated_config.generated_cache_dir.display(),
             hint = "set LUCIDA_GENERATED_COARSE_CACHE_DIR",
