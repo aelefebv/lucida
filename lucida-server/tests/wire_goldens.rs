@@ -391,6 +391,7 @@ fn enum_vocabulary() -> EnumVocabulary {
         }),
         dataset_open_failure_kinds: vocab!(DatasetOpenFailureKind::{
             Authorization, SessionClosed, WorkspaceLookup, UnsupportedScheme, InvalidLocation,
+            SourceNotAllowed,
             LocalPath,
             MissingObject, Permission, CloudConfiguration, Http, StorageBackend,
             UnsupportedCodec, UnsupportedLayout, MalformedMetadata, MissingMetadata, Import,

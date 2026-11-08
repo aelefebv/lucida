@@ -1,6 +1,8 @@
 //! What a dataset location becomes over a real workspace socket: a
 //! location that does not parse is refused before any storage is touched,
-//! echoing the input as given, and a `file://` URL opens the path it names.
+//! echoing the input as given, a `file://` URL opens the path it names, and
+//! a restricted source policy refuses what it does not allow with a typed
+//! kind.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -20,6 +22,7 @@ use lucida_server::auth::{
 };
 use lucida_server::storage::{self, DatabaseUrl};
 use lucida_server::workspace::WorkspaceManager;
+use lucida_store::source_policy::{SourcePolicy, SourcePolicyConfig};
 use tokio::net::TcpStream;
 use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
@@ -54,6 +57,10 @@ impl Drop for Rig {
 }
 
 async fn start_server(root: &Path) -> Rig {
+    start_server_with(root, SourcePolicy::unrestricted()).await
+}
+
+async fn start_server_with(root: &Path, source_policy: SourcePolicy) -> Rig {
     let storage = storage::open(&DatabaseUrl::in_memory()).await.unwrap();
     let workspace = storage
         .workspaces()
@@ -64,7 +71,10 @@ async fn start_server(root: &Path) -> Rig {
     proxy_config.cache_dir = root.join("proxies");
     proxy_config.generated_cache_dir = root.join("generated-coarse");
     proxy_config.generated_enabled = false;
-    let manager = Arc::new(WorkspaceManager::new(storage.workspaces(), proxy_config));
+    let manager = Arc::new(
+        WorkspaceManager::new(storage.workspaces(), proxy_config)
+            .with_source_policy(Arc::new(source_policy)),
+    );
     let app: Router =
         lucida_server::workspace::router(manager).layer(axum::middleware::from_fn_with_state(
             bearer_extractor().await,
@@ -264,4 +274,58 @@ async fn a_file_url_opens_the_absolute_path_it_names() {
     assert!(reply.failure.is_none(), "{:?}", reply.failure);
     let expected = DatasetLocation::parse(data.to_str().unwrap()).unwrap();
     assert_eq!(reply.url, expected.as_str());
+}
+
+fn restricted(data_roots: Vec<std::path::PathBuf>) -> SourcePolicy {
+    SourcePolicy::new(SourcePolicyConfig {
+        restricted: true,
+        data_roots,
+        ..Default::default()
+    })
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_restricted_server_opens_local_paths_only_under_its_data_directories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let inside = tmp.path().join("data").join("sample.zarr");
+    let outside = tmp.path().join("other").join("sample.zarr");
+    write_minimal_zarr(&inside);
+    write_minimal_zarr(&outside);
+    let rig = start_server_with(tmp.path(), restricted(vec![tmp.path().join("data")])).await;
+
+    let opened = open(&rig, inside.to_str().unwrap()).await;
+    assert!(opened.failure.is_none(), "{:?}", opened.failure);
+
+    let refused = open(&rig, outside.to_str().unwrap()).await;
+    let failure = refused
+        .failure
+        .expect("a path outside the data roots must fail");
+    assert_eq!(failure.stage, DatasetOpenStage::BackendOpen);
+    assert_eq!(failure.kind, DatasetOpenFailureKind::SourceNotAllowed);
+    assert!(!failure.retryable);
+    assert!(
+        failure.message.contains("data directories"),
+        "{}",
+        failure.message
+    );
+}
+
+#[tokio::test]
+async fn a_restricted_server_refuses_http_to_a_non_public_address() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rig = start_server_with(tmp.path(), restricted(vec![])).await;
+
+    for url in [
+        "http://127.0.0.1:9/sample.zarr",
+        "http://169.254.169.254/sample.zarr",
+    ] {
+        let failure = open(&rig, url).await.failure.expect("must fail");
+        assert_eq!(
+            failure.kind,
+            DatasetOpenFailureKind::SourceNotAllowed,
+            "{url}"
+        );
+        assert_eq!(failure.stage, DatasetOpenStage::BackendOpen);
+    }
 }

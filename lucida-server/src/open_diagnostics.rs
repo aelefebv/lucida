@@ -90,6 +90,13 @@ pub(crate) fn backend_open_failure(
     error: &lucida_store::backend::StoreError,
 ) -> DatasetOpenFailureDiagnostic {
     match error {
+        lucida_store::backend::StoreError::Denied(denied) => open_failure(
+            DatasetOpenStage::BackendOpen,
+            DatasetOpenFailureKind::SourceNotAllowed,
+            false,
+            denied.to_string(),
+            None,
+        ),
         lucida_store::backend::StoreError::Metadata(message) => {
             let lower = message.to_ascii_lowercase();
             let kind = if lower.contains("bucket") || lower.contains("credential") {

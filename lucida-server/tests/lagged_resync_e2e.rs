@@ -95,7 +95,7 @@ async fn start_server(broadcast_capacity: usize) -> Rig {
         tx: tx.clone(),
         next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes,
-        data_dir: None,
+        source_policy: Arc::default(),
         proxy_config,
     };
     let app = Router::new().route("/ws", get(ws_route)).with_state(state);

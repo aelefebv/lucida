@@ -75,7 +75,7 @@ async fn serve() -> SocketAddr {
         tx,
         next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes: Arc::new(Mutex::new(HashMap::new())),
-        data_dir: None,
+        source_policy: Arc::default(),
         proxy_config: proxy_config(&root),
     };
     let app = Router::new().route("/ws", get(ws_route)).with_state(state);

@@ -1362,7 +1362,7 @@ def dataset_open_error_kind(diagnostic: Any) -> str:
     if not isinstance(diagnostic, dict):
         return "dataset_open_failure"
     kind = diagnostic.get("kind")
-    if kind == "authorization":
+    if kind in {"authorization", "source_not_allowed"}:
         return "unauthorized"
     if kind == "session_closed":
         return "session_disconnect"

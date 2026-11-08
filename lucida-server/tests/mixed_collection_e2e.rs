@@ -80,7 +80,7 @@ fn native_level1_plane(tile: &str, channel: u32) -> Vec<u16> {
         .join("0")
         .join("0");
     let raw = std::fs::read(&path).unwrap();
-    samples(&decode_storage_bytes(&raw, StorageCompression::Zstd).unwrap())
+    samples(&decode_storage_bytes(&raw, StorageCompression::Zstd, usize::MAX).unwrap())
 }
 
 #[tokio::test]

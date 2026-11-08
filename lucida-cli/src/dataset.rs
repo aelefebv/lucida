@@ -1027,7 +1027,9 @@ fn classify_open_dataset_failure(
 
 fn error_kind_for_open_failure(kind: DatasetOpenFailureKind) -> ErrorKind {
     match kind {
-        DatasetOpenFailureKind::Authorization => ErrorKind::Unauthorized,
+        DatasetOpenFailureKind::Authorization | DatasetOpenFailureKind::SourceNotAllowed => {
+            ErrorKind::Unauthorized
+        }
         DatasetOpenFailureKind::SessionClosed => ErrorKind::SessionDisconnect,
         DatasetOpenFailureKind::LocalPath
         | DatasetOpenFailureKind::MissingObject
