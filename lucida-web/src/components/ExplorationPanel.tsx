@@ -1,6 +1,5 @@
-// The guided exploration panel: the web surface over `explore_view`, the wasm
-// export of the `lucida_core::view_transform` generator that the CLI and Python
-// also use. It offers small next moves from the current view and navigates
+// The guided exploration panel: the web surface over `WasmScene.explore`, the
+// `lucida_core::view_transform` generator that the CLI and Python also use. It offers small next moves from the current view and navigates
 // through callbacks App.tsx wires in.
 //
 // Row thumbnails are rendered by the worker from the already-resident coarse
@@ -20,7 +19,7 @@ import {
   type Icon,
 } from "@phosphor-icons/react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { explore_view } from "lucida-core";
+import type { WasmScene } from "lucida-core";
 import { positionLabel } from "../axes.ts";
 import type { SavedView } from "../savedView/types.ts";
 import { useAppearance } from "../theme/appearance.ts";
@@ -43,7 +42,7 @@ interface ExplorationCell {
   view: SavedView;
 }
 
-/** `explore_view`'s JSON when it is not an error envelope. */
+/** `WasmScene.explore`'s JSON when it is not an error envelope. */
 interface ExplorationSidecar {
   v: number;
   current: { handle: string; view: SavedView };
@@ -68,17 +67,13 @@ export interface ExplorationPanelProps {
   /** First visible dataset's id, or null when nothing is loaded. */
   datasetId: string | null;
   datasetName?: string | null;
-  /** First visible dataset's `[T, C, Z, Y, X]` shape, or null. */
+  /** First visible dataset's `[T, C, Z, Y, X]` shape, for the labels, or null. */
   dims: Dims | null;
   /** Current viewport size in CSS px (for the synthesized Home camera). */
   viewport: readonly [number, number];
-  /**
-   * The dataset's box in the live camera's coordinate space
-   * (`WasmScene.dataset_fit_bounds`), so Home frames what the viewer's own fit
-   * does. Without it the generator frames the shape's voxel box, which a 3D
-   * camera doesn't share.
-   */
-  getHomeBounds?: (datasetId: string) => Float64Array | null;
+  /** The live scene, which builds the moves and the Home every client shares.
+   *  Null before there is one. */
+  getScene: () => WasmScene | null;
   /**
    * Render a preview of `view`, or resolve `null` when one can't be produced yet
    * (the coarse overview isn't resident) so the row stays label-only. `size` is
@@ -126,30 +121,22 @@ const NUDGES: ReadonlyArray<{
 /** Run the generator for `current` (or Home when `current` is null). `depth` is
  *  the breadcrumb length, so the sidecar's recorded depth is accurate. */
 function runExplore(
+  scene: WasmScene,
   current: SavedView | null,
   datasetId: string,
-  dims: Dims,
   viewport: readonly [number, number],
   depth: number,
-  bounds: Float64Array | null,
 ): { sidecar?: ExplorationSidecar; error?: string } {
-  const [t, c, z, y, x] = dims;
   const [vw, vh] = viewport;
   const viewJson = current ? JSON.stringify(current) : undefined;
   let raw: string;
   try {
-    raw = explore_view(
+    raw = scene.explore(
       viewJson,
       datasetId,
-      Math.max(0, Math.floor(t)),
-      Math.max(0, Math.floor(c)),
-      Math.max(0, Math.floor(z)),
-      Math.max(0, Math.floor(y)),
-      Math.max(0, Math.floor(x)),
       Math.max(1, Math.floor(vw)),
       Math.max(1, Math.floor(vh)),
       Math.max(0, Math.floor(depth)),
-      bounds,
     );
   } catch (e) {
     return { error: e instanceof Error ? e.message : String(e) };
@@ -316,7 +303,7 @@ export function ExplorationPanel({
   datasetName,
   dims,
   viewport,
-  getHomeBounds,
+  getScene,
   requestThumbnail,
 }: ExplorationPanelProps) {
   const [cells, setCells] = useState<ExplorationCell[]>([]);
@@ -387,17 +374,16 @@ export function ExplorationPanel({
   const viewportRef = useRef(viewport);
   // eslint-disable-next-line react-hooks/refs
   viewportRef.current = viewport;
-  const getHomeBoundsRef = useRef(getHomeBounds);
+  const getSceneRef = useRef(getScene);
   // eslint-disable-next-line react-hooks/refs
-  getHomeBoundsRef.current = getHomeBounds;
+  getSceneRef.current = getScene;
 
   /** Run the generator from `current` against the live dataset. */
   const explore = useCallback((current: SavedView | null, depth: number) => {
     const dsId = datasetIdRef.current;
-    const ds = dimsRef.current;
-    if (!dsId || !ds) return null;
-    const bounds = getHomeBoundsRef.current?.(dsId) ?? null;
-    return runExplore(current, dsId, ds, viewportRef.current, depth, bounds);
+    const scene = getSceneRef.current();
+    if (!dsId || !dimsRef.current || !scene) return null;
+    return runExplore(scene, current, dsId, viewportRef.current, depth);
   }, []);
 
   const refresh = useCallback(() => {

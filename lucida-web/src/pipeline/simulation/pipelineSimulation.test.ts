@@ -15,6 +15,7 @@ import {
   type PhaseOutcome,
   type Scenario,
   type ScenarioSpec,
+  type ScenarioStep,
   type SimulationRun,
 } from "./harness.ts";
 import { collection, singleImage, type PyramidSpec } from "./fixtures.ts";
@@ -275,6 +276,52 @@ describe("a zoom, pan and orbit inside a volume with a full atlas", () => {
   }));
 });
 
+describe("a two-timepoint volume whose detail budget holds the view but not its prefetch", () => {
+  // The view wants level 0 of the first timepoint, 128 chunks, and prefetch
+  // asks for the same 128 of the second. Prefetch chunks near the center rank
+  // above view chunks at the corners, but only what the view leaves is
+  // prefetch's, and an evicted prefetch chunk is no reason to wait.
+  const block = singleImage({
+    id: "block",
+    pyramid: { shape: [2, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
+  });
+  const CHUNK_32_CUBE_BYTES = 32 * 32 * 32 * 2;
+  const steps: ScenarioStep[] = [{ zoom: 2 }, { orbit: [0.5, 0.2] }, { zoom: 0.5 }];
+  const fits = describeScenario({
+    name: "volume prefetch beyond the detail budget",
+    mode: "volume",
+    dataset: block,
+    cache: { mainBudgetBytes: 140 * CHUNK_32_CUBE_BYTES },
+    steps,
+  });
+  const short = describeScenario({
+    name: "volume view beyond the detail budget",
+    mode: "volume",
+    dataset: block,
+    cache: { mainBudgetBytes: 100 * CHUNK_32_CUBE_BYTES },
+    gpuComplete: false,
+    steps,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`settles covering the whole view in every phase at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(fits, { dpr });
+      expectSettled(run);
+      for (const phase of run.phases) {
+        expect(phase.quiescence, phase.label).toBe("quiescent");
+        expect(phase.detail.resident, phase.label).toBe(phase.detail.desired);
+      }
+    });
+    it(`settles covering less in every phase when the view itself does not fit at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(short, { dpr });
+      expectSettled(run);
+      for (const phase of run.phases) {
+        expect(phase.quiescence, phase.label).toBe("coverage_limited");
+        expect(phase.detail.resident, phase.label).toBe(100);
+      }
+    });
+  }
+});
+
 describe("a zoom and pan across a collection", () => {
   settles(describeScenario({
     name: "collection moves",
@@ -329,6 +376,63 @@ describe("a permanent source failure", () => {
       expect(open.missingGpu).toHaveLength(1);
       expect(open.missingGpu[0]).toContain("3/0/0/0/0/0");
       expect(open.missingGpu[0]).toContain("source answered corrupt_chunk (1 request)");
+      // The renderer is told, so the chunk draws as failed rather than as nothing.
+      expect(open.drawnFailed).toEqual(["broken-image coarse level 3 cell 0,0"]);
+    });
+  }
+});
+
+describe("a permanent source failure at the target level", () => {
+  // The target is level 1 at ratio 1 and level 0 at ratio 2. Its corner
+  // chunk fails, and the coarse tier holds data there. The cell draws as
+  // failed instead of falling through to the coarse stand-in, which would
+  // pass for the target forever.
+  const scenario = describeScenario({
+    name: "permanent source failure at the target level",
+    dataset: singleImage({ id: "broken", pyramid: IMAGE_1024 }),
+    source: {
+      answer: (req) =>
+        /^[01]\/0\/0\/0\/0\/0$/.test(req.chunkKey)
+          ? { status: "failed_permanent", failure: "wrong_size" }
+          : "ready",
+    },
+    gpuComplete: false,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`draws the failed chunk as failed at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const target = dpr === 1 ? 1 : 0;
+      const [open] = run.phases;
+      expect(open.failed).toEqual([`broken/broken-image/${target}/0/0/0/0/0: wrong_size`]);
+      expect(open.drawnFailed).toEqual([`broken-image detail level ${target} cell 0,0`]);
+    });
+  }
+});
+
+describe("a permanent source failure in a volume", () => {
+  const scenario = describeScenario({
+    name: "permanent source failure in a volume",
+    mode: "volume",
+    dataset: singleImage({
+      id: "block",
+      pyramid: { shape: [1, 1, 64, 256, 256], chunk: [32, 32, 32], levels: 3 },
+    }),
+    source: {
+      answer: (req) =>
+        req.chunkKey === "2/0/0/1/0/0"
+          ? { status: "failed_permanent", failure: "corrupt_chunk" }
+          : "ready",
+    },
+    gpuComplete: false,
+  });
+  for (const dpr of DEVICE_PIXEL_RATIOS) {
+    it(`draws the failed chunk as failed at device pixel ratio ${dpr}`, async () => {
+      const run = await runScenario(scenario, { dpr });
+      expectSettled(run);
+      const [open] = run.phases;
+      expect(open.failed).toEqual(["block/block-image/2/0/0/1/0/0: corrupt_chunk"]);
+      expect(open.drawnFailed).toEqual(["block-image coarse level 2 cell 0,0,1"]);
     });
   }
 });

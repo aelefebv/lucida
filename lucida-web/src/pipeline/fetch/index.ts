@@ -16,6 +16,7 @@ export {
   MAX_TRANSIENT_RETRIES,
   INTERACTION_MODE_WINDOW,
 } from "./cpuCache.ts";
+export type { FailedChunk } from "./cpuCache.ts";
 export type {
   CpuCacheConfig,
   EvictionTier,

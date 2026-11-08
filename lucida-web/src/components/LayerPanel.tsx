@@ -40,6 +40,8 @@ import type { LevelRange } from "../renderer/workerProtocol.ts";
 import type { DatasetImportWarning } from "../bridge.ts";
 import { displayedLevelNotice, levelNumbers } from "./levelReadout.ts";
 import { coverageNotice, useCoverageLoss } from "../hooks/useCoverageLoss.ts";
+import { useFailedChunks } from "../hooks/useFailedChunks.ts";
+import { failedChunksNotice } from "../pipeline/failedChunks.ts";
 import type { BlendMode, Colormap, RenderMode } from "../savedView/types.ts";
 import {
   applyChannelToggle,
@@ -270,7 +272,11 @@ function LayerRow(props: LayerRowProps) {
   const multichannel = layer.channels.length > 1;
   // One `c` serves the scene, so a layer without the soloed channel draws nothing.
   const hiddenBySolo = soloChannel !== null && soloChannel >= layer.channels.length;
-  const problems = (props.importWarnings?.get(layer.id) ?? []).filter((warning) => warning.degrades);
+  const failedChunks = useFailedChunks(layer.id);
+  const problems = (props.importWarnings?.get(layer.id) ?? [])
+    .filter((warning) => warning.degrades)
+    .map((warning) => warning.message);
+  if (failedChunks) problems.push(failedChunksNotice(failedChunks));
   const problemsId = useId();
 
   return (
@@ -364,8 +370,8 @@ function LayerRow(props: LayerRowProps) {
       </div>
       {problems.length > 0 && (
         <ul className="lc-layer-problems" id={problemsId} aria-label={`${layer.name} data problems`}>
-          {problems.map((warning) => (
-            <li key={warning.message}>{warning.message}</li>
+          {problems.map((message) => (
+            <li key={message}>{message}</li>
           ))}
         </ul>
       )}
