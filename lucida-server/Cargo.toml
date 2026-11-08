@@ -36,7 +36,7 @@ blake3 = "1"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
 num_cpus = "1"
-rand = "0.8"
+rand = "0.9"
 thiserror = "1"
 bytemuck = "1"
 async-trait = "0.1"
