@@ -4353,8 +4353,8 @@ async fn prepare_script_datasets(
     let run_dataset = normalize_dataset_url(run_dataset);
     if needs.absent.contains(&run_dataset) {
         return Err(CliError::config(format!(
-            "the script adds {run_dataset}, which is the dataset the run opens; add another \
-             dataset, or remove this one first"
+            "the script adds {run_dataset} before any step removes it, but the run opens that \
+             dataset, so it is already in the workspace"
         )));
     }
     for url in &needs.absent {
