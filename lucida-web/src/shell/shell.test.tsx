@@ -115,6 +115,7 @@ describe("CanvasStage", () => {
         canvasRef={createRef<HTMLCanvasElement>()}
         canvasKey={0}
         pixelated={false}
+        label="2D view of sample"
         slots={{ "top-center": <span>banner</span>, "bottom-right": <span>minimap</span> }}
       >
         <span>layer</span>
@@ -125,9 +126,14 @@ describe("CanvasStage", () => {
     expect(screen.getByText("minimap").parentElement?.dataset.slot).toBe("bottom-right");
   });
 
+  it("names the canvas for assistive technology", () => {
+    render(<CanvasStage canvasRef={createRef<HTMLCanvasElement>()} canvasKey={0} pixelated label="2D view of sample" />);
+    expect(screen.getByRole("img", { name: "2D view of sample" }).tagName).toBe("CANVAS");
+  });
+
   it("marks the capture surface bare", () => {
     const { container } = render(
-      <CanvasStage canvasRef={createRef<HTMLCanvasElement>()} canvasKey={0} pixelated bare />,
+      <CanvasStage canvasRef={createRef<HTMLCanvasElement>()} canvasKey={0} pixelated bare label="Empty view" />,
     );
     expect(container.querySelector(".lc-canvas-stage")?.hasAttribute("data-bare")).toBe(true);
   });

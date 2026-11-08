@@ -32,7 +32,7 @@ import { applyViewportCommand } from "../applyAndSend.ts";
 import { frameClock, useWakeFramesOnRender } from "../frameClock.ts";
 import { buildAnnotationView } from "../savedView/buildAnnotationView.ts";
 import { annotationVertices, hitTestShapes, isClosedShape, type ScreenPoint } from "./annotationGeometry.ts";
-import { isOffContext, type ViewContext } from "./annotationContext.ts";
+import { isOffContext, pinLabel, type ViewContext } from "./annotationContext.ts";
 import type { Tool } from "./annotationTool.ts";
 import { ThreadPopover } from "./ThreadPopover.tsx";
 import type { MentionCandidate } from "./annotationMentions.ts";
@@ -494,9 +494,13 @@ export const AnnotationOverlay3D = forwardRef<AnnotationOverlayHandle, Props>(fu
             }}
           >
             {/* Every marker takes the pointer so any pin's thread can open; a
-                peer's pin just can't be moved. */}
-            <div
+                peer's pin just can't be moved. A native button, as in the 2D
+                overlay, so the gestures keep the pointer. */}
+            {/* eslint-disable-next-line no-restricted-syntax -- see above */}
+            <button
+              type="button"
               className="lc-annotation-pin"
+              aria-label={pinLabel(pin, mine, offCtx)}
               data-testid={`annot-pin-${pin.id}`}
               data-author={mine ? "own" : "peer"}
               data-off-context={offCtx || undefined}

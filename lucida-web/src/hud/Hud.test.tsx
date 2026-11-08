@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 
 import { Hud } from "./Hud.tsx";
@@ -30,31 +30,32 @@ describe("the HUD legend", () => {
   it("shows one toggle per overlay, reflecting the persisted state", () => {
     setOverlayEnabled("chunkGrid", true);
     renderHud();
-    for (const name of DEBUG_OVERLAYS) {
-      const box = screen.getByLabelText(name) as HTMLInputElement;
-      expect(box.checked).toBe(name === "chunkGrid");
-      expect(box.disabled).toBe(false);
-    }
+    const boxes = within(screen.getByTestId("hud-legend")).getAllByRole("checkbox") as HTMLInputElement[];
+    expect(boxes).toHaveLength(DEBUG_OVERLAYS.length);
+    DEBUG_OVERLAYS.forEach((name, i) => {
+      expect(boxes[i].checked).toBe(name === "chunkGrid");
+      expect(boxes[i].disabled).toBe(false);
+    });
   });
 
   it("writes a toggle through the registry into the same preference the overlays read", async () => {
     const user = userEvent.setup();
     renderHud();
-    await user.click(screen.getByLabelText("plannedRank"));
+    await user.click(screen.getByRole("checkbox", { name: "planned rank" }));
     expect(isOverlayEnabled("plannedRank")).toBe(true);
     expect(getPreference(debugOverlaysPreference)).toEqual(["plannedRank"]);
-    await user.click(screen.getByLabelText("plannedRank"));
+    await user.click(screen.getByRole("checkbox", { name: "planned rank" }));
     expect(isOverlayEnabled("plannedRank")).toBe(false);
     expect(getPreference(debugOverlaysPreference)).toEqual([]);
   });
 
   it("reflects a toggle flipped from outside", async () => {
     renderHud();
-    expect((screen.getByLabelText("chunkGrid") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("checkbox", { name: "chunk grid" }) as HTMLInputElement).checked).toBe(false);
     await act(async () => {
       setOverlayEnabled("chunkGrid", true);
     });
-    expect((screen.getByLabelText("chunkGrid") as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByRole("checkbox", { name: "chunk grid" }) as HTMLInputElement).checked).toBe(true);
   });
 });
 

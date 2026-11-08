@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { DevControls, type LiveCacheKnobs } from "./DevControls.tsx";
 import { configStore, PLANNING_KNOB_PREFERENCES } from "../pipeline/planning/configStore.ts";
@@ -51,6 +51,17 @@ function fakeCache(overrides: Partial<ReturnType<LiveCacheKnobs["getConfig"]>> =
   return { getConfig: () => ({ ...own, ...readCacheKnobs() }) };
 }
 
+/** A tunable's slider: the range input React Aria keeps under the thumb. */
+const slider = (label: string) => screen.getByRole("slider", { name: label }) as HTMLInputElement;
+/** A tunable's editable value, beside its label. */
+const valueField = (label: string) => screen.getByRole("textbox", { name: label }) as HTMLInputElement;
+/** A field commits on Enter, as a person typing a value would. */
+async function typeInto(field: HTMLInputElement, text: string) {
+  const user = userEvent.setup();
+  await user.clear(field);
+  await user.type(field, `${text}{Enter}`);
+}
+
 describe("DevControls — planning config rendering", () => {
   it("renders each tunable's label and current value", () => {
     render(<DevControls />);
@@ -63,18 +74,15 @@ describe("DevControls — planning config rendering", () => {
     expect(screen.getByText(/Detail render radius/)).toBeTruthy();
     expect(screen.getByText(/Coarse render radius/)).toBeTruthy();
 
-    const weightSlider = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
-    expect(Number(weightSlider.value)).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
-
-    const weightNumber = screen.getByLabelText(/Importance weight.*value/i) as HTMLInputElement;
-    expect(Number(weightNumber.value)).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
+    expect(Number(slider("Importance weight").value)).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
+    expect(Number(valueField("Importance weight").value)).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
   });
 
   it("collapses lane-offsets section by default", () => {
     render(<DevControls />);
     // Lane offset rows are not in the DOM until toggled open.
-    expect(screen.queryByLabelText(/MINIMAP lane offset.*slider/i)).toBeNull();
-    expect(screen.queryByLabelText(/DETAIL lane offset.*slider/i)).toBeNull();
+    expect(screen.queryByRole("slider", { name: "MINIMAP lane offset" })).toBeNull();
+    expect(screen.queryByRole("slider", { name: "DETAIL lane offset" })).toBeNull();
     // The section header + toggle are present.
     expect(screen.getByText(/Lane offsets/)).toBeTruthy();
     expect(screen.getByRole("button", { name: /show/i })).toBeTruthy();
@@ -84,21 +92,20 @@ describe("DevControls — planning config rendering", () => {
     const user = userEvent.setup();
     render(<DevControls />);
     await user.click(screen.getByRole("button", { name: /show/i }));
-    expect(screen.getByLabelText(/MINIMAP lane offset.*slider/i)).toBeTruthy();
-    expect(screen.getByLabelText(/COARSE lane offset.*slider/i)).toBeTruthy();
+    expect(slider("MINIMAP lane offset")).toBeTruthy();
+    expect(slider("COARSE lane offset")).toBeTruthy();
     // Warning banner mentions the canonical priority order.
     expect(screen.getByText(/canonical order/i)).toBeTruthy();
   });
 
   it("offers each planning knob over exactly the range its preference clamps to", async () => {
     const user = userEvent.setup();
-    const { container } = render(<DevControls />);
+    render(<DevControls />);
     await user.click(screen.getByRole("button", { name: /show/i }));
     for (const [field, pref] of Object.entries(PLANNING_KNOB_PREFERENCES)) {
-      const slider = container.querySelector(`#cfg-${field}`) as HTMLInputElement | null;
-      expect(slider, field).not.toBeNull();
-      expect(Number(slider!.min), field).toBe(pref.parse(-1e12));
-      expect(Number(slider!.max), field).toBe(pref.parse(1e12));
+      const range = within(screen.getByTestId(`cfg-${field}`)).getByRole("slider") as HTMLInputElement;
+      expect(Number(range.min), field).toBe(pref.parse(-1e12));
+      expect(Number(range.max), field).toBe(pref.parse(1e12));
     }
   });
 });
@@ -106,61 +113,60 @@ describe("DevControls — planning config rendering", () => {
 describe("DevControls — developer tools", () => {
   it("edits knobs that apply only while developer tools are on", () => {
     render(<DevControls />);
-    fireEvent.change(screen.getByLabelText(/Importance weight.*slider/i), { target: { value: "120" } });
+    fireEvent.change(slider("Importance weight"), { target: { value: "120" } });
     expect(configStore.get().importanceWeight).toBe(120);
     act(() => setPreference(developerToolsPreference, false));
     expect(configStore.get().importanceWeight).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
   });
 });
 
-describe("DevControls — slider + number input edits", () => {
-  it("dragging the importance weight slider updates the configStore", () => {
+describe("DevControls — slider + value edits", () => {
+  it("moving the importance weight slider updates the configStore", () => {
     render(<DevControls />);
-    const slider = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
-    fireEvent.change(slider, { target: { value: "120" } });
+    fireEvent.change(slider("Importance weight"), { target: { value: "120" } });
     expect(configStore.get().importanceWeight).toBe(120);
   });
 
-  it("dragging the detail radius slider updates the configStore", () => {
+  it("moving the detail radius slider updates the configStore", () => {
     render(<DevControls />);
-    const slider = screen.getByLabelText(/Detail render radius.*slider/i) as HTMLInputElement;
-    fireEvent.change(slider, { target: { value: "0.75" } });
+    fireEvent.change(slider("Detail render radius (view)"), { target: { value: "0.75" } });
     expect(configStore.get().detailRenderRadiusView).toBe(0.75);
   });
 
-  it("previews only the active radius tier while dragging radius sliders", () => {
+  it("previews only the active radius tier while a radius is adjusted", () => {
     render(<DevControls />);
 
-    const detail = screen.getByLabelText(/Detail render radius.*slider/i);
-    fireEvent.pointerDown(detail);
+    fireEvent.change(slider("Detail render radius (view)"), { target: { value: "1" } });
     expect(getRenderRadiusPreviewTier()).toBe("detail");
     fireEvent.pointerUp(window);
     expect(getRenderRadiusPreviewTier()).toBeNull();
 
-    const coarse = screen.getByLabelText(/Coarse render radius.*slider/i);
-    fireEvent.pointerDown(coarse);
+    fireEvent.change(slider("Coarse render radius (view)"), { target: { value: "1" } });
     expect(getRenderRadiusPreviewTier()).toBe("coarse");
     fireEvent.pointerCancel(window);
+    expect(getRenderRadiusPreviewTier()).toBeNull();
+
+    fireEvent.change(slider("Coarse render radius (view)"), { target: { value: "1.5" } });
+    expect(getRenderRadiusPreviewTier()).toBe("coarse");
+    fireEvent.keyUp(window);
     expect(getRenderRadiusPreviewTier()).toBeNull();
   });
 
   it("does not preview radius visuals for unrelated sliders", () => {
     render(<DevControls />);
-    fireEvent.pointerDown(screen.getByLabelText(/Importance weight.*slider/i));
+    fireEvent.change(slider("Importance weight"), { target: { value: "120" } });
     expect(getRenderRadiusPreviewTier()).toBeNull();
   });
 
-  it("typing into the number input updates the configStore", () => {
+  it("typing a value updates the configStore", async () => {
     render(<DevControls />);
-    const number = screen.getByLabelText(/Importance weight.*value/i) as HTMLInputElement;
-    fireEvent.change(number, { target: { value: "55" } });
-    expect(configStore.get().importanceWeight).toBe(55);
+    await typeInto(valueField("Importance weight"), "120");
+    expect(configStore.get().importanceWeight).toBe(120);
   });
 
-  it("clamps inputs above the slider max", () => {
+  it("clamps a typed value above the slider max", async () => {
     render(<DevControls />);
-    const number = screen.getByLabelText(/Importance weight.*value/i) as HTMLInputElement;
-    fireEvent.change(number, { target: { value: "999999" } });
+    await typeInto(valueField("Importance weight"), "999999");
     // Importance weight slider max is 2000 in the schema.
     expect(configStore.get().importanceWeight).toBe(2000);
   });
@@ -175,9 +181,8 @@ describe("DevControls — reset arrow", () => {
   it("appears when value differs from default and restores on click", async () => {
     const user = userEvent.setup();
     render(<DevControls />);
-    const slider = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
 
-    fireEvent.change(slider, { target: { value: "120" } });
+    fireEvent.change(slider("Importance weight"), { target: { value: "120" } });
 
     const resetBtn = await screen.findByRole("button", { name: /Reset Importance weight/i });
     await user.click(resetBtn);
@@ -193,14 +198,8 @@ describe("DevControls — reset all", () => {
     const user = userEvent.setup();
     render(<DevControls />);
 
-    fireEvent.change(
-      screen.getByLabelText(/Distance weight.*slider/i),
-      { target: { value: "50" } },
-    );
-    fireEvent.change(
-      screen.getByLabelText(/Importance weight.*slider/i),
-      { target: { value: "1500" } },
-    );
+    fireEvent.change(slider("Distance weight"), { target: { value: "50" } });
+    fireEvent.change(slider("Importance weight"), { target: { value: "1500" } });
     expect(configStore.get().distanceWeight).toBe(50);
     expect(configStore.get().importanceWeight).toBe(1500);
 
@@ -223,10 +222,7 @@ describe("DevControls — cross-constraint warnings", () => {
 
     // Push DETAIL lane offset above PREFETCH lane offset (default 500 vs
     // 1500) by setting DETAIL to 2000.
-    fireEvent.change(
-      screen.getByLabelText(/DETAIL lane offset.*slider/i),
-      { target: { value: "2000" } },
-    );
+    fireEvent.change(slider("DETAIL lane offset"), { target: { value: "2000" } });
     expect(screen.getAllByText(/inverts canonical lane order/i).length).toBeGreaterThan(0);
   });
 });
@@ -238,12 +234,9 @@ describe("DevControls — read-only mode (production builds)", () => {
     });
     render(<DevControls editable={false} />);
 
-    const slider = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
-    expect(slider.disabled).toBe(true);
-    expect(Number(slider.value)).toBe(120);
-
-    const number = screen.getByLabelText(/Importance weight.*value/i) as HTMLInputElement;
-    expect(number.disabled).toBe(true);
+    expect(slider("Importance weight").disabled).toBe(true);
+    expect(Number(slider("Importance weight").value)).toBe(120);
+    expect(valueField("Importance weight").disabled).toBe(true);
 
     // Dirty value, but no per-field reset in read-only mode.
     expect(screen.queryByRole("button", { name: /Reset Importance weight/i })).toBeNull();
@@ -277,34 +270,27 @@ describe("DevControls — read-only mode (production builds)", () => {
     expect(resetAll.disabled).toBe(true);
   });
 
-  it("ignores change events on sliders and number inputs", () => {
+  it("ignores edits to sliders and values", async () => {
     render(<DevControls editable={false} />);
-    fireEvent.change(
-      screen.getByLabelText(/Importance weight.*slider/i),
-      { target: { value: "120" } },
-    );
-    fireEvent.change(
-      screen.getByLabelText(/Importance weight.*value/i),
-      { target: { value: "55" } },
-    );
+    fireEvent.change(slider("Importance weight"), { target: { value: "120" } });
     expect(configStore.get().importanceWeight).toBe(
       DEFAULT_PLANNING_CONFIG.importanceWeight,
     );
+    expect(getRenderRadiusPreviewTier()).toBeNull();
   });
 });
 
 describe("DevControls — store subscription", () => {
   it("re-renders when configStore changes externally", async () => {
     render(<DevControls />);
-    const slider = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
-    expect(Number(slider.value)).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
+    expect(Number(slider("Importance weight").value)).toBe(DEFAULT_PLANNING_CONFIG.importanceWeight);
 
     // Change the store directly (bypassing the UI).
     await act(async () => {
-      configStore.set("importanceWeight", 175);
+      configStore.set("importanceWeight", 170);
     });
-    const sliderAfter = screen.getByLabelText(/Importance weight.*slider/i) as HTMLInputElement;
-    expect(Number(sliderAfter.value)).toBe(175);
+    expect(Number(slider("Importance weight").value)).toBe(170);
+    expect(Number(valueField("Importance weight").value)).toBe(170);
   });
 });
 
@@ -320,22 +306,24 @@ describe("DevControls — overlay toggles", () => {
 });
 
 describe("DevControls — cache knobs", () => {
+  const knob = (label: string) => screen.getByRole("textbox", { name: label }) as HTMLInputElement;
+
   it("shows the values the live cache runs under", () => {
     render(<DevControls getCpuCache={() => fakeCache()} />);
 
-    expect((screen.getByLabelText("Main budget (MB)") as HTMLInputElement).value).toBe("512");
-    expect((screen.getByLabelText("Overview budget (MB)") as HTMLInputElement).value).toBe("128");
-    expect((screen.getByLabelText("Max fetches") as HTMLInputElement).value).toBe("12");
-    expect((screen.getByLabelText("Max in-flight (MB)") as HTMLInputElement).value).toBe("64");
+    expect(knob("Main budget (MB)").value).toBe("512");
+    expect(knob("Overview budget (MB)").value).toBe("128");
+    expect(knob("Max fetches").value).toBe("12");
+    expect(knob("Max in-flight (MB)").value).toBe("64");
   });
 
-  it("writes each knob to its preference, in the cache's units", () => {
+  it("writes each knob to its preference, in the cache's units", async () => {
     render(<DevControls getCpuCache={() => fakeCache()} />);
 
-    fireEvent.change(screen.getByLabelText("Main budget (MB)"), { target: { value: "256" } });
-    fireEvent.change(screen.getByLabelText("Overview budget (MB)"), { target: { value: "64" } });
-    fireEvent.change(screen.getByLabelText("Max fetches"), { target: { value: "24" } });
-    fireEvent.change(screen.getByLabelText("Max in-flight (MB)"), { target: { value: "32" } });
+    await typeInto(knob("Main budget (MB)"), "256");
+    await typeInto(knob("Overview budget (MB)"), "64");
+    await typeInto(knob("Max fetches"), "24");
+    await typeInto(knob("Max in-flight (MB)"), "32");
 
     expect(readCacheKnobs()).toEqual({
       mainBudgetBytes: 256 * 1024 * 1024,
@@ -345,10 +333,10 @@ describe("DevControls — cache knobs", () => {
     });
   });
 
-  it("shows the edited value back without waiting for a telemetry poll", () => {
+  it("shows the edited value back without waiting for a telemetry poll", async () => {
     render(<DevControls getCpuCache={() => fakeCache()} />);
-    fireEvent.change(screen.getByLabelText("Main budget (MB)"), { target: { value: "256" } });
-    expect((screen.getByLabelText("Main budget (MB)") as HTMLInputElement).value).toBe("256");
+    await typeInto(knob("Main budget (MB)"), "256");
+    expect(knob("Main budget (MB)").value).toBe("256");
   });
 
   it("returns a knob to the cache's own value from its reset arrow", async () => {
@@ -356,23 +344,24 @@ describe("DevControls — cache knobs", () => {
     render(<DevControls getCpuCache={() => fakeCache()} />);
     expect(screen.queryByRole("button", { name: /Reset Max fetches/i })).toBeNull();
 
-    fireEvent.change(screen.getByLabelText("Max fetches"), { target: { value: "24" } });
+    await typeInto(knob("Max fetches"), "24");
     await user.click(await screen.findByRole("button", { name: /Reset Max fetches/i }));
     expect(getPreference(CACHE_KNOB_PREFERENCES.maxConcurrentFetches)).toBeNull();
-    expect((screen.getByLabelText("Max fetches") as HTMLInputElement).value).toBe("12");
+    expect(knob("Max fetches").value).toBe("12");
   });
 
-  it("ignores non-positive values rather than starving the cache", () => {
+  it("ignores non-positive values rather than starving the cache", async () => {
     render(<DevControls getCpuCache={() => fakeCache()} />);
-    fireEvent.change(screen.getByLabelText("Max fetches"), { target: { value: "0" } });
+    await typeInto(knob("Max fetches"), "0");
     expect(getPreference(CACHE_KNOB_PREFERENCES.maxConcurrentFetches)).toBeNull();
   });
 
-  it("disables the knobs in read-only builds", () => {
+  it("disables the knobs in read-only builds", async () => {
     render(<DevControls getCpuCache={() => fakeCache()} editable={false} />);
-    const input = screen.getByLabelText("Main budget (MB)") as HTMLInputElement;
+    const input = knob("Main budget (MB)");
     expect(input.disabled).toBe(true);
     fireEvent.change(input, { target: { value: "256" } });
+    fireEvent.blur(input);
     expect(getPreference(CACHE_KNOB_PREFERENCES.mainBudgetBytes)).toBeNull();
   });
 
@@ -388,7 +377,7 @@ describe("DevControls — cache knobs", () => {
 
   it("explains the absence of the knobs when no session is connected", () => {
     render(<DevControls getCpuCache={() => null} />);
-    expect(screen.queryByLabelText("Main budget (MB)")).toBeNull();
+    expect(screen.queryByRole("textbox", { name: "Main budget (MB)" })).toBeNull();
     expect(screen.getByText(/no session/i)).toBeTruthy();
   });
 
@@ -399,13 +388,13 @@ describe("DevControls — cache knobs", () => {
     try {
       let cache: ReturnType<typeof fakeCache> | null = null;
       render(<DevControls getCpuCache={() => cache} />);
-      expect(screen.queryByLabelText("Main budget (MB)")).toBeNull();
+      expect(screen.queryByRole("textbox", { name: "Main budget (MB)" })).toBeNull();
 
       cache = fakeCache({ mainBudgetBytes: 384 * 1024 * 1024 });
       await act(async () => {
         vi.advanceTimersByTime(1100);
       });
-      expect((screen.getByLabelText("Main budget (MB)") as HTMLInputElement).value).toBe("384");
+      expect(knob("Main budget (MB)").value).toBe("384");
     } finally {
       vi.useRealTimers();
     }

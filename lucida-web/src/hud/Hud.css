@@ -40,16 +40,7 @@
 }
 
 .hud-legend-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--lc-space-1);
-  cursor: pointer;
   white-space: nowrap;
-}
-
-.hud-legend-toggle input {
-  margin: 0;
-  accent-color: var(--lc-accent);
 }
 
 /* The churn toggle's window label. */

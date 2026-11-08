@@ -364,7 +364,7 @@ function Viewer({
 
   const datasets = useDatasets({
     // Wrap so URL→DatasetId tracking is populated for every local open
-    // (FileBrowser-driven, URL-bar-driven, applier-driven).
+    // (browse-pane-driven, URL-bar-driven, applier-driven).
     sendOpenRemoteDataset: savedViewSync.trackedSendOpen,
   });
 
@@ -1041,6 +1041,11 @@ function Viewer({
             pixelated={dims.viewMode === "2d"}
             onResize={handleCanvasResize}
             bare={captureSurface}
+            label={
+              hasData
+                ? `${dims.viewMode === "3d" ? "3D" : "2D"} view of ${loadedDatasetNames.join(", ")}`
+                : "Empty view"
+            }
             emptyState={
               render.gpuUnavailable ? (
                 <WebGpuUnavailable reason={render.gpuUnavailable} />

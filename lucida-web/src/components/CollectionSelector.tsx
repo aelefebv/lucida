@@ -4,6 +4,7 @@ import { buildManifestIndex, entityExtent, type VoxelRect } from "../pipeline/la
 import { usePreference } from "../theme/preferences.ts";
 import { Button } from "../ui/Button.tsx";
 import { PanelHeader } from "../ui/PanelHeader.tsx";
+import { UnstyledButton } from "../ui/UnstyledButton.tsx";
 import { CanvasCard } from "./CanvasCard.tsx";
 import { navigatorCardPreference } from "./canvasCards.ts";
 import { groupAt, unionRects } from "./collectionGroups.ts";
@@ -234,15 +235,14 @@ export function CollectionSelector({
               const key = groupKey(r, c);
               const name = `${row}${column}`;
               return (
-                <button
+                <UnstyledButton
                   key={key}
-                  type="button"
                   className="lc-navigator-cell"
                   aria-label={name}
                   title={name}
                   aria-current={key === currentKey ? "location" : undefined}
-                  disabled={!groupMembers.has(key)}
-                  onClick={() => handleGroupClick(key)}
+                  isDisabled={!groupMembers.has(key)}
+                  onPress={() => handleGroupClick(key)}
                 />
               );
             })}

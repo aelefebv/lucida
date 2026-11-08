@@ -64,13 +64,23 @@
   cursor: not-allowed;
 }
 
-.lc-saved-view-visibility-option input {
+.lc-saved-view-visibility-dot {
   flex: none;
+  box-sizing: border-box;
+  width: 13px;
+  height: 13px;
   margin: 3px 0 0;
-  accent-color: var(--lc-accent);
+  border: 1px solid var(--lc-text-subtle);
+  border-radius: var(--lc-radius-full);
+  background: var(--lc-field-bg);
 }
 
-.lc-saved-view-visibility-option input:focus-visible {
+.lc-saved-view-visibility-option[data-selected] .lc-saved-view-visibility-dot {
+  border: 4px solid var(--lc-accent);
+  background: var(--lc-text-on-accent);
+}
+
+.lc-saved-view-visibility-option[data-focus-visible] .lc-saved-view-visibility-dot {
   outline: 2px solid var(--lc-focus-ring);
   outline-offset: 2px;
 }
