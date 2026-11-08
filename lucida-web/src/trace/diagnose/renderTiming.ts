@@ -12,7 +12,13 @@
 import type { GpuIdentity, TraceReading, TraceRun } from "../types.ts";
 import type { RunIdentity } from "./types.ts";
 import { percentile, usToMs } from "./phaseRollup.ts";
-import type { GpuPassAbsenceReason, GpuPassTiming, RenderTiming, TimingSummary } from "./types.ts";
+import type {
+  GpuMemorySummary,
+  GpuPassAbsenceReason,
+  GpuPassTiming,
+  RenderTiming,
+  TimingSummary,
+} from "./types.ts";
 
 const ABSENCE_STATEMENTS: Record<GpuPassAbsenceReason, string> = {
   "no-timestamp-queries":
@@ -46,6 +52,37 @@ export function deriveRenderTiming(run: TraceRun): RenderTiming {
     mainThread: summariseTiming(mainThreadUs),
     gpuPass: gpuPassTiming(gpuPassUs, run.header.gpu),
   };
+}
+
+/** GPU memory over the readings that carried it, or null when none did. */
+export function deriveGpuMemory(readings: readonly TraceReading[]): GpuMemorySummary | null {
+  let summary: GpuMemorySummary | null = null;
+  for (const { gpuMemory } of readings) {
+    if (!gpuMemory) continue;
+    if (!summary) {
+      summary = {
+        peakBytes: gpuMemory.bytes,
+        peakBudgetBytes: gpuMemory.budgetBytes,
+        overBudget: false,
+        lastBytes: 0,
+        lastBudgetBytes: 0,
+        slotsHeld: 0,
+        slots: 0,
+        samples: 0,
+      };
+    }
+    if (gpuMemory.bytes > summary.peakBytes) {
+      summary.peakBytes = gpuMemory.bytes;
+      summary.peakBudgetBytes = gpuMemory.budgetBytes;
+    }
+    if (gpuMemory.bytes > gpuMemory.budgetBytes) summary.overBudget = true;
+    summary.lastBytes = gpuMemory.bytes;
+    summary.lastBudgetBytes = gpuMemory.budgetBytes;
+    summary.slotsHeld = gpuMemory.slotsHeld;
+    summary.slots = gpuMemory.slots;
+    summary.samples++;
+  }
+  return summary;
 }
 
 /**
