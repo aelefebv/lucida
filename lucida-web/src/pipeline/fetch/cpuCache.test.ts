@@ -3585,6 +3585,28 @@ describe("CpuCache", () => {
       expect(evaluateSettle(Object.assign(createSettleState(), inputs), 0).reason).toBe("coverage_limited");
     });
 
+    it("never evicts a wanted chunk more urgent than the one arriving, and counts the refused one short", async () => {
+      const { cache, source } = createTestCache({ mainBudgetBytes: 2 * 64, overviewBudgetBytes: 64 });
+      source.autoResolveBytes = 64;
+      const detail = (x: number) =>
+        makeRequest({ x, priority: x, lane: "detail", tier: "detail", chunkKey: `0/0/0/0/0/${x}` });
+      const coarse = makeRequest({ level: 2, lane: "coarse", tier: "coarse", chunkKey: "2/0/0/0/0/0" });
+      cache.onPlanRebuildStart();
+      cache.submit(makePlan([detail(0), detail(1), detail(5), coarse]));
+      await flush();
+
+      const cached = cache.snapshot().cached.get("entity-1")!;
+      expect(cached.has("0/0/0/0/0/0")).toBe(true);
+      expect(cached.has("0/0/0/0/0/1")).toBe(true);
+      expect(cached.has("0/0/0/0/0/5")).toBe(false);
+      expect(cache.settleInputs(createSettleState())).toMatchObject({ shortDetailChunks: 1 });
+
+      // Short for this plan: nothing fetches it again.
+      const requestsBefore = source.fetchCount;
+      await flush();
+      expect(source.fetchCount).toBe(requestsBefore);
+    });
+
     it("counts a wanted chunk the server has not made yet as waiting on it, not as short", async () => {
       const { cache, source } = createTestCache();
       cache.onPlanRebuildStart();
