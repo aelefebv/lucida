@@ -16,7 +16,7 @@ lucida-content = { path = "../lucida-content" }
 lucida-protocol = { path = "../lucida-protocol" }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "charset"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "charset", "query"] }
 tokio-tungstenite = "0.29"
 futures-util = "0.3"
 serde = { version = "1", features = ["derive"] }

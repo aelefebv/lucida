@@ -135,10 +135,12 @@ jobs:
           # with the wasm-pack pin in Dockerfile.
           version: 'v0.15.0'
 
+      # The version is lucida-web's `packageManager` pin, which Dependabot
+      # and the Dockerfile run too, so every lockfile writer agrees.
       - name: Install pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 9
+          package_json_file: lucida-web/package.json
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -209,7 +211,7 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v6
         with:
-          version: 9
+          package_json_file: lucida-web/package.json
 
       - name: Install Node.js
         uses: actions/setup-node@v4
