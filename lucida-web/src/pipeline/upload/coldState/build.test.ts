@@ -1,10 +1,9 @@
 /**
  * Unit tests for `buildColdState` / `buildColdActiveEntry`.
  *
- * The end-to-end pure builder collapses three near-duplicate per-variant
- * literals (group-as-proxy / invisible / tile) into one branching
- * function and a top-level `Array.map`. Tests cover each variant +
- * display-state fallback + empty active set + multi-dataset shape.
+ * The end-to-end pure builder maps each planner entry (tile or invisible)
+ * through one function and a top-level `Array.map`. Tests cover each
+ * variant + display-state fallback + empty active set + multi-dataset shape.
  */
 import { describe, it, expect } from "vitest";
 import { Axis } from "../../../axes.ts";
@@ -81,7 +80,7 @@ function makeVisibleRegion(): VisibleRegion {
 }
 
 function makeEpochs(): SceneEpochs {
-  return { content: 1, layout: 2, view: 3, selection: 4, asset: 5, request: 6 };
+  return { content: 1, layout: 2, view: 3, selection: 4, request: 6 };
 }
 
 function makeDsSettings(over: Partial<DatasetSettings> = {}): DatasetSettings {
@@ -106,33 +105,23 @@ function makeMatrices(): Map<string, { model: Float32Array; inv: Float32Array }>
 // Cases
 
 describe("buildColdActiveEntry", () => {
-  it("maps a `tile` entry forwarding tier levels + mode + proxy flags + parentGroupId", () => {
+  it("maps a `tile` entry forwarding its tier levels", () => {
     const entityById = new Map([["ent-a", makeTile("ent-a", "img-a", "group-0")]]);
     const matricesByEntity = makeMatrices();
     const tileEntry: ActiveSetEntry = {
       kind: "tile",
       entityId: "ent-a",
       imageId: "img-a",
-      mode: "tiles-with-proxy-fallback",
       detailLevels: [1],
       coarseLevel: 3,
-      proxyKind: "TileProxy3D",
-      proxyAvailable: true,
-      groupProxyAvailable: false,
-    } as ActiveSetEntry;
+    };
 
     const result = buildColdActiveEntry(tileEntry, entityById, matricesByEntity, {});
 
     expect(result.entityId).toBe("ent-a");
     expect(result.imageId).toBe("img-a");
-    if (result.kind !== "tile") throw new Error("expected tile");
     expect(result.detailLevels).toEqual([1]);
     expect(result.coarseLevel).toBe(3);
-    expect(result.mode).toBe("tiles-with-proxy-fallback");
-    expect(result.proxyKind).toBe("TileProxy3D");
-    expect(result.proxyAvailable).toBe(true);
-    expect(result.groupProxyAvailable).toBe(false);
-    expect(result.parentGroupId).toBe("group-0");
     // Levels are derived from the entity's `levels` array.
     expect(result.levels).toHaveLength(1);
     expect(result.levels[0]).toEqual({
@@ -146,31 +135,22 @@ describe("buildColdActiveEntry", () => {
     expect(result.invModelMatrix[5]).toBe(1);
   });
 
-  it("maps a `group-as-proxy` entry to mode group-as-proxy, GroupProxy3D, etc.", () => {
+  it("uses the entity's precomputed matrices when present", () => {
     const matricesByEntity = new Map<string, { model: Float32Array; inv: Float32Array }>();
     const synthM = new Float32Array(16); synthM[0] = 30; synthM[5] = 30; synthM[10] = 30; synthM[15] = 1;
     const synthInv = new Float32Array(16); synthInv[0] = 1/30; synthInv[5] = 1/30; synthInv[10] = 1/30; synthInv[15] = 1;
-    matricesByEntity.set("group-0", { model: synthM, inv: synthInv });
+    matricesByEntity.set("ent-a", { model: synthM, inv: synthInv });
 
-    const entry: ActiveSetEntry = { kind: "group-as-proxy", entityId: "group-0" } as ActiveSetEntry;
+    const entry: ActiveSetEntry = {
+      kind: "tile", entityId: "ent-a", imageId: "img-a", detailLevels: [0], coarseLevel: null,
+    };
     const result = buildColdActiveEntry(entry, new Map(), matricesByEntity, {});
 
-    expect(result.kind).toBe("group-as-proxy");
-    expect(result.entityId).toBe("group-0");
-    // The group-as-proxy variant has no `imageId` tile (`?: never`).
-    // Guard the assertion so the type narrows cleanly.
-    if (result.kind !== "group-as-proxy") throw new Error("expected group-as-proxy");
-    expect((result as unknown as Record<string, unknown>).imageId).toBeUndefined();
-    expect(result.mode).toBe("group-as-proxy");
-    expect(result.proxyKind).toBe("GroupProxy3D");
-    expect(result.proxyAvailable).toBe(true);
-    expect(result.groupProxyAvailable).toBe(true);
-    expect(result.parentGroupId).toBeNull();
     expect(result.modelMatrix[0]).toBe(30);
     expect(result.invModelMatrix[0]).toBeCloseTo(1 / 30);
   });
 
-  it("maps an `invisible` entry to a tiles-with-detail entry holding its coarsest level", () => {
+  it("maps an `invisible` entry to an entry holding its coarsest level", () => {
     const entityById = new Map([["ent-x", makeTile("ent-x", "img-x", "group-0")]]);
     const entry: ActiveSetEntry = {
       kind: "invisible",
@@ -183,14 +163,8 @@ describe("buildColdActiveEntry", () => {
 
     expect(result.entityId).toBe("ent-x");
     expect(result.imageId).toBe("img-x");
-    if (result.kind !== "tile") throw new Error("expected tile");
     expect(result.detailLevels).toEqual([3]);
     expect(result.coarseLevel).toBeNull();
-    expect(result.mode).toBe("tiles-with-detail");
-    expect(result.proxyKind).toBeUndefined();
-    expect(result.proxyAvailable).toBe(false);
-    expect(result.groupProxyAvailable).toBe(false);
-    expect(result.parentGroupId).toBe("group-0"); // Tile's parent
   });
 });
 
@@ -202,11 +176,8 @@ describe("buildColdState", () => {
         kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "tiles-with-detail",
         detailLevels: [0],
         coarseLevel: null,
-        proxyAvailable: false,
-        groupProxyAvailable: false,
       } as ActiveSetEntry,
     ];
 
@@ -231,50 +202,9 @@ describe("buildColdState", () => {
     expect(msg.multiChannel).toBe(false);
     expect(msg.visibleChannels).toEqual([0]);
     expect(msg.viewMode).toBe("volume");
-    expect(msg.desiredProxyKeys).toEqual([]);
-    expect(msg.epochs).toEqual({ content: 1, layout: 2, view: 3, selection: 4, asset: 5, request: 6 });
+    expect(msg.epochs).toEqual({ content: 1, layout: 2, view: 3, selection: 4, request: 6 });
     expect(msg.activeSet).toHaveLength(1);
     expect(msg.activeSet[0].entityId).toBe("ent-a");
-  });
-
-  it("threads desired proxy keys into cold state in stable order", () => {
-    const entities = [makeTile("ent-a", "img-a", "group-0")];
-    const activeSet: ActiveSetEntry[] = [
-      {
-        kind: "tile",
-        entityId: "ent-a",
-        imageId: "img-a",
-        mode: "tiles-with-detail",
-        detailLevels: [0],
-        coarseLevel: null,
-        proxyAvailable: true,
-        proxyKind: "TileProxy3D",
-        groupProxyAvailable: false,
-      } as ActiveSetEntry,
-    ];
-
-    const msg = buildColdState({
-      datasetId: "ds1",
-      activeSet,
-      entities,
-      selection: makeSelection(),
-      multiChannel: false,
-      visibleRegion: makeVisibleRegion(),
-      desiredProxyKeys: new Set([
-        "ds1|ent-b|TileProxy3D|0|0",
-        "ds1|ent-a|TileProxy3D|0|0",
-      ]),
-      epochs: makeEpochs(),
-      wantedChunks: [],
-      matricesByEntity: makeMatrices(),
-      dsSettings: undefined,
-      sampleFormat: "u16",
-    });
-
-    expect(msg.desiredProxyKeys).toEqual([
-      "ds1|ent-a|TileProxy3D|0|0",
-      "ds1|ent-b|TileProxy3D|0|0",
-    ]);
   });
 
   it("bakes display state per visible channel with dataset-level fallbacks", () => {
@@ -284,11 +214,8 @@ describe("buildColdState", () => {
         kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "tiles-with-detail",
         detailLevels: [0],
         coarseLevel: null,
-        proxyAvailable: false,
-        groupProxyAvailable: false,
       } as ActiveSetEntry,
     ];
     const dsSettings = makeDsSettings({
@@ -332,7 +259,7 @@ describe("buildColdState", () => {
     expect(ds1.gamma).toBeCloseTo(2);
   });
 
-  it("handles all three active-set variants in one tick (multi-variant)", () => {
+  it("handles both active-set variants in one tick", () => {
     const entities = [
       makeTile("ent-a", "img-a", "group-0"),
       makeTile("ent-i", "img-i", "group-1"), // invisible owner
@@ -340,20 +267,15 @@ describe("buildColdState", () => {
 
     const matrices = new Map<string, { model: Float32Array; inv: Float32Array }>();
     const m = new Float32Array(16); m[0] = m[5] = m[10] = m[15] = 1; // identity
-    matrices.set("group-0", { model: m, inv: m });
     matrices.set("ent-a", { model: m, inv: m });
 
     const activeSet: ActiveSetEntry[] = [
-      { kind: "group-as-proxy", entityId: "group-0" } as ActiveSetEntry,
       {
         kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "tiles-with-detail",
         detailLevels: [0],
         coarseLevel: null,
-        proxyAvailable: false,
-        groupProxyAvailable: false,
       } as ActiveSetEntry,
       { kind: "invisible", entityId: "ent-i", imageId: "img-i", coarsestLod: 2 } as ActiveSetEntry,
     ];
@@ -372,13 +294,9 @@ describe("buildColdState", () => {
       sampleFormat: "u16",
     });
 
-    expect(msg.activeSet).toHaveLength(3);
-    expect(msg.activeSet[0].mode).toBe("group-as-proxy");
-    expect(msg.activeSet[1].mode).toBe("tiles-with-detail");
-    expect(msg.activeSet[2].mode).toBe("tiles-with-detail"); // invisible encoding
-    const invisible = msg.activeSet[2];
-    if (invisible.kind !== "tile") throw new Error("expected tile");
-    expect(invisible.detailLevels).toEqual([2]);             // invisible @ coarsestLod
+    expect(msg.activeSet).toHaveLength(2);
+    expect(msg.activeSet[0].detailLevels).toEqual([0]);
+    expect(msg.activeSet[1].detailLevels).toEqual([2]); // invisible @ coarsestLod
   });
 
   it("empty active set → empty cold message activeSet", () => {
@@ -406,11 +324,8 @@ describe("buildColdState", () => {
         kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "tiles-with-detail",
         detailLevels: [0],
         coarseLevel: null,
-        proxyAvailable: false,
-        groupProxyAvailable: false,
       } as ActiveSetEntry,
     ];
     const entities = [makeTile("ent-a", "img-a", "group-0")];
@@ -458,11 +373,8 @@ function tileEntry(over: Partial<Extract<ActiveSetEntry, { kind: "tile" }>>): Ac
     kind: "tile",
     entityId: "ent",
     imageId: "img",
-    mode: "tiles-with-detail",
     detailLevels: [0],
     coarseLevel: null,
-    proxyAvailable: false,
-    groupProxyAvailable: false,
     ...over,
   } as ActiveSetEntry;
 }
@@ -480,10 +392,6 @@ describe("activeEntryReuseKey", () => {
     expect(activeEntryReuseKey(a)).not.toBe(activeEntryReuseKey(b));
   });
 
-  it("is null for group-as-proxy (its matrix is view-dependent → never reused)", () => {
-    const g: ActiveSetEntry = { kind: "group-as-proxy", entityId: "group-0" } as ActiveSetEntry;
-    expect(activeEntryReuseKey(g)).toBeNull();
-  });
 });
 
 describe("computeActiveSetIndexMap / iterateActiveSetMembers", () => {
@@ -575,17 +483,6 @@ describe("buildColdStateDelta", () => {
     expect(delta.upserts).toEqual([]);
   });
 
-  it("always upserts a group-as-proxy entry even when its scalar fields match", () => {
-    const g: ActiveSetEntry = { kind: "group-as-proxy", entityId: "group-0" } as ActiveSetEntry;
-    const matrices = makeMatrices();
-    const synth = new Float32Array(16); synth[0] = 5; synth[15] = 1;
-    matrices.set("group-0", { model: synth, inv: synth });
-    const delta = buildColdStateDelta({
-      ...commonArgs([g], [g]),
-      matricesByEntity: matrices,
-    });
-    expect(delta.upserts.map((u) => u.entityId)).toEqual(["group-0"]);
-  });
 });
 
 // Reuse-key ⇔ descriptor contract
@@ -607,12 +504,8 @@ describe("reuse-key ⇔ descriptor contract", () => {
       kind: "tile",
       entityId: "ent-a",
       imageId: "img-a",
-      mode: "tiles-with-detail",
       detailLevels: [2, 3],
       coarseLevel: 4,
-      proxyKind: "TileProxy3D",
-      proxyAvailable: true,
-      groupProxyAvailable: true,
     }) as Extract<ActiveSetEntry, { kind: "tile" }>;
 
   // Every field `buildColdActiveEntry` reads from a tile entry, each paired with
@@ -624,10 +517,6 @@ describe("reuse-key ⇔ descriptor contract", () => {
     ["detailLevels (member)", (t) => { t.detailLevels = [3, 3]; }],
     ["detailLevels (length)", (t) => { t.detailLevels = [2, 3, 4]; }],
     ["coarseLevel", (t) => { t.coarseLevel = null; }],
-    ["mode", (t) => { t.mode = "tiles-with-proxy-fallback"; }],
-    ["proxyKind", (t) => { t.proxyKind = undefined; }],
-    ["proxyAvailable", (t) => { t.proxyAvailable = false; }],
-    ["groupProxyAvailable", (t) => { t.groupProxyAvailable = false; }],
   ];
 
   for (const [name, mutate] of tileMutations) {

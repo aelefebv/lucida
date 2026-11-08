@@ -12,15 +12,13 @@ use lucida_core::protocol::{
     ServerMessage,
 };
 use lucida_protocol::{
-    AssetMessage, ChunkFailureKind, DatasetGeneratedCoarseCacheStats,
-    DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth, DatasetHealthComponent,
-    DatasetHealthStatus, DatasetImportWarning, DatasetOpenFailureDiagnostic,
-    DatasetOpenFailureKind, DatasetOpenProgressDiagnostic, DatasetOpenStage,
-    DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats, DatasetSourceHealth,
-    GeneratedAvailabilitySnapshot, GeneratedChunkStatus, ServerPhase, TimingRowFamily,
-    TimingRowOutcome,
+    ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
+    DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
+    DatasetImportWarning, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
+    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
+    DatasetSourceCacheStats, DatasetSourceHealth, GeneratedAvailabilitySnapshot,
+    GeneratedChunkStatus, ServerPhase, TimingRowFamily, TimingRowOutcome,
 };
-use lucida_proxy::{ProxyAsset, ProxyKind, ProxySpec};
 use lucida_store::cache::CachedStore;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
 use tokio::sync::{broadcast, mpsc};
@@ -38,11 +36,10 @@ use crate::inbox::{self, InboxStore, Report as InboxReport};
 use crate::open_diagnostics::{
     backend_kind_for_url, location_failure, open_failure, open_progress,
 };
-use crate::proxy::{PROXY_TARGET_LONG_AXIS, ProxyGenerator};
 use crate::session::Session;
 use crate::timing::{FLUSH_INTERVAL, MetadataReadSink, RequestProbe, TimingBuffer};
 use crate::workspace::{CommandApplyError, LiveWorkspace, WorkspaceError, WorkspaceManager};
-use crate::{BroadcastItem, ProxyConfig, UnicastRoutes};
+use crate::{BroadcastItem, GeneratedConfig, UnicastRoutes};
 
 /// Serve one workspace socket until it closes.
 pub async fn handle_workspace_client(
@@ -52,11 +49,11 @@ pub async fn handle_workspace_client(
     manager: Arc<WorkspaceManager>,
     principal: AuthPrincipal,
 ) {
-    let proxy_config = manager.proxy_config();
+    let generated_config = manager.generated_config();
     handle_client_inner(
         id,
         ws,
-        proxy_config,
+        generated_config,
         WorkspaceScope {
             live,
             manager,
@@ -92,7 +89,7 @@ fn rename_rejection(error: &WorkspaceError) -> CommandRejection {
 async fn handle_client_inner(
     id: ClientId,
     ws: WebSocket,
-    proxy_config: ProxyConfig,
+    generated_config: GeneratedConfig,
     ctx: WorkspaceScope,
 ) {
     let session = Arc::clone(&ctx.live.session);
@@ -473,7 +470,7 @@ async fn handle_client_inner(
                                 url = %url,
                                 "open_remote_dataset.received"
                             );
-                            let proxy_config_clone = proxy_config.clone();
+                            let generated_config_clone = generated_config.clone();
                             let scope = ctx.clone();
                             let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest { request_id, url };
@@ -481,7 +478,7 @@ async fn handle_client_inner(
                                 handle_open_remote_dataset(
                                     id,
                                     request,
-                                    proxy_config_clone,
+                                    generated_config_clone,
                                     scope,
                                     timings_clone,
                                 )
@@ -562,7 +559,7 @@ async fn handle_client_inner(
                                 url = %source.canonical_url,
                                 "dataset_retry.received"
                             );
-                            let proxy_config_clone = proxy_config.clone();
+                            let generated_config_clone = generated_config.clone();
                             let scope = ctx.clone();
                             let timings_clone = Arc::clone(&timings);
                             let request = OpenRemoteDatasetRequest {
@@ -573,7 +570,7 @@ async fn handle_client_inner(
                                 handle_open_remote_dataset(
                                     id,
                                     request,
-                                    proxy_config_clone,
+                                    generated_config_clone,
                                     scope,
                                     timings_clone,
                                 )
@@ -848,78 +845,6 @@ async fn handle_client_inner(
                                 dropped,
                                 "ws.chunk_cancel"
                             );
-                        }
-                    }
-                    continue;
-                }
-
-                // Try as AssetMessage (proxy asset request).
-                if let Ok(asset_msg) = serde_json::from_str::<AssetMessage>(&json) {
-                    match asset_msg {
-                        AssetMessage::AssetRequest {
-                            rid,
-                            dataset_id,
-                            entity_id,
-                            kind,
-                            t,
-                            c,
-                        } => {
-                            let mut probe = RequestProbe::arrived(
-                                rid,
-                                TimingRowFamily::Asset,
-                                arrival,
-                                Arc::clone(&timings),
-                            );
-                            probe.mark(ServerPhase::Arrival);
-                            let generator = {
-                                let sess = session.lock().await;
-                                sess.server_bindings.get(&dataset_id).and_then(|b| {
-                                    b.legacy_proxy_enabled.then(|| b.proxy_generator.clone())
-                                })
-                            };
-                            probe.mark(ServerPhase::BindingLookup);
-                            let Some(generator) = generator else {
-                                tracing::warn!(
-                                    client_id = %id,
-                                    dataset = %dataset_id,
-                                    entity = %entity_id.0,
-                                    kind = proxy_kind_str(kind),
-                                    t,
-                                    c,
-                                    "asset.request.unknown_dataset"
-                                );
-                                probe.finish(TimingRowOutcome::Failed);
-                                reject_message(
-                                    id,
-                                    Rejected {
-                                        rid: Some(rid),
-                                        message_type: Some("asset_request".into()),
-                                        ..Rejected::new(
-                                            MessageRejection::UnknownDataset,
-                                            format!(
-                                                "this session holds no dataset {dataset_id} with proxy assets"
-                                            ),
-                                        )
-                                    },
-                                    &unicast_routes,
-                                )
-                                .await;
-                                continue;
-                            };
-                            let unicast_routes_clone = Arc::clone(&unicast_routes);
-                            tokio::spawn(async move {
-                                serve_asset_request(
-                                    id,
-                                    entity_id,
-                                    kind,
-                                    t,
-                                    c,
-                                    &generator,
-                                    &unicast_routes_clone,
-                                    probe,
-                                )
-                                .await;
-                            });
                         }
                     }
                     continue;
@@ -1404,7 +1329,7 @@ struct OpenRemoteDatasetRequest {
 async fn handle_open_remote_dataset(
     client_id: ClientId,
     request: OpenRemoteDatasetRequest,
-    proxy_config: ProxyConfig,
+    generated_config: GeneratedConfig,
     workspace: WorkspaceScope,
     timings: Arc<TimingBuffer>,
 ) {
@@ -1452,7 +1377,7 @@ async fn handle_open_remote_dataset(
     };
 
     let ctx = DatasetOpenContext {
-        proxy_config,
+        generated_config,
         source_policy: workspace.manager.source_policy(),
         workspace,
     };
@@ -1793,7 +1718,6 @@ const CLIENT_MESSAGE_TYPES: &[&str] = &[
     "chunk_request",
     "chunk_fetch",
     "chunk_cancel",
-    "asset_request",
 ];
 
 async fn send_generated_chunk_status(
@@ -1840,159 +1764,6 @@ fn encode_chunk_frame(
     buf
 }
 
-/// Generate (or fetch from cache) a proxy asset and send it to the
-/// requesting client over the unicast channel.
-///
-/// Wire frame layout (binary, little-endian):
-///
-/// ```text
-/// [client_id : u32]
-/// [key_len   : u16] [key bytes]
-/// [header    : 64 bytes  (lucida_proxy::write_header layout)]
-/// [voxels    : N * u16   (Z, Y, X row-major)]
-/// ```
-///
-/// The leading `client_id`/`key_len`/`key` envelope mirrors
-/// [`serve_chunk_from_store`] so the client's bridge layer can route both
-/// chunk and proxy frames through the same binary handler.
-///
-/// `key` is `proxy/{entity_id}/{kind_str}/T{t:05}_C{c:03}` where
-/// `kind_str` is `GroupProxy3D` or `TileProxy3D` (matching the JSON
-/// variant names of [`ProxyKind`]). The `proxy/` prefix lets the client
-/// distinguish proxy frames from chunk frames, which use
-/// `{dataset_id}/{image_id}/{chunk_key}`.
-// Internal helper threading per-request state from the dispatch site.
-#[allow(clippy::too_many_arguments)]
-async fn serve_asset_request(
-    client_id: ClientId,
-    entity_id: lucida_content::EntityId,
-    kind: ProxyKind,
-    t: u32,
-    c: u32,
-    generator: &Arc<ProxyGenerator>,
-    unicast_routes: &UnicastRoutes,
-    mut probe: RequestProbe,
-) {
-    let spec = ProxySpec {
-        entity_id: entity_id.clone(),
-        kind,
-        t,
-        c,
-        target_long_axis: PROXY_TARGET_LONG_AXIS,
-    };
-
-    tracing::debug!(
-        entity = %entity_id.0,
-        kind = ?kind,
-        t,
-        c,
-        "serving proxy asset"
-    );
-
-    probe.mark(ServerPhase::Dispatch);
-    let asset = match generator.request(spec, 1).await {
-        Ok(a) => a,
-        Err(e) => {
-            tracing::warn!(
-                client_id = %client_id,
-                entity = %entity_id.0,
-                kind = proxy_kind_str(kind),
-                t,
-                c,
-                error = %e,
-                "asset.generation_failed"
-            );
-            probe.mark(ServerPhase::SliceEncode);
-            probe.finish(TimingRowOutcome::Failed);
-            return;
-        }
-    };
-
-    let buf = match encode_proxy_frame(client_id, &entity_id, kind, t, c, &asset) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!(
-                client_id = %client_id,
-                entity = %entity_id.0,
-                kind = proxy_kind_str(kind),
-                error = %e,
-                "asset.frame_encode_failed"
-            );
-            probe.mark(ServerPhase::SliceEncode);
-            probe.finish(TimingRowOutcome::Failed);
-            return;
-        }
-    };
-    // Producing the asset and encoding its frame share one slot: this
-    // family has no generation phase of its own, and no planner emits a proxy
-    // request, so it does not earn a wider enum.
-    probe.mark(ServerPhase::SliceEncode);
-
-    let senders = unicast_routes.lock().await;
-    if let Some(sender) = senders.get(&client_id) {
-        let _ = sender.send(Message::Binary(buf.into()));
-    }
-    probe.mark(ServerPhase::Handoff);
-    probe.finish(TimingRowOutcome::Delivered);
-}
-
-/// Build the binary proxy response frame. See [`serve_asset_request`] for
-/// the layout. Pulled out as a free function so unit tests can exercise the
-/// format without spinning up the network.
-pub(crate) fn encode_proxy_frame(
-    client_id: ClientId,
-    entity_id: &lucida_content::EntityId,
-    kind: ProxyKind,
-    t: u32,
-    c: u32,
-    asset: &ProxyAsset,
-) -> std::io::Result<Vec<u8>> {
-    let key = proxy_response_key(entity_id, kind, t, c);
-    let key_bytes = key.as_bytes();
-    let key_len: u16 = key_bytes
-        .len()
-        .try_into()
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "proxy key too long"))?;
-
-    let voxel_bytes: &[u8] = bytemuck::cast_slice(&asset.voxels);
-
-    let mut buf = Vec::with_capacity(4 + 2 + key_bytes.len() + 64 + voxel_bytes.len());
-    buf.extend_from_slice(&(client_id as u32).to_le_bytes());
-    buf.extend_from_slice(&key_len.to_le_bytes());
-    buf.extend_from_slice(key_bytes);
-    lucida_proxy::write_header(&mut buf, &asset.header)?;
-    buf.extend_from_slice(voxel_bytes);
-    Ok(buf)
-}
-
-/// Compose the proxy response key. Public so the TS client can mirror
-/// the format and the test suite can assert it.
-pub(crate) fn proxy_response_key(
-    entity_id: &lucida_content::EntityId,
-    kind: ProxyKind,
-    t: u32,
-    c: u32,
-) -> String {
-    format!(
-        "proxy/{}/{}/T{:05}_C{:03}",
-        entity_id.0,
-        proxy_kind_str(kind),
-        t,
-        c
-    )
-}
-
-/// Stable string representation of [`ProxyKind`] used in proxy response
-/// keys. We pin it explicitly rather than using `Debug` so renaming a
-/// variant won't silently break the wire format.
-pub(crate) fn proxy_kind_str(kind: ProxyKind) -> &'static str {
-    match kind {
-        ProxyKind::GroupProxy3D => "GroupProxy3D",
-        ProxyKind::TileProxy3D => "TileProxy3D",
-    }
-}
-
-/// Send a dataset-open progress message to the requesting client.
 async fn send_open_progress(
     client_id: ClientId,
     request_id: &str,
@@ -2326,8 +2097,6 @@ mod tests {
     use crate::test_fixtures::{
         FailingStore, StoreFailure, four_byte_level, image_seed, single_image_manifest,
     };
-    use lucida_content::EntityId;
-    use lucida_proxy::{ProxyDtype, ProxyHeader};
     use object_store::path::Path;
 
     #[test]
@@ -2464,74 +2233,6 @@ mod tests {
             health.recent_failures[0].status,
             GeneratedChunkStatus::FailedTransient
         );
-    }
-
-    fn sample_asset(zyx: [u32; 3]) -> ProxyAsset {
-        let count = zyx.iter().fold(1usize, |a, b| a * (*b as usize));
-        let voxels: Vec<u16> = (0..count).map(|i| (i as u16).wrapping_mul(7)).collect();
-        ProxyAsset {
-            header: ProxyHeader {
-                algorithm_version: lucida_proxy::ALGORITHM_VERSION,
-                source_content_hash: [0xABu8; 32],
-                dims: zyx,
-                dtype: ProxyDtype::U16,
-            },
-            voxels,
-        }
-    }
-
-    #[test]
-    fn proxy_response_key_format_matches_spec() {
-        let key = proxy_response_key(&EntityId("tile-A1".into()), ProxyKind::TileProxy3D, 0, 0);
-        assert_eq!(key, "proxy/tile-A1/TileProxy3D/T00000_C000");
-
-        let group =
-            proxy_response_key(&EntityId("group-B2".into()), ProxyKind::GroupProxy3D, 12, 3);
-        assert_eq!(group, "proxy/group-B2/GroupProxy3D/T00012_C003");
-    }
-
-    #[test]
-    fn proxy_kind_str_pins_variant_names() {
-        assert_eq!(proxy_kind_str(ProxyKind::GroupProxy3D), "GroupProxy3D");
-        assert_eq!(proxy_kind_str(ProxyKind::TileProxy3D), "TileProxy3D");
-    }
-
-    #[test]
-    fn encode_proxy_frame_round_trips_header_and_voxels() {
-        let asset = sample_asset([2, 3, 4]);
-        let entity_id = EntityId("e1".into());
-        let buf = encode_proxy_frame(7, &entity_id, ProxyKind::TileProxy3D, 5, 1, &asset)
-            .expect("encode");
-
-        // [client_id:u32 LE][key_len:u16 LE][key][header 64][voxels]
-        assert!(buf.len() >= 4 + 2 + 64);
-        let client_id = u32::from_le_bytes(buf[0..4].try_into().unwrap());
-        assert_eq!(client_id, 7);
-
-        let key_len = u16::from_le_bytes(buf[4..6].try_into().unwrap()) as usize;
-        let key_start = 6;
-        let key_end = key_start + key_len;
-        let key = std::str::from_utf8(&buf[key_start..key_end]).unwrap();
-        assert_eq!(key, "proxy/e1/TileProxy3D/T00005_C001");
-
-        // Header round-trips via lucida_proxy::read_header.
-        let mut header_cursor = std::io::Cursor::new(&buf[key_end..key_end + 64]);
-        let header = lucida_proxy::read_header(&mut header_cursor).unwrap();
-        assert_eq!(header.dims, [2, 3, 4]);
-        assert_eq!(header.algorithm_version, asset.header.algorithm_version);
-        assert_eq!(header.source_content_hash, asset.header.source_content_hash);
-
-        // Voxels follow immediately, little-endian u16.
-        let voxel_bytes = &buf[key_end + 64..];
-        assert_eq!(voxel_bytes.len(), asset.voxels.len() * 2);
-        let parsed: Vec<u16> = voxel_bytes
-            .as_chunks::<2>()
-            .0
-            .iter()
-            .copied()
-            .map(u16::from_le_bytes)
-            .collect();
-        assert_eq!(parsed, asset.voxels);
     }
 
     #[test]
@@ -2728,8 +2429,7 @@ mod tests {
             let path = entry.unwrap().path();
             let text = std::fs::read_to_string(&path).unwrap();
             let is_client = serde_json::from_str::<ClientMessage>(&text).is_ok()
-                || serde_json::from_str::<ChunkMessage>(&text).is_ok()
-                || serde_json::from_str::<AssetMessage>(&text).is_ok();
+                || serde_json::from_str::<ChunkMessage>(&text).is_ok();
             if !is_client {
                 continue;
             }

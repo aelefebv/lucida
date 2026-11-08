@@ -42,13 +42,6 @@ const PREFETCH: TunableSpec[] = [
 const PRIORITY_WEIGHTS: TunableSpec[] = [
   { field: "importanceWeight", label: "Importance weight", min: 10, max: 2000, step: 10 },
   { field: "distanceWeight", label: "Distance weight", min: 1, max: 100, step: 1 },
-  {
-    field: "groupProxyPriorityBump",
-    label: "Group-proxy priority bump",
-    min: 0,
-    max: 500,
-    step: 5,
-  },
 ];
 
 // `depthBiasView` is user-facing, so it lives in
@@ -72,19 +65,11 @@ const RESIDENCY_BUDGETS: TunableSpec[] = [
     step: 0.05,
     previewRadiusTier: "coarse",
   },
-  {
-    field: "proxyResidencyBudgetBytes",
-    label: "Proxy GPU budget (bytes)",
-    min: 16 * 1024 * 1024,
-    max: 512 * 1024 * 1024,
-    step: 16 * 1024 * 1024,
-  },
 ];
 
 const LANE_OFFSETS: TunableSpec[] = [
   { field: "minimapLaneOffset", label: "MINIMAP lane offset", min: 0, max: 5000, step: 50 },
   { field: "detailLaneOffset", label: "DETAIL lane offset", min: 0, max: 5000, step: 50 },
-  { field: "proxyLaneOffset", label: "PROXY lane offset", min: 0, max: 5000, step: 50 },
   { field: "prefetchLaneOffset", label: "PREFETCH lane offset", min: 0, max: 5000, step: 50 },
   { field: "coarseLaneOffset", label: "COARSE lane offset", min: 0, max: 5000, step: 50 },
 ];
@@ -94,7 +79,6 @@ const LANE_OFFSETS: TunableSpec[] = [
 const LANE_ORDER: (keyof PlanningConfig)[] = [
   "minimapLaneOffset",
   "detailLaneOffset",
-  "proxyLaneOffset",
   "prefetchLaneOffset",
   "coarseLaneOffset",
 ];
@@ -132,7 +116,7 @@ const CACHE_KNOBS: CacheKnobSpec[] = [
 
 /**
  * Returns a warning when a given lane offset breaks the canonical order
- * MINIMAP < DETAIL < PROXY < PREFETCH < COARSE. The warning attaches
+ * MINIMAP < DETAIL < PREFETCH < COARSE. The warning attaches
  * to the field whose value disagrees with its neighbour.
  */
 function laneOrderWarning(
@@ -441,7 +425,7 @@ export function DevControls({
               <div className="dev-controls-warn" role="note">
                 Structural knobs: changing lane offsets reorders the queue
                 priorities across the system. The canonical order is
-                MINIMAP &lt; DETAIL &lt; PROXY &lt; PREFETCH &lt; COARSE.
+                MINIMAP &lt; DETAIL &lt; PREFETCH &lt; COARSE.
               </div>
               {LANE_OFFSETS.map((spec) => (
                 <TunableRow

@@ -88,12 +88,9 @@ function makeDescIndex(
     indexByMember: new Map(memberIds.map((id, i) => [id, i])),
     memberByIndex: [...memberIds],
     sourceBindingByMember: new Map(),
-    proxyPoolIndexByKey: new Map(),
-    proxyPoolsByIndex: [],
     entityCount: memberIds.length,
     colormapLutIndices: new Map([["gray", 0]]),
     colormapNameByMember: new Map(memberIds.map((id) => [id, "gray"])),
-    proxyDescriptorByMember: new Map(),
     ...overrides,
   };
 }
@@ -119,7 +116,6 @@ function makeQuads(
 
 interface MockRenderer {
   setColormapTexture: ReturnType<typeof vi.fn>;
-  setProxyTextures: ReturnType<typeof vi.fn>;
   setTierAtlases: ReturnType<typeof vi.fn>;
   setTransform: ReturnType<typeof vi.fn>;
   setPixelRatio: ReturnType<typeof vi.fn>;
@@ -133,7 +129,6 @@ interface MockRenderer {
 function makeRenderer(): MockRenderer {
   return {
     setColormapTexture: vi.fn(),
-    setProxyTextures: vi.fn(),
     setTierAtlases: vi.fn(),
     setTransform: vi.fn(),
     setPixelRatio: vi.fn(),
@@ -202,7 +197,7 @@ function makeCtx(opts: {
   } as unknown as WorkerCtx;
 }
 
-const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, asset: 0, request: 1 };
+const EPOCHS = { content: 1, layout: 1, view: 1, selection: 1, request: 1 };
 
 function memberMsg(memberId: string, dataW = 128, dataH = 128): SliceRenderMultiPassMessage {
   return {
@@ -360,61 +355,7 @@ describe("handleSliceRenderMultiPass", () => {
     expect(renderer.renderLayerGroup).toHaveBeenCalledTimes(1);
   });
 
-  it("renders a layer backed only by a resident tile proxy", async () => {
-    const device = makeDevice();
-    const renderer = makeRenderer();
-    const composite = vi.fn();
-    const state = createInitialState();
-    const tileProxyTexture = {} as GPUTexture;
-    const descIndex = makeDescIndex(["img-a:ch1"], {
-      proxyPoolIndexByKey: new Map([["tile-proxy-ch1", 0]]),
-      proxyPoolsByIndex: [{
-        texture: tileProxyTexture,
-        slots: new Map(),
-        freeSlots: [],
-        capacity: 1,
-        requestedCapacity: 1,
-        slotDims: [8, 16, 32],
-        slotsX: 1,
-        slotsY: 1,
-        slotsZ: 1,
-        kind: "TileProxy3D",
-        channel: 1,
-        touchOrder: [],
-      }],
-      colormapLutIndices: new Map([["green", 0]]),
-      colormapNameByMember: new Map([["img-a:ch1", "green"]]),
-      proxyDescriptorByMember: new Map([
-        ["img-a:ch1", {
-          tileProxyHandle: { poolKey: "tile-proxy-ch1", slotIndex: 0 },
-          groupProxyHandle: null,
-        }],
-      ]),
-    });
-    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
-
-    await handleSliceRenderMultiPass(ctx, {
-      type: "sliceRenderMultiPass",
-      epochs: EPOCHS,
-      layers: [
-        { datasetId: "img-a:ch1", entityId: "entity-a", entityIndex: 0, blendMode: "additive", dataW: 256, dataH: 256 },
-      ],
-      zoom: 1,
-      cx: 128,
-      cy: 128,
-      canvasW: 64,
-      canvasH: 64,
-    });
-
-    expect(renderer.renderLayerGroup).toHaveBeenCalledTimes(1);
-    expect(memberOf(renderer).tileProxyTexture).toBe(tileProxyTexture);
-    expect(memberOf(renderer).groupProxyTexture).toBeNull();
-    expect(memberOf(renderer).levels).toEqual([]);
-    expect(memberOf(renderer).coarse).toBeNull();
-    expect(composite).toHaveBeenCalledTimes(1);
-  });
-
-  it("skips a member whose descriptor names no pool and that has no resident proxy", async () => {
+  it("skips a member whose descriptor names no pool", async () => {
     const device = makeDevice();
     const renderer = makeRenderer();
     const composite = vi.fn();
@@ -643,49 +584,6 @@ describe("handleSliceRenderMultiPass — aggregate layers", () => {
     expect(params.batches.every((b) => b.coarse === null)).toBe(true);
   });
 
-  it("binds a proxy-backed batched member's own pool texture", async () => {
-    const device = makeDevice();
-    const renderer = makeRenderer();
-    const composite = vi.fn();
-    const state = createInitialState(); // no chunk atlases at all
-    const tileProxyTexture = {} as GPUTexture;
-    const descIndex = makeDescIndex(["img-0", "img-1"], {
-      proxyPoolIndexByKey: new Map([["tile-proxy-ch0", 0]]),
-      proxyPoolsByIndex: [{
-        texture: tileProxyTexture,
-        slots: new Map(),
-        freeSlots: [],
-        capacity: 1,
-        requestedCapacity: 1,
-        slotDims: [8, 16, 32],
-        slotsX: 1,
-        slotsY: 1,
-        slotsZ: 1,
-        kind: "TileProxy3D",
-        channel: 0,
-        touchOrder: [],
-      }],
-      proxyDescriptorByMember: new Map([
-        ["img-0", {
-          tileProxyHandle: { poolKey: "tile-proxy-ch0", slotIndex: 0 },
-          groupProxyHandle: null,
-        }],
-      ]),
-    });
-    const ctx = makeCtx({ device, state, renderer, composite, descIndex });
-
-    await handleSliceRenderMultiPass(ctx, aggregateMsg(twoMemberQuads(), 2));
-
-    const params = groupOf(renderer).aggregate!;
-    // img-0 rides its proxy pool; img-1 (nothing resident) is dropped.
-    expect(params.batches).toHaveLength(1);
-    expect(params.batches[0].count).toBe(1);
-    expect(params.batches[0].tileProxyTexture).toBe(tileProxyTexture);
-    expect(params.batches[0].levels).toEqual([]);
-    expect(params.batches[0].coarse).toBeNull();
-    // Proxy-only members carry no chunk residency → no camera-UV update.
-    expect(state.cameraUVPerEntity.size).toBe(0);
-  });
 });
 
 describe("handleSliceRenderMultiPass — one target per (dataset, channel)", () => {

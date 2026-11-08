@@ -37,7 +37,6 @@ function registerEnvironment(): void {
       detailBytes: 0,
       coarseChunks: 0,
       coarseBytes: 0,
-      proxyBytes: 0,
     }),
     captureConditions: () => ({
       datasetIds: ["ds"],

@@ -306,8 +306,6 @@ function emptyLaneOutstanding(): LaneOutstanding {
   return {
     inFlight: zero(),
     pending: zero(),
-    proxyInFlight: 0,
-    proxyPending: 0,
     pendingTotal: 0,
     pendingUnclassified: false,
     pendingScanCap: 0,

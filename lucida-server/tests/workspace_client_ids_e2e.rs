@@ -10,7 +10,7 @@ use tokio::time::timeout;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 
 use lucida_core::protocol::{ClientId, ServerMessage};
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::auth::dev::default_dev_principal;
 use lucida_server::auth::principal::StubPrincipalExtractor;
 use lucida_server::auth::{AuthConfig, PrincipalExtractor};
@@ -56,7 +56,7 @@ async fn first_clients_of_two_workspaces_get_different_ids() {
 
     let manager = Arc::new(WorkspaceManager::new(
         storage.workspaces(),
-        ProxyConfig::defaults(),
+        GeneratedConfig::defaults(),
     ));
     let extractor: Arc<dyn PrincipalExtractor> = Arc::new(StubPrincipalExtractor::new(Arc::new(
         AuthConfig::for_tests(),

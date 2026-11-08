@@ -9,7 +9,7 @@ import type { SceneEpochs } from "../epochs.ts";
 // Helpers
 
 const ZERO_EPOCHS: SceneEpochs = {
-  content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0,
+  content: 0, layout: 0, view: 0, selection: 0, request: 0,
 };
 
 let nextInsertedAt = 0;

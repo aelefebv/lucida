@@ -11,7 +11,6 @@ import type {
   ChunkResidencyMessage,
   ViewHotStateMessage,
   MissingChunk,
-  MissingProxy,
 } from "../../renderer/workerProtocol.ts";
 import type { SceneEpochs } from "../epochs.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
@@ -22,7 +21,7 @@ export type ChunkResidencyHandler = (msg: ChunkResidencyMessage) => void;
 export type WantedSetHandler = (
   datasetId: string,
   epochs: SceneEpochs,
-  missing: Array<MissingChunk | MissingProxy>,
+  missing: MissingChunk[],
 ) => void;
 
 export interface UploadClient {
@@ -170,18 +169,6 @@ export interface UploadClient {
     chunkX: number,
     chunkY: number,
     chunkZ: number,
-    epochs: SceneEpochs,
-  ): void;
-
-  proxyAssetData(
-    datasetId: string,
-    entityId: string,
-    imageId: string,
-    kind: "GroupProxy3D" | "TileProxy3D",
-    t: number,
-    c: number,
-    dims: [number, number, number],
-    data: ArrayBuffer,
     epochs: SceneEpochs,
   ): void;
 

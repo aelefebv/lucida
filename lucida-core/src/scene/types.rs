@@ -4,7 +4,6 @@ use std::collections::HashMap;
 
 use indexmap::IndexMap;
 use lucida_content::{DatasetId, DatasetKind, DatasetManifest, EntityId, LayoutId, LayoutSpec};
-use lucida_protocol::AssetCatalog;
 
 use crate::chunk::ChunkCoord;
 use crate::command::DocumentCommand;
@@ -522,11 +521,6 @@ pub struct DocumentState {
     pub registered_layouts: HashMap<DatasetId, Vec<LayoutSpec>>,
     #[serde(default)]
     pub active_layout_ids: HashMap<DatasetId, LayoutId>,
-    /// Per-dataset asset catalog (proxy availability). Populated via
-    /// `DatasetOpened.catalog` on open and incrementally via
-    /// `DocumentCommand::ApplyAssetCatalogDelta`.
-    #[serde(default)]
-    pub asset_catalogs: IndexMap<DatasetId, AssetCatalog>,
     /// Per-dataset collaborative annotations, keyed by dataset id. Populated
     /// via `DocumentCommand::AddAnnotation` / `RemoveAnnotation`.
     #[serde(default)]
@@ -587,7 +581,6 @@ impl DocumentState {
         });
         rekey(&mut self.registered_layouts, &fate, |_, _| {});
         rekey(&mut self.active_layout_ids, &fate, |_, _| {});
-        rekey(&mut self.asset_catalogs, &fate, |_, _| {});
         rekey(&mut self.annotations, &fate, |new_id, anns| {
             on_kept_annotations(new_id, anns);
         });
@@ -750,54 +743,6 @@ impl DocumentState {
         }
     }
 
-    /// Merge an [`AssetCatalogDelta`] into the catalog for `dataset_id`.
-    ///
-    /// Idempotent: re-applying the same delta is a no-op. Existing
-    /// `ProxyAvailability` entries for an entity are merged by union of
-    /// their `kinds` lists (preserving original order; new kinds appended
-    /// at the end).
-    pub fn apply_asset_catalog_delta(
-        &mut self,
-        dataset_id: DatasetId,
-        delta: lucida_protocol::AssetCatalogDelta,
-    ) {
-        let catalog = self.asset_catalogs.entry(dataset_id).or_default();
-        for mut incoming in delta.added {
-            for footprint in &incoming.footprints {
-                if !incoming.kinds.contains(&footprint.kind) {
-                    incoming.kinds.push(footprint.kind);
-                }
-            }
-            if let Some(existing) = catalog
-                .entries
-                .iter_mut()
-                .find(|e| e.entity_id == incoming.entity_id)
-            {
-                for kind in incoming.kinds {
-                    if !existing.kinds.contains(&kind) {
-                        existing.kinds.push(kind);
-                    }
-                }
-                for footprint in incoming.footprints {
-                    if !existing.kinds.contains(&footprint.kind) {
-                        existing.kinds.push(footprint.kind);
-                    }
-                    if let Some(existing_footprint) = existing
-                        .footprints
-                        .iter_mut()
-                        .find(|candidate| candidate.kind == footprint.kind)
-                    {
-                        *existing_footprint = footprint;
-                    } else {
-                        existing.footprints.push(footprint);
-                    }
-                }
-            } else {
-                catalog.entries.push(incoming);
-            }
-        }
-    }
-
     /// Pick the collection entity a freshly dropped pin is glued to: the entity
     /// nearest to `position` in the dataset's active layout.
     ///
@@ -915,10 +860,7 @@ impl DocumentState {
     pub fn apply(&mut self, cmd: DocumentCommand) {
         match cmd {
             DocumentCommand::DatasetOpened(event) => {
-                let dataset_id = event.manifest.dataset_id.clone();
                 self.register_dataset(event.manifest);
-                // Seed the catalog from the open event.
-                self.asset_catalogs.insert(dataset_id, event.catalog);
             }
             DocumentCommand::RemoveDataset { id } => {
                 self.remove_dataset(&id);
@@ -943,9 +885,6 @@ impl DocumentState {
                 // reach every peer.
                 self.reanchor_for_layout(&dataset_id, from_id.as_ref(), &layout_id);
                 self.active_layout_ids.insert(dataset_id, layout_id);
-            }
-            DocumentCommand::ApplyAssetCatalogDelta { dataset_id, delta } => {
-                self.apply_asset_catalog_delta(dataset_id, delta);
             }
             DocumentCommand::AddAnnotation {
                 dataset_id,
@@ -1258,8 +1197,6 @@ mod annotation_view_tests {
         );
         doc.active_layout_ids
             .insert(old.clone(), LayoutId("img".into()));
-        doc.asset_catalogs
-            .insert(old.clone(), AssetCatalog::empty());
         doc.add_annotation(old.clone(), pin_with_view(None));
 
         let mut remap = HashMap::new();
@@ -1272,8 +1209,6 @@ mod annotation_view_tests {
         assert!(!doc.registered_layouts.contains_key(&old));
         assert!(doc.active_layout_ids.contains_key(&new));
         assert!(!doc.active_layout_ids.contains_key(&old));
-        assert!(doc.asset_catalogs.contains_key(&new));
-        assert!(!doc.asset_catalogs.contains_key(&old));
         assert!(doc.annotations.contains_key(&new));
         assert!(!doc.annotations.contains_key(&old));
         assert_eq!(doc.manifests.get(&new).unwrap().dataset_id, new);
@@ -1358,7 +1293,6 @@ mod annotation_view_tests {
         );
         doc.active_layout_ids
             .insert(id.clone(), LayoutId("img".into()));
-        doc.asset_catalogs.insert(id.clone(), AssetCatalog::empty());
         doc.add_annotation(id.clone(), pin_with_view(None));
         doc
     }
@@ -1394,8 +1328,6 @@ mod annotation_view_tests {
         );
         doc.active_layout_ids
             .insert(kept.clone(), LayoutId("img".into()));
-        doc.asset_catalogs
-            .insert(kept.clone(), AssetCatalog::empty());
         doc.add_annotation(kept.clone(), pin_with_view(None));
 
         doc.remove_dataset(&gone);
@@ -1409,13 +1341,11 @@ mod annotation_view_tests {
             !doc.active_layout_ids.contains_key(&gone),
             "remove_dataset must clear active_layout_ids (was orphaned)"
         );
-        assert!(!doc.asset_catalogs.contains_key(&gone));
         assert!(!doc.annotations.contains_key(&gone));
 
         assert!(doc.manifests.contains_key(&kept));
         assert!(doc.registered_layouts.contains_key(&kept));
         assert!(doc.active_layout_ids.contains_key(&kept));
-        assert!(doc.asset_catalogs.contains_key(&kept));
         assert!(doc.annotations.contains_key(&kept));
     }
 
@@ -1432,7 +1362,6 @@ mod annotation_view_tests {
         assert!(doc.manifests.is_empty());
         assert!(doc.registered_layouts.is_empty());
         assert!(doc.active_layout_ids.is_empty());
-        assert!(doc.asset_catalogs.is_empty());
         assert!(doc.annotations.is_empty());
     }
 
@@ -1463,8 +1392,6 @@ mod annotation_view_tests {
                     Vec::new(),
                     None,
                 ));
-                doc.asset_catalogs
-                    .insert((*id).clone(), AssetCatalog::empty());
                 doc.add_annotation((*id).clone(), pin_with_view(None));
             }
             doc
@@ -1479,10 +1406,6 @@ mod annotation_view_tests {
         let expected = vec![a.clone(), b_prime.clone(), c.clone()];
         assert_eq!(doc.manifests.keys().cloned().collect::<Vec<_>>(), expected);
         assert_eq!(
-            doc.asset_catalogs.keys().cloned().collect::<Vec<_>>(),
-            expected
-        );
-        assert_eq!(
             doc.annotations.keys().cloned().collect::<Vec<_>>(),
             expected,
         );
@@ -1494,10 +1417,6 @@ mod annotation_view_tests {
 
         let expected = vec![a.clone(), c.clone()];
         assert_eq!(doc.manifests.keys().cloned().collect::<Vec<_>>(), expected);
-        assert_eq!(
-            doc.asset_catalogs.keys().cloned().collect::<Vec<_>>(),
-            expected
-        );
         assert_eq!(
             doc.annotations.keys().cloned().collect::<Vec<_>>(),
             expected

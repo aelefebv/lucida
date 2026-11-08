@@ -18,7 +18,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async_with_conf
 
 use common::workspace_rig::WorkspaceRig;
 use lucida_core::protocol::{ClientMessage, ServerMessage, WatchItem};
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::connection::{
     CLOSE_TOO_FAR_BEHIND, MAX_INBOUND_MESSAGE_BYTES, OUTBOUND_BUDGET_BYTES,
 };
@@ -34,11 +34,10 @@ struct Rig {
 
 async fn start_server() -> Rig {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let mut proxy_config = ProxyConfig::defaults();
-    proxy_config.cache_dir = tmp.path().join("proxies");
-    proxy_config.generated_cache_dir = tmp.path().join("generated-coarse");
+    let mut generated_config = GeneratedConfig::defaults();
+    generated_config.generated_cache_dir = tmp.path().join("generated-coarse");
     Rig {
-        workspace: WorkspaceRig::start(proxy_config).await,
+        workspace: WorkspaceRig::start(generated_config).await,
         _tmp: tmp,
     }
 }

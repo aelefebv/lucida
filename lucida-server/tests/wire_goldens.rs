@@ -48,17 +48,16 @@ use lucida_core::scene::{
 };
 use lucida_core::view::ViewState;
 use lucida_protocol::{
-    AssetCatalog, AssetCatalogDelta, AssetMessage, ChunkFailureKind,
-    DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure, DatasetGeneratedCoarseHealth,
-    DatasetHealthComponent, DatasetHealthStatus, DatasetImportWarning,
-    DatasetOpenFailureDiagnostic, DatasetOpenFailureKind, DatasetOpenProgressDiagnostic,
-    DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened, DatasetSourceCacheStats,
-    DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec, FetchSource,
-    GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
+    ChunkFailureKind, DatasetGeneratedCoarseCacheStats, DatasetGeneratedCoarseFailure,
+    DatasetGeneratedCoarseHealth, DatasetHealthComponent, DatasetHealthStatus,
+    DatasetImportWarning, DatasetOpenFailureDiagnostic, DatasetOpenFailureKind,
+    DatasetOpenProgressDiagnostic, DatasetOpenStage, DatasetOpenSuccessDiagnostic, DatasetOpened,
+    DatasetSourceCacheStats, DatasetSourceHealth, DirectFetchDescriptor, DirectImageSpec,
+    FetchSource, GeneratedAvailabilityDelta, GeneratedAvailabilitySnapshot, GeneratedChunkStatus,
     GeneratedChunkStatusUpdate, GeneratedLevelAvailability, GeneratedLevelSummary, LABEL_NONE,
     LevelAddress, LocalFetchDescriptor, MetadataReadPhase, PHASE_UNSET, ProxiedFetchDescriptor,
-    ProxiedImageSpec, ProxyAvailability, ProxyFootprint, ProxyKind, ServerTimingBatch,
-    SourceChunkStatus, TimingRowFamily, TimingRowOutcome, WireFormat,
+    ProxiedImageSpec, ServerTimingBatch, SourceChunkStatus, TimingRowFamily, TimingRowOutcome,
+    WireFormat,
 };
 
 const REGEN_HINT: &str = "fixture out of date with the Rust wire types. If the wire change is \
@@ -224,7 +223,6 @@ fn server_message_fixture_paths(msg: &ServerMessage) -> &'static [&'static str] 
         }
         ServerMessage::OpenDatasetFailed { .. } => &["session/server_open_dataset_failed.json"],
         ServerMessage::DatasetHealth { .. } => &["session/server_dataset_health.json"],
-        ServerMessage::AssetCatalogUpdate { .. } => &["session/server_asset_catalog_update.json"],
         ServerMessage::GeneratedAvailabilityUpdate { .. } => {
             &["session/server_generated_availability_update.json"]
         }
@@ -261,7 +259,6 @@ fn client_message_fixture_paths(msg: &ClientMessage) -> &'static [&'static str] 
             "session/client_command_set_active_layout.json",
             "session/client_command_remove_dataset.json",
             "session/client_command_rename_dataset.json",
-            "session/client_command_apply_asset_catalog_delta.json",
         ],
         ClientMessage::Presence { .. } => &["session/client_presence.json"],
         ClientMessage::Cursor { .. } => &["session/client_cursor.json"],
@@ -303,9 +300,6 @@ fn document_command_fixture_paths(cmd: &DocumentCommand) -> &'static [&'static s
         DocumentCommand::SetActiveLayout { .. } => {
             &["session/client_command_set_active_layout.json"]
         }
-        DocumentCommand::ApplyAssetCatalogDelta { .. } => {
-            &["session/client_command_apply_asset_catalog_delta.json"]
-        }
         DocumentCommand::AddAnnotation { .. } => &["session/client_command_add_annotation.json"],
         DocumentCommand::RemoveAnnotation { .. } => {
             &["session/client_command_remove_annotation.json"]
@@ -328,12 +322,6 @@ fn chunk_message_fixture_paths(msg: &ChunkMessage) -> &'static [&'static str] {
         // here if a producer ever appears.
         ChunkMessage::ChunkFetch { .. } => &[],
         ChunkMessage::ChunkCancel { .. } => &["session/chunk_cancel.json"],
-    }
-}
-
-fn asset_message_fixture_paths(msg: &AssetMessage) -> &'static [&'static str] {
-    match msg {
-        AssetMessage::AssetRequest { .. } => &["session/asset_request.json"],
     }
 }
 
@@ -369,7 +357,6 @@ struct EnumVocabulary {
     entity_kinds: Vec<EntityKind>,
     data_types: Vec<DataType>,
     positioning_modes: Vec<PositioningMode>,
-    proxy_kinds: Vec<ProxyKind>,
     dataset_open_stages: Vec<DatasetOpenStage>,
     dataset_open_failure_kinds: Vec<DatasetOpenFailureKind>,
     dataset_health_statuses: Vec<DatasetHealthStatus>,
@@ -396,7 +383,6 @@ fn enum_vocabulary() -> EnumVocabulary {
         entity_kinds: vocab!(EntityKind::{ Image, Group, Tile }),
         data_types: vocab!(DataType::{ Uint8, Uint16, Uint32, Int8, Int16, Int32, Float32, Float64 }),
         positioning_modes: vocab!(PositioningMode::{ Explicit, Derived }),
-        proxy_kinds: vocab!(ProxyKind::{ GroupProxy3D, TileProxy3D }),
         dataset_open_stages: vocab!(DatasetOpenStage::{
             RequestReceived, Authorization, SourceLookup, BackendOpen, MetadataImport,
             BindingBuild, GeneratedCoarsePlanning, WorkspacePersist, Broadcast, Complete,
@@ -625,21 +611,10 @@ fn single_fetch() -> FetchSource {
     })
 }
 
-fn single_catalog() -> AssetCatalog {
-    AssetCatalog {
-        entries: vec![ProxyAvailability {
-            entity_id: EntityId(SINGLE_ENTITY_ID.into()),
-            kinds: vec![ProxyKind::TileProxy3D],
-            footprints: vec![ProxyFootprint::u16(ProxyKind::TileProxy3D, [50, 128, 128])],
-        }],
-    }
-}
-
 fn single_dataset_opened() -> DatasetOpened {
     DatasetOpened {
         manifest: single_manifest(),
         fetch: single_fetch(),
-        catalog: single_catalog(),
         opener_client_id: Some(7),
     }
 }
@@ -789,7 +764,6 @@ fn collection_dataset_opened() -> DatasetOpened {
         fetch: FetchSource::Proxied(ProxiedFetchDescriptor {
             images: fetch_images,
         }),
-        catalog: AssetCatalog::default(),
         opener_client_id: None,
     }
 }
@@ -1031,9 +1005,6 @@ fn snapshot_document() -> DocumentState {
         .active_layout_ids
         .insert(dataset_id.clone(), LayoutId("layout-grid".into()));
     document
-        .asset_catalogs
-        .insert(dataset_id.clone(), single_catalog());
-    document
         .annotations
         .insert(dataset_id, snapshot_annotations());
     document
@@ -1195,16 +1166,6 @@ fn source_health() -> DatasetSourceHealth {
     }
 }
 
-fn asset_catalog_delta() -> AssetCatalogDelta {
-    AssetCatalogDelta {
-        added: vec![ProxyAvailability {
-            entity_id: EntityId(SINGLE_ENTITY_ID.into()),
-            kinds: vec![ProxyKind::GroupProxy3D, ProxyKind::TileProxy3D],
-            footprints: vec![ProxyFootprint::u16(ProxyKind::GroupProxy3D, [50, 256, 256])],
-        }],
-    }
-}
-
 /// Required fields of `DatasetManifest` and its component types, rooted at
 /// the manifest object. Written against `single_manifest()`'s shape.
 const MANIFEST_REQUIRED: &[&str] = &[
@@ -1260,21 +1221,11 @@ const PROXIED_FETCH_REQUIRED: &[&str] = &[
     "/Proxied/images/0/wire_format/Zstd/data_type",
 ];
 
-/// Required fields of the populated `AssetCatalog` shape.
-const CATALOG_REQUIRED: &[&str] = &[
-    "/entries/0/entity_id",
-    "/entries/0/kinds",
-    "/entries/0/footprints/0/kind",
-    "/entries/0/footprints/0/dims",
-    "/entries/0/footprints/0/bytes",
-];
-
 /// Required fields of `DatasetOpened` (with the single manifest inside).
 fn dataset_opened_required() -> Vec<String> {
     let mut keys = vec!["/manifest".to_string(), "/fetch".to_string()];
     keys.extend(req("/manifest", MANIFEST_REQUIRED));
     keys.extend(req("/fetch", PROXIED_FETCH_REQUIRED));
-    keys.extend(req("/catalog", CATALOG_REQUIRED));
     keys
 }
 
@@ -1682,27 +1633,6 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
             },
         ),
         (
-            "session/server_asset_catalog_update.json",
-            ServerMessage::AssetCatalogUpdate {
-                dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
-                delta: asset_catalog_delta(),
-            },
-            {
-                let mut keys = req("", &["/type", "/dataset_id", "/delta", "/delta/added"]);
-                keys.extend(req(
-                    "/delta/added/0",
-                    &[
-                        "/entity_id",
-                        "/kinds",
-                        "/footprints/0/kind",
-                        "/footprints/0/dims",
-                        "/footprints/0/bytes",
-                    ],
-                ));
-                keys
-            },
-        ),
-        (
             "session/server_generated_availability_update.json",
             ServerMessage::GeneratedAvailabilityUpdate {
                 dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
@@ -1790,13 +1720,13 @@ fn server_goldens() -> Vec<(&'static str, ServerMessage, Vec<String>)> {
                 batch: ServerTimingBatch {
                     dropped: 3,
                     // The metadata-read row keys on the open's request id
-                    // and leaves the correlation label unset; the chunk and
-                    // asset rows do the reverse.
+                    // and leaves the correlation label unset; the chunk rows
+                    // do the reverse.
                     rid: vec![2558, 2559, 0],
                     request_id: vec![None, None, Some("web-open-4c1a".into())],
                     family: vec![
                         TimingRowFamily::Chunk,
-                        TimingRowFamily::Asset,
+                        TimingRowFamily::Chunk,
                         TimingRowFamily::MetadataRead,
                     ],
                     outcome: vec![
@@ -2111,14 +2041,6 @@ fn command_goldens() -> Vec<(&'static str, DocumentCommand, Vec<&'static str>)> 
             },
             vec!["/id", "/name"],
         ),
-        (
-            "session/client_command_apply_asset_catalog_delta.json",
-            DocumentCommand::ApplyAssetCatalogDelta {
-                dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
-                delta: asset_catalog_delta(),
-            },
-            vec!["/dataset_id", "/delta", "/delta/added"],
-        ),
     ]
 }
 
@@ -2356,37 +2278,20 @@ const GENERATED_FILES: &[&str] = &[
     "generated/availability_delta.json",
 ];
 
-const REQUEST_FILES: &[&str] = &[
-    "session/chunk_request.json",
-    "session/asset_request.json",
-    "session/chunk_cancel.json",
-];
+const REQUEST_FILES: &[&str] = &["session/chunk_request.json", "session/chunk_cancel.json"];
 
 const VOCAB_FILES: &[&str] = &["vocab/enum_vocabulary.json"];
 
-/// The two request goldens carry consecutive labels from one counter — `0`
-/// then `1` — because that is what a connection's first chunk request and
-/// first asset request actually get: the counter is shared across families
-/// and starts at zero. The vitest mirror reproduces both from a real
-/// `ProxiedContentSource`, so the shared counter is locked, not just the
-/// field's presence.
+/// The request golden carries label `0`, because that is what a
+/// connection's first chunk request gets: the counter starts at zero. The
+/// vitest mirror reproduces it from a real `ProxiedContentSource`, so the
+/// counter is locked, not just the field's presence.
 fn chunk_request_golden() -> ChunkMessage {
     ChunkMessage::ChunkRequest {
         rid: 0,
         dataset_id: DatasetId(SINGLE_DATASET_ID.into()),
         image_id: ImageId(SINGLE_IMAGE_ID.into()),
         key: "1/2/1/12/3/4".into(),
-    }
-}
-
-fn asset_request_golden() -> AssetMessage {
-    AssetMessage::AssetRequest {
-        rid: 1,
-        dataset_id: DatasetId("wds-collection-77".into()),
-        entity_id: EntityId("tile-A1-f0".into()),
-        kind: ProxyKind::TileProxy3D,
-        t: 0,
-        c: 2,
     }
 }
 
@@ -2443,26 +2348,6 @@ fn request_envelopes_match_goldens() {
         "session/chunk_cancel.json",
         &cancel,
         &req("", &["/type", "/rids"]),
-        &mut failures,
-    );
-
-    let asset = asset_request_golden();
-    assert!(asset_message_fixture_paths(&asset).contains(&"session/asset_request.json"));
-    check(
-        "session/asset_request.json",
-        &asset,
-        &req(
-            "",
-            &[
-                "/type",
-                "/rid",
-                "/dataset_id",
-                "/entity_id",
-                "/kind",
-                "/t",
-                "/c",
-            ],
-        ),
         &mut failures,
     );
 
@@ -2613,7 +2498,6 @@ fn enum_vocabulary_matches_golden() {
             "/entity_kinds",
             "/data_types",
             "/positioning_modes",
-            "/proxy_kinds",
             "/dataset_open_stages",
             "/dataset_open_failure_kinds",
             "/dataset_health_statuses",

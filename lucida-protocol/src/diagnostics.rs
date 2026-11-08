@@ -166,7 +166,6 @@ pub struct DatasetGeneratedCoarseHealth {
 #[serde(rename_all = "snake_case")]
 pub enum TimingRowFamily {
     Chunk,
-    Asset,
     /// One object read performed while opening a dataset. Keyed on the open's
     /// `request_id` rather than on a correlation label: the open already has
     /// a parent identifier and these reads are its children.
@@ -271,9 +270,7 @@ pub enum ServerPhase {
     /// Storage codec decode.
     Decompress = 7,
     /// Turning the stored bytes into the wire frame: the (t, c) slice and
-    /// the frame envelope. For the asset family, producing the asset and
-    /// its frame — that family has no separate generation slot, since no
-    /// planner emits a proxy request.
+    /// the frame envelope.
     SliceEncode = 8,
     /// Handing the frame to this connection's outbound queue. Terminal:
     /// socket write time happens in a separate task behind an unbounded

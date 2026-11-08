@@ -95,9 +95,9 @@ export function chunkWorldDims(
 
 /**
  * Enumerate culled chunk grid cells for a tile entry's detail-tier levels.
- * Non-tile entries return `[]`: a `group-as-proxy` is served by one proxy
- * asset, and `invisible` has no chunks. Returned requests are placeholders
- * (`priority` 0, `lane` `"detail"`) that `plan()` stamps per lane.
+ * An `invisible` entry has no chunks and returns `[]`. Returned requests
+ * are placeholders (`priority` 0, `lane` `"detail"`) that `plan()` stamps
+ * per lane.
  * `datasetId` defaults to empty for synthetic test snapshots.
  */
 export function iterateChunks(

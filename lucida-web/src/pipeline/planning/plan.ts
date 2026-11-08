@@ -21,7 +21,6 @@ import {
   type PlanningSnapshot,
   type PlanStats,
   type PlanningState,
-  type ProxyRequest,
   type RequestPlan,
   type ZoomDirection,
 } from "./types.ts";
@@ -36,21 +35,8 @@ function resolveZoomDirection(
   return effectiveZoom > previous ? "in" : "out";
 }
 
-function compareProxyRequests(a: ProxyRequest, b: ProxyRequest): number {
-  const priority = a.priority - b.priority;
-  if (priority !== 0) return priority;
-  return (
-    a.datasetId.localeCompare(b.datasetId) ||
-    a.entityId.localeCompare(b.entityId) ||
-    a.kind.localeCompare(b.kind) ||
-    a.t - b.t ||
-    a.c - b.c
-  );
-}
-
 /**
- * Emit the chunk and proxy request streams for an already-resolved active
- * set. Lets a caller regenerate requests for a T scrub or Z-plane move
+ * Emit the chunk requests for an already-resolved active set. Lets a caller regenerate requests for a T scrub or Z-plane move
  * without `buildActiveSet`. Pure in `(activeSet, snapshot, config,
  * zoomDirection)`, so the result matches a full {@link plan} for that
  * selection. A scrub is not a zoom, so the stored `zoomDirection` applies.
@@ -62,29 +48,15 @@ export function emitPlanRequests(
   stats: PlanStats,
   config: PlanningConfig,
   zoomDirection: ZoomDirection | null,
-): { requests: ChunkRequest[]; proxyRequests: ProxyRequest[] } {
+): ChunkRequest[] {
   const entityById = new Map<string, EntitySnapshot>();
   for (const entity of snapshot.entities) {
     entityById.set(entity.entityId, entity);
   }
 
   const allRequests: ChunkRequest[] = [];
-  const proxyRequests: ProxyRequest[] = [];
 
-  // One parent-group request per (groupId, t, c), however many
-  // tiles-with-proxy-fallback tiles of the group are active.
-  const groupProxyEmitted = new Set<string>();
-
-  emitDetailLane(
-    activeSet,
-    snapshot,
-    entityById,
-    stats,
-    allRequests,
-    proxyRequests,
-    groupProxyEmitted,
-    config,
-  );
+  emitDetailLane(activeSet, snapshot, entityById, stats, allRequests, config);
 
   emitPrefetchLane(activeSet, snapshot, entityById, stats, allRequests, config, zoomDirection);
 
@@ -107,9 +79,8 @@ export function emitPlanRequests(
   );
 
   allRequests.sort(compareChunkRequests);
-  proxyRequests.sort(compareProxyRequests);
 
-  return { requests: allRequests, proxyRequests };
+  return allRequests;
 }
 
 /**
@@ -117,8 +88,7 @@ export function emitPlanRequests(
  * caller stored from the previous tick's {@link RequestPlan.nextState}.
  *
  * Postconditions:
- *   - `requests` and `proxyRequests` are sorted ascending by `priority`
- *     (lower = more urgent).
+ *   - `requests` is sorted ascending by `priority` (lower = more urgent).
  *   - Output objects are freshly allocated; the caller may mutate them.
  *     Every request carries `datasetId` from {@link PlanningSnapshot.datasetId}.
  *   - `epochs.request` = input + 1; other epoch tiles forwarded unchanged.
@@ -139,9 +109,7 @@ export function plan(
   const effectiveZoom = snapshot.visibleRegion.effectiveZoom;
   const zoomDirection = resolveZoomDirection(state, effectiveZoom);
 
-  const { requests, proxyRequests } = emitPlanRequests(
-    activeSet, snapshot, stats, config, zoomDirection,
-  );
+  const requests = emitPlanRequests(activeSet, snapshot, stats, config, zoomDirection);
 
   const epochs: SceneEpochs = {
     ...snapshot.epochs,
@@ -153,5 +121,5 @@ export function plan(
     previousEffectiveZoom: effectiveZoom,
     zoomDirection,
   };
-  return { requests, activeSet, epochs, proxyRequests, stats, nextState };
+  return { requests, activeSet, epochs, stats, nextState };
 }

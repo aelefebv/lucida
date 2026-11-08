@@ -23,18 +23,15 @@ use common::workspace_rig::WorkspaceRig;
 use lucida_core::protocol::{
     ClientId, ClientMessage, ServerMessage, WatchBoundaryEvent, WatchItem,
 };
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::watch::WATCH_RING_CAPACITY;
 
 type WsClient = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-fn proxy_config(root: &Path) -> ProxyConfig {
-    ProxyConfig {
-        cache_dir: root.join("proxies"),
-        legacy_proxy_enabled: false,
-        concurrency: 1,
+fn generated_config(root: &Path) -> GeneratedConfig {
+    GeneratedConfig {
         generated_enabled: false,
         generated_cache_dir: root.join("generated"),
         generated_concurrency: 1,
@@ -50,7 +47,7 @@ fn proxy_config(root: &Path) -> ProxyConfig {
 /// Serve a workspace socket on an ephemeral port.
 async fn serve() -> WorkspaceRig {
     let root = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("watch-stream-e2e");
-    WorkspaceRig::start(proxy_config(&root)).await
+    WorkspaceRig::start(generated_config(&root)).await
 }
 
 /// Connect and consume the snapshot handshake the server always sends first.

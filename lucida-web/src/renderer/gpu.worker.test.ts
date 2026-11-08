@@ -13,7 +13,7 @@ const seen = vi.hoisted(() => ({
 vi.mock("./worker/bootstrap.ts", () => ({
   bootstrapWorker: vi.fn(async () => ({ state: {} })),
 }));
-vi.mock("./worker/devtools.ts", () => ({ installDevtools: vi.fn() }));
+
 vi.mock("./worker/lifecycle.ts", () => ({ handleDestroy: vi.fn() }));
 vi.mock("./worker/dispatch.ts", () => ({
   dispatchMessage: vi.fn(async (_ctx: unknown, msg: MainToWorkerMessage) => {

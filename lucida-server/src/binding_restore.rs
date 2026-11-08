@@ -11,9 +11,7 @@ use std::sync::Arc;
 
 use lucida_content::DatasetId;
 use lucida_content::url::DatasetLocation;
-use lucida_protocol::{
-    AssetCatalog, DatasetOpenFailureDiagnostic, DatasetOpened, GeneratedAvailabilityDelta,
-};
+use lucida_protocol::{DatasetOpenFailureDiagnostic, DatasetOpened, GeneratedAvailabilityDelta};
 use lucida_store::cache::CachedStore;
 use lucida_store::source_policy::SourcePolicy;
 use tokio::sync::{Mutex, broadcast};
@@ -26,15 +24,14 @@ use crate::generated::{
 use crate::open_diagnostics::{
     MetadataReadCost, backend_open_failure, import_failure, location_failure,
 };
-use crate::proxy::{ProxyCache, ProxyGenerator, proxy_catalog_entries_for_manifest};
 use crate::session::Session;
 use crate::workspace::types::WorkspaceDatasetSource;
-use crate::{BroadcastItem, ProxyConfig};
+use crate::{BroadcastItem, GeneratedConfig};
 
 /// Rebuild server-private dataset bindings for a lazily restored workspace.
 ///
 /// The durable workspace document stores client-facing dataset state, but
-/// operational chunk/proxy/generated services are intentionally not part of
+/// operational chunk and generated services are intentionally not part of
 /// `DocumentState`. On first open after a server restart, rebuild those
 /// bindings from the structured `workspace_datasets → dataset_sources`
 /// records before the first snapshot goes out.
@@ -42,7 +39,7 @@ pub async fn restore_workspace_bindings(
     session: Arc<Mutex<Session>>,
     tx: broadcast::Sender<BroadcastItem>,
     sources: Vec<WorkspaceDatasetSource>,
-    proxy_config: ProxyConfig,
+    generated_config: GeneratedConfig,
     source_policy: &SourcePolicy,
 ) {
     for source in sources {
@@ -73,7 +70,7 @@ pub async fn restore_workspace_bindings(
                     tx.clone(),
                     &source,
                     location,
-                    &proxy_config,
+                    &generated_config,
                     source_policy,
                 )
                 .await
@@ -110,7 +107,7 @@ async fn restore_one_workspace_binding(
     tx: broadcast::Sender<BroadcastItem>,
     source: &WorkspaceDatasetSource,
     location: &DatasetLocation,
-    proxy_config: &ProxyConfig,
+    generated_config: &GeneratedConfig,
     source_policy: &SourcePolicy,
 ) -> Result<(), DatasetOpenFailureDiagnostic> {
     let dataset_id = source.workspace_dataset_id.0.clone();
@@ -150,27 +147,22 @@ async fn restore_one_workspace_binding(
         );
     }
 
-    let catalog_entries =
-        proxy_catalog_entries_for_manifest(&result.manifest, proxy_config.legacy_proxy_enabled);
     let dataset_opened = DatasetOpened {
         manifest: result.manifest.clone(),
         fetch: result.fetch,
-        catalog: AssetCatalog {
-            entries: catalog_entries.clone(),
-        },
         // Server-side workspace restore has no originating client, so no peer
         // should auto-fit off this broadcast.
         opener_client_id: None,
     };
 
     let resolver = Arc::new(ChunkResolver::new(&result.binding_seed));
-    let generated_config = GeneratedCoarseConfig {
-        target_long_axis: proxy_config.generated_target_long_axis,
-        chunk_long_axis: proxy_config.generated_chunk_long_axis,
-        max_chunk_bytes: proxy_config.generated_max_chunk_bytes,
+    let plan_config = GeneratedCoarseConfig {
+        target_long_axis: generated_config.generated_target_long_axis,
+        chunk_long_axis: generated_config.generated_chunk_long_axis,
+        max_chunk_bytes: generated_config.generated_max_chunk_bytes,
     };
-    let generated_plans = if proxy_config.generated_enabled {
-        plan_generated_coarse_for_manifest(&result.manifest, generated_config)
+    let generated_plans = if generated_config.generated_enabled {
+        plan_generated_coarse_for_manifest(&result.manifest, plan_config)
     } else {
         vec![]
     };
@@ -178,11 +170,11 @@ async fn restore_one_workspace_binding(
     let url_hash16 = location.hash16();
     let derived_chunks = Arc::new(
         DerivedChunkCache::new_on_disk_with_budget(
-            proxy_config.generated_cache_dir.clone(),
+            generated_config.generated_cache_dir.clone(),
             url_hash16,
-            proxy_config.generated_disk_budget_bytes,
+            generated_config.generated_disk_budget_bytes,
         )
-        .with_memory(Arc::clone(&proxy_config.generated_memory)),
+        .with_memory(Arc::clone(&generated_config.generated_memory)),
     );
     let mut generated_initial_delta = GeneratedAvailabilityDelta::default();
     for plan in &generated_plans {
@@ -205,7 +197,6 @@ async fn restore_one_workspace_binding(
             }
         }
     }
-    let proxy_cache = Arc::new(ProxyCache::new(proxy_config.cache_dir.clone(), url_hash16));
     let generated_service = Arc::new(GeneratedCoarseService::new(
         generated_plans.clone(),
         Arc::new(result.manifest.clone()),
@@ -215,19 +206,12 @@ async fn restore_one_workspace_binding(
         Arc::clone(&session),
         tx,
         GeneratedSchedulingConfig {
-            concurrency: proxy_config.generated_concurrency,
-            background_chunk_limit: proxy_config.generated_background_chunk_limit,
+            concurrency: generated_config.generated_concurrency,
+            background_chunk_limit: generated_config.generated_background_chunk_limit,
             ..GeneratedSchedulingConfig::default()
         },
     ));
     generated_service.start();
-    let proxy_generator = Arc::new(ProxyGenerator::new(
-        proxy_cache.clone(),
-        cached.clone(),
-        resolver.clone(),
-        Arc::new(result.manifest),
-        proxy_config.concurrency,
-    ));
 
     let binding = ServerBinding {
         source_url: location.as_str().to_string(),
@@ -237,9 +221,6 @@ async fn restore_one_workspace_binding(
         dataset_opened,
         derived_chunks,
         generated_service: generated_service.clone(),
-        legacy_proxy_enabled: proxy_config.legacy_proxy_enabled,
-        proxy_cache,
-        proxy_generator,
         import_warnings,
     };
 

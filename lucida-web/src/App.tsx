@@ -516,38 +516,6 @@ function Viewer({
     },
   };
 
-  // Expose the tickCoordinator and cpuCache as `window.__orch` (alias
-  // `__lucidaOrch`) for `requestTestProxy` from the dev console. Dev builds
-  // only, since it issues real fetches. The capture globals
-  // (`__lucidaCaptureReady`, `__lucidaAutoContrast`) are a separate contract
-  // that the CLI reads in every build.
-  useEffect(() => {
-    if (!import.meta.env.DEV) return;
-    const loop = render.activeLoop;
-    const cache = bridge.sessionRef.current?.cpuCache;
-    if (!loop || !cache) return;
-    const coord = loop.getTickCoordinator();
-    const debug = {
-      tickCoordinator: coord,
-      cpuCache: cache,
-      requestTestProxy: (
-        datasetId: string,
-        entityId: string,
-        imageId: string,
-        kind: "GroupProxy3D" | "TileProxy3D",
-        t = 0,
-        c = 0,
-      ) => coord.requestTestProxy(cache, datasetId, entityId, imageId, kind, t, c),
-    };
-    const w = window as unknown as { __orch?: typeof debug; __lucidaOrch?: typeof debug };
-    w.__orch = debug;
-    w.__lucidaOrch = debug;
-    return () => {
-      delete w.__orch;
-      delete w.__lucidaOrch;
-    };
-  }, [render.activeLoop, bridge.sessionRef]);
-
   // The two sections of a bundle the trace does not record, the server's
   // dataset health and the frame on the canvas, come from the session socket
   // and the render worker, which both live here. The seam owns the rest, and

@@ -1,4 +1,3 @@
-use crate::asset::AssetCatalog;
 use crate::fetch::FetchSource;
 use lucida_content::DatasetManifest;
 use serde::{Deserialize, Serialize};
@@ -12,17 +11,12 @@ pub type ClientId = u64;
 
 /// Application-level event: a dataset has been opened on the server and
 /// should be registered by all clients. Carries the canonical dataset
-/// manifest, the client-visible fetch source, and the initial asset
-/// catalog snapshot for proxy availability. Does NOT carry server-private
-/// binding state.
+/// manifest and the client-visible fetch source. Does NOT carry
+/// server-private binding state.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetOpened {
     pub manifest: DatasetManifest,
     pub fetch: FetchSource,
-    /// Initial asset catalog. `#[serde(default)]` keeps backward compat
-    /// with messages that omit the field (older clients/snapshots).
-    #[serde(default)]
-    pub catalog: AssetCatalog,
     /// Id of the client that opened this dataset, stamped by the server on
     /// the open path so the broadcast's recipients can tell whether THEY are
     /// the opener. `dataset_opened` is a fan-out broadcast, so the web uses
@@ -111,7 +105,6 @@ mod tests {
         DatasetOpened {
             manifest,
             fetch,
-            catalog: AssetCatalog::default(),
             opener_client_id: None,
         }
     }
@@ -152,38 +145,6 @@ mod tests {
         assert!(value.is_object());
         assert!(value.get("manifest").is_some(), "missing 'manifest' key");
         assert!(value.get("fetch").is_some(), "missing 'fetch' key");
-        assert!(value.get("catalog").is_some(), "missing 'catalog' key");
-    }
-
-    #[test]
-    fn dataset_opened_catalog_round_trip() {
-        use crate::asset::ProxyAvailability;
-        use lucida_proxy::ProxyKind;
-
-        let mut event = make_dataset_opened();
-        event.catalog = AssetCatalog {
-            entries: vec![ProxyAvailability {
-                entity_id: EntityId("img-0".into()),
-                kinds: vec![ProxyKind::TileProxy3D],
-                footprints: vec![],
-            }],
-        };
-        let json = serde_json::to_string(&event).unwrap();
-        let back: DatasetOpened = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.catalog.entries.len(), 1);
-        assert_eq!(back.catalog.entries[0].entity_id, EntityId("img-0".into()));
-        assert_eq!(back.catalog.entries[0].kinds, vec![ProxyKind::TileProxy3D]);
-    }
-
-    #[test]
-    fn dataset_opened_backward_compat_without_catalog() {
-        // Older messages omit 'catalog' — should deserialize with empty default.
-        let event = make_dataset_opened();
-        let json = serde_json::to_string(&event).unwrap();
-        let mut val: serde_json::Value = serde_json::from_str(&json).unwrap();
-        val.as_object_mut().unwrap().remove("catalog");
-        let back: DatasetOpened = serde_json::from_value(val).unwrap();
-        assert!(back.catalog.entries.is_empty());
     }
 
     #[test]

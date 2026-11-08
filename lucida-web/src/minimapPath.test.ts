@@ -221,7 +221,7 @@ describe("identityModelMatrix", () => {
 describe("readMinimapOverviewEpochs", () => {
   it("reads content and layout from the epochs JSON", () => {
     const scene = {
-      epochs: () => JSON.stringify({ content: 7, layout: 3, view: 99, selection: 5, asset: 2 }),
+      epochs: () => JSON.stringify({ content: 7, layout: 3, view: 99, selection: 5 }),
     } as unknown as WasmScene;
     expect(readMinimapOverviewEpochs(scene)).toEqual({ content: 7, layout: 3 });
   });
@@ -294,7 +294,7 @@ describe("tickMinimap overview/overlay split", () => {
       center: () => s.center,
       eye_position: () => new Float32Array(s.eye),
       epochs: () =>
-        JSON.stringify({ content: s.contentEpoch, layout: s.layoutEpoch, view: 0, selection: 0, asset: 0 }),
+        JSON.stringify({ content: s.contentEpoch, layout: s.layoutEpoch, view: 0, selection: 0 }),
       // 36 floats: [0..16) invViewProj, [16..19) eye, [19..35) viewProj, [35] topDown.
       minimap_camera: () => new Float32Array(36),
       member_positions: () => JSON.stringify({ m0: [0, 0] }),

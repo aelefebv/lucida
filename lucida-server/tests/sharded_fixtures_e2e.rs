@@ -21,7 +21,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 use common::workspace_rig::WorkspaceRig;
 use lucida_content::{DatasetManifest, ImageId};
 use lucida_protocol::DatasetOpened;
-use lucida_server::ProxyConfig;
+use lucida_server::GeneratedConfig;
 use lucida_server::binding::ChunkResolver;
 use lucida_server::chunk_read::{ChunkRead, read_chunk};
 use lucida_server::dataset_open::{DatasetOpenContext, DatasetOpenOutcome, open_dataset};
@@ -212,11 +212,8 @@ async fn generated_coarse_over_the_sharded_twin_produces_the_unsharded_twins_chu
     assert_eq!(outputs[0], outputs[1]);
 }
 
-fn proxy_config(root: &Path) -> ProxyConfig {
-    ProxyConfig {
-        cache_dir: root.join("proxies"),
-        legacy_proxy_enabled: false,
-        concurrency: 1,
+fn generated_config(root: &Path) -> GeneratedConfig {
+    GeneratedConfig {
         generated_enabled: false,
         generated_cache_dir: root.join("generated"),
         generated_concurrency: 1,
@@ -270,9 +267,9 @@ async fn the_server_frames_the_same_bytes_for_the_sharded_and_the_unsharded_twin
     let root = temp_dir("served_twins");
     fs::create_dir_all(&root).unwrap();
 
-    let rig = WorkspaceRig::start(proxy_config(&root)).await;
+    let rig = WorkspaceRig::start(generated_config(&root)).await;
     let context = DatasetOpenContext {
-        proxy_config: proxy_config(&root),
+        generated_config: generated_config(&root),
         source_policy: Arc::default(),
         workspace: rig.scope(),
     };

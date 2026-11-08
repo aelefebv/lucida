@@ -13,7 +13,6 @@ path = "src/main.rs"
 lucida-content = { path = "../lucida-content" }
 lucida-core = { path = "../lucida-core" }
 lucida-protocol = { path = "../lucida-protocol" }
-lucida-proxy = { path = "../lucida-proxy" }
 lucida-store = { path = "../lucida-store" }
 object_store = "0.14"
 tokio = { version = "1", features = ["full"] }
@@ -36,10 +35,8 @@ blake3 = "1"
 lru = "0.19"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "7"
-num_cpus = "1"
 rand = "0.8"
 thiserror = "2"
-bytemuck = "1"
 async-trait = "0.1"
 # Storage backends. Pin runtime-tokio-rustls to match tokio's runtime;
 # macros for query helpers; chrono for the schema's timestamp columns;
