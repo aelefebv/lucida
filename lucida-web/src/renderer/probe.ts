@@ -63,13 +63,18 @@ function answeringSource<A extends ProbeAtlas>(
   return { location: { kind: "missing" }, source: levels[0] ?? coarse };
 }
 
+/** An unbound slot reads slot dims of zero in the shader, which misses everywhere. */
+function readable<A extends ProbeAtlas>({ atlas }: ProbeSource<A>, mode: "slice" | "volume"): boolean {
+  return !!atlas && atlas.slotsX !== 0 && atlas.slotsY !== 0 && (mode === "slice" || (atlas.slotsZ ?? 0) !== 0);
+}
+
 function sampleSource<A extends ProbeAtlas>(
-  { meta, atlas }: ProbeSource<A>,
+  source: ProbeSource<A>,
   pos: readonly number[],
   mode: "slice" | "volume",
 ): SampleLocation<A> | null {
-  // An unbound slot reads slot dims of zero in the shader, which misses.
-  if (!atlas || atlas.slotsX === 0 || atlas.slotsY === 0) return null;
+  const { meta, atlas } = source;
+  if (!atlas || !readable(source, mode)) return null;
   const [levelZ, levelY, levelX] = meta.levelDims;
   const [chunkZ, chunkY, chunkX] = meta.chunkDims;
   const [, gridY, gridX] = meta.gridDims;
@@ -87,8 +92,6 @@ function sampleSource<A extends ProbeAtlas>(
       texel: [(slot % atlas.slotsX) * chunkX + (x % chunkX), Math.floor(slot / atlas.slotsX) * chunkY + (y % chunkY), 0],
     };
   }
-  const slotsZ = atlas.slotsZ ?? 0;
-  if (slotsZ === 0) return null;
   const y = texelIndex(1 - pos[1], levelY);
   const z = texelIndex(pos[2], levelZ);
   const cell = meta.offset
@@ -322,7 +325,8 @@ export interface MarchStep<A extends ProbeAtlas> {
 /**
  * The samples a volume march reads along `span`, in order, as volume.wgsl's
  * loops take them: each step is the answering level's own spacing, floored so
- * `steps` of them reach the end. `steps` is 512 for a translucent or label
+ * `steps` of them reach the end, and a miss steps on to the far side of the
+ * chunk cell every source missed in. `steps` is 512 for a translucent or label
  * march and 256 for MIP. Which samples are read depends only on residency, so
  * they are known before any value is. The march runs in float32, as the
  * shader's does, so hundreds of steps don't drift off the shader's positions.
@@ -345,10 +349,42 @@ export function marchSamples<A extends ProbeAtlas>(
     const { location, source } = answeringSource(levels, coarse, pos, "volume");
     out.push({ pos, location });
     // An entity that binds no tier has no level to step by, so it misses at the unit step.
-    const step = source ? stepForDims(source.meta.levelDims) : 1;
+    let step = source ? stepForDims(source.meta.levelDims) : 1;
+    if (source && location.kind === "missing") {
+      const rd: Vec3 = [dx, dy, dz];
+      let skip = NO_CELL_EXIT;
+      for (const s of coarse ? [...levels, coarse] : levels) {
+        if (readable(s, "volume")) skip = Math.min(skip, cellExitDistance(s.meta, pos, rd));
+      }
+      step = Math.max(step, f(skip + CELL_EXIT_NUDGE));
+    }
     t = f(t + Math.max(step, minStep));
   }
   return out;
+}
+
+/** volume.wgsl's `CELL_EXIT_NUDGE` and `NO_CELL_EXIT`. */
+const CELL_EXIT_NUDGE = Math.fround(1e-5);
+const NO_CELL_EXIT = Math.fround(1e30);
+
+/** `cellExitDistance` in volume.wgsl, in float32. */
+function cellExitDistance(meta: LodIndirectionMeta, pos: Vec3, rd: Vec3): number {
+  const f = Math.fround;
+  const [levelZ, levelY, levelX] = meta.levelDims;
+  const [chunkZ, chunkY, chunkX] = meta.chunkDims;
+  const axes: Array<[texel: number, dir: number, level: number, chunk: number]> = [
+    [f(pos[0] * levelX), f(rd[0] * levelX), levelX, chunkX],
+    [f(f(1 - pos[1]) * levelY), f(-rd[1] * levelY), levelY, chunkY],
+    [f(pos[2] * levelZ), f(rd[2] * levelZ), levelZ, chunkZ],
+  ];
+  let exit = NO_CELL_EXIT;
+  for (const [texel, dir, level, chunk] of axes) {
+    // An axis the ray runs parallel to never bounds the exit.
+    if (Math.abs(dir) < f(1e-12)) continue;
+    const lo = Math.floor(Math.min(Math.max(Math.floor(texel), 0), level - 1) / chunk) * chunk;
+    exit = Math.min(exit, f(f((dir > 0 ? lo + chunk : lo) - texel) / dir));
+  }
+  return Math.max(exit, 0);
 }
 
 /** `stepForDims` in volume.wgsl: two thirds of a sample along the densest axis. */
