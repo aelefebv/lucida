@@ -51,6 +51,7 @@ import {
   isLastShownChannel,
 } from "./channels.ts";
 import { positionLabel } from "../axes.ts";
+import type { ResolvedLayer, ResolvedLayers } from "../resolvedLayers.ts";
 import "./LayerPanel.css";
 
 export interface LayerChannel {
@@ -122,8 +123,9 @@ interface Props {
   layers: LayerInfo[];
   selectedLayerId: string | null;
   expandedLayerId: string | null;
-  /** The channel shown alone, or `null` for the composite. One for the whole scene. */
-  soloChannel: number | null;
+  /** What each layer shows, from the scene: its solo, and whether the scene's
+   *  z or t reaches past it. */
+  resolvedLayers: ResolvedLayers;
   /** Each dataset's import warnings, by layer id. Those that say the data is
    *  shown wrong mark the layer degraded and are spelled out under it. */
   importWarnings?: ReadonlyMap<string, readonly DatasetImportWarning[]>;
@@ -152,9 +154,10 @@ interface Props {
   /** Fit a channel's contrast to its loaded data once. */
   onChannelAutoFit: (id: string, ch: number) => void;
   onChannelSetBlendMode: (id: string, blendMode: BlendMode) => void;
-  /** Solo a channel, or return to the composite when it is already soloed. */
-  onSoloChannel: (ch: number) => void;
-  onShowAllChannels: () => void;
+  /** Solo a channel of one layer, or return that layer to its composite when
+   *  the channel is already soloed. Other layers keep what they show. */
+  onSoloChannel: (id: string, ch: number) => void;
+  onShowAllChannels: (id: string) => void;
   onLabelSetVisible: (id: string, label: number, visible: boolean) => void;
   /** Opacity in 0..1. */
   onLabelSetOpacity: (id: string, label: number, opacity: number) => void;
@@ -180,15 +183,17 @@ const RENDER_OPTIONS = [
 ] as const;
 
 export function LayerPanel(props: Props) {
-  const { layers, selectedLayerId, soloChannel, onAddData } = props;
+  const { layers, selectedLayerId, resolvedLayers, onAddData } = props;
+  const soloOf = (layer: LayerInfo) => resolvedLayers.get(layer.id)?.solo ?? null;
   const coverage = useCoverageLoss();
 
   const toggleLayerChannel = (layer: LayerInfo, channel: number) =>
-    applyChannelToggle(layer, soloChannel, channel, props);
+    applyChannelToggle(layer, soloOf(layer), channel, props);
 
   // One command per channel the target layer has, so the palette and the
   // shortcut sheet list only channels that exist, by name.
   const shortcutTarget = channelShortcutTarget(layers, selectedLayerId);
+  const targetSolo = shortcutTarget ? soloOf(shortcutTarget) : null;
   const channelCommands: CommandOptions[] = (shortcutTarget?.channels ?? [])
     .slice(0, CHANNEL_KEYS.length)
     .flatMap((channel, i) => [
@@ -204,11 +209,13 @@ export function LayerPanel(props: Props) {
       },
       {
         id: `channels.solo${i + 1}`,
-        label: soloChannel === i ? "Show all channels" : `Solo ${channel.name}`,
+        label: targetSolo === i ? "Show all channels" : `Solo ${channel.name}`,
         group: "Channels",
         keys: [SOLO_KEYS[i]],
         keywords: [positionLabel("channel", i), "solo", "composite"],
-        run: () => props.onSoloChannel(i),
+        run: () => {
+          if (shortcutTarget) props.onSoloChannel(shortcutTarget.id, i);
+        },
       },
     ]);
   useCommands(channelCommands);
@@ -236,6 +243,8 @@ export function LayerPanel(props: Props) {
             key={layer.id}
             {...props}
             layer={layer}
+            resolved={resolvedLayers.get(layer.id)}
+            soloChannel={soloOf(layer)}
             index={index}
             isShortcutTarget={shortcutTarget?.id === layer.id}
             onToggleChannel={(channel) => toggleLayerChannel(layer, channel)}
@@ -257,6 +266,9 @@ export function LayerPanel(props: Props) {
 
 interface LayerRowProps extends Props {
   layer: LayerInfo;
+  resolved: ResolvedLayer | undefined;
+  /** This layer's solo, or `null` for its composite. */
+  soloChannel: number | null;
   index: number;
   /** The channel keys act on this layer, so its toggles show them. */
   isShortcutTarget: boolean;
@@ -264,14 +276,13 @@ interface LayerRowProps extends Props {
 }
 
 function LayerRow(props: LayerRowProps) {
-  const { layer, index, layers, canEdit, soloChannel } = props;
+  const { layer, index, layers, canEdit, resolved } = props;
   const [renaming, setRenaming] = useState(false);
   const isSelected = layer.id === props.selectedLayerId;
   const isExpanded = layer.id === props.expandedLayerId;
   const bodyId = useId();
   const multichannel = layer.channels.length > 1;
-  // One `c` serves the scene, so a layer without the soloed channel draws nothing.
-  const hiddenBySolo = soloChannel !== null && soloChannel >= layer.channels.length;
+  const clamped = resolved ? clampedNote(resolved) : null;
   const failedChunks = useFailedChunks(layer.id);
   const problems = (props.importWarnings?.get(layer.id) ?? [])
     .filter((warning) => warning.degrades)
@@ -375,9 +386,9 @@ function LayerRow(props: LayerRowProps) {
           ))}
         </ul>
       )}
-      {hiddenBySolo && (
-        <p className="lc-layer-note">
-          {`Not shown while ${positionLabel("channel", soloChannel ?? 0)} is soloed.`}
+      {clamped && layer.visible && (
+        <p className="lc-layer-note" data-testid={`layer-clamped-${layer.id}`}>
+          {clamped}
         </p>
       )}
       {isExpanded && (
@@ -389,6 +400,18 @@ function LayerRow(props: LayerRowProps) {
       )}
     </section>
   );
+}
+
+/**
+ * What a layer shows in place of a z or t it does not have, or `null` when it
+ * has both. The scene's selectors reach past a smaller layer, which then shows
+ * its nearest plane and timepoint rather than nothing.
+ */
+function clampedNote(layer: ResolvedLayer): string | null {
+  const parts: string[] = [];
+  if (layer.z_clamped) parts.push(positionLabel("Z", layer.z_range.start));
+  if (layer.t_clamped) parts.push(positionLabel("T", layer.t));
+  return parts.length > 0 ? `Past this layer's extent; showing ${parts.join(" · ")}.` : null;
 }
 
 /** The colormap and contrast of an image with one channel. */
@@ -450,7 +473,7 @@ function ChannelList(props: LayerRowProps) {
       {soloChannel !== null && (
         <div className="lc-channels-solo">
           <span>{`${layer.channels[soloChannel]?.name ?? channelDisplayName(soloChannel)} is soloed.`}</span>
-          <Button size="sm" variant="ghost" onPress={props.onShowAllChannels}>
+          <Button size="sm" variant="ghost" onPress={() => props.onShowAllChannels(layer.id)}>
             Show all
           </Button>
         </div>
@@ -474,7 +497,7 @@ function ChannelRow(props: LayerRowProps & { channel: LayerChannel; channelIndex
 
   const eyeLabel = isSolo ? `Show all channels` : `${shown ? "Hide" : "Show"} ${channel.name}`;
   const onEyePress = (event: PressEvent) => {
-    if (event.altKey) props.onSoloChannel(i);
+    if (event.altKey) props.onSoloChannel(layer.id, i);
     else props.onToggleChannel(i);
   };
 
@@ -534,7 +557,7 @@ function ChannelRow(props: LayerRowProps & { channel: LayerChannel; channelIndex
           <MenuItem
             icon={HeadphonesIcon}
             shortcut={isShortcutTarget ? soloKey : undefined}
-            onAction={() => props.onSoloChannel(i)}
+            onAction={() => props.onSoloChannel(layer.id, i)}
           >
             {isSolo ? "Show all channels" : "Solo"}
           </MenuItem>

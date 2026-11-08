@@ -196,7 +196,6 @@ describe("configStore — the seed the trace driver hands the capture surface", 
       },
       selection: {
         t: 0,
-        c: 0,
         z: 0,
         visibleChannels: [0],
         renderMode: "slice",

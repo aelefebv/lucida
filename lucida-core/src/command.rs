@@ -255,9 +255,6 @@ pub enum ViewportCommand {
     SetT {
         t: u32,
     },
-    SetC {
-        c: u32,
-    },
     // Display
     SetContrast {
         min: f64,
@@ -299,9 +296,13 @@ pub enum ViewportCommand {
         dataset_id: String,
         level: Option<u32>,
     },
-    // Multi-channel
-    SetMultiChannel {
-        enabled: bool,
+    // Channels
+    /// Show one channel of a layer alone, or `channel: None` for the layer's
+    /// composite. Other layers keep theirs. A channel past the layer's last
+    /// is ignored.
+    SetChannelSolo {
+        dataset_id: String,
+        channel: Option<u32>,
     },
     SetChannelVisible {
         dataset_id: String,
@@ -381,14 +382,14 @@ impl From<ViewportCommand> for Command {
 ///
 /// `Scene::apply` snapshots only this slice before mutating and diffs it after
 /// to decide the epoch bump, so per-frame commands (`FlyTick`, the per-tick
-/// `SetViewport`/`SetZ`/`SetT`/`SetC` re-asserts) never clone the per-dataset
+/// `SetViewport`/`SetZ`/`SetT` re-asserts) never clone the per-dataset
 /// settings map, the one snapshot with real cost at scale. Classification is
 /// exhaustive, so an unclassified new variant is a compile error.
 enum ViewportScope {
     /// Mutates `Scene::camera` only. A change bumps `epochs.view`.
     Camera,
-    /// Mutates `Scene::view` (slice/timepoint/channel selectors +
-    /// multi-channel flag) only. A change bumps `epochs.selection`.
+    /// Mutates `Scene::view` (the slice and timepoint selectors) only. A
+    /// change bumps `epochs.selection`.
     ViewSelectors,
     /// Mutates `Scene::display` (global contrast/gamma) only. A change bumps
     /// `epochs.selection`.
@@ -421,9 +422,7 @@ impl ViewportCommand {
             | ViewportCommand::AdjustClipDistance { .. } => ViewportScope::Camera,
             ViewportCommand::SetZ { .. }
             | ViewportCommand::SetZRange { .. }
-            | ViewportCommand::SetT { .. }
-            | ViewportCommand::SetC { .. }
-            | ViewportCommand::SetMultiChannel { .. } => ViewportScope::ViewSelectors,
+            | ViewportCommand::SetT { .. } => ViewportScope::ViewSelectors,
             ViewportCommand::SetContrast { .. } | ViewportCommand::SetGamma { .. } => {
                 ViewportScope::Display
             }
@@ -435,6 +434,7 @@ impl ViewportCommand {
             | ViewportCommand::SetDatasetBlendMode { .. }
             | ViewportCommand::SetDatasetRenderMode { .. }
             | ViewportCommand::SetDatasetDetailLevelOverride { .. }
+            | ViewportCommand::SetChannelSolo { .. }
             | ViewportCommand::SetChannelVisible { .. }
             | ViewportCommand::SetChannelColormap { .. }
             | ViewportCommand::SetChannelName { .. }
@@ -483,8 +483,7 @@ impl ViewportCommand {
             | ViewportCommand::SetZ { .. }
             | ViewportCommand::SetZRange { .. }
             | ViewportCommand::SetT { .. }
-            | ViewportCommand::SetC { .. }
-            | ViewportCommand::SetMultiChannel { .. }
+            | ViewportCommand::SetChannelSolo { .. }
             | ViewportCommand::SetDatasetOrder { .. }
             | ViewportCommand::SetDatasetVisible { .. }
             | ViewportCommand::SetDatasetBlendMode { .. }
@@ -720,7 +719,7 @@ impl Scene {
     ///
     /// The check diffs only the slice [`ViewportCommand::scope`] declares. The
     /// no-change guard is load-bearing: the chunk-plan cache keys off these
-    /// counters each tick, and `SetViewport`/`SetZ`/`SetT`/`SetC` are
+    /// counters each tick, and `SetViewport`/`SetZ`/`SetT` are
     /// re-asserted every render tick, so an unconditional bump would force a
     /// full replan per frame.
     ///
@@ -909,9 +908,6 @@ impl Scene {
             ViewportCommand::SetT { t } => {
                 self.view.t = t;
             }
-            ViewportCommand::SetC { c } => {
-                self.view.c = c;
-            }
             ViewportCommand::SetContrast { min, max } => {
                 self.display.contrast_min = min;
                 self.display.contrast_max = max;
@@ -976,8 +972,20 @@ impl Scene {
                     s.detail_level_override = clamped;
                 }
             }
-            ViewportCommand::SetMultiChannel { enabled } => {
-                self.view.multi_channel = enabled;
+            ViewportCommand::SetChannelSolo {
+                dataset_id,
+                channel,
+            } => {
+                let ds = DatasetId(dataset_id);
+                let in_range = channel.is_none_or(|c| {
+                    self.document
+                        .manifests
+                        .get(&ds)
+                        .is_some_and(|m| c < crate::scene::LayerExtent::of(m).c)
+                });
+                if in_range && let Some(s) = self.dataset_settings.get_mut(&ds) {
+                    s.solo = channel;
+                }
             }
             ViewportCommand::SetChannelVisible {
                 dataset_id,
@@ -1707,14 +1715,18 @@ mod tests {
     }
 
     #[test]
-    fn set_multi_channel_round_trips() {
-        let cmd = ViewportCommand::SetMultiChannel { enabled: true };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("\"type\":\"set_multi_channel\""));
-        let parsed: ViewportCommand = serde_json::from_str(&json).unwrap();
-        match parsed {
-            ViewportCommand::SetMultiChannel { enabled } => assert!(enabled),
-            _ => panic!("expected SetMultiChannel"),
+    fn set_channel_solo_round_trips() {
+        for channel in [Some(2), None] {
+            let cmd = ViewportCommand::SetChannelSolo {
+                dataset_id: "ds".into(),
+                channel,
+            };
+            let json = serde_json::to_string(&cmd).unwrap();
+            assert!(json.contains("\"type\":\"set_channel_solo\""));
+            match serde_json::from_str(&json).unwrap() {
+                ViewportCommand::SetChannelSolo { channel: back, .. } => assert_eq!(back, channel),
+                _ => panic!("expected SetChannelSolo"),
+            }
         }
     }
 
@@ -1910,13 +1922,26 @@ mod tests {
     }
 
     #[test]
-    fn apply_set_multi_channel_updates_view() {
+    fn apply_set_channel_solo_updates_one_layer_and_bumps_selection() {
         let mut scene = Scene::new([800, 600]);
-        assert!(!scene.view.multi_channel);
-        scene.apply(ViewportCommand::SetMultiChannel { enabled: true }.into());
-        assert!(scene.view.multi_channel);
-        scene.apply(ViewportCommand::SetMultiChannel { enabled: false }.into());
-        assert!(!scene.view.multi_channel);
+        for id in ["a", "b"] {
+            scene.apply(
+                DocumentCommand::DatasetOpened(test_helpers::make_dataset_opened(id, id, 3)).into(),
+            );
+        }
+        let before = scene.epochs.selection;
+        let solo = |channel| ViewportCommand::SetChannelSolo {
+            dataset_id: "a".into(),
+            channel,
+        };
+        scene.apply(solo(Some(1)).into());
+        assert_eq!(scene.dataset_settings[&DatasetId("a".into())].solo, Some(1));
+        assert_eq!(scene.dataset_settings[&DatasetId("b".into())].solo, None);
+        assert_eq!(scene.epochs.selection, before + 1);
+        scene.apply(solo(Some(1)).into());
+        assert_eq!(scene.epochs.selection, before + 1);
+        scene.apply(solo(None).into());
+        assert_eq!(scene.dataset_settings[&DatasetId("a".into())].solo, None);
     }
 
     #[test]
@@ -2529,17 +2554,15 @@ mod tests {
     }
 
     #[test]
-    fn reasserting_current_z_t_c_bumps_selection_epoch_once_each() {
+    fn reasserting_current_z_t_bumps_selection_epoch_once_each() {
         let mut scene = Scene::new([800, 600]);
         scene.apply(ViewportCommand::SetZ { z: 4 }.into());
         scene.apply(ViewportCommand::SetT { t: 2 }.into());
-        scene.apply(ViewportCommand::SetC { c: 1 }.into());
-        assert_eq!(scene.epochs.selection, 3);
+        assert_eq!(scene.epochs.selection, 2);
         scene.apply(ViewportCommand::SetZ { z: 4 }.into());
         scene.apply(ViewportCommand::SetT { t: 2 }.into());
-        scene.apply(ViewportCommand::SetC { c: 1 }.into());
         assert_eq!(
-            scene.epochs.selection, 3,
+            scene.epochs.selection, 2,
             "re-asserting the current selectors must not bump"
         );
         assert_eq!(scene.epochs.view, 0);

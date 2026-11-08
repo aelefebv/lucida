@@ -44,9 +44,23 @@ pub struct ViewExtent {
     pub t_count: u32,
     /// Number of channels.
     pub c_count: u32,
+    /// The dataset in hand. Channels are shown per layer, so the channel
+    /// moves step this layer's solo and leave the others as they are; without
+    /// it they step every layer together.
+    #[serde(skip)]
+    pub dataset_id: Option<DatasetId>,
 }
 
 impl ViewExtent {
+    /// The soloed channel of the dataset in hand, or of the first soloed
+    /// layer when the extent names none.
+    pub fn solo_in(&self, view: &SavedView) -> Option<u32> {
+        match &self.dataset_id {
+            Some(id) => view.dataset_settings.get(id).and_then(|s| s.solo),
+            None => view.dataset_settings.values().find_map(|s| s.solo),
+        }
+    }
+
     /// The extent of `dataset_id` in `scene`: its whole box, every member of
     /// a collection included, and the axis counts of its first image at
     /// level 0. `None` when the scene doesn't hold the dataset or it has no
@@ -76,6 +90,7 @@ impl ViewExtent {
             z_count: z as u32,
             t_count: t as u32,
             c_count: c as u32,
+            dataset_id: Some(dataset_id.clone()),
         })
     }
 
@@ -179,8 +194,9 @@ pub enum ViewTransform {
     /// mode, but no-ops away on a single-timepoint (`t_count <= 1`) or
     /// out-of-range move.
     StepT(i32),
-    /// Step the active channel (C) by a signed offset. Available in every mode,
-    /// but no-ops away on a single-channel (`c_count <= 1`) or out-of-range move.
+    /// Step the solo by a signed offset, the composite counting as the
+    /// position before channel 0. Available in every mode, but no-ops away
+    /// on a single-channel (`c_count <= 1`) or out-of-range move.
     StepC(i32),
     /// Flip volume rendering between translucent and max-intensity projection.
     /// Arcball-only — it changes how the 3D volume is rendered.
@@ -408,12 +424,31 @@ pub fn apply(view: &SavedView, t: &ViewTransform, extent: &ViewExtent) -> Option
             if extent.c_count <= 1 {
                 return None;
             }
-            let c0 = view.view.c as i64 + *d as i64;
-            let last = extent.c_count as i64 - 1;
-            if c0 < 0 || c0 > last {
+            // The composite sits one step before the first channel, so a step
+            // forward from it solos channel 0 and a step back from channel 0
+            // returns to it.
+            let current = extent.solo_in(view).map_or(-1, i64::from);
+            let next = current + *d as i64;
+            if next < -1 || next >= extent.c_count as i64 {
                 return None;
             }
-            child.view.c = c0 as u32;
+            if let Some(id) = &extent.dataset_id
+                && !child.dataset_settings.contains_key(id)
+            {
+                return None;
+            }
+            let solo = u32::try_from(next).ok();
+            for (id, settings) in child.dataset_settings.iter_mut() {
+                if extent.dataset_id.as_ref().is_some_and(|hand| hand != id) {
+                    continue;
+                }
+                // Home's entry lists no channels; the extent counts them.
+                let count = match settings.channel_settings.len() {
+                    0 => extent.c_count,
+                    n => n as u32,
+                };
+                settings.solo = solo.filter(|&c| c < count);
+            }
         }
         ViewTransform::ToggleProjection => {
             // Nothing to toggle if no dataset has display settings yet.
@@ -606,8 +641,9 @@ pub struct ExplorationCell {
     pub z: u32,
     /// Destination timepoint index.
     pub t: u32,
-    /// Destination channel index.
-    pub c: u32,
+    /// Destination soloed channel, absent for the composite.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c: Option<u32>,
     /// The child saved view.
     pub view: SavedView,
     /// Optional deep link to this child view (filled in by a higher tier).
@@ -663,7 +699,7 @@ impl ExplorationSidecar {
                 // gets the same orientation without re-deriving it.
                 z: c.view.view.z_range.start,
                 t: c.view.view.t,
-                c: c.view.view.c,
+                c: extent.solo_in(&c.view),
                 view: c.view,
                 url: None,
                 stat: None,
@@ -753,6 +789,7 @@ mod tests {
             z_count: 40,
             t_count: 5,
             c_count: 2,
+            dataset_id: None,
         }
     }
 
@@ -766,6 +803,22 @@ mod tests {
         let mut v = SavedView::empty([1024, 768]);
         v.camera = Camera::Arcball(Arcball::new([1024, 768]));
         v
+    }
+
+    /// `v` with one layer entry soloed on `solo`, or showing its composite.
+    fn soloed(mut v: SavedView, solo: Option<u32>) -> SavedView {
+        v.dataset_settings.insert(
+            DatasetId("ds".into()),
+            DatasetDisplaySettings {
+                solo,
+                ..Default::default()
+            },
+        );
+        v
+    }
+
+    fn solo_of(v: &SavedView) -> Option<u32> {
+        v.dataset_settings[&DatasetId("ds".into())].solo
     }
 
     fn fly_view() -> SavedView {
@@ -1113,31 +1166,63 @@ mod tests {
 
     #[test]
     fn apply_stepc_forward() {
-        let mut v = slice_view();
-        v.view.c = 0;
+        let v = soloed(slice_view(), Some(0));
         let child = apply(&v, &ViewTransform::StepC(1), &extent_3d()).unwrap();
-        assert_eq!(child.view.c, 1);
+        assert_eq!(solo_of(&child), Some(1));
     }
 
     #[test]
-    fn apply_stepc_back() {
-        let mut v = slice_view();
-        v.view.c = 1;
-        let child = apply(&v, &ViewTransform::StepC(-1), &extent_3d()).unwrap();
-        assert_eq!(child.view.c, 0);
-    }
-
-    #[test]
-    fn apply_stepc_below_zero_is_none() {
-        let mut v = slice_view();
-        v.view.c = 0;
+    fn apply_stepc_from_the_composite_solos_the_first_channel() {
+        let v = soloed(slice_view(), None);
+        let child = apply(&v, &ViewTransform::StepC(1), &extent_3d()).unwrap();
+        assert_eq!(solo_of(&child), Some(0));
         assert!(apply(&v, &ViewTransform::StepC(-1), &extent_3d()).is_none());
     }
 
     #[test]
+    fn apply_stepc_steps_only_the_dataset_in_hand() {
+        let mut v = soloed(slice_view(), None);
+        v.dataset_settings.insert(
+            DatasetId("other".into()),
+            DatasetDisplaySettings {
+                solo: Some(1),
+                ..Default::default()
+            },
+        );
+        let extent = ViewExtent {
+            dataset_id: Some(DatasetId("ds".into())),
+            ..extent_3d()
+        };
+        let solo_of_other = |v: &SavedView| v.dataset_settings[&DatasetId("other".into())].solo;
+
+        // The other layer's solo is not the dataset in hand's position.
+        assert!(apply(&v, &ViewTransform::StepC(-1), &extent).is_none());
+        let child = apply(&v, &ViewTransform::StepC(1), &extent).unwrap();
+        assert_eq!(solo_of(&child), Some(0));
+        assert_eq!(solo_of_other(&child), Some(1));
+
+        let cells = ExplorationSidecar::build(&v, &extent, 0, Vec::new()).cells;
+        let step = cells.iter().find(|c| c.transform == "stepc:+1").unwrap();
+        assert_eq!(step.c, Some(0));
+    }
+
+    #[test]
+    fn apply_stepc_back() {
+        let v = soloed(slice_view(), Some(1));
+        let child = apply(&v, &ViewTransform::StepC(-1), &extent_3d()).unwrap();
+        assert_eq!(solo_of(&child), Some(0));
+    }
+
+    #[test]
+    fn apply_stepc_back_from_the_first_channel_returns_to_the_composite() {
+        let v = soloed(slice_view(), Some(0));
+        let child = apply(&v, &ViewTransform::StepC(-1), &extent_3d()).unwrap();
+        assert_eq!(solo_of(&child), None);
+    }
+
+    #[test]
     fn apply_stepc_past_last_is_none() {
-        let mut v = slice_view();
-        v.view.c = 1; // last channel (c_count = 2)
+        let v = soloed(slice_view(), Some(1)); // last channel (c_count = 2)
         assert!(apply(&v, &ViewTransform::StepC(1), &extent_3d()).is_none());
     }
 
@@ -1234,6 +1319,7 @@ mod tests {
             z_count: 40,
             t_count: 5,
             c_count: 3,
+            dataset_id: None,
         }
     }
 
@@ -1243,10 +1329,9 @@ mod tests {
         // +/-, StepT +/-, StepC +/- — but no azimuth/elevation/projection (those
         // are Arcball-only). Mid-stack/mid-t/mid-c so each dimensional step is in
         // range both ways.
-        let mut v = slice_view();
+        let mut v = soloed(slice_view(), Some(1)); // c_count = 3 -> 1 is interior
         v.view.z_range = 10..11;
         v.view.t = 2; // t_count = 5
-        v.view.c = 1; // c_count = 3 -> 1 is interior
         let kids = children(&v, &extent_rich());
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
         assert_eq!(
@@ -1266,13 +1351,14 @@ mod tests {
     fn children_arcball_3d_dataset() {
         // Arcball + 3D multichannel-timeseries, in the grouped MOVE_SET order:
         // Home, orient (azimuth +/- then elevation +/-), scale (zoom in/out),
-        // then dimensional steps (StepZ +/-, StepT +/-, StepC +/-).
-        // (ToggleProjection needs a dataset_settings entry, which a bare
-        // arcball_view lacks — see children_arcball_full_extent_has_all_enriched_cells.)
+        // render (projection), then dimensional steps (StepZ +/-, StepT +/-,
+        // StepC +/-).
         let mut v = arcball_view();
         v.view.z_range = 10..11;
         v.view.t = 2; // t_count = 5
-        v.view.c = 1; // c_count = 3 -> 1 is interior
+        // c_count = 3 -> 1 is interior. The solo needs a layer entry, which
+        // also offers the projection toggle.
+        v = soloed(v, Some(1));
         let kids = children(&v, &extent_rich());
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
         assert_eq!(
@@ -1285,6 +1371,7 @@ mod tests {
                 "elevation:-30",
                 "zoom:in",
                 "zoom:out",
+                "projection:toggle",
                 "stepz:+1",
                 "stepz:-1",
                 "stept:+1",
@@ -1320,12 +1407,14 @@ mod tests {
         // extent offers the full enriched menu: elevation, stept, stepc, and
         // projection:toggle.
         let dims = [40, 3, 340, 512, 512]; // [T, C, Z, Y, X]
-        let mut view = home_of("wds-rich", dims, [800, 600]);
+        let mut view = home_of("ds", dims, [800, 600]);
         assert!(matches!(view.camera, Camera::Arcball(_)));
-        // home_of mid-points Z but leaves t/c at 0; sit them in the interior
-        // so the reverse T/C steps are in range too.
+        // home_of mid-points Z but leaves t at 0 and the composite on; sit
+        // both in the interior so the reverse T/C steps are in range too.
         view.view.t = 20; // t_count = 40
-        view.view.c = 1; // c_count = 3
+        for settings in view.dataset_settings.values_mut() {
+            settings.solo = Some(1); // c_count = 3
+        }
         let kids = children(&view, &extent_of(dims));
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
         // Every applicable cell is offered, in the grouped MOVE_SET order:
@@ -1390,7 +1479,7 @@ mod tests {
         // A 2D Slice node never offers the Arcball-only enriched cells, even
         // with a dataset_settings entry present.
         let dims = [5, 3, 1, 512, 512]; // flat -> Slice Home, but multi-T/C
-        let view = home_of("wds-2d", dims, [800, 600]);
+        let view = home_of("ds", dims, [800, 600]);
         assert!(matches!(view.camera, Camera::Slice(_)));
         let kids = children(&view, &extent_of(dims));
         let ids: Vec<&str> = kids.iter().map(|c| c.transform.as_str()).collect();
@@ -1500,16 +1589,15 @@ mod tests {
     fn sidecar_cell_ztc_match_child_view() {
         // Each cell's z/t/c are the destination indices of its child view, so a
         // reader can orient on any surface without digging into `view.view`.
-        let mut v = arcball_view();
+        let mut v = soloed(arcball_view(), Some(1)); // c_count = 2
         v.view.z_range = 10..11;
         v.view.t = 2; // t_count = 5
-        v.view.c = 1; // c_count = 2 -> 1 is interior in one direction
         let extent = extent_3d();
         let side = ExplorationSidecar::build(&v, &extent, 0, Vec::new());
         for cell in &side.cells {
             assert_eq!(cell.z, cell.view.view.z_range.start);
             assert_eq!(cell.t, cell.view.view.t);
-            assert_eq!(cell.c, cell.view.view.c);
+            assert_eq!(cell.c, solo_of(&cell.view));
         }
         // Sanity: a StepZ cell actually moved Z off the parent's 10.
         let stepz = side
@@ -1520,7 +1608,7 @@ mod tests {
         assert_eq!(stepz.z, 11);
         // ... while leaving t/c at the parent's values.
         assert_eq!(stepz.t, 2);
-        assert_eq!(stepz.c, 1);
+        assert_eq!(stepz.c, Some(1));
     }
 
     #[test]
@@ -1537,7 +1625,7 @@ mod tests {
         for (cell, orig) in cells.iter().zip(side.cells.iter()) {
             assert_eq!(cell["z"], orig.z);
             assert_eq!(cell["t"], orig.t);
-            assert_eq!(cell["c"], orig.c);
+            assert_eq!(cell["c"], serde_json::to_value(orig.c).unwrap());
         }
     }
 
@@ -1574,6 +1662,7 @@ mod tests {
             z_count: 0,
             t_count: 0,
             c_count: 0,
+            dataset_id: None,
         };
         let v = slice_view();
         let _ = children(&v, &point);

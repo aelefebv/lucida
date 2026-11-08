@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DatasetManifest } from "../../manifestTypes.ts";
 import type { DatasetEntry, TickContext } from "../../renderLoopTypes.ts";
+import { resolvedLayersJson } from "../../resolvedLayerFixtures.ts";
 import type { CpuCache, FailedChunk, ReadyChunkDelivery } from "../fetch/index.ts";
 import type {
   ColdStateMessage,
@@ -39,9 +40,7 @@ interface MockSceneConfig {
     frustum_planes: [number, number, number, number][] | null;
   };
   t: number;
-  c: number;
   z: number;
-  multiChannel: boolean;
   datasetOrder: string[];
   allSettings: Record<string, unknown>;
 }
@@ -74,9 +73,7 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
       frustum_planes: null,
     },
     t: 0,
-    c: 0,
     z: 0,
-    multiChannel: false,
     datasetOrder: ["ds1"],
     allSettings: {
       ds1: {
@@ -100,16 +97,14 @@ function createMockScene(overrides?: Partial<MockSceneConfig>) {
     member_positions: () => JSON.stringify(config.memberPositions),
     visible_region: () => JSON.stringify(config.visibleRegion),
     t: () => config.t,
-    c: () => config.c,
     z: () => config.z,
-    multi_channel: () => config.multiChannel,
+    resolved_layers: () => resolvedLayersJson(config.datasetOrder, config.allSettings, config),
     camera_mode: () => "slice",
     dataset_order: () => JSON.stringify(config.datasetOrder),
     all_dataset_settings: () => JSON.stringify(config.allSettings),
     set_viewport: () => {},
     set_z: () => {},
     set_t: () => {},
-    set_c: () => {},
     center: () => new Float32Array([512, 512]),
     zoom: () => 1,
     member_model_matrix: () => {
@@ -274,7 +269,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
 
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     expect(markSent.mock.calls.map(c => c[0])).toEqual([chunk]);
@@ -290,7 +285,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
 
     expect(sliceChunkData).not.toHaveBeenCalled();
     expect(cpuCache.markSent).not.toHaveBeenCalled();
@@ -309,10 +304,10 @@ describe("Uploader unified delivery", () => {
     });
     const uploader = new Uploader();
 
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
     for (let i = 0; i < RESEND_GUARD_TICKS; i++) {
       uploader.handleChunkResidency("img-0", "detail", "refused", [chunk.chunkKey], ctx.cpuCache, "wrong-slice");
-      uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+      uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
     }
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
     const held = recordPointEvent.mock.calls.filter(([kind]) => kind === PointEvent.Held);
@@ -321,11 +316,11 @@ describe("Uploader unified delivery", () => {
     ]);
 
     // Held: the next ticks send nothing and ask for no further tick.
-    expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0)).toBe(false);
+    expect(uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0)).toBe(false);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateDisplay({ ctx, datasetId: "ds1", displayStateByChannel: {} });
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 1);
 
     uploader.sendColdStateSelection({
@@ -337,7 +332,7 @@ describe("Uploader unified delivery", () => {
       visibleRegion: { xyBoundsVox: [0, 0, 1, 1], zRangeVox: [1, 2], effectiveZoom: 1, sortCenterVox: null, frustumPlanes: null },
       epochs: { content: 1, layout: 1, view: 1, selection: 2, request: 1 },
     });
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
     expect(sliceChunkData).toHaveBeenCalledTimes(RESEND_GUARD_TICKS + 2);
     recordPointEvent.mockRestore();
   });
@@ -358,7 +353,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 1 * 1024 * 1024, 0);
+    const ret = uploader.deliverToWorker(ctx, 1 * 1024 * 1024, () => 0);
 
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
     expect(sliceChunkData.mock.calls[0][1][0].key).toBe(large.chunkKey);
@@ -392,7 +387,7 @@ describe("Uploader unified delivery", () => {
     const sliceChunkData = vi.fn();
     const ctx = makeCtx({ cpuCache, client: { sliceChunkData } });
 
-    new Uploader().deliverToWorker(ctx, 1000, 0);
+    new Uploader().deliverToWorker(ctx, 1000, () => 0);
 
     expect(sliceChunkData).toHaveBeenCalledTimes(2);
     expect(sliceChunkData.mock.calls.map((call) => call[1][0].key)).toEqual([
@@ -413,7 +408,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
 
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(2048);
     expect(publish.mock.calls[0][1].bytesBudget).toBe(8 * 1024 * 1024);
@@ -428,7 +423,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    uploader.deliverToWorker(ctx, 1024, 0);
+    uploader.deliverToWorker(ctx, 1024, () => 0);
 
     expect(publish.mock.calls[0][1].bytesUploaded).toBe(2048);
     expect(publish.mock.calls[0][1].budgetExhausted).toBe(true);
@@ -444,7 +439,7 @@ describe("Uploader unified delivery", () => {
 
     const uploader = new Uploader();
     const publish = captureTickStats(uploader);
-    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, 0);
+    const ret = uploader.deliverToWorker(ctx, 8 * 1024 * 1024, () => 0);
 
     // The send loop itself is unaffected by the telemetry gate.
     expect(sliceChunkData).toHaveBeenCalledTimes(1);
@@ -456,13 +451,13 @@ describe("Uploader unified delivery", () => {
   it("tracks worker member ids for lifecycle cleanup without using delivery state", () => {
     const cpuCache = makeCpuCache([makeChunkDelivery({ c: 2 })]);
     const sliceChunkData = vi.fn();
-    const scene = createMockScene({ multiChannel: true });
+    const scene = createMockScene();
     const uploader = new Uploader();
 
     uploader.deliverToWorker(
       makeCtx({ cpuCache, scene, client: { sliceChunkData } }),
       8 * 1024 * 1024,
-      0,
+      () => 0,
     );
 
     expect(sliceChunkData.mock.calls[0][0]).toBe("img-0:ch2");
@@ -513,7 +508,6 @@ describe("Uploader worker feedback", () => {
 describe("Uploader cold and hot state", () => {
   it("populates display state by channel from dataset settings", () => {
     const scene = createMockScene({
-      c: 1,
       allSettings: {
         ds1: {
           visible: true,

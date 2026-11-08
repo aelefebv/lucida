@@ -7,8 +7,9 @@ import type { SliceLayerParams } from "./renderer/workerProtocol.ts";
 import type { DatasetManifest } from "./manifestTypes.ts";
 import type { TickContext } from "./renderLoopTypes.ts";
 import { MAIN_VIEW_UPLOAD_BUDGET_BYTES } from "./pipeline/upload/constants.ts";
-import { getActiveChannels, compositeKey } from "./tickCommon.ts";
+import { compositeKey } from "./tickCommon.ts";
 import type { SceneSettings } from "./tickCommon.ts";
+import type { ResolvedLayers } from "./resolvedLayers.ts";
 import type { SceneEpochs } from "./pipeline/epochs.ts";
 import type { TickCoordinator, MemberRosterEntry, MinimapChunkCoord } from "./pipeline/tickCoordinator.ts";
 import type { Uploader } from "./pipeline/upload/uploader.ts";
@@ -56,10 +57,9 @@ export function sliceBackingScale(backingW: number, backingH: number): number {
 /** Inputs for one (dataset, channel) {@link pushMemberLayers} call. */
 export interface MemberLayerInput {
   members: MemberRosterEntry[];
-  /** memberId (or composite `id:chN` key) → entity descriptor index. */
+  /** Per-channel member key (`id:chN`) → entity descriptor index. */
   indexByMember: Map<string, number>;
-  /** Channel for multi-channel composite keys; `null` in single-channel mode. */
-  channel: number | null;
+  channel: number;
   blendMode: "alpha" | "additive" | "max";
   /** Every member's footprint, in voxels. */
   fullResWidth: number;
@@ -110,7 +110,7 @@ export function pushMemberLayers(
 
   const candidates: MemberLayerCandidate[] = [];
   for (const m of members) {
-    const memberKey = channel === null ? m.imageId : compositeKey(m.imageId, channel);
+    const memberKey = compositeKey(m.imageId, channel);
     const entityIndex = indexByMember.get(memberKey);
     if (entityIndex === undefined) continue;
     candidates.push({
@@ -265,9 +265,9 @@ export function pushLabelLayers(
 interface SlicePlanResult {
   memberRoster: Map<string, MemberRosterEntry[]>;
   settings: SceneSettings;
+  layers: ResolvedLayers;
   vpCx: number;
   vpCy: number;
-  multiChannel: boolean;
   epochs: SceneEpochs;
   /** Per-dataset memberId → entity index map. */
   entityIndexByDataset: Map<string, Map<string, number>>;
@@ -281,17 +281,11 @@ function uploadAndRenderSlice(
   ctx: TickContext,
   uploader: Uploader,
   sliceZ: number,
-  sliceT: number,
-  sliceC: number,
   planResult: SlicePlanResult,
   shouldRender: boolean = true,
 ): boolean {
   const { scene, client, canvas, datasets } = ctx;
-  const { memberRoster, settings, multiChannel, entityIndexByDataset } = planResult;
-
-  const z = sliceZ;
-  const t = sliceT;
-  const c = sliceC;
+  const { memberRoster, settings, layers: resolvedLayers, entityIndexByDataset } = planResult;
 
   const dpr = devicePixelRatio;
   const fullW = Math.round(canvas.clientWidth * dpr);
@@ -302,7 +296,11 @@ function uploadAndRenderSlice(
   const canvasW = Math.max(1, Math.round(fullW * backingScale));
   const canvasH = Math.max(1, Math.round(fullH * backingScale));
 
-  const budgetExhausted = uploader.deliverToWorker(ctx, MAIN_VIEW_UPLOAD_BUDGET_BYTES, sliceZ);
+  const budgetExhausted = uploader.deliverToWorker(
+    ctx,
+    MAIN_VIEW_UPLOAD_BUDGET_BYTES,
+    (datasetId) => resolvedLayers.get(datasetId)?.z_range.start ?? sliceZ,
+  );
 
   if (!shouldRender) return budgetExhausted;
 
@@ -317,7 +315,8 @@ function uploadAndRenderSlice(
     const ds = datasets.get(dsId);
     if (!ds) continue;
     const dsSettings = allSettings[dsId];
-    if (!dsSettings || !dsSettings.visible) continue;
+    const resolved = resolvedLayers.get(dsId);
+    if (!dsSettings || !resolved || !resolved.visible) continue;
 
     const dsShapeL = ds.manifest.images[0].multiscale.levels[0].shape; // [T, C, Z, Y, X]
     const fullResWidth = dsShapeL[Axis.X];
@@ -327,30 +326,14 @@ function uploadAndRenderSlice(
       ?? [{ imageId: dsId, position: [0, 0] as [number, number] }];
     const indexByMember = entityIndexByDataset.get(dsId) ?? new Map<string, number>();
 
-    if (multiChannel) {
-      // The member-pass budget applies per channel.
-      const activeChannels = getActiveChannels(dsSettings);
-      const channelBlend = dsSettings.channel_blend_mode as "alpha" | "additive" | "max" || "additive";
-
-      for (const ch of activeChannels) {
-        if (z >= dsShapeL[Axis.Z] || ch >= dsShapeL[Axis.C] || t >= dsShapeL[Axis.T]) continue;
-        pushMemberLayers(layers, {
-          members,
-          indexByMember,
-          channel: ch,
-          blendMode: channelBlend,
-          fullResWidth,
-          fullResHeight,
-          zoom: currentZoom,
-        });
-      }
-    } else {
-      if (z >= dsShapeL[Axis.Z] || c >= dsShapeL[Axis.C] || t >= dsShapeL[Axis.T]) continue;
+    // The member-pass budget applies per channel. A layer past the scene's z
+    // or t draws its clamped plane, which the plan already asked for.
+    for (const ch of resolved.channels) {
       pushMemberLayers(layers, {
         members,
         indexByMember,
-        channel: null,
-        blendMode: dsSettings.blend_mode as "alpha" | "additive" | "max",
+        channel: ch.channel,
+        blendMode: ch.blend_mode,
         fullResWidth,
         fullResHeight,
         zoom: currentZoom,
@@ -394,8 +377,6 @@ export function tickSlice(
   // The scene owns the selectors, as it does for the volume path, so this
   // reads them and never writes them back.
   const sliceZ = scene.z();
-  const sliceT = scene.t();
-  const sliceC = scene.c();
   const dpr = devicePixelRatio;
   const canvasW = Math.round(canvas.clientWidth * dpr);
   const canvasH = Math.round(canvas.clientHeight * dpr);
@@ -408,14 +389,14 @@ export function tickSlice(
   const planResult: SlicePlanResult = {
     memberRoster: orchResult.memberRoster,
     settings: orchResult.settings,
+    layers: orchResult.layers,
     vpCx: vpCenter[0],
     vpCy: vpCenter[1],
-    multiChannel: orchResult.multiChannel,
     epochs: orchResult.epochs,
     entityIndexByDataset: orchResult.entityIndexByDataset,
   };
 
-  const result = uploadAndRenderSlice(ctx, uploader, sliceZ, sliceT, sliceC, planResult, shouldRender);
+  const result = uploadAndRenderSlice(ctx, uploader, sliceZ, planResult, shouldRender);
   return result;
 }
 

@@ -53,31 +53,31 @@ export function scriptControls(): ScriptControls | null {
 export interface SelectorState {
   z: number;
   t: number;
-  c: number;
   dimZ: number;
   dimT: number;
-  dimC: number;
   viewMode: "2d" | "3d";
 }
 
 /**
- * Where a scrub by `count` puts the selector, or why the control would not
- * move it. The refusals are the control's own: the Z selector is disabled in
- * volume mode, an axis with one position renders no selector, and the next
+ * Where a scrub by `count` puts the z or t selector, or why the control would
+ * not move it. The refusals are the control's own: the Z selector is disabled
+ * in volume mode, an axis with one position renders no selector, and the next
  * button is disabled at the end of the axis. A refused scrub marks no input,
  * exactly as a click on a disabled button marks none.
  */
 export function scrubIndex(
   state: SelectorState,
-  axis: ScrubAxis,
+  axis: "z" | "t",
   count: number,
 ): { index: number } | { refused: string } {
-  if (!Number.isInteger(count)) return { refused: `a scrub count is a whole number, not ${count}` };
-  if (count === 0) return { refused: "a scrub by 0 moves nothing" };
+  const invalid = invalidCount(count);
+  if (invalid) return { refused: invalid };
   if (axis === "z" && state.viewMode === "3d") {
     return { refused: "the Z selector is disabled in volume mode" };
   }
-  const { current, extent } = selectorOn(state, axis);
+  const { current, extent } = axis === "z"
+    ? { current: state.z, extent: state.dimZ }
+    : { current: state.t, extent: state.dimT };
   if (extent <= 1) return { refused: `${axis} has one position, so there is no selector to move` };
   const index = Math.min(extent - 1, Math.max(0, current + count));
   if (index === current) {
@@ -87,27 +87,53 @@ export function scrubIndex(
   return { index };
 }
 
-function selectorOn(state: SelectorState, axis: ScrubAxis): { current: number; extent: number } {
-  const byAxis = {
-    z: { current: state.z, extent: state.dimZ },
-    t: { current: state.t, extent: state.dimT },
-    c: { current: state.c, extent: state.dimC },
-  };
-  return byAxis[axis];
+/**
+ * Where a `c` scrub by `count` puts a layer's solo, or why it would not move.
+ * The scrub solos the layer's channels in turn, and the composite counts as
+ * the position before channel 0: from the composite `c:1` solos channel 0, and
+ * from channel 0 `c:-1` returns to the composite (`solo: null`).
+ */
+export function scrubSolo(
+  solo: number | null,
+  channelCount: number,
+  count: number,
+): { solo: number | null } | { refused: string } {
+  const invalid = invalidCount(count);
+  if (invalid) return { refused: invalid };
+  if (channelCount <= 1) return { refused: "the layer has one channel, so there is nothing to solo" };
+  const current = solo ?? -1;
+  const next = Math.min(channelCount - 1, Math.max(-1, current + count));
+  if (next === current) {
+    const at = current === -1 ? "the composite" : `its last channel (index ${current} of ${channelCount})`;
+    return { refused: `c is already at ${at}` };
+  }
+  return { solo: next === -1 ? null : next };
+}
+
+function invalidCount(count: number): string | null {
+  if (!Number.isInteger(count)) return `a scrub count is a whole number, not ${count}`;
+  if (count === 0) return "a scrub by 0 moves nothing";
+  return null;
 }
 
 /**
  * The part of a view a scripted step is judged by: the camera less its
- * viewport, the selectors, and whether each dataset, channel, and label is
- * shown. Contrast is left out because auto-contrast refits it as data
- * arrives, which would make a hold look like a change of view. The driver
+ * viewport, the selectors, whether each dataset, channel, and label is
+ * shown, and each layer's solo. Contrast is left out because auto-contrast
+ * refits it as data arrives, which would make a hold look like a change of
+ * view. The driver
  * reads this before and after each step and compares the two; the rule
  * lives here so the page, not the driver, says what counts as the view.
  */
 export interface ViewSignature {
   camera: Record<string, unknown> | null;
   view: ViewState | null;
-  visibility: Record<DatasetId, { visible: boolean; channels: boolean[] | null; labels: boolean[] | null }>;
+  visibility: Record<DatasetId, {
+    visible: boolean;
+    channels: boolean[] | null;
+    solo: number | null;
+    labels: boolean[] | null;
+  }>;
 }
 
 export function viewSignature(view: SavedView | null): ViewSignature | null {
@@ -119,6 +145,7 @@ export function viewSignature(view: SavedView | null): ViewSignature | null {
     visibility[id] = {
       visible: settings.visible,
       channels: settings.channel_settings?.map((channel) => channel.visible) ?? null,
+      solo: settings.solo ?? null,
       labels: settings.label_settings?.map((label) => label.visible) ?? null,
     };
   }

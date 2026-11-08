@@ -88,7 +88,6 @@ export function createSyntheticSnapshot(
     },
     selection: {
       t: 0,
-      c: 0,
       z: 0,
       visibleChannels: [0],
       renderMode: "slice",

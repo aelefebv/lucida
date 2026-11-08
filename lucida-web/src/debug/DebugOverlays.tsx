@@ -63,6 +63,7 @@ import {
   type Projector,
   type Vec3,
 } from "./volumeWireframe.ts";
+import { readResolvedLayers, shownChannels } from "../resolvedLayers.ts";
 import "./DebugOverlays.css";
 
 interface Props {
@@ -834,8 +835,7 @@ export function DebugOverlays({
 
       if (showGrid && plans && cpuCache) {
         const out: ChunkCell[] = [];
-        const t = ws.t();
-        const c = ws.c();
+        const resolvedLayers = readResolvedLayers(ws);
         const planningConfig = configStore.get();
         const snap = cpuCache.snapshot();
         // Rank lookup for "planned" color gradient. Built once per
@@ -852,6 +852,11 @@ export function DebugOverlays({
           if (out.length >= MAX_CHUNK_RECTS) break;
           const ds = datasets.get(dsId);
           if (!ds) continue;
+          // A group proxy is fetched for the layer's first shown channel at
+          // its own timepoint.
+          const layer = resolvedLayers.get(dsId);
+          const t = layer?.t ?? ws.t();
+          const c = shownChannels(layer)[0];
           let positions: Record<string, [number, number]> = {};
           try {
             positions = JSON.parse(ws.member_positions(dsId));

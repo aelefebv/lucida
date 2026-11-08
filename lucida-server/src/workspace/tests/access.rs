@@ -300,7 +300,10 @@ async fn last_view_rest_round_trips_and_preserves_default() {
         .await
         .unwrap();
     let body = response_json(res).await;
-    assert_eq!(body["last_view"]["v"], 1);
+    assert_eq!(
+        body["last_view"]["v"],
+        lucida_core::saved_view::SAVED_VIEW_VERSION
+    );
 
     // Invariant at the wire layer: the shared default is untouched.
     let record = store.get_workspace(&workspace.id).await.unwrap().unwrap();

@@ -20,7 +20,6 @@ import {
   type FetchSource,
   type FetchSourceWire,
 } from "./manifestTypes.ts";
-import type { ViewportCommand } from "./commands.ts";
 import { DecodePool, ProxiedContentSource, CpuCache } from "./pipeline/fetch/index.ts";
 import { readCacheKnobs, subscribeCacheKnobs } from "./pipeline/fetch/cacheKnobs.ts";
 import { pageDeviceBudgets } from "./deviceBudget.ts";
@@ -859,25 +858,6 @@ export class SessionController {
     this.deps.initLayerMaps(datasetId);
     const t3 = performance.now();
 
-    // Ensure per-channel settings exist for all channels.
-    // DatasetOpened may only create 1 channel setting (layers.len() = 1),
-    // but the real channel count is in the data shape.
-    if (channelCount > 1) {
-      const scene = this.deps.getScene();
-      if (scene) {
-        // Touch the last channel to grow the vec via ensure_channel
-        const cmd: ViewportCommand = {
-          type: "set_channel_visible",
-          dataset_id: datasetId,
-          channel: channelCount - 1,
-          visible: true,
-        };
-        guardedSceneCall("apply_command", scene, () => scene.apply_command(JSON.stringify(cmd)));
-        invalidateDisplaySettings(this.deps.getLoop(), "channel_settings_grown");
-      }
-    }
-    const t4 = performance.now();
-
     const loop = this.deps.getLoop();
     if (loop) {
       loop.addDataset(datasetId, manifest);
@@ -901,8 +881,7 @@ export class SessionController {
         registerImages: +(t1 - t0).toFixed(2),
         datasetsRefSet: +(t2 - t1).toFixed(2),
         initLayerMaps: +(t3 - t2).toFixed(2),
-        setChannelVisible: +(t4 - t3).toFixed(2),
-        addDataset: +(t5 - t4).toFixed(2),
+        addDataset: +(t5 - t3).toFixed(2),
       },
     });
   }

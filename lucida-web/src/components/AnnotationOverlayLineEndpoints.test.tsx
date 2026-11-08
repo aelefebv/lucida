@@ -69,7 +69,7 @@ function renderOverlay(opts: { pins: Annotation[]; myId?: string }) {
       wasmSceneRef={sceneRef}
       canvas={canvas}
       version={0}
-      viewContext={{ z: 3, t: 0, c: 0 }}
+      viewContext={{ z: 3, t: 0, channels: [0] }}
       myId={opts.myId ?? MY_ID}
       sendCommand={(json) => sent.push(JSON.parse(json) as Record<string, unknown>)}
       onDocumentChanged={() => {

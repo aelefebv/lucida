@@ -34,7 +34,6 @@ function makeColdMsg(
     datasetId: "ds1",
     currentT: 0,
     currentZ: 0,
-    multiChannel: visibleChannels.length > 1,
     visibleChannels,
     visibleRegion: {
       xyBoundsVox: [0, 0, 1, 1],
@@ -75,15 +74,15 @@ describe("buildViewHotState", () => {
     // 2 members → 2 entries, each with the same rayHit.
     expect(msg.rayHitsByEntity).toHaveLength(2);
     const memberIds = msg.rayHitsByEntity.map(([id]) => id);
-    expect(memberIds).toEqual(["img-a", "img-b"]);
+    expect(memberIds).toEqual(["img-a:ch0", "img-b:ch0"]);
     for (const [, hit] of msg.rayHitsByEntity) {
       expect(hit).toEqual([10, 20, 30]);
     }
   });
 
   it("dedupes when two entries produce the same memberId", () => {
-    // Two entries share imageId "dup", so both yield memberId "dup" in
-    // single-channel mode. Only the first one emits.
+    // Two entries share imageId "dup", so both yield memberId "dup:ch0".
+    // Only the first one emits.
     const cold = makeColdMsg(
       [0],
       [
@@ -102,7 +101,7 @@ describe("buildViewHotState", () => {
 
     // 2 unique memberIds → 2 entries (the second "dup" is deduped).
     expect(msg.rayHitsByEntity).toHaveLength(2);
-    expect(msg.rayHitsByEntity.map(([id]) => id)).toEqual(["dup", "img-c"]);
+    expect(msg.rayHitsByEntity.map(([id]) => id)).toEqual(["dup:ch0", "img-c:ch0"]);
   });
 
   it("empty cold msg → empty rayHitsByEntity", () => {
