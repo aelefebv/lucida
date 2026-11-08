@@ -1,4 +1,4 @@
-// 2D slice viewer shader — GPU-side u16→u8 normalization
+// 2D slice viewer shader — GPU-side windowing of sample values
 
 // Matches DESCRIPTOR_MAX_LEVEL_SOURCES in descriptor/layout.ts: one level pool binding per slot.
 const MAX_LEVEL_SOURCES: u32 = 4u;
@@ -38,7 +38,7 @@ struct EntityDescriptor {
   tileProxySlotIndex: u32,
   groupProxyPoolIndex: u32,
   groupProxySlotIndex: u32,
-  _pad_proxy0: u32,
+  sampleFormat: u32,
   _pad_proxy1: u32,
   _pad_proxy2: u32,
   tileProxyDims: vec3<u32>,
@@ -234,6 +234,25 @@ fn sampleCoarse2D(source: ChunkTierSource, uv: vec2f) -> u32 {
   return textureLoad(coarseTex, atlasCoord2D(slot, slotDims.x, cell), 0).r;
 }
 
+// `EntityDescriptor.sampleFormat`: the texel is the sample's float32 bits,
+// not the integer itself. Matches `sampleFormatCode` in dataTypeUtil.ts.
+const SAMPLE_F32: u32 = 1u;
+
+// A float texel holding NaN: no value, so it draws nothing. Decoding rewrites
+// every NaN to one pattern, so none is the MISS sentinel.
+fn texelIsNaN(texel: u32, format: u32) -> bool {
+  return format == SAMPLE_F32 && (texel & 0x7FFFFFFFu) > 0x7F800000u;
+}
+
+// The value a resident texel holds, in the data's own units, which is what
+// the contrast window is in.
+fn texelValue(texel: u32, format: u32) -> f32 {
+  if (format == SAMPLE_F32) {
+    return bitcast<f32>(texel);
+  }
+  return f32(texel);
+}
+
 // Integer avalanche (MurmurHash3 finalizer). Native u32 wrap matches the
 // `Math.imul`/`>>> 0` port in labelColors.ts.
 fn labelFmix32(value: u32) -> u32 {
@@ -383,10 +402,11 @@ fn fs(input: VSOut) -> @location(0) vec4f {
     return vec4f(labelRgba.rgb * labelOp, labelOp);
   }
 
-  if (chunkVal == MISS) {
+  if (chunkVal == MISS || texelIsNaN(chunkVal, entity.sampleFormat)) {
     return vec4f(0.0, 0.0, 0.0, 0.0);
   }
-  let normalized = pow(clamp((f32(chunkVal) - intensityMin) / range, 0.0, 1.0), gamma);
+  let value = texelValue(chunkVal, entity.sampleFormat);
+  let normalized = pow(clamp((value - intensityMin) / range, 0.0, 1.0), gamma);
   let color = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;
   return vec4f(color * layerOpacity, layerOpacity);
 }
@@ -461,12 +481,12 @@ fn fsAggregate(input: AggregateVSOut) -> @location(0) vec4f {
   }
 
   let chunkVal = sampleEntityValue(input.entityIdx, input.uv);
-  if (chunkVal == MISS) {
+  if (chunkVal == MISS || texelIsNaN(chunkVal, entity.sampleFormat)) {
     return vec4f(0.0, 0.0, 0.0, 0.0);
   }
   let range = entity.contrastMax - entity.contrastMin;
   let normalized = pow(
-    clamp((f32(chunkVal) - entity.contrastMin) / range, 0.0, 1.0),
+    clamp((texelValue(chunkVal, entity.sampleFormat) - entity.contrastMin) / range, 0.0, 1.0),
     entity.gamma,
   );
   let color = textureSampleLevel(lutTex, lutSampler, vec2f(normalized, 0.5), 0.0).rgb;

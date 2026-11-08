@@ -120,6 +120,7 @@ fn store_error_kind(
 ) -> (DatasetOpenFailureKind, bool) {
     match error {
         StoreError::Denied(_) => (DatasetOpenFailureKind::SourceNotAllowed, false),
+        StoreError::UnsupportedDataType(_) => (DatasetOpenFailureKind::UnsupportedDataType, false),
         StoreError::LocalPath(_) => (DatasetOpenFailureKind::LocalPath, false),
         StoreError::BackendConfiguration(_) => (DatasetOpenFailureKind::CloudConfiguration, false),
         StoreError::Metadata { fault, .. } => (
@@ -254,6 +255,23 @@ mod tests {
                 "{error}"
             );
             assert_eq!(diagnostic.stage, DatasetOpenStage::MetadataImport);
+            assert!(!diagnostic.retryable);
+        }
+    }
+
+    /// A refused data type is named and triaged as such, even when its name
+    /// holds a word another rule matches on.
+    #[test]
+    fn a_refused_data_type_is_an_unsupported_data_type() {
+        for name in ["complex64", "int64", "r16-chunked"] {
+            let error = lucida_store::backend::StoreError::UnsupportedDataType(name.to_string());
+            let diagnostic = import_failure(&error);
+            assert_eq!(
+                diagnostic.kind,
+                DatasetOpenFailureKind::UnsupportedDataType,
+                "{error}"
+            );
+            assert!(diagnostic.message.contains(name), "{}", diagnostic.message);
             assert!(!diagnostic.retryable);
         }
     }

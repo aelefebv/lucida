@@ -1399,21 +1399,17 @@ fn parse_data_type(s: &str) -> Result<DataType, StoreError> {
         "uint8" => Ok(DataType::Uint8),
         "uint16" => Ok(DataType::Uint16),
         "uint32" => Ok(DataType::Uint32),
+        "int8" => Ok(DataType::Int8),
+        "int16" => Ok(DataType::Int16),
+        "int32" => Ok(DataType::Int32),
         "float32" => Ok(DataType::Float32),
         "float64" => Ok(DataType::Float64),
-        other => Err(StoreError::malformed_metadata(format!(
-            "unsupported data type: {other}"
-        ))),
+        other => Err(StoreError::UnsupportedDataType(other.to_string())),
     }
 }
 
 fn data_type_size(dt: DataType) -> u8 {
-    match dt {
-        DataType::Uint8 => 1,
-        DataType::Uint16 => 2,
-        DataType::Uint32 | DataType::Float32 => 4,
-        DataType::Float64 => 8,
-    }
+    dt.size_bytes() as u8
 }
 
 /// Build per-level [`LevelBindingInfo`] for one image or collection tile.
@@ -2725,7 +2721,9 @@ mod tests {
 
     #[test]
     fn unsupported_data_type() {
-        assert!(parse_data_type("complex128").is_err());
+        let err = parse_data_type("complex128").unwrap_err();
+        assert!(matches!(&err, StoreError::UnsupportedDataType(name) if name == "complex128"));
+        assert_eq!(err.to_string(), "unsupported data type: complex128");
     }
 
     #[test]
@@ -2733,6 +2731,9 @@ mod tests {
         assert_eq!(parse_data_type("uint8").unwrap(), DataType::Uint8);
         assert_eq!(parse_data_type("uint16").unwrap(), DataType::Uint16);
         assert_eq!(parse_data_type("uint32").unwrap(), DataType::Uint32);
+        assert_eq!(parse_data_type("int8").unwrap(), DataType::Int8);
+        assert_eq!(parse_data_type("int16").unwrap(), DataType::Int16);
+        assert_eq!(parse_data_type("int32").unwrap(), DataType::Int32);
         assert_eq!(parse_data_type("float32").unwrap(), DataType::Float32);
         assert_eq!(parse_data_type("float64").unwrap(), DataType::Float64);
     }

@@ -31,7 +31,7 @@ pub const GENERATED_COARSE_GENERATOR_VERSION: &str = "generated-coarse-v2";
 const DEFAULT_TARGET_LONG_AXIS: u64 = 512;
 const DEFAULT_CHUNK_LONG_AXIS: u64 = 256;
 const DEFAULT_MAX_CHUNK_BYTES: u64 = 2 * 1024 * 1024;
-const DOWNSAMPLE_ALGORITHM_VERSION: &str = "max-pool-v1";
+const DOWNSAMPLE_ALGORITHM_VERSION: &str = "max-pool-v2";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GeneratedCoarseConfig {
@@ -2077,8 +2077,9 @@ async fn generate_chunk_from_source_level(
         resolver,
     )
     .await?;
-    let chunk = downsample_region_to_generated_chunk(
+    downsample_region_to_generated_chunk(
         &source_data,
+        image.multiscale.data_type,
         source_region,
         region_dims,
         source_dims,
@@ -2086,9 +2087,7 @@ async fn generate_chunk_from_source_level(
         level,
         coords,
     )
-    .map_err(GeneratedChunkBuildError::Downsample)?;
-
-    Ok(encode_generated_chunk_values(&chunk, plan.output_data_type))
+    .map_err(GeneratedChunkBuildError::Downsample)
 }
 
 fn spatial_dims_u32(shape: [u64; 5]) -> Result<[u32; 3], &'static str> {
@@ -2177,25 +2176,97 @@ fn source_region_for_output_chunk(
     })
 }
 
+/// One sample type a generated level pools in, read and written as its
+/// little-endian bytes, so a generated chunk holds the source's own values.
+trait PoolSample: Copy {
+    const SIZE: usize = std::mem::size_of::<Self>();
+    fn read(bytes: &[u8]) -> Self;
+    fn write(self, out: &mut [u8]);
+    /// The larger sample. A float NaN loses to any number, so a generated
+    /// sample is NaN only when every source sample under it is.
+    fn pool_max(self, other: Self) -> Self;
+}
+
+macro_rules! pool_sample {
+    ($($t:ty),* $(,)?) => {$(
+        impl PoolSample for $t {
+            fn read(bytes: &[u8]) -> Self {
+                let mut le = [0_u8; std::mem::size_of::<$t>()];
+                le.copy_from_slice(bytes);
+                <$t>::from_le_bytes(le)
+            }
+            fn write(self, out: &mut [u8]) {
+                out.copy_from_slice(&self.to_le_bytes());
+            }
+            fn pool_max(self, other: Self) -> Self {
+                <$t>::max(self, other)
+            }
+        }
+    )*};
+}
+
+pool_sample!(u8, u16, u32, i8, i16, i32, f32, f64);
+
+/// Max-pool one generated chunk from a source region of `data_type`
+/// samples (little-endian bytes, as `fetch_volume_region` returns them) into
+/// that chunk's bytes, in the same type.
+#[allow(clippy::too_many_arguments)]
 fn downsample_region_to_generated_chunk(
-    source: &[u16],
+    source: &[u8],
+    data_type: DataType,
     source_region: VolumeRegion,
     region_dims: [u32; 3],
     source_dims: [u32; 3],
     output_dims: [u32; 3],
     level: &LevelGeometry,
     coords: GeneratedChunkCoords,
-) -> Result<Vec<u16>, String> {
+) -> Result<Vec<u8>, String> {
+    macro_rules! pool_as {
+        ($t:ty) => {
+            max_pool_region::<$t>(
+                source,
+                source_region,
+                region_dims,
+                source_dims,
+                output_dims,
+                level,
+                coords,
+            )
+        };
+    }
+    match data_type {
+        DataType::Uint8 => pool_as!(u8),
+        DataType::Uint16 => pool_as!(u16),
+        DataType::Uint32 => pool_as!(u32),
+        DataType::Int8 => pool_as!(i8),
+        DataType::Int16 => pool_as!(i16),
+        DataType::Int32 => pool_as!(i32),
+        DataType::Float32 => pool_as!(f32),
+        DataType::Float64 => pool_as!(f64),
+    }
+}
+
+fn max_pool_region<T: PoolSample>(
+    source: &[u8],
+    source_region: VolumeRegion,
+    region_dims: [u32; 3],
+    source_dims: [u32; 3],
+    output_dims: [u32; 3],
+    level: &LevelGeometry,
+    coords: GeneratedChunkCoords,
+) -> Result<Vec<u8>, String> {
     let expected = (region_dims[0] as usize)
         .checked_mul(region_dims[1] as usize)
         .and_then(|v| v.checked_mul(region_dims[2] as usize))
         .ok_or_else(|| "source generated coarse region is too large".to_string())?;
-    if source.len() != expected {
+    if source.len() != expected * T::SIZE {
         return Err(format!(
-            "source generated coarse region has {} voxels, expected {expected}",
-            source.len()
+            "source generated coarse region has {} bytes, expected {expected} samples of {} bytes",
+            source.len(),
+            T::SIZE
         ));
     }
+    let sample = |index: usize| T::read(&source[index * T::SIZE..(index + 1) * T::SIZE]);
 
     let bounds = output_chunk_bounds(output_dims, level, coords)?;
     let chunk_z = level.chunk_shape[2].max(1);
@@ -2205,7 +2276,7 @@ fn downsample_region_to_generated_chunk(
         .checked_mul(chunk_y as usize)
         .and_then(|v| v.checked_mul(chunk_x as usize))
         .ok_or_else(|| "generated coarse chunk is too large".to_string())?;
-    let mut chunk = vec![0_u16; chunk_voxels];
+    let mut chunk = vec![0_u8; chunk_voxels * T::SIZE];
 
     let [in_z, in_y, in_x] = source_dims;
     let [out_z, out_y, out_x] = output_dims;
@@ -2220,7 +2291,7 @@ fn downsample_region_to_generated_chunk(
             let (src_y0, src_y1) = scale_range(oy, out_y, in_y);
             for ox in bounds.x0..bounds.x1 {
                 let (src_x0, src_x1) = scale_range(ox, out_x, in_x);
-                let mut value = 0_u16;
+                let mut value: Option<T> = None;
                 for iz in src_z0..src_z1 {
                     let local_z = (iz as u64)
                         .checked_sub(source_region.z0)
@@ -2235,14 +2306,18 @@ fn downsample_region_to_generated_chunk(
                             let local_x = (ix as u64)
                                 .checked_sub(source_region.x0)
                                 .ok_or_else(|| "generated coarse source x underflow".to_string())?;
-                            value = value.max(source[base + local_x as usize]);
+                            let s = sample(base + local_x as usize);
+                            value = Some(value.map_or(s, |v| v.pool_max(s)));
                         }
                     }
                 }
                 let dst = ((oz - bounds.z0) as usize) * chunk_stride_z
                     + ((oy - bounds.y0) as usize) * chunk_stride_y
                     + (ox - bounds.x0) as usize;
-                chunk[dst] = value;
+                // `scale_range` never yields an empty window.
+                if let Some(value) = value {
+                    value.write(&mut chunk[dst * T::SIZE..(dst + 1) * T::SIZE]);
+                }
             }
         }
     }
@@ -2366,7 +2441,8 @@ fn generated_status_for_source_error(error: &BuildSourceError) -> GeneratedChunk
         | BuildSourceError::UnknownImage(_)
         | BuildSourceError::Decode { .. }
         | BuildSourceError::ShortChunk { .. }
-        | BuildSourceError::TooLarge => GeneratedChunkStatus::FailedPermanent,
+        | BuildSourceError::TooLarge
+        | BuildSourceError::UnsupportedDataType { .. } => GeneratedChunkStatus::FailedPermanent,
     }
 }
 
@@ -2662,68 +2738,7 @@ fn checked_product(values: &[u64]) -> Option<u64> {
 }
 
 fn data_type_size(data_type: DataType) -> u64 {
-    match data_type {
-        DataType::Uint8 => 1,
-        DataType::Uint16 => 2,
-        DataType::Uint32 | DataType::Float32 => 4,
-        DataType::Float64 => 8,
-    }
-}
-
-#[cfg(test)]
-fn downsample_u16_max(
-    input: &[u16],
-    input_dims: [u32; 3],
-    output_dims: [u32; 3],
-) -> Result<Vec<u16>, String> {
-    let [in_z, in_y, in_x] = input_dims;
-    let [out_z, out_y, out_x] = output_dims;
-    let expected = (in_z as usize)
-        .checked_mul(in_y as usize)
-        .and_then(|v| v.checked_mul(in_x as usize))
-        .ok_or_else(|| "source generated coarse volume is too large".to_string())?;
-    if input.len() != expected {
-        return Err(format!(
-            "source generated coarse volume has {} voxels, expected {expected}",
-            input.len()
-        ));
-    }
-    if input_dims == output_dims {
-        return Ok(input.to_vec());
-    }
-
-    let output_len = (out_z as usize)
-        .checked_mul(out_y as usize)
-        .and_then(|v| v.checked_mul(out_x as usize))
-        .ok_or_else(|| "output generated coarse volume is too large".to_string())?;
-    let mut output = vec![0_u16; output_len];
-    let out_stride_y = out_x as usize;
-    let out_stride_z = (out_y as usize) * out_stride_y;
-    let in_stride_y = in_x as usize;
-    let in_stride_z = (in_y as usize) * in_stride_y;
-
-    for oz in 0..out_z {
-        let (z0, z1) = scale_range(oz, out_z, in_z);
-        for oy in 0..out_y {
-            let (y0, y1) = scale_range(oy, out_y, in_y);
-            for ox in 0..out_x {
-                let (x0, x1) = scale_range(ox, out_x, in_x);
-                let mut value = 0_u16;
-                for iz in z0..z1 {
-                    for iy in y0..y1 {
-                        let base = (iz as usize) * in_stride_z + (iy as usize) * in_stride_y;
-                        for ix in x0..x1 {
-                            value = value.max(input[base + ix as usize]);
-                        }
-                    }
-                }
-                let out_idx =
-                    (oz as usize) * out_stride_z + (oy as usize) * out_stride_y + ox as usize;
-                output[out_idx] = value;
-            }
-        }
-    }
-    Ok(output)
+    data_type.size_bytes() as u64
 }
 
 fn scale_range(out_index: u32, out_len: u32, in_len: u32) -> (u32, u32) {
@@ -2731,70 +2746,6 @@ fn scale_range(out_index: u32, out_len: u32, in_len: u32) -> (u32, u32) {
     let end = (((out_index as u64 + 1) * (in_len as u64)).div_ceil(out_len as u64)) as u32;
     let end = end.max(start + 1).min(in_len);
     (start.min(in_len.saturating_sub(1)), end)
-}
-
-#[cfg(test)]
-fn encode_generated_chunk_bytes(
-    output: &[u16],
-    level: &LevelGeometry,
-    gz: u64,
-    gy: u64,
-    gx: u64,
-    output_data_type: DataType,
-) -> Vec<u8> {
-    let chunk_z = level.chunk_shape[2];
-    let chunk_y = level.chunk_shape[3];
-    let chunk_x = level.chunk_shape[4];
-    let level_z = level.shape[2];
-    let level_y = level.shape[3];
-    let level_x = level.shape[4];
-    let chunk_voxels = (chunk_z as usize) * (chunk_y as usize) * (chunk_x as usize);
-    let mut chunk = vec![0_u16; chunk_voxels];
-    let out_stride_y = level_x as usize;
-    let out_stride_z = (level_y as usize) * out_stride_y;
-    let chunk_stride_y = chunk_x as usize;
-    let chunk_stride_z = (chunk_y as usize) * chunk_stride_y;
-    let z0 = gz * chunk_z;
-    let y0 = gy * chunk_y;
-    let x0 = gx * chunk_x;
-    let z_end = (z0 + chunk_z).min(level_z);
-    let y_end = (y0 + chunk_y).min(level_y);
-    let x_end = (x0 + chunk_x).min(level_x);
-
-    for z in z0..z_end {
-        for y in y0..y_end {
-            let src_base = (z as usize) * out_stride_z + (y as usize) * out_stride_y;
-            let dst_base =
-                ((z - z0) as usize) * chunk_stride_z + ((y - y0) as usize) * chunk_stride_y;
-            for x in x0..x_end {
-                chunk[dst_base + (x - x0) as usize] = output[src_base + x as usize];
-            }
-        }
-    }
-
-    encode_generated_chunk_values(&chunk, output_data_type)
-}
-
-fn encode_generated_chunk_values(chunk: &[u16], output_data_type: DataType) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(chunk.len() * data_type_size(output_data_type) as usize);
-    for value in chunk {
-        encode_u16_as_data_type(*value, output_data_type, &mut bytes);
-    }
-    bytes
-}
-
-fn encode_u16_as_data_type(value: u16, data_type: DataType, out: &mut Vec<u8>) {
-    match data_type {
-        DataType::Uint8 => out.push(value.min(u8::MAX as u16) as u8),
-        DataType::Uint16 => out.extend_from_slice(&value.to_le_bytes()),
-        DataType::Uint32 => out.extend_from_slice(&(value as u32).to_le_bytes()),
-        DataType::Float32 => {
-            out.extend_from_slice(&((value as f32) / (u16::MAX as f32)).to_le_bytes())
-        }
-        DataType::Float64 => {
-            out.extend_from_slice(&((value as f64) / (u16::MAX as f64)).to_le_bytes())
-        }
-    }
 }
 
 fn hex32(bytes: &[u8; 32]) -> String {
@@ -3204,17 +3155,60 @@ mod tests {
         assert_eq!(key.config_id, plan.config.config_id());
     }
 
+    /// Pools a whole `in_dims` source into one generated chunk of `out_dims`.
+    fn pool_whole(
+        source: &[u8],
+        data_type: DataType,
+        in_dims: [u32; 3],
+        out_dims: [u32; 3],
+    ) -> Vec<u8> {
+        let shape = [
+            1,
+            1,
+            out_dims[0] as u64,
+            out_dims[1] as u64,
+            out_dims[2] as u64,
+        ];
+        let level = LevelGeometry {
+            level_index: 1,
+            shape,
+            chunk_shape: shape,
+            grid_shape: [1; 5],
+            scale: [1.0; 5],
+        };
+        let coords = GeneratedChunkCoords {
+            level_index: 1,
+            t: 0,
+            c: 0,
+            z: 0,
+            y: 0,
+            x: 0,
+        };
+        let region =
+            source_region_for_output_chunk(in_dims, out_dims, &level, coords).expect("region");
+        downsample_region_to_generated_chunk(
+            source, data_type, region, in_dims, in_dims, out_dims, &level, coords,
+        )
+        .expect("pooled")
+    }
+
     #[test]
     fn max_downsample_preserves_sparse_source_pixels() {
-        let input: Vec<u16> = (0..16).collect();
+        let input: Vec<u8> = (0_u16..16).flat_map(u16::to_le_bytes).collect();
 
-        let output = downsample_u16_max(&input, [1, 4, 4], [1, 2, 2]).unwrap();
+        let bytes = pool_whole(&input, DataType::Uint16, [1, 4, 4], [1, 2, 2]);
+        let output: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| u16::from_le_bytes(*b))
+            .collect();
 
         assert_eq!(output, vec![5, 7, 13, 15]);
     }
 
     #[test]
-    fn generated_chunk_encoding_pads_edge_chunks_to_nominal_shape() {
+    fn generated_chunk_pads_edge_chunks_to_nominal_shape() {
         let level = LevelGeometry {
             level_index: 1,
             shape: [1, 1, 1, 3, 3],
@@ -3222,45 +3216,92 @@ mod tests {
             grid_shape: [1, 1, 1, 2, 2],
             scale: [1.0; 5],
         };
-        let output: Vec<u16> = (1..=9).collect();
+        let coords = GeneratedChunkCoords {
+            level_index: 1,
+            t: 0,
+            c: 0,
+            z: 0,
+            y: 1,
+            x: 1,
+        };
+        let input: Vec<u8> = (1_u16..=9).flat_map(u16::to_le_bytes).collect();
+        let region =
+            source_region_for_output_chunk([1, 3, 3], [1, 3, 3], &level, coords).expect("region");
+        let source = &input[16..18];
 
-        let bytes = encode_generated_chunk_bytes(&output, &level, 0, 1, 1, DataType::Uint16);
+        let bytes = downsample_region_to_generated_chunk(
+            source,
+            DataType::Uint16,
+            region,
+            [1, 1, 1],
+            [1, 3, 3],
+            [1, 3, 3],
+            &level,
+            coords,
+        )
+        .expect("pooled");
         let values: Vec<u16> = bytes
             .as_chunks::<2>()
             .0
             .iter()
-            .copied()
-            .map(u16::from_le_bytes)
+            .map(|b| u16::from_le_bytes(*b))
             .collect();
 
         assert_eq!(values, vec![9, 0, 0, 0]);
     }
 
+    /// Generated samples are source samples: negative and out-of-[0, 1]
+    /// floats keep their values, an all-negative cell stays negative, and NaN
+    /// shows only where every source sample is NaN.
     #[test]
-    fn generated_chunk_encoding_preserves_float32_wire_format() {
-        let level = LevelGeometry {
-            level_index: 1,
-            shape: [1, 1, 1, 2, 2],
-            chunk_shape: [1, 1, 1, 2, 2],
-            grid_shape: [1, 1, 1, 1, 1],
-            scale: [1.0; 5],
-        };
-        let output = vec![0, 32768, 65535, 16384];
+    fn generated_float32_chunk_keeps_source_values() {
+        let nan = f32::NAN;
+        #[rustfmt::skip]
+        let input: [f32; 16] = [
+            -7.0, -3.0,   500.25, 2.0,
+            -9.0, -1.5,   -5.0,   1.0,
+            nan,  4.0,    nan,    nan,
+            nan,  nan,    nan,    nan,
+        ];
+        let bytes: Vec<u8> = input.iter().flat_map(|v| v.to_le_bytes()).collect();
 
-        let bytes = encode_generated_chunk_bytes(&output, &level, 0, 0, 0, DataType::Float32);
-        let values: Vec<f32> = bytes
+        let pooled = pool_whole(&bytes, DataType::Float32, [1, 4, 4], [1, 2, 2]);
+        let output: Vec<f32> = pooled
             .as_chunks::<4>()
             .0
             .iter()
-            .copied()
-            .map(f32::from_le_bytes)
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
 
-        assert_eq!(bytes.len(), 16);
-        assert_eq!(values[0], 0.0);
-        assert!((values[1] - 0.5).abs() < 0.00002);
-        assert_eq!(values[2], 1.0);
-        assert!((values[3] - 0.25).abs() < 0.00002);
+        assert_eq!(&output[..3], &[-1.5, 500.25, 4.0]);
+        assert!(output[3].is_nan());
+    }
+
+    #[test]
+    fn generated_signed_and_wide_chunks_keep_source_values() {
+        let int16: Vec<u8> = [-32768_i16, -2, -30000, -1]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let pooled = pool_whole(&int16, DataType::Int16, [1, 2, 2], [1, 1, 1]);
+        assert_eq!(i16::from_le_bytes([pooled[0], pooled[1]]), -1);
+
+        let float64: Vec<u8> = [1.0e300_f64, -2.5, 3.0, 0.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let pooled = pool_whole(&float64, DataType::Float64, [1, 2, 2], [1, 1, 1]);
+        assert_eq!(f64::from_le_bytes(pooled.try_into().unwrap()), 1.0e300);
+
+        let uint32: Vec<u8> = [70_000_u32, 4_000_000_000, 1, 2]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect();
+        let pooled = pool_whole(&uint32, DataType::Uint32, [1, 2, 2], [1, 1, 1]);
+        assert_eq!(
+            u32::from_le_bytes(pooled.try_into().unwrap()),
+            4_000_000_000
+        );
     }
 
     #[test]
@@ -3608,7 +3649,7 @@ mod tests {
         let store = Arc::new(InMemory::new()) as Arc<dyn object_store::ObjectStore>;
         let source_path = source_path(&resolver, "0/0/0/0/0/0");
         let mut source_bytes = Vec::new();
-        for value in [0.0_f32, 0.5, 1.0, 2.0] {
+        for value in [-0.5_f32, 0.5, 1.0, 750.0] {
             source_bytes.extend_from_slice(&value.to_le_bytes());
         }
         store
@@ -3648,10 +3689,7 @@ mod tests {
                     .copied()
                     .map(f32::from_le_bytes)
                     .collect();
-                assert!((values[0] - 0.0).abs() < 0.00001);
-                assert!((values[1] - 0.5).abs() < 0.00002);
-                assert!((values[2] - 1.0).abs() < 0.00001);
-                assert!((values[3] - 1.0).abs() < 0.00001);
+                assert_eq!(values, vec![-0.5, 0.5, 1.0, 750.0]);
             }
             DerivedChunkLookup::Status { status, message } => {
                 panic!("expected generated bytes, got {status:?}: {message:?}");

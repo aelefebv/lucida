@@ -34,7 +34,7 @@ function layer(id: string, channels: LayerChannel[]): LayerInfo {
     opacity: 1,
     channels,
     autoContrast: false,
-    fullRangeMax: 255,
+    valueRange: [0, 255],
     integerData: true,
     blendMode: "alpha",
     renderMode: "translucent",

@@ -5,6 +5,7 @@ import { DESCRIPTOR_ENTRY_SIZE, DESCRIPTOR_MAX_LEVEL_SOURCES } from "./descripto
 import { serializeTransientDescriptor } from "./descriptor/transient.ts";
 import type { PassTiming } from "./passTiming.ts";
 import { requireCompiled } from "./pipelineCompile.ts";
+import type { SampleFormat } from "./dataTypeUtil.ts";
 
 /**
  * Byte offsets of the shader's `Uniforms` fields (volume.wgsl). The
@@ -356,6 +357,7 @@ export class VolumeRenderer {
     contrastMax: number,
     gamma: number,
     opacity: number,
+    sampleFormat: SampleFormat,
   ) {
     if (!this.transientDescriptorBuffer) {
       this.transientDescriptorBuffer = this.device.createBuffer({
@@ -372,6 +374,7 @@ export class VolumeRenderer {
       contrastMax,
       gamma,
       opacity,
+      sampleFormat,
     });
     this.device.queue.writeBuffer(this.transientDescriptorBuffer, 0, cpu);
     // The minimap/thumbnail path is intensity-only; bind the dummy palette

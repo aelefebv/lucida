@@ -233,6 +233,9 @@ fn pick_level(image: &ImageSpec, target_long_axis: u32) -> usize {
 /// Fetch every chunk in `image`'s `level` grid for `(t, c)`, decompress
 /// each, and assemble a dense `[Z, Y, X]` u16 buffer of the level's
 /// spatial shape. Returns `(data, dims, voxel_to_image)`.
+///
+/// A proxy holds u16 samples, so only data types whose values all fit one
+/// are read; any other is refused rather than clamped into that range.
 pub(crate) async fn fetch_dense_volume(
     content: &DatasetManifest,
     image: &ImageSpec,
@@ -263,8 +266,24 @@ pub(crate) async fn fetch_dense_volume(
         x0: 0,
         x1: level_x,
     };
-    let (out, dims) =
+    let data_type = image.multiscale.data_type;
+    if !proxy_holds_data_type(data_type) {
+        return Err(BuildSourceError::UnsupportedDataType {
+            image: image.image_id.clone(),
+            data_type,
+        });
+    }
+    let (samples, dims) =
         fetch_volume_region(content, image, t, c, level, region, store, resolver).await?;
+    let out: Vec<u16> = match data_type {
+        DataType::Uint8 => samples.iter().map(|&value| value as u16).collect(),
+        _ => samples
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|bytes| u16::from_le_bytes(*bytes))
+            .collect(),
+    };
 
     // voxel_to_image: maps level-`level` voxel coords to full-res image-space
     // (= level-0 voxel space). The aggregator composes this with tile_to_group
@@ -299,8 +318,9 @@ pub(crate) async fn fetch_dense_volume(
 }
 
 /// Fetch a dense spatial subregion from one `(t, c, level)` source volume.
-/// The returned buffer is row-major `[Z, Y, X]` over `region`, normalized to
-/// the generator/proxy u16 working representation.
+/// The returned buffer is row-major `[Z, Y, X]` over `region`, each sample in
+/// the image's own data type as little-endian bytes, so a consumer computes
+/// in the source's units.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_volume_region(
     _content: &DatasetManifest,
@@ -311,7 +331,7 @@ pub(crate) async fn fetch_volume_region(
     region: VolumeRegion,
     store: &Arc<CachedStore>,
     resolver: &ChunkResolver,
-) -> Result<(Vec<u16>, [u32; 3]), BuildSourceError> {
+) -> Result<(Vec<u8>, [u32; 3]), BuildSourceError> {
     let level_geom =
         image
             .multiscale
@@ -364,7 +384,13 @@ pub(crate) async fn fetch_volume_region(
         .checked_mul(region_y as usize)
         .and_then(|v| v.checked_mul(region_x as usize))
         .ok_or(BuildSourceError::TooLarge)?;
-    let mut out = vec![0u16; total_voxels];
+    let bytes_per_voxel = image.multiscale.data_type.size_bytes();
+    let mut out = vec![
+        0u8;
+        total_voxels
+            .checked_mul(bytes_per_voxel)
+            .ok_or(BuildSourceError::TooLarge)?
+    ];
 
     for gz in grid_z0..=grid_z1 {
         for gy in grid_y0..=grid_y1 {
@@ -443,11 +469,9 @@ pub(crate) async fn fetch_volume_region(
 
                 // Each chunk is stored densely as `[chunk_z, chunk_y, chunk_x]`
                 // in row-major order (X varies fastest), as little-endian
-                // dtype bytes. We normalize into the proxy/generator's u16
-                // working representation while copying into the dense volume.
+                // dtype bytes, the same layout `out` holds.
                 let stride_z = (chunk_y * chunk_x) as usize;
                 let stride_y = chunk_x as usize;
-                let bytes_per_voxel = data_type_size(image.multiscale.data_type);
 
                 let out_stride_y = region_x as usize;
                 let out_stride_z = (region_y as usize) * out_stride_y;
@@ -474,16 +498,11 @@ pub(crate) async fn fetch_volume_region(
                         let out_off = ((z - region.z0) as usize) * out_stride_z
                             + ((y - region.y0) as usize) * out_stride_y
                             + (copy_x0 - region.x0) as usize;
-                        let len = (copy_x1 - copy_x0) as usize;
+                        let row_len = (copy_x1 - copy_x0) as usize * bytes_per_voxel;
                         let in_byte_off = in_off * bytes_per_voxel;
-                        let row_bytes = &raw[in_byte_off..in_byte_off + len * bytes_per_voxel];
-                        for i in 0..len {
-                            let start = i * bytes_per_voxel;
-                            out[out_off + i] = sample_to_u16(
-                                image.multiscale.data_type,
-                                &row_bytes[start..start + bytes_per_voxel],
-                            );
-                        }
+                        let out_byte_off = out_off * bytes_per_voxel;
+                        out[out_byte_off..out_byte_off + row_len]
+                            .copy_from_slice(&raw[in_byte_off..in_byte_off + row_len]);
                     }
                 }
             }
@@ -539,41 +558,9 @@ fn find_voxel_to_image(content: &DatasetManifest, owner: &EntityId) -> VoxelTran
         .unwrap_or_else(VoxelTransform::identity)
 }
 
-fn data_type_size(data_type: DataType) -> usize {
-    match data_type {
-        DataType::Uint8 => 1,
-        DataType::Uint16 => 2,
-        DataType::Uint32 | DataType::Float32 => 4,
-        DataType::Float64 => 8,
-    }
-}
-
-fn sample_to_u16(data_type: DataType, bytes: &[u8]) -> u16 {
-    match data_type {
-        DataType::Uint8 => bytes[0] as u16,
-        DataType::Uint16 => u16::from_le_bytes([bytes[0], bytes[1]]),
-        DataType::Uint32 => {
-            let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            value.min(u16::MAX as u32) as u16
-        }
-        DataType::Float32 => {
-            let value = f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-            unit_float_to_u16(value as f64)
-        }
-        DataType::Float64 => {
-            let value = f64::from_le_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
-            ]);
-            unit_float_to_u16(value)
-        }
-    }
-}
-
-fn unit_float_to_u16(value: f64) -> u16 {
-    if !value.is_finite() {
-        return 0;
-    }
-    (value.clamp(0.0, 1.0) * u16::MAX as f64).round() as u16
+/// Whether every value of `data_type` is exactly a u16 proxy sample.
+pub(crate) fn proxy_holds_data_type(data_type: DataType) -> bool {
+    matches!(data_type, DataType::Uint8 | DataType::Uint16)
 }
 
 /// Errors from [`build_server_proxy_source`]. Mapped onto
@@ -616,6 +603,8 @@ pub enum BuildSourceError {
     },
     #[error("requested level too large to fit in memory")]
     TooLarge,
+    #[error("a proxy holds u16 samples and cannot hold {data_type:?} values of image {image}")]
+    UnsupportedDataType { image: ImageId, data_type: DataType },
 }
 
 impl From<BuildSourceError> for SourceError {
@@ -626,7 +615,8 @@ impl From<BuildSourceError> for SourceError {
             | BuildSourceError::NoTiles(_)
             | BuildSourceError::OutOfBounds { .. }
             | BuildSourceError::SpatialOutOfBounds { .. }
-            | BuildSourceError::BadLevel { .. } => SourceError::NotFound,
+            | BuildSourceError::BadLevel { .. }
+            | BuildSourceError::UnsupportedDataType { .. } => SourceError::NotFound,
             other => SourceError::Io(other.to_string()),
         }
     }
@@ -637,13 +627,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normalizes_float32_samples_to_u16_unit_range() {
-        let values = [-1.0_f32, 0.0, 0.5, 1.0, 2.0, f32::NAN];
-        let out: Vec<u16> = values
-            .iter()
-            .map(|value| sample_to_u16(DataType::Float32, &value.to_le_bytes()))
-            .collect();
-
-        assert_eq!(out, vec![0, 0, 32768, 65535, 65535, 0]);
+    fn proxies_hold_only_the_data_types_whose_values_fit_u16() {
+        for data_type in [DataType::Uint8, DataType::Uint16] {
+            assert!(proxy_holds_data_type(data_type), "{data_type:?}");
+        }
+        for data_type in [
+            DataType::Uint32,
+            DataType::Int8,
+            DataType::Int16,
+            DataType::Int32,
+            DataType::Float32,
+            DataType::Float64,
+        ] {
+            assert!(!proxy_holds_data_type(data_type), "{data_type:?}");
+        }
     }
 }
