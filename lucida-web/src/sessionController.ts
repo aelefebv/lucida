@@ -1236,8 +1236,15 @@ export class SessionController {
       onGeneratedChunkStatus: (datasetId, imageId, key, status, message) => {
         this.contentSource.handleChunkStatus(datasetId, imageId, key, status, message);
       },
-      onSourceChunkStatus: (datasetId, imageId, key, status, message) => {
-        this.contentSource.handleSourceChunkStatus(datasetId, imageId, key, status, message);
+      onSourceChunkStatus: (datasetId, imageId, key, status, message, failure) => {
+        this.contentSource.handleSourceChunkStatus(
+          datasetId,
+          imageId,
+          key,
+          status,
+          message,
+          failure,
+        );
       },
       onConnected: (generation) => {
         // Chunk failures accumulated against a dropped transport (or its

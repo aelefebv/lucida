@@ -40,6 +40,28 @@ describe("evaluateQuiescence", () => {
     expect(state.speculativeInFlight).toBe(4);
   });
 
+  it("settles without a wanted chunk the source failed for good", () => {
+    const state = evaluateQuiescence(
+      settled({
+        residentDetailChunks: 11,
+        failedDetailChunks: 1,
+        residentCoarseChunks: 1,
+        failedCoarseChunks: 2,
+      }),
+      0,
+    );
+    expect(state.quiescent).toBe(true);
+  });
+
+  it("still waits on a wanted chunk that has not failed", () => {
+    const state = evaluateQuiescence(
+      settled({ residentDetailChunks: 10, failedDetailChunks: 1 }),
+      0,
+    );
+    expect(state.quiescent).toBe(false);
+    expect(state.reason).toBe("detail_not_resident");
+  });
+
   it("refuses to call a queue it could not classify settled", () => {
     const state = evaluateQuiescence(settled({ pendingUnclassified: true }), 0);
     expect(state.quiescent).toBe(false);

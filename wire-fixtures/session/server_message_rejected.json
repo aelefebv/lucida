@@ -1,0 +1,8 @@
+{
+  "type": "message_rejected",
+  "request_id": "open-7",
+  "rid": 42,
+  "message_type": "open_remote_dataset",
+  "reason": "malformed",
+  "message": "the open_remote_dataset message does not have the fields its type requires"
+}

@@ -7,17 +7,15 @@
 //! declared chunk from the stored chunks under it. The chunk handler and
 //! coarse generation both call it and do none of these steps themselves.
 
-use lucida_content::ImageId;
-use lucida_protocol::ServerPhase;
+use lucida_content::{ChunkKey, ImageId};
+use lucida_protocol::{ChunkFailureKind, ServerPhase};
 use lucida_store::cache::{CachedStore, SourceReadTiming, TimedRead};
 use lucida_store::import_types::Regrid;
 use lucida_store::layout::ChunkByteLayout;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
 
-use crate::binding::{
-    ChunkLocation, ChunkResolver, LevelInfo, parse_level_from_chunk_key, parse_t_c_from_chunk_key,
-};
-use crate::decode::{DecodeError, StorageCompression, decode_storage_bytes};
+use crate::binding::{ChunkLocation, ChunkResolver, LevelInfo};
+use crate::decode::{DecodeError, decode_storage_bytes};
 use crate::open_diagnostics::is_not_found;
 use crate::timing::RequestProbe;
 
@@ -52,6 +50,10 @@ pub enum ChunkReadError {
     /// The image is not in the binding, so the key has no location.
     #[error("unknown image {0}")]
     UnknownImage(ImageId),
+    /// The image has no level of the key's index, so the key has no layout
+    /// to read it by.
+    #[error("image {image} has no level {level}")]
+    UnknownLevel { image: ImageId, level: u32 },
     /// The object store answered with something other than the bytes or an
     /// absence: revoked access, a backend fault, an unreachable service.
     #[error("object store read failed: {0}")]
@@ -60,6 +62,22 @@ pub enum ChunkReadError {
     /// undid them to the wrong size.
     #[error("decode failed: {0}")]
     Decode(#[source] DecodeError),
+}
+
+impl ChunkReadError {
+    /// The failure as a client is told it.
+    pub fn failure_kind(&self) -> ChunkFailureKind {
+        match self {
+            ChunkReadError::UnknownImage(_) => ChunkFailureKind::UnknownImage,
+            ChunkReadError::UnknownLevel { .. } => ChunkFailureKind::UnknownLevel,
+            ChunkReadError::ObjectStore(
+                object_store::Error::PermissionDenied { .. }
+                | object_store::Error::Unauthenticated { .. },
+            ) => ChunkFailureKind::Permission,
+            ChunkReadError::ObjectStore(_) => ChunkFailureKind::StorageBackend,
+            ChunkReadError::Decode(e) => e.failure_kind(),
+        }
+    }
 }
 
 /// Read the wire chunk for `chunk_key` of `image_id`.
@@ -76,14 +94,21 @@ pub async fn read_chunk(
     resolver: &ChunkResolver,
     store: &CachedStore,
     image_id: &ImageId,
-    chunk_key: &str,
+    chunk_key: &ChunkKey,
     reader: ReaderId,
     label: RequestLabel,
     mut probe: Option<&mut RequestProbe>,
 ) -> Result<ChunkRead, ChunkReadError> {
-    let level_info = resolver
-        .level_info(image_id, parse_level_from_chunk_key(chunk_key))
-        .unwrap_or_else(unsliced_level_info);
+    let Some(level_info) = resolver.level_info(image_id, chunk_key.level) else {
+        return Err(if resolver.axes_names(image_id).is_some() {
+            ChunkReadError::UnknownLevel {
+                image: image_id.clone(),
+                level: chunk_key.level,
+            }
+        } else {
+            ChunkReadError::UnknownImage(image_id.clone())
+        });
+    };
     if let Some(regrid) = &level_info.regrid {
         return read_regridded_chunk(
             resolver,
@@ -102,7 +127,7 @@ pub async fn read_chunk(
         .resolve(image_id, chunk_key)
         .ok_or_else(|| ChunkReadError::UnknownImage(image_id.clone()))?;
 
-    tracing::trace!(image = %image_id, key = chunk_key, path = %location.path(), "reading chunk");
+    tracing::trace!(image = %image_id, key = %chunk_key, path = %location.path(), "reading chunk");
     if let Some(probe) = probe.as_deref_mut() {
         probe.mark(ServerPhase::Dispatch);
     }
@@ -147,11 +172,6 @@ async fn read_location(
     }
 }
 
-/// The decode limit for a level that declares no chunk size, which only a
-/// key naming a level the binding lacks reaches. Still a bound, so no
-/// stream decodes without one.
-const UNDECLARED_CHUNK_LIMIT: usize = 1 << 30;
-
 /// Decode one stored chunk and cut out the key's timepoint and channel.
 ///
 /// A chunk that decodes to another size than its stored chunk shape holds is
@@ -160,35 +180,29 @@ const UNDECLARED_CHUNK_LIMIT: usize = 1 << 30;
 fn decode_wire_chunk(
     storage_bytes: &[u8],
     level_info: &LevelInfo,
-    chunk_key: &str,
+    chunk_key: &ChunkKey,
 ) -> Result<Vec<u8>, ChunkReadError> {
     let expected = level_info.chunk_byte_layout.on_disk_byte_size;
-    let max_len = if expected > 0 {
-        expected
-    } else {
-        UNDECLARED_CHUNK_LIMIT
-    };
-    let raw = decode_storage_bytes(storage_bytes, level_info.compression, max_len)
+    let raw = decode_storage_bytes(storage_bytes, level_info.compression, expected)
         .map_err(ChunkReadError::Decode)?;
     tracing::debug!(
-        key = chunk_key,
+        key = %chunk_key,
         compressed = storage_bytes.len(),
         decompressed = raw.len(),
         compression = ?level_info.compression,
         "chunk decoded"
     );
-    if expected > 0 && raw.len() != expected {
+    if raw.len() != expected {
         return Err(ChunkReadError::Decode(DecodeError::WrongSize {
             expected,
             actual: raw.len(),
         }));
     }
-    let (wire_t, wire_c) = parse_t_c_from_chunk_key(chunk_key);
     Ok(slice_wire_chunk(
         raw,
         &level_info.chunk_byte_layout,
-        wire_t,
-        wire_c,
+        chunk_key.t,
+        chunk_key.c,
     ))
 }
 
@@ -200,7 +214,7 @@ async fn read_regridded_chunk(
     resolver: &ChunkResolver,
     store: &CachedStore,
     image_id: &ImageId,
-    chunk_key: &str,
+    chunk_key: &ChunkKey,
     stored: &LevelInfo,
     regrid: &Regrid,
     reader: ReaderId,
@@ -211,7 +225,7 @@ async fn read_regridded_chunk(
     let axes = resolver
         .axes_names(image_id)
         .ok_or_else(|| ChunkReadError::UnknownImage(image_id.clone()))?;
-    let Some(plan) = RegridPlan::new(chunk_key, axes, stored, regrid) else {
+    let Some(plan) = RegridPlan::new(*chunk_key, axes, stored, regrid) else {
         return Ok(ChunkRead::Absent { len: served_len });
     };
 
@@ -267,9 +281,7 @@ async fn read_regridded_chunk(
 /// Where one declared chunk of a regridded level lies, in samples of the
 /// level, on the canonical `z`, `y`, and `x` axes.
 struct RegridPlan {
-    level: u64,
-    t: u64,
-    c: u64,
+    key: ChunkKey,
     /// The declared chunk's origin.
     origin: [u64; 3],
     /// The declared chunk's shape, which the served bytes are laid out in.
@@ -284,22 +296,16 @@ struct RegridPlan {
 
 /// One stored chunk that a declared chunk overlaps.
 struct StoredSource {
-    key: String,
+    key: ChunkKey,
     /// Its position in the stored chunk grid.
     grid: [u64; 3],
 }
 
 impl RegridPlan {
-    /// `None` when the declared chunk lies wholly past the stored level or
-    /// the key is malformed. Either way it reads as fill.
-    fn new(chunk_key: &str, axes: &[String], stored: &LevelInfo, regrid: &Regrid) -> Option<Self> {
-        let parts: Vec<u64> = chunk_key
-            .split('/')
-            .map(|part| part.parse().ok())
-            .collect::<Option<_>>()?;
-        let [level, t, c, z, y, x] = parts[..] else {
-            return None;
-        };
+    /// `None` when the declared chunk lies wholly past the stored level,
+    /// which reads as fill.
+    fn new(key: ChunkKey, axes: &[String], stored: &LevelInfo, regrid: &Regrid) -> Option<Self> {
+        let ChunkKey { t, c, z, y, x, .. } = key;
         let along = |shape: &[u64], name: &str| {
             axes.iter()
                 .position(|axis| axis.eq_ignore_ascii_case(name))
@@ -325,9 +331,7 @@ impl RegridPlan {
         let end = std::array::from_fn(|axis| (origin[axis] + served[axis]).min(extent[axis]));
         let served_samples = served.iter().product::<u64>() as usize;
         Some(RegridPlan {
-            level,
-            t,
-            c,
+            key,
             origin,
             served,
             end,
@@ -345,7 +349,12 @@ impl RegridPlan {
             for gy in range(1) {
                 for gx in range(2) {
                     sources.push(StoredSource {
-                        key: format!("{}/{}/{}/{gz}/{gy}/{gx}", self.level, self.t, self.c),
+                        key: ChunkKey {
+                            z: gz,
+                            y: gy,
+                            x: gx,
+                            ..self.key
+                        },
                         grid: [gz, gy, gx],
                     });
                 }
@@ -385,8 +394,7 @@ impl RegridPlan {
 
 /// Cut the key's timepoint and channel out of a decoded on-disk chunk that
 /// bundles several. A range the bytes cannot satisfy passes the chunk
-/// through whole; the zero-size layout from [`unsliced_level_info`] relies
-/// on that.
+/// through whole.
 fn slice_wire_chunk(
     mut raw: Vec<u8>,
     layout: &ChunkByteLayout,
@@ -401,28 +409,6 @@ fn slice_wire_chunk(
     raw
 }
 
-/// Stand-in for a level the binding does not describe: the object's bytes
-/// are the wire chunk as-is, and an absent chunk fills to nothing. Import
-/// describes every level, so only a key naming a level the binding lacks or
-/// a test fixture built without levels reaches this.
-fn unsliced_level_info() -> LevelInfo {
-    LevelInfo {
-        level_index: 0,
-        compression: StorageCompression::None,
-        chunk_shape: Vec::new(),
-        chunk_byte_layout: ChunkByteLayout {
-            canonical_byte_size: 0,
-            on_disk_byte_size: 0,
-            byte_stride_t: 0,
-            byte_stride_c: 0,
-            chunk_size_t: 1,
-            chunk_size_c: 1,
-        },
-        shard: None,
-        regrid: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -435,6 +421,7 @@ mod tests {
     use object_store::path::Path;
 
     use super::*;
+    use crate::decode::StorageCompression;
     use crate::test_fixtures::{
         DelayedStore, FailingStore, StoreFailure, four_byte_level, image_seed,
     };
@@ -545,13 +532,17 @@ mod tests {
         CachedStore::new(Arc::new(store), 1024)
     }
 
+    fn key(key: &str) -> ChunkKey {
+        ChunkKey::parse(key).unwrap()
+    }
+
     async fn put_chunk(
         store: &impl ObjectStore,
         resolver: &ChunkResolver,
         key: &str,
         bytes: &[u8],
     ) {
-        let location = resolver.resolve(&image_id(), key).unwrap();
+        let location = resolver.resolve(&image_id(), &self::key(key)).unwrap();
         store
             .put(location.path(), bytes.to_vec().into())
             .await
@@ -567,7 +558,7 @@ mod tests {
             resolver,
             store,
             &image_id(),
-            key,
+            &self::key(key),
             ReaderId::UNATTRIBUTED,
             RequestLabel::UNATTRIBUTED,
             None,
@@ -717,17 +708,76 @@ mod tests {
         assert_eq!(store.stats().backend_errors, 0);
     }
 
+    /// A level the binding does not describe has no chunk size to check
+    /// bytes against, so its key is refused rather than read.
     #[tokio::test]
-    async fn level_without_binding_info_passes_the_object_through() {
-        let resolver = resolver_with(vec![]);
+    async fn a_level_the_image_lacks_is_refused_before_any_read() {
+        let resolver = resolver_with(vec![four_byte_level()]);
+        let store = cached(FailingStore(StoreFailure::Backend));
+
+        let error = read(&resolver, &store, "1/0/0/0/0/0").await.unwrap_err();
+
+        assert!(
+            matches!(&error, ChunkReadError::UnknownLevel { image, level: 1 } if *image == image_id()),
+            "{error:?}"
+        );
+        assert_eq!(error.failure_kind(), ChunkFailureKind::UnknownLevel);
+        assert_eq!(store.stats().source_reads, 0);
+    }
+
+    #[tokio::test]
+    async fn each_read_failure_names_its_kind() {
+        let resolver = resolver_with(vec![four_byte_level()]);
+        let empty = ChunkResolver::new(&ServerBindingSeed { images: vec![] });
+        let unknown = read(
+            &empty,
+            &cached(object_store::memory::InMemory::new()),
+            "0/0/0/0/0/0",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(unknown.failure_kind(), ChunkFailureKind::UnknownImage);
+
+        let backend = read(
+            &resolver,
+            &cached(FailingStore(StoreFailure::Backend)),
+            "0/0/0/0/0/0",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(backend.failure_kind(), ChunkFailureKind::StorageBackend);
+
+        let denied = read(
+            &resolver,
+            &cached(FailingStore(StoreFailure::PermissionDenied)),
+            "0/0/0/0/0/0",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(denied.failure_kind(), ChunkFailureKind::Permission);
+
+        let mut lz4 = four_byte_level();
+        lz4.compression = StorageCompression::Lz4;
+        let corrupt_resolver = resolver_with(vec![lz4]);
         let store = object_store::memory::InMemory::new();
-        put_chunk(&store, &resolver, "0/0/0/0/0/0", &[9, 8, 7]).await;
-
-        let read = read(&resolver, &cached(store), "0/0/0/0/0/0")
+        put_chunk(
+            &store,
+            &corrupt_resolver,
+            "0/0/0/0/0/0",
+            &[0, 0, 0, 0, 1, 2, 3],
+        )
+        .await;
+        let corrupt = read(&corrupt_resolver, &cached(store), "0/0/0/0/0/0")
             .await
-            .unwrap();
+            .unwrap_err();
+        assert_eq!(corrupt.failure_kind(), ChunkFailureKind::CorruptChunk);
 
-        assert_eq!(read, ChunkRead::Present(vec![9, 8, 7]));
+        let store = object_store::memory::InMemory::new();
+        put_chunk(&store, &resolver, "0/0/0/0/0/0", &[1, 2]).await;
+        let short = read(&resolver, &cached(store), "0/0/0/0/0/0")
+            .await
+            .unwrap_err();
+        assert_eq!(short.failure_kind(), ChunkFailureKind::WrongSize);
     }
 
     async fn phases_for(
@@ -746,7 +796,7 @@ mod tests {
             resolver,
             store,
             &image_id(),
-            key,
+            &self::key(key),
             ReaderId::UNATTRIBUTED,
             RequestLabel::UNATTRIBUTED,
             Some(&mut probe),
