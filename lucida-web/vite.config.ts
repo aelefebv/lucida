@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
+import { precompress } from './precompress'
 
 // The release version, read from the manifest release-please maintains. It
 // goes in every trace run's header: two runs from different builds are not
@@ -17,7 +18,7 @@ export default defineConfig({
   define: {
     __LUCIDA_VERSION__: JSON.stringify(releaseVersion),
   },
-  plugins: [react()],
+  plugins: [react(), precompress()],
   worker: {
     format: 'es',
   },
