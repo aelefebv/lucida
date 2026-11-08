@@ -528,7 +528,7 @@ export class Uploader {
     this.resendGuard.onRebuild();
   }
 
-  // Lifecycle (dataset removal, multi-channel transitions)
+  // Lifecycle (dataset removal)
 
   clearMember(workerMemberId: string): void {
     this.workerResources.clearMember(workerMemberId);

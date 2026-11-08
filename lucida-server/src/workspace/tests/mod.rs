@@ -88,6 +88,96 @@ fn workspace_router_with_principal(
     ))
 }
 
+/// Open a socket's worth of server state for `who` on a live workspace:
+/// the queue the handler would register, attached under the principal.
+async fn attach(
+    manager: &WorkspaceManager,
+    live: &LiveWorkspace,
+    id: u64,
+    who: &AuthPrincipal,
+) -> crate::connection::ClientSender {
+    let (sender, _receiver) = crate::connection::client_queue();
+    manager
+        .attach_connection(live, id, who, sender.clone())
+        .await;
+    sender
+}
+
+type WsClient =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+const SOCKET_READ_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Serve `manager`'s routes as `who` on a local port, and return the
+/// socket URL for `workspace_id` with the server task.
+async fn serve_workspace_socket(
+    manager: Arc<WorkspaceManager>,
+    who: AuthPrincipal,
+    workspace_id: &str,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let app = workspace_router_with_principal(manager, who);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let url = format!(
+        "ws://{addr}/ws/workspaces/{}",
+        urlencoding::encode(workspace_id)
+    );
+    (url, server)
+}
+
+async fn connect_socket(url: &str) -> WsClient {
+    let (socket, _) = tokio_tungstenite::connect_async(url.into_client_request().unwrap())
+        .await
+        .unwrap();
+    socket
+}
+
+async fn send_command(socket: &mut WsClient, command: DocumentCommand) {
+    use futures_util::SinkExt;
+    let message =
+        serde_json::to_string(&lucida_core::protocol::ClientMessage::Command { command }).unwrap();
+    socket
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            message.into(),
+        ))
+        .await
+        .unwrap();
+}
+
+/// The next text frame, skipping any other kind.
+async fn next_text(socket: &mut WsClient) -> serde_json::Value {
+    use futures_util::StreamExt;
+    loop {
+        let frame = tokio::time::timeout(SOCKET_READ_TIMEOUT, socket.next())
+            .await
+            .expect("the server answers")
+            .expect("the socket is open")
+            .expect("the frame reads");
+        if let tokio_tungstenite::tungstenite::Message::Text(text) = frame {
+            return serde_json::from_str(&text).unwrap();
+        }
+    }
+}
+
+/// The code of the close frame the server sends next, skipping anything
+/// before it.
+async fn next_close_code(socket: &mut WsClient) -> u16 {
+    use futures_util::StreamExt;
+    loop {
+        let frame = tokio::time::timeout(SOCKET_READ_TIMEOUT, socket.next())
+            .await
+            .expect("the server closes")
+            .expect("the socket is open")
+            .expect("the frame reads");
+        if let tokio_tungstenite::tungstenite::Message::Close(frame) = frame {
+            return frame.expect("the close says why").code.into();
+        }
+    }
+}
+
 async fn response_json(res: axum::response::Response) -> serde_json::Value {
     let bytes = to_bytes(res.into_body(), 64 * 1024).await.unwrap();
     serde_json::from_slice(&bytes).unwrap()

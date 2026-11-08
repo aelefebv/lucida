@@ -858,8 +858,7 @@ export type MissingChunk = {
   tier: ResidencyTier;
   entityId: string;
   /**
-   * Worker-side member id that owns the missing chunk. Single-channel
-   * mode uses bare image ids; multi-channel mode uses `imageId:chN`.
+   * Worker-side member id that owns the missing chunk, `imageId:chN`.
    */
   memberId: string;
   /** The member's channel. */

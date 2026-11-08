@@ -138,6 +138,9 @@ export interface SessionControllerEvents {
    *  the author's own edits. */
   onRemoteDocumentChanged: () => void;
   onWorkspaceArchived: () => void;
+  /** The server removed this person's access and closed the connection; it
+   *  will not reconnect. */
+  onAccessRevoked: () => void;
   /** The server refused one of this client's document commands; the bridge
    *  is already fetching the snapshot that undoes it. */
   onCommandRejected: (reason: CommandRejection) => void;
@@ -541,6 +544,17 @@ export class SessionController {
     if (!removedWarnings && removedOverflow === undefined) return;
     if (removedWarnings) this.rebuildRetainedMessages();
     this.publishWarnings();
+  }
+
+  /** The server ended this workspace's connection for good (archived, or
+   *  access removed): no reconnect follows, so drop every connection-scoped
+   *  signal, warning and pending fetch with it. */
+  private endConnection(): void {
+    this.deps.events.onConnectedChanged(false);
+    this.deps.events.onSessionReadyChanged(false);
+    this.clearAllOpenWarnings();
+    this.updateRemoteActivity({ loading: false, progress: null });
+    this.contentSource.rejectAll();
   }
 
   /** Drop every collected warning: on disconnect, archive, or user dismiss. */
@@ -1244,14 +1258,12 @@ export class SessionController {
         traceRecorder.ingestServerBatch(batch, generation);
       },
       onWorkspaceArchived: () => {
-        this.deps.events.onConnectedChanged(false);
-        this.deps.events.onSessionReadyChanged(false);
-        // The workspace is gone: drop every collected warning with the spinner
-        // so no notice about the archived workspace's opens lingers.
-        this.clearAllOpenWarnings();
-        this.updateRemoteActivity({ loading: false, progress: null });
-        this.contentSource.rejectAll();
+        this.endConnection();
         this.deps.events.onWorkspaceArchived();
+      },
+      onAccessRevoked: () => {
+        this.endConnection();
+        this.deps.events.onAccessRevoked();
       },
       onDisconnect: () => {
         // Re-arm both readiness signals so a reconnect's `onopen` and fresh

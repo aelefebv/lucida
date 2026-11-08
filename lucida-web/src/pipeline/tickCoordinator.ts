@@ -33,7 +33,7 @@ import {
 import type { WasmScene } from "lucida-core";
 import { recordPlanningTick } from "./planning/traceTick.ts";
 import { computeLabelChunkRequests } from "./planning/labelRequests.ts";
-import { admitRequests, chunkBytesFor, type GpuSlot } from "./planning/admission.ts";
+import { admitPlans, chunkBytesFor, type Admission } from "./planning/admission.ts";
 import { gpuChunkRoomBytes, gpuSlotsFor } from "./planning/gpuCapacity.ts";
 import { pageDeviceBudgets } from "../deviceBudget.ts";
 import type {
@@ -282,21 +282,28 @@ function displayStatesEqual(
 }
 
 /**
- * The GPU chunk pools admission counts against, as the render worker last
- * reported them, in either view mode.
+ * Admit each dataset's requests against what the CPU budgets and the GPU
+ * pools hold between them, as the render worker last reported its pools, in
+ * either view mode, so the wanted set the cache drives toward fits both.
  */
-function gpuSlotsOf(ctx: TickContext, datasetId: string): (req: ChunkRequest) => GpuSlot | null {
-  return gpuSlotsFor(
-    ctx.datasets.get(datasetId)!.manifest,
-    ctx.mode,
-    ctx.client.gpuCapacity(),
-    pageDeviceBudgets().gpuTotalBytes,
+function admitDatasetPlans(
+  ctx: TickContext,
+  plans: readonly { dsId: string; requests: readonly ChunkRequest[] }[],
+): Admission[] {
+  const report = ctx.client.gpuCapacity();
+  const gpuTotalBytes = pageDeviceBudgets().gpuTotalBytes;
+  return admitPlans(
+    plans.map(({ dsId, requests }) => {
+      const manifest = ctx.datasets.get(dsId)!.manifest;
+      return {
+        requests,
+        bytesOf: chunkBytesFor(manifest),
+        slotOf: gpuSlotsFor(manifest, ctx.mode, report, gpuTotalBytes),
+      };
+    }),
+    ctx.cpuCache.tierCapacity(),
+    gpuChunkRoomBytes(report, gpuTotalBytes),
   );
-}
-
-/** The GPU bytes every dataset's chunk pools may hold between them, from the same report. */
-function gpuRoomOf(ctx: TickContext): number {
-  return gpuChunkRoomBytes(ctx.client.gpuCapacity(), pageDeviceBudgets().gpuTotalBytes);
 }
 
 function emitViewerInterestHint(
@@ -799,22 +806,13 @@ export class TickCoordinator {
       desiredProxyKeysByDataset.set(datasetId, set);
     }
 
-    // Admit each dataset's plan against what the CPU budgets and the GPU
-    // pools have left, in layer order, so the wanted set the cache drives
-    // toward fits both.
-    let capacity = ctx.cpuCache.tierCapacity();
-    let gpuRoom = gpuRoomOf(ctx);
-    for (const planned of plannedDatasets) {
+    const admissions = admitDatasetPlans(
+      ctx,
+      plannedDatasets.map((planned) => ({ dsId: planned.dsId, requests: planned.result.requests })),
+    );
+    for (const [index, planned] of plannedDatasets.entries()) {
       const { dsId, dsSettings, layer, entities, visibleRegion, selection } = planned;
-      const admission = admitRequests(
-        planned.result.requests,
-        capacity,
-        chunkBytesFor(ctx.datasets.get(dsId)!.manifest),
-        gpuSlotsOf(ctx, dsId),
-        gpuRoom,
-      );
-      capacity = admission.remaining;
-      gpuRoom = admission.gpuRoomLeft;
+      const admission = admissions[index];
       const result: RequestPlan = {
         ...planned.result,
         requests: admission.admitted,
@@ -1349,18 +1347,9 @@ export class TickCoordinator {
     // reports any slot the new T/Z leaves stale. The active set is unchanged,
     // so `planningState` stays.
     ctx.cpuCache.onPlanRebuildStart();
-    let capacity = ctx.cpuCache.tierCapacity();
-    let gpuRoom = gpuRoomOf(ctx);
-    for (const scrubbed of planned) {
-      const admission = admitRequests(
-        scrubbed.requests,
-        capacity,
-        chunkBytesFor(ctx.datasets.get(scrubbed.dsId)!.manifest),
-        gpuSlotsOf(ctx, scrubbed.dsId),
-        gpuRoom,
-      );
-      capacity = admission.remaining;
-      gpuRoom = admission.gpuRoomLeft;
+    const admissions = admitDatasetPlans(ctx, planned);
+    for (const [index, scrubbed] of planned.entries()) {
+      const admission = admissions[index];
       const p = { ...scrubbed, requests: admission.admitted };
       this.requestEpoch = scrubRequestEpoch;
       this._lastVisibleRegion.set(p.dsId, p.visibleRegion);

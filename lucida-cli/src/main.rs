@@ -1188,6 +1188,15 @@ struct TraceRunArgs {
     /// Device pixel ratio to drive the page at
     #[arg(long, default_value_t = trace::DEFAULT_DEVICE_PIXEL_RATIO, value_name = "RATIO")]
     device_pixel_ratio: f64,
+    /// Drive the page as a device that reports this much memory, so it fits
+    /// its memory budgets to it, as `navigator.deviceMemory` does
+    #[arg(long, value_name = "GIB", value_parser = trace::parse_device_memory)]
+    device_memory: Option<f64>,
+    /// Accepted so older scripts still run. Every layer opens in its
+    /// composite, so it changes nothing.
+    #[arg(long, hide = true)]
+    #[allow(dead_code)]
+    multi_channel: bool,
     /// Write the run here instead of the trace directory beside the config
     #[arg(long, short, value_name = "PATH")]
     output: Option<String>,
@@ -4166,6 +4175,7 @@ async fn run_trace(
         width: args.width,
         height: args.height,
         device_pixel_ratio: args.device_pixel_ratio,
+        device_memory_gib: args.device_memory,
         camera: composed_camera,
     };
 
@@ -4291,6 +4301,7 @@ async fn run_replay(
             width: plan.width,
             height: plan.height,
             device_pixel_ratio: plan.device_pixel_ratio,
+            device_memory_gib: None,
             camera: None,
         },
         server_warmth: warmth,
@@ -6397,8 +6408,9 @@ mod tests {
         // The planning knobs replay through the header's planning
         // configuration. The cache knobs have no header field: the panel's
         // own edits to them die on reload, so a replay runs the cache at
-        // its defaults.
-        let mut session_scoped = Vec::new();
+        // its defaults. Nor does the device memory: a replay runs at the
+        // memory of the machine it runs on.
+        let mut session_scoped = vec!["device_memory"];
         for knob in trace_knobs::KNOBS {
             match knob.store {
                 trace_knobs::KnobStore::Planning => {
@@ -6417,6 +6429,8 @@ mod tests {
             "timeout_seconds",
             "gate",
             "help",
+            // Accepted and ignored: every layer opens in its composite.
+            "multi_channel",
             // A second workload, replayed from its own run's header.
             trace_knobs::VERSUS,
         ];

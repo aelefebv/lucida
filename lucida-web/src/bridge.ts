@@ -235,6 +235,10 @@ const DATASET_PRESENCE_THROTTLE_MS = 200;
 
 const RECONNECT_DELAY_MS = 2000;
 
+/** The server's close code for a socket whose principal lost access to the
+ *  workspace (`CLOSE_ACCESS_REVOKED`, 1008 "policy violation"). */
+const CLOSE_ACCESS_REVOKED = 1008;
+
 /** Membership key of a document command, for the datasets-present mirror:
  *  `dataset_opened` adds `manifest.dataset_id`, `remove_dataset` removes
  *  `id`; every other command leaves membership untouched. */
@@ -376,6 +380,12 @@ export interface BridgeHandlers {
     failure?: ChunkFailureKind | null,
   ) => void;
   onWorkspaceArchived?: (workspaceId: string) => void;
+  /**
+   * The server closed the socket because this person no longer has access
+   * to the workspace. The bridge is already destroyed: reconnecting would
+   * only be refused.
+   */
+  onAccessRevoked?: () => void;
   /**
    * The server refused one of this client's document commands and applied
    * nothing. The bridge has already asked for the snapshot that undoes the
@@ -707,10 +717,16 @@ export class Bridge {
       }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event: CloseEvent) => {
       // The close event fires asynchronously after destroy()'s close();
       // a dead bridge must not report a disconnect (or reconnect).
       if (this.destroyed) return;
+      if (event.code === CLOSE_ACCESS_REVOKED) {
+        bridgeLog("ws.access_revoked", { reason: event.reason }, ws.readyState);
+        this.handlers.onAccessRevoked?.();
+        this.destroy();
+        return;
+      }
       this.ws = null;
       // Seq tracking is per-connection; the reconnect's snapshot re-seeds
       // it. Pending local commands drop too: one may never have reached the
