@@ -37,11 +37,13 @@ export LUCIDA_TRACE_DIR="${output_dir}"
 
 # name|camera|generator options. Each dataset is framed whole by the camera
 # of the mode it is meant for. Sizes are large enough to need several levels
-# and many chunks, and small enough to generate in seconds.
+# and many chunks, and small enough to generate in seconds. `single-level`
+# has no pyramid, so the server generates its coarse tier.
 fixtures=(
   "image|slice|--size 2048,2048 --channels 2 --levels 4 --chunk 256"
   "volume|arcball|--size 128,512,512 --channels 3 --levels 3 --chunk 64"
   "collection|slice|--tiles 12 --size 512,512 --channels 2 --levels 3 --chunk 128"
+  "single-level|slice|--size 4096,4096 --levels 1 --chunk 512"
 )
 ratios=(1 2)
 
