@@ -233,3 +233,6 @@ id_ed25519.*
 
 # Local databases (dev server state, caches)
 *.db
+
+# Real datasets for scripts/perf.py, local to this machine
+scripts/perf/datasets.local.json

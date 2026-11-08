@@ -139,9 +139,10 @@ function deliveries(interval: TraceRun): Delivery[] {
 /**
  * Bytes in, binned by the second they landed in. Seconds are counted one by
  * one rather than averaged, because a burst that finishes in two seconds is a
- * tail and an average over the interval would hide the difference.
+ * tail and an average over the interval would hide the difference. A run's
+ * load reading takes the same summary over the run itself.
  */
-function summariseReceived(interval: TraceRun): ReceivedSummary {
+export function summariseReceived(interval: TraceRun): ReceivedSummary {
   const spanUs = Math.max(1, interval.header.durationUs);
   const floor = RULESET.steadyState.received.minBytesPerS;
   const bySecond = new Map<number, number>();

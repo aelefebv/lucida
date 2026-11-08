@@ -1,0 +1,10 @@
+{
+  "description": "orbit the volume twice around the vertical axis, then tilt it",
+  "requires": ["volume"],
+  "camera": "arcball",
+  "steps": [
+    { "kind": "orbit", "theta": 30, "phi": 0 },
+    { "kind": "orbit", "theta": 30, "phi": 0 },
+    { "kind": "orbit", "theta": 0, "phi": 20 }
+  ]
+}
