@@ -2952,6 +2952,8 @@ mod tests {
                                 chunk_size_t: 1,
                                 chunk_size_c: 1,
                             },
+                            chunk_key_encoding: Default::default(),
+                            fill_value: Default::default(),
                             shard: None,
                             regrid: None,
                         }

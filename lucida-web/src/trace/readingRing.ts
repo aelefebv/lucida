@@ -11,9 +11,11 @@
  */
 
 import { RingSlots } from "./ring.ts";
-import { READING_NAMES, type TraceReading } from "./types.ts";
+import { READING_NAMES, type GpuMemoryReading, type TraceReading } from "./types.ts";
 
 const COLUMNS = READING_NAMES.length;
+/** `bytes`, `budgetBytes`, `slotsHeld`, `slots`, NaN together when the reading has none. */
+const GPU_MEMORY_COLUMNS = 4;
 
 /**
  * How many readings a run keeps. One per tick, and a tick is dirty-driven, so
@@ -23,8 +25,8 @@ const COLUMNS = READING_NAMES.length;
 export const DEFAULT_READING_CAPACITY = 1024;
 
 export class ReadingRing {
-  /** One timestamp, the columns, and the optional GPU pass time, all doubles. */
-  static readonly BYTES_PER_SAMPLE = (1 + COLUMNS + 1) * 8;
+  /** One timestamp, the columns, the optional GPU pass time, and the optional GPU memory, all doubles. */
+  static readonly BYTES_PER_SAMPLE = (1 + COLUMNS + 1 + GPU_MEMORY_COLUMNS) * 8;
 
   private readonly slots: RingSlots;
   private readonly capacity: number;
@@ -36,6 +38,8 @@ export class ReadingRing {
    * and this one is optional: `serialise` omits it rather than writing a zero.
    */
   private readonly gpuPassUs: Float64Array;
+  /** Optional like {@link gpuPassUs}, and for the same reason its own columns. */
+  private readonly gpuMemory: Float64Array;
 
   constructor(capacity = DEFAULT_READING_CAPACITY) {
     this.slots = new RingSlots(capacity);
@@ -43,6 +47,7 @@ export class ReadingRing {
     this.atUs = new Float64Array(this.capacity);
     this.values = new Float64Array(this.capacity * COLUMNS);
     this.gpuPassUs = new Float64Array(this.capacity).fill(NaN);
+    this.gpuMemory = new Float64Array(this.capacity * GPU_MEMORY_COLUMNS).fill(NaN);
   }
 
   get dropped(): number {
@@ -60,13 +65,24 @@ export class ReadingRing {
   /**
    * `values` is the reading in {@link READING_NAMES} order. `gpuPassUs` is
    * the GPU pass time that arrived since the previous reading, or null when
-   * none did.
+   * none did. `gpuMemory` is the render worker's latest report, or null
+   * before its first.
    */
-  append(atUs: number, values: Float64Array, gpuPassUs: number | null): void {
+  append(
+    atUs: number,
+    values: Float64Array,
+    gpuPassUs: number | null,
+    gpuMemory: GpuMemoryReading | null = null,
+  ): void {
     const slot = this.slots.claim();
     this.atUs[slot] = atUs;
     this.values.set(values, slot * COLUMNS);
     this.gpuPassUs[slot] = gpuPassUs ?? NaN;
+    const at = slot * GPU_MEMORY_COLUMNS;
+    this.gpuMemory[at] = gpuMemory?.bytes ?? NaN;
+    this.gpuMemory[at + 1] = gpuMemory?.budgetBytes ?? NaN;
+    this.gpuMemory[at + 2] = gpuMemory?.slotsHeld ?? NaN;
+    this.gpuMemory[at + 3] = gpuMemory?.slots ?? NaN;
   }
 
   /** Oldest-first, so a reader walks the ring the way the run happened. */
@@ -106,6 +122,15 @@ export class ReadingRing {
     }
     const gpuPassUs = this.gpuPassUs[slot];
     if (!Number.isNaN(gpuPassUs)) sample.gpuPassUs = gpuPassUs;
+    const at = slot * GPU_MEMORY_COLUMNS;
+    if (!Number.isNaN(this.gpuMemory[at])) {
+      sample.gpuMemory = {
+        bytes: this.gpuMemory[at],
+        budgetBytes: this.gpuMemory[at + 1],
+        slotsHeld: this.gpuMemory[at + 2],
+        slots: this.gpuMemory[at + 3],
+      };
+    }
     return sample;
   }
 }

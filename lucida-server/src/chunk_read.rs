@@ -10,6 +10,7 @@
 use lucida_content::{ChunkKey, ImageId};
 use lucida_protocol::{ChunkFailureKind, ServerPhase};
 use lucida_store::cache::{CachedStore, SourceReadTiming, TimedRead};
+use lucida_store::fill::FillValue;
 use lucida_store::import_types::Regrid;
 use lucida_store::layout::ChunkByteLayout;
 use lucida_store::source_limiter::{ReaderId, RequestLabel};
@@ -28,10 +29,10 @@ pub enum ChunkRead {
     Present(Vec<u8>),
     /// The object store held nothing at the chunk's location. That is sparse
     /// data rather than a failure, and the chunk reads as `len` bytes of
-    /// fill: one wire chunk's worth of zeros. The fill is built on demand by
-    /// [`ChunkRead::into_bytes`], so a caller that only needs to know the
-    /// chunk is absent never allocates it.
-    Absent { len: usize },
+    /// fill: one wire chunk's worth of the array's fill value. The fill is
+    /// built on demand by [`ChunkRead::into_bytes`], so a caller that only
+    /// needs to know the chunk is absent never allocates it.
+    Absent { len: usize, fill: FillValue },
 }
 
 impl ChunkRead {
@@ -39,7 +40,7 @@ impl ChunkRead {
     pub fn into_bytes(self) -> Vec<u8> {
         match self {
             ChunkRead::Present(bytes) => bytes,
-            ChunkRead::Absent { len } => vec![0; len],
+            ChunkRead::Absent { len, fill } => fill.bytes(len),
         }
     }
 }
@@ -142,6 +143,7 @@ pub async fn read_chunk(
         Err(e) if is_not_found(&e) => {
             return Ok(ChunkRead::Absent {
                 len: level_info.chunk_byte_layout.canonical_byte_size,
+                fill: level_info.fill_value,
             });
         }
         Err(e) => return Err(ChunkReadError::ObjectStore(e)),
@@ -183,8 +185,13 @@ fn decode_wire_chunk(
     chunk_key: &ChunkKey,
 ) -> Result<Vec<u8>, ChunkReadError> {
     let expected = level_info.chunk_byte_layout.on_disk_byte_size;
-    let raw = decode_storage_bytes(storage_bytes, level_info.compression, expected)
-        .map_err(ChunkReadError::Decode)?;
+    let raw = decode_storage_bytes(
+        storage_bytes,
+        &level_info.compression,
+        &level_info.chunk_shape,
+        expected,
+    )
+    .map_err(ChunkReadError::Decode)?;
     tracing::debug!(
         key = %chunk_key,
         compressed = storage_bytes.len(),
@@ -222,11 +229,15 @@ async fn read_regridded_chunk(
     mut probe: Option<&mut RequestProbe>,
 ) -> Result<ChunkRead, ChunkReadError> {
     let served_len = regrid.chunk_byte_layout.canonical_byte_size;
+    let fill = stored.fill_value;
     let axes = resolver
         .axes_names(image_id)
         .ok_or_else(|| ChunkReadError::UnknownImage(image_id.clone()))?;
     let Some(plan) = RegridPlan::new(*chunk_key, axes, stored, regrid) else {
-        return Ok(ChunkRead::Absent { len: served_len });
+        return Ok(ChunkRead::Absent {
+            len: served_len,
+            fill,
+        });
     };
 
     if let Some(probe) = probe.as_deref_mut() {
@@ -256,7 +267,7 @@ async fn read_regridded_chunk(
         probe.record_read(timing);
     }
 
-    let mut out = vec![0_u8; served_len];
+    let mut out = fill.bytes(served_len);
     let mut any_present = false;
     for (source, read) in sources.iter().zip(reads) {
         let storage_bytes = match read.result {
@@ -274,7 +285,10 @@ async fn read_regridded_chunk(
     Ok(if any_present {
         ChunkRead::Present(out)
     } else {
-        ChunkRead::Absent { len: served_len }
+        ChunkRead::Absent {
+            len: served_len,
+            fill,
+        }
     })
 }
 
@@ -446,6 +460,8 @@ mod tests {
                 chunk_size_t: 1,
                 chunk_size_c: 2,
             },
+            chunk_key_encoding: Default::default(),
+            fill_value: Default::default(),
             shard: None,
             regrid: None,
         }
@@ -586,7 +602,13 @@ mod tests {
 
         let read = read(&resolver, &store, "0/0/0/0/0/0").await.unwrap();
 
-        assert_eq!(read, ChunkRead::Absent { len: 4 });
+        assert_eq!(
+            read,
+            ChunkRead::Absent {
+                len: 4,
+                fill: FillValue::default()
+            }
+        );
         assert_eq!(read.into_bytes(), vec![0; 4]);
     }
 
@@ -603,7 +625,7 @@ mod tests {
     #[tokio::test]
     async fn compressed_chunk_is_decoded() {
         let mut level = four_byte_level();
-        level.compression = StorageCompression::Lz4;
+        level.compression = StorageCompression::compressed(lucida_store::codec::BytesCodec::Lz4, 2);
         let resolver = resolver_with(vec![level]);
         let store = object_store::memory::InMemory::new();
         let compressed = lz4_flex::compress_prepend_size(&[7, 7, 7, 7]);
@@ -619,7 +641,7 @@ mod tests {
     #[tokio::test]
     async fn undecodable_bytes_are_a_decode_error() {
         let mut level = four_byte_level();
-        level.compression = StorageCompression::Lz4;
+        level.compression = StorageCompression::compressed(lucida_store::codec::BytesCodec::Lz4, 2);
         let resolver = resolver_with(vec![level]);
         let store = object_store::memory::InMemory::new();
         put_chunk(&store, &resolver, "0/0/0/0/0/0", &[0, 0, 0, 0, 1, 2, 3]).await;
@@ -703,7 +725,14 @@ mod tests {
 
         for key in ["0/0/0/0/0/1", "0/0/1/0/0/1"] {
             let read = read(&resolver, &store, key).await.unwrap();
-            assert_eq!(read, ChunkRead::Absent { len: 4 }, "{key}");
+            assert_eq!(
+                read,
+                ChunkRead::Absent {
+                    len: 4,
+                    fill: FillValue::default()
+                },
+                "{key}"
+            );
         }
         assert_eq!(store.stats().backend_errors, 0);
     }
@@ -757,7 +786,7 @@ mod tests {
         assert_eq!(denied.failure_kind(), ChunkFailureKind::Permission);
 
         let mut lz4 = four_byte_level();
-        lz4.compression = StorageCompression::Lz4;
+        lz4.compression = StorageCompression::compressed(lucida_store::codec::BytesCodec::Lz4, 2);
         let corrupt_resolver = resolver_with(vec![lz4]);
         let store = object_store::memory::InMemory::new();
         put_chunk(
@@ -891,6 +920,8 @@ mod tests {
             compression: StorageCompression::None,
             chunk_shape: vec![1, 1, 1, 2, 2],
             chunk_byte_layout: layout(4),
+            chunk_key_encoding: Default::default(),
+            fill_value: Default::default(),
             shard: None,
             regrid: Some(Regrid {
                 chunk_shape: vec![1, 1, 1, 4, 4],
@@ -986,11 +1017,24 @@ mod tests {
         // that were never written.
         for key in ["0/0/2/0/0/0", "0/0/0/0/1/0"] {
             let read = read(&resolver, &store, key).await.unwrap();
-            assert_eq!(read, ChunkRead::Absent { len: 16 }, "{key}");
+            assert_eq!(
+                read,
+                ChunkRead::Absent {
+                    len: 16,
+                    fill: FillValue::default()
+                },
+                "{key}"
+            );
         }
         let empty = cached(object_store::memory::InMemory::new());
         let read = read(&resolver, &empty, "0/0/0/0/0/0").await.unwrap();
-        assert_eq!(read, ChunkRead::Absent { len: 16 });
+        assert_eq!(
+            read,
+            ChunkRead::Absent {
+                len: 16,
+                fill: FillValue::default()
+            }
+        );
     }
 
     #[tokio::test]

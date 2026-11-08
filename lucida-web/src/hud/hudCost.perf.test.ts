@@ -39,7 +39,7 @@
 import { describe, expect, it } from "vitest";
 
 import { drawHud, hudHeight } from "./hudDraw.ts";
-import { fakeCache, HARDWARE, HUD_TEST_COLORS, makeRecorder, MIB, RecordingContext } from "./hudFixtures.ts";
+import { fakeCache, gpuReport, HARDWARE, HUD_TEST_COLORS, makeRecorder, MIB, RecordingContext } from "./hudFixtures.ts";
 import { buildHudView, createHudHistory, HUD_HISTORY, HUD_TICK_MS, pushSample, type HudSample } from "./hudModel.ts";
 import { emptyLaneOutstanding, HudSource } from "./hudSource.ts";
 import { Scheduler } from "../pipeline/fetch/scheduler.ts";
@@ -93,7 +93,7 @@ function sampleAt(tick: number): HudSample {
       main: { bytes: (100 + tick) * MIB, budgetBytes: 512 * MIB },
       overview: { bytes: 60 * MIB, budgetBytes: 64 * MIB },
     },
-    gpuAtlases: { atlases: 6, bytes: (300 + tick) * MIB },
+    gpuMemory: gpuReport({ atlases: 6, bytes: (300 + tick) * MIB }),
     levels: Array.from({ length: 4 }, (_, i) => ({
       datasetId: `ds-${i}`,
       name: `dataset-${i}.zarr`,

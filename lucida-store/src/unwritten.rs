@@ -14,6 +14,7 @@ use std::sync::Arc;
 use futures_util::future::join_all;
 use object_store::path::Path;
 
+use crate::ChunkKeyEncoding;
 use crate::cache::CachedStore;
 use crate::import_types::{ImportWarning, ImportWarningKind};
 use crate::shard::{self, ShardLayout};
@@ -27,6 +28,8 @@ pub(crate) struct ProbeTarget {
     /// How many coordinates an on-disk chunk key for this level carries — one
     /// per axis of the level's own array, which is what the key is built from.
     pub axis_count: usize,
+    /// How the level names a chunk's object from its coordinates.
+    pub chunk_key_encoding: ChunkKeyEncoding,
     /// How much source space this level's origin chunk spans, per canonical
     /// axis: the chunk's extent in voxels scaled into the shared coordinate
     /// space all levels are expressed in. On a sharded level the chunk is
@@ -48,18 +51,19 @@ pub(crate) enum OriginChunk {
     Unknown,
 }
 
-/// The store path of a level's origin chunk: one `0` per on-disk axis, under
-/// the Zarr v3 `c/` chunk prefix. Every coordinate is zero, so the wire's
+/// The store path of a level's origin chunk: one `0` per on-disk axis, named
+/// by the level's chunk key encoding. Every coordinate is zero, so the wire's
 /// voxel-vs-grid distinction for `t`/`c` (see [`crate::chunk_key_to_store_path`])
 /// cannot change the answer and no chunk shape is needed here. On a sharded
 /// level the same path names the origin shard, the one that holds the
 /// origin inner chunk at its first index position.
-fn origin_chunk_path(base_prefix: &str, level_path: &str, axis_count: usize) -> String {
-    let coords = vec!["0"; axis_count].join("/");
+fn origin_chunk_path(base_prefix: &str, target: &ProbeTarget) -> String {
+    let coords = vec![0; target.axis_count];
     if base_prefix.is_empty() {
-        format!("{level_path}/c/{coords}")
+        target.chunk_key_encoding.store_path(&target.path, &coords)
     } else {
-        format!("{base_prefix}/{level_path}/c/{coords}")
+        let level = format!("{base_prefix}/{}", target.path);
+        target.chunk_key_encoding.store_path(level, &coords)
     }
 }
 
@@ -72,11 +76,7 @@ async fn probe_level_origins(
     targets: &[ProbeTarget],
 ) -> Vec<OriginChunk> {
     let probes = targets.iter().map(|target| {
-        let path = Path::from(origin_chunk_path(
-            base_prefix,
-            &target.path,
-            target.axis_count,
-        ));
+        let path = Path::from(origin_chunk_path(base_prefix, target));
         let store = Arc::clone(store);
         let shard = target.shard.as_ref();
         async move {
@@ -199,6 +199,7 @@ mod tests {
         ProbeTarget {
             path: path.to_string(),
             axis_count,
+            chunk_key_encoding: ChunkKeyEncoding::default(),
             origin_footprint: [1.0, 1.0, 1.0, edge, edge],
             shard: None,
         }
@@ -207,13 +208,28 @@ mod tests {
     #[test]
     fn origin_path_emits_one_zero_per_on_disk_axis() {
         // A real 7-axis layout (m, p, t, z, c, y, x).
-        assert_eq!(origin_chunk_path("", "1", 7), "1/c/0/0/0/0/0/0/0");
-        assert_eq!(origin_chunk_path("", "0", 5), "0/c/0/0/0/0/0");
+        assert_eq!(
+            origin_chunk_path("", &target("1", 7, 1.0)),
+            "1/c/0/0/0/0/0/0/0"
+        );
+        assert_eq!(origin_chunk_path("", &target("0", 5, 1.0)), "0/c/0/0/0/0/0");
     }
 
     #[test]
     fn origin_path_is_scoped_by_the_collection_tile_prefix() {
-        assert_eq!(origin_chunk_path("A/1/0", "2", 3), "A/1/0/2/c/0/0/0");
+        assert_eq!(
+            origin_chunk_path("A/1/0", &target("2", 3, 1.0)),
+            "A/1/0/2/c/0/0/0"
+        );
+    }
+
+    #[test]
+    fn origin_path_follows_the_level_s_chunk_key_encoding() {
+        let v2 = ProbeTarget {
+            chunk_key_encoding: ChunkKeyEncoding::V2 { separator: '.' },
+            ..target("2", 3, 1.0)
+        };
+        assert_eq!(origin_chunk_path("A/1/0", &v2), "A/1/0/2/0.0.0");
     }
 
     /// A partial export to scale: level 0 declared with 2048-wide chunks

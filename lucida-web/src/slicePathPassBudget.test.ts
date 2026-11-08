@@ -37,6 +37,25 @@ function indexFor(members: MemberRosterEntry[], channel: number | null): Map<str
 }
 
 describe("pushMemberLayers", () => {
+  it("puts every layer of one (dataset, channel) in one pass group, and the next channel in another", () => {
+    const members = rosterGrid(12, 4, 1024);
+    const layers: SliceLayerParams[] = [];
+    for (const channel of [0, 1]) {
+      pushMemberLayers(layers, {
+        members,
+        indexByMember: indexFor(members, channel),
+        channel,
+        blendMode: "additive",
+        fullResWidth: 1024,
+        fullResHeight: 1024,
+        zoom: 0.5,
+      });
+    }
+    expect(layers).toHaveLength(24);
+    expect(new Set(layers.slice(0, 12).map((layer) => layer.passGroup))).toEqual(new Set([0]));
+    expect(new Set(layers.slice(12).map((layer) => layer.passGroup))).toEqual(new Set([12]));
+  });
+
   it("aggregates a wide collection of sub-pixel members into ONE layer", () => {
     const members = rosterGrid(5000, 100, 1024);
     const layers: SliceLayerParams[] = [];

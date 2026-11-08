@@ -12,7 +12,6 @@
 import type { DatasetManifest } from "../../manifestTypes.ts";
 import type { ResidencyTier } from "../residencyTier.ts";
 import type { ChunkRequest } from "./types.ts";
-import { computeAtlasGeometry } from "../../renderer/atlasSizing.ts";
 
 /** Bytes, or chunk counts, per residency tier. */
 export type PerTier = Record<ResidencyTier, number>;
@@ -30,6 +29,8 @@ export interface Admission {
   remaining: PerTier;
   /** Bytes the coarse tier took beyond its own capacity, from detail's room. */
   borrowed: number;
+  /** GPU bytes the chunk pools have left for the next dataset's plan. */
+  gpuRoomLeft: number;
 }
 
 /**
@@ -38,7 +39,8 @@ export interface Admission {
  * detail leaves: the coarse floor grows with the layout instead of stopping
  * at a fixed size while detail room sits empty. `bytesOf` is what one
  * resident chunk of a request costs, and `slotOf` the GPU slot pool it lands
- * in, when that pool has a fixed size.
+ * in. `gpuRoom` is the bytes the render worker's chunk pools may hold between
+ * them, which every slot admitted into any pool takes from.
  *
  * Two requests for one chunk of one tier, such as the coarse and minimap
  * lanes asking for the same chunk, are admitted or refused together and
@@ -49,6 +51,7 @@ export function admitRequests(
   capacity: Readonly<PerTier>,
   bytesOf: (req: ChunkRequest) => number,
   slotOf: (req: ChunkRequest) => GpuSlot | null = () => null,
+  gpuRoom: number = Infinity,
 ): Admission {
   const admitted = new Set<ChunkRequest>();
   // Chunks charged to a tier, and chunks its room refused. A chunk is held
@@ -58,6 +61,7 @@ export function admitRequests(
   const shortfall: PerTier = { detail: 0, coarse: 0 };
   const used: PerTier = { detail: 0, coarse: 0 };
   const slotsUsed = new Map<string, number>();
+  let gpuUsed = 0;
   const short = (req: ChunkRequest): void => {
     if (req.lane !== "prefetch") shortfall[req.tier]++;
   };
@@ -71,7 +75,7 @@ export function admitRequests(
       // A full slot pool refuses this lane's upload, not the chunk: a lane
       // that never uploads, such as the minimap, can still hold it.
       const slot = slotOf(req);
-      if (slot && (slotsUsed.get(slot.pool) ?? 0) >= slot.slots) {
+      if (slot && ((slotsUsed.get(slot.pool) ?? 0) >= slot.slots || gpuUsed + slot.slotBytes > gpuRoom)) {
         short(req);
         continue;
       }
@@ -85,7 +89,10 @@ export function admitRequests(
         used[tier] += bytes;
         charged.add(key);
       }
-      if (slot) slotsUsed.set(slot.pool, (slotsUsed.get(slot.pool) ?? 0) + 1);
+      if (slot) {
+        slotsUsed.set(slot.pool, (slotsUsed.get(slot.pool) ?? 0) + 1);
+        gpuUsed += slot.slotBytes;
+      }
       admitted.add(req);
     }
   };
@@ -103,50 +110,18 @@ export function admitRequests(
       coarse: Math.max(0, capacity.coarse - used.coarse),
     },
     borrowed,
+    gpuRoomLeft: gpuRoom - gpuUsed,
   };
-}
-
-/** The render worker's slot pool a chunk lands in, and how many slots it has. */
-export interface GpuSlot {
-  pool: string;
-  slots: number;
 }
 
 /**
- * Where each request's chunk goes on the GPU, for a slice view: one pool
- * per dataset, tier, channel and chunk plane, sized as the worker sizes it
- * from the slice atlas budget. The worker's device can only have larger
- * texture limits than the WebGPU minimums used here, which leave a budget-
- * bound pool the same size. Prefetch and minimap chunks never enter these
- * pools, and a volume's pools grow as chunks arrive, so neither is counted.
+ * The render worker's chunk pool a chunk lands in, the slots it may hold,
+ * and the bytes one slot takes of the GPU total (`gpuCapacity.ts`).
  */
-export function sliceSlotsFor(
-  manifest: DatasetManifest,
-  sliceAtlasBytes: number,
-): (req: ChunkRequest) => GpuSlot | null {
-  const limits = { maxTextureDimension2D: 8192, maxTextureDimension3D: 2048, maxStorageBufferBindingSize: 0, maxBufferSize: 0 };
-  const planes = new Map<string, Map<number, [number, number]>>();
-  for (const image of manifest.images) {
-    const byLevel = new Map<number, [number, number]>();
-    for (const level of image.multiscale.levels) {
-      const [, , , y, x] = level.chunk_shape;
-      byLevel.set(level.level_index, [x, y]);
-    }
-    planes.set(image.image_id, byLevel);
-  }
-  const slotsByPlane = new Map<string, number>();
-  return (req) => {
-    if (req.lane !== "detail" && req.lane !== "coarse") return null;
-    const plane = planes.get(req.imageId)?.get(req.level);
-    if (!plane) return null;
-    const dims = `${plane[0]}x${plane[1]}`;
-    let slots = slotsByPlane.get(dims);
-    if (slots === undefined) {
-      slots = computeAtlasGeometry(limits, plane, sliceAtlasBytes, "2d").totalSlots;
-      slotsByPlane.set(dims, slots);
-    }
-    return { pool: `${req.datasetId}|${req.tier}|${req.c}|${dims}`, slots };
-  };
+export interface GpuSlot {
+  pool: string;
+  slots: number;
+  slotBytes: number;
 }
 
 const SAMPLE_BYTES: Record<string, number> = {

@@ -14,6 +14,7 @@ import {
   budgetBoundCoarseRun,
   coldRemoteOpen,
   fallbackAdapterOpen,
+  gpuMemoryOpen,
   gpuTimedOpen,
   healthyLocalOpen,
   interactionRun,
@@ -49,6 +50,7 @@ const RUNS = {
   sendHeavy: sendHeavyIdleRun(),
   lateStall: lateStallOpen(),
   gpuTimed: gpuTimedOpen(),
+  gpuMemory: gpuMemoryOpen(),
   mainThreadOnly: mainThreadOnlyOpen(),
   fallback: fallbackAdapterOpen(),
 };
@@ -76,6 +78,21 @@ const DOCUMENTS = {
 function numericTokens(text: string): string[] {
   return [...text.replace(/(\d),(?=\d{3}\b)/g, "$1").matchAll(/\d+(?:\.\d+)?/g)].map((m) => m[0]);
 }
+
+describe("the GPU memory line", () => {
+  it("states the peak against its budget, the last reading, a halved budget, and the slots held", () => {
+    const line = renderDiagnostic(DOCUMENTS.gpuMemory).text.split("\n").find((l) => l.startsWith("gpu mem"));
+    expect(line).toBe(
+      "gpu mem   peak 629,145,600 B of 1,610,612,736 B budget · last 629,145,600 B · " +
+        "budget halved to 805,306,368 B · chunk slots 440 of 512 held",
+    );
+  });
+
+  it("says when no reading carried one", () => {
+    const line = renderDiagnostic(DOCUMENTS.healthy).text.split("\n").find((l) => l.startsWith("gpu mem"));
+    expect(line).toBe("gpu mem   not reported by the render worker");
+  });
+});
 
 describe("the default rendering", () => {
   it("fits 30 lines and 3 kB on every fixture", () => {

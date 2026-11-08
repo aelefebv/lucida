@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { FALLBACK, HARDWARE, hudSample, lanes, MIB } from "./hudFixtures.ts";
+import { FALLBACK, gpuReport, HARDWARE, hudSample, lanes, MIB } from "./hudFixtures.ts";
 import {
   buildHudView,
   createHudHistory,
@@ -181,12 +181,24 @@ describe("resident bytes against budget", () => {
     expect(view.pools.map((p) => p.state)).toEqual(["no session", "no session", "not reported"]);
   });
 
-  it("reads the render worker's atlases into the GPU row, with no budget to fill against", () => {
-    const view = buildHudView(after([hudSample(0, { gpuAtlases: { atlases: 6, bytes: 412 * MIB } })]));
-    expect(view.pools[2]).toEqual({ label: "GPU", text: "412 MiB", fill: null, state: "6 atlases", tone: "info" });
+  it("fills the GPU row against the one GPU budget, with the chunk slots held", () => {
+    const report = gpuReport({ bytes: 384 * MIB, budgetBytes: 1536 * MIB, slotsHeld: 90, slots: 120 });
+    const view = buildHudView(after([hudSample(0, { gpuMemory: report })]));
+    expect(view.pools[2]).toEqual({
+      label: "GPU",
+      text: "384 / 1536 MiB",
+      fill: 0.25,
+      state: "under budget · 90 of 120 slots",
+      tone: "ok",
+    });
 
-    const one = buildHudView(after([hudSample(0, { gpuAtlases: { atlases: 1, bytes: 0.5 * MIB } })]));
-    expect([one.pools[2].text, one.pools[2].state]).toEqual(["0.5 MiB", "1 atlas"]);
+    const full = buildHudView(after([hudSample(0, {
+      gpuMemory: gpuReport({ bytes: 192 * MIB, budgetBytes: 192 * MIB, slotsHeld: 64, slots: 64, overviewsRefused: 3 }),
+    })]));
+    expect([full.pools[2].state, full.pools[2].tone]).toEqual([
+      "at budget · 64 of 64 slots · 3 minimap overviews left out",
+      "busy",
+    ]);
   });
 });
 

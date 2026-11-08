@@ -11,7 +11,7 @@
 import { LANES, type Lane, type LaneOutstanding, type PoolResidencyReport } from "../pipeline/fetch/types.ts";
 import { traceRecorder, type TraceRecorder } from "../trace/recorder.ts";
 import type { TickScratch } from "../trace/tickRing.ts";
-import type { GpuAtlasReport } from "../renderer/workerProtocol.ts";
+import type { GpuMemoryReport } from "../renderer/workerProtocol.ts";
 import type { HudLevelSample, HudSample } from "./hudModel.ts";
 
 /** The two reads the HUD makes on the CPU cache. */
@@ -25,7 +25,7 @@ export interface HudSourceOptions {
   /** The session's cache, or null while there is no session. Read at each tick. */
   getCache: () => HudCacheReads | null;
   /** The render worker's atlas report, or null while there is no worker. Read at each tick. */
-  getGpuAtlases?: () => GpuAtlasReport | null;
+  getGpuMemory?: () => GpuMemoryReport | null;
   /** A dataset's display name, for the levels column. */
   datasetName?: (datasetId: string) => string;
   now?: () => number;
@@ -57,7 +57,7 @@ interface LevelMemory {
 export class HudSource {
   private readonly recorder: TraceRecorder;
   private readonly getCache: () => HudCacheReads | null;
-  private readonly getGpuAtlases: () => GpuAtlasReport | null;
+  private readonly getGpuMemory: () => GpuMemoryReport | null;
   private readonly datasetName: (datasetId: string) => string;
   private readonly now: () => number;
   private readonly levels = new Map<string, LevelMemory>();
@@ -66,7 +66,7 @@ export class HudSource {
   constructor(options: HudSourceOptions) {
     this.recorder = options.recorder ?? traceRecorder;
     this.getCache = options.getCache;
-    this.getGpuAtlases = options.getGpuAtlases ?? (() => null);
+    this.getGpuMemory = options.getGpuMemory ?? (() => null);
     this.datasetName = options.datasetName ?? ((id) => id);
     this.now = options.now ?? (() => performance.now());
   }
@@ -117,7 +117,7 @@ export class HudSource {
       quiescence: quiescence ? { quiescent: quiescence.quiescent, reason: quiescence.reason } : null,
       lanes: cache ? cache.laneOutstanding(emptyLaneOutstanding()) : null,
       pools: cache ? cache.poolResidency() : null,
-      gpuAtlases: this.getGpuAtlases(),
+      gpuMemory: this.getGpuMemory(),
       levels,
       gpu: this.recorder.gpu,
       runOpen: this.recorder.isRunOpen,

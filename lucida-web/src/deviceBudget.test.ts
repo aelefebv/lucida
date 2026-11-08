@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { CEILING_BUDGETS, fitBudgets, readDeviceMemoryGiB } from "./deviceBudget.ts";
+import {
+  CEILING_BUDGETS,
+  GPU_TOTAL_FLOOR_BYTES,
+  fitBudgets,
+  halvedGpuTotal,
+  readDeviceMemoryGiB,
+} from "./deviceBudget.ts";
 
 const MIB = 1024 * 1024;
 
@@ -16,8 +22,7 @@ describe("fitBudgets", () => {
 
   it("halves every budget on a device that reports 4 GiB", () => {
     expect(fitBudgets(4)).toEqual({
-      volumeAtlasBytes: 256 * MIB,
-      sliceAtlasBytes: 32 * MIB,
+      gpuTotalBytes: 768 * MIB,
       labelVolumeBytes: 256 * MIB,
       labelTotalVolumeBytes: 256 * MIB,
       cpuMainBytes: 256 * MIB,
@@ -28,7 +33,7 @@ describe("fitBudgets", () => {
 
   it("stops at a floor on the smallest devices", () => {
     const tiny = fitBudgets(0.25);
-    expect(tiny.volumeAtlasBytes).toBe(64 * MIB);
+    expect(tiny.gpuTotalBytes).toBe(GPU_TOTAL_FLOOR_BYTES);
     expect(tiny.cpuMainBytes).toBe(64 * MIB);
     expect(tiny.cpuBytesInFlight).toBe(8 * MIB);
     for (const [key, bytes] of Object.entries(tiny)) {
@@ -37,17 +42,19 @@ describe("fitBudgets", () => {
     }
   });
 
-  it("holds the GPU atlases to the adapter's largest buffer", () => {
-    const budgets = fitBudgets(8, { maxBufferSize: 256 * MIB });
-    expect(budgets.volumeAtlasBytes).toBe(256 * MIB);
-    expect(budgets.sliceAtlasBytes).toBe(64 * MIB);
-    // The CPU side and the label caps, which the page fits alone, stay put.
-    expect(budgets.cpuMainBytes).toBe(CEILING_BUDGETS.cpuMainBytes);
-    expect(budgets.labelVolumeBytes).toBe(CEILING_BUDGETS.labelVolumeBytes);
+  it("leaves every label atlas room inside the GPU total", () => {
+    for (const memory of [null, 8, 4, 2, 1, 0.25]) {
+      const budgets = fitBudgets(memory);
+      expect(budgets.labelTotalVolumeBytes, String(memory)).toBeLessThan(budgets.gpuTotalBytes);
+    }
   });
+});
 
-  it("leaves a desktop adapter's atlases at the ceiling", () => {
-    expect(fitBudgets(null, { maxBufferSize: 2 * 1024 * MIB })).toEqual(CEILING_BUDGETS);
+describe("halvedGpuTotal", () => {
+  it("halves the total after an out-of-memory failure, down to the floor and no further", () => {
+    expect(halvedGpuTotal(1536 * MIB)).toBe(768 * MIB);
+    expect(halvedGpuTotal(300 * MIB)).toBe(GPU_TOTAL_FLOOR_BYTES);
+    expect(halvedGpuTotal(GPU_TOTAL_FLOOR_BYTES)).toBe(GPU_TOTAL_FLOOR_BYTES);
   });
 });
 

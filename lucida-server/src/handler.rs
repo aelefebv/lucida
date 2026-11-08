@@ -2354,7 +2354,8 @@ mod tests {
     #[tokio::test]
     async fn corrupt_chunk_sends_a_permanent_status() {
         let mut level = four_byte_level();
-        level.compression = crate::decode::StorageCompression::Lz4;
+        level.compression =
+            crate::decode::StorageCompression::compressed(lucida_store::codec::BytesCodec::Lz4, 2);
         let resolver = ChunkResolver::new(&image_seed("img1", vec![level]));
         let store = store_with(&resolver, "0/0/0/0/0/0", &[4, 0, 0, 0, 0xff, 0xff]).await;
 
