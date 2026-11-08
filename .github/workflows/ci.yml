@@ -483,8 +483,11 @@ jobs:
       - name: Cache cargo build (shared with rust job)
         uses: Swatinem/rust-cache@v2
 
+      # From PyPI rather than astral-sh/setup-uv, which fetches uv from its
+      # GitHub release: release downloads can return 504s for long stretches.
+      # The runner image puts pipx's bin directory on PATH.
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        run: pipx install uv==0.13.7
 
       # The client's integration tests drive a real server.
       - name: Build lucida-server
