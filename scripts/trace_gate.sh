@@ -46,13 +46,14 @@ datasets=(
 )
 # name|dataset|timeout|framing. Each run frames its dataset whole, and an
 # empty timeout is LUCIDA_GATE_TIMEOUT. Ray-marching is the costliest pass on
-# a software rasterizer: in a ninth of the default viewport, SwiftShader
-# settles the volume at ratio 1 in about 15 s and at ratio 2, where the view
-# asks for level 0, in about 95 s.
+# a software rasterizer, and the view marches each of the volume's three
+# channels: in a ninth of the default viewport, SwiftShader settles it at
+# ratio 1 in about 8 s and at ratio 2, where the view asks for level 0, in
+# about 30 s.
 runs=(
   "image|image||--camera slice"
   "volume|volume||--camera slice"
-  "volume-render|volume|300|--camera arcball --width 480 --height 300"
+  "volume-render|volume||--camera arcball --width 480 --height 300"
   "collection|collection||--camera slice"
   "single-level|single-level||--camera slice"
 )
