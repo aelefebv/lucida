@@ -1894,7 +1894,7 @@ mod tests {
     /// `CachedStore`, exactly as the server wires it.
     fn cached_store(dir: &str) -> Arc<CachedStore> {
         Arc::new(CachedStore::new(
-            crate::backend::open(dir).unwrap(),
+            crate::backend::open(&dir.parse().unwrap()).unwrap(),
             TEST_CACHE_BYTES,
         ))
     }
@@ -5300,7 +5300,7 @@ mod tests {
         let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let store = Arc::new(CachedStore::new(
             Arc::new(RecordingStore {
-                inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+                inner: crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap(),
                 reads: reads.clone(),
                 fail_get_when: None,
             }),
@@ -5429,7 +5429,7 @@ mod tests {
         let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let store = Arc::new(CachedStore::new(
             Arc::new(RecordingStore {
-                inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+                inner: crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap(),
                 reads: reads.clone(),
                 fail_get_when: None,
             }),
@@ -5448,7 +5448,7 @@ mod tests {
         let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let store = Arc::new(CachedStore::new(
             Arc::new(RecordingStore {
-                inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+                inner: crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap(),
                 reads: reads.clone(),
                 fail_get_when: Some(|location| location.ends_with("labels/zarr.json")),
             }),
@@ -5469,7 +5469,7 @@ mod tests {
         let reads = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
         let store = Arc::new(CachedStore::new(
             Arc::new(RecordingStore {
-                inner: crate::backend::open(dir.to_str().unwrap()).unwrap(),
+                inner: crate::backend::open(&dir.to_str().unwrap().parse().unwrap()).unwrap(),
                 reads: reads.clone(),
                 fail_get_when: Some(|location| {
                     location.ends_with("/zarr.json") && location.matches('/').count() == 3
