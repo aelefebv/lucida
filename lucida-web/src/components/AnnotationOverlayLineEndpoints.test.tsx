@@ -218,7 +218,7 @@ describe("AnnotationOverlay — adjust a line endpoint (move_annotation reshape)
     expect(moves[0].end).toBeUndefined(); // rigid translate carries no end
   });
 
-  it("regression (#790): a plain click on a HOVERED line's anchor dot opens its thread", () => {
+  it("regression: a plain click on a HOVERED line's anchor dot opens its thread", () => {
     // A `start` grip drawn on the anchor vertex would stack over the dot and
     // swallow the click, so the grip is outset off the vertex.
     renderOverlay({
@@ -233,7 +233,7 @@ describe("AnnotationOverlay — adjust a line endpoint (move_annotation reshape)
     expect(screen.getByText("on the line")).toBeTruthy();
   });
 
-  it("regression (#790): a Shift+drag on a HOVERED line's anchor dot does a rigid move (no end), not a reshape", () => {
+  it("regression: a Shift+drag on a HOVERED line's anchor dot does a rigid move (no end), not a reshape", () => {
     // A grip over the dot would steal the Shift+drag and reshape one endpoint
     // instead of moving the whole line.
     const { sent } = renderOverlay({ pins: [linePin()] });
@@ -257,7 +257,7 @@ describe("AnnotationOverlay — adjust a line endpoint (move_annotation reshape)
  * writes and asserts the grip sits about HANDLE_OUTSET px off the vertex, along
  * the line axis, away from the other end.
  */
-describe("AnnotationOverlay — the line start grip is OUTSET off the anchor dot (geometry, #790)", () => {
+describe("AnnotationOverlay — the line start grip is OUTSET off the anchor dot (geometry)", () => {
   // Mirrors the component's unexported HANDLE_OUTSET; assertions use a tolerance.
   const HANDLE_OUTSET = 9;
 

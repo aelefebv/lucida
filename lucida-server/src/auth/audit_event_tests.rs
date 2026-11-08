@@ -375,7 +375,7 @@ async fn revoked_bearer_token_emits_auth_bearer_revoked() {
 #[tokio::test]
 async fn idle_expired_emits_auth_session_expired_idle() {
     let store = Arc::new(MemorySessionStore::new());
-    let mut row = fresh_session("stale", "user@x.com");
+    let mut row = fresh_session("stale", "user@example.com");
     // Default idle timeout is 7 days; place last_used_at at 8d ago.
     row.last_used_at = Utc::now() - ChronoDuration::hours(8 * 24);
     store.create(row).await.unwrap();
@@ -391,7 +391,7 @@ async fn idle_expired_emits_auth_session_expired_idle() {
     })
     .await;
     let evt = require_event(&events, "auth.session.expired.idle", Level::DEBUG);
-    assert_eq!(evt.field("email"), Some("user@x.com"));
+    assert_eq!(evt.field("email"), Some("user@example.com"));
 }
 
 // auth.session.expired.hard_cap — extractor finds past-expires_at row
@@ -402,7 +402,7 @@ async fn hard_cap_expired_emits_auth_session_expired_hard_cap() {
     store
         .create(LoginSession {
             id: "capped".into(),
-            email: "user@x.com".into(),
+            email: "user@example.com".into(),
             display_name: "X".into(),
             picture_url: None,
             created_at: now - ChronoDuration::hours(31 * 24),
@@ -424,7 +424,7 @@ async fn hard_cap_expired_emits_auth_session_expired_hard_cap() {
     })
     .await;
     let evt = require_event(&events, "auth.session.expired.hard_cap", Level::DEBUG);
-    assert_eq!(evt.field("email"), Some("user@x.com"));
+    assert_eq!(evt.field("email"), Some("user@example.com"));
 }
 
 // auth.startup.insecure_mode — emit pattern matches main.rs branch.
@@ -466,14 +466,14 @@ fn config_error_event_fires_at_error() {
 fn signin_success_event_fires_at_info_with_email_field() {
     let (events, _) = capture(|| {
         tracing::info!(
-            email = %"alice@calicolabs.com",
+            email = %"alice@example.com",
             session_id = %"uuid-123",
             target = %"/",
             "auth.signin.success",
         );
     });
     let evt = require_event(&events, "auth.signin.success", Level::INFO);
-    assert_eq!(evt.field("email"), Some("alice@calicolabs.com"));
+    assert_eq!(evt.field("email"), Some("alice@example.com"));
 }
 
 // auth.signin.rejected.hd_mismatch — emitted in callback handler
@@ -481,15 +481,15 @@ fn signin_success_event_fires_at_info_with_email_field() {
 fn hd_mismatch_event_fires_at_warn_with_attempted_fields() {
     let (events, _) = capture(|| {
         tracing::warn!(
-            attempted_email = %"alice@gmail.com",
+            attempted_email = %"alice@example.net",
             attempted_hd = %"<none>",
-            allowed_domains = %"calicolabs.com",
+            allowed_domains = %"example.com",
             "auth.signin.rejected.hd_mismatch",
         );
     });
     let evt = require_event(&events, "auth.signin.rejected.hd_mismatch", Level::WARN);
-    assert_eq!(evt.field("attempted_email"), Some("alice@gmail.com"));
-    assert_eq!(evt.field("allowed_domains"), Some("calicolabs.com"));
+    assert_eq!(evt.field("attempted_email"), Some("alice@example.net"));
+    assert_eq!(evt.field("allowed_domains"), Some("example.com"));
 }
 
 // auth.signin.rejected.unverified — emitted in callback handler
@@ -497,12 +497,12 @@ fn hd_mismatch_event_fires_at_warn_with_attempted_fields() {
 fn unverified_event_fires_at_warn_with_attempted_email() {
     let (events, _) = capture(|| {
         tracing::warn!(
-            attempted_email = %"alice@calicolabs.com",
+            attempted_email = %"alice@example.com",
             "auth.signin.rejected.unverified",
         );
     });
     let evt = require_event(&events, "auth.signin.rejected.unverified", Level::WARN);
-    assert_eq!(evt.field("attempted_email"), Some("alice@calicolabs.com"));
+    assert_eq!(evt.field("attempted_email"), Some("alice@example.com"));
 }
 
 // auth.signin.error.* — four flavors emitted from callback
@@ -542,10 +542,10 @@ fn signin_error_network_event_fires_at_error() {
 #[test]
 fn logout_event_fires_at_info_with_email_field() {
     let (events, _) = capture(|| {
-        tracing::info!(email = %"alice@calicolabs.com", "auth.logout");
+        tracing::info!(email = %"alice@example.com", "auth.logout");
     });
     let evt = require_event(&events, "auth.logout", Level::INFO);
-    assert_eq!(evt.field("email"), Some("alice@calicolabs.com"));
+    assert_eq!(evt.field("email"), Some("alice@example.com"));
 }
 
 // auth.bearer.revoke_current — emitted in bearer-token logout handler
@@ -554,11 +554,11 @@ fn bearer_revoke_current_event_fires_at_info_with_token_id_and_email() {
     let (events, _) = capture(|| {
         tracing::info!(
             token_id = %"token-123",
-            email = %"alice@calicolabs.com",
+            email = %"alice@example.com",
             "auth.bearer.revoke_current",
         );
     });
     let evt = require_event(&events, "auth.bearer.revoke_current", Level::INFO);
     assert_eq!(evt.field("token_id"), Some("token-123"));
-    assert_eq!(evt.field("email"), Some("alice@calicolabs.com"));
+    assert_eq!(evt.field("email"), Some("alice@example.com"));
 }

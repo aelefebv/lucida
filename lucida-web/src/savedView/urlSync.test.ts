@@ -626,7 +626,7 @@ describe("UrlSync — default saved view bootstrap", () => {
   });
 });
 
-describe("UrlSync — last view bootstrap (#700)", () => {
+describe("UrlSync — last view bootstrap", () => {
   let applier: FakeApplier;
   let captureBuilder: () => SavedView | null;
 
@@ -762,7 +762,7 @@ describe("UrlSync — last view bootstrap (#700)", () => {
   });
 });
 
-describe("parseAnnotationHash (#a=<annotation-id>, slice 3)", () => {
+describe("parseAnnotationHash (#a=<annotation-id>)", () => {
   it("returns null for empty hash", () => {
     expect(parseAnnotationHash("")).toBeNull();
     expect(parseAnnotationHash("#")).toBeNull();
@@ -804,7 +804,7 @@ describe("parseAnnotationHash (#a=<annotation-id>, slice 3)", () => {
   });
 });
 
-describe("buildAnnotationLink (#a= round-trip, slice 3)", () => {
+describe("buildAnnotationLink (#a= round-trip)", () => {
   it("builds <workspace-url>#a=<pinId> from the location", () => {
     const link = buildAnnotationLink("pin-123", {
       origin: "https://lucida.example",
