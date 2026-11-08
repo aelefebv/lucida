@@ -17,6 +17,7 @@ use lucida_core::command::DocumentCommand;
 use lucida_core::protocol::{ClientId, ServerMessage};
 use lucida_core::saved_view::SavedView;
 use lucida_core::scene::DocumentState;
+use lucida_store::source_policy::SourcePolicy;
 use serde_json::json;
 use thiserror::Error;
 use tokio::sync::{Mutex, broadcast};
@@ -117,6 +118,7 @@ pub struct WorkspaceManager {
     inbox: Option<Arc<dyn InboxStore>>,
     pub(crate) live: Mutex<HashMap<String, Arc<LiveWorkspace>>>,
     proxy_config: ProxyConfig,
+    source_policy: Arc<SourcePolicy>,
     runtime_config: WorkspaceRuntimeConfig,
 }
 
@@ -135,8 +137,17 @@ impl WorkspaceManager {
             inbox: None,
             live: Mutex::new(HashMap::new()),
             proxy_config,
+            source_policy: Arc::default(),
             runtime_config,
         }
+    }
+
+    /// Set where this server's workspaces may open datasets from. Without
+    /// it every location opens.
+    #[must_use]
+    pub fn with_source_policy(mut self, policy: Arc<SourcePolicy>) -> Self {
+        self.source_policy = policy;
+        self
     }
 
     /// Attach the workspace inbox, so a **Send report** arriving on a
@@ -163,6 +174,10 @@ impl WorkspaceManager {
 
     pub fn proxy_config(&self) -> ProxyConfig {
         self.proxy_config.clone()
+    }
+
+    pub fn source_policy(&self) -> Arc<SourcePolicy> {
+        Arc::clone(&self.source_policy)
     }
 
     pub fn runtime_config(&self) -> WorkspaceRuntimeConfig {
@@ -1126,6 +1141,7 @@ impl WorkspaceManager {
             live.tx.clone(),
             sources,
             self.proxy_config.clone(),
+            &self.source_policy,
         )
         .await;
         self.live

@@ -69,7 +69,7 @@ async fn start_server() -> Rig {
         tx,
         next_id: Arc::new(AtomicU64::new(0)),
         unicast_routes: Arc::new(Mutex::new(HashMap::new())),
-        data_dir: None,
+        source_policy: Arc::default(),
         proxy_config,
     };
     let app = Router::new().route("/ws", get(ws_route)).with_state(state);

@@ -21,6 +21,7 @@ use lucida_protocol::{
 };
 use lucida_proxy::ProxySpec;
 use lucida_store::cache::CachedStore;
+use lucida_store::source_policy::SourcePolicy;
 use tokio::sync::{Mutex, broadcast, mpsc};
 
 use crate::binding::{ChunkResolver, ServerBinding};
@@ -53,13 +54,14 @@ pub struct WorkspaceScope {
 
 /// Everything a dataset open runs against: the shared session + broadcast
 /// hub it mutates, the proxy/generated configuration for the binding it
-/// builds, and the (optional) workspace scope that authorizes and
-/// persists the open.
+/// builds, the source policy the location must pass, and the (optional)
+/// workspace scope that authorizes and persists the open.
 #[derive(Clone)]
 pub struct DatasetOpenContext {
     pub session: Arc<Mutex<Session>>,
     pub tx: broadcast::Sender<BroadcastItem>,
     pub proxy_config: ProxyConfig,
+    pub source_policy: Arc<SourcePolicy>,
     pub workspace: Option<WorkspaceScope>,
 }
 
@@ -344,7 +346,7 @@ pub async fn open_dataset(
             Some(format!("backend: {}", location.scheme().as_str())),
         ),
     );
-    let store = match lucida_store::backend::open(location) {
+    let store = match lucida_store::backend::open_permitted(location, &ctx.source_policy).await {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!(error = %e, "open_remote_dataset.backend_open_failed");
@@ -1136,6 +1138,7 @@ mod tests {
                 generated_max_chunk_bytes: 1024 * 1024,
                 generated_disk_budget_bytes: None,
             },
+            source_policy: Arc::default(),
             workspace: None,
         }
     }

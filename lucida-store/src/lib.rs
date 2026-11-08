@@ -12,6 +12,7 @@ pub mod metadata_reads;
 pub(crate) mod parse;
 pub mod shard;
 pub mod source_limiter;
+pub mod source_policy;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub(crate) mod unwritten;

@@ -15,6 +15,7 @@ use lucida_protocol::{
     AssetCatalog, DatasetOpenFailureDiagnostic, DatasetOpened, GeneratedAvailabilityDelta,
 };
 use lucida_store::cache::CachedStore;
+use lucida_store::source_policy::SourcePolicy;
 use tokio::sync::{Mutex, broadcast};
 
 use crate::binding::{ChunkResolver, ServerBinding};
@@ -42,6 +43,7 @@ pub async fn restore_workspace_bindings(
     tx: broadcast::Sender<BroadcastItem>,
     sources: Vec<WorkspaceDatasetSource>,
     proxy_config: ProxyConfig,
+    source_policy: &SourcePolicy,
 ) {
     for source in sources {
         let location = DatasetLocation::parse(&source.canonical_url);
@@ -72,6 +74,7 @@ pub async fn restore_workspace_bindings(
                     &source,
                     location,
                     &proxy_config,
+                    source_policy,
                 )
                 .await
             }
@@ -108,11 +111,14 @@ async fn restore_one_workspace_binding(
     source: &WorkspaceDatasetSource,
     location: &DatasetLocation,
     proxy_config: &ProxyConfig,
+    source_policy: &SourcePolicy,
 ) -> Result<(), DatasetOpenFailureDiagnostic> {
     let dataset_id = source.workspace_dataset_id.0.clone();
     let dataset_id_key = DatasetId(dataset_id.clone());
 
-    let store = lucida_store::backend::open(location).map_err(|e| backend_open_failure(&e))?;
+    let store = lucida_store::backend::open_permitted(location, source_policy)
+        .await
+        .map_err(|e| backend_open_failure(&e))?;
     // Built before the import so the metadata reads go through the cache and
     // are counted by the same source-cache instrumentation as the chunk reads
     // that follow. Mirrors the interactive open path in `crate::dataset_open`.
