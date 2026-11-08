@@ -8,7 +8,7 @@
  * — a mock that emits them proves nothing.
  */
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CpuCache, type CpuCacheConfig } from "./cpuCache.ts";
 import { FetchError } from "./retry.ts";
@@ -100,9 +100,27 @@ function createDecode(): DecodePool {
   } as unknown as DecodePool;
 }
 
+/**
+ * Every cache a test makes, reset when the test ends. A cache otherwise
+ * outlives its test: a transient failure's retry fires after the test is over
+ * and writes a row into whatever run a later test has open on the shared
+ * recorder. A reset leaves the retry nothing in flight to retry.
+ */
+const caches: CpuCache[] = [];
+
+afterEach(() => {
+  for (const cache of caches.splice(0)) cache.reset();
+});
+
+function newCache(...args: ConstructorParameters<typeof CpuCache>): CpuCache {
+  const cache = new CpuCache(...args);
+  caches.push(cache);
+  return cache;
+}
+
 function createCache(bytes: number, config?: Partial<CpuCacheConfig>) {
   const { source, failures } = createSource(bytes);
-  const cache = new CpuCache(source, createDecode(), config);
+  const cache = newCache(source, createDecode(), config);
   return { cache, failures };
 }
 
@@ -377,7 +395,7 @@ describe("counted-not-timed phases", () => {
 
     // Same chunk twice across two plans, while the first fetch is still out.
     const source = { fetch: () => new Promise<FetchResult>(() => {}) };
-    const held = new CpuCache(source as unknown as ContentSource, createDecode());
+    const held = newCache(source as unknown as ContentSource, createDecode());
     held.submit(makePlan([makeRequest()]));
     held.submit(makePlan([makeRequest()]));
 
@@ -419,7 +437,7 @@ describe("per-level residency", () => {
 
   it("counts dispatched fetches by level while they are out", () => {
     const source = { fetch: () => new Promise<FetchResult>(() => {}) };
-    const cache = new CpuCache(source as unknown as ContentSource, createDecode());
+    const cache = newCache(source as unknown as ContentSource, createDecode());
 
     cache.submit(makePlan([makeRequest({ level: 3 })]));
 
