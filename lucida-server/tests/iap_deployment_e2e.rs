@@ -141,7 +141,10 @@ impl Deployment {
                 "LUCIDA_DB_URL",
                 format!("sqlite://{}", tmp.path().join("lucida.db").display()),
             )
-            .env("LUCIDA_PROXY_CACHE_DIR", tmp.path().join("cache"))
+            .env(
+                "LUCIDA_GENERATED_COARSE_CACHE_DIR",
+                tmp.path().join("cache"),
+            )
             .env("LUCIDA_WEB_DIST", tmp.path().join("no-dist"))
             .stdout(Stdio::null())
             .stderr(Stdio::piped());

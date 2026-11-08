@@ -15,7 +15,7 @@ export const COLD_STATE_DURATION_SAMPLES = 60;
 
 /**
  * View-epoch churn is expected during camera motion; selection / content /
- * layout / asset bumping at >30/s is almost always a bug.
+ * layout bumping at >30/s is almost always a bug.
  */
 export const COLD_STATE_CHURN_THRESHOLD_PER_SEC = 30;
 

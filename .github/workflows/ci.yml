@@ -277,7 +277,6 @@ jobs:
               - 'lucida-content/src/**'
               - 'lucida-core/src/**'
               - 'lucida-protocol/src/**'
-              - 'lucida-proxy/src/**'
               - 'lucida-server/src/**'
               - 'lucida-store/src/**'
               - 'lucida-web/src/**'

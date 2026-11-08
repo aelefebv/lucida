@@ -113,7 +113,6 @@ export function checkVisibleRegionBounds(snapshot: PlanningSnapshot): void {
   }
 }
 
-// No check 6 (catalog entries name snapshot entities): the catalog spans every dataset seen.
 // No check 7 (minimapPending keys name snapshot images): the minimap covers images view_query omits.
 
 /**
@@ -134,11 +133,10 @@ export function checkPrevActiveSetUnique(state: PlanningState): void {
 
 /**
  * Check 9: each previous active-set entry whose entity is still in the
- * snapshot agrees with that entity's kind. `group-as-proxy` needs a
- * Group. `tile` accepts Tile or Image, because `groupMembers` wraps each
- * Image in a synthetic one-tile group. `invisible` accepts any kind. An
- * entity missing from the snapshot is not a violation; entities come and
- * go across ticks.
+ * snapshot agrees with that entity's kind. `tile` accepts Tile or Image,
+ * because `groupMembers` wraps each Image in a synthetic one-tile group.
+ * `invisible` accepts any kind. An entity missing from the snapshot is not
+ * a violation; entities come and go across ticks.
  */
 export function checkPrevActiveSetKindAgreement(
   snapshot: PlanningSnapshot,
@@ -168,8 +166,6 @@ function allowedEntityKindsFor(
   entry: ActiveSetEntry,
 ): EntitySnapshot["kind"][] | null {
   switch (entry.kind) {
-    case "group-as-proxy":
-      return ["Group"];
     case "tile":
       return ["Tile", "Image"];
     case "invisible":

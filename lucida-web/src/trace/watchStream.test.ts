@@ -61,7 +61,6 @@ function harness() {
       detailBytes: 0,
       coarseChunks: 0,
       coarseBytes: 0,
-      proxyBytes: 0,
     }),
     captureConditions: () => CONDITIONS,
     captureOutstanding: () => ({

@@ -10,10 +10,8 @@ import type {
   ChunkFeedbackReason,
   ChunkResidencyChange,
   MissingChunk,
-  MissingProxy,
 } from "../../../renderer/workerProtocol.ts";
 import { debugLog } from "../../../debug/logging.ts";
-import { proxyKeyFromMissing } from "../proxyKeys.ts";
 import type { ResendGuard } from "./resendGuard.ts";
 import {
   channelFromChunkKey,
@@ -77,37 +75,28 @@ export class WorkerFeedback {
   }
 
   /**
-   * Proxies the worker lacks are re-delivered. A missing chunk normally
-   * changes nothing, since every loss is reported on its own, but one the
-   * mirror holds is a disagreement: it is logged, named to the guard, and
-   * made sendable again. Returns whether anything may now be sent again.
+   * A missing chunk normally changes nothing, since every loss is reported
+   * on its own, but one the mirror holds is a disagreement: it is logged,
+   * named to the guard, and made sendable again. Returns whether anything
+   * may now be sent again.
    */
   handleWantedSetDelta(
     datasetId: string,
-    missing: Array<MissingChunk | MissingProxy>,
+    missing: MissingChunk[],
     cpuCache: CpuCache,
   ): boolean {
     const disagreements: string[] = [];
-    let missingProxies = 0;
     for (const entry of missing) {
-      if (entry.kind === "chunk") {
-        const parsed = parseWorkerMemberId(entry.memberId);
-        const c = entry.c ?? parsed.c ?? channelFromChunkKey(entry.chunkKey) ?? 0;
-        if (cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, entry.tier)) {
-          this.guard?.noteMissing(parsed.imageId, c, entry.chunkKey);
-          disagreements.push(`${entry.memberId}/${entry.chunkKey} [${entry.tier}]`);
-        }
-      } else if (entry.kind === "proxy") {
-        cpuCache.markProxyMissing(proxyKeyFromMissing(entry));
-        missingProxies++;
+      const parsed = parseWorkerMemberId(entry.memberId);
+      const c = entry.c ?? parsed.c ?? channelFromChunkKey(entry.chunkKey) ?? 0;
+      if (cpuCache.markChunkMissing(parsed.imageId, c, entry.chunkKey, entry.tier)) {
+        this.guard?.noteMissing(parsed.imageId, c, entry.chunkKey);
+        disagreements.push(`${entry.memberId}/${entry.chunkKey} [${entry.tier}]`);
       }
     }
     if (disagreements.length > 0) {
       debugLog("orch", "upload.residency_disagreement", { datasetId, chunks: disagreements });
     }
-    if (missingProxies > 0) {
-      debugLog("orch", "upload.worker_wanted_set_delta", { missingProxies });
-    }
-    return disagreements.length > 0 || missingProxies > 0;
+    return disagreements.length > 0;
   }
 }

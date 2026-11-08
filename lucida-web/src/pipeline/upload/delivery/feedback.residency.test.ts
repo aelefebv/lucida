@@ -11,12 +11,10 @@ function makeCpuCache(heldByMirror = false): CpuCache {
     markChunksRefused: vi.fn(),
     markChunksLost: vi.fn(),
     markChunkMissing: vi.fn(() => heldByMirror),
-    markProxyMissing: vi.fn(),
   } as unknown as CpuCache;
 }
 
 const missingChunk: MissingChunk = {
-  kind: "chunk",
   datasetId: "ds-0",
   tier: "detail",
   entityId: "tile-0",
@@ -33,7 +31,6 @@ describe("WorkerFeedback residency reconciliation", () => {
     expect(feedback.handleWantedSetDelta("ds-0", [missingChunk], cpuCache)).toBe(false);
 
     expect(cpuCache.markChunkMissing).toHaveBeenCalledWith("img-0", 2, "0/0/2/0/0/0", "detail");
-    expect(cpuCache.markProxyMissing).not.toHaveBeenCalled();
   });
 
   it("names a missing chunk the mirror held to the guard, with no reason the worker gave", () => {
@@ -43,27 +40,6 @@ describe("WorkerFeedback residency reconciliation", () => {
 
     expect(feedback.handleWantedSetDelta("ds-0", [missingChunk], makeCpuCache(true))).toBe(true);
     expect(noteMissing).toHaveBeenCalledWith("img-0", 2, "0/0/2/0/0/0");
-  });
-
-  it("keeps proxy missing feedback on the proxy sent-state path", () => {
-    const feedback = new WorkerFeedback();
-    const cpuCache = makeCpuCache();
-
-    expect(feedback.handleWantedSetDelta("ds-0", [
-      {
-        kind: "proxy",
-        datasetId: "ds-0",
-        entityId: "tile-0",
-        proxyKind: "TileProxy3D",
-        t: 1,
-        c: 3,
-      },
-    ], cpuCache)).toBe(true);
-
-    expect(cpuCache.markProxyMissing).toHaveBeenCalledWith(
-      "ds-0|tile-0|TileProxy3D|1|3",
-    );
-    expect(cpuCache.markChunkMissing).not.toHaveBeenCalled();
   });
 
   it("tells the guard why each refused or lost chunk came back", () => {

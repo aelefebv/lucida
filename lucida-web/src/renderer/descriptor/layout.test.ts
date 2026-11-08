@@ -31,16 +31,13 @@ import {
   OFFSET_LABEL_OPACITY,
   OFFSET_LEVEL_SOURCES,
   OFFSET_LEVEL_SOURCE_COUNT,
-  OFFSET_TILE_PROXY_DIMS,
-  OFFSET_TILE_PROXY_POOL_INDEX,
-  OFFSET_TILE_PROXY_SLOT_INDEX,
   OFFSET_GAMMA,
   OFFSET_INV_MODEL_MATRIX,
   OFFSET_MODEL_MATRIX,
   OFFSET_OPACITY,
-  OFFSET_GROUP_PROXY_DIMS,
-  OFFSET_GROUP_PROXY_POOL_INDEX,
-  OFFSET_GROUP_PROXY_SLOT_INDEX,
+  OFFSET_PAD0,
+  OFFSET_PAD1,
+  OFFSET_SAMPLE_FORMAT,
   SOURCE_OFFSET_CHUNK_DIMS,
   SOURCE_OFFSET_GRID_DIMS,
   SOURCE_OFFSET_INDIRECTION_OFFSET,
@@ -189,12 +186,7 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.modelMatrix).toBe(OFFSET_MODEL_MATRIX);
     expect(offsets.invModelMatrix).toBe(OFFSET_INV_MODEL_MATRIX);
     expect(offsets.channelMask).toBe(OFFSET_CHANNEL_MASK);
-    expect(offsets.tileProxyPoolIndex).toBe(OFFSET_TILE_PROXY_POOL_INDEX);
-    expect(offsets.tileProxySlotIndex).toBe(OFFSET_TILE_PROXY_SLOT_INDEX);
-    expect(offsets.groupProxyPoolIndex).toBe(OFFSET_GROUP_PROXY_POOL_INDEX);
-    expect(offsets.groupProxySlotIndex).toBe(OFFSET_GROUP_PROXY_SLOT_INDEX);
-    expect(offsets.tileProxyDims).toBe(OFFSET_TILE_PROXY_DIMS);
-    expect(offsets.groupProxyDims).toBe(OFFSET_GROUP_PROXY_DIMS);
+    expect(offsets.sampleFormat).toBe(OFFSET_SAMPLE_FORMAT);
     expect(offsets.contrastMin).toBe(OFFSET_CONTRAST_MIN);
     expect(offsets.contrastMax).toBe(OFFSET_CONTRAST_MAX);
     expect(offsets.gamma).toBe(OFFSET_GAMMA);
@@ -203,6 +195,8 @@ describe("EntityDescriptor WGSL ↔ TS layout agreement", () => {
     expect(offsets.levelSourceCount).toBe(OFFSET_LEVEL_SOURCE_COUNT);
     expect(offsets.colormapMode).toBe(OFFSET_COLORMAP_MODE);
     expect(offsets.labelOpacity).toBe(OFFSET_LABEL_OPACITY);
+    expect(offsets._pad0).toBe(OFFSET_PAD0);
+    expect(offsets._pad1).toBe(OFFSET_PAD1);
     expect(offsets.levelSources).toBe(OFFSET_LEVEL_SOURCES);
     expect(offsets.levelSources).toBe(DESCRIPTOR_LEVEL_SOURCES_OFFSET);
     expect(offsets.coarseSource).toBe(OFFSET_COARSE_SOURCE);

@@ -555,40 +555,6 @@ export class RenderClient implements UploadClient {
     this.worker.postMessage(msg);
   }
 
-  /**
-   * Forward a proxy asset to the worker. Copies before transferring because
-   * the CpuCache keeps `data` for re-delivery after worker-side eviction.
-   */
-  proxyAssetData(
-    datasetId: string,
-    entityId: string,
-    imageId: string,
-    kind: "GroupProxy3D" | "TileProxy3D",
-    t: number,
-    c: number,
-    dims: [number, number, number],
-    data: ArrayBuffer,
-    epochs: SceneEpochs,
-  ) {
-    const buf = data.slice(0);
-    this.worker.postMessage(
-      {
-        type: "proxyAssetData",
-        epochs,
-        datasetId,
-        entityId,
-        imageId,
-        kind,
-        t,
-        c,
-        dims,
-        dataType: "u16",
-        data: buf,
-      },
-      [buf],
-    );
-  }
-
   volumeRenderMultiPass(
     layers: VolumeLayerParams[],
     invViewProj: Float32Array,

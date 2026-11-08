@@ -24,8 +24,8 @@ use tokio::sync::{Mutex as AsyncMutex, Notify, broadcast};
 
 use crate::BroadcastItem;
 use crate::binding::ChunkResolver;
-use crate::proxy::{BuildSourceError, VolumeRegion, fetch_volume_region};
 use crate::session::Session;
+use crate::source_region::{RegionReadError, VolumeRegion, fetch_volume_region};
 
 pub const GENERATED_COARSE_GENERATOR_VERSION: &str = "generated-coarse-v2";
 const DEFAULT_TARGET_LONG_AXIS: u64 = 512;
@@ -1574,7 +1574,7 @@ struct GeneratedChunkCoords {
 
 #[derive(Debug)]
 enum GeneratedChunkBuildError {
-    Source(BuildSourceError),
+    Source(RegionReadError),
     Downsample(String),
 }
 
@@ -1587,8 +1587,8 @@ impl std::fmt::Display for GeneratedChunkBuildError {
     }
 }
 
-impl From<BuildSourceError> for GeneratedChunkBuildError {
-    fn from(error: BuildSourceError) -> Self {
+impl From<RegionReadError> for GeneratedChunkBuildError {
+    fn from(error: RegionReadError) -> Self {
         GeneratedChunkBuildError::Source(error)
     }
 }
@@ -1931,11 +1931,7 @@ where
         return MaterializeOneResult::Failed;
     };
 
-    let bytes = match generate_chunk_with_fallback(
-        &manifest, &image, coords, plan, &store, &resolver,
-    )
-    .await
-    {
+    let bytes = match generate_chunk_with_fallback(&image, coords, plan, &store, &resolver).await {
         Ok(bytes) => bytes,
         Err(e) => {
             publish_chunk_status(
@@ -2009,7 +2005,6 @@ where
 }
 
 async fn generate_chunk_with_fallback(
-    manifest: &DatasetManifest,
     image: &ImageSpec,
     coords: GeneratedChunkCoords,
     plan: &GeneratedCoarsePlan,
@@ -2019,7 +2014,6 @@ async fn generate_chunk_with_fallback(
     let mut last_error = None;
     for source_level_index in &plan.input_level_candidates {
         match generate_chunk_from_source_level(
-            manifest,
             image,
             coords,
             plan,
@@ -2034,7 +2028,7 @@ async fn generate_chunk_with_fallback(
         }
     }
     Err(last_error.unwrap_or_else(|| {
-        BuildSourceError::BadLevel {
+        RegionReadError::BadLevel {
             image: image.image_id.clone(),
             level: 0,
         }
@@ -2043,7 +2037,6 @@ async fn generate_chunk_with_fallback(
 }
 
 async fn generate_chunk_from_source_level(
-    manifest: &DatasetManifest,
     image: &ImageSpec,
     coords: GeneratedChunkCoords,
     plan: &GeneratedCoarsePlan,
@@ -2055,7 +2048,7 @@ async fn generate_chunk_from_source_level(
         .multiscale
         .levels
         .get(source_level_index)
-        .ok_or_else(|| BuildSourceError::BadLevel {
+        .ok_or_else(|| RegionReadError::BadLevel {
             image: image.image_id.clone(),
             level: source_level_index,
         })?;
@@ -2067,7 +2060,6 @@ async fn generate_chunk_from_source_level(
     let source_region = source_region_for_output_chunk(source_dims, output_dims, level, coords)
         .map_err(GeneratedChunkBuildError::Downsample)?;
     let (source_data, region_dims) = fetch_volume_region(
-        manifest,
         image,
         coords.t,
         coords.c,
@@ -2429,20 +2421,16 @@ async fn publish_generated_delta(
     });
 }
 
-fn generated_status_for_source_error(error: &BuildSourceError) -> GeneratedChunkStatus {
+fn generated_status_for_source_error(error: &RegionReadError) -> GeneratedChunkStatus {
     match error {
-        BuildSourceError::Fetch { .. } => GeneratedChunkStatus::FailedTransient,
-        BuildSourceError::MissingEntity(_)
-        | BuildSourceError::MissingImage(_)
-        | BuildSourceError::NoTiles(_)
-        | BuildSourceError::BadLevel { .. }
-        | BuildSourceError::OutOfBounds { .. }
-        | BuildSourceError::SpatialOutOfBounds { .. }
-        | BuildSourceError::UnknownImage(_)
-        | BuildSourceError::Decode { .. }
-        | BuildSourceError::ShortChunk { .. }
-        | BuildSourceError::TooLarge
-        | BuildSourceError::UnsupportedDataType { .. } => GeneratedChunkStatus::FailedPermanent,
+        RegionReadError::Fetch { .. } => GeneratedChunkStatus::FailedTransient,
+        RegionReadError::BadLevel { .. }
+        | RegionReadError::OutOfBounds { .. }
+        | RegionReadError::SpatialOutOfBounds { .. }
+        | RegionReadError::UnknownImage(_)
+        | RegionReadError::Decode { .. }
+        | RegionReadError::ShortChunk { .. }
+        | RegionReadError::TooLarge => GeneratedChunkStatus::FailedPermanent,
     }
 }
 
@@ -4118,12 +4106,12 @@ mod tests {
 
     #[test]
     fn generated_source_failures_are_classified_for_retry() {
-        let transient = BuildSourceError::Fetch {
+        let transient = RegionReadError::Fetch {
             image: ImageId("img-1".into()),
             key: "0/0/0/0/0/0".into(),
             message: "temporary object-store failure".into(),
         };
-        let permanent = BuildSourceError::ShortChunk {
+        let permanent = RegionReadError::ShortChunk {
             image: ImageId("img-1".into()),
             key: "0/0/0/0/0/0".into(),
             got: 1,

@@ -99,9 +99,9 @@ describe("DebugOverlays tier coverage helpers", () => {
       detail: { wanted: 2, shown: 1, ready: 1, inFlight: 1 },
       coarse: { wanted: 1, shown: 1, ready: 1, inFlight: 0 },
     });
-    expect(formatTierCoverageLabel(coverage!, "FD", 0)).toBe("C1/1 D1/2");
-    expect(tierCoverageMode(coverage!, "tiles-with-detail")).toBe("render-coarse");
-    expect(formatTierCoverageTitle(coverage!, "FD", 0)).toContain(
+    expect(formatTierCoverageLabel(coverage!, 0)).toBe("C1/1 D1/2");
+    expect(tierCoverageMode(coverage!)).toBe("render-coarse");
+    expect(formatTierCoverageTitle(coverage!, 0)).toContain(
       "detail available 1/2, ready 1, in-flight 1",
     );
   });
@@ -130,20 +130,21 @@ describe("DebugOverlays tier coverage helpers", () => {
       ready: 2,
       inFlight: 0,
     });
-    expect(formatTierCoverageLabel(coverageByGroup.get("group-a")!, "FD", 0)).toBe("D2/2");
+    expect(formatTierCoverageLabel(coverageByGroup.get("group-a")!, 0)).toBe("D2/2");
   });
 
-  it("falls back to the legacy mode label when no chunk-tier requests exist", () => {
+  it("falls back to the target level when no chunk-tier requests exist", () => {
     const coverage = emptyCoverage();
-    expect(formatTierCoverageLabel(coverage, "FD", 0)).toBe("FD L0");
-    expect(tierCoverageMode(coverage, "tiles-with-detail")).toBe("tiles-with-detail");
+    expect(formatTierCoverageLabel(coverage, 0)).toBe("L0");
+    expect(formatTierCoverageTitle(coverage, 0)).toBe("target L0");
+    expect(tierCoverageMode(coverage)).toBe("render-detail");
   });
 
   it("colors coarse-only available coverage as coarse", () => {
     const coverage = emptyCoverage();
     coverage.coarse.wanted = 4;
     coverage.coarse.shown = 4;
-    expect(formatTierCoverageLabel(coverage, "FD", 0)).toBe("C4/4");
-    expect(tierCoverageMode(coverage, "tiles-with-detail")).toBe("render-coarse");
+    expect(formatTierCoverageLabel(coverage, 0)).toBe("C4/4");
+    expect(tierCoverageMode(coverage)).toBe("render-coarse");
   });
 });

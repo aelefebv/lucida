@@ -10,7 +10,7 @@ function fakeScene() {
     c: 0,
     multi: false,
     mode: "slice",
-    epochs: { content: 0, layout: 0, view: 0, selection: 0, asset: 0, annotation: 0 },
+    epochs: { content: 0, layout: 0, view: 0, selection: 0, annotation: 0 },
   };
   const scene = {
     z: () => state.z,

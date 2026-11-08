@@ -4,7 +4,7 @@
  * consumes.
  */
 import { describe, it, expect } from "vitest";
-import { Axis } from "../../../axes.ts";
+
 import type { TickContext } from "../../../renderLoopTypes.ts";
 import type {
   ActiveSetEntry,
@@ -112,21 +112,15 @@ describe("buildRoster", () => {
         kind: "tile",
         entityId: "ent-a",
         imageId: "img-a",
-        mode: "tiles-with-detail",
         detailLevels: [0],
         coarseLevel: null,
-        proxyAvailable: false,
-        groupProxyAvailable: false,
       } as ActiveSetEntry,
       {
         kind: "tile",
         entityId: "ent-b",
         imageId: "img-b",
-        mode: "tiles-with-detail",
         detailLevels: [0],
         coarseLevel: null,
-        proxyAvailable: false,
-        groupProxyAvailable: false,
       } as ActiveSetEntry,
     ];
 
@@ -135,9 +129,9 @@ describe("buildRoster", () => {
     });
 
     expect(entries).toHaveLength(2);
-    expect(entries[0]).toMatchObject({ imageId: "img-a", entityId: "ent-a", mode: "tiles-with-detail" });
+    expect(entries[0]).toMatchObject({ imageId: "img-a", entityId: "ent-a" });
     expect(entries[0].position).toEqual([0, 0]);
-    expect(entries[1]).toMatchObject({ imageId: "img-b", entityId: "ent-b", mode: "tiles-with-detail" });
+    expect(entries[1]).toMatchObject({ imageId: "img-b", entityId: "ent-b" });
     expect(entries[1].position).toEqual([100, 100]);
 
     // matricesByEntity populated for both entries.
@@ -146,49 +140,6 @@ describe("buildRoster", () => {
     expect(mA.model[0]).toBe(10); expect(mA.model[12]).toBe(1);
     const mB = matricesByEntity.get("ent-b")!;
     expect(mB.model[0]).toBe(5); expect(mB.model[12]).toBe(20);
-  });
-
-  it("synthesises group-as-proxy entries and records their matrices", () => {
-    // Two tiles under the same group — group's AABB is union of the two.
-    const ctx = makeCtx({
-      "img-1": {
-        model: translateScaleMatrix(0, 0, 0, 10, 10, 10),
-        inv: inverseTranslateScale(0, 0, 0, 10, 10, 10),
-      },
-      "img-2": {
-        model: translateScaleMatrix(20, 20, 20, 10, 10, 10),
-        inv: inverseTranslateScale(20, 20, 20, 10, 10, 10),
-      },
-    });
-
-    const entities: EntitySnapshot[] = [
-      makeTile("ent-1", "img-1", "group-0", [0, 0],     [1, 1, 1, 100, 100]),
-      makeTile("ent-2", "img-2", "group-0", [100, 100], [1, 1, 1, 100, 100]),
-    ];
-
-    const activeSet: ActiveSetEntry[] = [
-      { kind: "group-as-proxy", entityId: "group-0" } as ActiveSetEntry,
-    ];
-
-    const { entries, matricesByEntity } = buildRoster({
-      activeSet, entities, ctx, datasetId: "ds1",
-    });
-
-    // Synthetic group member.
-    expect(entries).toHaveLength(1);
-    expect(entries[0].entityId).toBe("group-0");
-    expect(entries[0].mode).toBe("group-as-proxy");
-    expect(entries[0].imageId).toBe("group-0");
-    // Synthetic 3D matrix: span 30 in each axis, translate 0,0,0.
-    expect(entries[0].modelMatrix![0]).toBe(30);
-    expect(entries[0].modelMatrix![5]).toBe(30);
-    expect(entries[0].modelMatrix![10]).toBe(30);
-
-    // matricesByEntity has the synthesised matrices keyed by group entityId.
-    expect(matricesByEntity.size).toBe(1);
-    const m = matricesByEntity.get("group-0")!;
-    expect(m.model[0]).toBe(30);
-    expect(m.inv[0]).toBeCloseTo(1 / 30);
   });
 
   it("skips invisible entries — no roster entry, no matrices entry", () => {
@@ -217,22 +168,4 @@ describe("buildRoster", () => {
     expect(matricesByEntity.size).toBe(0);
   });
 
-  it("skips group-as-proxy entries whose group has zero visible tiles", () => {
-    const ctx = makeCtx({});
-    // No tiles at all in `entities` for this group.
-    const activeSet: ActiveSetEntry[] = [
-      { kind: "group-as-proxy", entityId: "group-empty" } as ActiveSetEntry,
-    ];
-
-    const { entries, matricesByEntity } = buildRoster({
-      activeSet, entities: [], ctx, datasetId: "ds1",
-    });
-
-    expect(entries).toHaveLength(0);
-    expect(matricesByEntity.size).toBe(0);
-    // Defensive: imageId-shape assertion on the empty result.
-    expect(Array.from(matricesByEntity.keys())).toEqual([]);
-    // Verify Axis import is exercised somewhere (silence unused-import lint).
-    expect(Axis.X).toBeGreaterThanOrEqual(0);
-  });
 });

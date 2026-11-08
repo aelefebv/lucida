@@ -30,7 +30,6 @@ import type {
   WireGeneratedAvailabilitySnapshot,
 } from "./pipeline/generatedAvailability.ts";
 import { derivedBuildersFor } from "./pipeline/layoutBuilders.ts";
-import type { WireAssetCatalog } from "./pipeline/assetCatalog.ts";
 import { Session } from "./session.ts";
 import type { RenderLoop } from "./renderLoop.ts";
 import { assertCanvasSize } from "./applyAndSend.ts";
@@ -286,7 +285,6 @@ export class SessionController {
     this.cpuCache = new CpuCache(this.contentSource, decodePool, {
       mainBudgetBytes: budgets.cpuMainBytes,
       overviewBudgetBytes: budgets.cpuOverviewBytes,
-      proxyBudgetBytes: budgets.cpuProxyBytes,
       maxBytesInFlight: budgets.cpuBytesInFlight,
       // Without this, failing deliveries present as a silently stalling
       // canvas. Store failures after a successful open (e.g. revoked access)
@@ -710,9 +708,6 @@ export class SessionController {
   private ensureDatasetRegistered(reg: {
     manifest: DatasetManifest;
     fetch: FetchSource;
-    /** Initial asset catalog for the JS-side mirror (WASM already holds it
-     *  via `load_document` / `apply_command`). */
-    catalog: WireAssetCatalog | null | undefined;
     /**
      * How to activate a layout after registering the derived builders
      * (registration is idempotent):
@@ -732,9 +727,6 @@ export class SessionController {
     } else {
       bridgeLog("setup_fetch_pipeline.skipped_existing", { datasetId });
     }
-    // Mirror the initial catalog into the JS-side AssetCatalog so Planning's
-    // snapshot view stays consistent with WASM.
-    this.session.ensureAssetCatalog()?.applyInitial(datasetId, reg.catalog ?? { entries: [] });
 
     const registry = this.session.ensureLayoutRegistry();
     if (!registry) return;
@@ -754,7 +746,6 @@ export class SessionController {
 
   private removeDataset(datasetId: string): void {
     this.deps.removeDatasetLocal(datasetId);
-    this.session.ensureAssetCatalog()?.removeDataset(datasetId);
     this.session.generatedAvailability.removeDataset(datasetId);
     this.session.ensureLayoutRegistry()?.removeDataset(datasetId);
     // Open warnings are keyed by source url and removal carries only the
@@ -1004,7 +995,6 @@ export class SessionController {
               this.ensureDatasetRegistered({
                 manifest,
                 fetch: fetchDesc,
-                catalog: doc.asset_catalogs?.[dsId] ?? { entries: [] },
                 layoutActivation: {
                   kind: "local",
                   activeId:
@@ -1234,14 +1224,7 @@ export class SessionController {
           progress: diagnostic.message,
         });
       },
-      onAssetCatalogUpdate: (datasetId, deltaJson) => {
-        try {
-          const delta = JSON.parse(deltaJson);
-          this.session.ensureAssetCatalog()?.applyDelta(datasetId, delta);
-        } catch (e) {
-          console.warn("[Bridge] bad asset_catalog_update:", e);
-        }
-      },
+
       onGeneratedAvailabilityUpdate: (datasetId, deltaJson) => {
         try {
           const delta = JSON.parse(deltaJson) as WireGeneratedAvailabilityDelta;
@@ -1317,7 +1300,6 @@ export class SessionController {
       type: string;
       manifest: DatasetManifestWire;
       fetch: FetchSourceWire;
-      catalog?: WireAssetCatalog | null;
     },
     scene: WasmScene,
   ): void {
@@ -1348,7 +1330,6 @@ export class SessionController {
     this.ensureDatasetRegistered({
       manifest,
       fetch,
-      catalog: cmd.catalog ?? { entries: [] },
       layoutActivation: { kind: "broadcast" },
     });
 

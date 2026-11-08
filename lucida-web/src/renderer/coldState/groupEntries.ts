@@ -5,7 +5,7 @@
  * Each tile entry contributes one detail section per level in
  * {@link detailTierLevels} plus one for its coarse level, and each level
  * lands in the pool matching its own chunk shape, so one entity's levels can
- * spread across pools. `group-as-proxy` entries have no chunks and no pool.
+ * spread across pools.
  */
 
 import type { ResidencyTier } from "../../pipeline/residencyTier.ts";
@@ -76,7 +76,6 @@ export function groupEntriesByPool(
 function tierSourcesForEntry(
   entry: ColdStateActiveEntry,
 ): Array<{ tier: ResidencyTier; level: number }> {
-  if (entry.kind === "group-as-proxy") return [];
   const sources: Array<{ tier: ResidencyTier; level: number }> =
     detailTierLevels(entry).map(level => ({ tier: "detail", level }));
   if (entry.coarseLevel !== null) {

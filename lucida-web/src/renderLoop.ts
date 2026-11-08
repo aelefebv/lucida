@@ -10,7 +10,7 @@ import { type VolumeState, createVolumeState, tickVolume, clearVolumeForDataset,
 import { TickCoordinator } from "./pipeline/tickCoordinator.ts";
 import { Uploader } from "./pipeline/upload/uploader.ts";
 import { configStore } from "./pipeline/planning/configStore.ts";
-import type { CpuCache } from "./pipeline/fetch/index.ts";
+
 import { identityMatrix } from "./pipeline/upload/coldState/identity.ts";
 import type { Session } from "./session.ts";
 import { type MinimapState, createMinimapState, tickMinimapOverview, tickMinimap, markMinimapOverviewSeeded, clearMinimapForDataset, invalidateMinimapOverview, forgetMinimapOverviewUploads, forgetMinimapOverviewsOf } from "./minimapPath.ts";
@@ -256,18 +256,9 @@ export class RenderLoop implements TraceEnvironment {
     this.unsubs.clear();
   }
 
-  /**
-   * Expose the tickCoordinator + cpuCache for HITL debugging via
-   * `window.__lucidaOrch`. The full chain is needed because
-   * `TickCoordinator.requestTestProxy(...)` submits through CpuCache and
-   * the normal subscribe → tick → `deliverToWorker` path forwards the
-   * result to the GPU worker.
-   */
+  /** For the debug overlays and the simulation harness, which read its last plans. */
   getTickCoordinator(): TickCoordinator {
     return this.tickCoordinator;
-  }
-  getCpuCache(): CpuCache {
-    return this.session.cpuCache;
   }
 
   addDataset(id: string, manifest: DatasetManifest): void {
@@ -329,7 +320,7 @@ export class RenderLoop implements TraceEnvironment {
     if (this.datasets.size === 0) {
       const w = this.canvas.clientWidth;
       const h = this.canvas.clientHeight;
-      const zeroEpochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, asset: 0, request: 0 };
+      const zeroEpochs: SceneEpochs = { content: 0, layout: 0, view: 0, selection: 0, request: 0 };
       this.client.resize(w, h);
       if (this.mode === "slice") {
         this.client.sliceRenderMultiPass([], 1, 0, 0, w, h, zeroEpochs);
@@ -421,7 +412,6 @@ export class RenderLoop implements TraceEnvironment {
       detailBytes: telemetry.mainBytes,
       coarseChunks: tiers.overview.count,
       coarseBytes: telemetry.overviewBytes,
-      proxyBytes: telemetry.proxyBytes,
     };
   }
 
@@ -673,7 +663,6 @@ export class RenderLoop implements TraceEnvironment {
       resolutionScale: cappedPixelRatioScale(devicePixelRatio) * this.resolution.scale,
       cpuCache: this.session.cpuCache,
       sendViewerInterest: (interest) => this.session.bridge.sendViewerInterest(interest),
-      assetCatalog: this.session.assetCatalog!,
     };
   }
 
@@ -682,10 +671,10 @@ export class RenderLoop implements TraceEnvironment {
 
     if (!this.interactiveDirty && !this.residencyDirty) return;
 
-    // AssetCatalog not yet wired (the brief window before the first server
-    // snapshot constructs it on Session). Once the catalog appears, the next
+    // No scene yet (the brief window before the first server snapshot sets
+    // it on Session). Once it appears, the next
     // markInteractiveDirty/markResidencyDirty triggers a tick.
-    if (!this.session.assetCatalog) {
+    if (!this.session.scene) {
       this.scheduleIfNeeded();
       return;
     }

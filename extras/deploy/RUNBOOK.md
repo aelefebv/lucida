@@ -19,8 +19,8 @@ the result there.
 - An image. Releases publish `ghcr.io/aelefebv/lucida:vX.Y.Z`, or run
   `docker build` at the repo root.
 
-No cache server or static-asset host is needed. The proxy cache is a
-directory, and lucida-server serves the web UI itself.
+No cache server or static-asset host is needed. The generated-level cache
+is a directory, and lucida-server serves the web UI itself.
 
 ### Choose a storage backend
 
@@ -188,7 +188,7 @@ copy. Scale to 0 and copy all three, or run
 volume, since the image has no `sqlite3`. On PostgreSQL, nothing on the
 pod's disk is authoritative.
 
-The proxy cache can be rebuilt from its sources. Lucida only reads
+The generated-level cache can be rebuilt from its sources. Lucida only reads
 `LUCIDA_DATA_DIR`.
 
 ## 9. Updating to a new release
@@ -209,8 +209,7 @@ variables.
 | `LUCIDA_BIND` | `127.0.0.1:9876`; the image sets `0.0.0.0:9876` | Listen address |
 | `LUCIDA_DB_URL` | `sqlite://lucida.db` | Storage backend. See step 1. |
 | `LUCIDA_DATA_DIR` | unset: lists from `/` | Directories the file picker is confined to, separated by `:` (`;` on Windows). See [Dataset sources](#dataset-sources). |
-| `LUCIDA_PROXY_CACHE_DIR` | `<user cache dir>/lucida/proxies` | Proxy cache directory |
-| `LUCIDA_PROXY_CONCURRENCY` | half the CPUs | Per-generator concurrency cap |
+| `LUCIDA_GENERATED_COARSE_CACHE_DIR` | `<user cache dir>/lucida/generated-coarse` | Cache of generated coarse levels |
 | `LUCIDA_LOG_FORMAT` | `text` | `json` for structured logs |
 | `LUCIDA_WEB_DIST` | `./lucida-web/dist`; set in the image | Web UI bundle |
 | `LUCIDA_THEME_FILE` | unset or blank: built-in theme | Default appearance and token overrides. See the README's [Theme a deployment](../../README.md#theme-a-deployment). |

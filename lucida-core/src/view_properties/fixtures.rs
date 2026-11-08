@@ -149,7 +149,6 @@ fn opened(manifest: DatasetManifest) -> DatasetOpened {
     DatasetOpened {
         manifest,
         fetch: FetchSource::Proxied(ProxiedFetchDescriptor { images }),
-        catalog: AssetCatalog::default(),
         opener_client_id: None,
     }
 }
