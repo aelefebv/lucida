@@ -1335,6 +1335,52 @@ export interface TraceRun {
    * keeping it would spend the budget truncation exists to protect.
    */
   serverRowsDiscarded: number;
+  /** How the view kept up with input. Absent from an interval that took no input. */
+  lag?: TraceLag;
+}
+
+/**
+ * Each input an interval took and the frame that answered it, the frames the
+ * render worker finished, and the main thread's long tasks, from the
+ * interval's first input on. Offsets are run-relative microseconds and may be
+ * negative: an input event can wait behind a task that was running when its
+ * handler opened the run.
+ */
+export interface TraceLag {
+  /** Oldest first. */
+  inputs: TraceInput[];
+  /** Inputs past the tier's capacity, overwritten oldest first. */
+  inputsUnrecorded: number;
+  /** When each viewport frame's GPU work finished, oldest first. */
+  framesUs: number[];
+  framesUnrecorded: number;
+  longTasks: TraceLongTask[];
+  longTasksUnrecorded: number;
+  /**
+   * The display's refresh interval: the median of the page's recent gaps
+   * between consecutive animation frames. Null before it has drawn enough
+   * of them to tell.
+   */
+  displayIntervalUs: number | null;
+}
+
+export interface TraceInput {
+  kind: InputKind;
+  /** When the input event happened. */
+  atUs: number;
+  /**
+   * When the first frame dispatched after the input was applied left for the
+   * render worker, and when its GPU work finished. That frame draws the view
+   * the input set. Null when the run closed first.
+   */
+  dispatchedUs: number | null;
+  presentedUs: number | null;
+}
+
+/** A main-thread task of 50 ms or more, as the browser reports it. */
+export interface TraceLongTask {
+  startUs: number;
+  durationUs: number;
 }
 
 /**

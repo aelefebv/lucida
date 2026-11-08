@@ -154,6 +154,9 @@ export function renderDiagnostic(
       `${document.run.gpu} · ${document.run.adapterKind.label} · build ${document.run.build}`,
   );
   push(IDENTITY, `render    ${renderTimingOf(document, p)}`);
+  // A run that took no input has no lag reading, and prints no line for one.
+  const lag = lagOf(document, p);
+  if (lag) push(IDENTITY, `lag       ${lag}`);
   push(IDENTITY, `gpu mem   ${gpuMemoryOf(document, p)}`);
 
   // The identity line names only the types that sent anything. The SENT table
@@ -260,6 +263,10 @@ export function renderDiagnostic(
       );
     });
     renderSteadyState(document, push, p);
+    if (document.lag) {
+      push(DETAIL, "");
+      push(DETAIL, `LAG  ${document.lag.statement}`);
+    }
     push(DETAIL, "");
     push(DETAIL, `RULESET v${document.ruleset.version} — ${document.ruleset.note}`);
   }
@@ -679,6 +686,34 @@ function renderTimingOf(document: DiagnosticDocument, p: PrintNumber): string {
       `(n=${p("renderTiming.gpuPass.samples", gpuPass.samples)})`
     : `GPU pass not recorded: ${gpuPass.statement}`;
   return `${main} · ${gpu}`;
+}
+
+function lagOf(document: DiagnosticDocument, p: PrintNumber): string | null {
+  const lag = document.lag;
+  if (!lag) return null;
+  const timing = lag.inputToFrame;
+  const answered = lag.inputs - lag.unanswered;
+  const inputs =
+    lag.unanswered > 0
+      ? `n=${p("lag.inputToFrame.samples", answered)} of ${p("lag.inputs", lag.inputs)} inputs`
+      : `n=${p("lag.inputs", lag.inputs)}`;
+  const toFrame = timing
+    ? `input-to-frame p50 ${p("lag.inputToFrame.p50Ms", timing.p50Ms)} ms · ` +
+      `p95 ${p("lag.inputToFrame.p95Ms", timing.p95Ms)} ms · max ${p("lag.inputToFrame.maxMs", timing.maxMs)} ms (${inputs})`
+    : `no input reached a frame before the run closed (${inputs})`;
+  const tasks = lag.longTasks;
+  const longTasks =
+    tasks.count === 0
+      ? "no long task"
+      : `${p("lag.longTasks.count", tasks.count)} long task(s), longest ${p("lag.longTasks.longestMs", tasks.longestMs)} ms, ` +
+        `${p("lag.longTasks.totalMs", tasks.totalMs)} ms total`;
+  const frames = lag.frames;
+  const dropped =
+    frames.dropped === null
+      ? `${p("lag.frames.presented", frames.presented)} frames, drops not counted`
+      : `${p("lag.frames.presented", frames.presented)} frames, ${p("lag.frames.dropped", frames.dropped)} dropped ` +
+        `against a ${p("lag.frames.displayIntervalMs", frames.displayIntervalMs!)} ms refresh`;
+  return `${toFrame} · ${longTasks} · ${dropped}`;
 }
 
 function gpuMemoryOf(document: DiagnosticDocument, p: PrintNumber): string {
